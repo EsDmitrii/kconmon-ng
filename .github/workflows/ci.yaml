@@ -1,71 +1,20 @@
 name: CI
 
 on:
-  workflow_dispatch:
   workflow_call:
   pull_request:
     branches: [main]
-  push:
-    branches: [main]
-    tags:
-      - "v*"
 
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  generate:
-    name: Generate protobuf
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up Buf
-        uses: bufbuild/buf-setup-action@v1
-
-      - name: Generate protobuf into api/proto
-        run: |
-          cat > buf.gen.ci.yaml <<'YAML'
-          version: v2
-          plugins:
-            - remote: buf.build/protocolbuffers/go
-              out: api/proto
-              opt: paths=source_relative
-            - remote: buf.build/grpc/go
-              out: api/proto
-              opt: paths=source_relative
-          YAML
-
-          buf generate --template buf.gen.ci.yaml
-
-      - name: Verify generated files
-        run: |
-          echo "=== generated files ==="
-          find api/proto -type f -name "*.pb.go"
-          test -n "$(find api/proto -type f -name "*.pb.go" -print -quit)"
-
-      - name: Upload generated proto
-        uses: actions/upload-artifact@v4
-        with:
-          name: proto-generated
-          path: |
-            api/proto/**/*.pb.go
-            api/proto/**/*_grpc.pb.go
-          retention-days: 1
-
   lint:
     name: Lint
-    needs: generate
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
-      - name: Download generated proto
-        uses: actions/download-artifact@v4
-        with:
-          name: proto-generated
-          path: api/proto
 
       - name: Set up Go
         uses: actions/setup-go@v5
@@ -86,12 +35,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
-      - name: Download generated proto
-        uses: actions/download-artifact@v4
-        with:
-          name: proto-generated
-          path: api/proto
 
       - name: Set up Go
         uses: actions/setup-go@v5
@@ -117,12 +60,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
-      - name: Download generated proto
-        uses: actions/download-artifact@v4
-        with:
-          name: proto-generated
-          path: api/proto
 
       - name: Set up Go
         uses: actions/setup-go@v5

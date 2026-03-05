@@ -115,8 +115,8 @@ func TestValidation(t *testing.T) {
 		wantErr bool
 	}{
 		{
-			name: "valid default config",
-			modify: func(_ *Config) {},
+			name:    "valid default config",
+			modify:  func(_ *Config) {},
 			wantErr: false,
 		},
 		{

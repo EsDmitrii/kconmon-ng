@@ -1,7 +1,6 @@
 name: E2E
 
 on:
-  workflow_dispatch:
   workflow_run:
     workflows: ["Release"]
     types: [completed]
@@ -47,27 +46,6 @@ jobs:
         uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-
-      - name: Set up Buf
-        if: ${{ steps.meta.outputs.skip != 'true' }}
-        uses: bufbuild/buf-setup-action@v1
-
-      - name: Generate protobuf into api/proto
-        if: ${{ steps.meta.outputs.skip != 'true' }}
-        run: |
-          cat > buf.gen.ci.yaml <<'YAML'
-          version: v2
-          plugins:
-            - remote: buf.build/protocolbuffers/go
-              out: api/proto
-              opt: paths=source_relative
-            - remote: buf.build/grpc/go
-              out: api/proto
-              opt: paths=source_relative
-          YAML
-
-          buf generate --template buf.gen.ci.yaml
-          test -n "$(find api/proto -type f -name '*.pb.go' -print -quit)"
 
       - name: Write kind config
         if: ${{ steps.meta.outputs.skip != 'true' }}
