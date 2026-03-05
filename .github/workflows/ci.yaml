@@ -24,33 +24,23 @@ jobs:
       - name: Set up Buf
         uses: bufbuild/buf-setup-action@v1
 
-      - name: Generate protobuf into gen/go
-        run: |
-          cat > buf.gen.ci.yaml <<'YAML'
-          version: v2
-          plugins:
-            - remote: buf.build/protocolbuffers/go
-              out: gen/go
-              opt: paths=source_relative
-            - remote: buf.build/grpc/go
-              out: gen/go
-              opt: paths=source_relative
-          YAML
+      - name: Generate protobuf into api/proto
+        run: buf generate --template api/proto/buf.gen.yaml
 
-          rm -rf gen/go
-          mkdir -p gen/go
-          buf generate --template buf.gen.ci.yaml
-
-      - name: Debug generated files
+      - name: Assert generated files exist
         run: |
-          echo "=== gen/go ==="
-          find gen/go -type f -maxdepth 8 -print || true
+          set -e
+          echo "=== api/proto generated files ==="
+          find api/proto -type f \( -name "*.pb.go" -o -name "*_grpc.pb.go" \) -print
+          test -n "$(find api/proto -type f -name "*.pb.go" -print -quit)"
 
       - name: Upload generated proto
         uses: actions/upload-artifact@v4
         with:
           name: proto-generated
-          path: gen/go
+          path: |
+            api/proto/**/*.pb.go
+            api/proto/**/*_grpc.pb.go
           retention-days: 1
 
   lint:
@@ -64,7 +54,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: proto-generated
-          path: gen/go
+          path: api/proto
 
       - name: Set up Go
         uses: actions/setup-go@v5
@@ -90,7 +80,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: proto-generated
-          path: gen/go
+          path: api/proto
 
       - name: Set up Go
         uses: actions/setup-go@v5
@@ -121,7 +111,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: proto-generated
-          path: gen/go
+          path: api/proto
 
       - name: Set up Go
         uses: actions/setup-go@v5
