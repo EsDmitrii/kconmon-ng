@@ -1,0 +1,120 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ include "kconmon-ng.fullname" . }}-agent
+  labels:
+    {{- include "kconmon-ng.labels" . | nindent 4 }}
+    app.kubernetes.io/component: agent
+spec:
+  selector:
+    matchLabels:
+      {{- include "kconmon-ng.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: agent
+  minReadySeconds: 5
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+  template:
+    metadata:
+      {{- $annotations := dict }}
+      {{- if .Values.agent.zone }}
+      {{- $_ := set $annotations "kconmon-ng.zone" .Values.agent.zone }}
+      {{- end }}
+      {{- with .Values.agent.podAnnotations }}
+      {{- range $k, $v := . }}
+      {{- $_ := set $annotations $k $v }}
+      {{- end }}
+      {{- end }}
+      {{- if $annotations }}
+      annotations:
+        {{- range $k, $v := $annotations }}
+        {{ $k }}: {{ $v | quote }}
+        {{- end }}
+      {{- end }}
+      labels:
+        {{- include "kconmon-ng.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: agent
+    spec:
+      {{- with .Values.serviceAccount.create }}
+      serviceAccountName: {{ include "kconmon-ng.serviceAccountName" $ }}
+      {{- end }}
+      {{- with .Values.agent.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.agent.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.agent.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: agent
+          image: "{{ .Values.agent.image.repository }}:{{ .Values.agent.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.agent.image.pullPolicy }}
+          securityContext:
+            {{- with .Values.agent.securityContext }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.config.httpPort }}
+              protocol: TCP
+            - name: grpc
+              containerPort: {{ .Values.config.grpcPort }}
+              protocol: TCP
+          env:
+            - name: KCONMON_NG_NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: KCONMON_NG_POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: KCONMON_NG_POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            {{- if .Values.agent.zone }}
+            - name: KCONMON_NG_ZONE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.annotations['kconmon-ng.zone']
+            {{- end }}
+            - name: KCONMON_NG_CONTROLLER_ADDRESS
+              value: {{ include "kconmon-ng.controllerService" . | quote }}
+            - name: KCONMON_NG_CONFIG
+              value: /etc/kconmon-ng/config.yaml
+          volumeMounts:
+            - name: config
+              mountPath: /etc/kconmon-ng
+              readOnly: true
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 3
+            failureThreshold: 20
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 5
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: 5
+            timeoutSeconds: 3
+          resources:
+            {{- toYaml .Values.agent.resources | nindent 12 }}
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "kconmon-ng.fullname" . }}-config

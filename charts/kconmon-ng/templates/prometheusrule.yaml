@@ -1,0 +1,28 @@
+{{- if .Values.prometheusRule.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ include "kconmon-ng.fullname" . }}
+  labels:
+    {{- include "kconmon-ng.labels" . | nindent 4 }}
+spec:
+  groups:
+    - name: kconmon-ng
+      rules:
+        {{- $prefix := .Values.config.metricsPrefix }}
+        {{- range .Values.prometheusRule.rules }}
+        - alert: {{ .alert }}
+          expr: {{ replace "kconmon_ng" $prefix .expr | quote }}
+          {{- if .for }}
+          for: {{ .for }}
+          {{- end }}
+          {{- if .labels }}
+          labels:
+            {{- toYaml .labels | nindent 12 }}
+          {{- end }}
+          {{- if .annotations }}
+          annotations:
+            {{- toYaml .annotations | nindent 12 }}
+          {{- end }}
+        {{- end }}
+{{- end }}

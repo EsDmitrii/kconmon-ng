@@ -1,0 +1,18 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "kconmon-ng.fullname" . }}-agent
+  labels:
+    {{- include "kconmon-ng.labels" . | nindent 4 }}
+    app.kubernetes.io/component: agent
+spec:
+  type: ClusterIP
+  clusterIP: None
+  selector:
+    {{- include "kconmon-ng.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: agent
+  ports:
+    - name: http
+      port: {{ .Values.config.httpPort }}
+      targetPort: http
+      protocol: TCP
