@@ -28,30 +28,30 @@ kconmon-ng continuously probes network connectivity between every pair of Kubern
 ## How it works
 
 ```bash
-                                +-------------------------------------------+
-                                |          Controller (Deployment)          |
-                                |                                           |
-                                |  - Agent registry (heartbeat eviction)    |
-                                |  - NodeWatcher (k8s node zone labels)     |
-                                |  - Topology API / gRPC streaming server   |
-                                |  - Leader election (active/standby HA)    |
-                                +---------------------+---------------------+
-                                                      |
-                            gRPC stream (peer list sync + updates on change)
-                                                      |
-                              +----------------------+----------------------+
-                              |                      |                      |
-                    +---------+---------+  +---------+---------+  +---------+---------+
-                    | Agent (node-1)    |  | Agent (node-2)    |  | Agent (node-3)    |
-                    | DaemonSet         |  | DaemonSet         |  | DaemonSet         |
-                    |                   |  |                   |  |                   |
-                    | TCP / UDP / ICMP  |  | TCP / UDP / ICMP  |  | TCP / UDP / ICMP  |
-                    | DNS / HTTP        |  | DNS / HTTP        |  | DNS / HTTP        |
-                    | MTR on failure    |  | MTR on failure    |  | MTR on failure    |
-                    | /metrics :8080    |  | /metrics :8080    |  | /metrics :8080    |
-                    +-------------------+  +-------------------+  +-------------------+
-                      ^                                                             ^
-                      +------------------- probes between all pairs ---------------+
+                          +-------------------------------------------+
+                          |          Controller (Deployment)          |
+                          |                                           |
+                          |  - Agent registry (heartbeat eviction)    |
+                          |  - NodeWatcher (k8s node zone labels)     |
+                          |  - Topology API / gRPC streaming server   |
+                          |  - Leader election (active/standby HA)    |
+                          +---------------------+---------------------+
+                                                |
+                      gRPC stream (peer list sync + updates on change)
+                                                |
+                        +----------------------+----------------------+
+                        |                      |                      |
+              +---------+---------+  +---------+---------+  +---------+---------+
+              | Agent (node-1)    |  | Agent (node-2)    |  | Agent (node-3)    |
+              | DaemonSet         |  | DaemonSet         |  | DaemonSet         |
+              |                   |  |                   |  |                   |
+              | TCP / UDP / ICMP  |  | TCP / UDP / ICMP  |  | TCP / UDP / ICMP  |
+              | DNS / HTTP        |  | DNS / HTTP        |  | DNS / HTTP        |
+              | MTR on failure    |  | MTR on failure    |  | MTR on failure    |
+              | /metrics :8080    |  | /metrics :8080    |  | /metrics :8080    |
+              +-------------------+  +-------------------+  +-------------------+
+                ^                                                             ^
+                +------------------- probes between all pairs ---------------+
 ```
 
 Each agent registers with the controller over gRPC and receives a live-updated list of peers. The scheduler runs each enabled checker concurrently against every peer. Agents filter themselves out of the peer list to prevent self-probing. When a TCP, UDP, or ICMP probe fails, MTR is triggered once per (source, destination) pair per cooldown window, and its hop-by-hop metrics are exported. On peer topology changes, stale gauge values (loss ratios, jitter, MTR hops) are reset automatically to avoid ghost metrics.
