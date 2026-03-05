@@ -21,18 +21,23 @@ jobs:
         with:
           go-version-file: go.mod
 
+      - name: Write kind config
+        run: |
+          cat > kind-config.yaml <<'YAML'
+          kind: Cluster
+          apiVersion: kind.x-k8s.io/v1alpha4
+          nodes:
+            - role: control-plane
+            - role: worker
+            - role: worker
+          YAML
+
       - name: Create Kind cluster
         uses: helm/kind-action@v1
         with:
           cluster_name: kconmon-ng-e2e
           node_image: kindest/node:v1.31.0
-          config: |
-            kind: Cluster
-            apiVersion: kind.x-k8s.io/v1alpha4
-            nodes:
-              - role: control-plane
-              - role: worker
-              - role: worker
+          config_file: kind-config.yaml
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
