@@ -1,6 +1,7 @@
 # kconmon-ng
 
-[![CI](https://github.com/EsDmitrii/kconmon-ng/actions/workflows/ci.yaml/badge.svg)](https://github.com/EsDmitrii/kconmon-ng/actions/workflows/ci.yaml)
+[![Release](https://github.com/EsDmitrii/kconmon-ng/actions/workflows/release.yaml/badge.svg)](https://github.com/EsDmitrii/kconmo
+n-ng/actions/workflows/release.yaml)
 [![Go](https://img.shields.io/badge/go-1.25-00ADD8?logo=go&logoColor=white)](https://go.dev/)
 [![Go Report Card](https://goreportcard.com/badge/github.com/EsDmitrii/kconmon-ng)](https://goreportcard.com/report/github.com/EsDmitrii/kconmon-ng)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE)
@@ -83,7 +84,7 @@ Each agent registers with the controller over gRPC and receives a live-updated l
 | Kubernetes          | 1.25+                                     |
 | Helm                | 3.14+                                     |
 | Prometheus Operator | any (for ServiceMonitor / PrometheusRule) |
-| Go (build only)     | 1.22+                                     |
+| Go (build only)     | 1.25+                                     |
 
 The agent DaemonSet requires the `NET_RAW` Linux capability for ICMP and MTR. The controller ServiceAccount requires `get`, `list`, `watch` on `nodes` (provided by the chart's ClusterRole when `serviceAccount.create: true`).
 
@@ -94,7 +95,7 @@ The agent DaemonSet requires the `NET_RAW` Linux capability for ICMP and MTR. Th
 ```bash
 # Install from OCI registry
 helm install kconmon-ng oci://ghcr.io/esdmitrii/charts/kconmon-ng \
-  --version 0.1.0 \
+  --version 1.0.0 \
   --set serviceMonitor.enabled=true \
   --set prometheusRule.enabled=true
 ```
@@ -459,7 +460,7 @@ The CI pipeline (`.github/workflows/ci.yaml`) runs on every push and pull reques
 - **Build** — `CGO_ENABLED=0` cross-compile of both binaries
 - **Helm Lint** — chart linted against default, full, and minimal value sets
 
-E2E tests (`.github/workflows/e2e.yaml`) run against a real Minikube cluster on PRs.
+E2E tests (`.github/workflows/e2e.yaml`) run automatically after a successful Release workflow (i.e. on every `v*` tag).
 
 Releases are published when a `v*` tag is pushed — Docker images and the Helm chart are pushed to GHCR.
 
