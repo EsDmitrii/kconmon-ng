@@ -10,4 +10,17 @@ keywords:
   - connectivity
   - monitoring
   - network
-maintainers: []
+maintainers:
+  - name: Dmitrii Esin
+    url: https://github.com/EsDmitrii
+
+annotations:
+  artifacthub.io/license: Apache-2.0
+  artifacthub.io/links: |
+    - name: GitHub
+      url: https://github.com/EsDmitrii/kconmon-ng
+    - name: Documentation
+      url: https://github.com/EsDmitrii/kconmon-ng#readme
+  artifacthub.io/changes: |
+    - kind: added
+      description: Initial release
