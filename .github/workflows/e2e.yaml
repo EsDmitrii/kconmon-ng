@@ -50,6 +50,10 @@ jobs:
           load: true
           tags: kconmon-ng-agent:test
           target: agent
+          build-args: |
+            VERSION=e2e
+            COMMIT=${{ github.sha }}
+            BUILD_DATE=${{ github.run_started_at }}
 
       - name: Build controller image
         uses: docker/build-push-action@v6
@@ -59,6 +63,10 @@ jobs:
           load: true
           tags: kconmon-ng-controller:test
           target: controller
+          build-args: |
+            VERSION=e2e
+            COMMIT=${{ github.sha }}
+            BUILD_DATE=${{ github.run_started_at }}
 
       - name: Load images into Kind
         run: |
