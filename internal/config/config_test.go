@@ -116,8 +116,7 @@ func TestValidation(t *testing.T) {
 	}{
 		{
 			name: "valid default config",
-			modify: func(_ *Config) {
-			},
+			modify: func(_ *Config) {},
 			wantErr: false,
 		},
 		{
@@ -259,6 +258,7 @@ httpPort: 7777
 grpcPort: 9090
 logLevel: debug
 `
+
 	if err := os.WriteFile(path, []byte(newContent), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -269,10 +269,14 @@ logLevel: debug
 		case cfg := <-changed:
 			if cfg.HTTPPort == 7777 && cfg.LogLevel == "debug" {
 				return
-			} 
+			}
 		case <-deadline:
 			last := loader.Get()
-			t.Fatalf("timeout waiting for config reload (last seen: httpPort=%d logLevel=%s)", last.HTTPPort, last.LogLevel)
+			t.Fatalf(
+				"timeout waiting for config reload (last seen: httpPort=%d logLevel=%s)",
+				last.HTTPPort,
+				last.LogLevel,
+			)
 		}
 	}
 }
