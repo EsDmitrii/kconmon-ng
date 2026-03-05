@@ -15,27 +15,52 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  lint:
-    name: Lint
+  generate:
+    name: Generate protobuf
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
 
       - name: Set up Buf
         uses: bufbuild/buf-setup-action@v1
 
       - name: Generate protobuf
-        run: buf generate
+        run: buf generate --template api/proto/buf.gen.yaml
+
+      - name: Upload generated proto
+        uses: actions/upload-artifact@v4
+        with:
+          name: proto-generated
+          path: |
+            api/proto/**/*.pb.go
+            api/proto/**/*_grpc.pb.go
+          retention-days: 1
+
+  lint:
+    name: Lint
+    needs: generate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download generated proto
+        uses: actions/download-artifact@v4
+        with:
+          name: proto-generated
+          path: api/proto
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+          cache-dependency-path: go.sum
 
       - name: Run golangci-lint
         uses: golangci/golangci-lint-action@v7
         with:
           version: v2.10.1
+          cache-invalidation-interval: 7
 
   test:
     name: Test
@@ -44,16 +69,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Download generated proto
+        uses: actions/download-artifact@v4
+        with:
+          name: proto-generated
+          path: api/proto
+
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-
-      - name: Set up Buf
-        uses: bufbuild/buf-setup-action@v1
-
-      - name: Generate protobuf
-        run: buf generate
+          cache: true
+          cache-dependency-path: go.sum
 
       - name: Run tests
         run: go test -race -coverprofile=coverage.txt -covermode=atomic -count=1 ./...
@@ -73,16 +100,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Download generated proto
+        uses: actions/download-artifact@v4
+        with:
+          name: proto-generated
+          path: api/proto
+
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-
-      - name: Set up Buf
-        uses: bufbuild/buf-setup-action@v1
-
-      - name: Generate protobuf
-        run: buf generate
+          cache: true
+          cache-dependency-path: go.sum
 
       - name: Build agent
         run: CGO_ENABLED=0 go build -o /dev/null ./cmd/agent
