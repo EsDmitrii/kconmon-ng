@@ -26,6 +26,12 @@ jobs:
         with:
           go-version-file: go.mod
 
+      - name: Set up Buf
+        uses: bufbuild/buf-setup-action@v1
+
+      - name: Generate protobuf
+        run: buf generate
+
       - name: Run golangci-lint
         uses: golangci/golangci-lint-action@v7
         with:
@@ -42,6 +48,12 @@ jobs:
         uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+
+      - name: Set up Buf
+        uses: bufbuild/buf-setup-action@v1
+
+      - name: Generate protobuf
+        run: buf generate
 
       - name: Run tests
         run: go test -race -coverprofile=coverage.txt -covermode=atomic -count=1 ./...
@@ -65,6 +77,12 @@ jobs:
         uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+
+      - name: Set up Buf
+        uses: bufbuild/buf-setup-action@v1
+
+      - name: Generate protobuf
+        run: buf generate
 
       - name: Build agent
         run: CGO_ENABLED=0 go build -o /dev/null ./cmd/agent
