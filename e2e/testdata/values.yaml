@@ -1,0 +1,32 @@
+---
+# Minimal values for e2e testing
+controller:
+  replicaCount: 1
+  leaderElection: false
+
+agent:
+  resources:
+    limits:
+      cpu: 100m
+      memory: 64Mi
+    requests:
+      cpu: 10m
+      memory: 32Mi
+
+config:
+  checkers:
+    tcp:
+      enabled: true
+    udp:
+      enabled: false
+    icmp:
+      enabled: false
+    dns:
+      enabled: false
+    http:
+      enabled: false
+    mtr:
+      maxHops: 5
+
+pdb:
+  enabled: false

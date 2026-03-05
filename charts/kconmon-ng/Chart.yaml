@@ -1,0 +1,13 @@
+---
+apiVersion: v2
+name: kconmon-ng
+description: Kubernetes Node Connectivity Monitor - Next Generation
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+keywords:
+  - kubernetes
+  - connectivity
+  - monitoring
+  - network
+maintainers: []

@@ -1,0 +1,9 @@
+---
+extends: default
+rules:
+  document-start: enable
+  line-length:
+    max: 120
+  # Allow both true/false and on/off (GitHub Actions uses on:)
+  truthy:
+    allowed-values: ['true', 'false', 'on', 'off']

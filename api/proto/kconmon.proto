@@ -1,0 +1,81 @@
+syntax = "proto3";
+
+package kconmonng.v1;
+
+option go_package = "github.com/EsDmitrii/kconmon-ng/api/proto;proto";
+
+import "google/protobuf/timestamp.proto";
+import "google/protobuf/empty.proto";
+
+service AgentRegistry {
+  rpc Register(RegisterRequest) returns (RegisterResponse);
+  rpc Heartbeat(HeartbeatRequest) returns (google.protobuf.Empty);
+  rpc WatchPeers(WatchPeersRequest) returns (stream PeerUpdate);
+}
+
+service ProbeService {
+  rpc TCPProbe(TCPProbeRequest) returns (TCPProbeResponse);
+  rpc UDPProbe(UDPProbeRequest) returns (UDPProbeResponse);
+}
+
+message AgentMeta {
+  string id = 1;
+  string node_name = 2;
+  string pod_name = 3;
+  string pod_ip = 4;
+  string zone = 5;
+  map<string, string> labels = 6;
+}
+
+message RegisterRequest {
+  AgentMeta agent = 1;
+}
+
+message RegisterResponse {
+  string agent_id = 1;
+  repeated AgentMeta peers = 2;
+  google.protobuf.Timestamp server_time = 3;
+}
+
+message HeartbeatRequest {
+  string agent_id = 1;
+  google.protobuf.Timestamp timestamp = 2;
+}
+
+message WatchPeersRequest {
+  string agent_id = 1;
+}
+
+message PeerUpdate {
+  enum UpdateType {
+    FULL_SYNC = 0;
+    PEER_ADDED = 1;
+    PEER_REMOVED = 2;
+  }
+  UpdateType type = 1;
+  repeated AgentMeta peers = 2;
+  google.protobuf.Timestamp timestamp = 3;
+}
+
+message TCPProbeRequest {
+  string source_agent_id = 1;
+  google.protobuf.Timestamp timestamp = 2;
+}
+
+message TCPProbeResponse {
+  bool ok = 1;
+  google.protobuf.Timestamp timestamp = 2;
+}
+
+message UDPProbeRequest {
+  string source_agent_id = 1;
+  uint32 sequence = 2;
+  bytes payload = 3;
+  google.protobuf.Timestamp timestamp = 4;
+}
+
+message UDPProbeResponse {
+  uint32 sequence = 1;
+  bytes payload = 2;
+  google.protobuf.Timestamp timestamp = 3;
+}

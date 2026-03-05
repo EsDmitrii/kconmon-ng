@@ -1,0 +1,54 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "kconmon-ng.fullname" . }}-config
+  labels:
+    {{- include "kconmon-ng.labels" . | nindent 4 }}
+data:
+  config.yaml: |
+    metricsPrefix: {{ .Values.config.metricsPrefix | quote }}
+    httpPort: {{ .Values.config.httpPort }}
+    grpcPort: {{ .Values.config.grpcPort }}
+    logLevel: {{ .Values.config.logLevel | quote }}
+    logFormat: {{ .Values.config.logFormat | quote }}
+    failureDomainLabel: {{ .Values.config.failureDomainLabel | quote }}
+    controllerAddress: {{ include "kconmon-ng.controllerService" . | quote }}
+    controller:
+      leaderElection: {{ .Values.controller.leaderElection }}
+      agentTtl: {{ .Values.config.controllerAgentTtl | quote }}
+    checkers:
+      tcp:
+        enabled: {{ .Values.config.checkers.tcp.enabled }}
+        interval: {{ .Values.config.checkers.tcp.interval | quote }}
+        timeout: {{ .Values.config.checkers.tcp.timeout | quote }}
+      udp:
+        enabled: {{ .Values.config.checkers.udp.enabled }}
+        interval: {{ .Values.config.checkers.udp.interval | quote }}
+        timeout: {{ .Values.config.checkers.udp.timeout | quote }}
+        packets: {{ .Values.config.checkers.udp.packets }}
+      icmp:
+        enabled: {{ .Values.config.checkers.icmp.enabled }}
+        interval: {{ .Values.config.checkers.icmp.interval | quote }}
+        timeout: {{ .Values.config.checkers.icmp.timeout | quote }}
+      dns:
+        enabled: {{ .Values.config.checkers.dns.enabled }}
+        interval: {{ .Values.config.checkers.dns.interval | quote }}
+        hosts:
+          {{- range .Values.config.checkers.dns.hosts }}
+          - {{ . | quote }}
+          {{- end }}
+        {{- with .Values.config.checkers.dns.resolvers }}
+        resolvers:
+          {{- range . }}
+          - {{ . | quote }}
+          {{- end }}
+        {{- end }}
+      http:
+        enabled: {{ .Values.config.checkers.http.enabled }}
+        interval: {{ .Values.config.checkers.http.interval | quote }}
+        timeout: {{ .Values.config.checkers.http.timeout | quote }}
+        targets:
+          {{- toYaml .Values.config.checkers.http.targets | nindent 10 }}
+      mtr:
+        cooldown: {{ .Values.config.checkers.mtr.cooldown | quote }}
+        maxHops: {{ .Values.config.checkers.mtr.maxHops }}

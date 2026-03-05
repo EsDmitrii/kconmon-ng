@@ -1,0 +1,21 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "kconmon-ng.fullname" . }}-controller
+  labels:
+    {{- include "kconmon-ng.labels" . | nindent 4 }}
+    app.kubernetes.io/component: controller
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "kconmon-ng.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: controller
+  ports:
+    - name: http
+      port: {{ .Values.config.httpPort }}
+      targetPort: http
+      protocol: TCP
+    - name: grpc
+      port: {{ .Values.config.grpcPort }}
+      targetPort: grpc
+      protocol: TCP

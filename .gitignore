@@ -1,0 +1,36 @@
+# Binaries
+bin/
+dist/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test
+*.test
+*.out
+coverage.txt
+coverage.html
+
+# Go
+vendor/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Generated protobuf
+api/proto/*.pb.go
+
+# Helm
+charts/kconmon-ng/charts/
+*.tgz
+
+# Environment
+.env
+.env.local

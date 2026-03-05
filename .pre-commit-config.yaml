@@ -1,0 +1,50 @@
+---
+repos:
+  # General file hygiene
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-merge-conflict
+      - id: check-added-large-files
+        args: [--maxkb=1024]
+      - id: detect-private-key
+
+  # Go formatting and import ordering
+  # goimports is a superset of gofmt: formats code + organises imports
+  - repo: local
+    hooks:
+      - id: goimports
+        name: goimports
+        language: golang
+        entry: goimports -w
+        types: [go]
+        exclude: \.pb\.go$
+        additional_dependencies: [golang.org/x/tools/cmd/goimports@latest]
+
+      # golangci-lint must be installed separately to match CI version exactly.
+      # Install: https://golangci-lint.run/usage/install/#local-installation
+      - id: golangci-lint
+        name: golangci-lint
+        language: system
+        entry: golangci-lint run --fix --timeout=5m
+        types: [go]
+        pass_filenames: false
+
+  # Shell scripts
+  - repo: https://github.com/shellcheck-py/shellcheck-py
+    rev: v0.10.0.1
+    hooks:
+      - id: shellcheck
+        files: ^hack/.*\.sh$
+
+  # YAML files (workflows, Helm values, configs)
+  # Helm chart templates are excluded: {{ }} Go template syntax is not valid YAML
+  - repo: https://github.com/adrienverge/yamllint
+    rev: v1.35.1
+    hooks:
+      - id: yamllint
+        args: [-c, .yamllint.yaml]
+        files: \.(yaml|yml)$
+        exclude: ^charts/.*/templates/

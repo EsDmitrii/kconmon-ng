@@ -1,0 +1,158 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "controller": {
+      "type": "object",
+      "properties": {
+        "replicaCount": { "type": "integer", "minimum": 1 },
+        "leaderElection": { "type": "boolean" },
+        "image": {
+          "type": "object",
+          "properties": {
+            "repository": { "type": "string" },
+            "tag": { "type": "string" },
+            "pullPolicy": { "type": "string", "enum": ["Always", "IfNotPresent", "Never"] }
+          }
+        },
+        "resources": { "type": "object" },
+        "nodeSelector": { "type": "object" },
+        "tolerations": { "type": "array" },
+        "affinity": { "type": "object" }
+      }
+    },
+    "agent": {
+      "type": "object",
+      "properties": {
+        "zone": { "type": "string" },
+        "podAnnotations": { "type": "object" },
+        "image": {
+          "type": "object",
+          "properties": {
+            "repository": { "type": "string" },
+            "tag": { "type": "string" },
+            "pullPolicy": { "type": "string", "enum": ["Always", "IfNotPresent", "Never"] }
+          }
+        },
+        "resources": { "type": "object" },
+        "tolerations": { "type": "array" },
+        "securityContext": { "type": "object" }
+      }
+    },
+    "config": {
+      "type": "object",
+      "required": ["httpPort", "grpcPort"],
+      "properties": {
+        "metricsPrefix": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" },
+        "httpPort": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "grpcPort": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "logLevel": { "type": "string", "enum": ["debug", "info", "warn", "error"] },
+        "logFormat": { "type": "string", "enum": ["json", "text"] },
+        "failureDomainLabel": { "type": "string" },
+        "controllerAgentTtl": { "type": "string" },
+        "checkers": {
+          "type": "object",
+          "properties": {
+            "tcp": {
+              "type": "object",
+              "properties": {
+                "enabled": { "type": "boolean" },
+                "interval": { "type": "string" },
+                "timeout": { "type": "string" }
+              }
+            },
+            "udp": {
+              "type": "object",
+              "properties": {
+                "enabled": { "type": "boolean" },
+                "interval": { "type": "string" },
+                "timeout": { "type": "string" },
+                "packets": { "type": "integer", "minimum": 1, "maximum": 100 }
+              }
+            },
+            "icmp": {
+              "type": "object",
+              "properties": {
+                "enabled": { "type": "boolean" },
+                "interval": { "type": "string" },
+                "timeout": { "type": "string" }
+              }
+            },
+            "dns": {
+              "type": "object",
+              "properties": {
+                "enabled": { "type": "boolean" },
+                "interval": { "type": "string" },
+                "hosts": { "type": "array", "items": { "type": "string" } },
+                "resolvers": { "type": "array", "items": { "type": "string" } }
+              }
+            },
+            "http": {
+              "type": "object",
+              "properties": {
+                "enabled": { "type": "boolean" },
+                "interval": { "type": "string" },
+                "timeout": { "type": "string" },
+                "targets": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "required": ["url"],
+                    "properties": {
+                      "url": { "type": "string", "format": "uri" },
+                      "method": { "type": "string", "enum": ["GET", "HEAD"] },
+                      "expectedStatus": { "type": "integer" },
+                      "bodyPattern": { "type": "string" }
+                    }
+                  }
+                }
+              }
+            },
+            "mtr": {
+              "type": "object",
+              "properties": {
+                "cooldown": { "type": "string" },
+                "maxHops": { "type": "integer", "minimum": 1, "maximum": 64 }
+              }
+            }
+          }
+        }
+      }
+    },
+    "serviceMonitor": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "interval": { "type": "string" }
+      }
+    },
+    "prometheusRule": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "rules": { "type": "array" }
+      }
+    },
+    "networkPolicy": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "prometheusNamespace": { "type": "string" }
+      }
+    },
+    "pdb": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "minAvailable": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "serviceAccount": {
+      "type": "object",
+      "properties": {
+        "create": { "type": "boolean" },
+        "name": { "type": "string" }
+      }
+    }
+  }
+}

@@ -1,0 +1,119 @@
+---
+name: E2E
+
+on:
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  e2e:
+    name: E2E Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Create Kind cluster
+        uses: helm/kind-action@v1
+        with:
+          cluster_name: kconmon-ng-e2e
+          node_image: kindest/node:v1.31.0
+          config: |
+            kind: Cluster
+            apiVersion: kind.x-k8s.io/v1alpha4
+            nodes:
+              - role: control-plane
+              - role: worker
+              - role: worker
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build agent image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          load: true
+          tags: kconmon-ng-agent:test
+          target: agent
+
+      - name: Build controller image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          load: true
+          tags: kconmon-ng-controller:test
+          target: controller
+
+      - name: Load images into Kind
+        run: |
+          kind load docker-image kconmon-ng-agent:test --name kconmon-ng-e2e
+          kind load docker-image kconmon-ng-controller:test --name kconmon-ng-e2e
+
+      - name: Install Helm chart
+        run: |
+          helm upgrade --install kconmon-ng ./charts/kconmon-ng \
+            -f e2e/testdata/values.yaml \
+            --set controller.image.repository=kconmon-ng-controller \
+            --set controller.image.tag=test \
+            --set controller.image.pullPolicy=Never \
+            --set agent.image.repository=kconmon-ng-agent \
+            --set agent.image.tag=test \
+            --set agent.image.pullPolicy=Never \
+            --wait \
+            --timeout 5m
+
+      - name: Wait for pods
+        run: |
+          kubectl wait --for=condition=ready pod \
+            -l app.kubernetes.io/name=kconmon-ng \
+            --timeout=120s
+
+      - name: Smoke tests
+        run: |
+          CONTROLLER_POD=$(kubectl get pods \
+            -l app.kubernetes.io/component=controller \
+            -o jsonpath='{.items[0].metadata.name}')
+          kubectl port-forward "pod/$CONTROLLER_POD" 8080:8080 &
+          PF_PID=$!
+          sleep 3
+
+          curl -sf http://localhost:8080/healthz
+          curl -sf http://localhost:8080/readyz
+          curl -sf http://localhost:8080/metrics | head -20
+          curl -sf http://localhost:8080/api/v1/topology
+
+          kill $PF_PID || true
+
+      - name: Run E2E tests
+        run: |
+          CONTROLLER_POD=$(kubectl get pods \
+            -l app.kubernetes.io/component=controller \
+            -o jsonpath='{.items[0].metadata.name}')
+          kubectl port-forward "pod/$CONTROLLER_POD" 8080:8080 &
+          sleep 3
+          go test -tags=e2e -v -count=1 ./e2e/... -timeout 120s
+        env:
+          KCONMON_CONTROLLER_URL: http://localhost:8080
+
+      - name: Collect debug info on failure
+        if: failure()
+        run: |
+          echo "=== Pod status ==="
+          kubectl get pods -o wide
+          echo "=== Controller logs ==="
+          kubectl logs -l app.kubernetes.io/component=controller --tail=50 || true
+          echo "=== Agent logs ==="
+          kubectl logs -l app.kubernetes.io/component=agent --tail=50 || true
+          echo "=== Events ==="
+          kubectl get events --sort-by='.lastTimestamp' | tail -30

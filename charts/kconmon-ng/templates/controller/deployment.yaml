@@ -1,0 +1,83 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "kconmon-ng.fullname" . }}-controller
+  labels:
+    {{- include "kconmon-ng.labels" . | nindent 4 }}
+    app.kubernetes.io/component: controller
+spec:
+  replicas: {{ .Values.controller.replicaCount }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  minReadySeconds: 10
+  selector:
+    matchLabels:
+      {{- include "kconmon-ng.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: controller
+  template:
+    metadata:
+      labels:
+        {{- include "kconmon-ng.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: controller
+    spec:
+      {{- with .Values.serviceAccount.create }}
+      serviceAccountName: {{ include "kconmon-ng.serviceAccountName" $ }}
+      {{- end }}
+      {{- with .Values.controller.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.controller.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.controller.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: controller
+          image: "{{ .Values.controller.image.repository }}:{{ .Values.controller.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.controller.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.config.httpPort }}
+              protocol: TCP
+            - name: grpc
+              containerPort: {{ .Values.config.grpcPort }}
+              protocol: TCP
+          env:
+            - name: KCONMON_NG_CONFIG
+              value: /etc/kconmon-ng/config.yaml
+          volumeMounts:
+            - name: config
+              mountPath: /etc/kconmon-ng
+              readOnly: true
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 3
+            failureThreshold: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 5
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: 5
+            timeoutSeconds: 3
+          resources:
+            {{- toYaml .Values.controller.resources | nindent 12 }}
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "kconmon-ng.fullname" . }}-config

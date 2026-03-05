@@ -1,0 +1,88 @@
+---
+# Local testing values: all checkers enabled, monitoring enabled, local images
+controller:
+  replicaCount: 1
+  leaderElection: true
+  image:
+    repository: kconmon-ng-controller
+    tag: local
+    pullPolicy: Never
+  resources:
+    limits:
+      cpu: 200m
+      memory: 128Mi
+    requests:
+      cpu: 50m
+      memory: 64Mi
+
+agent:
+  image:
+    repository: kconmon-ng-agent
+    tag: local
+    pullPolicy: Never
+  resources:
+    limits:
+      cpu: 200m
+      memory: 128Mi
+    requests:
+      cpu: 50m
+      memory: 64Mi
+  tolerations:
+    - operator: Exists
+  securityContext:
+    capabilities:
+      add:
+        - NET_RAW
+
+config:
+  metricsPrefix: kconmon_ng
+  httpPort: 8080
+  grpcPort: 9090
+  logLevel: debug
+  logFormat: json
+  failureDomainLabel: topology.kubernetes.io/zone
+  controllerAgentTtl: 30s
+  checkers:
+    tcp:
+      enabled: true
+      interval: 5s
+      timeout: 1s
+    udp:
+      enabled: true
+      interval: 5s
+      timeout: 250ms
+      packets: 5
+    icmp:
+      enabled: true
+      interval: 5s
+      timeout: 1s
+    dns:
+      enabled: true
+      interval: 5s
+      hosts:
+        - kubernetes.default.svc.cluster.local
+      resolvers: []
+    http:
+      enabled: true
+      interval: 15s
+      timeout: 5s
+      targets:
+        - url: https://kubernetes.default.svc.cluster.local/healthz
+          method: GET
+          expectStatus: 200
+    mtr:
+      cooldown: 60s
+      maxHops: 30
+
+serviceMonitor:
+  enabled: true
+  interval: 10s
+
+prometheusRule:
+  enabled: true
+
+pdb:
+  enabled: false
+
+serviceAccount:
+  create: true

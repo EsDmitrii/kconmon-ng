@@ -1,0 +1,120 @@
+---
+# Default values for kconmon-ng.
+# This is a YAML-formatted file.
+
+controller:
+  replicaCount: 2
+  leaderElection: true
+  image:
+    repository: ghcr.io/esdmitrii/kconmon-ng-controller
+    tag: ""
+    pullPolicy: IfNotPresent
+  resources:
+    limits:
+      cpu: 200m
+      memory: 128Mi
+    requests:
+      cpu: 50m
+      memory: 64Mi
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+agent:
+  zone: ""
+  podAnnotations: {}
+  image:
+    repository: ghcr.io/esdmitrii/kconmon-ng-agent
+    tag: ""
+    pullPolicy: IfNotPresent
+  resources:
+    limits:
+      cpu: 200m
+      memory: 128Mi
+    requests:
+      cpu: 50m
+      memory: 64Mi
+  tolerations:
+    - operator: Exists
+  securityContext:
+    capabilities:
+      add:
+        - NET_RAW
+
+config:
+  metricsPrefix: kconmon_ng
+  httpPort: 8080
+  grpcPort: 9090
+  logLevel: info
+  logFormat: json
+  failureDomainLabel: topology.kubernetes.io/zone
+  controllerAgentTtl: 30s
+  checkers:
+    tcp:
+      enabled: true
+      interval: 5s
+      timeout: 1s
+    udp:
+      enabled: true
+      interval: 5s
+      timeout: 250ms
+      packets: 5
+    icmp:
+      enabled: true
+      interval: 5s
+      timeout: 1s
+    dns:
+      enabled: true
+      interval: 5s
+      hosts:
+        - kubernetes.default.svc.cluster.local
+      resolvers: []
+    http:
+      enabled: false
+      interval: 30s
+      timeout: 5s
+      targets: []
+    mtr:
+      cooldown: 60s
+      maxHops: 30
+
+serviceMonitor:
+  enabled: false
+  interval: 15s
+
+prometheusRule:
+  enabled: false
+  rules:
+    - alert: UDPLossHigh
+      expr: kconmon_ng_udp_packet_loss_ratio > 0.5
+      for: 5m
+      labels:
+        severity: warning
+      annotations:
+        summary: High UDP packet loss detected
+    - alert: TCPChecksFailing
+      expr: rate(kconmon_ng_tcp_results_total{result="fail"}[5m]) > 0
+      for: 5m
+      labels:
+        severity: warning
+      annotations:
+        summary: TCP connectivity checks failing
+    - alert: DNSChecksFailing
+      expr: rate(kconmon_ng_dns_results_total{result="fail"}[5m]) > 0
+      for: 5m
+      labels:
+        severity: warning
+      annotations:
+        summary: DNS resolution checks failing
+
+networkPolicy:
+  enabled: false
+  prometheusNamespace: ""
+
+pdb:
+  enabled: true
+  minAvailable: 1
+
+serviceAccount:
+  create: true
+  name: ""

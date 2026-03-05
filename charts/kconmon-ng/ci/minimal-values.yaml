@@ -1,0 +1,39 @@
+---
+# Minimal values for chart testing
+controller:
+  replicaCount: 1
+  resources:
+    limits:
+      cpu: 100m
+      memory: 64Mi
+
+agent:
+  resources:
+    limits:
+      cpu: 100m
+      memory: 64Mi
+
+config:
+  checkers:
+    tcp:
+      enabled: true
+    udp:
+      enabled: false
+    icmp:
+      enabled: false
+    dns:
+      enabled: false
+    http:
+      enabled: false
+
+serviceMonitor:
+  enabled: false
+
+prometheusRule:
+  enabled: false
+
+networkPolicy:
+  enabled: false
+
+pdb:
+  enabled: false

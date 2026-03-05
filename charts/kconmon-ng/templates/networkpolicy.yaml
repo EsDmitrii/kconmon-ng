@@ -1,0 +1,83 @@
+{{- if .Values.networkPolicy.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "kconmon-ng.fullname" . }}
+  labels:
+    {{- include "kconmon-ng.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "kconmon-ng.selectorLabels" . | nindent 6 }}
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # Agent to controller gRPC
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "kconmon-ng.selectorLabels" . | nindent 14 }}
+              app.kubernetes.io/component: agent
+      ports:
+        - protocol: TCP
+          port: {{ .Values.config.grpcPort }}
+    # Agent to agent probes (UDP)
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "kconmon-ng.selectorLabels" . | nindent 14 }}
+              app.kubernetes.io/component: agent
+      ports:
+        - protocol: UDP
+          port: {{ .Values.config.grpcPort }}
+    # Prometheus scraping
+    - from:
+        {{- if .Values.networkPolicy.prometheusNamespace }}
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.networkPolicy.prometheusNamespace | quote }}
+        {{- else }}
+        - namespaceSelector: {}
+        {{- end }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.config.httpPort }}
+  egress:
+    # Agent to controller gRPC
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- include "kconmon-ng.selectorLabels" . | nindent 14 }}
+              app.kubernetes.io/component: controller
+      ports:
+        - protocol: TCP
+          port: {{ .Values.config.grpcPort }}
+    # Agent to agent probes
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- include "kconmon-ng.selectorLabels" . | nindent 14 }}
+              app.kubernetes.io/component: agent
+      ports:
+        - protocol: UDP
+          port: {{ .Values.config.grpcPort }}
+        - protocol: TCP
+          port: {{ .Values.config.httpPort }}
+    # DNS
+    - to:
+        - namespaceSelector: {}
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # Kubernetes API (controller needs node access)
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: default
+      ports:
+        - protocol: TCP
+          port: 443
+{{- end }}

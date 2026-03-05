@@ -1,0 +1,62 @@
+---
+# Full production values for chart testing
+controller:
+  replicaCount: 3
+  leaderElection: true
+  resources:
+    limits:
+      cpu: 500m
+      memory: 256Mi
+    requests:
+      cpu: 100m
+      memory: 128Mi
+  affinity:
+    podAntiAffinity:
+      preferredDuringSchedulingIgnoredDuringExecution:
+        - weight: 100
+          podAffinityTerm:
+            labelSelector:
+              matchLabels:
+                app.kubernetes.io/component: controller
+            topologyKey: kubernetes.io/hostname
+
+agent:
+  zone: "us-east-1a"
+  resources:
+    limits:
+      cpu: 300m
+      memory: 192Mi
+    requests:
+      cpu: 100m
+      memory: 96Mi
+
+config:
+  metricsPrefix: kconmon_ng
+  logLevel: debug
+  checkers:
+    tcp:
+      enabled: true
+      interval: 3s
+    udp:
+      enabled: true
+      interval: 3s
+    dns:
+      enabled: true
+      hosts:
+        - kubernetes.default.svc.cluster.local
+        - kube-dns.kube-system.svc.cluster.local
+
+serviceMonitor:
+  enabled: true
+  interval: 10s
+
+prometheusRule:
+  enabled: true
+
+networkPolicy:
+  enabled: true
+  prometheusNamespace: monitoring
+
+pdb:
+  enabled: true
+  minAvailable: 2
