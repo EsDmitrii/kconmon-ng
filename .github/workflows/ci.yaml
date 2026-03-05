@@ -25,13 +25,24 @@ jobs:
         uses: bufbuild/buf-setup-action@v1
 
       - name: Generate protobuf into api/proto
-        run: buf generate --template api/proto/buf.gen.yaml
-
-      - name: Assert generated files exist
         run: |
-          set -e
-          echo "=== api/proto generated files ==="
-          find api/proto -type f \( -name "*.pb.go" -o -name "*_grpc.pb.go" \) -print
+          cat > buf.gen.ci.yaml <<'YAML'
+          version: v2
+          plugins:
+            - remote: buf.build/protocolbuffers/go
+              out: api/proto
+              opt: paths=source_relative
+            - remote: buf.build/grpc/go
+              out: api/proto
+              opt: paths=source_relative
+          YAML
+
+          buf generate --template buf.gen.ci.yaml
+
+      - name: Verify generated files
+        run: |
+          echo "=== generated files ==="
+          find api/proto -type f -name "*.pb.go"
           test -n "$(find api/proto -type f -name "*.pb.go" -print -quit)"
 
       - name: Upload generated proto
