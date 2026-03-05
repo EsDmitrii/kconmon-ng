@@ -24,9 +24,6 @@ vendor/
 *~
 .DS_Store
 
-# Generated protobuf
-api/proto/*.pb.go
-
 # Helm
 charts/kconmon-ng/charts/
 *.tgz

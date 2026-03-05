@@ -1,14 +1,9 @@
 name: CI
 
 on:
-  workflow_dispatch:
   workflow_call:
   pull_request:
     branches: [main]
-  push:
-    branches: [main]
-    tags:
-      - "v*"
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -25,11 +20,14 @@ jobs:
         uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+          cache: true
+          cache-dependency-path: go.sum
 
       - name: Run golangci-lint
         uses: golangci/golangci-lint-action@v7
         with:
           version: v2.10.1
+          cache-invalidation-interval: 7
 
   test:
     name: Test
@@ -42,6 +40,8 @@ jobs:
         uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+          cache: true
+          cache-dependency-path: go.sum
 
       - name: Run tests
         run: go test -race -coverprofile=coverage.txt -covermode=atomic -count=1 ./...
@@ -65,6 +65,8 @@ jobs:
         uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+          cache: true
+          cache-dependency-path: go.sum
 
       - name: Build agent
         run: CGO_ENABLED=0 go build -o /dev/null ./cmd/agent
