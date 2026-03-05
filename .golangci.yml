@@ -1,4 +1,3 @@
----
 version: "2"
 
 run:
@@ -33,15 +32,18 @@ linters:
     - unconvert
     - unparam
     - whitespace
+
   settings:
     govet:
       enable:
         - shadow
+
     gocritic:
       enabled-tags:
         - diagnostic
         - style
         - performance
+
     revive:
       rules:
         - name: blank-imports
@@ -55,18 +57,19 @@ linters:
         - name: var-naming
         - name: package-comments
           disabled: true
+
     gosec:
       excludes:
         - G104
         - G304
 
-issues:
   exclusions:
     rules:
       - path: _test\.go
         linters:
           - gosec
           - gocritic
+
       - path: \.pb\.go
         linters:
           - all

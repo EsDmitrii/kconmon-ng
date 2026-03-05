@@ -47,8 +47,10 @@ checkers:
     timeout: 500ms
     packets: 10
 `
+
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yaml")
+
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -118,48 +120,67 @@ func TestValidation(t *testing.T) {
 			wantErr: false,
 		},
 		{
-			name:    "invalid HTTP port zero",
-			modify:  func(c *Config) { c.HTTPPort = 0 },
+			name: "invalid HTTP port zero",
+			modify: func(c *Config) {
+				c.HTTPPort = 0
+			},
 			wantErr: true,
 		},
 		{
-			name:    "invalid HTTP port too high",
-			modify:  func(c *Config) { c.HTTPPort = 70000 },
+			name: "invalid HTTP port too high",
+			modify: func(c *Config) {
+				c.HTTPPort = 70000
+			},
 			wantErr: true,
 		},
 		{
-			name:    "same HTTP and gRPC port",
-			modify:  func(c *Config) { c.HTTPPort = 8080; c.GRPCPort = 8080 },
+			name: "same HTTP and gRPC port",
+			modify: func(c *Config) {
+				c.HTTPPort = 8080
+				c.GRPCPort = 8080
+			},
 			wantErr: true,
 		},
 		{
-			name:    "invalid log level",
-			modify:  func(c *Config) { c.LogLevel = "verbose" },
+			name: "invalid log level",
+			modify: func(c *Config) {
+				c.LogLevel = "verbose"
+			},
 			wantErr: true,
 		},
 		{
-			name:    "zero UDP packets",
-			modify:  func(c *Config) { c.Checkers.UDP.Packets = 0 },
+			name: "zero UDP packets",
+			modify: func(c *Config) {
+				c.Checkers.UDP.Packets = 0
+			},
 			wantErr: true,
 		},
 		{
-			name:    "MTR max hops too high",
-			modify:  func(c *Config) { c.Checkers.MTR.MaxHops = 100 },
+			name: "MTR max hops too high",
+			modify: func(c *Config) {
+				c.Checkers.MTR.MaxHops = 100
+			},
 			wantErr: true,
 		},
 		{
-			name:    "invalid log format",
-			modify:  func(c *Config) { c.LogFormat = "yaml" },
+			name: "invalid log format",
+			modify: func(c *Config) {
+				c.LogFormat = "yaml"
+			},
 			wantErr: true,
 		},
 		{
-			name:    "valid log format text",
-			modify:  func(c *Config) { c.LogFormat = "text" },
+			name: "valid log format text",
+			modify: func(c *Config) {
+				c.LogFormat = "text"
+			},
 			wantErr: false,
 		},
 		{
-			name:    "valid log format json",
-			modify:  func(c *Config) { c.LogFormat = "json" },
+			name: "valid log format json",
+			modify: func(c *Config) {
+				c.LogFormat = "json"
+			},
 			wantErr: false,
 		},
 	}
@@ -169,6 +190,7 @@ func TestValidation(t *testing.T) {
 			loader := NewLoader("")
 			cfg := DefaultConfig()
 			tt.modify(cfg)
+
 			err := loader.validate(cfg)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("validate() error = %v, wantErr %v", err, tt.wantErr)
@@ -198,8 +220,10 @@ httpPort: 8080
 grpcPort: 9090
 logLevel: info
 `
+
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yaml")
+
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -211,7 +235,12 @@ logLevel: info
 
 	changed := make(chan *Config, 1)
 	loader.OnChange(func(cfg *Config) {
-		changed <- cfg
+		select {
+		case changed <- cfg:
+		default:
+			<-changed
+			changed <- cfg
+		}
 	})
 
 	if err := loader.WatchForChanges(); err != nil {
@@ -219,24 +248,35 @@ logLevel: info
 	}
 	defer func() { _ = loader.Close() }()
 
+	select {
+	case <-changed:
+	default:
+	}
+
 	newContent := `
 httpPort: 7777
 grpcPort: 9090
 logLevel: debug
 `
+
 	if err := os.WriteFile(path, []byte(newContent), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
-	select {
-	case cfg := <-changed:
-		if cfg.HTTPPort != 7777 {
-			t.Errorf("expected HTTP port 7777 after reload, got %d", cfg.HTTPPort)
+	deadline := time.After(3 * time.Second)
+	for {
+		select {
+		case cfg := <-changed:
+			if cfg.HTTPPort == 7777 && cfg.LogLevel == "debug" {
+				return
+			}
+		case <-deadline:
+			last := loader.Get()
+			t.Fatalf(
+				"timeout waiting for config reload (last seen: httpPort=%d logLevel=%s)",
+				last.HTTPPort,
+				last.LogLevel,
+			)
 		}
-		if cfg.LogLevel != "debug" {
-			t.Errorf("expected log level debug after reload, got %s", cfg.LogLevel)
-		}
-	case <-time.After(3 * time.Second):
-		t.Error("timeout waiting for config reload")
 	}
 }
