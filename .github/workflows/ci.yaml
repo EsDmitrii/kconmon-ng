@@ -4,6 +4,13 @@ on:
   workflow_call:
   pull_request:
     branches: [main]
+    paths:
+      - "**.go"
+      - "go.mod"
+      - "go.sum"
+      - ".golangci.yml"
+      - "charts/**"
+      - ".github/workflows/ci.yaml"
 
 concurrency:
   group: ci-${{ github.ref }}
