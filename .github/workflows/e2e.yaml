@@ -2,8 +2,9 @@ name: E2E
 
 on:
   workflow_dispatch:
-  pull_request:
-    branches: [main]
+  workflow_run:
+    workflows: ["Release"]
+    types: [completed]
 
 concurrency:
   group: e2e-${{ github.ref }}
@@ -13,18 +14,46 @@ jobs:
   e2e:
     name: E2E Tests
     runs-on: ubuntu-latest
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout released commit
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.workflow_run.head_sha }}
+
+      - name: Detect release tag and build metadata
+        id: meta
+        run: |
+          set -e
+          git fetch --tags --force
+
+          TAG="$(git tag --points-at "${{ github.event.workflow_run.head_sha }}" | grep '^v' | head -n1 || true)"
+          if [ -z "$TAG" ]; then
+            echo "No v* tag points at this commit. Skipping E2E."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+          echo "commit=${{ github.event.workflow_run.head_sha }}" >> "$GITHUB_OUTPUT"
+          echo "build_date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
 
       - name: Set up Go
+        if: ${{ steps.meta.outputs.skip != 'true' }}
         uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
 
       - name: Set up Buf
+        if: ${{ steps.meta.outputs.skip != 'true' }}
         uses: bufbuild/buf-setup-action@v1
 
       - name: Generate protobuf into api/proto
+        if: ${{ steps.meta.outputs.skip != 'true' }}
         run: |
           cat > buf.gen.ci.yaml <<'YAML'
           version: v2
@@ -38,19 +67,10 @@ jobs:
           YAML
 
           buf generate --template buf.gen.ci.yaml
-
-          echo "=== generated files ==="
-          find api/proto -type f -name "*.pb.go" -print
-          test -n "$(find api/proto -type f -name "*.pb.go" -print -quit)"
-
-      - name: Compute build metadata
-        id: meta
-        run: |
-          echo "version=e2e" >> "$GITHUB_OUTPUT"
-          echo "commit=${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
-          echo "build_date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+          test -n "$(find api/proto -type f -name '*.pb.go' -print -quit)"
 
       - name: Write kind config
+        if: ${{ steps.meta.outputs.skip != 'true' }}
         run: |
           cat > kind-config.yaml <<'YAML'
           kind: Cluster
@@ -62,6 +82,7 @@ jobs:
           YAML
 
       - name: Create Kind cluster
+        if: ${{ steps.meta.outputs.skip != 'true' }}
         uses: helm/kind-action@v1
         with:
           cluster_name: kconmon-ng-e2e
@@ -69,9 +90,11 @@ jobs:
           config_file: kind-config.yaml
 
       - name: Set up Docker Buildx
+        if: ${{ steps.meta.outputs.skip != 'true' }}
         uses: docker/setup-buildx-action@v3
 
       - name: Build agent image
+        if: ${{ steps.meta.outputs.skip != 'true' }}
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -85,6 +108,7 @@ jobs:
             BUILD_DATE=${{ steps.meta.outputs.build_date }}
 
       - name: Build controller image
+        if: ${{ steps.meta.outputs.skip != 'true' }}
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -98,11 +122,13 @@ jobs:
             BUILD_DATE=${{ steps.meta.outputs.build_date }}
 
       - name: Load images into Kind
+        if: ${{ steps.meta.outputs.skip != 'true' }}
         run: |
           kind load docker-image kconmon-ng-agent:test --name kconmon-ng-e2e
           kind load docker-image kconmon-ng-controller:test --name kconmon-ng-e2e
 
       - name: Install Helm chart
+        if: ${{ steps.meta.outputs.skip != 'true' }}
         run: |
           helm upgrade --install kconmon-ng ./charts/kconmon-ng \
             -f e2e/testdata/values.yaml \
@@ -116,12 +142,14 @@ jobs:
             --timeout 5m
 
       - name: Wait for pods
+        if: ${{ steps.meta.outputs.skip != 'true' }}
         run: |
           kubectl wait --for=condition=ready pod \
             -l app.kubernetes.io/name=kconmon-ng \
             --timeout=120s
 
       - name: Smoke tests
+        if: ${{ steps.meta.outputs.skip != 'true' }}
         run: |
           CONTROLLER_POD=$(kubectl get pods \
             -l app.kubernetes.io/component=controller \
@@ -138,6 +166,7 @@ jobs:
           kill $PF_PID || true
 
       - name: Run E2E tests
+        if: ${{ steps.meta.outputs.skip != 'true' }}
         run: |
           CONTROLLER_POD=$(kubectl get pods \
             -l app.kubernetes.io/component=controller \
@@ -149,7 +178,7 @@ jobs:
           KCONMON_CONTROLLER_URL: http://localhost:8080
 
       - name: Collect debug info on failure
-        if: failure()
+        if: ${{ steps.meta.outputs.skip != 'true' && failure() }}
         run: |
           echo "=== Pod status ==="
           kubectl get pods -o wide
