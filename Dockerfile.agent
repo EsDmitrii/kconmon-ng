@@ -1,0 +1,4 @@
+FROM gcr.io/distroless/static-debian12:nonroot
+COPY kconmon-ng-agent /usr/local/bin/kconmon-ng-agent
+USER nonroot:nonroot
+ENTRYPOINT ["kconmon-ng-agent"]
