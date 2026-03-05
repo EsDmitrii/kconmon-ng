@@ -21,6 +21,35 @@ jobs:
         with:
           go-version-file: go.mod
 
+      - name: Set up Buf
+        uses: bufbuild/buf-setup-action@v1
+
+      - name: Generate protobuf into api/proto
+        run: |
+          cat > buf.gen.ci.yaml <<'YAML'
+          version: v2
+          plugins:
+            - remote: buf.build/protocolbuffers/go
+              out: api/proto
+              opt: paths=source_relative
+            - remote: buf.build/grpc/go
+              out: api/proto
+              opt: paths=source_relative
+          YAML
+
+          buf generate --template buf.gen.ci.yaml
+
+          echo "=== generated files ==="
+          find api/proto -type f -name "*.pb.go" -print
+          test -n "$(find api/proto -type f -name "*.pb.go" -print -quit)"
+
+      - name: Compute build metadata
+        id: meta
+        run: |
+          echo "version=e2e" >> "$GITHUB_OUTPUT"
+          echo "commit=${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+          echo "build_date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+
       - name: Write kind config
         run: |
           cat > kind-config.yaml <<'YAML'
@@ -51,9 +80,9 @@ jobs:
           tags: kconmon-ng-agent:test
           target: agent
           build-args: |
-            VERSION=e2e
-            COMMIT=${{ github.sha }}
-            BUILD_DATE=${{ github.run_started_at }}
+            VERSION=${{ steps.meta.outputs.version }}
+            COMMIT=${{ steps.meta.outputs.commit }}
+            BUILD_DATE=${{ steps.meta.outputs.build_date }}
 
       - name: Build controller image
         uses: docker/build-push-action@v6
@@ -64,9 +93,9 @@ jobs:
           tags: kconmon-ng-controller:test
           target: controller
           build-args: |
-            VERSION=e2e
-            COMMIT=${{ github.sha }}
-            BUILD_DATE=${{ github.run_started_at }}
+            VERSION=${{ steps.meta.outputs.version }}
+            COMMIT=${{ steps.meta.outputs.commit }}
+            BUILD_DATE=${{ steps.meta.outputs.build_date }}
 
       - name: Load images into Kind
         run: |
