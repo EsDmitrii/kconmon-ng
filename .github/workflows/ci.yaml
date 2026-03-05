@@ -24,16 +24,33 @@ jobs:
       - name: Set up Buf
         uses: bufbuild/buf-setup-action@v1
 
-      - name: Generate protobuf
-        run: buf generate --template api/proto/buf.gen.yaml
+      - name: Generate protobuf into gen/go
+        run: |
+          cat > buf.gen.ci.yaml <<'YAML'
+          version: v2
+          plugins:
+            - remote: buf.build/protocolbuffers/go
+              out: gen/go
+              opt: paths=source_relative
+            - remote: buf.build/grpc/go
+              out: gen/go
+              opt: paths=source_relative
+          YAML
+
+          rm -rf gen/go
+          mkdir -p gen/go
+          buf generate --template buf.gen.ci.yaml
+
+      - name: Debug generated files
+        run: |
+          echo "=== gen/go ==="
+          find gen/go -type f -maxdepth 8 -print || true
 
       - name: Upload generated proto
         uses: actions/upload-artifact@v4
         with:
           name: proto-generated
-          path: |
-            api/proto/**/*.pb.go
-            api/proto/**/*_grpc.pb.go
+          path: gen/go
           retention-days: 1
 
   lint:
@@ -47,7 +64,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: proto-generated
-          path: api/proto
+          path: gen/go
 
       - name: Set up Go
         uses: actions/setup-go@v5
@@ -73,7 +90,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: proto-generated
-          path: api/proto
+          path: gen/go
 
       - name: Set up Go
         uses: actions/setup-go@v5
@@ -104,7 +121,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: proto-generated
-          path: api/proto
+          path: gen/go
 
       - name: Set up Go
         uses: actions/setup-go@v5
