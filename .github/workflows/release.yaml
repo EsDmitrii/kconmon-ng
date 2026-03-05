@@ -60,5 +60,6 @@ jobs:
         run: |
           printf '%s' "$HELM_TOKEN" | helm registry login ghcr.io -u "${{ github.actor }}" --password-stdin
           VERSION="${GITHUB_REF#refs/tags/v}"
+          OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
           helm package charts/kconmon-ng --version "$VERSION" --app-version "$VERSION"
-          helm push "kconmon-ng-${VERSION}.tgz" "oci://ghcr.io/${{ github.repository_owner }}/charts"
+          helm push "kconmon-ng-${VERSION}.tgz" "oci://ghcr.io/${OWNER}/charts"
