@@ -27,6 +27,7 @@ jobs:
         uses: golangci/golangci-lint-action@v7
         with:
           version: v2.10.1
+          install-mode: goinstall
           cache-invalidation-interval: 7
 
   test:
