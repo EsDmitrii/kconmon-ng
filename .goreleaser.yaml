@@ -40,12 +40,12 @@ builds:
 
 dockers:
   - id: agent-amd64
+    ids: [agent]
     use: buildx
     image_templates:
       - "ghcr.io/esdmitrii/kconmon-ng-agent:{{.Version}}-amd64"
-    dockerfile: Dockerfile
+    dockerfile: Dockerfile.agent
     build_flag_templates:
-      - "--target=agent"
       - "--platform=linux/amd64"
       - "--label=org.opencontainers.image.title=kconmon-ng-agent"
       - "--label=org.opencontainers.image.version={{.Version}}"
@@ -54,12 +54,12 @@ dockers:
       - "--label=org.opencontainers.image.created={{.Date}}"
 
   - id: agent-arm64
+    ids: [agent]
     use: buildx
     image_templates:
       - "ghcr.io/esdmitrii/kconmon-ng-agent:{{.Version}}-arm64"
-    dockerfile: Dockerfile
+    dockerfile: Dockerfile.agent
     build_flag_templates:
-      - "--target=agent"
       - "--platform=linux/arm64"
       - "--label=org.opencontainers.image.title=kconmon-ng-agent"
       - "--label=org.opencontainers.image.version={{.Version}}"
@@ -68,12 +68,12 @@ dockers:
       - "--label=org.opencontainers.image.created={{.Date}}"
 
   - id: controller-amd64
+    ids: [controller]
     use: buildx
     image_templates:
       - "ghcr.io/esdmitrii/kconmon-ng-controller:{{.Version}}-amd64"
-    dockerfile: Dockerfile
+    dockerfile: Dockerfile.controller
     build_flag_templates:
-      - "--target=controller"
       - "--platform=linux/amd64"
       - "--label=org.opencontainers.image.title=kconmon-ng-controller"
       - "--label=org.opencontainers.image.version={{.Version}}"
@@ -82,12 +82,12 @@ dockers:
       - "--label=org.opencontainers.image.created={{.Date}}"
 
   - id: controller-arm64
+    ids: [controller]
     use: buildx
     image_templates:
       - "ghcr.io/esdmitrii/kconmon-ng-controller:{{.Version}}-arm64"
-    dockerfile: Dockerfile
+    dockerfile: Dockerfile.controller
     build_flag_templates:
-      - "--target=controller"
       - "--platform=linux/arm64"
       - "--label=org.opencontainers.image.title=kconmon-ng-controller"
       - "--label=org.opencontainers.image.version={{.Version}}"

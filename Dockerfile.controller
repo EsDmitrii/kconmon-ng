@@ -1,0 +1,4 @@
+FROM gcr.io/distroless/static-debian12:nonroot
+COPY kconmon-ng-controller /usr/local/bin/kconmon-ng-controller
+USER nonroot:nonroot
+ENTRYPOINT ["kconmon-ng-controller"]
