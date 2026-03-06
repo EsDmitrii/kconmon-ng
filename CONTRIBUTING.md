@@ -4,9 +4,9 @@ Thanks for your interest in contributing. This document covers how to build, tes
 
 ## Prerequisites
 
-- Go 1.22 or newer
+- Go 1.25 or newer
 - Docker (for building images and running E2E tests)
-- Helm 3.x
+- Helm 3.14+
 - Minikube (for local E2E testing)
 
 ## Building
@@ -58,8 +58,8 @@ The repository ships with a `.pre-commit-config.yaml` that runs formatting, lint
 # Install pre-commit (requires Python)
 pip install pre-commit   # or: brew install pre-commit
 
-# Install golangci-lint (must match CI version)
-curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b $(go env GOPATH)/bin
+# Install golangci-lint (must match CI version v2.10.1)
+curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b $(go env GOPATH)/bin v2.10.1
 
 # Register the hooks in your local clone
 pre-commit install
