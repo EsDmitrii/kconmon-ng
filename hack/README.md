@@ -10,7 +10,7 @@ Step-by-step guide for running kconmon-ng locally on Minikube with Prometheus an
 | [Docker](https://www.docker.com/) | 24+ | OrbStack / Docker Desktop |
 | [Helm](https://helm.sh/) | 3.14+ | `brew install helm` |
 | [kubectl](https://kubernetes.io/docs/tasks/tools/) | 1.29+ | `brew install kubectl` |
-| [Go](https://go.dev/) | 1.22+ | `brew install go` |
+| [Go](https://go.dev/) | 1.25+ | `brew install go` |
 
 ## Quick Start (automated)
 
