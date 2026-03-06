@@ -1,6 +1,7 @@
 # kconmon-ng
 
 [![Release](https://github.com/EsDmitrii/kconmon-ng/actions/workflows/release.yaml/badge.svg)](https://github.com/EsDmitrii/kconmon-ng/actions/workflows/release.yaml)
+[![Artifact Hub](https://img.shields.io/endpoint?url=https://artifacthub.io/badge/repository/kconmon-ng)](https://artifacthub.io/packages/search?repo=kconmon-ng)
 [![Go](https://img.shields.io/badge/go-1.25-00ADD8?logo=go&logoColor=white)](https://go.dev/)
 [![Go Report Card](https://goreportcard.com/badge/github.com/EsDmitrii/kconmon-ng)](https://goreportcard.com/report/github.com/EsDmitrii/kconmon-ng)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE)
