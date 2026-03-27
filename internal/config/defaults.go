@@ -31,6 +31,7 @@ func DefaultConfig() *Config {
 			DNS: DNSCheckerConfig{
 				Enabled:  true,
 				Interval: 5 * time.Second,
+				Timeout:  5 * time.Second,
 				Hosts:    []string{"kubernetes.default.svc.cluster.local"},
 			},
 			HTTP: HTTPCheckerConfig{

@@ -3,8 +3,8 @@ apiVersion: v2
 name: kconmon-ng
 description: Kubernetes Node Connectivity Monitor - Next Generation
 type: application
-version: 1.0.0
-appVersion: "1.0.0"
+version: 1.1.0
+appVersion: "1.1.0"
 keywords:
   - kubernetes
   - connectivity
@@ -22,5 +22,13 @@ annotations:
     - name: Documentation
       url: https://github.com/EsDmitrii/kconmon-ng#readme
   artifacthub.io/changes: |
-    - kind: added
-      description: Initial release
+    - kind: fixed
+      description: MTR lastRun map memory leak — expired entries now purged on each TryAcquire call
+    - kind: fixed
+      description: HTTP body pattern mismatch was silently counted as success in Prometheus metrics
+    - kind: changed
+      description: DNS resolver dial timeout is now configurable via checkers.dns.timeout (default 5s)
+    - kind: changed
+      description: Agent re-registration backoff now includes jitter to prevent thundering herd on controller restart
+    - kind: changed
+      description: MTR traceroute read buffer allocated once per trace instead of per hop

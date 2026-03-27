@@ -1,6 +1,7 @@
 package checker
 
 import (
+	"fmt"
 	"testing"
 	"time"
 )
@@ -52,5 +53,31 @@ func TestMTRCheckerTryAcquireAtomicRecord(t *testing.T) {
 
 	if !recorded {
 		t.Error("TryAcquire must record the key atomically")
+	}
+}
+
+func TestMTRCheckerExpiredEntriesPurged(t *testing.T) {
+	c := NewMTRChecker(30, 1*time.Second, 100*time.Millisecond)
+
+	// Seed several expired entries directly.
+	c.mu.Lock()
+	for i := range 5 {
+		key := fmt.Sprintf("node-%d->node-x", i)
+		c.lastRun[key] = time.Now().Add(-200 * time.Millisecond)
+	}
+	c.mu.Unlock()
+
+	// TryAcquire for a new pair triggers cleanup of the expired entries.
+	if !c.TryAcquire("node-new", "node-x") {
+		t.Fatal("expected TryAcquire=true for new pair")
+	}
+
+	c.mu.Lock()
+	remaining := len(c.lastRun)
+	c.mu.Unlock()
+
+	// Only the newly recorded entry should remain.
+	if remaining != 1 {
+		t.Errorf("expected 1 entry after purge, got %d", remaining)
 	}
 }

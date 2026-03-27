@@ -66,6 +66,7 @@ config:
     dns:
       enabled: true
       interval: 5s
+      timeout: 5s
       hosts:
         - kubernetes.default.svc.cluster.local
       resolvers: []

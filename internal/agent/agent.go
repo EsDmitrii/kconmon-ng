@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"math/rand"
 	"net/http"
 	"os"
 	"regexp"
@@ -88,7 +89,7 @@ func New(cfg *config.Config) (*Agent, error) {
 	}
 	if cfg.Checkers.DNS.Enabled && len(cfg.Checkers.DNS.Hosts) > 0 {
 		sched.AddChecker(
-			checker.NewDNSChecker(cfg.Checkers.DNS.Hosts, cfg.Checkers.DNS.Resolvers),
+			checker.NewDNSChecker(cfg.Checkers.DNS.Hosts, cfg.Checkers.DNS.Resolvers, cfg.Checkers.DNS.Timeout),
 			SchedulerConfig{Interval: cfg.Checkers.DNS.Interval, NodeLocal: true},
 		)
 		slog.Info("checker enabled", "type", "dns", "interval", cfg.Checkers.DNS.Interval)
@@ -202,10 +203,11 @@ func (a *Agent) Run(ctx context.Context) error {
 		wait := 2 * time.Second
 		maxWait := 30 * time.Second
 		for {
+			jitter := time.Duration(rand.Int63n(int64(wait / 4))) //nolint:gosec // G404: non-cryptographic randomness is intentional for backoff jitter
 			select {
 			case <-ctx.Done():
 				return
-			case <-time.After(wait):
+			case <-time.After(wait + jitter):
 			}
 			newPeers, regErr := grpcClient.Register(ctx, a.info, a.cfg.HTTPPort)
 			if regErr == nil {
@@ -214,7 +216,7 @@ func (a *Agent) Run(ctx context.Context) error {
 				slog.Info("re-registered with controller after reconnect")
 				return
 			}
-			slog.Warn("re-registration failed, retrying", "error", regErr, "backoff", wait)
+			slog.Warn("re-registration failed, retrying", "error", regErr, "backoff", wait+jitter)
 			wait = min(wait*2, maxWait)
 		}
 	}
@@ -316,7 +318,8 @@ func NewResultHandler(m *metrics.PrometheusMetrics, source checker.Target) Resul
 		case model.CheckDNS:
 			if details, ok := result.Details.([]DNSDetails); ok {
 				for _, d := range details {
-					dnsLabels := []string{d.Host, d.Resolver, source.NodeName, source.Zone}
+					dnsLabels := make([]string, 0, 5)
+					dnsLabels = append(dnsLabels, d.Host, d.Resolver, source.NodeName, source.Zone)
 					m.DNSDuration.WithLabelValues(dnsLabels...).Observe(d.Duration.Seconds())
 					r := "success"
 					if len(d.ResolvedIPs) == 0 && !result.Success {
@@ -336,7 +339,7 @@ func NewResultHandler(m *metrics.PrometheusMetrics, source checker.Target) Resul
 					m.HTTPTTFBDuration.WithLabelValues(urlLabels...).Observe(d.TTFBTime.Seconds())
 					m.HTTPTotalDuration.WithLabelValues(urlLabels...).Observe(d.TotalTime.Seconds())
 					r := "success"
-					if d.StatusCode == 0 || d.StatusCode >= 400 {
+					if d.StatusCode == 0 || d.StatusCode >= 400 || d.BodyMismatch {
 						r = "fail"
 					}
 					m.HTTPResults.WithLabelValues(d.URL, d.Method, fmt.Sprintf("%d", d.StatusCode), source.NodeName, source.Zone, r).Inc()

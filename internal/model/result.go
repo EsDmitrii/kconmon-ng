@@ -56,14 +56,15 @@ type DNSDetails struct {
 }
 
 type HTTPDetails struct {
-	URL         string        `json:"url"`
-	Method      string        `json:"method"`
-	StatusCode  int           `json:"statusCode"`
-	DNSTime     time.Duration `json:"dnsTime"`
-	ConnectTime time.Duration `json:"connectTime"`
-	TLSTime     time.Duration `json:"tlsTime"`
-	TTFBTime    time.Duration `json:"ttfbTime"`
-	TotalTime   time.Duration `json:"totalTime"`
+	URL          string        `json:"url"`
+	Method       string        `json:"method"`
+	StatusCode   int           `json:"statusCode"`
+	BodyMismatch bool          `json:"bodyMismatch,omitempty"`
+	DNSTime      time.Duration `json:"dnsTime"`
+	ConnectTime  time.Duration `json:"connectTime"`
+	TLSTime      time.Duration `json:"tlsTime"`
+	TTFBTime     time.Duration `json:"ttfbTime"`
+	TotalTime    time.Duration `json:"totalTime"`
 }
 
 type MTRHop struct {
