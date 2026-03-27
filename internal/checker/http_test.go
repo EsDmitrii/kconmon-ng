@@ -63,12 +63,45 @@ func TestHTTPCheckerBodyPatternMismatch(t *testing.T) {
 
 	result := c.Check(context.Background(), Target{})
 
+	if result.Success {
+		t.Error("expected failure for body pattern mismatch")
+	}
+
 	details, ok := result.Details.([]model.HTTPDetails)
 	if !ok || len(details) == 0 {
 		t.Fatal("expected HTTPDetails")
 	}
-	if details[0].StatusCode != -1 {
-		t.Errorf("expected status -1 for body mismatch, got %d", details[0].StatusCode)
+	if !details[0].BodyMismatch {
+		t.Error("expected BodyMismatch=true for mismatched body pattern")
+	}
+	if details[0].StatusCode != http.StatusOK {
+		t.Errorf("expected real HTTP status 200, got %d", details[0].StatusCode)
+	}
+}
+
+func TestHTTPCheckerBodyPatternMatch(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"status":"ok"}`))
+	}))
+	defer srv.Close()
+
+	c := NewHTTPChecker(5*time.Second, []HTTPCheckTarget{
+		{URL: srv.URL, Method: "GET", BodyPattern: regexp.MustCompile(`"status":"ok"`)},
+	})
+
+	result := c.Check(context.Background(), Target{})
+
+	if !result.Success {
+		t.Errorf("expected success for matching body pattern, got error: %s", result.Error)
+	}
+
+	details, ok := result.Details.([]model.HTTPDetails)
+	if !ok || len(details) == 0 {
+		t.Fatal("expected HTTPDetails")
+	}
+	if details[0].BodyMismatch {
+		t.Error("expected BodyMismatch=false for matching body pattern")
 	}
 }
 

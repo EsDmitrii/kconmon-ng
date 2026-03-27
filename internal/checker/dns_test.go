@@ -9,7 +9,7 @@ import (
 )
 
 func TestDNSCheckerSuccess(t *testing.T) {
-	c := NewDNSChecker([]string{"localhost"}, nil)
+	c := NewDNSChecker([]string{"localhost"}, nil, 5*time.Second)
 	result := c.Check(context.Background(), Target{})
 
 	if !result.Success {
@@ -24,7 +24,7 @@ func TestDNSCheckerSuccess(t *testing.T) {
 }
 
 func TestDNSCheckerMultipleHosts(t *testing.T) {
-	c := NewDNSChecker([]string{"localhost", "localhost"}, nil)
+	c := NewDNSChecker([]string{"localhost", "localhost"}, nil, 5*time.Second)
 	result := c.Check(context.Background(), Target{})
 
 	if !result.Success {
@@ -41,7 +41,7 @@ func TestDNSCheckerMultipleHosts(t *testing.T) {
 }
 
 func TestDNSCheckerUnresolvable(t *testing.T) {
-	c := NewDNSChecker([]string{"this.host.definitely.does.not.exist.invalid"}, nil)
+	c := NewDNSChecker([]string{"this.host.definitely.does.not.exist.invalid"}, nil, 5*time.Second)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -57,10 +57,18 @@ func TestDNSCheckerUnresolvable(t *testing.T) {
 }
 
 func TestDNSCheckerEmptyHosts(t *testing.T) {
-	c := NewDNSChecker(nil, nil)
+	c := NewDNSChecker(nil, nil, 5*time.Second)
 	result := c.Check(context.Background(), Target{})
 
 	if !result.Success {
 		t.Error("expected success for empty hosts list")
+	}
+}
+
+func TestDNSCheckerTimeoutPropagated(t *testing.T) {
+	const customTimeout = 3 * time.Second
+	c := NewDNSChecker([]string{"localhost"}, nil, customTimeout)
+	if c.timeout != customTimeout {
+		t.Errorf("expected timeout %v, got %v", customTimeout, c.timeout)
 	}
 }

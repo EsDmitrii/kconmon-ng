@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -13,7 +14,7 @@ func TestAgentHealthz(t *testing.T) {
 	promReg := prometheus.NewRegistry()
 	srv := NewHTTPServer(promReg)
 
-	req := httptest.NewRequest(http.MethodGet, "/healthz", http.NoBody)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/healthz", http.NoBody)
 	w := httptest.NewRecorder()
 
 	srv.Handler().ServeHTTP(w, req)
@@ -27,7 +28,7 @@ func TestAgentReadyzNotReady(t *testing.T) {
 	promReg := prometheus.NewRegistry()
 	srv := NewHTTPServer(promReg)
 
-	req := httptest.NewRequest(http.MethodGet, "/readyz", http.NoBody)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/readyz", http.NoBody)
 	w := httptest.NewRecorder()
 
 	srv.Handler().ServeHTTP(w, req)
@@ -42,7 +43,7 @@ func TestAgentReadyzReady(t *testing.T) {
 	srv := NewHTTPServer(promReg)
 	srv.SetReady(true)
 
-	req := httptest.NewRequest(http.MethodGet, "/readyz", http.NoBody)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/readyz", http.NoBody)
 	w := httptest.NewRecorder()
 
 	srv.Handler().ServeHTTP(w, req)
@@ -56,7 +57,7 @@ func TestAgentVersion(t *testing.T) {
 	promReg := prometheus.NewRegistry()
 	srv := NewHTTPServer(promReg)
 
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/version", http.NoBody)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/api/v1/version", http.NoBody)
 	w := httptest.NewRecorder()
 
 	srv.Handler().ServeHTTP(w, req)
@@ -82,7 +83,7 @@ func TestAgentMetrics(t *testing.T) {
 	promReg := prometheus.NewRegistry()
 	srv := NewHTTPServer(promReg)
 
-	req := httptest.NewRequest(http.MethodGet, "/metrics", http.NoBody)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/metrics", http.NoBody)
 	w := httptest.NewRecorder()
 
 	srv.Handler().ServeHTTP(w, req)

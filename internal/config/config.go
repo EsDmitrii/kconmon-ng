@@ -63,6 +63,7 @@ type ICMPCheckerConfig struct {
 type DNSCheckerConfig struct {
 	Enabled   bool          `yaml:"enabled"`
 	Interval  time.Duration `yaml:"interval"`
+	Timeout   time.Duration `yaml:"timeout"`
 	Hosts     []string      `yaml:"hosts"`
 	Resolvers []string      `yaml:"resolvers,omitempty"`
 }

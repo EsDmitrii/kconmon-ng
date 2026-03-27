@@ -40,6 +40,8 @@ func (c *MTRChecker) Name() model.CheckType {
 // TryAcquire checks whether MTR can run for the given source-destination pair
 // and, if so, atomically records the current time to enforce the cooldown.
 // Returns true if the trace should proceed, false if still within cooldown.
+// Expired entries are purged on each call to prevent unbounded map growth in
+// large clusters where node pairs come and go over time.
 func (c *MTRChecker) TryAcquire(source, destination string) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -48,6 +50,13 @@ func (c *MTRChecker) TryAcquire(source, destination string) bool {
 	if last, ok := c.lastRun[key]; ok && time.Since(last) < c.cooldown {
 		return false
 	}
+
+	for k, t := range c.lastRun {
+		if time.Since(t) >= c.cooldown {
+			delete(c.lastRun, k)
+		}
+	}
+
 	c.lastRun[key] = time.Now()
 	return true
 }
@@ -116,6 +125,7 @@ func (c *MTRChecker) traceroute(ctx context.Context, dst net.IP) ([]model.MTRHop
 
 	id := os.Getpid() & 0xffff
 	hops := make([]model.MTRHop, 0, c.maxHops)
+	buf := make([]byte, 1500)
 
 	for ttl := 1; ttl <= c.maxHops; ttl++ {
 		select {
@@ -157,7 +167,6 @@ func (c *MTRChecker) traceroute(ctx context.Context, dst net.IP) ([]model.MTRHop
 		if deadlineErr := conn.SetReadDeadline(time.Now().Add(c.timeout)); deadlineErr != nil {
 			continue
 		}
-		buf := make([]byte, 1500)
 		n, peer, err := conn.ReadFrom(buf)
 		rtt := time.Since(start)
 
