@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -16,7 +17,7 @@ func TestHealthzEndpoint(t *testing.T) {
 	promReg := prometheus.NewRegistry()
 	srv := NewHTTPServer(reg, nil, promReg)
 
-	req := httptest.NewRequest(http.MethodGet, "/healthz", http.NoBody)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/healthz", http.NoBody)
 	w := httptest.NewRecorder()
 
 	srv.Handler().ServeHTTP(w, req)
@@ -34,7 +35,7 @@ func TestReadyzEndpointNotReady(t *testing.T) {
 	promReg := prometheus.NewRegistry()
 	srv := NewHTTPServer(reg, nil, promReg)
 
-	req := httptest.NewRequest(http.MethodGet, "/readyz", http.NoBody)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/readyz", http.NoBody)
 	w := httptest.NewRecorder()
 
 	srv.Handler().ServeHTTP(w, req)
@@ -50,7 +51,7 @@ func TestReadyzEndpointReady(t *testing.T) {
 	srv := NewHTTPServer(reg, nil, promReg)
 	srv.SetReady(true)
 
-	req := httptest.NewRequest(http.MethodGet, "/readyz", http.NoBody)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/readyz", http.NoBody)
 	w := httptest.NewRecorder()
 
 	srv.Handler().ServeHTTP(w, req)
@@ -65,7 +66,7 @@ func TestMetricsEndpoint(t *testing.T) {
 	promReg := prometheus.NewRegistry()
 	srv := NewHTTPServer(reg, nil, promReg)
 
-	req := httptest.NewRequest(http.MethodGet, "/metrics", http.NoBody)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/metrics", http.NoBody)
 	w := httptest.NewRecorder()
 
 	srv.Handler().ServeHTTP(w, req)
@@ -83,7 +84,7 @@ func TestTopologyEndpoint(t *testing.T) {
 	promReg := prometheus.NewRegistry()
 	srv := NewHTTPServer(reg, nil, promReg)
 
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/topology", http.NoBody)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/api/v1/topology", http.NoBody)
 	w := httptest.NewRecorder()
 
 	srv.Handler().ServeHTTP(w, req)
@@ -117,7 +118,7 @@ func TestTopologyEndpointWithNodeWatcher(t *testing.T) {
 	}
 	srv.SetNodeWatcher(nw)
 
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/topology", http.NoBody)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/api/v1/topology", http.NoBody)
 	w := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(w, req)
 
@@ -140,7 +141,7 @@ func TestVersionEndpoint(t *testing.T) {
 	promReg := prometheus.NewRegistry()
 	srv := NewHTTPServer(reg, nil, promReg)
 
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/version", http.NoBody)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/api/v1/version", http.NoBody)
 	w := httptest.NewRecorder()
 
 	srv.Handler().ServeHTTP(w, req)

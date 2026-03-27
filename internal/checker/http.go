@@ -63,6 +63,9 @@ func (c *HTTPChecker) Check(ctx context.Context, _ Target) model.CheckResult {
 		if detail.StatusCode == 0 && firstErr == "" {
 			firstErr = fmt.Sprintf("HTTP check %s failed", target.URL)
 		}
+		if detail.BodyMismatch && firstErr == "" {
+			firstErr = fmt.Sprintf("HTTP check %s: body pattern mismatch", target.URL)
+		}
 	}
 
 	if firstErr != "" {
@@ -148,7 +151,7 @@ func (c *HTTPChecker) checkOne(ctx context.Context, target HTTPCheckTarget) mode
 	if target.BodyPattern != nil {
 		body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20)) // 1MB limit
 		if err == nil && !target.BodyPattern.Match(body) {
-			detail.StatusCode = -1
+			detail.BodyMismatch = true
 		}
 	} else {
 		_, _ = io.Copy(io.Discard, resp.Body)

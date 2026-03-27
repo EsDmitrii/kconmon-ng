@@ -12,12 +12,14 @@ import (
 type DNSChecker struct {
 	hosts     []string
 	resolvers []string
+	timeout   time.Duration
 }
 
-func NewDNSChecker(hosts, resolvers []string) *DNSChecker {
+func NewDNSChecker(hosts, resolvers []string, timeout time.Duration) *DNSChecker {
 	return &DNSChecker{
 		hosts:     hosts,
 		resolvers: resolvers,
+		timeout:   timeout,
 	}
 }
 
@@ -53,7 +55,7 @@ func (c *DNSChecker) Check(ctx context.Context, _ Target) model.CheckResult {
 			resolver := &net.Resolver{
 				PreferGo: true,
 				Dial: func(ctx context.Context, network, _ string) (net.Conn, error) {
-					d := net.Dialer{Timeout: 5 * time.Second}
+					d := net.Dialer{Timeout: c.timeout}
 					return d.DialContext(ctx, "udp", resolverAddr)
 				},
 			}

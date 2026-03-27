@@ -33,6 +33,7 @@ data:
       dns:
         enabled: {{ .Values.config.checkers.dns.enabled }}
         interval: {{ .Values.config.checkers.dns.interval | quote }}
+        timeout: {{ .Values.config.checkers.dns.timeout | quote }}
         hosts:
           {{- range .Values.config.checkers.dns.hosts }}
           - {{ . | quote }}
