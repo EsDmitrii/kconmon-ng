@@ -95,7 +95,7 @@ The agent DaemonSet requires the `NET_RAW` Linux capability for ICMP and MTR. Th
 ```bash
 # Install from OCI registry
 helm install kconmon-ng oci://ghcr.io/esdmitrii/charts/kconmon-ng \
-  --version 1.0.0 \
+  --version 1.1.0 \
   --set serviceMonitor.enabled=true \
   --set prometheusRule.enabled=true
 ```
