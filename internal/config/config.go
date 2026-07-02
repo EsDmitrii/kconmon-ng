@@ -1,9 +1,15 @@
 package config
 
 import (
+	"bytes"
+	"errors"
 	"fmt"
+	"io"
 	"log/slog"
+	"net"
+	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -209,7 +215,17 @@ func (l *Loader) loadFromFile(cfg *Config) error {
 	if err != nil {
 		return err
 	}
-	return yaml.Unmarshal(data, cfg)
+	dec := yaml.NewDecoder(bytes.NewReader(data))
+	dec.KnownFields(true)
+	if err := dec.Decode(cfg); err != nil {
+		// An empty file (or only comments) yields EOF from Decode; treat it as
+		// an empty config so all defaults apply rather than a load failure.
+		if errors.Is(err, io.EOF) {
+			return nil
+		}
+		return err
+	}
+	return nil
 }
 
 func (l *Loader) loadFromEnv(cfg *Config) {
@@ -261,5 +277,106 @@ func (l *Loader) validate(cfg *Config) error {
 		return fmt.Errorf("mtr.maxHops must be between 1 and 64, got %d", cfg.Checkers.MTR.MaxHops)
 	}
 
+	if cfg.Checkers.TCP.Enabled {
+		if err := validateTiming("tcp", cfg.Checkers.TCP.Interval, cfg.Checkers.TCP.Timeout); err != nil {
+			return err
+		}
+	}
+	if cfg.Checkers.UDP.Enabled {
+		if err := validateTiming("udp", cfg.Checkers.UDP.Interval, cfg.Checkers.UDP.Timeout); err != nil {
+			return err
+		}
+	}
+	if cfg.Checkers.ICMP.Enabled {
+		if err := validateTiming("icmp", cfg.Checkers.ICMP.Interval, cfg.Checkers.ICMP.Timeout); err != nil {
+			return err
+		}
+	}
+	if cfg.Checkers.DNS.Enabled {
+		if err := validateTiming("dns", cfg.Checkers.DNS.Interval, cfg.Checkers.DNS.Timeout); err != nil {
+			return err
+		}
+		if err := validateDNS(cfg.Checkers.DNS); err != nil {
+			return err
+		}
+	}
+	if cfg.Checkers.HTTP.Enabled {
+		if err := validateTiming("http", cfg.Checkers.HTTP.Interval, cfg.Checkers.HTTP.Timeout); err != nil {
+			return err
+		}
+		if err := validateHTTP(cfg.Checkers.HTTP); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// validateTiming enforces positive interval/timeout for an enabled checker.
+// Timeout >= Interval is intentionally only a warning: probes may be tuned
+// tight and the operator may know what they are doing.
+func validateTiming(name string, interval, timeout time.Duration) error {
+	if interval <= 0 {
+		return fmt.Errorf("%s.interval must be > 0 when the checker is enabled, got %v", name, interval)
+	}
+	if timeout <= 0 {
+		return fmt.Errorf("%s.timeout must be > 0 when the checker is enabled, got %v", name, timeout)
+	}
+	if timeout >= interval {
+		slog.Warn("checker timeout >= interval; probes may overlap or starve",
+			"checker", name, "timeout", timeout, "interval", interval)
+	}
+	return nil
+}
+
+func validateDNS(dns DNSCheckerConfig) error {
+	if len(dns.Hosts) == 0 {
+		return fmt.Errorf("dns.hosts must not be empty when the dns checker is enabled")
+	}
+	for i, h := range dns.Hosts {
+		if strings.TrimSpace(h) == "" {
+			return fmt.Errorf("dns.hosts[%d] must not be empty", i)
+		}
+	}
+	for i, r := range dns.Resolvers {
+		if strings.TrimSpace(r) == "" {
+			return fmt.Errorf("dns.resolvers[%d] must not be empty", i)
+		}
+		// Accept either "host" or "host:port".
+		if strings.Contains(r, ":") {
+			host, port, err := net.SplitHostPort(r)
+			if err != nil {
+				return fmt.Errorf("dns.resolvers[%d] %q is not a valid host or host:port: %w", i, r, err)
+			}
+			if host == "" {
+				return fmt.Errorf("dns.resolvers[%d] %q has an empty host", i, r)
+			}
+			if _, err := strconv.Atoi(port); err != nil {
+				return fmt.Errorf("dns.resolvers[%d] %q has an invalid port %q", i, r, port)
+			}
+		}
+	}
+	return nil
+}
+
+func validateHTTP(h HTTPCheckerConfig) error {
+	if len(h.Targets) == 0 {
+		return fmt.Errorf("http.targets must not be empty when the http checker is enabled")
+	}
+	for i, t := range h.Targets {
+		if strings.TrimSpace(t.URL) == "" {
+			return fmt.Errorf("http.targets[%d].url must not be empty", i)
+		}
+		u, err := url.Parse(t.URL)
+		if err != nil {
+			return fmt.Errorf("http.targets[%d].url %q is not a valid URL: %w", i, t.URL, err)
+		}
+		if u.Scheme != "http" && u.Scheme != "https" {
+			return fmt.Errorf("http.targets[%d].url %q must use scheme http or https, got %q", i, t.URL, u.Scheme)
+		}
+		if u.Host == "" {
+			return fmt.Errorf("http.targets[%d].url %q must include a host", i, t.URL)
+		}
+	}
 	return nil
 }

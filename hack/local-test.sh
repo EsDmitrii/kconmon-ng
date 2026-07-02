@@ -38,14 +38,18 @@ cluster_up() {
     kubectl wait --for=condition=Ready node --all --timeout=120s
 }
 
+# Unique tag per build: minikube's image-load cache silently keeps the old
+# image when the tag is unchanged, so re-running `up` would deploy stale code.
+IMAGE_TAG="local-$(date +%Y%m%d%H%M%S)"
+
 build_images() {
-    log "Building Docker images locally..."
-    docker build --target agent -t kconmon-ng-agent:local "$PROJECT_DIR"
-    docker build --target controller -t kconmon-ng-controller:local "$PROJECT_DIR"
+    log "Building Docker images locally (tag: $IMAGE_TAG)..."
+    docker build --target agent -t "kconmon-ng-agent:$IMAGE_TAG" "$PROJECT_DIR"
+    docker build --target controller -t "kconmon-ng-controller:$IMAGE_TAG" "$PROJECT_DIR"
 
     log "Loading images into minikube (all nodes)..."
-    minikube image load kconmon-ng-agent:local -p "$PROFILE"
-    minikube image load kconmon-ng-controller:local -p "$PROFILE"
+    minikube image load "kconmon-ng-agent:$IMAGE_TAG" -p "$PROFILE"
+    minikube image load "kconmon-ng-controller:$IMAGE_TAG" -p "$PROFILE"
 
     log "Images loaded into minikube"
 }
@@ -101,6 +105,8 @@ install_kconmon() {
     log "Installing kconmon-ng..."
     helm upgrade -i kconmon-ng "$PROJECT_DIR/charts/kconmon-ng" \
         -f "$PROJECT_DIR/hack/values-local.yaml" \
+        --set-string agent.image.tag="$IMAGE_TAG" \
+        --set-string controller.image.tag="$IMAGE_TAG" \
         -n "$NAMESPACE_APP" \
         --wait \
         --timeout 3m
@@ -144,7 +150,8 @@ smoke_test() {
     echo
 
     log "Testing controller /metrics (first 30 kconmon_ng lines)..."
-    curl -sf http://localhost:18080/metrics | grep "^kconmon_ng" | head -30
+    # || true: head closes the pipe early -> SIGPIPE (141) would kill the script under pipefail
+    curl -sf http://localhost:18080/metrics | grep "^kconmon_ng" | head -30 || true
     echo
 
     kill "$ctrl_pf" 2>/dev/null; wait "$ctrl_pf" 2>/dev/null || true
@@ -162,7 +169,7 @@ smoke_test() {
     sleep 2
 
     log "Agent $agent_pod metrics (first 30 kconmon_ng lines)..."
-    curl -sf http://localhost:18081/metrics | grep "^kconmon_ng" | head -30
+    curl -sf http://localhost:18081/metrics | grep "^kconmon_ng" | head -30 || true
     echo
 
     kill "$agent_pf" 2>/dev/null; wait "$agent_pf" 2>/dev/null || true
@@ -184,6 +191,7 @@ check_prometheus() {
 import_dashboards() {
     log "Importing Grafana dashboards..."
 
+    lsof -ti:13000 | xargs kill -9 2>/dev/null || true
     kubectl port-forward -n "$NAMESPACE_MONITORING" svc/monitoring-grafana 13000:80 &
     local pf_pid=$!
     sleep 3
@@ -203,10 +211,10 @@ import_dashboards() {
 
         if [[ "$status" == "success" ]]; then
             echo "  ✓ $name"
-            ((ok++))
+            ok=$((ok+1))  # not ((ok++)): returns pre-increment value, so 0 -> exit 1 under set -e
         else
             echo "  ✗ $name ($status)"
-            ((fail++))
+            fail=$((fail+1))
         fi
     done
 

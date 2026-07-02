@@ -183,6 +183,128 @@ func TestValidation(t *testing.T) {
 			},
 			wantErr: false,
 		},
+		{
+			name: "enabled checker with zero interval",
+			modify: func(c *Config) {
+				c.Checkers.TCP.Enabled = true
+				c.Checkers.TCP.Interval = 0
+			},
+			wantErr: true,
+		},
+		{
+			name: "enabled checker with zero timeout",
+			modify: func(c *Config) {
+				c.Checkers.TCP.Enabled = true
+				c.Checkers.TCP.Timeout = 0
+			},
+			wantErr: true,
+		},
+		{
+			name: "disabled checker with zero interval is ok",
+			modify: func(c *Config) {
+				c.Checkers.HTTP.Enabled = false
+				c.Checkers.HTTP.Interval = 0
+				c.Checkers.HTTP.Timeout = 0
+			},
+			wantErr: false,
+		},
+		{
+			name: "timeout >= interval is a warning not error",
+			modify: func(c *Config) {
+				c.Checkers.DNS.Enabled = true
+				c.Checkers.DNS.Interval = 5 * time.Second
+				c.Checkers.DNS.Timeout = 5 * time.Second
+			},
+			wantErr: false,
+		},
+		{
+			name: "dns enabled with no hosts",
+			modify: func(c *Config) {
+				c.Checkers.DNS.Enabled = true
+				c.Checkers.DNS.Hosts = nil
+			},
+			wantErr: true,
+		},
+		{
+			name: "dns enabled with empty-string host",
+			modify: func(c *Config) {
+				c.Checkers.DNS.Enabled = true
+				c.Checkers.DNS.Hosts = []string{"  "}
+			},
+			wantErr: true,
+		},
+		{
+			name: "dns resolver host only is valid",
+			modify: func(c *Config) {
+				c.Checkers.DNS.Enabled = true
+				c.Checkers.DNS.Resolvers = []string{"8.8.8.8"}
+			},
+			wantErr: false,
+		},
+		{
+			name: "dns resolver host:port is valid",
+			modify: func(c *Config) {
+				c.Checkers.DNS.Enabled = true
+				c.Checkers.DNS.Resolvers = []string{"8.8.8.8:53"}
+			},
+			wantErr: false,
+		},
+		{
+			name: "dns resolver with bad port",
+			modify: func(c *Config) {
+				c.Checkers.DNS.Enabled = true
+				c.Checkers.DNS.Resolvers = []string{"8.8.8.8:notaport"}
+			},
+			wantErr: true,
+		},
+		{
+			name: "dns resolver empty string",
+			modify: func(c *Config) {
+				c.Checkers.DNS.Enabled = true
+				c.Checkers.DNS.Resolvers = []string{""}
+			},
+			wantErr: true,
+		},
+		{
+			name: "http enabled with valid target",
+			modify: func(c *Config) {
+				c.Checkers.HTTP.Enabled = true
+				c.Checkers.HTTP.Targets = []HTTPTarget{{URL: "https://example.com/healthz"}}
+			},
+			wantErr: false,
+		},
+		{
+			name: "http enabled with no targets",
+			modify: func(c *Config) {
+				c.Checkers.HTTP.Enabled = true
+				c.Checkers.HTTP.Targets = nil
+			},
+			wantErr: true,
+		},
+		{
+			name: "http target with empty url",
+			modify: func(c *Config) {
+				c.Checkers.HTTP.Enabled = true
+				c.Checkers.HTTP.Targets = []HTTPTarget{{URL: ""}}
+			},
+			wantErr: true,
+		},
+		{
+			name: "http target with unsupported scheme",
+			modify: func(c *Config) {
+				c.Checkers.HTTP.Enabled = true
+				c.Checkers.HTTP.Targets = []HTTPTarget{{URL: "ftp://example.com/x"}}
+			},
+			wantErr: true,
+		},
+		{
+			name: "http target missing host",
+			modify: func(c *Config) {
+				c.Checkers.HTTP.Enabled = true
+				c.Checkers.HTTP.Targets = []HTTPTarget{{URL: "http:///healthz"}}
+			},
+			wantErr: true,
+		},
 	}
 
 	for _, tt := range tests {

@@ -52,7 +52,9 @@ func (c *GRPCClient) OnNeedReregister(fn func()) {
 	c.onNeedReregister = fn
 }
 
-func (c *GRPCClient) Register(ctx context.Context, info model.AgentInfo, httpPort int) ([]checker.Target, error) { //nolint:gocritic // hugeParam: AgentInfo is passed by value intentionally
+// Register registers the agent and returns the peer list plus the zone the
+// controller resolved for this agent (empty if the controller has no zone).
+func (c *GRPCClient) Register(ctx context.Context, info model.AgentInfo, httpPort int) ([]checker.Target, string, error) { //nolint:gocritic // hugeParam: AgentInfo is passed by value intentionally
 	resp, err := c.client.Register(ctx, &pb.RegisterRequest{
 		Agent: &pb.AgentMeta{
 			Id:       info.ID,
@@ -64,11 +66,11 @@ func (c *GRPCClient) Register(ctx context.Context, info model.AgentInfo, httpPor
 		},
 	})
 	if err != nil {
-		return nil, fmt.Errorf("registering agent: %w", err)
+		return nil, "", fmt.Errorf("registering agent: %w", err)
 	}
 
 	c.agentID = resp.GetAgentId()
-	return protoToTargets(resp.GetPeers(), httpPort), nil
+	return protoToTargets(resp.GetPeers(), httpPort), resp.GetAgent().GetZone(), nil
 }
 
 func (c *GRPCClient) StartHeartbeat(ctx context.Context, interval time.Duration) {

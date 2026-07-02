@@ -41,6 +41,7 @@ type PrometheusMetrics struct {
 	MTRTriggered *prometheus.CounterVec
 
 	ControllerRegisteredAgents *prometheus.GaugeVec
+	ControllerExpectedAgents   *prometheus.GaugeVec
 	ControllerPeerUpdates      *prometheus.CounterVec
 	ControllerGRPCConnections  *prometheus.GaugeVec
 	ControllerLeader           *prometheus.GaugeVec
@@ -162,6 +163,10 @@ func NewPrometheusMetrics(prefix string, reg prometheus.Registerer) *PrometheusM
 		ControllerRegisteredAgents: factory.NewGaugeVec(prometheus.GaugeOpts{
 			Name: prefix + "_controller_registered_agents",
 			Help: "Number of currently registered agents",
+		}, []string{}),
+		ControllerExpectedAgents: factory.NewGaugeVec(prometheus.GaugeOpts{
+			Name: prefix + "_controller_expected_agents",
+			Help: "Number of schedulable nodes expected to run an agent",
 		}, []string{}),
 		ControllerPeerUpdates: factory.NewCounterVec(prometheus.CounterOpts{
 			Name: prefix + "_controller_peer_updates_total",

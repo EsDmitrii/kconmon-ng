@@ -27,6 +27,7 @@ type Agent struct {
 	metrics     *metrics.PrometheusMetrics
 	promReg     *prometheus.Registry
 	info        model.AgentInfo
+	envZone     string
 }
 
 func New(cfg *config.Config) (*Agent, error) {
@@ -130,6 +131,7 @@ func New(cfg *config.Config) (*Agent, error) {
 		metrics:     m,
 		promReg:     promReg,
 		info:        info,
+		envZone:     zone,
 	}
 
 	return a, nil
@@ -157,10 +159,11 @@ func (a *Agent) Run(ctx context.Context) error {
 	defer func() { _ = grpcClient.Close() }()
 
 	var peers []checker.Target
+	var resolvedZone string
 	backoff := 1 * time.Second
 	maxBackoff := 15 * time.Second
 	for {
-		peers, err = grpcClient.Register(ctx, a.info, a.cfg.HTTPPort)
+		peers, resolvedZone, err = grpcClient.Register(ctx, a.info, a.cfg.HTTPPort)
 		if err == nil {
 			break
 		}
@@ -171,6 +174,15 @@ func (a *Agent) Run(ctx context.Context) error {
 		case <-time.After(backoff):
 		}
 		backoff = min(backoff*2, maxBackoff)
+	}
+
+	// Adopt the controller-resolved zone when no explicit zone was configured.
+	// This happens before the scheduler starts, so all emitted metrics carry
+	// the correct source_zone from the first check.
+	if z := resolveZone(a.envZone, resolvedZone); z != a.info.Zone {
+		slog.Info("adopted zone from controller", "zone", z)
+		a.info.Zone = z
+		a.scheduler.SetSourceZone(z)
 	}
 
 	a.scheduler.UpdatePeers(peers)
@@ -209,8 +221,13 @@ func (a *Agent) Run(ctx context.Context) error {
 				return
 			case <-time.After(wait + jitter):
 			}
-			newPeers, regErr := grpcClient.Register(ctx, a.info, a.cfg.HTTPPort)
+			newPeers, newZone, regErr := grpcClient.Register(ctx, a.info, a.cfg.HTTPPort)
 			if regErr == nil {
+				if z := resolveZone(a.envZone, newZone); z != a.info.Zone {
+					slog.Info("adopted zone from controller on re-registration", "zone", z)
+					a.info.Zone = z
+					a.scheduler.SetSourceZone(z)
+				}
 				a.metrics.ResetPeerGauges()
 				a.scheduler.UpdatePeers(newPeers)
 				slog.Info("re-registered with controller after reconnect")
@@ -283,6 +300,15 @@ func (a *Agent) Run(ctx context.Context) error {
 	}
 }
 
+// resolveZone decides the agent's effective zone: an explicit env-provided
+// zone always wins; otherwise the controller-resolved zone is adopted.
+func resolveZone(envZone, resolvedZone string) string {
+	if envZone != "" {
+		return envZone
+	}
+	return resolvedZone
+}
+
 func NewResultHandler(m *metrics.PrometheusMetrics, source checker.Target) ResultHandler {
 	return func(result model.CheckResult) {
 		labels := []string{result.Source, result.Destination, result.SourceZone, result.DestZone}
@@ -319,7 +345,7 @@ func NewResultHandler(m *metrics.PrometheusMetrics, source checker.Target) Resul
 			if details, ok := result.Details.([]DNSDetails); ok {
 				for _, d := range details {
 					dnsLabels := make([]string, 0, 5)
-					dnsLabels = append(dnsLabels, d.Host, d.Resolver, source.NodeName, source.Zone)
+					dnsLabels = append(dnsLabels, d.Host, d.Resolver, source.NodeName, result.SourceZone)
 					m.DNSDuration.WithLabelValues(dnsLabels...).Observe(d.Duration.Seconds())
 					r := "success"
 					if len(d.ResolvedIPs) == 0 && !result.Success {
@@ -332,7 +358,7 @@ func NewResultHandler(m *metrics.PrometheusMetrics, source checker.Target) Resul
 		case model.CheckHTTP:
 			if details, ok := result.Details.([]HTTPDetails); ok {
 				for _, d := range details {
-					urlLabels := []string{d.URL, source.NodeName, source.Zone}
+					urlLabels := []string{d.URL, source.NodeName, result.SourceZone}
 					m.HTTPDNSDuration.WithLabelValues(urlLabels...).Observe(d.DNSTime.Seconds())
 					m.HTTPConnectDuration.WithLabelValues(urlLabels...).Observe(d.ConnectTime.Seconds())
 					m.HTTPTLSDuration.WithLabelValues(urlLabels...).Observe(d.TLSTime.Seconds())
@@ -342,7 +368,7 @@ func NewResultHandler(m *metrics.PrometheusMetrics, source checker.Target) Resul
 					if d.StatusCode == 0 || d.StatusCode >= 400 || d.BodyMismatch {
 						r = "fail"
 					}
-					m.HTTPResults.WithLabelValues(d.URL, d.Method, fmt.Sprintf("%d", d.StatusCode), source.NodeName, source.Zone, r).Inc()
+					m.HTTPResults.WithLabelValues(d.URL, d.Method, fmt.Sprintf("%d", d.StatusCode), source.NodeName, result.SourceZone, r).Inc()
 				}
 			}
 

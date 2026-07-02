@@ -107,6 +107,12 @@ func (c *Controller) Run(ctx context.Context) error {
 		} else {
 			nw := NewNodeWatcherWithContext(ctx, clientset, c.cfg.FailureDomainLabel)
 			c.httpServer.SetNodeWatcher(nw)
+			c.registry.SetZoneResolver(nw)
+			nw.OnCountChange(func(n int) {
+				c.metrics.ControllerExpectedAgents.WithLabelValues().Set(float64(n))
+			})
+			nw.OnZoneChange(c.registry.UpdateZone)
+			c.metrics.ControllerExpectedAgents.WithLabelValues().Set(float64(nw.SchedulableNodeCount()))
 			slog.Info("NodeWatcher started", "failureDomainLabel", c.cfg.FailureDomainLabel)
 		}
 	}

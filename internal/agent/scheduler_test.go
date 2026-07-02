@@ -87,6 +87,59 @@ func TestSchedulerRunsCheckers(t *testing.T) {
 	}
 }
 
+func TestSchedulerSetSourceZone(t *testing.T) {
+	source := checker.Target{AgentID: "a", NodeName: "test-node", PodIP: "10.0.0.1"}
+
+	var results []model.CheckResult
+	var mu sync.Mutex
+	handler := func(r model.CheckResult) {
+		mu.Lock()
+		results = append(results, r)
+		mu.Unlock()
+	}
+
+	s := NewScheduler(source, handler)
+	s.SetSourceZone("zone-a")
+	s.AddChecker(&mockChecker{name: model.CheckTCP}, SchedulerConfig{Interval: 50 * time.Millisecond})
+	s.UpdatePeers([]checker.Target{{AgentID: "peer-1", NodeName: "node-1", PodIP: "10.0.0.2", Port: 8080}})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Millisecond)
+	defer cancel()
+	s.Run(ctx)
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(results) == 0 {
+		t.Fatal("expected at least one result")
+	}
+	for _, r := range results {
+		if r.SourceZone != "zone-a" {
+			t.Fatalf("expected SourceZone zone-a after SetSourceZone, got %q", r.SourceZone)
+		}
+	}
+}
+
+func TestResolveZone(t *testing.T) {
+	cases := []struct {
+		name     string
+		env      string
+		resolved string
+		want     string
+	}{
+		{"env wins over resolved", "zone-env", "zone-ctrl", "zone-env"},
+		{"adopt resolved when env empty", "", "zone-ctrl", "zone-ctrl"},
+		{"keep empty when both empty", "", "", ""},
+		{"keep env when resolved empty", "zone-env", "", "zone-env"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := resolveZone(tc.env, tc.resolved); got != tc.want {
+				t.Errorf("resolveZone(%q, %q) = %q, want %q", tc.env, tc.resolved, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestSchedulerUpdatePeersFiltersSelf(t *testing.T) {
 	source := checker.Target{
 		AgentID:  "self-agent",

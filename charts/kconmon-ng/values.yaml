@@ -2,13 +2,25 @@
 # Default values for kconmon-ng.
 # This is a YAML-formatted file.
 
+# Controller Deployment. One controller hands every agent its peer list over
+# gRPC and (as leader) watches Kubernetes nodes to resolve zones and count
+# expected agents. Tune replicas/HA and scheduling here.
 controller:
+  # Number of controller Pods. Only the leader is active; extra replicas stay
+  # ready but passive (HA standby). Requires leaderElection=true to be useful.
   replicaCount: 1
+  # HA leader election among controller replicas. IMPORTANT: the node informer
+  # only runs on the leader, so zone enrichment (source_zone/dest_zone labels)
+  # and the kconmon_ng_controller_expected_agents metric require this to be
+  # true. Setting it false disables those features even with one replica.
   leaderElection: true
   image:
     repository: ghcr.io/esdmitrii/kconmon-ng-controller
+    # Image tag. Empty string means the chart appVersion is used.
     tag: ""
     pullPolicy: IfNotPresent
+  # Controller resource requests/limits. Defaults are small; the controller is
+  # not on the data path (agents do the probing).
   resources:
     limits:
       cpu: 200m
@@ -16,17 +28,29 @@ controller:
     requests:
       cpu: 50m
       memory: 64Mi
+  # Standard scheduling controls for the controller Deployment.
   nodeSelector: {}
   tolerations: []
   affinity: {}
 
+# Agent DaemonSet. One agent runs on every node and executes the enabled
+# checkers against its peers, exposing results as Prometheus metrics.
 agent:
+  # zone is an optional explicit override for the agent's failure-domain zone.
+  # Leave empty (default): the controller resolves each agent's zone from its
+  # node label (config.failureDomainLabel) at registration and the agent adopts
+  # it. A non-empty value here always wins over the controller-resolved zone.
+  # Note: zone enrichment requires controller.leaderElection=true (the
+  # NodeWatcher only runs on the leader).
   zone: ""
+  # Extra annotations for agent Pods (e.g. custom Prometheus scrape hints).
   podAnnotations: {}
   image:
     repository: ghcr.io/esdmitrii/kconmon-ng-agent
+    # Image tag. Empty string means the chart appVersion is used.
     tag: ""
     pullPolicy: IfNotPresent
+  # Agent resource requests/limits. Applied to every node's agent Pod.
   resources:
     limits:
       cpu: 200m
@@ -34,55 +58,103 @@ agent:
     requests:
       cpu: 50m
       memory: 64Mi
+  # Default tolerates everything so an agent runs on all nodes, including
+  # tainted/control-plane nodes. Narrow this to skip specific nodes.
   tolerations:
     - operator: Exists
+  # Agent needs the NET_RAW capability to open raw sockets for the ICMP checker
+  # and reactive MTR traces. Removing it breaks ICMP/MTR (TCP/UDP/DNS/HTTP
+  # checkers do not require it).
   securityContext:
     capabilities:
       add:
         - NET_RAW
 
+# Runtime configuration rendered into a ConfigMap and consumed by both the
+# controller and the agents. Changes are hot-reloaded without a restart.
 config:
+  # Prefix for all exported Prometheus metrics (e.g. kconmon_ng_tcp_results_total).
+  # Changing it renames every metric; update dashboards/alerts accordingly.
   metricsPrefix: kconmon_ng
+  # Port serving /metrics and health endpoints. Must differ from grpcPort;
+  # both must be 1-65535 or startup fails.
   httpPort: 8080
+  # Port for the controller's gRPC peer-list/topology API. Must differ from httpPort.
   grpcPort: 9090
+  # Log verbosity: one of debug, info, warn, error. Invalid values fail startup.
   logLevel: info
+  # Log output format: json or text. Invalid values fail startup.
   logFormat: json
+  # Node label the controller reads to determine each agent's zone. Used to
+  # populate source_zone/dest_zone metric labels (see agent.zone override).
   failureDomainLabel: topology.kubernetes.io/zone
+  # How long the controller keeps a registered agent without a heartbeat before
+  # evicting it from the peer list. Too low risks flapping on slow nodes.
   controllerAgentTtl: 30s
+  # Per-protocol connectivity checkers run by each agent against its peers.
+  # For any ENABLED checker, invalid timing fails startup (v1.2.0 strict
+  # validation): interval and timeout must both be > 0. A shorter interval
+  # means more frequent probes -> higher CPU/network load and metric cardinality.
   checkers:
+    # TCP dial check to a peer's port. Verifies L4 reachability.
     tcp:
       enabled: true
+      # How often to probe. Lower = more load.
       interval: 5s
+      # Per-probe deadline. Must be > 0 when enabled; >= interval only warns.
       timeout: 1s
+    # UDP probe measuring packet loss to a peer.
     udp:
       enabled: true
       interval: 5s
       timeout: 250ms
+      # Packets sent per probe to compute loss ratio. Must be >= 1 (validated).
       packets: 5
+    # ICMP (ping) reachability/loss check. Requires the agent NET_RAW capability.
     icmp:
       enabled: true
       interval: 5s
       timeout: 1s
+    # DNS resolution check.
     dns:
       enabled: true
       interval: 5s
+      # DNS lookups can be slow; timeout is larger by default.
       timeout: 5s
+      # Names to resolve each interval. Must be non-empty when the checker is
+      # enabled (validated); each entry must be a non-empty name.
       hosts:
         - kubernetes.default.svc.cluster.local
+      # Optional explicit resolvers as "host" or "host:port". Empty = use the
+      # Pod's default resolver. Malformed entries fail startup.
       resolvers: []
+    # HTTP endpoint check. Disabled by default. When enabled, targets must be
+    # non-empty and each URL must be a valid http/https URL with a host.
     http:
       enabled: false
       interval: 30s
       timeout: 5s
+      # List of HTTP targets (url, optional method/expectStatus/bodyPattern).
       targets: []
+    # Reactive traceroute (MTR) triggered on probe failures to locate the bad hop.
     mtr:
+      # Minimum gap between MTR runs for the same node pair, to avoid trace floods.
       cooldown: 60s
+      # Max traceroute hops. Must be between 1 and 64 (validated).
       maxHops: 30
 
+# Prometheus Operator ServiceMonitor for scraping the /metrics endpoint.
+# Requires the Prometheus Operator CRDs to be installed.
 serviceMonitor:
   enabled: false
+  # Scrape interval used by the generated ServiceMonitor.
   interval: 15s
 
+# Prometheus Operator PrometheusRule with built-in alerts. Requires the
+# Prometheus Operator CRDs. Edit or replace `rules` to customize alerting.
+# The two self-monitoring alerts (KconmonAgentsMissing, KconmonControllerDown)
+# require controller.leaderElection=true, since expected_agents and the leader
+# metric are only produced by the leader's node informer.
 prometheusRule:
   enabled: false
   rules:
@@ -107,15 +179,45 @@ prometheusRule:
         severity: warning
       annotations:
         summary: DNS resolution checks failing
+    # Self-monitoring: registered agents stay below the schedulable-node count
+    # for 10m (agents failing to register or crash-looping).
+    - alert: KconmonAgentsMissing
+      expr: kconmon_ng_controller_registered_agents < kconmon_ng_controller_expected_agents
+      for: 10m
+      labels:
+        severity: warning
+      annotations:
+        summary: Fewer kconmon-ng agents registered than schedulable nodes
+    # Self-monitoring: no controller reports itself leader for 5m — the control
+    # plane is down and no other rule would evaluate.
+    - alert: KconmonControllerDown
+      expr: absent(kconmon_ng_controller_leader == 1)
+      for: 5m
+      labels:
+        severity: critical
+      annotations:
+        summary: No active kconmon-ng controller leader
 
+# NetworkPolicy locking down agent/controller traffic. When enabled it allows:
+# agent<->controller gRPC, agent<->agent UDP probes + HTTP metrics, DNS (53),
+# and the Kubernetes API (443). Enable only if the cluster enforces policies.
 networkPolicy:
   enabled: false
+  # Namespace Prometheus scrapes from. Empty = allow scrape ingress from any
+  # namespace; set it to restrict scraping to your monitoring namespace.
   prometheusNamespace: ""
 
+# PodDisruptionBudget for the controller Deployment, so voluntary disruptions
+# (drains/upgrades) keep a controller available.
 pdb:
+  # With replicaCount=1 a minAvailable of 1 blocks voluntary eviction of the
+  # sole controller; raise replicaCount for smoother maintenance.
   enabled: true
   minAvailable: 1
 
+# ServiceAccount used by the controller (needs RBAC to watch nodes/leases).
 serviceAccount:
+  # Create the ServiceAccount and its RBAC. Set false to use an existing one.
   create: true
+  # Name of the ServiceAccount. Empty = generated from the release name.
   name: ""

@@ -201,10 +201,13 @@ func (x *RegisterRequest) GetAgent() *AgentMeta {
 }
 
 type RegisterResponse struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	AgentId       string                 `protobuf:"bytes,1,opt,name=agent_id,json=agentId,proto3" json:"agent_id,omitempty"`
-	Peers         []*AgentMeta           `protobuf:"bytes,2,rep,name=peers,proto3" json:"peers,omitempty"`
-	ServerTime    *timestamppb.Timestamp `protobuf:"bytes,3,opt,name=server_time,json=serverTime,proto3" json:"server_time,omitempty"`
+	state      protoimpl.MessageState `protogen:"open.v1"`
+	AgentId    string                 `protobuf:"bytes,1,opt,name=agent_id,json=agentId,proto3" json:"agent_id,omitempty"`
+	Peers      []*AgentMeta           `protobuf:"bytes,2,rep,name=peers,proto3" json:"peers,omitempty"`
+	ServerTime *timestamppb.Timestamp `protobuf:"bytes,3,opt,name=server_time,json=serverTime,proto3" json:"server_time,omitempty"`
+	// agent is the resolved metadata for the registering agent (e.g. zone
+	// enriched by the controller from the node's failure-domain label).
+	Agent         *AgentMeta `protobuf:"bytes,4,opt,name=agent,proto3" json:"agent,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -256,6 +259,13 @@ func (x *RegisterResponse) GetPeers() []*AgentMeta {
 func (x *RegisterResponse) GetServerTime() *timestamppb.Timestamp {
 	if x != nil {
 		return x.ServerTime
+	}
+	return nil
+}
+
+func (x *RegisterResponse) GetAgent() *AgentMeta {
+	if x != nil {
+		return x.Agent
 	}
 	return nil
 }
@@ -664,12 +674,13 @@ const file_kconmon_proto_rawDesc = "" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"@\n" +
 	"\x0fRegisterRequest\x12-\n" +
-	"\x05agent\x18\x01 \x01(\v2\x17.kconmonng.v1.AgentMetaR\x05agent\"\x99\x01\n" +
+	"\x05agent\x18\x01 \x01(\v2\x17.kconmonng.v1.AgentMetaR\x05agent\"\xc8\x01\n" +
 	"\x10RegisterResponse\x12\x19\n" +
 	"\bagent_id\x18\x01 \x01(\tR\aagentId\x12-\n" +
 	"\x05peers\x18\x02 \x03(\v2\x17.kconmonng.v1.AgentMetaR\x05peers\x12;\n" +
 	"\vserver_time\x18\x03 \x01(\v2\x1a.google.protobuf.TimestampR\n" +
-	"serverTime\"g\n" +
+	"serverTime\x12-\n" +
+	"\x05agent\x18\x04 \x01(\v2\x17.kconmonng.v1.AgentMetaR\x05agent\"g\n" +
 	"\x10HeartbeatRequest\x12\x19\n" +
 	"\bagent_id\x18\x01 \x01(\tR\aagentId\x128\n" +
 	"\ttimestamp\x18\x02 \x01(\v2\x1a.google.protobuf.TimestampR\ttimestamp\".\n" +
@@ -745,29 +756,30 @@ var file_kconmon_proto_depIdxs = []int32{
 	1,  // 1: kconmonng.v1.RegisterRequest.agent:type_name -> kconmonng.v1.AgentMeta
 	1,  // 2: kconmonng.v1.RegisterResponse.peers:type_name -> kconmonng.v1.AgentMeta
 	12, // 3: kconmonng.v1.RegisterResponse.server_time:type_name -> google.protobuf.Timestamp
-	12, // 4: kconmonng.v1.HeartbeatRequest.timestamp:type_name -> google.protobuf.Timestamp
-	0,  // 5: kconmonng.v1.PeerUpdate.type:type_name -> kconmonng.v1.PeerUpdate.UpdateType
-	1,  // 6: kconmonng.v1.PeerUpdate.peers:type_name -> kconmonng.v1.AgentMeta
-	12, // 7: kconmonng.v1.PeerUpdate.timestamp:type_name -> google.protobuf.Timestamp
-	12, // 8: kconmonng.v1.TCPProbeRequest.timestamp:type_name -> google.protobuf.Timestamp
-	12, // 9: kconmonng.v1.TCPProbeResponse.timestamp:type_name -> google.protobuf.Timestamp
-	12, // 10: kconmonng.v1.UDPProbeRequest.timestamp:type_name -> google.protobuf.Timestamp
-	12, // 11: kconmonng.v1.UDPProbeResponse.timestamp:type_name -> google.protobuf.Timestamp
-	2,  // 12: kconmonng.v1.AgentRegistry.Register:input_type -> kconmonng.v1.RegisterRequest
-	4,  // 13: kconmonng.v1.AgentRegistry.Heartbeat:input_type -> kconmonng.v1.HeartbeatRequest
-	5,  // 14: kconmonng.v1.AgentRegistry.WatchPeers:input_type -> kconmonng.v1.WatchPeersRequest
-	7,  // 15: kconmonng.v1.ProbeService.TCPProbe:input_type -> kconmonng.v1.TCPProbeRequest
-	9,  // 16: kconmonng.v1.ProbeService.UDPProbe:input_type -> kconmonng.v1.UDPProbeRequest
-	3,  // 17: kconmonng.v1.AgentRegistry.Register:output_type -> kconmonng.v1.RegisterResponse
-	13, // 18: kconmonng.v1.AgentRegistry.Heartbeat:output_type -> google.protobuf.Empty
-	6,  // 19: kconmonng.v1.AgentRegistry.WatchPeers:output_type -> kconmonng.v1.PeerUpdate
-	8,  // 20: kconmonng.v1.ProbeService.TCPProbe:output_type -> kconmonng.v1.TCPProbeResponse
-	10, // 21: kconmonng.v1.ProbeService.UDPProbe:output_type -> kconmonng.v1.UDPProbeResponse
-	17, // [17:22] is the sub-list for method output_type
-	12, // [12:17] is the sub-list for method input_type
-	12, // [12:12] is the sub-list for extension type_name
-	12, // [12:12] is the sub-list for extension extendee
-	0,  // [0:12] is the sub-list for field type_name
+	1,  // 4: kconmonng.v1.RegisterResponse.agent:type_name -> kconmonng.v1.AgentMeta
+	12, // 5: kconmonng.v1.HeartbeatRequest.timestamp:type_name -> google.protobuf.Timestamp
+	0,  // 6: kconmonng.v1.PeerUpdate.type:type_name -> kconmonng.v1.PeerUpdate.UpdateType
+	1,  // 7: kconmonng.v1.PeerUpdate.peers:type_name -> kconmonng.v1.AgentMeta
+	12, // 8: kconmonng.v1.PeerUpdate.timestamp:type_name -> google.protobuf.Timestamp
+	12, // 9: kconmonng.v1.TCPProbeRequest.timestamp:type_name -> google.protobuf.Timestamp
+	12, // 10: kconmonng.v1.TCPProbeResponse.timestamp:type_name -> google.protobuf.Timestamp
+	12, // 11: kconmonng.v1.UDPProbeRequest.timestamp:type_name -> google.protobuf.Timestamp
+	12, // 12: kconmonng.v1.UDPProbeResponse.timestamp:type_name -> google.protobuf.Timestamp
+	2,  // 13: kconmonng.v1.AgentRegistry.Register:input_type -> kconmonng.v1.RegisterRequest
+	4,  // 14: kconmonng.v1.AgentRegistry.Heartbeat:input_type -> kconmonng.v1.HeartbeatRequest
+	5,  // 15: kconmonng.v1.AgentRegistry.WatchPeers:input_type -> kconmonng.v1.WatchPeersRequest
+	7,  // 16: kconmonng.v1.ProbeService.TCPProbe:input_type -> kconmonng.v1.TCPProbeRequest
+	9,  // 17: kconmonng.v1.ProbeService.UDPProbe:input_type -> kconmonng.v1.UDPProbeRequest
+	3,  // 18: kconmonng.v1.AgentRegistry.Register:output_type -> kconmonng.v1.RegisterResponse
+	13, // 19: kconmonng.v1.AgentRegistry.Heartbeat:output_type -> google.protobuf.Empty
+	6,  // 20: kconmonng.v1.AgentRegistry.WatchPeers:output_type -> kconmonng.v1.PeerUpdate
+	8,  // 21: kconmonng.v1.ProbeService.TCPProbe:output_type -> kconmonng.v1.TCPProbeResponse
+	10, // 22: kconmonng.v1.ProbeService.UDPProbe:output_type -> kconmonng.v1.UDPProbeResponse
+	18, // [18:23] is the sub-list for method output_type
+	13, // [13:18] is the sub-list for method input_type
+	13, // [13:13] is the sub-list for extension type_name
+	13, // [13:13] is the sub-list for extension extendee
+	0,  // [0:13] is the sub-list for field type_name
 }
 
 func init() { file_kconmon_proto_init() }
