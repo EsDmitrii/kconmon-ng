@@ -129,6 +129,92 @@ func TestRegistryConcurrency(t *testing.T) {
 	wg.Wait()
 }
 
+type stubZoneResolver struct {
+	zones map[string]string
+}
+
+func (s stubZoneResolver) ZoneFor(nodeName string) string {
+	return s.zones[nodeName]
+}
+
+func TestRegistryEnrichesEmptyZone(t *testing.T) {
+	r := NewRegistry(30 * time.Second)
+	r.SetZoneResolver(stubZoneResolver{zones: map[string]string{"node-1": "zone-a"}})
+
+	info := r.Register(model.AgentInfo{ID: "agent-1", NodeName: "node-1"})
+	if info.Zone != "zone-a" {
+		t.Fatalf("expected enriched zone zone-a, got %q", info.Zone)
+	}
+
+	all := r.GetAll()
+	if len(all) != 1 || all[0].Zone != "zone-a" {
+		t.Fatalf("expected stored agent zone zone-a, got %+v", all)
+	}
+}
+
+func TestRegistryDoesNotOverrideExplicitZone(t *testing.T) {
+	r := NewRegistry(30 * time.Second)
+	r.SetZoneResolver(stubZoneResolver{zones: map[string]string{"node-1": "zone-a"}})
+
+	info := r.Register(model.AgentInfo{ID: "agent-1", NodeName: "node-1", Zone: "zone-explicit"})
+	if info.Zone != "zone-explicit" {
+		t.Fatalf("expected explicit zone preserved, got %q", info.Zone)
+	}
+}
+
+func TestRegistryUpdateZone(t *testing.T) {
+	r := NewRegistry(30 * time.Second)
+
+	var mu sync.Mutex
+	var notifications int
+	var lastSnapshot []model.AgentInfo
+	r.OnChange(func(agents []model.AgentInfo) {
+		mu.Lock()
+		notifications++
+		lastSnapshot = agents
+		mu.Unlock()
+	})
+
+	// Two agents on node-1, one on node-2.
+	r.Register(model.AgentInfo{ID: "agent-1", NodeName: "node-1"})
+	r.Register(model.AgentInfo{ID: "agent-1b", NodeName: "node-1"})
+	r.Register(model.AgentInfo{ID: "agent-2", NodeName: "node-2"})
+
+	mu.Lock()
+	base := notifications
+	mu.Unlock()
+
+	r.UpdateZone("node-1", "zone-a")
+
+	mu.Lock()
+	defer mu.Unlock()
+	if notifications != base+1 {
+		t.Fatalf("expected exactly one peer-update notification from UpdateZone, got %d extra", notifications-base)
+	}
+	byID := map[string]string{}
+	for _, a := range lastSnapshot {
+		byID[a.ID] = a.Zone
+	}
+	if byID["agent-1"] != "zone-a" || byID["agent-1b"] != "zone-a" {
+		t.Errorf("expected both node-1 agents in zone-a, got %+v", byID)
+	}
+	if byID["agent-2"] != "" {
+		t.Errorf("expected agent-2 unchanged, got %q", byID["agent-2"])
+	}
+}
+
+func TestRegistryUpdateZoneNoAgentsNoNotify(t *testing.T) {
+	r := NewRegistry(30 * time.Second)
+
+	var notifications int
+	r.OnChange(func([]model.AgentInfo) { notifications++ })
+
+	r.UpdateZone("node-unknown", "zone-a")
+	if notifications != 0 {
+		t.Errorf("expected no notification when no agents match, got %d", notifications)
+	}
+}
+
 func TestRegistryGetAll(t *testing.T) {
 	r := NewRegistry(30 * time.Second)
 

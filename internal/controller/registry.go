@@ -8,11 +8,18 @@ import (
 	"github.com/EsDmitrii/kconmon-ng/internal/model"
 )
 
+// ZoneResolver resolves a node's failure-domain zone. Implemented by
+// *NodeWatcher; kept as an interface so the registry can be tested without one.
+type ZoneResolver interface {
+	ZoneFor(nodeName string) string
+}
+
 type Registry struct {
-	mu       sync.RWMutex
-	agents   map[string]*registeredAgent
-	ttl      time.Duration
-	onChange []func([]model.AgentInfo)
+	mu           sync.RWMutex
+	agents       map[string]*registeredAgent
+	ttl          time.Duration
+	onChange     []func([]model.AgentInfo)
+	zoneResolver ZoneResolver
 }
 
 type registeredAgent struct {
@@ -27,11 +34,25 @@ func NewRegistry(ttl time.Duration) *Registry {
 	}
 }
 
-func (r *Registry) Register(info model.AgentInfo) { //nolint:gocritic // hugeParam: public API uses value semantics intentionally
+// SetZoneResolver injects the zone resolver used to enrich agents that
+// register without an explicit zone. Safe to call before serving traffic.
+func (r *Registry) SetZoneResolver(zr ZoneResolver) {
+	r.mu.Lock()
+	r.zoneResolver = zr
+	r.mu.Unlock()
+}
+
+// Register stores the agent and returns its resolved metadata. When the agent
+// provides no zone, the zone is enriched from the node's failure-domain label
+// via the configured ZoneResolver (an explicit zone is never overridden).
+func (r *Registry) Register(info model.AgentInfo) model.AgentInfo { //nolint:gocritic // hugeParam: public API uses value semantics intentionally
 	r.mu.Lock()
 	now := time.Now()
 	info.JoinedAt = now
 	info.LastSeen = now
+	if info.Zone == "" && r.zoneResolver != nil {
+		info.Zone = r.zoneResolver.ZoneFor(info.NodeName)
+	}
 	r.agents[info.ID] = &registeredAgent{
 		info:     info,
 		lastSeen: now,
@@ -41,6 +62,31 @@ func (r *Registry) Register(info model.AgentInfo) { //nolint:gocritic // hugePar
 
 	slog.Info("agent registered", "id", info.ID, "node", info.NodeName, "zone", info.Zone)
 	r.notifyChange(snapshot)
+	return info
+}
+
+// UpdateZone sets the zone for every agent registered on nodeName and, if any
+// were changed, broadcasts a peer update to subscribers. Agents that resolve
+// their zone at registration time will keep the new value on re-registration.
+func (r *Registry) UpdateZone(nodeName, zone string) {
+	r.mu.Lock()
+	changed := false
+	for _, agent := range r.agents {
+		if agent.info.NodeName == nodeName && agent.info.Zone != zone {
+			agent.info.Zone = zone
+			changed = true
+		}
+	}
+	var snapshot []model.AgentInfo
+	if changed {
+		snapshot = r.snapshotLocked()
+	}
+	r.mu.Unlock()
+
+	if changed {
+		slog.Info("agent zone updated", "node", nodeName, "zone", zone)
+		r.notifyChange(snapshot)
+	}
 }
 
 func (r *Registry) Deregister(agentID string) {

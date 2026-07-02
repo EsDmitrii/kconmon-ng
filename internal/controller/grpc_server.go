@@ -49,19 +49,20 @@ func (s *GRPCServer) Register(_ context.Context, req *pb.RegisterRequest) (*pb.R
 		Labels:   agentMeta.GetLabels(),
 	}
 
-	s.registry.Register(info)
+	resolved := s.registry.Register(info)
 	s.metrics.ControllerRegisteredAgents.WithLabelValues().Set(float64(s.registry.Count()))
 
-	peers := s.registry.GetPeers(info.ID)
+	peers := s.registry.GetPeers(resolved.ID)
 	pbPeers := make([]*pb.AgentMeta, 0, len(peers))
 	for i := range peers {
 		pbPeers = append(pbPeers, agentInfoToProto(peers[i]))
 	}
 
 	return &pb.RegisterResponse{
-		AgentId:    info.ID,
+		AgentId:    resolved.ID,
 		Peers:      pbPeers,
 		ServerTime: timestamppb.Now(),
+		Agent:      agentInfoToProto(resolved),
 	}, nil
 }
 

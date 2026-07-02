@@ -35,6 +35,9 @@ message RegisterResponse {
   string agent_id = 1;
   repeated AgentMeta peers = 2;
   google.protobuf.Timestamp server_time = 3;
+  // agent is the resolved metadata for the registering agent (e.g. zone
+  // enriched by the controller from the node's failure-domain label).
+  AgentMeta agent = 4;
 }
 
 message HeartbeatRequest {

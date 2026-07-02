@@ -1,3 +1,83 @@
+## kconmon-ng v1.2.0
+
+### Features
+
+- **Automatic zone discovery** — agents no longer need a statically configured zone. The
+  controller enriches each agent registration with the node's failure-domain zone taken from its
+  node informer (`failureDomainLabel`, default `topology.kubernetes.io/zone`) and returns the
+  resolved metadata in `RegisterResponse.agent`; the agent adopts it for all `source_zone` /
+  `destination_zone` metric labels. `KCONMON_NG_ZONE` (`agent.zone` in Helm values) remains an
+  explicit override and always wins. Node zone relabels propagate to peers via a FULL_SYNC peer
+  update; the relabeled node's own `source_zone` refreshes on its next re-registration.
+  Per-zone metrics and the Zone Heatmap dashboard now work out of the box on multi-zone clusters.
+
+- **Self-monitoring** — new gauge `kconmon_ng_controller_expected_agents` (count of schedulable
+  nodes from the controller's node informer) and two PrometheusRule alerts:
+  `KconmonAgentsMissing` (warning: registered < expected for 10m) and `KconmonControllerDown`
+  (critical: `absent(kconmon_ng_controller_leader == 1)` for 5m). Degradation of kconmon-ng
+  itself now alerts instead of failing silently. Requires `controller.leaderElection: true`
+  (default) for the node informer.
+
+### Breaking-ish Changes
+
+- **Strict config parsing** — the application config (ConfigMap / `--config` file) is now decoded
+  with unknown-field rejection and per-checker semantic validation (intervals/timeouts > 0 for
+  enabled checkers, HTTP target URL scheme/host, DNS resolver host[:port], non-empty DNS hosts).
+  A typo'd or invalid config now fails startup and is rejected on hot-reload (the previous config
+  stays active) instead of being silently ignored. Review your values overrides before upgrading:
+  a config that previously "worked" by accident will now fail loudly. `timeout >= interval` logs
+  a warning but does not fail.
+
+### Helm Chart / Artifact Hub
+
+- Chart README is now packaged into the chart archive — the Artifact Hub package page renders
+  description, install instructions, values and metrics reference instead of
+  "This package version does not provide a README file".
+- `home` and `sources` added to `Chart.yaml`; Artifact Hub repository metadata
+  (`artifacthub-repo.yml`) is published as an ORAS artifact on release for repository
+  verification.
+- `agent.zone` is now documented as an optional override (auto-discovery is the default).
+
+### Dashboards
+
+- **Overview / MTR Triggers Count** — switched from `increase(...[$__range])` to a plain
+  `sum(...)`: `increase()` misses counter births on freshly restarted agent pods and chronically
+  undercounted exactly when MTR fires most (pod churn).
+
+### Local Development
+
+- `hack/local-test.sh` hardening: unique image tag per build (minikube's image-load cache
+  silently kept stale same-tag images on re-runs), `set -e`/`pipefail` fixes (`((ok++))`
+  pre-increment exit, SIGPIPE on `head`-truncated pipes), port-forward cleanup.
+
+### Upgrade Notes
+
+1. Validate your config overrides against the stricter parser before rolling out (a quick check:
+   `helm template ... | <render your config>` and run the controller/agent with `--config` locally,
+   or just watch pod readiness on a staging cluster first).
+2. If you previously set `agent.zone` to force a zone, you can keep it (it still wins) or drop it
+   to switch to automatic discovery.
+3. Metric label sets are unchanged; the new alerts ship in the chart's default
+   `prometheusRule.rules` and are inert unless `prometheusRule.enabled: true`.
+
+### Install
+
+```bash
+helm upgrade --install kconmon-ng oci://ghcr.io/esdmitrii/charts/kconmon-ng \
+  --version 1.2.0 \
+  --namespace kconmon-ng \
+  --create-namespace
+```
+
+### Images
+
+```
+ghcr.io/esdmitrii/kconmon-ng-agent:1.2.0
+ghcr.io/esdmitrii/kconmon-ng-controller:1.2.0
+```
+
+---
+
 ## kconmon-ng v1.1.0
 
 ### Bug Fixes
