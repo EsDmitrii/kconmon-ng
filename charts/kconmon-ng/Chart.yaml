@@ -3,8 +3,8 @@ apiVersion: v2
 name: kconmon-ng
 description: Kubernetes Node Connectivity Monitor - Next Generation
 type: application
-version: 1.1.0
-appVersion: "1.1.0"
+version: 1.2.0
+appVersion: "1.2.0"
 keywords:
   - kubernetes
   - connectivity
@@ -13,6 +13,9 @@ keywords:
 maintainers:
   - name: Dmitrii Esin
     url: https://github.com/EsDmitrii
+home: https://github.com/EsDmitrii/kconmon-ng
+sources:
+  - https://github.com/EsDmitrii/kconmon-ng
 
 annotations:
   artifacthub.io/license: Apache-2.0
@@ -22,13 +25,13 @@ annotations:
     - name: Documentation
       url: https://github.com/EsDmitrii/kconmon-ng#readme
   artifacthub.io/changes: |
+    - kind: added
+      description: Self-monitoring — expected-agents gauge plus KconmonAgentsMissing and KconmonControllerDown alerts
+    - kind: added
+      description: Automatic zone discovery via controller-side enrichment; agent.zone is now an optional override
+    - kind: added
+      description: Chart README packaged for Artifact Hub; home/sources metadata; repo metadata published via ORAS
+    - kind: changed
+      description: Strict app config parsing — unknown or invalid config keys now fail startup and hot-reload
     - kind: fixed
-      description: MTR lastRun map memory leak — expired entries now purged on each TryAcquire call
-    - kind: fixed
-      description: HTTP body pattern mismatch was silently counted as success in Prometheus metrics
-    - kind: changed
-      description: DNS resolver dial timeout is now configurable via checkers.dns.timeout (default 5s)
-    - kind: changed
-      description: Agent re-registration backoff now includes jitter to prevent thundering herd on controller restart
-    - kind: changed
-      description: MTR traceroute read buffer allocated once per trace instead of per hop
+      description: Overview MTR Triggers panel no longer undercounts after agent restarts
