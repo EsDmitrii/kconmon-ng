@@ -1979,13 +1979,13 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "sum(increase(kconmon_ng_mtr_triggered_total[$__range])) or vector(0)",
+          "expr": "sum(kconmon_ng_mtr_triggered_total) or vector(0)",
           "legendFormat": "MTR Triggers",
           "refId": "A"
         }
       ],
       "title": "MTR Triggers Count",
-      "description": "Number of MTR traceroutes triggered by check failures within the selected time range. 0 means all checks are passing.",
+      "description": "MTR traceroutes triggered by check failures, summed over running agents (counters reset on agent restart). Not windowed: increase() misses counter births on fresh pods and undercounts churn-time triggers.",
       "type": "stat"
     }
   ],

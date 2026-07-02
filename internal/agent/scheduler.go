@@ -94,6 +94,20 @@ func (s *Scheduler) AddChecker(c checker.Checker, cfg SchedulerConfig) {
 	s.configs[c.Name()] = cfg
 }
 
+// SetSourceZone updates the source zone reported on every emitted result.
+// Intended to be called once after registration, before Run starts.
+func (s *Scheduler) SetSourceZone(zone string) {
+	s.mu.Lock()
+	s.source.Zone = zone
+	s.mu.Unlock()
+}
+
+func (s *Scheduler) sourceZone() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.source.Zone
+}
+
 func (s *Scheduler) UpdatePeers(peers []checker.Target) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -172,7 +186,7 @@ func (s *Scheduler) runCheckerOnce(ctx context.Context, c checker.Checker) {
 	if cfg.NodeLocal {
 		result := c.Check(ctx, checker.Target{})
 		result.Source = s.source.NodeName
-		result.SourceZone = s.source.Zone
+		result.SourceZone = s.sourceZone()
 
 		if s.handler != nil {
 			s.handler(result)
@@ -196,7 +210,7 @@ func (s *Scheduler) runCheckerOnce(ctx context.Context, c checker.Checker) {
 	for _, peer := range peers {
 		result := c.Check(ctx, peer)
 		result.Source = s.source.NodeName
-		result.SourceZone = s.source.Zone
+		result.SourceZone = s.sourceZone()
 		result.Destination = peer.NodeName
 		result.DestZone = peer.Zone
 
@@ -241,7 +255,7 @@ func (s *Scheduler) triggerMTR(ctx context.Context, peer checker.Target, failedR
 
 	mtrResult := mtr.Check(ctx, peer)
 	mtrResult.Source = s.source.NodeName
-	mtrResult.SourceZone = s.source.Zone
+	mtrResult.SourceZone = s.sourceZone()
 	mtrResult.Destination = peer.NodeName
 	mtrResult.DestZone = peer.Zone
 

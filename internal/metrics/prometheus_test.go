@@ -30,6 +30,7 @@ func TestNewPrometheusMetrics(t *testing.T) {
 	m.ICMPLossRatio.WithLabelValues("src", "dst", "zone-a", "zone-b").Set(0.0)
 
 	m.ControllerRegisteredAgents.WithLabelValues().Set(3)
+	m.ControllerExpectedAgents.WithLabelValues().Set(4)
 	m.ControllerLeader.WithLabelValues().Set(1)
 
 	families, err := reg.Gather()
@@ -46,6 +47,7 @@ func TestNewPrometheusMetrics(t *testing.T) {
 		"kconmon_ng_tcp_connect_duration_seconds": false,
 		"kconmon_ng_udp_rtt_seconds":              false,
 		"kconmon_ng_controller_registered_agents": false,
+		"kconmon_ng_controller_expected_agents":   false,
 		"kconmon_ng_controller_leader":            false,
 	}
 
