@@ -71,6 +71,7 @@ Each agent registers with the controller over gRPC and receives a live-updated l
 | **Self-probe prevention** | Agents filter themselves from the peer list by agent ID, node name, and pod IP                                               |
 | **Controller HA**         | Leader election via `leaderElection: true`; standby replicas stay ready but passive                                          |
 | **Node topology**         | Controller watches Kubernetes node objects; zone info enriches topology API and can be used in dashboards                    |
+| **Zone enrichment**       | On registration the controller resolves each agent's zone from its node `failureDomainLabel` and the agent adopts it, so `source_zone`/`dest_zone` are populated with no agent config. An explicit `agent.zone` overrides this. A label change after registration is broadcast to peers immediately; the agent's own `source_zone` updates on its next re-registration. Requires `controller.leaderElection: true` (NodeWatcher runs only on the leader). |
 | **Config hot-reload**     | Config file changes are applied without restart via fsnotify                                                                 |
 | **Prometheus metrics**    | All checks export metrics with `source_node`, `destination_node`, `source_zone`, `destination_zone` labels                   |
 | **OpenTelemetry**         | Optional OTLP trace export for probe runs                                                                                    |
@@ -95,7 +96,7 @@ The agent DaemonSet requires the `NET_RAW` Linux capability for ICMP and MTR. Th
 ```bash
 # Install from OCI registry
 helm install kconmon-ng oci://ghcr.io/esdmitrii/charts/kconmon-ng \
-  --version 1.1.0 \
+  --version 1.2.0 \
   --set serviceMonitor.enabled=true \
   --set prometheusRule.enabled=true
 ```
@@ -331,6 +332,7 @@ All metric names use the configurable prefix (default `kconmon_ng`). The common 
 | Metric                                     | Type    | Description                               |
 | ------------------------------------------ | ------- | ----------------------------------------- |
 | `kconmon_ng_controller_registered_agents`  | gauge   | Currently registered agents               |
+| `kconmon_ng_controller_expected_agents`    | gauge   | Schedulable nodes expected to run an agent |
 | `kconmon_ng_controller_grpc_connections`   | gauge   | Active gRPC streaming connections         |
 | `kconmon_ng_controller_peer_updates_total` | counter | Peer list updates broadcast to agents     |
 | `kconmon_ng_controller_leader`             | gauge   | `1` if this instance is the active leader |
@@ -363,9 +365,32 @@ Default rules are deployed when `prometheusRule.enabled: true`. The metric prefi
     severity: warning
   annotations:
     summary: DNS resolution checks are failing
+
+- alert: KconmonAgentsMissing
+  expr: kconmon_ng_controller_registered_agents < kconmon_ng_controller_expected_agents
+  for: 10m
+  labels:
+    severity: warning
+  annotations:
+    summary: Fewer kconmon-ng agents registered than schedulable nodes
+
+- alert: KconmonControllerDown
+  expr: absent(kconmon_ng_controller_leader == 1)
+  for: 5m
+  labels:
+    severity: critical
+  annotations:
+    summary: No active kconmon-ng controller leader
 ```
 
 Additional rules can be appended under `prometheusRule.rules` in Helm values.
+
+### Self-monitoring
+
+kconmon-ng monitors itself so that degradation of the monitor raises an alert instead of silent gaps. The controller derives `kconmon_ng_controller_expected_agents` from its node informer — the number of schedulable nodes (`spec.unschedulable == false`), each of which should run an agent. Two default rules cover the failure modes:
+
+- `KconmonAgentsMissing` (warning) fires when registered agents stay below the expected count for 10m — agents failing to register or crash-looping.
+- `KconmonControllerDown` (critical) fires when no controller reports itself leader for 5m — the whole control plane is down and no other alert would be evaluated.
 
 ## Grafana Dashboards
 
