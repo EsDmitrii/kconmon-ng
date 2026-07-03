@@ -45,6 +45,7 @@ type PrometheusMetrics struct {
 	ControllerPeerUpdates      *prometheus.CounterVec
 	ControllerGRPCConnections  *prometheus.GaugeVec
 	ControllerLeader           *prometheus.GaugeVec
+	ControllerDiagnostics      *prometheus.CounterVec
 }
 
 func NewPrometheusMetrics(prefix string, reg prometheus.Registerer) *PrometheusMetrics {
@@ -180,6 +181,10 @@ func NewPrometheusMetrics(prefix string, reg prometheus.Registerer) *PrometheusM
 			Name: prefix + "_controller_leader",
 			Help: "1 if this instance is the leader, 0 otherwise",
 		}, []string{}),
+		ControllerDiagnostics: factory.NewCounterVec(prometheus.CounterOpts{
+			Name: prefix + "_controller_diagnostics_total",
+			Help: "Total on-demand diagnostics requests by check type and outcome",
+		}, []string{"type", "result"}),
 	}
 
 	return m

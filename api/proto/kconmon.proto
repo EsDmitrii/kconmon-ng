@@ -12,6 +12,12 @@ service AgentRegistry {
   rpc Heartbeat(HeartbeatRequest) returns (google.protobuf.Empty);
   rpc WatchPeers(WatchPeersRequest) returns (stream PeerUpdate);
   rpc Deregister(DeregisterRequest) returns (google.protobuf.Empty);
+  // WatchTasks server-streams on-demand diagnostic tasks from the controller
+  // to a registered agent, mirroring the WatchPeers push pattern.
+  rpc WatchTasks(WatchTasksRequest) returns (stream TaskRequest);
+  // ReportTaskResult delivers the outcome of a WatchTasks task back to the
+  // controller.
+  rpc ReportTaskResult(TaskResult) returns (google.protobuf.Empty);
 }
 
 service ProbeService {
@@ -63,6 +69,26 @@ message PeerUpdate {
   UpdateType type = 1;
   repeated AgentMeta peers = 2;
   google.protobuf.Timestamp timestamp = 3;
+}
+
+message WatchTasksRequest {
+  string agent_id = 1;
+}
+
+message TaskRequest {
+  string task_id = 1;
+  string check_type = 2; // tcp|udp|icmp|dns|http|mtr
+  AgentMeta target = 3;
+  string plane = 4; // pod|host
+}
+
+message TaskResult {
+  string task_id = 1;
+  string agent_id = 2;
+  bool success = 3;
+  string error = 4;
+  bytes details_json = 5; // serialized model.CheckResult
+  google.protobuf.Timestamp timestamp = 6;
 }
 
 message TCPProbeRequest {

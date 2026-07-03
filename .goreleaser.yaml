@@ -38,6 +38,23 @@ builds:
       - -X github.com/EsDmitrii/kconmon-ng/internal/config.Commit={{.Commit}}
       - -X github.com/EsDmitrii/kconmon-ng/internal/config.BuildDate={{.Date}}
 
+  - id: kubectl-kconmon
+    main: ./cmd/kubectl-kconmon
+    binary: kubectl-kconmon
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w
+      - -X github.com/EsDmitrii/kconmon-ng/internal/config.Version={{.Version}}
+      - -X github.com/EsDmitrii/kconmon-ng/internal/config.Commit={{.Commit}}
+      - -X github.com/EsDmitrii/kconmon-ng/internal/config.BuildDate={{.Date}}
+
 dockers:
   - id: agent-amd64
     ids: [agent]
@@ -117,8 +134,18 @@ docker_manifests:
       - "ghcr.io/esdmitrii/kconmon-ng-controller:{{.Version}}-arm64"
 
 archives:
-  - format: tar.gz
+  - id: server
+    ids: [agent, controller]
+    formats: [tar.gz]
     name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+
+  # krew requires the plugin binary and a LICENSE in each platform archive.
+  - id: kubectl-kconmon
+    ids: [kubectl-kconmon]
+    formats: [tar.gz]
+    name_template: "kconmon_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - LICENSE
 
 checksum:
   name_template: checksums.txt

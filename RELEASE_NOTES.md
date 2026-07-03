@@ -1,3 +1,70 @@
+## kconmon-ng v1.3.0
+
+### Features
+
+- **`kubectl-kconmon` plugin (on-demand diagnostics)** — a new kubectl plugin talks to the
+  controller's HTTP API through a client-go port-forward, so operators can inspect topology
+  (`kubectl kconmon topology` / `agents`) and run one-shot connectivity checks
+  (`kubectl kconmon check SRC DST --type …`, `kubectl kconmon mtr SRC DST`) between any two nodes
+  without opening Grafana. Table or `-o json` output; a failed check exits `2` (distinct from `1`
+  for CLI/API errors) so it composes in shell pipelines. Install via krew from the release manifest
+  (see Install below).
+
+- **On-demand diagnostics API** — new `POST /api/v1/diagnostics` controller endpoint runs a single
+  check (`tcp`/`udp`/`icmp`/`dns`/`http`/`mtr`) from a source node's agent to a destination and
+  returns the `CheckResult` verbatim. Served by the leader only; `?timeout=` caps the wait
+  (default 60s, max 120s). This is the endpoint the plugin drives. See `docs/api.md`.
+
+- **Graceful agent deregistration on SIGTERM** — a restarting agent now deregisters from the
+  controller on shutdown, so peers drop it immediately instead of waiting out the heartbeat TTL.
+  This removes the transient false-loss window that a rolling agent restart used to leave in its
+  own metrics.
+
+### Security
+
+- **Toolchain and dependency bumps** — Go toolchain `go1.26.4`; `google.golang.org/grpc`
+  1.79.1 → 1.82.0, `golang.org/x/net` 0.51 → 0.56, `golang.org/x/sys` 0.41 → 0.46, and OpenTelemetry
+  1.41 → 1.43. This clears the CVE findings behind the previous Artifact Hub security-report grade.
+- **`govulncheck` in CI** — a dedicated CI job runs `govulncheck ./...` on every PR and tag;
+  Dependabot (gomod / github-actions / docker, weekly) keeps dependencies current so CVE fixes land
+  as normal PRs instead of accumulating until the next scan.
+
+### Supply chain
+
+- The Helm chart is now signed with cosign (keyless, by digest) — v1.3.0 is the first signed
+  release. Artifact Hub repository metadata continues to be published as an ORAS artifact.
+
+### Docs
+
+- README reworked with an "On-demand diagnostics (kubectl plugin)" section and real command output.
+- `docs/api.md` documents the full `POST /api/v1/diagnostics` contract (request fields, status
+  codes, `?timeout=` cap, and ICMP / MTR response examples).
+
+### Install
+
+```bash
+helm upgrade --install kconmon-ng oci://ghcr.io/esdmitrii/charts/kconmon-ng \
+  --version 1.3.0 \
+  --namespace kconmon-ng \
+  --create-namespace
+```
+
+kubectl plugin (via krew, from the release manifest):
+
+```bash
+kubectl krew install --manifest-url \
+  https://github.com/EsDmitrii/kconmon-ng/releases/download/v1.3.0/kconmon.yaml
+```
+
+### Images
+
+```
+ghcr.io/esdmitrii/kconmon-ng-agent:1.3.0
+ghcr.io/esdmitrii/kconmon-ng-controller:1.3.0
+```
+
+---
+
 ## kconmon-ng v1.2.0
 
 ### Features

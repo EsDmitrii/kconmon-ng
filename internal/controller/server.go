@@ -16,6 +16,7 @@ type HTTPServer struct {
 	promReg         *prometheus.Registry
 	ready           atomic.Bool
 	topologyHandler *TopologyHandler
+	diagHandler     atomic.Pointer[DiagnosticsHandler]
 }
 
 func NewHTTPServer(registry *Registry, nodeWatcher *NodeWatcher, promReg *prometheus.Registry) *HTTPServer {
@@ -32,6 +33,7 @@ func NewHTTPServer(registry *Registry, nodeWatcher *NodeWatcher, promReg *promet
 	s.mux.HandleFunc("GET /readyz", s.handleReadyz)
 	s.mux.Handle("GET /api/v1/topology", s.topologyHandler)
 	s.mux.HandleFunc("GET /api/v1/version", s.handleVersion)
+	s.mux.HandleFunc("POST /api/v1/diagnostics", s.handleDiagnostics)
 
 	return s
 }
@@ -40,6 +42,22 @@ func NewHTTPServer(registry *Registry, nodeWatcher *NodeWatcher, promReg *promet
 // Can be called after construction, before or after the server starts accepting requests.
 func (s *HTTPServer) SetNodeWatcher(nw *NodeWatcher) {
 	s.topologyHandler.SetNodeWatcher(nw)
+}
+
+// SetDiagnosticsHandler hot-injects the on-demand diagnostics handler. Safe to
+// call concurrently with request serving. Until set, the diagnostics route
+// returns 503.
+func (s *HTTPServer) SetDiagnosticsHandler(h *DiagnosticsHandler) {
+	s.diagHandler.Store(h)
+}
+
+func (s *HTTPServer) handleDiagnostics(w http.ResponseWriter, r *http.Request) {
+	h := s.diagHandler.Load()
+	if h == nil {
+		http.Error(w, "diagnostics not available", http.StatusServiceUnavailable)
+		return
+	}
+	h.ServeHTTP(w, r)
 }
 
 func (s *HTTPServer) Handler() http.Handler {

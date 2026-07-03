@@ -23,6 +23,7 @@ type GRPCClient struct {
 	agentID          string
 	onPeers          func([]checker.Target)
 	onNeedReregister func()
+	onTask           func(context.Context, *pb.TaskRequest)
 }
 
 func NewGRPCClient(address string) (*GRPCClient, error) {
@@ -50,6 +51,13 @@ func (c *GRPCClient) OnPeersUpdate(fn func([]checker.Target)) {
 
 func (c *GRPCClient) OnNeedReregister(fn func()) {
 	c.onNeedReregister = fn
+}
+
+// OnTask registers the handler invoked for each on-demand diagnostic task
+// received on the WatchTasks stream. The handler is called with the stream
+// context so executions abort when the stream (and thus the agent) shuts down.
+func (c *GRPCClient) OnTask(fn func(context.Context, *pb.TaskRequest)) {
+	c.onTask = fn
 }
 
 // Register registers the agent and returns the peer list plus the zone the
@@ -133,6 +141,44 @@ func (c *GRPCClient) WatchPeers(ctx context.Context, httpPort int) error {
 			c.onPeers(targets)
 		}
 	}
+}
+
+// WatchTasks subscribes to the controller's on-demand task stream and invokes
+// the OnTask handler for each task received. It mirrors WatchPeers: it returns
+// on the first stream error so the caller's reconnect loop can re-subscribe.
+func (c *GRPCClient) WatchTasks(ctx context.Context) error {
+	stream, err := c.client.WatchTasks(ctx, &pb.WatchTasksRequest{
+		AgentId: c.agentID,
+	})
+	if err != nil {
+		return fmt.Errorf("watching tasks: %w", err)
+	}
+
+	for {
+		task, err := stream.Recv()
+		if err != nil {
+			return fmt.Errorf("receiving task: %w", err)
+		}
+
+		slog.Info("on-demand task received",
+			"taskId", task.GetTaskId(),
+			"checkType", task.GetCheckType(),
+			"target", task.GetTarget().GetNodeName(),
+			"plane", task.GetPlane(),
+		)
+
+		if c.onTask != nil {
+			c.onTask(ctx, task)
+		}
+	}
+}
+
+// ReportTaskResult sends a completed task result back to the controller.
+func (c *GRPCClient) ReportTaskResult(ctx context.Context, res *pb.TaskResult) error {
+	if _, err := c.client.ReportTaskResult(ctx, res); err != nil {
+		return fmt.Errorf("reporting task result: %w", err)
+	}
+	return nil
 }
 
 func (c *GRPCClient) Close() error {

@@ -27,6 +27,11 @@ Short plan for publishing the two drafts in this directory. Not a marketing camp
 - [ ] Artifact Hub listing — confirm `charts/kconmon-ng/README.md` renders correctly on the package page (already fixed in v1.2.0 per `RELEASE_NOTES.md`)
 - [ ] GitHub repo — pin or link the published articles from the README or a "Press/Articles" section if one gets added later (out of scope for this task)
 
+## After the 1.3.0 release
+
+- [ ] Verify the krew install on a clean machine: `kubectl krew install --manifest-url https://github.com/EsDmitrii/kconmon-ng/releases/download/v1.3.0/kconmon.yaml`, then `kubectl kconmon topology` against a live cluster — confirm the release archives and sha256s in `kconmon.yaml` resolve.
+- [ ] Apply for Artifact Hub "official" status once the 1.3.0 chart is indexed and the security report clears — file the request via the artifacthub/hub issue template (verified publisher + README-in-package are already satisfied).
+
 ## After publishing
 
 - [ ] Watch GitHub issues/discussions for the first 48h — comparison articles tend to draw "what about X" questions (MTU detection, root-cause hints, kubectl plugin are known gaps, already flagged as roadmap in both drafts)
