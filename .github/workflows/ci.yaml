@@ -10,6 +10,7 @@ on:
       - "go.sum"
       - ".golangci.yml"
       - "charts/**"
+      - "krew/**"
       - ".github/workflows/ci.yaml"
 
 concurrency:
@@ -17,6 +18,41 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  krew-manifest:
+    name: Krew manifest
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # Render the krew manifest with a stand-in version + dummy archives and
+      # assert it is well-formed. Catches the class of bugs that broke real
+      # releases: a version without the required 'v' prefix, unsubstituted
+      # placeholders, or a missing platform block — before a tag is cut.
+      - name: Render and validate manifest
+        run: |
+          set -euo pipefail
+          tmp=$(mktemp -d)
+          for a in linux_amd64 linux_arm64 darwin_amd64 darwin_arm64; do
+            echo dummy > "$tmp/kconmon_9.9.9_${a}.tar.gz"
+          done
+          ./krew/render-manifest.sh 9.9.9 "$tmp" "$tmp/kconmon.yaml"
+          cat "$tmp/kconmon.yaml"
+
+          # krew requires spec.version to start with 'v'.
+          grep -Eq '^\s*version:\s*"?v9\.9\.9"?' "$tmp/kconmon.yaml" \
+            || { echo "::error::krew manifest version must be v-prefixed"; exit 1; }
+          # No placeholder may survive rendering.
+          if grep -q '{{' "$tmp/kconmon.yaml"; then
+            echo "::error::unsubstituted placeholder in krew manifest"; exit 1
+          fi
+          # All four platform archives must be referenced.
+          for a in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64; do
+            os=${a%/*}; arch=${a#*/}
+            grep -q "kconmon_9.9.9_${os}_${arch}.tar.gz" "$tmp/kconmon.yaml" \
+              || { echo "::error::missing platform $a"; exit 1; }
+          done
+          echo "krew manifest OK"
+
   govulncheck:
     name: Vulnerability scan
     runs-on: ubuntu-latest
