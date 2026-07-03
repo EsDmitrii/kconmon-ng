@@ -143,9 +143,13 @@ func (h *DiagnosticsHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	h.count(req.Type, "ok")
 	w.Header().Set("Content-Type", "application/json")
+	// nosniff pins the declared JSON type so no browser will ever interpret
+	// this response as HTML, closing the theoretical XSS vector gosec's taint
+	// analysis flags for echoing agent-produced bytes.
+	w.Header().Set("X-Content-Type-Options", "nosniff")
 	// details_json is the agent's serialized model.CheckResult; return it
 	// verbatim so the CLI sees exactly what the agent produced.
-	if _, err := w.Write(res.GetDetailsJson()); err != nil {
+	if _, err := w.Write(res.GetDetailsJson()); err != nil { //nolint:gosec // G705: JSON response with nosniff, never rendered as HTML
 		return
 	}
 }
