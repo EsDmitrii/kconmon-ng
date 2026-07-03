@@ -164,3 +164,8 @@ release:
     owner: EsDmitrii
     name: kconmon-ng
   prerelease: auto
+  # Create the release as a draft: GitHub immutable releases seal assets at
+  # publish time, so the krew manifest must be uploaded while still a draft.
+  # The workflow publishes the draft as its final step, which also makes the
+  # release near-atomic — it goes live only after helm/cosign/oras succeed.
+  draft: true

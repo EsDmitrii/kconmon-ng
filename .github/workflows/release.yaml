@@ -104,3 +104,13 @@ jobs:
           oras push "ghcr.io/${OWNER}/charts/kconmon-ng:artifacthub.io" \
             --config /dev/null:application/vnd.cncf.artifacthub.config.v1+yaml \
             artifacthub-repo.yml:application/vnd.cncf.artifacthub.repository-metadata.layer.v1.yaml
+
+      # Last step on purpose: goreleaser creates the release as a DRAFT
+      # (immutable releases seal assets at publish time), so the release goes
+      # live only after every artifact — archives, krew manifest, chart,
+      # signature, AH metadata — is in place.
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release edit "$GITHUB_REF_NAME" --draft=false --latest
