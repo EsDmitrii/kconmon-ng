@@ -292,11 +292,37 @@ func (a *Agent) Run(ctx context.Context) error {
 		slog.Info("shutting down agent")
 		a.httpServer.SetReady(false)
 
+		// Stop probing, then tell the controller to drop us immediately so peers
+		// stop probing this pod IP right away instead of after TTL eviction.
+		// Safety note: the heartbeat/re-register goroutines still run here, but they
+		// cannot re-register after this Deregister because reregister() dials with the
+		// already-cancelled root ctx. If reregister ever gets its own context, add an
+		// explicit goroutine drain before deregistering.
+		a.scheduler.Pause()
+		a.gracefulDeregister(grpcClient)
+
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		return httpSrv.Shutdown(shutdownCtx)
 	case err := <-errCh:
 		return err
+	}
+}
+
+// deregisterer is the narrow slice of the gRPC client used at shutdown, kept as
+// an interface so the deregistration path can be tested without a live server.
+type deregisterer interface {
+	Deregister(ctx context.Context) error
+}
+
+// gracefulDeregister makes a best-effort Deregister call with a short timeout.
+// The parent context is already cancelled at this point, so it uses a fresh
+// background context. Failures are logged and never block shutdown.
+func (a *Agent) gracefulDeregister(d deregisterer) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := d.Deregister(ctx); err != nil {
+		slog.Warn("graceful deregister failed, controller will evict on TTL", "error", err)
 	}
 }
 

@@ -3,8 +3,8 @@ apiVersion: v2
 name: kconmon-ng
 description: Kubernetes Node Connectivity Monitor - Next Generation
 type: application
-version: 1.2.0
-appVersion: "1.2.0"
+version: 1.2.1
+appVersion: "1.2.1"
 keywords:
   - kubernetes
   - connectivity
@@ -25,13 +25,5 @@ annotations:
     - name: Documentation
       url: https://github.com/EsDmitrii/kconmon-ng#readme
   artifacthub.io/changes: |
-    - kind: added
-      description: Self-monitoring — expected-agents gauge plus KconmonAgentsMissing and KconmonControllerDown alerts
-    - kind: added
-      description: Automatic zone discovery via controller-side enrichment; agent.zone is now an optional override
-    - kind: added
-      description: Chart README packaged for Artifact Hub; home/sources metadata; repo metadata published via ORAS
-    - kind: changed
-      description: Strict app config parsing — unknown or invalid config keys now fail startup and hot-reload
     - kind: fixed
-      description: Overview MTR Triggers panel no longer undercounts after agent restarts
+      description: Graceful agent deregistration on SIGTERM — peers drop a restarting pod at once, not after TTL

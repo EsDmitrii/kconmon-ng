@@ -227,3 +227,54 @@ func TestRegistryGetAll(t *testing.T) {
 		t.Errorf("expected 3 agents, got %d", len(all))
 	}
 }
+
+func TestRegistryDeregisterBroadcasts(t *testing.T) {
+	r := NewRegistry(30 * time.Second)
+
+	var mu sync.Mutex
+	var notifications int
+	var lastSnapshot []model.AgentInfo
+	r.OnChange(func(agents []model.AgentInfo) {
+		mu.Lock()
+		notifications++
+		lastSnapshot = agents
+		mu.Unlock()
+	})
+
+	r.Register(model.AgentInfo{ID: "agent-1", NodeName: "node-1"})
+	r.Register(model.AgentInfo{ID: "agent-2", NodeName: "node-2"})
+
+	mu.Lock()
+	base := notifications
+	mu.Unlock()
+
+	r.Deregister("agent-1")
+
+	mu.Lock()
+	defer mu.Unlock()
+	if notifications != base+1 {
+		t.Fatalf("expected exactly one peer-update notification from Deregister, got %d extra", notifications-base)
+	}
+	if len(lastSnapshot) != 1 || lastSnapshot[0].ID != "agent-2" {
+		t.Errorf("expected snapshot with only agent-2, got %+v", lastSnapshot)
+	}
+}
+
+func TestRegistryDeregisterUnknownNoOp(t *testing.T) {
+	r := NewRegistry(30 * time.Second)
+
+	var notifications int
+	r.OnChange(func([]model.AgentInfo) { notifications++ })
+
+	r.Register(model.AgentInfo{ID: "agent-1", NodeName: "node-1"})
+	base := notifications
+
+	r.Deregister("agent-unknown")
+
+	if notifications != base {
+		t.Errorf("expected no notification for unknown agent deregister, got %d extra", notifications-base)
+	}
+	if r.Count() != 1 {
+		t.Errorf("expected registry unchanged at 1 agent, got %d", r.Count())
+	}
+}

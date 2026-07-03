@@ -73,6 +73,17 @@ func (c *GRPCClient) Register(ctx context.Context, info model.AgentInfo, httpPor
 	return protoToTargets(resp.GetPeers(), httpPort), resp.GetAgent().GetZone(), nil
 }
 
+// Deregister tells the controller to remove this agent immediately, so peers
+// stop probing its pod IP the moment it starts shutting down instead of waiting
+// for TTL eviction. Best-effort: callers should not block shutdown on the error.
+func (c *GRPCClient) Deregister(ctx context.Context) error {
+	_, err := c.client.Deregister(ctx, &pb.DeregisterRequest{AgentId: c.agentID})
+	if err != nil {
+		return fmt.Errorf("deregistering agent: %w", err)
+	}
+	return nil
+}
+
 func (c *GRPCClient) StartHeartbeat(ctx context.Context, interval time.Duration) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
