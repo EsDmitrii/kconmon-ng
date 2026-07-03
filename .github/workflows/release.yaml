@@ -50,7 +50,7 @@ jobs:
           test -s /tmp/current-release-notes.md
 
       - name: Run GoReleaser
-        uses: goreleaser/goreleaser-action@v6
+        uses: goreleaser/goreleaser-action@v7
         with:
           version: ~>v2
           args: release --clean --release-notes /tmp/current-release-notes.md
