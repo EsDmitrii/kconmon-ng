@@ -6,6 +6,78 @@
 [![Go Report Card](https://goreportcard.com/badge/github.com/EsDmitrii/kconmon-ng)](https://goreportcard.com/report/github.com/EsDmitrii/kconmon-ng)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE)
 
+**Stop guessing where your Kubernetes network is broken.** kconmon-ng probes every node pair over TCP, UDP, ICMP, DNS, and HTTP — and when a check fails, it automatically runs MTR and exports every hop to Prometheus.
+
+Instead of a single up/down signal, you get per-protocol latency, loss, and jitter for every source/destination node pair, cross-zone visibility, and hop-by-hop failure traces — all as Prometheus metrics with three pre-built Grafana dashboards.
+
+<p align="center">
+  <img src="docs/img/overview.png" alt="kconmon-ng Overview dashboard: cluster-wide per-protocol success rates, latencies, controller status, and registered-agent count" width="100%">
+  <br>
+  <em>Overview dashboard — cluster-wide success rates, latencies, and controller status.</em>
+</p>
+
+<p align="center">
+  <img src="docs/img/zone-heatmap.png" alt="kconmon-ng Zone Heatmap dashboard: cross-zone latency and packet-loss heatmap for TCP, UDP, and ICMP" width="49%">
+  <img src="docs/img/node-detail.png" alt="kconmon-ng Node Detail dashboard: per-node TCP/UDP/ICMP/DNS/HTTP breakdown by destination node" width="49%">
+  <br>
+  <em>Zone Heatmap (cross-zone latency/loss) and Node Detail (per-node protocol breakdown).</em>
+</p>
+
+## Why not just Goldpinger?
+
+[Goldpinger](https://github.com/bloomberg/goldpinger) is a mature, widely deployed tool, and if your question is "did the last CNI rollout partition the mesh, yes or no?", it answers that in minutes with a built-in web graph anyone can read. kconmon-ng is not a replacement for that — it targets a different, deeper question: **which protocol, which node pair, and which network hop is degraded?**
+
+The pattern kconmon-ng is built for is intermittent, protocol-specific degradation — UDP jitter creeping up, DNS timing out on some resolvers but not others, HTTP health checks flapping — where a binary reachability check surfaces nothing and you need per-protocol time series plus an automatic hop-by-hop trace when something fails.
+
+The comparison below reflects what is actually in kconmon-ng v1.2.0 and Goldpinger's documented feature set — not aspirational claims.
+
+| Capability | Goldpinger | kconmon-ng |
+|---|---|---|
+| Node-to-node reachability | ✅ (HTTP peer ping; optional external TCP/HTTP/DNS targets) | ✅ (TCP, UDP, ICMP) |
+| Built-in web UI / connectivity graph | ✅ | ❌ (Grafana dashboards instead) |
+| Protocol breadth (per-protocol checks) | ✅ (HTTP peer ping + UDP probe + optional TCP/HTTP/DNS target checks), but not per-peer ICMP | ✅ (TCP/UDP/ICMP/DNS/HTTP as separate per-peer checks) |
+| Per-hop traceroute on failure | ❌ | ✅ (reactive MTR, per-hop RTT/loss metrics) |
+| Packet loss / hop-count / RTT | ✅ (UDP probe: loss %, hop count, RTT, dup/out-of-order) | ✅ (UDP jitter + loss ratio, ICMP loss ratio) |
+| Zone/topology-aware labels | Partial | ✅ (`source_zone`/`destination_zone`, auto-discovered from node labels since v1.2.0) |
+| Controller HA / leader election | N/A (fully mesh, no controller) | ✅ (`controller.leaderElection`, active/standby) |
+| Prometheus metrics | ✅ | ✅ |
+| Pre-built Grafana dashboards | Community-provided | ✅ (3 dashboards ship in-repo) |
+| Self-monitoring (alerts if the monitor itself degrades) | ❌ | ✅ (`KconmonAgentsMissing`, `KconmonControllerDown`) |
+| Setup complexity | Low (single DaemonSet) | Low-medium (Helm chart, agent + controller) |
+
+## Quick Start
+
+Three commands to a working install with Prometheus scraping and default alerts:
+
+```bash
+# 1. Install from the OCI registry (chart pulls agent + controller images)
+helm upgrade --install kconmon-ng oci://ghcr.io/esdmitrii/charts/kconmon-ng \
+  --version 1.2.0 \
+  --set serviceMonitor.enabled=true \
+  --set prometheusRule.enabled=true
+
+# 2. Confirm the control plane is up: 1 controller + one agent per node
+kubectl get pods -l app.kubernetes.io/name=kconmon-ng -o wide
+
+# 3. Peek at an agent's live metrics
+AGENT=$(kubectl get pods -l app.kubernetes.io/component=agent -o jsonpath='{.items[0].metadata.name}')
+kubectl port-forward "$AGENT" 8080 & curl -s http://localhost:8080/metrics | grep '^kconmon_ng' | head
+```
+
+Then import the three dashboards from [`dashboards/`](dashboards/) into Grafana (see [Grafana Dashboards](#grafana-dashboards)). For the full installation walkthrough, requirements, and Helm values, see [Full installation](#full-installation) below.
+
+## Key features
+
+- **Per-peer, five-protocol probing** — TCP, UDP, ICMP, DNS, and HTTP run as separate checkers against every node pair, each exporting its own latency/loss/jitter series rather than one up/down signal.
+- **Reactive per-hop MTR** — when a TCP, UDP, or ICMP probe fails, an MTR trace fires automatically for that (source, destination) pair (rate-limited per pair) and per-hop RTT and loss are exported as metrics.
+- **Zone auto-discovery (v1.2.0)** — the controller resolves each agent's zone from its node's failure-domain label and pushes it at registration, so `source_zone`/`destination_zone` are populated with no per-agent config; the Zone Heatmap works out of the box on multi-zone clusters.
+- **Self-monitoring alerts** — degradation of kconmon-ng itself raises an alert instead of a silent gap, via `KconmonAgentsMissing` and `KconmonControllerDown` default rules.
+- **Three Grafana dashboards included** — Overview, Node Detail, and Zone Heatmap ship in-repo, no dashboard-building required.
+- **Graceful agent deregistration (this branch, upcoming release)** — on shutdown an agent deregisters from the controller so peers stop probing it immediately instead of recording loss until TTL eviction; a rollout of kconmon-ng itself no longer leaves false loss records in the metrics.
+- **Controller HA** — leader election (`controller.leaderElection: true`) keeps standby replicas ready but passive, so a controller restart does not interrupt peer distribution.
+
+---
+
 **Kubernetes Node Connectivity Monitor — Next Generation**
 
 kconmon-ng continuously probes network connectivity between every pair of Kubernetes nodes using TCP, UDP, ICMP, DNS, and HTTP checks. All results are exported as Prometheus metrics with `source_node`, `destination_node`, `source_zone`, and `destination_zone` labels, enabling per-node and cross-zone visibility in Grafana. When a probe fails, MTR traceroute is triggered automatically to capture the failure path.
@@ -15,7 +87,7 @@ kconmon-ng continuously probes network connectivity between every pair of Kubern
 - [How it works](#how-it-works)
 - [Features](#features)
 - [Requirements](#requirements)
-- [Quick Start](#quick-start)
+- [Full installation](#full-installation)
 - [Configuration](#configuration)
 - [Helm Chart](#helm-chart)
 - [Metrics](#metrics)
@@ -89,13 +161,13 @@ Each agent registers with the controller over gRPC and receives a live-updated l
 
 The agent DaemonSet requires the `NET_RAW` Linux capability for ICMP and MTR. The controller ServiceAccount requires `get`, `list`, `watch` on `nodes` (provided by the chart's ClusterRole when `serviceAccount.create: true`).
 
-## Quick Start
+## Full installation
 
 ### Helm (recommended)
 
 ```bash
 # Install from OCI registry
-helm install kconmon-ng oci://ghcr.io/esdmitrii/charts/kconmon-ng \
+helm upgrade --install kconmon-ng oci://ghcr.io/esdmitrii/charts/kconmon-ng \
   --version 1.2.0 \
   --set serviceMonitor.enabled=true \
   --set prometheusRule.enabled=true
@@ -222,7 +294,7 @@ observability:
 
 ```bash
 # From OCI registry
-helm install kconmon-ng oci://ghcr.io/esdmitrii/charts/kconmon-ng
+helm upgrade --install kconmon-ng oci://ghcr.io/esdmitrii/charts/kconmon-ng
 
 # From local chart
 helm install kconmon-ng ./charts/kconmon-ng -f my-values.yaml
