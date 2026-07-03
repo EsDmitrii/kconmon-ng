@@ -17,7 +17,7 @@ jobs:
 
     steps:
       - name: Checkout released commit
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
           ref: ${{ github.event.workflow_run.head_sha }}
@@ -43,7 +43,7 @@ jobs:
 
       - name: Set up Go
         if: ${{ steps.meta.outputs.skip != 'true' }}
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
 
@@ -69,11 +69,11 @@ jobs:
 
       - name: Set up Docker Buildx
         if: ${{ steps.meta.outputs.skip != 'true' }}
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       - name: Build agent image
         if: ${{ steps.meta.outputs.skip != 'true' }}
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           push: false
@@ -87,7 +87,7 @@ jobs:
 
       - name: Build controller image
         if: ${{ steps.meta.outputs.skip != 'true' }}
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           push: false
