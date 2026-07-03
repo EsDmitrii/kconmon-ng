@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"time"
 
+	pb "github.com/EsDmitrii/kconmon-ng/api/proto"
 	"github.com/EsDmitrii/kconmon-ng/internal/checker"
 	"github.com/EsDmitrii/kconmon-ng/internal/config"
 	"github.com/EsDmitrii/kconmon-ng/internal/metrics"
@@ -17,6 +18,11 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
 )
+
+// maxConcurrentTasks bounds simultaneous on-demand diagnostic executions so a
+// burst of API calls cannot fork-bomb the agent. Tasks arriving while saturated
+// get an immediate error result.
+const maxConcurrentTasks = 4
 
 type Agent struct {
 	cfg         *config.Config
@@ -28,6 +34,11 @@ type Agent struct {
 	promReg     *prometheus.Registry
 	info        model.AgentInfo
 	envZone     string
+	// checkers holds the same checker instances registered with the scheduler,
+	// reused by the on-demand task executor. mtrChecker is kept separately since
+	// it is not part of the Checker map (it bypasses the cooldown on demand).
+	checkers   map[model.CheckType]checker.Checker
+	mtrChecker *checker.MTRChecker
 }
 
 func New(cfg *config.Config) (*Agent, error) {
@@ -67,32 +78,32 @@ func New(cfg *config.Config) (*Agent, error) {
 
 	sched := NewScheduler(source, resultHandler)
 
+	// checkers is the shared registry of enabled checker instances, reused by
+	// both the scheduler and the on-demand task executor.
+	checkers := make(map[model.CheckType]checker.Checker)
+
 	if cfg.Checkers.TCP.Enabled {
-		sched.AddChecker(
-			checker.NewTCPChecker(cfg.Checkers.TCP.Timeout),
-			SchedulerConfig{Interval: cfg.Checkers.TCP.Interval},
-		)
+		c := checker.NewTCPChecker(cfg.Checkers.TCP.Timeout)
+		sched.AddChecker(c, SchedulerConfig{Interval: cfg.Checkers.TCP.Interval})
+		checkers[model.CheckTCP] = c
 		slog.Info("checker enabled", "type", "tcp", "interval", cfg.Checkers.TCP.Interval)
 	}
 	if cfg.Checkers.UDP.Enabled {
-		sched.AddChecker(
-			checker.NewUDPChecker(cfg.Checkers.UDP.Timeout, cfg.Checkers.UDP.Packets, cfg.GRPCPort),
-			SchedulerConfig{Interval: cfg.Checkers.UDP.Interval},
-		)
+		c := checker.NewUDPChecker(cfg.Checkers.UDP.Timeout, cfg.Checkers.UDP.Packets, cfg.GRPCPort)
+		sched.AddChecker(c, SchedulerConfig{Interval: cfg.Checkers.UDP.Interval})
+		checkers[model.CheckUDP] = c
 		slog.Info("checker enabled", "type", "udp", "interval", cfg.Checkers.UDP.Interval)
 	}
 	if cfg.Checkers.ICMP.Enabled {
-		sched.AddChecker(
-			checker.NewICMPChecker(cfg.Checkers.ICMP.Timeout),
-			SchedulerConfig{Interval: cfg.Checkers.ICMP.Interval},
-		)
+		c := checker.NewICMPChecker(cfg.Checkers.ICMP.Timeout)
+		sched.AddChecker(c, SchedulerConfig{Interval: cfg.Checkers.ICMP.Interval})
+		checkers[model.CheckICMP] = c
 		slog.Info("checker enabled", "type", "icmp", "interval", cfg.Checkers.ICMP.Interval)
 	}
 	if cfg.Checkers.DNS.Enabled && len(cfg.Checkers.DNS.Hosts) > 0 {
-		sched.AddChecker(
-			checker.NewDNSChecker(cfg.Checkers.DNS.Hosts, cfg.Checkers.DNS.Resolvers, cfg.Checkers.DNS.Timeout),
-			SchedulerConfig{Interval: cfg.Checkers.DNS.Interval, NodeLocal: true},
-		)
+		c := checker.NewDNSChecker(cfg.Checkers.DNS.Hosts, cfg.Checkers.DNS.Resolvers, cfg.Checkers.DNS.Timeout)
+		sched.AddChecker(c, SchedulerConfig{Interval: cfg.Checkers.DNS.Interval, NodeLocal: true})
+		checkers[model.CheckDNS] = c
 		slog.Info("checker enabled", "type", "dns", "interval", cfg.Checkers.DNS.Interval)
 	}
 	if cfg.Checkers.HTTP.Enabled && len(cfg.Checkers.HTTP.Targets) > 0 {
@@ -112,10 +123,9 @@ func New(cfg *config.Config) (*Agent, error) {
 			}
 			httpTargets = append(httpTargets, ht)
 		}
-		sched.AddChecker(
-			checker.NewHTTPChecker(cfg.Checkers.HTTP.Timeout, httpTargets),
-			SchedulerConfig{Interval: cfg.Checkers.HTTP.Interval, NodeLocal: true},
-		)
+		c := checker.NewHTTPChecker(cfg.Checkers.HTTP.Timeout, httpTargets)
+		sched.AddChecker(c, SchedulerConfig{Interval: cfg.Checkers.HTTP.Interval, NodeLocal: true})
+		checkers[model.CheckHTTP] = c
 		slog.Info("checker enabled", "type", "http", "interval", cfg.Checkers.HTTP.Interval, "targets", len(httpTargets))
 	}
 
@@ -132,6 +142,8 @@ func New(cfg *config.Config) (*Agent, error) {
 		promReg:     promReg,
 		info:        info,
 		envZone:     zone,
+		checkers:    checkers,
+		mtrChecker:  mtrChecker,
 	}
 
 	return a, nil
@@ -208,6 +220,28 @@ func (a *Agent) Run(ctx context.Context) error {
 		}
 	})
 
+	// On-demand diagnostic task executor. Reuses the agent's checker instances
+	// and reports results back over the same gRPC client. Executions run in
+	// goroutines tied to the root ctx (via OnTask below), so they abort on
+	// shutdown and are never awaited by the shutdown path.
+	taskExecutor := NewTaskExecutor(
+		a.checkers,
+		a.mtrChecker,
+		checker.Target{
+			AgentID:  a.info.ID,
+			NodeName: a.info.NodeName,
+			PodIP:    a.info.PodIP,
+			Zone:     a.info.Zone,
+			Port:     a.cfg.HTTPPort,
+		},
+		a.cfg.HTTPPort,
+		grpcClient,
+		maxConcurrentTasks,
+	)
+	grpcClient.OnTask(func(taskCtx context.Context, task *pb.TaskRequest) {
+		taskExecutor.Handle(taskCtx, task)
+	})
+
 	go grpcClient.StartHeartbeat(ctx, 5*time.Second)
 
 	reregister := func() {
@@ -246,6 +280,28 @@ func (a *Agent) Run(ctx context.Context) error {
 			}
 			slog.Warn("peer watch disconnected, re-registering", "error", err)
 			reregister()
+		}
+	}()
+
+	// WatchTasks runs its own reconnect loop mirroring WatchPeers: on stream
+	// error it re-subscribes after a short backoff. Peer re-registration is
+	// owned by the WatchPeers loop above, so this loop only needs to re-open the
+	// task stream. It exits when the root ctx is cancelled at shutdown.
+	go func() {
+		backoff := 1 * time.Second
+		maxBackoff := 15 * time.Second
+		for {
+			err := grpcClient.WatchTasks(ctx)
+			if ctx.Err() != nil {
+				return
+			}
+			slog.Warn("task watch disconnected, re-subscribing", "error", err, "backoff", backoff)
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(backoff):
+			}
+			backoff = min(backoff*2, maxBackoff)
 		}
 	}()
 

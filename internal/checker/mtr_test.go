@@ -2,6 +2,7 @@ package checker
 
 import (
 	"fmt"
+	"net"
 	"testing"
 	"time"
 )
@@ -79,5 +80,33 @@ func TestMTRCheckerExpiredEntriesPurged(t *testing.T) {
 	// Only the newly recorded entry should remain.
 	if remaining != 1 {
 		t.Errorf("expected 1 entry after purge, got %d", remaining)
+	}
+}
+
+func TestHopIPFromAddrStripsPort(t *testing.T) {
+	cases := []struct {
+		name string
+		addr net.Addr
+		want string
+	}{
+		{"IPAddr v4", &net.IPAddr{IP: net.ParseIP("10.244.1.11")}, "10.244.1.11"},
+		{"IPAddr v6", &net.IPAddr{IP: net.ParseIP("fe80::1")}, "fe80::1"},
+		{"UDPAddr with port", &net.UDPAddr{IP: net.ParseIP("10.244.1.11"), Port: 0}, "10.244.1.11"},
+		{"UDPAddr v6 with port", &net.UDPAddr{IP: net.ParseIP("fe80::1"), Port: 12345}, "fe80::1"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := hopIPFromAddr(tc.addr)
+			if got != tc.want {
+				t.Errorf("hopIPFromAddr(%v) = %q, want %q", tc.addr, got, tc.want)
+			}
+			// A "host:port" string (as produced by UDPAddr.String()) must not
+			// survive extraction; a bare IPv6 address is not itself a valid
+			// "host:port" pair, so SplitHostPort must fail on the result.
+			if _, _, err := net.SplitHostPort(got); err == nil {
+				t.Errorf("hopIPFromAddr(%v) = %q, still looks like host:port", tc.addr, got)
+			}
+		})
 	}
 }

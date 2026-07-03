@@ -184,10 +184,11 @@ func (c *MTRChecker) traceroute(ctx context.Context, dst net.IP) ([]model.MTRHop
 				hop.IP = "*"
 				hop.LossRatio = 1.0
 			} else {
-				hop.IP = peer.String()
+				ip := hopIPFromAddr(peer)
+				hop.IP = ip
 				hop.LossRatio = 0.0
 
-				names, _ := net.DefaultResolver.LookupAddr(ctx, peer.String())
+				names, _ := net.DefaultResolver.LookupAddr(ctx, ip)
 				if len(names) > 0 {
 					hop.Hostname = names[0]
 				}
@@ -203,4 +204,24 @@ func (c *MTRChecker) traceroute(ctx context.Context, dst net.IP) ([]model.MTRHop
 	}
 
 	return hops, nil
+}
+
+// hopIPFromAddr extracts the bare IP from a net.Addr returned by an ICMP
+// socket's ReadFrom. Depending on platform and address family this can be a
+// *net.IPAddr or a *net.UDPAddr (which stringifies as "ip:port"); either way
+// callers need the bare IP for display, metric labels, and reverse-DNS
+// lookups.
+func hopIPFromAddr(addr net.Addr) string {
+	switch a := addr.(type) {
+	case *net.IPAddr:
+		return a.IP.String()
+	case *net.UDPAddr:
+		return a.IP.String()
+	}
+
+	s := addr.String()
+	if host, _, err := net.SplitHostPort(s); err == nil {
+		return host
+	}
+	return s
 }
