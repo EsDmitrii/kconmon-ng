@@ -23,6 +23,7 @@ const (
 	AgentRegistry_Register_FullMethodName   = "/kconmonng.v1.AgentRegistry/Register"
 	AgentRegistry_Heartbeat_FullMethodName  = "/kconmonng.v1.AgentRegistry/Heartbeat"
 	AgentRegistry_WatchPeers_FullMethodName = "/kconmonng.v1.AgentRegistry/WatchPeers"
+	AgentRegistry_Deregister_FullMethodName = "/kconmonng.v1.AgentRegistry/Deregister"
 )
 
 // AgentRegistryClient is the client API for AgentRegistry service.
@@ -32,6 +33,7 @@ type AgentRegistryClient interface {
 	Register(ctx context.Context, in *RegisterRequest, opts ...grpc.CallOption) (*RegisterResponse, error)
 	Heartbeat(ctx context.Context, in *HeartbeatRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	WatchPeers(ctx context.Context, in *WatchPeersRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[PeerUpdate], error)
+	Deregister(ctx context.Context, in *DeregisterRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
 }
 
 type agentRegistryClient struct {
@@ -81,6 +83,16 @@ func (c *agentRegistryClient) WatchPeers(ctx context.Context, in *WatchPeersRequ
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type AgentRegistry_WatchPeersClient = grpc.ServerStreamingClient[PeerUpdate]
 
+func (c *agentRegistryClient) Deregister(ctx context.Context, in *DeregisterRequest, opts ...grpc.CallOption) (*emptypb.Empty, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(emptypb.Empty)
+	err := c.cc.Invoke(ctx, AgentRegistry_Deregister_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // AgentRegistryServer is the server API for AgentRegistry service.
 // All implementations must embed UnimplementedAgentRegistryServer
 // for forward compatibility.
@@ -88,6 +100,7 @@ type AgentRegistryServer interface {
 	Register(context.Context, *RegisterRequest) (*RegisterResponse, error)
 	Heartbeat(context.Context, *HeartbeatRequest) (*emptypb.Empty, error)
 	WatchPeers(*WatchPeersRequest, grpc.ServerStreamingServer[PeerUpdate]) error
+	Deregister(context.Context, *DeregisterRequest) (*emptypb.Empty, error)
 	mustEmbedUnimplementedAgentRegistryServer()
 }
 
@@ -106,6 +119,9 @@ func (UnimplementedAgentRegistryServer) Heartbeat(context.Context, *HeartbeatReq
 }
 func (UnimplementedAgentRegistryServer) WatchPeers(*WatchPeersRequest, grpc.ServerStreamingServer[PeerUpdate]) error {
 	return status.Error(codes.Unimplemented, "method WatchPeers not implemented")
+}
+func (UnimplementedAgentRegistryServer) Deregister(context.Context, *DeregisterRequest) (*emptypb.Empty, error) {
+	return nil, status.Error(codes.Unimplemented, "method Deregister not implemented")
 }
 func (UnimplementedAgentRegistryServer) mustEmbedUnimplementedAgentRegistryServer() {}
 func (UnimplementedAgentRegistryServer) testEmbeddedByValue()                       {}
@@ -175,6 +191,24 @@ func _AgentRegistry_WatchPeers_Handler(srv interface{}, stream grpc.ServerStream
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type AgentRegistry_WatchPeersServer = grpc.ServerStreamingServer[PeerUpdate]
 
+func _AgentRegistry_Deregister_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(DeregisterRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AgentRegistryServer).Deregister(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: AgentRegistry_Deregister_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AgentRegistryServer).Deregister(ctx, req.(*DeregisterRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // AgentRegistry_ServiceDesc is the grpc.ServiceDesc for AgentRegistry service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -189,6 +223,10 @@ var AgentRegistry_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "Heartbeat",
 			Handler:    _AgentRegistry_Heartbeat_Handler,
+		},
+		{
+			MethodName: "Deregister",
+			Handler:    _AgentRegistry_Deregister_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{

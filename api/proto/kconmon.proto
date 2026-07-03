@@ -11,6 +11,7 @@ service AgentRegistry {
   rpc Register(RegisterRequest) returns (RegisterResponse);
   rpc Heartbeat(HeartbeatRequest) returns (google.protobuf.Empty);
   rpc WatchPeers(WatchPeersRequest) returns (stream PeerUpdate);
+  rpc Deregister(DeregisterRequest) returns (google.protobuf.Empty);
 }
 
 service ProbeService {
@@ -46,6 +47,10 @@ message HeartbeatRequest {
 }
 
 message WatchPeersRequest {
+  string agent_id = 1;
+}
+
+message DeregisterRequest {
   string agent_id = 1;
 }
 

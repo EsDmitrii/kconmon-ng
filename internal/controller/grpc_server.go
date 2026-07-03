@@ -74,6 +74,15 @@ func (s *GRPCServer) Heartbeat(_ context.Context, req *pb.HeartbeatRequest) (*em
 	return &emptypb.Empty{}, nil
 }
 
+// Deregister removes an agent from the registry on graceful shutdown, so peers
+// stop probing its dead pod IP immediately instead of waiting for TTL eviction.
+// Unknown agent IDs are a no-op and do not return an error.
+func (s *GRPCServer) Deregister(_ context.Context, req *pb.DeregisterRequest) (*emptypb.Empty, error) {
+	s.registry.Deregister(req.GetAgentId())
+	s.metrics.ControllerRegisteredAgents.WithLabelValues().Set(float64(s.registry.Count()))
+	return &emptypb.Empty{}, nil
+}
+
 func (s *GRPCServer) WatchPeers(req *pb.WatchPeersRequest, stream pb.AgentRegistry_WatchPeersServer) error {
 	agentID := req.GetAgentId()
 
