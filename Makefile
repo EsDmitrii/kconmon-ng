@@ -42,8 +42,13 @@ test-fuzz:
 
 ## Lint
 
+# Keep in sync with .github/workflows/ci.yaml (golangci-lint-action `version:`).
+# `go run` pins the exact CI version so local lint == CI lint; a system-wide
+# golangci-lint of a different version has already hidden CI-only findings once.
+GOLANGCI_LINT_VERSION ?= v2.10.1
+
 lint:
-	golangci-lint run ./...
+	go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION) run ./...
 
 fmt:
 	gofmt -s -w .

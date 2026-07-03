@@ -176,7 +176,10 @@ func (c *Client) doRequest(ctx context.Context, hc *http.Client, method, path st
 		req.Header.Set("Content-Type", "application/json")
 	}
 
-	resp, err := hc.Do(req)
+	// The request host is always 127.0.0.1:<port> from our own port-forward
+	// (see portforward.go); user-supplied node names travel in the JSON body,
+	// never in the URL, so there is no server-side request forgery surface.
+	resp, err := hc.Do(req) //nolint:gosec // G704: base URL is our own localhost port-forward, not user input
 	if err != nil {
 		return nil, err
 	}
