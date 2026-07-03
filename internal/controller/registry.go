@@ -149,6 +149,21 @@ func (r *Registry) Count() int {
 	return len(r.agents)
 }
 
+// GetByNodeName returns the registered agent running on nodeName. If several
+// agents share a node (rolling restart overlap), the first match is returned.
+// The bool is false when no agent is registered for that node.
+func (r *Registry) GetByNodeName(nodeName string) (model.AgentInfo, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	for _, agent := range r.agents {
+		if agent.info.NodeName == nodeName {
+			return agent.info, true
+		}
+	}
+	return model.AgentInfo{}, false
+}
+
 func (r *Registry) EvictStale() int {
 	r.mu.Lock()
 	evicted := 0

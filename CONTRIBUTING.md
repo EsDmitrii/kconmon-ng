@@ -4,7 +4,7 @@ Thanks for your interest in contributing. This document covers how to build, tes
 
 ## Prerequisites
 
-- Go 1.25 or newer
+- Go 1.26 or newer
 - Docker (for building images and running E2E tests)
 - Helm 3.14+
 - Minikube (for local E2E testing)

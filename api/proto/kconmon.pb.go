@@ -470,6 +470,202 @@ func (x *PeerUpdate) GetTimestamp() *timestamppb.Timestamp {
 	return nil
 }
 
+type WatchTasksRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	AgentId       string                 `protobuf:"bytes,1,opt,name=agent_id,json=agentId,proto3" json:"agent_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *WatchTasksRequest) Reset() {
+	*x = WatchTasksRequest{}
+	mi := &file_kconmon_proto_msgTypes[7]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *WatchTasksRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*WatchTasksRequest) ProtoMessage() {}
+
+func (x *WatchTasksRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_kconmon_proto_msgTypes[7]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use WatchTasksRequest.ProtoReflect.Descriptor instead.
+func (*WatchTasksRequest) Descriptor() ([]byte, []int) {
+	return file_kconmon_proto_rawDescGZIP(), []int{7}
+}
+
+func (x *WatchTasksRequest) GetAgentId() string {
+	if x != nil {
+		return x.AgentId
+	}
+	return ""
+}
+
+type TaskRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	TaskId        string                 `protobuf:"bytes,1,opt,name=task_id,json=taskId,proto3" json:"task_id,omitempty"`
+	CheckType     string                 `protobuf:"bytes,2,opt,name=check_type,json=checkType,proto3" json:"check_type,omitempty"` // tcp|udp|icmp|dns|http|mtr
+	Target        *AgentMeta             `protobuf:"bytes,3,opt,name=target,proto3" json:"target,omitempty"`
+	Plane         string                 `protobuf:"bytes,4,opt,name=plane,proto3" json:"plane,omitempty"` // pod|host
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *TaskRequest) Reset() {
+	*x = TaskRequest{}
+	mi := &file_kconmon_proto_msgTypes[8]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *TaskRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*TaskRequest) ProtoMessage() {}
+
+func (x *TaskRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_kconmon_proto_msgTypes[8]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use TaskRequest.ProtoReflect.Descriptor instead.
+func (*TaskRequest) Descriptor() ([]byte, []int) {
+	return file_kconmon_proto_rawDescGZIP(), []int{8}
+}
+
+func (x *TaskRequest) GetTaskId() string {
+	if x != nil {
+		return x.TaskId
+	}
+	return ""
+}
+
+func (x *TaskRequest) GetCheckType() string {
+	if x != nil {
+		return x.CheckType
+	}
+	return ""
+}
+
+func (x *TaskRequest) GetTarget() *AgentMeta {
+	if x != nil {
+		return x.Target
+	}
+	return nil
+}
+
+func (x *TaskRequest) GetPlane() string {
+	if x != nil {
+		return x.Plane
+	}
+	return ""
+}
+
+type TaskResult struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	TaskId        string                 `protobuf:"bytes,1,opt,name=task_id,json=taskId,proto3" json:"task_id,omitempty"`
+	AgentId       string                 `protobuf:"bytes,2,opt,name=agent_id,json=agentId,proto3" json:"agent_id,omitempty"`
+	Success       bool                   `protobuf:"varint,3,opt,name=success,proto3" json:"success,omitempty"`
+	Error         string                 `protobuf:"bytes,4,opt,name=error,proto3" json:"error,omitempty"`
+	DetailsJson   []byte                 `protobuf:"bytes,5,opt,name=details_json,json=detailsJson,proto3" json:"details_json,omitempty"` // serialized model.CheckResult
+	Timestamp     *timestamppb.Timestamp `protobuf:"bytes,6,opt,name=timestamp,proto3" json:"timestamp,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *TaskResult) Reset() {
+	*x = TaskResult{}
+	mi := &file_kconmon_proto_msgTypes[9]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *TaskResult) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*TaskResult) ProtoMessage() {}
+
+func (x *TaskResult) ProtoReflect() protoreflect.Message {
+	mi := &file_kconmon_proto_msgTypes[9]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use TaskResult.ProtoReflect.Descriptor instead.
+func (*TaskResult) Descriptor() ([]byte, []int) {
+	return file_kconmon_proto_rawDescGZIP(), []int{9}
+}
+
+func (x *TaskResult) GetTaskId() string {
+	if x != nil {
+		return x.TaskId
+	}
+	return ""
+}
+
+func (x *TaskResult) GetAgentId() string {
+	if x != nil {
+		return x.AgentId
+	}
+	return ""
+}
+
+func (x *TaskResult) GetSuccess() bool {
+	if x != nil {
+		return x.Success
+	}
+	return false
+}
+
+func (x *TaskResult) GetError() string {
+	if x != nil {
+		return x.Error
+	}
+	return ""
+}
+
+func (x *TaskResult) GetDetailsJson() []byte {
+	if x != nil {
+		return x.DetailsJson
+	}
+	return nil
+}
+
+func (x *TaskResult) GetTimestamp() *timestamppb.Timestamp {
+	if x != nil {
+		return x.Timestamp
+	}
+	return nil
+}
+
 type TCPProbeRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	SourceAgentId string                 `protobuf:"bytes,1,opt,name=source_agent_id,json=sourceAgentId,proto3" json:"source_agent_id,omitempty"`
@@ -480,7 +676,7 @@ type TCPProbeRequest struct {
 
 func (x *TCPProbeRequest) Reset() {
 	*x = TCPProbeRequest{}
-	mi := &file_kconmon_proto_msgTypes[7]
+	mi := &file_kconmon_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -492,7 +688,7 @@ func (x *TCPProbeRequest) String() string {
 func (*TCPProbeRequest) ProtoMessage() {}
 
 func (x *TCPProbeRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_kconmon_proto_msgTypes[7]
+	mi := &file_kconmon_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -505,7 +701,7 @@ func (x *TCPProbeRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TCPProbeRequest.ProtoReflect.Descriptor instead.
 func (*TCPProbeRequest) Descriptor() ([]byte, []int) {
-	return file_kconmon_proto_rawDescGZIP(), []int{7}
+	return file_kconmon_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *TCPProbeRequest) GetSourceAgentId() string {
@@ -532,7 +728,7 @@ type TCPProbeResponse struct {
 
 func (x *TCPProbeResponse) Reset() {
 	*x = TCPProbeResponse{}
-	mi := &file_kconmon_proto_msgTypes[8]
+	mi := &file_kconmon_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -544,7 +740,7 @@ func (x *TCPProbeResponse) String() string {
 func (*TCPProbeResponse) ProtoMessage() {}
 
 func (x *TCPProbeResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_kconmon_proto_msgTypes[8]
+	mi := &file_kconmon_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -557,7 +753,7 @@ func (x *TCPProbeResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TCPProbeResponse.ProtoReflect.Descriptor instead.
 func (*TCPProbeResponse) Descriptor() ([]byte, []int) {
-	return file_kconmon_proto_rawDescGZIP(), []int{8}
+	return file_kconmon_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *TCPProbeResponse) GetOk() bool {
@@ -586,7 +782,7 @@ type UDPProbeRequest struct {
 
 func (x *UDPProbeRequest) Reset() {
 	*x = UDPProbeRequest{}
-	mi := &file_kconmon_proto_msgTypes[9]
+	mi := &file_kconmon_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -598,7 +794,7 @@ func (x *UDPProbeRequest) String() string {
 func (*UDPProbeRequest) ProtoMessage() {}
 
 func (x *UDPProbeRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_kconmon_proto_msgTypes[9]
+	mi := &file_kconmon_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -611,7 +807,7 @@ func (x *UDPProbeRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UDPProbeRequest.ProtoReflect.Descriptor instead.
 func (*UDPProbeRequest) Descriptor() ([]byte, []int) {
-	return file_kconmon_proto_rawDescGZIP(), []int{9}
+	return file_kconmon_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *UDPProbeRequest) GetSourceAgentId() string {
@@ -653,7 +849,7 @@ type UDPProbeResponse struct {
 
 func (x *UDPProbeResponse) Reset() {
 	*x = UDPProbeResponse{}
-	mi := &file_kconmon_proto_msgTypes[10]
+	mi := &file_kconmon_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -665,7 +861,7 @@ func (x *UDPProbeResponse) String() string {
 func (*UDPProbeResponse) ProtoMessage() {}
 
 func (x *UDPProbeResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_kconmon_proto_msgTypes[10]
+	mi := &file_kconmon_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -678,7 +874,7 @@ func (x *UDPProbeResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UDPProbeResponse.ProtoReflect.Descriptor instead.
 func (*UDPProbeResponse) Descriptor() ([]byte, []int) {
-	return file_kconmon_proto_rawDescGZIP(), []int{10}
+	return file_kconmon_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *UDPProbeResponse) GetSequence() uint32 {
@@ -742,7 +938,23 @@ const file_kconmon_proto_rawDesc = "" +
 	"\tFULL_SYNC\x10\x00\x12\x0e\n" +
 	"\n" +
 	"PEER_ADDED\x10\x01\x12\x10\n" +
-	"\fPEER_REMOVED\x10\x02\"s\n" +
+	"\fPEER_REMOVED\x10\x02\".\n" +
+	"\x11WatchTasksRequest\x12\x19\n" +
+	"\bagent_id\x18\x01 \x01(\tR\aagentId\"\x8c\x01\n" +
+	"\vTaskRequest\x12\x17\n" +
+	"\atask_id\x18\x01 \x01(\tR\x06taskId\x12\x1d\n" +
+	"\n" +
+	"check_type\x18\x02 \x01(\tR\tcheckType\x12/\n" +
+	"\x06target\x18\x03 \x01(\v2\x17.kconmonng.v1.AgentMetaR\x06target\x12\x14\n" +
+	"\x05plane\x18\x04 \x01(\tR\x05plane\"\xcd\x01\n" +
+	"\n" +
+	"TaskResult\x12\x17\n" +
+	"\atask_id\x18\x01 \x01(\tR\x06taskId\x12\x19\n" +
+	"\bagent_id\x18\x02 \x01(\tR\aagentId\x12\x18\n" +
+	"\asuccess\x18\x03 \x01(\bR\asuccess\x12\x14\n" +
+	"\x05error\x18\x04 \x01(\tR\x05error\x12!\n" +
+	"\fdetails_json\x18\x05 \x01(\fR\vdetailsJson\x128\n" +
+	"\ttimestamp\x18\x06 \x01(\v2\x1a.google.protobuf.TimestampR\ttimestamp\"s\n" +
 	"\x0fTCPProbeRequest\x12&\n" +
 	"\x0fsource_agent_id\x18\x01 \x01(\tR\rsourceAgentId\x128\n" +
 	"\ttimestamp\x18\x02 \x01(\v2\x1a.google.protobuf.TimestampR\ttimestamp\"\\\n" +
@@ -757,14 +969,17 @@ const file_kconmon_proto_rawDesc = "" +
 	"\x10UDPProbeResponse\x12\x1a\n" +
 	"\bsequence\x18\x01 \x01(\rR\bsequence\x12\x18\n" +
 	"\apayload\x18\x02 \x01(\fR\apayload\x128\n" +
-	"\ttimestamp\x18\x03 \x01(\v2\x1a.google.protobuf.TimestampR\ttimestamp2\xb1\x02\n" +
+	"\ttimestamp\x18\x03 \x01(\v2\x1a.google.protobuf.TimestampR\ttimestamp2\xc3\x03\n" +
 	"\rAgentRegistry\x12I\n" +
 	"\bRegister\x12\x1d.kconmonng.v1.RegisterRequest\x1a\x1e.kconmonng.v1.RegisterResponse\x12C\n" +
 	"\tHeartbeat\x12\x1e.kconmonng.v1.HeartbeatRequest\x1a\x16.google.protobuf.Empty\x12I\n" +
 	"\n" +
 	"WatchPeers\x12\x1f.kconmonng.v1.WatchPeersRequest\x1a\x18.kconmonng.v1.PeerUpdate0\x01\x12E\n" +
 	"\n" +
-	"Deregister\x12\x1f.kconmonng.v1.DeregisterRequest\x1a\x16.google.protobuf.Empty2\xa4\x01\n" +
+	"Deregister\x12\x1f.kconmonng.v1.DeregisterRequest\x1a\x16.google.protobuf.Empty\x12J\n" +
+	"\n" +
+	"WatchTasks\x12\x1f.kconmonng.v1.WatchTasksRequest\x1a\x19.kconmonng.v1.TaskRequest0\x01\x12D\n" +
+	"\x10ReportTaskResult\x12\x18.kconmonng.v1.TaskResult\x1a\x16.google.protobuf.Empty2\xa4\x01\n" +
 	"\fProbeService\x12I\n" +
 	"\bTCPProbe\x12\x1d.kconmonng.v1.TCPProbeRequest\x1a\x1e.kconmonng.v1.TCPProbeResponse\x12I\n" +
 	"\bUDPProbe\x12\x1d.kconmonng.v1.UDPProbeRequest\x1a\x1e.kconmonng.v1.UDPProbeResponseB1Z/github.com/EsDmitrii/kconmon-ng/api/proto;protob\x06proto3"
@@ -782,7 +997,7 @@ func file_kconmon_proto_rawDescGZIP() []byte {
 }
 
 var file_kconmon_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_kconmon_proto_msgTypes = make([]protoimpl.MessageInfo, 12)
+var file_kconmon_proto_msgTypes = make([]protoimpl.MessageInfo, 15)
 var file_kconmon_proto_goTypes = []any{
 	(PeerUpdate_UpdateType)(0),    // 0: kconmonng.v1.PeerUpdate.UpdateType
 	(*AgentMeta)(nil),             // 1: kconmonng.v1.AgentMeta
@@ -792,45 +1007,54 @@ var file_kconmon_proto_goTypes = []any{
 	(*WatchPeersRequest)(nil),     // 5: kconmonng.v1.WatchPeersRequest
 	(*DeregisterRequest)(nil),     // 6: kconmonng.v1.DeregisterRequest
 	(*PeerUpdate)(nil),            // 7: kconmonng.v1.PeerUpdate
-	(*TCPProbeRequest)(nil),       // 8: kconmonng.v1.TCPProbeRequest
-	(*TCPProbeResponse)(nil),      // 9: kconmonng.v1.TCPProbeResponse
-	(*UDPProbeRequest)(nil),       // 10: kconmonng.v1.UDPProbeRequest
-	(*UDPProbeResponse)(nil),      // 11: kconmonng.v1.UDPProbeResponse
-	nil,                           // 12: kconmonng.v1.AgentMeta.LabelsEntry
-	(*timestamppb.Timestamp)(nil), // 13: google.protobuf.Timestamp
-	(*emptypb.Empty)(nil),         // 14: google.protobuf.Empty
+	(*WatchTasksRequest)(nil),     // 8: kconmonng.v1.WatchTasksRequest
+	(*TaskRequest)(nil),           // 9: kconmonng.v1.TaskRequest
+	(*TaskResult)(nil),            // 10: kconmonng.v1.TaskResult
+	(*TCPProbeRequest)(nil),       // 11: kconmonng.v1.TCPProbeRequest
+	(*TCPProbeResponse)(nil),      // 12: kconmonng.v1.TCPProbeResponse
+	(*UDPProbeRequest)(nil),       // 13: kconmonng.v1.UDPProbeRequest
+	(*UDPProbeResponse)(nil),      // 14: kconmonng.v1.UDPProbeResponse
+	nil,                           // 15: kconmonng.v1.AgentMeta.LabelsEntry
+	(*timestamppb.Timestamp)(nil), // 16: google.protobuf.Timestamp
+	(*emptypb.Empty)(nil),         // 17: google.protobuf.Empty
 }
 var file_kconmon_proto_depIdxs = []int32{
-	12, // 0: kconmonng.v1.AgentMeta.labels:type_name -> kconmonng.v1.AgentMeta.LabelsEntry
+	15, // 0: kconmonng.v1.AgentMeta.labels:type_name -> kconmonng.v1.AgentMeta.LabelsEntry
 	1,  // 1: kconmonng.v1.RegisterRequest.agent:type_name -> kconmonng.v1.AgentMeta
 	1,  // 2: kconmonng.v1.RegisterResponse.peers:type_name -> kconmonng.v1.AgentMeta
-	13, // 3: kconmonng.v1.RegisterResponse.server_time:type_name -> google.protobuf.Timestamp
+	16, // 3: kconmonng.v1.RegisterResponse.server_time:type_name -> google.protobuf.Timestamp
 	1,  // 4: kconmonng.v1.RegisterResponse.agent:type_name -> kconmonng.v1.AgentMeta
-	13, // 5: kconmonng.v1.HeartbeatRequest.timestamp:type_name -> google.protobuf.Timestamp
+	16, // 5: kconmonng.v1.HeartbeatRequest.timestamp:type_name -> google.protobuf.Timestamp
 	0,  // 6: kconmonng.v1.PeerUpdate.type:type_name -> kconmonng.v1.PeerUpdate.UpdateType
 	1,  // 7: kconmonng.v1.PeerUpdate.peers:type_name -> kconmonng.v1.AgentMeta
-	13, // 8: kconmonng.v1.PeerUpdate.timestamp:type_name -> google.protobuf.Timestamp
-	13, // 9: kconmonng.v1.TCPProbeRequest.timestamp:type_name -> google.protobuf.Timestamp
-	13, // 10: kconmonng.v1.TCPProbeResponse.timestamp:type_name -> google.protobuf.Timestamp
-	13, // 11: kconmonng.v1.UDPProbeRequest.timestamp:type_name -> google.protobuf.Timestamp
-	13, // 12: kconmonng.v1.UDPProbeResponse.timestamp:type_name -> google.protobuf.Timestamp
-	2,  // 13: kconmonng.v1.AgentRegistry.Register:input_type -> kconmonng.v1.RegisterRequest
-	4,  // 14: kconmonng.v1.AgentRegistry.Heartbeat:input_type -> kconmonng.v1.HeartbeatRequest
-	5,  // 15: kconmonng.v1.AgentRegistry.WatchPeers:input_type -> kconmonng.v1.WatchPeersRequest
-	6,  // 16: kconmonng.v1.AgentRegistry.Deregister:input_type -> kconmonng.v1.DeregisterRequest
-	8,  // 17: kconmonng.v1.ProbeService.TCPProbe:input_type -> kconmonng.v1.TCPProbeRequest
-	10, // 18: kconmonng.v1.ProbeService.UDPProbe:input_type -> kconmonng.v1.UDPProbeRequest
-	3,  // 19: kconmonng.v1.AgentRegistry.Register:output_type -> kconmonng.v1.RegisterResponse
-	14, // 20: kconmonng.v1.AgentRegistry.Heartbeat:output_type -> google.protobuf.Empty
-	7,  // 21: kconmonng.v1.AgentRegistry.WatchPeers:output_type -> kconmonng.v1.PeerUpdate
-	14, // 22: kconmonng.v1.AgentRegistry.Deregister:output_type -> google.protobuf.Empty
-	9,  // 23: kconmonng.v1.ProbeService.TCPProbe:output_type -> kconmonng.v1.TCPProbeResponse
-	11, // 24: kconmonng.v1.ProbeService.UDPProbe:output_type -> kconmonng.v1.UDPProbeResponse
-	19, // [19:25] is the sub-list for method output_type
-	13, // [13:19] is the sub-list for method input_type
-	13, // [13:13] is the sub-list for extension type_name
-	13, // [13:13] is the sub-list for extension extendee
-	0,  // [0:13] is the sub-list for field type_name
+	16, // 8: kconmonng.v1.PeerUpdate.timestamp:type_name -> google.protobuf.Timestamp
+	1,  // 9: kconmonng.v1.TaskRequest.target:type_name -> kconmonng.v1.AgentMeta
+	16, // 10: kconmonng.v1.TaskResult.timestamp:type_name -> google.protobuf.Timestamp
+	16, // 11: kconmonng.v1.TCPProbeRequest.timestamp:type_name -> google.protobuf.Timestamp
+	16, // 12: kconmonng.v1.TCPProbeResponse.timestamp:type_name -> google.protobuf.Timestamp
+	16, // 13: kconmonng.v1.UDPProbeRequest.timestamp:type_name -> google.protobuf.Timestamp
+	16, // 14: kconmonng.v1.UDPProbeResponse.timestamp:type_name -> google.protobuf.Timestamp
+	2,  // 15: kconmonng.v1.AgentRegistry.Register:input_type -> kconmonng.v1.RegisterRequest
+	4,  // 16: kconmonng.v1.AgentRegistry.Heartbeat:input_type -> kconmonng.v1.HeartbeatRequest
+	5,  // 17: kconmonng.v1.AgentRegistry.WatchPeers:input_type -> kconmonng.v1.WatchPeersRequest
+	6,  // 18: kconmonng.v1.AgentRegistry.Deregister:input_type -> kconmonng.v1.DeregisterRequest
+	8,  // 19: kconmonng.v1.AgentRegistry.WatchTasks:input_type -> kconmonng.v1.WatchTasksRequest
+	10, // 20: kconmonng.v1.AgentRegistry.ReportTaskResult:input_type -> kconmonng.v1.TaskResult
+	11, // 21: kconmonng.v1.ProbeService.TCPProbe:input_type -> kconmonng.v1.TCPProbeRequest
+	13, // 22: kconmonng.v1.ProbeService.UDPProbe:input_type -> kconmonng.v1.UDPProbeRequest
+	3,  // 23: kconmonng.v1.AgentRegistry.Register:output_type -> kconmonng.v1.RegisterResponse
+	17, // 24: kconmonng.v1.AgentRegistry.Heartbeat:output_type -> google.protobuf.Empty
+	7,  // 25: kconmonng.v1.AgentRegistry.WatchPeers:output_type -> kconmonng.v1.PeerUpdate
+	17, // 26: kconmonng.v1.AgentRegistry.Deregister:output_type -> google.protobuf.Empty
+	9,  // 27: kconmonng.v1.AgentRegistry.WatchTasks:output_type -> kconmonng.v1.TaskRequest
+	17, // 28: kconmonng.v1.AgentRegistry.ReportTaskResult:output_type -> google.protobuf.Empty
+	12, // 29: kconmonng.v1.ProbeService.TCPProbe:output_type -> kconmonng.v1.TCPProbeResponse
+	14, // 30: kconmonng.v1.ProbeService.UDPProbe:output_type -> kconmonng.v1.UDPProbeResponse
+	23, // [23:31] is the sub-list for method output_type
+	15, // [15:23] is the sub-list for method input_type
+	15, // [15:15] is the sub-list for extension type_name
+	15, // [15:15] is the sub-list for extension extendee
+	0,  // [0:15] is the sub-list for field type_name
 }
 
 func init() { file_kconmon_proto_init() }
@@ -844,7 +1068,7 @@ func file_kconmon_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_kconmon_proto_rawDesc), len(file_kconmon_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   12,
+			NumMessages:   15,
 			NumExtensions: 0,
 			NumServices:   2,
 		},

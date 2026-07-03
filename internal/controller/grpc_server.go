@@ -20,6 +20,7 @@ type GRPCServer struct {
 	pb.UnimplementedAgentRegistryServer
 	registry *Registry
 	metrics  *metrics.PrometheusMetrics
+	taskMgr  *TaskManager
 
 	mu       sync.RWMutex
 	watchers map[string]chan *pb.PeerUpdate
@@ -29,8 +30,15 @@ func NewGRPCServer(registry *Registry, m *metrics.PrometheusMetrics) *GRPCServer
 	return &GRPCServer{
 		registry: registry,
 		metrics:  m,
+		taskMgr:  NewTaskManager(),
 		watchers: make(map[string]chan *pb.PeerUpdate),
 	}
+}
+
+// TaskManager exposes the task dispatcher so the HTTP diagnostics handler can
+// dispatch on-demand tasks over the same streams agents watch.
+func (s *GRPCServer) TaskManager() *TaskManager {
+	return s.taskMgr
 }
 
 func (s *GRPCServer) RegisterService(srv *grpc.Server) {
@@ -126,6 +134,46 @@ func (s *GRPCServer) WatchPeers(req *pb.WatchPeersRequest, stream pb.AgentRegist
 			return stream.Context().Err()
 		}
 	}
+}
+
+// WatchTasks server-streams on-demand diagnostic tasks to an agent. It mirrors
+// the WatchPeers lifecycle: register a subscription, count the connection, and
+// clean up on stream close. Task fan-out is owned by the TaskManager.
+func (s *GRPCServer) WatchTasks(req *pb.WatchTasksRequest, stream pb.AgentRegistry_WatchTasksServer) error {
+	agentID := req.GetAgentId()
+
+	tasks, cleanup := s.taskMgr.Subscribe(agentID)
+	s.metrics.ControllerGRPCConnections.WithLabelValues().Inc()
+
+	defer func() {
+		cleanup()
+		s.metrics.ControllerGRPCConnections.WithLabelValues().Dec()
+	}()
+
+	for {
+		select {
+		// The TaskManager never closes the subscription channel (see Subscribe),
+		// so this branch does not fire on teardown; the loop exits via the
+		// stream context below. The ok check is kept as belt-and-braces.
+		case task, ok := <-tasks:
+			if !ok {
+				return nil
+			}
+			if err := stream.Send(task); err != nil {
+				return err
+			}
+		case <-stream.Context().Done():
+			return stream.Context().Err()
+		}
+	}
+}
+
+// ReportTaskResult delivers a task outcome from an agent back to the waiting
+// Dispatch caller. Unknown task IDs are dropped by the TaskManager and are not
+// an error.
+func (s *GRPCServer) ReportTaskResult(_ context.Context, res *pb.TaskResult) (*emptypb.Empty, error) {
+	s.taskMgr.Report(res)
+	return &emptypb.Empty{}, nil
 }
 
 func (s *GRPCServer) BroadcastPeerUpdate(agents []model.AgentInfo) {

@@ -1,0 +1,22 @@
+---
+version: 2
+updates:
+  # Go module dependencies: CVE fixes in grpc/x-net/otel land as normal PRs
+  # instead of accumulating until the next Artifact Hub security scan.
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      go-deps:
+        patterns: ["*"]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly

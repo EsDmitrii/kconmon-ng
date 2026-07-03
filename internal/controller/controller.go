@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"sync/atomic"
 	"time"
 
 	"github.com/EsDmitrii/kconmon-ng/internal/config"
@@ -26,6 +27,25 @@ type Controller struct {
 	httpServer *HTTPServer
 	metrics    *metrics.PrometheusMetrics
 	promReg    *prometheus.Registry
+	leader     atomic.Bool
+}
+
+// IsLeader reports whether this replica currently serves as the leader. A real
+// leader-election loop is not yet wired, so the flag defaults to true (matching
+// the controller_leader gauge). SetLeader keeps the two in sync when election
+// lands.
+func (c *Controller) IsLeader() bool {
+	return c.leader.Load()
+}
+
+// SetLeader updates the leadership state and the controller_leader gauge.
+func (c *Controller) SetLeader(leader bool) {
+	c.leader.Store(leader)
+	if leader {
+		c.metrics.ControllerLeader.WithLabelValues().Set(1)
+	} else {
+		c.metrics.ControllerLeader.WithLabelValues().Set(0)
+	}
 }
 
 func New(cfg *config.Config) *Controller {
@@ -51,7 +71,17 @@ func New(cfg *config.Config) *Controller {
 		m.ControllerRegisteredAgents.WithLabelValues().Set(float64(len(agents)))
 	})
 
-	m.ControllerLeader.WithLabelValues().Set(1)
+	// No leader-election loop is wired yet; default to leader so behavior is
+	// unchanged. SetLeader also syncs the controller_leader gauge to 1.
+	c.SetLeader(true)
+
+	c.httpServer.SetDiagnosticsHandler(NewDiagnosticsHandler(
+		registry,
+		c.grpcServer.TaskManager(),
+		m,
+		cfg.Controller.LeaderElection,
+		c.IsLeader,
+	))
 
 	return c
 }

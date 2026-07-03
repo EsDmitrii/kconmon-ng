@@ -20,10 +20,12 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	AgentRegistry_Register_FullMethodName   = "/kconmonng.v1.AgentRegistry/Register"
-	AgentRegistry_Heartbeat_FullMethodName  = "/kconmonng.v1.AgentRegistry/Heartbeat"
-	AgentRegistry_WatchPeers_FullMethodName = "/kconmonng.v1.AgentRegistry/WatchPeers"
-	AgentRegistry_Deregister_FullMethodName = "/kconmonng.v1.AgentRegistry/Deregister"
+	AgentRegistry_Register_FullMethodName         = "/kconmonng.v1.AgentRegistry/Register"
+	AgentRegistry_Heartbeat_FullMethodName        = "/kconmonng.v1.AgentRegistry/Heartbeat"
+	AgentRegistry_WatchPeers_FullMethodName       = "/kconmonng.v1.AgentRegistry/WatchPeers"
+	AgentRegistry_Deregister_FullMethodName       = "/kconmonng.v1.AgentRegistry/Deregister"
+	AgentRegistry_WatchTasks_FullMethodName       = "/kconmonng.v1.AgentRegistry/WatchTasks"
+	AgentRegistry_ReportTaskResult_FullMethodName = "/kconmonng.v1.AgentRegistry/ReportTaskResult"
 )
 
 // AgentRegistryClient is the client API for AgentRegistry service.
@@ -34,6 +36,12 @@ type AgentRegistryClient interface {
 	Heartbeat(ctx context.Context, in *HeartbeatRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	WatchPeers(ctx context.Context, in *WatchPeersRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[PeerUpdate], error)
 	Deregister(ctx context.Context, in *DeregisterRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
+	// WatchTasks server-streams on-demand diagnostic tasks from the controller
+	// to a registered agent, mirroring the WatchPeers push pattern.
+	WatchTasks(ctx context.Context, in *WatchTasksRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[TaskRequest], error)
+	// ReportTaskResult delivers the outcome of a WatchTasks task back to the
+	// controller.
+	ReportTaskResult(ctx context.Context, in *TaskResult, opts ...grpc.CallOption) (*emptypb.Empty, error)
 }
 
 type agentRegistryClient struct {
@@ -93,6 +101,35 @@ func (c *agentRegistryClient) Deregister(ctx context.Context, in *DeregisterRequ
 	return out, nil
 }
 
+func (c *agentRegistryClient) WatchTasks(ctx context.Context, in *WatchTasksRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[TaskRequest], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &AgentRegistry_ServiceDesc.Streams[1], AgentRegistry_WatchTasks_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[WatchTasksRequest, TaskRequest]{ClientStream: stream}
+	if err := x.ClientStream.SendMsg(in); err != nil {
+		return nil, err
+	}
+	if err := x.ClientStream.CloseSend(); err != nil {
+		return nil, err
+	}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type AgentRegistry_WatchTasksClient = grpc.ServerStreamingClient[TaskRequest]
+
+func (c *agentRegistryClient) ReportTaskResult(ctx context.Context, in *TaskResult, opts ...grpc.CallOption) (*emptypb.Empty, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(emptypb.Empty)
+	err := c.cc.Invoke(ctx, AgentRegistry_ReportTaskResult_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // AgentRegistryServer is the server API for AgentRegistry service.
 // All implementations must embed UnimplementedAgentRegistryServer
 // for forward compatibility.
@@ -101,6 +138,12 @@ type AgentRegistryServer interface {
 	Heartbeat(context.Context, *HeartbeatRequest) (*emptypb.Empty, error)
 	WatchPeers(*WatchPeersRequest, grpc.ServerStreamingServer[PeerUpdate]) error
 	Deregister(context.Context, *DeregisterRequest) (*emptypb.Empty, error)
+	// WatchTasks server-streams on-demand diagnostic tasks from the controller
+	// to a registered agent, mirroring the WatchPeers push pattern.
+	WatchTasks(*WatchTasksRequest, grpc.ServerStreamingServer[TaskRequest]) error
+	// ReportTaskResult delivers the outcome of a WatchTasks task back to the
+	// controller.
+	ReportTaskResult(context.Context, *TaskResult) (*emptypb.Empty, error)
 	mustEmbedUnimplementedAgentRegistryServer()
 }
 
@@ -122,6 +165,12 @@ func (UnimplementedAgentRegistryServer) WatchPeers(*WatchPeersRequest, grpc.Serv
 }
 func (UnimplementedAgentRegistryServer) Deregister(context.Context, *DeregisterRequest) (*emptypb.Empty, error) {
 	return nil, status.Error(codes.Unimplemented, "method Deregister not implemented")
+}
+func (UnimplementedAgentRegistryServer) WatchTasks(*WatchTasksRequest, grpc.ServerStreamingServer[TaskRequest]) error {
+	return status.Error(codes.Unimplemented, "method WatchTasks not implemented")
+}
+func (UnimplementedAgentRegistryServer) ReportTaskResult(context.Context, *TaskResult) (*emptypb.Empty, error) {
+	return nil, status.Error(codes.Unimplemented, "method ReportTaskResult not implemented")
 }
 func (UnimplementedAgentRegistryServer) mustEmbedUnimplementedAgentRegistryServer() {}
 func (UnimplementedAgentRegistryServer) testEmbeddedByValue()                       {}
@@ -209,6 +258,35 @@ func _AgentRegistry_Deregister_Handler(srv interface{}, ctx context.Context, dec
 	return interceptor(ctx, in, info, handler)
 }
 
+func _AgentRegistry_WatchTasks_Handler(srv interface{}, stream grpc.ServerStream) error {
+	m := new(WatchTasksRequest)
+	if err := stream.RecvMsg(m); err != nil {
+		return err
+	}
+	return srv.(AgentRegistryServer).WatchTasks(m, &grpc.GenericServerStream[WatchTasksRequest, TaskRequest]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type AgentRegistry_WatchTasksServer = grpc.ServerStreamingServer[TaskRequest]
+
+func _AgentRegistry_ReportTaskResult_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(TaskResult)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AgentRegistryServer).ReportTaskResult(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: AgentRegistry_ReportTaskResult_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AgentRegistryServer).ReportTaskResult(ctx, req.(*TaskResult))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // AgentRegistry_ServiceDesc is the grpc.ServiceDesc for AgentRegistry service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -228,11 +306,20 @@ var AgentRegistry_ServiceDesc = grpc.ServiceDesc{
 			MethodName: "Deregister",
 			Handler:    _AgentRegistry_Deregister_Handler,
 		},
+		{
+			MethodName: "ReportTaskResult",
+			Handler:    _AgentRegistry_ReportTaskResult_Handler,
+		},
 	},
 	Streams: []grpc.StreamDesc{
 		{
 			StreamName:    "WatchPeers",
 			Handler:       _AgentRegistry_WatchPeers_Handler,
+			ServerStreams: true,
+		},
+		{
+			StreamName:    "WatchTasks",
+			Handler:       _AgentRegistry_WatchTasks_Handler,
 			ServerStreams: true,
 		},
 	},

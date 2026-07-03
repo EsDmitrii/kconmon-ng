@@ -3,8 +3,8 @@ apiVersion: v2
 name: kconmon-ng
 description: Kubernetes Node Connectivity Monitor - Next Generation
 type: application
-version: 1.2.1
-appVersion: "1.2.1"
+version: 1.3.0
+appVersion: "1.3.0"
 keywords:
   - kubernetes
   - connectivity
@@ -25,5 +25,13 @@ annotations:
     - name: Documentation
       url: https://github.com/EsDmitrii/kconmon-ng#readme
   artifacthub.io/changes: |
+    - kind: added
+      description: kubectl-kconmon plugin for on-demand topology and connectivity checks (install via krew)
+    - kind: added
+      description: On-demand diagnostics API — POST /api/v1/diagnostics runs a one-shot check (leader only)
     - kind: fixed
       description: Graceful agent deregistration on SIGTERM — peers drop a restarting pod at once, not after TTL
+    - kind: security
+      description: go1.26.4 toolchain plus grpc/x-net/otel bumps clear the previous CVE findings
+    - kind: security
+      description: govulncheck CI job and weekly Dependabot updates for gomod, github-actions and docker
