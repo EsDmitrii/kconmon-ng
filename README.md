@@ -58,7 +58,7 @@ for the controller's node watch.
 
 ```bash
 helm upgrade --install kconmon-ng oci://ghcr.io/esdmitrii/charts/kconmon-ng \
-  --version 1.3.1 \
+  --version 1.3.2 \
   --set serviceMonitor.enabled=true \
   --set prometheusRule.enabled=true
 ```
@@ -164,7 +164,7 @@ lands in the official krew index):
 
 ```bash
 kubectl krew install --manifest-url \
-  https://github.com/EsDmitrii/kconmon-ng/releases/download/v1.3.1/kconmon.yaml
+  https://github.com/EsDmitrii/kconmon-ng/releases/download/v1.3.2/kconmon.yaml
 ```
 
 ```

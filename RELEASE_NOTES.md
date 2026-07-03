@@ -1,9 +1,11 @@
-## kconmon-ng v1.3.1
+## kconmon-ng v1.3.2
 
-> Note: v1.3.0 was aborted mid-release by a pipeline failure (GitHub immutable
-> releases sealed the release before all assets were attached) and was never
-> fully published; its tag is permanently retired by GitHub's immutability
-> tombstone. v1.3.1 is the complete release of the same content.
+> Note: this is the first fully working release of the on-demand diagnostics
+> feature set. v1.3.0 was aborted mid-release (GitHub immutable releases sealed
+> it before all assets were attached); v1.3.1 published but shipped a krew
+> manifest with an invalid version string, so `kubectl krew install
+> --manifest-url` rejected it. v1.3.2 carries the same content with a valid
+> krew manifest. The v1.3.0/v1.3.1 tags are retired.
 
 ### Features
 
@@ -29,14 +31,14 @@
 
 - **Toolchain and dependency bumps** — Go toolchain `go1.26.4`; `google.golang.org/grpc`
   1.79.1 → 1.82.0, `golang.org/x/net` 0.51 → 0.56, `golang.org/x/sys` 0.41 → 0.46, and OpenTelemetry
-  1.41 → 1.43. This clears the CVE findings behind the previous Artifact Hub security-report grade.
+  1.41 → 1.44. This clears the CVE findings behind the previous Artifact Hub security-report grade.
 - **`govulncheck` in CI** — a dedicated CI job runs `govulncheck ./...` on every PR and tag;
   Dependabot (gomod / github-actions / docker, weekly) keeps dependencies current so CVE fixes land
   as normal PRs instead of accumulating until the next scan.
 
 ### Supply chain
 
-- The Helm chart is now signed with cosign (keyless, by digest) — v1.3.1 is the first signed
+- The Helm chart is now signed with cosign (keyless, by digest) — v1.3.2 is the first signed
   release. Artifact Hub repository metadata continues to be published as an ORAS artifact.
 
 ### Docs
@@ -49,7 +51,7 @@
 
 ```bash
 helm upgrade --install kconmon-ng oci://ghcr.io/esdmitrii/charts/kconmon-ng \
-  --version 1.3.1 \
+  --version 1.3.2 \
   --namespace kconmon-ng \
   --create-namespace
 ```
@@ -58,14 +60,14 @@ kubectl plugin (via krew, from the release manifest):
 
 ```bash
 kubectl krew install --manifest-url \
-  https://github.com/EsDmitrii/kconmon-ng/releases/download/v1.3.1/kconmon.yaml
+  https://github.com/EsDmitrii/kconmon-ng/releases/download/v1.3.2/kconmon.yaml
 ```
 
 ### Images
 
 ```
-ghcr.io/esdmitrii/kconmon-ng-agent:1.3.1
-ghcr.io/esdmitrii/kconmon-ng-controller:1.3.1
+ghcr.io/esdmitrii/kconmon-ng-agent:1.3.2
+ghcr.io/esdmitrii/kconmon-ng-controller:1.3.2
 ```
 
 ---

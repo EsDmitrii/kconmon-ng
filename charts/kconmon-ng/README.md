@@ -21,21 +21,21 @@ results as Prometheus metrics.
 The chart is published as an OCI artifact on GHCR.
 
 ```bash
-helm install kconmon-ng oci://ghcr.io/esdmitrii/charts/kconmon-ng --version 1.3.1
+helm install kconmon-ng oci://ghcr.io/esdmitrii/charts/kconmon-ng --version 1.3.2
 ```
 
 With custom values:
 
 ```bash
 helm install kconmon-ng oci://ghcr.io/esdmitrii/charts/kconmon-ng \
-  --version 1.3.1 -f values.yaml
+  --version 1.3.2 -f values.yaml
 ```
 
 ### Upgrading
 
 ```bash
 helm upgrade kconmon-ng oci://ghcr.io/esdmitrii/charts/kconmon-ng \
-  --version 1.3.1 -f values.yaml
+  --version 1.3.2 -f values.yaml
 ```
 
 ### Uninstalling
