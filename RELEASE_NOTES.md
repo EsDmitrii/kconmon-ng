@@ -1,4 +1,9 @@
-## kconmon-ng v1.3.0
+## kconmon-ng v1.3.1
+
+> Note: v1.3.0 was aborted mid-release by a pipeline failure (GitHub immutable
+> releases sealed the release before all assets were attached) and was never
+> fully published; its tag is permanently retired by GitHub's immutability
+> tombstone. v1.3.1 is the complete release of the same content.
 
 ### Features
 
@@ -31,7 +36,7 @@
 
 ### Supply chain
 
-- The Helm chart is now signed with cosign (keyless, by digest) — v1.3.0 is the first signed
+- The Helm chart is now signed with cosign (keyless, by digest) — v1.3.1 is the first signed
   release. Artifact Hub repository metadata continues to be published as an ORAS artifact.
 
 ### Docs
@@ -44,7 +49,7 @@
 
 ```bash
 helm upgrade --install kconmon-ng oci://ghcr.io/esdmitrii/charts/kconmon-ng \
-  --version 1.3.0 \
+  --version 1.3.1 \
   --namespace kconmon-ng \
   --create-namespace
 ```
@@ -53,14 +58,14 @@ kubectl plugin (via krew, from the release manifest):
 
 ```bash
 kubectl krew install --manifest-url \
-  https://github.com/EsDmitrii/kconmon-ng/releases/download/v1.3.0/kconmon.yaml
+  https://github.com/EsDmitrii/kconmon-ng/releases/download/v1.3.1/kconmon.yaml
 ```
 
 ### Images
 
 ```
-ghcr.io/esdmitrii/kconmon-ng-agent:1.3.0
-ghcr.io/esdmitrii/kconmon-ng-controller:1.3.0
+ghcr.io/esdmitrii/kconmon-ng-agent:1.3.1
+ghcr.io/esdmitrii/kconmon-ng-controller:1.3.1
 ```
 
 ---
