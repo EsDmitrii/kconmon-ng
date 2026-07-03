@@ -93,7 +93,7 @@ jobs:
           cosign sign --yes "ghcr.io/${OWNER}/charts/kconmon-ng@${{ steps.helm-push.outputs.digest }}"
 
       - name: Set up ORAS
-        uses: oras-project/setup-oras@v1
+        uses: oras-project/setup-oras@v2
 
       - name: Publish Artifact Hub repository metadata
         env:
