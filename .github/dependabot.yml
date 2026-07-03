@@ -11,12 +11,20 @@ updates:
       go-deps:
         patterns: ["*"]
 
+  # Group all Action bumps into one PR per week instead of one PR per action
+  # (the first run otherwise opens a pile of separate PRs).
   - package-ecosystem: github-actions
     directory: /
     schedule:
       interval: weekly
+    groups:
+      github-actions:
+        patterns: ["*"]
 
   - package-ecosystem: docker
     directory: /
     schedule:
       interval: weekly
+    groups:
+      docker:
+        patterns: ["*"]
