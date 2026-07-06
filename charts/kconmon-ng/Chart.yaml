@@ -3,8 +3,8 @@ apiVersion: v2
 name: kconmon-ng
 description: Kubernetes Node Connectivity Monitor - Next Generation
 type: application
-version: 1.3.2
-appVersion: "1.3.2"
+version: 1.3.3
+appVersion: "1.3.3"
 keywords:
   - kubernetes
   - connectivity
@@ -25,6 +25,12 @@ annotations:
     - name: Documentation
       url: https://github.com/EsDmitrii/kconmon-ng#readme
   artifacthub.io/changes: |
+    - kind: fixed
+      description: ICMP checker sets net.ipv4.ping_group_range so ping sockets work on all runtimes
+    - kind: added
+      description: new agent.podSecurityContext value opens net.ipv4.ping_group_range for the ICMP checker
+    - kind: fixed
+      description: values.schema.json http target field expectedStatus -> expectStatus to match the checker
     - kind: added
       description: kubectl-kconmon plugin for on-demand topology and connectivity checks (install via krew)
     - kind: added

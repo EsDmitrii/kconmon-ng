@@ -69,6 +69,16 @@ agent:
     capabilities:
       add:
         - NET_RAW
+  # Pod-level security context. The ICMP checker opens an unprivileged ICMP
+  # "ping" socket (SOCK_DGRAM+IPPROTO_ICMP), which the kernel gates on
+  # net.ipv4.ping_group_range — NOT on NET_RAW. Some container runtimes leave
+  # this at the closed kernel default ("1 0"), so the checker fails with
+  # "socket: permission denied". Opening the range (a safe, namespaced sysctl)
+  # lets any GID create ping sockets. Set podSecurityContext to {} to opt out.
+  podSecurityContext:
+    sysctls:
+      - name: net.ipv4.ping_group_range
+        value: "0 2147483647"
 
 # Runtime configuration rendered into a ConfigMap and consumed by both the
 # controller and the agents. Changes are hot-reloaded without a restart.
