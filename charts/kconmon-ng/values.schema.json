@@ -36,7 +36,8 @@
         },
         "resources": { "type": "object" },
         "tolerations": { "type": "array" },
-        "securityContext": { "type": "object" }
+        "securityContext": { "type": "object" },
+        "podSecurityContext": { "type": "object" }
       }
     },
     "config": {

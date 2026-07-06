@@ -15,27 +15,31 @@ results as Prometheus metrics.
   `PrometheusRule` resources (`serviceMonitor.enabled` / `prometheusRule.enabled`)
 - The agent Pods request the `NET_RAW` capability (for ICMP / raw sockets used by
   the ICMP checker and MTR)
+- The ICMP checker opens an unprivileged ICMP "ping" socket, which the kernel
+  gates on `net.ipv4.ping_group_range`. Some container runtimes leave this at the
+  closed default (`1 0`), so the chart sets the (safe) sysctl via
+  `agent.podSecurityContext`. Set `agent.podSecurityContext: {}` to opt out.
 
 ## Installing
 
 The chart is published as an OCI artifact on GHCR.
 
 ```bash
-helm install kconmon-ng oci://ghcr.io/esdmitrii/charts/kconmon-ng --version 1.3.2
+helm install kconmon-ng oci://ghcr.io/esdmitrii/charts/kconmon-ng --version 1.3.3
 ```
 
 With custom values:
 
 ```bash
 helm install kconmon-ng oci://ghcr.io/esdmitrii/charts/kconmon-ng \
-  --version 1.3.2 -f values.yaml
+  --version 1.3.3 -f values.yaml
 ```
 
 ### Upgrading
 
 ```bash
 helm upgrade kconmon-ng oci://ghcr.io/esdmitrii/charts/kconmon-ng \
-  --version 1.3.2 -f values.yaml
+  --version 1.3.3 -f values.yaml
 ```
 
 ### Uninstalling
@@ -56,6 +60,8 @@ The table below lists the most relevant parameters. See
 | `controller.resources` | requests `50m`/`64Mi`, limits `200m`/`128Mi` | Controller resource requests/limits |
 | `agent.tolerations` | `[{operator: Exists}]` | Agent DaemonSet tolerations (default: run on all nodes) |
 | `agent.resources` | requests `50m`/`64Mi`, limits `200m`/`128Mi` | Agent resource requests/limits |
+| `agent.securityContext` | `{capabilities: {add: [NET_RAW]}}` | Agent container securityContext (NET_RAW for ICMP/MTR raw sockets) |
+| `agent.podSecurityContext` | `{sysctls: [{name: net.ipv4.ping_group_range, value: "0 2147483647"}]}` | Agent Pod securityContext; opens `ping_group_range` so the ICMP checker can open ping sockets. Set to `{}` to opt out |
 | `config.metricsPrefix` | `kconmon_ng` | Prefix for all exported Prometheus metrics |
 | `config.checkers.tcp.enabled` | `true` | Enable TCP checker (interval `5s`, timeout `1s`) |
 | `config.checkers.udp.enabled` | `true` | Enable UDP checker (interval `5s`, timeout `250ms`, `packets: 5`) |
