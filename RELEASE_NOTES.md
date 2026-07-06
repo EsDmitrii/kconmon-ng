@@ -20,6 +20,9 @@
   (defaults to opening `ping_group_range` for the ICMP checker). Set
   `agent.podSecurityContext: {}` to opt out. Documented in the chart README and
   `values.schema.json`.
+- `values.schema.json`: HTTP target field corrected from `expectedStatus` to
+  `expectStatus` to match the checker's config (the schema key never matched the
+  code, so a schema-guided value was silently ignored).
 
 ### Install
 
