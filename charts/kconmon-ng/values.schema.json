@@ -36,7 +36,8 @@
         },
         "resources": { "type": "object" },
         "tolerations": { "type": "array" },
-        "securityContext": { "type": "object" }
+        "securityContext": { "type": "object" },
+        "podSecurityContext": { "type": "object" }
       }
     },
     "config": {
@@ -101,7 +102,7 @@
                     "properties": {
                       "url": { "type": "string", "format": "uri" },
                       "method": { "type": "string", "enum": ["GET", "HEAD"] },
-                      "expectedStatus": { "type": "integer" },
+                      "expectStatus": { "type": "integer" },
                       "bodyPattern": { "type": "string" }
                     }
                   }

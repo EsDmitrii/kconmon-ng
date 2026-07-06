@@ -1,3 +1,54 @@
+## kconmon-ng v1.3.3
+
+> Chart-focused release. The Go agent/controller code is unchanged from v1.3.2;
+> the `:1.3.3` images are a version-synchronized rebuild (the release tag drives
+> both the chart version and the image tag).
+
+### Fixes
+
+- **ICMP checker on runtimes with a closed `net.ipv4.ping_group_range`** — the ICMP
+  checker opens an unprivileged ICMP "ping" socket (`SOCK_DGRAM`), which the kernel
+  gates on `net.ipv4.ping_group_range`, not on `NET_RAW`. Some container runtimes
+  leave this at the closed kernel default (`1 0`), so the checker failed with
+  `socket: permission denied` on those nodes. The agent Pod now sets the safe,
+  namespaced sysctl `net.ipv4.ping_group_range=0 2147483647`, so ping sockets work
+  regardless of the runtime default.
+
+### Chart
+
+- New `agent.podSecurityContext` value exposes the agent Pod-level `securityContext`
+  (defaults to opening `ping_group_range` for the ICMP checker). Set
+  `agent.podSecurityContext: {}` to opt out. Documented in the chart README and
+  `values.schema.json`.
+- `values.schema.json`: HTTP target field corrected from `expectedStatus` to
+  `expectStatus` to match the checker's config (the schema key never matched the
+  code, so a schema-guided value was silently ignored).
+
+### Install
+
+```bash
+helm upgrade --install kconmon-ng oci://ghcr.io/esdmitrii/charts/kconmon-ng \
+  --version 1.3.3 \
+  --namespace kconmon-ng \
+  --create-namespace
+```
+
+kubectl plugin (via krew, from the release manifest):
+
+```bash
+kubectl krew install --manifest-url \
+  https://github.com/EsDmitrii/kconmon-ng/releases/download/v1.3.3/kconmon.yaml
+```
+
+### Images
+
+```
+ghcr.io/esdmitrii/kconmon-ng-agent:1.3.3
+ghcr.io/esdmitrii/kconmon-ng-controller:1.3.3
+```
+
+---
+
 ## kconmon-ng v1.3.2
 
 > Note: this is the first fully working release of the on-demand diagnostics
