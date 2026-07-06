@@ -677,7 +677,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "sum by (source_node, destination_node) (rate(kconmon_ng_tcp_results_total{result=\"success\"}[5m])) / sum by (source_node, destination_node) (rate(kconmon_ng_tcp_results_total[5m])) * 100",
+          "expr": "label_join(sum by (source_node, destination_node) (rate(kconmon_ng_tcp_results_total{result=\"success\"}[5m])) / sum by (source_node, destination_node) (rate(kconmon_ng_tcp_results_total[5m])) * 100, \"pair\", \"|\", \"source_node\", \"destination_node\")",
           "format": "table",
           "instant": true,
           "refId": "A"
@@ -687,7 +687,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "sum by (source_node, destination_node) (rate(kconmon_ng_udp_results_total{result=\"success\"}[5m])) / sum by (source_node, destination_node) (rate(kconmon_ng_udp_results_total[5m])) * 100",
+          "expr": "label_join(sum by (source_node, destination_node) (rate(kconmon_ng_udp_results_total{result=\"success\"}[5m])) / sum by (source_node, destination_node) (rate(kconmon_ng_udp_results_total[5m])) * 100, \"pair\", \"|\", \"source_node\", \"destination_node\")",
           "format": "table",
           "instant": true,
           "refId": "B"
@@ -697,7 +697,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "sum by (source_node, destination_node) (rate(kconmon_ng_icmp_results_total{result=\"success\"}[5m])) / sum by (source_node, destination_node) (rate(kconmon_ng_icmp_results_total[5m])) * 100",
+          "expr": "label_join(sum by (source_node, destination_node) (rate(kconmon_ng_icmp_results_total{result=\"success\"}[5m])) / sum by (source_node, destination_node) (rate(kconmon_ng_icmp_results_total[5m])) * 100, \"pair\", \"|\", \"source_node\", \"destination_node\")",
           "format": "table",
           "instant": true,
           "refId": "C"
@@ -707,7 +707,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "avg by (source_node, destination_node) (avg_over_time(kconmon_ng_udp_packet_loss_ratio[5m]))",
+          "expr": "label_join(avg by (source_node, destination_node) (avg_over_time(kconmon_ng_udp_packet_loss_ratio[5m])), \"pair\", \"|\", \"source_node\", \"destination_node\")",
           "format": "table",
           "instant": true,
           "refId": "D"
@@ -717,7 +717,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "avg by (source_node, destination_node) (avg_over_time(kconmon_ng_icmp_packet_loss_ratio[5m]))",
+          "expr": "label_join(avg by (source_node, destination_node) (avg_over_time(kconmon_ng_icmp_packet_loss_ratio[5m])), \"pair\", \"|\", \"source_node\", \"destination_node\")",
           "format": "table",
           "instant": true,
           "refId": "E"
@@ -727,26 +727,39 @@
         {
           "id": "seriesToColumns",
           "options": {
-            "byField": "source_node"
+            "byField": "pair"
           }
         },
         {
           "id": "organize",
           "options": {
             "excludeByName": {
-              "Time": true,
               "Time 1": true,
               "Time 2": true,
               "Time 3": true,
               "Time 4": true,
               "Time 5": true,
+              "pair": true,
+              "source_node 2": true,
+              "source_node 3": true,
+              "source_node 4": true,
+              "source_node 5": true,
               "destination_node 2": true,
               "destination_node 3": true,
               "destination_node 4": true,
               "destination_node 5": true
             },
+            "indexByName": {
+              "source_node 1": 0,
+              "destination_node 1": 1,
+              "Value #A": 2,
+              "Value #B": 3,
+              "Value #C": 4,
+              "Value #D": 5,
+              "Value #E": 6
+            },
             "renameByName": {
-              "source_node": "Source",
+              "source_node 1": "Source",
               "destination_node 1": "Destination",
               "Value #A": "TCP",
               "Value #B": "UDP",
@@ -1963,7 +1976,9 @@
       "id": 60,
       "options": {
         "reduceOptions": {
-          "calcs": ["lastNotNull"],
+          "calcs": [
+            "lastNotNull"
+          ],
           "fields": "",
           "values": false
         },
