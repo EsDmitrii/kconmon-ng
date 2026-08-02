@@ -61,6 +61,33 @@ func TestTaskManagerDispatchReportRoundtrip(t *testing.T) {
 	}
 }
 
+// TestTaskManagerDispatchKeepsCallerTaskID pins the id ownership: a caller that
+// pre-stamped a task ID (to correlate its dispatch-start event with the outcome)
+// keeps it, while an empty one still gets a fresh uuid.
+func TestTaskManagerDispatchKeepsCallerTaskID(t *testing.T) {
+	tm := NewTaskManager()
+
+	sub, unsub := tm.Subscribe("agent-1")
+	defer unsub()
+
+	go func() {
+		_, _ = tm.Dispatch(context.Background(), "agent-1",
+			&pb.TaskRequest{TaskId: "caller-supplied-id", CheckType: "icmp"})
+	}()
+
+	select {
+	case dispatched := <-sub:
+		if dispatched.GetTaskId() != "caller-supplied-id" {
+			t.Errorf("Dispatch overwrote the caller's task ID: got %q", dispatched.GetTaskId())
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("agent did not receive dispatched task")
+	}
+
+	// The result is still correlated under the caller's ID.
+	tm.Report(&pb.TaskResult{TaskId: "caller-supplied-id", Success: true})
+}
+
 func TestTaskManagerDispatchTimeout(t *testing.T) {
 	tm := NewTaskManager()
 

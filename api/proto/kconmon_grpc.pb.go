@@ -465,3 +465,118 @@ var ProbeService_ServiceDesc = grpc.ServiceDesc{
 	Streams:  []grpc.StreamDesc{},
 	Metadata: "kconmon.proto",
 }
+
+const (
+	EventStream_WatchEvents_FullMethodName = "/kconmonng.v1.EventStream/WatchEvents"
+)
+
+// EventStreamClient is the client API for EventStream service.
+//
+// For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
+//
+// EventStream lets the Console watch controller-observed domain events in
+// realtime. Leader-only: a non-leader replica fails the call immediately
+// (codes.Unavailable) so the Console's reconnect loop retries and may land on
+// the leader on a subsequent dial.
+type EventStreamClient interface {
+	WatchEvents(ctx context.Context, in *WatchEventsRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[Event], error)
+}
+
+type eventStreamClient struct {
+	cc grpc.ClientConnInterface
+}
+
+func NewEventStreamClient(cc grpc.ClientConnInterface) EventStreamClient {
+	return &eventStreamClient{cc}
+}
+
+func (c *eventStreamClient) WatchEvents(ctx context.Context, in *WatchEventsRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[Event], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &EventStream_ServiceDesc.Streams[0], EventStream_WatchEvents_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[WatchEventsRequest, Event]{ClientStream: stream}
+	if err := x.ClientStream.SendMsg(in); err != nil {
+		return nil, err
+	}
+	if err := x.ClientStream.CloseSend(); err != nil {
+		return nil, err
+	}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type EventStream_WatchEventsClient = grpc.ServerStreamingClient[Event]
+
+// EventStreamServer is the server API for EventStream service.
+// All implementations must embed UnimplementedEventStreamServer
+// for forward compatibility.
+//
+// EventStream lets the Console watch controller-observed domain events in
+// realtime. Leader-only: a non-leader replica fails the call immediately
+// (codes.Unavailable) so the Console's reconnect loop retries and may land on
+// the leader on a subsequent dial.
+type EventStreamServer interface {
+	WatchEvents(*WatchEventsRequest, grpc.ServerStreamingServer[Event]) error
+	mustEmbedUnimplementedEventStreamServer()
+}
+
+// UnimplementedEventStreamServer must be embedded to have
+// forward compatible implementations.
+//
+// NOTE: this should be embedded by value instead of pointer to avoid a nil
+// pointer dereference when methods are called.
+type UnimplementedEventStreamServer struct{}
+
+func (UnimplementedEventStreamServer) WatchEvents(*WatchEventsRequest, grpc.ServerStreamingServer[Event]) error {
+	return status.Error(codes.Unimplemented, "method WatchEvents not implemented")
+}
+func (UnimplementedEventStreamServer) mustEmbedUnimplementedEventStreamServer() {}
+func (UnimplementedEventStreamServer) testEmbeddedByValue()                     {}
+
+// UnsafeEventStreamServer may be embedded to opt out of forward compatibility for this service.
+// Use of this interface is not recommended, as added methods to EventStreamServer will
+// result in compilation errors.
+type UnsafeEventStreamServer interface {
+	mustEmbedUnimplementedEventStreamServer()
+}
+
+func RegisterEventStreamServer(s grpc.ServiceRegistrar, srv EventStreamServer) {
+	// If the following call panics, it indicates UnimplementedEventStreamServer was
+	// embedded by pointer and is nil.  This will cause panics if an
+	// unimplemented method is ever invoked, so we test this at initialization
+	// time to prevent it from happening at runtime later due to I/O.
+	if t, ok := srv.(interface{ testEmbeddedByValue() }); ok {
+		t.testEmbeddedByValue()
+	}
+	s.RegisterService(&EventStream_ServiceDesc, srv)
+}
+
+func _EventStream_WatchEvents_Handler(srv interface{}, stream grpc.ServerStream) error {
+	m := new(WatchEventsRequest)
+	if err := stream.RecvMsg(m); err != nil {
+		return err
+	}
+	return srv.(EventStreamServer).WatchEvents(m, &grpc.GenericServerStream[WatchEventsRequest, Event]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type EventStream_WatchEventsServer = grpc.ServerStreamingServer[Event]
+
+// EventStream_ServiceDesc is the grpc.ServiceDesc for EventStream service.
+// It's only intended for direct use with grpc.RegisterService,
+// and not to be introspected or modified (even as a copy)
+var EventStream_ServiceDesc = grpc.ServiceDesc{
+	ServiceName: "kconmonng.v1.EventStream",
+	HandlerType: (*EventStreamServer)(nil),
+	Methods:     []grpc.MethodDesc{},
+	Streams: []grpc.StreamDesc{
+		{
+			StreamName:    "WatchEvents",
+			Handler:       _EventStream_WatchEvents_Handler,
+			ServerStreams: true,
+		},
+	},
+	Metadata: "kconmon.proto",
+}

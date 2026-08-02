@@ -95,7 +95,7 @@ func TestRegistryOnChange(t *testing.T) {
 	var received []model.AgentInfo
 	var mu sync.Mutex
 
-	r.OnChange(func(agents []model.AgentInfo) {
+	r.OnChange(func(agents []model.AgentInfo, _ string) {
 		mu.Lock()
 		received = agents
 		mu.Unlock()
@@ -168,7 +168,7 @@ func TestRegistryUpdateZone(t *testing.T) {
 	var mu sync.Mutex
 	var notifications int
 	var lastSnapshot []model.AgentInfo
-	r.OnChange(func(agents []model.AgentInfo) {
+	r.OnChange(func(agents []model.AgentInfo, _ string) {
 		mu.Lock()
 		notifications++
 		lastSnapshot = agents
@@ -207,7 +207,7 @@ func TestRegistryUpdateZoneNoAgentsNoNotify(t *testing.T) {
 	r := NewRegistry(30 * time.Second)
 
 	var notifications int
-	r.OnChange(func([]model.AgentInfo) { notifications++ })
+	r.OnChange(func([]model.AgentInfo, string) { notifications++ })
 
 	r.UpdateZone("node-unknown", "zone-a")
 	if notifications != 0 {
@@ -234,7 +234,7 @@ func TestRegistryDeregisterBroadcasts(t *testing.T) {
 	var mu sync.Mutex
 	var notifications int
 	var lastSnapshot []model.AgentInfo
-	r.OnChange(func(agents []model.AgentInfo) {
+	r.OnChange(func(agents []model.AgentInfo, _ string) {
 		mu.Lock()
 		notifications++
 		lastSnapshot = agents
@@ -264,7 +264,7 @@ func TestRegistryDeregisterUnknownNoOp(t *testing.T) {
 	r := NewRegistry(30 * time.Second)
 
 	var notifications int
-	r.OnChange(func([]model.AgentInfo) { notifications++ })
+	r.OnChange(func([]model.AgentInfo, string) { notifications++ })
 
 	r.Register(model.AgentInfo{ID: "agent-1", NodeName: "node-1"})
 	base := notifications

@@ -1,0 +1,63 @@
+{{- if and .Values.console.enabled (eq .Values.console.valkey.mode "bundled") }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "kconmon-ng.console.valkeyFullname" . }}
+  labels:
+    {{- include "kconmon-ng.labels" . | nindent 4 }}
+    app.kubernetes.io/component: console-valkey
+spec:
+  replicas: 1
+  # Recreate, not RollingUpdate: a single ephemeral in-memory instance, so two
+  # Pods overlapping would briefly split pub/sub between them.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "kconmon-ng.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: console-valkey
+  template:
+    metadata:
+      labels:
+        {{- include "kconmon-ng.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: console-valkey
+    spec:
+      containers:
+        - name: valkey
+          image: "{{ .Values.console.valkey.image.repository }}:{{ .Values.console.valkey.image.tag }}"
+          imagePullPolicy: {{ .Values.console.valkey.image.pullPolicy }}
+          # Persistence fully off (ADR-002: a flush must lose zero durable
+          # data). No RDB snapshots, no AOF, therefore no writable data dir and
+          # deliberately no PersistentVolumeClaim anywhere in this chart.
+          args:
+            - --save
+            - ""
+            - --appendonly
+            - "no"
+            - --port
+            - {{ .Values.console.valkey.port | int64 | quote }}
+          ports:
+            - name: valkey
+              containerPort: {{ .Values.console.valkey.port | int64 }}
+              protocol: TCP
+          readinessProbe:
+            tcpSocket:
+              port: valkey
+            periodSeconds: 5
+            timeoutSeconds: 3
+          livenessProbe:
+            tcpSocket:
+              port: valkey
+            periodSeconds: 10
+            timeoutSeconds: 5
+          resources:
+            {{- toYaml .Values.console.valkey.resources | nindent 12 }}
+      {{- with .Values.console.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.console.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

@@ -17,13 +17,20 @@ type HTTPServer struct {
 	ready           atomic.Bool
 	topologyHandler *TopologyHandler
 	diagHandler     atomic.Pointer[DiagnosticsHandler]
+	capabilities    []string
 }
 
-func NewHTTPServer(registry *Registry, nodeWatcher *NodeWatcher, promReg *prometheus.Registry) *HTTPServer {
+func NewHTTPServer(registry *Registry, nodeWatcher *NodeWatcher, promReg *prometheus.Registry, capabilities []string) *HTTPServer {
 	s := &HTTPServer{
-		mux:      http.NewServeMux(),
-		registry: registry,
-		promReg:  promReg,
+		mux:          http.NewServeMux(),
+		registry:     registry,
+		promReg:      promReg,
+		capabilities: capabilities,
+	}
+	// A nil slice would marshal as JSON null; an empty one keeps the field an
+	// array the Console can iterate unconditionally.
+	if s.capabilities == nil {
+		s.capabilities = []string{}
 	}
 
 	s.topologyHandler = NewTopologyHandler(registry, nodeWatcher)
@@ -85,8 +92,9 @@ func (s *HTTPServer) handleReadyz(w http.ResponseWriter, _ *http.Request) {
 
 func (s *HTTPServer) handleVersion(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]string{
-		"version": config.Version,
-		"commit":  config.Commit,
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"version":      config.Version,
+		"commit":       config.Commit,
+		"capabilities": s.capabilities,
 	})
 }

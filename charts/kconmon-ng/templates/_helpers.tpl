@@ -65,3 +65,52 @@ Create the name of the service account to use
 {{- default "default" .Values.serviceAccount.name }}
 {{- end }}
 {{- end }}
+
+{{/*
+Console fully qualified name.
+*/}}
+{{- define "kconmon-ng.console.fullname" -}}
+{{- printf "%s-console" (include "kconmon-ng.fullname" .) | trunc 63 | trimSuffix "-" }}
+{{- end }}
+
+{{/*
+Console bundled Valkey fully qualified name (console.valkey.mode=bundled).
+*/}}
+{{- define "kconmon-ng.console.valkeyFullname" -}}
+{{- printf "%s-valkey" (include "kconmon-ng.console.fullname" . | trunc 56 | trimSuffix "-") | trunc 63 | trimSuffix "-" }}
+{{- end }}
+
+{{/*
+Console Valkey address written into the console ConfigMap.
+Resolves console.valkey.mode (a Helm-only concept) to the Go-side
+"empty string = disabled" convention:
+  bundled  -> "<console fullname>-valkey:<port>"
+  external -> console.valkey.address verbatim (validated non-empty)
+  disabled -> "" (console falls back to the in-process bus, ADR-002)
+*/}}
+{{- define "kconmon-ng.console.valkeyAddress" -}}
+{{- $v := .Values.console.valkey -}}
+{{- if eq $v.mode "bundled" -}}
+{{- printf "%s:%d" (include "kconmon-ng.console.valkeyFullname" .) (int $v.port) -}}
+{{- else if eq $v.mode "external" -}}
+{{- if not $v.address -}}
+{{- fail "console.valkey.mode=external requires console.valkey.address (host:port)" -}}
+{{- end -}}
+{{- $v.address -}}
+{{- end -}}
+{{- end }}
+
+{{/*
+Console -> controller gRPC dial target for the events ingester.
+Empty (realtime off) unless controller.events.enabled. An explicit
+console.controller.grpcAddr always wins; otherwise reuse the SAME
+Service:port agents already dial. NOTE: kconmon-ng.controllerService
+ALREADY includes ":<grpcPort>" — never append the port again.
+*/}}
+{{- define "kconmon-ng.console.controllerGRPCAddr" -}}
+{{- if .Values.console.controller.grpcAddr -}}
+{{- .Values.console.controller.grpcAddr -}}
+{{- else if .Values.controller.events.enabled -}}
+{{- include "kconmon-ng.controllerService" . -}}
+{{- end -}}
+{{- end }}

@@ -46,6 +46,8 @@ type PrometheusMetrics struct {
 	ControllerGRPCConnections  *prometheus.GaugeVec
 	ControllerLeader           *prometheus.GaugeVec
 	ControllerDiagnostics      *prometheus.CounterVec
+	ControllerEventSubscribers *prometheus.GaugeVec
+	ControllerEventsPublished  *prometheus.CounterVec
 }
 
 func NewPrometheusMetrics(prefix string, reg prometheus.Registerer) *PrometheusMetrics {
@@ -185,6 +187,14 @@ func NewPrometheusMetrics(prefix string, reg prometheus.Registerer) *PrometheusM
 			Name: prefix + "_controller_diagnostics_total",
 			Help: "Total on-demand diagnostics requests by check type and outcome",
 		}, []string{"type", "result"}),
+		ControllerEventSubscribers: factory.NewGaugeVec(prometheus.GaugeOpts{
+			Name: prefix + "_controller_event_subscribers",
+			Help: "Number of active Console WatchEvents subscriptions on this controller replica",
+		}, []string{}),
+		ControllerEventsPublished: factory.NewCounterVec(prometheus.CounterOpts{
+			Name: prefix + "_controller_events_published_total",
+			Help: "Total controller domain events published to WatchEvents subscribers, by type",
+		}, []string{"type"}),
 	}
 
 	return m

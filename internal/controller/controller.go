@@ -9,6 +9,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	pb "github.com/EsDmitrii/kconmon-ng/api/proto"
 	"github.com/EsDmitrii/kconmon-ng/internal/config"
 	"github.com/EsDmitrii/kconmon-ng/internal/metrics"
 	"github.com/EsDmitrii/kconmon-ng/internal/model"
@@ -63,12 +64,15 @@ func New(cfg *config.Config) *Controller {
 		promReg:  promReg,
 	}
 
-	c.grpcServer = NewGRPCServer(registry, m)
-	c.httpServer = NewHTTPServer(registry, nil, promReg)
+	c.grpcServer = NewGRPCServer(registry, m, cfg.Controller.LeaderElection, c.IsLeader, cfg.Controller.Events.Enabled)
+	c.httpServer = NewHTTPServer(registry, nil, promReg, capabilitiesFor(cfg))
 
-	registry.OnChange(func(agents []model.AgentInfo) {
+	registry.OnChange(func(agents []model.AgentInfo, reason string) {
 		c.grpcServer.BroadcastPeerUpdate(agents)
 		m.ControllerRegisteredAgents.WithLabelValues().Set(float64(len(agents)))
+		c.grpcServer.PublishEvent(&pb.Event{Payload: &pb.Event_TopologyChanged{
+			TopologyChanged: &pb.TopologyChanged{Reason: reason},
+		}})
 	})
 
 	// No leader-election loop is wired yet; default to leader so behavior is
@@ -81,6 +85,7 @@ func New(cfg *config.Config) *Controller {
 		m,
 		cfg.Controller.LeaderElection,
 		c.IsLeader,
+		c.grpcServer,
 	))
 
 	return c
@@ -168,7 +173,11 @@ func (c *Controller) Run(ctx context.Context) error {
 	select {
 	case <-ctx.Done():
 		slog.Info("shutting down controller")
-		grpcSrv.GracefulStop()
+		// Flip readiness first: during a rolling restart the endpoint removal
+		// races the gRPC stop, and now that graceful shutdown actually
+		// completes, a ready-but-tearing-down replica is observable.
+		c.httpServer.SetReady(false)
+		stopGRPC(grpcSrv, c.grpcServer)
 
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
@@ -176,6 +185,55 @@ func (c *Controller) Run(ctx context.Context) error {
 	case err := <-errCh:
 		return err
 	}
+}
+
+// grpcGracefulStopTimeout bounds the wait for in-flight RPCs to drain before
+// the server is stopped forcefully.
+const grpcGracefulStopTimeout = 5 * time.Second
+
+// stopGRPC shuts the gRPC server down without the GracefulStop trap.
+//
+// GracefulStop waits for every active handler to return but does not cancel
+// their stream contexts, so a server-streaming handler parked in a select
+// blocks it forever — which is exactly what happened with a connected agent or
+// a subscribed Console: the process ignored SIGTERM and only died on SIGKILL
+// after terminationGracePeriod. Signalling the handlers first is what makes
+// GracefulStop able to finish at all.
+//
+// The timer is the backstop for anything the signal does not reach (a handler
+// blocked in Send against a stalled client, say): losing a few in-flight RPCs
+// beats hanging the pod.
+func stopGRPC(grpcSrv *grpc.Server, streams *GRPCServer) {
+	streams.Shutdown()
+
+	stopped := make(chan struct{})
+	go func() {
+		defer close(stopped)
+		grpcSrv.GracefulStop()
+	}()
+
+	timer := time.NewTimer(grpcGracefulStopTimeout)
+	defer timer.Stop()
+
+	select {
+	case <-stopped:
+	case <-timer.C:
+		slog.Warn("gRPC graceful stop timed out, forcing shutdown",
+			"timeout", grpcGracefulStopTimeout)
+		grpcSrv.Stop()
+		<-stopped
+	}
+}
+
+// capabilitiesFor returns the controller's advertised capability flags for
+// GET /api/v1/version. "events" is only advertised when the operator has
+// turned on controller.events.enabled — the Console never version-sniffs.
+func capabilitiesFor(cfg *config.Config) []string {
+	caps := []string{}
+	if cfg.Controller.Events.Enabled {
+		caps = append(caps, "events")
+	}
+	return caps
 }
 
 // buildInClusterClientset builds a Kubernetes clientset from the in-cluster service account.

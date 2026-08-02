@@ -3,8 +3,8 @@ apiVersion: v2
 name: kconmon-ng
 description: Kubernetes Node Connectivity Monitor - Next Generation
 type: application
-version: 1.3.3
-appVersion: "1.3.3"
+version: 1.6.0
+appVersion: "1.6.0"
 keywords:
   - kubernetes
   - connectivity
@@ -25,6 +25,14 @@ annotations:
     - name: Documentation
       url: https://github.com/EsDmitrii/kconmon-ng#readme
   artifacthub.io/changes: |
+    - kind: added
+      description: Console realtime (M2) — controller.events.enabled, console.valkey.mode, WebSocket /ws, Live page
+    - kind: added
+      description: Bundled ephemeral Valkey for cross-replica console fan-out (no PVC by design, ADR-002)
+    - kind: added
+      description: NetworkPolicy opens console->controller gRPC and console->Valkey on both sides
+    - kind: added
+      description: Optional Console web UI (console.enabled, off by default) — M0 foundation
     - kind: fixed
       description: ICMP checker sets net.ipv4.ping_group_range so ping sockets work on all runtimes
     - kind: added

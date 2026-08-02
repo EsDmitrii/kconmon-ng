@@ -1,0 +1,5 @@
+# Vite build output is generated; only the placeholder index.html is tracked so
+# `go build`/`go test` compile the embed without requiring a node build.
+*
+!.gitignore
+!index.html

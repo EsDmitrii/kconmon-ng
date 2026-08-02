@@ -402,3 +402,28 @@ logLevel: debug
 		}
 	}
 }
+
+func TestDefaultConfigEventsDisabled(t *testing.T) {
+	cfg := DefaultConfig()
+	if cfg.Controller.Events.Enabled {
+		t.Error("expected controller.events.enabled to default false")
+	}
+}
+
+func TestLoadFromFileEventsEnabled(t *testing.T) {
+	l := NewLoader("")
+	cfg := DefaultConfig()
+	data := []byte("controller:\n  leaderElection: true\n  agentTtl: 30s\n  events:\n    enabled: true\n")
+	dir := t.TempDir()
+	p := dir + "/config.yaml"
+	if err := os.WriteFile(p, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	l.filePath = p
+	if err := l.loadFromFile(cfg); err != nil {
+		t.Fatalf("loadFromFile: %v", err)
+	}
+	if !cfg.Controller.Events.Enabled {
+		t.Error("expected controller.events.enabled true after load")
+	}
+}

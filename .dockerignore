@@ -1,0 +1,22 @@
+# Build outputs and local artifacts
+bin/
+dist/
+coverage.txt
+*.tgz
+
+# Frontend
+web/node_modules/
+web/dist/
+
+# VCS / editor / CI-local
+.git/
+.github/
+.idea/
+.vscode/
+*.md
+!RELEASE_NOTES.md
+docs/
+e2e/
+charts/
+krew/
+.superpowers/
