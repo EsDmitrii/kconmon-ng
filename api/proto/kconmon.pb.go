@@ -898,6 +898,667 @@ func (x *UDPProbeResponse) GetTimestamp() *timestamppb.Timestamp {
 	return nil
 }
 
+type WatchEventsRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Reserved for a future resume-by-seq capability across controller
+	// restarts. The controller keeps no cross-restart event history in M2, so
+	// this is currently unused; the field exists so the wire shape does not
+	// need to change when that lands.
+	LastSeq       uint64 `protobuf:"varint,1,opt,name=last_seq,json=lastSeq,proto3" json:"last_seq,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *WatchEventsRequest) Reset() {
+	*x = WatchEventsRequest{}
+	mi := &file_kconmon_proto_msgTypes[14]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *WatchEventsRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*WatchEventsRequest) ProtoMessage() {}
+
+func (x *WatchEventsRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_kconmon_proto_msgTypes[14]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use WatchEventsRequest.ProtoReflect.Descriptor instead.
+func (*WatchEventsRequest) Descriptor() ([]byte, []int) {
+	return file_kconmon_proto_rawDescGZIP(), []int{14}
+}
+
+func (x *WatchEventsRequest) GetLastSeq() uint64 {
+	if x != nil {
+		return x.LastSeq
+	}
+	return 0
+}
+
+type Event struct {
+	state     protoimpl.MessageState `protogen:"open.v1"`
+	Seq       uint64                 `protobuf:"varint,1,opt,name=seq,proto3" json:"seq,omitempty"`
+	Timestamp *timestamppb.Timestamp `protobuf:"bytes,2,opt,name=timestamp,proto3" json:"timestamp,omitempty"`
+	// Types that are valid to be assigned to Payload:
+	//
+	//	*Event_TopologyChanged
+	//	*Event_CheckObserved
+	//	*Event_MtrTriggered
+	//	*Event_MtrCompleted
+	//	*Event_DiagnosticProgress
+	Payload       isEvent_Payload `protobuf_oneof:"payload"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Event) Reset() {
+	*x = Event{}
+	mi := &file_kconmon_proto_msgTypes[15]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Event) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Event) ProtoMessage() {}
+
+func (x *Event) ProtoReflect() protoreflect.Message {
+	mi := &file_kconmon_proto_msgTypes[15]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Event.ProtoReflect.Descriptor instead.
+func (*Event) Descriptor() ([]byte, []int) {
+	return file_kconmon_proto_rawDescGZIP(), []int{15}
+}
+
+func (x *Event) GetSeq() uint64 {
+	if x != nil {
+		return x.Seq
+	}
+	return 0
+}
+
+func (x *Event) GetTimestamp() *timestamppb.Timestamp {
+	if x != nil {
+		return x.Timestamp
+	}
+	return nil
+}
+
+func (x *Event) GetPayload() isEvent_Payload {
+	if x != nil {
+		return x.Payload
+	}
+	return nil
+}
+
+func (x *Event) GetTopologyChanged() *TopologyChanged {
+	if x != nil {
+		if x, ok := x.Payload.(*Event_TopologyChanged); ok {
+			return x.TopologyChanged
+		}
+	}
+	return nil
+}
+
+func (x *Event) GetCheckObserved() *CheckObserved {
+	if x != nil {
+		if x, ok := x.Payload.(*Event_CheckObserved); ok {
+			return x.CheckObserved
+		}
+	}
+	return nil
+}
+
+func (x *Event) GetMtrTriggered() *MTRTriggered {
+	if x != nil {
+		if x, ok := x.Payload.(*Event_MtrTriggered); ok {
+			return x.MtrTriggered
+		}
+	}
+	return nil
+}
+
+func (x *Event) GetMtrCompleted() *MTRCompleted {
+	if x != nil {
+		if x, ok := x.Payload.(*Event_MtrCompleted); ok {
+			return x.MtrCompleted
+		}
+	}
+	return nil
+}
+
+func (x *Event) GetDiagnosticProgress() *DiagnosticProgress {
+	if x != nil {
+		if x, ok := x.Payload.(*Event_DiagnosticProgress); ok {
+			return x.DiagnosticProgress
+		}
+	}
+	return nil
+}
+
+type isEvent_Payload interface {
+	isEvent_Payload()
+}
+
+type Event_TopologyChanged struct {
+	TopologyChanged *TopologyChanged `protobuf:"bytes,3,opt,name=topology_changed,json=topologyChanged,proto3,oneof"`
+}
+
+type Event_CheckObserved struct {
+	CheckObserved *CheckObserved `protobuf:"bytes,4,opt,name=check_observed,json=checkObserved,proto3,oneof"`
+}
+
+type Event_MtrTriggered struct {
+	MtrTriggered *MTRTriggered `protobuf:"bytes,5,opt,name=mtr_triggered,json=mtrTriggered,proto3,oneof"`
+}
+
+type Event_MtrCompleted struct {
+	MtrCompleted *MTRCompleted `protobuf:"bytes,6,opt,name=mtr_completed,json=mtrCompleted,proto3,oneof"`
+}
+
+type Event_DiagnosticProgress struct {
+	DiagnosticProgress *DiagnosticProgress `protobuf:"bytes,7,opt,name=diagnostic_progress,json=diagnosticProgress,proto3,oneof"`
+}
+
+func (*Event_TopologyChanged) isEvent_Payload() {}
+
+func (*Event_CheckObserved) isEvent_Payload() {}
+
+func (*Event_MtrTriggered) isEvent_Payload() {}
+
+func (*Event_MtrCompleted) isEvent_Payload() {}
+
+func (*Event_DiagnosticProgress) isEvent_Payload() {}
+
+// TopologyChanged is a lightweight "refetch" signal, not a full snapshot: the
+// Console already has an authoritative HTTP topology endpoint
+// (GET /api/v1/topology) and re-queries it rather than duplicating node/zone
+// enrichment logic in the event stream.
+type TopologyChanged struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Reason        string                 `protobuf:"bytes,1,opt,name=reason,proto3" json:"reason,omitempty"` // agent_registered|zone_updated|agent_deregistered|agent_evicted
+	NodeName      string                 `protobuf:"bytes,2,opt,name=node_name,json=nodeName,proto3" json:"node_name,omitempty"`
+	AgentId       string                 `protobuf:"bytes,3,opt,name=agent_id,json=agentId,proto3" json:"agent_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *TopologyChanged) Reset() {
+	*x = TopologyChanged{}
+	mi := &file_kconmon_proto_msgTypes[16]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *TopologyChanged) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*TopologyChanged) ProtoMessage() {}
+
+func (x *TopologyChanged) ProtoReflect() protoreflect.Message {
+	mi := &file_kconmon_proto_msgTypes[16]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use TopologyChanged.ProtoReflect.Descriptor instead.
+func (*TopologyChanged) Descriptor() ([]byte, []int) {
+	return file_kconmon_proto_rawDescGZIP(), []int{16}
+}
+
+func (x *TopologyChanged) GetReason() string {
+	if x != nil {
+		return x.Reason
+	}
+	return ""
+}
+
+func (x *TopologyChanged) GetNodeName() string {
+	if x != nil {
+		return x.NodeName
+	}
+	return ""
+}
+
+func (x *TopologyChanged) GetAgentId() string {
+	if x != nil {
+		return x.AgentId
+	}
+	return ""
+}
+
+// CheckObserved reports the outcome of a completed ON-DEMAND diagnostic check
+// (POST /api/v1/diagnostics). It is NOT the continuous background probes —
+// those go straight from agent to Prometheus and never touch the controller.
+// It is a compact rollup, never the raw CheckResult payload.
+type CheckObserved struct {
+	state           protoimpl.MessageState `protogen:"open.v1"`
+	TaskId          string                 `protobuf:"bytes,1,opt,name=task_id,json=taskId,proto3" json:"task_id,omitempty"`
+	CheckType       string                 `protobuf:"bytes,2,opt,name=check_type,json=checkType,proto3" json:"check_type,omitempty"` // tcp|udp|icmp|dns|http (mtr uses MTRTriggered/MTRCompleted instead)
+	SourceNode      string                 `protobuf:"bytes,3,opt,name=source_node,json=sourceNode,proto3" json:"source_node,omitempty"`
+	DestinationNode string                 `protobuf:"bytes,4,opt,name=destination_node,json=destinationNode,proto3" json:"destination_node,omitempty"`
+	Plane           string                 `protobuf:"bytes,5,opt,name=plane,proto3" json:"plane,omitempty"`
+	Success         bool                   `protobuf:"varint,6,opt,name=success,proto3" json:"success,omitempty"`
+	DurationNs      int64                  `protobuf:"varint,7,opt,name=duration_ns,json=durationNs,proto3" json:"duration_ns,omitempty"`
+	Error           string                 `protobuf:"bytes,8,opt,name=error,proto3" json:"error,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
+}
+
+func (x *CheckObserved) Reset() {
+	*x = CheckObserved{}
+	mi := &file_kconmon_proto_msgTypes[17]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *CheckObserved) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*CheckObserved) ProtoMessage() {}
+
+func (x *CheckObserved) ProtoReflect() protoreflect.Message {
+	mi := &file_kconmon_proto_msgTypes[17]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use CheckObserved.ProtoReflect.Descriptor instead.
+func (*CheckObserved) Descriptor() ([]byte, []int) {
+	return file_kconmon_proto_rawDescGZIP(), []int{17}
+}
+
+func (x *CheckObserved) GetTaskId() string {
+	if x != nil {
+		return x.TaskId
+	}
+	return ""
+}
+
+func (x *CheckObserved) GetCheckType() string {
+	if x != nil {
+		return x.CheckType
+	}
+	return ""
+}
+
+func (x *CheckObserved) GetSourceNode() string {
+	if x != nil {
+		return x.SourceNode
+	}
+	return ""
+}
+
+func (x *CheckObserved) GetDestinationNode() string {
+	if x != nil {
+		return x.DestinationNode
+	}
+	return ""
+}
+
+func (x *CheckObserved) GetPlane() string {
+	if x != nil {
+		return x.Plane
+	}
+	return ""
+}
+
+func (x *CheckObserved) GetSuccess() bool {
+	if x != nil {
+		return x.Success
+	}
+	return false
+}
+
+func (x *CheckObserved) GetDurationNs() int64 {
+	if x != nil {
+		return x.DurationNs
+	}
+	return 0
+}
+
+func (x *CheckObserved) GetError() string {
+	if x != nil {
+		return x.Error
+	}
+	return ""
+}
+
+type MTRTriggered struct {
+	state           protoimpl.MessageState `protogen:"open.v1"`
+	TaskId          string                 `protobuf:"bytes,1,opt,name=task_id,json=taskId,proto3" json:"task_id,omitempty"`
+	SourceNode      string                 `protobuf:"bytes,2,opt,name=source_node,json=sourceNode,proto3" json:"source_node,omitempty"`
+	DestinationNode string                 `protobuf:"bytes,3,opt,name=destination_node,json=destinationNode,proto3" json:"destination_node,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
+}
+
+func (x *MTRTriggered) Reset() {
+	*x = MTRTriggered{}
+	mi := &file_kconmon_proto_msgTypes[18]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *MTRTriggered) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*MTRTriggered) ProtoMessage() {}
+
+func (x *MTRTriggered) ProtoReflect() protoreflect.Message {
+	mi := &file_kconmon_proto_msgTypes[18]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use MTRTriggered.ProtoReflect.Descriptor instead.
+func (*MTRTriggered) Descriptor() ([]byte, []int) {
+	return file_kconmon_proto_rawDescGZIP(), []int{18}
+}
+
+func (x *MTRTriggered) GetTaskId() string {
+	if x != nil {
+		return x.TaskId
+	}
+	return ""
+}
+
+func (x *MTRTriggered) GetSourceNode() string {
+	if x != nil {
+		return x.SourceNode
+	}
+	return ""
+}
+
+func (x *MTRTriggered) GetDestinationNode() string {
+	if x != nil {
+		return x.DestinationNode
+	}
+	return ""
+}
+
+type MTRHop struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Number        int32                  `protobuf:"varint,1,opt,name=number,proto3" json:"number,omitempty"`
+	Ip            string                 `protobuf:"bytes,2,opt,name=ip,proto3" json:"ip,omitempty"`
+	Hostname      string                 `protobuf:"bytes,3,opt,name=hostname,proto3" json:"hostname,omitempty"`
+	RttNs         int64                  `protobuf:"varint,4,opt,name=rtt_ns,json=rttNs,proto3" json:"rtt_ns,omitempty"`
+	LossRatio     float64                `protobuf:"fixed64,5,opt,name=loss_ratio,json=lossRatio,proto3" json:"loss_ratio,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *MTRHop) Reset() {
+	*x = MTRHop{}
+	mi := &file_kconmon_proto_msgTypes[19]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *MTRHop) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*MTRHop) ProtoMessage() {}
+
+func (x *MTRHop) ProtoReflect() protoreflect.Message {
+	mi := &file_kconmon_proto_msgTypes[19]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use MTRHop.ProtoReflect.Descriptor instead.
+func (*MTRHop) Descriptor() ([]byte, []int) {
+	return file_kconmon_proto_rawDescGZIP(), []int{19}
+}
+
+func (x *MTRHop) GetNumber() int32 {
+	if x != nil {
+		return x.Number
+	}
+	return 0
+}
+
+func (x *MTRHop) GetIp() string {
+	if x != nil {
+		return x.Ip
+	}
+	return ""
+}
+
+func (x *MTRHop) GetHostname() string {
+	if x != nil {
+		return x.Hostname
+	}
+	return ""
+}
+
+func (x *MTRHop) GetRttNs() int64 {
+	if x != nil {
+		return x.RttNs
+	}
+	return 0
+}
+
+func (x *MTRHop) GetLossRatio() float64 {
+	if x != nil {
+		return x.LossRatio
+	}
+	return 0
+}
+
+type MTRCompleted struct {
+	state           protoimpl.MessageState `protogen:"open.v1"`
+	TaskId          string                 `protobuf:"bytes,1,opt,name=task_id,json=taskId,proto3" json:"task_id,omitempty"`
+	SourceNode      string                 `protobuf:"bytes,2,opt,name=source_node,json=sourceNode,proto3" json:"source_node,omitempty"`
+	DestinationNode string                 `protobuf:"bytes,3,opt,name=destination_node,json=destinationNode,proto3" json:"destination_node,omitempty"`
+	Success         bool                   `protobuf:"varint,4,opt,name=success,proto3" json:"success,omitempty"`
+	Error           string                 `protobuf:"bytes,5,opt,name=error,proto3" json:"error,omitempty"`
+	Hops            []*MTRHop              `protobuf:"bytes,6,rep,name=hops,proto3" json:"hops,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
+}
+
+func (x *MTRCompleted) Reset() {
+	*x = MTRCompleted{}
+	mi := &file_kconmon_proto_msgTypes[20]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *MTRCompleted) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*MTRCompleted) ProtoMessage() {}
+
+func (x *MTRCompleted) ProtoReflect() protoreflect.Message {
+	mi := &file_kconmon_proto_msgTypes[20]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use MTRCompleted.ProtoReflect.Descriptor instead.
+func (*MTRCompleted) Descriptor() ([]byte, []int) {
+	return file_kconmon_proto_rawDescGZIP(), []int{20}
+}
+
+func (x *MTRCompleted) GetTaskId() string {
+	if x != nil {
+		return x.TaskId
+	}
+	return ""
+}
+
+func (x *MTRCompleted) GetSourceNode() string {
+	if x != nil {
+		return x.SourceNode
+	}
+	return ""
+}
+
+func (x *MTRCompleted) GetDestinationNode() string {
+	if x != nil {
+		return x.DestinationNode
+	}
+	return ""
+}
+
+func (x *MTRCompleted) GetSuccess() bool {
+	if x != nil {
+		return x.Success
+	}
+	return false
+}
+
+func (x *MTRCompleted) GetError() string {
+	if x != nil {
+		return x.Error
+	}
+	return ""
+}
+
+func (x *MTRCompleted) GetHops() []*MTRHop {
+	if x != nil {
+		return x.Hops
+	}
+	return nil
+}
+
+// DiagnosticProgress fires at dispatch-start and on non-terminal-failure
+// paths; the terminal success outcome is a CheckObserved or MTRCompleted
+// instead, never a second DiagnosticProgress.
+type DiagnosticProgress struct {
+	state           protoimpl.MessageState `protogen:"open.v1"`
+	TaskId          string                 `protobuf:"bytes,1,opt,name=task_id,json=taskId,proto3" json:"task_id,omitempty"`
+	CheckType       string                 `protobuf:"bytes,2,opt,name=check_type,json=checkType,proto3" json:"check_type,omitempty"`
+	SourceNode      string                 `protobuf:"bytes,3,opt,name=source_node,json=sourceNode,proto3" json:"source_node,omitempty"`
+	DestinationNode string                 `protobuf:"bytes,4,opt,name=destination_node,json=destinationNode,proto3" json:"destination_node,omitempty"`
+	State           string                 `protobuf:"bytes,5,opt,name=state,proto3" json:"state,omitempty"` // dispatched|timeout|error
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
+}
+
+func (x *DiagnosticProgress) Reset() {
+	*x = DiagnosticProgress{}
+	mi := &file_kconmon_proto_msgTypes[21]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DiagnosticProgress) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DiagnosticProgress) ProtoMessage() {}
+
+func (x *DiagnosticProgress) ProtoReflect() protoreflect.Message {
+	mi := &file_kconmon_proto_msgTypes[21]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DiagnosticProgress.ProtoReflect.Descriptor instead.
+func (*DiagnosticProgress) Descriptor() ([]byte, []int) {
+	return file_kconmon_proto_rawDescGZIP(), []int{21}
+}
+
+func (x *DiagnosticProgress) GetTaskId() string {
+	if x != nil {
+		return x.TaskId
+	}
+	return ""
+}
+
+func (x *DiagnosticProgress) GetCheckType() string {
+	if x != nil {
+		return x.CheckType
+	}
+	return ""
+}
+
+func (x *DiagnosticProgress) GetSourceNode() string {
+	if x != nil {
+		return x.SourceNode
+	}
+	return ""
+}
+
+func (x *DiagnosticProgress) GetDestinationNode() string {
+	if x != nil {
+		return x.DestinationNode
+	}
+	return ""
+}
+
+func (x *DiagnosticProgress) GetState() string {
+	if x != nil {
+		return x.State
+	}
+	return ""
+}
+
 var File_kconmon_proto protoreflect.FileDescriptor
 
 const file_kconmon_proto_rawDesc = "" +
@@ -969,7 +1630,62 @@ const file_kconmon_proto_rawDesc = "" +
 	"\x10UDPProbeResponse\x12\x1a\n" +
 	"\bsequence\x18\x01 \x01(\rR\bsequence\x12\x18\n" +
 	"\apayload\x18\x02 \x01(\fR\apayload\x128\n" +
-	"\ttimestamp\x18\x03 \x01(\v2\x1a.google.protobuf.TimestampR\ttimestamp2\xc3\x03\n" +
+	"\ttimestamp\x18\x03 \x01(\v2\x1a.google.protobuf.TimestampR\ttimestamp\"/\n" +
+	"\x12WatchEventsRequest\x12\x19\n" +
+	"\blast_seq\x18\x01 \x01(\x04R\alastSeq\"\xcb\x03\n" +
+	"\x05Event\x12\x10\n" +
+	"\x03seq\x18\x01 \x01(\x04R\x03seq\x128\n" +
+	"\ttimestamp\x18\x02 \x01(\v2\x1a.google.protobuf.TimestampR\ttimestamp\x12J\n" +
+	"\x10topology_changed\x18\x03 \x01(\v2\x1d.kconmonng.v1.TopologyChangedH\x00R\x0ftopologyChanged\x12D\n" +
+	"\x0echeck_observed\x18\x04 \x01(\v2\x1b.kconmonng.v1.CheckObservedH\x00R\rcheckObserved\x12A\n" +
+	"\rmtr_triggered\x18\x05 \x01(\v2\x1a.kconmonng.v1.MTRTriggeredH\x00R\fmtrTriggered\x12A\n" +
+	"\rmtr_completed\x18\x06 \x01(\v2\x1a.kconmonng.v1.MTRCompletedH\x00R\fmtrCompleted\x12S\n" +
+	"\x13diagnostic_progress\x18\a \x01(\v2 .kconmonng.v1.DiagnosticProgressH\x00R\x12diagnosticProgressB\t\n" +
+	"\apayload\"a\n" +
+	"\x0fTopologyChanged\x12\x16\n" +
+	"\x06reason\x18\x01 \x01(\tR\x06reason\x12\x1b\n" +
+	"\tnode_name\x18\x02 \x01(\tR\bnodeName\x12\x19\n" +
+	"\bagent_id\x18\x03 \x01(\tR\aagentId\"\xfa\x01\n" +
+	"\rCheckObserved\x12\x17\n" +
+	"\atask_id\x18\x01 \x01(\tR\x06taskId\x12\x1d\n" +
+	"\n" +
+	"check_type\x18\x02 \x01(\tR\tcheckType\x12\x1f\n" +
+	"\vsource_node\x18\x03 \x01(\tR\n" +
+	"sourceNode\x12)\n" +
+	"\x10destination_node\x18\x04 \x01(\tR\x0fdestinationNode\x12\x14\n" +
+	"\x05plane\x18\x05 \x01(\tR\x05plane\x12\x18\n" +
+	"\asuccess\x18\x06 \x01(\bR\asuccess\x12\x1f\n" +
+	"\vduration_ns\x18\a \x01(\x03R\n" +
+	"durationNs\x12\x14\n" +
+	"\x05error\x18\b \x01(\tR\x05error\"s\n" +
+	"\fMTRTriggered\x12\x17\n" +
+	"\atask_id\x18\x01 \x01(\tR\x06taskId\x12\x1f\n" +
+	"\vsource_node\x18\x02 \x01(\tR\n" +
+	"sourceNode\x12)\n" +
+	"\x10destination_node\x18\x03 \x01(\tR\x0fdestinationNode\"\x82\x01\n" +
+	"\x06MTRHop\x12\x16\n" +
+	"\x06number\x18\x01 \x01(\x05R\x06number\x12\x0e\n" +
+	"\x02ip\x18\x02 \x01(\tR\x02ip\x12\x1a\n" +
+	"\bhostname\x18\x03 \x01(\tR\bhostname\x12\x15\n" +
+	"\x06rtt_ns\x18\x04 \x01(\x03R\x05rttNs\x12\x1d\n" +
+	"\n" +
+	"loss_ratio\x18\x05 \x01(\x01R\tlossRatio\"\xcd\x01\n" +
+	"\fMTRCompleted\x12\x17\n" +
+	"\atask_id\x18\x01 \x01(\tR\x06taskId\x12\x1f\n" +
+	"\vsource_node\x18\x02 \x01(\tR\n" +
+	"sourceNode\x12)\n" +
+	"\x10destination_node\x18\x03 \x01(\tR\x0fdestinationNode\x12\x18\n" +
+	"\asuccess\x18\x04 \x01(\bR\asuccess\x12\x14\n" +
+	"\x05error\x18\x05 \x01(\tR\x05error\x12(\n" +
+	"\x04hops\x18\x06 \x03(\v2\x14.kconmonng.v1.MTRHopR\x04hops\"\xae\x01\n" +
+	"\x12DiagnosticProgress\x12\x17\n" +
+	"\atask_id\x18\x01 \x01(\tR\x06taskId\x12\x1d\n" +
+	"\n" +
+	"check_type\x18\x02 \x01(\tR\tcheckType\x12\x1f\n" +
+	"\vsource_node\x18\x03 \x01(\tR\n" +
+	"sourceNode\x12)\n" +
+	"\x10destination_node\x18\x04 \x01(\tR\x0fdestinationNode\x12\x14\n" +
+	"\x05state\x18\x05 \x01(\tR\x05state2\xc3\x03\n" +
 	"\rAgentRegistry\x12I\n" +
 	"\bRegister\x12\x1d.kconmonng.v1.RegisterRequest\x1a\x1e.kconmonng.v1.RegisterResponse\x12C\n" +
 	"\tHeartbeat\x12\x1e.kconmonng.v1.HeartbeatRequest\x1a\x16.google.protobuf.Empty\x12I\n" +
@@ -982,7 +1698,9 @@ const file_kconmon_proto_rawDesc = "" +
 	"\x10ReportTaskResult\x12\x18.kconmonng.v1.TaskResult\x1a\x16.google.protobuf.Empty2\xa4\x01\n" +
 	"\fProbeService\x12I\n" +
 	"\bTCPProbe\x12\x1d.kconmonng.v1.TCPProbeRequest\x1a\x1e.kconmonng.v1.TCPProbeResponse\x12I\n" +
-	"\bUDPProbe\x12\x1d.kconmonng.v1.UDPProbeRequest\x1a\x1e.kconmonng.v1.UDPProbeResponseB1Z/github.com/EsDmitrii/kconmon-ng/api/proto;protob\x06proto3"
+	"\bUDPProbe\x12\x1d.kconmonng.v1.UDPProbeRequest\x1a\x1e.kconmonng.v1.UDPProbeResponse2U\n" +
+	"\vEventStream\x12F\n" +
+	"\vWatchEvents\x12 .kconmonng.v1.WatchEventsRequest\x1a\x13.kconmonng.v1.Event0\x01B1Z/github.com/EsDmitrii/kconmon-ng/api/proto;protob\x06proto3"
 
 var (
 	file_kconmon_proto_rawDescOnce sync.Once
@@ -997,7 +1715,7 @@ func file_kconmon_proto_rawDescGZIP() []byte {
 }
 
 var file_kconmon_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_kconmon_proto_msgTypes = make([]protoimpl.MessageInfo, 15)
+var file_kconmon_proto_msgTypes = make([]protoimpl.MessageInfo, 23)
 var file_kconmon_proto_goTypes = []any{
 	(PeerUpdate_UpdateType)(0),    // 0: kconmonng.v1.PeerUpdate.UpdateType
 	(*AgentMeta)(nil),             // 1: kconmonng.v1.AgentMeta
@@ -1014,47 +1732,64 @@ var file_kconmon_proto_goTypes = []any{
 	(*TCPProbeResponse)(nil),      // 12: kconmonng.v1.TCPProbeResponse
 	(*UDPProbeRequest)(nil),       // 13: kconmonng.v1.UDPProbeRequest
 	(*UDPProbeResponse)(nil),      // 14: kconmonng.v1.UDPProbeResponse
-	nil,                           // 15: kconmonng.v1.AgentMeta.LabelsEntry
-	(*timestamppb.Timestamp)(nil), // 16: google.protobuf.Timestamp
-	(*emptypb.Empty)(nil),         // 17: google.protobuf.Empty
+	(*WatchEventsRequest)(nil),    // 15: kconmonng.v1.WatchEventsRequest
+	(*Event)(nil),                 // 16: kconmonng.v1.Event
+	(*TopologyChanged)(nil),       // 17: kconmonng.v1.TopologyChanged
+	(*CheckObserved)(nil),         // 18: kconmonng.v1.CheckObserved
+	(*MTRTriggered)(nil),          // 19: kconmonng.v1.MTRTriggered
+	(*MTRHop)(nil),                // 20: kconmonng.v1.MTRHop
+	(*MTRCompleted)(nil),          // 21: kconmonng.v1.MTRCompleted
+	(*DiagnosticProgress)(nil),    // 22: kconmonng.v1.DiagnosticProgress
+	nil,                           // 23: kconmonng.v1.AgentMeta.LabelsEntry
+	(*timestamppb.Timestamp)(nil), // 24: google.protobuf.Timestamp
+	(*emptypb.Empty)(nil),         // 25: google.protobuf.Empty
 }
 var file_kconmon_proto_depIdxs = []int32{
-	15, // 0: kconmonng.v1.AgentMeta.labels:type_name -> kconmonng.v1.AgentMeta.LabelsEntry
+	23, // 0: kconmonng.v1.AgentMeta.labels:type_name -> kconmonng.v1.AgentMeta.LabelsEntry
 	1,  // 1: kconmonng.v1.RegisterRequest.agent:type_name -> kconmonng.v1.AgentMeta
 	1,  // 2: kconmonng.v1.RegisterResponse.peers:type_name -> kconmonng.v1.AgentMeta
-	16, // 3: kconmonng.v1.RegisterResponse.server_time:type_name -> google.protobuf.Timestamp
+	24, // 3: kconmonng.v1.RegisterResponse.server_time:type_name -> google.protobuf.Timestamp
 	1,  // 4: kconmonng.v1.RegisterResponse.agent:type_name -> kconmonng.v1.AgentMeta
-	16, // 5: kconmonng.v1.HeartbeatRequest.timestamp:type_name -> google.protobuf.Timestamp
+	24, // 5: kconmonng.v1.HeartbeatRequest.timestamp:type_name -> google.protobuf.Timestamp
 	0,  // 6: kconmonng.v1.PeerUpdate.type:type_name -> kconmonng.v1.PeerUpdate.UpdateType
 	1,  // 7: kconmonng.v1.PeerUpdate.peers:type_name -> kconmonng.v1.AgentMeta
-	16, // 8: kconmonng.v1.PeerUpdate.timestamp:type_name -> google.protobuf.Timestamp
+	24, // 8: kconmonng.v1.PeerUpdate.timestamp:type_name -> google.protobuf.Timestamp
 	1,  // 9: kconmonng.v1.TaskRequest.target:type_name -> kconmonng.v1.AgentMeta
-	16, // 10: kconmonng.v1.TaskResult.timestamp:type_name -> google.protobuf.Timestamp
-	16, // 11: kconmonng.v1.TCPProbeRequest.timestamp:type_name -> google.protobuf.Timestamp
-	16, // 12: kconmonng.v1.TCPProbeResponse.timestamp:type_name -> google.protobuf.Timestamp
-	16, // 13: kconmonng.v1.UDPProbeRequest.timestamp:type_name -> google.protobuf.Timestamp
-	16, // 14: kconmonng.v1.UDPProbeResponse.timestamp:type_name -> google.protobuf.Timestamp
-	2,  // 15: kconmonng.v1.AgentRegistry.Register:input_type -> kconmonng.v1.RegisterRequest
-	4,  // 16: kconmonng.v1.AgentRegistry.Heartbeat:input_type -> kconmonng.v1.HeartbeatRequest
-	5,  // 17: kconmonng.v1.AgentRegistry.WatchPeers:input_type -> kconmonng.v1.WatchPeersRequest
-	6,  // 18: kconmonng.v1.AgentRegistry.Deregister:input_type -> kconmonng.v1.DeregisterRequest
-	8,  // 19: kconmonng.v1.AgentRegistry.WatchTasks:input_type -> kconmonng.v1.WatchTasksRequest
-	10, // 20: kconmonng.v1.AgentRegistry.ReportTaskResult:input_type -> kconmonng.v1.TaskResult
-	11, // 21: kconmonng.v1.ProbeService.TCPProbe:input_type -> kconmonng.v1.TCPProbeRequest
-	13, // 22: kconmonng.v1.ProbeService.UDPProbe:input_type -> kconmonng.v1.UDPProbeRequest
-	3,  // 23: kconmonng.v1.AgentRegistry.Register:output_type -> kconmonng.v1.RegisterResponse
-	17, // 24: kconmonng.v1.AgentRegistry.Heartbeat:output_type -> google.protobuf.Empty
-	7,  // 25: kconmonng.v1.AgentRegistry.WatchPeers:output_type -> kconmonng.v1.PeerUpdate
-	17, // 26: kconmonng.v1.AgentRegistry.Deregister:output_type -> google.protobuf.Empty
-	9,  // 27: kconmonng.v1.AgentRegistry.WatchTasks:output_type -> kconmonng.v1.TaskRequest
-	17, // 28: kconmonng.v1.AgentRegistry.ReportTaskResult:output_type -> google.protobuf.Empty
-	12, // 29: kconmonng.v1.ProbeService.TCPProbe:output_type -> kconmonng.v1.TCPProbeResponse
-	14, // 30: kconmonng.v1.ProbeService.UDPProbe:output_type -> kconmonng.v1.UDPProbeResponse
-	23, // [23:31] is the sub-list for method output_type
-	15, // [15:23] is the sub-list for method input_type
-	15, // [15:15] is the sub-list for extension type_name
-	15, // [15:15] is the sub-list for extension extendee
-	0,  // [0:15] is the sub-list for field type_name
+	24, // 10: kconmonng.v1.TaskResult.timestamp:type_name -> google.protobuf.Timestamp
+	24, // 11: kconmonng.v1.TCPProbeRequest.timestamp:type_name -> google.protobuf.Timestamp
+	24, // 12: kconmonng.v1.TCPProbeResponse.timestamp:type_name -> google.protobuf.Timestamp
+	24, // 13: kconmonng.v1.UDPProbeRequest.timestamp:type_name -> google.protobuf.Timestamp
+	24, // 14: kconmonng.v1.UDPProbeResponse.timestamp:type_name -> google.protobuf.Timestamp
+	24, // 15: kconmonng.v1.Event.timestamp:type_name -> google.protobuf.Timestamp
+	17, // 16: kconmonng.v1.Event.topology_changed:type_name -> kconmonng.v1.TopologyChanged
+	18, // 17: kconmonng.v1.Event.check_observed:type_name -> kconmonng.v1.CheckObserved
+	19, // 18: kconmonng.v1.Event.mtr_triggered:type_name -> kconmonng.v1.MTRTriggered
+	21, // 19: kconmonng.v1.Event.mtr_completed:type_name -> kconmonng.v1.MTRCompleted
+	22, // 20: kconmonng.v1.Event.diagnostic_progress:type_name -> kconmonng.v1.DiagnosticProgress
+	20, // 21: kconmonng.v1.MTRCompleted.hops:type_name -> kconmonng.v1.MTRHop
+	2,  // 22: kconmonng.v1.AgentRegistry.Register:input_type -> kconmonng.v1.RegisterRequest
+	4,  // 23: kconmonng.v1.AgentRegistry.Heartbeat:input_type -> kconmonng.v1.HeartbeatRequest
+	5,  // 24: kconmonng.v1.AgentRegistry.WatchPeers:input_type -> kconmonng.v1.WatchPeersRequest
+	6,  // 25: kconmonng.v1.AgentRegistry.Deregister:input_type -> kconmonng.v1.DeregisterRequest
+	8,  // 26: kconmonng.v1.AgentRegistry.WatchTasks:input_type -> kconmonng.v1.WatchTasksRequest
+	10, // 27: kconmonng.v1.AgentRegistry.ReportTaskResult:input_type -> kconmonng.v1.TaskResult
+	11, // 28: kconmonng.v1.ProbeService.TCPProbe:input_type -> kconmonng.v1.TCPProbeRequest
+	13, // 29: kconmonng.v1.ProbeService.UDPProbe:input_type -> kconmonng.v1.UDPProbeRequest
+	15, // 30: kconmonng.v1.EventStream.WatchEvents:input_type -> kconmonng.v1.WatchEventsRequest
+	3,  // 31: kconmonng.v1.AgentRegistry.Register:output_type -> kconmonng.v1.RegisterResponse
+	25, // 32: kconmonng.v1.AgentRegistry.Heartbeat:output_type -> google.protobuf.Empty
+	7,  // 33: kconmonng.v1.AgentRegistry.WatchPeers:output_type -> kconmonng.v1.PeerUpdate
+	25, // 34: kconmonng.v1.AgentRegistry.Deregister:output_type -> google.protobuf.Empty
+	9,  // 35: kconmonng.v1.AgentRegistry.WatchTasks:output_type -> kconmonng.v1.TaskRequest
+	25, // 36: kconmonng.v1.AgentRegistry.ReportTaskResult:output_type -> google.protobuf.Empty
+	12, // 37: kconmonng.v1.ProbeService.TCPProbe:output_type -> kconmonng.v1.TCPProbeResponse
+	14, // 38: kconmonng.v1.ProbeService.UDPProbe:output_type -> kconmonng.v1.UDPProbeResponse
+	16, // 39: kconmonng.v1.EventStream.WatchEvents:output_type -> kconmonng.v1.Event
+	31, // [31:40] is the sub-list for method output_type
+	22, // [22:31] is the sub-list for method input_type
+	22, // [22:22] is the sub-list for extension type_name
+	22, // [22:22] is the sub-list for extension extendee
+	0,  // [0:22] is the sub-list for field type_name
 }
 
 func init() { file_kconmon_proto_init() }
@@ -1062,15 +1797,22 @@ func file_kconmon_proto_init() {
 	if File_kconmon_proto != nil {
 		return
 	}
+	file_kconmon_proto_msgTypes[15].OneofWrappers = []any{
+		(*Event_TopologyChanged)(nil),
+		(*Event_CheckObserved)(nil),
+		(*Event_MtrTriggered)(nil),
+		(*Event_MtrCompleted)(nil),
+		(*Event_DiagnosticProgress)(nil),
+	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_kconmon_proto_rawDesc), len(file_kconmon_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   15,
+			NumMessages:   23,
 			NumExtensions: 0,
-			NumServices:   2,
+			NumServices:   3,
 		},
 		GoTypes:           file_kconmon_proto_goTypes,
 		DependencyIndexes: file_kconmon_proto_depIdxs,

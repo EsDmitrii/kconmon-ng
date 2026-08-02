@@ -1,0 +1,34 @@
+# syntax=docker/dockerfile:1
+
+FROM node:22-alpine AS web
+WORKDIR /web
+COPY web/package.json web/package-lock.json ./
+RUN npm ci
+COPY web/ ./
+# vite.config.ts sets build.outDir to ../internal/console/ui/dist, which does
+# not exist in this stage; override to a stage-local dir the builder copies from.
+# The restore-dist-gitignore closeBundle plugin still writes to the hardcoded
+# ../internal/console/ui/dist path, so pre-create it to avoid ENOENT.
+RUN mkdir -p /out /internal/console/ui/dist && npm run build -- --outDir /out --emptyOutDir
+
+FROM golang:1.26-alpine AS builder
+RUN apk add --no-cache git ca-certificates
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+# Replace the committed placeholder with the real SPA build.
+COPY --from=web /out/ ./internal/console/ui/dist/
+
+ARG VERSION=dev
+ARG COMMIT=unknown
+ARG BUILD_DATE=unknown
+
+RUN CGO_ENABLED=0 go build \
+    -ldflags="-s -w -X github.com/EsDmitrii/kconmon-ng/internal/config.Version=${VERSION} -X github.com/EsDmitrii/kconmon-ng/internal/config.Commit=${COMMIT} -X github.com/EsDmitrii/kconmon-ng/internal/config.BuildDate=${BUILD_DATE}" \
+    -o /bin/kconmon-ng-console ./cmd/console
+
+FROM gcr.io/distroless/static-debian12:nonroot AS console
+COPY --from=builder /bin/kconmon-ng-console /usr/local/bin/kconmon-ng-console
+USER nonroot:nonroot
+ENTRYPOINT ["kconmon-ng-console"]

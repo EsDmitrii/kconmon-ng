@@ -1,0 +1,19 @@
+{{- if .Values.console.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "kconmon-ng.console.fullname" . }}
+  labels:
+    {{- include "kconmon-ng.labels" . | nindent 4 }}
+    app.kubernetes.io/component: console
+spec:
+  type: {{ .Values.console.service.type }}
+  selector:
+    {{- include "kconmon-ng.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: console
+  ports:
+    - name: http
+      port: {{ .Values.console.service.port }}
+      targetPort: http
+      protocol: TCP
+{{- end }}

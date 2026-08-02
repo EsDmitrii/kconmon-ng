@@ -14,6 +14,13 @@ controller:
   # and the kconmon_ng_controller_expected_agents metric require this to be
   # true. Setting it false disables those features even with one replica.
   leaderElection: true
+  # Controller domain event stream (EventStream.WatchEvents gRPC) consumed by
+  # the Console's events ingester, plus the "events" capability flag on
+  # GET /api/v1/version. Leader-only: passive replicas reject subscriptions.
+  # OFF by default — with events.enabled=false the Console detects the missing
+  # capability and stays on M1 Prometheus polling with a "delayed data" badge.
+  events:
+    enabled: false
   image:
     repository: ghcr.io/esdmitrii/kconmon-ng-controller
     # Image tag. Empty string means the chart appVersion is used.
@@ -231,3 +238,129 @@ serviceAccount:
   create: true
   # Name of the ServiceAccount. Empty = generated from the release name.
   name: ""
+
+# Console (kconmon-ng Console). A separate Deployment serving the web UI and its
+# API. OFF by default: with console.enabled=false the chart renders exactly as
+# before. M0 supports auth.mode=anonymous ONLY (a fixed role + a permanent
+# warning banner in the UI). Database/Valkey/OIDC/alerting integration arrives
+# in later milestones.
+console:
+  enabled: false
+  # Number of console replicas. The M0 console is stateless.
+  replicas: 2
+  image:
+    repository: ghcr.io/esdmitrii/kconmon-ng-console
+    # Image tag. Empty string means the chart appVersion is used.
+    tag: ""
+    pullPolicy: IfNotPresent
+  # Authentication. M0: only "anonymous" is accepted; any other value fails
+  # console startup. Other modes (oidc/local/header) land in M3.
+  auth:
+    mode: anonymous
+    anonymous:
+      # Fixed role assigned to every anonymous request.
+      role: viewer
+  # Controller API access (topology). Empty url means "derive from this
+  # release's controller Service"; set explicitly to point elsewhere.
+  controller:
+    url: ""
+    # Per-request timeout for console -> controller calls.
+    timeout: 10s
+    # gRPC address of the controller's EventStream (host:port). Empty means
+    # "derive from this release's controller Service when
+    # controller.events.enabled=true, otherwise leave realtime off".
+    # Setting this explicitly points the console at a controller in ANOTHER
+    # namespace or cluster. The chart still renders only a same-namespace
+    # egress rule to THIS release's controller, so a target outside this
+    # namespace needs your own NetworkPolicy on both the egress and ingress
+    # sides (plus any host firewall) — there is no grpcEgress override list
+    # in M2.
+    grpcAddr: ""
+  # Prometheus query API (matrix, Explore, PromQL console). REQUIRED for the
+  # M1 data pages; with url empty those APIs answer 503 and the UI says so.
+  prometheus:
+    url: ""
+    queryTimeout: 30s
+    # Maximum query_range window the guarded proxy accepts.
+    maxRange: 24h
+    # Response size cap in bytes (8 MiB).
+    maxResponseBytes: 8388608
+  # Valkey pub/sub for cross-replica WebSocket fan-out (ADR-002: ephemeral
+  # only — a flush must lose zero durable data).
+  #   bundled  = this chart renders a minimal single-replica Valkey
+  #              Deployment + Service (see the ephemeral note below)
+  #   external = point at an existing Valkey/Redis via address
+  #   disabled = no Valkey; the console falls back to an in-process bus,
+  #              which is correct ONLY for console.replicas=1 (documented
+  #              degradation: browsers on other replicas see no events)
+  # The bundled Valkey is deliberately ephemeral: no PersistentVolumeClaim, no
+  # volumeClaimTemplates, no writable data dir at all. Per ADR-002 a Valkey
+  # flush must lose zero durable data, so losing the whole instance on a Pod
+  # restart is a liveness event, never a data-loss event; the console's own
+  # in-memory replay ring covers the reconnect window.
+  valkey:
+    mode: disabled
+    # host:port of an existing Valkey. REQUIRED when mode=external, ignored
+    # otherwise (rendering fails fast if mode=external and this is empty).
+    address: ""
+    # Initial dial timeout for the console's Valkey client.
+    dialTimeout: 5s
+    # Port the bundled Valkey listens on and the address the console dials.
+    port: 6379
+    # Bundled-only image. Ignored for mode=external|disabled.
+    image:
+      repository: valkey/valkey
+      tag: 8-alpine
+      pullPolicy: IfNotPresent
+    # Bundled-only resources. Pub/sub fan-out plus short-TTL caches only.
+    resources:
+      limits:
+        cpu: 200m
+        memory: 128Mi
+      requests:
+        cpu: 50m
+        memory: 64Mi
+  # NetworkPolicy rules specific to the console (only rendered when
+  # console.enabled and the top-level networkPolicy.enabled are both true).
+  # NOTE: a Kubernetes NetworkPolicy is only ONE of the two layers that gate
+  # this traffic in a real deployment. If the destination (an external Valkey,
+  # a Prometheus outside the cluster) sits behind a host firewall — iptables,
+  # nftables, a puppet-managed ruleset, a cloud security group — that layer
+  # must be opened separately. Egress allowed here and still refused on the
+  # wire almost always means the host-firewall layer was missed.
+  networkPolicy:
+    # Custom egress rule list for console -> Prometheus; when empty a
+    # default rule allowing TCP 9090 to any namespace is rendered.
+    prometheusEgress: []
+    # Custom egress rule list for console -> external Valkey; when empty and
+    # console.valkey.mode=external, a default rule allowing TCP
+    # console.valkey.port to any namespace is rendered. Ignored for
+    # mode=bundled (a precise pod-selector rule is rendered instead).
+    valkeyEgress: []
+  service:
+    type: ClusterIP
+    # Port the console listens on and the Service exposes.
+    port: 8080
+  ingress:
+    enabled: false
+    className: ""
+    annotations: {}
+    # hosts: [{host: console.example.com, paths: [{path: /, pathType: Prefix}]}]
+    hosts: []
+    # tls: [{secretName: console-tls, hosts: [console.example.com]}]
+    tls: []
+  resources:
+    limits:
+      cpu: 500m
+      memory: 256Mi
+    requests:
+      cpu: 100m
+      memory: 128Mi
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  # PodDisruptionBudget for the console Deployment. Only rendered when
+  # console.enabled and replicas > 1.
+  pdb:
+    enabled: true
+    minAvailable: 1

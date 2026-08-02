@@ -42,6 +42,46 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Compute version
+        id: ver
+        run: |
+          echo "version=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_OUTPUT"
+          echo "build_date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+
+      # The console image cannot go through goreleaser dockers (those need a
+      # prebuilt binary + thin Dockerfile; Dockerfile.console has a Node build
+      # stage and needs full source context), so it is built here. Deliberately
+      # BEFORE GoReleaser: a console build failure aborts the release before
+      # any GitHub Release draft exists.
+      - name: Build and push console image
+        id: console-image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: Dockerfile.console
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ghcr.io/esdmitrii/kconmon-ng-console:${{ steps.ver.outputs.version }}
+            ghcr.io/esdmitrii/kconmon-ng-console:latest
+          build-args: |
+            VERSION=${{ steps.ver.outputs.version }}
+            COMMIT=${{ github.sha }}
+            BUILD_DATE=${{ steps.ver.outputs.build_date }}
+          labels: |
+            org.opencontainers.image.title=kconmon-ng-console
+            org.opencontainers.image.version=${{ steps.ver.outputs.version }}
+            org.opencontainers.image.source=https://github.com/EsDmitrii/kconmon-ng
+            org.opencontainers.image.revision=${{ github.sha }}
+
+      - name: Sign console image (cosign keyless)
+        run: |
+          # Sign by digest, not tag: tags are mutable, digests are what verifiers pin.
+          cosign sign --yes "ghcr.io/esdmitrii/kconmon-ng-console@${{ steps.console-image.outputs.digest }}"
+
       - name: Extract current release notes
         run: |
           # RELEASE_NOTES.md keeps the full history; the GitHub Release body
@@ -82,9 +122,6 @@ jobs:
           PUSH_OUT=$(helm push "kconmon-ng-${VERSION}.tgz" "oci://ghcr.io/${OWNER}/charts" 2>&1)
           echo "$PUSH_OUT"
           echo "digest=$(echo "$PUSH_OUT" | awk '/^Digest:/{print $2}')" >> "$GITHUB_OUTPUT"
-
-      - name: Install cosign
-        uses: sigstore/cosign-installer@v3
 
       - name: Sign Helm chart (cosign keyless)
         run: |

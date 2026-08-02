@@ -23,6 +23,11 @@ controllerAddress: "" # e.g. kconmon-ng-controller:9090
 controller:
   leaderElection: true # enable leader election for HA (requires k8s RBAC)
   agentTtl: 30s # evict agents that miss heartbeats for this duration
+  events:
+    enabled: false # serve EventStream.WatchEvents (Console realtime) and advertise
+    # the "events" capability on GET /api/v1/version. Leader-only: passive
+    # replicas reject subscriptions. Requires a controller image that includes
+    # the M2 event stream (newer than v1.3.3).
 
 checkers:
   tcp:
@@ -90,6 +95,8 @@ observability:
 controller:
   replicaCount: 2 # run 2 replicas; only the leader is active (leaderElection: true)
   leaderElection: true
+  events:
+    enabled: true # required for Console realtime (Live page, pushed matrix)
 
 agent:
   tolerations:
@@ -128,6 +135,87 @@ serviceAccount:
 
 Every value is documented inline in
 [charts/kconmon-ng/values.yaml](../charts/kconmon-ng/values.yaml).
+
+## Console (M1/M2)
+
+The Console is off by default and reads its own config file, rendered by the
+chart from `console.*` (it is not part of the `config:` block above). M1 gave it
+read-only pages over Prometheus and the controller API; M2 added the realtime
+path — the `/ws` WebSocket, the Live page and pushed matrix snapshots.
+
+```yaml
+controller:
+  events:
+    enabled: true # controller side of realtime; see the note below
+
+console:
+  enabled: false # default; the rest of this block is ignored while it is false
+  replicas: 2
+  controller:
+    url: "" # empty = derive from this release's controller Service
+    timeout: 10s
+    # gRPC address of the controller's EventStream. Empty = derive from this
+    # release's controller Service when controller.events.enabled=true,
+    # otherwise realtime stays off and the UI polls with a "Delayed data" badge.
+    grpcAddr: ""
+  prometheus:
+    url: "" # REQUIRED for the matrix/Explore/PromQL pages; empty = those APIs 503
+    queryTimeout: 30s
+    maxRange: 24h # max query_range window
+    maxResponseBytes: 8388608 # 8 MiB
+  # Valkey pub/sub, used only to fan events across Console replicas.
+  valkey:
+    mode: disabled # bundled | external | disabled
+    address: "" # host:port; REQUIRED for mode=external, ignored otherwise
+    dialTimeout: 5s
+    port: 6379 # bundled: listen port and the address the console dials
+    image: # bundled only
+      repository: valkey/valkey
+      tag: 8-alpine
+      pullPolicy: IfNotPresent
+    resources: # bundled only
+      limits: { cpu: 200m, memory: 128Mi }
+      requests: { cpu: 50m, memory: 64Mi }
+  networkPolicy:
+    # Egress rule list for console -> external Valkey. Empty + mode=external
+    # renders a default allowing TCP console.valkey.port to any namespace;
+    # ignored for mode=bundled (a precise pod-selector rule is rendered).
+    valkeyEgress: []
+```
+
+`controller.events.enabled` turns on the controller's `EventStream.WatchEvents`
+RPC and the `"events"` capability flag on its `GET /api/v1/version`. It is
+leader-only — passive replicas reject subscriptions — and needs a controller
+image that includes the M2 event stream (newer than v1.3.3; the chart's
+`appVersion` is bumped to that image at release). While it is `false` the
+chart omits the `events` key from the
+rendered controller config entirely, so a pre-M2 image (which would reject the
+unknown key at startup) keeps rolling safely; enabling it is what commits the
+fleet to an M2+ image.
+
+Setting `console.controller.grpcAddr` explicitly points the Console at a
+controller elsewhere. The chart still renders only a **same-namespace** egress
+rule to this release's controller, so a target in another namespace or cluster
+needs your own NetworkPolicy on **both** the egress and the ingress side, plus
+any host firewall — there is no `grpcEgress` override list.
+
+The bundled Valkey (`mode: bundled`) is a single-replica Deployment with **no
+PersistentVolumeClaim**: per ADR-002 it holds nothing durable, so losing it on a
+restart is a liveness event, never data loss. With `mode: disabled` the Console
+falls back to an in-process bus, which has no cross-replica fan-out — so
+realtime plus `console.replicas > 1` plus no Valkey is a misconfiguration the
+chart **refuses to render**, with a message naming the fix. The check keys on the
+resolved gRPC address rather than on `controller.events.enabled`, because an
+explicit `grpcAddr` dials with events off too.
+
+The Console serves `GET /ws` (one multiplexed WebSocket per browser tab) at the
+top level of `console.service.port`, alongside its `/api/v1/*` REST endpoints. An
+ingress in front of it must allow upgrades and **preserve `Host`** — the origin
+check compares the browser's `Origin` header host against the request host, so a
+proxy that rewrites `Host` (or forwards a mismatched `Origin`) makes every
+upgrade refused and the UI silently falls back to 15s polling. A proxy that
+strips `Origin` entirely still upgrades: an absent header is allowed, since
+non-browser clients never send one.
 
 ## Zone auto-discovery
 

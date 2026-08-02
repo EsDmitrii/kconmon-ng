@@ -10,20 +10,23 @@ LDFLAGS := -s -w \
 
 BIN_DIR := bin
 
-.PHONY: all build build-agent build-controller test test-race test-cover lint fmt proto clean help \
+.PHONY: all build build-agent build-controller build-console test test-race test-cover lint fmt proto clean help \
 	local-up local-down local-status local-smoke local-urls
 
 all: lint test build
 
 ## Build
 
-build: build-agent build-controller
+build: build-agent build-controller build-console
 
 build-agent:
 	CGO_ENABLED=0 go build -ldflags="$(LDFLAGS)" -o $(BIN_DIR)/kconmon-ng-agent ./cmd/agent
 
 build-controller:
 	CGO_ENABLED=0 go build -ldflags="$(LDFLAGS)" -o $(BIN_DIR)/kconmon-ng-controller ./cmd/controller
+
+build-console:
+	CGO_ENABLED=0 go build -ldflags="$(LDFLAGS)" -o $(BIN_DIR)/kconmon-ng-console ./cmd/console
 
 ## Test
 
@@ -66,9 +69,11 @@ helm-lint:
 	helm lint charts/kconmon-ng -f charts/kconmon-ng/ci/default-values.yaml
 	helm lint charts/kconmon-ng -f charts/kconmon-ng/ci/full-values.yaml
 	helm lint charts/kconmon-ng -f charts/kconmon-ng/ci/minimal-values.yaml
+	helm lint charts/kconmon-ng -f charts/kconmon-ng/ci/console-values.yaml
 
 helm-template:
 	helm template kconmon-ng charts/kconmon-ng
+	helm template kconmon-ng charts/kconmon-ng -f charts/kconmon-ng/ci/console-values.yaml
 
 helm-package:
 	helm package charts/kconmon-ng -d dist/
@@ -78,6 +83,7 @@ helm-package:
 docker-build:
 	docker build --target agent -t $(PROJECT_NAME)-agent:$(VERSION) .
 	docker build --target controller -t $(PROJECT_NAME)-controller:$(VERSION) .
+	docker build -f Dockerfile.console -t $(PROJECT_NAME)-console:$(VERSION) .
 
 ## Clean
 
@@ -105,7 +111,7 @@ local-urls:
 
 help:
 	@echo "Available targets:"
-	@echo "  build            - Build agent and controller binaries"
+	@echo "  build            - Build agent, controller and console binaries"
 	@echo "  test             - Run unit tests"
 	@echo "  test-race        - Run tests with race detector"
 	@echo "  test-cover       - Run tests with coverage"

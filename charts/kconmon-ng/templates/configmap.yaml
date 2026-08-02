@@ -16,6 +16,16 @@ data:
     controller:
       leaderElection: {{ .Values.controller.leaderElection }}
       agentTtl: {{ .Values.config.controllerAgentTtl | quote }}
+      {{- /*
+      Emitted only when ON: EventsConfig.Enabled's Go zero value makes an
+      omitted key identical to an explicit false, and this shared config is
+      parsed with KnownFields(true) — so a pre-M2 controller image (which has
+      no Events field) would crashloop on an unconditional key as Pods roll.
+      */}}
+      {{- if .Values.controller.events.enabled }}
+      events:
+        enabled: true
+      {{- end }}
     checkers:
       tcp:
         enabled: {{ .Values.config.checkers.tcp.enabled }}

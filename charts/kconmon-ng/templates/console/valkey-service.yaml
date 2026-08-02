@@ -1,0 +1,19 @@
+{{- if and .Values.console.enabled (eq .Values.console.valkey.mode "bundled") }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "kconmon-ng.console.valkeyFullname" . }}
+  labels:
+    {{- include "kconmon-ng.labels" . | nindent 4 }}
+    app.kubernetes.io/component: console-valkey
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "kconmon-ng.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: console-valkey
+  ports:
+    - name: valkey
+      port: {{ .Values.console.valkey.port | int64 }}
+      targetPort: valkey
+      protocol: TCP
+{{- end }}
