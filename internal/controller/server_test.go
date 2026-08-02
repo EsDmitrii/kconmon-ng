@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/EsDmitrii/kconmon-ng/internal/config"
 	"github.com/EsDmitrii/kconmon-ng/internal/model"
 	"github.com/prometheus/client_golang/prometheus"
 )
@@ -15,7 +17,7 @@ import (
 func TestHealthzEndpoint(t *testing.T) {
 	reg := NewRegistry(30 * time.Second)
 	promReg := prometheus.NewRegistry()
-	srv := NewHTTPServer(reg, nil, promReg)
+	srv := NewHTTPServer(reg, nil, promReg, nil)
 
 	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/healthz", http.NoBody)
 	w := httptest.NewRecorder()
@@ -33,7 +35,7 @@ func TestHealthzEndpoint(t *testing.T) {
 func TestReadyzEndpointNotReady(t *testing.T) {
 	reg := NewRegistry(30 * time.Second)
 	promReg := prometheus.NewRegistry()
-	srv := NewHTTPServer(reg, nil, promReg)
+	srv := NewHTTPServer(reg, nil, promReg, nil)
 
 	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/readyz", http.NoBody)
 	w := httptest.NewRecorder()
@@ -48,7 +50,7 @@ func TestReadyzEndpointNotReady(t *testing.T) {
 func TestReadyzEndpointReady(t *testing.T) {
 	reg := NewRegistry(30 * time.Second)
 	promReg := prometheus.NewRegistry()
-	srv := NewHTTPServer(reg, nil, promReg)
+	srv := NewHTTPServer(reg, nil, promReg, nil)
 	srv.SetReady(true)
 
 	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/readyz", http.NoBody)
@@ -64,7 +66,7 @@ func TestReadyzEndpointReady(t *testing.T) {
 func TestMetricsEndpoint(t *testing.T) {
 	reg := NewRegistry(30 * time.Second)
 	promReg := prometheus.NewRegistry()
-	srv := NewHTTPServer(reg, nil, promReg)
+	srv := NewHTTPServer(reg, nil, promReg, nil)
 
 	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/metrics", http.NoBody)
 	w := httptest.NewRecorder()
@@ -82,7 +84,7 @@ func TestTopologyEndpoint(t *testing.T) {
 	reg.Register(model.AgentInfo{ID: "a2", NodeName: "node-2", Zone: "zone-b"})
 
 	promReg := prometheus.NewRegistry()
-	srv := NewHTTPServer(reg, nil, promReg)
+	srv := NewHTTPServer(reg, nil, promReg, nil)
 
 	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/api/v1/topology", http.NoBody)
 	w := httptest.NewRecorder()
@@ -106,7 +108,7 @@ func TestTopologyEndpoint(t *testing.T) {
 func TestTopologyEndpointWithNodeWatcher(t *testing.T) {
 	reg := NewRegistry(30 * time.Second)
 	promReg := prometheus.NewRegistry()
-	srv := NewHTTPServer(reg, nil, promReg)
+	srv := NewHTTPServer(reg, nil, promReg, nil)
 
 	nw := &NodeWatcher{
 		nodes: map[string]model.NodeInfo{
@@ -139,7 +141,7 @@ func TestTopologyEndpointWithNodeWatcher(t *testing.T) {
 func TestVersionEndpoint(t *testing.T) {
 	reg := NewRegistry(30 * time.Second)
 	promReg := prometheus.NewRegistry()
-	srv := NewHTTPServer(reg, nil, promReg)
+	srv := NewHTTPServer(reg, nil, promReg, nil)
 
 	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/api/v1/version", http.NoBody)
 	w := httptest.NewRecorder()
@@ -150,12 +152,86 @@ func TestVersionEndpoint(t *testing.T) {
 		t.Errorf("expected 200, got %d", w.Code)
 	}
 
-	var version map[string]string
+	// map[string]any, not map[string]string: the payload now carries the
+	// capabilities array alongside the string fields.
+	var version map[string]any
 	if err := json.Unmarshal(w.Body.Bytes(), &version); err != nil {
 		t.Fatal(err)
 	}
 
 	if _, ok := version["version"]; !ok {
 		t.Error("expected version field in response")
+	}
+}
+
+func TestHandleVersionAdvertisesEventsCapability(t *testing.T) {
+	reg := NewRegistry(30 * time.Second)
+	s := NewHTTPServer(reg, nil, prometheus.NewRegistry(), []string{"events"})
+
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/api/v1/version", http.NoBody)
+	w := httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, req)
+
+	var body struct {
+		Capabilities []string `json:"capabilities"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(body.Capabilities) != 1 || body.Capabilities[0] != "events" {
+		t.Errorf("expected capabilities=[events], got %v", body.Capabilities)
+	}
+}
+
+// TestHandleVersionCapabilitiesIsEmptyArrayNotNull asserts on the raw response
+// body, not on a decoded []string: JSON null and [] both decode to a nil slice,
+// so only the bytes can prove the empty-array normalization is still in place.
+func TestHandleVersionCapabilitiesIsEmptyArrayNotNull(t *testing.T) {
+	// Both paths must serialize as []: an explicit nil (normalized by
+	// NewHTTPServer) and the real wiring with events turned off.
+	cases := []struct {
+		name string
+		caps []string
+	}{
+		{name: "nil capabilities", caps: nil},
+		{name: "events disabled in config", caps: capabilitiesFor(&config.Config{})},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			reg := NewRegistry(30 * time.Second)
+			s := NewHTTPServer(reg, nil, prometheus.NewRegistry(), tc.caps)
+
+			req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/api/v1/version", http.NoBody)
+			w := httptest.NewRecorder()
+			s.Handler().ServeHTTP(w, req)
+
+			body := w.Body.String()
+			if !strings.Contains(body, `"capabilities":[]`) {
+				t.Errorf(`expected raw body to contain "capabilities":[], got %s`, body)
+			}
+			if strings.Contains(body, `"capabilities":null`) {
+				t.Errorf("capabilities must never serialize as null, got %s", body)
+			}
+		})
+	}
+}
+
+func TestHandleVersionNoCapabilitiesWhenDisabled(t *testing.T) {
+	reg := NewRegistry(30 * time.Second)
+	s := NewHTTPServer(reg, nil, prometheus.NewRegistry(), nil)
+
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/api/v1/version", http.NoBody)
+	w := httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, req)
+
+	var body struct {
+		Capabilities []string `json:"capabilities"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(body.Capabilities) != 0 {
+		t.Errorf("expected no capabilities, got %v", body.Capabilities)
 	}
 }

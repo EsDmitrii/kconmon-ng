@@ -4,11 +4,13 @@ import (
 	"context"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	pb "github.com/EsDmitrii/kconmon-ng/api/proto"
 	"github.com/EsDmitrii/kconmon-ng/internal/metrics"
 	"github.com/EsDmitrii/kconmon-ng/internal/model"
+	"github.com/google/uuid"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -18,21 +20,71 @@ import (
 
 type GRPCServer struct {
 	pb.UnimplementedAgentRegistryServer
+	pb.UnimplementedEventStreamServer
 	registry *Registry
 	metrics  *metrics.PrometheusMetrics
 	taskMgr  *TaskManager
 
 	mu       sync.RWMutex
 	watchers map[string]chan *pb.PeerUpdate
+
+	leaderElection bool
+	isLeader       func() bool
+
+	eventsEnabled bool
+	eventsMu      sync.RWMutex
+	eventSubs     map[string]chan *pb.Event
+	eventSeq      atomic.Uint64
+
+	// leaderCheckInterval bounds how long a demoted replica may keep streaming
+	// events to already-connected subscribers. Shortened by tests.
+	leaderCheckInterval time.Duration
+
+	// stopCh is closed by Shutdown to end every open server-streaming handler.
+	// grpc.Server.GracefulStop waits for handlers to return but never cancels
+	// their stream contexts, so a handler that only selects on its own channel
+	// and stream.Context() blocks shutdown forever. stopCh is the missing
+	// out-of-band signal. stopOnce keeps the close idempotent.
+	stopCh   chan struct{}
+	stopOnce sync.Once
 }
 
-func NewGRPCServer(registry *Registry, m *metrics.PrometheusMetrics) *GRPCServer {
+// defaultLeaderCheckInterval is how often an open WatchEvents stream re-checks
+// leadership.
+const defaultLeaderCheckInterval = 5 * time.Second
+
+func NewGRPCServer(
+	registry *Registry,
+	m *metrics.PrometheusMetrics,
+	leaderElection bool,
+	isLeader func() bool,
+	eventsEnabled bool,
+) *GRPCServer {
 	return &GRPCServer{
-		registry: registry,
-		metrics:  m,
-		taskMgr:  NewTaskManager(),
-		watchers: make(map[string]chan *pb.PeerUpdate),
+		registry:            registry,
+		metrics:             m,
+		taskMgr:             NewTaskManager(),
+		watchers:            make(map[string]chan *pb.PeerUpdate),
+		leaderElection:      leaderElection,
+		isLeader:            isLeader,
+		eventsEnabled:       eventsEnabled,
+		eventSubs:           make(map[string]chan *pb.Event),
+		leaderCheckInterval: defaultLeaderCheckInterval,
+		stopCh:              make(chan struct{}),
 	}
+}
+
+// Shutdown ends every open server-streaming handler so a subsequent
+// grpc.Server.GracefulStop can complete. It is idempotent and safe to call
+// concurrently with PublishEvent and BroadcastPeerUpdate: it only closes a
+// signalling channel and touches no subscriber map, so publishers racing it
+// keep taking their existing non-blocking paths and cannot panic.
+//
+// Handlers answer codes.Unavailable, the same code a non-leader replica
+// returns, so the agent's WatchTasks reconnect loop and the Console ingester
+// both treat it as an ordinary retryable stream end.
+func (s *GRPCServer) Shutdown() {
+	s.stopOnce.Do(func() { close(s.stopCh) })
 }
 
 // TaskManager exposes the task dispatcher so the HTTP diagnostics handler can
@@ -41,8 +93,15 @@ func (s *GRPCServer) TaskManager() *TaskManager {
 	return s.taskMgr
 }
 
+// RegisterService registers the controller's gRPC services. EventStream is only
+// registered when controller.events.enabled is on: leaving it unregistered makes
+// gRPC answer a subscribing Console with codes.Unimplemented, which is the
+// honest answer and needs no per-RPC gate.
 func (s *GRPCServer) RegisterService(srv *grpc.Server) {
 	pb.RegisterAgentRegistryServer(srv, s)
+	if s.eventsEnabled {
+		pb.RegisterEventStreamServer(srv, s)
+	}
 }
 
 func (s *GRPCServer) Register(_ context.Context, req *pb.RegisterRequest) (*pb.RegisterResponse, error) {
@@ -130,6 +189,8 @@ func (s *GRPCServer) WatchPeers(req *pb.WatchPeersRequest, stream pb.AgentRegist
 			if err := stream.Send(update); err != nil {
 				return err
 			}
+		case <-s.stopCh:
+			return status.Error(codes.Unavailable, "controller shutting down")
 		case <-stream.Context().Done():
 			return stream.Context().Err()
 		}
@@ -154,7 +215,8 @@ func (s *GRPCServer) WatchTasks(req *pb.WatchTasksRequest, stream pb.AgentRegist
 		select {
 		// The TaskManager never closes the subscription channel (see Subscribe),
 		// so this branch does not fire on teardown; the loop exits via the
-		// stream context below. The ok check is kept as belt-and-braces.
+		// stream context or the server-wide stopCh below. The ok check is kept
+		// as belt-and-braces.
 		case task, ok := <-tasks:
 			if !ok {
 				return nil
@@ -162,6 +224,8 @@ func (s *GRPCServer) WatchTasks(req *pb.WatchTasksRequest, stream pb.AgentRegist
 			if err := stream.Send(task); err != nil {
 				return err
 			}
+		case <-s.stopCh:
+			return status.Error(codes.Unavailable, "controller shutting down")
 		case <-stream.Context().Done():
 			return stream.Context().Err()
 		}
@@ -174,6 +238,121 @@ func (s *GRPCServer) WatchTasks(req *pb.WatchTasksRequest, stream pb.AgentRegist
 func (s *GRPCServer) ReportTaskResult(_ context.Context, res *pb.TaskResult) (*emptypb.Empty, error) {
 	s.taskMgr.Report(res)
 	return &emptypb.Empty{}, nil
+}
+
+// WatchEvents server-streams controller domain events to the Console.
+// Leader-only when leader election is enabled: a non-leader replica fails the
+// call immediately with codes.Unavailable so the caller's reconnect loop
+// retries (and may land on the leader on a subsequent dial), mirroring
+// DiagnosticsHandler's HTTP 503-on-non-leader behavior.
+//
+// Leadership is also re-checked on a ticker while the stream is open, so a
+// replica demoted mid-stream stops fanning out events instead of serving a
+// stale view forever. A ticker rather than a check before each Send: staleness
+// must stay bounded even when no events are flowing.
+func (s *GRPCServer) WatchEvents(_ *pb.WatchEventsRequest, stream pb.EventStream_WatchEventsServer) error {
+	if s.lostLeadership() {
+		return status.Error(codes.Unavailable, "not the leader")
+	}
+
+	id := uuid.NewString()
+	ch := make(chan *pb.Event, 64)
+	s.eventsMu.Lock()
+	s.eventSubs[id] = ch
+	s.metrics.ControllerEventSubscribers.WithLabelValues().Inc()
+	s.metrics.ControllerGRPCConnections.WithLabelValues().Inc()
+	s.eventsMu.Unlock()
+
+	defer func() {
+		s.eventsMu.Lock()
+		delete(s.eventSubs, id)
+		s.metrics.ControllerEventSubscribers.WithLabelValues().Dec()
+		s.metrics.ControllerGRPCConnections.WithLabelValues().Dec()
+		s.eventsMu.Unlock()
+		close(ch)
+	}()
+
+	leaderCheck := time.NewTicker(s.leaderCheckInterval)
+	defer leaderCheck.Stop()
+
+	for {
+		select {
+		case ev, ok := <-ch:
+			if !ok {
+				return nil
+			}
+			if err := stream.Send(ev); err != nil {
+				return err
+			}
+		case <-leaderCheck.C:
+			if s.lostLeadership() {
+				return status.Error(codes.Unavailable, "leadership lost")
+			}
+		case <-s.stopCh:
+			return status.Error(codes.Unavailable, "controller shutting down")
+		case <-stream.Context().Done():
+			return stream.Context().Err()
+		}
+	}
+}
+
+// lostLeadership reports whether leader election is on and this replica is not
+// (or is no longer) the leader.
+func (s *GRPCServer) lostLeadership() bool {
+	return s.leaderElection && (s.isLeader == nil || !s.isLeader())
+}
+
+// PublishEvent assigns a sequence number and timestamp, then fans ev out to
+// every subscribed WatchEvents stream. Callers construct ev with only the
+// oneof Payload field set.
+//
+// With controller.events.enabled off this is a no-op taken before anything is
+// stamped or counted: a disabled controller must not burn sequence numbers or
+// move the published-events counter.
+func (s *GRPCServer) PublishEvent(ev *pb.Event) {
+	if !s.eventsEnabled {
+		return
+	}
+
+	ev.Seq = s.eventSeq.Add(1)
+	ev.Timestamp = timestamppb.Now()
+
+	s.eventsMu.RLock()
+	defer s.eventsMu.RUnlock()
+	for id, ch := range s.eventSubs {
+		select {
+		case ch <- ev:
+		default:
+			slog.Warn("dropping event, subscriber channel full", "subscriber", id)
+		}
+	}
+	s.metrics.ControllerEventsPublished.WithLabelValues(eventType(ev)).Inc()
+}
+
+// EventSubscriberCount reports the number of active WatchEvents streams.
+// Intended for tests and diagnostics.
+func (s *GRPCServer) EventSubscriberCount() int {
+	s.eventsMu.RLock()
+	defer s.eventsMu.RUnlock()
+	return len(s.eventSubs)
+}
+
+// eventType returns a bounded-cardinality label for ControllerEventsPublished.
+func eventType(ev *pb.Event) string {
+	switch ev.GetPayload().(type) {
+	case *pb.Event_TopologyChanged:
+		return "topology_changed"
+	case *pb.Event_CheckObserved:
+		return "check_observed"
+	case *pb.Event_MtrTriggered:
+		return "mtr_triggered"
+	case *pb.Event_MtrCompleted:
+		return "mtr_completed"
+	case *pb.Event_DiagnosticProgress:
+		return "diagnostic_progress"
+	default:
+		return "unknown"
+	}
 }
 
 func (s *GRPCServer) BroadcastPeerUpdate(agents []model.AgentInfo) {

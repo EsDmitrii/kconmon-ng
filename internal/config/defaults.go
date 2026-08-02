@@ -48,6 +48,7 @@ func DefaultConfig() *Config {
 		Controller: ControllerConfig{
 			LeaderElection: true,
 			AgentTTL:       30 * time.Second,
+			Events:         EventsConfig{Enabled: false},
 		},
 		Observability: ObservabilityConfig{
 			OTel: OTelConfig{

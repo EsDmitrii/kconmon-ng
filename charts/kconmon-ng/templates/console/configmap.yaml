@@ -1,0 +1,42 @@
+{{- if .Values.console.enabled }}
+{{- /* Keyed on the RESOLVED gRPC address, not the raw events flag, for the
+same reason as the console egress rule: an explicit grpcAddr with
+events.enabled=false is still realtime-on-with-no-bus, exactly what this
+guard exists to reject. */}}
+{{- if and (include "kconmon-ng.console.controllerGRPCAddr" .) (eq .Values.console.valkey.mode "disabled") (gt (int .Values.console.replicas) 1) }}
+{{- fail "realtime events with console.valkey.mode=disabled require console.replicas=1 (the in-process bus has no cross-replica fan-out, ADR-002): set console.valkey.mode=bundled|external or console.replicas=1" }}
+{{- end }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "kconmon-ng.console.fullname" . }}
+  labels:
+    {{- include "kconmon-ng.labels" . | nindent 4 }}
+    app.kubernetes.io/component: console
+data:
+  config.yaml: |
+    httpPort: {{ .Values.console.service.port }}
+    logLevel: {{ .Values.config.logLevel | quote }}
+    logFormat: {{ .Values.config.logFormat | quote }}
+    metricsPrefix: {{ .Values.config.metricsPrefix | quote }}
+    auth:
+      mode: {{ .Values.console.auth.mode | quote }}
+      anonymous:
+        role: {{ .Values.console.auth.anonymous.role | quote }}
+    controller:
+      {{- if .Values.console.controller.url }}
+      url: {{ .Values.console.controller.url | quote }}
+      {{- else }}
+      url: "http://{{ include "kconmon-ng.fullname" . }}-controller:{{ .Values.config.httpPort }}"
+      {{- end }}
+      timeout: {{ .Values.console.controller.timeout | quote }}
+      grpcAddr: {{ include "kconmon-ng.console.controllerGRPCAddr" . | quote }}
+    prometheus:
+      url: {{ .Values.console.prometheus.url | quote }}
+      queryTimeout: {{ .Values.console.prometheus.queryTimeout | quote }}
+      maxRange: {{ .Values.console.prometheus.maxRange | quote }}
+      maxResponseBytes: {{ .Values.console.prometheus.maxResponseBytes | int64 }}
+    valkey:
+      address: {{ include "kconmon-ng.console.valkeyAddress" . | quote }}
+      dialTimeout: {{ .Values.console.valkey.dialTimeout | quote }}
+{{- end }}

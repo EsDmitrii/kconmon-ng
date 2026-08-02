@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"time"
@@ -11,6 +12,7 @@ import (
 	pb "github.com/EsDmitrii/kconmon-ng/api/proto"
 	"github.com/EsDmitrii/kconmon-ng/internal/metrics"
 	"github.com/EsDmitrii/kconmon-ng/internal/model"
+	"github.com/google/uuid"
 )
 
 const (
@@ -45,6 +47,12 @@ type diagnosticsRequest struct {
 	Plane       string `json:"plane"`
 }
 
+// EventPublisher is the seam DiagnosticsHandler uses to emit domain events for
+// each on-demand diagnostic dispatch. Satisfied by *GRPCServer.
+type EventPublisher interface {
+	PublishEvent(ev *pb.Event)
+}
+
 // DiagnosticsHandler serves POST /api/v1/diagnostics: it resolves the source
 // and destination nodes to registered agents, dispatches an on-demand task to
 // the source agent, and returns the resulting model.CheckResult verbatim.
@@ -54,6 +62,7 @@ type DiagnosticsHandler struct {
 	metrics        *metrics.PrometheusMetrics
 	leaderElection bool
 	isLeader       func() bool
+	events         EventPublisher
 }
 
 func NewDiagnosticsHandler(
@@ -62,6 +71,7 @@ func NewDiagnosticsHandler(
 	m *metrics.PrometheusMetrics,
 	leaderElection bool,
 	isLeader func() bool,
+	events EventPublisher,
 ) *DiagnosticsHandler {
 	return &DiagnosticsHandler{
 		registry:       registry,
@@ -69,6 +79,7 @@ func NewDiagnosticsHandler(
 		metrics:        m,
 		leaderElection: leaderElection,
 		isLeader:       isLeader,
+		events:         events,
 	}
 }
 
@@ -117,31 +128,41 @@ func (h *DiagnosticsHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), timeout)
 	defer cancel()
 
+	// Stamp the task ID here rather than letting Dispatch mint it, so the
+	// dispatch-start event published below carries the same ID as the terminal
+	// event and a Console can correlate the two halves of one run.
 	task := &pb.TaskRequest{
+		TaskId:    uuid.NewString(),
 		CheckType: req.Type,
 		Target:    agentInfoToProto(destination),
 		Plane:     plane,
 	}
+
+	h.publishDispatched(task.GetTaskId(), req.Type, req.Source, req.Destination)
 
 	res, err := h.dispatcher.Dispatch(ctx, source.ID, task)
 	if err != nil {
 		switch {
 		case errors.Is(err, context.DeadlineExceeded):
 			h.count(req.Type, "timeout")
+			h.publishProgress(task.GetTaskId(), req.Type, req.Source, req.Destination, "timeout")
 			http.Error(w, "diagnostics dispatch timed out", http.StatusGatewayTimeout)
 		case errors.Is(err, ErrAgentNotSubscribed):
 			// The source agent is registered but has no active task stream, so
 			// there is no agent able to run the check.
 			h.count(req.Type, "not_found")
+			h.publishProgress(task.GetTaskId(), req.Type, req.Source, req.Destination, "error")
 			http.Error(w, "source agent has no active diagnostics stream", http.StatusNotFound)
 		default:
 			h.count(req.Type, "error")
+			h.publishProgress(task.GetTaskId(), req.Type, req.Source, req.Destination, "error")
 			http.Error(w, "diagnostics dispatch failed", http.StatusBadGateway)
 		}
 		return
 	}
 
 	h.count(req.Type, "ok")
+	h.publishObserved(task.GetTaskId(), req.Type, plane, req.Source, req.Destination, res.GetDetailsJson())
 	w.Header().Set("Content-Type", "application/json")
 	// nosniff pins the declared JSON type so no browser will ever interpret
 	// this response as HTML, closing the theoretical XSS vector gosec's taint
@@ -175,4 +196,106 @@ func (h *DiagnosticsHandler) resolveTimeout(r *http.Request) time.Duration {
 
 func (h *DiagnosticsHandler) count(checkType, result string) {
 	h.metrics.ControllerDiagnostics.WithLabelValues(checkType, result).Inc()
+}
+
+// publishDispatched announces that a diagnostic was handed to the source agent.
+// mtr gets its own MTRTriggered event instead of a generic progress update.
+func (h *DiagnosticsHandler) publishDispatched(taskID, checkType, source, destination string) {
+	if h.events == nil {
+		return
+	}
+	if checkType == string(model.CheckMTR) {
+		h.events.PublishEvent(&pb.Event{Payload: &pb.Event_MtrTriggered{
+			MtrTriggered: &pb.MTRTriggered{TaskId: taskID, SourceNode: source, DestinationNode: destination},
+		}})
+		return
+	}
+	h.events.PublishEvent(&pb.Event{Payload: &pb.Event_DiagnosticProgress{
+		DiagnosticProgress: &pb.DiagnosticProgress{
+			TaskId: taskID, CheckType: checkType, SourceNode: source, DestinationNode: destination, State: "dispatched",
+		},
+	}})
+}
+
+func (h *DiagnosticsHandler) publishProgress(taskID, checkType, source, destination, state string) {
+	if h.events == nil {
+		return
+	}
+	h.events.PublishEvent(&pb.Event{Payload: &pb.Event_DiagnosticProgress{
+		DiagnosticProgress: &pb.DiagnosticProgress{
+			TaskId: taskID, CheckType: checkType, SourceNode: source, DestinationNode: destination, State: state,
+		},
+	}})
+}
+
+// publishObserved decodes the agent's CheckResult and emits either a
+// CheckObserved (non-mtr types) or an MTRCompleted (mtr, with hops). Decode
+// failures are logged and swallowed — the HTTP response to the caller (the
+// verbatim CheckResult bytes) is unaffected either way.
+func (h *DiagnosticsHandler) publishObserved(taskID, checkType, plane, source, destination string, detailsJSON []byte) {
+	if h.events == nil {
+		return
+	}
+	var result model.CheckResult
+	if err := json.Unmarshal(detailsJSON, &result); err != nil {
+		slog.Warn("failed to decode CheckResult for event publishing", "error", err, "taskId", taskID)
+		return
+	}
+
+	if checkType == string(model.CheckMTR) {
+		h.events.PublishEvent(&pb.Event{Payload: &pb.Event_MtrCompleted{
+			MtrCompleted: &pb.MTRCompleted{
+				TaskId: taskID, SourceNode: source, DestinationNode: destination,
+				Success: result.Success, Error: result.Error, Hops: mtrHopsFromDetails(result.Details),
+			},
+		}})
+		return
+	}
+
+	h.events.PublishEvent(&pb.Event{Payload: &pb.Event_CheckObserved{
+		CheckObserved: &pb.CheckObserved{
+			TaskId: taskID, CheckType: checkType, SourceNode: source, DestinationNode: destination, Plane: plane,
+			Success: result.Success, DurationNs: result.Duration.Nanoseconds(), Error: result.Error,
+		},
+	}})
+}
+
+// mtrHopsFromDetails pulls the hop list out of a CheckResult.Details that was
+// decoded into `any`: json.Unmarshal rebuilds it as map[string]any/[]any, never
+// as the concrete model.MTRDetails the agent serialized, so the fields are
+// extracted by hand.
+func mtrHopsFromDetails(details any) []*pb.MTRHop {
+	md, isMap := details.(map[string]any)
+	if !isMap {
+		return nil
+	}
+	raw, isSlice := md["hops"].([]any)
+	if !isSlice {
+		return nil
+	}
+	hops := make([]*pb.MTRHop, 0, len(raw))
+	for _, item := range raw {
+		hm, isHop := item.(map[string]any)
+		if !isHop {
+			continue
+		}
+		hops = append(hops, &pb.MTRHop{
+			Number:    int32(asFloat(hm["number"])),
+			Ip:        asString(hm["ip"]),
+			Hostname:  asString(hm["hostname"]),
+			RttNs:     int64(asFloat(hm["rtt"])),
+			LossRatio: asFloat(hm["lossRatio"]),
+		})
+	}
+	return hops
+}
+
+func asFloat(v any) float64 {
+	f, _ := v.(float64) // json.Unmarshal into any always yields float64 for JSON numbers
+	return f
+}
+
+func asString(v any) string {
+	s, _ := v.(string)
+	return s
 }

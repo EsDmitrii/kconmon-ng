@@ -67,12 +67,16 @@ func (tm *TaskManager) Subscribe(agentID string) (tasks <-chan *pb.TaskRequest, 
 
 // Dispatch sends req to agentID and blocks until the agent reports a result,
 // the context is cancelled, or the context deadline is exceeded. A task ID is
-// generated and stamped on the request so the result can be correlated. The
-// pending entry is always removed before returning, so a timed-out task does
-// not leak.
+// generated and stamped on the request when the caller left it empty, so the
+// result can be correlated; a caller that already stamped one (to correlate its
+// own pre-dispatch events with the outcome) keeps it. The pending entry is
+// always removed before returning, so a timed-out task does not leak.
 func (tm *TaskManager) Dispatch(ctx context.Context, agentID string, req *pb.TaskRequest) (*pb.TaskResult, error) {
-	taskID := uuid.NewString()
-	req.TaskId = taskID
+	taskID := req.GetTaskId()
+	if taskID == "" {
+		taskID = uuid.NewString()
+		req.TaskId = taskID
+	}
 
 	resultCh := make(chan *pb.TaskResult, 1)
 

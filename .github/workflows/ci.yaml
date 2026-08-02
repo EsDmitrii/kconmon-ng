@@ -1,3 +1,4 @@
+---
 name: CI
 
 on:
@@ -12,6 +13,8 @@ on:
       - "charts/**"
       - "krew/**"
       - ".github/workflows/ci.yaml"
+      - "web/**"
+      - "Dockerfile.console"
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -135,6 +138,61 @@ jobs:
 
       - name: Build controller
         run: CGO_ENABLED=0 go build -o /dev/null ./cmd/controller
+
+      - name: Build console
+        run: CGO_ENABLED=0 go build -o /dev/null ./cmd/console
+
+  frontend:
+    name: Frontend
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install deps
+        working-directory: web
+        run: npm ci
+
+      - name: Typecheck
+        working-directory: web
+        run: npm run typecheck
+
+      - name: Test
+        working-directory: web
+        run: npm run test -- --run
+
+      - name: Build
+        working-directory: web
+        # Bundle only — the preceding Typecheck step already ran `tsc --noEmit`
+        # (the "Build" npm script's `npm run typecheck &&` prefix would repeat it).
+        run: npx vite build
+
+  console-image:
+    name: Console image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build console image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: Dockerfile.console
+          push: false
+          load: false
+          tags: kconmon-ng-console:ci
+          build-args: |
+            VERSION=ci
+            COMMIT=${{ github.sha }}
 
   helm-lint:
     name: Helm Lint

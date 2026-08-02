@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 )
 
 func TestNewPrometheusMetrics(t *testing.T) {
@@ -85,5 +86,17 @@ func TestPrometheusMetricsCustomPrefix(t *testing.T) {
 
 	if !found {
 		t.Error("expected metric with custom prefix")
+	}
+}
+
+func TestNewPrometheusMetricsEventGauges(t *testing.T) {
+	m := NewPrometheusMetrics("test", prometheus.NewRegistry())
+	m.ControllerEventSubscribers.WithLabelValues().Set(2)
+	m.ControllerEventsPublished.WithLabelValues("topology_changed").Inc()
+	if got := testutil.ToFloat64(m.ControllerEventSubscribers.WithLabelValues()); got != 2 {
+		t.Errorf("ControllerEventSubscribers = %v, want 2", got)
+	}
+	if got := testutil.ToFloat64(m.ControllerEventsPublished.WithLabelValues("topology_changed")); got != 1 {
+		t.Errorf("ControllerEventsPublished = %v, want 1", got)
 	}
 }

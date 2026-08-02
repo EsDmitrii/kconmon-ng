@@ -25,7 +25,8 @@ func startTaskTestServer(t *testing.T) (*controller.GRPCServer, *GRPCClient) {
 	lis := bufconn.Listen(1 << 20)
 	reg := controller.NewRegistry(30 * time.Second)
 	m := metrics.NewPrometheusMetrics("test_"+t.Name(), prometheus.NewRegistry())
-	srv := controller.NewGRPCServer(reg, m)
+	// events disabled: this test only exercises the AgentRegistry task stream.
+	srv := controller.NewGRPCServer(reg, m, false, nil, false)
 
 	gs := grpc.NewServer()
 	srv.RegisterService(gs)

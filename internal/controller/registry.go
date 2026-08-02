@@ -18,7 +18,7 @@ type Registry struct {
 	mu           sync.RWMutex
 	agents       map[string]*registeredAgent
 	ttl          time.Duration
-	onChange     []func([]model.AgentInfo)
+	onChange     []func(agents []model.AgentInfo, reason string)
 	zoneResolver ZoneResolver
 }
 
@@ -61,7 +61,7 @@ func (r *Registry) Register(info model.AgentInfo) model.AgentInfo { //nolint:goc
 	r.mu.Unlock()
 
 	slog.Info("agent registered", "id", info.ID, "node", info.NodeName, "zone", info.Zone)
-	r.notifyChange(snapshot)
+	r.notifyChange(snapshot, "agent_registered")
 	return info
 }
 
@@ -85,7 +85,7 @@ func (r *Registry) UpdateZone(nodeName, zone string) {
 
 	if changed {
 		slog.Info("agent zone updated", "node", nodeName, "zone", zone)
-		r.notifyChange(snapshot)
+		r.notifyChange(snapshot, "zone_updated")
 	}
 }
 
@@ -100,7 +100,7 @@ func (r *Registry) Deregister(agentID string) {
 
 	if existed {
 		slog.Info("agent deregistered", "id", agentID)
-		r.notifyChange(snapshot)
+		r.notifyChange(snapshot, "agent_deregistered")
 	}
 }
 
@@ -190,12 +190,12 @@ func (r *Registry) EvictStale() int {
 		slog.Warn("agent evicted (TTL expired)", "id", e.id, "node", e.nodeName, "lastSeen", e.lastSeen)
 	}
 	if evicted > 0 {
-		r.notifyChange(snapshot)
+		r.notifyChange(snapshot, "agent_evicted")
 	}
 	return evicted
 }
 
-func (r *Registry) OnChange(fn func([]model.AgentInfo)) {
+func (r *Registry) OnChange(fn func(agents []model.AgentInfo, reason string)) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.onChange = append(r.onChange, fn)
@@ -209,13 +209,13 @@ func (r *Registry) snapshotLocked() []model.AgentInfo {
 	return agents
 }
 
-func (r *Registry) notifyChange(agents []model.AgentInfo) {
+func (r *Registry) notifyChange(agents []model.AgentInfo, reason string) {
 	r.mu.RLock()
-	callbacks := make([]func([]model.AgentInfo), len(r.onChange))
+	callbacks := make([]func([]model.AgentInfo, string), len(r.onChange))
 	copy(callbacks, r.onChange)
 	r.mu.RUnlock()
 
 	for _, fn := range callbacks {
-		fn(agents)
+		fn(agents, reason)
 	}
 }

@@ -7,6 +7,12 @@
       "properties": {
         "replicaCount": { "type": "integer", "minimum": 1 },
         "leaderElection": { "type": "boolean" },
+        "events": {
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean" }
+          }
+        },
         "image": {
           "type": "object",
           "properties": {
@@ -38,6 +44,107 @@
         "tolerations": { "type": "array" },
         "securityContext": { "type": "object" },
         "podSecurityContext": { "type": "object" }
+      }
+    },
+    "console": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "replicas": { "type": "integer", "minimum": 1 },
+        "image": {
+          "type": "object",
+          "properties": {
+            "repository": { "type": "string" },
+            "tag": { "type": "string" },
+            "pullPolicy": { "type": "string", "enum": ["Always", "IfNotPresent", "Never"] }
+          }
+        },
+        "auth": {
+          "type": "object",
+          "properties": {
+            "mode": { "type": "string", "enum": ["anonymous"] },
+            "anonymous": {
+              "type": "object",
+              "properties": { "role": { "type": "string" } }
+            }
+          }
+        },
+        "controller": {
+          "type": "object",
+          "properties": {
+            "url": { "type": "string" },
+            "timeout": { "type": "string" },
+            "grpcAddr": { "type": "string" }
+          }
+        },
+        "prometheus": {
+          "type": "object",
+          "properties": {
+            "url": { "type": "string" },
+            "queryTimeout": { "type": "string" },
+            "maxRange": { "type": "string" },
+            "maxResponseBytes": { "type": "integer", "minimum": 1 }
+          }
+        },
+        "valkey": {
+          "type": "object",
+          "properties": {
+            "mode": {
+              "type": "string",
+              "enum": ["bundled", "external", "disabled"]
+            },
+            "address": { "type": "string" },
+            "dialTimeout": { "type": "string" },
+            "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+            "image": {
+              "type": "object",
+              "properties": {
+                "repository": { "type": "string" },
+                "tag": { "type": "string" },
+                "pullPolicy": {
+                  "type": "string",
+                  "enum": ["Always", "IfNotPresent", "Never"]
+                }
+              }
+            },
+            "resources": { "type": "object" }
+          }
+        },
+        "networkPolicy": {
+          "type": "object",
+          "properties": {
+            "prometheusEgress": { "type": "array" },
+            "valkeyEgress": { "type": "array" }
+          }
+        },
+        "service": {
+          "type": "object",
+          "properties": {
+            "type": { "type": "string" },
+            "port": { "type": "integer", "minimum": 1, "maximum": 65535 }
+          }
+        },
+        "ingress": {
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "className": { "type": "string" },
+            "annotations": { "type": "object" },
+            "hosts": { "type": "array" },
+            "tls": { "type": "array" }
+          }
+        },
+        "resources": { "type": "object" },
+        "nodeSelector": { "type": "object" },
+        "tolerations": { "type": "array" },
+        "affinity": { "type": "object" },
+        "pdb": {
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "minAvailable": { "type": "integer", "minimum": 0 }
+          }
+        }
       }
     },
     "config": {

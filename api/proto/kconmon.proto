@@ -25,6 +25,14 @@ service ProbeService {
   rpc UDPProbe(UDPProbeRequest) returns (UDPProbeResponse);
 }
 
+// EventStream lets the Console watch controller-observed domain events in
+// realtime. Leader-only: a non-leader replica fails the call immediately
+// (codes.Unavailable) so the Console's reconnect loop retries and may land on
+// the leader on a subsequent dial.
+service EventStream {
+  rpc WatchEvents(WatchEventsRequest) returns (stream Event);
+}
+
 message AgentMeta {
   string id = 1;
   string node_name = 2;
@@ -112,4 +120,83 @@ message UDPProbeResponse {
   uint32 sequence = 1;
   bytes payload = 2;
   google.protobuf.Timestamp timestamp = 3;
+}
+
+message WatchEventsRequest {
+  // Reserved for a future resume-by-seq capability across controller
+  // restarts. The controller keeps no cross-restart event history in M2, so
+  // this is currently unused; the field exists so the wire shape does not
+  // need to change when that lands.
+  uint64 last_seq = 1;
+}
+
+message Event {
+  uint64 seq = 1;
+  google.protobuf.Timestamp timestamp = 2;
+  oneof payload {
+    TopologyChanged topology_changed = 3;
+    CheckObserved check_observed = 4;
+    MTRTriggered mtr_triggered = 5;
+    MTRCompleted mtr_completed = 6;
+    DiagnosticProgress diagnostic_progress = 7;
+  }
+}
+
+// TopologyChanged is a lightweight "refetch" signal, not a full snapshot: the
+// Console already has an authoritative HTTP topology endpoint
+// (GET /api/v1/topology) and re-queries it rather than duplicating node/zone
+// enrichment logic in the event stream.
+message TopologyChanged {
+  string reason = 1;    // agent_registered|zone_updated|agent_deregistered|agent_evicted
+  string node_name = 2;
+  string agent_id = 3;
+}
+
+// CheckObserved reports the outcome of a completed ON-DEMAND diagnostic check
+// (POST /api/v1/diagnostics). It is NOT the continuous background probes —
+// those go straight from agent to Prometheus and never touch the controller.
+// It is a compact rollup, never the raw CheckResult payload.
+message CheckObserved {
+  string task_id = 1;
+  string check_type = 2; // tcp|udp|icmp|dns|http (mtr uses MTRTriggered/MTRCompleted instead)
+  string source_node = 3;
+  string destination_node = 4;
+  string plane = 5;
+  bool success = 6;
+  int64 duration_ns = 7;
+  string error = 8;
+}
+
+message MTRTriggered {
+  string task_id = 1;
+  string source_node = 2;
+  string destination_node = 3;
+}
+
+message MTRHop {
+  int32 number = 1;
+  string ip = 2;
+  string hostname = 3;
+  int64 rtt_ns = 4;
+  double loss_ratio = 5;
+}
+
+message MTRCompleted {
+  string task_id = 1;
+  string source_node = 2;
+  string destination_node = 3;
+  bool success = 4;
+  string error = 5;
+  repeated MTRHop hops = 6;
+}
+
+// DiagnosticProgress fires at dispatch-start and on non-terminal-failure
+// paths; the terminal success outcome is a CheckObserved or MTRCompleted
+// instead, never a second DiagnosticProgress.
+message DiagnosticProgress {
+  string task_id = 1;
+  string check_type = 2;
+  string source_node = 3;
+  string destination_node = 4;
+  string state = 5; // dispatched|timeout|error
 }

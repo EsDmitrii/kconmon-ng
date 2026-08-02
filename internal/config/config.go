@@ -96,6 +96,13 @@ type MTRCheckerConfig struct {
 type ControllerConfig struct {
 	LeaderElection bool          `yaml:"leaderElection"`
 	AgentTTL       time.Duration `yaml:"agentTtl"`
+	Events         EventsConfig  `yaml:"events"`
+}
+
+// EventsConfig gates the controller's WatchEvents gRPC stream and the
+// "events" capability flag on GET /api/v1/version.
+type EventsConfig struct {
+	Enabled bool `yaml:"enabled"`
 }
 
 type ObservabilityConfig struct {
