@@ -1,4 +1,4 @@
-## kconmon-ng v1.6.0
+## kconmon-ng v1.4.0
 
 > Console release. Adds an optional read-only web Console (M1) with a realtime
 > event pipeline (M2). The Console is off by default (`console.enabled: false`);
@@ -41,7 +41,7 @@
 
 ```bash
 helm upgrade --install kconmon-ng oci://ghcr.io/esdmitrii/charts/kconmon-ng \
-  --version 1.6.0 \
+  --version 1.4.0 \
   --namespace kconmon-ng \
   --create-namespace
 ```
@@ -50,15 +50,15 @@ kubectl plugin (via krew, from the release manifest):
 
 ```bash
 kubectl krew install --manifest-url \
-  https://github.com/EsDmitrii/kconmon-ng/releases/download/v1.6.0/kconmon.yaml
+  https://github.com/EsDmitrii/kconmon-ng/releases/download/v1.4.0/kconmon.yaml
 ```
 
 ### Images
 
 ```
-ghcr.io/esdmitrii/kconmon-ng-agent:1.6.0
-ghcr.io/esdmitrii/kconmon-ng-controller:1.6.0
-ghcr.io/esdmitrii/kconmon-ng-console:1.6.0
+ghcr.io/esdmitrii/kconmon-ng-agent:1.4.0
+ghcr.io/esdmitrii/kconmon-ng-controller:1.4.0
+ghcr.io/esdmitrii/kconmon-ng-console:1.4.0
 ```
 
 ---
