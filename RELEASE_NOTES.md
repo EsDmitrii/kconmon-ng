@@ -1,3 +1,68 @@
+## kconmon-ng v1.6.0
+
+> Console release. Adds an optional read-only web Console (M1) with a realtime
+> event pipeline (M2). The Console is off by default (`console.enabled: false`);
+> existing agent/controller installs are unaffected until it is turned on.
+
+### Added
+
+- **Console web UI** — new `kconmon-ng-console` binary and image with an embedded
+  SPA: Overview, Matrix, Topology, Explore, PromQL console and a Live event feed.
+  Read-only in this release (anonymous viewer role, banner shown in the UI).
+- **Realtime pipeline** — the controller exposes a leader-gated
+  `EventStream.WatchEvents` gRPC stream (`controller.events.enabled`); the console
+  ingests it and fans events out to browsers over WebSocket (`/ws`) with per-topic
+  sequencing, snapshot replay and duplicate suppression. The matrix switches from
+  polling to push when the stream is healthy and falls back to REST automatically.
+- **Cross-replica fan-out via Valkey** — `console.valkey.mode` supports
+  `off` (in-process, single replica), `bundled` (ephemeral Valkey Deployment, no
+  PVC by design) and `external`. NetworkPolicies open console→controller gRPC and
+  console→Valkey on both sides.
+- **Chart** — new `console.*` values (deployment, service, ingress, PDB,
+  NetworkPolicy, bundled Valkey), documented in `docs/configuration.md` and
+  covered by `values.schema.json` and a `ci/console-values.yaml` lint profile.
+
+### Fixed
+
+- **Controller graceful shutdown hang with active streaming subscribers** —
+  `WatchEvents`/`WatchTasks`/`WatchPeers` handlers now terminate on shutdown and
+  `GracefulStop` is bounded with a hard-stop fallback (the Tasks/Peers case was
+  latent since v1.3.0, masked by Kubernetes killing the pod after the grace
+  period).
+- **Fleet-safe events config** — the `events` key is omitted from the controller
+  ConfigMap when disabled, so controller images without M2 support keep starting
+  under strict config parsing.
+
+### Security
+
+- grpc-go bumped to v1.82.1 (GO-2026-6061, reachable via the event stream).
+
+### Install
+
+```bash
+helm upgrade --install kconmon-ng oci://ghcr.io/esdmitrii/charts/kconmon-ng \
+  --version 1.6.0 \
+  --namespace kconmon-ng \
+  --create-namespace
+```
+
+kubectl plugin (via krew, from the release manifest):
+
+```bash
+kubectl krew install --manifest-url \
+  https://github.com/EsDmitrii/kconmon-ng/releases/download/v1.6.0/kconmon.yaml
+```
+
+### Images
+
+```
+ghcr.io/esdmitrii/kconmon-ng-agent:1.6.0
+ghcr.io/esdmitrii/kconmon-ng-controller:1.6.0
+ghcr.io/esdmitrii/kconmon-ng-console:1.6.0
+```
+
+---
+
 ## kconmon-ng v1.3.3
 
 > Chart-focused release. The Go agent/controller code is unchanged from v1.3.2;
