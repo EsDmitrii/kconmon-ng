@@ -151,3 +151,14 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh release edit "$GITHUB_REF_NAME" --draft=false --latest
+
+      # Opens the version-bump PR in kubernetes-sigs/krew-index, so a release no
+      # longer needs a hand-written krew PR. The bot is a hosted service: the
+      # action posts the release request to it and it opens the PR from its own
+      # fork, so no token or secret of ours is involved. krew maintainers
+      # auto-approve those PRs.
+      - name: Open krew-index bump PR
+        if: ${{ !contains(github.ref_name, '-') }}
+        uses: rajatjindal/krew-release-bot@v0.0.51
+        with:
+          krew_template_file: kconmon.yaml
