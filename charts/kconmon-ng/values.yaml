@@ -310,7 +310,7 @@ console:
     # Bundled-only image. Ignored for mode=external|disabled.
     image:
       repository: valkey/valkey
-      tag: 8-alpine
+      tag: 9-alpine
       pullPolicy: IfNotPresent
     # Bundled-only resources. Pub/sub fan-out plus short-TTL caches only.
     resources:
