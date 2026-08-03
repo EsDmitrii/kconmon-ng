@@ -21,6 +21,13 @@ on:
       - "Dockerfile*"
       - ".goreleaser.yaml"
 
+# No job here needs a writable token: nothing pushes an image
+# (docker/build-push-action runs with push: false), nothing calls the API, and
+# no step reads GITHUB_TOKEN. Declared at workflow level so every job inherits
+# it, including when release.yaml calls this workflow via workflow_call.
+permissions:
+  contents: read
+
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true

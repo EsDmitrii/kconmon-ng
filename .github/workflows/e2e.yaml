@@ -5,6 +5,11 @@ on:
     workflows: ["Release"]
     types: [completed]
 
+# Read-only: this job clones, builds a kind cluster and installs the released
+# chart. It never pushes anything and never reads GITHUB_TOKEN.
+permissions:
+  contents: read
+
 concurrency:
   group: e2e-${{ github.ref }}
   cancel-in-progress: true
@@ -16,6 +21,13 @@ jobs:
     if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
 
     steps:
+      # CodeQL flags workflow_run + checkout of workflow_run.head_sha as an
+      # untrusted checkout in a privileged context. That pattern is dangerous
+      # when the triggering workflow can be started from a fork PR. It cannot
+      # here: the parent is Release, which triggers only on `push: tags: v*`,
+      # and a fork cannot push a tag to this repo. head_sha is therefore always
+      # a commit that already lives on this repository. Do not "fix" this by
+      # checking out a fixed ref: the tag lookup below needs that exact commit.
       - name: Checkout released commit
         uses: actions/checkout@v7
         with:
