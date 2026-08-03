@@ -1,0 +1,133 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:recommended",
+    ":dependencyDashboard",
+    ":semanticCommitTypeAll(build)",
+    ":semanticCommitScope(deps)"
+  ],
+  "timezone": "Europe/Moscow",
+  "schedule": ["before 6am on monday"],
+  "labels": ["dependencies"],
+  "prConcurrentLimit": 8,
+  "prHourlyLimit": 4,
+  "rebaseWhen": "behind-base-branch",
+  "configMigration": true,
+  "dependencyDashboardTitle": "Renovate: dependency dashboard",
+
+  "automergeType": "pr",
+  "automergeStrategy": "squash",
+
+  "platformAutomerge": false,
+
+  "minimumReleaseAge": "3 days",
+
+  "postUpdateOptions": ["gomodTidy"],
+
+  "lockFileMaintenance": {
+    "enabled": true,
+    "schedule": ["before 6am on the first day of the month"],
+    "automerge": true
+  },
+
+  "ignorePaths": [
+    "**/node_modules/**",
+    "web/dist/**",
+    "internal/console/ui/dist/**",
+    "dist/**"
+  ],
+
+  "pre-commit": {
+    "enabled": true
+  },
+
+  "osvVulnerabilityAlerts": true,
+  "vulnerabilityAlerts": {
+    "enabled": true,
+    "schedule": ["at any time"],
+    "minimumReleaseAge": null,
+    "labels": ["dependencies", "security"],
+    "automerge": true
+  },
+
+  "packageRules": [
+    {
+      "description": "Our own images. Their tags come from the chart appVersion at release time (values.yaml ships tag: \"\"), so Renovate must never touch them.",
+      "matchDatasources": ["docker"],
+      "matchPackageNames": [
+        "ghcr.io/esdmitrii/**",
+        "ghcr.io/EsDmitrii/**"
+      ],
+      "enabled": false
+    },
+    {
+      "description": "Majors always wait for a human. Grouped with nothing so the diff is readable.",
+      "matchUpdateTypes": ["major"],
+      "automerge": false,
+      "labels": ["dependencies", "major-update"]
+    },
+    {
+      "description": "Go module dependencies: one weekly PR, automerged once CI is green.",
+      "matchManagers": ["gomod"],
+      "matchUpdateTypes": ["minor", "patch", "digest"],
+      "groupName": "go-deps",
+      "automerge": true
+    },
+    {
+      "description": "Go language/toolchain in go.mod. Patch level is where the crypto/tls and net/http CVE fixes land (GO-2026-5856 was exactly this) so it automerges; a language minor (1.26 -> 1.27) waits for a human.",
+      "matchManagers": ["gomod"],
+      "matchDepNames": ["go"],
+      "matchUpdateTypes": ["patch"],
+      "groupName": "go toolchain",
+      "automerge": true
+    },
+    {
+      "matchManagers": ["gomod"],
+      "matchDepNames": ["go"],
+      "matchUpdateTypes": ["minor"],
+      "groupName": "go toolchain",
+      "automerge": false
+    },
+    {
+      "description": "Frontend (web/). Was covered by nobody before Renovate.",
+      "matchManagers": ["npm"],
+      "matchUpdateTypes": ["minor", "patch", "pin", "digest"],
+      "groupName": "frontend deps",
+      "automerge": true
+    },
+    {
+      "matchManagers": ["github-actions"],
+      "matchUpdateTypes": ["minor", "patch", "digest"],
+      "groupName": "github-actions",
+      "automerge": true
+    },
+    {
+      "description": "Base images in the four Dockerfiles plus the bundled valkey image in the chart values.",
+      "matchManagers": ["dockerfile", "helm-values", "helmv3"],
+      "matchUpdateTypes": ["minor", "patch", "digest"],
+      "groupName": "container images",
+      "automerge": true
+    },
+    {
+      "matchManagers": ["pre-commit"],
+      "matchUpdateTypes": ["minor", "patch"],
+      "groupName": "pre-commit hooks",
+      "automerge": true
+    },
+    {
+      "description": "Tool versions pinned in a `with: version:` block: golangci-lint inside golangci-lint-action, the helm CLI inside azure/setup-helm. The github-actions manager already extracts these itself as depType uses-with (verified by a local extract dry-run), so no custom regex manager is needed and adding one would produce a second PR for the same line. A golangci-lint minor ships new linters and therefore new lint failures, and a helm minor changes chart rendering, so only patch automerges.",
+      "matchDepTypes": ["uses-with"],
+      "matchPackageNames": ["golangci/golangci-lint", "helm/helm"],
+      "matchUpdateTypes": ["patch"],
+      "groupName": "ci tooling",
+      "automerge": true
+    },
+    {
+      "matchDepTypes": ["uses-with"],
+      "matchPackageNames": ["golangci/golangci-lint", "helm/helm"],
+      "matchUpdateTypes": ["minor", "major"],
+      "automerge": false,
+      "labels": ["dependencies", "ci-tooling"]
+    }
+  ]
+}
