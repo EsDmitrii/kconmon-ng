@@ -42,7 +42,7 @@ repos:
   # YAML files (workflows, Helm values, configs)
   # Helm chart templates are excluded: {{ }} Go template syntax is not valid YAML
   - repo: https://github.com/adrienverge/yamllint
-    rev: v1.35.1
+    rev: v1.38.0
     hooks:
       - id: yamllint
         args: [-c, .yamllint.yaml]
