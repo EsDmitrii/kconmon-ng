@@ -12,9 +12,14 @@ on:
       - ".golangci.yml"
       - "charts/**"
       - "krew/**"
-      - ".github/workflows/ci.yaml"
+      # Every workflow, not just this one: an Action or pinned-tool bump in
+      # release.yaml/e2e.yaml must not reach main untested (Renovate automerges
+      # on a green CI, and a filtered-out PR produces no checks at all).
+      - ".github/workflows/**"
       - "web/**"
-      - "Dockerfile.console"
+      # All four Dockerfiles, so base-image bumps are always built.
+      - "Dockerfile*"
+      - ".goreleaser.yaml"
 
 concurrency:
   group: ci-${{ github.ref }}
