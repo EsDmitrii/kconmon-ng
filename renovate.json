@@ -7,7 +7,7 @@
     ":semanticCommitScope(deps)"
   ],
   "timezone": "Europe/Moscow",
-  "schedule": ["before 6am on monday"],
+  "schedule": ["after 2am and before 6am"],
   "labels": ["dependencies"],
   "prConcurrentLimit": 8,
   "prHourlyLimit": 4,
@@ -61,9 +61,10 @@
       "enabled": false
     },
     {
-      "description": "Majors always wait for a human. Grouped with nothing so the diff is readable.",
+      "description": "Majors always wait for a human, and they wait ON THE DASHBOARD, not as open PRs. The very first Renovate run surfaced 14 of them at once (web/ npm had never been covered by anything: typescript v7, vite v8, vitest v4, jsdom v30, node v24, helm v4, valkey v9, ...). Tick the box on the dependency dashboard issue to release one into a real PR.",
       "matchUpdateTypes": ["major"],
       "automerge": false,
+      "dependencyDashboardApproval": true,
       "labels": ["dependencies", "major-update"]
     },
     {
@@ -119,13 +120,15 @@
       "matchDepTypes": ["uses-with"],
       "matchPackageNames": ["golangci/golangci-lint", "helm/helm"],
       "matchUpdateTypes": ["patch"],
-      "groupName": "ci tooling",
+      "groupName": "ci tooling (patch)",
       "automerge": true
     },
     {
+      "description": "The groupName here is load-bearing: without it these deps keep the `github-actions` group from the rule above while carrying automerge:false, and a group is merged as a whole — one non-automergeable member parks every Action bump behind a human. Seen for real on the first run: golangci/golangci-lint and helm landed inside the github-actions group PR.",
       "matchDepTypes": ["uses-with"],
       "matchPackageNames": ["golangci/golangci-lint", "helm/helm"],
-      "matchUpdateTypes": ["minor", "major"],
+      "matchUpdateTypes": ["minor"],
+      "groupName": "ci tooling",
       "automerge": false,
       "labels": ["dependencies", "ci-tooling"]
     }
