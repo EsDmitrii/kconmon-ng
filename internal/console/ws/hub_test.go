@@ -403,6 +403,22 @@ func TestHubDropsMalformedAndIDLessLiveMessages(t *testing.T) {
 		}
 	}
 
+	// Each malformed pair is followed by a uniquely-ID'd valid probe, and the
+	// loop waits for that probe before publishing the next pair. The hub reads
+	// its subscription serially, so a delivered probe proves the two frames
+	// ahead of it were processed — and dropped — rather than merely still queued.
+	//
+	// The pacing is load-bearing, not style. cache.InProcessBus gives each
+	// subscriber a 32-slot channel and drops on full instead of blocking the
+	// publisher (inprocess.go: localSubscriberBuffer). The earlier shape of this
+	// test fired 41 publishes in one tight loop past those 32 slots and then
+	// waited on a single trailing sentinel, so whenever the hub goroutine was
+	// not scheduled fast enough the bus threw the sentinel away and the test
+	// timed out. That is a bounded-channel overflow by construction, not a race
+	// in the hub: it merely looked like a rare flake on a fast machine while
+	// failing constantly on a loaded CI runner. Waiting per iteration keeps at
+	// most three messages in flight, and asserting per pair is strictly stronger
+	// than one sentinel for the whole batch.
 	for i := 0; i < 20; i++ {
 		if err := bus.Publish(ctx, TopicLive, cache.Message{Type: TypeEvent, Data: json.RawMessage(`{not json`)}); err != nil {
 			t.Fatalf("Publish: %v", err)
@@ -410,30 +426,28 @@ func TestHubDropsMalformedAndIDLessLiveMessages(t *testing.T) {
 		if err := bus.Publish(ctx, TopicLive, cache.Message{Type: TypeEvent, Data: json.RawMessage(`{"seq":1}`)}); err != nil {
 			t.Fatalf("Publish: %v", err)
 		}
-	}
-	// Sentinel: the hub reads its subscription serially, so once the sentinel
-	// frame arrives every malformed message above was processed — and dropped —
-	// rather than merely still queued. Straggler barrier frames (published
-	// before the malformed batch) may be delivered first; skip past them.
-	const sentinelID = "sentinel-1"
-	if err := bus.Publish(ctx, TopicLive, cache.Message{Type: TypeEvent, Data: liveEventBytes(t, sentinelID, 999)}); err != nil {
-		t.Fatalf("Publish: %v", err)
-	}
-	for {
-		env := nextEnvelope(t, c)
-		var live events.LiveEvent
-		if err := json.Unmarshal(env.Data, &live); err != nil {
-			t.Fatalf("a delivered frame is not a LiveEvent (%s): %v", env.Data, err)
+		probeID := "probe-" + strconv.Itoa(i)
+		probe := liveEventBytes(t, probeID, uint64(1000+i))
+		if err := bus.Publish(ctx, TopicLive, cache.Message{Type: TypeEvent, Data: probe}); err != nil {
+			t.Fatalf("Publish: %v", err)
 		}
-		if live.ID == sentinelID {
-			break
-		}
-		// Only barrier frames may precede the sentinel: a delivered ID-less
-		// frame ({"seq":1}) would unmarshal cleanly and otherwise be silently
-		// skipped here, letting the very frames this test exists to reject
-		// slip through as "stragglers".
-		if !strings.HasPrefix(live.ID, "barrier-") {
-			t.Fatalf("non-barrier frame %q was delivered — malformed/ID-less events must be dropped", live.ID)
+		for {
+			env := nextEnvelope(t, c)
+			var live events.LiveEvent
+			if err := json.Unmarshal(env.Data, &live); err != nil {
+				t.Fatalf("a delivered frame is not a LiveEvent (%s): %v", env.Data, err)
+			}
+			if live.ID == probeID {
+				break
+			}
+			// Only barrier frames may precede a probe: barriers were published
+			// before this loop, and every earlier probe was already consumed by
+			// the iteration that published it. A delivered ID-less frame
+			// ({"seq":1}) would unmarshal cleanly, so it has to be rejected
+			// explicitly here instead of being skipped as a "straggler".
+			if !strings.HasPrefix(live.ID, "barrier-") {
+				t.Fatalf("non-barrier frame %q was delivered — malformed/ID-less events must be dropped", live.ID)
+			}
 		}
 	}
 	expectNoEnvelope(t, c)
