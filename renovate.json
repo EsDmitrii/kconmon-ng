@@ -97,6 +97,18 @@
       "automerge": true
     },
     {
+      "description": "The build toolchain moves as one PR because vite and @vitejs/plugin-react are mutually pinned: @vitejs/plugin-react@6 declares peer `vite: ^8.0.0` while @4 refuses vite 8, so a standalone bump of either cannot resolve a lockfile. Observed for real on the first run: PRs #29 and #36 both landed with package.json changed and NO package-lock.json, and both went red (Console image, and Frontend on #29). @tailwindcss/vite@4 already accepts vite ^8 and vitest 4 is independently fine, but they belong in the same reviewable unit.",
+      "matchManagers": ["npm"],
+      "matchPackageNames": [
+        "vite",
+        "vitest",
+        "@vitejs/plugin-react",
+        "@tailwindcss/vite",
+        "@vitest/**"
+      ],
+      "groupName": "vite toolchain"
+    },
+    {
       "matchManagers": ["github-actions"],
       "matchUpdateTypes": ["minor", "patch", "digest"],
       "groupName": "github-actions",
