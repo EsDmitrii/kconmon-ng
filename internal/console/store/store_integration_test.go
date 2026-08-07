@@ -46,7 +46,11 @@ func dropSchema(t *testing.T, dsn string) {
 	}
 	defer pool.Close()
 
-	const tables = `check_results, check_runs, topology_events, audit_log, api_tokens, role_bindings, roles, users, goose_db_version`
+	// One statement listing every table: PostgreSQL resolves the dependencies
+	// among the listed tables itself, so no CASCADE and no ordering by
+	// foreign key is needed here.
+	const tables = `check_schedules, check_definitions, targets, ` +
+		`check_results, check_runs, topology_events, audit_log, api_tokens, role_bindings, roles, users, goose_db_version`
 	if _, err := pool.Exec(ctx, `DROP TABLE IF EXISTS `+tables); err != nil {
 		t.Fatalf("dropSchema: %v", err)
 	}

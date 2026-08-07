@@ -35,6 +35,41 @@ func SubjectFrom(ctx context.Context) (authz.Subject, bool) {
 	return s, ok
 }
 
+// subjectHolderKey is the context key the recoverer stores its subjectHolder
+// under. Unexported struct type, same forgery-proof convention as
+// subjectContextKey.
+type subjectHolderKey struct{}
+
+// subjectHolder is a one-slot mailbox s.recoverer installs on the request
+// context BEFORE the auth chain runs and authenticate fills in the moment it
+// has resolved a Subject.
+//
+// It exists because the two middlewares see different requests: authenticate
+// passes its Subject DOWN on a child context (r.WithContext), while the
+// recoverer -- sitting outside the whole chain so it can catch a panic from
+// any of it -- only ever holds the ORIGINAL request, whose context will never
+// contain that child value. Without this, every panic-path audit row would
+// carry an empty subject, which is precisely the attribution the row exists
+// to provide (M3 follow-up #4).
+//
+// No mutex: the write (authenticate) happens-before the read (the recoverer's
+// deferred recover) on the request's own goroutine, ordered by the call stack
+// unwinding. A handler that spawns goroutines never touches this value -- and
+// a panic on one of those is not recoverable from here in any case.
+type subjectHolder struct{ subject authz.Subject }
+
+// contextWithSubjectHolder returns a child of ctx carrying h.
+func contextWithSubjectHolder(ctx context.Context, h *subjectHolder) context.Context {
+	return context.WithValue(ctx, subjectHolderKey{}, h)
+}
+
+// subjectHolderFrom returns the holder the recoverer installed, or nil for a
+// request that never went through it (a router assembled by hand in a test).
+func subjectHolderFrom(ctx context.Context) *subjectHolder {
+	h, _ := ctx.Value(subjectHolderKey{}).(*subjectHolder)
+	return h
+}
+
 // routeRule is the route->permission table's value: exactly one closed
 // authz.Permission the caller must hold, or public == true meaning the
 // route is reachable with no permission decision at all (the login flow
@@ -74,6 +109,48 @@ var routeTable = map[string]routeRule{
 	"GET /api/v1/runs":      {permission: authz.PermRunsRead},
 	"GET /api/v1/runs/{id}": {permission: authz.PermRunsRead},
 
+	// Targets are the fleet's probe CONFIGURATION, so the split is read vs
+	// write, not one permission for the whole resource: targets:read is in
+	// operator and admin only (Decision 3 -- viewer must not gain it, since
+	// viewer is what auth.anonymous.role defaults to), and every mutation
+	// needs targets:write.
+	"GET /api/v1/targets":         {permission: authz.PermTargetsRead},
+	"POST /api/v1/targets":        {permission: authz.PermTargetsWrite},
+	"GET /api/v1/targets/{id}":    {permission: authz.PermTargetsRead},
+	"PUT /api/v1/targets/{id}":    {permission: authz.PermTargetsWrite},
+	"DELETE /api/v1/targets/{id}": {permission: authz.PermTargetsWrite},
+
+	// Check definitions split read vs write exactly as targets do, for the
+	// same Decision 3 reason: checks:read stops at operator and admin, so the
+	// viewer role that auth.anonymous.role defaults to never learns what the
+	// fleet probes.
+	//
+	// POST /api/v1/checks/projection is a WRITE row despite persisting
+	// nothing. It is read-only in effect, but its body is a draft definition
+	// and its answer is the number that gates creating one -- a caller who
+	// cannot create a definition has no question to ask it, and gating it on
+	// checks:read would hand every reader a topology-derived agent count
+	// through a side door.
+	"GET /api/v1/checks":             {permission: authz.PermChecksRead},
+	"POST /api/v1/checks":            {permission: authz.PermChecksWrite},
+	"POST /api/v1/checks/projection": {permission: authz.PermChecksWrite},
+	"GET /api/v1/checks/{id}":        {permission: authz.PermChecksRead},
+	"PUT /api/v1/checks/{id}":        {permission: authz.PermChecksWrite},
+	"DELETE /api/v1/checks/{id}":     {permission: authz.PermChecksWrite},
+
+	// Schedules have no schedules:read of their own (M4 Task 2 defined
+	// exactly one schedules permission): reading a cadence tells you nothing
+	// the definition it belongs to does not already tell you, so the read
+	// side rides on checks:read and only mutations need schedules:write. A
+	// role holding schedules:write but not checks:read can therefore change a
+	// cadence it cannot list -- deliberate, and the reason the built-in
+	// operator role holds both.
+	"GET /api/v1/schedules":         {permission: authz.PermChecksRead},
+	"POST /api/v1/schedules":        {permission: authz.PermSchedulesWrite},
+	"GET /api/v1/schedules/{id}":    {permission: authz.PermChecksRead},
+	"PUT /api/v1/schedules/{id}":    {permission: authz.PermSchedulesWrite},
+	"DELETE /api/v1/schedules/{id}": {permission: authz.PermSchedulesWrite},
+
 	"GET /api/v1/rbac/permissions":      {permission: authz.PermRBACManage},
 	"GET /api/v1/rbac/roles":            {permission: authz.PermRBACManage},
 	"POST /api/v1/rbac/roles":           {permission: authz.PermRBACManage},
@@ -86,6 +163,19 @@ var routeTable = map[string]routeRule{
 	"POST /api/v1/tokens":        {permission: authz.PermTokensManage},
 	"DELETE /api/v1/tokens/{id}": {permission: authz.PermTokensManage},
 
+	// One permission gates the WHOLE socket, every multiplexed topic
+	// included -- ws.Hub never receives an authz.Subject, so its subscribe
+	// path (hub.go's topicAllowed/subscribe) decides on the topic NAME
+	// alone and cannot be per-topic-authorized from here. Consequence, made
+	// explicit by M4 Task 2 (M3 follow-up #10): a custom role holding only
+	// runs:read cannot open the socket to watch its own run's progress and
+	// must poll GET /api/v1/runs/{id} instead; conversely events:read alone
+	// already covers run:{id} topics. Lowering this row to runs:read would
+	// hand every run watcher the "live" events stream too -- a real
+	// widening. Splitting it properly is a hub change (subject-aware
+	// subscribe), not a routeTable change. Pinned by
+	// TestWSRequiresEventsReadEvenForRunWatching and documented in
+	// SECURITY.md §10.2.
 	"GET /ws": {permission: authz.PermEventsRead},
 }
 
@@ -157,6 +247,14 @@ func (s *Server) authenticate(next http.Handler) http.Handler {
 		default:
 			subject = authz.Subject{}
 			s.metrics.AuthRequests.WithLabelValues(mode, authResultLabel(err)).Inc()
+		}
+
+		// Hand the resolved subject back UP to the recoverer as well, which
+		// sits outside this middleware and cannot see the child context
+		// below (subjectHolder's doc comment). Nil for a request that never
+		// went through the recoverer.
+		if h := subjectHolderFrom(r.Context()); h != nil {
+			h.subject = subject
 		}
 
 		next.ServeHTTP(w, r.WithContext(contextWithSubject(r.Context(), subject)))

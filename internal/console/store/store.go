@@ -10,11 +10,59 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/EsDmitrii/kconmon-ng/internal/console/metrics"
 )
 
 // DB is an open pool plus the migration state that was applied to it.
 type DB struct {
 	pool *pgxpool.Pool
+	// m meters the auth-path queries (auth.go). It is nil for a DB nobody
+	// called SetMetrics on -- every integration test, and any embedding with
+	// no registry -- and observe is a no-op in that case. eventStore
+	// (events.go) demands a non-nil Metrics in its constructor instead; *DB
+	// cannot, because Open has no Metrics parameter and is called from
+	// contexts (migrations, tests) that have no registry to hand it.
+	m *metrics.Metrics
+}
+
+// SetMetrics attaches m to db, so every auth-path query it serves is counted
+// and timed. Call it once, immediately after Open and before db is shared
+// with anything else: it is a plain field write with no synchronization, and
+// the only safe moment to do it is while db is still owned by one goroutine.
+func (db *DB) SetMetrics(m *metrics.Metrics) {
+	db.m = m
+}
+
+// observe records the StoreQueryDuration / StoreQueries pair for one query,
+// success or failure, which is what makes StoreQueries a true call count. A
+// no-op when no Metrics was attached -- see DB.m.
+func (db *DB) observe(query string, start time.Time, result string) {
+	if db.m == nil {
+		return
+	}
+	db.m.StoreQueryDuration.WithLabelValues(query).Observe(time.Since(start).Seconds())
+	db.m.StoreQueries.WithLabelValues(query, result).Inc()
+}
+
+// queryResult classifies one query's outcome into the closed {ok, conflict,
+// error} label set. A unique-constraint conflict is "conflict", matching
+// InsertEvent's use of it for ON CONFLICT DO NOTHING. A miss -- ErrNotFound,
+// whether from pgx.ErrNoRows or from a zero-row UPDATE -- is "ok", NOT
+// "error": an unknown username or an unrecognized token hash is a normal
+// outcome of an authentication attempt, and counting it as a store error
+// would make store_queries_total{result="error"} alarm on nothing more than
+// someone mistyping a login. Whether that miss mattered is the authn layer's
+// question, and AuthRequests{result="invalid"} is where it is answered.
+func queryResult(err error) string {
+	switch {
+	case err == nil, errors.Is(err, ErrNotFound):
+		return resultOK
+	case errors.Is(err, ErrAlreadyExists):
+		return resultConflict
+	default:
+		return resultError
+	}
 }
 
 // Open dials dsn, applies migrations when migrate is true, and returns a DB.

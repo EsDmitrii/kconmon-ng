@@ -18,7 +18,12 @@ var builtinRoles = map[string][]Permission{
 		PermRunsRead,
 	},
 
-	// operator adds the ability to trigger diagnostic runs.
+	// operator adds the ability to trigger diagnostic runs, plus M4's
+	// targets/checks/schedules authority (Decision 3). The five M4
+	// permissions stop here and at admin: viewer must not gain them, since
+	// viewer is what auth.anonymous.role defaults to, and alert-editor is an
+	// M7 alerting placeholder with no reason to reconfigure the fleet's
+	// probes.
 	"operator": {
 		PermTopologyRead,
 		PermMatrixRead,
@@ -26,13 +31,21 @@ var builtinRoles = map[string][]Permission{
 		PermPromQLQuery,
 		PermRunsRead,
 		PermRunsCreate,
+		PermTargetsRead,
+		PermTargetsWrite,
+		PermChecksRead,
+		PermChecksWrite,
+		PermSchedulesWrite,
 	},
 
 	// alert-editor has no alerting permissions yet — those land in M7. The
-	// role exists now, identical to operator, so bindings written today
-	// (e.g. via the roles table in Task 12) stay valid once alerting
-	// permissions are added; it is not a lie, it is a placeholder with an
-	// honest, currently-equal permission set.
+	// role exists now so bindings written today (e.g. via the roles table in
+	// Task 12) stay valid once alerting permissions are added; it is not a
+	// lie, it is a placeholder with an honest permission set. It was
+	// identical to operator through M3; M4 deliberately did NOT give it the
+	// targets/checks/schedules permissions (Decision 3), so the two roles
+	// have diverged — an alert editor reconfiguring what the fleet probes is
+	// not what the name promises.
 	"alert-editor": {
 		PermTopologyRead,
 		PermMatrixRead,

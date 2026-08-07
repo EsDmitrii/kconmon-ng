@@ -41,6 +41,10 @@ type Metrics struct {
 
 	// Persistence (M3). query is a closed set of sqlc method names; result is
 	// ok|conflict|error. No table, row-count, user or run-ID labels anywhere.
+	// StorePoolConns' state is its own closed set (acquired, idle, total) and
+	// is written by exactly one owner, store.PoolStatsPoller, spawned by
+	// cmd/console alongside the retention pruner -- nothing else samples the
+	// pool, so the gauge never has two writers disagreeing about it.
 	StoreQueries       *prometheus.CounterVec
 	StoreQueryDuration *prometheus.HistogramVec
 	StorePoolConns     *prometheus.GaugeVec
@@ -66,6 +70,14 @@ type Metrics struct {
 	// requires: a full buffer must never block or fail the request it
 	// describes, so it drops the entry and counts it here instead.
 	AuditDropped *prometheus.CounterVec
+
+	// ProjectionGuardFailOpen counts definition writes the cardinality
+	// projection guard ALLOWED because the topology could not be read (M4
+	// Task 4, Decision 8: the guard fails open on a backend error and
+	// increments a metric so failing-open is visible rather than silent --
+	// a controller outage must never become a config-write outage, but it
+	// must be alertable). Zero labels.
+	ProjectionGuardFailOpen *prometheus.CounterVec
 
 	// Diagnostics runner (M3, Task 22): checks.Runner's fan-out lifecycle.
 	// Closed label sets, same convention as WSTopics -- a run ID must never
@@ -169,6 +181,10 @@ func New(prefix string, reg prometheus.Registerer) *Metrics {
 		AuditDropped: f.NewCounterVec(prometheus.CounterOpts{
 			Name: ns + "_audit_dropped_total",
 			Help: "Audit log entries dropped because the async write buffer was full.",
+		}, []string{}),
+		ProjectionGuardFailOpen: f.NewCounterVec(prometheus.CounterOpts{
+			Name: ns + "_projection_guard_failopen_total",
+			Help: "Definition writes the cardinality projection guard allowed because the topology was unreadable (fail-open, Decision 8).",
 		}, []string{}),
 		RunsTotal: f.NewCounterVec(prometheus.CounterOpts{
 			Name: ns + "_runs_total",

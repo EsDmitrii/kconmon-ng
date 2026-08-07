@@ -32,7 +32,21 @@ func TestViewerCoversTheM1M2Surface(t *testing.T) {
 	}
 }
 
-func TestOperatorAddsRunsCreateAndNothingElse(t *testing.T) {
+// m4Permissions is the set M4 added for the targets/checks/schedules surface.
+// Listed here once, in AllPermissions order, and reused by every grant
+// assertion below so the role table is pinned from a single place.
+var m4Permissions = []authz.Permission{
+	authz.PermTargetsRead,
+	authz.PermTargetsWrite,
+	authz.PermChecksRead,
+	authz.PermChecksWrite,
+	authz.PermSchedulesWrite,
+}
+
+// TestOperatorAddsWriteAuthorityOverViewer pins operator - viewer as an
+// EXACT set, not a superset check: runs:create plus the five M4 permissions,
+// nothing more. Widening operator silently is exactly what this refuses.
+func TestOperatorAddsWriteAuthorityOverViewer(t *testing.T) {
 	t.Parallel()
 
 	policy := authz.NewPolicy(nil)
@@ -54,13 +68,58 @@ func TestOperatorAddsRunsCreateAndNothingElse(t *testing.T) {
 		}
 	}
 
-	if len(diff) != 1 || diff[0] != authz.PermRunsCreate {
-		t.Fatalf("operator - viewer = %v, want [runs:create]", diff)
+	// PermissionsFor returns AllPermissions order, so this expectation is
+	// order-stable without sorting.
+	want := append([]authz.Permission{authz.PermRunsCreate}, m4Permissions...)
+	if len(diff) != len(want) {
+		t.Fatalf("operator - viewer = %v, want %v", diff, want)
+	}
+	for i := range want {
+		if diff[i] != want[i] {
+			t.Fatalf("operator - viewer = %v, want %v", diff, want)
+		}
 	}
 
 	for _, p := range viewerPerms {
 		if !policy.Can(operator, p) {
 			t.Errorf("operator lost viewer permission %q", p)
+		}
+	}
+}
+
+// TestM4PermissionsAreDeniedToViewerAndAlertEditor is Decision 3 as a test.
+// viewer is the anonymous default (auth.mode=anonymous +
+// auth.anonymous.role=viewer), so granting it targets:read would silently
+// hand an unauthenticated console the fleet's probe configuration -- and
+// targets:write would hand it the authority to point N agents at an
+// arbitrary address. alert-editor is a placeholder for M7 alerting and has
+// no business mutating targets either.
+func TestM4PermissionsAreDeniedToViewerAndAlertEditor(t *testing.T) {
+	t.Parallel()
+
+	policy := authz.NewPolicy(nil)
+	for _, role := range []string{"viewer", "alert-editor"} {
+		s := authz.Subject{Kind: authz.SubjectUser, ID: "x", Roles: []string{role}}
+		for _, perm := range m4Permissions {
+			if policy.Can(s, perm) {
+				t.Errorf("%s holds %q, want deny (M4 Decision 3)", role, perm)
+			}
+		}
+	}
+}
+
+// TestM4PermissionsAreGrantedToOperatorAndAdmin is the other half of
+// Decision 3.
+func TestM4PermissionsAreGrantedToOperatorAndAdmin(t *testing.T) {
+	t.Parallel()
+
+	policy := authz.NewPolicy(nil)
+	for _, role := range []string{"operator", "admin"} {
+		s := authz.Subject{Kind: authz.SubjectUser, ID: "x", Roles: []string{role}}
+		for _, perm := range m4Permissions {
+			if !policy.Can(s, perm) {
+				t.Errorf("%s denied %q, want grant", role, perm)
+			}
 		}
 	}
 }
@@ -83,6 +142,11 @@ func TestAdminHoldsEveryPermission(t *testing.T) {
 		authz.PermRBACManage,
 		authz.PermTokensManage,
 		authz.PermSettingsWrite,
+		authz.PermTargetsRead,
+		authz.PermTargetsWrite,
+		authz.PermChecksRead,
+		authz.PermChecksWrite,
+		authz.PermSchedulesWrite,
 	}
 
 	if len(authz.AllPermissions) != len(expected) {

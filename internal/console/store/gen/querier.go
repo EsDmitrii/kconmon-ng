@@ -13,6 +13,11 @@ import (
 type Querier interface {
 	CountUsers(ctx context.Context) (int64, error)
 	CreateBinding(ctx context.Context, arg CreateBindingParams) (RoleBinding, error)
+	// destination_target_id is NULL for every destination_kind other than
+	// 'target'; a non-NULL value naming no targets row fails with a
+	// foreign_key_violation, which the Go layer reports as ErrNotFound (the
+	// reference is missing) rather than ErrInUse (which is the DELETE direction).
+	CreateDefinition(ctx context.Context, arg CreateDefinitionParams) (CheckDefinition, error)
 	// status is always the literal 'pending' -- a caller never gets to create a
 	// run in any other status; the lifecycle only ever advances it forward via
 	// MarkRunStarted and FinishRun below. id is caller-supplied (not DB-default,
@@ -20,6 +25,12 @@ type Querier interface {
 	// it can also be the ephemeral WS "run:{id}" topic name (Task 20) without a
 	// round trip first.
 	CreateRun(ctx context.Context, arg CreateRunParams) (CheckRun, error)
+	CreateSchedule(ctx context.Context, arg CreateScheduleParams) (CheckSchedule, error)
+	// id is caller-supplied, same as CreateRun (checks.sql): targets.id has no
+	// column DEFAULT, so the Go layer mints the UUID. That also means a caller
+	// retrying a create with the same id gets ErrAlreadyExists rather than a
+	// second row.
+	CreateTarget(ctx context.Context, arg CreateTargetParams) (Target, error)
 	CreateToken(ctx context.Context, arg CreateTokenParams) (CreateTokenRow, error)
 	CreateUser(ctx context.Context, arg CreateUserParams) (User, error)
 	// al alias on the subquery's own FROM: see DeleteTopologyEventsBefore's
@@ -27,6 +38,9 @@ type Querier interface {
 	// real PostgreSQL resolves the unaliased form unambiguously.
 	DeleteAuditEntriesBefore(ctx context.Context, arg DeleteAuditEntriesBeforeParams) (int64, error)
 	DeleteBinding(ctx context.Context, id int64) (int64, error)
+	// ON DELETE CASCADE on check_schedules.definition_id removes the definition's
+	// schedules along with it -- no separate schedule sweep exists or is needed.
+	DeleteDefinition(ctx context.Context, id pgtype.UUID) (int64, error)
 	DeleteRole(ctx context.Context, name string) (int64, error)
 	// cr alias on the subquery's own FROM: sqlc v1.31.1's own query analyzer
 	// (not real PostgreSQL -- verified this exact self-join resolves
@@ -37,6 +51,11 @@ type Querier interface {
 	// means deleting the run row here is enough to also drop its results -- no
 	// separate check_results sweep exists or is needed.
 	DeleteRunsBefore(ctx context.Context, arg DeleteRunsBeforeParams) (int64, error)
+	DeleteSchedule(ctx context.Context, id pgtype.UUID) (int64, error)
+	// No cascade of any kind: check_definitions.destination_target_id is
+	// ON DELETE RESTRICT, so this statement fails with a foreign_key_violation
+	// (mapped to ErrInUse) while any definition still probes the target.
+	DeleteTarget(ctx context.Context, id pgtype.UUID) (int64, error)
 	// The inner subquery aliases topology_events as te: sqlc v1.31.1's own query
 	// analyzer (not real PostgreSQL -- verified this exact self-join resolves
 	// unambiguously against a live postgres:17-alpine) reports "column reference
@@ -52,8 +71,11 @@ type Querier interface {
 	// 'pending' does: a run that never started, or already finished, is left
 	// untouched (0 rows) rather than silently overwritten by a retry.
 	FinishRun(ctx context.Context, arg FinishRunParams) (int64, error)
+	GetDefinition(ctx context.Context, id pgtype.UUID) (CheckDefinition, error)
 	GetRun(ctx context.Context, id pgtype.UUID) (CheckRun, error)
 	GetRunResults(ctx context.Context, runID pgtype.UUID) ([]CheckResult, error)
+	GetSchedule(ctx context.Context, id pgtype.UUID) (CheckSchedule, error)
+	GetTarget(ctx context.Context, id pgtype.UUID) (Target, error)
 	// token_hash is deliberately not in the SELECT list, even here: the caller
 	// already knows the hash it looked up by, and there is never a reason to hand
 	// a hash value back across this boundary.
@@ -78,6 +100,18 @@ type Querier interface {
 	// group binding for the caller's group membership in a single query, rather
 	// than one query per group.
 	ListBindingsForSubject(ctx context.Context, arg ListBindingsForSubjectParams) ([]RoleBinding, error)
+	// The target_id filter is what check_definitions_target_idx exists for: the
+	// "which definitions would this target's deletion break?" question an admin
+	// API asks before it ever attempts the DELETE.
+	ListDefinitions(ctx context.Context, arg ListDefinitionsParams) ([]CheckDefinition, error)
+	// The WHERE clause is written to match check_schedules_due_idx exactly --
+	// "enabled" bare (the index's own predicate) and a plain range test on
+	// next_fire_at (its key), nothing else. next_fire_at IS NOT NULL is left
+	// implicit: a NULL never satisfies <=, and spelling it out would add a clause
+	// the partial index cannot be matched against. ORDER BY next_fire_at is the
+	// index's own order, so the scheduler's due poll is an index range scan with
+	// no sort, however large the table grows.
+	ListDueSchedules(ctx context.Context, arg ListDueSchedulesParams) ([]CheckSchedule, error)
 	ListRoles(ctx context.Context) ([]Role, error)
 	// Same keyset cursor shape as ListTopologyEvents/ListAuditEntries: (created_at,
 	// id) DESC, seeked via the row-tuple comparison below against
@@ -85,6 +119,13 @@ type Querier interface {
 	// need to be a meaningful sort order, only a stable deterministic tie-breaker
 	// for rows sharing one created_at.
 	ListRuns(ctx context.Context, arg ListRunsParams) ([]CheckRun, error)
+	ListSchedules(ctx context.Context, arg ListSchedulesParams) ([]CheckSchedule, error)
+	// Same keyset cursor shape as ListRuns: (created_at, id) DESC seeked via a
+	// row-tuple comparison. targets carries no (created_at DESC, id DESC) index
+	// -- it is a curated configuration table an operator maintains by hand, sized
+	// in the tens, so the ordering is a sort over a handful of rows, not a scan
+	// the planner needs help with.
+	ListTargets(ctx context.Context, arg ListTargetsParams) ([]Target, error)
 	// token_hash is NEVER selected here: this result set is exposed to admin UI
 	// and API responses, and the hash must never leave the database once written.
 	ListTokens(ctx context.Context) ([]ListTokensRow, error)
@@ -98,6 +139,13 @@ type Querier interface {
 	// so a caller can tell "no such run" apart from "wrong state" -- see
 	// checks.go's disambiguating GetRun lookup on rows == 0.
 	MarkRunStarted(ctx context.Context, id pgtype.UUID) (int64, error)
+	// The scheduler's post-dispatch bookkeeping: stamp what just fired and when
+	// the next fire is due, in one UPDATE, so a reader never sees a schedule whose
+	// last_fired_at moved while next_fire_at still points at the fire that already
+	// happened (which would make ListDueSchedules hand it out a second time).
+	// next_fire_at = NULL retires the schedule from the due index without
+	// disabling it -- the terminal state of a kind='once' schedule.
+	MarkScheduleFired(ctx context.Context, arg MarkScheduleFiredParams) (int64, error)
 	RevokeToken(ctx context.Context, id pgtype.UUID) (int64, error)
 	SetUserDisabled(ctx context.Context, arg SetUserDisabledParams) (int64, error)
 	// Callers (the authn layer, Task 14) must debounce this to at most once per
@@ -105,6 +153,19 @@ type Querier interface {
 	// query is intentionally a plain, cheap single-row UPDATE with no such logic
 	// baked in, so the debounce policy stays entirely in the caller's hands.
 	TouchTokenLastUsed(ctx context.Context, id pgtype.UUID) (int64, error)
+	// Full replace, same contract as UpdateTarget.
+	UpdateDefinition(ctx context.Context, arg UpdateDefinitionParams) (CheckDefinition, error)
+	// definition_id is deliberately NOT updatable: re-pointing a schedule at a
+	// different definition is a different schedule, and letting it move would
+	// silently reinterpret last_fired_at/next_fire_at against a cadence they were
+	// never computed for.
+	UpdateSchedule(ctx context.Context, arg UpdateScheduleParams) (CheckSchedule, error)
+	// A full replace, not a patch: every mutable column is written on every call,
+	// so the caller's TargetInput is the whole truth about the row afterwards and
+	// there is no "field absent means keep" ambiguity to get wrong. :one (not
+	// :execrows) so the refreshed updated_at comes back without a second round
+	// trip; an id matching nothing yields pgx.ErrNoRows -> ErrNotFound.
+	UpdateTarget(ctx context.Context, arg UpdateTargetParams) (Target, error)
 	UpdateUserPassword(ctx context.Context, arg UpdateUserPasswordParams) (int64, error)
 	UpsertRole(ctx context.Context, arg UpsertRoleParams) (Role, error)
 	// A retried pair overwrites rather than erroring: ON CONFLICT ON CONSTRAINT

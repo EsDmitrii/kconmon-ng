@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"runtime/debug"
 	"strconv"
 	"sync/atomic"
 	"time"
@@ -97,6 +98,29 @@ type Server struct {
 	// the same convention every other optional dependency in this struct
 	// follows.
 	runner RunService
+
+	// targets backs CRUD /api/v1/targets (M4 Task 3). nil means
+	// database.mode=disabled and all five routes answer 503 -- targets are
+	// CONFIGURATION and get NO in-memory fallback (Decision 13), unlike
+	// runner.
+	targets TargetService
+
+	// definitions and schedules back CRUD /api/v1/checks and
+	// /api/v1/schedules (M4 Task 4) under the same Decision 13 rule as
+	// targets: nil = database.mode=disabled = 503, never an in-memory
+	// fallback. topology backs the projection guard -- nil means POST
+	// /api/v1/checks/projection answers 503 and the create/update guard
+	// fails open (enforceProjection, definitions.go).
+	definitions DefinitionService
+	schedules   ScheduleService
+	topology    TopologySource
+
+	// auditDropped counts the audit rows recordAudit had to throw away
+	// because the drain could not keep up, for the shutdown log flushAudit
+	// writes. It duplicates metrics.AuditDropped on purpose: a pod that is
+	// going away may never be scraped again, and the count then only exists
+	// in its own logs.
+	auditDropped atomic.Int64
 }
 
 // Deps is everything NewServer needs. Every field except Config, Metrics,
@@ -176,6 +200,26 @@ type Deps struct {
 	// Store when database.mode is disabled, Decision 15: runs still work
 	// in-memory). nil means all three routes answer 503.
 	Runner RunService
+
+	// Targets backs CRUD /api/v1/targets. nil means database.mode=disabled
+	// and all five routes answer 503 -- targets are CONFIGURATION and get NO
+	// in-memory fallback (Plan Decision 13), unlike Runner.
+	Targets TargetService
+
+	// Definitions backs CRUD /api/v1/checks and Schedules backs CRUD
+	// /api/v1/schedules. Same Decision 13 rule as Targets: nil means
+	// database.mode=disabled and every one of those routes answers 503.
+	Definitions DefinitionService
+	Schedules   ScheduleService
+
+	// Topology is the snapshot source the projection guard resolves a
+	// definition's agent selection against (Decision 12). Left nil, NewServer
+	// falls back to Controller when one is wired -- which is what production
+	// gets, with no extra wiring in cmd/console -- so this field exists
+	// chiefly so a test can pin a FIXED topology without a controller. nil
+	// with no Controller either means POST /api/v1/checks/projection answers
+	// 503 and the create/update guard fails open (see enforceProjection).
+	Topology TopologySource
 }
 
 // NewServer wires the router, middleware, and routes from d. Controller,
@@ -202,7 +246,21 @@ func NewServer(d Deps) *Server { //nolint:gocritic // hugeParam: Deps is the pin
 		authenticator: authenticator, policy: policy, roles: d.Roles, sessions: d.Sessions,
 		users: d.Users, oidc: d.OIDC,
 		audit: d.Audit, roleAdmin: d.RBAC, tokens: d.Tokens,
-		runner: d.Runner,
+		runner: d.Runner, targets: d.Targets,
+		definitions: d.Definitions, schedules: d.Schedules, topology: d.Topology,
+	}
+
+	// The projection guard reads the same topology GET /api/v1/topology
+	// serves, so a console with a controller configured needs no second
+	// dependency wired for it. Assigned through the explicit nil check rather
+	// than "d.Topology or d.Controller" in one expression because
+	// *controllerclient.Client is a CONCRETE pointer: assigning a nil one
+	// straight into the interface field would produce a typed-nil that
+	// compares != nil, and projectDefinition's own nil gate would then call
+	// Topology on a nil receiver instead of reporting errTopologyUnavailable
+	// (the exact trap Deps.Events' doc comment documents).
+	if s.topology == nil && d.Controller != nil {
+		s.topology = d.Controller
 	}
 
 	// The audit drain goroutine (runAuditDrain, audit.go) is started here,
@@ -218,7 +276,15 @@ func NewServer(d Deps) *Server { //nolint:gocritic // hugeParam: Deps is the pin
 	}
 
 	r := chi.NewRouter()
-	r.Use(s.instrument)
+	// Order is load-bearing. instrument stays OUTERMOST so a panic-born 500
+	// is still counted with its route pattern (the recoverer writes the
+	// status through instrument's own statusRecorder); recoverer sits
+	// immediately inside it so every other middleware -- authenticate,
+	// authorize, the audit wrapper -- and every handler is inside its
+	// deferred recover. M3 follow-up #4: M4 roughly doubles this package's
+	// mutating surface, and an unrecovered panic there would otherwise drop
+	// the connection with no response and no audit row.
+	r.Use(s.instrument, s.recoverer)
 
 	// Never authenticated: kubelet probes and the Prometheus scrape would
 	// fail every pod if these required credentials (task-16-brief.md route
@@ -250,6 +316,29 @@ func NewServer(d Deps) *Server { //nolint:gocritic // hugeParam: Deps is the pin
 		api.Post("/api/v1/runs", s.handleRunsCreate)
 		api.Get("/api/v1/runs", s.handleRunsList)
 		api.Get("/api/v1/runs/{id}", s.handleRunsGet)
+
+		api.Get("/api/v1/targets", s.handleTargetsList)
+		api.Post("/api/v1/targets", s.handleTargetsCreate)
+		api.Get("/api/v1/targets/{id}", s.handleTargetsGet)
+		api.Put("/api/v1/targets/{id}", s.handleTargetsUpdate)
+		api.Delete("/api/v1/targets/{id}", s.handleTargetsDelete)
+
+		// /api/v1/checks/projection is registered BEFORE the {id} routes for
+		// readability only -- chi matches a static segment ahead of a
+		// wildcard regardless of registration order, and there is no POST
+		// /api/v1/checks/{id} for it to compete with in any case.
+		api.Get("/api/v1/checks", s.handleChecksList)
+		api.Post("/api/v1/checks", s.handleChecksCreate)
+		api.Post("/api/v1/checks/projection", s.handleChecksProjection)
+		api.Get("/api/v1/checks/{id}", s.handleChecksGet)
+		api.Put("/api/v1/checks/{id}", s.handleChecksUpdate)
+		api.Delete("/api/v1/checks/{id}", s.handleChecksDelete)
+
+		api.Get("/api/v1/schedules", s.handleSchedulesList)
+		api.Post("/api/v1/schedules", s.handleSchedulesCreate)
+		api.Get("/api/v1/schedules/{id}", s.handleSchedulesGet)
+		api.Put("/api/v1/schedules/{id}", s.handleSchedulesUpdate)
+		api.Delete("/api/v1/schedules/{id}", s.handleSchedulesDelete)
 
 		api.Get("/api/v1/rbac/permissions", s.handleRBACPermissions)
 		api.Get("/api/v1/rbac/roles", s.handleRBACRolesList)
@@ -316,7 +405,12 @@ func (s *Server) Run(ctx context.Context) error {
 	case <-ctx.Done():
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		return srv.Shutdown(shutdownCtx)
+		err := srv.Shutdown(shutdownCtx)
+		// Shutdown has already drained the in-flight requests, so nothing new
+		// can be enqueued by the time this runs -- whatever is still in the
+		// buffer is the last of it.
+		s.flushAudit(shutdownCtx)
+		return err
 	case err := <-errCh:
 		if errors.Is(err, http.ErrServerClosed) {
 			return nil
@@ -446,6 +540,113 @@ func (r *statusRecorder) WriteHeader(code int) {
 // not supported" — embedding an interface promotes only that interface's
 // methods, so the recorder hides net/http's Hijacker.
 func (r *statusRecorder) Unwrap() http.ResponseWriter { return r.ResponseWriter }
+
+// panicRecorder is the ResponseWriter wrapper s.recoverer installs so the
+// panic path can tell whether the handler already committed a status line
+// before it blew up: writing a second header would be both useless and a
+// "superfluous WriteHeader call" from net/http, and the partial body already
+// on the wire cannot be taken back.
+//
+// Unwrap is NOT optional. gorilla's /ws upgrade hijacks the connection
+// through http.NewResponseController, which finds the real http.Hijacker only
+// by following Unwrap through every wrapper in the chain -- embedding an
+// interface promotes that interface's methods and hides net/http's Hijacker.
+// Without this method every /ws upgrade fails with "websocket: hijack:
+// feature not supported". Same standing warning as statusRecorder's, and this
+// wrapper sits in front of statusRecorder on the exact same path.
+type panicRecorder struct {
+	http.ResponseWriter
+	wrote bool
+}
+
+func (r *panicRecorder) WriteHeader(code int) {
+	r.wrote = true
+	r.ResponseWriter.WriteHeader(code)
+}
+
+// Write marks the response committed too: a handler that writes a body
+// without an explicit WriteHeader has still sent 200 and its headers.
+func (r *panicRecorder) Write(b []byte) (int, error) {
+	r.wrote = true
+	return r.ResponseWriter.Write(b) //nolint:wrapcheck // pass-through wrapper, wrapping would corrupt the io.Writer contract
+}
+
+func (r *panicRecorder) Unwrap() http.ResponseWriter { return r.ResponseWriter }
+
+// recoverer turns a panic from any inner middleware or handler into a 500
+// problem+json AND one audit row with outcome "error" -- M3 follow-up #4.
+// chi's own middleware.Recoverer does the first half only; the audit row is
+// the half that matters here, because a 500 nobody can attribute to a subject
+// is the one class of failure the audit log exists to catch.
+//
+// The subject comes from the holder authenticate fills in, not from
+// SubjectFrom(r.Context()): authenticate hands its subject DOWN on a child
+// context, and this middleware only ever holds the original request, so the
+// child context is unreachable from here (see subjectHolder, middleware_auth.go).
+//
+// http.ErrAbortHandler is re-panicked untouched, exactly as net/http and chi
+// specify: it is the documented "abort this connection quietly" signal, not a
+// bug, and swallowing it would turn every deliberate abort into a bogus 500
+// plus a bogus audit row.
+func (s *Server) recoverer(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		holder := &subjectHolder{}
+		r = r.WithContext(contextWithSubjectHolder(r.Context(), holder))
+		rec := &panicRecorder{ResponseWriter: w}
+
+		defer func() {
+			rv := recover()
+			if rv == nil {
+				return
+			}
+			if err, ok := rv.(error); ok && errors.Is(err, http.ErrAbortHandler) {
+				panic(rv)
+			}
+
+			slog.Error("httpapi: recovered from panic in handler", //nolint:gosec // G706: structured slog fields, not string-built log injection
+				"method", r.Method, "pattern", chi.RouteContext(r.Context()).RoutePattern(),
+				"panic", fmt.Sprint(rv), "stack", string(debug.Stack()))
+			s.recordAudit(r, holder.subject, auditOutcomeError, nil)
+
+			if !rec.wrote {
+				// The panic value never reaches the client: it routinely
+				// carries internal state, and a 500 has nothing actionable to
+				// say beyond its own status.
+				writeProblem(rec, http.StatusInternalServerError, "internal error", "")
+			}
+		}()
+
+		next.ServeHTTP(rec, r)
+	})
+}
+
+// flushAudit gives the audit drain a bounded window to write whatever is
+// still queued at shutdown, then logs how many rows this process dropped in
+// total. A no-op when no Auditor is wired (database.mode=disabled: there is
+// no drain goroutine and s.auditCh is nil).
+//
+// It does not close s.auditCh -- the drain keeps the never-stopped,
+// fire-and-forget lifecycle NewServer documents, and closing a channel other
+// goroutines may still send on would panic. Waiting for the buffer to empty
+// is therefore best-effort by construction: an entry the drain has already
+// dequeued but not yet written is invisible here.
+func (s *Server) flushAudit(ctx context.Context) {
+	if s.audit == nil {
+		return
+	}
+	ticker := time.NewTicker(5 * time.Millisecond)
+	defer ticker.Stop()
+	for len(s.auditCh) > 0 {
+		select {
+		case <-ctx.Done():
+			slog.Warn("httpapi: audit flush timed out at shutdown",
+				"queued", len(s.auditCh), "dropped", s.auditDropped.Load())
+			return
+		case <-ticker.C:
+		}
+	}
+	slog.Info("httpapi: audit drain flushed at shutdown", "dropped", s.auditDropped.Load())
+}
 
 // instrument records request count and duration keyed by method + route
 // pattern (bounded cardinality) + status.

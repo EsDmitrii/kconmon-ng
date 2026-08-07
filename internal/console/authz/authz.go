@@ -22,6 +22,19 @@ const (
 	PermRBACManage    Permission = "rbac:manage"
 	PermTokensManage  Permission = "tokens:manage"
 	PermSettingsWrite Permission = "settings:write"
+
+	// M4 (targets/checks/schedules). Read is split from write because the
+	// Targets page must be viewable by a role that cannot mutate the
+	// fleet's probe configuration: a write here is the authority to make N
+	// agents send traffic to an operator-chosen address, the
+	// highest-blast-radius action in the product. Granted to operator and
+	// admin only -- never to viewer, which is the anonymous default
+	// (Decision 3, roles.go).
+	PermTargetsRead    Permission = "targets:read"
+	PermTargetsWrite   Permission = "targets:write"
+	PermChecksRead     Permission = "checks:read"
+	PermChecksWrite    Permission = "checks:write"
+	PermSchedulesWrite Permission = "schedules:write"
 )
 
 // AllPermissions is every permission this build knows, in a stable order.
@@ -39,6 +52,11 @@ var AllPermissions = []Permission{
 	PermRBACManage,
 	PermTokensManage,
 	PermSettingsWrite,
+	PermTargetsRead,
+	PermTargetsWrite,
+	PermChecksRead,
+	PermChecksWrite,
+	PermSchedulesWrite,
 }
 
 // SubjectKind is how a request was authenticated.

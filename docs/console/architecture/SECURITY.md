@@ -154,6 +154,43 @@ is rejected outright (`422 "reserved role name"` — storing it would create a
 row that silently never takes effect, since the authz layer resolves
 built-ins first).
 
+**M4's five permissions stop at `operator` (Decision 3).** `targets:read`,
+`targets:write`, `checks:read`, `checks:write` and `schedules:write` are
+granted to `operator` and — via `AllPermissions` — to `admin`. They are
+granted to neither `viewer` nor `alert-editor`. `viewer` is deliberate:
+it is what `auth.anonymous.role` defaults to, so granting it `targets:read`
+would hand an unauthenticated console the fleet's probe configuration, and
+`targets:write` would hand it the authority to point N agents at an
+operator-chosen address — the highest-blast-radius action in the product.
+The visible consequence with shipped defaults: an anonymous console renders
+the Targets page as a permission-explained empty state, not a 500.
+`alert-editor` was identical to `operator` through M3 and diverges here;
+reconfiguring what the fleet probes is not what that role's name promises.
+
+**WebSocket authorization is per-connection, not per-topic.** `GET /ws`
+requires exactly one permission, `events:read`, and that single decision
+covers every topic multiplexed over the socket — `live`, `topology`,
+`matrix:*:pod`, and the ephemeral `run:{id}` topics alike. `ws.Hub` never
+receives an `authz.Subject` (`ServeWS` takes only the request; `subscribe`
+and `topicAllowed` decide on the topic *name* alone), so there is no layer
+that could gate one topic differently from another. Two consequences worth
+knowing before you write a custom role:
+
+- A role holding only `runs:read` **cannot open the socket** to watch its
+  own run's progress. It gets `403 missing permission: events:read` and must
+  fall back to polling `GET /api/v1/runs/{id}`. Grant `events:read`
+  alongside `runs:read` for any role that should watch runs live.
+- Conversely, `events:read` alone already covers `run:{id}` topics. It is
+  not a narrower grant than it looks.
+
+Lowering `/ws` to `runs:read` was considered in M4 and rejected: with
+per-connection granularity it would hand every run watcher the `live`
+events stream too, which is a genuine widening of exactly what `events:read`
+gates on `GET /api/v1/events`. Splitting the two properly means teaching the
+hub subject-aware subscribe authorization — a hub change, not a route-table
+change — and is not scheduled. Both directions are pinned by tests in
+`internal/console/httpapi/auth_test.go`.
+
 **Custom-role API guard rails**, both `422 Unprocessable Entity`:
 
 - `POST /api/v1/rbac/roles` with a name colliding with a built-in
