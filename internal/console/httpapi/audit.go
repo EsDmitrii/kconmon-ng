@@ -109,6 +109,10 @@ func (s *Server) recordAudit(r *http.Request, subject authz.Subject, outcome str
 	case s.auditCh <- job:
 	default:
 		s.metrics.AuditDropped.WithLabelValues().Inc()
+		// Counted locally as well as in the metric: flushAudit reports the
+		// total in the pod's own logs at shutdown, for the case where nobody
+		// scrapes this replica again before it goes away.
+		s.auditDropped.Add(1)
 		slog.Warn("httpapi: audit buffer full, dropping entry", "action", job.action, "outcome", job.outcome)
 	}
 }
@@ -149,6 +153,46 @@ var auditDetailAllowlist = map[string][]string{
 	"POST /api/v1/rbac/bindings": {"roleName", "subjectKind", "subjectId"},
 	"POST /api/v1/tokens":        {"name", "expiresAt"},
 	"POST /api/v1/runs":          {"type", "plane"},
+	// Targets (M4 Task 3): "name" and "kind" only, NEVER "address". This is
+	// the conscious decision the default-deny allow-list forces per mutating
+	// route -- an audit log is read by more people, and retained longer, than
+	// a target list is, and the address is the one field that names internal
+	// infrastructure (a management URL, an internal IP). Name and kind are
+	// enough to say WHICH target an operator changed; the address itself is
+	// always readable from GET /api/v1/targets/{id} by whoever holds
+	// targets:read. DELETE has no body and therefore no entry at all -- the
+	// id it names is already recorded in the row's resource column
+	// (auditResource).
+	"POST /api/v1/targets":     {"name", "kind"},
+	"PUT /api/v1/targets/{id}": {"name", "kind"},
+	// Check definitions (M4 Task 4): the same conscious choice as targets,
+	// one field further. "name", "checkType" and "sourceSelection" say WHICH
+	// definition changed and how far it fans out; "enabled" is listed because
+	// it is the single most consequential bit on the row -- it is what turns
+	// a draft into fleet-wide probe traffic, and "who enabled this" is
+	// precisely the question an audit log is read to answer.
+	// "destinationAddress" is NEVER listed, for the identical reason a
+	// target's address is not: it names internal infrastructure, and it stays
+	// readable from GET /api/v1/checks/{id} by whoever holds checks:read.
+	// "params" is not listed either -- it is an open JSON object this package
+	// never inspects, so allow-listing it would be allow-listing whatever a
+	// future check type decides to put in it, sight unseen.
+	"POST /api/v1/checks":     {"name", "checkType", "sourceSelection", "enabled"},
+	"PUT /api/v1/checks/{id}": {"name", "checkType", "sourceSelection", "enabled"},
+	// POST /api/v1/checks/projection has NO entry: it persists nothing, so
+	// there is no state change to attribute, and its body is a draft that may
+	// never be saved. It is still audited as a mutating method (it is a POST)
+	// -- with an empty {} detail, which is the honest record of "someone
+	// asked what this would project".
+	//
+	// Schedules: "definitionId" and "kind" name what was scheduled and how,
+	// "enabled" is again the bit that decides whether anything actually runs.
+	// "intervalNs" and "runAt" are left off -- the cadence itself is
+	// reconstructible from GET /api/v1/schedules/{id}, and an audit row is
+	// not the place to keep a second copy of it. DELETE carries no body and
+	// therefore no entry, its id being in the resource column already.
+	"POST /api/v1/schedules":     {"definitionId", "kind", "enabled"},
+	"PUT /api/v1/schedules/{id}": {"definitionId", "kind", "enabled"},
 }
 
 // auditDetailFor extracts action's allow-listed subset of body's top-level

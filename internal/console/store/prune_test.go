@@ -200,3 +200,127 @@ func TestRunSweepsNilErrorWhenEverySweepSucceeds(t *testing.T) {
 		t.Errorf("runSweeps: deleted = %+v, want {topology_events:1 audit_log:2}", deleted)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// PoolStatsPoller
+// ---------------------------------------------------------------------------
+
+// newFakePoller returns a poller reading from a caller-controlled poolStats,
+// with an interval short enough for a test to observe a second tick. The fake
+// is a plain func rather than a *pgxpool.Stat because pgxpool.Stat cannot be
+// constructed outside its own package -- see poolStats' doc comment.
+func newFakePoller(m *metrics.Metrics, stats func() poolStats, interval time.Duration) *PoolStatsPoller {
+	return &PoolStatsPoller{stats: stats, m: m, interval: interval}
+}
+
+// TestPoolStatsPollerObserveWritesEveryState asserts one sample lands on all
+// three StorePoolConns series -- the whole point of the ticket: the gauge was
+// registered but never written, so it read as a permanently empty pool.
+func TestPoolStatsPollerObserveWritesEveryState(t *testing.T) {
+	m := testPruneMetrics()
+	p := newFakePoller(m, func() poolStats {
+		return poolStats{acquired: 3, idle: 5, total: 8}
+	}, time.Hour)
+
+	p.observe()
+
+	for state, want := range map[string]float64{
+		poolStateAcquired: 3,
+		poolStateIdle:     5,
+		poolStateTotal:    8,
+	} {
+		if got := testutil.ToFloat64(m.StorePoolConns.WithLabelValues(state)); got != want {
+			t.Errorf("StorePoolConns(%s) = %v, want %v", state, got, want)
+		}
+	}
+}
+
+// TestPoolStatsPollerObserveOverwritesPreviousSample asserts the gauge tracks
+// the pool rather than accumulating: a Set, not an Add. A second, smaller
+// sample must lower the series.
+func TestPoolStatsPollerObserveOverwritesPreviousSample(t *testing.T) {
+	m := testPruneMetrics()
+	stats := poolStats{acquired: 9, idle: 1, total: 10}
+	p := newFakePoller(m, func() poolStats { return stats }, time.Hour)
+
+	p.observe()
+	stats = poolStats{acquired: 0, idle: 2, total: 2}
+	p.observe()
+
+	if got := testutil.ToFloat64(m.StorePoolConns.WithLabelValues(poolStateAcquired)); got != 0 {
+		t.Errorf("StorePoolConns(acquired) = %v after a 9 -> 0 sample, want 0", got)
+	}
+	if got := testutil.ToFloat64(m.StorePoolConns.WithLabelValues(poolStateTotal)); got != 2 {
+		t.Errorf("StorePoolConns(total) = %v after a 10 -> 2 sample, want 2", got)
+	}
+}
+
+// TestPoolStatsPollerRunSamplesBeforeFirstTick asserts Run writes the gauge
+// immediately, without waiting out one interval: a replica scraped in its
+// first seconds must not report zeros that are indistinguishable from a pool
+// that failed to open. The interval here is an hour, so only the pre-loop
+// sample can possibly have run.
+func TestPoolStatsPollerRunSamplesBeforeFirstTick(t *testing.T) {
+	m := testPruneMetrics()
+	sampled := make(chan struct{}, 1)
+	p := newFakePoller(m, func() poolStats {
+		select {
+		case sampled <- struct{}{}:
+		default:
+		}
+		return poolStats{acquired: 1, idle: 2, total: 3}
+	}, time.Hour)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		p.Run(ctx)
+	}()
+
+	select {
+	case <-sampled:
+	case <-time.After(2 * time.Second):
+		cancel()
+		<-done
+		t.Fatal("Run did not sample the pool before its first tick")
+	}
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run did not return after ctx cancellation")
+	}
+
+	if got := testutil.ToFloat64(m.StorePoolConns.WithLabelValues(poolStateTotal)); got != 3 {
+		t.Errorf("StorePoolConns(total) = %v, want 3", got)
+	}
+}
+
+// TestPoolStatsPollerRunKeepsSampling asserts the ticker loop keeps writing
+// after the initial sample, not just once.
+func TestPoolStatsPollerRunKeepsSampling(t *testing.T) {
+	m := testPruneMetrics()
+	samples := make(chan struct{}, 8)
+	p := newFakePoller(m, func() poolStats {
+		select {
+		case samples <- struct{}{}:
+		default:
+		}
+		return poolStats{acquired: 1, idle: 1, total: 2}
+	}, time.Millisecond)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go p.Run(ctx)
+
+	deadline := time.After(2 * time.Second)
+	for i := 0; i < 3; i++ {
+		select {
+		case <-samples:
+		case <-deadline:
+			t.Fatalf("only %d samples arrived, want at least 3", i)
+		}
+	}
+}

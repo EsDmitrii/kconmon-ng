@@ -29,6 +29,33 @@ const (
 	queryInsertTopologyEvent = "InsertTopologyEvent"
 	queryListTopologyEvents  = "ListTopologyEvents"
 
+	// The auth-path queries (auth.go): users, roles and role bindings, API
+	// tokens, audit log. Every one of *DB's auth.go methods is metered, so
+	// this list and the set of gen.Queries calls that file makes must stay
+	// exactly in step.
+	queryGetUserByID              = "GetUserByID"
+	queryGetUserByUsername        = "GetUserByUsername"
+	queryCreateUser               = "CreateUser"
+	queryUpdateUserPassword       = "UpdateUserPassword"
+	queryListUsers                = "ListUsers"
+	queryCountUsers               = "CountUsers"
+	querySetUserDisabled          = "SetUserDisabled"
+	queryListRoles                = "ListRoles"
+	queryUpsertRole               = "UpsertRole"
+	queryDeleteRole               = "DeleteRole"
+	queryListBindingsForSubject   = "ListBindingsForSubject"
+	queryListBindings             = "ListBindings"
+	queryCreateBinding            = "CreateBinding"
+	queryDeleteBinding            = "DeleteBinding"
+	queryGetTokenByHash           = "GetTokenByHash"
+	queryCreateToken              = "CreateToken"
+	queryListTokens               = "ListTokens"
+	queryRevokeToken              = "RevokeToken"
+	queryTouchTokenLastUsed       = "TouchTokenLastUsed"
+	queryInsertAuditEntry         = "InsertAuditEntry"
+	queryListAuditEntries         = "ListAuditEntries"
+	queryDeleteAuditEntriesBefore = "DeleteAuditEntriesBefore"
+
 	resultOK       = "ok"
 	resultConflict = "conflict"
 	resultError    = "error"

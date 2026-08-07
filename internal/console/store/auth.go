@@ -193,7 +193,9 @@ func (db *DB) GetUserByID(ctx context.Context, id string) (User, error) {
 	if err != nil {
 		return User{}, fmt.Errorf("store: get user by id: %w", err)
 	}
+	start := time.Now()
 	u, err := gen.New(db.pool).GetUserByID(ctx, uid)
+	db.observe(queryGetUserByID, start, queryResult(wrapNoRows(err)))
 	if err != nil {
 		return User{}, fmt.Errorf("store: get user by id: %w", wrapNoRows(err))
 	}
@@ -201,7 +203,9 @@ func (db *DB) GetUserByID(ctx context.Context, id string) (User, error) {
 }
 
 func (db *DB) GetUserByUsername(ctx context.Context, username string) (User, error) {
+	start := time.Now()
 	u, err := gen.New(db.pool).GetUserByUsername(ctx, username)
+	db.observe(queryGetUserByUsername, start, queryResult(wrapNoRows(err)))
 	if err != nil {
 		return User{}, fmt.Errorf("store: get user by username: %w", wrapNoRows(err))
 	}
@@ -209,11 +213,13 @@ func (db *DB) GetUserByUsername(ctx context.Context, username string) (User, err
 }
 
 func (db *DB) CreateUser(ctx context.Context, username, passwordHash, displayName string) (User, error) {
+	start := time.Now()
 	u, err := gen.New(db.pool).CreateUser(ctx, gen.CreateUserParams{
 		Username:     username,
 		PasswordHash: passwordHash,
 		DisplayName:  displayName,
 	})
+	db.observe(queryCreateUser, start, queryResult(wrapUniqueViolation(err)))
 	if err != nil {
 		return User{}, fmt.Errorf("store: create user: %w", wrapUniqueViolation(err))
 	}
@@ -225,10 +231,12 @@ func (db *DB) UpdateUserPassword(ctx context.Context, id, passwordHash string) e
 	if err != nil {
 		return fmt.Errorf("store: update user password: %w", err)
 	}
+	start := time.Now()
 	rows, err := gen.New(db.pool).UpdateUserPassword(ctx, gen.UpdateUserPasswordParams{
 		ID:           uid,
 		PasswordHash: passwordHash,
 	})
+	db.observe(queryUpdateUserPassword, start, queryResult(err))
 	if err != nil {
 		return fmt.Errorf("store: update user password: %w", err)
 	}
@@ -239,7 +247,9 @@ func (db *DB) UpdateUserPassword(ctx context.Context, id, passwordHash string) e
 }
 
 func (db *DB) ListUsers(ctx context.Context) ([]User, error) {
+	start := time.Now()
 	rows, err := gen.New(db.pool).ListUsers(ctx)
+	db.observe(queryListUsers, start, queryResult(err))
 	if err != nil {
 		return nil, fmt.Errorf("store: list users: %w", err)
 	}
@@ -251,7 +261,9 @@ func (db *DB) ListUsers(ctx context.Context) ([]User, error) {
 }
 
 func (db *DB) CountUsers(ctx context.Context) (int64, error) {
+	start := time.Now()
 	n, err := gen.New(db.pool).CountUsers(ctx)
+	db.observe(queryCountUsers, start, queryResult(err))
 	if err != nil {
 		return 0, fmt.Errorf("store: count users: %w", err)
 	}
@@ -263,7 +275,9 @@ func (db *DB) SetUserDisabled(ctx context.Context, id string, disabled bool) err
 	if err != nil {
 		return fmt.Errorf("store: set user disabled: %w", err)
 	}
+	start := time.Now()
 	rows, err := gen.New(db.pool).SetUserDisabled(ctx, gen.SetUserDisabledParams{ID: uid, Disabled: disabled})
+	db.observe(querySetUserDisabled, start, queryResult(err))
 	if err != nil {
 		return fmt.Errorf("store: set user disabled: %w", err)
 	}
@@ -349,7 +363,9 @@ func bindingFromRow(b *gen.RoleBinding) RoleBinding {
 }
 
 func (db *DB) ListRoles(ctx context.Context) ([]Role, error) {
+	start := time.Now()
 	rows, err := gen.New(db.pool).ListRoles(ctx)
+	db.observe(queryListRoles, start, queryResult(err))
 	if err != nil {
 		return nil, fmt.Errorf("store: list roles: %w", err)
 	}
@@ -361,7 +377,9 @@ func (db *DB) ListRoles(ctx context.Context) ([]Role, error) {
 }
 
 func (db *DB) UpsertRole(ctx context.Context, name string, permissions []string) (Role, error) {
+	start := time.Now()
 	r, err := gen.New(db.pool).UpsertRole(ctx, gen.UpsertRoleParams{Name: name, Permissions: permissions})
+	db.observe(queryUpsertRole, start, queryResult(err))
 	if err != nil {
 		return Role{}, fmt.Errorf("store: upsert role: %w", err)
 	}
@@ -369,7 +387,9 @@ func (db *DB) UpsertRole(ctx context.Context, name string, permissions []string)
 }
 
 func (db *DB) DeleteRole(ctx context.Context, name string) error {
+	start := time.Now()
 	rows, err := gen.New(db.pool).DeleteRole(ctx, name)
+	db.observe(queryDeleteRole, start, queryResult(err))
 	if err != nil {
 		return fmt.Errorf("store: delete role: %w", err)
 	}
@@ -380,10 +400,12 @@ func (db *DB) DeleteRole(ctx context.Context, name string) error {
 }
 
 func (db *DB) ListBindingsForSubject(ctx context.Context, userID string, groups []string) ([]RoleBinding, error) {
+	start := time.Now()
 	rows, err := gen.New(db.pool).ListBindingsForSubject(ctx, gen.ListBindingsForSubjectParams{
 		UserID: userID,
 		Groups: groups,
 	})
+	db.observe(queryListBindingsForSubject, start, queryResult(err))
 	if err != nil {
 		return nil, fmt.Errorf("store: list bindings for subject: %w", err)
 	}
@@ -395,7 +417,9 @@ func (db *DB) ListBindingsForSubject(ctx context.Context, userID string, groups 
 }
 
 func (db *DB) ListBindings(ctx context.Context) ([]RoleBinding, error) {
+	start := time.Now()
 	rows, err := gen.New(db.pool).ListBindings(ctx)
+	db.observe(queryListBindings, start, queryResult(err))
 	if err != nil {
 		return nil, fmt.Errorf("store: list bindings: %w", err)
 	}
@@ -407,11 +431,13 @@ func (db *DB) ListBindings(ctx context.Context) ([]RoleBinding, error) {
 }
 
 func (db *DB) CreateBinding(ctx context.Context, roleName, subjectKind, subjectID string) (RoleBinding, error) {
+	start := time.Now()
 	b, err := gen.New(db.pool).CreateBinding(ctx, gen.CreateBindingParams{
 		RoleName:    roleName,
 		SubjectKind: subjectKind,
 		SubjectID:   subjectID,
 	})
+	db.observe(queryCreateBinding, start, queryResult(wrapUniqueViolation(err)))
 	if err != nil {
 		return RoleBinding{}, fmt.Errorf("store: create binding: %w", wrapUniqueViolation(err))
 	}
@@ -419,7 +445,9 @@ func (db *DB) CreateBinding(ctx context.Context, roleName, subjectKind, subjectI
 }
 
 func (db *DB) DeleteBinding(ctx context.Context, id int64) error {
+	start := time.Now()
 	rows, err := gen.New(db.pool).DeleteBinding(ctx, id)
+	db.observe(queryDeleteBinding, start, queryResult(err))
 	if err != nil {
 		return fmt.Errorf("store: delete binding: %w", err)
 	}
@@ -526,7 +554,9 @@ func tokenFromRow(r *tokenRow) Token {
 }
 
 func (db *DB) GetTokenByHash(ctx context.Context, hash []byte) (Token, error) {
+	start := time.Now()
 	r, err := gen.New(db.pool).GetTokenByHash(ctx, hash)
+	db.observe(queryGetTokenByHash, start, queryResult(wrapNoRows(err)))
 	if err != nil {
 		return Token{}, fmt.Errorf("store: get token by hash: %w", wrapNoRows(err))
 	}
@@ -535,12 +565,14 @@ func (db *DB) GetTokenByHash(ctx context.Context, hash []byte) (Token, error) {
 }
 
 func (db *DB) CreateToken(ctx context.Context, name string, hash []byte, owner string, expiresAt *time.Time) (Token, error) {
+	start := time.Now()
 	r, err := gen.New(db.pool).CreateToken(ctx, gen.CreateTokenParams{
 		Name:      name,
 		TokenHash: hash,
 		Owner:     owner,
 		ExpiresAt: timestamptzFromPtr(expiresAt),
 	})
+	db.observe(queryCreateToken, start, queryResult(wrapUniqueViolation(err)))
 	if err != nil {
 		return Token{}, fmt.Errorf("store: create token: %w", wrapUniqueViolation(err))
 	}
@@ -549,7 +581,9 @@ func (db *DB) CreateToken(ctx context.Context, name string, hash []byte, owner s
 }
 
 func (db *DB) ListTokens(ctx context.Context) ([]Token, error) {
+	start := time.Now()
 	rows, err := gen.New(db.pool).ListTokens(ctx)
+	db.observe(queryListTokens, start, queryResult(err))
 	if err != nil {
 		return nil, fmt.Errorf("store: list tokens: %w", err)
 	}
@@ -570,7 +604,9 @@ func (db *DB) RevokeToken(ctx context.Context, id string) error {
 	if err != nil {
 		return fmt.Errorf("store: revoke token: %w", err)
 	}
+	start := time.Now()
 	rows, err := gen.New(db.pool).RevokeToken(ctx, tid)
+	db.observe(queryRevokeToken, start, queryResult(err))
 	if err != nil {
 		return fmt.Errorf("store: revoke token: %w", err)
 	}
@@ -585,7 +621,9 @@ func (db *DB) TouchTokenLastUsed(ctx context.Context, id string) error {
 	if err != nil {
 		return fmt.Errorf("store: touch token last used: %w", err)
 	}
+	start := time.Now()
 	rows, err := gen.New(db.pool).TouchTokenLastUsed(ctx, tid)
+	db.observe(queryTouchTokenLastUsed, start, queryResult(err))
 	if err != nil {
 		return fmt.Errorf("store: touch token last used: %w", err)
 	}
@@ -648,6 +686,7 @@ func (db *DB) InsertAuditEntry(ctx context.Context, subjectKind, subjectID, acti
 	if detail == nil {
 		detail = json.RawMessage(`{}`)
 	}
+	start := time.Now()
 	r, err := gen.New(db.pool).InsertAuditEntry(ctx, gen.InsertAuditEntryParams{
 		SubjectKind: subjectKind,
 		SubjectID:   subjectID,
@@ -657,6 +696,7 @@ func (db *DB) InsertAuditEntry(ctx context.Context, subjectKind, subjectID, acti
 		RemoteAddr:  remoteAddr,
 		Detail:      detail,
 	})
+	db.observe(queryInsertAuditEntry, start, queryResult(err))
 	if err != nil {
 		return AuditEntry{}, fmt.Errorf("store: insert audit entry: %w", err)
 	}
@@ -697,6 +737,7 @@ func (db *DB) ListAuditEntries(ctx context.Context, f AuditFilter) (AuditPage, e
 		subjectID = pgtype.Text{String: f.SubjectID, Valid: true}
 	}
 
+	start := time.Now()
 	rows, err := gen.New(db.pool).ListAuditEntries(ctx, gen.ListAuditEntriesParams{
 		SubjectKind: subjectKind,
 		SubjectID:   subjectID,
@@ -704,6 +745,7 @@ func (db *DB) ListAuditEntries(ctx context.Context, f AuditFilter) (AuditPage, e
 		CurID:       curID,
 		Lim:         int32(limit), //nolint:gosec // limit is clamped to [1,500] above
 	})
+	db.observe(queryListAuditEntries, start, queryResult(err))
 	if err != nil {
 		return AuditPage{}, fmt.Errorf("store: list audit entries: %w", err)
 	}
@@ -734,10 +776,12 @@ func (db *DB) ListAuditEntries(ctx context.Context, f AuditFilter) (AuditPage, e
 }
 
 func (db *DB) DeleteAuditEntriesBefore(ctx context.Context, before time.Time, limit int32) (int64, error) {
+	start := time.Now()
 	n, err := gen.New(db.pool).DeleteAuditEntriesBefore(ctx, gen.DeleteAuditEntriesBeforeParams{
 		At:    before,
 		Limit: limit,
 	})
+	db.observe(queryDeleteAuditEntriesBefore, start, queryResult(err))
 	if err != nil {
 		return 0, fmt.Errorf("store: delete audit entries before: %w", err)
 	}

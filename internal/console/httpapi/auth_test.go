@@ -534,6 +534,105 @@ func TestWSUpgradesThroughAuthMiddlewareForPermittedSubject(t *testing.T) {
 	}
 }
 
+// TestWSRequiresEventsReadEvenForRunWatching pins M4 Task 2's answer to
+// follow-up #10: GET /ws is gated by ONE permission, events:read, and that
+// gate covers every topic multiplexed over the socket -- including the
+// ephemeral run:{id} topics a run watcher wants. A custom role granted only
+// runs:read therefore cannot open the socket at all and must fall back to
+// REST polling of GET /api/v1/runs/{id}.
+//
+// This is deliberate, not an oversight: ws.Hub never sees an authz.Subject
+// (ServeWS takes only the request; subscribe/topicAllowed in hub.go decide
+// on the topic NAME alone), so the socket's authorization is necessarily
+// per-connection, not per-topic. Lowering /ws's bar to runs:read would hand
+// every run watcher the "live" events topic too -- a real widening, since
+// events:read is exactly the permission that gates GET /api/v1/events.
+// Splitting it properly means teaching the hub subject-aware subscribe
+// authorization, which is a hub change, not a routeTable change. Documented
+// in SECURITY.md §10.2 under "WebSocket authorization is per-connection".
+//
+// If a later milestone does add per-topic authorization, this test is the
+// one that must be rewritten -- consciously.
+func TestWSRequiresEventsReadEvenForRunWatching(t *testing.T) {
+	hub := ws.NewHub(cache.NewInProcessBus(), metrics.New("kconmon_ng", prometheus.NewRegistry()))
+	policy := authz.NewPolicy(map[string][]authz.Permission{
+		"run-watcher": {authz.PermRunsRead},
+	})
+	authr := fakeAuthenticator{subject: authz.Subject{Kind: authz.SubjectUser, ID: "u1"}, mode: "local"}
+	s := newAuthzServer(t, authr, policy, Deps{Hub: hub, Roles: fakeRoleResolver{roles: []string{"run-watcher"}}})
+
+	w := doRequest(t, s, http.MethodGet, "/ws", nil, nil)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("GET /ws for a runs:read-only role = %d, want 403", w.Code)
+	}
+	if !strings.Contains(w.Body.String(), string(authz.PermEventsRead)) {
+		t.Errorf("403 body = %s, want it to name the missing permission %q",
+			w.Body.String(), authz.PermEventsRead)
+	}
+	if got := routeTable["GET /ws"].permission; got != authz.PermEventsRead {
+		t.Errorf(`routeTable["GET /ws"] = %q, want %q -- see this test's doc comment before changing it`,
+			got, authz.PermEventsRead)
+	}
+}
+
+// TestWSEventsReadAloneCoversRunTopics is the other face of the same
+// coupling: events:read alone -- with no runs:read at all -- is enough to
+// subscribe to a run:{id} topic and receive its frames, because the hub
+// applies no per-topic permission check. Stated as a test so the
+// per-connection granularity is a pinned property rather than folklore.
+func TestWSEventsReadAloneCoversRunTopics(t *testing.T) {
+	hub := ws.NewHub(cache.NewInProcessBus(), metrics.New("kconmon_ng", prometheus.NewRegistry()))
+	policy := authz.NewPolicy(map[string][]authz.Permission{
+		"events-only": {authz.PermEventsRead},
+	})
+	authr := fakeAuthenticator{subject: authz.Subject{Kind: authz.SubjectUser, ID: "u1"}, mode: "local"}
+	s := newAuthzServer(t, authr, policy, Deps{Hub: hub, Roles: fakeRoleResolver{roles: []string{"events-only"}}})
+
+	topic := ws.RunTopic("run-1")
+	if !hub.OpenTopic(t.Context(), topic) {
+		t.Fatal("OpenTopic refused the run topic")
+	}
+
+	httpSrv := httptest.NewServer(s.Handler())
+	defer httpSrv.Close()
+
+	conn, resp, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(httpSrv.URL, "http")+"/ws", nil)
+	if err != nil {
+		status := 0
+		if resp != nil {
+			status = resp.StatusCode
+			_ = resp.Body.Close()
+		}
+		t.Fatalf("dial /ws with events:read only: %v (http status %d)", err, status)
+	}
+	defer func() { _ = conn.Close() }()
+	if resp != nil {
+		_ = resp.Body.Close()
+	}
+
+	if err := conn.WriteJSON(ws.ClientMessage{Action: ws.ActionSubscribe, Topic: topic}); err != nil {
+		t.Fatalf("subscribe %s: %v", topic, err)
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	var env ws.Envelope
+	for {
+		hub.Broadcast(topic, ws.TypeSnapshot, json.RawMessage(`{"progress":1}`))
+		if err := conn.SetReadDeadline(time.Now().Add(100 * time.Millisecond)); err != nil {
+			t.Fatalf("set read deadline: %v", err)
+		}
+		if err := conn.ReadJSON(&env); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("no frame on %s within 5s -- events:read should already cover run topics", topic)
+		}
+	}
+	if env.Topic != topic || env.Type == ws.TypeError {
+		t.Errorf("envelope = %+v, want a frame on %s, not an error", env, topic)
+	}
+}
+
 // --- /api/v1/auth/* endpoints -------------------------------------------
 
 func TestAuthMeAnonymousReturnsFixedSubject(t *testing.T) {

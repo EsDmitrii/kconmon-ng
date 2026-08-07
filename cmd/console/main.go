@@ -178,6 +178,9 @@ func main() {
 			slog.Error("failed to open database", "error", err)
 			os.Exit(1)
 		}
+		// Here, while db is still owned by this goroutine and before anything
+		// else can hold it — SetMetrics is an unsynchronized field write.
+		db.SetMetrics(m)
 	}
 
 	// --- Auth (M3 Phase B/C) ------------------------------------------------
@@ -264,6 +267,11 @@ func main() {
 	var auditDep httpapi.Auditor
 	var rbacDep httpapi.RoleAdmin
 	var tokensDep httpapi.TokenAdmin
+	// targetsDep has NO non-database fallback, unlike runnerDep below:
+	// targets are persisted configuration (Decision 13), so with
+	// database.mode=disabled all five /api/v1/targets routes answer 503
+	// rather than accepting writes that would vanish on the next restart.
+	var targetsDep httpapi.TargetService
 	policy := authz.NewPolicy(nil)
 	if db != nil {
 		rolesDep = roleResolver{db: db}
@@ -271,6 +279,7 @@ func main() {
 		auditDep = db
 		rbacDep = db
 		tokensDep = db
+		targetsDep = db
 
 		if cfg.Auth.Mode == "local" {
 			bootstrapLocalAdmin(bgCtx, db, cfg.Auth.Local)
@@ -375,7 +384,7 @@ func main() {
 		Authenticator: authenticator, Policy: policy, Roles: rolesDep, Sessions: sessions,
 		Users: usersDep, OIDC: oidcDep,
 		Audit: auditDep, RBAC: rbacDep, Tokens: tokensDep,
-		Runner: runnerDep,
+		Runner: runnerDep, Targets: targetsDep,
 	})
 
 	var wg sync.WaitGroup
@@ -402,6 +411,9 @@ func main() {
 	if db != nil {
 		retention := time.Duration(cfg.Database.RetentionDays) * 24 * time.Hour
 		spawn("retention-pruner", store.NewPruner(db, retention, m).Run)
+		// Unlike the pruner, this one runs whatever retention is set to: the
+		// pool gauge describes the pool, not the retention policy.
+		spawn("store-pool-stats", store.NewPoolStatsPoller(db, m).Run)
 		spawn("rbac-policy-refresh", func(ctx context.Context) { refreshCustomRoles(ctx, db, policy) })
 	}
 

@@ -66,45 +66,62 @@ func DecodeCursor(cursor string) (eventTime time.Time, id int64, ok bool, err er
 	return ts, parsedID, true, nil
 }
 
-// EncodeRunCursor builds the opaque keyset cursor ListRuns hands back as
-// RunPage.NextCursor: base64.RawURLEncoding of "<createdAt RFC3339Nano>|<id>",
-// the same shape EncodeCursor uses except id is check_runs' own UUID primary
-// key (a canonical UUID string) rather than a bigint.
-func EncodeRunCursor(createdAt time.Time, id string) string {
+// EncodeUUIDCursor builds the opaque keyset cursor every (created_at, UUID)
+// listing hands back as its NextCursor: base64.RawURLEncoding of
+// "<createdAt RFC3339Nano>|<id>", the same shape EncodeCursor uses except id
+// is a canonical UUID string rather than a bigint. ListRuns, ListTargets,
+// ListDefinitions and ListSchedules all page this way, so they share one
+// codec rather than four near-identical ones.
+func EncodeUUIDCursor(createdAt time.Time, id string) string {
 	raw := createdAt.Format(time.RFC3339Nano) + cursorSep + id
 	return base64.RawURLEncoding.EncodeToString([]byte(raw))
 }
 
-// DecodeRunCursor is EncodeRunCursor's inverse, with the same contract as
+// DecodeUUIDCursor is EncodeUUIDCursor's inverse, with the same contract as
 // DecodeCursor: cursor == "" is the well-defined "no cursor" case (ok ==
 // false, err == nil); every other malformed input (bad base64, a missing
 // separator, an unparseable timestamp, a non-UUID id) returns a non-nil
 // error and ok == false. Must never panic and must never return ok == true
 // with a zero-value time/id for a non-empty cursor -- same reasoning as
 // DecodeCursor's doc comment.
-func DecodeRunCursor(cursor string) (createdAt time.Time, id string, ok bool, err error) {
+func DecodeUUIDCursor(cursor string) (createdAt time.Time, id string, ok bool, err error) {
 	if cursor == "" {
 		return time.Time{}, "", false, nil
 	}
 
 	decoded, err := base64.RawURLEncoding.DecodeString(cursor)
 	if err != nil {
-		return time.Time{}, "", false, fmt.Errorf("store: decode run cursor: %w", err)
+		return time.Time{}, "", false, fmt.Errorf("store: decode cursor: %w", err)
 	}
 
 	parts := strings.SplitN(string(decoded), cursorSep, 2)
 	if len(parts) != 2 {
-		return time.Time{}, "", false, fmt.Errorf("store: decode run cursor: missing %q separator", cursorSep)
+		return time.Time{}, "", false, fmt.Errorf("store: decode cursor: missing %q separator", cursorSep)
 	}
 
 	ts, err := time.Parse(time.RFC3339Nano, parts[0])
 	if err != nil {
-		return time.Time{}, "", false, fmt.Errorf("store: decode run cursor: parse time: %w", err)
+		return time.Time{}, "", false, fmt.Errorf("store: decode cursor: parse time: %w", err)
 	}
 
 	if _, err := uuid.Parse(parts[1]); err != nil {
-		return time.Time{}, "", false, fmt.Errorf("store: decode run cursor: parse id: %w", err)
+		return time.Time{}, "", false, fmt.Errorf("store: decode cursor: parse id: %w", err)
 	}
 
 	return ts, parts[1], true, nil
+}
+
+// EncodeRunCursor builds the opaque keyset cursor ListRuns hands back as
+// RunPage.NextCursor. It is EncodeUUIDCursor under a run-specific name, kept
+// because internal/console/checks (the in-memory RunStore) and
+// internal/console/httpapi both name it directly as "the cursor encoding
+// *store.DB uses for runs".
+func EncodeRunCursor(createdAt time.Time, id string) string {
+	return EncodeUUIDCursor(createdAt, id)
+}
+
+// DecodeRunCursor is EncodeRunCursor's inverse -- DecodeUUIDCursor under a
+// run-specific name, same contract.
+func DecodeRunCursor(cursor string) (createdAt time.Time, id string, ok bool, err error) {
+	return DecodeUUIDCursor(cursor)
 }

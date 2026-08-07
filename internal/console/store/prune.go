@@ -247,6 +247,88 @@ func deleteBatches(ctx context.Context, del func(ctx context.Context, limit int3
 	}
 }
 
+// ---------------------------------------------------------------------------
+// Connection pool gauge
+// ---------------------------------------------------------------------------
+
+// StorePoolConns "state" labels: a closed set of three, enforced only by this
+// file's own usage (metrics.go's Help string names the same three). Never
+// widened with a pool name, a DSN, or a host.
+const (
+	poolStateAcquired = "acquired"
+	poolStateIdle     = "idle"
+	poolStateTotal    = "total"
+)
+
+// poolStatInterval is how often PoolStatsPoller resamples. pgxpool.Pool.Stat
+// is a cheap in-process read (it touches no connection and issues no query),
+// so the cadence is set by how fresh a scrape needs the gauge to be, not by
+// cost: 15s keeps it under the shortest scrape interval anyone realistically
+// configures.
+const poolStatInterval = 15 * time.Second
+
+// poolStats is the three-integer view of pgxpool.Pool.Stat() the gauge needs.
+// It is deliberately NOT *pgxpool.Stat: that type's only field is an
+// unexported *puddle.Stat with no exported constructor, so a test could not
+// fabricate one to assert against -- every method call on a hand-built
+// &pgxpool.Stat{} panics on the nil embedded pointer. Reducing the pool to
+// three numbers at the seam is what makes the poller unit-testable without a
+// database.
+type poolStats struct {
+	acquired int32
+	idle     int32
+	total    int32
+}
+
+// PoolStatsPoller samples a pool's connection counts into StorePoolConns.
+// Without it the gauge is declared and registered but never written -- a
+// permanently-zero series that reads, on a dashboard, exactly like a pool
+// with no connections.
+type PoolStatsPoller struct {
+	stats    func() poolStats
+	m        *metrics.Metrics
+	interval time.Duration
+}
+
+// NewPoolStatsPoller returns a poller over db's pool. m must not be nil.
+func NewPoolStatsPoller(db *DB, m *metrics.Metrics) *PoolStatsPoller {
+	return &PoolStatsPoller{
+		stats: func() poolStats {
+			s := db.pool.Stat()
+			return poolStats{acquired: s.AcquiredConns(), idle: s.IdleConns(), total: s.TotalConns()}
+		},
+		m:        m,
+		interval: poolStatInterval,
+	}
+}
+
+// Run samples once immediately, then every poolStatInterval until ctx is
+// cancelled. The immediate first sample matters: without it a replica scraped
+// in its first 15 seconds reports zeros, which is indistinguishable from a
+// pool that failed to open.
+func (p *PoolStatsPoller) Run(ctx context.Context) {
+	p.observe()
+
+	ticker := time.NewTicker(p.interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			p.observe()
+		}
+	}
+}
+
+// observe writes one sample to all three gauge series.
+func (p *PoolStatsPoller) observe() {
+	s := p.stats()
+	p.m.StorePoolConns.WithLabelValues(poolStateAcquired).Set(float64(s.acquired))
+	p.m.StorePoolConns.WithLabelValues(poolStateIdle).Set(float64(s.idle))
+	p.m.StorePoolConns.WithLabelValues(poolStateTotal).Set(float64(s.total))
+}
+
 // pruneJitter returns a random delay in [0, pruneJitterMax). Split out from
 // Run so a unit test can assert its bound without waiting out a real sleep.
 func pruneJitter() time.Duration {

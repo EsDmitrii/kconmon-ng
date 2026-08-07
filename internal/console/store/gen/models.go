@@ -34,6 +34,21 @@ type AuditLog struct {
 	Detail      json.RawMessage
 }
 
+type CheckDefinition struct {
+	ID                  pgtype.UUID
+	Name                string
+	SourceSelection     string
+	DestinationKind     string
+	DestinationTargetID pgtype.UUID
+	DestinationAddress  string
+	CheckType           string
+	Plane               string
+	Params              json.RawMessage
+	Enabled             bool
+	CreatedAt           time.Time
+	UpdatedAt           time.Time
+}
+
 type CheckResult struct {
 	ID              int64
 	RunID           pgtype.UUID
@@ -62,6 +77,19 @@ type CheckRun struct {
 	PairFailed    int32
 }
 
+type CheckSchedule struct {
+	ID           pgtype.UUID
+	DefinitionID pgtype.UUID
+	Kind         string
+	IntervalNs   int64
+	RunAt        pgtype.Timestamptz
+	Enabled      bool
+	LastFiredAt  pgtype.Timestamptz
+	NextFireAt   pgtype.Timestamptz
+	CreatedAt    time.Time
+	UpdatedAt    time.Time
+}
+
 type Role struct {
 	Name        string
 	Permissions []string
@@ -74,6 +102,16 @@ type RoleBinding struct {
 	SubjectKind string
 	SubjectID   string
 	CreatedAt   time.Time
+}
+
+type Target struct {
+	ID        pgtype.UUID
+	Name      string
+	Kind      string
+	Address   string
+	Labels    json.RawMessage
+	CreatedAt time.Time
+	UpdatedAt time.Time
 }
 
 type TopologyEvent struct {
