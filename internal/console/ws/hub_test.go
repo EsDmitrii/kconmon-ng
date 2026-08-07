@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -14,6 +16,28 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 )
+
+// countingBus wraps InProcessBus and counts unsubscribe calls, so a shutdown
+// test can assert every ephemeral-topic subscription was actually torn down
+// rather than merely assuming it from the absence of a panic.
+type countingBus struct {
+	*cache.InProcessBus
+	unsubscribes atomic.Int64
+}
+
+var _ cache.Bus = (*countingBus)(nil)
+
+func newCountingBus() *countingBus {
+	return &countingBus{InProcessBus: cache.NewInProcessBus()}
+}
+
+func (b *countingBus) Subscribe(topic string) (<-chan cache.Message, func()) {
+	msgs, unsubscribe := b.InProcessBus.Subscribe(topic)
+	return msgs, func() {
+		unsubscribe()
+		b.unsubscribes.Add(1)
+	}
+}
 
 func newTestHub(t *testing.T, bus cache.Bus) (*Hub, *metrics.Metrics) {
 	t.Helper()
@@ -593,5 +617,727 @@ func TestHubRegisterAfterShutdownClosesClientImmediately(t *testing.T) {
 	}
 	if got := testutil.ToFloat64(m.WSClients.WithLabelValues()); got != 0 {
 		t.Errorf("ws_clients = %v, want 0", got)
+	}
+}
+
+// --- Task 20: ephemeral run:{id} topics ---
+
+func TestRunTopicShape(t *testing.T) {
+	if got, want := RunTopic("abc-123"), "run:abc-123"; got != want {
+		t.Errorf("RunTopic(%q) = %q, want %q", "abc-123", got, want)
+	}
+}
+
+// Without OpenTopic, a run:{id} subscribe is the same M2 rejection as any
+// other unknown topic. This is the "before" half of the required test: the
+// UI's fallback (REST polling) depends on this staying an out-loud error, not
+// a silently-idle topic.
+func TestSubscribeToUnopenedRunTopicIsRejected(t *testing.T) {
+	h, _ := newTestHub(t, cache.NewInProcessBus())
+	c := h.register()
+	defer h.unregister(c)
+
+	topic := RunTopic("never-opened")
+	subscribeClient(h, c, topic, 0)
+
+	got := nextEnvelope(t, c)
+	if got.Type != TypeError {
+		t.Errorf("frame type = %q, want %q", got.Type, TypeError)
+	}
+	if got.Topic != topic {
+		t.Errorf("error frame topic = %q, want %q", got.Topic, topic)
+	}
+}
+
+// OpenTopic makes the same subscribe succeed, and a message published to the
+// bus on that topic reaches the client with a per-topic seq starting at 1 --
+// the two halves of the required "before/after OpenTopic" test.
+func TestOpenTopicMakesSubscribeSucceedAndDeliversBusMessages(t *testing.T) {
+	bus := cache.NewInProcessBus()
+	h, m := newTestHub(t, bus)
+	topic := RunTopic("run-1")
+
+	if !h.OpenTopic(context.Background(), topic) {
+		t.Fatal("OpenTopic returned false")
+	}
+	if got := h.OpenTopicCount(); got != 1 {
+		t.Errorf("OpenTopicCount = %d, want 1", got)
+	}
+	if got := testutil.ToFloat64(m.WSTopics.WithLabelValues()); got != 1 {
+		t.Errorf("ws_topics = %v, want 1", got)
+	}
+
+	c := h.register()
+	defer h.unregister(c)
+	subscribeClient(h, c, topic, 0)
+	expectNoEnvelope(t, c) // subscribing alone delivers nothing; the ring is empty
+
+	// Publish until the per-topic subscription is demonstrably live, the same
+	// barrier pattern the live-topic tests use rather than sleeping on a guess.
+	deadline := time.Now().Add(5 * time.Second)
+	var got Envelope
+	for {
+		if err := bus.Publish(context.Background(), topic, cache.Message{Type: TypeEvent, Data: json.RawMessage(`{"step":1}`)}); err != nil {
+			t.Fatalf("Publish: %v", err)
+		}
+		select {
+		case got = <-c.send:
+		case <-time.After(20 * time.Millisecond):
+			if time.Now().After(deadline) {
+				t.Fatal("no envelope delivered from the ephemeral topic's bus subscription")
+			}
+			continue
+		}
+		break
+	}
+	if got.Topic != topic || got.Type != TypeEvent || got.Seq != 1 || string(got.Data) != `{"step":1}` {
+		t.Errorf("delivered %+v, want topic=%s type=event seq=1 data={\"step\":1}", got, topic)
+	}
+}
+
+// run:{id} data frames must never mint a ws_messages_sent_total series keyed
+// by run ID -- the same closed-label-set constraint
+// TestHubErrorFramesDoNotMintTopicMetricLabels enforces for client-chosen
+// junk topics, now for a controller-assigned but still per-run-unique one.
+func TestOpenTopicDataFramesDoNotMintTopicMetricLabels(t *testing.T) {
+	bus := cache.NewInProcessBus()
+	h, m := newTestHub(t, bus)
+	topic := RunTopic("cardinality-check")
+
+	if !h.OpenTopic(context.Background(), topic) {
+		t.Fatal("OpenTopic returned false")
+	}
+	c := h.register()
+	defer h.unregister(c)
+	subscribeClient(h, c, topic, 0)
+
+	h.Broadcast(topic, TypeEvent, json.RawMessage(`{}`))
+	_ = nextEnvelope(t, c)
+
+	if got := testutil.CollectAndCount(m.WSMessagesSent); got != 0 {
+		t.Errorf("ws_messages_sent_total has %d series, want 0 -- a run ID minted a label", got)
+	}
+}
+
+// CloseTopic keeps replay working immediately after (the browser reconnect
+// case its doc comment describes), and only after reapDelay has actually
+// elapsed is the topic gone -- subscribe errors again, OpenTopicCount drops,
+// and h.seq/h.rings hold no trace of the key. That last assertion is the
+// leak test this task exists to pass: a topic that is merely inaccessible but
+// still present in those maps would still be the unbounded growth Broadcast's
+// doc comment warned about.
+func TestCloseTopicKeepsReplayThenReapsAfterDelay(t *testing.T) {
+	h, m := newTestHub(t, cache.NewInProcessBus())
+	topic := RunTopic("closes-then-reaps")
+
+	if !h.OpenTopic(context.Background(), topic) {
+		t.Fatal("OpenTopic returned false")
+	}
+	h.Broadcast(topic, TypeEvent, json.RawMessage(`{"n":1}`))
+
+	h.CloseTopic(topic)
+	h.CloseTopic(topic) // idempotent
+
+	// Immediately after close: replay still works.
+	c := h.register()
+	defer h.unregister(c)
+	subscribeClient(h, c, topic, 0)
+	if got := nextEnvelope(t, c); got.Seq != 1 || string(got.Data) != `{"n":1}` {
+		t.Errorf("replay after close = %+v, want seq=1 data={\"n\":1}", got)
+	}
+	if got := h.OpenTopicCount(); got != 1 {
+		t.Errorf("OpenTopicCount right after close = %d, want 1 (still registered, awaiting reap)", got)
+	}
+
+	// Force the reap without sleeping reapDelay: back-date closedAt and run
+	// the reaper directly (white-box, same package).
+	h.mu.Lock()
+	h.ephemeral[topic].closedAt = time.Now().Add(-reapDelay - time.Second)
+	h.mu.Unlock()
+	h.reapExpiredTopics()
+
+	if got := h.OpenTopicCount(); got != 0 {
+		t.Errorf("OpenTopicCount after reap = %d, want 0", got)
+	}
+	if got := testutil.ToFloat64(m.WSTopics.WithLabelValues()); got != 0 {
+		t.Errorf("ws_topics after reap = %v, want 0", got)
+	}
+	h.mu.Lock()
+	_, seqPresent := h.seq[topic]
+	_, ringPresent := h.rings[topic]
+	_, ephemeralPresent := h.ephemeral[topic]
+	h.mu.Unlock()
+	if seqPresent {
+		t.Error("h.seq still holds the reaped topic's key")
+	}
+	if ringPresent {
+		t.Error("h.rings still holds the reaped topic's key")
+	}
+	if ephemeralPresent {
+		t.Error("h.ephemeral still holds the reaped topic's key")
+	}
+
+	c2 := h.register()
+	defer h.unregister(c2)
+	subscribeClient(h, c2, topic, 0)
+	if got := nextEnvelope(t, c2); got.Type != TypeError {
+		t.Errorf("post-reap subscribe frame type = %q, want %q", got.Type, TypeError)
+	}
+}
+
+// A run:{id} topic's ring is append-only like live's, not last-write-wins
+// like a snapshot topic: a reconnecting browser must get every progress frame
+// after its lastSeq, not just the newest one.
+func TestRunTopicRingIsAppendOnlyAndBounded(t *testing.T) {
+	h, _ := newTestHub(t, cache.NewInProcessBus())
+	topic := RunTopic("append-only")
+	if !h.OpenTopic(context.Background(), topic) {
+		t.Fatal("OpenTopic returned false")
+	}
+
+	const published = runRingSize + 10
+	for i := 1; i <= published; i++ {
+		h.Broadcast(topic, TypeEvent, json.RawMessage(`{"i":`+strconv.Itoa(i)+`}`))
+	}
+
+	c := h.register()
+	defer h.unregister(c)
+	subscribeClient(h, c, topic, 0)
+
+	first := nextEnvelope(t, c)
+	if want := uint64(published - runRingSize + 1); first.Seq != want {
+		t.Errorf("oldest replayed seq = %d, want %d (the ring holds %d)", first.Seq, want, runRingSize)
+	}
+	count := 1
+	for {
+		select {
+		case env := <-c.send:
+			count++
+			if env.Seq != uint64(published-runRingSize+count) {
+				t.Fatalf("replay is out of order at position %d: seq %d", count, env.Seq)
+			}
+		case <-time.After(100 * time.Millisecond):
+			if count != runRingSize {
+				t.Fatalf("replayed %d frames, want %d", count, runRingSize)
+			}
+			return
+		}
+	}
+}
+
+// Opening 256 topics succeeds; the 257th with all of them still open must
+// fail closed (the run still executes, per OpenTopic's doc comment); the
+// 257th with one CLOSED topic among the 256 evicts that one and succeeds.
+func TestOpenTopicCapAndEviction(t *testing.T) {
+	h, m := newTestHub(t, cache.NewInProcessBus())
+	ctx := context.Background()
+
+	for i := 0; i < maxEphemeralTopics; i++ {
+		topic := RunTopic("cap-" + strconv.Itoa(i))
+		if !h.OpenTopic(ctx, topic) {
+			t.Fatalf("OpenTopic(%d) returned false before the cap", i)
+		}
+	}
+	if got := h.OpenTopicCount(); got != maxEphemeralTopics {
+		t.Fatalf("OpenTopicCount = %d, want %d", got, maxEphemeralTopics)
+	}
+	if got := testutil.ToFloat64(m.WSTopics.WithLabelValues()); got != float64(maxEphemeralTopics) {
+		t.Errorf("ws_topics = %v, want %d", got, maxEphemeralTopics)
+	}
+
+	// All 256 still open: the 257th must be refused.
+	overflowTopic := RunTopic("overflow")
+	if h.OpenTopic(ctx, overflowTopic) {
+		t.Fatal("OpenTopic succeeded past the cap with nothing closed")
+	}
+	if got := h.OpenTopicCount(); got != maxEphemeralTopics {
+		t.Errorf("OpenTopicCount after a refused open = %d, want %d (unchanged)", got, maxEphemeralTopics)
+	}
+
+	// Close one, freeing a slot for the oldest-closed-first eviction.
+	evictable := RunTopic("cap-0")
+	h.CloseTopic(evictable)
+
+	if !h.OpenTopic(ctx, overflowTopic) {
+		t.Fatal("OpenTopic still refused after a topic was closed")
+	}
+	if got := h.OpenTopicCount(); got != maxEphemeralTopics {
+		t.Errorf("OpenTopicCount after eviction = %d, want %d (still at the cap)", got, maxEphemeralTopics)
+	}
+	if h.topicAllowed(evictable) {
+		t.Error("the evicted topic is still in the registry")
+	}
+	h.mu.Lock()
+	_, seqPresent := h.seq[evictable]
+	_, ringPresent := h.rings[evictable]
+	h.mu.Unlock()
+	if seqPresent || ringPresent {
+		t.Error("the evicted topic's seq/ring were not freed")
+	}
+	if !h.topicAllowed(overflowTopic) {
+		t.Error("the newly opened topic is not registered")
+	}
+}
+
+// Hub.Run's shutdown must cancel every ephemeral subscription goroutine, not
+// just close WebSocket clients -- otherwise cmd/console's wg.Wait waits on
+// goroutines nothing ever tells to stop.
+func TestHubRunShutdownClosesEveryEphemeralSubscription(t *testing.T) {
+	bus := newCountingBus()
+	h, _ := newTestHub(t, bus)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); h.Run(ctx) }()
+
+	const topics = 5
+	for i := 0; i < topics; i++ {
+		if !h.OpenTopic(context.Background(), RunTopic("shutdown-"+strconv.Itoa(i))) {
+			t.Fatalf("OpenTopic(%d) returned false", i)
+		}
+	}
+	if got := h.OpenTopicCount(); got != topics {
+		t.Fatalf("OpenTopicCount = %d, want %d", got, topics)
+	}
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run did not return after ctx cancel")
+	}
+
+	if got := h.OpenTopicCount(); got != 0 {
+		t.Errorf("OpenTopicCount after shutdown = %d, want 0", got)
+	}
+	// The per-topic goroutines' deferred unsubscribe runs asynchronously to
+	// closeAllClients cancelling their context, so poll for it rather than
+	// asserting immediately. +1 is Run's own TopicLive subscription, torn
+	// down by the same shutdown through the same countingBus.
+	const wantUnsubscribes = topics + 1
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if got := bus.unsubscribes.Load(); got == wantUnsubscribes {
+			break
+		} else if time.Now().After(deadline) {
+			t.Fatalf("countingBus saw %d unsubscribe calls, want %d", got, wantUnsubscribes)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// The registry gauge must track OpenTopic/CloseTopic/reap, not just OpenTopic.
+func TestWSTopicsGaugeTracksRegistryAcrossOpenCloseReap(t *testing.T) {
+	h, m := newTestHub(t, cache.NewInProcessBus())
+	topicA, topicB := RunTopic("gauge-a"), RunTopic("gauge-b")
+
+	if !h.OpenTopic(context.Background(), topicA) {
+		t.Fatal("OpenTopic(a) returned false")
+	}
+	if got := testutil.ToFloat64(m.WSTopics.WithLabelValues()); got != 1 {
+		t.Errorf("ws_topics after opening a = %v, want 1", got)
+	}
+
+	if !h.OpenTopic(context.Background(), topicB) {
+		t.Fatal("OpenTopic(b) returned false")
+	}
+	if got := testutil.ToFloat64(m.WSTopics.WithLabelValues()); got != 2 {
+		t.Errorf("ws_topics after opening b = %v, want 2", got)
+	}
+
+	// CloseTopic alone does not free the slot -- only the reaper does.
+	h.CloseTopic(topicA)
+	if got := testutil.ToFloat64(m.WSTopics.WithLabelValues()); got != 2 {
+		t.Errorf("ws_topics right after close = %v, want 2 (still registered)", got)
+	}
+
+	h.mu.Lock()
+	h.ephemeral[topicA].closedAt = time.Now().Add(-reapDelay - time.Second)
+	h.mu.Unlock()
+	h.reapExpiredTopics()
+
+	if got := testutil.ToFloat64(m.WSTopics.WithLabelValues()); got != 1 {
+		t.Errorf("ws_topics after reaping a = %v, want 1", got)
+	}
+}
+
+// Concurrent OpenTopic/CloseTopic/Broadcast/subscribe on overlapping topics,
+// meant to run under -race. No assertions on delivery outcome -- this is
+// purely a data-race and deadlock check for the shared h.mu across the new
+// ephemeral-registry paths and the pre-existing client/ring paths.
+func TestHubEphemeralTopicsConcurrentAccessRace(t *testing.T) {
+	bus := cache.NewInProcessBus()
+	h, _ := newTestHub(t, bus)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	runDone := make(chan struct{})
+	go func() { defer close(runDone); h.Run(ctx) }()
+
+	topics := make([]string, 5)
+	for i := range topics {
+		topics[i] = RunTopic("race-" + strconv.Itoa(i))
+	}
+
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+
+	for _, topic := range topics {
+		wg.Add(1)
+		go func(topic string) {
+			defer wg.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				h.OpenTopic(ctx, topic)
+				_ = bus.Publish(ctx, topic, cache.Message{Type: TypeEvent, Data: json.RawMessage(`{}`)})
+				h.CloseTopic(topic)
+			}
+		}(topic)
+	}
+
+	for i := 0; i < 3; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			c := h.register()
+			defer h.unregister(c)
+			drain := func() {
+				for {
+					select {
+					case <-c.send:
+					default:
+						return
+					}
+				}
+			}
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				for _, topic := range topics {
+					subscribeClient(h, c, topic, 0)
+				}
+				drain()
+			}
+		}()
+	}
+
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				for _, topic := range topics {
+					h.Broadcast(topic, TypeEvent, json.RawMessage(`{}`))
+				}
+			}
+		}()
+	}
+
+	time.Sleep(200 * time.Millisecond)
+	close(stop)
+	wg.Wait()
+
+	cancel()
+	select {
+	case <-runDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run did not return after ctx cancel")
+	}
+}
+
+// --- Fix pass regression tests (code review on Task 20) ---
+
+// subscribeCountingBus wraps InProcessBus and counts Subscribe calls per
+// topic. It exists for TestOpenTopicConcurrentSameTopicSubscribesOnlyOnce:
+// OpenTopic must reserve a topic's registry slot atomically with the cap/
+// idempotence check BEFORE calling bus.Subscribe, precisely so two racing
+// OpenTopic(sameTopic) calls cannot each start their own bus subscription.
+type subscribeCountingBus struct {
+	*cache.InProcessBus
+	mu     sync.Mutex
+	counts map[string]int
+}
+
+func newSubscribeCountingBus() *subscribeCountingBus {
+	return &subscribeCountingBus{InProcessBus: cache.NewInProcessBus(), counts: make(map[string]int)}
+}
+
+func (b *subscribeCountingBus) Subscribe(topic string) (<-chan cache.Message, func()) {
+	b.mu.Lock()
+	b.counts[topic]++
+	b.mu.Unlock()
+	return b.InProcessBus.Subscribe(topic)
+}
+
+func (b *subscribeCountingBus) subscribeCount(topic string) int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.counts[topic]
+}
+
+// OpenTopic must not hold h.mu across h.bus.Subscribe, but two concurrent
+// OpenTopic calls for the SAME topic must still result in exactly one bus
+// subscription: OpenTopic's reservation (a placeholder ephemeralTopic
+// inserted under the lock before Subscribe runs) is what a second, racing
+// caller sees as "already open" and returns on without subscribing again.
+func TestOpenTopicConcurrentSameTopicSubscribesOnlyOnce(t *testing.T) {
+	bus := newSubscribeCountingBus()
+	h, _ := newTestHub(t, bus)
+	topic := RunTopic("concurrent-open")
+
+	const callers = 20
+	results := make([]bool, callers)
+	var wg sync.WaitGroup
+	for i := 0; i < callers; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			results[i] = h.OpenTopic(context.Background(), topic)
+		}(i)
+	}
+	wg.Wait()
+
+	for i, ok := range results {
+		if !ok {
+			t.Errorf("OpenTopic call %d returned false, want true (idempotent open)", i)
+		}
+	}
+	if got := bus.subscribeCount(topic); got != 1 {
+		t.Errorf("bus.Subscribe(%q) called %d times, want exactly 1 -- a concurrent OpenTopic race must not double-subscribe", topic, got)
+	}
+	if got := h.OpenTopicCount(); got != 1 {
+		t.Errorf("OpenTopicCount = %d, want 1", got)
+	}
+}
+
+// The cap check and the registry insert must be atomic across concurrent
+// OpenTopic calls for DIFFERENT topics too, or more than one caller could read
+// len(h.ephemeral) < maxEphemeralTopics before either had reserved a slot and
+// all of them would squeeze past the cap.
+func TestOpenTopicConcurrentDifferentTopicsRespectsCapExactly(t *testing.T) {
+	h, _ := newTestHub(t, cache.NewInProcessBus())
+	ctx := context.Background()
+
+	for i := 0; i < maxEphemeralTopics-1; i++ {
+		if !h.OpenTopic(ctx, RunTopic("precap-"+strconv.Itoa(i))) {
+			t.Fatalf("OpenTopic(%d) returned false before the cap", i)
+		}
+	}
+	if got := h.OpenTopicCount(); got != maxEphemeralTopics-1 {
+		t.Fatalf("OpenTopicCount = %d, want %d", got, maxEphemeralTopics-1)
+	}
+
+	// Exactly one slot remains and nothing is closed (so eviction cannot free
+	// more). Race several distinct-topic OpenTopic calls for that one slot.
+	const racers = 8
+	results := make([]bool, racers)
+	var wg sync.WaitGroup
+	for i := 0; i < racers; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			results[i] = h.OpenTopic(ctx, RunTopic("racer-"+strconv.Itoa(i)))
+		}(i)
+	}
+	wg.Wait()
+
+	succeeded := 0
+	for _, ok := range results {
+		if ok {
+			succeeded++
+		}
+	}
+	if succeeded != 1 {
+		t.Errorf("%d of %d racers succeeded, want exactly 1 -- the cap must be enforced atomically", succeeded, racers)
+	}
+	if got := h.OpenTopicCount(); got != maxEphemeralTopics {
+		t.Errorf("OpenTopicCount = %d, want %d (exactly at the cap, never over)", got, maxEphemeralTopics)
+	}
+}
+
+// The reap-vs-in-flight-Broadcast resurrection race: a Broadcast call that
+// read its message off the topic's bus subscription before reapTopicLocked
+// ran must NOT recreate h.seq/h.rings once it finally gets h.mu. This test
+// forces the interleaving deterministically by holding h.mu itself across the
+// publish and the reap, guaranteeing that whenever runEphemeralTopic's
+// goroutine gets around to calling Broadcast, it blocks on h.mu until AFTER
+// the reap has already run and released it -- so Broadcast's guard is
+// exercised against a topic that is provably already gone, not merely
+// probably gone by scheduling luck.
+func TestBroadcastDoesNotResurrectAReapedRunTopic(t *testing.T) {
+	bus := cache.NewInProcessBus()
+	h, _ := newTestHub(t, bus)
+	topic := RunTopic("resurrection")
+
+	if !h.OpenTopic(context.Background(), topic) {
+		t.Fatal("OpenTopic returned false")
+	}
+
+	h.mu.Lock()
+	if err := bus.Publish(context.Background(), topic, cache.Message{Type: TypeEvent, Data: json.RawMessage(`{"n":1}`)}); err != nil {
+		h.mu.Unlock()
+		t.Fatalf("Publish: %v", err)
+	}
+	// Give runEphemeralTopic's goroutine a chance to read the message and reach
+	// its own h.mu.Lock() call inside Broadcast -- there is no signal for
+	// "blocked on a mutex" to wait on instead, but correctness here does not
+	// actually depend on the goroutine having reached that point yet: h.mu is
+	// held for the whole publish-then-reap sequence below, so whenever the
+	// goroutine's Broadcast call does acquire the lock -- before this sleep,
+	// during it, or after -- it can only do so once the reap (also inside this
+	// critical section) has already completed.
+	time.Sleep(50 * time.Millisecond)
+
+	et := h.ephemeral[topic]
+	et.closed = true
+	et.closedAt = time.Now().Add(-reapDelay - time.Second)
+	h.reapTopicLocked(topic)
+	h.mu.Unlock()
+
+	// Let the (now-guarded) Broadcast call run to completion.
+	time.Sleep(100 * time.Millisecond)
+
+	h.mu.Lock()
+	_, seqPresent := h.seq[topic]
+	_, ringPresent := h.rings[topic]
+	_, ephemeralPresent := h.ephemeral[topic]
+	h.mu.Unlock()
+	if seqPresent {
+		t.Error("h.seq was resurrected by a Broadcast racing the reap")
+	}
+	if ringPresent {
+		t.Error("h.rings was resurrected by a Broadcast racing the reap")
+	}
+	if ephemeralPresent {
+		t.Error("h.ephemeral was resurrected by a Broadcast racing the reap")
+	}
+}
+
+// CloseTopic's terminal frame is what tells an already-subscribed client the
+// run is over instead of the topic silently going idle. A second CloseTopic
+// call must not send a second one -- idempotence applies to the broadcast,
+// not just the registry state.
+func TestCloseTopicBroadcastsTerminalFrameToSubscribedClient(t *testing.T) {
+	h, _ := newTestHub(t, cache.NewInProcessBus())
+	topic := RunTopic("terminal-frame")
+	if !h.OpenTopic(context.Background(), topic) {
+		t.Fatal("OpenTopic returned false")
+	}
+
+	c := h.register()
+	defer h.unregister(c)
+	subscribeClient(h, c, topic, 0)
+	expectNoEnvelope(t, c) // nothing yet -- the ring is empty
+
+	h.CloseTopic(topic)
+
+	got := nextEnvelope(t, c)
+	if got.Topic != topic {
+		t.Errorf("terminal frame topic = %q, want %q", got.Topic, topic)
+	}
+	if got.Type != TypeClosed {
+		t.Errorf("terminal frame type = %q, want %q", got.Type, TypeClosed)
+	}
+	if got.Seq != 1 {
+		t.Errorf("terminal frame seq = %d, want 1 (it is a real data frame, unlike an error)", got.Seq)
+	}
+
+	h.CloseTopic(topic) // idempotent: no second terminal frame
+	expectNoEnvelope(t, c)
+}
+
+// CloseTopicWithFinal must deliver its final data frame strictly before the
+// TypeClosed control frame -- lower Seq, and first in delivery order -- to a
+// subscribed client, and must do so as one atomic pair (a second call after
+// the topic is already closed sends neither frame). This is the ordering
+// guarantee task-22-brief.md's I-2 exists to make structural instead of a
+// race between an async bus-fed publish and CloseTopic's own synchronous
+// Broadcast (see CloseTopicWithFinal's doc comment).
+func TestCloseTopicWithFinalOrdersFinalFrameStrictlyBeforeClosed(t *testing.T) {
+	h, _ := newTestHub(t, cache.NewInProcessBus())
+	topic := RunTopic("final-before-closed")
+	if !h.OpenTopic(context.Background(), topic) {
+		t.Fatal("OpenTopic returned false")
+	}
+
+	c := h.register()
+	defer h.unregister(c)
+	subscribeClient(h, c, topic, 0)
+	expectNoEnvelope(t, c) // nothing yet -- the ring is empty
+
+	final := json.RawMessage(`{"state":"finished","status":"succeeded"}`)
+	h.CloseTopicWithFinal(topic, TypeEvent, final)
+
+	gotFinal := nextEnvelope(t, c)
+	if gotFinal.Type != TypeEvent {
+		t.Errorf("first frame type = %q, want %q", gotFinal.Type, TypeEvent)
+	}
+	if string(gotFinal.Data) != string(final) {
+		t.Errorf("first frame data = %s, want %s", gotFinal.Data, final)
+	}
+
+	gotClosed := nextEnvelope(t, c)
+	if gotClosed.Type != TypeClosed {
+		t.Errorf("second frame type = %q, want %q", gotClosed.Type, TypeClosed)
+	}
+
+	if gotFinal.Seq >= gotClosed.Seq {
+		t.Errorf("final frame seq %d, TypeClosed seq %d -- want final strictly lower", gotFinal.Seq, gotClosed.Seq)
+	}
+	expectNoEnvelope(t, c)
+
+	// Idempotent, exactly like CloseTopic: a second call after the topic is
+	// already closed broadcasts neither frame.
+	h.CloseTopicWithFinal(topic, TypeEvent, final)
+	expectNoEnvelope(t, c)
+}
+
+// reapTopicLocked must clear the reaped topic out of every currently
+// subscribed client's c.topics map, or a long-lived connection that
+// subscribed to many short-lived run:{id} topics over its lifetime would
+// accumulate a dead entry per run forever.
+func TestReapTopicLockedClearsTopicFromSubscribedClientsTopicsMap(t *testing.T) {
+	h, _ := newTestHub(t, cache.NewInProcessBus())
+	topic := RunTopic("reap-clears-client")
+	if !h.OpenTopic(context.Background(), topic) {
+		t.Fatal("OpenTopic returned false")
+	}
+
+	c := h.register()
+	defer h.unregister(c)
+	subscribeClient(h, c, topic, 0)
+
+	h.mu.Lock()
+	_, subscribed := c.topics[topic]
+	h.mu.Unlock()
+	if !subscribed {
+		t.Fatal("test setup: client is not subscribed to the topic")
+	}
+
+	h.CloseTopic(topic)
+	_ = nextEnvelope(t, c) // drain the terminal frame
+
+	h.mu.Lock()
+	h.ephemeral[topic].closedAt = time.Now().Add(-reapDelay - time.Second)
+	h.mu.Unlock()
+	h.reapExpiredTopics()
+
+	h.mu.Lock()
+	_, stillSubscribed := c.topics[topic]
+	h.mu.Unlock()
+	if stillSubscribed {
+		t.Error("reap left the topic in the client's topics map -- a long-lived connection would accumulate dead entries")
 	}
 }

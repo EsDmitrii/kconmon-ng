@@ -8,8 +8,9 @@ import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Segmented } from "@/components/ui/segmented";
 import { Skeleton } from "@/components/ui/skeleton";
-import { useCapabilities } from "@/hooks/use-capabilities";
+import { useCapabilities, useDatabaseAvailable } from "@/hooks/use-capabilities";
 import { getWsClient } from "@/hooks/use-ws-topic";
+import { ApiError, getEvents } from "@/lib/api";
 import {
   LIVE_EVENT_SEVERITIES,
   LIVE_EVENT_TYPES,
@@ -299,12 +300,67 @@ const EMPTY_FILTERS: LiveFilters = { type: "all", severity: "all", scope: "" };
 
 export function LivePage() {
   const { realtime, resolved } = useCapabilities();
+  const { available: historyAvailable, resolved: historyResolved } = useDatabaseAvailable();
   const [events, setEvents] = useState<LiveEvent[]>([]);
   const [connected, setConnected] = useState(false);
   const [topicError, setTopicError] = useState<string | null>(null);
   const [paused, setPaused] = useState(false);
   const [buffered, setBuffered] = useState(0);
   const [filters, setFilters] = useState<LiveFilters>(EMPTY_FILTERS);
+
+  /* Scrollback (GET /api/v1/events, Task 5). `history.nextCursor` doubles as
+     both "there is nothing more to load" (exhausted, "" after a real page)
+     and "nothing has loaded yet" (the initial value, also "") — both read the
+     same on the Load older button, and that is the right default: a button
+     that has not yet heard back from its first page should not be clickable
+     either. A failed load (the 503 case) also lands on "", not on the retry
+     button, because console.database.mode being unset is a deploy-time state
+     that a retry click cannot fix. */
+  const [history, setHistory] = useState<{ nextCursor: string; loading: boolean; notice: string | null }>({
+    nextCursor: "",
+    loading: false,
+    notice: null,
+  });
+
+  /* Server-side filtering keeps a page relevant to what the operator is
+     actually looking at; severity has no place here because GET
+     /api/v1/events has no severity param — that filter stays client-side only,
+     same as it always has. */
+  const loadHistory = useCallback(
+    async (cursor?: string) => {
+      setHistory((h) => ({ ...h, loading: true }));
+      try {
+        const types = filters.type === "all" ? undefined : [filters.type];
+        const scope = filters.scope.trim() || undefined;
+        const page = await getEvents({ types, scope, cursor });
+        // Merged through the exact same dedupe/sort pushEvents uses for the
+        // socket: a historical row and one already delivered live share an id
+        // ("<seq>-<unixNano>" on both paths), so pushEvents' Set-based dedupe
+        // folds them into one row with no special-casing here.
+        setEvents((prev) => pushEvents(prev, page.events));
+        setHistory({ nextCursor: page.nextCursor, loading: false, notice: null });
+      } catch (err) {
+        const notice =
+          err instanceof ApiError ? (err.problem.detail ?? err.problem.title) : "failed to load event history";
+        setHistory({ nextCursor: "", loading: false, notice });
+      }
+    },
+    [filters.type, filters.scope],
+  );
+
+  // Fetches page one on mount, and again whenever the type or scope filter
+  // changes — "one consistent stream" per the operator's current filter,
+  // rather than a filtered live half sitting over an unfiltered old half.
+  // Gated on historyResolved so a cold /api/v1/config never gets read as "no
+  // history": that would skip the very fetch this effect exists to make.
+  useEffect(() => {
+    if (!historyResolved) return;
+    if (!historyAvailable) {
+      setHistory({ nextCursor: "", loading: false, notice: null });
+      return;
+    }
+    void loadHistory(undefined);
+  }, [historyAvailable, historyResolved, loadHistory]);
 
   /* Arrivals land in a ref and are merged once per animation frame. A busy
      cluster emits an event per check observation, and a setState per event
@@ -572,6 +628,16 @@ export function LivePage() {
         </Card>
       ) : null}
 
+      {/* Non-fatal: the scrollback endpoint failing (503, history disabled)
+          says nothing about the live feed, which keeps working off the socket
+          regardless. */}
+      {history.notice ? (
+        <Card role="status" className="border-l-4 border-l-health-warn bg-health-warn-soft/40 p-5">
+          <p className="text-sm font-medium">Event history is unavailable</p>
+          <p className="mt-1 max-w-prose text-xs leading-relaxed text-muted-foreground">{history.notice}</p>
+        </Card>
+      ) : null}
+
       <Card className="overflow-hidden p-0">
         <div className="flex flex-wrap items-center gap-x-4 gap-y-2 border-b border-border px-4 py-3">
           <label className="relative flex items-center">
@@ -584,6 +650,17 @@ export function LivePage() {
               className="h-8 w-64 rounded-md bg-surface-2 pl-8 pr-2 text-sm placeholder:text-muted-foreground/70 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
             />
           </label>
+
+          {historyAvailable ? (
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={history.nextCursor === "" || history.loading}
+              onClick={() => loadHistory(history.nextCursor)}
+            >
+              {history.loading ? "Loading older…" : "Load older"}
+            </Button>
+          ) : null}
 
           {paused ? <Badge variant="warn" dot>{`Paused · ${buffered} buffered`}</Badge> : null}
 

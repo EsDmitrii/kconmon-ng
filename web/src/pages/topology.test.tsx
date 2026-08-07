@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildFlow } from "./topology";
+import { buildFlow, nodeNavigationPath } from "./topology";
 import type { Matrix, Topology } from "@/lib/types";
 
 const topo: Topology = {
@@ -66,5 +66,21 @@ describe("buildFlow", () => {
     const kept = edges.map((e) => (e.data as { failLabel: string }).failLabel);
     expect(kept).not.toContain("5%"); // the 5 weakest (1–5%) were dropped
     expect(kept).toContain("6%");
+  });
+});
+
+describe("nodeNavigationPath", () => {
+  it("builds /nodes/<name> for a real node, URL-encoding the name", () => {
+    expect(nodeNavigationPath({ id: "node-a", type: "topoNode" })).toBe("/nodes/node-a");
+  });
+
+  it("round-trips a node name that needs URL encoding", () => {
+    const name = "weird node/name äöü";
+    expect(nodeNavigationPath({ id: name, type: "topoNode" })).toBe(`/nodes/${encodeURIComponent(name)}`);
+    expect(decodeURIComponent(nodeNavigationPath({ id: name, type: "topoNode" })!.slice("/nodes/".length))).toBe(name);
+  });
+
+  it("ignores a zone container click", () => {
+    expect(nodeNavigationPath({ id: "zone:z1", type: "zone" })).toBeUndefined();
   });
 });

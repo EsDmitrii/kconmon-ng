@@ -13,6 +13,7 @@ import (
 	"github.com/EsDmitrii/kconmon-ng/internal/console/cache"
 	"github.com/EsDmitrii/kconmon-ng/internal/console/config"
 	"github.com/EsDmitrii/kconmon-ng/internal/console/metrics"
+	"github.com/EsDmitrii/kconmon-ng/internal/console/store"
 	"github.com/EsDmitrii/kconmon-ng/internal/console/ws"
 	"github.com/gorilla/websocket"
 	"github.com/prometheus/client_golang/prometheus"
@@ -27,7 +28,7 @@ func newTestServer(t *testing.T) *Server {
 		w.Header().Set("Content-Type", "text/html")
 		_, _ = w.Write([]byte(`<div id="root"></div>`))
 	})
-	return NewServer(cfg, m, reg, ui, nil, nil, nil, nil)
+	return NewServer(Deps{Config: cfg, Metrics: m, PromRegistry: reg, UI: ui})
 }
 
 func do(t *testing.T, s *Server, target string) *httptest.ResponseRecorder {
@@ -86,23 +87,109 @@ func TestVersionEndpoint(t *testing.T) {
 	}
 }
 
+// configBody is GET /api/v1/config's shape, as consumed by the tests below.
+type configBody struct {
+	Auth struct {
+		Mode      string `json:"mode"`
+		Role      string `json:"role"`
+		LoginPath string `json:"loginPath"`
+	} `json:"auth"`
+	AnonymousBanner bool `json:"anonymousBanner"`
+	Controller      struct {
+		Configured bool `json:"configured"`
+	} `json:"controller"`
+	Prometheus struct {
+		Configured bool `json:"configured"`
+	} `json:"prometheus"`
+	Database struct {
+		Configured bool `json:"configured"`
+	} `json:"database"`
+}
+
 func TestConfigEndpointAdvertisesAnonymousBanner(t *testing.T) {
 	w := do(t, newTestServer(t), "/api/v1/config")
 	if w.Code != http.StatusOK {
 		t.Fatalf("config = %d", w.Code)
 	}
-	var body struct {
-		Auth struct {
-			Mode string `json:"mode"`
-			Role string `json:"role"`
-		} `json:"auth"`
-		AnonymousBanner bool `json:"anonymousBanner"`
-	}
+	var body configBody
 	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
 		t.Fatalf("config json: %v", err)
 	}
 	if body.Auth.Mode != "anonymous" || body.Auth.Role != "viewer" || !body.AnonymousBanner {
 		t.Errorf("unexpected config payload: %+v", body)
+	}
+	if body.Database.Configured {
+		t.Errorf("database.configured = true, want false: newTestServer wires no Events dependency")
+	}
+}
+
+// fakeConfigEventLister is an EventLister double used only to make
+// Deps.Events non-nil for TestConfigEndpointAdvertisesDatabaseConfigured — the
+// handler under test never calls ListEvents.
+type fakeConfigEventLister struct{}
+
+func (fakeConfigEventLister) ListEvents(context.Context, store.EventFilter) (store.EventPage, error) {
+	return store.EventPage{}, nil
+}
+
+// TestConfigEndpointAdvertisesDatabaseConfigured pins the M3 contract: the
+// "database":{"configured":...} bit in /api/v1/config must track whether
+// cmd/console wired an EventLister (i.e. db != nil in main.go), the same
+// signal handleEvents' own 503 gate reads, so this endpoint never grows a
+// second, independently-driftable notion of "is the database up".
+func TestConfigEndpointAdvertisesDatabaseConfigured(t *testing.T) {
+	cfg := &config.Config{HTTPPort: 8080, LogLevel: "info", LogFormat: "json", MetricsPrefix: "kconmon_ng", Auth: config.AuthConfig{Mode: "anonymous", Anonymous: config.AnonymousConfig{Role: "viewer"}}}
+	reg := prometheus.NewRegistry()
+	m := metrics.New(cfg.MetricsPrefix, reg)
+	ui := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte("spa")) })
+	s := NewServer(Deps{Config: cfg, Metrics: m, PromRegistry: reg, UI: ui, Events: fakeConfigEventLister{}})
+
+	w := do(t, s, "/api/v1/config")
+	if w.Code != http.StatusOK {
+		t.Fatalf("config = %d", w.Code)
+	}
+	var body configBody
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatalf("config json: %v", err)
+	}
+	if !body.Database.Configured {
+		t.Errorf("database.configured = false, want true: Events is wired")
+	}
+}
+
+// TestConfigEndpointLoginPathPerMode pins Task 18's authLoginPath: the
+// frontend feature-detects the login flow from GET /api/v1/config instead of
+// hardcoding auth.mode's four cases itself.
+func TestConfigEndpointLoginPathPerMode(t *testing.T) {
+	cases := []struct {
+		mode string
+		want string
+	}{
+		{"anonymous", ""},
+		{"local", "/api/v1/auth/login"},
+		{"header", ""},
+		{"oidc", "/api/v1/auth/oidc/start"},
+	}
+	for _, c := range cases {
+		t.Run(c.mode, func(t *testing.T) {
+			cfg := authTestConfig(c.mode)
+			reg := prometheus.NewRegistry()
+			m := metrics.New(cfg.MetricsPrefix, reg)
+			ui := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte("spa")) })
+			s := NewServer(Deps{Config: cfg, Metrics: m, PromRegistry: reg, UI: ui})
+
+			w := do(t, s, "/api/v1/config")
+			if w.Code != http.StatusOK {
+				t.Fatalf("config = %d", w.Code)
+			}
+			var body configBody
+			if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+				t.Fatalf("config json: %v", err)
+			}
+			if body.Auth.LoginPath != c.want {
+				t.Errorf("mode=%q loginPath = %q, want %q", c.mode, body.Auth.LoginPath, c.want)
+			}
+		})
 	}
 }
 
@@ -141,7 +228,7 @@ func newRealtimeTestServer(t *testing.T, hub *ws.Hub, realtime RealtimeStatus) *
 		w.Header().Set("Content-Type", "text/html")
 		_, _ = w.Write([]byte(`<div id="root"></div>`))
 	})
-	return NewServer(cfg, m, reg, ui, nil, nil, hub, realtime)
+	return NewServer(Deps{Config: cfg, Metrics: m, PromRegistry: reg, UI: ui, Hub: hub, Realtime: realtime})
 }
 
 func versionCapabilities(t *testing.T, s *Server) []string {

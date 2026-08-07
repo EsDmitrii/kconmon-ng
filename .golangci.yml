@@ -1,3 +1,4 @@
+---
 version: "2"
 
 run:
@@ -71,5 +72,9 @@ linters:
           - gocritic
 
       - path: \.pb\.go
+        linters:
+          - all
+
+      - path: internal/console/store/gen/
         linters:
           - all

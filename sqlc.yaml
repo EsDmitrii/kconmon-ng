@@ -1,0 +1,26 @@
+---
+version: "2"
+sql:
+  - engine: postgresql
+    schema: internal/console/store/migrations
+    queries: internal/console/store/queries
+    gen:
+      go:
+        package: gen
+        out: internal/console/store/gen
+        sql_package: pgx/v5
+        emit_json_tags: false
+        emit_prepared_queries: false
+        emit_interface: true
+        emit_empty_slices: true
+        overrides:
+          - db_type: "timestamptz"
+            go_type: "time.Time"
+          - column: "topology_events.details"
+            go_type: "encoding/json.RawMessage"
+          - column: "audit_log.detail"
+            go_type: "encoding/json.RawMessage"
+          - column: "check_runs.spec"
+            go_type: "encoding/json.RawMessage"
+          - column: "check_results.result"
+            go_type: "encoding/json.RawMessage"

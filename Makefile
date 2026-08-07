@@ -10,7 +10,7 @@ LDFLAGS := -s -w \
 
 BIN_DIR := bin
 
-.PHONY: all build build-agent build-controller build-console test test-race test-cover lint fmt proto clean help \
+.PHONY: all build build-agent build-controller build-console test test-race test-cover lint fmt proto sqlc clean help \
 	local-up local-down local-status local-smoke local-urls
 
 all: lint test build
@@ -62,6 +62,15 @@ fmt:
 proto:
 	buf generate api/proto
 
+## sqlc
+
+# Pinned so a locally-installed sqlc of a different version cannot silently
+# regenerate different code, exactly as GOLANGCI_LINT_VERSION is pinned above.
+SQLC_VERSION ?= v1.31.1
+
+sqlc:
+	go run github.com/sqlc-dev/sqlc/cmd/sqlc@$(SQLC_VERSION) generate
+
 ## Helm
 
 helm-lint:
@@ -70,10 +79,14 @@ helm-lint:
 	helm lint charts/kconmon-ng -f charts/kconmon-ng/ci/full-values.yaml
 	helm lint charts/kconmon-ng -f charts/kconmon-ng/ci/minimal-values.yaml
 	helm lint charts/kconmon-ng -f charts/kconmon-ng/ci/console-values.yaml
+	helm lint charts/kconmon-ng -f charts/kconmon-ng/ci/console-db-values.yaml
+	helm lint charts/kconmon-ng -f charts/kconmon-ng/ci/console-auth-values.yaml
 
 helm-template:
 	helm template kconmon-ng charts/kconmon-ng
 	helm template kconmon-ng charts/kconmon-ng -f charts/kconmon-ng/ci/console-values.yaml
+	helm template kconmon-ng charts/kconmon-ng -f charts/kconmon-ng/ci/console-db-values.yaml
+	helm template kconmon-ng charts/kconmon-ng -f charts/kconmon-ng/ci/console-auth-values.yaml
 
 helm-package:
 	helm package charts/kconmon-ng -d dist/
@@ -119,6 +132,7 @@ help:
 	@echo "  lint             - Run golangci-lint"
 	@echo "  fmt              - Format code"
 	@echo "  proto            - Generate protobuf code"
+	@echo "  sqlc             - Generate database query code"
 	@echo "  helm-lint        - Lint Helm chart"
 	@echo "  helm-template    - Render Helm templates"
 	@echo "  helm-package     - Package Helm chart"

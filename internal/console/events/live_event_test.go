@@ -3,6 +3,7 @@ package events_test
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -281,5 +282,82 @@ func TestLiveEventJSONKeys(t *testing.T) {
 	}
 	if len(decoded) != 8 {
 		t.Errorf("LiveEvent JSON has %d keys, want exactly 8: %s", len(decoded), raw)
+	}
+}
+
+// subMicroNanos is a controller timestamp whose nanosecond part is NOT a whole
+// number of microseconds (…000123456 ns → 123456 ns past the second, i.e. 456 ns
+// past microsecond 123). Postgres TIMESTAMPTZ cannot hold those trailing 456 ns.
+const subMicroNanos int64 = 1753400000000123456
+
+// subMicroTruncatedNanos is what a µs-resolution store can hold, and therefore
+// what ToLiveEvent must already have produced.
+const subMicroTruncatedNanos int64 = 1753400000000123000
+
+// storeRoundTrip models the ONE lossy step between ToLiveEvent and the
+// scrollback endpoint: topology_events.event_time is TIMESTAMPTZ, so whatever
+// the ingester wrote comes back truncated to microseconds. No database is
+// needed to model it faithfully — the resolution is the whole of the loss.
+func storeRoundTrip(ts time.Time) time.Time { return ts.UTC().Truncate(time.Microsecond) }
+
+// rebuildID is httpapi.toLiveEvent's id expression (internal/console/httpapi/
+// events.go), duplicated here because that package cannot be imported from this
+// one. TestEventsScrollbackIDMatchesTheLiveID in httpapi pins the same rule from
+// the other side; if the two ever diverge, this constant is the contract.
+func rebuildID(seq uint64, ts time.Time) string {
+	return fmt.Sprintf("%d-%d", seq, ts.UnixNano())
+}
+
+// A LiveEvent's id must survive persistence. The Live page dedupes the
+// WebSocket frame against the scrollback row by id, so if ToLiveEvent kept
+// sub-microsecond nanos the two ids would differ after a Postgres round trip
+// and the same event would render twice.
+func TestToLiveEventIDSurvivesAMicrosecondStoreRoundTrip(t *testing.T) {
+	ev := &pb.Event{
+		Seq:       77,
+		Timestamp: timestamppb.New(time.Unix(0, subMicroNanos).UTC()),
+		Payload: &pb.Event_TopologyChanged{
+			TopologyChanged: &pb.TopologyChanged{Reason: "agent_registered", NodeName: "node-a"},
+		},
+	}
+
+	live, err := events.ToLiveEvent(ev)
+	if err != nil {
+		t.Fatalf("ToLiveEvent: %v", err)
+	}
+
+	// The strong form of the guarantee: the projection is ALREADY µs-aligned,
+	// so ANY µs-resolution store is an identity on it, not just this one.
+	if got := live.Timestamp.Nanosecond() % 1000; got != 0 {
+		t.Errorf("Timestamp has %d sub-microsecond nanos; it must be truncated so a TIMESTAMPTZ round trip is lossless", got)
+	}
+	if want := time.Unix(0, subMicroTruncatedNanos).UTC(); !live.Timestamp.Equal(want) {
+		t.Errorf("Timestamp = %v, want %v", live.Timestamp, want)
+	}
+	if want := rebuildID(77, time.Unix(0, subMicroTruncatedNanos).UTC()); live.ID != want {
+		t.Errorf("ID = %q, want %q", live.ID, want)
+	}
+
+	// And the round trip itself, end to end: write → read → rebuild.
+	persisted := storeRoundTrip(live.Timestamp)
+	if rebuilt := rebuildID(live.Seq, persisted); rebuilt != live.ID {
+		t.Errorf("scrollback rebuilt id %q, want the live id %q — the Live page would render this event twice", rebuilt, live.ID)
+	}
+}
+
+// The truncation must not disturb a timestamp that is already µs-aligned: the
+// pinned ids elsewhere in this file depend on it being an exact no-op there.
+func TestToLiveEventLeavesMicrosecondAlignedTimestampsAlone(t *testing.T) {
+	live, err := events.ToLiveEvent(&pb.Event{Seq: 5, Timestamp: fixedTime(), Payload: &pb.Event_TopologyChanged{
+		TopologyChanged: &pb.TopologyChanged{Reason: "agent_registered", NodeName: "node-a"},
+	}})
+	if err != nil {
+		t.Fatalf("ToLiveEvent: %v", err)
+	}
+	if want := time.Unix(0, fixedNanos).UTC(); !live.Timestamp.Equal(want) {
+		t.Errorf("Timestamp = %v, want %v (truncation must be a no-op here)", live.Timestamp, want)
+	}
+	if want := rebuildID(5, time.Unix(0, fixedNanos).UTC()); live.ID != want {
+		t.Errorf("ID = %q, want %q", live.ID, want)
 	}
 }

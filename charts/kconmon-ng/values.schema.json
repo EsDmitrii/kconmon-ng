@@ -62,10 +62,49 @@
         "auth": {
           "type": "object",
           "properties": {
-            "mode": { "type": "string", "enum": ["anonymous"] },
+            "mode": { "type": "string", "enum": ["anonymous", "local", "header", "oidc"] },
             "anonymous": {
               "type": "object",
               "properties": { "role": { "type": "string" } }
+            },
+            "defaultRole": { "type": "string" },
+            "local": {
+              "type": "object",
+              "properties": {
+                "bootstrapAdmin": { "type": "string" },
+                "existingSecret": { "type": "string" },
+                "existingSecretKey": { "type": "string" }
+              }
+            },
+            "header": {
+              "type": "object",
+              "properties": {
+                "userHeader": { "type": "string" },
+                "groupsHeader": { "type": "string" },
+                "groupsDelimiter": { "type": "string" },
+                "trustedProxyCIDRs": { "type": "array", "items": { "type": "string" } }
+              }
+            },
+            "oidc": {
+              "type": "object",
+              "properties": {
+                "issuer": { "type": "string" },
+                "clientID": { "type": "string" },
+                "existingSecret": { "type": "string" },
+                "existingSecretKey": { "type": "string" },
+                "redirectURL": { "type": "string" },
+                "scopes": { "type": "array", "items": { "type": "string" } },
+                "usernameClaim": { "type": "string" },
+                "groupsClaim": { "type": "string" }
+              }
+            },
+            "session": {
+              "type": "object",
+              "properties": {
+                "ttl": { "type": "string" },
+                "cookieName": { "type": "string" },
+                "secure": { "type": "boolean" }
+              }
             }
           }
         },
@@ -110,11 +149,54 @@
             "resources": { "type": "object" }
           }
         },
+        "podSecurityContext": { "type": "object" },
+        "database": {
+          "type": "object",
+          "properties": {
+            "mode": {
+              "type": "string",
+              "enum": ["cnpg", "external", "disabled"]
+            },
+            "existingSecret": { "type": "string" },
+            "existingSecretKey": { "type": "string" },
+            "maxConns": { "type": "integer", "minimum": 1, "maximum": 1000 },
+            "connectTimeout": { "type": "string" },
+            "migrateOnStart": { "type": "boolean" },
+            "retentionDays": { "type": "integer", "minimum": 0, "maximum": 36500 },
+            "cnpg": {
+              "type": "object",
+              "properties": {
+                "instances": { "type": "integer", "minimum": 1, "maximum": 16 },
+                "imageName": { "type": "string" },
+                "storage": {
+                  "type": "object",
+                  "properties": {
+                    "size": { "type": "string" },
+                    "storageClass": { "type": "string" }
+                  }
+                },
+                "resources": { "type": "object" },
+                "backup": {
+                  "type": "object",
+                  "properties": {
+                    "enabled": { "type": "boolean" },
+                    "schedule": { "type": "string" },
+                    "destinationPath": { "type": "string" },
+                    "endpointURL": { "type": "string" },
+                    "credentialsSecret": { "type": "string" }
+                  }
+                }
+              }
+            }
+          }
+        },
         "networkPolicy": {
           "type": "object",
           "properties": {
             "prometheusEgress": { "type": "array" },
-            "valkeyEgress": { "type": "array" }
+            "valkeyEgress": { "type": "array" },
+            "databaseEgress": { "type": "array" },
+            "oidcEgress": { "type": "array" }
           }
         },
         "service": {

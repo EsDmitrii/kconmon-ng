@@ -101,6 +101,81 @@ Resolves console.valkey.mode (a Helm-only concept) to the Go-side
 {{- end }}
 
 {{/*
+Console PostgreSQL: CNPG Cluster name (console.database.mode=cnpg).
+*/}}
+{{- define "kconmon-ng.console.databaseClusterName" -}}
+{{- /* trunc 60, not 63: CNPG derives pod names "<cluster>-N" and stamps them
+into the cnpg.io/instanceName LABEL (63-char cap) — a 63-char cluster name
+makes instance creation fail. */ -}}
+{{- printf "%s-db" (include "kconmon-ng.console.fullname" . | trunc 57 | trimSuffix "-") | trunc 60 | trimSuffix "-" }}
+{{- end }}
+
+{{/*
+Console PostgreSQL: name of the Secret holding the DSN. Resolves
+console.database.mode the same way valkeyAddress resolves valkey.mode:
+  cnpg     -> "<cluster>-app" (the Secret CNPG generates for the app user)
+  external -> console.database.existingSecret (validated non-empty)
+The chart only ever references this Secret BY NAME; it never templates,
+generates or reads credential material.
+*/}}
+{{- define "kconmon-ng.console.databaseSecretName" -}}
+{{- $db := .Values.console.database -}}
+{{- if eq $db.mode "cnpg" -}}
+{{- printf "%s-app" (include "kconmon-ng.console.databaseClusterName" .) -}}
+{{- else if eq $db.mode "external" -}}
+{{- if not $db.existingSecret -}}
+{{- fail "console.database.mode=external requires console.database.existingSecret (a Secret holding a full postgres:// DSN)" -}}
+{{- end -}}
+{{- $db.existingSecret -}}
+{{- end -}}
+{{- end }}
+
+{{/*
+Console PostgreSQL: key inside the DSN Secret.
+  cnpg     -> "uri" (CNPG's generated key holding the full DSN)
+  external -> console.database.existingSecretKey
+*/}}
+{{- define "kconmon-ng.console.databaseSecretKey" -}}
+{{- if eq .Values.console.database.mode "cnpg" -}}
+uri
+{{- else -}}
+{{- .Values.console.database.existingSecretKey -}}
+{{- end -}}
+{{- end }}
+
+{{/*
+Console local-mode bootstrap admin: name of the Secret holding the bootstrap
+password (auth.local.existingSecret). Referenced by name only -- this chart
+never creates or reads it, same as databaseSecretName above. Only required
+(and only checked) when auth.local.bootstrapAdmin is actually set: an
+operator running mode=local without a bootstrap admin (users provisioned
+some other way) is not required to set existingSecret at all.
+*/}}
+{{- define "kconmon-ng.console.localAdminSecretName" -}}
+{{- $local := .Values.console.auth.local -}}
+{{- if and $local.bootstrapAdmin (not $local.existingSecret) -}}
+{{- fail "console.auth.local.bootstrapAdmin is set but console.auth.local.existingSecret is empty (a Secret holding the bootstrap password is required to create it)" -}}
+{{- end -}}
+{{- $local.existingSecret -}}
+{{- end }}
+
+{{/*
+Console oidc-mode: name of the Secret holding the OIDC client secret
+(auth.oidc.existingSecret). Referenced by name only, same as
+databaseSecretName above. REQUIRED whenever auth.mode=oidc -- unlike the
+local-mode bootstrap secret, there is no "mode=oidc without a client secret"
+degraded path (config.Config.Validate's own auth.oidc.clientSecretFile check
+would reject it at console boot anyway; failing the render here is faster).
+*/}}
+{{- define "kconmon-ng.console.oidcClientSecretName" -}}
+{{- $oidc := .Values.console.auth.oidc -}}
+{{- if not $oidc.existingSecret -}}
+{{- fail "console.auth.mode=oidc requires console.auth.oidc.existingSecret (a Secret holding the OIDC client secret)" -}}
+{{- end -}}
+{{- $oidc.existingSecret -}}
+{{- end }}
+
+{{/*
 Console -> controller gRPC dial target for the events ingester.
 Empty (realtime off) unless controller.events.enabled. An explicit
 console.controller.grpcAddr always wins; otherwise reuse the SAME

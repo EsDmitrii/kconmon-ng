@@ -1,3 +1,98 @@
+## kconmon-ng v1.5.0
+
+> Console release. Adds durable persistence, authentication/RBAC, and an
+> on-demand diagnostics runner (M3) on top of the M1/M2 Console. Off by
+> default (`console.enabled: false`, `console.database.mode: disabled`,
+> `console.auth.mode: anonymous`); existing installs — including existing
+> Console installs on `anonymous` auth — are functionally unaffected until
+> you turn these on.
+
+### Added
+
+- **PostgreSQL persistence** — `console.database.mode=cnpg|external|disabled`
+  (ADR-001): CloudNativePG-provisioned or externally-supplied PostgreSQL for
+  event history, RBAC, audit, and diagnostics run history. `GET /api/v1/events`
+  now serves durable scrollback for the Live page, backed by `topology_events`
+  (all five WebSocket event types, not only topology ones).
+- **Authentication and RBAC** — `console.auth.mode=anonymous|local|header|oidc`:
+  local users (PostgreSQL, argon2id), header-based trusted-proxy auth (explicit
+  CIDR opt-in), and OIDC (code flow + PKCE). Built-in roles
+  (`viewer`/`operator`/`alert-editor`/`admin`) are compiled-in and work with
+  `database.mode=disabled`; a custom-role admin API layers on top when a
+  database is configured. `__Host-` session cookies, CSRF double-submit for
+  cookie-authenticated mutations, and an async best-effort audit log
+  (`GET /api/v1/audit`).
+- **API tokens (PATs)** — `/api/v1/tokens`: SHA-256-hashed bearer tokens that
+  work in every auth mode. A PAT is **not** individually scoped in M3: its
+  effective permissions are exactly `auth.defaultRole`, deployment-wide — a
+  token subject resolves no role bindings of its own, and token-kind bindings
+  are rejected by the RBAC API by design (they would silently grant nothing).
+  Where a database is configured, disabling a **local** user's account revokes
+  the tokens they own on that user's next request; subjects created by header
+  or OIDC mode have no `users` row, so their disable state lives upstream at
+  the proxy/IdP and only `DELETE /api/v1/tokens/{id}` revokes their tokens.
+- **Diagnostics runner** — `POST`/`GET /api/v1/runs`, `GET /api/v1/runs/{id}`:
+  bounded on-demand check fan-out (up to 400 pairs) with persisted run history
+  and shareable permalinks. Live per-pair progress streams over a new
+  ephemeral `run:{id}` WebSocket topic, opened per run, with an automatic
+  REST-polling fallback on any console replica other than the one executing
+  the run.
+- **Object cards v1** — Node and Pair cards with a shared "Recent changes"
+  event rail, linked from Topology and the Matrix heatmap.
+- **NetworkPolicy** — opens console↔database (CNPG pod-selector rule, or a
+  namespace-wide default for `mode=external`) and console→OIDC IdP on both
+  layers, alongside the existing console→controller/Valkey rules.
+
+### Fixed
+
+- Chart mounts every console secret (database DSN, local-admin bootstrap
+  password, OIDC client secret) under one sibling directory,
+  `/etc/kconmon-ng-console-secrets/`, group-readable (`0440`) with
+  `console.podSecurityContext.fsGroup` matching the distroless nonroot gid —
+  the milestone's originally planned nested path and owner-only mode were
+  both unworkable (a read-only ConfigMap volume cannot host a mountpoint
+  inside itself, and `0400` is unreadable by the nonroot process without
+  matching UID ownership).
+
+### Upgrade Notes
+
+1. This release is safe to roll out with every new feature left at its
+   default (`console.database.mode: disabled`, `console.auth.mode: anonymous`):
+   the M1/M2 surface behaves identically.
+2. **Every existing Console install rolls once on upgrade, even one that
+   changes nothing in `values.yaml`.** `auth.defaultRole` and the
+   `auth.session.*` block are now rendered into the console ConfigMap
+   unconditionally (previously absent keys), so the ConfigMap's content —
+   and therefore its checksum annotation on the Deployment's pod template —
+   changes for every install, triggering one rollout. There is no data or
+   config migration behind it; it is a one-time restart.
+3. To turn on persistence and auth, set `console.database.mode` to `cnpg` (this
+   chart does **not** install the CloudNativePG operator or its CRDs —
+   install those first, or `helm install` fails with a clear error) or
+   `external` (supply `console.database.existingSecret`), then set
+   `console.auth.mode` and its mode-specific block. See
+   `docs/console/architecture/CONFIG.md` and `SECURITY.md` for the full
+   validation matrix and secret-mount layout.
+
+### Install
+
+```bash
+helm upgrade --install kconmon-ng oci://ghcr.io/esdmitrii/charts/kconmon-ng \
+  --version 1.5.0 \
+  --namespace kconmon-ng \
+  --create-namespace
+```
+
+### Images
+
+```
+ghcr.io/esdmitrii/kconmon-ng-agent:1.5.0
+ghcr.io/esdmitrii/kconmon-ng-controller:1.5.0
+ghcr.io/esdmitrii/kconmon-ng-console:1.5.0
+```
+
+---
+
 ## kconmon-ng v1.4.0
 
 > Console release. Adds an optional read-only web Console (M1) with a realtime

@@ -19,6 +19,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { useMatrix } from "@/hooks/use-matrix";
 import { useTopology } from "@/hooks/use-topology";
 import { useTheme } from "@/components/theme-provider";
+import { goTo } from "@/lib/api";
 import type { Matrix, Topology } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
@@ -98,6 +99,21 @@ export function buildFlow(
   }));
 
   return { nodes, edges, problemTotal: problems.length };
+}
+
+/**
+ * nodeNavigationPath decides the click destination for one React Flow node
+ * (task-25-brief.md: clicking a topology node navigates to /nodes/<name>).
+ * Pulled out as a pure function, tested directly, rather than only inline in
+ * onNodeClick below -- @xyflow/react needs ResizeObserver, which jsdom does
+ * not provide (this repo's test environment has no polyfill for it either),
+ * so a full page render+click here is not viable; this is the actual
+ * decision logic that render makes, exercised without React Flow at all.
+ * Only `topoNode` ids are real node names -- a `zone:<name>` container click
+ * must not navigate anywhere.
+ */
+export function nodeNavigationPath(node: Pick<Node, "id" | "type">): string | undefined {
+  return node.type === "topoNode" ? `/nodes/${encodeURIComponent(node.id)}` : undefined;
 }
 
 /* Custom node renderers. The wrapper element already carries the .topo-zone /
@@ -228,6 +244,10 @@ export function TopologyPage() {
                 colorMode={theme}
                 fitView
                 fitViewOptions={{ padding: 0.15 }}
+                onNodeClick={(_, node) => {
+                  const path = nodeNavigationPath(node);
+                  if (path) goTo(path);
+                }}
                 onEdgeMouseEnter={(_, e) => setHoveredEdge(e.id)}
                 onEdgeMouseLeave={() => setHoveredEdge(null)}
                 proOptions={{ hideAttribution: true }}

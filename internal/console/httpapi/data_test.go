@@ -34,7 +34,10 @@ func newDataServer(t *testing.T, ctrlURL, promURL string) *httpapi.Server {
 		prom = promql.New(promURL, promql.Guards{QueryTimeout: 2 * time.Second, MaxRange: 24 * time.Hour, MaxResponseBytes: 1 << 20})
 	}
 	ui := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte("spa")) })
-	return httpapi.NewServer(cfg, m, reg, ui, ctrl, prom, nil, nil)
+	return httpapi.NewServer(httpapi.Deps{
+		Config: cfg, Metrics: m, PromRegistry: reg, UI: ui,
+		Controller: ctrl, Prometheus: prom,
+	})
 }
 
 func fakeController(t *testing.T) *httptest.Server {

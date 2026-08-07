@@ -46,7 +46,9 @@ type LiveEvent struct {
 	// ID is "<seq>-<unixNano>", built only from controller-assigned values so
 	// every console replica derives the SAME id for the same pb.Event. That is
 	// what makes it usable as the ws.Hub's dedupe key (and as the React list
-	// key). Never mix a local clock or a per-replica id in here.
+	// key). Never mix a local clock or a per-replica id in here. The nanos are
+	// always a whole number of microseconds -- see ToLiveEvent for why that is
+	// load-bearing for the persisted-scrollback path.
 	ID        string          `json:"id"`
 	Seq       uint64          `json:"seq"`
 	Type      string          `json:"type"`
@@ -116,7 +118,18 @@ func ToLiveEvent(ev *pb.Event) (LiveEvent, error) {
 	// yields the Unix epoch, which looks wrong but is IDENTICAL on every
 	// replica; substituting time.Now() here would give the same event a
 	// different id per replica and defeat the hub's dedupe.
-	ts := ev.GetTimestamp().AsTime().UTC()
+	//
+	// Truncated to microseconds because the id must survive a store round trip:
+	// topology_events.event_time is TIMESTAMPTZ, whose resolution is 1 µs, so a
+	// controller timestamp carrying sub-µs nanos comes back from Postgres
+	// rounded and httpapi's toLiveEvent (which rebuilds the SAME "<seq>-<nanos>"
+	// string from the persisted row) would derive a different id for the same
+	// event -- the Live page dedupes socket frames against scrollback rows by
+	// id, so the two would render as duplicates. Truncating here makes the
+	// projection already-µs-aligned, hence the id an invariant of the event
+	// rather than of where it was read from. Both the id and the Timestamp
+	// field use this value; they must not diverge.
+	ts := ev.GetTimestamp().AsTime().UTC().Truncate(time.Microsecond)
 
 	out := LiveEvent{
 		ID:        fmt.Sprintf("%d-%d", ev.GetSeq(), ts.UnixNano()),

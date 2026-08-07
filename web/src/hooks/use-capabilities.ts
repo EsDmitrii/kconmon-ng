@@ -1,6 +1,6 @@
 import { useMemo } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { getVersion } from "@/lib/api";
+import { getConfig, getVersion } from "@/lib/api";
 
 // Same cadence as MATRIX_POLL_MS/TOPOLOGY_POLL_MS. It is what makes the
 // realtime→polling fallback self-healing: when this console replica's ingester
@@ -39,4 +39,33 @@ export function useCapabilities(): { realtime: boolean; resolved: boolean } {
   const realtime = data?.capabilities?.includes("events") ?? false;
   const resolved = !isPending;
   return useMemo(() => ({ realtime, resolved }), [realtime, resolved]);
+}
+
+/**
+ * useDatabaseAvailable reports whether GET /api/v1/events has anything behind
+ * it — GET /api/v1/config's `database.configured` (internal/console/httpapi
+ * handleConfig), which is `true` exactly when `s.events != nil`, the same
+ * signal handleEvents' own 503 gate reads. The Live page uses this to decide
+ * whether to fetch scrollback at all: fetching against a replica that answers
+ * 503 would just be a request that always fails.
+ *
+ * Unlike `realtime` this is not expected to flap while the page is open —
+ * console.database.mode is a deploy-time setting, not a per-replica health
+ * signal — so it is fetched once (`staleTime: Infinity`) rather than polled
+ * on CAPABILITIES_POLL_MS.
+ *
+ * `resolved` is the same "have we asked yet" split useCapabilities makes:
+ * `available === false` before the first answer must not be read as "history
+ * is off", or the Live page would skip the scrollback fetch on every cold
+ * load before ever finding out it should have made it.
+ */
+export function useDatabaseAvailable(): { available: boolean; resolved: boolean } {
+  const { data, isPending } = useQuery({
+    queryKey: ["config"],
+    queryFn: getConfig,
+    staleTime: Infinity,
+  });
+  const available = data?.database?.configured ?? false;
+  const resolved = !isPending;
+  return useMemo(() => ({ available, resolved }), [available, resolved]);
 }

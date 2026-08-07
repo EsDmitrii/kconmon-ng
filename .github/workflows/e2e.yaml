@@ -1,3 +1,4 @@
+---
 name: E2E
 
 on:
@@ -111,23 +112,59 @@ jobs:
             COMMIT=${{ steps.meta.outputs.commit }}
             BUILD_DATE=${{ steps.meta.outputs.build_date }}
 
+      # Dockerfile.console is a SEPARATE Dockerfile (not a `target:` of the
+      # root one, see Makefile's docker-build) -- it stages the SPA build
+      # (web/) through a node image before the Go build, so `file:` must
+      # point at it explicitly.
+      - name: Build console image
+        if: ${{ steps.meta.outputs.skip != 'true' }}
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: Dockerfile.console
+          push: false
+          load: true
+          tags: kconmon-ng-console:test
+          target: console
+          build-args: |
+            VERSION=${{ steps.meta.outputs.version }}
+            COMMIT=${{ steps.meta.outputs.commit }}
+            BUILD_DATE=${{ steps.meta.outputs.build_date }}
+
       - name: Load images into Kind
         if: ${{ steps.meta.outputs.skip != 'true' }}
         run: |
           kind load docker-image kconmon-ng-agent:test --name kconmon-ng-e2e
           kind load docker-image kconmon-ng-controller:test --name kconmon-ng-e2e
+          kind load docker-image kconmon-ng-console:test --name kconmon-ng-e2e
+
+      # Deliberately a plain postgres:17-alpine Deployment/Service, not CNPG
+      # -- see e2e/testdata/postgres.yaml's header for why. Applied BEFORE
+      # the Helm install: the console Pod mounts the Secret's "dsn" key at
+      # boot and fails readiness without it already existing.
+      - name: Apply Postgres fixture
+        if: ${{ steps.meta.outputs.skip != 'true' }}
+        run: |
+          kubectl apply -f e2e/testdata/postgres.yaml
+          kubectl wait --for=condition=ready pod \
+            -l app=kconmon-e2e-postgres \
+            --timeout=90s
 
       - name: Install Helm chart
         if: ${{ steps.meta.outputs.skip != 'true' }}
         run: |
           helm upgrade --install kconmon-ng ./charts/kconmon-ng \
             -f e2e/testdata/values.yaml \
+            -f e2e/testdata/console-values.yaml \
             --set controller.image.repository=kconmon-ng-controller \
             --set controller.image.tag=test \
             --set controller.image.pullPolicy=Never \
             --set agent.image.repository=kconmon-ng-agent \
             --set agent.image.tag=test \
             --set agent.image.pullPolicy=Never \
+            --set console.image.repository=kconmon-ng-console \
+            --set console.image.tag=test \
+            --set console.image.pullPolicy=Never \
             --wait \
             --timeout 5m
 
@@ -136,7 +173,7 @@ jobs:
         run: |
           kubectl wait --for=condition=ready pod \
             -l app.kubernetes.io/name=kconmon-ng \
-            --timeout=120s
+            --timeout=180s
 
       - name: Smoke tests
         if: ${{ steps.meta.outputs.skip != 'true' }}
@@ -162,10 +199,98 @@ jobs:
             -l app.kubernetes.io/component=controller \
             -o jsonpath='{.items[0].metadata.name}')
           kubectl port-forward "pod/$CONTROLLER_POD" 8080:8080 &
+          CONTROLLER_PF_PID=$!
+
+          CONSOLE_POD=$(kubectl get pods \
+            -l app.kubernetes.io/component=console \
+            -o jsonpath='{.items[0].metadata.name}')
+          kubectl port-forward "pod/$CONSOLE_POD" 8081:8080 &
+          CONSOLE_PF_PID=$!
+
           sleep 3
-          go test -tags=e2e -v -count=1 ./e2e/... -timeout 120s
+
+          # --- Deterministic events for TestConsoleEvents / TestConsoleMetrics ---
+          # The controller's WatchEvents stream has NO replay: each agent emits its
+          # topology_changed event exactly ONCE, at registration, to whoever is
+          # subscribed at that instant. `helm upgrade --install --wait` above already
+          # let every agent register while the console's ingester may not yet have
+          # subscribed, so without this step GET /api/v1/events can stay empty
+          # forever -- TestConsoleEvents (60s poll) and TestConsoleMetrics (which
+          # depends on the same store-write pipeline) would then fail on a timing
+          # race, not a real regression.
+          #
+          # Fix: wait until the console itself reports its ingester subscribed --
+          # /api/v1/version's "capabilities" is computed per-request from live
+          # ingester health (internal/console/httpapi/server.go's capabilities()),
+          # so capabilities containing "events" IS the "subscribed" signal -- then
+          # force every agent to re-register by restarting the DaemonSet. Those
+          # fresh registrations happen strictly after the subscription, so the
+          # topology_changed events they emit are guaranteed to be observed.
+          echo "Waiting for console ingester to subscribe to controller events..."
+          DEADLINE=$((SECONDS + 90))
+          until curl -sf http://localhost:8081/api/v1/version \
+              | jq -e '(.capabilities // []) | index("events")' >/dev/null 2>&1; do
+            if [ "$SECONDS" -ge "$DEADLINE" ]; then
+              echo "::error::console ingester did not report the 'events' capability within 90s"
+              echo "=== Console logs ==="
+              kubectl logs -l app.kubernetes.io/component=console --tail=100 || true
+              exit 1
+            fi
+            sleep 2
+          done
+          echo "Console ingester subscribed."
+
+          echo "Restarting agent DaemonSet so registrations happen after subscription..."
+          kubectl rollout restart daemonset/kconmon-ng-agent
+          kubectl rollout status daemonset/kconmon-ng-agent --timeout=90s
+
+          # TestConsoleDegradedMode needs a SECOND rollout with the database
+          # disabled (see the two steps below) -- excluded here so it does
+          # not run against this (database-enabled) deployment.
+          go test -tags=e2e -v -count=1 ./e2e/... -timeout 5m -skip TestConsoleDegradedMode
+
+          kill "$CONTROLLER_PF_PID" "$CONSOLE_PF_PID" || true
         env:
           KCONMON_CONTROLLER_URL: http://localhost:8080
+          KCONMON_CONSOLE_URL: http://localhost:8081
+
+      # Phase A guarantee (M3 plan): with console.database.mode=disabled the
+      # M1/M2 surface stays up and only the M3 database-backed endpoints
+      # degrade to 503. Verified here in a real cluster via a second rollout,
+      # not just in a unit test. --wait blocks until the new console Pod is
+      # ready, so no separate rollout-status step is needed.
+      - name: Reinstall console with database disabled
+        if: ${{ steps.meta.outputs.skip != 'true' }}
+        run: |
+          helm upgrade --install kconmon-ng ./charts/kconmon-ng \
+            -f e2e/testdata/values.yaml \
+            -f e2e/testdata/console-values.yaml \
+            --set controller.image.repository=kconmon-ng-controller \
+            --set controller.image.tag=test \
+            --set controller.image.pullPolicy=Never \
+            --set agent.image.repository=kconmon-ng-agent \
+            --set agent.image.tag=test \
+            --set agent.image.pullPolicy=Never \
+            --set console.image.repository=kconmon-ng-console \
+            --set console.image.tag=test \
+            --set console.image.pullPolicy=Never \
+            --set console.database.mode=disabled \
+            --wait \
+            --timeout 5m
+
+      - name: Run degraded-mode E2E tests
+        if: ${{ steps.meta.outputs.skip != 'true' }}
+        run: |
+          CONSOLE_POD=$(kubectl get pods \
+            -l app.kubernetes.io/component=console \
+            -o jsonpath='{.items[0].metadata.name}')
+          kubectl port-forward "pod/$CONSOLE_POD" 8081:8080 &
+          CONSOLE_PF_PID=$!
+          sleep 3
+          go test -tags=e2e -v -count=1 ./e2e/... -run TestConsoleDegradedMode -timeout 90s
+          kill "$CONSOLE_PF_PID" || true
+        env:
+          KCONMON_CONSOLE_URL: http://localhost:8081
 
       - name: Collect debug info on failure
         if: ${{ steps.meta.outputs.skip != 'true' && failure() }}
@@ -176,5 +301,9 @@ jobs:
           kubectl logs -l app.kubernetes.io/component=controller --tail=50 || true
           echo "=== Agent logs ==="
           kubectl logs -l app.kubernetes.io/component=agent --tail=50 || true
+          echo "=== Console logs ==="
+          kubectl logs -l app.kubernetes.io/component=console --tail=50 || true
+          echo "=== Postgres logs ==="
+          kubectl logs -l app=kconmon-e2e-postgres --tail=50 || true
           echo "=== Events ==="
           kubectl get events --sort-by='.lastTimestamp' | tail -30

@@ -25,21 +25,21 @@ results as Prometheus metrics.
 The chart is published as an OCI artifact on GHCR.
 
 ```bash
-helm install kconmon-ng oci://ghcr.io/esdmitrii/charts/kconmon-ng --version 1.3.3
+helm install kconmon-ng oci://ghcr.io/esdmitrii/charts/kconmon-ng --version 1.5.0
 ```
 
 With custom values:
 
 ```bash
 helm install kconmon-ng oci://ghcr.io/esdmitrii/charts/kconmon-ng \
-  --version 1.3.3 -f values.yaml
+  --version 1.5.0 -f values.yaml
 ```
 
 ### Upgrading
 
 ```bash
 helm upgrade kconmon-ng oci://ghcr.io/esdmitrii/charts/kconmon-ng \
-  --version 1.3.3 -f values.yaml
+  --version 1.5.0 -f values.yaml
 ```
 
 ### Uninstalling
@@ -72,6 +72,23 @@ The table below lists the most relevant parameters. See
 | `prometheusRule.enabled` | `false` | Create a Prometheus Operator `PrometheusRule` with the built-in alerts |
 | `networkPolicy.enabled` | `false` | Create a `NetworkPolicy` (set `networkPolicy.prometheusNamespace` to allow scraping) |
 | `pdb.enabled` | `true` | Create a `PodDisruptionBudget` (`pdb.minAvailable: 1`) |
+
+## Console (optional)
+
+An optional web UI Deployment, off by default (`console.enabled: false`).
+Read-only pages (topology, matrix, PromQL) work with no extra setup; setting
+`console.database.mode` (PostgreSQL, via CloudNativePG or an external DSN)
+and `console.auth.mode` (`anonymous | local | header | oidc`) adds durable
+event/run history, authentication, RBAC and an on-demand diagnostics runner.
+See [`docs/console/`](https://github.com/EsDmitrii/kconmon-ng/tree/main/docs/console)
+for the full architecture and configuration reference.
+
+| Key | Default | Description |
+| --- | --- | --- |
+| `console.enabled` | `false` | Deploy the Console |
+| `console.replicas` | `2` | Console replica count (stateless; realtime fan-out needs `console.valkey.mode` set for `replicas > 1`) |
+| `console.auth.mode` | `anonymous` | `anonymous \| local \| header \| oidc` |
+| `console.database.mode` | `disabled` | `disabled \| cnpg \| external` — PostgreSQL persistence |
 
 ## Metrics & Alerts
 

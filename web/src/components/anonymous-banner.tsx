@@ -1,9 +1,14 @@
 import { AlertTriangle } from "lucide-react";
 
-// M0 runs anonymous-only, so the banner is always shown. M1+ will drive this
-// from GET /api/v1/config (anonymousBanner). Slim and quiet: it must inform
-// without shouting over the page it sits on.
-export function AnonymousBanner() {
+// M0 ran anonymous-only, so the banner was always shown; M3 finally wires it
+// to GET /api/v1/config's `auth.mode` via `mode` (routes.tsx's AppShell
+// passes `config?.auth.mode`). Defaulting to "anonymous" keeps `<AnonymousBanner
+// />` with no prop — the original M0/M2 call shape, still exercised by the
+// untouched test below — showing exactly as before, and also fails safe
+// (shown) for the brief instant before the first config response lands.
+// Slim and quiet: it must inform without shouting over the page it sits on.
+export function AnonymousBanner({ mode = "anonymous" }: { mode?: string }) {
+  if (mode !== "anonymous") return null;
   return (
     <div
       role="alert"

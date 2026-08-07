@@ -241,9 +241,9 @@ serviceAccount:
 
 # Console (kconmon-ng Console). A separate Deployment serving the web UI and its
 # API. OFF by default: with console.enabled=false the chart renders exactly as
-# before. M0 supports auth.mode=anonymous ONLY (a fixed role + a permanent
-# warning banner in the UI). Database/Valkey/OIDC/alerting integration arrives
-# in later milestones.
+# before. The default auth.mode=anonymous (a fixed role + a permanent warning
+# banner in the UI) keeps that byte-identical default even with everything
+# below present. Alerting integration lands in a later milestone.
 console:
   enabled: false
   # Number of console replicas. The M0 console is stateless.
@@ -253,13 +253,62 @@ console:
     # Image tag. Empty string means the chart appVersion is used.
     tag: ""
     pullPolicy: IfNotPresent
-  # Authentication. M0: only "anonymous" is accepted; any other value fails
-  # console startup. Other modes (oidc/local/header) land in M3.
+  # Authentication (SECURITY.md §10.1).
   auth:
+    # anonymous | local | header | oidc.
+    # anonymous is the default and a fully supported deployment: RBAC still
+    # applies, with every request carrying the fixed role below.
     mode: anonymous
     anonymous:
       # Fixed role assigned to every anonymous request.
       role: viewer
+    # Role granted to an authenticated subject that no role binding matches.
+    # Empty means such a subject can do nothing (403) until an admin binds it.
+    defaultRole: ""
+    # mode=local: users and sessions in PostgreSQL (argon2id passwords).
+    # Requires console.database.mode=cnpg|external (see the render guard
+    # below).
+    local:
+      # Username created on FIRST start only, when the users table is empty.
+      bootstrapAdmin: ""
+      # Name of an existing Secret holding the bootstrap password.
+      # Referenced by name only; this chart never creates or reads it.
+      existingSecret: ""
+      existingSecretKey: password
+    # mode=header: identity trusted from a header set by an in-cluster
+    # reverse proxy. See trustedProxyCIDRs below — it is mandatory in this
+    # mode, with no default that would trust every peer.
+    header:
+      userHeader: X-Remote-User
+      groupsHeader: X-Remote-Groups
+      groupsDelimiter: ","
+      # REQUIRED and non-empty for mode=header. The console trusts the identity
+      # headers ONLY from a peer inside these CIDRs. An empty list would make an
+      # unauthenticated request header an authentication bypass, so rendering
+      # fails rather than shipping that.
+      trustedProxyCIDRs: []
+    # mode=oidc: authorization-code + PKCE against an external IdP. Requires
+    # console.database.mode=cnpg|external (sessions live in PostgreSQL) and,
+    # for console.replicas>1, console.valkey.mode=bundled|external (sessions
+    # live in Valkey, not the single-replica in-process KV) — see the render
+    # guards below.
+    oidc:
+      issuer: ""
+      clientID: ""
+      # Name of an existing Secret holding the OIDC client secret.
+      existingSecret: ""
+      existingSecretKey: clientSecret
+      redirectURL: ""
+      scopes: [openid, profile, email, groups]
+      usernameClaim: preferred_username
+      groupsClaim: groups
+    # Session cookie used by every non-anonymous mode.
+    session:
+      ttl: 12h
+      cookieName: __Host-kconmon_session
+      # Set false ONLY for local http:// development. A __Host- cookie name
+      # with secure=false is rejected at startup.
+      secure: true
   # Controller API access (topology). Empty url means "derive from this
   # release's controller Service"; set explicitly to point elsewhere.
   controller:
@@ -320,6 +369,66 @@ console:
       requests:
         cpu: 50m
         memory: 64Mi
+  # PostgreSQL for durable Console state (ADR-001). M3 uses it for the event
+  # history behind GET /api/v1/events, the auth/RBAC/audit tables and run
+  # history. It is OPTIONAL: with mode=disabled the console runs exactly the
+  # M1/M2 surface — no history, no local/oidc auth, in-memory run history only.
+  #   cnpg     = this chart renders a CloudNativePG Cluster CR; the console
+  #              reads the DSN from the operator-generated <cluster>-app Secret
+  #   external = point at an existing PostgreSQL; you supply a Secret holding
+  #              the full DSN (existingSecret + existingSecretKey)
+  #   disabled = no database (default)
+  # CRD ORDERING TRAP (ADR-001 "Negative"): mode=cnpg requires the CNPG
+  # operator's CRDs to already exist in the cluster. This chart does NOT install
+  # the operator (installOperator is intentionally absent) — `helm install` will
+  # fail with "no matches for kind Cluster" if you skip that step.
+  # NOTE on rotation: the DSN Secret is read once at boot (mounted as a file);
+  # rotating it is an operator-initiated restart, the Deployment does not roll
+  # automatically on Secret changes (only on ConfigMap changes).
+  database:
+    mode: disabled
+    # mode=external only. The Secret must contain a full postgres:// DSN.
+    # The chart NEVER templates a credential value — it references this Secret
+    # by name and mounts the key as a file.
+    existingSecret: ""
+    existingSecretKey: dsn
+    maxConns: 10
+    connectTimeout: 10s
+    # Run embedded goose migrations at startup (ADR-001: embedded,
+    # advisory-locked, run on start). Set false only if you migrate out of band.
+    migrateOnStart: true
+    # Rows older than this are pruned by a daily background sweep (DATA.md §5.2).
+    # 0 keeps everything forever.
+    retentionDays: 90
+    # mode=cnpg only.
+    cnpg:
+      instances: 2
+      imageName: ""            # empty = CNPG operator default
+      storage:
+        size: 10Gi
+        storageClass: ""
+      resources: {}
+      # Optional ScheduledBackup; requires a configured barmanObjectStore.
+      backup:
+        enabled: false
+        schedule: "0 0 2 * * *"
+        destinationPath: ""
+        endpointURL: ""
+        # Name of an existing Secret with the object-store credentials.
+        # Referenced by name only; never created or read by this chart.
+        # S3-compatible object stores only (barman s3Credentials); for
+        # Azure/GCS/IAM-role credentials render your own Cluster CR.
+        credentialsSecret: ""
+  # Pod-level securityContext for the console Deployment. Rendered ONLY when
+  # database.mode != disabled, so the default (database off) manifest stays
+  # byte-identical to chart 1.4.0. The default fsGroup matches the distroless
+  # nonroot gid (65532): the kubelet writes the DSN Secret file root-owned, and
+  # fsGroup + the volume's group-readable defaultMode (0440) is what lets the
+  # nonroot console process read it — without this the console crashes at boot
+  # with "read database.dsnFile: permission denied". Override if you run a
+  # custom console image with a different gid.
+  podSecurityContext:
+    fsGroup: 65532
   # NetworkPolicy rules specific to the console (only rendered when
   # console.enabled and the top-level networkPolicy.enabled are both true).
   # NOTE: a Kubernetes NetworkPolicy is only ONE of the two layers that gate
@@ -337,6 +446,24 @@ console:
     # console.valkey.port to any namespace is rendered. Ignored for
     # mode=bundled (a precise pod-selector rule is rendered instead).
     valkeyEgress: []
+    # Custom egress rule list for console -> an EXTERNAL PostgreSQL; when empty
+    # and mode=external, a default rule allowing TCP 5432 to any namespace is
+    # rendered. Ignored for mode=cnpg (a precise pod-selector rule is rendered
+    # instead). Same two-layer warning as above applies: for a database outside
+    # the cluster, the destination host's own firewall must allow it too.
+    databaseEgress: []
+    # Custom egress rule list for console -> the OIDC IdP (auth.mode=oidc
+    # only); when empty a permissive default rule allowing TCP 443 to any
+    # namespace is rendered, since an IdP is almost always outside the
+    # cluster and its address is not known to this chart. A PUBLIC IdP also
+    # needs egress to DNS (already allowed, see the DNS rule below) to
+    # resolve its hostname. Same two-layer warning as prometheusEgress/
+    # valkeyEgress/databaseEgress: this NetworkPolicy is only the CLUSTER
+    # side of the gate — a cluster that also enforces a default-deny egress
+    # policy at the node/CNI layer (not just via Kubernetes NetworkPolicy)
+    # must be checked and opened there too, or the IdP stays unreachable
+    # even with this rule present.
+    oidcEgress: []
   service:
     type: ClusterIP
     # Port the console listens on and the Service exposes.
