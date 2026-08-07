@@ -1,0 +1,98 @@
+---
+# E2E PostgreSQL fixture for console.database.mode=external.
+#
+# DELIBERATELY NOT CNPG. ADR-001 names the CloudNativePG CRD
+# chicken-and-egg as a known negative: mode=cnpg requires the CNPG
+# operator's CRDs to already exist in the cluster, and this chart does not
+# install the operator. Installing the operator here and waiting for its
+# CRDs would add minutes and a whole new failure mode to e2e for ZERO
+# additional coverage of kconmon-ng's own code -- database.mode=external
+# exercises the identical Go path (DatabaseConfig.ResolveDSN -> store.Open
+# -> goose migrations -> sqlc queries) that mode=cnpg would, the only
+# difference being which controller renders the Postgres Service. The CNPG
+# **rendering** path (the Cluster CR itself) is covered by `make helm-lint`
+# + `helm template` in the chart's own CI (Task 9's verification), not here.
+#
+# Do not "upgrade" this fixture to CNPG -- see the reasoning above before
+# changing it.
+#
+# Applied with `kubectl apply -f` BEFORE the Helm install (the console Pod
+# mounts the Secret below at boot and fails readiness without it).
+apiVersion: v1
+kind: Secret
+metadata:
+  name: kconmon-e2e-postgres
+type: Opaque
+stringData:
+  # console.database.existingSecretKey default is "dsn" -- console-values.yaml
+  # relies on that default rather than overriding it. sslmode=disable: this is
+  # a throwaway single-replica fixture inside an ephemeral kind cluster, never
+  # a pattern to copy for a real deployment.
+  dsn: postgres://kconmon:kconmon@kconmon-e2e-postgres:5432/kconmon?sslmode=disable
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kconmon-e2e-postgres
+  labels:
+    app: kconmon-e2e-postgres
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: kconmon-e2e-postgres
+  template:
+    metadata:
+      labels:
+        app: kconmon-e2e-postgres
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:17-alpine
+          ports:
+            - name: postgres
+              containerPort: 5432
+          env:
+            - name: POSTGRES_USER
+              value: kconmon
+            - name: POSTGRES_PASSWORD
+              value: kconmon
+            - name: POSTGRES_DB
+              value: kconmon
+            # Skips the fsync-heavy default init on kind's already-ephemeral
+            # overlay storage -- this fixture is discarded with the cluster.
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "kconmon", "-d", "kconmon"]
+            initialDelaySeconds: 3
+            periodSeconds: 3
+            timeoutSeconds: 3
+          livenessProbe:
+            exec:
+              command: ["pg_isready", "-U", "kconmon", "-d", "kconmon"]
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 3
+          resources:
+            limits:
+              cpu: 500m
+              memory: 256Mi
+            requests:
+              cpu: 50m
+              memory: 128Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kconmon-e2e-postgres
+spec:
+  selector:
+    app: kconmon-e2e-postgres
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: postgres

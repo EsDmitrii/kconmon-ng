@@ -2,7 +2,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { renderHook, waitFor } from "@testing-library/react";
 import type { ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { CAPABILITIES_POLL_MS, useCapabilities } from "./use-capabilities";
+import { CAPABILITIES_POLL_MS, useCapabilities, useDatabaseAvailable } from "./use-capabilities";
 
 const json = (body: unknown) =>
   new Response(JSON.stringify(body), { status: 200, headers: { "Content-Type": "application/json" } });
@@ -89,5 +89,46 @@ describe("useCapabilities", () => {
     await inFlight;
     expect(result.current.resolved).toBe(true);
     expect(result.current.realtime).toBe(true);
+  });
+});
+
+function configHarness(databaseConfigured?: boolean) {
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  if (databaseConfigured !== undefined) {
+    qc.setQueryData(["config"], {
+      auth: { mode: "anonymous", role: "admin" },
+      anonymousBanner: true,
+      controller: { configured: true },
+      prometheus: { configured: true },
+      database: { configured: databaseConfigured },
+    });
+  }
+  const wrapper = ({ children }: { children: ReactNode }) => (
+    <QueryClientProvider client={qc}>{children}</QueryClientProvider>
+  );
+  return { qc, wrapper };
+}
+
+describe("useDatabaseAvailable", () => {
+  it("reports available once /api/v1/config advertises database.configured", () => {
+    const { wrapper } = configHarness(true);
+    const { result } = renderHook(() => useDatabaseAvailable(), { wrapper });
+    expect(result.current.available).toBe(true);
+    expect(result.current.resolved).toBe(true);
+  });
+
+  it("reports unavailable when database.configured is false", () => {
+    const { wrapper } = configHarness(false);
+    const { result } = renderHook(() => useDatabaseAvailable(), { wrapper });
+    expect(result.current.available).toBe(false);
+    expect(result.current.resolved).toBe(true);
+  });
+
+  it("reports unresolved, not unavailable, before the first answer is in", () => {
+    vi.stubGlobal("fetch", vi.fn(() => new Promise(() => {})));
+    const { wrapper } = configHarness();
+    const { result } = renderHook(() => useDatabaseAvailable(), { wrapper });
+    expect(result.current.resolved).toBe(false);
+    expect(result.current.available).toBe(false);
   });
 });

@@ -38,6 +38,10 @@ spec:
       tolerations:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+      {{- if and (ne .Values.console.database.mode "disabled") .Values.console.podSecurityContext }}
+      securityContext:
+        {{- toYaml .Values.console.podSecurityContext | nindent 8 }}
+      {{- end }}
       containers:
         - name: console
           image: "{{ .Values.console.image.repository }}:{{ .Values.console.image.tag | default .Chart.AppVersion }}"
@@ -53,6 +57,20 @@ spec:
             - name: config
               mountPath: /etc/kconmon-ng-console
               readOnly: true
+            {{- if ne .Values.console.database.mode "disabled" }}
+            # Deliberately NOT nested under /etc/kconmon-ng-console: the
+            # runtime cannot create a mountpoint inside an already-mounted
+            # read-only volume (CreateContainerError). dsnFile in the rendered
+            # config.yaml points here, and so do
+            # auth.local.bootstrapAdminPasswordFile / auth.oidc.clientSecretFile
+            # below (Task 18) -- one sibling directory, one mount, multiple
+            # projected Secret sources; the same CreateContainerError reasoning
+            # rules out a THIRD mountPath nested under /etc/kconmon-ng-console
+            # for those two files.
+            - name: database-dsn
+              mountPath: /etc/kconmon-ng-console-secrets
+              readOnly: true
+            {{- end }}
           startupProbe:
             httpGet:
               path: /healthz
@@ -78,4 +96,38 @@ spec:
         - name: config
           configMap:
             name: {{ include "kconmon-ng.console.fullname" . }}
+        {{- if ne .Values.console.database.mode "disabled" }}
+        # Projected Secret reference — the chart names the Secret, it never
+        # holds the DSN itself. 0440 + fsGroup above: see the securityContext
+        # comment. Rotation note: read once at boot; rotating the Secret is an
+        # operator-initiated restart (the Deployment rolls on ConfigMap
+        # changes only). auth.mode=local|oidc always implies this whole block
+        # renders (the render guards in configmap.yaml refuse
+        # database.mode=disabled for those two modes), so the bootstrap
+        # password / OIDC client secret sources below can ride the SAME
+        # projected volume as the DSN rather than needing one of their own.
+        - name: database-dsn
+          projected:
+            defaultMode: 0440
+            sources:
+              - secret:
+                  name: {{ include "kconmon-ng.console.databaseSecretName" . }}
+                  items:
+                    - key: {{ include "kconmon-ng.console.databaseSecretKey" . }}
+                      path: database-dsn
+              {{- if and (eq .Values.console.auth.mode "local") .Values.console.auth.local.bootstrapAdmin }}
+              - secret:
+                  name: {{ include "kconmon-ng.console.localAdminSecretName" . }}
+                  items:
+                    - key: {{ .Values.console.auth.local.existingSecretKey }}
+                      path: local-admin-password
+              {{- end }}
+              {{- if eq .Values.console.auth.mode "oidc" }}
+              - secret:
+                  name: {{ include "kconmon-ng.console.oidcClientSecretName" . }}
+                  items:
+                    - key: {{ .Values.console.auth.oidc.existingSecretKey }}
+                      path: oidc-client-secret
+              {{- end }}
+        {{- end }}
 {{- end }}

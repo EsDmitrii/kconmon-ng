@@ -74,6 +74,59 @@ spec:
           port: {{ .Values.console.valkey.port | int64 }}
     {{- end }}
     {{- end }}
+    {{- if eq .Values.console.database.mode "cnpg" }}
+    # Console to the CNPG-managed PostgreSQL (event history, ADR-001). Precise
+    # pod-selector rule: CNPG labels every instance Pod with cnpg.io/cluster.
+    # The database-side ingress half lives in
+    # templates/console/database-networkpolicy.yaml — both layers are required.
+    - to:
+        - podSelector:
+            matchLabels:
+              cnpg.io/cluster: {{ include "kconmon-ng.console.databaseClusterName" . }}
+      ports:
+        - protocol: TCP
+          port: 5432
+    {{- else if eq .Values.console.database.mode "external" }}
+    # Console to an external PostgreSQL. Namespace/port are deployment-specific;
+    # default allows TCP 5432 cluster-wide, tighten via
+    # console.networkPolicy.databaseEgress. NOTE: for a database outside the
+    # cluster this NetworkPolicy is only one of two gates — the destination
+    # host's own firewall (iptables/nftables/security group) must allow it too.
+    {{- if .Values.console.networkPolicy.databaseEgress }}
+    {{- toYaml .Values.console.networkPolicy.databaseEgress | nindent 4 }}
+    {{- else }}
+    - to:
+        - namespaceSelector: {}
+      ports:
+        - protocol: TCP
+          port: 5432
+    {{- end }}
+    {{- end }}
+    {{- if eq .Values.console.auth.mode "oidc" }}
+    # Console to the OIDC IdP (authorization-code + PKCE, SECURITY.md
+    # §10.1: discovery, token exchange, and the lazy refresh in
+    # OIDCAuthenticator.maybeRefresh). An IdP is almost always OUTSIDE the
+    # cluster, so the default uses ipBlock 0.0.0.0/0 (a namespaceSelector
+    # would match only in-cluster pods and silently drop every packet to an
+    # external IdP -- discovery fails, the pod exits 1, CrashLoopBackOff);
+    # tighten via console.networkPolicy.oidcEgress. A PUBLIC IdP also needs
+    # egress to DNS to resolve its hostname (already allowed below). Same
+    # two-layer warning as the valkey/database egress rules above: this
+    # NetworkPolicy is only the CLUSTER-side gate. A cluster that ALSO
+    # enforces a default-deny egress policy at the node/CNI layer (not just
+    # via Kubernetes NetworkPolicy objects) must be checked and opened there
+    # too, or the IdP stays unreachable even with this rule present.
+    {{- if .Values.console.networkPolicy.oidcEgress }}
+    {{- toYaml .Values.console.networkPolicy.oidcEgress | nindent 4 }}
+    {{- else }}
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+      ports:
+        - protocol: TCP
+          port: 443
+    {{- end }}
+    {{- end }}
     # Console to Prometheus (query API). Namespace/port are deployment-specific;
     # default allows TCP 9090 cluster-wide, tighten via console.networkPolicy.prometheusEgress.
     {{- if .Values.console.networkPolicy.prometheusEgress }}

@@ -55,17 +55,44 @@ function ev(seq: number, over: Partial<LiveEvent> = {}): LiveEvent {
   };
 }
 
-/** `capabilities: null` leaves the version cache unseeded, i.e. the cold load. */
-function renderPage(capabilities: string[] | null = ["events"]) {
+/**
+ * `capabilities: null` leaves the version cache unseeded, i.e. the cold load.
+ * `databaseConfigured` seeds GET /api/v1/config's `database.configured`
+ * straight into the cache the same way — defaulting to `false` so every M2
+ * test written before scrollback existed keeps making zero history requests
+ * and seeing no scrollback control, unchanged.
+ */
+function renderPage(capabilities: string[] | null = ["events"], databaseConfigured = false) {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   if (capabilities !== null) {
     qc.setQueryData(["version"], { version: "1.6.0", commit: "abc123", capabilities });
   }
+  qc.setQueryData(["config"], {
+    auth: { mode: "anonymous", role: "admin" },
+    anonymousBanner: true,
+    controller: { configured: true },
+    prometheus: { configured: true },
+    database: { configured: databaseConfigured },
+  });
   return render(
     <QueryClientProvider client={qc}>
       <LivePage />
     </QueryClientProvider>,
   );
+}
+
+/** URL-aware fetch double for the scrollback tests: routes /api/v1/events to
+ * `onEvents` (given the query string) and answers every other URL (the
+ * background /api/v1/version refetch) with a plain version payload. */
+function stubEventsFetch(onEvents: (qs: URLSearchParams) => Response) {
+  const fn = vi.fn((url: string) => {
+    if (typeof url === "string" && url.startsWith("/api/v1/events")) {
+      return Promise.resolve(onEvents(new URLSearchParams(url.split("?")[1] ?? "")));
+    }
+    return Promise.resolve(json({ version: "1.6.0", commit: "abc123", capabilities: ["events"] }));
+  });
+  vi.stubGlobal("fetch", fn);
+  return fn;
 }
 
 /**
@@ -414,5 +441,97 @@ describe("LivePage", () => {
 
   it("keeps the /live nav path that the route wiring keys off", () => {
     expect(NAV_ITEMS.map((item) => item.path)).toContain("/live");
+  });
+});
+
+describe("LivePage scrollback (Task 5's GET /api/v1/events)", () => {
+  it("fetches the first page of history on mount and renders it below the live rows, deduped by id", async () => {
+    const seenBothWays = ev(2, { timestamp: "2026-07-28T09:30:00Z", summary: "seen both ways" });
+    const historyOnly = ev(1, { timestamp: "2026-07-28T09:00:00Z", summary: "history only" });
+    stubEventsFetch(() => json({ events: [seenBothWays, historyOnly], nextCursor: "" }));
+
+    renderPage(["events"], true);
+    open();
+    await emit([ev(3, { timestamp: "2026-07-28T10:00:00Z", summary: "live only" }), seenBothWays]);
+    await screen.findByText("history only");
+
+    const rows = screen.getAllByRole("listitem");
+    expect(rows).toHaveLength(3);
+    expect(rows[0]).toHaveTextContent("live only");
+    expect(rows[1]).toHaveTextContent("seen both ways");
+    expect(rows[2]).toHaveTextContent("history only");
+  });
+
+  it("'Load older' appends the next page and disables itself once nextCursor is empty", async () => {
+    const page1 = { events: [ev(5, { timestamp: "2026-07-28T09:50:00Z" })], nextCursor: "cursor-1" };
+    const page2 = { events: [ev(4, { timestamp: "2026-07-28T09:40:00Z" })], nextCursor: "" };
+    stubEventsFetch((qs) => json(qs.get("cursor") === "cursor-1" ? page2 : page1));
+
+    renderPage(["events"], true);
+    open();
+    await screen.findByText("event 5");
+
+    const loadOlder = screen.getByRole("button", { name: "Load older" });
+    expect(loadOlder).not.toBeDisabled();
+    fireEvent.click(loadOlder);
+    await screen.findByText("event 4");
+
+    expect(loadOlder).toBeDisabled();
+  });
+
+  it("makes no history request and shows no scrollback control when database.configured is false", async () => {
+    const fetchMock = stubEventsFetch(() => json({ events: [], nextCursor: "" }));
+
+    renderPage(["events"], false);
+    open();
+    await emit([ev(1, { summary: "live still works" })]);
+
+    expect(screen.queryByRole("button", { name: "Load older" })).not.toBeInTheDocument();
+    expect(fetchMock.mock.calls.some(([url]) => typeof url === "string" && url.startsWith("/api/v1/events"))).toBe(
+      false,
+    );
+  });
+
+  it("shows an inline notice on a 503 from /api/v1/events and leaves the live feed working", async () => {
+    stubEventsFetch(
+      () =>
+        new Response(
+          JSON.stringify({
+            type: "about:blank",
+            title: "event history not available",
+            status: 503,
+            detail: "set console.database.mode in the console config to enable GET /api/v1/events",
+          }),
+          { status: 503, headers: { "Content-Type": "application/problem+json" } },
+        ),
+    );
+
+    renderPage(["events"], true);
+    open();
+    await screen.findByText(/set console.database.mode/);
+
+    await emit([ev(1, { summary: "still live" })]);
+    expect(screen.getAllByRole("listitem")).toHaveLength(1);
+    expect(screen.getByText("still live")).toBeInTheDocument();
+  });
+
+  it("refetches history with the new type filter when it changes", async () => {
+    const allTypes = { events: [ev(1, { type: "check_observed", summary: "history check" })], nextCursor: "" };
+    const topologyOnly = {
+      events: [ev(2, { type: "topology_changed", summary: "history topology" })],
+      nextCursor: "",
+    };
+    const fetchMock = stubEventsFetch((qs) => json(qs.get("type") === "topology_changed" ? topologyOnly : allTypes));
+
+    renderPage(["events"], true);
+    open();
+    await screen.findByText("history check");
+
+    fireEvent.change(screen.getByLabelText("Type"), { target: { value: "topology_changed" } });
+    await screen.findByText("history topology");
+
+    expect(
+      fetchMock.mock.calls.some(([url]) => typeof url === "string" && url.includes("type=topology_changed")),
+    ).toBe(true);
   });
 });

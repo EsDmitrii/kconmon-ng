@@ -1,0 +1,271 @@
+package store
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"log/slog"
+	"math/rand/v2"
+	"time"
+
+	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/EsDmitrii/kconmon-ng/internal/console/metrics"
+	"github.com/EsDmitrii/kconmon-ng/internal/console/store/gen"
+)
+
+// tableTopologyEvents, tableAuditLog, and tableCheckRuns are the
+// RetentionDeleted "table" labels for the three tables this sweep prunes.
+// This is a closed set enforced only by this file's own usage. check_runs'
+// own results (check_results) never get a fourth label or a fourth
+// deleteBatches call: ON DELETE CASCADE on check_results.run_id means
+// deleting the run row is enough to also drop its results.
+const (
+	tableTopologyEvents = "topology_events"
+	tableAuditLog       = "audit_log"
+	tableCheckRuns      = "check_runs"
+)
+
+// pruneInterval is the steady-state sweep cadence.
+const pruneInterval = 24 * time.Hour
+
+// pruneJitterMax bounds the random delay before a replica's very first sweep.
+// Several console replicas restarting together (a rollout) would otherwise all
+// call pg_try_advisory_lock in the same instant; harmless since only one can
+// ever win, but needless simultaneous connection use against the pool for no
+// benefit.
+const pruneJitterMax = 30 * time.Second
+
+// pruneBatchSize bounds one DELETE statement: a first sweep against a
+// long-neglected database can have far more expired rows than is safe to
+// remove in one statement, so a sweep loops in bounded batches instead of
+// taking one table-wide lock or risking the statement timeout.
+const pruneBatchSize = 5000
+
+// pruneBatchPause separates consecutive batches within one sweep, so a long
+// catch-up run does not hold the connection -- and with it the advisory lock
+// -- in a tight loop against the database.
+const pruneBatchPause = 50 * time.Millisecond
+
+// unlockTimeout bounds pg_advisory_unlock, run on a context deliberately
+// independent of the sweep's own ctx -- see PruneOnce.
+const unlockTimeout = 5 * time.Second
+
+// pruneLockKey is the pg_try_advisory_lock key Pruner uses to serialize
+// sweeps across replicas. It is
+// crc32.Checksum([]byte("kconmon-ng.store.Pruner"), crc32.MakeTable(crc32.IEEE)):
+// the same derivation goose's own DefaultLockID uses (4097083626, see
+// github.com/pressly/goose/v3/lock.DefaultLockID), computed from a different
+// input string so a migration run and a prune sweep never contend for the
+// same key.
+const pruneLockKey int64 = 3698486424
+
+// Pruner deletes rows past the retention horizon. It runs in every replica but
+// does work in at most one at a time: each sweep takes a PostgreSQL
+// session-level advisory lock (pg_try_advisory_lock) and returns immediately
+// if another replica holds it. That is the same primitive goose uses for
+// migrations (migrate.go), so no new concurrency mechanism enters the
+// codebase.
+type Pruner struct {
+	db        *DB
+	retention time.Duration
+	m         *metrics.Metrics
+}
+
+// NewPruner returns a Pruner that deletes rows older than retention from db's
+// tables on every sweep. m must not be nil.
+func NewPruner(db *DB, retention time.Duration, m *metrics.Metrics) *Pruner {
+	return &Pruner{db: db, retention: retention, m: m}
+}
+
+// Run sweeps once at start (after a short jitter) and every 24h until ctx is
+// cancelled. A zero (or negative) retention makes Run a no-op that returns
+// immediately, without ever touching db's pool: database.retentionDays=0 is
+// the documented "keep everything" setting (internal/console/config/config.go),
+// not merely an unconfigured edge case.
+func (p *Pruner) Run(ctx context.Context) {
+	if p.retention <= 0 {
+		return
+	}
+
+	if !pruneSleep(ctx, pruneJitter()) {
+		return
+	}
+	p.sweep(ctx)
+
+	ticker := time.NewTicker(pruneInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			p.sweep(ctx)
+		}
+	}
+}
+
+// sweep runs one PruneOnce and logs the outcome. A failed sweep must never
+// stop Run's loop -- a transient database error simply gets retried on the
+// next tick, 24h later.
+func (p *Pruner) sweep(ctx context.Context) {
+	deleted, err := p.PruneOnce(ctx)
+	if err != nil {
+		slog.Warn("prune sweep failed", "error", err)
+		return
+	}
+	if len(deleted) > 0 {
+		slog.Info("prune sweep completed", "deleted", deleted)
+	}
+}
+
+// PruneOnce performs one bounded sweep and reports rows deleted per table. It
+// returns an empty (non-nil), zero-value map with a nil error when another
+// replica already holds the advisory lock: that is the expected steady-state
+// outcome on every replica but one, not a failure. Every table's sweep always
+// runs, even when an earlier one fails: the returned map holds the counts for
+// the sweeps that ran, alongside a joined error for the ones that did not
+// finish clean — a partial result, not all-or-nothing.
+func (p *Pruner) PruneOnce(ctx context.Context) (map[string]int64, error) {
+	// pg_try_advisory_lock and its matching pg_advisory_unlock must run on the
+	// exact same backend connection: it is a session-level lock, and p.db.pool's
+	// own Exec/Query/QueryRow each borrow a possibly-different pooled connection
+	// per call. conn, acquired once here, is reused below for the lock check,
+	// every delete batch, and the unlock.
+	conn, err := p.db.pool.Acquire(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("store: prune: acquire connection: %w", err)
+	}
+	defer conn.Release()
+
+	var locked bool
+	if err = conn.QueryRow(ctx, "SELECT pg_try_advisory_lock($1)", pruneLockKey).Scan(&locked); err != nil {
+		return nil, fmt.Errorf("store: prune: acquire advisory lock: %w", err)
+	}
+	if !locked {
+		return map[string]int64{}, nil
+	}
+	defer p.releaseLock(conn)
+
+	cutoff := time.Now().Add(-p.retention)
+	q := gen.New(conn)
+
+	return runSweeps(ctx, p.m, []sweep{
+		{
+			table: tableTopologyEvents,
+			del: func(ctx context.Context, limit int32) (int64, error) {
+				return q.DeleteTopologyEventsBefore(ctx, gen.DeleteTopologyEventsBeforeParams{
+					EventTime: cutoff,
+					Limit:     limit,
+				})
+			},
+		},
+		{
+			table: tableAuditLog,
+			del: func(ctx context.Context, limit int32) (int64, error) {
+				return q.DeleteAuditEntriesBefore(ctx, gen.DeleteAuditEntriesBeforeParams{
+					At:    cutoff,
+					Limit: limit,
+				})
+			},
+		},
+		{
+			table: tableCheckRuns,
+			del: func(ctx context.Context, limit int32) (int64, error) {
+				return q.DeleteRunsBefore(ctx, gen.DeleteRunsBeforeParams{
+					CreatedAt: cutoff,
+					Limit:     limit,
+				})
+			},
+		},
+	})
+}
+
+// sweep is one prune target: table is the RetentionDeleted metric label and
+// the returned per-table map key, del is the deleteBatches-shaped closure
+// that drives one table's DELETEs.
+type sweep struct {
+	table string
+	del   func(ctx context.Context, limit int32) (int64, error)
+}
+
+// runSweeps runs every sweep in sweeps, unconditionally: an error from one
+// sweep never skips the next, so a topology_events failure (say, a statement
+// timeout on an unusually large backlog) still leaves the unrelated
+// audit_log sweep a chance to make its own progress on the same lock/conn.
+// Rows a sweep deleted before failing (deleteBatches's partial total on a
+// mid-loop error, or a ctx cancel between batches) are still committed rows,
+// so they are credited to that sweep's own RetentionDeleted metric and its
+// entry in the returned map either way. Every sweep's error, if any, is
+// combined into the single returned error with errors.Join.
+func runSweeps(ctx context.Context, m *metrics.Metrics, sweeps []sweep) (map[string]int64, error) {
+	deleted := make(map[string]int64, len(sweeps))
+	var errs []error
+	for _, s := range sweeps {
+		n, err := deleteBatches(ctx, s.del)
+		m.RetentionDeleted.WithLabelValues(s.table).Add(float64(n))
+		deleted[s.table] = n
+		if err != nil {
+			errs = append(errs, fmt.Errorf("store: prune: %s: %w", s.table, err))
+		}
+	}
+	return deleted, errors.Join(errs...)
+}
+
+// releaseLock runs pg_advisory_unlock on conn using a fresh, short-lived
+// context rather than the sweep's own ctx: the unlock must still happen when
+// ctx is already cancelled, or this pooled connection would keep holding
+// pruneLockKey for the rest of its life in the pool, silently starving every
+// future sweep this same replica ever attempts (pg_try_advisory_lock would
+// keep reporting "already locked" against its own earlier, orphaned lock).
+func (p *Pruner) releaseLock(conn *pgxpool.Conn) {
+	ctx, cancel := context.WithTimeout(context.Background(), unlockTimeout)
+	defer cancel()
+	if _, err := conn.Exec(ctx, "SELECT pg_advisory_unlock($1)", pruneLockKey); err != nil {
+		slog.Warn("prune: release advisory lock failed", "error", err)
+	}
+}
+
+// deleteBatches calls del repeatedly with limit=pruneBatchSize, pausing
+// pruneBatchPause between calls, until del reports fewer rows than requested
+// -- proof nothing further is left to delete -- or ctx is cancelled. It
+// returns the running total either way.
+func deleteBatches(ctx context.Context, del func(ctx context.Context, limit int32) (int64, error)) (int64, error) {
+	var total int64
+	for {
+		n, err := del(ctx, pruneBatchSize)
+		if err != nil {
+			return total, err
+		}
+		total += n
+		if n < pruneBatchSize {
+			return total, nil
+		}
+		if !pruneSleep(ctx, pruneBatchPause) {
+			return total, ctx.Err()
+		}
+	}
+}
+
+// pruneJitter returns a random delay in [0, pruneJitterMax). Split out from
+// Run so a unit test can assert its bound without waiting out a real sleep.
+func pruneJitter() time.Duration {
+	return time.Duration(rand.Int64N(int64(pruneJitterMax))) //nolint:gosec // G404: non-security jitter
+}
+
+// pruneSleep waits for d or ctx cancellation, whichever comes first, and
+// reports whether d elapsed (true) or ctx was done first (false). A
+// non-positive d returns immediately, true, unless ctx is already done.
+func pruneSleep(ctx context.Context, d time.Duration) bool {
+	if d <= 0 {
+		return ctx.Err() == nil
+	}
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
+	}
+}

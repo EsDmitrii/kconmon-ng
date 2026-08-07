@@ -3,6 +3,7 @@ package events_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net"
 	"net/http"
@@ -241,6 +242,55 @@ func countingListener(t *testing.T) (addr string, accepted *atomic.Int64) {
 		}
 	}()
 	return lis.Addr().String(), accepted
+}
+
+// fakeSink is an events.EventSink test double. err makes every call return
+// that error; conflict (checked only when err is nil) makes every call return
+// (false, nil) — the "another replica won the race" outcome; delay, if set,
+// blocks the call until it elapses OR ctx is done, whichever comes first, so
+// a test can exercise the sink's independent timeout without hanging forever
+// if the ingester ever regresses to not deriving one.
+type fakeSink struct {
+	mu       sync.Mutex
+	received []events.LiveEvent
+	err      error
+	conflict bool
+	delay    time.Duration
+}
+
+func (f *fakeSink) InsertEvent(ctx context.Context, ev events.LiveEvent) (bool, error) {
+	f.mu.Lock()
+	f.received = append(f.received, ev)
+	f.mu.Unlock()
+
+	if f.delay > 0 {
+		select {
+		case <-time.After(f.delay):
+		case <-ctx.Done():
+			return false, ctx.Err()
+		}
+	}
+	if f.err != nil {
+		return false, f.err
+	}
+	if f.conflict {
+		return false, nil
+	}
+	return true, nil
+}
+
+// callCount reports how many times InsertEvent has been called so far.
+func (f *fakeSink) callCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.received)
+}
+
+// calls returns a snapshot of every LiveEvent handed to InsertEvent so far.
+func (f *fakeSink) calls() []events.LiveEvent {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]events.LiveEvent(nil), f.received...)
 }
 
 // newTestMetrics gives every test a fresh registry: promauto panics on a
@@ -777,5 +827,355 @@ func TestIngesterBecomesHealthyOnTheFirstEventAheadOfTheGrace(t *testing.T) {
 	})
 	if ing.Healthy() {
 		t.Error("Healthy must be false after Run returns")
+	}
+}
+
+// topologyEvent builds a minimal pb.Event with the given seq, useful for the
+// persistence tests below where the payload content itself is not the point.
+func topologyEvent(seq uint64) *pb.Event {
+	return &pb.Event{
+		Seq:       seq,
+		Timestamp: timestamppb.Now(),
+		Payload: &pb.Event_TopologyChanged{TopologyChanged: &pb.TopologyChanged{
+			Reason: "agent_registered", NodeName: "node-a",
+		}},
+	}
+}
+
+// TestIngesterPersistsAfterPublish is Task 4's core wiring test: a configured
+// EventSink is called once per event, and what it receives matches what the
+// bus received — same Seq, Timestamp, Type and Details.
+func TestIngesterPersistsAfterPublish(t *testing.T) {
+	_, ctrl := startFakeController(t, "events")
+	fake, addr := startFakeEventStream(t)
+
+	bus := cache.NewInProcessBus()
+	msgs, unsubscribe := bus.Subscribe(liveBusTopic)
+	defer unsubscribe()
+
+	sink := &fakeSink{}
+	m := newTestMetrics()
+	ing := events.NewIngester(ctrl, addr, bus, m, events.WithEventSink(sink))
+	ing.SetConnectGrace(preconditionGrace)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() { defer close(done); ing.Run(ctx) }()
+
+	waitFor(t, "the ingester to establish a stream", ing.Healthy)
+
+	fake.send(t, topologyEvent(42))
+
+	var busEvent events.LiveEvent
+	select {
+	case msg := <-msgs:
+		if err := json.Unmarshal(msg.Data, &busEvent); err != nil {
+			t.Fatalf("bus payload is not a LiveEvent: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the event never reached the bus")
+	}
+
+	waitFor(t, "the sink to be called once", func() bool { return sink.callCount() == 1 })
+
+	got := sink.calls()[0]
+	if got.Seq != busEvent.Seq || !got.Timestamp.Equal(busEvent.Timestamp) ||
+		got.Type != busEvent.Type || string(got.Details) != string(busEvent.Details) {
+		t.Errorf("sink received %+v, want it to match the bus event %+v", got, busEvent)
+	}
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run did not return after ctx cancel")
+	}
+}
+
+// TestIngesterSinkErrorDoesNotStopPublishing drives three events through a
+// sink that fails on every call. All three must still reach the bus, the
+// ingester must stay connected, and every failure must be counted as
+// EventsPersisted{result="error"} — a database hiccup degrades history, not
+// the realtime feed.
+func TestIngesterSinkErrorDoesNotStopPublishing(t *testing.T) {
+	_, ctrl := startFakeController(t, "events")
+	fake, addr := startFakeEventStream(t)
+
+	bus := cache.NewInProcessBus()
+	msgs, unsubscribe := bus.Subscribe(liveBusTopic)
+	defer unsubscribe()
+
+	sink := &fakeSink{err: errors.New("db unavailable")}
+	m := newTestMetrics()
+	ing := events.NewIngester(ctrl, addr, bus, m, events.WithEventSink(sink))
+	ing.SetConnectGrace(preconditionGrace)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() { defer close(done); ing.Run(ctx) }()
+
+	waitFor(t, "the ingester to establish a stream", ing.Healthy)
+
+	for seq := uint64(1); seq <= 3; seq++ {
+		fake.send(t, topologyEvent(seq))
+		select {
+		case <-msgs:
+		case <-time.After(5 * time.Second):
+			t.Fatalf("event seq=%d never reached the bus", seq)
+		}
+	}
+
+	waitFor(t, `events_persisted_total{result="error"} == 3`, func() bool {
+		return testutil.ToFloat64(m.EventsPersisted.WithLabelValues("error")) == 3
+	})
+	if !ing.Healthy() {
+		t.Error("a sink failure must not knock the ingester unhealthy")
+	}
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run did not return after ctx cancel")
+	}
+}
+
+// TestIngesterSinkConflictIsNotAnError is the normal N-replica path: another
+// replica already inserted the row, InsertEvent returns (false, nil), and that
+// must be counted as EventsPersisted{result="conflict"} without a single
+// error-level log line.
+func TestIngesterSinkConflictIsNotAnError(t *testing.T) {
+	_, ctrl := startFakeController(t, "events")
+	fake, addr := startFakeEventStream(t)
+
+	bus := cache.NewInProcessBus()
+	msgs, unsubscribe := bus.Subscribe(liveBusTopic)
+	defer unsubscribe()
+
+	logs := captureLogs(t)
+	sink := &fakeSink{conflict: true}
+	m := newTestMetrics()
+	ing := events.NewIngester(ctrl, addr, bus, m, events.WithEventSink(sink))
+	ing.SetConnectGrace(preconditionGrace)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() { defer close(done); ing.Run(ctx) }()
+
+	waitFor(t, "the ingester to establish a stream", ing.Healthy)
+
+	fake.send(t, topologyEvent(7))
+	select {
+	case <-msgs:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the event never reached the bus")
+	}
+
+	waitFor(t, `events_persisted_total{result="conflict"} == 1`, func() bool {
+		return testutil.ToFloat64(m.EventsPersisted.WithLabelValues("conflict")) == 1
+	})
+
+	logs.mu.Lock()
+	for _, rec := range logs.records {
+		if rec.level >= slog.LevelWarn {
+			t.Errorf("logged at %v: %q — a persistence conflict is the normal N-replica path, not a warning", rec.level, rec.msg)
+		}
+	}
+	logs.mu.Unlock()
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run did not return after ctx cancel")
+	}
+}
+
+// TestIngesterWithoutSinkIsUnchanged is the M1/M2 regression test
+// (database.mode=disabled): constructed with no options at all, the ingester's
+// bus delivery must be identical to before this task, and no EventsPersisted
+// label may move.
+func TestIngesterWithoutSinkIsUnchanged(t *testing.T) {
+	_, ctrl := startFakeController(t, "events")
+	fake, addr := startFakeEventStream(t)
+
+	bus := cache.NewInProcessBus()
+	msgs, unsubscribe := bus.Subscribe(liveBusTopic)
+	defer unsubscribe()
+
+	m := newTestMetrics()
+	ing := events.NewIngester(ctrl, addr, bus, m) // no Option at all
+	ing.SetConnectGrace(preconditionGrace)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() { defer close(done); ing.Run(ctx) }()
+
+	waitFor(t, "the ingester to establish a stream", ing.Healthy)
+
+	fake.send(t, topologyEvent(9))
+	select {
+	case <-msgs:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the event never reached the bus")
+	}
+
+	for _, result := range []string{"ok", "conflict", "error"} {
+		if got := testutil.ToFloat64(m.EventsPersisted.WithLabelValues(result)); got != 0 {
+			t.Errorf("events_persisted_total{result=%s} = %v, want 0 with no sink configured", result, got)
+		}
+	}
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run did not return after ctx cancel")
+	}
+}
+
+// TestIngesterSinkGetsIndependentTimeout proves the sink's context is its own
+// short-lived timeout, not the long-lived stream context: a sink that blocks
+// well past that budget must still let go, so the consume loop can pick up
+// the next event rather than wedging for the life of the stream.
+func TestIngesterSinkGetsIndependentTimeout(t *testing.T) {
+	_, ctrl := startFakeController(t, "events")
+	fake, addr := startFakeEventStream(t)
+
+	bus := cache.NewInProcessBus()
+	msgs, unsubscribe := bus.Subscribe(liveBusTopic)
+	defer unsubscribe()
+
+	sink := &fakeSink{delay: 30 * time.Second} // far past the sink's own timeout budget
+	m := newTestMetrics()
+	ing := events.NewIngester(ctrl, addr, bus, m, events.WithEventSink(sink))
+	ing.SetConnectGrace(preconditionGrace)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() { defer close(done); ing.Run(ctx) }()
+
+	waitFor(t, "the ingester to establish a stream", ing.Healthy)
+
+	fake.send(t, topologyEvent(1))
+	select {
+	case <-msgs:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the first event never reached the bus")
+	}
+
+	// The sink is still blocked inside InsertEvent for event 1 (its own 5s
+	// budget has not elapsed yet). Handing event 2 straight to the fake
+	// stream's channel, bypassing fake.send's own 5s timeout: gRPC's stream
+	// buffering means the server can accept this into its send loop almost
+	// immediately regardless of whether the client has called Recv again, so
+	// that handoff alone proves nothing about the consume loop.
+	select {
+	case fake.events <- topologyEvent(2):
+	case <-time.After(8 * time.Second):
+		t.Fatal("the fake server never picked up the second event")
+	}
+
+	// What DOES prove the consume loop freed itself is the second event making
+	// it all the way to the bus, which requires publish(ev1) — and therefore
+	// the blocked sink call — to have returned first. The deadline here is
+	// comfortably longer than sinkTimeout (5s) but far short of the fake
+	// sink's 30s delay, so this only passes if the sink's own context, not the
+	// stream context, is what unblocked it.
+	select {
+	case <-msgs:
+	case <-time.After(8 * time.Second):
+		t.Fatal("the second event never reached the bus — the consume loop stayed wedged past the sink's own timeout budget")
+	}
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run did not return after ctx cancel")
+	}
+}
+
+// failingBus wraps a real bus and makes every Publish fail, while Subscribe
+// keeps working: it models a Valkey outage on the publish path only, which is
+// the shape the ingester has to survive. The wrapped bus is still there so the
+// test can prove nothing else changed.
+type failingBus struct {
+	inner    cache.Bus
+	err      error
+	attempts atomic.Int64
+}
+
+func (b *failingBus) Publish(context.Context, string, cache.Message) error {
+	b.attempts.Add(1)
+	return b.err
+}
+
+func (b *failingBus) Subscribe(topic string) (<-chan cache.Message, func()) {
+	return b.inner.Subscribe(topic)
+}
+
+// TestIngesterBusErrorStillPersists is the other half of
+// TestIngesterSinkErrorDoesNotStopPublishing: the two failures are
+// independent in BOTH directions. With bus.Publish failing on every call, all
+// three events must still reach the sink and be counted as
+// EventsPersisted{result="ok"} — a Valkey outage degrades realtime, it must
+// not silently stop durable history while the database is healthy. (The
+// earlier bug: publish returned early on the bus error and never reached the
+// sink block at all.)
+func TestIngesterBusErrorStillPersists(t *testing.T) {
+	_, ctrl := startFakeController(t, "events")
+	fake, addr := startFakeEventStream(t)
+
+	bus := &failingBus{inner: cache.NewInProcessBus(), err: errors.New("valkey unreachable")}
+	sink := &fakeSink{}
+	m := newTestMetrics()
+	ing := events.NewIngester(ctrl, addr, bus, m, events.WithEventSink(sink))
+	ing.SetConnectGrace(preconditionGrace)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() { defer close(done); ing.Run(ctx) }()
+
+	waitFor(t, "the ingester to establish a stream", ing.Healthy)
+
+	for seq := uint64(1); seq <= 3; seq++ {
+		fake.send(t, topologyEvent(seq))
+	}
+
+	waitFor(t, "the sink to receive all three events", func() bool { return sink.callCount() == 3 })
+	waitFor(t, `events_persisted_total{result="ok"} == 3`, func() bool {
+		return testutil.ToFloat64(m.EventsPersisted.WithLabelValues("ok")) == 3
+	})
+
+	// Every event was still offered to the bus: the fix is "do not return
+	// early", not "skip the bus".
+	if got := bus.attempts.Load(); got != 3 {
+		t.Errorf("bus.Publish called %d times, want 3", got)
+	}
+	seen := make(map[uint64]bool, 3)
+	for _, ev := range sink.calls() {
+		seen[ev.Seq] = true
+	}
+	for seq := uint64(1); seq <= 3; seq++ {
+		if !seen[seq] {
+			t.Errorf("event seq=%d never reached the sink", seq)
+		}
+	}
+	if !ing.Healthy() {
+		t.Error("a bus failure must not tear the stream down")
+	}
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run did not return after ctx cancel")
 	}
 }

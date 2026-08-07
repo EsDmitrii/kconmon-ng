@@ -136,6 +136,30 @@ describe("MatrixPage", () => {
     expect(screen.queryByRole("tooltip")).not.toBeInTheDocument();
   });
 
+  it("links each non-self cell to its pair card, URL-encoding the node names", async () => {
+    stubFetch(matrixBody);
+    renderPage();
+    const cell = await screen.findByLabelText("a → b: fail 50.0%, RTT p95 2.0ms");
+    expect(cell.tagName).toBe("A");
+    expect(cell).toHaveAttribute("href", "/pairs/a/b");
+
+    const noData = screen.getByLabelText("b → a: no data");
+    expect(noData).toHaveAttribute("href", "/pairs/b/a");
+  });
+
+  it("URL-encodes node names that need it in the pair link", async () => {
+    stubFetch({
+      protocol: "tcp",
+      plane: "pod",
+      nodes: ["ns/pod a", "b"],
+      cells: [{ source: "ns/pod a", destination: "b", failRatio: 0.02 }],
+      timestamp: "t",
+    });
+    renderPage();
+    const cell = await screen.findByLabelText(/ns\/pod a → b/);
+    expect(cell).toHaveAttribute("href", `/pairs/${encodeURIComponent("ns/pod a")}/b`);
+  });
+
   it("surfaces problem errors", async () => {
     stubFetch(
       { type: "about:blank", title: "prometheus not configured", status: 503 },

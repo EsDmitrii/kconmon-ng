@@ -1,0 +1,20 @@
+---
+# Console + database values for chart testing (M3 persistence surface:
+# CNPG-managed PostgreSQL, realtime with the bundled Valkey, NetworkPolicy on
+# both sides). The M2 profile (console-values.yaml) is left untouched so the
+# realtime regression stays covered without a database.
+controller:
+  events:
+    enabled: true
+console:
+  enabled: true
+  replicas: 2
+  valkey:
+    mode: bundled
+  database:
+    mode: cnpg
+    retentionDays: 30
+  prometheus:
+    url: http://prometheus-operated.monitoring:9090
+networkPolicy:
+  enabled: true

@@ -6,10 +6,18 @@
 // The wire types mirror internal/console/ws.Envelope and ws.ClientMessage
 // field-for-field; there is no codegen (see FRONTEND.md "Data layer").
 
-/** Envelope is what the browser receives: internal/console/ws.Envelope. */
+/**
+ * Envelope is what the browser receives: internal/console/ws.Envelope.
+ * "closed" mirrors ws.TypeClosed (hub.go) -- a topic's terminal control
+ * frame, broadcast once (CloseTopic/CloseTopicWithFinal) and never followed
+ * by anything else on that topic. Ephemeral run:{id} topics (task-22-brief.md)
+ * are the first consumer that needs it: pages/run-detail.tsx's useRun hook
+ * (hooks/use-run.ts) unsubscribes on it rather than leaving the subscription
+ * open against a topic the hub has already reaped.
+ */
 export interface WsEnvelope<T = unknown> {
   topic: string;
-  type: "snapshot" | "delta" | "event" | "error";
+  type: "snapshot" | "delta" | "event" | "error" | "closed";
   seq: number;
   data: T;
 }

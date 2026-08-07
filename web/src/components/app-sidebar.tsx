@@ -16,6 +16,8 @@ import {
 } from "lucide-react";
 import { NAV_ITEMS, type NavItem } from "@/nav";
 import { ThemeToggle } from "@/components/theme-toggle";
+import { UserMenu } from "@/components/user-menu";
+import { useAuth } from "@/hooks/use-auth";
 import { cn } from "@/lib/utils";
 
 /* The sidebar derives its grouping and icons from NAV_ITEMS by path, without
@@ -86,6 +88,7 @@ function NavLink({ item }: { item: NavItem }) {
 }
 
 export function AppSidebar() {
+  const { me, can, isAnonymous } = useAuth();
   return (
     <aside className="flex h-full w-64 flex-col bg-surface">
       <div className="flex items-center justify-between px-4 pb-2 pt-4">
@@ -112,8 +115,16 @@ export function AppSidebar() {
           </div>
         ))}
       </nav>
-      <div className="border-t border-border px-4 py-3 text-[11px] text-muted-foreground/70">
-        Network connectivity console
+      <div className="border-t border-border px-4 py-3">
+        {/* me is undefined until GET /api/v1/auth/me answers, and isAnonymous
+            reads false in that gap (use-auth.ts's fail-closed default) — so
+            this only ever shows the real user menu once a genuinely
+            non-anonymous subject is confirmed, never mid-load. */}
+        {me && !isAnonymous ? (
+          <UserMenu me={me} can={can} />
+        ) : (
+          <span className="text-[11px] text-muted-foreground/70">Network connectivity console</span>
+        )}
       </div>
     </aside>
   );

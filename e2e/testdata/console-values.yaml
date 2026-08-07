@@ -1,0 +1,51 @@
+---
+# Console overlay for e2e. Layered on top of e2e/testdata/values.yaml (both
+# passed to `helm upgrade --install` with -f, this file last so it wins) --
+# it only adds the console-specific surface, it does not repeat the
+# controller/agent/config values the base file already sets.
+#
+# Chart surface exercised here (task-27-brief.md, owner-approved):
+#   - console.enabled + a single replica (kind has no spare capacity, and one
+#     replica keeps the in-process paths deterministic).
+#   - auth.mode=anonymous with role=operator (not the chart default
+#     "viewer"): the run endpoint (POST /api/v1/runs, permission
+#     runs:create) is only on the operator role, and anonymous auth keeps
+#     the e2e barrier low -- no login flow to build into these tests.
+#   - valkey.mode=bundled: exercises the chart's own bundled Valkey
+#     Deployment/Service, never covered by e2e before this.
+#   - database.mode=external against e2e/testdata/postgres.yaml's fixture
+#     Secret (kconmon-e2e-postgres, key "dsn" -- the chart default
+#     existingSecretKey, left unset here on purpose). NOT cnpg -- see
+#     postgres.yaml's header for why.
+#   - controller.events.enabled=true (top-level, not console-scoped): makes
+#     the controller publish its domain-event stream, and (via the chart's
+#     own controllerGRPCAddr helper) makes the console derive
+#     console.controller.grpcAddr automatically, wiring up the events
+#     ingester GET /api/v1/events proves is exercised.
+#
+# networkPolicy.enabled is already false in the chart's own default (kind's
+# CNI does not enforce NetworkPolicy, so enabling it would give false
+# confidence rather than coverage -- Task 9's helm-template verification is
+# where that surface is actually checked). Restated here anyway, so this
+# file documents the decision instead of silently relying on a default that
+# could change.
+networkPolicy:
+  enabled: false
+
+controller:
+  events:
+    enabled: true
+
+console:
+  enabled: true
+  replicas: 1
+  auth:
+    mode: anonymous
+    anonymous:
+      role: operator
+  valkey:
+    mode: bundled
+  database:
+    mode: external
+    existingSecret: kconmon-e2e-postgres
+    existingSecretKey: dsn

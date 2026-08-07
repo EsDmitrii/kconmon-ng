@@ -135,11 +135,18 @@ function GridCell({
     </div>
   );
 
+  // Every non-self cell opens the pair's object card (task-25-brief.md), even
+  // one with no data yet -- an operator may want the page open before probe
+  // data exists. A real <a href> keeps native keyboard focus/activation
+  // (Tab, Enter) instead of hand-rolling it on a div, and lets the existing
+  // hover/focus Tooltip wrapper attach its handlers exactly as before.
+  const pairHref = `/pairs/${encodeURIComponent(src)}/${encodeURIComponent(dst)}`;
+
   return (
     <td className="p-0.5">
       <Tooltip content={tooltip}>
-        <div
-          tabIndex={0}
+        <a
+          href={pairHref}
           aria-label={label}
           className={cn(
             "relative flex h-12 w-full min-w-16 flex-col items-center justify-center overflow-hidden rounded-md",
@@ -161,7 +168,7 @@ function GridCell({
               </span>
             </>
           )}
-        </div>
+        </a>
       </Tooltip>
     </td>
   );

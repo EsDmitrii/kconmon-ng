@@ -59,6 +59,13 @@ const (
 	keepaliveTimeout = 5 * time.Second
 )
 
+// sinkTimeout bounds one EventSink.InsertEvent call. It is independent of the
+// stream context (which lives as long as the whole attempt, and dies on
+// reconnect) and of context.Background() (which would outlive shutdown): a
+// database hiccup must degrade history within a bounded time, never wedge the
+// consume loop for the life of the stream.
+const sinkTimeout = 5 * time.Second
+
 var (
 	// errNoCapability is the "the controller is not offering events" case. It is
 	// deliberately handled exactly like a failed dial: back off, retry.
@@ -67,6 +74,23 @@ var (
 	// set but controller.url is not, so there is nothing to precheck against.
 	errNoControllerClient = errors.New("controller HTTP client is not configured, cannot run the capability precheck")
 )
+
+// EventSink durably records a live event. Satisfied by *store.DB via a thin
+// adapter in cmd/console. Nil sink = persistence off (the default, and the
+// entire M1/M2 posture).
+type EventSink interface {
+	InsertEvent(ctx context.Context, ev LiveEvent) (inserted bool, err error)
+}
+
+// Option configures an Ingester. Variadic, so the eleven existing call sites
+// (one in cmd/console, ten in ingester_test.go) need no edit.
+type Option func(*Ingester)
+
+// WithEventSink turns on durable persistence of every published live event.
+// Omit it (the default) to leave persistence off, exactly as in M1/M2.
+func WithEventSink(sink EventSink) Option {
+	return func(i *Ingester) { i.sink = sink }
+}
 
 // Ingester is one console replica's client for the controller's
 // EventStream.WatchEvents stream. It runs forever: capability precheck, dial,
@@ -82,6 +106,10 @@ type Ingester struct {
 	bus      cache.Bus
 	metrics  *metrics.Metrics
 
+	// sink is nil unless WithEventSink was passed to NewIngester, which is the
+	// entire M1/M2 posture and every deployment with database.mode=disabled.
+	sink EventSink
+
 	// connectGrace defaults to the connectGrace const. Overridable via
 	// export_test.go so a test can stretch it far enough that a promotion can
 	// only have come from a received event. Never changed after Run starts.
@@ -94,8 +122,15 @@ type Ingester struct {
 // grpcAddr means realtime ingestion is disabled: Run returns immediately and
 // Healthy always reports false, which is what makes the console's own
 // /api/v1/version correctly advertise no "events" capability.
-func NewIngester(ctrl *controllerclient.Client, grpcAddr string, bus cache.Bus, m *metrics.Metrics) *Ingester {
-	return &Ingester{ctrl: ctrl, grpcAddr: grpcAddr, bus: bus, metrics: m, connectGrace: connectGrace}
+//
+// opts is variadic so the existing call sites (cmd/console and
+// ingester_test.go) need no edit; today the only Option is WithEventSink.
+func NewIngester(ctrl *controllerclient.Client, grpcAddr string, bus cache.Bus, m *metrics.Metrics, opts ...Option) *Ingester {
+	i := &Ingester{ctrl: ctrl, grpcAddr: grpcAddr, bus: bus, metrics: m, connectGrace: connectGrace}
+	for _, opt := range opts {
+		opt(i)
+	}
+	return i
 }
 
 // Healthy reports whether this replica currently holds a WatchEvents stream
@@ -305,6 +340,20 @@ func (i *Ingester) setConnected(up bool) {
 // publish converts one controller event and hands it to the bus. Every failure
 // here drops a single event and is logged; none of them ends the stream, because
 // one unconvertible event must not cost the console its realtime feed.
+//
+// The bus and the sink are ordered but INDEPENDENT, in both directions.
+// Ordered: the bus goes first because realtime delivery is the user-visible
+// path with a hard latency budget, while durable history is the recoverable
+// one. Independent: neither failure is allowed to suppress the other write.
+//   - A sink failure never aborts or delays the publish that already happened
+//     -- a database hiccup degrades history, it does not blind the Live page.
+//   - A bus failure never skips the sink -- a Valkey outage degrades realtime,
+//     it does not stop durable history while the database is perfectly healthy
+//     (the events would then be unrecoverable, which is strictly worse than the
+//     case this ordering exists to protect against).
+//
+// So the bus error below is logged and metered and then execution FALLS
+// THROUGH to the sink block; do not turn it back into an early return.
 func (i *Ingester) publish(ctx context.Context, ev *pb.Event) {
 	live, err := ToLiveEvent(ev)
 	if err != nil {
@@ -319,6 +368,26 @@ func (i *Ingester) publish(ctx context.Context, ev *pb.Event) {
 
 	i.metrics.EventsReceived.WithLabelValues(live.Type).Inc()
 	if err := i.bus.Publish(ctx, busTopicLive, cache.Message{Type: "event", Data: data}); err != nil {
+		// Deliberately no early return: see the doc comment. Realtime is lost
+		// for this event, history need not be.
 		slog.Warn("publishing live event to the bus failed", "id", live.ID, "error", err)
+	}
+
+	if i.sink == nil {
+		return
+	}
+	// Its own short context, derived from the process context: not the stream
+	// context (which dies on reconnect), and not context.Background() (which
+	// would outlive shutdown).
+	sinkCtx, cancel := context.WithTimeout(ctx, sinkTimeout)
+	defer cancel()
+	switch inserted, err := i.sink.InsertEvent(sinkCtx, live); {
+	case err != nil:
+		i.metrics.EventsPersisted.WithLabelValues("error").Inc()
+		slog.Warn("failed to persist live event", "error", err, "type", live.Type) // WARN, never ERROR: history is degraded, the pipeline is not
+	case inserted:
+		i.metrics.EventsPersisted.WithLabelValues("ok").Inc()
+	default:
+		i.metrics.EventsPersisted.WithLabelValues("conflict").Inc() // another replica won the race; expected, not a problem
 	}
 }

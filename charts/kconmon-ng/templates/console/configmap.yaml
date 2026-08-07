@@ -6,6 +6,26 @@ guard exists to reject. */}}
 {{- if and (include "kconmon-ng.console.controllerGRPCAddr" .) (eq .Values.console.valkey.mode "disabled") (gt (int .Values.console.replicas) 1) }}
 {{- fail "realtime events with console.valkey.mode=disabled require console.replicas=1 (the in-process bus has no cross-replica fan-out, ADR-002): set console.valkey.mode=bundled|external or console.replicas=1" }}
 {{- end }}
+{{- /* Keyed on the RESOLVED auth mode: sessions for local/oidc live in
+Valkey (DATA.md §5.3), not the in-process KV, once more than one replica is
+running -- same shape as the realtime guard above, one mode set instead of
+one flag. */}}
+{{- if and (has .Values.console.auth.mode (list "local" "oidc")) (eq .Values.console.valkey.mode "disabled") (gt (int .Values.console.replicas) 1) }}
+{{- fail "auth.mode=local|oidc with console.valkey.mode=disabled requires console.replicas=1 (sessions live in Valkey per DATA.md §5.3; the in-process KV has no cross-replica visibility, so a browser load-balanced to another replica would be logged out at random): set console.valkey.mode=bundled|external or console.replicas=1" }}
+{{- end }}
+{{- /* Keyed on the RESOLVED auth mode: local/oidc store users, tokens and
+the audit log in PostgreSQL (SECURITY.md §10.1), so a database is not
+optional the way it is for anonymous/header. */}}
+{{- if and (has .Values.console.auth.mode (list "local" "oidc")) (eq .Values.console.database.mode "disabled") }}
+{{- fail "auth.mode=local|oidc requires console.database.mode=cnpg|external (users, tokens and the audit log live in PostgreSQL, SECURITY.md §10.1)" }}
+{{- end }}
+{{- /* Keyed on the RESOLVED trustedProxyCIDRs list: an empty list in header
+mode would make an unauthenticated request header an authentication bypass
+(SECURITY.md §10.1's "explicit opt-in"), so rendering fails rather than
+shipping that. */}}
+{{- if and (eq .Values.console.auth.mode "header") (not .Values.console.auth.header.trustedProxyCIDRs) }}
+{{- fail "auth.mode=header requires a non-empty console.auth.header.trustedProxyCIDRs: without it any client could set X-Remote-User and authenticate as anyone" }}
+{{- end }}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -23,6 +43,44 @@ data:
       mode: {{ .Values.console.auth.mode | quote }}
       anonymous:
         role: {{ .Values.console.auth.anonymous.role | quote }}
+      defaultRole: {{ .Values.console.auth.defaultRole | quote }}
+      {{- if eq .Values.console.auth.mode "local" }}
+      local:
+        bootstrapAdmin: {{ .Values.console.auth.local.bootstrapAdmin | quote }}
+        {{- if .Values.console.auth.local.bootstrapAdmin }}
+        {{- /* Forces the existingSecret guard (kconmon-ng.console.localAdminSecretName)
+        to run even though its result is only used for the volume mount below,
+        not here -- rendering must fail at THIS point, not silently produce a
+        bootstrapAdminPasswordFile no Secret backs. */}}
+        {{- $_ := include "kconmon-ng.console.localAdminSecretName" . }}
+        bootstrapAdminPasswordFile: "/etc/kconmon-ng-console-secrets/local-admin-password"
+        {{- end }}
+      {{- end }}
+      {{- if eq .Values.console.auth.mode "header" }}
+      header:
+        userHeader: {{ .Values.console.auth.header.userHeader | quote }}
+        groupsHeader: {{ .Values.console.auth.header.groupsHeader | quote }}
+        groupsDelimiter: {{ .Values.console.auth.header.groupsDelimiter | quote }}
+        trustedProxyCIDRs:
+          {{- toYaml .Values.console.auth.header.trustedProxyCIDRs | nindent 10 }}
+      {{- end }}
+      {{- if eq .Values.console.auth.mode "oidc" }}
+      {{- /* Forces the existingSecret guard (kconmon-ng.console.oidcClientSecretName). */}}
+      {{- $_ := include "kconmon-ng.console.oidcClientSecretName" . }}
+      oidc:
+        issuer: {{ .Values.console.auth.oidc.issuer | quote }}
+        clientID: {{ .Values.console.auth.oidc.clientID | quote }}
+        clientSecretFile: "/etc/kconmon-ng-console-secrets/oidc-client-secret"
+        redirectURL: {{ .Values.console.auth.oidc.redirectURL | quote }}
+        scopes:
+          {{- toYaml .Values.console.auth.oidc.scopes | nindent 10 }}
+        usernameClaim: {{ .Values.console.auth.oidc.usernameClaim | quote }}
+        groupsClaim: {{ .Values.console.auth.oidc.groupsClaim | quote }}
+      {{- end }}
+      session:
+        ttl: {{ .Values.console.auth.session.ttl | quote }}
+        cookieName: {{ .Values.console.auth.session.cookieName | quote }}
+        secure: {{ .Values.console.auth.session.secure }}
     controller:
       {{- if .Values.console.controller.url }}
       url: {{ .Values.console.controller.url | quote }}
@@ -39,4 +97,12 @@ data:
     valkey:
       address: {{ include "kconmon-ng.console.valkeyAddress" . | quote }}
       dialTimeout: {{ .Values.console.valkey.dialTimeout | quote }}
+    {{- if ne .Values.console.database.mode "disabled" }}
+    database:
+      dsnFile: "/etc/kconmon-ng-console-secrets/database-dsn"
+      maxConns: {{ .Values.console.database.maxConns | int }}
+      connectTimeout: {{ .Values.console.database.connectTimeout | quote }}
+      migrateOnStart: {{ .Values.console.database.migrateOnStart }}
+      retentionDays: {{ .Values.console.database.retentionDays | int }}
+    {{- end }}
 {{- end }}

@@ -1,0 +1,59 @@
+{{- if and .Values.console.enabled (eq .Values.console.database.mode "cnpg") }}
+{{- $db := .Values.console.database }}
+{{- /* CRD ORDERING TRAP (ADR-001 "Negative"): this CR requires the CNPG
+operator's CRDs to already exist — the chart deliberately does not install
+the operator. `helm install` fails with "no matches for kind Cluster" until
+the operator is installed. */}}
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: {{ include "kconmon-ng.console.databaseClusterName" . }}
+  labels:
+    {{- include "kconmon-ng.labels" . | nindent 4 }}
+    app.kubernetes.io/component: console-db
+spec:
+  instances: {{ $db.cnpg.instances | int }}
+  {{- with $db.cnpg.imageName }}
+  imageName: {{ . | quote }}
+  {{- end }}
+  storage:
+    size: {{ $db.cnpg.storage.size | quote }}
+    {{- with $db.cnpg.storage.storageClass }}
+    storageClass: {{ . | quote }}
+    {{- end }}
+  {{- with $db.cnpg.resources }}
+  resources:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  {{- if $db.cnpg.backup.enabled }}
+  backup:
+    barmanObjectStore:
+      destinationPath: {{ required "console.database.cnpg.backup.destinationPath is required when backup.enabled" $db.cnpg.backup.destinationPath | quote }}
+      {{- with $db.cnpg.backup.endpointURL }}
+      endpointURL: {{ . | quote }}
+      {{- end }}
+      # Credentials referenced BY NAME only (never created or read by this
+      # chart). Keys follow CNPG's documented convention.
+      s3Credentials:
+        accessKeyId:
+          name: {{ required "console.database.cnpg.backup.credentialsSecret is required when backup.enabled" $db.cnpg.backup.credentialsSecret | quote }}
+          key: ACCESS_KEY_ID
+        secretAccessKey:
+          name: {{ $db.cnpg.backup.credentialsSecret | quote }}
+          key: ACCESS_SECRET_KEY
+  {{- end }}
+{{- if $db.cnpg.backup.enabled }}
+---
+apiVersion: postgresql.cnpg.io/v1
+kind: ScheduledBackup
+metadata:
+  name: {{ include "kconmon-ng.console.databaseClusterName" . }}-backup
+  labels:
+    {{- include "kconmon-ng.labels" . | nindent 4 }}
+    app.kubernetes.io/component: console-db
+spec:
+  schedule: {{ $db.cnpg.backup.schedule | quote }}
+  cluster:
+    name: {{ include "kconmon-ng.console.databaseClusterName" . }}
+{{- end }}
+{{- end }}

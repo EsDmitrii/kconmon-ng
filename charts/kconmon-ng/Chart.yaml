@@ -3,8 +3,8 @@ apiVersion: v2
 name: kconmon-ng
 description: Kubernetes Node Connectivity Monitor - Next Generation
 type: application
-version: 1.4.0
-appVersion: "1.4.0"
+version: 1.5.0
+appVersion: "1.5.0"
 keywords:
   - kubernetes
   - connectivity
@@ -25,6 +25,22 @@ annotations:
     - name: Documentation
       url: https://github.com/EsDmitrii/kconmon-ng#readme
   artifacthub.io/changes: |
+    - kind: added
+      description: >-
+        Console persistence (M3) — console.database.mode=cnpg|external|disabled,
+        PostgreSQL via CloudNativePG, event history, run history
+    - kind: added
+      description: >-
+        Console authentication and RBAC (M3) — console.auth.mode=anonymous|local|header|oidc,
+        built-in and custom roles, audit log, API tokens (PATs)
+    - kind: added
+      description: >-
+        Diagnostics runner — on-demand run fan-out with persisted history, permalinks,
+        and a live run:{id} WebSocket topic with REST-polling fallback
+    - kind: added
+      description: Object cards (Node, Pair) with a "Recent changes" event rail
+    - kind: added
+      description: NetworkPolicy opens console<->database (CNPG or external) and console->OIDC IdP on both sides
     - kind: added
       description: Console realtime (M2) — controller.events.enabled, console.valkey.mode, WebSocket /ws, Live page
     - kind: added

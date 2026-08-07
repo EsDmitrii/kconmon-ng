@@ -90,3 +90,22 @@ func TestTopology(t *testing.T) {
 		t.Errorf("expected JSON response, got content-type: %s", ct)
 	}
 }
+
+// pollUntil polls fn every interval until it returns true or budget elapses,
+// then fails the test naming what it was waiting for. Shared by this file
+// and console_test.go for asserting on eventually-consistent state (event
+// history catching up, a run reaching a terminal status) instead of each
+// caller hand-rolling its own retry loop.
+func pollUntil(t *testing.T, budget, interval time.Duration, what string, fn func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(budget)
+	for {
+		if fn() {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out after %s waiting for %s", budget, what)
+		}
+		time.Sleep(interval)
+	}
+}

@@ -136,12 +136,17 @@ serviceAccount:
 Every value is documented inline in
 [charts/kconmon-ng/values.yaml](../charts/kconmon-ng/values.yaml).
 
-## Console (M1/M2)
+## Console (M1/M2/M3)
 
 The Console is off by default and reads its own config file, rendered by the
 chart from `console.*` (it is not part of the `config:` block above). M1 gave it
 read-only pages over Prometheus and the controller API; M2 added the realtime
-path — the `/ws` WebSocket, the Live page and pushed matrix snapshots.
+path — the `/ws` WebSocket, the Live page and pushed matrix snapshots; M3
+added optional PostgreSQL persistence and authentication/RBAC. Full detail —
+the config file's every key/default/validation rule, the auth-mode matrix,
+and the secret-mount layout — lives in
+[docs/console/architecture/CONFIG.md](console/architecture/CONFIG.md); this
+section stays a summary.
 
 ```yaml
 controller:
@@ -181,6 +186,22 @@ console:
     # renders a default allowing TCP console.valkey.port to any namespace;
     # ignored for mode=bundled (a precise pod-selector rule is rendered).
     valkeyEgress: []
+  # PostgreSQL persistence (M3, ADR-001). Optional: with mode=disabled the
+  # console runs exactly the M1/M2 surface, no history, no local/oidc auth.
+  database:
+    mode: disabled # cnpg | external | disabled
+    existingSecret: "" # mode=external only; must hold a full postgres:// DSN
+    existingSecretKey: dsn
+  # Authentication (M3, SECURITY.md §10.1). anonymous is the default and a
+  # fully supported deployment; RBAC still applies, with the fixed role below.
+  auth:
+    mode: anonymous # anonymous | local | header | oidc
+    anonymous:
+      role: viewer
+    defaultRole: "" # role for an authenticated subject with no binding; empty = none (403)
+    # mode=local and mode=oidc both require database.mode=cnpg|external.
+    # mode=header requires a non-empty auth.header.trustedProxyCIDRs (no
+    # default — an empty list would be an authentication bypass).
 ```
 
 `controller.events.enabled` turns on the controller's `EventStream.WatchEvents`
@@ -216,6 +237,23 @@ proxy that rewrites `Host` (or forwards a mismatched `Origin`) makes every
 upgrade refused and the UI silently falls back to 15s polling. A proxy that
 strips `Origin` entirely still upgrades: an absent header is allowed, since
 non-browser clients never send one.
+
+`console.database.mode=cnpg` renders a CloudNativePG `Cluster` CR but this
+chart does **not** install the CNPG operator or its CRDs — `helm install`
+fails outright with a clear "no matches for kind Cluster" error if they are
+not already present. Every console secret (the database DSN, the local-mode
+bootstrap admin password, the OIDC client secret) mounts as a file under one
+directory, `/etc/kconmon-ng-console-secrets/`, group-readable
+(`console.podSecurityContext.fsGroup`, default matching the distroless
+nonroot gid); rotating one is an operator-initiated restart, since the
+Deployment rolls on ConfigMap changes only. `auth.mode=local|oidc` requires
+`database.mode` to be `cnpg` or `external`, and — with `console.replicas > 1`
+— `console.valkey.mode` to be `bundled` or `external` (sessions live in
+Valkey/PostgreSQL, not the single-replica in-process fallback); the chart
+refuses to render otherwise, with a message naming the fix. See
+[docs/console/architecture/CONFIG.md](console/architecture/CONFIG.md) for
+every validation rule and [SECURITY.md](console/architecture/SECURITY.md)
+for the auth-mode/RBAC/audit detail.
 
 ## Zone auto-discovery
 

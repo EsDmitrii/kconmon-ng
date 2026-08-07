@@ -1,0 +1,59 @@
+{{- if and .Values.console.enabled .Values.networkPolicy.enabled (eq .Values.console.database.mode "cnpg") }}
+{{- $cluster := include "kconmon-ng.console.databaseClusterName" . }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $cluster }}
+  labels:
+    {{- include "kconmon-ng.labels" . | nindent 4 }}
+    app.kubernetes.io/component: console-db
+spec:
+  podSelector:
+    matchLabels:
+      cnpg.io/cluster: {{ $cluster }}
+  policyTypes:
+    - Ingress
+  ingress:
+    # Console -> PostgreSQL. The egress half of this path lives in
+    # templates/console/networkpolicy.yaml — both layers are required.
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "kconmon-ng.selectorLabels" . | nindent 14 }}
+              app.kubernetes.io/component: console
+      ports:
+        - protocol: TCP
+          port: 5432
+    # The CNPG cluster's OWN pods: streaming replication (5432) and the
+    # operator's instance manager / status probes (8000) run between the
+    # instances. An ingress policy that forgets this breaks HA — replicas
+    # cannot join and the operator cannot see instance health.
+    - from:
+        - podSelector:
+            matchLabels:
+              cnpg.io/cluster: {{ $cluster }}
+      ports:
+        - protocol: TCP
+          port: 5432
+        - protocol: TCP
+          port: 8000
+    # Prometheus scraping of the CNPG instance-manager metrics endpoint
+    # (9187, used by CNPG's PodMonitor). Same knob as the root policy's
+    # scrape rule: networkPolicy.prometheusNamespace narrows it, empty allows
+    # any namespace.
+    - from:
+        {{- if .Values.networkPolicy.prometheusNamespace }}
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.networkPolicy.prometheusNamespace | quote }}
+        {{- else }}
+        - namespaceSelector: {}
+        {{- end }}
+      ports:
+        - protocol: TCP
+          port: 9187
+    # NOTE: depending on the installation, the CNPG OPERATOR's own namespace
+    # may also need ingress here (webhooks/status calls into the instance
+    # manager on 8000). This chart cannot know that namespace; add a rule of
+    # your own if the operator logs connection timeouts to these pods.
+{{- end }}
