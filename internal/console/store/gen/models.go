@@ -11,6 +11,16 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+type Annotation struct {
+	ID        pgtype.UUID
+	StartAt   time.Time
+	EndAt     pgtype.Timestamptz
+	Scope     string
+	Text      string
+	CreatedBy string
+	CreatedAt time.Time
+}
+
 type ApiToken struct {
 	ID         pgtype.UUID
 	Name       string
@@ -88,6 +98,28 @@ type CheckSchedule struct {
 	NextFireAt   pgtype.Timestamptz
 	CreatedAt    time.Time
 	UpdatedAt    time.Time
+}
+
+type MtrHopEnrichment struct {
+	Ip         string
+	Rdns       string
+	Asn        int64
+	Provider   string
+	Geo        json.RawMessage
+	ResolvedAt time.Time
+}
+
+type MtrPathSnapshot struct {
+	ID          pgtype.UUID
+	SourceNode  string
+	Destination string
+	PathHash    string
+	HopCount    int32
+	Hops        json.RawMessage
+	FirstSeen   time.Time
+	LastSeen    time.Time
+	TraceCount  int64
+	RunID       pgtype.UUID
 }
 
 type Role struct {

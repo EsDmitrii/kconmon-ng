@@ -4,7 +4,10 @@ Owner: @EsDmitrii
 Source: extracted from root DESIGN.md §6.2–6.4 in M0 (2026-07-14); §6.4 and
 §7.x Diagnostics updated/added from the as-built M3 implementation
 (2026-08-06): web/src/pages/{diagnostics,run-detail,node-card,pair-card}.tsx,
-web/src/hooks/use-run.ts.
+web/src/hooks/use-run.ts. §6.3, §7.5 and §7.x Annotations written from the
+as-built M5 implementation (2026-08-08): web/src/lib/{timemachine.tsx,
+annotations.ts}, web/src/components/{timemachine-bar,annotations}.tsx,
+web/src/pages/{mtr,topology,live,explore}.tsx.
 This document is the source of truth for Pages & Navigation. Update it (and the ADRs) in the same PR as any deviation.
 -->
 
@@ -34,21 +37,88 @@ every action gets a palette entry for free.
 
 ### 6.3 Time Machine (global time context)
 
-A top-bar control with two states: **Live** and **@ timestamp**. It is a
-single piece of global state (`timemachine` store) that every data hook
-resolves through:
+**Delivered in M5.** A top-bar control with two states, **Live** and
+**@ timestamp**, held in one React context (`web/src/lib/timemachine.tsx`)
+mounted in the AppShell, that every read surface resolves through. The full
+contract — strict RFC 3339 parsing, seconds truncation, `pushState`/`popstate`,
+the two hooks, and the three named limitations — is
+[TIME_MACHINE.md](TIME_MACHINE.md). What matters at page level:
 
 - Prometheus reads become instant/range queries evaluated at/around `t`.
-- Topology is reconstructed from `topology_events` up to `t`.
-- Matrix renders the historical snapshot; Live feed becomes a scrollback
-  around `t`; object cards show state-as-of-`t` with "Recent changes"
-  relative to `t`.
-- Mutating actions (run check, edit rule) are disabled with a clear banner
-  ("You are viewing 15:34 yesterday — return to Live to act").
-- The state is in the URL (`?at=`), so a Time Machine view is shareable.
+- Topology is reconstructed from `topology_events` up to `t`, server-side.
+- Matrix is rebuilt from PromQL at `t` (`GET /api/v1/matrix` stayed live-only);
+  the Live feed becomes a scrollback **ending** at `t`; object cards show
+  state-as-of-`t` with "Recent changes" bounded to `≤ t`; Explore anchors both
+  its A and B legs at `t`.
+- Mutating actions are disabled — through one hook, `useWritesDisabled()` —
+  with the amber banner as the **single** explanation, no per-button tooltips.
+  Permission **hides** an affordance and Time Machine **disables** it: two
+  signals that compose rather than collapse into one greyed-out button meaning
+  either.
+- The state is in the URL (`?at=`), so a Time Machine view is shareable — for
+  the URL you are **on**. A `<Link>` to another page drops the param from the
+  URL while the context keeps the value, because Decision 9 deliberately did
+  not adopt router search params.
+
+**The Topology page's historical view is honest about being empty.** The
+controller shipped with this release publishes `topology_changed` with a reason
+and no node or agent identity, so a fold over its events reconstructs nothing.
+The page does not render that as an empty cluster: it reads the server's own
+`unfoldableEvents`/`eventsFolded` counters and says it found *N* events at or
+before that instant and could fold *M* of them — a statement about what the
+controller records, not about the instant you picked. A separate card appears
+when the fold hit its 100 000-row guard (`truncated`), because a partial fold
+is a wrong fold.
 
 Implementation note: this is why §4.1 persists `topology_events` — the
 controller only knows *now*.
+
+### 7.5 MTR
+
+Delivered in M5 at `/mtr`, replacing the stub — three panes, a diff view, a
+Runner segment, per-hop enrichment and a per-hop trend chart. It has its own
+source-of-truth document: [MTR_EXPLORER.md](MTR_EXPLORER.md).
+
+### 7.x Explore — A/B compare
+
+Delivered in M5 as a **dedicated Compare panel above the curated grid**, not as
+a second control on all five curated cards: five copies of the same two
+dropdowns would have made the page about comparing rather than about looking.
+
+Two **mutually exclusive** modes, with the exclusivity stated in the copy
+rather than discovered by trying: B is either a second curated metric, or the
+same metric A shifted against its own past (1h / 24h / 7d). "B is UDP loss AND
+B is yesterday" has no single meaning, so it is not offered.
+
+Shift math is pinned: `end_B = end_A − shift`, same window length. The fetched
+leg's timestamps are then re-offset **forward** by the shift for drawing, so
+the two lines overlay instead of B sitting a day to the left. B is drawn in a
+muted dashed palette and captioned when the two metrics' units disagree. An
+unshifted B shares the curated card's own request — the shift only enters the
+query key above 0 — so the default state adds no traffic. Both legs anchor
+through Time Machine.
+
+### 7.x Annotations
+
+Delivered in M5 as an overlay on existing surfaces rather than a page of its
+own — an annotation is a mark on something, not a thing to browse.
+
+- **Charts** (Explore, object cards) draw annotations in the visible range as
+  echarts `markLine` (instant) / `markArea` (range), from pure geometry helpers
+  in `web/src/lib/annotations.ts` that are unit-tested independently of the
+  chart.
+- **Live** shows global annotations inline at their timestamp, read-only.
+- **Scope is never absent from a surface's fetch**, and `?scope=` present-but-
+  empty means *global only* — `""` is a real scope value, so the code tests
+  `scope !== undefined` rather than truthiness. Explore reads global only;
+  cards read the object's scope and global as two legs.
+- **Create** is an affordance beside the chart, hidden without
+  `annotations:write` and disabled under Time Machine. **Delete** is a list row
+  in a popover rather than a canvas tooltip — keyboard-reachable and testable,
+  where a canvas hit-target is neither.
+- Two things the design implies that did **not** ship: clicking a chart does
+  not set the annotation's time (it is typed), and there is no edit — M5 is
+  create/list/delete, because a mark is not a document (Decision 10).
 
 ### 6.4 Object cards
 
@@ -89,8 +159,10 @@ own "any deviation updates the doc" rule:
   A server-side `?node=`/`?pair=` filter on `GET /api/v1/runs` is a
   plausible follow-up, not yet built.
 - **Quick actions** are narrower than the full design: "Investigate this
-  pair" and MTR actions wait on Investigation (M6) and MTR (M5)
-  respectively; only "Run check" exists today.
+  pair" still waits on Investigation (M6), and the card's MTR actions were
+  **not** added in M5 either — the MTR Explorer has its own Runner
+  (MTR_EXPLORER.md §7.5) and a card-level shortcut into it was not built. Only
+  "Run check" exists today.
 - **Target card ships THREE real tabs and no placeholders** (M4 Plan
   Decision 17):
   - **Checks & Schedules** — the definitions probing this target and their
@@ -225,11 +297,15 @@ M3**: the feed now loads its initial history from `GET /api/v1/events`
 (backed by the durable `topology_events` table, DATA.md §5.2), the same
 opaque keyset-cursor "Load older" convention as Diagnostics' run history and
 `GET /api/v1/audit`; the live stream still fills in from there forward. The
-other two limits remain as of M3: the feed's `check_observed` entries are
+other two limits remain as of M5: the feed's `check_observed` entries are
 on-demand diagnostic completions, not continuous background probes — those
 never reach the controller (see [WEBSOCKET.md](../architecture/WEBSOCKET.md)
-"Payloads"). And `topology_changed` rows always read scope `cluster`, because
-the controller does not yet attribute a registry change to a node. Time
-Machine scrollback around `t` (§6.3) is a different feature — a global `?at=`
-time context, not per-page history — and still waits for M5 even though its
-data source (`topology_events`) now exists.
+"Payloads"). And `topology_changed` rows **still** always read scope `cluster`,
+because the controller does not yet attribute a registry change to a node —
+the same gap that makes M5's historical topology fold empty (§6.3).
+
+**Time Machine scrollback landed in M5.** Engaging `?at=` turns this feed into
+a scrollback *ending* at `t`, by passing `to=t` to the same
+`GET /api/v1/events` the M3 scrollback already used — the events API's time
+filtering was already there end to end, so this cost no server change at all.
+Global annotations render inline at their timestamps in the same feed.

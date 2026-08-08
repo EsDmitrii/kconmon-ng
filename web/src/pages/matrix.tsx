@@ -8,6 +8,7 @@ import { Segmented } from "@/components/ui/segmented";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tooltip } from "@/components/ui/tooltip";
 import { useMatrix } from "@/hooks/use-matrix";
+import { useTimeContext } from "@/lib/timemachine";
 import { PROTOCOLS, type MatrixCell, type Protocol } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
@@ -197,6 +198,7 @@ function MatrixSkeleton() {
 
 export function MatrixPage() {
   const [protocol, setProtocol] = useState<Protocol>("tcp");
+  const { at } = useTimeContext();
   const { data, isLoading, error, live } = useMatrix(protocol);
 
   const byPair = useMemo(() => {
@@ -208,7 +210,11 @@ export function MatrixPage() {
   return (
     <PageShell
       title="Matrix"
-      description="Live N×N node connectivity, recomputed from Prometheus every 15s."
+      description={
+        at
+          ? `N×N node connectivity as of ${at.toLocaleString()}, evaluated straight from Prometheus at that instant.`
+          : "Live N×N node connectivity, recomputed from Prometheus every 15s."
+      }
       actions={
         <>
           <Segmented
@@ -219,8 +225,10 @@ export function MatrixPage() {
           />
           <Badge variant="neutral">plane: pod</Badge>
           {/* How fresh the grid actually is — pushed, or up to 15s of polling
-              behind. Both states carry a label, never colour alone. */}
-          <RealtimeBadge realtime={live} />
+              behind. Both states carry a label, never colour alone. Engaged the
+              question is moot (the grid is pinned to an instant on purpose) and
+              a "delayed" badge would read as a fault, so it is not shown. */}
+          {at ? null : <RealtimeBadge realtime={live} />}
         </>
       }
     >
@@ -242,11 +250,13 @@ export function MatrixPage() {
             >
               <Inbox className="size-5" />
             </span>
-            <p className="text-sm font-medium">No probe data in Prometheus yet</p>
+            <p className="text-sm font-medium">
+              {at ? "No probe data in Prometheus at this time" : "No probe data in Prometheus yet"}
+            </p>
             <p className="max-w-sm text-xs leading-relaxed text-muted-foreground">
-              The {protocol.toUpperCase()} matrix fills in once the agents complete a probe round
-              and Prometheus scrapes them — usually within a minute of the DaemonSet becoming
-              ready.
+              {at
+                ? `Nothing was scraped for ${protocol.toUpperCase()} probes at that instant — it may predate the deployment, or fall outside Prometheus' own retention.`
+                : `The ${protocol.toUpperCase()} matrix fills in once the agents complete a probe round and Prometheus scrapes them — usually within a minute of the DaemonSet becoming ready.`}
             </p>
           </div>
         ) : null}

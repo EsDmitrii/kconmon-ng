@@ -10,7 +10,9 @@ import { NAV_ITEMS } from "@/nav";
 import { AppSidebar } from "@/components/app-sidebar";
 import { AnonymousBanner } from "@/components/anonymous-banner";
 import { StubPage } from "@/components/stub-page";
+import { TimeMachineBar } from "@/components/timemachine-bar";
 import { getConfig } from "@/lib/api";
+import { TimeMachineProvider } from "@/lib/timemachine";
 import { OverviewPage } from "@/pages/overview";
 import { LivePage } from "@/pages/live";
 import { MatrixPage } from "@/pages/matrix";
@@ -19,6 +21,7 @@ import { DiagnosticsPage } from "@/pages/diagnostics";
 import { ExplorePage } from "@/pages/explore";
 import { PromQLConsolePage } from "@/pages/promql-console";
 import { LoginPage } from "@/pages/login";
+import { MTRPage } from "@/pages/mtr";
 import { NodeCardPage } from "@/pages/node-card";
 import { PairCardPage } from "@/pages/pair-card";
 import { RunDetailPage } from "@/pages/run-detail";
@@ -41,13 +44,22 @@ import { TargetsPage } from "@/pages/targets";
 export function AppShell({ children }: { children: ReactNode }) {
   const { data: config } = useQuery({ queryKey: ["config"], queryFn: getConfig, staleTime: Infinity });
   return (
-    <div className="flex h-screen w-screen overflow-hidden">
-      <AppSidebar />
-      <div className="flex flex-1 flex-col overflow-hidden">
-        <AnonymousBanner mode={config?.auth.mode} />
-        <main className="flex-1 overflow-auto">{children}</main>
+    // TimeMachineProvider wraps the shell rather than sitting up in main.tsx
+    // next to QueryClientProvider/ThemeProvider: AppShell is the root route's
+    // component, so this is still ABOVE every page's Outlet (all of them see
+    // the context), and it keeps the provider inside the one unit tests already
+    // drive with their own router (anonymous-banner.test.tsx's shell test) —
+    // main.tsx has no test seam at all.
+    <TimeMachineProvider>
+      <div className="flex h-screen w-screen overflow-hidden">
+        <AppSidebar />
+        <div className="flex flex-1 flex-col overflow-hidden">
+          <AnonymousBanner mode={config?.auth.mode} />
+          <TimeMachineBar />
+          <main className="flex-1 overflow-auto">{children}</main>
+        </div>
       </div>
-    </div>
+    </TimeMachineProvider>
   );
 }
 
@@ -72,15 +84,17 @@ const routes = NAV_ITEMS.map((item) =>
             ? MatrixPage
             : item.path === "/topology"
               ? TopologyPage
-              : item.path === "/diagnostics"
-                ? DiagnosticsPage
-                : item.path === "/targets"
-                  ? TargetsPage
-                  : item.path === "/explore"
-                    ? ExplorePage
-                    : item.path === "/console"
-                      ? PromQLConsolePage
-                      : () => <StubPage title={item.label} description={item.description} />,
+              : item.path === "/mtr"
+                ? MTRPage
+                : item.path === "/diagnostics"
+                  ? DiagnosticsPage
+                  : item.path === "/targets"
+                    ? TargetsPage
+                    : item.path === "/explore"
+                      ? ExplorePage
+                      : item.path === "/console"
+                        ? PromQLConsolePage
+                        : () => <StubPage title={item.label} description={item.description} />,
   }),
 );
 

@@ -6,16 +6,20 @@ package authz
 // (Decision 7). The roles table (Task 12) only ever adds custom roles
 // alongside these; it never redefines them — see NewPolicy.
 var builtinRoles = map[string][]Permission{
-	// viewer holds EXACTLY the permissions the M1/M2 endpoints require. This
-	// is what makes auth.mode=anonymous + auth.anonymous.role=viewer (the
-	// defaults) byte-identical to the pre-M3 surface — the degraded-state
-	// guarantee.
+	// viewer is read-only TELEMETRY: the M1/M2 surface plus M5's mtr:read
+	// and annotations:read (Plan Decision 11 — path history and chart notes
+	// are things the fleet already recorded, the same class as events and
+	// runs). What viewer must NEVER gain is CONFIGURATION authority — the
+	// M4 targets/checks/schedules permissions — because viewer is what
+	// auth.mode=anonymous defaults to.
 	"viewer": {
 		PermTopologyRead,
 		PermMatrixRead,
 		PermEventsRead,
 		PermPromQLQuery,
 		PermRunsRead,
+		PermMTRRead,
+		PermAnnotationsRead,
 	},
 
 	// operator adds the ability to trigger diagnostic runs, plus M4's
@@ -36,6 +40,11 @@ var builtinRoles = map[string][]Permission{
 		PermChecksRead,
 		PermChecksWrite,
 		PermSchedulesWrite,
+		PermMTRRead,
+		PermAnnotationsRead,
+		// annotations:write stops at operator and admin: a note pinned to
+		// the fleet's history is an operator statement, not a viewer one.
+		PermAnnotationsWrite,
 	},
 
 	// alert-editor has no alerting permissions yet — those land in M7. The
@@ -53,6 +62,12 @@ var builtinRoles = map[string][]Permission{
 		PermPromQLQuery,
 		PermRunsRead,
 		PermRunsCreate,
+		// M5 telemetry reads, same reasoning as viewer's: an alert editor
+		// reads charts, so it reads the notes and path history on them.
+		// annotations:write deliberately absent — same line as the M4
+		// configuration permissions above.
+		PermMTRRead,
+		PermAnnotationsRead,
 	},
 
 	// admin holds every permission this build knows.

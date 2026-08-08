@@ -117,6 +117,30 @@ type Server struct {
 	schedules   ScheduleService
 	topology    TopologySource
 
+	// topologyHistory backs GET /api/v1/topology?at= ONLY (M5 Task 9). The
+	// live, param-less topology stays controller-backed and is completely
+	// unaffected by this being nil -- a console with database.mode=disabled
+	// keeps serving live topology and answers 503 for ?at= alone, because a
+	// reconstruction has nowhere to read its events from.
+	topologyHistory TopologyHistory
+
+	// mtr backs GET /api/v1/mtr/* and annotations backs GET/POST/DELETE
+	// /api/v1/annotations (M5 Task 4). Same Decision 13 rule as targets: nil
+	// = database.mode=disabled = 503, never an in-memory fallback -- path
+	// history and operator notes are worth exactly as much as they are
+	// durable.
+	mtr         MTRService
+	annotations AnnotationService
+
+	// enricher OVERRIDES the enrichment half of s.mtr (M5 Task 5). nil is the
+	// Task 4 behaviour, unchanged: hop enrichment is served cache-only,
+	// straight out of mtr_hop_enrichment. Non-nil is an *enrich.Resolver,
+	// which reads the same cache and additionally resolves what it does not
+	// find. The seam is EnrichmentReader either way -- the resolver satisfies
+	// the read-only interface deliberately, so the handler cannot write the
+	// cache through it and never learns which one it is talking to.
+	enricher EnrichmentReader
+
 	// kv is the short-TTL key/value store the fixed-window rate limiter counts
 	// in (ratelimit.go) -- the SAME cache.KV cmd/console already builds for
 	// SessionStore and the OIDC state stash, so a Valkey-backed console gets
@@ -229,6 +253,28 @@ type Deps struct {
 	Definitions DefinitionService
 	Schedules   ScheduleService
 
+	// MTR backs the three GET /api/v1/mtr/* routes (path history + the hop
+	// enrichment cache read) and Annotations backs GET/POST/DELETE
+	// /api/v1/annotations. Same Decision 13 rule as Targets: nil means
+	// database.mode=disabled and every one of those routes answers 503.
+	// Typed to the local MTRService/AnnotationService interfaces, so leaving
+	// them unset is Deps{}'s ordinary zero value -- a genuine nil interface,
+	// never the typed-nil trap Deps.Events' doc comment describes.
+	MTR         MTRService
+	Annotations AnnotationService
+
+	// Enricher swaps the cache-only hop enrichment read for a resolving one
+	// (M5 Task 5). cmd/console builds an *enrich.Resolver here only when
+	// mtr.enrichment.enabled is true AND a database is configured -- the TTL
+	// cache lives in PostgreSQL, so a resolver without one would re-resolve
+	// every hop on every read.
+	//
+	// nil is not "feature off, answer 503" like every other field above: it is
+	// "serve what the cache already knows", which is exactly what Task 4
+	// shipped. Enrichment is decoration on a trace and its absence must never
+	// change a status code.
+	Enricher EnrichmentReader
+
 	// KV backs the fixed-window rate limiter (ratelimit.go). In production
 	// this is the very same cache.KV cmd/console builds for Sessions and the
 	// OIDC state stash -- Valkey-backed when console.valkey.mode=valkey, so
@@ -247,6 +293,16 @@ type Deps struct {
 	// with no Controller either means POST /api/v1/checks/projection answers
 	// 503 and the create/update guard fails open (see enforceProjection).
 	Topology TopologySource
+
+	// TopologyHistory folds topology_events into the node/agent set as of an
+	// instant, for GET /api/v1/topology?at= (M5 Task 9). In production this is
+	// the SAME store.EventStore Events carries, so a folded snapshot is built
+	// from exactly the rows the Live page pages through. nil means
+	// database.mode=disabled: ?at= answers 503 and the param-less live route
+	// is untouched. Typed to the local TopologyHistory interface, so leaving
+	// it unset is Deps{}'s ordinary zero value -- a genuine nil interface,
+	// never the typed-nil trap Deps.Events' doc comment describes.
+	TopologyHistory TopologyHistory
 }
 
 // NewServer wires the router, middleware, and routes from d. Controller,
@@ -275,6 +331,8 @@ func NewServer(d Deps) *Server { //nolint:gocritic // hugeParam: Deps is the pin
 		audit: d.Audit, roleAdmin: d.RBAC, tokens: d.Tokens,
 		runner: d.Runner, targets: d.Targets,
 		definitions: d.Definitions, schedules: d.Schedules, topology: d.Topology,
+		topologyHistory: d.TopologyHistory,
+		mtr:             d.MTR, annotations: d.Annotations, enricher: d.Enricher,
 		kv: d.KV,
 	}
 
@@ -380,6 +438,22 @@ func NewServer(d Deps) *Server { //nolint:gocritic // hugeParam: Deps is the pin
 		api.Get("/api/v1/schedules/{id}", s.handleSchedulesGet)
 		api.Put("/api/v1/schedules/{id}", s.handleSchedulesUpdate)
 		api.Delete("/api/v1/schedules/{id}", s.handleSchedulesDelete)
+
+		// MTR path history is READ-ONLY over HTTP: snapshots are written by
+		// the checks runner's projector (M5 Task 2) at result-ingest time, and
+		// there is no operation a client could ask for that a trace does not
+		// already produce. /api/v1/mtr/snapshots is registered before the
+		// {id} route for readability only -- chi matches a static segment
+		// ahead of a wildcard regardless of registration order.
+		api.Get("/api/v1/mtr/destinations", s.handleMTRDestinations)
+		api.Get("/api/v1/mtr/snapshots", s.handleMTRSnapshots)
+		api.Get("/api/v1/mtr/snapshots/{id}", s.handleMTRSnapshotGet)
+
+		// Annotations are create/list/delete and deliberately have no update:
+		// an annotation is a mark, not a document (M5 Decision 10).
+		api.Get("/api/v1/annotations", s.handleAnnotationsList)
+		api.Post("/api/v1/annotations", s.handleAnnotationsCreate)
+		api.Delete("/api/v1/annotations/{id}", s.handleAnnotationsDelete)
 
 		api.Get("/api/v1/rbac/permissions", s.handleRBACPermissions)
 		api.Get("/api/v1/rbac/roles", s.handleRBACRolesList)

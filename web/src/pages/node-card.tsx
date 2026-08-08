@@ -1,5 +1,6 @@
 import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
+import { AnnotationBar, useAnnotations } from "@/components/annotations";
 import { PageShell } from "@/components/page-shell";
 import { RecentChanges } from "@/components/recent-changes";
 import { Badge, type BadgeProps } from "@/components/ui/badge";
@@ -9,6 +10,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { useMatrix } from "@/hooks/use-matrix";
 import { useTopology } from "@/hooks/use-topology";
 import { getRun, getRuns } from "@/lib/api";
+import { useTimeContext } from "@/lib/timemachine";
 import { PROTOCOLS, type MatrixCell, type Protocol, type RunDetail } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
@@ -303,6 +305,36 @@ function DiagnosticsTab({ nodeName }: { nodeName: string }) {
   );
 }
 
+/* NODE_ANNOTATION_RANGE_SECONDS is a day, not an hour, and it is a choice this
+   card has to make alone: unlike Explore, the pair card and the target card,
+   the node card has NO chart and therefore no plotted window to inherit. A day
+   is what an operator arriving at a node after an incident is looking back
+   over. */
+const NODE_ANNOTATION_RANGE_SECONDS = 24 * 60 * 60;
+
+/**
+ * NodeAnnotations is this card's annotation surface. It is a LIST rather than a
+ * chart overlay for the plain reason that this page draws no chart at all — the
+ * node card is identity, a breakdown table and a run scan. The same marks show
+ * up as markLine/markArea wherever a chart's window covers them (the pair card
+ * for a pair this node is an endpoint of, Explore for the global ones); here
+ * they are what they are, notes with times.
+ */
+function NodeAnnotations({ nodeName }: { nodeName: string }) {
+  const { annotations, error, refresh } = useAnnotations(nodeName, NODE_ANNOTATION_RANGE_SECONDS);
+  return (
+    <Card asChild className="p-5">
+      <section>
+        <h3 className="text-sm font-semibold">Annotations</h3>
+        <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
+          Notes pinned to this node over the last 24 hours, plus the fleet-wide ones.
+        </p>
+        <AnnotationBar scope={nodeName} annotations={annotations} error={error} onChanged={() => void refresh()} />
+      </section>
+    </Card>
+  );
+}
+
 function NotFound({ nodeName }: { nodeName: string }) {
   return (
     <PageShell title="Node" description={nodeName ? `No node name in the URL for “${nodeName}”.` : "No node name in the URL."}>
@@ -315,6 +347,7 @@ function NotFound({ nodeName }: { nodeName: string }) {
 
 export function NodeCardPage() {
   const nodeName = nodeNameFromPath(window.location.pathname);
+  const { at } = useTimeContext();
   const topo = useTopology();
   const [protocol, setProtocol] = useState<Protocol>("tcp");
   const matrix = useMatrix(protocol);
@@ -331,7 +364,20 @@ export function NodeCardPage() {
   return (
     <PageShell
       title={nodeName}
-      description={node ? `Zone ${node.zone}` : "Node"}
+      /* The card's whole body — identity from useTopology, health from
+         useMatrix, both already resolved through the Time Machine — is
+         state-as-of-t while engaged, and the description is where that is said
+         once rather than on each panel. asOf comes from the topology response
+         (the server's own echo of the instant it folded to) and falls back to
+         the requested instant when this console has no historical topology to
+         answer with at all. */
+      description={
+        at
+          ? `${node ? `Zone ${node.zone} · ` : ""}state as of ${new Date(topo.data?.asOf ?? at).toLocaleString()}`
+          : node
+            ? `Zone ${node.zone}`
+            : "Node"
+      }
       actions={
         <>
           <Segmented
@@ -390,7 +436,10 @@ export function NodeCardPage() {
               <DiagnosticsTab nodeName={nodeName} />
             )}
           </div>
-          <RecentChanges scope={nodeName} />
+          <div className="flex flex-col gap-5">
+            <RecentChanges scope={nodeName} />
+            <NodeAnnotations nodeName={nodeName} />
+          </div>
         </div>
       )}
     </PageShell>

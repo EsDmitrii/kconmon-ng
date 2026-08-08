@@ -14,16 +14,30 @@ import (
 	"github.com/EsDmitrii/kconmon-ng/internal/console/store/gen"
 )
 
-// tableTopologyEvents, tableAuditLog, and tableCheckRuns are the
-// RetentionDeleted "table" labels for the three tables this sweep prunes.
+// The RetentionDeleted "table" labels for the six tables this sweep prunes.
 // This is a closed set enforced only by this file's own usage. check_runs'
-// own results (check_results) never get a fourth label or a fourth
-// deleteBatches call: ON DELETE CASCADE on check_results.run_id means
-// deleting the run row is enough to also drop its results.
+// own results (check_results) never get a label or a deleteBatches call of
+// their own: ON DELETE CASCADE on check_results.run_id means deleting the run
+// row is enough to also drop its results.
+//
+// The three M5 tables age out on the column that means "still relevant", not
+// on when the row was written:
+//
+//   - mtr_path_snapshots by last_seen -- a route the pair still takes is
+//     current however long ago it was first observed. (Its run_id is
+//     ON DELETE SET NULL, so a snapshot deliberately outlives the check_runs
+//     row that produced it; the two sweeps are independent by design.)
+//   - mtr_hop_enrichment by resolved_at -- a TTL cache whose every row is
+//     re-derivable, so this sweep costs at most one lookup to be wrong.
+//   - annotations by start_at -- a mark ages out with the data it annotates,
+//     not with when it was typed.
 const (
 	tableTopologyEvents = "topology_events"
 	tableAuditLog       = "audit_log"
 	tableCheckRuns      = "check_runs"
+	tableMTRSnapshots   = "mtr_path_snapshots"
+	tableMTREnrichment  = "mtr_hop_enrichment"
+	tableAnnotations    = "annotations"
 )
 
 // pruneInterval is the steady-state sweep cadence.
@@ -175,6 +189,33 @@ func (p *Pruner) PruneOnce(ctx context.Context) (map[string]int64, error) {
 				return q.DeleteRunsBefore(ctx, gen.DeleteRunsBeforeParams{
 					CreatedAt: cutoff,
 					Limit:     limit,
+				})
+			},
+		},
+		{
+			table: tableMTRSnapshots,
+			del: func(ctx context.Context, limit int32) (int64, error) {
+				return q.DeletePathSnapshotsBefore(ctx, gen.DeletePathSnapshotsBeforeParams{
+					LastSeen: cutoff,
+					Limit:    limit,
+				})
+			},
+		},
+		{
+			table: tableMTREnrichment,
+			del: func(ctx context.Context, limit int32) (int64, error) {
+				return q.DeleteEnrichmentBefore(ctx, gen.DeleteEnrichmentBeforeParams{
+					ResolvedAt: cutoff,
+					Limit:      limit,
+				})
+			},
+		},
+		{
+			table: tableAnnotations,
+			del: func(ctx context.Context, limit int32) (int64, error) {
+				return q.DeleteAnnotationsBefore(ctx, gen.DeleteAnnotationsBeforeParams{
+					StartAt: cutoff,
+					Limit:   limit,
 				})
 			},
 		},

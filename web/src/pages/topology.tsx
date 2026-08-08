@@ -21,6 +21,7 @@ import { useTopology } from "@/hooks/use-topology";
 import { useTheme } from "@/components/theme-provider";
 import { goTo } from "@/lib/api";
 import type { Matrix, Topology } from "@/lib/types";
+
 import { cn } from "@/lib/utils";
 
 const ZONE_W = 300;
@@ -151,11 +152,40 @@ const LEGEND = [
   { dot: "bg-health-bad", label: "Failing · ≥ 10% or not ready" },
 ] as const;
 
+/**
+ * unfoldableEmpty is the Time Machine's honest empty state, DERIVED from the
+ * response rather than assumed.
+ *
+ * Task 9's finding, unchanged by anything this page can do: the topology events
+ * this controller emits today carry no node identity, so folding them yields an
+ * empty node set no matter how many events there were. The server reports that
+ * precisely — `unfoldableEvents` counted, `eventsFolded` folded — and the note
+ * this gates quotes those two numbers back. The alternative, a hardcoded "your
+ * history is probably empty" on every historical view, would be a lie the day
+ * the controller starts attributing events, and would say nothing useful before
+ * then either.
+ *
+ * The three conditions are all load-bearing: `historical` (a live body has none
+ * of these fields), an EMPTY node set (a fold that produced nodes is a success
+ * whatever it also skipped), and at least one unfoldable event (with zero, the
+ * honest answer is simply "nothing had happened yet" — a different note).
+ */
+export function unfoldableEmpty(
+  topo: Topology | undefined,
+): { unfoldableEvents: number; eventsFolded: number } | null {
+  if (!topo?.historical) return null;
+  if (topo.nodes.length > 0) return null;
+  const unfoldableEvents = topo.unfoldableEvents ?? 0;
+  if (unfoldableEvents === 0) return null;
+  return { unfoldableEvents, eventsFolded: topo.eventsFolded ?? 0 };
+}
+
 export function TopologyPage() {
   const topo = useTopology();
   const matrix = useMatrix("tcp");
   const { theme } = useTheme();
   const [hoveredEdge, setHoveredEdge] = useState<string | null>(null);
+  const unfoldable = unfoldableEmpty(topo.data);
 
   const flow = useMemo(
     () => (topo.data ? buildFlow(topo.data, matrix.data) : { nodes: [], edges: [], problemTotal: 0 }),
@@ -177,12 +207,29 @@ export function TopologyPage() {
   return (
     <PageShell
       title="Topology"
-      description="Live zone/node map. Problem paths (TCP fail ≥ 1%) are drawn worst-first; hover an edge for its failure ratio."
+      description={
+        topo.data?.asOf
+          ? `Zone/node map as of ${new Date(topo.data.asOf).toLocaleString()}, reconstructed from topology events. Problem paths (TCP fail ≥ 1%) are drawn worst-first; hover an edge for its failure ratio.`
+          : "Live zone/node map. Problem paths (TCP fail ≥ 1%) are drawn worst-first; hover an edge for its failure ratio."
+      }
     >
       {topo.error ? (
         <Card role="alert" className="border-l-4 border-l-health-bad bg-health-bad-soft/40 p-5">
           <p className="text-sm font-medium">Topology is unavailable</p>
           <p className="mt-1 text-xs leading-relaxed text-muted-foreground">{topo.error.message}</p>
+        </Card>
+      ) : null}
+
+      {/* The fold hit its own bound, so the node set below is built from a
+          SUFFIX of the history — say so rather than presenting a partial
+          reconstruction as a complete one. */}
+      {topo.data?.truncated ? (
+        <Card role="status" className="border-l-4 border-l-health-warn bg-health-warn-soft/40 p-5">
+          <p className="text-sm font-medium">This reconstruction is incomplete</p>
+          <p className="mt-1 max-w-prose text-xs leading-relaxed text-muted-foreground">
+            More topology events precede this instant than the fold will read in one pass, so nodes whose only event is
+            older than the window may be missing from the map.
+          </p>
         </Card>
       ) : null}
 
@@ -201,7 +248,7 @@ export function TopologyPage() {
         </Card>
       ) : null}
 
-      {topo.data && topo.data.nodes.length === 0 ? (
+      {unfoldable ? (
         <Card className="flex flex-col items-center gap-3 px-6 py-14 text-center">
           <span
             aria-hidden="true"
@@ -209,10 +256,33 @@ export function TopologyPage() {
           >
             <Network className="size-5" />
           </span>
-          <p className="text-sm font-medium">No nodes reported by the controller yet</p>
+          <p className="text-sm font-medium">Nothing to reconstruct at this time</p>
+          <p className="max-w-prose text-xs leading-relaxed text-muted-foreground">
+            {`This console found ${unfoldable.unfoldableEvents} topology event${
+              unfoldable.unfoldableEvents === 1 ? "" : "s"
+            } at or before this instant and could fold ${unfoldable.eventsFolded} of them into a node set: `}
+            the rest name no node, so there is nothing to rebuild the map from. That is a property of what this
+            controller records today, not of the instant you picked — historical topology fills in for events emitted
+            after the controller starts attributing them.
+          </p>
+        </Card>
+      ) : null}
+
+      {topo.data && !unfoldable && topo.data.nodes.length === 0 ? (
+        <Card className="flex flex-col items-center gap-3 px-6 py-14 text-center">
+          <span
+            aria-hidden="true"
+            className="flex size-12 items-center justify-center rounded-full bg-surface-2 text-muted-foreground"
+          >
+            <Network className="size-5" />
+          </span>
+          <p className="text-sm font-medium">
+            {topo.data.historical ? "No nodes existed at this time" : "No nodes reported by the controller yet"}
+          </p>
           <p className="max-w-sm text-xs leading-relaxed text-muted-foreground">
-            Nodes appear as soon as agents register with the controller — check that the DaemonSet
-            is running and the controller is reachable.
+            {topo.data.historical
+              ? "No topology event at or before this instant put a node into the cluster — try a later time, or check that it is inside console.database.retentionDays."
+              : "Nodes appear as soon as agents register with the controller — check that the DaemonSet is running and the controller is reachable."}
           </p>
         </Card>
       ) : null}

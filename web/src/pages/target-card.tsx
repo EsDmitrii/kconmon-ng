@@ -1,6 +1,7 @@
 import { useMemo, useState, type ReactNode } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { SearchX } from "lucide-react";
+import { AnnotationBar, useAnnotations } from "@/components/annotations";
 import { EChart } from "@/components/echart";
 import { PageShell } from "@/components/page-shell";
 import { RecentChanges } from "@/components/recent-changes";
@@ -13,10 +14,12 @@ import { useAuth } from "@/hooks/use-auth";
 import { useDatabaseAvailable } from "@/hooks/use-capabilities";
 import { ApiError, getConfig, getRun, getRuns, getTarget, listChecks, listSchedules, promqlQuery, promqlQueryRange } from "@/lib/api";
 import { toSeriesOption, type CuratedChart } from "@/lib/curated-metrics";
+import { useTimeContext } from "@/lib/timemachine";
 import type { CheckDefinition, PromResult, RunDetail, Schedule, Target } from "@/lib/types";
 // fmtIntervalNs is imported rather than re-derived so a schedule's cadence
 // reads identically on this card and on the Targets page's own Schedules tab —
 // the same reason recent-changes.tsx imports pushEvents from pages/live.
+import { escapeLabelValue } from "@/lib/utils";
 import { fmtIntervalNs } from "@/pages/targets";
 
 const TARGET_PATH_PREFIX = "/targets/";
@@ -44,13 +47,6 @@ export function targetIdFromPath(pathname: string): string {
   } catch {
     return rest;
   }
-}
-
-// escapeLabelValue guards the hand-built PromQL selectors below against a
-// target name containing a `"` or `\` -- PromQL string-literal escaping
-// matches Go/JSON's. Same helper, same reason, as pair-card.tsx's.
-function escapeLabelValue(v: string): string {
-  return v.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
 }
 
 /**
@@ -349,6 +345,14 @@ const HISTORY_MIN_STEP_SECONDS = 15;
  */
 function HistoryTab({ targetName, promConfigured, promResolved }: { targetName: string; promConfigured: boolean; promResolved: boolean }) {
   const { theme } = useTheme();
+  /* The scope is the target's NAME, not its id — the same string the events
+     rail and every other scope in this console is keyed by, and the one an
+     operator can actually recognise in a listing. It is also stable across the
+     id: a target deleted and recreated under the same name keeps its notes,
+     which is the honest outcome for a mark about a place in the network.
+     The annotations do not depend on Prometheus, so unlike the chart above they
+     are fetched even when this replica has no Prometheus at all. */
+  const { annotations, error: annotationsError, refresh } = useAnnotations(targetName, HISTORY_RANGE_SECONDS);
   const chart = useMemo<CuratedChart>(
     () => ({
       id: "target-duration",
@@ -358,10 +362,13 @@ function HistoryTab({ targetName, promConfigured, promResolved }: { targetName: 
     }),
     [targetName],
   );
+  // Engaged, the window ends at `t`: the hour before the instant being read,
+  // not the hour before this render.
+  const { at } = useTimeContext();
   const { data, isLoading, error } = useQuery({
-    queryKey: ["target-series", targetName],
+    queryKey: at ? ["target-series", targetName, "at", at.toISOString()] : ["target-series", targetName],
     queryFn: () => {
-      const end = new Date();
+      const end = at ?? new Date();
       const start = new Date(end.getTime() - HISTORY_RANGE_SECONDS * 1000);
       const stepSeconds =
         Math.ceil(HISTORY_RANGE_SECONDS / HISTORY_TARGET_POINTS / HISTORY_MIN_STEP_SECONDS) * HISTORY_MIN_STEP_SECONDS;
@@ -380,7 +387,9 @@ function HistoryTab({ targetName, promConfigured, promResolved }: { targetName: 
   return (
     <Card asChild className="p-5">
       <section>
-        <h3 className="text-sm font-semibold">{chart.title} (last hour)</h3>
+        <h3 className="text-sm font-semibold">
+          {chart.title} {at ? `(hour ending ${at.toLocaleString()})` : "(last hour)"}
+        </h3>
 
         {promResolved && !promConfigured ? (
           <p role="status" className="mt-3 text-xs leading-relaxed text-muted-foreground">
@@ -410,7 +419,15 @@ function HistoryTab({ targetName, promConfigured, promResolved }: { targetName: 
           </p>
         ) : null}
 
-        {option && !empty && !queryError ? <EChart option={option} className="mt-3 h-64 w-full" /> : null}
+        {option && !empty && !queryError ? (
+          <EChart option={option} annotations={annotations} dark={theme === "dark"} className="mt-3 h-64 w-full" />
+        ) : null}
+        <AnnotationBar
+          scope={targetName}
+          annotations={annotations}
+          error={annotationsError}
+          onChanged={() => void refresh()}
+        />
       </section>
     </Card>
   );
@@ -577,6 +594,7 @@ function NotFound({ id, known }: { id: string; known: boolean }) {
  */
 export function TargetCardPage() {
   const id = targetIdFromPath(window.location.pathname);
+  const { at } = useTimeContext();
   const { me, can } = useAuth();
   const { available: dbAvailable, resolved: dbResolved } = useDatabaseAvailable();
   // Same ["config"] cache entry useDatabaseAvailable and AppShell already read
@@ -599,9 +617,14 @@ export function TargetCardPage() {
 
   const promResolved = config !== undefined;
   const promConfigured = config?.prometheus.configured ?? false;
+  // The header's health figure is an INSTANT query, so the Time Machine moves
+  // the evaluation instant itself (the proxy's own `time` parameter) rather
+  // than a window — this is the "state as of t" the header claims to show.
   const healthQuery = useQuery({
-    queryKey: ["target-health", target?.name ?? ""],
-    queryFn: () => promqlQuery(targetHealthQuery(target?.name ?? "")),
+    queryKey: at
+      ? ["target-health", target?.name ?? "", "at", at.toISOString()]
+      : ["target-health", target?.name ?? ""],
+    queryFn: () => promqlQuery(targetHealthQuery(target?.name ?? ""), at ?? undefined),
     enabled: target !== undefined && promConfigured,
   });
   const health = healthFromVector(healthQuery.data);
@@ -684,7 +707,7 @@ export function TargetCardPage() {
   return (
     <PageShell
       title={target.name}
-      description="External probe target"
+      description={at ? `External probe target — state as of ${at.toLocaleString()}` : "External probe target"}
       actions={
         <>
           <Badge variant="neutral">{target.kind}</Badge>

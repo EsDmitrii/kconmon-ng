@@ -705,6 +705,11 @@ func TestAuditDetailAllowlistIsPinned(t *testing.T) {
 		// out (reconstructible from the row, noise in the audit trail).
 		"POST /api/v1/schedules":     {"definitionId", "kind", "enabled"},
 		"PUT /api/v1/schedules/{id}": {"definitionId", "kind", "enabled"},
+		// annotations: the SCOPE alone. "text" is free-form operator prose
+		// and must never reach an audit row (M5 Task 4) — pinned here and
+		// asserted per-route by
+		// TestAnnotationsCreateAuditDetailIsScopeOnlyAndNeverText.
+		"POST /api/v1/annotations": {"scope"},
 	}
 	if len(auditDetailAllowlist) != len(want) {
 		t.Fatalf("auditDetailAllowlist has %d routes, pinned copy has %d — update BOTH, consciously",

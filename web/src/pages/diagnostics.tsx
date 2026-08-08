@@ -10,6 +10,7 @@ import { useAuth } from "@/hooks/use-auth";
 import { useDatabaseAvailable } from "@/hooks/use-capabilities";
 import { useTopology } from "@/hooks/use-topology";
 import { ApiError, createCheck, createRun, getRuns, goTo, listTargets } from "@/lib/api";
+import { useWritesDisabled } from "@/lib/timemachine";
 import {
   CHECK_TYPES,
   type CheckDefinitionRequest,
@@ -94,7 +95,7 @@ const STATUS_VARIANT: Record<string, NonNullable<BadgeProps["variant"]>> = {
    console produced and the body this form produces for a node run are the
    same bytes (resolveRunDestination in internal/console/httpapi/runs.go
    treats "" and "node" identically). */
-const DESTINATION_KIND_LABELS: Record<DestinationKind, string> = {
+export const DESTINATION_KIND_LABELS: Record<DestinationKind, string> = {
   node: "Nodes",
   target: "Target",
   adhoc: "Ad-hoc",
@@ -108,7 +109,15 @@ function StatusBadge({ status }: { status: string }) {
   );
 }
 
-function NodeSelector({
+/* NodeSelector, toggleName, FieldLabel, CONTROL_CLASS and
+   DESTINATION_KIND_LABELS below are EXPORTED, not because this page needs them
+   to be, but because M5 Task 8's MTR Runner builds the same body against the
+   same endpoint from pages/mtr.tsx. Exporting the pieces rather than copying
+   them is the same call this file already made when it imported targets.tsx's
+   422-detail table: one run form's vocabulary, one set of controls, and a
+   change to the destination kinds cannot land on one page and not the other.
+   Nothing here changed shape — the exports are purely additive. */
+export function NodeSelector({
   label,
   nodes,
   all,
@@ -158,7 +167,7 @@ function NodeSelector({
   );
 }
 
-function toggleName(list: string[], name: string): string[] {
+export function toggleName(list: string[], name: string): string[] {
   return list.includes(name) ? list.filter((n) => n !== name) : [...list, name];
 }
 
@@ -200,7 +209,7 @@ export function buildRunRequest(input: {
   return req;
 }
 
-function FieldLabel({ label, children }: { label: string; children: (id: string) => ReactNode }) {
+export function FieldLabel({ label, children }: { label: string; children: (id: string) => ReactNode }) {
   const id = useId();
   return (
     <div className="flex flex-col gap-1 text-[13px]">
@@ -212,7 +221,7 @@ function FieldLabel({ label, children }: { label: string; children: (id: string)
   );
 }
 
-const CONTROL_CLASS = "h-9 rounded-md border border-border-strong bg-transparent px-3 text-[13px]";
+export const CONTROL_CLASS = "h-9 rounded-md border border-border-strong bg-transparent px-3 text-[13px]";
 
 function RunForm({
   nodeNames,
@@ -233,6 +242,7 @@ function RunForm({
   const [destinationAddress, setDestinationAddress] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string>();
+  const writesDisabled = useWritesDisabled();
 
   /* The target picker's options. Fetched ONLY once "Target" is actually
      selected, and only with targets:read — GET /api/v1/targets is gated on
@@ -423,10 +433,15 @@ function RunForm({
           </p>
         ) : null}
 
+        {/* The Time Machine joins the three reasons this button was already
+            allowed to be dead. A run started from a view of the past would run
+            NOW against the present fleet, which is exactly the confusion plan
+            Decision 8 exists to prevent — disabled, not hidden, because the
+            permission to start it has not gone anywhere. */}
         <Button
           type="submit"
           loading={submitting}
-          disabled={overLimit || noPairs || incompleteDestination}
+          disabled={overLimit || noPairs || incompleteDestination || writesDisabled}
           className="self-start"
         >
           Start run
@@ -481,6 +496,7 @@ function SaveAsDefinition({
   destinationAddress: string;
   incompleteDestination: boolean;
 }) {
+  const writesDisabled = useWritesDisabled();
   const [name, setName] = useState("");
   const [saving, setSaving] = useState(false);
   const [errors, setErrors] = useState<Partial<Record<SaveField, string>>>({});
@@ -546,7 +562,13 @@ function SaveAsDefinition({
             />
           )}
         </FieldLabel>
-        <Button type="button" variant="outline" loading={saving} disabled={incompleteDestination} onClick={handleSave}>
+        <Button
+          type="button"
+          variant="outline"
+          loading={saving}
+          disabled={incompleteDestination || writesDisabled}
+          onClick={handleSave}
+        >
           Save as definition
         </Button>
       </div>

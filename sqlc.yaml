@@ -28,3 +28,7 @@ sql:
             go_type: "encoding/json.RawMessage"
           - column: "check_definitions.params"
             go_type: "encoding/json.RawMessage"
+          - column: "mtr_path_snapshots.hops"
+            go_type: "encoding/json.RawMessage"
+          - column: "mtr_hop_enrichment.geo"
+            go_type: "encoding/json.RawMessage"

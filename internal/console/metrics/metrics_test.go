@@ -116,7 +116,12 @@ func TestNewRegistersStoreMetrics(t *testing.T) {
 	for _, result := range []string{"ok", "conflict", "error"} {
 		m.EventsPersisted.WithLabelValues(result).Inc()
 	}
-	for _, table := range []string{"topology_events", "audit_log", "check_runs"} {
+	// Every RetentionDeleted table label, exercised rather than sampled: the
+	// set is closed (store/prune.go owns it) and M5 widened it by three.
+	for _, table := range []string{
+		"topology_events", "audit_log", "check_runs",
+		"mtr_path_snapshots", "mtr_hop_enrichment", "annotations",
+	} {
 		m.RetentionDeleted.WithLabelValues(table).Add(5)
 	}
 
@@ -376,6 +381,146 @@ func TestNewRegistersExternalReconcilerMetrics(t *testing.T) {
 		"kconmon_ng_console_external_series_projected",
 		"kconmon_ng_console_external_reconciles_total",
 		"kconmon_ng_console_external_specs_skipped_total",
+	} {
+		if !present[name] {
+			t.Errorf("metric %q was not registered", name)
+		}
+	}
+}
+
+// TestNewRegistersMTRSnapshotMetric exercises the M5 Task 2 path-history
+// projector metric: exactly one label, result, over the CLOSED set
+// new-path|repeat|error. A hop address, a path hash or a destination in a
+// label here would be the cardinality bomb the whole package's discipline
+// exists to prevent, so the label VALUES are pinned, not just the name.
+func TestNewRegistersMTRSnapshotMetric(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	m := New("kconmon_ng", reg)
+
+	for _, result := range []string{"new-path", "repeat", "error"} {
+		m.MTRSnapshots.WithLabelValues(result).Inc()
+	}
+
+	if got := testutil.ToFloat64(m.MTRSnapshots.WithLabelValues("new-path")); got != 1 {
+		t.Errorf("MTRSnapshots(new-path) = %v, want 1", got)
+	}
+
+	families, err := reg.Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	present := make(map[string]bool, len(families))
+	for _, mf := range families {
+		present[mf.GetName()] = true
+		if !strings.HasPrefix(mf.GetName(), "kconmon_ng_console_") {
+			t.Errorf("metric %q not in kconmon_ng_console_ namespace", mf.GetName())
+		}
+		if mf.GetName() != "kconmon_ng_console_mtr_snapshots_total" {
+			continue
+		}
+		for _, metric := range mf.GetMetric() {
+			labels := metric.GetLabel()
+			if len(labels) != 1 || labels[0].GetName() != "result" {
+				t.Errorf("%s has labels %v, want exactly one {result}", mf.GetName(), labels)
+				continue
+			}
+			switch labels[0].GetValue() {
+			case "new-path", "repeat", "error":
+			default:
+				t.Errorf("%s has result=%q, outside the closed set new-path|repeat|error",
+					mf.GetName(), labels[0].GetValue())
+			}
+		}
+	}
+	if !present["kconmon_ng_console_mtr_snapshots_total"] {
+		t.Error("metric \"kconmon_ng_console_mtr_snapshots_total\" was not registered")
+	}
+}
+
+// TestNewRegistersEnrichmentMetrics pins M5 Task 5's two counters and, more
+// importantly, their SHAPE. The obvious single-counter design --
+// enrichment_lookups_total{source,result} with result hit|miss|error -- is
+// wrong: a cache hit is not per-source (one cached row answers rdns, asn and
+// city at once), so "hit" would have had to be attributed to a source that
+// never ran. The split below keeps each counter answering one question:
+//
+//	enrichment_cache_total{result}      -- did the TTL cache answer? hit|miss,
+//	                                       one increment per IP, so hit/(hit+miss)
+//	                                       is the cache hit ratio.
+//	enrichment_lookups_total{source,result} -- what did each source that ACTUALLY
+//	                                       RAN produce? source rdns|asn|city,
+//	                                       result ok|miss|error. Only misses reach
+//	                                       here, so this never double-counts the
+//	                                       cache.
+//
+// Neither carries an IP, a hostname, an ASN, a country or a snapshot id.
+func TestNewRegistersEnrichmentMetrics(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	m := New("kconmon_ng", reg)
+
+	for _, result := range []string{"hit", "miss"} {
+		m.EnrichmentCache.WithLabelValues(result).Inc()
+	}
+	for _, source := range []string{"rdns", "asn", "city"} {
+		for _, result := range []string{"ok", "miss", "error"} {
+			m.EnrichmentLookups.WithLabelValues(source, result).Inc()
+		}
+	}
+
+	if got := testutil.ToFloat64(m.EnrichmentCache.WithLabelValues("hit")); got != 1 {
+		t.Errorf("EnrichmentCache(hit) = %v, want 1", got)
+	}
+	if got := testutil.ToFloat64(m.EnrichmentLookups.WithLabelValues("rdns", "error")); got != 1 {
+		t.Errorf("EnrichmentLookups(rdns, error) = %v, want 1", got)
+	}
+
+	families, err := reg.Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	present := make(map[string]bool, len(families))
+	for _, mf := range families {
+		present[mf.GetName()] = true
+		if !strings.HasPrefix(mf.GetName(), "kconmon_ng_console_") {
+			t.Errorf("metric %q not in kconmon_ng_console_ namespace", mf.GetName())
+		}
+		switch mf.GetName() {
+		case "kconmon_ng_console_enrichment_cache_total":
+			for _, metric := range mf.GetMetric() {
+				labels := metric.GetLabel()
+				if len(labels) != 1 || labels[0].GetName() != "result" {
+					t.Errorf("%s has labels %v, want exactly one {result}", mf.GetName(), labels)
+					continue
+				}
+				switch labels[0].GetValue() {
+				case "hit", "miss":
+				default:
+					t.Errorf("%s has result=%q, outside the closed set hit|miss", mf.GetName(), labels[0].GetValue())
+				}
+			}
+		case "kconmon_ng_console_enrichment_lookups_total":
+			for _, metric := range mf.GetMetric() {
+				labels := metric.GetLabel()
+				if len(labels) != 2 || labels[0].GetName() != "result" || labels[1].GetName() != "source" {
+					t.Errorf("%s has labels %v, want exactly {result, source}", mf.GetName(), labels)
+					continue
+				}
+				switch labels[1].GetValue() {
+				case "rdns", "asn", "city":
+				default:
+					t.Errorf("%s has source=%q, outside the closed set rdns|asn|city", mf.GetName(), labels[1].GetValue())
+				}
+				switch labels[0].GetValue() {
+				case "ok", "miss", "error":
+				default:
+					t.Errorf("%s has result=%q, outside the closed set ok|miss|error", mf.GetName(), labels[0].GetValue())
+				}
+			}
+		}
+	}
+	for _, name := range []string{
+		"kconmon_ng_console_enrichment_cache_total",
+		"kconmon_ng_console_enrichment_lookups_total",
 	} {
 		if !present[name] {
 			t.Errorf("metric %q was not registered", name)

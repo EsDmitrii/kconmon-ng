@@ -508,6 +508,75 @@ console:
     # tick, so a replica dying mid-tick delays one tick instead of wedging the
     # fleet until its PostgreSQL session is reaped. Must be > 0 when enabled.
     tickInterval: 5s
+  # MTR path history extras (M5). Path history itself needs no configuration —
+  # the checks runner projects every MTR result into mtr_path_snapshots whenever
+  # console.database.mode is cnpg|external. This block is only about ENRICHING
+  # the hop addresses in a stored trace with reverse DNS and MaxMind data.
+  #
+  # The whole block is rendered into the ConfigMap only when enabled, exactly
+  # like console.scheduler and config.checkers.external: the console config is
+  # parsed with KnownFields(true) and a pre-M5 console image has no `mtr:` key
+  # at all, so an unconditional block would crashloop the old Pod as the
+  # Deployment rolls. Off by default also keeps this chart's default render
+  # key-identical to 1.6.0's.
+  mtr:
+    enrichment:
+      # Master gate. OFF for a stronger reason than the scheduler's: enrichment
+      # is the only part of the console that talks to something other than the
+      # controller, Prometheus, Valkey and PostgreSQL. rdns sends every hop
+      # address the fleet ever traced to whatever resolver /etc/resolv.conf
+      # names — an egress footprint, not a default.
+      enabled: false
+      # rdns and geoip gate INDEPENDENTLY. An air-gapped cluster with mmdb files
+      # and no reachable resolver runs geoip-only; a cluster with internal DNS
+      # and no MaxMind licence runs rdns-only. Turning the master gate on with
+      # every source off is a STARTUP ERROR, not a no-op: the resolver would
+      # cache empty rows and the ttl would then protect them for a day.
+      rdns:
+        enabled: false
+        # Bounds ONE lookup, not the batch. Milliseconds rather than a duration
+        # string so `500` cannot accidentally mean 500ns. Must be > 0 when
+        # rdns.enabled.
+        timeoutMs: 500
+      # MaxMind GeoLite2 databases. The console NEVER downloads them: the files
+      # come from a volume you supply below. An empty path is that source off;
+      # an unreadable file is NOT a boot failure — the console warns, disables
+      # that one source, and keeps serving trace history.
+      geoip:
+        # Both paths must sit under /geoip — that mount path is fixed by the
+        # chart (see volume below), and a path outside it names a file no
+        # container ever sees.
+        # asnPath: /geoip/GeoLite2-ASN.mmdb
+        asnPath: ""
+        # cityPath: /geoip/GeoLite2-City.mmdb
+        cityPath: ""
+        # OPAQUE Kubernetes VolumeSource, spliced verbatim into the console
+        # Pod's volumes[] and mounted read-only at /geoip. Deliberately not a
+        # typed {configMap|secret|hostPath|pvc} switch: mmdb files are ~10 MB
+        # (too big for a ConfigMap in many clusters), operators keep them in
+        # wildly different places, and re-declaring the VolumeSource union in
+        # values.schema.json would go stale the first time Kubernetes adds a
+        # source. Whatever you write here is what Kubernetes validates.
+        #
+        #   volume:
+        #     persistentVolumeClaim:
+        #       claimName: geolite2
+        #
+        # Rendering FAILS if a geoip path is set and this is empty: the config
+        # would name a file nothing mounts, and the console would start, warn
+        # once and silently run without geoip — the failure mode this guard
+        # exists to make loud.
+        volume: {}
+      # Cache row lifetime in mtr_hop_enrichment. A row older than this is
+      # re-resolved on the next read that wants it: there is no background
+      # refresher in M5, so an address nobody looks at costs nothing. 24h
+      # because the answers are slow-moving — a PTR record and an ASN change on
+      # the order of months. Must be > 0 when enabled.
+      #
+      # The cache lives in PostgreSQL, so this whole block is INERT with
+      # console.database.mode=disabled: the console logs a warning at boot and
+      # runs without the resolver rather than re-resolving on every read.
+      ttl: 24h
   # Pod-level securityContext for the console Deployment. Rendered ONLY when
   # database.mode != disabled, so the default (database off) manifest stays
   # byte-identical to chart 1.4.0. The default fsGroup matches the distroless

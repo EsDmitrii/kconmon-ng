@@ -1,5 +1,6 @@
 import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
+import { AnnotationBar, useAnnotations } from "@/components/annotations";
 import { EChart } from "@/components/echart";
 import { PageShell } from "@/components/page-shell";
 import { RecentChanges } from "@/components/recent-changes";
@@ -13,7 +14,9 @@ import { useAuth } from "@/hooks/use-auth";
 import { useMatrix } from "@/hooks/use-matrix";
 import { ApiError, createRun, getRun, getRuns, goTo, promqlQueryRange } from "@/lib/api";
 import { toSeriesOption, type CuratedChart } from "@/lib/curated-metrics";
+import { useTimeContext, useWritesDisabled } from "@/lib/timemachine";
 import type { MatrixCell, RunDetail, RunResult } from "@/lib/types";
+import { escapeLabelValue } from "@/lib/utils";
 
 const PAIR_PATH_PREFIX = "/pairs/";
 
@@ -93,13 +96,6 @@ function DirectionStat({ label, cell }: { label: string; cell?: MatrixCell }) {
   );
 }
 
-// escapeLabelValue guards the hand-built PromQL selector below against a node
-// name containing a `"` or `\` -- PromQL string-literal escaping matches
-// Go/JSON's.
-function escapeLabelValue(v: string): string {
-  return v.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
-}
-
 /**
  * pairSeriesQuery mirrors curated-metrics.ts's own fail-rate query shape:
  * three protocols' RTT p95 requested as one PromQL query, each tagged with a
@@ -126,14 +122,27 @@ const PAIR_MIN_STEP_SECONDS = 15;
 
 function PairOverviewTab({ source, destination }: { source: string; destination: string }) {
   const { theme } = useTheme();
+  /* The pair's own scope is the SAME string the RecentChanges rail and the
+     controller's live events use — pairScope's U+2192, never a hyphen-arrow.
+     Getting it wrong here would file notes under a scope nothing else in the
+     console ever reads. Global marks come along for the ride (useAnnotations
+     fetches both legs), because a fleet-wide event is exactly the context a
+     single pair's chart is missing. */
+  const scope = pairScope(source, destination);
+  const { annotations, error: annotationsError, refresh } = useAnnotations(scope, PAIR_RANGE_SECONDS);
   const chart = useMemo<CuratedChart>(
     () => ({ id: "pair-rtt", title: "RTT p95 by protocol", unit: "seconds", query: pairSeriesQuery(source, destination) }),
     [source, destination],
   );
+  // Engaged, the window ends at `t` rather than now — "state as of t" for a
+  // chart means the hour BEFORE t, not the hour before this render.
+  const { at } = useTimeContext();
   const { data, isLoading, error } = useQuery({
-    queryKey: ["pair-series", source, destination],
+    queryKey: at
+      ? ["pair-series", source, destination, "at", at.toISOString()]
+      : ["pair-series", source, destination],
     queryFn: () => {
-      const end = new Date();
+      const end = at ?? new Date();
       const start = new Date(end.getTime() - PAIR_RANGE_SECONDS * 1000);
       const stepSeconds =
         Math.ceil(PAIR_RANGE_SECONDS / PAIR_TARGET_POINTS / PAIR_MIN_STEP_SECONDS) * PAIR_MIN_STEP_SECONDS;
@@ -150,7 +159,9 @@ function PairOverviewTab({ source, destination }: { source: string; destination:
   return (
     <Card asChild className="p-5">
       <section>
-        <h3 className="text-sm font-semibold">RTT p95 by protocol (last hour)</h3>
+        <h3 className="text-sm font-semibold">
+          RTT p95 by protocol {at ? `(hour ending ${at.toLocaleString()})` : "(last hour)"}
+        </h3>
         {error ? (
           <p role="alert" className="mt-3 text-sm text-health-bad">
             {error.message}
@@ -163,9 +174,21 @@ function PairOverviewTab({ source, destination }: { source: string; destination:
         ) : null}
         {isLoading && !data ? <Skeleton className="mt-3 h-64 w-full" /> : null}
         {empty ? (
-          <p className="mt-3 text-xs text-muted-foreground">No series returned for this pair in the last hour.</p>
+          <p className="mt-3 text-xs text-muted-foreground">
+            {at
+              ? "No series returned for this pair in the hour before that instant."
+              : "No series returned for this pair in the last hour."}
+          </p>
         ) : null}
-        {option && !empty && !queryError ? <EChart option={option} className="mt-3 h-64 w-full" /> : null}
+        {option && !empty && !queryError ? (
+          <EChart option={option} annotations={annotations} dark={theme === "dark"} className="mt-3 h-64 w-full" />
+        ) : null}
+        <AnnotationBar
+          scope={scope}
+          annotations={annotations}
+          error={annotationsError}
+          onChanged={() => void refresh()}
+        />
       </section>
     </Card>
   );
@@ -227,6 +250,7 @@ function PairDiagnosticsTab({
   canCreate: boolean;
 }) {
   const { last, isLoading, error } = usePairLastRun(source, destination);
+  const writesDisabled = useWritesDisabled();
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string>();
 
@@ -247,8 +271,13 @@ function PairDiagnosticsTab({
       <section>
         <div className="flex flex-wrap items-center justify-between gap-3">
           <h3 className="text-sm font-semibold">Last run for this pair</h3>
+          {/* Permission decides whether this button EXISTS; time decides
+              whether it is usable (lib/timemachine.tsx's useWritesDisabled
+              documents the split). Starting a probe from a view of the past
+              would run it now, against the present fleet — the one thing the
+              mode must not let happen by accident. */}
           {canCreate ? (
-            <Button size="sm" loading={submitting} onClick={() => void runCheck()}>
+            <Button size="sm" loading={submitting} disabled={writesDisabled} onClick={() => void runCheck()}>
               Run check
             </Button>
           ) : null}

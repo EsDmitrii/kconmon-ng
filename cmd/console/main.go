@@ -18,6 +18,7 @@ import (
 	"github.com/EsDmitrii/kconmon-ng/internal/console/checks"
 	"github.com/EsDmitrii/kconmon-ng/internal/console/config"
 	"github.com/EsDmitrii/kconmon-ng/internal/console/controllerclient"
+	"github.com/EsDmitrii/kconmon-ng/internal/console/enrich"
 	"github.com/EsDmitrii/kconmon-ng/internal/console/events"
 	"github.com/EsDmitrii/kconmon-ng/internal/console/httpapi"
 	"github.com/EsDmitrii/kconmon-ng/internal/console/metrics"
@@ -281,6 +282,14 @@ func main() {
 	// answered 503 with the database fully configured.
 	var definitionsDep httpapi.DefinitionService
 	var schedulesDep httpapi.ScheduleService
+	// mtrDep/annotationsDep (M5 Task 4) share the exact same posture, and are
+	// wired in the SAME task as their handlers precisely because of the M4
+	// lesson recorded just above: nil means every /api/v1/mtr and
+	// /api/v1/annotations route answers 503. Path history and operator notes
+	// are worth exactly as much as they are durable, so neither gets an
+	// in-memory fallback either.
+	var mtrDep httpapi.MTRService
+	var annotationsDep httpapi.AnnotationService
 	policy := authz.NewPolicy(nil)
 	if db != nil {
 		rolesDep = roleResolver{db: db}
@@ -291,6 +300,8 @@ func main() {
 		targetsDep = db
 		definitionsDep = db
 		schedulesDep = db
+		mtrDep = db
+		annotationsDep = db
 
 		if cfg.Auth.Mode == "local" {
 			bootstrapLocalAdmin(bgCtx, db, cfg.Auth.Local)
@@ -357,9 +368,15 @@ func main() {
 	// to an interface field instead would produce a typed-nil interface that
 	// compares != nil, so httpapi's "s.events == nil" 503 gate would then call
 	// ListEvents on a nil receiver instead of answering 503.
+	// topologyHistoryDep is the SAME eventStore, taken through its fold seam:
+	// GET /api/v1/topology?at= reconstructs from exactly the rows the Live page
+	// pages through. Assigned under the same db != nil guard, and for the same
+	// typed-nil reason, as eventsDep above.
 	var eventsDep httpapi.EventLister
+	var topologyHistoryDep httpapi.TopologyHistory
 	if db != nil {
 		eventsDep = eventStore
+		topologyHistoryDep = eventStore
 	}
 
 	// runner executes on-demand diagnostics runs (Task 22/23): constructed
@@ -388,15 +405,53 @@ func main() {
 		runnerDep = runner
 	}
 
+	// enricherDep swaps the cache-only hop enrichment read for a resolving one
+	// (M5 Task 5). It needs BOTH the master gate and a database: the TTL cache
+	// is mtr_hop_enrichment, so a resolver without one would re-resolve every
+	// hop of every trace on every read -- an unbounded rDNS load on the
+	// cluster's resolver produced by a page refresh. That is a warn-and-skip,
+	// not a fatal: mtr.enrichment.enabled with database.mode=disabled is an
+	// operator asking for something the deployment cannot give, and taking the
+	// whole console down over an optional decoration would be the wrong trade.
+	//
+	// enrich.New itself never fails on the environment -- an unreadable or
+	// missing mmdb file disables that ONE source with a WARN (Decision 5) --
+	// so an error here is a composition bug, and those fail closed.
+	var enricherDep httpapi.EnrichmentReader
+	var enricher *enrich.Resolver
+	switch {
+	case !cfg.MTR.Enrichment.Enabled:
+		// The default. Nothing to log: an off feature is not news.
+	case db == nil:
+		slog.Warn("mtr.enrichment.enabled is set but no database is configured — hop enrichment is off " +
+			"(the TTL cache lives in PostgreSQL; set console.database.mode)")
+	default:
+		// enrichErr rather than err: assigning the function-scoped err this
+		// far down would make every earlier `x, err :=` a govet shadow report.
+		resolver, enrichErr := enrich.New(cfg.MTR.Enrichment, db, nil, m)
+		if enrichErr != nil {
+			slog.Error("failed to build the hop enrichment resolver", "error", enrichErr)
+			os.Exit(1)
+		}
+		enricher, enricherDep = resolver, resolver
+		slog.Info("hop enrichment enabled",
+			"rdns", cfg.MTR.Enrichment.RDNS.Enabled,
+			"asnPath", cfg.MTR.Enrichment.GeoIP.ASNPath, //nolint:gosec // G706: structured slog fields, operator config
+			"cityPath", cfg.MTR.Enrichment.GeoIP.CityPath,
+			"ttl", cfg.MTR.Enrichment.TTL)
+	}
+
 	srv := httpapi.NewServer(httpapi.Deps{
 		Config: cfg, Metrics: m, PromRegistry: promReg, UI: uiHandler,
 		Controller: ctrl, Prometheus: prom, Hub: hub, Realtime: ingester,
-		Events:        eventsDep,
-		Authenticator: authenticator, Policy: policy, Roles: rolesDep, Sessions: sessions,
+		Events:          eventsDep,
+		TopologyHistory: topologyHistoryDep,
+		Authenticator:   authenticator, Policy: policy, Roles: rolesDep, Sessions: sessions,
 		Users: usersDep, OIDC: oidcDep,
 		Audit: auditDep, RBAC: rbacDep, Tokens: tokensDep,
 		Runner: runnerDep, Targets: targetsDep,
 		Definitions: definitionsDep, Schedules: schedulesDep,
+		MTR: mtrDep, Annotations: annotationsDep, Enricher: enricherDep,
 		// The SAME kv SessionStore and the OIDC state stash ride on, so the
 		// rate limiter is cluster-wide exactly when Valkey is (and
 		// per-replica, weaker but never stronger, when it is not).
@@ -542,6 +597,14 @@ func main() {
 	// own to stop.
 	if ipkv, ok := kv.(*cache.InProcessKV); ok {
 		ipkv.Close()
+	}
+	// Before db.Close(), for no functional reason -- the mmdb readers are
+	// mmapped files and owe the database nothing -- but keeping the teardown
+	// in the reverse order of construction is what makes it reviewable.
+	if enricher != nil {
+		if err := enricher.Close(); err != nil {
+			slog.Warn("closing the hop enrichment mmdb readers failed", "error", err)
+		}
 	}
 	if db != nil {
 		db.Close()

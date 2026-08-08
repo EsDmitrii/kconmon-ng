@@ -133,6 +133,51 @@ are the honest cost of Decision 8 (a Valkey outage must not become a login
 outage; a controller outage must not become a config-write outage): every
 admission they count is a control that did not run.
 
+M5 additions:
+
+| Metric                                          | Type    | Labels             | Description                                                          |
+| ----------------------------------------------- | ------- | ------------------ | -------------------------------------------------------------------- |
+| `kconmon_ng_console_mtr_snapshots_total`        | counter | `result`           | MTR traces projected into path history: `new-path`, `repeat`, `error` |
+| `kconmon_ng_console_enrichment_cache_total`     | counter | `result`           | Hop addresses the TTL cache was asked about: `hit`, `miss`            |
+| `kconmon_ng_console_enrichment_lookups_total`   | counter | `source`, `result` | Source lookups run for cache misses: `rdns\|asn\|city` × `ok\|miss\|error` |
+
+`mtr_snapshots_total{result="new-path"}` is **the route-changed alerting
+primitive** — it fires when a pair takes a route it has never taken before,
+which is otherwise something an operator has to notice by diffing two traces
+by hand. `repeat` is the steady state (a stable route re-confirmed) and is what
+makes `new-path` meaningful: without it a silent projector and a stable network
+look identical. `error` counts projections that never landed; a projection
+failure deliberately never fails the pair (the `check_results` row is the
+authority, the snapshot is a projection), so this counter is the **only** place
+it is visible.
+
+Enrichment is **two** counters rather than one, because a cache hit and a
+source lookup are not the same event and cannot share a label set honestly: one
+cached row answers rdns, asn and city at once, so folding hits into a
+`{source,result}` counter would mean attributing a hit to a source that never
+ran. `enrichment_cache_total` increments **once per requested IP**, which makes
+`hit/(hit+miss)` the cache hit ratio — the number that says whether
+`mtr.enrichment.ttl` is doing its job. `enrichment_lookups_total` increments
+once per source that **actually ran** for a missed IP: `ok` = the source
+returned data, `miss` = it ran and knew nothing about the address (no PTR
+record, or the address is not in the mmdb — an ordinary answer, not a failure),
+`error` = the lookup itself failed. A source switched off in config, or one
+whose file failed to open at boot, is **never counted at all**: a series pinned
+at zero would read as "working and finding nothing".
+
+`kconmon_ng_console_retention_deleted_total{table}` gained **three closed label
+values** in M5 — `mtr_path_snapshots`, `mtr_hop_enrichment`, `annotations` —
+alongside the existing `topology_events`, `audit_log` and `check_runs`.
+
+**No M5 metric carries an IP, a hostname, an ASN, an organization, a country, a
+path hash, a node name, a destination or an annotation's text.** Enrichment is
+where that rule is easiest to break, since every one of those values is sitting
+right there in the resolved row. Per-hop RTT already has a metric with `hop_ip`
+in its label set (`kconmon_ng_mtr_hop_rtt_seconds`, exported by the **agent**);
+the Console deliberately did not add a second one, which is why the per-hop
+trend chart in the MTR Explorer reads snapshot history rather than Prometheus
+(M5 Decision 13).
+
 ## Default alerting rules
 
 Deployed when `prometheusRule.enabled: true`. The metric prefix in `expr` is

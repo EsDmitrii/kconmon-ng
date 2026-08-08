@@ -3,6 +3,9 @@ Status: current
 Owner: @EsDmitrii
 Source: extracted from root DESIGN.md §8 in M0 (2026-07-14); "Implemented in M3"
 added from the as-built implementation (2026-08-06): internal/console/httpapi/{events,runs,audit,rbac,tokens,auth}.go.
+"Implemented in M5" written from the as-built implementation (2026-08-08):
+internal/console/httpapi/{mtr,annotations,data}.go, middleware_auth.go's
+routeTable, audit.go's allow-list, and docs/console-api.yaml.
 This document is the source of truth for Console API. Update it (and the ADRs) in the same PR as any deviation.
 -->
 
@@ -17,17 +20,20 @@ into `web/src/lib/api-types.ts` — see "OpenAPI + codegen (landed M4)" below
 for what shipped and what deliberately did not.
 
 ```
-GET    /api/v1/topology?at=                  live or reconstructed @t        -- implemented (M1): live only, no ?at= yet
-GET    /api/v1/matrix?protocol&plane&at=                                     -- implemented (M1): protocol=tcp|udp|icmp, plane=pod only, no ?at= yet
+GET    /api/v1/topology?at=                  live or reconstructed @t        -- implemented (M1 live, M5 ?at=)
+GET    /api/v1/matrix?protocol&plane                                         -- implemented (M1): protocol=tcp|udp|icmp, plane=pod only; NO ?at= (Decision 7)
 GET    /api/v1/events?filters&from&to        history for Live scrollback      -- implemented (M3)
 POST   /api/v1/runs        GET /runs/{id}    diagnostics fan-out + results    -- implemented (M3)
 GET    /api/v1/runs                          run history, paged               -- implemented (M3)
 POST   /api/v1/runs/{id}/cancel              cancel an in-flight run          -- implemented (M4)
 CRUD   /api/v1/targets|checks|schedules      external targets + saved specs   -- implemented (M4)
 POST   /api/v1/checks/projection             cardinality preview              -- implemented (M4)
-GET    /api/v1/mtr/paths?src&dst&from&to     ; GET /mtr/paths/diff?a&b
+GET    /api/v1/mtr/destinations              pairs path history knows about   -- implemented (M5)
+GET    /api/v1/mtr/snapshots?source&destination  one pair's distinct routes   -- implemented (M5)
+GET    /api/v1/mtr/snapshots/{id}?enrich     one route + optional hop enrichment -- implemented (M5)
+GET/POST /api/v1/annotations ; DELETE /annotations/{id}                      -- implemented (M5)
 POST   /api/v1/investigations                assemble; GET result; save→incident
-CRUD   /api/v1/incidents|annotations|maintenance|webhooks
+CRUD   /api/v1/incidents|maintenance|webhooks
 CRUD   /api/v1/alert-rules (+ /{id}/preview, /{id}/sync)
 POST   /api/v1/promql/query|query_range      guarded proxy                   -- implemented (M1)
 GET    /api/v1/export      POST /api/v1/import
@@ -38,20 +44,30 @@ POST   /api/v1/auth/login|logout ; GET /api/v1/auth/me|oidc/start|oidc/callback 
 GET    /ws                                   authenticated WebSocket          -- implemented (M2, extended M3): see WEBSOCKET.md
 ```
 
-`?at=` (Time Machine — historical topology/matrix reconstruction) is not
-implemented yet; it lands with M5. `targets`/`checks`/`schedules` shipped in
-M4 and are **not** on this list any more; every one of them needs
+`?at=` (Time Machine) shipped in **M5 on `GET /api/v1/topology` only**.
+`GET /api/v1/matrix` deliberately stays live-only and grew no `at` parameter:
+the matrix's cells are already Prometheus series, so the historical matrix is
+the same PromQL evaluated at `t` through the existing promql proxy's `time`
+field, rebuilt browser-side (Decision 7, `web/src/lib/matrix-promql.ts`). The
+M5 path-history routes shipped as `mtr/destinations` + `mtr/snapshots`, **not**
+as the `mtr/paths` + `mtr/paths/diff` this list once predicted: the diff is
+computed client-side from two snapshots the API already returns (Decision 3),
+so a diff endpoint would have duplicated presentation logic server-side for
+zero authority gain. `targets`/`checks`/`schedules` shipped in M4 and are
+**not** on this list any more; every one of them needs
 `database.mode=cnpg|external` and answers `503` otherwise (Decision 13), the
-same way the M3 history endpoints do. `mtr/paths`, `investigations`,
-`incidents`/`annotations`/`maintenance`/`webhooks`, `alert-rules`, and
-`export`/`import` remain entirely unimplemented past M4.
+same way the M3 history endpoints and every M5 route do. `investigations`,
+`incidents`/`maintenance`/`webhooks`, `alert-rules`, and `export`/`import`
+remain entirely unimplemented past M5.
 
 WebSocket: single multiplexed socket at `/ws`, topic subscribe, messages
 `{"topic","type":"snapshot|delta|event|error|closed","seq","data"}`, ping/pong
 30s, resume by last-seen `seq` per topic. Implemented in M2 for the topics
 `live`, `topology` and `matrix:{tcp,udp,icmp}:pod`; `run:{id}` is implemented
-in M3 (ephemeral, opened per run — see WEBSOCKET.md); `mtr` is still deferred
-to M5 and rejected with an error frame until then. Replay is a per-replica
+in M3 (ephemeral, opened per run — see WEBSOCKET.md); `mtr` is **still
+rejected with an error frame after M5**, and deliberately so — the MTR
+Explorer reads path history over REST and needs no push topic, so an allowed
+topic that never delivers would be worse than an honest error. Replay is a per-replica
 in-memory ring, not a Valkey log; snapshot topics resubscribe without a resume
 cursor and take a fresh whole state; and `delta` frames are not produced yet. The
 full protocol — envelope, allowlist, sequence semantics, limits, origin check,
@@ -365,6 +381,111 @@ allow-list let through for that route — `{}` for almost everything
 - `GET /api/v1/auth/oidc/start`, `GET /api/v1/auth/oidc/callback` —
   `auth.mode=oidc` only; `404` otherwise. `?returnTo=` must be a
   same-origin relative path (`400` otherwise).
+
+## Implemented in M5
+
+Six new routes plus one new parameter on an old one. Every one of the six
+needs `database.mode != disabled` and answers `503` otherwise, the same
+Decision 13 convention M3 and M4 established. Permissions: `mtr:read` for the
+three MTR reads, `annotations:read` for the list and `annotations:write` (plus
+CSRF) for create/delete — all four reach `viewer` except `annotations:write`,
+which stops at `operator`. See [SECURITY.md](SECURITY.md) §10.2 for why.
+
+### `GET /api/v1/topology?at=`
+
+The one **existing** route M5 changed, and it changed additively: without
+`at`, the response is byte-identical to M1's controller passthrough and the
+store is not consulted at all. With `at`, the node set is rebuilt by folding
+persisted `topology_changed` events in `(event_time, id)` order up to that
+instant (Decision 6), and the body gains five fields that are **absent** from
+a live response — `historical: true`, `asOf`, `eventsFolded`,
+`unfoldableEvents`, `truncated` — which is how a client tells the two apart.
+
+| `at` | Answer |
+| --- | --- |
+| absent or empty | live passthrough, unchanged |
+| valid, within retention | `200` with the fold + its counters |
+| unparseable | `400` |
+| in the future | `400` |
+| older than the oldest retained event, or any value with nothing retained | `422`, detail naming `console.database.retentionDays` |
+| any value with `database.mode=disabled` | `503` — **this parameter only**; live topology stays available |
+
+Two honest bounds on what a fold can say:
+
+- **The fold is only as good as what the events record.** They carry
+  `{reason, nodeName, agentId}` and nothing more, so `zone` and `podIP` are
+  empty on every folded entry and `ready` means "seen registered and not since
+  removed", not kubelet readiness. **The controller shipped with this release
+  publishes the reason with `node_name` and `agent_id` empty**, so history
+  written by it folds to an empty `nodes` array with every event counted in
+  `unfoldableEvents`. That counter, not the empty array, is the honest signal
+  — and the UI reads the counter rather than the array (PAGES.md §6.3). The
+  fold is coded against the full event shape, so history works the day the
+  controller starts attributing.
+- **100 000 rows is a hard fold ceiling.** Past it the answer carries
+  `truncated: true` and the reconstruction is missing its newest events. A
+  partial fold is a *wrong* fold, so the flag exists to be believed rather
+  than to be a footnote.
+
+### `GET /api/v1/mtr/destinations`
+
+Every `(sourceNode, destination)` pair path history knows about, most recently
+traced first, **unpaged on purpose**: the row count is pairs, not traces. Each
+row carries `snapshotCount` (distinct routes) and `traceCount` (traces that
+produced them) — `snapshotCount: 1` with `traceCount: 4000` is a stable route.
+
+```json
+{"destinations": [{"sourceNode": "node-a", "destination": "node-b", "snapshotCount": 2, "traceCount": 4001, "firstSeen": "...", "lastSeen": "..."}]}
+```
+
+It is an **envelope, not a bare array**, even though nothing is paged here:
+every list this API serves is an envelope, and breaking that for the one
+unpaged list would make the shape depend on a property callers cannot see.
+
+### `GET /api/v1/mtr/snapshots?source=&destination=&limit=&cursor=`
+
+One pair's distinct routes, newest first, opaque keyset cursor, `?limit=`
+clamped into `[1,500]` with a default of 100 — the same convention Events,
+Runs and Audit use. **Both filters are required**; omitting either is `422`,
+not an unfiltered listing: the whole table has no UI and no bound. List the
+pairs with `GET /api/v1/mtr/destinations` first.
+
+### `GET /api/v1/mtr/snapshots/{id}?enrich=true`
+
+One stored route. An unknown id and a malformed one are both `404`. Without
+`enrich=true` the `enrichment` field is **absent** — never `null`, never an
+empty object — so "did not ask" stays distinguishable from "asked and nothing
+is known". With it, `enrichment` maps hop address → cached row, and a cache
+miss is simply an absent key. Enrichment is a **cache read and never fails the
+trace**: an unreadable cache yields an empty map, not an error, and a console
+with `mtr.enrichment.enabled=false` still answers `200` with an empty map
+rather than a `503`.
+
+### `/api/v1/annotations`
+
+- `GET` — one page of marks, keyset cursor, same `[1,500]`/default-100 limit.
+  `from`/`to` bound the window an annotation must **overlap**, not the window
+  its start must fall in: a span that began before `from` and is still running
+  at `from` is exactly the mark a chart needs to draw. `scope` has **three**
+  states — absent means every scope, present-but-empty (`?scope=`) means the
+  global ones only (because `""` is a real scope value), any other value is an
+  exact match. Unlike `GET /api/v1/events`, an inverted `from >= to` is **not**
+  a `400`: an events query with an inverted window is a client bug worth
+  naming, while this one is driven by a chart's visible range, where a
+  degenerate range is simply a range with nothing in it. The honest answer is
+  an empty page.
+- `POST` — `201` with a `Location` header. `createdBy` is the **server's** view
+  of the authenticated subject (`user:<id>`, `token:<id>`), never a body field.
+  The audit row for this route records **`scope` only**; the text is free-form
+  operator prose and never enters the audit log. `text` is 1–1024 **bytes** and
+  `scope` at most 255 bytes — bytes rather than runes, so a payload that
+  squeezed multi-byte characters past a rune count cannot outgrow the column.
+  `endAt` is omitted for an instant mark and otherwise at or after `startAt`.
+- `DELETE /{id}` — `204`. Deleting a mark that is not there is `404`, not a
+  courtesy success.
+
+There is **no update verb**, deliberately: a mark is not a document
+(Decision 10).
 
 ## OpenAPI + codegen (landed M4)
 

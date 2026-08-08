@@ -201,6 +201,87 @@ func TestRunSweepsNilErrorWhenEverySweepSucceeds(t *testing.T) {
 	}
 }
 
+// retentionTables is the closed RetentionDeleted{table} label set, spelled out
+// once so the tests below and any future reader see the whole of it in one
+// place. Order matches PruneOnce's own sweep order.
+var retentionTables = []string{
+	tableTopologyEvents,
+	tableAuditLog,
+	tableCheckRuns,
+	tableMTRSnapshots,
+	tableMTREnrichment,
+	tableAnnotations,
+}
+
+// TestRetentionTableLabelsAreTheClosedSet pins the label VALUES, not just
+// their count. RetentionDeleted{table} is a closed set (metrics.go), and the
+// three M5 additions are the first widening it has had -- a typo in one of
+// them would not fail any other test, it would just quietly split a
+// dashboard's series in two. The literal strings here are deliberately NOT
+// the constants: a test that compares a constant to itself pins nothing.
+func TestRetentionTableLabelsAreTheClosedSet(t *testing.T) {
+	want := []string{
+		"topology_events",
+		"audit_log",
+		"check_runs",
+		"mtr_path_snapshots",
+		"mtr_hop_enrichment",
+		"annotations",
+	}
+	if len(retentionTables) != len(want) {
+		t.Fatalf("retentionTables has %d entries, want %d", len(retentionTables), len(want))
+	}
+	for i := range want {
+		if retentionTables[i] != want[i] {
+			t.Errorf("retentionTables[%d] = %q, want %q", i, retentionTables[i], want[i])
+		}
+	}
+
+	seen := make(map[string]bool, len(retentionTables))
+	for _, table := range retentionTables {
+		if seen[table] {
+			t.Errorf("retention table label %q appears twice: two sweeps would share one series", table)
+		}
+		seen[table] = true
+	}
+}
+
+// TestRunSweepsCreditsEveryTableIndependently runs one sweep per closed label
+// value with a distinct row count and asserts each landed on its own series.
+// The M5 sweeps share runSweeps with the M3 ones, so the risk being tested is
+// not the loop but the wiring: two sweep entries accidentally carrying the
+// same table label would double one counter and leave another at zero, and
+// only a per-label assertion catches it.
+func TestRunSweepsCreditsEveryTableIndependently(t *testing.T) {
+	m := testPruneMetrics()
+
+	sweeps := make([]sweep, 0, len(retentionTables))
+	for i, table := range retentionTables {
+		n := int64(i + 1)
+		sweeps = append(sweeps, sweep{
+			table: table,
+			del:   func(context.Context, int32) (int64, error) { return n, nil },
+		})
+	}
+
+	deleted, err := runSweeps(context.Background(), m, sweeps)
+	if err != nil {
+		t.Fatalf("runSweeps: err = %v, want nil", err)
+	}
+	if len(deleted) != len(retentionTables) {
+		t.Fatalf("runSweeps returned %d table entries, want %d", len(deleted), len(retentionTables))
+	}
+	for i, table := range retentionTables {
+		want := float64(i + 1)
+		if got := deleted[table]; got != int64(want) {
+			t.Errorf("deleted[%s] = %d, want %v", table, got, want)
+		}
+		if got := testutil.ToFloat64(m.RetentionDeleted.WithLabelValues(table)); got != want {
+			t.Errorf("RetentionDeleted(%s) = %v, want %v", table, got, want)
+		}
+	}
+}
+
 // ---------------------------------------------------------------------------
 // PoolStatsPoller
 // ---------------------------------------------------------------------------

@@ -3,6 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import { useDatabaseAvailable } from "@/hooks/use-capabilities";
 import { getWsClient } from "@/hooks/use-ws-topic";
 import { ApiError, getEvents } from "@/lib/api";
+import { useTimeContext } from "@/lib/timemachine";
 import type { LiveEvent, LiveEventSeverity } from "@/lib/types";
 import { TOPIC_LIVE, type WsEnvelope } from "@/lib/ws";
 // Reuses the Live page's own merge/dedupe store rather than re-implementing
@@ -68,6 +69,8 @@ function mergeCapped(prev: LiveEvent[], incoming: LiveEvent[]): LiveEvent[] {
  */
 export function RecentChanges({ scope }: { scope: string }) {
   const { available: dbAvailable, resolved: dbResolved } = useDatabaseAvailable();
+  const { at } = useTimeContext();
+  const atKey = at ? at.toISOString() : "";
   const [events, setEvents] = useState<LiveEvent[]>([]);
 
   // Gated on dbResolved too, not just dbAvailable: a cold /api/v1/config must
@@ -75,16 +78,24 @@ export function RecentChanges({ scope }: { scope: string }) {
   // make) the same way useDatabaseAvailable's own doc comment warns about.
   const historyEnabled = dbResolved && dbAvailable && scope !== "";
   const historyQuery = useQuery({
-    queryKey: ["events", scope],
-    queryFn: () => getEvents({ scope, limit: RECENT_CHANGES_LIMIT }),
+    // `to` bounds the rail to the Time Machine's instant (Task 11): "Recent
+    // changes" on a card showing state-as-of-t means the changes up to t, not
+    // everything that has happened since. The bound is EXCLUSIVE server-side
+    // (store.EventFilter.To), and `at` carries seconds precision, so an event
+    // stamped exactly at t belongs to the next second's view — the same edge
+    // the annotations store already documents.
+    queryKey: at ? ["events", scope, "to", at.toISOString()] : ["events", scope],
+    queryFn: () => getEvents({ scope, limit: RECENT_CHANGES_LIMIT, ...(at ? { to: at } : {}) }),
     enabled: historyEnabled,
   });
 
   // A scope change (a different node/pair card mounted in place of this one)
   // must not carry over the previous object's history for even one render.
+  // Moving through time is the same kind of change for the same reason: rows
+  // from after t are exactly what this rail must not be showing.
   useEffect(() => {
     setEvents([]);
-  }, [scope]);
+  }, [scope, atKey]);
 
   useEffect(() => {
     if (historyQuery.data) setEvents((prev) => mergeCapped(prev, historyQuery.data.events));
@@ -94,8 +105,12 @@ export function RecentChanges({ scope }: { scope: string }) {
   // replica's events still arrive over the Valkey bus even while this
   // replica's own ingester is down, and holding the socket open costs
   // nothing extra (it is already page-wide, ADR-003).
+  // ... EXCEPT while the Time Machine is engaged. A live arrival is by
+  // definition after t, so subscribing at all would let the present trickle
+  // into a rail whose whole claim is "up to t". The socket itself is page-wide
+  // and stays open; this rail simply stops listening until Live returns.
   useEffect(() => {
-    if (scope === "") return;
+    if (scope === "" || at !== null) return;
     const ws = getWsClient();
     const off = ws.subscribe<LiveEvent>(TOPIC_LIVE, (env: WsEnvelope<LiveEvent>) => {
       if (env.type !== "event") return;
@@ -103,7 +118,7 @@ export function RecentChanges({ scope }: { scope: string }) {
       setEvents((prev) => mergeCapped(prev, [env.data]));
     });
     return () => off();
-  }, [scope]);
+  }, [scope, at]);
 
   const historyError = historyQuery.isError
     ? historyQuery.error instanceof ApiError
@@ -125,6 +140,9 @@ export function RecentChanges({ scope }: { scope: string }) {
       <aside aria-label="Recent changes" className="flex flex-col">
         <div className="border-b border-border px-4 py-3">
           <h2 className="text-sm font-semibold">Recent changes</h2>
+          {/* The rail says what it is bounded BY, right where the rows are —
+              the top-bar banner explains the mode, this states the cut. */}
+          {at ? <p className="mt-0.5 text-[11px] text-muted-foreground">up to {at.toLocaleString()}</p> : null}
         </div>
 
         {/* Degraded, not broken: no database means no scrollback, but the

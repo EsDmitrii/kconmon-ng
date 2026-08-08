@@ -71,6 +71,18 @@ spec:
               mountPath: /etc/kconmon-ng-console-secrets
               readOnly: true
             {{- end }}
+            {{- /* M5 hop enrichment. The mount path is FIXED at /geoip and is
+            not a value: the chart would otherwise own two halves of the same
+            fact (a mountPath here and an asnPath in the ConfigMap) with nothing
+            keeping them agreeing, and a drift between them renders perfectly
+            and fails only at runtime. One fixed directory, operator-chosen file
+            names under it. Gated on the same condition as the volume below --
+            the configmap.yaml guard makes the two impossible to separate. */}}
+            {{- if and .Values.console.mtr.enrichment.enabled (or .Values.console.mtr.enrichment.geoip.asnPath .Values.console.mtr.enrichment.geoip.cityPath) }}
+            - name: geoip
+              mountPath: /geoip
+              readOnly: true
+            {{- end }}
           startupProbe:
             httpGet:
               path: /healthz
@@ -129,5 +141,18 @@ spec:
                     - key: {{ .Values.console.auth.oidc.existingSecretKey }}
                       path: oidc-client-secret
               {{- end }}
+        {{- end }}
+        {{- /* console.mtr.enrichment.geoip.volume is an OPAQUE VolumeSource,
+        spliced in verbatim under a chart-owned name. The chart deliberately
+        does not model the {configMap|secret|hostPath|persistentVolumeClaim}
+        union: GeoLite2 mmdb files are ~10 MB (past what many clusters accept in
+        a ConfigMap), operators keep them in genuinely different places, and a
+        re-declared union in values.schema.json goes stale the first time
+        Kubernetes grows a source. The API server validates what you wrote.
+        Unlike the projected Secret above there is no defaultMode here: an mmdb
+        is not a secret, and the console only ever reads it. */}}
+        {{- if and .Values.console.mtr.enrichment.enabled (or .Values.console.mtr.enrichment.geoip.asnPath .Values.console.mtr.enrichment.geoip.cityPath) }}
+        - name: geoip
+          {{- toYaml .Values.console.mtr.enrichment.geoip.volume | nindent 10 }}
         {{- end }}
 {{- end }}

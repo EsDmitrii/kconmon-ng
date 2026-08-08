@@ -9,6 +9,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { useAuth } from "@/hooks/use-auth";
 import { isTerminalRunStatus, type RunPairRow, useRun } from "@/hooks/use-run";
 import { ApiError, cancelRun } from "@/lib/api";
+import { useWritesDisabled } from "@/lib/timemachine";
 import { cn } from "@/lib/utils";
 
 const RUN_PATH_PREFIX = "/diagnostics/runs/";
@@ -134,6 +135,11 @@ function PairTable({ pairs }: { pairs: RunPairRow[] }) {
  * refetchInterval), which is also what makes this button disappear.
  */
 function CancelRunButton({ runId, onCancelled }: { runId: string; onCancelled: () => Promise<unknown> }) {
+  // Note the asymmetry with the permission gate two paragraphs up, and that it
+  // is deliberate: no runs:create means this button is ABSENT, the Time Machine
+  // means it is DISABLED (lib/timemachine.tsx's useWritesDisabled). Cancelling
+  // from a view of the past would stop a run happening in the present.
+  const writesDisabled = useWritesDisabled();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
 
@@ -151,7 +157,7 @@ function CancelRunButton({ runId, onCancelled }: { runId: string; onCancelled: (
 
   return (
     <>
-      <Button size="sm" variant="outline" loading={busy} onClick={handleCancel}>
+      <Button size="sm" variant="outline" loading={busy} disabled={writesDisabled} onClick={handleCancel}>
         Cancel run
       </Button>
       {error ? (

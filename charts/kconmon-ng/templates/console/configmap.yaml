@@ -26,6 +26,13 @@ shipping that. */}}
 {{- if and (eq .Values.console.auth.mode "header") (not .Values.console.auth.header.trustedProxyCIDRs) }}
 {{- fail "auth.mode=header requires a non-empty console.auth.header.trustedProxyCIDRs: without it any client could set X-Remote-User and authenticate as anyone" }}
 {{- end }}
+{{- /* Keyed on the RESOLVED geoip configuration (M5): a geoip path names a file
+inside the /geoip mount, and the chart has no other way to put a file there.
+Without the volume source the console would boot, warn once and run with geoip
+silently off -- exactly the quiet degradation the other guards above refuse. */}}
+{{- if and .Values.console.mtr.enrichment.enabled (or .Values.console.mtr.enrichment.geoip.asnPath .Values.console.mtr.enrichment.geoip.cityPath) (not .Values.console.mtr.enrichment.geoip.volume) }}
+{{- fail "console.mtr.enrichment.geoip.asnPath/cityPath are set but console.mtr.enrichment.geoip.volume is empty: the chart mounts that volume read-only at /geoip and nothing else puts the mmdb files there, so the console would start with geoip disabled and only a warning to say so" }}
+{{- end }}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -118,5 +125,27 @@ data:
     scheduler:
       enabled: true
       tickInterval: {{ .Values.console.scheduler.tickInterval | quote }}
+    {{- end }}
+    {{- /* Emitted only when ON, for the reason config.checkers.external is:
+    console config.Load parses with KnownFields(true) (config.go:515) and a
+    pre-M5 console image has no MTRConfig field at all, so an unconditional
+    block would crashloop the OLD Pod while the Deployment rolls. THIS build
+    would accept it -- mtr.* is a known field here -- which is precisely why the
+    gate has to be justified by the rolling image rather than by this one.
+    Off by default also keeps the default render key-identical to chart
+    1.6.0's. The sub-gates are the binary's own: rdns and geoip switch
+    independently, an empty geoip path is that source off, and enabled with
+    every source off is a startup error, not a silent no-op. */}}
+    {{- if .Values.console.mtr.enrichment.enabled }}
+    mtr:
+      enrichment:
+        enabled: true
+        rdns:
+          enabled: {{ .Values.console.mtr.enrichment.rdns.enabled }}
+          timeoutMs: {{ .Values.console.mtr.enrichment.rdns.timeoutMs | int }}
+        geoip:
+          asnPath: {{ .Values.console.mtr.enrichment.geoip.asnPath | quote }}
+          cityPath: {{ .Values.console.mtr.enrichment.geoip.cityPath | quote }}
+        ttl: {{ .Values.console.mtr.enrichment.ttl | quote }}
     {{- end }}
 {{- end }}

@@ -96,6 +96,7 @@ helm-lint:
 	helm lint charts/kconmon-ng -f charts/kconmon-ng/ci/console-db-values.yaml
 	helm lint charts/kconmon-ng -f charts/kconmon-ng/ci/console-auth-values.yaml
 	helm lint charts/kconmon-ng -f charts/kconmon-ng/ci/console-targets-values.yaml
+	helm lint charts/kconmon-ng -f charts/kconmon-ng/ci/console-mtr-values.yaml
 
 # full-values.yaml is templated as well as linted: `helm lint` validates values
 # against values.schema.json but does not prove every template renders, and the
@@ -107,6 +108,7 @@ helm-template:
 	helm template kconmon-ng charts/kconmon-ng -f charts/kconmon-ng/ci/console-db-values.yaml
 	helm template kconmon-ng charts/kconmon-ng -f charts/kconmon-ng/ci/console-auth-values.yaml
 	helm template kconmon-ng charts/kconmon-ng -f charts/kconmon-ng/ci/console-targets-values.yaml
+	helm template kconmon-ng charts/kconmon-ng -f charts/kconmon-ng/ci/console-mtr-values.yaml
 
 helm-package:
 	helm package charts/kconmon-ng -d dist/

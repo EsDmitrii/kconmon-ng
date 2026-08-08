@@ -63,6 +63,80 @@ export type ScheduleKind = components["schemas"]["ScheduleKind"];
 export type ScheduleRequest = components["schemas"]["ScheduleRequest"];
 export type SchedulePage = components["schemas"]["SchedulePage"];
 
+/* ── M5: MTR path history ───────────────────────────────────────────────────
+   Same half of this file the M4 shapes live in, for the same reason: these
+   are generated from docs/console-api.yaml, and CI fails on a regeneration
+   diff, so a server-side field rename cannot pass silently as a browser-side
+   `undefined`.
+
+   MTRHop and Enrichment are re-exported even though M5 Task 6 only reads
+   `hops` off a PathSnapshot: Task 7's hop table and enrichment row are typed
+   against exactly these names, and introducing them once here is the
+   convention the plan's type-consistency note asks for. */
+export type MTRDestination = components["schemas"]["MTRDestination"];
+export type MTRDestinationList = components["schemas"]["MTRDestinationList"];
+export type MTRHop = components["schemas"]["MTRHop"];
+export type Enrichment = components["schemas"]["Enrichment"];
+export type PathSnapshot = components["schemas"]["PathSnapshot"];
+export type PathSnapshotPage = components["schemas"]["PathSnapshotPage"];
+
+/**
+ * PathSnapshotQuery is the browser-side request shape for GET
+ * /api/v1/mtr/snapshots — hand-written for the same reason
+ * TargetQuery/EventQuery are: query PARAMETERS are not a schema in the
+ * OpenAPI components map, so they cannot be re-exported from api-types.ts.
+ *
+ * `source` and `destination` are REQUIRED here, not optional-with-a-default,
+ * because the server refuses an unfiltered listing with 422 (console-api.yaml:
+ * "the whole table has no UI and no bound"). Making them required in the type
+ * turns that 422 into a compile error instead of a runtime surprise.
+ */
+export interface PathSnapshotQuery {
+  source: string;
+  destination: string;
+  limit?: number;
+  cursor?: string;
+}
+
+/* ── M5: annotations ────────────────────────────────────────────────────────
+   Generated half again (docs/console-api.yaml), same reasoning as the M4 and
+   MTR shapes above.
+
+   The one thing worth reading off the schema rather than guessing: `endAt` is
+   OPTIONAL and its absence is the whole INSTANT/RANGE distinction — an
+   annotation with no endAt is a mark at a moment, not a span that is "still
+   open". lib/annotations.ts turns exactly that field into markLine vs
+   markArea, and nothing else decides it. */
+export type Annotation = components["schemas"]["Annotation"];
+export type AnnotationRequest = components["schemas"]["AnnotationRequest"];
+export type AnnotationPage = components["schemas"]["AnnotationPage"];
+
+/**
+ * AnnotationQuery is the browser-side request shape for GET
+ * /api/v1/annotations — hand-written like every other *Query here, because
+ * query parameters are not a schema in the OpenAPI components map.
+ *
+ * `scope` is the field that does NOT follow this file's usual "absent means
+ * server default" convention, and the difference is load-bearing: the endpoint
+ * reads THREE states out of one parameter (docs/console-api.yaml's
+ * listAnnotations).
+ *
+ *   scope ABSENT (undefined here)       → every scope
+ *   scope PRESENT-BUT-EMPTY ("" here)   → the GLOBAL annotations only
+ *   scope = anything else               → exact match
+ *
+ * So `undefined` and `""` mean genuinely different things on the wire, which is
+ * why lib/api.ts's listAnnotations serialises it with `!== undefined` rather
+ * than the truthiness test every other filter in that file uses.
+ */
+export interface AnnotationQuery {
+  from?: Date;
+  to?: Date;
+  scope?: string;
+  limit?: number;
+  cursor?: string;
+}
+
 export interface TopologyNode {
   name: string;
   zone: string;
@@ -74,10 +148,30 @@ export interface TopologyAgent {
   podIP: string;
   zone: string;
 }
+/**
+ * Topology is GET /api/v1/topology's body. The five optional fields are the
+ * `?at=` (Time Machine) half ONLY — httpapi's `historicalTopology` adds them
+ * and the live controller snapshot omits them entirely, so `historical` being
+ * undefined is itself the signal "this is live", never a default that could be
+ * confused with a historical answer.
+ *
+ * They are the fold's honesty budget (internal/console/httpapi/data.go):
+ * `eventsFolded` events were replayed into this node set, `unfoldableEvents`
+ * more were seen and could NOT be — they carry no node identity — and
+ * `truncated` says the fold hit its own bound. An EMPTY node set next to a
+ * large `unfoldableEvents` is therefore not a broken response: it is the
+ * console saying the events do not name anybody. pages/topology.tsx renders
+ * exactly that case, from these numbers rather than from a hardcoded guess.
+ */
 export interface Topology {
   nodes: TopologyNode[];
   agents: TopologyAgent[];
   timestamp: string;
+  historical?: boolean;
+  asOf?: string;
+  eventsFolded?: number;
+  unfoldableEvents?: number;
+  truncated?: boolean;
 }
 export interface MatrixCell {
   source: string;

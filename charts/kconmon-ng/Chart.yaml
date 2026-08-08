@@ -3,8 +3,8 @@ apiVersion: v2
 name: kconmon-ng
 description: Kubernetes Node Connectivity Monitor - Next Generation
 type: application
-version: 1.6.0
-appVersion: "1.6.0"
+version: 1.7.0
+appVersion: "1.7.0"
 keywords:
   - kubernetes
   - connectivity
@@ -25,6 +25,33 @@ annotations:
     - name: Documentation
       url: https://github.com/EsDmitrii/kconmon-ng#readme
   artifacthub.io/changes: |
+    - kind: added
+      description: >-
+        MTR path history (M5) — every pair's distinct routes deduped by a content hash into
+        mtr_path_snapshots, behind GET /api/v1/mtr/destinations|snapshots and a three-pane /mtr Explorer
+    - kind: added
+      description: >-
+        Hop enrichment — console.mtr.enrichment.* (rDNS plus optional MaxMind mmdb files from an
+        operator-supplied volume mounted at /geoip); OFF by default, every source gating independently
+    - kind: added
+      description: >-
+        Time Machine — ?at= is one global time context every read surface resolves through, and
+        GET /api/v1/topology?at= rebuilds the node set by folding persisted topology_changed events
+    - kind: added
+      description: >-
+        Annotations — create/list/delete notes pinned to a moment or a span, drawn on Explore and
+        object-card charts and inline in the Live feed
+    - kind: added
+      description: >-
+        Three new permissions — mtr:read and annotations:read reach viewer (telemetry, not configuration),
+        while annotations:write stops at operator and admin
+    - kind: added
+      description: >-
+        kconmon_ng_console_mtr_snapshots_total, _enrichment_cache_total and _enrichment_lookups_total,
+        plus three new table values on _retention_deleted_total
+    - kind: added
+      description: >-
+        console-mtr-values.yaml chart-test profile covering hop enrichment and the mmdb volume
     - kind: added
       description: >-
         External targets, saved checks and schedules (M4) — CRUD /api/v1/targets|checks|schedules

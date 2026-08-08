@@ -7,7 +7,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 
 	"github.com/EsDmitrii/kconmon-ng/internal/console/cache"
 	"github.com/EsDmitrii/kconmon-ng/internal/console/controllerclient"
@@ -72,10 +74,12 @@ func (f *panicOnceFakeCtrl) Diagnose(context.Context, controllerclient.DiagnoseR
 type ctxObservingStore struct {
 	*MemoryStore
 
-	finishRunCalled        bool
-	finishRunCtxWasLive    bool
-	upsertResultCalled     bool
-	upsertResultCtxWasLive bool
+	finishRunCalled          bool
+	finishRunCtxWasLive      bool
+	upsertResultCalled       bool
+	upsertResultCtxWasLive   bool
+	upsertSnapshotCalled     bool
+	upsertSnapshotCtxWasLive bool
 }
 
 func (s *ctxObservingStore) FinishRun(ctx context.Context, id, status string, pairOK, pairFailed int32) error {
@@ -90,6 +94,82 @@ func (s *ctxObservingStore) UpsertRunResult(ctx context.Context, in store.RunRes
 		s.upsertResultCtxWasLive = true
 	}
 	return s.MemoryStore.UpsertRunResult(ctx, in)
+}
+
+func (s *ctxObservingStore) UpsertPathSnapshot(ctx context.Context, in store.PathSnapshotInput) (store.PathSnapshot, bool, error) { //nolint:gocritic // hugeParam: matches store.PathSnapshotStore's own signature
+	s.upsertSnapshotCalled = true
+	if ctx.Err() == nil {
+		s.upsertSnapshotCtxWasLive = true
+	}
+	return s.MemoryStore.UpsertPathSnapshot(ctx, in)
+}
+
+// mtrThenCancelCtrl answers with a complete mtr trace and then cancels the
+// run's own context before returning it -- the shape that makes the projection
+// hook's context discipline observable. A pair whose result HAS arrived must
+// still be projected, so the snapshot write cannot be handed runCtx: it would
+// be Done before the write ever started.
+type mtrThenCancelCtrl struct {
+	cancel context.CancelFunc
+	body   json.RawMessage
+}
+
+func (f *mtrThenCancelCtrl) Topology(context.Context) (*controllerclient.Topology, error) {
+	return &controllerclient.Topology{}, nil
+}
+
+func (f *mtrThenCancelCtrl) Diagnose(context.Context, controllerclient.DiagnoseRequest, time.Duration) (json.RawMessage, error) {
+	f.cancel()
+	return f.body, nil
+}
+
+// A trace that arrived must reach path history even though the run's own
+// context was cancelled between the dispatch and the write -- the same
+// terminal-op guarantee UpsertRunResult has, applied to the projection that
+// immediately follows it (M5 Task 2).
+func TestExecuteProjectsMTRSnapshotOnAContextOutlivingTheRun(t *testing.T) {
+	m := metrics.New("kconmon_ng_test_m5", prometheus.NewRegistry())
+	bus := cache.NewInProcessBus()
+	hub := ws.NewHub(bus, m)
+	st := &ctxObservingStore{MemoryStore: NewMemoryStore()}
+
+	runCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctrl := &mtrThenCancelCtrl{cancel: cancel, body: json.RawMessage(
+		`{"type":"mtr","success":true,"details":{"target":"10.0.0.2","hops":[` +
+			`{"number":1,"ip":"10.0.0.254","rtt":500000,"lossRatio":0},` +
+			`{"number":2,"ip":"10.0.0.2","rtt":2000000,"lossRatio":0}]}}`)}
+	r := NewRunner(ctrl, hub, bus, st, m)
+
+	spec := Spec{Sources: []string{"n1"}, Destinations: []string{"n2"}, Type: "mtr", Plane: "pod", Timeout: 1 * time.Second}
+	pairs := []Pair{{Source: "n1", Destination: NodeDestination("n2")}}
+	specJSON, err := json.Marshal(spec)
+	if err != nil {
+		t.Fatalf("marshal spec: %v", err)
+	}
+	// A real UUID, not a "run-m5" placeholder: the run id becomes the
+	// snapshot's RunID and PathSnapshotInput.Validate parses it, exactly as
+	// the FK to check_runs requires. Start mints one with uuid.NewString, so a
+	// placeholder here would test a shape production never produces.
+	run, err := st.CreateRun(context.Background(), uuid.NewString(), spec.Type, spec.Plane, specJSON, "user", "u1", int32(len(pairs)))
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+
+	// The topic is deliberately left unopened: this test is about the store
+	// hook, and execute's pre-close relay wait would otherwise spend its full
+	// budget waiting for frames the cancelled runCtx already tore the topic's
+	// subscription goroutine away from.
+	r.execute(runCtx, cancel, run.ID, pairs, &spec, 1*time.Second, false)
+
+	if !st.upsertSnapshotCalled {
+		t.Fatal("UpsertPathSnapshot was never called for a successful mtr pair")
+	}
+	if !st.upsertSnapshotCtxWasLive {
+		t.Error("UpsertPathSnapshot's ctx was already Done -- it must run on a context derived from context.WithoutCancel(runCtx), not runCtx itself")
+	}
+	if got := testutil.ToFloat64(m.MTRSnapshots.WithLabelValues("new-path")); got != 1 {
+		t.Errorf("MTRSnapshots(new-path) = %v, want 1", got)
+	}
 }
 
 // A run whose runCtx deadline fires WHILE a pair is still dispatching (a slow

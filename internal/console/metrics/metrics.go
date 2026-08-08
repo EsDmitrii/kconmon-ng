@@ -51,8 +51,9 @@ type Metrics struct {
 	EventsPersisted    *prometheus.CounterVec
 
 	// RetentionDeleted is store.Pruner's own metric: table is a closed set
-	// (topology_events, audit_log, check_runs) -- never widened with row
-	// counts, cutoff times, or per-sweep identifiers.
+	// (topology_events, audit_log, check_runs, mtr_path_snapshots,
+	// mtr_hop_enrichment, annotations) -- never widened with row counts,
+	// cutoff times, or per-sweep identifiers.
 	RetentionDeleted *prometheus.CounterVec
 
 	// Auth (M3). Neither metric is written by the store package itself --
@@ -157,6 +158,55 @@ type Metrics struct {
 	ExternalSeriesProjected *prometheus.GaugeVec
 	ExternalReconciles      *prometheus.CounterVec
 	ExternalSpecsSkipped    *prometheus.CounterVec
+
+	// MTRSnapshots is the M5 path-history projector's metric (Task 2,
+	// Decision 1): one increment per mtr pair whose trace the checks runner
+	// projected into mtr_path_snapshots. result is the CLOSED set
+	// new-path|repeat|error -- no source node, destination, hop address or
+	// path hash ever appears here, the same discipline every block above
+	// follows (a hop IP as a label value is precisely the cardinality bomb M4
+	// refused).
+	//
+	// new-path is the reason this metric exists: it fires when a pair takes a
+	// route it has never taken before, which is "the route changed" as an
+	// alertable rate rather than something an operator has to notice by
+	// diffing two traces. repeat is the steady state (a stable route
+	// re-confirmed) and is what makes new-path meaningful -- without it a
+	// silent projector and a stable network look identical. error counts
+	// projections that never landed; since a projection failure deliberately
+	// never fails the pair, this counter is the ONLY place it is visible.
+	MTRSnapshots *prometheus.CounterVec
+
+	// Hop enrichment (M5 Task 5, Decision 4): internal/console/enrich's TTL
+	// cache over rDNS + mmdb. TWO counters rather than one, because a cache
+	// hit and a source lookup are not the same event and cannot share a label
+	// set honestly -- ONE cached row answers rdns, asn and city at once, so
+	// folding hits into a {source,result} counter would force attributing a
+	// hit to a source that never ran (or inventing a source="cache" value that
+	// means "not a source").
+	//
+	// EnrichmentCache's result is hit|miss, ONE increment per requested IP:
+	// hit means a cache row younger than mtr.enrichment.ttl answered it and
+	// nothing was resolved, miss means the resolver had to run. That makes
+	// hit/(hit+miss) the cache hit ratio -- the number that says whether the
+	// TTL is doing its job -- which a bare hit counter could not produce.
+	//
+	// EnrichmentLookups' source is rdns|asn|city and its result is
+	// ok|miss|error, one increment per source that ACTUALLY RAN for a missed
+	// IP. ok = the source returned data; miss = the source ran and knew
+	// nothing about the address (no PTR record, or the address is not in the
+	// mmdb -- an ordinary answer, not a failure); error = the lookup itself
+	// failed (rDNS timed out, the mmdb record would not decode). A source
+	// switched off in config, or one whose file failed to open at boot, is
+	// never counted at all: a series pinned at zero would read as "working and
+	// finding nothing".
+	//
+	// NEITHER counter may ever carry an IP, a hostname, an ASN, an
+	// organization or a country. That is the same rule MTRSnapshots states
+	// above, and enrichment is where it is easiest to break -- every one of
+	// those values is sitting right there in the resolved row.
+	EnrichmentCache   *prometheus.CounterVec
+	EnrichmentLookups *prometheus.CounterVec
 }
 
 // New registers and returns the Console metrics under <prefix>_console_*.
@@ -237,7 +287,8 @@ func New(prefix string, reg prometheus.Registerer) *Metrics {
 		}, []string{"result"}),
 		RetentionDeleted: f.NewCounterVec(prometheus.CounterOpts{
 			Name: ns + "_retention_deleted_total",
-			Help: "Rows deleted by the retention pruner, by table (topology_events, audit_log, check_runs).",
+			Help: "Rows deleted by the retention pruner, by table (topology_events, audit_log, check_runs, " +
+				"mtr_path_snapshots, mtr_hop_enrichment, annotations).",
 		}, []string{"table"}),
 		AuthRequests: f.NewCounterVec(prometheus.CounterOpts{
 			Name: ns + "_auth_requests_total",
@@ -304,5 +355,21 @@ func New(prefix string, reg prometheus.Registerer) *Metrics {
 			Name: ns + "_external_specs_skipped_total",
 			Help: "Continuous definitions left out of the desired assignment, by reason (check-type, destination-kind).",
 		}, []string{"reason"}),
+		MTRSnapshots: f.NewCounterVec(prometheus.CounterOpts{
+			Name: ns + "_mtr_snapshots_total",
+			Help: "MTR traces projected into path history, by result (new-path, repeat, error). " +
+				"new-path means the pair took a route it had never taken before -- the route-changed alerting primitive.",
+		}, []string{"result"}),
+		EnrichmentCache: f.NewCounterVec(prometheus.CounterOpts{
+			Name: ns + "_enrichment_cache_total",
+			Help: "Hop addresses the enrichment TTL cache was asked about, by result (hit, miss). " +
+				"hit/(hit+miss) is the cache hit ratio.",
+		}, []string{"result"}),
+		EnrichmentLookups: f.NewCounterVec(prometheus.CounterOpts{
+			Name: ns + "_enrichment_lookups_total",
+			Help: "Enrichment source lookups performed for cache misses, by source (rdns, asn, city) and " +
+				"result (ok, miss, error). miss means the source knew nothing about the address; " +
+				"error means the lookup failed. Disabled sources are never counted.",
+		}, []string{"source", "result"}),
 	}
 }

@@ -165,6 +165,37 @@
             "tickInterval": { "type": "string" }
           }
         },
+        "mtr": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enrichment": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "enabled": { "type": "boolean" },
+                "rdns": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "enabled": { "type": "boolean" },
+                    "timeoutMs": { "type": "integer", "minimum": 1 }
+                  }
+                },
+                "geoip": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "asnPath": { "type": "string" },
+                    "cityPath": { "type": "string" },
+                    "volume": { "type": "object" }
+                  }
+                },
+                "ttl": { "type": "string" }
+              }
+            }
+          }
+        },
         "podSecurityContext": { "type": "object" },
         "database": {
           "type": "object",
