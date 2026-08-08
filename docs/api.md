@@ -60,13 +60,34 @@ Request body:
 
 | Field         | Type   | Required | Description                                            |
 | ------------- | ------ | -------- | ------------------------------------------------------ |
-| `source`      | string | yes      | Node name whose agent runs the probe                   |
-| `destination` | string | yes      | Node name to probe                                     |
-| `type`        | string | yes      | One of `tcp`, `udp`, `icmp`, `dns`, `http`, `mtr`      |
-| `plane`       | string | no       | Traffic plane; defaults to `pod`                       |
+| `source`                | string | yes | Node name whose agent runs the probe                                     |
+| `destination`           | string | *   | Node name to probe (`destinationKind=node`), or the target's NAME for an external one |
+| `type`                  | string | yes | One of `tcp`, `udp`, `icmp`, `dns`, `http`, `mtr`                        |
+| `plane`                 | string | no  | Traffic plane; defaults to `pod`                                         |
+| `destinationKind`       | string | no  | `node` (default) or `external` — added in v1.6.0                         |
+| `destinationAddress`    | string | *   | Required for `destinationKind=external`; the address to probe            |
 
 An optional `?timeout=<seconds>` query parameter caps the dispatch wait. It
 defaults to `60` and is capped at `120`; invalid values fall back to `60`.
+
+**External destinations (v1.6.0).** With `destinationKind=external` the
+destination is not resolved against the agent registry: `destinationAddress`
+carries the address and `destination`, when present, only names it. The name —
+never the address — is what published events and metrics report as the
+destination, since an address must not become an identifier downstream. The
+address is treated as `kind=host` (an address with no scheme is a host; `url`
+targets arrive through the Console's stored target objects, not this body),
+and the port is left to the check type's own default.
+
+Two gates apply and both are the agent's, not the controller's:
+
+- The **source agent must advertise the `external-checks` capability**. A
+  pre-v1.6.0 agent silently ignores the external field, so the controller
+  refuses up front with `501` rather than letting the request time out
+  mysteriously.
+- The source agent's own `checkers.external` allowlist decides whether the
+  probe happens. The controller does not consult it and cannot override it —
+  see the Console's SECURITY.md §10.2.1 for why that split exists.
 
 Status codes:
 
@@ -75,6 +96,7 @@ Status codes:
 | `200` | Check dispatched and completed; body is the `CheckResult` JSON                |
 | `400` | Malformed JSON, missing `source`/`destination`/`type`, or an invalid `type`   |
 | `404` | No agent registered on the source/destination node, or no active task stream  |
+| `501` | `destinationKind=external` and the source agent does not advertise `external-checks` |
 | `502` | The dispatch failed for a reason other than timeout or a missing task stream  |
 | `503` | This replica is not the leader                                                |
 | `504` | The check did not complete before the timeout                                 |

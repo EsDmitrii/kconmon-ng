@@ -24,46 +24,36 @@ func TestControllerPodsRunning(t *testing.T) {
 	t.Skip("pod status checked via kubectl wait in workflow")
 }
 
+// Every request below goes through console_test.go's mustRequest helper (same
+// package): it carries a context, closes the response body and checks the
+// close error, which is what keeps `golangci-lint run --build-tags e2e` --
+// the only run that compiles these files at all -- clean for the package.
+
 func TestHealthz(t *testing.T) {
 	baseURL := getBaseURL()
-	resp, err := http.Get(baseURL + "/healthz")
-	if err != nil {
-		t.Fatalf("healthz request failed: %v", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		t.Errorf("expected /healthz 200, got %d", resp.StatusCode)
+	status, _, _ := mustRequest(t, http.MethodGet, baseURL+"/healthz", nil)
+	if status != http.StatusOK {
+		t.Errorf("expected /healthz 200, got %d", status)
 	}
 }
 
 func TestReadyz(t *testing.T) {
 	baseURL := getBaseURL()
-	resp, err := http.Get(baseURL + "/readyz")
-	if err != nil {
-		t.Fatalf("readyz request failed: %v", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		t.Errorf("expected /readyz 200, got %d", resp.StatusCode)
+	status, _, _ := mustRequest(t, http.MethodGet, baseURL+"/readyz", nil)
+	if status != http.StatusOK {
+		t.Errorf("expected /readyz 200, got %d", status)
 	}
 }
 
 func TestMetrics(t *testing.T) {
 	baseURL := getBaseURL()
-	resp, err := http.Get(baseURL + "/metrics")
-	if err != nil {
-		t.Fatalf("metrics request failed: %v", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		t.Errorf("expected /metrics 200, got %d", resp.StatusCode)
+	status, header, _ := mustRequest(t, http.MethodGet, baseURL+"/metrics", nil)
+	if status != http.StatusOK {
+		t.Errorf("expected /metrics 200, got %d", status)
 	}
 
 	// Basic check for Prometheus format
-	ct := resp.Header.Get("Content-Type")
+	ct := header.Get("Content-Type")
 	if !strings.Contains(ct, "text/plain") && !strings.Contains(ct, "text/html") {
 		t.Logf("metrics content-type: %s (prometheus may use text/plain)", ct)
 	}
@@ -75,17 +65,12 @@ func TestTopology(t *testing.T) {
 	// Allow time for agents to register
 	time.Sleep(2 * time.Second)
 
-	resp, err := http.Get(baseURL + "/api/v1/topology")
-	if err != nil {
-		t.Fatalf("topology request failed: %v", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		t.Errorf("expected /api/v1/topology 200, got %d", resp.StatusCode)
+	status, header, _ := mustRequest(t, http.MethodGet, baseURL+"/api/v1/topology", nil)
+	if status != http.StatusOK {
+		t.Errorf("expected /api/v1/topology 200, got %d", status)
 	}
 
-	ct := resp.Header.Get("Content-Type")
+	ct := header.Get("Content-Type")
 	if !strings.Contains(ct, "application/json") {
 		t.Errorf("expected JSON response, got content-type: %s", ct)
 	}

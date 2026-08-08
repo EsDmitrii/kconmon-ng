@@ -63,3 +63,26 @@ data:
       mtr:
         cooldown: {{ .Values.config.checkers.mtr.cooldown | quote }}
         maxHops: {{ .Values.config.checkers.mtr.maxHops }}
+      {{- /*
+      Emitted only when ON, for the same KnownFields(true) reason as
+      controller.events above: a pre-M4 agent image has no External field, so
+      an unconditional `external:` key would crashloop it as the DaemonSet
+      rolls node by node. Off by default also means an untouched install
+      renders a config.yaml byte-identical to chart 1.5.0's.
+      */}}
+      {{- if .Values.config.checkers.external.enabled }}
+      external:
+        enabled: true
+        allowedCidrs:
+          {{- range .Values.config.checkers.external.allowedCidrs }}
+          - {{ . | quote }}
+          {{- end }}
+        {{- with .Values.config.checkers.external.deniedCidrs }}
+        deniedCidrs:
+          {{- range . }}
+          - {{ . | quote }}
+          {{- end }}
+        {{- end }}
+        maxTargets: {{ .Values.config.checkers.external.maxTargets | int }}
+        timeout: {{ .Values.config.checkers.external.timeout | quote }}
+      {{- end }}

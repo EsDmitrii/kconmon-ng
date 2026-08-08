@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/EsDmitrii/kconmon-ng/internal/checker"
 	"github.com/fsnotify/fsnotify"
 	"gopkg.in/yaml.v3"
 )
@@ -39,12 +40,13 @@ type Config struct {
 }
 
 type CheckersConfig struct {
-	TCP  TCPCheckerConfig  `yaml:"tcp"`
-	UDP  UDPCheckerConfig  `yaml:"udp"`
-	ICMP ICMPCheckerConfig `yaml:"icmp"`
-	DNS  DNSCheckerConfig  `yaml:"dns"`
-	HTTP HTTPCheckerConfig `yaml:"http"`
-	MTR  MTRCheckerConfig  `yaml:"mtr"`
+	TCP      TCPCheckerConfig      `yaml:"tcp"`
+	UDP      UDPCheckerConfig      `yaml:"udp"`
+	ICMP     ICMPCheckerConfig     `yaml:"icmp"`
+	DNS      DNSCheckerConfig      `yaml:"dns"`
+	HTTP     HTTPCheckerConfig     `yaml:"http"`
+	MTR      MTRCheckerConfig      `yaml:"mtr"`
+	External ExternalCheckerConfig `yaml:"external"`
 }
 
 type TCPCheckerConfig struct {
@@ -91,6 +93,28 @@ type HTTPTarget struct {
 type MTRCheckerConfig struct {
 	Cooldown time.Duration `yaml:"cooldown"`
 	MaxHops  int           `yaml:"maxHops"`
+}
+
+// ExternalCheckerConfig gates every probe whose destination is not a peer
+// agent: both continuous target checks and one-shot external diagnostics.
+// AllowedCIDRs has NO default and an empty list is a VALIDATION ERROR when
+// the feature is enabled, not "allow everything" -- the identical posture
+// auth.header.trustedProxyCIDRs already takes in the Console
+// (internal/console/config/config.go, HeaderConfig).
+//
+// Timeout bounds the resolution-and-authorisation step of an external task
+// (DNS lookup plus allowlist check), NOT the probe itself: the probe stays
+// governed by its own checkers.<type>.timeout, so enabling external checks
+// cannot silently truncate a long MTR trace.
+//
+// MaxTargets caps how many operator-defined external targets the agent will
+// accept; it is validated here and consumed by the target-list plumbing.
+type ExternalCheckerConfig struct {
+	Enabled      bool          `yaml:"enabled"`
+	AllowedCIDRs []string      `yaml:"allowedCidrs"`
+	DeniedCIDRs  []string      `yaml:"deniedCidrs"`
+	MaxTargets   int           `yaml:"maxTargets"`
+	Timeout      time.Duration `yaml:"timeout"`
 }
 
 type ControllerConfig struct {
@@ -141,6 +165,7 @@ func (l *Loader) Load() error {
 	}
 
 	l.loadFromEnv(cfg)
+	applyDerivedDefaults(cfg)
 
 	if err := l.validate(cfg); err != nil {
 		return fmt.Errorf("validating config: %w", err)
@@ -315,7 +340,69 @@ func (l *Loader) validate(cfg *Config) error {
 			return err
 		}
 	}
+	if err := validateExternal(cfg.Checkers.External); err != nil {
+		return err
+	}
 
+	return nil
+}
+
+const (
+	// defaultExternalMaxTargets caps operator-defined external targets when the
+	// feature is enabled and the operator left maxTargets unset. 100 is far more
+	// than any realistic target list and still a bound.
+	defaultExternalMaxTargets = 100
+	// defaultExternalTimeout bounds resolution-and-authorisation of one external
+	// destination when the operator left timeout unset. 10s is generous for a
+	// DNS lookup and short enough that a hung resolver cannot pin a task slot.
+	defaultExternalTimeout = 10 * time.Second
+)
+
+// applyDerivedDefaults fills in values that only make sense once an optional
+// block is switched on. Nothing is defaulted while the block is disabled, so a
+// disabled block stays byte-identical to what the operator wrote.
+func applyDerivedDefaults(cfg *Config) {
+	if cfg.Checkers.External.Enabled {
+		if cfg.Checkers.External.MaxTargets == 0 {
+			cfg.Checkers.External.MaxTargets = defaultExternalMaxTargets
+		}
+		if cfg.Checkers.External.Timeout == 0 {
+			cfg.Checkers.External.Timeout = defaultExternalTimeout
+		}
+	}
+}
+
+// validateExternal fails startup on any external-checks misconfiguration that
+// would otherwise widen what the agent may probe.
+//
+// A DISABLED block is not inspected at all -- not even parsed into an
+// Allowlist. An operator with a half-written block in values.yaml gets an inert
+// feature, not a crash-looping DaemonSet, and the single gate on the enforcing
+// path stays checkers.external.enabled.
+//
+// An ENABLED block with an empty allowedCidrs is rejected rather than treated
+// as "allow everything": that is the same posture the Console takes for
+// auth.header.trustedProxyCIDRs, and for the same reason -- an empty list that
+// means "everything" is a bypass wearing a config key's clothes.
+func validateExternal(e ExternalCheckerConfig) error {
+	if !e.Enabled {
+		return nil
+	}
+	if len(e.AllowedCIDRs) == 0 {
+		return fmt.Errorf("checkers.external.allowedCidrs must be non-empty when checkers.external.enabled is true " +
+			"(an empty list denies everything and is never read as allow-everything)")
+	}
+	if e.MaxTargets < 0 {
+		return fmt.Errorf("checkers.external.maxTargets must be >= 0, got %d", e.MaxTargets)
+	}
+	if e.Timeout < 0 {
+		return fmt.Errorf("checkers.external.timeout must be >= 0, got %v", e.Timeout)
+	}
+	// Parse through the same constructor the agent enforces with, so a CIDR that
+	// would be rejected at probe time is rejected at startup instead.
+	if _, err := checker.NewAllowlist(e.AllowedCIDRs, e.DeniedCIDRs); err != nil {
+		return fmt.Errorf("checkers.external.%w", err)
+	}
 	return nil
 }
 

@@ -1,0 +1,2358 @@
+---
+# kconmon-ng Console API -- hand-authored OpenAPI 3.1 description of every
+# route internal/console/httpapi/server.go registers under /api/v1.
+#
+# This file is NOT generated from the Go types, and the Go types are not
+# generated from it. What keeps the two honest is a machine-checked join:
+# TestEveryAPIRouteIsInTheOpenAPISpec (internal/console/httpapi/openapi_test.go)
+# walks the LIVE chi router and fails when a registered /api/v1/* method+path
+# is missing here, or when this document names a route the router does not
+# serve. Field-level shapes are still reviewed by hand, as they were in M1-M3.
+#
+# web/src/lib/api-types.ts is generated FROM this file (`make openapi`, or
+# `npm run gen:api` in web/) and committed; CI regenerates it and fails on a
+# diff, so a spec edit without a regenerate cannot land.
+#
+# Out of scope by design: /healthz, /readyz, /metrics (probe and scrape
+# endpoints, never part of the JSON API) and GET /ws (a WebSocket protocol,
+# documented in docs/console/architecture/WEBSOCKET.md).
+#
+# Conventions repo-wide: durations are integer NANOSECONDS, list endpoints
+# page with an opaque keyset cursor plus a `limit` clamped into [1,500]
+# (default 100), and every console-originated error is RFC 7807
+# application/problem+json.
+openapi: 3.1.0
+
+info:
+  title: kconmon-ng Console API
+  version: "1.0.0"
+  summary: REST API of the kconmon-ng console (topology, matrix, events, runs, configuration, RBAC).
+  description: >-
+    Every route below is served by the console binary under /api/v1. Routes
+    whose backing dependency is not configured answer 503 with a problem+json
+    body naming the config value that enables them, rather than disappearing
+    from the router.
+  license:
+    name: Apache-2.0
+    identifier: Apache-2.0
+
+servers:
+  - url: /
+    description: The console itself; the SPA and the API share an origin.
+
+tags:
+  - name: meta
+    description: Version and feature-detection probes. Public.
+  - name: observability
+    description: Topology, matrix, event history and the guarded PromQL proxy.
+  - name: runs
+    description: On-demand diagnostics runs.
+  - name: configuration
+    description: Targets, check definitions and schedules -- persisted probe configuration.
+  - name: administration
+    description: Audit log, RBAC and API tokens.
+  - name: auth
+    description: Session lifecycle and identity.
+
+security:
+  - bearerAuth: []
+  - sessionCookie: []
+
+paths:
+  /api/v1/version:
+    get:
+      operationId: getVersion
+      tags: [meta]
+      summary: Console build identity and live capability flags.
+      description: >-
+        `capabilities` is computed per request from this replica's own realtime
+        pipeline health, never from config: it holds "events" only while the
+        ingester has a proven stream. Always an array, never null.
+      security: []
+      responses:
+        "200":
+          description: Build identity.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Version"
+
+  /api/v1/config:
+    get:
+      operationId: getConfig
+      tags: [meta]
+      summary: What this console instance has wired, for frontend feature detection.
+      security: []
+      responses:
+        "200":
+          description: Feature-detection snapshot.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Config"
+
+  /api/v1/topology:
+    get:
+      operationId: getTopology
+      tags: [observability]
+      summary: Live cluster topology, proxied from the controller.
+      description: >-
+        The controller's snapshot verbatim. A non-leader reply is retried with
+        backoff; if every attempt still fails the console answers 502.
+      responses:
+        "200":
+          description: Topology snapshot.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Topology"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "502":
+          $ref: "#/components/responses/BadGateway"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
+  /api/v1/matrix:
+    get:
+      operationId: getMatrix
+      tags: [observability]
+      summary: Node-to-node connectivity matrix, recomputed from Prometheus per request.
+      description: >-
+        Fail ratio and RTT p95 come from 5m-rate-window queries; loss ratio
+        (udp/icmp only) is an instant average. A pair with no matching series
+        gets a null field rather than a zero. rttP95 is nanoseconds.
+      parameters:
+        - name: protocol
+          in: query
+          description: Probe protocol. Anything outside the enum is 400.
+          schema:
+            $ref: "#/components/schemas/Protocol"
+        - name: plane
+          in: query
+          description: Only "pod" exists so far; anything else is 400.
+          schema:
+            type: string
+            enum: [pod]
+            default: pod
+      responses:
+        "200":
+          description: Matrix snapshot.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Matrix"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "502":
+          $ref: "#/components/responses/BadGateway"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
+  /api/v1/events:
+    get:
+      operationId: listEvents
+      tags: [observability]
+      summary: Event history for Live scrollback, newest first.
+      description: >-
+        Same LiveEvent shape the `live` WebSocket topic delivers, so one type
+        serves both. `nextCursor` is set only when the page came back exactly
+        as full as requested.
+      parameters:
+        - name: type
+          in: query
+          description: Repeatable. An unknown event type is 400.
+          schema:
+            type: array
+            items:
+              $ref: "#/components/schemas/LiveEventType"
+          style: form
+          explode: true
+        - name: scope
+          in: query
+          description: Exact match on the event's scope.
+          schema:
+            type: string
+        - name: from
+          in: query
+          description: RFC3339. Must precede `to`.
+          schema:
+            type: string
+            format: date-time
+        - name: to
+          in: query
+          schema:
+            type: string
+            format: date-time
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Cursor"
+      responses:
+        "200":
+          description: One page of events.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EventPage"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "502":
+          $ref: "#/components/responses/BadGateway"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
+  /api/v1/promql/query:
+    post:
+      operationId: promqlQuery
+      tags: [observability]
+      summary: Guarded passthrough to Prometheus /api/v1/query.
+      description: >-
+        The response envelope -- success or Prometheus's own error body -- is
+        forwarded byte-for-byte, never re-shaped.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PromQLQueryRequest"
+      responses:
+        "200":
+          description: Prometheus's own response envelope, forwarded verbatim.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PromResult"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "422":
+          $ref: "#/components/responses/UnprocessableEntity"
+        "502":
+          $ref: "#/components/responses/BadGateway"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
+  /api/v1/promql/query_range:
+    post:
+      operationId: promqlQueryRange
+      tags: [observability]
+      summary: Guarded passthrough to Prometheus /api/v1/query_range.
+      description: >-
+        `step` is nanoseconds in this request (the client converts to
+        Prometheus's seconds). A range wider than prometheus.maxRange, or a
+        result over prometheus.maxResponseBytes, is 422.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PromQLRangeRequest"
+      responses:
+        "200":
+          description: Prometheus's own response envelope, forwarded verbatim.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PromResult"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "422":
+          $ref: "#/components/responses/UnprocessableEntity"
+        "502":
+          $ref: "#/components/responses/BadGateway"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
+  /api/v1/runs:
+    get:
+      operationId: listRuns
+      tags: [runs]
+      summary: Run history, newest first.
+      parameters:
+        - name: type
+          in: query
+          schema:
+            $ref: "#/components/schemas/CheckType"
+        - name: status
+          in: query
+          schema:
+            $ref: "#/components/schemas/RunStatus"
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Cursor"
+      responses:
+        "200":
+          description: One page of runs.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RunPage"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "502":
+          $ref: "#/components/responses/BadGateway"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+    post:
+      operationId: createRun
+      tags: [runs]
+      summary: Start a diagnostics run (asynchronous).
+      description: >-
+        Fan-out over sources x destinations -- full mesh, or one-sided when
+        either is empty, resolved against live topology -- bounded to 400 pairs
+        after self-pair exclusion. A malformed body or unknown type is 400; a
+        well-formed spec refused for what it would produce (too many pairs, no
+        pairs, no nodes) is 422.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RunCreateRequest"
+      responses:
+        "202":
+          description: Run accepted and started.
+          headers:
+            Location:
+              description: Permalink to the run.
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RunCreateResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "422":
+          $ref: "#/components/responses/UnprocessableEntity"
+        "502":
+          $ref: "#/components/responses/BadGateway"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
+  /api/v1/runs/{id}:
+    parameters:
+      - $ref: "#/components/parameters/PathID"
+    get:
+      operationId: getRun
+      tags: [runs]
+      summary: One run's summary plus its per-pair results.
+      description: >-
+        Also the documented REST-polling fallback when the run's `run:{id}`
+        WebSocket topic is unavailable.
+      responses:
+        "200":
+          description: Run detail.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RunDetail"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "502":
+          $ref: "#/components/responses/BadGateway"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
+  /api/v1/runs/{id}/cancel:
+    parameters:
+      - $ref: "#/components/parameters/PathID"
+    post:
+      operationId: cancelRun
+      tags: [runs]
+      summary: Cancel a run in flight.
+      description: >-
+        Requires runs:create -- starting fleet-wide probe traffic and stopping
+        it are the same operational class. Cancellation is asynchronous: pairs
+        already dispatched still record their outcome, pairs not yet dispatched
+        never dispatch, and the run reaches status `cancelled`. Read the final
+        state from GET /api/v1/runs/{id}. Cancelling a run that already
+        finished, or one another replica started, is a no-op that also answers
+        204 -- the stuck-run reaper is what eventually finishes a run no
+        replica still holds.
+      responses:
+        "204":
+          description: Cancellation accepted (or the run was already terminal).
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "502":
+          $ref: "#/components/responses/BadGateway"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
+  /api/v1/targets:
+    get:
+      operationId: listTargets
+      tags: [configuration]
+      summary: One page of external probe targets, newest first.
+      parameters:
+        - name: kind
+          in: query
+          schema:
+            $ref: "#/components/schemas/TargetKind"
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Cursor"
+      responses:
+        "200":
+          description: One page of targets.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TargetPage"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "502":
+          $ref: "#/components/responses/BadGateway"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+    post:
+      operationId: createTarget
+      tags: [configuration]
+      summary: Create one target.
+      description: >-
+        A duplicate name is 422, not 409: it is a rejected field value in an
+        otherwise well-formed body.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TargetRequest"
+      responses:
+        "201":
+          description: Target created.
+          headers:
+            Location:
+              description: Permalink to the new target.
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Target"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "422":
+          $ref: "#/components/responses/UnprocessableEntity"
+        "502":
+          $ref: "#/components/responses/BadGateway"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
+  /api/v1/targets/{id}:
+    parameters:
+      - $ref: "#/components/parameters/PathID"
+    get:
+      operationId: getTarget
+      tags: [configuration]
+      summary: One target. An unknown id and a malformed one are both 404.
+      responses:
+        "200":
+          description: The target.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Target"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "502":
+          $ref: "#/components/responses/BadGateway"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+    put:
+      operationId: updateTarget
+      tags: [configuration]
+      summary: Replace one target in full (an omitted field means empty, never "leave as-is").
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TargetRequest"
+      responses:
+        "200":
+          description: The stored row after the write, not an echo of the request.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Target"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/UnprocessableEntity"
+        "502":
+          $ref: "#/components/responses/BadGateway"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+    delete:
+      operationId: deleteTarget
+      tags: [configuration]
+      summary: Delete one target; 409 while any check definition still references it.
+      responses:
+        "204":
+          $ref: "#/components/responses/NoContent"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "502":
+          $ref: "#/components/responses/BadGateway"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
+  /api/v1/checks:
+    get:
+      operationId: listCheckDefinitions
+      tags: [configuration]
+      summary: One page of check definitions, newest first.
+      parameters:
+        - name: targetId
+          in: query
+          description: Must be a UUID; a typo is 400, never 502.
+          schema:
+            type: string
+            format: uuid
+        - name: enabled
+          in: query
+          description: Anything other than "true"/"false" is treated as unset.
+          schema:
+            type: boolean
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Cursor"
+      responses:
+        "200":
+          description: One page of check definitions.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CheckDefinitionPage"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "502":
+          $ref: "#/components/responses/BadGateway"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+    post:
+      operationId: createCheckDefinition
+      tags: [configuration]
+      summary: Create one check definition.
+      description: >-
+        The projection guard runs before the write and only for a definition
+        arriving enabled: over the 400-series limit it is 422, while the same
+        definition saved with "enabled": false is accepted.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CheckDefinitionRequest"
+      responses:
+        "201":
+          description: Check definition created.
+          headers:
+            Location:
+              description: Permalink to the new definition.
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CheckDefinition"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "422":
+          $ref: "#/components/responses/UnprocessableEntity"
+        "502":
+          $ref: "#/components/responses/BadGateway"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
+  /api/v1/checks/projection:
+    post:
+      operationId: projectCheckDefinition
+      tags: [configuration]
+      summary: What a draft definition WOULD project against the live topology.
+      description: >-
+        Persists nothing. Same function, same limit the create/update guard
+        uses, so the number the UI shows can never disagree with enforcement.
+        Gated on checks:write, not checks:read -- the body is a draft
+        definition, and a caller who cannot create one has no question to ask.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CheckDefinitionRequest"
+      responses:
+        "200":
+          description: The projection.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Projection"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "422":
+          $ref: "#/components/responses/UnprocessableEntity"
+        "502":
+          $ref: "#/components/responses/BadGateway"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
+  /api/v1/checks/{id}:
+    parameters:
+      - $ref: "#/components/parameters/PathID"
+    get:
+      operationId: getCheckDefinition
+      tags: [configuration]
+      summary: One check definition. An unknown id and a malformed one are both 404.
+      responses:
+        "200":
+          description: The check definition.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CheckDefinition"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "502":
+          $ref: "#/components/responses/BadGateway"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+    put:
+      operationId: updateCheckDefinition
+      tags: [configuration]
+      summary: Replace one check definition in full.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CheckDefinitionRequest"
+      responses:
+        "200":
+          description: The stored row after the write.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CheckDefinition"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/UnprocessableEntity"
+        "502":
+          $ref: "#/components/responses/BadGateway"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+    delete:
+      operationId: deleteCheckDefinition
+      tags: [configuration]
+      summary: Delete one check definition; its schedules cascade with it.
+      responses:
+        "204":
+          $ref: "#/components/responses/NoContent"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "502":
+          $ref: "#/components/responses/BadGateway"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
+  /api/v1/schedules:
+    get:
+      operationId: listSchedules
+      tags: [configuration]
+      summary: One page of schedules.
+      parameters:
+        - name: definitionId
+          in: query
+          description: Must be a UUID; a typo is 400, never 502.
+          schema:
+            type: string
+            format: uuid
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Cursor"
+      responses:
+        "200":
+          description: One page of schedules.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SchedulePage"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "502":
+          $ref: "#/components/responses/BadGateway"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+    post:
+      operationId: createSchedule
+      tags: [configuration]
+      summary: Create one schedule.
+      description: >-
+        kind "cron" is refused with a 422 naming the milestone it lands in,
+        rather than degrading into a generic enum error. An interval below 10s
+        is clamped up, and the response is the stored row, so a client that
+        asked for 1s is told it got 10s.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ScheduleRequest"
+      responses:
+        "201":
+          description: Schedule created.
+          headers:
+            Location:
+              description: Permalink to the new schedule.
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Schedule"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "422":
+          $ref: "#/components/responses/UnprocessableEntity"
+        "502":
+          $ref: "#/components/responses/BadGateway"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
+  /api/v1/schedules/{id}:
+    parameters:
+      - $ref: "#/components/parameters/PathID"
+    get:
+      operationId: getSchedule
+      tags: [configuration]
+      summary: One schedule. An unknown id and a malformed one are both 404.
+      responses:
+        "200":
+          description: The schedule.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Schedule"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "502":
+          $ref: "#/components/responses/BadGateway"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+    put:
+      operationId: updateSchedule
+      tags: [configuration]
+      summary: Replace one schedule's cadence in full.
+      description: >-
+        definitionId is not updatable: a body naming a different definition is
+        refused with 422 rather than silently ignored.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ScheduleRequest"
+      responses:
+        "200":
+          description: The stored row after the write.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Schedule"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/UnprocessableEntity"
+        "502":
+          $ref: "#/components/responses/BadGateway"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+    delete:
+      operationId: deleteSchedule
+      tags: [configuration]
+      summary: Delete one schedule. Nothing references a schedule, so there is no 409.
+      responses:
+        "204":
+          $ref: "#/components/responses/NoContent"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "502":
+          $ref: "#/components/responses/BadGateway"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
+  /api/v1/audit:
+    get:
+      operationId: listAuditEntries
+      tags: [administration]
+      summary: Audit log, newest first.
+      description: >-
+        `detail` is whatever the per-route allow-list let through -- {} for
+        almost everything (SECURITY.md, "The audit log's documented lossiness").
+      parameters:
+        - name: subjectKind
+          in: query
+          schema:
+            $ref: "#/components/schemas/SubjectKind"
+        - name: subjectId
+          in: query
+          schema:
+            type: string
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Cursor"
+      responses:
+        "200":
+          description: One page of audit entries.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuditPage"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "502":
+          $ref: "#/components/responses/BadGateway"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
+  /api/v1/rbac/permissions:
+    get:
+      operationId: listPermissions
+      tags: [administration]
+      summary: The static, compiled-in permission list.
+      description: Needs no database and is therefore always available, unlike the rest of /api/v1/rbac.
+      responses:
+        "200":
+          description: Every permission string the policy engine knows.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PermissionList"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /api/v1/rbac/roles:
+    get:
+      operationId: listRoles
+      tags: [administration]
+      summary: Custom roles (built-ins are compiled in and not listed here).
+      responses:
+        "200":
+          description: Custom roles.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RoleList"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "502":
+          $ref: "#/components/responses/BadGateway"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+    post:
+      operationId: upsertRole
+      tags: [administration]
+      summary: Create or replace one custom role.
+      description: >-
+        422 for a name colliding with a built-in (viewer, operator,
+        alert-editor, admin) or for a permission outside the compiled-in list.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RoleRequest"
+      responses:
+        "200":
+          description: The stored role.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Role"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "422":
+          $ref: "#/components/responses/UnprocessableEntity"
+        "502":
+          $ref: "#/components/responses/BadGateway"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
+  /api/v1/rbac/roles/{name}:
+    parameters:
+      - name: name
+        in: path
+        required: true
+        description: Custom role name.
+        schema:
+          type: string
+    delete:
+      operationId: deleteRole
+      tags: [administration]
+      summary: Delete one custom role; 409 while any binding still references it.
+      responses:
+        "204":
+          $ref: "#/components/responses/NoContent"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "502":
+          $ref: "#/components/responses/BadGateway"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
+  /api/v1/rbac/bindings:
+    get:
+      operationId: listBindings
+      tags: [administration]
+      summary: Every role binding.
+      responses:
+        "200":
+          description: Role bindings.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BindingList"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "502":
+          $ref: "#/components/responses/BadGateway"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+    post:
+      operationId: createBinding
+      tags: [administration]
+      summary: Bind a subject to a role.
+      description: >-
+        422 for a subjectKind outside user/group (token bindings are declared
+        in the schema but resolved by nothing, so storing one would silently
+        grant nothing) or for an unknown role name; 409 on a duplicate.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/BindingRequest"
+      responses:
+        "200":
+          description: The stored binding.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Binding"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/UnprocessableEntity"
+        "502":
+          $ref: "#/components/responses/BadGateway"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
+  /api/v1/rbac/bindings/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        description: Binding id. A non-integer is 400.
+        schema:
+          type: integer
+          format: int64
+    delete:
+      operationId: deleteBinding
+      tags: [administration]
+      summary: Delete one role binding.
+      responses:
+        "204":
+          $ref: "#/components/responses/NoContent"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "502":
+          $ref: "#/components/responses/BadGateway"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
+  /api/v1/tokens:
+    get:
+      operationId: listTokens
+      tags: [administration]
+      summary: Token metadata -- never the hash, never the secret.
+      responses:
+        "200":
+          description: Every token's metadata.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TokenList"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "502":
+          $ref: "#/components/responses/BadGateway"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+    post:
+      operationId: createToken
+      tags: [administration]
+      summary: Mint a token.
+      description: >-
+        The response is the only place the raw wire-form token (kcm_...) is
+        ever returned; it is never stored or logged. Served with
+        Cache-Control: no-store.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TokenCreateRequest"
+      responses:
+        "200":
+          description: The minted token, secret included exactly once.
+          headers:
+            Cache-Control:
+              description: Always "no-store" on this response.
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TokenCreateResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "502":
+          $ref: "#/components/responses/BadGateway"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
+  /api/v1/tokens/{id}:
+    parameters:
+      - $ref: "#/components/parameters/PathID"
+    delete:
+      operationId: revokeToken
+      tags: [administration]
+      summary: Revoke one token; 404 for an unknown or already-revoked id.
+      responses:
+        "204":
+          $ref: "#/components/responses/NoContent"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "502":
+          $ref: "#/components/responses/BadGateway"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
+  /api/v1/auth/me:
+    get:
+      operationId: getMe
+      tags: [auth]
+      summary: The caller's resolved identity and effective permissions.
+      description: >-
+        The ROUTE is public -- the UI must be able to call it before it knows
+        whether it is logged in -- but the HANDLER still needs a resolved
+        identity: 401 when nothing resolved, which never happens under
+        auth.mode=anonymous.
+      security: []
+      responses:
+        "200":
+          description: Who the caller is.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Me"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /api/v1/auth/login:
+    post:
+      operationId: login
+      tags: [auth]
+      summary: Password login; auth.mode=local only.
+      description: >-
+        404 in every other mode, so the UI feature-detects the login affordance
+        instead of hardcoding auth.mode's cases. Unknown user, disabled account
+        and wrong password are indistinguishable by status, body AND timing. On
+        success sets the session and CSRF cookies.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LoginRequest"
+      responses:
+        "204":
+          description: Logged in; session and CSRF cookies set.
+          headers:
+            Set-Cookie:
+              description: Session cookie, then the CSRF cookie.
+              schema:
+                type: string
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
+  /api/v1/auth/logout:
+    post:
+      operationId: logout
+      tags: [auth]
+      summary: Delete the session server-side and clear both cookies.
+      description: Mode-agnostic and idempotent -- safe with no session cookie at all.
+      security: []
+      responses:
+        "204":
+          description: Logged out.
+          headers:
+            Set-Cookie:
+              description: Both cookies cleared.
+              schema:
+                type: string
+
+  /api/v1/auth/oidc/start:
+    get:
+      operationId: oidcStart
+      tags: [auth]
+      summary: Redirect to the IdP authorization endpoint; auth.mode=oidc only.
+      description: Full-page navigation, not fetch. 404 in every other mode.
+      security: []
+      parameters:
+        - name: returnTo
+          in: query
+          description: Must be a same-origin relative path; anything else is 400.
+          schema:
+            type: string
+      responses:
+        "302":
+          description: Redirect to the IdP.
+          headers:
+            Location:
+              description: The IdP authorization URL.
+              schema:
+                type: string
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/v1/auth/oidc/callback:
+    get:
+      operationId: oidcCallback
+      tags: [auth]
+      summary: Consume the IdP redirect, mint a session, redirect to returnTo.
+      description: >-
+        Browser-facing, not a JSON endpoint. auth.mode=oidc only; 404 otherwise.
+        returnTo is re-validated after its round trip through the state store,
+        so a corrupted stash can never become an open redirect.
+      security: []
+      parameters:
+        - name: state
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: code
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        "302":
+          description: Session minted; redirect to the stashed returnTo.
+          headers:
+            Location:
+              description: Same-origin relative path.
+              schema:
+                type: string
+            Set-Cookie:
+              description: Session cookie, then the CSRF cookie.
+              schema:
+                type: string
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: >-
+        A personal access token (kcm_...) minted by POST /api/v1/tokens. Exempt
+        from CSRF: a browser never sends it ambiently.
+    sessionCookie:
+      type: apiKey
+      in: cookie
+      name: kconmon_session
+      description: >-
+        Session cookie from the local or OIDC login flow. Mutations
+        additionally require the double-submit CSRF pair: echo the non-HttpOnly
+        `csrf` cookie's value in the X-CSRF-Token header.
+
+  parameters:
+    Limit:
+      name: limit
+      in: query
+      description: Page size, clamped into [1,500]. An unparseable value is treated as unset.
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 500
+        default: 100
+    Cursor:
+      name: cursor
+      in: query
+      description: >-
+        Opaque keyset cursor from the previous page's nextCursor. Malformed, or
+        minted by another server, is 400.
+      schema:
+        type: string
+    PathID:
+      name: id
+      in: path
+      required: true
+      description: Resource id (UUID). A malformed id is 404, indistinguishable from an unknown one.
+      schema:
+        type: string
+        format: uuid
+
+  responses:
+    NoContent:
+      description: Done; no body.
+    BadRequest:
+      description: Malformed request -- unparseable body, bad filter value, or a broken cursor.
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+    Unauthorized:
+      description: No credentials resolved for a route that needs a permission.
+      headers:
+        WWW-Authenticate:
+          description: Always "Bearer".
+          schema:
+            type: string
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+    Forbidden:
+      description: >-
+        Authenticated but missing the permission this route requires, or a
+        cookie-authenticated mutation without a valid CSRF double-submit pair.
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+    NotFound:
+      description: No such resource, or the endpoint is not offered in this auth mode.
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+    Conflict:
+      description: Refused because of the state of OTHER rows (something still references this one).
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+    UnprocessableEntity:
+      description: Well-formed body whose VALUES were rejected -- never a parse failure.
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+    InternalError:
+      description: Server-side failure; the detail is deliberately empty.
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+    BadGateway:
+      description: An upstream (controller, Prometheus, database) could not be reached or refused.
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+    Unavailable:
+      description: >-
+        The dependency this route needs is not configured. The detail names the
+        config value that enables it.
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+
+  schemas:
+    Problem:
+      type: object
+      description: RFC 7807 error body. `type` is always "about:blank" so far.
+      required: [type, title, status]
+      properties:
+        type:
+          type: string
+        title:
+          type: string
+        status:
+          type: integer
+        detail:
+          type: string
+      additionalProperties: false
+
+    Protocol:
+      type: string
+      enum: [tcp, udp, icmp]
+      default: tcp
+
+    CheckType:
+      type: string
+      description: A definition names exactly one of these.
+      enum: [tcp, udp, icmp, dns, http, mtr]
+
+    RunStatus:
+      type: string
+      # cancelled joined in M4: written by POST /runs/{id}/cancel and by the
+      # stuck-run reaper (migration 00003 declared it in M3; M4 writes it).
+      enum: [pending, running, succeeded, failed, partial, cancelled]
+
+    SubjectKind:
+      type: string
+      enum: [anonymous, user, token]
+
+    LiveEventType:
+      type: string
+      enum:
+        - topology_changed
+        - check_observed
+        - mtr_triggered
+        - mtr_completed
+        - diagnostic_progress
+
+    LiveEventSeverity:
+      type: string
+      enum: [info, warn, error]
+
+    Version:
+      type: object
+      required: [version, commit, capabilities]
+      properties:
+        version:
+          type: string
+          description: The console BINARY's version, not the Helm chart's.
+        commit:
+          type: string
+        capabilities:
+          type: array
+          description: Always an array, never null. Holds "events" while this replica's pipeline is healthy.
+          items:
+            type: string
+      additionalProperties: false
+
+    Config:
+      type: object
+      required: [auth, anonymousBanner, controller, prometheus, database]
+      properties:
+        auth:
+          type: object
+          required: [mode, role, loginPath]
+          properties:
+            mode:
+              type: string
+              enum: [anonymous, local, header, oidc]
+            role:
+              type: string
+              description: auth.anonymous.role -- what an unauthenticated caller gets.
+            loginPath:
+              type: string
+              description: Endpoint that starts this mode's login flow; empty when the mode has none.
+          additionalProperties: false
+        anonymousBanner:
+          type: boolean
+        controller:
+          $ref: "#/components/schemas/ConfiguredFlag"
+        prometheus:
+          $ref: "#/components/schemas/ConfiguredFlag"
+        database:
+          $ref: "#/components/schemas/ConfiguredFlag"
+      additionalProperties: false
+
+    ConfiguredFlag:
+      type: object
+      required: [configured]
+      properties:
+        configured:
+          type: boolean
+      additionalProperties: false
+
+    TopologyNode:
+      type: object
+      required: [name, zone, ready]
+      properties:
+        name:
+          type: string
+        zone:
+          type: string
+        ready:
+          type: boolean
+      additionalProperties: false
+
+    TopologyAgent:
+      type: object
+      required: [id, nodeName, podIP, zone]
+      properties:
+        id:
+          type: string
+        nodeName:
+          type: string
+        podIP:
+          type: string
+        zone:
+          type: string
+      additionalProperties: false
+
+    Topology:
+      type: object
+      required: [nodes, agents, timestamp]
+      properties:
+        nodes:
+          type: array
+          items:
+            $ref: "#/components/schemas/TopologyNode"
+        agents:
+          type: array
+          items:
+            $ref: "#/components/schemas/TopologyAgent"
+        timestamp:
+          type: string
+          format: date-time
+      additionalProperties: false
+
+    MatrixCell:
+      type: object
+      required: [source, destination, failRatio]
+      properties:
+        source:
+          type: string
+        destination:
+          type: string
+        failRatio:
+          type: [number, "null"]
+          description: null when no series matched the pair -- not a zero.
+        rttP95:
+          type: integer
+          format: int64
+          description: Nanoseconds. Omitted when no series matched.
+        lossRatio:
+          type: number
+          description: udp/icmp only. Omitted when no series matched.
+      additionalProperties: false
+
+    Matrix:
+      type: object
+      required: [protocol, plane, nodes, cells, timestamp]
+      properties:
+        protocol:
+          $ref: "#/components/schemas/Protocol"
+        plane:
+          type: string
+        nodes:
+          type: array
+          items:
+            type: string
+        cells:
+          type: array
+          items:
+            $ref: "#/components/schemas/MatrixCell"
+        timestamp:
+          type: string
+          format: date-time
+      additionalProperties: false
+
+    PromQLQueryRequest:
+      type: object
+      required: [query]
+      properties:
+        query:
+          type: string
+        time:
+          type: string
+          format: date-time
+          description: RFC3339; omitted means "now".
+      additionalProperties: false
+
+    PromQLRangeRequest:
+      type: object
+      required: [query, start, end, step]
+      properties:
+        query:
+          type: string
+        start:
+          type: string
+          format: date-time
+        end:
+          type: string
+          format: date-time
+        step:
+          type: integer
+          format: int64
+          description: >-
+            Nanoseconds (repo-wide convention) -- note this differs from
+            Prometheus's own API, which takes seconds; the client converts.
+      additionalProperties: false
+
+    PromResult:
+      type: object
+      description: >-
+        Prometheus's own envelope, forwarded byte-for-byte. Modelled loosely on
+        purpose: the console never re-shapes it, so pinning it here would
+        promise a stability the upstream does not.
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [success, error]
+        data:
+          type: object
+          additionalProperties: true
+        errorType:
+          type: string
+        error:
+          type: string
+      additionalProperties: true
+
+    LiveEvent:
+      type: object
+      description: >-
+        Browser-facing projection of the controller's event. `id` is
+        "<seq>-<unixNano>" and identical on every replica, which is what makes
+        it both the hub's dedupe key and a stable React list key.
+      required: [id, seq, type, severity, scope, timestamp, summary, details]
+      properties:
+        id:
+          type: string
+        seq:
+          type: integer
+          format: int64
+          description: Controller-assigned and gapless per controller; a gap here is the loss signal.
+        type:
+          $ref: "#/components/schemas/LiveEventType"
+        severity:
+          $ref: "#/components/schemas/LiveEventSeverity"
+        scope:
+          type: string
+        timestamp:
+          type: string
+          format: date-time
+        summary:
+          type: string
+        details:
+          type: object
+          description: Type-specific payload; see WEBSOCKET.md "Payloads".
+          additionalProperties: true
+      additionalProperties: false
+
+    EventPage:
+      type: object
+      required: [events, nextCursor]
+      properties:
+        events:
+          type: array
+          items:
+            $ref: "#/components/schemas/LiveEvent"
+        nextCursor:
+          type: string
+          description: Empty string when the page proves nothing older is left.
+      additionalProperties: false
+
+    RunCreateRequest:
+      type: object
+      required: [type]
+      properties:
+        sources:
+          type: array
+          description: Empty or absent means every node in the current topology.
+          items:
+            type: string
+        destinations:
+          type: array
+          items:
+            type: string
+        type:
+          $ref: "#/components/schemas/CheckType"
+        plane:
+          type: string
+        timeoutNs:
+          type: integer
+          format: int64
+          description: Per-pair timeout in nanoseconds; unset lets the server apply its own default and clamp.
+        destinationKind:
+          type: string
+          enum: [node, target, adhoc]
+          description: >-
+            node (default) keeps destinations as node names, the pre-M4 contract.
+            target resolves a saved target row (destinationTargetId); adhoc probes
+            destinationAddress. Both external kinds require destinations to be empty.
+        destinationTargetId:
+          type: string
+          format: uuid
+          description: Required when destinationKind is target.
+        destinationAddress:
+          type: string
+          description: Required when destinationKind is adhoc.
+      additionalProperties: false
+
+    RunCreateResponse:
+      type: object
+      required: [id, status, pairTotal, wsTopic]
+      properties:
+        id:
+          type: string
+        status:
+          $ref: "#/components/schemas/RunStatus"
+        pairTotal:
+          type: integer
+        wsTopic:
+          type: string
+          description: Server-chosen topic name; subscribe to what you were told, never a string you built.
+      additionalProperties: false
+
+    RunSummary:
+      type: object
+      required: [id, createdAt, status, type, plane, initiatorKind, initiatorId, pairTotal, pairOk, pairFailed]
+      properties:
+        id:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+        startedAt:
+          type: string
+          format: date-time
+        finishedAt:
+          type: string
+          format: date-time
+        status:
+          $ref: "#/components/schemas/RunStatus"
+        type:
+          type: string
+        plane:
+          type: string
+        initiatorKind:
+          type: string
+        initiatorId:
+          type: string
+        pairTotal:
+          type: integer
+        pairOk:
+          type: integer
+        pairFailed:
+          type: integer
+      additionalProperties: false
+
+    RunResult:
+      type: object
+      required: [sourceNode, destinationNode, success, durationNs, recordedAt]
+      properties:
+        sourceNode:
+          type: string
+        destinationNode:
+          type: string
+        success:
+          type: boolean
+        durationNs:
+          type: integer
+          format: int64
+        error:
+          type: string
+        result:
+          type: object
+          description: Check-type-specific payload, stored verbatim.
+          additionalProperties: true
+        recordedAt:
+          type: string
+          format: date-time
+      additionalProperties: false
+
+    RunDetail:
+      description: One run's summary plus its spec snapshot and per-pair results.
+      allOf:
+        - $ref: "#/components/schemas/RunSummary"
+        - type: object
+          required: [spec, results]
+          properties:
+            spec:
+              type: object
+              description: The run's spec as submitted, snapshotted at creation.
+              additionalProperties: true
+            results:
+              type: array
+              items:
+                $ref: "#/components/schemas/RunResult"
+
+    RunPage:
+      type: object
+      required: [runs, nextCursor]
+      properties:
+        runs:
+          type: array
+          items:
+            $ref: "#/components/schemas/RunSummary"
+        nextCursor:
+          type: string
+      additionalProperties: false
+
+    TargetKind:
+      type: string
+      enum: [host, url]
+
+    Target:
+      type: object
+      required: [id, name, kind, address, labels, createdAt, updatedAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+          description: Becomes a Prometheus label value, hence the restricted charset store enforces.
+        kind:
+          $ref: "#/components/schemas/TargetKind"
+        address:
+          type: string
+        labels:
+          type: object
+          description: Always an object ({} when unset), never null.
+          additionalProperties:
+            type: string
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+      additionalProperties: false
+
+    TargetRequest:
+      type: object
+      description: Create and update body; a FULL replace -- an omitted field means empty.
+      required: [name, kind, address]
+      properties:
+        name:
+          type: string
+        kind:
+          $ref: "#/components/schemas/TargetKind"
+        address:
+          type: string
+        labels:
+          type: object
+          additionalProperties:
+            type: string
+      additionalProperties: false
+
+    TargetPage:
+      type: object
+      required: [targets, nextCursor]
+      properties:
+        targets:
+          type: array
+          items:
+            $ref: "#/components/schemas/Target"
+        nextCursor:
+          type: string
+      additionalProperties: false
+
+    SourceSelection:
+      type: string
+      description: >-
+        How the definition picks the agents that run it. "all" and "per-zone"
+        both resolve to every agent -- per-zone groups them rather than
+        shrinking the set; only "one-per-zone" reduces the count, which is why
+        it is the default.
+      enum: [all, per-zone, one-per-zone]
+
+    DestinationKind:
+      type: string
+      enum: [node, target, adhoc]
+
+    CheckDefinition:
+      type: object
+      required:
+        - id
+        - name
+        - sourceSelection
+        - destinationKind
+        - destinationTargetId
+        - destinationAddress
+        - checkType
+        - plane
+        - params
+        - enabled
+        - createdAt
+        - updatedAt
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        sourceSelection:
+          $ref: "#/components/schemas/SourceSelection"
+        destinationKind:
+          $ref: "#/components/schemas/DestinationKind"
+        destinationTargetId:
+          type: string
+          description: Empty unless destinationKind is "target".
+        destinationAddress:
+          type: string
+          description: Empty unless destinationKind is "adhoc".
+        checkType:
+          $ref: "#/components/schemas/CheckType"
+        plane:
+          type: string
+        params:
+          type: object
+          description: Always an object ({} when unset), never null.
+          additionalProperties: true
+        enabled:
+          type: boolean
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+      additionalProperties: false
+
+    CheckDefinitionRequest:
+      type: object
+      description: >-
+        Create, update AND projection body -- the projection endpoint reads the
+        same shape so the UI can send the form it is about to submit,
+        unchanged. Create/update are FULL replaces.
+      required: [name, sourceSelection, destinationKind, checkType, plane]
+      properties:
+        name:
+          type: string
+        sourceSelection:
+          $ref: "#/components/schemas/SourceSelection"
+        destinationKind:
+          $ref: "#/components/schemas/DestinationKind"
+        destinationTargetId:
+          type: string
+          format: uuid
+        destinationAddress:
+          type: string
+        checkType:
+          $ref: "#/components/schemas/CheckType"
+        plane:
+          type: string
+        params:
+          type: object
+          additionalProperties: true
+        enabled:
+          type: boolean
+      additionalProperties: false
+
+    CheckDefinitionPage:
+      type: object
+      required: [definitions, nextCursor]
+      properties:
+        definitions:
+          type: array
+          items:
+            $ref: "#/components/schemas/CheckDefinition"
+        nextCursor:
+          type: string
+      additionalProperties: false
+
+    Projection:
+      type: object
+      description: >-
+        What ONE definition would project against the CURRENT topology, so the
+        same definition can project differently as the cluster scales. The
+        bound is per definition, never fleet-wide.
+      required: [agents, protocols, series, limit, overLimit]
+      properties:
+        agents:
+          type: integer
+        protocols:
+          type: integer
+          description: 1 today -- a definition names exactly one check type.
+        series:
+          type: integer
+          description: agents x protocols.
+        limit:
+          type: integer
+          description: 400, the same bound the diagnostics runner applies to one run's fan-out.
+        overLimit:
+          type: boolean
+          description: True means enabling this definition is refused with 422.
+      additionalProperties: false
+
+    ScheduleKind:
+      type: string
+      description: >-
+        "cron" is deliberately absent: it is refused with a 422 naming the
+        milestone it lands in, not silently treated as an enum typo.
+      enum: [once, interval, continuous]
+
+    Schedule:
+      type: object
+      required: [id, definitionId, kind, intervalNs, runAt, enabled, lastFiredAt, nextFireAt, createdAt, updatedAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+        definitionId:
+          type: string
+          format: uuid
+        kind:
+          $ref: "#/components/schemas/ScheduleKind"
+        intervalNs:
+          type: integer
+          format: int64
+          description: Nanoseconds; clamped up to 10s for kind "interval".
+        runAt:
+          type: [string, "null"]
+          format: date-time
+        enabled:
+          type: boolean
+        lastFiredAt:
+          type: [string, "null"]
+          format: date-time
+          description: null means this schedule has never fired -- a zero timestamp would read as year 1.
+        nextFireAt:
+          type: [string, "null"]
+          format: date-time
+          description: Scheduler bookkeeping; null for kind "continuous", which the loop never fires.
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+      additionalProperties: false
+
+    ScheduleRequest:
+      type: object
+      description: >-
+        Full replace. nextFireAt is deliberately absent -- it is scheduler
+        bookkeeping, and letting a client write it would let it schedule a fire
+        in the past and stampede the loop. definitionId is not updatable.
+      required: [definitionId, kind]
+      properties:
+        definitionId:
+          type: string
+          format: uuid
+        kind:
+          $ref: "#/components/schemas/ScheduleKind"
+        intervalNs:
+          type: integer
+          format: int64
+          description: Required for kind "interval"; must be absent for the others.
+        runAt:
+          type: string
+          format: date-time
+          description: Required for kind "once", and must be in the future.
+        enabled:
+          type: boolean
+      additionalProperties: false
+
+    SchedulePage:
+      type: object
+      required: [schedules, nextCursor]
+      properties:
+        schedules:
+          type: array
+          items:
+            $ref: "#/components/schemas/Schedule"
+        nextCursor:
+          type: string
+      additionalProperties: false
+
+    AuditEntry:
+      type: object
+      required: [id, at, subjectKind, subjectId, action, resource, outcome, remoteAddr, detail]
+      properties:
+        id:
+          type: integer
+          format: int64
+        at:
+          type: string
+          format: date-time
+        subjectKind:
+          type: string
+        subjectId:
+          type: string
+        action:
+          type: string
+          description: Method plus route pattern, e.g. "POST /api/v1/runs".
+        resource:
+          type: string
+        outcome:
+          type: string
+          enum: [allowed, denied, error]
+        remoteAddr:
+          type: string
+        detail:
+          type: object
+          description: Whatever the per-route allow-list let through; {} for almost everything.
+          additionalProperties: true
+      additionalProperties: false
+
+    AuditPage:
+      type: object
+      required: [entries, nextCursor]
+      properties:
+        entries:
+          type: array
+          items:
+            $ref: "#/components/schemas/AuditEntry"
+        nextCursor:
+          type: string
+      additionalProperties: false
+
+    PermissionList:
+      type: object
+      required: [permissions]
+      properties:
+        permissions:
+          type: array
+          items:
+            type: string
+      additionalProperties: false
+
+    Role:
+      type: object
+      required: [name, permissions]
+      properties:
+        name:
+          type: string
+        permissions:
+          type: array
+          items:
+            type: string
+      additionalProperties: false
+
+    RoleRequest:
+      type: object
+      required: [name, permissions]
+      properties:
+        name:
+          type: string
+          description: May not collide with a built-in (viewer, operator, alert-editor, admin).
+        permissions:
+          type: array
+          items:
+            type: string
+      additionalProperties: false
+
+    RoleList:
+      type: object
+      required: [roles]
+      properties:
+        roles:
+          type: array
+          items:
+            $ref: "#/components/schemas/Role"
+      additionalProperties: false
+
+    Binding:
+      type: object
+      required: [id, roleName, subjectKind, subjectId]
+      properties:
+        id:
+          type: integer
+          format: int64
+        roleName:
+          type: string
+        subjectKind:
+          type: string
+        subjectId:
+          type: string
+      additionalProperties: false
+
+    BindingRequest:
+      type: object
+      required: [roleName, subjectKind, subjectId]
+      properties:
+        roleName:
+          type: string
+        subjectKind:
+          type: string
+          enum: [user, group]
+        subjectId:
+          type: string
+      additionalProperties: false
+
+    BindingList:
+      type: object
+      required: [bindings]
+      properties:
+        bindings:
+          type: array
+          items:
+            $ref: "#/components/schemas/Binding"
+      additionalProperties: false
+
+    Token:
+      type: object
+      description: Token metadata. Structurally carries no hash and no secret.
+      required: [id, name, owner, createdAt]
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        owner:
+          type: string
+        expiresAt:
+          type: string
+          format: date-time
+        lastUsedAt:
+          type: string
+          format: date-time
+        revokedAt:
+          type: string
+          format: date-time
+        createdAt:
+          type: string
+          format: date-time
+      additionalProperties: false
+
+    TokenList:
+      type: object
+      required: [tokens]
+      properties:
+        tokens:
+          type: array
+          items:
+            $ref: "#/components/schemas/Token"
+      additionalProperties: false
+
+    TokenCreateRequest:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+        expiresAt:
+          type: string
+          format: date-time
+      additionalProperties: false
+
+    TokenCreateResponse:
+      type: object
+      required: [id, name, token]
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        token:
+          type: string
+          description: The raw wire-form token (kcm_...), returned exactly once and never again.
+        expiresAt:
+          type: string
+          format: date-time
+      additionalProperties: false
+
+    MeSubject:
+      type: object
+      required: [kind, id, displayName, groups, roles]
+      properties:
+        kind:
+          $ref: "#/components/schemas/SubjectKind"
+        id:
+          type: string
+        displayName:
+          type: string
+        groups:
+          type: array
+          items:
+            type: string
+        roles:
+          type: array
+          items:
+            type: string
+      additionalProperties: false
+
+    Me:
+      type: object
+      required: [subject, permissions]
+      properties:
+        subject:
+          $ref: "#/components/schemas/MeSubject"
+        permissions:
+          type: array
+          description: The flattened, already-resolved permission list -- never role names to re-resolve.
+          items:
+            type: string
+      additionalProperties: false
+
+    LoginRequest:
+      type: object
+      required: [username, password]
+      properties:
+        username:
+          type: string
+        password:
+          type: string
+          format: password
+      additionalProperties: false

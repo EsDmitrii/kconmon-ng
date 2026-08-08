@@ -3,8 +3,8 @@ apiVersion: v2
 name: kconmon-ng
 description: Kubernetes Node Connectivity Monitor - Next Generation
 type: application
-version: 1.5.0
-appVersion: "1.5.0"
+version: 1.6.0
+appVersion: "1.6.0"
 keywords:
   - kubernetes
   - connectivity
@@ -25,6 +25,40 @@ annotations:
     - name: Documentation
       url: https://github.com/EsDmitrii/kconmon-ng#readme
   artifacthub.io/changes: |
+    - kind: added
+      description: >-
+        External targets, saved checks and schedules (M4) — CRUD /api/v1/targets|checks|schedules
+        backed by PostgreSQL; requires console.database.mode=cnpg|external
+    - kind: added
+      description: >-
+        Agent external checkers — config.checkers.external.enabled with a mandatory allowedCidrs
+        allowlist (plus deniedCidrs, maxTargets, timeout); OFF by default
+    - kind: added
+      description: >-
+        Continuous external checks — the controller streams per-agent assignments and the console
+        reconciles them from continuous schedules on the scheduler's advisory lock
+    - kind: added
+      description: >-
+        Console schedule loop and stuck-run reaper — console.scheduler.enabled (OFF by default),
+        console.scheduler.tickInterval, PostgreSQL advisory lock for cross-replica singleton ticks
+    - kind: added
+      description: >-
+        Console request rate limits — console.rateLimit.runsPerMinute and
+        console.rateLimit.loginPerMinute; 0 disables a limit, and a Valkey outage fails OPEN
+    - kind: added
+      description: >-
+        POST /api/v1/runs/{id}/cancel — cooperative cancellation of an in-flight diagnostics run
+    - kind: added
+      description: >-
+        Hand-authored OpenAPI spec (docs/console-api.yaml) with generated TypeScript types and a
+        test that walks the router so an undocumented route cannot land
+    - kind: added
+      description: >-
+        kconmon_ng_external_* agent metrics, controller external-assignment gauges, the
+        ExternalChecksFailing alert rule and an external-checks dashboard row
+    - kind: added
+      description: >-
+        console-targets-values.yaml chart-test profile covering targets, scheduler and rate limits
     - kind: added
       description: >-
         Console persistence (M3) — console.database.mode=cnpg|external|disabled,

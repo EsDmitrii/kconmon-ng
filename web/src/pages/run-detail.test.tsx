@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { resetWsClient } from "@/hooks/use-ws-topic";
 import { FakeSocket } from "@/lib/fake-websocket";
@@ -29,12 +29,39 @@ function runBody(overrides: Partial<RunDetail> = {}): RunDetail {
 const json = (body: unknown) =>
   new Response(JSON.stringify(body), { status: 200, headers: { "Content-Type": "application/json" } });
 
-function renderPage(capabilities: string[], run: RunDetail, runId = RUN_ID) {
+function meBody(permissions: string[]) {
+  return {
+    subject: { kind: "user", id: "u1", displayName: "Ada", groups: [], roles: ["operator"] },
+    permissions,
+  };
+}
+
+/** Every call the page made against the run resource, method included --
+ *  enough to tell the cancel POST from the GET that follows it. */
+interface Call {
+  method: string;
+  url: string;
+}
+
+function renderPage(
+  capabilities: string[],
+  run: RunDetail | (() => RunDetail),
+  runId = RUN_ID,
+  opts: { permissions?: string[]; onCancel?: () => Response } = {},
+) {
+  const { permissions = ["runs:create"], onCancel } = opts;
   window.history.pushState({}, "", `/diagnostics/runs/${runId}`);
-  const fetchMock = vi.fn((url: string) => {
+  const calls: Call[] = [];
+  const fetchMock = vi.fn((url: string, init?: RequestInit) => {
     const href = String(url);
+    const method = (init?.method ?? "GET").toUpperCase();
+    calls.push({ method, url: href });
     if (href.includes("/api/v1/version")) return Promise.resolve(json({ version: "1.6.0", commit: "x", capabilities }));
-    if (href.startsWith("/api/v1/runs/")) return Promise.resolve(json(run));
+    if (href.includes("/api/v1/auth/me")) return Promise.resolve(json(meBody(permissions)));
+    if (href.endsWith("/cancel")) {
+      return Promise.resolve(onCancel ? onCancel() : new Response(null, { status: 204 }));
+    }
+    if (href.startsWith("/api/v1/runs/")) return Promise.resolve(json(typeof run === "function" ? run() : run));
     return Promise.resolve(json({}));
   });
   vi.stubGlobal("fetch", fetchMock);
@@ -45,7 +72,7 @@ function renderPage(capabilities: string[], run: RunDetail, runId = RUN_ID) {
       <RunDetailPage />
     </QueryClientProvider>,
   );
-  return { ...utils, fetchMock, qc };
+  return { ...utils, fetchMock, calls, qc };
 }
 
 function renderNotFound(runId = "nope") {
@@ -53,6 +80,7 @@ function renderNotFound(runId = "nope") {
   const fetchMock = vi.fn((url: string) => {
     const href = String(url);
     if (href.includes("/api/v1/version")) return Promise.resolve(json({ version: "1.6.0", commit: "x", capabilities: [] }));
+    if (href.includes("/api/v1/auth/me")) return Promise.resolve(json(meBody(["runs:create"])));
     if (href.startsWith("/api/v1/runs/")) {
       return Promise.resolve(
         new Response(JSON.stringify({ type: "about:blank", title: "run not found", status: 404 }), {
@@ -121,6 +149,7 @@ describe("RunDetailPage", () => {
     const fetchMock = vi.fn((url: string) => {
       const href = String(url);
       if (href.includes("/api/v1/version")) return Promise.resolve(json({ version: "1.6.0", commit: "x", capabilities: [] }));
+      if (href.includes("/api/v1/auth/me")) return Promise.resolve(json(meBody(["runs:create"])));
       if (href.startsWith("/api/v1/runs/")) {
         return Promise.resolve(
           json(
@@ -205,6 +234,63 @@ describe("RunDetailPage", () => {
     expect(screen.getByText("node-a")).toBeInTheDocument();
     // Already terminal on first paint -- no socket is ever opened for it.
     expect(FakeSocket.instances).toHaveLength(0);
+  });
+
+  it("cancels a running run: POSTs /cancel, then re-reads the run once and shows the new status", async () => {
+    let status = "running";
+    const { calls } = renderPage(["events"], () => runBody({ status }), RUN_ID, {
+      onCancel: () => {
+        // The 204 is "accepted", not "cancelled" -- the run's own goroutine
+        // writes the terminal status, which the page only learns by asking.
+        status = "cancelled";
+        return new Response(null, { status: 204 });
+      },
+    });
+
+    fireEvent.click(await screen.findByRole("button", { name: /cancel run/i }));
+
+    await waitFor(() =>
+      expect(calls.some((c) => c.method === "POST" && c.url === `/api/v1/runs/${RUN_ID}/cancel`)).toBe(true),
+    );
+    // The refetch is what surfaces the new status -- not a status this page
+    // wrote into its own cache.
+    expect(await screen.findByText("cancelled")).toBeInTheDocument();
+    const afterCancel = calls.findIndex((c) => c.url.endsWith("/cancel"));
+    expect(calls.slice(afterCancel + 1).some((c) => c.method === "GET" && c.url === `/api/v1/runs/${RUN_ID}`)).toBe(
+      true,
+    );
+    // Terminal now -- the affordance is gone, not merely disabled.
+    await waitFor(() => expect(screen.queryByRole("button", { name: /cancel run/i })).not.toBeInTheDocument());
+  });
+
+  it("renders no Cancel button for a run that is already terminal", async () => {
+    renderPage(["events"], runBody({ status: "succeeded" }));
+
+    await screen.findByText("succeeded");
+    expect(screen.queryByRole("button", { name: /cancel run/i })).not.toBeInTheDocument();
+  });
+
+  it("renders no Cancel button without runs:create, even while the run is in flight", async () => {
+    renderPage(["events"], runBody({ status: "running" }), RUN_ID, { permissions: ["runs:read"] });
+
+    await screen.findByText("running");
+    expect(screen.queryByRole("button", { name: /cancel run/i })).not.toBeInTheDocument();
+  });
+
+  it("keeps the run on screen and explains a refused cancel inline", async () => {
+    renderPage(["events"], runBody({ status: "running" }), RUN_ID, {
+      onCancel: () =>
+        new Response(JSON.stringify({ type: "about:blank", title: "forbidden", status: 403, detail: "runs:create required" }), {
+          status: 403,
+          headers: { "Content-Type": "application/problem+json" },
+        }),
+    });
+
+    fireEvent.click(await screen.findByRole("button", { name: /cancel run/i }));
+
+    expect(await screen.findByText("runs:create required")).toBeInTheDocument();
+    // Still cancellable: a refused cancel does not consume the affordance.
+    expect(screen.getByRole("button", { name: /cancel run/i })).toBeInTheDocument();
   });
 
   it("an unknown run id renders a not-found state rather than an infinite spinner", async () => {

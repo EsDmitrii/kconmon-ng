@@ -1,6 +1,9 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   ApiError,
+  cancelRun,
+  createSchedule,
+  deleteSchedule,
   getConfig,
   getEvents,
   getMatrix,
@@ -12,6 +15,7 @@ import {
   promqlQuery,
   resetNavigateForTest,
   setNavigateForTest,
+  updateSchedule,
 } from "./api";
 
 function mockFetch(status: number, body: unknown, contentType = "application/json") {
@@ -246,6 +250,61 @@ describe("apiFetch: 401 redirect (task-19-brief.md)", () => {
     mockFetch(401, { type: "about:blank", title: "invalid credentials", status: 401 }, "application/problem+json");
     await expect(login("ada", "wrong")).rejects.toBeInstanceOf(ApiError);
     expect(navigateSpy).not.toHaveBeenCalled();
+  });
+});
+
+describe("cancelRun", () => {
+  afterEach(clearCsrfCookie);
+
+  it("POSTs the cancel subresource with no body and resolves on the 204", async () => {
+    document.cookie = "csrf=tok-abc; path=/";
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(null, { status: 204 })));
+    await expect(cancelRun("run 1/2")).resolves.toBeUndefined();
+    const [url, init] = vi.mocked(fetch).mock.calls[0];
+    // The id is encoded, not interpolated raw -- it comes off a URL path.
+    expect(url).toBe("/api/v1/runs/run%201%2F2/cancel");
+    expect(init?.method).toBe("POST");
+    expect(init?.body).toBeUndefined();
+    expect(new Headers(init?.headers).get("X-CSRF-Token")).toBe("tok-abc");
+  });
+
+  it("rejects with ApiError on a 404 rather than swallowing it", async () => {
+    mockFetch(404, { type: "about:blank", title: "run not found", status: 404 }, "application/problem+json");
+    await expect(cancelRun("nope")).rejects.toBeInstanceOf(ApiError);
+  });
+});
+
+describe("schedule writes", () => {
+  afterEach(clearCsrfCookie);
+
+  it("createSchedule POSTs the body verbatim", async () => {
+    mockFetch(201, { id: "s-1" });
+    await createSchedule({ definitionId: "d-1", kind: "interval", intervalNs: 30_000_000_000, enabled: true });
+    const [url, init] = vi.mocked(fetch).mock.calls[0];
+    expect(url).toBe("/api/v1/schedules");
+    expect(init?.method).toBe("POST");
+    expect(JSON.parse(String(init?.body))).toEqual({
+      definitionId: "d-1",
+      kind: "interval",
+      intervalNs: 30_000_000_000,
+      enabled: true,
+    });
+  });
+
+  it("updateSchedule PUTs to the row's own URL", async () => {
+    mockFetch(200, { id: "s-1" });
+    await updateSchedule("s-1", { definitionId: "d-1", kind: "continuous", enabled: false });
+    const [url, init] = vi.mocked(fetch).mock.calls[0];
+    expect(url).toBe("/api/v1/schedules/s-1");
+    expect(init?.method).toBe("PUT");
+  });
+
+  it("deleteSchedule resolves on the 204 (no JSON parse of an empty body)", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(null, { status: 204 })));
+    await expect(deleteSchedule("s-1")).resolves.toBeUndefined();
+    const [url, init] = vi.mocked(fetch).mock.calls[0];
+    expect(url).toBe("/api/v1/schedules/s-1");
+    expect(init?.method).toBe("DELETE");
   });
 });
 

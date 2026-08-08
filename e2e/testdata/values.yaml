@@ -27,6 +27,32 @@ config:
       enabled: false
     mtr:
       maxHops: 5
+    # Continuous external checks, enabled so TestConsoleExternalCheckAssignment
+    # and TestConsoleExternalCheckDenied have an agent-side pipeline to observe
+    # at all (with this off the whole kconmon_ng_external_* family stays empty
+    # and both tests would time out on a config flag rather than a bug).
+    external:
+      enabled: true
+      # THE KIND CLUSTER'S OWN NETWORKS AND NOTHING ELSE. kind's defaults are
+      # 10.244.0.0/16 for Pods and 10.96.0.0/12 for Services (the workflow's
+      # kind-config.yaml sets no networking block, so both apply), which is
+      # exactly enough for TestConsoleExternalCheckAssignment to probe an
+      # in-cluster ClusterIP Service.
+      #
+      # Deliberately NO public-address carve-out: the e2e must never egress to
+      # the internet, and -- more importantly -- TestConsoleExternalCheckDenied
+      # asserts that an address OUTSIDE this list is refused. A wider list here
+      # would quietly turn that security assertion into a no-op.
+      allowedCidrs:
+        - "10.244.0.0/16"
+        - "10.96.0.0/12"
+      # Restated rather than inherited: the link-local metadata address is the
+      # one destination that must stay refused even if someone widens the list
+      # above, and denied wins over allowed.
+      deniedCidrs:
+        - "169.254.169.254/32"
+      maxTargets: 100
+      timeout: 10s
 
 pdb:
   enabled: false

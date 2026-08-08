@@ -6,6 +6,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"slices"
 	"strconv"
 	"time"
 
@@ -18,6 +19,31 @@ import (
 const (
 	defaultDiagnosticsTimeout = 60 * time.Second
 	maxDiagnosticsTimeout     = 120 * time.Second
+)
+
+const (
+	// destinationKindNode resolves Destination against the agent registry. It is
+	// the default and the only kind that existed before M4, so an M3-shaped body
+	// (no destinationKind at all) takes exactly the old path.
+	destinationKindNode = "node"
+	// destinationKindExternal skips the registry: DestinationAddress carries the
+	// address to probe and Destination, if present, only names it.
+	destinationKindExternal = "external"
+
+	// capabilityExternalChecks is the AgentMeta.capabilities flag an agent build
+	// advertises when it can probe a destination that is not a registered agent.
+	// A pre-M4 agent advertises nothing and ignores TaskRequest.external_target
+	// silently, which would make it probe an empty AgentMeta; the controller
+	// refuses up front instead (Decision 7).
+	capabilityExternalChecks = "external-checks"
+
+	// externalTargetKindHost is the ExternalTarget.kind this endpoint produces.
+	// The HTTP body carries only an address, and an address without a scheme is
+	// a host; "url" targets arrive with the operator-defined target objects.
+	externalTargetKindHost = "host"
+	// externalTargetDefaultPort is ExternalTarget.port's "use the check type's
+	// own default" sentinel: the HTTP body has no port field yet.
+	externalTargetDefaultPort = 0
 )
 
 // validCheckTypes is the set of diagnostic check types the API accepts. The
@@ -45,6 +71,11 @@ type diagnosticsRequest struct {
 	Destination string `json:"destination"`
 	Type        string `json:"type"`
 	Plane       string `json:"plane"`
+	// DestinationKind is "node" (default, and the ONLY value that existed
+	// before M4) or "external". When "external", Destination is NOT resolved
+	// against the registry and DestinationAddress carries the address.
+	DestinationKind    string `json:"destinationKind,omitempty"`
+	DestinationAddress string `json:"destinationAddress,omitempty"`
 }
 
 // EventPublisher is the seam DiagnosticsHandler uses to emit domain events for
@@ -97,8 +128,25 @@ func (h *DiagnosticsHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if req.Source == "" || req.Destination == "" || req.Type == "" {
+	destKind := req.DestinationKind
+	if destKind == "" {
+		destKind = destinationKindNode
+	}
+	switch destKind {
+	case destinationKindNode, destinationKindExternal:
+	default:
+		http.Error(w, "destinationKind must be node or external", http.StatusBadRequest)
+		return
+	}
+
+	// A node destination is named; an external one is addressed. Either way
+	// something must identify the far end, so both fields empty is a 400.
+	if req.Source == "" || req.Type == "" || (destKind == destinationKindNode && req.Destination == "") {
 		http.Error(w, "source, destination and type are required", http.StatusBadRequest)
+		return
+	}
+	if destKind == destinationKindExternal && req.DestinationAddress == "" {
+		http.Error(w, "destinationAddress is required when destinationKind is external", http.StatusBadRequest)
 		return
 	}
 	if _, ok := validCheckTypes[req.Type]; !ok {
@@ -117,16 +165,6 @@ func (h *DiagnosticsHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "no agent registered on source node", http.StatusNotFound)
 		return
 	}
-	destination, ok := h.registry.GetByNodeName(req.Destination)
-	if !ok {
-		h.count(req.Type, "not_found")
-		http.Error(w, "no agent registered on destination node", http.StatusNotFound)
-		return
-	}
-
-	timeout := h.resolveTimeout(r)
-	ctx, cancel := context.WithTimeout(r.Context(), timeout)
-	defer cancel()
 
 	// Stamp the task ID here rather than letting Dispatch mint it, so the
 	// dispatch-start event published below carries the same ID as the terminal
@@ -134,35 +172,76 @@ func (h *DiagnosticsHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	task := &pb.TaskRequest{
 		TaskId:    uuid.NewString(),
 		CheckType: req.Type,
-		Target:    agentInfoToProto(destination),
 		Plane:     plane,
 	}
 
-	h.publishDispatched(task.GetTaskId(), req.Type, req.Source, req.Destination)
+	// destName is what every published event reports as destination_node: the
+	// node name for a node destination, the target NAME for an external one.
+	// The address never appears — name is the only external field allowed to
+	// become an identifier downstream.
+	destName := req.Destination
+
+	if destKind == destinationKindExternal {
+		// Gate on the SOURCE agent: it is the one that has to understand
+		// external_target. Answering 501 here beats a mystifying timeout from an
+		// old agent that ignored the field.
+		if !slices.Contains(source.Capabilities, capabilityExternalChecks) {
+			h.count(req.Type, "unsupported")
+			http.Error(w,
+				"agent on node "+source.NodeName+" does not support external destinations",
+				http.StatusNotImplemented)
+			return
+		}
+		if destName == "" {
+			destName = req.DestinationAddress
+		}
+		// Exactly one of Target/ExternalTarget is ever populated: the agent
+		// treats both-set as malformed.
+		task.ExternalTarget = &pb.ExternalTarget{
+			Name:    destName,
+			Kind:    externalTargetKindHost,
+			Address: req.DestinationAddress,
+			Port:    externalTargetDefaultPort,
+		}
+	} else {
+		destination, found := h.registry.GetByNodeName(req.Destination)
+		if !found {
+			h.count(req.Type, "not_found")
+			http.Error(w, "no agent registered on destination node", http.StatusNotFound)
+			return
+		}
+		task.Target = agentInfoToProto(destination)
+	}
+
+	timeout := h.resolveTimeout(r)
+	ctx, cancel := context.WithTimeout(r.Context(), timeout)
+	defer cancel()
+
+	h.publishDispatched(task.GetTaskId(), req.Type, req.Source, destName)
 
 	res, err := h.dispatcher.Dispatch(ctx, source.ID, task)
 	if err != nil {
 		switch {
 		case errors.Is(err, context.DeadlineExceeded):
 			h.count(req.Type, "timeout")
-			h.publishProgress(task.GetTaskId(), req.Type, req.Source, req.Destination, "timeout")
+			h.publishProgress(task.GetTaskId(), req.Type, req.Source, destName, "timeout")
 			http.Error(w, "diagnostics dispatch timed out", http.StatusGatewayTimeout)
 		case errors.Is(err, ErrAgentNotSubscribed):
 			// The source agent is registered but has no active task stream, so
 			// there is no agent able to run the check.
 			h.count(req.Type, "not_found")
-			h.publishProgress(task.GetTaskId(), req.Type, req.Source, req.Destination, "error")
+			h.publishProgress(task.GetTaskId(), req.Type, req.Source, destName, "error")
 			http.Error(w, "source agent has no active diagnostics stream", http.StatusNotFound)
 		default:
 			h.count(req.Type, "error")
-			h.publishProgress(task.GetTaskId(), req.Type, req.Source, req.Destination, "error")
+			h.publishProgress(task.GetTaskId(), req.Type, req.Source, destName, "error")
 			http.Error(w, "diagnostics dispatch failed", http.StatusBadGateway)
 		}
 		return
 	}
 
 	h.count(req.Type, "ok")
-	h.publishObserved(task.GetTaskId(), req.Type, plane, req.Source, req.Destination, res.GetDetailsJson())
+	h.publishObserved(task.GetTaskId(), req.Type, plane, req.Source, destName, res.GetDetailsJson())
 	w.Header().Set("Content-Type", "application/json")
 	// nosniff pins the declared JSON type so no browser will ever interpret
 	// this response as HTML, closing the theoretical XSS vector gosec's taint

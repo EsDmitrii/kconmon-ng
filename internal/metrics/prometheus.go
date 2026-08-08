@@ -36,6 +36,19 @@ type PrometheusMetrics struct {
 	HTTPTotalDuration   *prometheus.HistogramVec
 	HTTPResults         *prometheus.CounterVec
 
+	// The external family is labelled by the operator's target NAME, never by
+	// its address: an external destination is attacker-influenced and its
+	// resolved addresses are unbounded, so only the name an operator typed into
+	// the Console is allowed to become a label value. There is no
+	// destination_node/destination_zone here for the same reason -- an external
+	// destination is not a peer and has neither.
+	ExternalDuration       *prometheus.HistogramVec
+	ExternalRtt            *prometheus.HistogramVec
+	ExternalPacketLoss     *prometheus.GaugeVec
+	ExternalResults        *prometheus.CounterVec
+	ExternalHTTPStatusCode *prometheus.GaugeVec
+	ExternalDenied         *prometheus.CounterVec
+
 	MTRHops      *prometheus.GaugeVec
 	MTRHopRTT    *prometheus.GaugeVec
 	MTRTriggered *prometheus.CounterVec
@@ -48,6 +61,9 @@ type PrometheusMetrics struct {
 	ControllerDiagnostics      *prometheus.CounterVec
 	ControllerEventSubscribers *prometheus.GaugeVec
 	ControllerEventsPublished  *prometheus.CounterVec
+
+	ControllerExternalSubscribers *prometheus.GaugeVec
+	ControllerExternalAssignments *prometheus.GaugeVec
 }
 
 func NewPrometheusMetrics(prefix string, reg prometheus.Registerer) *PrometheusMetrics {
@@ -58,6 +74,14 @@ func NewPrometheusMetrics(prefix string, reg prometheus.Registerer) *PrometheusM
 
 	peerLabels := []string{"source_node", "destination_node", "source_zone", "destination_zone"}
 	resultPeerLabels := []string{"source_node", "destination_node", "source_zone", "destination_zone", "result"}
+
+	// target is the operator's NAME for the destination and target_kind is the
+	// closed set host|url. Neither carries an address, and target_kind is
+	// derived from the check type rather than taken off the wire, so a
+	// controller cannot mint a third kind.
+	externalLabels := []string{"source_node", "source_zone", "target", "target_kind"}
+	resultExternalLabels := []string{"source_node", "source_zone", "target", "target_kind", "result"}
+	deniedExternalLabels := []string{"source_node", "source_zone", "target", "target_kind", "reason"}
 
 	m := &PrometheusMetrics{
 		prefix: prefix,
@@ -150,6 +174,37 @@ func NewPrometheusMetrics(prefix string, reg prometheus.Registerer) *PrometheusM
 			Help: "Total HTTP check results",
 		}, []string{"url", "method", "status_code", "source_node", "source_zone", "result"}),
 
+		// Every Vec below stays EMPTY until an external probe reports, and an
+		// empty Vec collects nothing: an agent with checkers.external.enabled
+		// false exposes a byte-identical /metrics to the one it exposed before
+		// this family existed.
+		ExternalDuration: factory.NewHistogramVec(prometheus.HistogramOpts{
+			Name:    prefix + "_external_duration_seconds",
+			Help:    "External check probe duration in seconds",
+			Buckets: defaultBuckets,
+		}, externalLabels),
+		ExternalRtt: factory.NewHistogramVec(prometheus.HistogramOpts{
+			Name:    prefix + "_external_rtt_seconds",
+			Help:    "External check round-trip time in seconds",
+			Buckets: defaultBuckets,
+		}, externalLabels),
+		ExternalPacketLoss: factory.NewGaugeVec(prometheus.GaugeOpts{
+			Name: prefix + "_external_packet_loss_ratio",
+			Help: "External check packet loss ratio (0.0-1.0)",
+		}, externalLabels),
+		ExternalResults: factory.NewCounterVec(prometheus.CounterOpts{
+			Name: prefix + "_external_results_total",
+			Help: "Total external check results that reached the network",
+		}, resultExternalLabels),
+		ExternalHTTPStatusCode: factory.NewGaugeVec(prometheus.GaugeOpts{
+			Name: prefix + "_external_http_status_code",
+			Help: "Last HTTP status code returned by an external http check",
+		}, externalLabels),
+		ExternalDenied: factory.NewCounterVec(prometheus.CounterOpts{
+			Name: prefix + "_external_denied_total",
+			Help: "Total external probes refused by the allowlist, by reason (cidr|resolve|disabled)",
+		}, deniedExternalLabels),
+
 		MTRHops: factory.NewGaugeVec(prometheus.GaugeOpts{
 			Name: prefix + "_mtr_hops",
 			Help: "Number of hops in last MTR trace",
@@ -195,15 +250,36 @@ func NewPrometheusMetrics(prefix string, reg prometheus.Registerer) *PrometheusM
 			Name: prefix + "_controller_events_published_total",
 			Help: "Total controller domain events published to WatchEvents subscribers, by type",
 		}, []string{"type"}),
+		ControllerExternalSubscribers: factory.NewGaugeVec(prometheus.GaugeOpts{
+			Name: prefix + "_controller_external_subscribers",
+			Help: "Number of active agent WatchExternalChecks subscriptions on this controller replica",
+		}, []string{}),
+		// Agents, never specs, and deliberately unlabelled: a per-agent series
+		// here would grow with the cluster for no operational gain.
+		ControllerExternalAssignments: factory.NewGaugeVec(prometheus.GaugeOpts{
+			Name: prefix + "_controller_external_assignments",
+			Help: "Number of agents with a non-empty continuous external-check assignment",
+		}, []string{}),
 	}
 
 	return m
 }
 
+// ResetPeerGauges drops every gauge whose series is keyed by a destination that
+// can DISAPPEAR. A counter is cumulative and is never reset here; a gauge is a
+// last-reading, and a last reading for a destination that no longer exists is a
+// lie that never expires on its own.
+//
+// The external gauges belong here for exactly that reason: an operator removes
+// a target from the Console and the agent stops probing it, so without a reset
+// its final packet-loss ratio or HTTP status would stay pinned at whatever it
+// read on the last probe, forever.
 func (m *PrometheusMetrics) ResetPeerGauges() {
 	m.UDPLossRatio.Reset()
 	m.UDPJitter.Reset()
 	m.ICMPLossRatio.Reset()
 	m.MTRHops.Reset()
 	m.MTRHopRTT.Reset()
+	m.ExternalPacketLoss.Reset()
+	m.ExternalHTTPStatusCode.Reset()
 }

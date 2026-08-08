@@ -84,6 +84,12 @@ database:
   connectTimeout: 10s
   migrateOnStart: true # ADR-001: embedded goose migrations, advisory-locked, run on start
   retentionDays: 90 # 0 disables pruning
+rateLimit:
+  runsPerMinute: 10 # POST /api/v1/runs, per subject; 0 disables THIS limit
+  loginPerMinute: 5 # POST /api/v1/auth/login, per username AND per source IP; 0 disables
+scheduler:
+  enabled: false # gates the schedule loop, the stuck-run reaper AND the continuous reconciler
+  tickInterval: 5s # poll cadence; the advisory lock is taken and released per tick
 ```
 
 `database` is entirely omitted from the rendered config when
@@ -114,6 +120,147 @@ Startup fails — loudly, before serving — on any of these:
 | `auth.defaultRole` set and not a known built-in role (`viewer\|operator\|alert-editor\|admin`) | error |
 | `auth.session.ttl` non-positive | error |
 | `auth.session.cookieName` starts with `__Host-` and `auth.session.secure=false` | error (browsers reject `__Host-` without `Secure`) |
+| `rateLimit.runsPerMinute` or `rateLimit.loginPerMinute` < 0 | error (0 is legal: "disables the limit") |
+| `scheduler.tickInterval` non-positive **while `scheduler.enabled=true`** | error (a disabled loop's interval is not inspected) |
+
+### `rateLimit` — what it actually bounds, and where it stops
+
+`runsPerMinute` (default **10**) caps `POST /api/v1/runs` per **subject**. One
+run fans out to up to 400 agent pairs, so an unbounded caller is a
+controller-load amplifier, not just a noisy one.
+
+`loginPerMinute` (default **5**) caps `POST /api/v1/auth/login` per
+**username** and, counted independently, per **source IP**. It is an
+availability control as much as an anti-brute-force one: argon2id is
+deliberately 64 MiB per verification, and unlimited concurrent logins against
+a 256Mi console pod is an unauthenticated OOM.
+
+`0` disables that one limit. A negative value is an error, not a second way to
+say "off" — otherwise a typo would silently disable a security control.
+
+Two honest limitations:
+
+- **Per-replica with `console.valkey.mode=disabled`.** The window lives in
+  `cache.KV`, so with Valkey the limit is cluster-wide and without it each
+  replica counts its own (ADR-002: the in-process KV has no cross-replica
+  visibility). N replicas then admit up to N times the configured rate. That
+  is weaker than configured, never stronger — but if the number in your values
+  file is the number you are relying on, run Valkey.
+- **Fail-open on a KV outage.** If the KV cannot be read the request is
+  **admitted**, not refused (Decision 8: a Valkey outage must not become a
+  login outage). Every such admission increments
+  `kconmon_ng_console_rate_limit_failopen_total{limit=...}`, so the gap is
+  visible rather than silent. Alert on it if you care.
+
+### `scheduler` — one flag, three consumers
+
+`scheduler.enabled` is **false by default**, deliberately: schedules can be
+created and stored without anything acting on them, so upgrading the chart
+must not by itself start dispatching fleet traffic from rows an operator
+entered while nothing was consuming them. Turning it on is a deliberate act.
+
+The one flag gates all three of:
+
+1. the **schedule loop** (fires due `check_schedules` rows as ordinary runs),
+2. the **stuck-run reaper** (`kconmon_ng_console_runs_reaped_total`),
+3. the **continuous external-check reconciler** — which pushes target
+   assignments to agents.
+
+There is no separate `console.externalChecks.*` block. The reconciler shares
+this flag and the scheduler's PostgreSQL advisory lock, so a Console with
+`scheduler.enabled=false` has continuous targets stored and nothing probing
+them.
+
+Enabling it also needs a resolved database DSN (`check_schedules` and the
+advisory lock both live in PostgreSQL) and a controller (a fired schedule
+becomes an ordinary diagnostics run). With either missing the console **logs
+and skips the loop** rather than failing to start — the rest of the Console is
+still useful.
+
+`scheduler_ticks_total{result="not-leader"}` is the normal case on every
+replica but one. The lock is taken and released per tick, so a replica dying
+mid-tick delays exactly one tick.
+
+### The other half lives in the agent's config, not this file
+
+The Console decides *what* to probe; the agent decides *whether it may*. The
+agent half is `config.checkers.external` in the **shared** agent/controller
+config (Helm: `config.checkers.external.*`), and it is not reachable from any
+Console setting:
+
+```yaml
+checkers:
+  external:
+    enabled: false # OFF by default; the block is not even parsed while false
+    allowedCidrs: [] # REQUIRED non-empty when enabled — an empty list is a startup error
+    deniedCidrs: [] # carve-outs; denied wins
+    maxTargets: 100 # defaulted when enabled and left at 0
+    timeout: 10s # bounds resolve-and-authorise, NOT the probe itself
+```
+
+Three things worth stating plainly:
+
+- **An empty `allowedCidrs` with `enabled: true` fails startup.** It is never
+  read as "allow everything" — the same posture `auth.header.trustedProxyCIDRs`
+  takes here, for the same reason: an empty list that means "everything" is a
+  bypass wearing a config key's clothes.
+- **`maxTargets` is validated but not yet enforced.** Startup rejects a
+  negative value and fills in 100 when the feature is on and the key was left
+  at 0, but nothing currently checks the assignment the controller pushes
+  against it. Treat it as a declared intent, not a running control, until it
+  is wired up — this is on the M4 deferral list in MILESTONES.md.
+- **`timeout` is not the probe timeout.** It bounds resolution and
+  authorisation of one destination. The probe stays governed by
+  `checkers.<type>.timeout`, so enabling external checks cannot silently
+  truncate a long MTR trace.
+
+A `NetworkPolicy` cannot substitute for this. `allowedCidrs`/`deniedCidrs` are
+enforced by the agent, in-process, after DNS resolution; see
+[SECURITY.md](SECURITY.md) for why the agent rather than the Console is the
+authority.
+
+### Continuous probe cadence is not operator-configurable yet
+
+A continuous external check is pushed to agents with a **30s interval and a 5s
+per-probe timeout**, and both are compile-time constants in
+`internal/console/checks/reconciler.go` — `defaultContinuousInterval` and
+`defaultContinuousTimeout`. There is no config key, no Helm value and no API
+field for either.
+
+That is a data-model gap, not an oversight in the config schema:
+`check_schedules` is the only row carrying a cadence, and `kind='continuous'`
+is explicitly forbidden from carrying one (`ScheduleInput.Validate` rejects a
+non-zero `interval_ns` on it) because a continuous check is never *fired*.
+That rule was written about the Console-side firing cadence and left the
+**agent-side probe** cadence with nowhere to live. `check_definitions.params`
+is free-form JSON, but inventing an unvalidated magic key there would turn an
+operator's typo into a silently-wrong probe rate with no feedback anywhere.
+
+30s matches the agents' own normal checker-loop cadence, and 5s is a
+deliberate small fraction of it so a hung probe cannot overlap the next one.
+The natural home for a real field is `check_schedules.interval_ns` with the
+continuous prohibition relaxed to mean "the probe interval" — one
+migration-free validation change plus a read in the reconciler. Carried
+forward out of M4.
+
+### The cardinality bound is a compile-time constant
+
+`POST /api/v1/checks/projection` reports, and create/update enforce, a
+**per-definition** ceiling of **400** projected Prometheus series
+(`maxProjectedSeries`, httpapi Decision 12). It is not configurable — not in
+the config file, not in Helm — and 400 is not arbitrary: it is `checks.maxPairs`,
+the bound the diagnostics runner already applies to one run's fan-out, reused
+so the Console's two cardinality guards tell an operator the same story.
+
+The bound is per definition, never fleet-wide, and that is load-bearing: the
+projection endpoint reports the number for the single definition in its body,
+the UI displays exactly that number, and the write path enforces exactly that
+number, so the warning can never disagree with the enforcement.
+
+The guard **fails open** when the topology cannot be read — a controller
+outage must not become a configuration-write outage — counted by
+`kconmon_ng_console_projection_guard_failopen_total`, with a WARN naming the
+definition that slipped through.
 
 ### The per-mode auth matrix
 
@@ -223,7 +370,7 @@ when `console.database.mode != disabled`**, so the default manifest
 Secrets are read once at boot; rotating one is an operator-initiated restart
 (the Deployment rolls on ConfigMap changes only, never on Secret changes).
 
-## Helm mapping (chart 1.5.0)
+## Helm mapping (chart 1.6.0)
 
 | Config key | Helm value |
 | ---------- | ---------- |
@@ -238,6 +385,8 @@ Secrets are read once at boot; rotating one is an operator-initiated restart
 | `valkey.dialTimeout` | `console.valkey.dialTimeout` |
 | `database.*` | `console.database.*`; the whole `database:` block is omitted from the rendered config when `console.database.mode=disabled` |
 | `database.dsnFile` | derived: `console.database.mode=cnpg` → the CNPG-operator-generated `<cluster>-app` Secret; `mode=external` → `console.database.existingSecret`/`existingSecretKey` |
+| `rateLimit.*` | `console.rateLimit.*`; emitted unconditionally (the limiter always runs) |
+| `scheduler.*` | `console.scheduler.*`; the whole `scheduler:` block is omitted from the rendered config when `console.scheduler.enabled=false` |
 
 Realtime therefore needs **two** flags, one on each side:
 
@@ -262,8 +411,24 @@ console:
   chart's rendered output for a fleet with events off, `auth.mode=anonymous` and
   `database.mode=disabled` is byte-identical to 1.3.x's — the pre-events chart,
   before M2's Valkey/WebSocket additions and M3's auth/database additions both
-  landed. (`1.5.0` post-dates this milestone and now names a **future**
-  release, so it can no longer be the comparison point.)
+  landed. 1.3.x is the comparison point because it PRE-dates those additions,
+  which is the only thing that makes a byte-identical claim meaningful; 1.5.0
+  is a *released* chart that already contains them, so it was never the right
+  baseline. (This sentence previously called 1.5.0 a future release. It has
+  shipped; the current chart is 1.6.0.)
+- **`config.checkers.external` is emitted into the shared ConfigMap only when
+  it is enabled**, for exactly the `controller.events` reason above: a pre-M4
+  agent image has no `External` field and `KnownFields(true)` would crashloop
+  it on an unconditional key as the DaemonSet rolls node by node. Off by
+  default also means an install that never touched the block renders an agent
+  `config.yaml` byte-identical to chart 1.5.0's.
+- **`console.scheduler` is emitted only when enabled**, and that one flag gates
+  three consumers: the schedule loop, the stuck-run reaper, and the continuous
+  external-check reconciler. They share the flag *and* the PostgreSQL advisory
+  lock, so there is no way to run the reconciler without the scheduler.
+- **`console.rateLimit` is emitted unconditionally**, unlike the two above.
+  There is no "off" state to gate on — the limiter always runs, and `0` is a
+  value that means "this limit is off", not "this block is absent".
 - **The render-time guard keys on the RESOLVED gRPC address**, not on
   `controller.events.enabled`: an explicit `grpcAddr` with events off is still
   realtime-on-with-no-bus. Resolved address + `valkey.mode=disabled` +

@@ -149,6 +149,22 @@
             "resources": { "type": "object" }
           }
         },
+        "rateLimit": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "runsPerMinute": { "type": "integer", "minimum": 0 },
+            "loginPerMinute": { "type": "integer", "minimum": 0 }
+          }
+        },
+        "scheduler": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "tickInterval": { "type": "string" }
+          }
+        },
         "podSecurityContext": { "type": "object" },
         "database": {
           "type": "object",
@@ -303,6 +319,17 @@
               "properties": {
                 "cooldown": { "type": "string" },
                 "maxHops": { "type": "integer", "minimum": 1, "maximum": 64 }
+              }
+            },
+            "external": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "enabled": { "type": "boolean" },
+                "allowedCidrs": { "type": "array", "items": { "type": "string" } },
+                "deniedCidrs": { "type": "array", "items": { "type": "string" } },
+                "maxTargets": { "type": "integer", "minimum": 0 },
+                "timeout": { "type": "string" }
               }
             }
           }

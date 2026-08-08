@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -425,5 +426,127 @@ func TestLoadFromFileEventsEnabled(t *testing.T) {
 	}
 	if !cfg.Controller.Events.Enabled {
 		t.Error("expected controller.events.enabled true after load")
+	}
+}
+
+// writeExternalConfig writes a minimal valid config with the given
+// checkers.external block and returns its path.
+func writeExternalConfig(t *testing.T, external string) string {
+	t.Helper()
+	content := "httpPort: 8080\ngrpcPort: 9090\nlogLevel: info\nlogFormat: json\ncheckers:\n  external:\n" + external
+	dir := t.TempDir()
+	p := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(p, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+func TestDefaultConfigExternalChecksDisabled(t *testing.T) {
+	cfg := DefaultConfig()
+	if cfg.Checkers.External.Enabled {
+		t.Error("checkers.external.enabled must default to false: external probing is opt-in")
+	}
+	if len(cfg.Checkers.External.AllowedCIDRs) != 0 {
+		t.Errorf("checkers.external.allowedCidrs must have no default, got %v", cfg.Checkers.External.AllowedCIDRs)
+	}
+}
+
+func TestExternalMalformedCIDRIsIndexedStartupError(t *testing.T) {
+	l := NewLoader(writeExternalConfig(t, "    enabled: true\n    allowedCidrs:\n      - 10.0.0.0/8\n      - 192.168.0.0/16\n      - nonsense\n"))
+	err := l.Load()
+	if err == nil {
+		t.Fatal("a malformed allowed CIDR must fail startup")
+	}
+	if !strings.Contains(err.Error(), "checkers.external.allowedCidrs[2]") {
+		t.Errorf("error must be indexed as checkers.external.allowedCidrs[2], got: %v", err)
+	}
+}
+
+func TestExternalMalformedDeniedCIDRIsIndexedStartupError(t *testing.T) {
+	l := NewLoader(writeExternalConfig(t, "    enabled: true\n    allowedCidrs:\n      - 10.0.0.0/8\n    deniedCidrs:\n      - 10.1.0.0/16\n      - 300.0.0.0/8\n"))
+	err := l.Load()
+	if err == nil {
+		t.Fatal("a malformed denied CIDR must fail startup")
+	}
+	if !strings.Contains(err.Error(), "checkers.external.deniedCidrs[1]") {
+		t.Errorf("error must be indexed as checkers.external.deniedCidrs[1], got: %v", err)
+	}
+}
+
+func TestExternalEnabledWithEmptyAllowedCIDRsIsError(t *testing.T) {
+	l := NewLoader(writeExternalConfig(t, "    enabled: true\n"))
+	err := l.Load()
+	if err == nil {
+		t.Fatal("an enabled external block with no allowedCidrs must fail: an empty list is not 'allow everything'")
+	}
+	if !strings.Contains(err.Error(), "allowedCidrs") {
+		t.Errorf("error must name allowedCidrs, got: %v", err)
+	}
+}
+
+// A disabled block is inert: it is not even parsed into an Allowlist, so an
+// operator can leave a half-written block in values.yaml without bricking the
+// agent. The gate is checkers.external.enabled, nothing else.
+func TestExternalDisabledWithGarbageStillLoads(t *testing.T) {
+	l := NewLoader(writeExternalConfig(t, "    enabled: false\n    allowedCidrs:\n      - total-nonsense\n      - 999.999.999.999/99\n    deniedCidrs:\n      - also-garbage\n    maxTargets: -5\n    timeout: -3s\n"))
+	if err := l.Load(); err != nil {
+		t.Fatalf("a disabled external block must load regardless of its contents, got: %v", err)
+	}
+	if l.Get().Checkers.External.Enabled {
+		t.Error("the block must stay disabled")
+	}
+}
+
+func TestExternalEnabledFillsDefaultsForZeroValues(t *testing.T) {
+	l := NewLoader(writeExternalConfig(t, "    enabled: true\n    allowedCidrs:\n      - 10.0.0.0/8\n"))
+	if err := l.Load(); err != nil {
+		t.Fatalf("valid enabled external block must load, got: %v", err)
+	}
+	ext := l.Get().Checkers.External
+	if ext.MaxTargets != defaultExternalMaxTargets {
+		t.Errorf("maxTargets = %d, want the %d default", ext.MaxTargets, defaultExternalMaxTargets)
+	}
+	if ext.Timeout != defaultExternalTimeout {
+		t.Errorf("timeout = %v, want the %v default", ext.Timeout, defaultExternalTimeout)
+	}
+}
+
+func TestExternalEnabledKeepsExplicitValues(t *testing.T) {
+	l := NewLoader(writeExternalConfig(t, "    enabled: true\n    allowedCidrs:\n      - 10.0.0.0/8\n      - 2001:db8::/32\n    deniedCidrs:\n      - 10.1.2.0/24\n    maxTargets: 7\n    timeout: 3s\n"))
+	if err := l.Load(); err != nil {
+		t.Fatalf("valid enabled external block must load, got: %v", err)
+	}
+	ext := l.Get().Checkers.External
+	if ext.MaxTargets != 7 {
+		t.Errorf("maxTargets = %d, want 7", ext.MaxTargets)
+	}
+	if ext.Timeout != 3*time.Second {
+		t.Errorf("timeout = %v, want 3s", ext.Timeout)
+	}
+	if len(ext.AllowedCIDRs) != 2 || len(ext.DeniedCIDRs) != 1 {
+		t.Errorf("CIDR lists not loaded: allowed=%v denied=%v", ext.AllowedCIDRs, ext.DeniedCIDRs)
+	}
+}
+
+func TestExternalEnabledRejectsNegativeMaxTargetsAndTimeout(t *testing.T) {
+	l := NewLoader(writeExternalConfig(t, "    enabled: true\n    allowedCidrs:\n      - 10.0.0.0/8\n    maxTargets: -1\n"))
+	if err := l.Load(); err == nil {
+		t.Error("a negative maxTargets must fail validation")
+	}
+
+	l2 := NewLoader(writeExternalConfig(t, "    enabled: true\n    allowedCidrs:\n      - 10.0.0.0/8\n    timeout: -1s\n"))
+	if err := l2.Load(); err == nil {
+		t.Error("a negative timeout must fail validation")
+	}
+}
+
+// An operator who allows nothing but denies something has still allowed
+// nothing: the enabled path requires a non-empty allowlist, deniedCidrs alone
+// is not a configuration.
+func TestExternalEnabledWithOnlyDeniedCIDRsIsError(t *testing.T) {
+	l := NewLoader(writeExternalConfig(t, "    enabled: true\n    deniedCidrs:\n      - 169.254.0.0/16\n"))
+	if err := l.Load(); err == nil {
+		t.Error("deniedCidrs alone must not satisfy the enabled path")
 	}
 }

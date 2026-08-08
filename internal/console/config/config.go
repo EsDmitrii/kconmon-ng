@@ -39,6 +39,80 @@ type Config struct {
 	Prometheus PrometheusConfig `yaml:"prometheus"`
 	Valkey     ValkeyConfig     `yaml:"valkey"`
 	Database   DatabaseConfig   `yaml:"database"`
+	RateLimit  RateLimitConfig  `yaml:"rateLimit"`
+	Scheduler  SchedulerConfig  `yaml:"scheduler"`
+}
+
+// SchedulerConfig configures the schedule loop (internal/console/scheduler):
+// the advisory-locked tick that fires due check_schedules rows through the
+// diagnostics runner and drives the stuck-run reaper.
+//
+// Enabled defaults to FALSE on purpose. Schedules can already be created and
+// stored (M4 Task 4) without anything acting on them, so an upgrade to the
+// milestone that adds this loop must not, on its own, start dispatching fleet
+// traffic from rows an operator entered while nothing was consuming them.
+// Turning it on is a deliberate act.
+type SchedulerConfig struct {
+	// Enabled turns the loop on. It also requires a resolved database DSN --
+	// check_schedules and the cross-replica advisory lock both live in
+	// PostgreSQL -- and a controller, since a fired schedule becomes an
+	// ordinary diagnostics run; cmd/console logs and skips the loop rather
+	// than failing to start when either is missing.
+	Enabled bool `yaml:"enabled"`
+	// TickInterval is the poll cadence. Short by design (seconds): the
+	// advisory lock is taken and released per tick, so a replica that dies
+	// mid-tick delays exactly one tick instead of wedging the fleet until
+	// its session is reaped.
+	TickInterval time.Duration `yaml:"tickInterval"`
+}
+
+// validate enforces scheduler.* invariants. The tick interval is only
+// checked when the loop is enabled: a disabled loop never reads it, and
+// rejecting a leftover zero in an operator's values.yaml for a feature they
+// have not switched on would be a boot failure over nothing.
+func (s *SchedulerConfig) validate() error {
+	if s.Enabled && s.TickInterval <= 0 {
+		return fmt.Errorf("scheduler.tickInterval must be positive when scheduler.enabled is true, got %v", s.TickInterval)
+	}
+	return nil
+}
+
+// RateLimitConfig configures the console's fixed-window request limits
+// (internal/console/httpapi/ratelimit.go). Both are counts per MINUTE, and
+// both follow the same "0 disables THAT limit" convention
+// database.retentionDays already uses for pruning -- a negative value is a
+// configuration error, not a disable.
+//
+// The window is counted in the cache.KV, so with console.valkey.mode=valkey
+// the limit is cluster-wide, and with console.valkey.mode=disabled it is
+// per-replica (the in-process KV has no cross-replica visibility, ADR-002):
+// N replicas then admit up to N times the configured rate. That is weaker
+// than configured, never stronger.
+type RateLimitConfig struct {
+	// RunsPerMinute caps POST /api/v1/runs per SUBJECT per minute (default
+	// 10): a diagnostics run fans out to up to 400 agent pairs, so an
+	// unbounded caller is a controller-load amplifier.
+	RunsPerMinute int `yaml:"runsPerMinute"`
+	// LoginPerMinute caps POST /api/v1/auth/login per USERNAME and, counted
+	// independently, per SOURCE IP per minute (default 5). This one is an
+	// availability control, not just an anti-brute-force one: argon2id is
+	// deliberately 64 MiB per verification, and unlimited concurrent logins
+	// against a 256Mi console pod is an unauthenticated OOM.
+	LoginPerMinute int `yaml:"loginPerMinute"`
+}
+
+// validate enforces rateLimit.* invariants. Zero is legal (that limit is
+// off); negative is not -- it would otherwise silently read as "off" too,
+// hiding a typo in an operator's values.yaml behind a disabled security
+// control.
+func (rl *RateLimitConfig) validate() error {
+	if rl.RunsPerMinute < 0 {
+		return fmt.Errorf("rateLimit.runsPerMinute must be >= 0 (0 disables the limit), got %d", rl.RunsPerMinute)
+	}
+	if rl.LoginPerMinute < 0 {
+		return fmt.Errorf("rateLimit.loginPerMinute must be >= 0 (0 disables the limit), got %d", rl.LoginPerMinute)
+	}
+	return nil
 }
 
 // ControllerConfig configures the console's HTTP client for the controller
@@ -166,6 +240,10 @@ func defaults() *Config {
 		Prometheus: PrometheusConfig{QueryTimeout: 30 * time.Second, MaxRange: 24 * time.Hour, MaxResponseBytes: 8 << 20},
 		Valkey:     ValkeyConfig{DialTimeout: 5 * time.Second},
 		Database:   DatabaseConfig{MaxConns: 10, ConnectTimeout: 10 * time.Second, MigrateOnStart: true, RetentionDays: 90},
+		RateLimit:  RateLimitConfig{RunsPerMinute: 10, LoginPerMinute: 5},
+		// enabled stays false (see SchedulerConfig); the interval is still
+		// defaulted so switching the loop on is a one-line change.
+		Scheduler: SchedulerConfig{TickInterval: 5 * time.Second},
 	}
 }
 
@@ -389,6 +467,12 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("valkey.dialTimeout must be positive, got %v", c.Valkey.DialTimeout)
 	}
 	if err := c.Database.validate(); err != nil {
+		return err
+	}
+	if err := c.RateLimit.validate(); err != nil {
+		return err
+	}
+	if err := c.Scheduler.validate(); err != nil {
 		return err
 	}
 	return nil

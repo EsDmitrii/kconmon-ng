@@ -101,6 +101,42 @@ Resolves console.valkey.mode (a Helm-only concept) to the Go-side
 {{- end }}
 
 {{/*
+Port the console's Valkey egress rule must open.
+
+For mode=bundled this is console.valkey.port: the chart owns both ends of that
+connection, so the listener and the rule cannot disagree.
+
+For mode=external it is the port inside console.valkey.address, because THAT is
+the port the console actually dials (valkeyAddress above hands the address to
+the config verbatim). console.valkey.port describes the BUNDLED listener and
+has nothing to do with an external instance, so using it there renders an
+egress rule for a port nothing connects to — `address: valkey.example.com:6380`
+with the default port would open 6379 and drop every packet with no diagnostic
+beyond a dial timeout.
+
+Both address shapes end in the port: "host:6379" and "[2001:db8::1]:6379". A
+trailing field that is not all digits means a malformed address; the rule falls
+back to console.valkey.port rather than emitting a non-integer port and failing
+the whole manifest — the console's own net.SplitHostPort rejects it at boot
+with a message that names the field.
+*/}}
+{{- define "kconmon-ng.console.valkeyEgressPort" -}}
+{{- $v := .Values.console.valkey -}}
+{{- $port := "" -}}
+{{- if eq $v.mode "external" -}}
+{{- $last := last (splitList ":" $v.address) -}}
+{{- if regexMatch "^[0-9]+$" $last -}}
+{{- $port = $last -}}
+{{- end -}}
+{{- end -}}
+{{- if $port -}}
+{{- $port -}}
+{{- else -}}
+{{- $v.port | int64 -}}
+{{- end -}}
+{{- end }}
+
+{{/*
 Console PostgreSQL: CNPG Cluster name (console.database.mode=cnpg).
 */}}
 {{- define "kconmon-ng.console.databaseClusterName" -}}

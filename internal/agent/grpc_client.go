@@ -24,6 +24,7 @@ type GRPCClient struct {
 	onPeers          func([]checker.Target)
 	onNeedReregister func()
 	onTask           func(context.Context, *pb.TaskRequest)
+	onExternal       func(*pb.ExternalCheckAssignment)
 }
 
 func NewGRPCClient(address string) (*GRPCClient, error) {
@@ -60,6 +61,14 @@ func (c *GRPCClient) OnTask(fn func(context.Context, *pb.TaskRequest)) {
 	c.onTask = fn
 }
 
+// OnExternalAssignment registers the handler invoked for each CONTINUOUS
+// external-check assignment received on the WatchExternalChecks stream. Every
+// message is the agent's COMPLETE assignment, never a delta, so the handler
+// replaces its target list wholesale rather than merging into it.
+func (c *GRPCClient) OnExternalAssignment(fn func(*pb.ExternalCheckAssignment)) {
+	c.onExternal = fn
+}
+
 // Register registers the agent and returns the peer list plus the zone the
 // controller resolved for this agent (empty if the controller has no zone).
 func (c *GRPCClient) Register(ctx context.Context, info model.AgentInfo, httpPort int) ([]checker.Target, string, error) { //nolint:gocritic // hugeParam: AgentInfo is passed by value intentionally
@@ -71,6 +80,9 @@ func (c *GRPCClient) Register(ctx context.Context, info model.AgentInfo, httpPor
 			PodIp:    info.PodIP,
 			Zone:     info.Zone,
 			Labels:   info.Labels,
+			// Capabilities gate the controller's dispatch of features an older
+			// agent would silently ignore; see model.AgentInfo.Capabilities.
+			Capabilities: info.Capabilities,
 		},
 	})
 	if err != nil {
@@ -169,6 +181,38 @@ func (c *GRPCClient) WatchTasks(ctx context.Context) error {
 
 		if c.onTask != nil {
 			c.onTask(ctx, task)
+		}
+	}
+}
+
+// WatchExternalChecks subscribes to the controller's continuous external-check
+// assignment stream and invokes the OnExternalAssignment handler for each
+// assignment. It mirrors WatchTasks: it returns on the first stream error so
+// the caller's reconnect loop can re-subscribe.
+//
+// The controller sends the agent's CURRENT assignment immediately on subscribe
+// (an empty one when it has none), so a reconnect always converges without any
+// delta bookkeeping here — including onto a restarted controller that lost
+// every assignment, where the empty send is what tells the agent to stop
+// probing rather than keep a stale target list alive.
+func (c *GRPCClient) WatchExternalChecks(ctx context.Context) error {
+	stream, err := c.client.WatchExternalChecks(ctx, &pb.WatchExternalChecksRequest{
+		AgentId: c.agentID,
+	})
+	if err != nil {
+		return fmt.Errorf("watching external checks: %w", err)
+	}
+
+	for {
+		assignment, err := stream.Recv()
+		if err != nil {
+			return fmt.Errorf("receiving external check assignment: %w", err)
+		}
+
+		slog.Info("external check assignment received", "specs", len(assignment.GetSpecs()))
+
+		if c.onExternal != nil {
+			c.onExternal(assignment)
 		}
 	}
 }

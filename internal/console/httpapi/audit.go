@@ -152,7 +152,19 @@ var auditDetailAllowlist = map[string][]string{
 	"POST /api/v1/rbac/roles":    {"name", "permissions"},
 	"POST /api/v1/rbac/bindings": {"roleName", "subjectKind", "subjectId"},
 	"POST /api/v1/tokens":        {"name", "expiresAt"},
-	"POST /api/v1/runs":          {"type", "plane"},
+	// destinationKind joined in M4: a closed three-value enum that tells an
+	// auditor whether a run probed the mesh or something outside it. The
+	// external address and target id stay excluded for the same reason
+	// sources/destinations are -- reconstructible from the run itself, and an
+	// address is exactly the kind of value an audit row must not echo.
+	"POST /api/v1/runs": {"type", "plane", "destinationKind"},
+	// POST /api/v1/runs/{id}/cancel has NO entry, and that is the conscious
+	// decision, not an omission: it carries no request body at all, so there
+	// are no body keys to allow-list, and the run it names is already in the
+	// row's resource column (auditResource reads {id}). It is still audited
+	// like every other mutation -- authorize routes every POST through
+	// auditMutation -- with the empty {} detail this map's default-deny rule
+	// gives a body-less route. Same shape as every DELETE here.
 	// Targets (M4 Task 3): "name" and "kind" only, NEVER "address". This is
 	// the conscious decision the default-deny allow-list forces per mutating
 	// route -- an audit log is read by more people, and retained longer, than

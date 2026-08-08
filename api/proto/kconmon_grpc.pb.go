@@ -20,12 +20,13 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	AgentRegistry_Register_FullMethodName         = "/kconmonng.v1.AgentRegistry/Register"
-	AgentRegistry_Heartbeat_FullMethodName        = "/kconmonng.v1.AgentRegistry/Heartbeat"
-	AgentRegistry_WatchPeers_FullMethodName       = "/kconmonng.v1.AgentRegistry/WatchPeers"
-	AgentRegistry_Deregister_FullMethodName       = "/kconmonng.v1.AgentRegistry/Deregister"
-	AgentRegistry_WatchTasks_FullMethodName       = "/kconmonng.v1.AgentRegistry/WatchTasks"
-	AgentRegistry_ReportTaskResult_FullMethodName = "/kconmonng.v1.AgentRegistry/ReportTaskResult"
+	AgentRegistry_Register_FullMethodName            = "/kconmonng.v1.AgentRegistry/Register"
+	AgentRegistry_Heartbeat_FullMethodName           = "/kconmonng.v1.AgentRegistry/Heartbeat"
+	AgentRegistry_WatchPeers_FullMethodName          = "/kconmonng.v1.AgentRegistry/WatchPeers"
+	AgentRegistry_Deregister_FullMethodName          = "/kconmonng.v1.AgentRegistry/Deregister"
+	AgentRegistry_WatchTasks_FullMethodName          = "/kconmonng.v1.AgentRegistry/WatchTasks"
+	AgentRegistry_ReportTaskResult_FullMethodName    = "/kconmonng.v1.AgentRegistry/ReportTaskResult"
+	AgentRegistry_WatchExternalChecks_FullMethodName = "/kconmonng.v1.AgentRegistry/WatchExternalChecks"
 )
 
 // AgentRegistryClient is the client API for AgentRegistry service.
@@ -42,6 +43,11 @@ type AgentRegistryClient interface {
 	// ReportTaskResult delivers the outcome of a WatchTasks task back to the
 	// controller.
 	ReportTaskResult(ctx context.Context, in *TaskResult, opts ...grpc.CallOption) (*emptypb.Empty, error)
+	// WatchExternalChecks server-streams this agent's CONTINUOUS external-check
+	// assignment, mirroring the WatchPeers push pattern. Each message is the
+	// agent's COMPLETE assignment, never a delta: a dropped message can then
+	// never leave an agent probing a target the operator deleted.
+	WatchExternalChecks(ctx context.Context, in *WatchExternalChecksRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[ExternalCheckAssignment], error)
 }
 
 type agentRegistryClient struct {
@@ -130,6 +136,25 @@ func (c *agentRegistryClient) ReportTaskResult(ctx context.Context, in *TaskResu
 	return out, nil
 }
 
+func (c *agentRegistryClient) WatchExternalChecks(ctx context.Context, in *WatchExternalChecksRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[ExternalCheckAssignment], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &AgentRegistry_ServiceDesc.Streams[2], AgentRegistry_WatchExternalChecks_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[WatchExternalChecksRequest, ExternalCheckAssignment]{ClientStream: stream}
+	if err := x.ClientStream.SendMsg(in); err != nil {
+		return nil, err
+	}
+	if err := x.ClientStream.CloseSend(); err != nil {
+		return nil, err
+	}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type AgentRegistry_WatchExternalChecksClient = grpc.ServerStreamingClient[ExternalCheckAssignment]
+
 // AgentRegistryServer is the server API for AgentRegistry service.
 // All implementations must embed UnimplementedAgentRegistryServer
 // for forward compatibility.
@@ -144,6 +169,11 @@ type AgentRegistryServer interface {
 	// ReportTaskResult delivers the outcome of a WatchTasks task back to the
 	// controller.
 	ReportTaskResult(context.Context, *TaskResult) (*emptypb.Empty, error)
+	// WatchExternalChecks server-streams this agent's CONTINUOUS external-check
+	// assignment, mirroring the WatchPeers push pattern. Each message is the
+	// agent's COMPLETE assignment, never a delta: a dropped message can then
+	// never leave an agent probing a target the operator deleted.
+	WatchExternalChecks(*WatchExternalChecksRequest, grpc.ServerStreamingServer[ExternalCheckAssignment]) error
 	mustEmbedUnimplementedAgentRegistryServer()
 }
 
@@ -171,6 +201,9 @@ func (UnimplementedAgentRegistryServer) WatchTasks(*WatchTasksRequest, grpc.Serv
 }
 func (UnimplementedAgentRegistryServer) ReportTaskResult(context.Context, *TaskResult) (*emptypb.Empty, error) {
 	return nil, status.Error(codes.Unimplemented, "method ReportTaskResult not implemented")
+}
+func (UnimplementedAgentRegistryServer) WatchExternalChecks(*WatchExternalChecksRequest, grpc.ServerStreamingServer[ExternalCheckAssignment]) error {
+	return status.Error(codes.Unimplemented, "method WatchExternalChecks not implemented")
 }
 func (UnimplementedAgentRegistryServer) mustEmbedUnimplementedAgentRegistryServer() {}
 func (UnimplementedAgentRegistryServer) testEmbeddedByValue()                       {}
@@ -287,6 +320,17 @@ func _AgentRegistry_ReportTaskResult_Handler(srv interface{}, ctx context.Contex
 	return interceptor(ctx, in, info, handler)
 }
 
+func _AgentRegistry_WatchExternalChecks_Handler(srv interface{}, stream grpc.ServerStream) error {
+	m := new(WatchExternalChecksRequest)
+	if err := stream.RecvMsg(m); err != nil {
+		return err
+	}
+	return srv.(AgentRegistryServer).WatchExternalChecks(m, &grpc.GenericServerStream[WatchExternalChecksRequest, ExternalCheckAssignment]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type AgentRegistry_WatchExternalChecksServer = grpc.ServerStreamingServer[ExternalCheckAssignment]
+
 // AgentRegistry_ServiceDesc is the grpc.ServiceDesc for AgentRegistry service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -320,6 +364,11 @@ var AgentRegistry_ServiceDesc = grpc.ServiceDesc{
 		{
 			StreamName:    "WatchTasks",
 			Handler:       _AgentRegistry_WatchTasks_Handler,
+			ServerStreams: true,
+		},
+		{
+			StreamName:    "WatchExternalChecks",
+			Handler:       _AgentRegistry_WatchExternalChecks_Handler,
 			ServerStreams: true,
 		},
 	},

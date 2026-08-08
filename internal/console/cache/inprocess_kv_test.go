@@ -130,6 +130,122 @@ func TestInProcessKVSweeperReclaimsMemory(t *testing.T) {
 	}
 }
 
+// --- IncrWithTTL: the fixed-window primitive (M4 Task 8) ------------------
+
+func TestInProcessKVIncrWithTTLCountsOneToNWithinTheWindow(t *testing.T) {
+	t.Parallel()
+	kv := cache.NewInProcessKV()
+	t.Cleanup(kv.Close)
+
+	for want := int64(1); want <= 5; want++ {
+		got, err := kv.IncrWithTTL(context.Background(), "rl:window", time.Minute)
+		if err != nil {
+			t.Fatalf("IncrWithTTL #%d: %v", want, err)
+		}
+		if got != want {
+			t.Fatalf("IncrWithTTL #%d = %d, want %d", want, got, want)
+		}
+	}
+}
+
+// TestInProcessKVIncrWithTTLDoesNotExtendTheWindow is the whole point of the
+// primitive: a FIXED window starts at its first hit and later hits inside it
+// must not push the expiry out, or a client hammering the endpoint would
+// keep its own counter alive forever and never get a fresh allowance.
+func TestInProcessKVIncrWithTTLDoesNotExtendTheWindow(t *testing.T) {
+	t.Parallel()
+	kv := cache.NewInProcessKV()
+	t.Cleanup(kv.Close)
+
+	const ttl = 600 * time.Millisecond
+	start := time.Now()
+	for i := range 3 {
+		if _, err := kv.IncrWithTTL(context.Background(), "rl:fixed", ttl); err != nil {
+			t.Fatalf("IncrWithTTL #%d: %v", i, err)
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	// t is now ~600ms; the third hit landed at ~400ms. A sliding window would
+	// keep the key alive until ~1000ms, a fixed one dies at ~600ms.
+	time.Sleep(time.Until(start.Add(750 * time.Millisecond)))
+
+	got, err := kv.IncrWithTTL(context.Background(), "rl:fixed", ttl)
+	if err != nil {
+		t.Fatalf("IncrWithTTL after the window: %v", err)
+	}
+	if got != 1 {
+		t.Fatalf("IncrWithTTL after the window = %d, want 1 -- later hits extended the TTL "+
+			"(sliding window), which is not what a fixed-window rate limit may do", got)
+	}
+}
+
+// TestInProcessKVIncrWithTTLConcurrentFirstHitsNeverLeaveAKeyTTLLess pins the
+// race the doc comment calls out: many goroutines racing on a key that does
+// not exist yet must produce exactly N as the final count AND a key that
+// still expires -- a lost TTL would lock a subject out permanently.
+func TestInProcessKVIncrWithTTLConcurrentFirstHitsNeverLeaveAKeyTTLLess(t *testing.T) {
+	t.Parallel()
+	kv := cache.NewInProcessKV()
+	t.Cleanup(kv.Close)
+
+	const goroutines = 32
+	const ttl = 250 * time.Millisecond
+
+	seen := make([]int64, goroutines)
+	var wg sync.WaitGroup
+	for g := range goroutines {
+		wg.Add(1)
+		go func(g int) {
+			defer wg.Done()
+			n, err := kv.IncrWithTTL(context.Background(), "rl:race", ttl)
+			if err != nil {
+				t.Errorf("goroutine %d: IncrWithTTL: %v", g, err)
+				return
+			}
+			seen[g] = n
+		}(g)
+	}
+	wg.Wait()
+
+	// Every 1..N must have been handed out exactly once.
+	got := map[int64]bool{}
+	for _, n := range seen {
+		if n < 1 || n > goroutines {
+			t.Fatalf("IncrWithTTL returned %d, outside 1..%d", n, goroutines)
+		}
+		if got[n] {
+			t.Fatalf("IncrWithTTL returned %d twice -- the increment is not atomic", n)
+		}
+		got[n] = true
+	}
+
+	time.Sleep(2 * ttl)
+	after, err := kv.IncrWithTTL(context.Background(), "rl:race", ttl)
+	if err != nil {
+		t.Fatalf("IncrWithTTL after the window: %v", err)
+	}
+	if after != 1 {
+		t.Fatalf("IncrWithTTL after the window = %d, want 1 -- the concurrent first hits left the key TTL-less", after)
+	}
+}
+
+// TestInProcessKVIncrWithTTLOnANonNumericValueErrors mirrors Valkey's own
+// INCR contract: a key holding something that is not an integer is an error,
+// not a silent reset -- otherwise a key collision between a counter and a
+// session blob would quietly wipe the rate limit.
+func TestInProcessKVIncrWithTTLOnANonNumericValueErrors(t *testing.T) {
+	t.Parallel()
+	kv := cache.NewInProcessKV()
+	t.Cleanup(kv.Close)
+
+	if err := kv.Set(context.Background(), "rl:not-a-number", []byte("hello"), time.Minute); err != nil {
+		t.Fatalf("Set: %v", err)
+	}
+	if _, err := kv.IncrWithTTL(context.Background(), "rl:not-a-number", time.Minute); err == nil {
+		t.Fatal("IncrWithTTL on a non-numeric value must return an error, got nil")
+	}
+}
+
 // TestInProcessKVConcurrentSetGetDelete exercises the lock discipline under
 // -race: many goroutines hammering Set/Get/Delete on overlapping keys.
 func TestInProcessKVConcurrentSetGetDelete(t *testing.T) {

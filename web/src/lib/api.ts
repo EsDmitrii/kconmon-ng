@@ -1,10 +1,15 @@
 import type {
+  CheckDefinition,
+  CheckDefinitionPage,
+  CheckDefinitionQuery,
+  CheckDefinitionRequest,
   Config,
   EventPage,
   EventQuery,
   Matrix,
   Me,
   Problem,
+  Projection,
   PromResult,
   Protocol,
   RunCreateRequest,
@@ -12,6 +17,14 @@ import type {
   RunDetail,
   RunPage,
   RunQuery,
+  Schedule,
+  SchedulePage,
+  ScheduleQuery,
+  ScheduleRequest,
+  Target,
+  TargetPage,
+  TargetQuery,
+  TargetRequest,
   Topology,
   Version,
 } from "./types";
@@ -250,6 +263,19 @@ export function getRun(id: string): Promise<RunDetail> {
   return apiFetch(`/api/v1/runs/${encodeURIComponent(id)}`).then((r) => handle<RunDetail>(r));
 }
 
+// cancelRun is POST /api/v1/runs/{id}/cancel: 204 (so handleVoid, not
+// handle), and 204 for the two outcomes the server deliberately treats as
+// non-errors too — cancelling a run that reached a terminal status a moment
+// earlier, and cancelling one another replica started. Cancellation is
+// ASYNCHRONOUS: the 204 only means "accepted", and the run's own goroutine
+// writes the terminal "cancelled" status once its in-flight pairs settle, so
+// the caller re-reads GET /api/v1/runs/{id} rather than assuming the new
+// status. Requires runs:create — starting fleet-wide probe traffic and
+// stopping it are the same operational class (middleware_auth.go).
+export function cancelRun(id: string): Promise<void> {
+  return apiFetch(`/api/v1/runs/${encodeURIComponent(id)}/cancel`, { method: "POST" }).then(handleVoid);
+}
+
 // getRuns is GET /api/v1/runs: one page of run history, newest first,
 // behind an opaque keyset cursor, filtered by ?type=&status= -- the
 // Diagnostics page's history list. Same "absent field means server
@@ -262,4 +288,175 @@ export function getRuns(q: RunQuery = {}): Promise<RunPage> {
   if (q.limit !== undefined) qs.set("limit", String(q.limit));
   const suffix = qs.toString();
   return apiFetch(`/api/v1/runs${suffix ? `?${suffix}` : ""}`).then((r) => handle<RunPage>(r));
+}
+
+/* ── M4: targets, check definitions, schedules ──────────────────────────────
+   All ten functions below ride the same apiFetch (credentials + CSRF header
+   on every mutation) and the same handle<T>/handleVoid pair everything above
+   uses — no second fetch path, so a future endpoint cannot forget the CSRF
+   header by being written against a different wrapper.
+
+   None of them enforces a permission. The Targets page hides affordances it
+   has no permission for (useAuth().can), but the server is the only real gate
+   — every one of these routes is re-checked in
+   internal/console/httpapi/middleware_auth.go's route→permission table, and a
+   403 surfaces here as an ApiError like any other problem+json. */
+
+// listTargets is GET /api/v1/targets: one page of external probe targets,
+// newest first, behind the same opaque keyset cursor getRuns/getEvents use.
+// Requires targets:read.
+export function listTargets(q: TargetQuery = {}): Promise<TargetPage> {
+  const qs = new URLSearchParams();
+  if (q.kind) qs.set("kind", q.kind);
+  if (q.limit !== undefined) qs.set("limit", String(q.limit));
+  if (q.cursor) qs.set("cursor", q.cursor);
+  const suffix = qs.toString();
+  return apiFetch(`/api/v1/targets${suffix ? `?${suffix}` : ""}`).then((r) => handle<TargetPage>(r));
+}
+
+// getTarget is GET /api/v1/targets/{id}: ONE target, which is exactly what the
+// Target card permalink (pages/target-card.tsx) renders its header from on a
+// cold, bookmarked load. It is a separate call rather than a find() over
+// listTargets' first page on purpose: that page is cursor-paginated, so a
+// target beyond it would render as "not found" on a link that is perfectly
+// valid. An unknown id and a malformed one are both 404 problem+json
+// (docs/console-api.yaml), i.e. indistinguishable here — the card says "this
+// target does not exist" for either. Requires targets:read.
+export function getTarget(id: string): Promise<Target> {
+  return apiFetch(`/api/v1/targets/${encodeURIComponent(id)}`).then((r) => handle<Target>(r));
+}
+
+// createTarget is POST /api/v1/targets (201 + Location). A duplicate name is
+// 422, not 409 (docs/console-api.yaml: "a rejected field value in an
+// otherwise well-formed body"), which is why the Targets page renders every
+// 422 detail at a FIELD rather than as a page-level banner.
+export function createTarget(req: TargetRequest): Promise<Target> {
+  return apiFetch("/api/v1/targets", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(req),
+  }).then((r) => handle<Target>(r));
+}
+
+// updateTarget is PUT /api/v1/targets/{id}: a FULL replace — an omitted field
+// means empty, never "leave as-is" — answering the stored row, not an echo of
+// the request. Callers must therefore send every field, including labels.
+export function updateTarget(id: string, req: TargetRequest): Promise<Target> {
+  return apiFetch(`/api/v1/targets/${encodeURIComponent(id)}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(req),
+  }).then((r) => handle<Target>(r));
+}
+
+// deleteTarget is DELETE /api/v1/targets/{id}: 204, so handleVoid rather than
+// handle. 409 while any check definition still references the target — a
+// problem+json like any other, surfaced to the caller as an ApiError.
+export function deleteTarget(id: string): Promise<void> {
+  return apiFetch(`/api/v1/targets/${encodeURIComponent(id)}`, { method: "DELETE" }).then(handleVoid);
+}
+
+// listChecks is GET /api/v1/checks: one page of check definitions, newest
+// first. `enabled` is a real tri-state here — absent means "no filter", and
+// the server treats anything that is not "true"/"false" as unset — so it is
+// only serialised when the caller passed a boolean.
+export function listChecks(q: CheckDefinitionQuery = {}): Promise<CheckDefinitionPage> {
+  const qs = new URLSearchParams();
+  if (q.targetId) qs.set("targetId", q.targetId);
+  if (q.enabled !== undefined) qs.set("enabled", String(q.enabled));
+  if (q.limit !== undefined) qs.set("limit", String(q.limit));
+  if (q.cursor) qs.set("cursor", q.cursor);
+  const suffix = qs.toString();
+  return apiFetch(`/api/v1/checks${suffix ? `?${suffix}` : ""}`).then((r) => handle<CheckDefinitionPage>(r));
+}
+
+// createCheck is POST /api/v1/checks. The projection guard runs server-side
+// before the write and ONLY for a definition arriving enabled: over the limit
+// it is 422, while the same definition saved with enabled:false is accepted
+// (httpapi's enforceProjection). checksProjection below previews that same
+// number, but this call is the arbiter.
+export function createCheck(req: CheckDefinitionRequest): Promise<CheckDefinition> {
+  return apiFetch("/api/v1/checks", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(req),
+  }).then((r) => handle<CheckDefinition>(r));
+}
+
+// updateCheck is PUT /api/v1/checks/{id}: a full replace, same contract and
+// same enabled-only projection guard as createCheck.
+export function updateCheck(id: string, req: CheckDefinitionRequest): Promise<CheckDefinition> {
+  return apiFetch(`/api/v1/checks/${encodeURIComponent(id)}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(req),
+  }).then((r) => handle<CheckDefinition>(r));
+}
+
+export function deleteCheck(id: string): Promise<void> {
+  return apiFetch(`/api/v1/checks/${encodeURIComponent(id)}`, { method: "DELETE" }).then(handleVoid);
+}
+
+// checksProjection is POST /api/v1/checks/projection: what a DRAFT definition
+// would project against the current topology. Persists nothing, and takes the
+// very same CheckDefinitionRequest body create/update take, so the form can
+// send the draft it is about to submit unchanged.
+//
+// Gated on checks:WRITE, not checks:read (middleware_auth.go: "a caller who
+// cannot create a definition has no question to ask it"), which is why the
+// page only ever calls this from behind a can("checks:write") check — without
+// it the call would be a guaranteed 403.
+export function checksProjection(req: CheckDefinitionRequest): Promise<Projection> {
+  return apiFetch("/api/v1/checks/projection", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(req),
+  }).then((r) => handle<Projection>(r));
+}
+
+// listSchedules is GET /api/v1/schedules. Note the permission: reading
+// schedules rides on checks:read, since there is no schedules:read at all
+// (middleware_auth.go: "reading a cadence tells you nothing the definition it
+// belongs to does not already tell you"); only mutations need
+// schedules:write. M4 Task 7 uses the read side only.
+export function listSchedules(q: ScheduleQuery = {}): Promise<SchedulePage> {
+  const qs = new URLSearchParams();
+  if (q.definitionId) qs.set("definitionId", q.definitionId);
+  if (q.limit !== undefined) qs.set("limit", String(q.limit));
+  if (q.cursor) qs.set("cursor", q.cursor);
+  const suffix = qs.toString();
+  return apiFetch(`/api/v1/schedules${suffix ? `?${suffix}` : ""}`).then((r) => handle<SchedulePage>(r));
+}
+
+// createSchedule is POST /api/v1/schedules (201). Requires schedules:write.
+// The body's cross-field rules are the server's (store.ScheduleInput.Validate
+// + httpapi's decodeScheduleRequest): kind "interval" requires a positive
+// intervalNs, kind "once" requires a runAt in the FUTURE, kind "continuous"
+// must carry neither — a rejected combination is a 422 problem+json, i.e. an
+// ApiError here, not a silent no-op. `nextFireAt` is deliberately not part of
+// the body: it is scheduler bookkeeping the server seeds itself.
+export function createSchedule(req: ScheduleRequest): Promise<Schedule> {
+  return apiFetch("/api/v1/schedules", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(req),
+  }).then((r) => handle<Schedule>(r));
+}
+
+// updateSchedule is PUT /api/v1/schedules/{id}: a FULL replace, like every
+// other write in this API — an omitted field means empty, never "leave
+// as-is". definitionId is not updatable: a body naming a DIFFERENT definition
+// is a 422, while an omitted or matching one is fine, so callers send the
+// stored row's own definitionId back.
+export function updateSchedule(id: string, req: ScheduleRequest): Promise<Schedule> {
+  return apiFetch(`/api/v1/schedules/${encodeURIComponent(id)}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(req),
+  }).then((r) => handle<Schedule>(r));
+}
+
+// deleteSchedule is DELETE /api/v1/schedules/{id}: 204, so handleVoid.
+export function deleteSchedule(id: string): Promise<void> {
+  return apiFetch(`/api/v1/schedules/${encodeURIComponent(id)}`, { method: "DELETE" }).then(handleVoid);
 }

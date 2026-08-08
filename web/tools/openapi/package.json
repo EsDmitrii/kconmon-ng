@@ -1,0 +1,10 @@
+{
+  "name": "kconmon-ng-openapi-codegen",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Isolated dependency tree for `npm run gen:api`. openapi-typescript@7 peers on typescript@^5.x and calls ts.factory through a DEFAULT import, which the console's own typescript@7 no longer provides -- installing it beside the app would either fail npm's peer resolution or crash at generate time with `Cannot read properties of undefined (reading 'createKeywordTypeNode')`. Keeping it in a file: sub-package gives the generator its own nested typescript@5 while the app stays on 7. Nothing here is imported by src/; the only entry point is web/package.json's gen:api script.",
+  "dependencies": {
+    "openapi-typescript": "^7.13.0",
+    "typescript": "^5.9.3"
+  }
+}

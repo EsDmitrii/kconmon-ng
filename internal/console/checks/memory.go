@@ -133,6 +133,45 @@ func (m *MemoryStore) FinishRun(_ context.Context, id, status string, pairOK, pa
 	return nil
 }
 
+// ReapStuckRuns force-finishes up to limit runs left "running" with CreatedAt
+// strictly before before, recording each as "cancelled", and reports how many
+// it moved -- the same contract *store.DB implements against SQL
+// (store.RunStore.ReapStuckRuns).
+//
+// It exists here for the reason every other method on this type does: with
+// database.mode=disabled the runner is handed a *MemoryStore instead of a
+// *store.DB and must not behave differently. A process that dies mid-run
+// loses this ring entirely, so the reaper has less to do here than against a
+// database -- but a run whose execute goroutine died without reaching
+// FinishRun (a panic outside runOneRecovered's reach, say) leaves exactly the
+// same stuck row in memory that it would on disk.
+//
+// Oldest-first, matching the SQL's ORDER BY created_at, so a limit that
+// cannot cover the whole backlog makes the same progress either way. The
+// insertion-ordered ring means iterating m.order forward IS oldest-first;
+// no sort is needed.
+func (m *MemoryStore) ReapStuckRuns(_ context.Context, before time.Time, limit int32) (int64, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	var reaped int64
+	now := time.Now().UTC()
+	for _, id := range m.order {
+		if reaped >= int64(limit) {
+			break
+		}
+		entry := m.runs[id]
+		// status "running" is half the predicate: age alone is never enough.
+		if entry.run.Status != "running" || !entry.run.CreatedAt.Before(before) {
+			continue
+		}
+		entry.run.Status = "cancelled"
+		entry.run.FinishedAt = &now
+		reaped++
+	}
+	return reaped, nil
+}
+
 // UpsertRunResult inserts one (run, source, destination) result, or -- on a
 // retried pair -- overwrites the existing row, matching *store.DB's upsert
 // contract.

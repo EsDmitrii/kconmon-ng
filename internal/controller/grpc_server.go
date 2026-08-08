@@ -21,9 +21,10 @@ import (
 type GRPCServer struct {
 	pb.UnimplementedAgentRegistryServer
 	pb.UnimplementedEventStreamServer
-	registry *Registry
-	metrics  *metrics.PrometheusMetrics
-	taskMgr  *TaskManager
+	registry    *Registry
+	metrics     *metrics.PrometheusMetrics
+	taskMgr     *TaskManager
+	externalMgr *ExternalCheckManager
 
 	mu       sync.RWMutex
 	watchers map[string]chan *pb.PeerUpdate
@@ -64,6 +65,7 @@ func NewGRPCServer(
 		registry:            registry,
 		metrics:             m,
 		taskMgr:             NewTaskManager(),
+		externalMgr:         NewExternalCheckManager(),
 		watchers:            make(map[string]chan *pb.PeerUpdate),
 		leaderElection:      leaderElection,
 		isLeader:            isLeader,
@@ -93,6 +95,13 @@ func (s *GRPCServer) TaskManager() *TaskManager {
 	return s.taskMgr
 }
 
+// ExternalCheckManager exposes the continuous external-check assignment store
+// so the HTTP PUT handler can fan changes out over the same streams agents
+// watch.
+func (s *GRPCServer) ExternalCheckManager() *ExternalCheckManager {
+	return s.externalMgr
+}
+
 // RegisterService registers the controller's gRPC services. EventStream is only
 // registered when controller.events.enabled is on: leaving it unregistered makes
 // gRPC answer a subscribing Console with codes.Unimplemented, which is the
@@ -114,6 +123,9 @@ func (s *GRPCServer) Register(_ context.Context, req *pb.RegisterRequest) (*pb.R
 		PodIP:    agentMeta.GetPodIp(),
 		Zone:     agentMeta.GetZone(),
 		Labels:   agentMeta.GetLabels(),
+		// Retained so the diagnostics handler can gate external destinations on
+		// what this agent build actually supports.
+		Capabilities: agentMeta.GetCapabilities(),
 	}
 
 	resolved := s.registry.Register(info)
@@ -222,6 +234,60 @@ func (s *GRPCServer) WatchTasks(req *pb.WatchTasksRequest, stream pb.AgentRegist
 				return nil
 			}
 			if err := stream.Send(task); err != nil {
+				return err
+			}
+		case <-s.stopCh:
+			return status.Error(codes.Unavailable, "controller shutting down")
+		case <-stream.Context().Done():
+			return stream.Context().Err()
+		}
+	}
+}
+
+// WatchExternalChecks server-streams an agent's CONTINUOUS external-check
+// assignment. It mirrors the WatchTasks lifecycle — subscribe, count the
+// connection, clean up on stream close — with one addition borrowed from
+// WatchPeers: the agent's CURRENT assignment (an empty one when it has none)
+// is sent immediately on subscribe, exactly as WatchPeers opens with a
+// FULL_SYNC. That is what lets a restarting agent converge without waiting for
+// the next operator change, and what stops a stale assignment surviving a
+// controller restart: the empty send tells the agent to drop everything.
+//
+// Subscribing BEFORE reading the current assignment is deliberate: no change
+// can slip through the gap. A change landing in between is delivered twice
+// instead, which is harmless because every assignment is absolute state, never
+// a delta.
+func (s *GRPCServer) WatchExternalChecks(
+	req *pb.WatchExternalChecksRequest,
+	stream pb.AgentRegistry_WatchExternalChecksServer,
+) error {
+	agentID := req.GetAgentId()
+
+	updates, cleanup := s.externalMgr.Subscribe(agentID)
+	s.metrics.ControllerExternalSubscribers.WithLabelValues().Inc()
+	s.metrics.ControllerGRPCConnections.WithLabelValues().Inc()
+
+	defer func() {
+		cleanup()
+		s.metrics.ControllerExternalSubscribers.WithLabelValues().Dec()
+		s.metrics.ControllerGRPCConnections.WithLabelValues().Dec()
+	}()
+
+	if err := stream.Send(s.externalMgr.Assignment(agentID)); err != nil {
+		return err
+	}
+
+	for {
+		select {
+		// The ExternalCheckManager never closes the subscription channel (see
+		// Subscribe), so this branch does not fire on teardown; the loop exits
+		// via the stream context or the server-wide stopCh below. The ok check
+		// is kept as belt-and-braces.
+		case assignment, ok := <-updates:
+			if !ok {
+				return nil
+			}
+			if err := stream.Send(assignment); err != nil {
 				return err
 			}
 		case <-s.stopCh:
@@ -384,11 +450,12 @@ func (s *GRPCServer) BroadcastPeerUpdate(agents []model.AgentInfo) {
 
 func agentInfoToProto(a model.AgentInfo) *pb.AgentMeta { //nolint:gocritic // hugeParam: value copy is intentional for proto conversion
 	return &pb.AgentMeta{
-		Id:       a.ID,
-		NodeName: a.NodeName,
-		PodName:  a.PodName,
-		PodIp:    a.PodIP,
-		Zone:     a.Zone,
-		Labels:   a.Labels,
+		Id:           a.ID,
+		NodeName:     a.NodeName,
+		PodName:      a.PodName,
+		PodIp:        a.PodIP,
+		Zone:         a.Zone,
+		Labels:       a.Labels,
+		Capabilities: a.Capabilities,
 	}
 }

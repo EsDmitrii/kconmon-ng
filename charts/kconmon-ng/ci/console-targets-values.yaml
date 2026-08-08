@@ -1,0 +1,48 @@
+---
+# Console + external-targets values for chart testing (M4 surface: the agent's
+# external checker block, the console schedule loop, and non-default rate
+# limits). The six existing profiles are left untouched so the M2 realtime, M3
+# persistence and M3 auth regressions stay covered on their own; this one adds
+# exactly the render paths M4 introduced.
+#
+# Deliberately the only profile that turns config.checkers.external on, because
+# it is the only render whose agent config.yaml differs from chart 1.5.0's:
+# everywhere else the block must stay absent, and a diff between this profile
+# and the others is what shows that.
+controller:
+  events:
+    enabled: true
+config:
+  checkers:
+    external:
+      enabled: true
+      allowedCidrs:
+        - 10.0.0.0/8
+        - 2001:db8::/32
+      deniedCidrs:
+        - 169.254.169.254/32
+      maxTargets: 50
+      timeout: 5s
+console:
+  enabled: true
+  replicas: 2
+  valkey:
+    mode: bundled
+  # Required by the scheduler below: check_schedules and the cross-replica
+  # advisory lock both live in PostgreSQL.
+  database:
+    mode: cnpg
+  scheduler:
+    enabled: true
+    tickInterval: 10s
+  # Non-default on purpose, including a 0 (that limit off) so the "0 disables"
+  # path is rendered by at least one profile.
+  rateLimit:
+    runsPerMinute: 30
+    loginPerMinute: 0
+  prometheus:
+    url: http://prometheus-operated.monitoring:9090
+networkPolicy:
+  enabled: true
+prometheusRule:
+  enabled: true

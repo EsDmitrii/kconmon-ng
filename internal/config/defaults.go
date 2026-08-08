@@ -44,6 +44,16 @@ func DefaultConfig() *Config {
 				Cooldown: 60 * time.Second,
 				MaxHops:  30,
 			},
+			// External probing is opt-in and has no default allowlist on
+			// purpose: an agent that was never configured for it must not be
+			// able to probe anything off-cluster. MaxTargets/Timeout stay zero
+			// here and are filled by applyDerivedDefaults only once the block
+			// is enabled.
+			External: ExternalCheckerConfig{
+				Enabled:      false,
+				AllowedCIDRs: nil,
+				DeniedCIDRs:  nil,
+			},
 		},
 		Controller: ControllerConfig{
 			LeaderElection: true,

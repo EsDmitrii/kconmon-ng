@@ -108,6 +108,14 @@ var routeTable = map[string]routeRule{
 	"POST /api/v1/runs":     {permission: authz.PermRunsCreate},
 	"GET /api/v1/runs":      {permission: authz.PermRunsRead},
 	"GET /api/v1/runs/{id}": {permission: authz.PermRunsRead},
+	// Cancelling is runs:create, not runs:read and not a permission of its
+	// own: starting fleet-wide probe traffic and stopping it are the same
+	// operational class. Gating it on runs:read would let every viewer stop
+	// an operator's diagnostic mid-flight; giving it a third permission would
+	// mean an operator who can start a 400-pair run needs a second grant to
+	// stop it, which is the wrong failure mode for the one control that makes
+	// a runaway run stoppable.
+	"POST /api/v1/runs/{id}/cancel": {permission: authz.PermRunsCreate},
 
 	// Targets are the fleet's probe CONFIGURATION, so the split is read vs
 	// write, not one permission for the whole resource: targets:read is in

@@ -197,6 +197,13 @@ func mustHashDummyPassword() string {
 	return hash
 }
 
+// loginRateLimitDetail is the 429 body's detail for POST
+// /api/v1/auth/login. It never says WHICH counter tripped (username or
+// source IP): that distinction would be a probe for whether a given account
+// is currently under attack.
+const loginRateLimitDetail = "too many login attempts; retry shortly " +
+	"(limit: console.rateLimit.loginPerMinute per username and per source address per minute)"
+
 // authLoginRequest is POST /api/v1/auth/login's body.
 type authLoginRequest struct {
 	Username string `json:"username"`
@@ -225,6 +232,29 @@ func (s *Server) handleAuthLogin(w http.ResponseWriter, r *http.Request) {
 	var req authLoginRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Username == "" || req.Password == "" {
 		writeProblem(w, http.StatusBadRequest, "invalid request", `body must be JSON with non-empty "username" and "password"`)
+		return
+	}
+
+	// Rate limit BEFORE the user lookup, and therefore before ANY argon2id
+	// verification -- including the dummy one the not-found path pays. That
+	// ordering is the entire reason this limit exists: argon2id is configured
+	// at 64 MiB per verification, and unlimited concurrent logins against a
+	// 256Mi console pod is an unauthenticated OOM, i.e. an availability
+	// finding, not merely a brute-force one.
+	//
+	// Username and source IP are counted INDEPENDENTLY against the same limit
+	// (rateLimitAllow increments both, always): the username counter is what
+	// protects one account from a distributed guessing attack, the IP counter
+	// is what catches a single source spraying a fresh username per request --
+	// which would otherwise never trip a per-username counter at all.
+	//
+	// The 429 is deliberately distinguishable from the 401s below. That does
+	// leak "this bucket is hot", but it is unavoidable for any rate limit
+	// worth having, and it is not a per-account oracle: the same 429 is
+	// returned whether the username exists or not.
+	if !s.rateLimitAllow(r.Context(), rateLimitLogin, s.cfg.RateLimit.LoginPerMinute,
+		loginUserRateLimitKey(req.Username), loginIPRateLimitKey(r.RemoteAddr)) {
+		writeRateLimited(w, loginRateLimitDetail)
 		return
 	}
 

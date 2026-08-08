@@ -28,6 +28,15 @@ var (
 	ErrDispatch     = errors.New("dispatch failed")    // controller 502
 	ErrCheckTimeout = errors.New("dispatch timed out") // controller 504
 	ErrBadRequest   = errors.New("invalid request")    // controller 400
+	// ErrExternalUnsupported is the controller's 501: the SOURCE agent does
+	// not advertise the "external-checks" capability, so it would silently
+	// ignore the task's external_target rather than probe it
+	// (internal/controller/diagnostics.go's capability gate). It is a distinct
+	// sentinel, not a flavour of ErrDispatch, because it is the one dispatch
+	// failure an operator fixes by rolling agents forward rather than by
+	// looking at the network -- and because a run whose pairs all fail this
+	// way is reporting an agent-version problem, not a connectivity one.
+	ErrExternalUnsupported = errors.New("agent does not support external destinations") // controller 501
 )
 
 const (
@@ -144,7 +153,26 @@ type DiagnoseRequest struct {
 	Destination string `json:"destination"`
 	Type        string `json:"type"`
 	Plane       string `json:"plane"`
+	// DestinationKind is "" (which the controller reads as "node", the only
+	// value that existed before M4) or "external". DestinationAddress carries
+	// the address an external destination is probed at; Destination stays the
+	// metric-safe NAME either way -- the address never becomes an identifier
+	// downstream (internal/controller/diagnostics.go's destName comment).
+	//
+	// Both are `omitempty` on purpose, and that is a compatibility guarantee,
+	// not a formatting preference: a node dispatch must serialize to exactly
+	// the four-field body M3 sent, byte for byte, so a controller that
+	// predates these fields sees no change whatsoever from a Console that has
+	// them. checks' own dispatch tests assert those bytes.
+	DestinationKind    string `json:"destinationKind,omitempty"`
+	DestinationAddress string `json:"destinationAddress,omitempty"`
 }
+
+// DestinationKindExternal is DiagnoseRequest.DestinationKind's non-node value,
+// mirroring internal/controller/diagnostics.go's own destinationKindExternal.
+// A deliberate copy, not an import: this package must not depend on
+// internal/controller.
+const DestinationKindExternal = "external"
 
 // Diagnose posts to the controller's on-demand diagnostics endpoint and
 // returns the agent's model.CheckResult verbatim, exactly as the controller's
@@ -166,9 +194,10 @@ type DiagnoseRequest struct {
 // doubling backoff, ErrUnavailable once exhausted. 502 and 504 do NOT
 // retry -- a dispatch that reached an agent and then failed or timed out
 // must not be silently re-run against a cluster the operator is diagnosing.
-// 400 and 404 are single-shot request-shape/topology errors that a retry
-// cannot fix either.
-func (c *Client) Diagnose(ctx context.Context, req DiagnoseRequest, timeout time.Duration) (json.RawMessage, error) {
+// 400, 404 and 501 are single-shot request-shape/topology/capability errors
+// that a retry cannot fix either -- retrying a 501 in particular cannot make
+// an old agent grow the external-checks capability.
+func (c *Client) Diagnose(ctx context.Context, req DiagnoseRequest, timeout time.Duration) (json.RawMessage, error) { //nolint:gocritic // hugeParam: DiagnoseRequest is a value-type request payload, mirroring the controller's own diagnosticsRequest, and is named in checks' controllerAPI interface -- every fake would have to change with it
 	switch {
 	case timeout <= 0, timeout > diagnosticsTimeoutCap:
 		timeout = diagnosticsTimeoutCap
@@ -206,6 +235,8 @@ func (c *Client) Diagnose(ctx context.Context, req DiagnoseRequest, timeout time
 			return nil, fmt.Errorf("controller diagnose: %w: %s", ErrDispatch, bytes.TrimSpace(data))
 		case status == http.StatusGatewayTimeout:
 			return nil, fmt.Errorf("controller diagnose: %w: %s", ErrCheckTimeout, bytes.TrimSpace(data))
+		case status == http.StatusNotImplemented:
+			return nil, fmt.Errorf("controller diagnose: %w: %s", ErrExternalUnsupported, bytes.TrimSpace(data))
 		case err != nil:
 			return nil, fmt.Errorf("controller diagnose: %w", err)
 		default:
@@ -236,6 +267,140 @@ func (c *Client) tryDiagnose(ctx context.Context, body []byte, timeout time.Dura
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := c.diagHC.Do(req) //nolint:gosec // G704: base URL is operator config, not user input
+	if err != nil {
+		return nil, 0, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	data, err = io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes))
+	if err != nil {
+		return nil, resp.StatusCode, fmt.Errorf("read body: %w", err)
+	}
+	return data, resp.StatusCode, nil
+}
+
+// ExternalTarget is one continuous probe's destination, mirroring the
+// controller's externalTargetJSON (internal/controller/external.go) and, through
+// it, pb.ExternalTarget. Port 0 means "the check type's default" -- the proto's
+// own convention, not a missing value.
+type ExternalTarget struct {
+	Name    string `json:"name"`
+	Kind    string `json:"kind"`
+	Address string `json:"address"`
+	Port    uint32 `json:"port"`
+}
+
+// ExternalCheckSpec is one continuous external check assigned to one agent,
+// mirroring the controller's externalCheckSpecJSON field for field. DefinitionID
+// is correlation only and NEVER becomes a metric label (pb.ExternalCheckSpec's
+// own comment); Params is the definition's opaque params object, forwarded to
+// the agent for its own check-type validation and left `omitempty` so a
+// paramless spec serializes without a null.
+//
+// CheckType is restricted to tcp|icmp|dns|http by the CONTROLLER (400 on
+// anything else, and the 400 rejects the WHOLE PUT), which is why the caller
+// filters before it gets here rather than discovering it on the wire.
+type ExternalCheckSpec struct {
+	DefinitionID string          `json:"definitionId"`
+	Target       ExternalTarget  `json:"target"`
+	CheckType    string          `json:"checkType"`
+	IntervalNs   int64           `json:"intervalNs"`
+	TimeoutNs    int64           `json:"timeoutNs"`
+	Params       json.RawMessage `json:"params,omitempty"`
+}
+
+// externalChecksRequest is the PUT body: the WHOLE desired state, never a
+// delta. An agent absent from the map, or present with an empty list, has no
+// checks -- both spellings converge on the controller pushing that agent an
+// empty assignment.
+type externalChecksRequest struct {
+	Agents map[string][]ExternalCheckSpec `json:"agents"`
+}
+
+// ExternalChecksResult is the controller's 200 body. Changed is 0 for a
+// retried identical PUT (the endpoint is idempotent by construction), and
+// Unknown lists the agent IDs the controller's registry does not know -- a
+// warning, not a failure, because the Console's topology view can legitimately
+// lag the registry.
+type ExternalChecksResult struct {
+	Agents  int      `json:"agents"`
+	Changed int      `json:"changed"`
+	Unknown []string `json:"unknown"`
+}
+
+// PutExternalChecks replaces the controller's ENTIRE continuous external-check
+// assignment state with agents.
+//
+// It rides the same retry ladder Topology/Version/Diagnose use for 503: a
+// non-leader controller replica cannot fan out, so it answers 503, and
+// retrying is safe here for the same reason it is safe for Diagnose's
+// dispatch-free 503 -- the PUT is absolute and idempotent, so landing on the
+// leader on the second attempt produces exactly the state the first attempt
+// wanted. Exhausted retries return ErrUnavailable.
+//
+// A 400 is ErrBadRequest and is NOT retried: it means a spec in this body is
+// malformed (in practice an ineligible checkType), which no number of attempts
+// can fix, and -- because the controller rejects the whole body, not the
+// offending spec -- it means NOTHING was applied. The caller must therefore
+// treat it exactly like any other failed PUT: not as a partial success.
+func (c *Client) PutExternalChecks(ctx context.Context, agents map[string][]ExternalCheckSpec) (*ExternalChecksResult, error) {
+	if agents == nil {
+		// An explicit empty object, never a JSON null: the controller reads
+		// "agents":{} as "no agent has any check" and sweeps every assignment,
+		// which is the honest meaning of an empty desired state.
+		agents = map[string][]ExternalCheckSpec{}
+	}
+	body, err := json.Marshal(externalChecksRequest{Agents: agents})
+	if err != nil {
+		return nil, fmt.Errorf("controller external-checks: encode request: %w", err)
+	}
+
+	backoff := initialBackoff
+	for attempt := 1; ; attempt++ {
+		data, status, err := c.tryPutExternalChecks(ctx, body)
+		switch {
+		case err == nil && status == http.StatusOK:
+			var out ExternalChecksResult
+			if decErr := json.Unmarshal(data, &out); decErr != nil {
+				return nil, fmt.Errorf("controller external-checks: decode response: %w", decErr)
+			}
+			return &out, nil
+		case status == http.StatusServiceUnavailable && attempt < maxAttempts:
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(backoff):
+			}
+			backoff *= 2
+		case status == http.StatusServiceUnavailable:
+			return nil, fmt.Errorf("controller external-checks after %d attempts: %w", attempt, ErrUnavailable)
+		case status == http.StatusBadRequest:
+			return nil, fmt.Errorf("controller external-checks: %w: %s", ErrBadRequest, bytes.TrimSpace(data))
+		case err != nil:
+			return nil, fmt.Errorf("controller external-checks: %w", err)
+		default:
+			return nil, fmt.Errorf("controller external-checks: unexpected status %d", status)
+		}
+	}
+}
+
+// tryPutExternalChecks issues one PUT attempt and returns the body (capped to
+// maxBodyBytes, exactly like tryOnce/tryDiagnose) alongside the status, so
+// PutExternalChecks can build its wrapped sentinel errors from the plain-text
+// http.Error body.
+//
+// It runs on the shared hc, not diagHC: this is a small control-plane write on
+// the same latency budget as a topology poll, so controller.timeout is the
+// right ceiling for it -- unlike a diagnostics dispatch, nothing here waits on
+// an agent's probe.
+func (c *Client) tryPutExternalChecks(ctx context.Context, body []byte) (data []byte, status int, err error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, c.base+"/api/v1/external-checks", bytes.NewReader(body))
+	if err != nil {
+		return nil, 0, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.hc.Do(req) //nolint:gosec // G704: base URL is operator config, not user input
 	if err != nil {
 		return nil, 0, err
 	}

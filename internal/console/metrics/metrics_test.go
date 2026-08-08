@@ -250,3 +250,135 @@ func TestNewRegistersRunMetrics(t *testing.T) {
 		}
 	}
 }
+
+// TestNewRegistersRateLimitMetrics exercises the M4 Task 8 limiter metrics:
+// both carry exactly one label, limit, over the CLOSED set runs|login --
+// never a username, subject ID or source IP.
+func TestNewRegistersRateLimitMetrics(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	m := New("kconmon_ng", reg)
+
+	for _, limit := range []string{"runs", "login"} {
+		m.RateLimited.WithLabelValues(limit).Inc()
+		m.RateLimitFailOpen.WithLabelValues(limit).Inc()
+	}
+
+	if got := testutil.ToFloat64(m.RateLimited.WithLabelValues("login")); got != 1 {
+		t.Errorf("RateLimited(login) = %v, want 1", got)
+	}
+	if got := testutil.ToFloat64(m.RateLimitFailOpen.WithLabelValues("runs")); got != 1 {
+		t.Errorf("RateLimitFailOpen(runs) = %v, want 1", got)
+	}
+
+	families, err := reg.Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	present := make(map[string]bool, len(families))
+	for _, mf := range families {
+		present[mf.GetName()] = true
+		if !strings.HasPrefix(mf.GetName(), "kconmon_ng_console_") {
+			t.Errorf("metric %q not in kconmon_ng_console_ namespace", mf.GetName())
+		}
+		if !strings.HasPrefix(mf.GetName(), "kconmon_ng_console_rate_limit") {
+			continue
+		}
+		for _, metric := range mf.GetMetric() {
+			labels := metric.GetLabel()
+			if len(labels) != 1 || labels[0].GetName() != "limit" {
+				t.Errorf("%s has labels %v, want exactly one {limit}", mf.GetName(), labels)
+				continue
+			}
+			switch labels[0].GetValue() {
+			case "runs", "login":
+			default:
+				t.Errorf("%s has limit=%q, outside the closed set runs|login",
+					mf.GetName(), labels[0].GetValue())
+			}
+		}
+	}
+	for _, name := range []string{
+		"kconmon_ng_console_rate_limited_total",
+		"kconmon_ng_console_rate_limit_failopen_total",
+	} {
+		if !present[name] {
+			t.Errorf("metric %q was not registered", name)
+		}
+	}
+}
+
+// TestNewRegistersExternalReconcilerMetrics exercises the M4 Task 17
+// continuous-assignment metrics: the projected-series gauge carries NO labels
+// at all, and both counters carry exactly one label over a closed set.
+func TestNewRegistersExternalReconcilerMetrics(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	m := New("kconmon_ng", reg)
+
+	m.ExternalSeriesProjected.WithLabelValues().Set(12)
+	for _, result := range []string{"pushed", "unchanged", "not-leader", "error"} {
+		m.ExternalReconciles.WithLabelValues(result).Inc()
+	}
+	for _, reason := range []string{"check-type", "destination-kind"} {
+		m.ExternalSpecsSkipped.WithLabelValues(reason).Inc()
+	}
+
+	if got := testutil.ToFloat64(m.ExternalSeriesProjected.WithLabelValues()); got != 12 {
+		t.Errorf("ExternalSeriesProjected = %v, want 12", got)
+	}
+	if got := testutil.ToFloat64(m.ExternalReconciles.WithLabelValues("unchanged")); got != 1 {
+		t.Errorf("ExternalReconciles(unchanged) = %v, want 1", got)
+	}
+	if got := testutil.ToFloat64(m.ExternalSpecsSkipped.WithLabelValues("check-type")); got != 1 {
+		t.Errorf("ExternalSpecsSkipped(check-type) = %v, want 1", got)
+	}
+
+	families, err := reg.Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	present := make(map[string]bool, len(families))
+	for _, mf := range families {
+		present[mf.GetName()] = true
+		if !strings.HasPrefix(mf.GetName(), "kconmon_ng_console_") {
+			t.Errorf("metric %q not in kconmon_ng_console_ namespace", mf.GetName())
+		}
+		for _, metric := range mf.GetMetric() {
+			labels := metric.GetLabel()
+			switch mf.GetName() {
+			case "kconmon_ng_console_external_series_projected":
+				if len(labels) != 0 {
+					t.Errorf("%s has labels %v, want none", mf.GetName(), labels)
+				}
+			case "kconmon_ng_console_external_reconciles_total":
+				if len(labels) != 1 || labels[0].GetName() != "result" {
+					t.Errorf("%s has labels %v, want exactly one {result}", mf.GetName(), labels)
+					continue
+				}
+				switch labels[0].GetValue() {
+				case "pushed", "unchanged", "not-leader", "error":
+				default:
+					t.Errorf("%s has result=%q, outside the closed set", mf.GetName(), labels[0].GetValue())
+				}
+			case "kconmon_ng_console_external_specs_skipped_total":
+				if len(labels) != 1 || labels[0].GetName() != "reason" {
+					t.Errorf("%s has labels %v, want exactly one {reason}", mf.GetName(), labels)
+					continue
+				}
+				switch labels[0].GetValue() {
+				case "check-type", "destination-kind":
+				default:
+					t.Errorf("%s has reason=%q, outside the closed set", mf.GetName(), labels[0].GetValue())
+				}
+			}
+		}
+	}
+	for _, name := range []string{
+		"kconmon_ng_console_external_series_projected",
+		"kconmon_ng_console_external_reconciles_total",
+		"kconmon_ng_console_external_specs_skipped_total",
+	} {
+		if !present[name] {
+			t.Errorf("metric %q was not registered", name)
+		}
+	}
+}

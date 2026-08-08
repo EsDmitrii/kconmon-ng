@@ -112,6 +112,19 @@ type RunStore interface {
 	// on a retried pair -- overwrites the existing row's success, duration,
 	// error, result, and recorded_at rather than erroring.
 	UpsertRunResult(ctx context.Context, in RunResultInput) (RunResult, error)
+	// ReapStuckRuns force-finishes up to limit runs left in status "running"
+	// with created_at strictly before before, recording each as "cancelled"
+	// with finished_at = now(), and reports how many it moved. A run that
+	// never started ("pending") and one that already reached a terminal
+	// status are both left untouched however old they are -- age alone is
+	// never enough.
+	//
+	// The cutoff is the CALLER's to compute: this seam has no idea what
+	// deadline a run was given (checks.Runner.ReapStuckRuns derives it from
+	// the largest fan-out it will accept). Idempotent by construction --
+	// a second sweep over the same window finds nothing, since the first one
+	// left no "running" rows behind it.
+	ReapStuckRuns(ctx context.Context, before time.Time, limit int32) (int64, error)
 }
 
 var _ RunStore = (*DB)(nil)
@@ -241,10 +254,19 @@ func (db *DB) FinishRun(ctx context.Context, id, status string, pairOK, pairFail
 	return nil
 }
 
+// GetRun validates id as a UUID BEFORE touching pgx, and reports a malformed
+// one as ErrNotFound rather than as a parse failure (M4 follow-up #5). The
+// distinction matters at the edge: httpapi maps ErrNotFound to 404 and
+// everything else to 502 "run history unavailable", so without this a typo in
+// a run URL would report the database as broken. An id that is not a UUID
+// cannot name a row in a UUID-keyed table, which makes "not found" the
+// truthful answer, not a convenient one -- and answering it here rather than
+// in httpapi means every caller of this seam gets it, not just the one
+// handler that remembered to pre-check.
 func (db *DB) GetRun(ctx context.Context, id string) (Run, error) {
 	rid, err := parseUUID(id)
 	if err != nil {
-		return Run{}, fmt.Errorf("store: get run: %w", err)
+		return Run{}, fmt.Errorf("store: get run: %w: %w", ErrNotFound, err)
 	}
 	r, err := gen.New(db.pool).GetRun(ctx, rid)
 	if err != nil {
@@ -306,10 +328,16 @@ func (db *DB) ListRuns(ctx context.Context, f RunFilter) (RunPage, error) { //no
 	return RunPage{Runs: runs, NextCursor: nextCursor}, nil
 }
 
+// GetRunResults applies GetRun's UUID pre-check for the same reason and with
+// the same ErrNotFound answer. Note the asymmetry with a well-formed id that
+// simply names no run: that still returns an empty, non-nil slice (this
+// method's documented "no rows is not itself a failure" contract). A
+// malformed id is a different thing entirely -- not "a run with no results"
+// but "not an id at all".
 func (db *DB) GetRunResults(ctx context.Context, id string) ([]RunResult, error) {
 	rid, err := parseUUID(id)
 	if err != nil {
-		return nil, fmt.Errorf("store: get run results: %w", err)
+		return nil, fmt.Errorf("store: get run results: %w: %w", ErrNotFound, err)
 	}
 	rows, err := gen.New(db.pool).GetRunResults(ctx, rid)
 	if err != nil {
@@ -340,6 +368,20 @@ func (db *DB) UpsertRunResult(ctx context.Context, in RunResultInput) (RunResult
 		return RunResult{}, fmt.Errorf("store: upsert run result: %w", err)
 	}
 	return runResultFromRow(&r), nil
+}
+
+// ReapStuckRuns force-finishes runs abandoned in status "running" -- see
+// RunStore.ReapStuckRuns for the contract and checks.Runner.ReapStuckRuns for
+// where the cutoff comes from.
+func (db *DB) ReapStuckRuns(ctx context.Context, before time.Time, limit int32) (int64, error) {
+	n, err := gen.New(db.pool).ReapStuckRuns(ctx, gen.ReapStuckRunsParams{
+		CreatedAt: before,
+		Limit:     limit,
+	})
+	if err != nil {
+		return 0, fmt.Errorf("store: reap stuck runs: %w", err)
+	}
+	return n, nil
 }
 
 // DeleteRunsBefore deletes up to limit runs older than before, oldest first,

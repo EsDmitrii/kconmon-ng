@@ -454,6 +454,68 @@ func TestValidateRejectsBadValkeyAddress(t *testing.T) {
 	}
 }
 
+// TestLoadRateLimitDefaults pins the two defaults the M4 Task 8 limiter
+// ships with: the console is rate-limited out of the box, not only once an
+// operator opts in.
+func TestLoadRateLimitDefaults(t *testing.T) {
+	cfg, err := Load(filepath.Join(t.TempDir(), "nope.yaml"))
+	if err != nil {
+		t.Fatalf("Load defaults: %v", err)
+	}
+	if cfg.RateLimit.RunsPerMinute != 10 {
+		t.Errorf("rateLimit.runsPerMinute default = %d, want 10", cfg.RateLimit.RunsPerMinute)
+	}
+	if cfg.RateLimit.LoginPerMinute != 5 {
+		t.Errorf("rateLimit.loginPerMinute default = %d, want 5", cfg.RateLimit.LoginPerMinute)
+	}
+}
+
+func TestValidateRateLimits(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		yaml    string
+		wantErr bool
+	}{
+		{"zero disables both", "rateLimit:\n  runsPerMinute: 0\n  loginPerMinute: 0\n", false},
+		{"positive overrides", "rateLimit:\n  runsPerMinute: 100\n  loginPerMinute: 20\n", false},
+		{"negative runs rejected", "rateLimit:\n  runsPerMinute: -1\n", true},
+		{"negative login rejected", "rateLimit:\n  loginPerMinute: -5\n", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := filepath.Join(t.TempDir(), "config.yaml")
+			if err := os.WriteFile(p, []byte(tc.yaml), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			_, err := Load(p)
+			if tc.wantErr && err == nil {
+				t.Fatal("expected a validation error, got nil")
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("expected the config to validate, got: %v", err)
+			}
+		})
+	}
+}
+
+// TestLoadRateLimitZeroIsHonoredNotDefaulted guards the one way an explicit
+// "off" could silently come back on: yaml decodes 0 onto the defaulted
+// struct, so an operator who writes runsPerMinute: 0 must end up with 0, not
+// with the 10 defaults() put there.
+func TestLoadRateLimitZeroIsHonoredNotDefaulted(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(p, []byte("rateLimit:\n  runsPerMinute: 0\n  loginPerMinute: 0\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(p)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.RateLimit.RunsPerMinute != 0 || cfg.RateLimit.LoginPerMinute != 0 {
+		t.Errorf("explicit zeros = %d/%d, want 0/0 (an explicit disable must survive defaulting)",
+			cfg.RateLimit.RunsPerMinute, cfg.RateLimit.LoginPerMinute)
+	}
+}
+
 func TestLoadRejectsUnknownKeys(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "config.yaml")
 	if err := os.WriteFile(p, []byte("httpPrt: 9000\n"), 0o600); err != nil {

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math/rand"
+	"net"
 	"net/http"
 	"os"
 	"regexp"
@@ -24,6 +25,14 @@ import (
 // get an immediate error result.
 const maxConcurrentTasks = 4
 
+// capabilityExternalChecks is the AgentMeta.capabilities flag this agent
+// advertises when, and only when, the operator enabled external destination
+// checks. The controller refuses to dispatch an external_target to an agent
+// that never advertised it (internal/controller/diagnostics.go), so an operator
+// who has not opted in is simply invisible to that dispatch path rather than
+// receiving tasks it would refuse one by one.
+const capabilityExternalChecks = "external-checks"
+
 type Agent struct {
 	cfg         *config.Config
 	grpcClient  *GRPCClient
@@ -39,6 +48,13 @@ type Agent struct {
 	// it is not part of the Checker map (it bypasses the cooldown on demand).
 	checkers   map[model.CheckType]checker.Checker
 	mtrChecker *checker.MTRChecker
+	// external is the gate applied to every probe whose destination is not a
+	// registered peer. Its zero value is a closed gate.
+	external ExternalPolicy
+	// externalChecker runs the CONTINUOUS external assignment pushed over
+	// WatchExternalChecks. It is nil unless checkers.external.enabled, which is
+	// also the switch that decides whether the agent subscribes at all.
+	externalChecker *checker.ExternalChecker
 }
 
 func New(cfg *config.Config) (*Agent, error) {
@@ -59,11 +75,38 @@ func New(cfg *config.Config) (*Agent, error) {
 	}
 
 	info := model.AgentInfo{
-		ID:       fmt.Sprintf("%s-%s", nodeName, podName),
-		NodeName: nodeName,
-		PodName:  podName,
-		PodIP:    podIP,
-		Zone:     zone,
+		ID:           fmt.Sprintf("%s-%s", nodeName, podName),
+		NodeName:     nodeName,
+		PodName:      podName,
+		PodIP:        podIP,
+		Zone:         zone,
+		Capabilities: agentCapabilities(cfg),
+	}
+
+	// The external-destination gate is built here, not lazily at first probe, so
+	// a CIDR the enforcement path would reject fails startup instead. Config
+	// validation already rejected the same input; this is the parse that
+	// actually enforces, and the two use one constructor so they cannot drift.
+	external := ExternalPolicy{}
+	if cfg.Checkers.External.Enabled {
+		allowlist, err := checker.NewAllowlist(cfg.Checkers.External.AllowedCIDRs, cfg.Checkers.External.DeniedCIDRs)
+		if err != nil {
+			return nil, fmt.Errorf("checkers.external.%w", err)
+		}
+		external = ExternalPolicy{
+			Enabled:   true,
+			Allowlist: allowlist,
+			// The system resolver: external destinations are named in cluster
+			// DNS terms like everything else the agent probes.
+			Resolver: net.DefaultResolver,
+			Timeout:  cfg.Checkers.External.Timeout,
+		}
+		slog.Info("external destination checks enabled",
+			"allowedCidrs", len(cfg.Checkers.External.AllowedCIDRs),
+			"deniedCidrs", len(cfg.Checkers.External.DeniedCIDRs),
+			"maxTargets", cfg.Checkers.External.MaxTargets,
+			"authTimeout", cfg.Checkers.External.Timeout,
+		)
 	}
 
 	source := checker.Target{
@@ -129,6 +172,22 @@ func New(cfg *config.Config) (*Agent, error) {
 		slog.Info("checker enabled", "type", "http", "interval", cfg.Checkers.HTTP.Interval, "targets", len(httpTargets))
 	}
 
+	// The continuous external checker is registered like any other NodeLocal
+	// checker: it holds its own destinations and ignores the peer list. Its
+	// scheduler interval is a FIXED tick, not a per-target interval, because a
+	// scheduler entry has one interval and an assignment has one per target —
+	// the checker itself skips targets whose own interval has not elapsed.
+	//
+	// It is added with an EMPTY assignment: nothing is probed until the
+	// controller pushes one over WatchExternalChecks, and an emptied assignment
+	// simply goes back to probing nothing without the scheduler noticing.
+	var externalChecker *checker.ExternalChecker
+	if external.Enabled {
+		externalChecker = checker.NewExternalChecker(external.Allowlist, external.Resolver, external.Timeout)
+		sched.AddChecker(externalChecker, SchedulerConfig{Interval: checker.ExternalTick, NodeLocal: true})
+		slog.Info("checker enabled", "type", "external", "tick", checker.ExternalTick)
+	}
+
 	mtrChecker := checker.NewMTRChecker(cfg.Checkers.MTR.MaxHops, 1*time.Second, cfg.Checkers.MTR.Cooldown)
 	sched.SetMTRChecker(mtrChecker)
 	slog.Info("mtr checker enabled", "maxHops", cfg.Checkers.MTR.MaxHops, "cooldown", cfg.Checkers.MTR.Cooldown)
@@ -144,9 +203,27 @@ func New(cfg *config.Config) (*Agent, error) {
 		envZone:     zone,
 		checkers:    checkers,
 		mtrChecker:  mtrChecker,
+		external:    external,
+
+		externalChecker: externalChecker,
 	}
 
 	return a, nil
+}
+
+// agentCapabilities returns the opt-in feature flags this agent advertises at
+// registration. It mirrors the controller's capabilitiesFor: feature detection,
+// never version sniffing, and never nil so the list stays a JSON array.
+//
+// external-checks appears ONLY when checkers.external.enabled is true. That is
+// the single switch: an agent that has not opted in never advertises it, so the
+// controller's external dispatch path cannot select it at all.
+func agentCapabilities(cfg *config.Config) []string {
+	caps := []string{}
+	if cfg.Checkers.External.Enabled {
+		caps = append(caps, capabilityExternalChecks)
+	}
+	return caps
 }
 
 func (a *Agent) Run(ctx context.Context) error {
@@ -237,6 +314,7 @@ func (a *Agent) Run(ctx context.Context) error {
 		a.cfg.HTTPPort,
 		grpcClient,
 		maxConcurrentTasks,
+		a.external,
 	)
 	grpcClient.OnTask(func(taskCtx context.Context, task *pb.TaskRequest) {
 		taskExecutor.Handle(taskCtx, task)
@@ -305,6 +383,34 @@ func (a *Agent) Run(ctx context.Context) error {
 		}
 	}()
 
+	// WatchExternalChecks runs its own reconnect loop mirroring WatchTasks: on
+	// stream error it re-subscribes after a short backoff. It is started ONLY
+	// when checkers.external.enabled — an agent that never opted in does not
+	// subscribe at all, so there is no stream for the controller to push an
+	// assignment down. Every assignment is absolute, so a reconnect converges on
+	// the controller's current state (including "nothing") with no delta
+	// bookkeeping. It exits when the root ctx is cancelled at shutdown.
+	if a.externalChecker != nil {
+		grpcClient.OnExternalAssignment(a.applyExternalAssignment)
+		go func() {
+			backoff := 1 * time.Second
+			maxBackoff := 15 * time.Second
+			for {
+				err := grpcClient.WatchExternalChecks(ctx)
+				if ctx.Err() != nil {
+					return
+				}
+				slog.Warn("external check watch disconnected, re-subscribing", "error", err, "backoff", backoff)
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(backoff):
+				}
+				backoff = min(backoff*2, maxBackoff)
+			}
+		}()
+	}
+
 	go func() {
 		for {
 			select {
@@ -363,6 +469,55 @@ func (a *Agent) Run(ctx context.Context) error {
 	case err := <-errCh:
 		return err
 	}
+}
+
+// applyExternalAssignment turns a controller assignment into validated agent
+// specs and swaps them into the external checker. The swap replaces the whole
+// target list under the CHECKER's own mutex and NEVER restarts the scheduler:
+// the external checker is an ordinary NodeLocal checker on a fixed tick, so a
+// new assignment only changes what the next tick probes. Restarting the
+// scheduler to apply one would take every other checker down with it.
+//
+// A spec that fails validation is DROPPED WITH A WARNING and the rest are still
+// applied: one malformed target must not silently disable every other check on
+// this agent. That includes check types the controller already rejects (mtr and
+// udp) — they should never arrive, and they are refused here anyway rather than
+// trusted, because a continuous MTR at an internet host is traffic nobody asked
+// for and unbounded hop_ip cardinality.
+func (a *Agent) applyExternalAssignment(assignment *pb.ExternalCheckAssignment) {
+	specs := assignment.GetSpecs()
+	parsed := make([]checker.ExternalSpec, 0, len(specs))
+	dropped := 0
+
+	for _, s := range specs {
+		in := checker.ExternalSpecInput{
+			DefinitionID: s.GetDefinitionId(),
+			Name:         s.GetTarget().GetName(),
+			Address:      s.GetTarget().GetAddress(),
+			Port:         s.GetTarget().GetPort(),
+			CheckType:    s.GetCheckType(),
+			Interval:     time.Duration(s.GetIntervalNs()),
+			Timeout:      time.Duration(s.GetTimeoutNs()),
+			ParamsJSON:   s.GetParamsJson(),
+		}
+		spec, err := checker.ParseExternalSpec(&in)
+		if err != nil {
+			dropped++
+			// definitionId and checkType are controller-side identifiers; the
+			// target address stays out of the message for the same reason the
+			// on-demand refusal path keeps it out (see approveExternalTarget).
+			slog.Warn("dropping invalid external check spec",
+				"definitionId", s.GetDefinitionId(),
+				"checkType", s.GetCheckType(),
+				"error", err,
+			)
+			continue
+		}
+		parsed = append(parsed, spec)
+	}
+
+	a.externalChecker.SetSpecs(parsed)
+	slog.Info("external check assignment applied", "targets", len(parsed), "dropped", dropped)
 }
 
 // deregisterer is the narrow slice of the gRPC client used at shutdown, kept as
@@ -454,6 +609,13 @@ func NewResultHandler(m *metrics.PrometheusMetrics, source checker.Target) Resul
 				}
 			}
 
+		case model.CheckExternal:
+			if details, ok := result.Details.([]ExternalDetails); ok {
+				for i := range details {
+					recordExternalDetail(m, source.NodeName, result.SourceZone, &details[i])
+				}
+			}
+
 		case model.CheckMTR:
 			m.MTRTriggered.WithLabelValues(labels...).Inc()
 			if details, ok := result.Details.(*MTRDetails); ok {
@@ -469,9 +631,63 @@ func NewResultHandler(m *metrics.PrometheusMetrics, source checker.Target) Resul
 	}
 }
 
+// externalTargetKind maps a per-target check type onto the closed label set
+// host|url. It is DERIVED, never taken from ExternalTarget.kind on the wire: a
+// label value that a controller can choose is a label value that can grow
+// without bound, and the mapping is not a judgement call -- an http external
+// check addresses a URL, everything else addresses a host.
+func externalTargetKind(t model.CheckType) string {
+	if t == model.CheckHTTP {
+		return "url"
+	}
+	return "host"
+}
+
+// recordExternalDetail drives the kconmon_ng_external_* family from ONE probed
+// target.
+//
+// A DENIED probe never reached the network: it is neither a success nor a
+// failure, so it increments denied_total{reason} and nothing else. Counting it
+// as a failure would turn an allowlist misconfiguration into what looks like an
+// outage at the destination, and counting a duration for it would report the
+// latency of a decision rather than of a network.
+func recordExternalDetail(m *metrics.PrometheusMetrics, node, zone string, d *ExternalDetails) {
+	kind := externalTargetKind(d.CheckType)
+
+	if d.Denied {
+		reason := d.DenyReason
+		if reason == "" {
+			// A denial with no typed reason still has to land inside the closed
+			// set rather than mint an empty label value.
+			reason = model.ExternalDenyCIDR
+		}
+		m.ExternalDenied.WithLabelValues(node, zone, d.Name, kind, string(reason)).Inc()
+		return
+	}
+
+	m.ExternalDuration.WithLabelValues(node, zone, d.Name, kind).Observe(d.Duration.Seconds())
+
+	// RTT and loss ratio exist only for icmp; observing a zero for a tcp probe
+	// would report a measurement that was never taken.
+	if d.CheckType == model.CheckICMP {
+		m.ExternalRtt.WithLabelValues(node, zone, d.Name, kind).Observe(d.RTT.Seconds())
+		m.ExternalPacketLoss.WithLabelValues(node, zone, d.Name, kind).Set(d.LossRatio)
+	}
+	if d.CheckType == model.CheckHTTP {
+		m.ExternalHTTPStatusCode.WithLabelValues(node, zone, d.Name, kind).Set(float64(d.StatusCode))
+	}
+
+	r := "success"
+	if !d.Success {
+		r = "fail"
+	}
+	m.ExternalResults.WithLabelValues(node, zone, d.Name, kind, r).Inc()
+}
+
 type TCPDetails = model.TCPDetails
 type UDPDetails = model.UDPDetails
 type ICMPDetails = model.ICMPDetails
 type DNSDetails = model.DNSDetails
 type HTTPDetails = model.HTTPDetails
 type MTRDetails = model.MTRDetails
+type ExternalDetails = model.ExternalDetails

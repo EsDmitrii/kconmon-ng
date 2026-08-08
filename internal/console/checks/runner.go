@@ -45,6 +45,32 @@ const terminalOpTimeout = 10 * time.Second
 // can make the bus drop frames, and a dropped frame never arrives.
 const relayWaitTimeout = 2 * time.Second
 
+// statusCancelled is the terminal status a cancelled or reaped run carries.
+// It has been a legal check_runs.status since migration 00003 (M3) -- nothing
+// wrote it until now.
+const statusCancelled = "cancelled"
+
+// reapSlack is added on top of the longest deadline Start can give a run
+// before ReapStuckRuns will touch it. The reaper's whole job is to catch rows
+// nothing else will ever finish (a Console killed mid-run leaves its
+// FinishRun unwritten), and the cost asymmetry is severe: reaping a live run
+// destroys real work an operator is waiting on, while reaping a dead one a
+// few minutes late costs nothing at all. So the margin is deliberately
+// generous rather than tight.
+const reapSlack = 5 * time.Minute
+
+// defaultReapLimit bounds one sweep when the caller names no limit.
+const defaultReapLimit = 100
+
+// maxRunLifetime is the longest a run can legitimately sit in status
+// "running": the deadline Start computes for the largest, slowest fan-out it
+// will accept (maxPairs pairs at maxPerPairTimeout each), plus reapSlack.
+// Derived from runDeadline rather than hardcoded so it cannot drift out of
+// step with the bound Start actually applies.
+func maxRunLifetime() time.Duration {
+	return runDeadline(maxPairs, maxPerPairTimeout) + reapSlack
+}
+
 // Store is the persistence seam Runner needs: create/mutate a run and its
 // per-pair results (store.RunStore), and read them back (store.RunReader,
 // used by Get/List). Satisfied by *store.DB when database.mode is enabled,
@@ -105,6 +131,32 @@ type Runner struct {
 	// frame's seq lands below the terminal frames' (the ordering the
 	// browser's stop-at-TypeClosed contract depends on).
 	framesPublished sync.Map
+
+	// runControls maps a run's id to the *runControl Cancel needs (Decision
+	// 15). Registered by Start before the run's goroutine is scheduled --
+	// same happens-before reasoning as activeRuns.Add -- and removed by
+	// execute on its way out, so the map never outgrows the set of runs
+	// actually in flight IN THIS PROCESS. A run this replica did not start
+	// (another replica's, or one from before a restart) is deliberately
+	// absent: Cancel reports that honestly rather than pretending, and the
+	// stuck-run reaper is what eventually finishes it.
+	runControls sync.Map
+}
+
+// runControl is one in-flight run's cancellation state: the CancelFunc for
+// its own context, plus the flag that turns the run's terminal status into
+// "cancelled".
+//
+// The flag is what distinguishes an OPERATOR cancel from runCtx's own deadline
+// firing. Both cancel the same context, but they mean different things: a run
+// that ran out of time reports the outcome its pairs actually produced
+// (succeeded/partial/failed -- M3's behaviour, unchanged), while a cancelled
+// one reports "cancelled" no matter how many pairs happened to finish first.
+// Inferring the status from runCtx.Err() alone would collapse the two and
+// silently relabel every deadline-expired M3 run.
+type runControl struct {
+	cancel    context.CancelFunc
+	cancelled atomic.Bool
 }
 
 // NewRunner returns a Runner. ctrl is used both to resolve "every node in
@@ -155,7 +207,7 @@ type finishedFrame struct {
 // cancel a run already in flight (cancellation is out of scope for M3 --
 // task-22-brief.md).
 func (r *Runner) Start(ctx context.Context, spec Spec, initiator authz.Subject) (string, error) { //nolint:gocritic // hugeParam: Spec mirrors the store package's own value-type write-payload structs (store/checks.go)
-	nodes, err := r.resolveNodes(ctx, spec.Sources, spec.Destinations)
+	nodes, err := r.resolveNodes(ctx, spec.Sources, spec.Destinations, spec.TypedDestinations)
 	if err != nil {
 		return "", err
 	}
@@ -197,6 +249,12 @@ func (r *Runner) Start(ctx context.Context, spec Spec, initiator authz.Subject) 
 	// stays untouched by this bookkeeping so runner_internal_test.go's
 	// white-box tests, which call execute directly without going through
 	// Start, are unaffected.
+	//
+	// The run's cancellation control is registered here, in the same
+	// before-the-goroutine window and for the same reason: a Cancel racing
+	// Start's return must find the run, not a map that the run's own
+	// goroutine has not populated yet.
+	r.runControls.Store(run.ID, &runControl{cancel: cancel})
 	r.activeRuns.Add(1)
 	r.activeCount.Add(1)
 	go func() {
@@ -206,6 +264,70 @@ func (r *Runner) Start(ctx context.Context, spec Spec, initiator authz.Subject) 
 	}()
 
 	return run.ID, nil
+}
+
+// Cancel stops the run named by runID (Plan Decision 15).
+//
+// It cancels that run's own context: pairs already dispatched still record
+// their outcome (each result write runs on a context.WithoutCancel-derived
+// context of its own -- see terminalOpTimeout), pairs not yet dispatched never
+// dispatch at all, and the run finishes with status "cancelled" rather than
+// the succeeded/partial/failed its partial pair counts would otherwise
+// produce.
+//
+// Two non-errors are deliberate. Cancelling a run that already reached a
+// terminal status is a NO-OP returning nil: an operator clicking cancel on a
+// run that finished a moment earlier has not done anything wrong, and turning
+// that race into an error would make the button lie. Cancelling a run this
+// process did not start -- another replica's, or one orphaned by a restart --
+// also returns nil, but logs: there is no cross-process cancellation seam
+// (none is in scope here), and the stuck-run reaper is what eventually
+// finishes such a row. Cancelling an id that names no run at all is
+// store.ErrNotFound, so httpapi can answer 404.
+func (r *Runner) Cancel(ctx context.Context, runID string) error {
+	if v, ok := r.runControls.Load(runID); ok {
+		ctl, _ := v.(*runControl)
+		// Set the flag BEFORE cancelling: execute reads it after wg.Wait()
+		// returns, and cancelling first would let a single-pair run finish
+		// and read the flag before it was written.
+		ctl.cancelled.Store(true)
+		ctl.cancel()
+		return nil
+	}
+
+	// Not in flight here. Only the store can tell "already finished" (nil)
+	// apart from "no such run" (ErrNotFound) apart from "someone else's"
+	// (nil, logged).
+	run, err := r.store.GetRun(ctx, runID)
+	if err != nil {
+		return fmt.Errorf("checks: cancel: %w", err)
+	}
+	if run.Status == "pending" || run.Status == "running" {
+		slog.Warn("checks: cancel: run is not in flight in this process; leaving it to the stuck-run reaper",
+			"run", runID, "status", run.Status)
+	}
+	return nil
+}
+
+// ReapStuckRuns force-finishes runs left in status "running" long past any
+// deadline Start could have given them, recording them as "cancelled" (M4
+// follow-up #6). It is the seam Task 13's scheduler calls on a timer; there is
+// no timer, and no cross-replica lock, here.
+//
+// The cutoff is this package's business, not the caller's: only this package
+// knows the ceiling Start can hand a run (runDeadline over maxPairs at the
+// maximum per-pair timeout), and a caller passing its own would eventually
+// pass one that kills live runs. limit bounds one sweep so a backlog cannot
+// hold a long transaction open over thousands of rows; 0 takes the default.
+func (r *Runner) ReapStuckRuns(ctx context.Context, limit int32) (int64, error) {
+	if limit <= 0 {
+		limit = defaultReapLimit
+	}
+	n, err := r.store.ReapStuckRuns(ctx, time.Now().UTC().Add(-maxRunLifetime()), limit)
+	if err != nil {
+		return 0, fmt.Errorf("checks: reap stuck runs: %w", err)
+	}
+	return n, nil
 }
 
 // Get returns one run by id.
@@ -252,11 +374,16 @@ func (r *Runner) Wait(ctx context.Context) {
 }
 
 // resolveNodes fetches the current topology's node names when spec needs
-// them for Plan's full-mesh/one-sided fallback (either Sources or
-// Destinations is empty). When both are already explicit, Plan never
-// consults nodes, so this skips the controller round trip entirely.
-func (r *Runner) resolveNodes(ctx context.Context, sources, destinations []string) ([]string, error) {
-	if len(sources) > 0 && len(destinations) > 0 {
+// them for Plan's full-mesh/one-sided fallback (either side is empty). When
+// both sides are already explicit, Plan never consults nodes, so this skips
+// the controller round trip entirely -- and a spec whose destination side is
+// carried entirely by typed destinations counts as explicit, exactly as Plan
+// treats it (planDestinations only falls back when BOTH destination halves
+// are empty). Getting that wrong would not just cost a needless round trip:
+// it would make a purely external run fail outright on a cluster whose
+// controller is unreachable, for a node list the run never needed.
+func (r *Runner) resolveNodes(ctx context.Context, sources, destinations []string, typed []Destination) ([]string, error) {
+	if len(sources) > 0 && (len(destinations) > 0 || len(typed) > 0) {
 		return nil, nil
 	}
 	topo, err := r.ctrl.Topology(ctx)
@@ -286,9 +413,9 @@ func runDeadline(pairCount int, perPairTimeout time.Duration) time.Duration {
 // publish a progress frame per pair, then FinishRun and
 // hub.CloseTopicWithFinal (the finished summary frame followed synchronously
 // by the topic's TypeClosed control frame). Runs on runCtx (background-derived,
-// own deadline -- never the HTTP request that called Start). Cancellation is
-// out of scope for M3: nothing external can stop this once it starts short of
-// runCtx's own deadline or process shutdown.
+// own deadline -- never the HTTP request that called Start), which Runner.Cancel
+// is the one external thing that can stop short of that deadline or process
+// shutdown (Decision 15).
 //
 // The finished frame goes through hub.CloseTopicWithFinal, not a bus publish
 // followed by a separate hub.CloseTopic call: per-pair progress frames reach
@@ -315,27 +442,63 @@ func (r *Runner) execute(runCtx context.Context, cancel context.CancelFunc, runI
 	r.framesPublished.Store(topic, &atomic.Uint64{})
 	defer r.framesPublished.Delete(topic)
 
-	if err := r.store.MarkRunStarted(runCtx, runID); err != nil {
+	// The control is removed here, not by Cancel: as long as this run is
+	// executing, Cancel must be able to find it. Deleting it on the way out
+	// is also what makes a second Cancel fall through to the store and answer
+	// the "already terminal" no-op instead of re-cancelling a dead context.
+	defer r.runControls.Delete(runID)
+
+	// MarkRunStarted deliberately does NOT run on runCtx: a Cancel landing in
+	// the window between Start's return and this call would cancel runCtx
+	// before the row ever left "pending", MarkRunStarted would fail, and
+	// FinishRun's `AND status = 'running'` guard would then refuse the
+	// terminal write -- leaving the row stuck "pending" forever. Same
+	// WithoutCancel reasoning as FinishRun/UpsertRunResult below, and the
+	// same bound.
+	startedCtx, startedCancel := context.WithTimeout(context.WithoutCancel(runCtx), terminalOpTimeout)
+	if err := r.store.MarkRunStarted(startedCtx, runID); err != nil {
 		slog.Error("checks: mark run started failed", "run", runID, "error", err)
 	}
+	startedCancel()
 
 	sem := make(chan struct{}, maxConcurrency)
 	var wg sync.WaitGroup
 	var completed atomic.Int32
 	var pairOK, pairFailed atomic.Int32
 
-	for _, pair := range pairs {
-		sem <- struct{}{}
+dispatch:
+	// Iterated by index, and each goroutine handed &pairs[i], so one Pair
+	// (80 bytes since Decision 14's typed destination) is not copied twice per
+	// dispatch. pairs is never mutated after Plan returned it.
+	for i := range pairs {
+		// A cancelled (or expired) run must not dispatch anything further:
+		// this is the guarantee that "undispatched pairs never dispatch",
+		// and it has to be checked BOTH before taking a slot and while
+		// waiting for one -- a run cancelled while every slot is occupied
+		// would otherwise sit here until an in-flight pair released one, then
+		// dispatch the next pair anyway.
+		select {
+		case <-runCtx.Done():
+			break dispatch
+		case sem <- struct{}{}:
+		}
 		wg.Add(1)
-		go func(pair Pair) {
+		go func(pair *Pair) {
 			defer wg.Done()
 			defer func() { <-sem }()
 			r.runOneRecovered(runCtx, topic, runID, pair, spec, perPairTimeout, len(pairs), &completed, &pairOK, &pairFailed)
-		}(pair)
+		}(&pairs[i])
 	}
 	wg.Wait()
 
 	status := finalStatus(int(pairOK.Load()), int(pairFailed.Load()), len(pairs))
+	// An operator cancel overrides the computed status; runCtx's own deadline
+	// firing does not (see runControl's doc comment).
+	if v, ok := r.runControls.Load(runID); ok {
+		if ctl, isCtl := v.(*runControl); isCtl && ctl.cancelled.Load() {
+			status = statusCancelled
+		}
+	}
 
 	// FinishRun MUST NOT be handed runCtx directly: by the time every pair has
 	// been dispatched, runCtx may already be past its own deadline (that is
@@ -390,7 +553,7 @@ func (r *Runner) execute(runCtx context.Context, cancel context.CancelFunc, runI
 // incremented, completed advanced) so the run's pair counts stay consistent
 // and every other in-flight pair is unaffected.
 func (r *Runner) runOneRecovered(
-	ctx context.Context, topic, runID string, pair Pair, spec *Spec, perPairTimeout time.Duration, total int,
+	ctx context.Context, topic, runID string, pair *Pair, spec *Spec, perPairTimeout time.Duration, total int,
 	completed, pairOK, pairFailed *atomic.Int32,
 ) {
 	defer func() {
@@ -399,11 +562,11 @@ func (r *Runner) runOneRecovered(
 			return
 		}
 		slog.Error("checks: pair panicked, recording as failed", "run", runID,
-			"source", pair.Source, "destination", pair.Destination, "panic", rec)
+			"source", pair.Source, "destination", pair.Destination.Label(), "panic", rec)
 		pairFailed.Add(1)
 		done := completed.Add(1)
 		r.publishFrame(ctx, topic, progressFrame{
-			RunID: runID, Source: pair.Source, Destination: pair.Destination,
+			RunID: runID, Source: pair.Source, Destination: pair.Destination.Label(),
 			State: "failed", Success: false, Error: fmt.Sprintf("checks: pair panicked: %v", rec),
 			Completed: int(done), Total: total,
 		})
@@ -414,11 +577,11 @@ func (r *Runner) runOneRecovered(
 // runOne dispatches one pair, persists its result, and publishes its
 // dispatched and terminal progress frames.
 func (r *Runner) runOne(
-	ctx context.Context, topic, runID string, pair Pair, spec *Spec, perPairTimeout time.Duration, total int,
+	ctx context.Context, topic, runID string, pair *Pair, spec *Spec, perPairTimeout time.Duration, total int,
 	completed, pairOK, pairFailed *atomic.Int32,
 ) {
 	r.publishFrame(ctx, topic, progressFrame{
-		RunID: runID, Source: pair.Source, Destination: pair.Destination,
+		RunID: runID, Source: pair.Source, Destination: pair.Destination.Label(),
 		State: "dispatched", Completed: int(completed.Load()), Total: total,
 	})
 
@@ -440,9 +603,20 @@ func (r *Runner) runOne(
 	// (runCtx) has, by now, hit its own deadline -- see terminalOpTimeout's
 	// doc comment. resultCtx deliberately outlives ctx's own cancellation.
 	resultCtx, resultCancel := context.WithTimeout(context.WithoutCancel(ctx), terminalOpTimeout)
+	// check_results.result is NOT NULL: a pair the agent refused (an
+	// errorResult carries no CheckResult at all) or a transport failure
+	// yields an empty resultJSON, and writing it raw would trade the error
+	// row -- the one thing the operator needs to see -- for an SQLSTATE
+	// 23502. The error string is already its own column; the payload
+	// becomes the honest empty object. (M4 final-gate browser smoke: a
+	// denied external pair left runs with pairFailed=1 and zero result rows.)
+	resultJSON := outcome.resultJSON
+	if len(resultJSON) == 0 {
+		resultJSON = json.RawMessage(`{}`)
+	}
 	if _, err := r.store.UpsertRunResult(resultCtx, store.RunResultInput{
-		RunID: runID, SourceNode: pair.Source, DestinationNode: pair.Destination,
-		Success: outcome.success, DurationNs: outcome.durationNs, Error: outcome.errStr, Result: outcome.resultJSON,
+		RunID: runID, SourceNode: pair.Source, DestinationNode: pair.Destination.Label(),
+		Success: outcome.success, DurationNs: outcome.durationNs, Error: outcome.errStr, Result: resultJSON,
 	}); err != nil {
 		slog.Error("checks: upsert run result failed", "run", runID, "error", err)
 	}
@@ -450,7 +624,7 @@ func (r *Runner) runOne(
 
 	done := completed.Add(1)
 	r.publishFrame(ctx, topic, progressFrame{
-		RunID: runID, Source: pair.Source, Destination: pair.Destination,
+		RunID: runID, Source: pair.Source, Destination: pair.Destination.Label(),
 		State: state, Success: outcome.success, DurationNs: outcome.durationNs, Error: outcome.errStr,
 		Completed: int(done), Total: total,
 	})
@@ -472,11 +646,21 @@ type pairOutcome struct {
 // (ErrNoAgent, ErrDispatch, ErrBadRequest, ErrUnavailable, a network error)
 // for the progress frame's state; all of them otherwise produce the same
 // "failed" pairOutcome so the remaining pairs in the run still execute.
-func (r *Runner) dispatchPair(ctx context.Context, pair Pair, spec *Spec, perPairTimeout time.Duration) pairOutcome {
+func (r *Runner) dispatchPair(ctx context.Context, pair *Pair, spec *Spec, perPairTimeout time.Duration) pairOutcome {
+	req := controllerclient.DiagnoseRequest{
+		Source: pair.Source, Destination: pair.Destination.Label(), Type: spec.Type, Plane: spec.Plane,
+	}
+	// A node destination leaves both external fields at their zero value, and
+	// they are `omitempty` -- so the body on the wire is byte-identical to the
+	// one M3 sent. That is the compatibility guarantee, asserted in
+	// dispatch_test.go, not an incidental property of this branch.
+	if !pair.Destination.IsNode() {
+		req.DestinationKind = controllerclient.DestinationKindExternal
+		req.DestinationAddress = pair.Destination.Address
+	}
+
 	start := time.Now()
-	raw, err := r.ctrl.Diagnose(ctx, controllerclient.DiagnoseRequest{
-		Source: pair.Source, Destination: pair.Destination, Type: spec.Type, Plane: spec.Plane,
-	}, perPairTimeout)
+	raw, err := r.ctrl.Diagnose(ctx, req, perPairTimeout)
 	elapsed := time.Since(start)
 
 	if err != nil {
