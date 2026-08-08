@@ -29,6 +29,13 @@ export function useAuth(): { me: Me | undefined; can: (p: string) => boolean; is
   });
   const permissions = data?.permissions;
   const can = useMemo(() => (p: string) => permissions?.includes(p) ?? false, [permissions]);
-  const isAnonymous = data?.subject.kind === "anonymous";
+  // Optional all the way down, deliberately. `Me` declares `subject` required
+  // because the Go handler always emits it, but this hook must survive a body
+  // that does not: a replica answering an unexpected shape, or a proxy
+  // returning something else with a 200, would otherwise take the whole tree
+  // down with a TypeError from a page that only wanted to know whether to draw
+  // a button. Unknown reads as "not anonymous", the same fail-closed direction
+  // `can()` already takes.
+  const isAnonymous = data?.subject?.kind === "anonymous";
   return { me: data, can, isAnonymous };
 }

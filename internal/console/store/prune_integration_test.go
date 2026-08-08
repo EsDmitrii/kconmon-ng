@@ -9,9 +9,11 @@ package store_test
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/EsDmitrii/kconmon-ng/internal/console/store"
@@ -136,6 +138,128 @@ func TestPruneOnceDeletesRowsPastRetention(t *testing.T) {
 	}
 	if got := second["topology_events"]; got != 0 {
 		t.Fatalf("second PruneOnce: deleted[topology_events] = %d, want 0", got)
+	}
+}
+
+// TestPruneOnceSweepsEveryTable is the whole sweep list in one call: each of
+// the six tables gets one row past retention and one inside it, and PruneOnce
+// must delete exactly the expired one from each and report it under that
+// table's own key. Seeding through the public store API rather than raw SQL is
+// deliberate -- it is what makes the test also prove the sweeps are pointed at
+// the columns the writers actually populate.
+func TestPruneOnceSweepsEveryTable(t *testing.T) {
+	db, dsn := newPrunerDB(t)
+	p := store.NewPruner(db, retention90d, newTestMetrics())
+	ctx := context.Background()
+
+	expired := time.Now().UTC().Add(-200 * 24 * time.Hour)
+	current := time.Now().UTC()
+
+	// topology_events (by event_time) and audit_log are covered by the other
+	// tests in this file; seed topology_events here too so the returned map
+	// carries a non-zero entry for it as well.
+	seedTopologyEventsAtAges(t, dsn, 1, []int{200, 1})
+
+	// check_runs (by created_at). created_at has a column DEFAULT of now(), so
+	// the expired run is aged with one direct UPDATE -- the store API has no
+	// way to backdate a run, and inventing one for a test would be worse.
+	oldRun := uuid.NewString()
+	if _, err := db.CreateRun(ctx, oldRun, "mtr", "pod", json.RawMessage(`{}`), "user", "admin", 1); err != nil {
+		t.Fatalf("CreateRun(old): %v", err)
+	}
+	if _, err := db.CreateRun(ctx, uuid.NewString(), "mtr", "pod", json.RawMessage(`{}`), "user", "admin", 1); err != nil {
+		t.Fatalf("CreateRun(new): %v", err)
+	}
+	pool, poolErr := pgxpool.New(ctx, dsn)
+	if poolErr != nil {
+		t.Fatalf("connect: %v", poolErr)
+	}
+	defer pool.Close()
+	if _, err := pool.Exec(ctx, `UPDATE check_runs SET created_at = $1 WHERE id = $2`, expired, oldRun); err != nil {
+		t.Fatalf("backdate the old run: %v", err)
+	}
+
+	// mtr_path_snapshots (by last_seen).
+	for _, tc := range []struct {
+		hops []store.PathHop
+		at   time.Time
+	}{{pathAB(), expired}, {pathAC(), current}} {
+		if _, _, err := db.UpsertPathSnapshot(ctx, snapshotInput("node-a", "edge-gw", tc.hops, tc.at)); err != nil {
+			t.Fatalf("UpsertPathSnapshot: %v", err)
+		}
+	}
+
+	// mtr_hop_enrichment (by resolved_at).
+	if err := db.PutEnrichment(ctx, []store.Enrichment{
+		{IP: "10.0.0.1", ResolvedAt: expired},
+		{IP: "10.0.0.2", ResolvedAt: current},
+	}); err != nil {
+		t.Fatalf("PutEnrichment: %v", err)
+	}
+
+	// annotations (by start_at).
+	for _, at := range []time.Time{expired, current} {
+		if _, err := db.CreateAnnotation(ctx, store.AnnotationInput{
+			StartAt: at, Text: "mark", CreatedBy: "user:admin",
+		}); err != nil {
+			t.Fatalf("CreateAnnotation: %v", err)
+		}
+	}
+
+	deleted, err := p.PruneOnce(ctx)
+	if err != nil {
+		t.Fatalf("PruneOnce: %v", err)
+	}
+
+	for table, want := range map[string]int64{
+		"topology_events":    1,
+		"check_runs":         1,
+		"mtr_path_snapshots": 1,
+		"mtr_hop_enrichment": 1,
+		"annotations":        1,
+	} {
+		got, ok := deleted[table]
+		if !ok {
+			t.Errorf("PruneOnce reported no entry for %s: the sweep is missing from the list", table)
+			continue
+		}
+		if got != want {
+			t.Errorf("PruneOnce: deleted[%s] = %d, want %d", table, got, want)
+		}
+	}
+	// audit_log has no expired rows here, but its sweep must still have run
+	// and reported zero rather than being absent.
+	if _, ok := deleted["audit_log"]; !ok {
+		t.Error("PruneOnce reported no entry for audit_log")
+	}
+	if len(deleted) != 6 {
+		t.Errorf("PruneOnce reported %d tables, want 6: %v", len(deleted), deleted)
+	}
+
+	// The survivors, read back through the store rather than counted in SQL.
+	snaps, err := db.ListPathSnapshots(ctx, store.SnapshotFilter{})
+	if err != nil {
+		t.Fatalf("ListPathSnapshots: %v", err)
+	}
+	if len(snaps.Snapshots) != 1 || !snaps.Snapshots[0].LastSeen.Equal(current.Truncate(time.Microsecond)) {
+		t.Errorf("after the sweep %d snapshots remain, want just the current one", len(snaps.Snapshots))
+	}
+	cache, err := db.GetEnrichment(ctx, []string{"10.0.0.1", "10.0.0.2"})
+	if err != nil {
+		t.Fatalf("GetEnrichment: %v", err)
+	}
+	if _, gone := cache["10.0.0.1"]; gone {
+		t.Error("the expired enrichment row survived the sweep")
+	}
+	if _, kept := cache["10.0.0.2"]; !kept {
+		t.Error("the fresh enrichment row was swept")
+	}
+	anns, err := db.ListAnnotations(ctx, store.AnnotationFilter{})
+	if err != nil {
+		t.Fatalf("ListAnnotations: %v", err)
+	}
+	if len(anns.Annotations) != 1 {
+		t.Errorf("after the sweep %d annotations remain, want 1", len(anns.Annotations))
 	}
 }
 

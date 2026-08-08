@@ -72,13 +72,23 @@ func maxRunLifetime() time.Duration {
 }
 
 // Store is the persistence seam Runner needs: create/mutate a run and its
-// per-pair results (store.RunStore), and read them back (store.RunReader,
-// used by Get/List). Satisfied by *store.DB when database.mode is enabled,
-// or by *MemoryStore when it is disabled (Plan Decision 15) -- Runner takes
-// this interface and never branches on which backend it was handed.
+// per-pair results (store.RunStore), read them back (store.RunReader, used by
+// Get/List), and record the MTR path snapshots the result-ingest hook projects
+// (store.PathSnapshotStore, M5 Task 2). Satisfied by *store.DB when
+// database.mode is enabled, or by *MemoryStore when it is disabled (Plan
+// Decision 15) -- Runner takes this interface and never branches on which
+// backend it was handed.
+//
+// The snapshot write joined this interface rather than arriving as a separate
+// optional field on Runner because there is exactly ONE store behind it: the
+// snapshot is a projection of the check_results row written a few lines
+// earlier, in the same process, on the same backend, and a second seam would
+// make it possible to wire a Runner whose two writes disagree about where they
+// land. Nothing has to be nil-checked at every call site either.
 type Store interface {
 	store.RunStore
 	store.RunReader
+	store.PathSnapshotStore
 }
 
 // Run, RunPage and ListFilter are the store package's own Run/RunPage/
@@ -619,6 +629,13 @@ func (r *Runner) runOne(
 		Success: outcome.success, DurationNs: outcome.durationNs, Error: outcome.errStr, Result: resultJSON,
 	}); err != nil {
 		slog.Error("checks: upsert run result failed", "run", runID, "error", err)
+	} else {
+		// Path history is projected only once the result row it describes is
+		// durable, and from the RAW outcome payload rather than resultJSON: the
+		// `{}` placeholder above exists to satisfy a NOT NULL column, and
+		// feeding it to the projector would be asking it to find a trace in a
+		// value that was invented here.
+		r.projectMTRSnapshot(ctx, runID, pair, spec, outcome.resultJSON)
 	}
 	resultCancel()
 
@@ -628,6 +645,54 @@ func (r *Runner) runOne(
 		State: state, Success: outcome.success, DurationNs: outcome.durationNs, Error: outcome.errStr,
 		Completed: int(done), Total: total,
 	})
+}
+
+// projectMTRSnapshot records one finished mtr pair's trace in path history
+// (M5 Decision 1: the capture point is the Console's existing result-ingest
+// path, not a new collector).
+//
+// It is a PROJECTION and never an authority. check_results already holds the
+// trace verbatim; this derives the normalized, content-hashed route from it so
+// "when did the route change?" is a query instead of an archaeology exercise.
+// Every failure here -- a payload the projector cannot read, an input the
+// store rejects, a database error -- is logged, counted on MTRSnapshots'
+// error label, and otherwise invisible: the pair stays successful and the run
+// keeps its status. Losing one trace out of a route's history is not worth
+// failing a diagnostics run over, and the operator can still read the result
+// row.
+//
+// A projector answer of false is NOT counted: a non-mtr pair, a dispatch that
+// produced no payload, a trace whose every hop timed out. Those are silences,
+// not failures, and counting them would make a controller outage look like a
+// path-history outage on the very metric meant to alert on route changes.
+//
+// ctx is the run's own context, which by this point may already be past its
+// deadline (see terminalOpTimeout). The write therefore runs on a
+// context.WithoutCancel-derived context with its own bound, exactly like the
+// UpsertRunResult it follows -- and on a FRESH one rather than sharing that
+// write's: a slow result write would otherwise leave the projection whatever
+// was left of a budget it never got to use.
+func (r *Runner) projectMTRSnapshot(ctx context.Context, runID string, pair *Pair, spec *Spec, resultJSON json.RawMessage) {
+	in, ok := ProjectMTRSnapshot(spec, pair, resultJSON, time.Now().UTC(), runID)
+	if !ok {
+		return
+	}
+
+	snapCtx, snapCancel := context.WithTimeout(context.WithoutCancel(ctx), terminalOpTimeout)
+	defer snapCancel()
+
+	_, isNew, err := r.store.UpsertPathSnapshot(snapCtx, in)
+	if err != nil {
+		slog.Error("checks: upsert path snapshot failed", "run", runID,
+			"source", pair.Source, "destination", pair.Destination.Label(), "error", err)
+		r.metrics.MTRSnapshots.WithLabelValues("error").Inc()
+		return
+	}
+	result := "repeat"
+	if isNew {
+		result = "new-path"
+	}
+	r.metrics.MTRSnapshots.WithLabelValues(result).Inc()
 }
 
 // pairOutcome is dispatchPair's result: enough to both persist a

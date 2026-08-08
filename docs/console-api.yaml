@@ -44,7 +44,9 @@ tags:
   - name: meta
     description: Version and feature-detection probes. Public.
   - name: observability
-    description: Topology, matrix, event history and the guarded PromQL proxy.
+    description: >-
+      Topology, matrix, event history, MTR path history, chart annotations and
+      the guarded PromQL proxy.
   - name: runs
     description: On-demand diagnostics runs.
   - name: configuration
@@ -95,21 +97,53 @@ paths:
     get:
       operationId: getTopology
       tags: [observability]
-      summary: Live cluster topology, proxied from the controller.
+      summary: Live cluster topology from the controller, or a reconstruction as of an instant.
       description: >-
-        The controller's snapshot verbatim. A non-leader reply is retried with
-        backoff; if every attempt still fails the console answers 502.
+        Without `at`, the controller's snapshot verbatim: a non-leader reply is
+        retried with backoff, and if every attempt still fails the console
+        answers 502. With `at`, the topology is instead REBUILT by folding
+        persisted `topology_changed` events up to that instant, and the body
+        carries `historical: true` plus the fold's own counters.
+
+
+        A reconstruction is bounded by what those events record, which is
+        `{reason, nodeName, agentId}` and nothing else. `zone` is never
+        recorded (not even by a `zone_updated` event) and `podIP` is never
+        recorded, so both come back empty on every folded entry; `ready` means
+        "seen registered and not since removed", not kubelet readiness. The
+        controller shipped with this release publishes the reason WITHOUT
+        node_name or agent_id, so history written by it folds to an empty
+        `nodes` array with every event counted in `unfoldableEvents` -- that
+        counter, not the empty array, is the honest signal.
+      parameters:
+        - name: at
+          in: query
+          description: >-
+            RFC 3339 instant to reconstruct the topology at. Absent or empty is
+            the live passthrough above, byte-for-byte. A value that does not
+            parse, or one in the future, is 400. A value older than the oldest
+            retained event -- or any value when nothing is retained -- is 422,
+            with a detail naming console.database.retentionDays. Requires a
+            database: with console.database.mode unset this parameter alone is
+            503, while the live route stays available.
+          schema:
+            type: string
+            format: date-time
       responses:
         "200":
-          description: Topology snapshot.
+          description: Topology snapshot -- live, or a fold marked `historical`.
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/Topology"
+        "400":
+          $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
         "403":
           $ref: "#/components/responses/Forbidden"
+        "422":
+          $ref: "#/components/responses/UnprocessableEntity"
         "502":
           $ref: "#/components/responses/BadGateway"
         "503":
@@ -886,6 +920,222 @@ paths:
         "503":
           $ref: "#/components/responses/Unavailable"
 
+  /api/v1/mtr/destinations:
+    get:
+      operationId: listMTRDestinations
+      tags: [observability]
+      summary: Every (source, destination) pair MTR path history knows about.
+      description: >-
+        Unpaged on purpose -- the row count is PAIRS, not traces. A pair with
+        snapshotCount 1 and traceCount 4000 has a stable route.
+      responses:
+        "200":
+          description: Every known pair, most-recently-traced first.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MTRDestinationList"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "502":
+          $ref: "#/components/responses/BadGateway"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
+  /api/v1/mtr/snapshots:
+    get:
+      operationId: listPathSnapshots
+      tags: [observability]
+      summary: One pair's route history (distinct paths), newest first.
+      description: >-
+        Both source and destination are REQUIRED; omitting either is 422, not
+        an unfiltered listing: the whole table has no UI and no bound. List the
+        pairs with GET /api/v1/mtr/destinations first.
+      parameters:
+        - name: source
+          in: query
+          required: true
+          description: Source node name; exact match.
+          schema:
+            type: string
+        - name: destination
+          in: query
+          required: true
+          description: Destination node or target NAME, never an address; exact match.
+          schema:
+            type: string
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Cursor"
+      responses:
+        "200":
+          description: One page of distinct paths this pair has taken.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PathSnapshotPage"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "422":
+          $ref: "#/components/responses/UnprocessableEntity"
+        "502":
+          $ref: "#/components/responses/BadGateway"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
+  /api/v1/mtr/snapshots/{id}:
+    parameters:
+      - $ref: "#/components/parameters/PathID"
+    get:
+      operationId: getPathSnapshot
+      tags: [observability]
+      summary: One stored route. An unknown id and a malformed one are both 404.
+      description: >-
+        Without `enrich=true` the `enrichment` field is ABSENT -- never null,
+        never an empty object -- so "did not ask" stays distinguishable from
+        "asked and nothing is known". Enrichment is a cache read and NEVER
+        fails the trace: an unreadable cache yields an empty map, not an error.
+      parameters:
+        - name: enrich
+          in: query
+          description: Only the exact value "true" turns the hop enrichment lookup on.
+          schema:
+            type: boolean
+            default: false
+      responses:
+        "200":
+          description: The snapshot, carrying `enrichment` only when it was asked for.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PathSnapshot"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "502":
+          $ref: "#/components/responses/BadGateway"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
+  /api/v1/annotations:
+    get:
+      operationId: listAnnotations
+      tags: [observability]
+      summary: One page of operator notes pinned to moments or spans.
+      description: >-
+        from/to bound the window an annotation must OVERLAP, not the window its
+        start must fall in: a span that began before from and is still running
+        at from is exactly the mark a chart needs to draw. Either side absent
+        is unbounded on that side.
+      parameters:
+        - name: from
+          in: query
+          description: RFC3339; absent means unbounded on this side.
+          schema:
+            type: string
+            format: date-time
+        - name: to
+          in: query
+          description: RFC3339, exclusive; absent means unbounded on this side.
+          schema:
+            type: string
+            format: date-time
+        - name: scope
+          in: query
+          description: >-
+            THREE states. Absent means every scope; present-but-empty
+            (`?scope=`) means the GLOBAL ones only, because "" is a real scope
+            value here; any other value is an exact match.
+          schema:
+            type: string
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Cursor"
+      responses:
+        "200":
+          description: One page of annotations.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AnnotationPage"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "502":
+          $ref: "#/components/responses/BadGateway"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+    post:
+      operationId: createAnnotation
+      tags: [observability]
+      summary: Pin one mark. There is no update -- a mark is not a document.
+      description: >-
+        createdBy is the SERVER's view of the authenticated subject
+        ("user:<id>", "token:<id>"), never a body field. The audit row for this
+        route records the scope ONLY: the text is free-form operator prose and
+        never enters the audit log.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AnnotationRequest"
+      responses:
+        "201":
+          description: Annotation created.
+          headers:
+            Location:
+              description: Permalink to the new annotation.
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Annotation"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "422":
+          $ref: "#/components/responses/UnprocessableEntity"
+        "502":
+          $ref: "#/components/responses/BadGateway"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
+  /api/v1/annotations/{id}:
+    parameters:
+      - $ref: "#/components/parameters/PathID"
+    delete:
+      operationId: deleteAnnotation
+      tags: [observability]
+      summary: Remove one mark; deleting one that is not there is 404, not success.
+      responses:
+        "204":
+          $ref: "#/components/responses/NoContent"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "502":
+          $ref: "#/components/responses/BadGateway"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
   /api/v1/audit:
     get:
       operationId: listAuditEntries
@@ -1579,8 +1829,37 @@ components:
           items:
             $ref: "#/components/schemas/TopologyAgent"
         timestamp:
+          description: >-
+            Live: the controller's snapshot time. Historical: when this
+            topology came into being, i.e. the time of the last folded change
+            at or before `asOf` (falling back to `asOf` when nothing folded).
           type: string
           format: date-time
+        historical:
+          description: >-
+            Present and true ONLY on a `?at=` response. Absent on the live
+            passthrough, which is how a client tells the two apart.
+          type: boolean
+        asOf:
+          description: The instant `?at=` asked about, echoed back. Historical only.
+          type: string
+          format: date-time
+        eventsFolded:
+          description: How many topology_changed events the fold consumed. Historical only.
+          type: integer
+        unfoldableEvents:
+          description: >-
+            How many of those could not move the node set: they named neither a
+            node nor an agent, carried unparseable details, or used a reason
+            this build does not know. A high value beside an empty `nodes`
+            array means the events do not name their subject -- NOT that the
+            cluster was empty. Historical only.
+          type: integer
+        truncated:
+          description: >-
+            True when the fold hit its 100k-row guard, so the reconstruction is
+            missing its newest events and must not be trusted. Historical only.
+          type: boolean
       additionalProperties: false
 
     MatrixCell:
@@ -1718,6 +1997,215 @@ components:
         nextCursor:
           type: string
           description: Empty string when the page proves nothing older is left.
+      additionalProperties: false
+
+    MTRDestination:
+      type: object
+      description: One (source, destination) pair path history knows about.
+      required: [sourceNode, destination, snapshotCount, traceCount, firstSeen, lastSeen]
+      properties:
+        sourceNode:
+          type: string
+        destination:
+          type: string
+          description: A node NAME or a target NAME, never an address.
+        snapshotCount:
+          type: integer
+          format: int64
+          description: How many DISTINCT routes the pair has taken.
+        traceCount:
+          type: integer
+          format: int64
+          description: How many traces produced them.
+        firstSeen:
+          type: string
+          format: date-time
+        lastSeen:
+          type: string
+          format: date-time
+      additionalProperties: false
+
+    MTRDestinationList:
+      type: object
+      required: [destinations]
+      properties:
+        destinations:
+          type: array
+          items:
+            $ref: "#/components/schemas/MTRDestination"
+      additionalProperties: false
+
+    MTRHop:
+      type: object
+      description: >-
+        One hop of a stored trace. Only `ip` takes part in the dedupe hash; the
+        rest is the payload of the FIRST trace that took this path.
+      required: [number, ip, rttNs, lossRatio]
+      properties:
+        number:
+          type: integer
+        ip:
+          type: string
+        hostname:
+          type: string
+          description: Absent unless the stored trace carried one; enrichment is separate.
+        rttNs:
+          type: integer
+          format: int64
+          description: Round-trip time in NANOSECONDS, the repo-wide duration convention.
+        lossRatio:
+          type: number
+          description: 0..1.
+      additionalProperties: false
+
+    Enrichment:
+      type: object
+      description: >-
+        One cached lookup about a hop address (mtr_hop_enrichment). Every field
+        is re-derivable, which is what makes the retention sweep over this
+        cache free of consequence.
+      required: [ip, resolvedAt]
+      properties:
+        ip:
+          type: string
+        rdns:
+          type: string
+        asn:
+          type: integer
+          format: int64
+        provider:
+          type: string
+        geo:
+          type: object
+          description: Resolver-shaped JSON object; absent when nothing geo-located.
+          additionalProperties: true
+        resolvedAt:
+          type: string
+          format: date-time
+      additionalProperties: false
+
+    PathSnapshot:
+      type: object
+      description: >-
+        One distinct route a pair has been observed taking, with the hop
+        payload of the first trace that took it.
+      required: [id, sourceNode, destination, pathHash, hopCount, hops, firstSeen, lastSeen, traceCount]
+      properties:
+        id:
+          type: string
+          format: uuid
+        sourceNode:
+          type: string
+        destination:
+          type: string
+        pathHash:
+          type: string
+          description: SHA-256 over the ordered hop IP list ONLY -- not RTTs, not hostnames.
+        hopCount:
+          type: integer
+        hops:
+          type: array
+          items:
+            $ref: "#/components/schemas/MTRHop"
+        firstSeen:
+          type: string
+          format: date-time
+        lastSeen:
+          type: string
+          format: date-time
+        traceCount:
+          type: integer
+          format: int64
+        runId:
+          type: string
+          format: uuid
+          description: Absent once the run that first produced this path has aged out.
+        enrichment:
+          type: object
+          description: >-
+            Hop address -> cached enrichment row. Present ONLY on GET
+            /api/v1/mtr/snapshots/{id}?enrich=true, and then possibly empty; a
+            cache miss is simply an absent key.
+          additionalProperties:
+            $ref: "#/components/schemas/Enrichment"
+      additionalProperties: false
+
+    PathSnapshotPage:
+      type: object
+      required: [snapshots, nextCursor]
+      properties:
+        snapshots:
+          type: array
+          items:
+            $ref: "#/components/schemas/PathSnapshot"
+        nextCursor:
+          type: string
+      additionalProperties: false
+
+    Annotation:
+      type: object
+      description: One operator note pinned to a moment or a span.
+      required: [id, startAt, scope, text, createdBy, createdAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+        startAt:
+          type: string
+          format: date-time
+        endAt:
+          type: string
+          format: date-time
+          description: Absent for an INSTANT mark -- a point in time, not "still open".
+        scope:
+          type: string
+          description: >-
+            "" is a real value: the GLOBAL scope. Any other value names a node,
+            a pair or a target. A filter key, NEVER a Prometheus label value.
+        text:
+          type: string
+          maxLength: 1024
+        createdBy:
+          type: string
+          description: The server's view of the subject ("user:<id>", "token:<id>").
+        createdAt:
+          type: string
+          format: date-time
+      additionalProperties: false
+
+    AnnotationRequest:
+      type: object
+      description: >-
+        Create body. There is deliberately no createdBy: attribution comes from
+        the authenticated subject, not from the client.
+      required: [startAt, text]
+      properties:
+        startAt:
+          type: string
+          format: date-time
+        endAt:
+          type: string
+          format: date-time
+          description: Omit for an instant mark; must be at or after startAt.
+        scope:
+          type: string
+          maxLength: 255
+          description: Omitted or "" pins the mark globally.
+        text:
+          type: string
+          maxLength: 1024
+      additionalProperties: false
+
+    AnnotationPage:
+      type: object
+      required: [annotations, nextCursor]
+      properties:
+        annotations:
+          type: array
+          items:
+            $ref: "#/components/schemas/Annotation"
+        nextCursor:
+          type: string
       additionalProperties: false
 
     RunCreateRequest:

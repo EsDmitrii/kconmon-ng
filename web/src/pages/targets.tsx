@@ -24,6 +24,13 @@ import {
   updateSchedule,
   updateTarget,
 } from "@/lib/api";
+// Read directly in each mutating component rather than threaded down from the
+// page as a prop: it is a context read, it costs nothing, and every affordance
+// that needs it then states its own dependency instead of inheriting one four
+// levels up. See lib/timemachine.tsx for the hide-vs-disable rule these all
+// follow — `canWrite` decides whether a control EXISTS, this decides whether it
+// is usable right now.
+import { useWritesDisabled } from "@/lib/timemachine";
 import {
   CHECK_TYPES,
   type CheckDefinition,
@@ -329,6 +336,7 @@ function fmtTime(timestamp?: string | null): string {
 
 function TargetForm({ initial, onDone }: { initial?: Target; onDone: () => void }) {
   const qc = useQueryClient();
+  const writesDisabled = useWritesDisabled();
   const [name, setName] = useState(initial?.name ?? "");
   const [kind, setKind] = useState<TargetKind>(initial?.kind ?? "host");
   const [address, setAddress] = useState(initial?.address ?? "");
@@ -395,7 +403,10 @@ function TargetForm({ initial, onDone }: { initial?: Target; onDone: () => void 
           </p>
         ) : null}
         <div className="flex gap-2">
-          <Button type="submit" loading={submitting}>
+          {/* Only the WRITE is disabled. Cancel closes a form and touches
+              nothing, so it stays live — a modal an operator cannot dismiss
+              would be the mode holding the page hostage. */}
+          <Button type="submit" loading={submitting} disabled={writesDisabled}>
             {initial ? "Save target" : "Create target"}
           </Button>
           <Button type="button" variant="outline" onClick={onDone}>
@@ -409,6 +420,7 @@ function TargetForm({ initial, onDone }: { initial?: Target; onDone: () => void 
 
 function TargetRowActions({ target, onEdit }: { target: Target; onEdit: () => void }) {
   const qc = useQueryClient();
+  const writesDisabled = useWritesDisabled();
   const [confirming, setConfirming] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
@@ -432,7 +444,7 @@ function TargetRowActions({ target, onEdit }: { target: Target; onEdit: () => vo
   if (confirming) {
     return (
       <span className="flex items-center gap-2">
-        <Button size="sm" variant="outline" loading={busy} onClick={handleDelete}>
+        <Button size="sm" variant="outline" loading={busy} disabled={writesDisabled} onClick={handleDelete}>
           Confirm delete {target.name}
         </Button>
         <Button size="sm" variant="ghost" onClick={() => setConfirming(false)}>
@@ -443,10 +455,13 @@ function TargetRowActions({ target, onEdit }: { target: Target; onEdit: () => vo
   }
   return (
     <span className="flex items-center gap-2">
-      <Button size="sm" variant="ghost" onClick={onEdit}>
+      {/* Edit opens a form whose only purpose is to submit a PUT, so it is
+          disabled with the write it leads to rather than left to dead-end at a
+          greyed Save. */}
+      <Button size="sm" variant="ghost" disabled={writesDisabled} onClick={onEdit}>
         Edit {target.name}
       </Button>
-      <Button size="sm" variant="ghost" onClick={() => setConfirming(true)}>
+      <Button size="sm" variant="ghost" disabled={writesDisabled} onClick={() => setConfirming(true)}>
         Delete {target.name}
       </Button>
       {error ? (
@@ -459,6 +474,7 @@ function TargetRowActions({ target, onEdit }: { target: Target; onEdit: () => vo
 }
 
 function TargetsTab({ canWrite }: { canWrite: boolean }) {
+  const writesDisabled = useWritesDisabled();
   const [editing, setEditing] = useState<{ mode: "none" } | { mode: "create" } | { mode: "edit"; target: Target }>({
     mode: "none",
   });
@@ -476,7 +492,7 @@ function TargetsTab({ canWrite }: { canWrite: boolean }) {
 
       {canWrite && editing.mode === "none" ? (
         <div>
-          <Button size="sm" onClick={() => setEditing({ mode: "create" })}>
+          <Button size="sm" disabled={writesDisabled} onClick={() => setEditing({ mode: "create" })}>
             New target
           </Button>
         </div>
@@ -576,6 +592,7 @@ function DefinitionForm({
   onDone: () => void;
 }) {
   const qc = useQueryClient();
+  const writesDisabled = useWritesDisabled();
   const [name, setName] = useState(initial?.name ?? "");
   const [checkType, setCheckType] = useState<CheckType>(initial?.checkType ?? "tcp");
   const [sourceSelection, setSourceSelection] = useState<SourceSelection>(initial?.sourceSelection ?? "one-per-zone");
@@ -777,7 +794,7 @@ function DefinitionForm({
         ) : null}
 
         <div className="flex gap-2">
-          <Button type="submit" loading={submitting} disabled={blocked}>
+          <Button type="submit" loading={submitting} disabled={blocked || writesDisabled}>
             {initial ? "Save definition" : "Create definition"}
           </Button>
           <Button type="button" variant="outline" onClick={onDone}>
@@ -791,6 +808,7 @@ function DefinitionForm({
 
 function DefinitionRowActions({ definition, onEdit }: { definition: CheckDefinition; onEdit: () => void }) {
   const qc = useQueryClient();
+  const writesDisabled = useWritesDisabled();
   const [confirming, setConfirming] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
@@ -811,7 +829,7 @@ function DefinitionRowActions({ definition, onEdit }: { definition: CheckDefinit
   if (confirming) {
     return (
       <span className="flex items-center gap-2">
-        <Button size="sm" variant="outline" loading={busy} onClick={handleDelete}>
+        <Button size="sm" variant="outline" loading={busy} disabled={writesDisabled} onClick={handleDelete}>
           Confirm delete {definition.name}
         </Button>
         <Button size="sm" variant="ghost" onClick={() => setConfirming(false)}>
@@ -822,10 +840,10 @@ function DefinitionRowActions({ definition, onEdit }: { definition: CheckDefinit
   }
   return (
     <span className="flex items-center gap-2">
-      <Button size="sm" variant="ghost" onClick={onEdit}>
+      <Button size="sm" variant="ghost" disabled={writesDisabled} onClick={onEdit}>
         Edit {definition.name}
       </Button>
-      <Button size="sm" variant="ghost" onClick={() => setConfirming(true)}>
+      <Button size="sm" variant="ghost" disabled={writesDisabled} onClick={() => setConfirming(true)}>
         Delete {definition.name}
       </Button>
       {error ? (
@@ -851,6 +869,7 @@ function destinationLabel(d: CheckDefinition, targets: Target[]): string {
 }
 
 function DefinitionsTab({ canRead, canWrite }: { canRead: boolean; canWrite: boolean }) {
+  const writesDisabled = useWritesDisabled();
   const [editing, setEditing] = useState<
     { mode: "none" } | { mode: "create" } | { mode: "edit"; definition: CheckDefinition }
   >({ mode: "none" });
@@ -882,7 +901,7 @@ function DefinitionsTab({ canRead, canWrite }: { canRead: boolean; canWrite: boo
 
       {canWrite && editing.mode === "none" ? (
         <div>
-          <Button size="sm" onClick={() => setEditing({ mode: "create" })}>
+          <Button size="sm" disabled={writesDisabled} onClick={() => setEditing({ mode: "create" })}>
             New definition
           </Button>
         </div>
@@ -1021,6 +1040,7 @@ export function localDateTimeToIso(value: string): string | null {
  */
 function ScheduleForm({ definitions, onDone }: { definitions: CheckDefinition[]; onDone: () => void }) {
   const qc = useQueryClient();
+  const writesDisabled = useWritesDisabled();
   const [definitionId, setDefinitionId] = useState(definitions[0]?.id ?? "");
   const [kind, setKind] = useState<ScheduleKind>("interval");
   const [intervalSeconds, setIntervalSeconds] = useState("60");
@@ -1142,7 +1162,7 @@ function ScheduleForm({ definitions, onDone }: { definitions: CheckDefinition[];
         ) : null}
 
         <div className="flex gap-2">
-          <Button type="submit" loading={submitting}>
+          <Button type="submit" loading={submitting} disabled={writesDisabled}>
             Create schedule
           </Button>
           <Button type="button" variant="outline" onClick={onDone}>
@@ -1161,6 +1181,7 @@ function ScheduleForm({ definitions, onDone }: { definitions: CheckDefinition[];
  *  the honest answer and renders right here rather than being pre-empted. */
 function ScheduleRowActions({ schedule, label }: { schedule: Schedule; label: string }) {
   const qc = useQueryClient();
+  const writesDisabled = useWritesDisabled();
   const [confirming, setConfirming] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
@@ -1185,6 +1206,7 @@ function ScheduleRowActions({ schedule, label }: { schedule: Schedule; label: st
           size="sm"
           variant="outline"
           loading={busy}
+          disabled={writesDisabled}
           onClick={() => run(() => deleteSchedule(schedule.id), "Failed to delete the schedule")}
         >
           Confirm delete {label}
@@ -1201,6 +1223,7 @@ function ScheduleRowActions({ schedule, label }: { schedule: Schedule; label: st
         size="sm"
         variant="ghost"
         loading={busy}
+        disabled={writesDisabled}
         onClick={() =>
           run(
             () => updateSchedule(schedule.id, scheduleRequestFrom(schedule, !schedule.enabled)),
@@ -1210,7 +1233,7 @@ function ScheduleRowActions({ schedule, label }: { schedule: Schedule; label: st
       >
         {schedule.enabled ? "Disable" : "Enable"} {label}
       </Button>
-      <Button size="sm" variant="ghost" onClick={() => setConfirming(true)}>
+      <Button size="sm" variant="ghost" disabled={writesDisabled} onClick={() => setConfirming(true)}>
         Delete {label}
       </Button>
       {error ? (
@@ -1234,6 +1257,7 @@ function ScheduleRowActions({ schedule, label }: { schedule: Schedule; label: st
  * the write affordances ABSENT rather than disabled (PAGES.md:126-129).
  */
 function SchedulesTab({ canRead, canWrite }: { canRead: boolean; canWrite: boolean }) {
+  const writesDisabled = useWritesDisabled();
   const [creating, setCreating] = useState(false);
   const query = useQuery({ queryKey: ["schedules"], queryFn: () => listSchedules(), enabled: canRead });
   // Named, not numbered: a schedule row that shows only a definition UUID
@@ -1267,7 +1291,7 @@ function SchedulesTab({ canRead, canWrite }: { canRead: boolean; canWrite: boole
 
       {canWrite && !creating ? (
         <div>
-          <Button size="sm" onClick={() => setCreating(true)}>
+          <Button size="sm" disabled={writesDisabled} onClick={() => setCreating(true)}>
             New schedule
           </Button>
         </div>

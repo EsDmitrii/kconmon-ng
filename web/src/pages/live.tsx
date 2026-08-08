@@ -10,10 +10,14 @@ import { Segmented } from "@/components/ui/segmented";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useCapabilities, useDatabaseAvailable } from "@/hooks/use-capabilities";
 import { getWsClient } from "@/hooks/use-ws-topic";
+import { useAnnotations } from "@/components/annotations";
 import { ApiError, getEvents } from "@/lib/api";
+import { GLOBAL_SCOPE } from "@/lib/annotations";
+import { useTimeContext } from "@/lib/timemachine";
 import {
   LIVE_EVENT_SEVERITIES,
   LIVE_EVENT_TYPES,
+  type Annotation,
   type LiveEvent,
   type LiveEventSeverity,
   type LiveEventType,
@@ -191,6 +195,59 @@ export function countMissedEvents(events: LiveEvent[]): number {
   return missed;
 }
 
+/**
+ * LIVE_ANNOTATION_RANGE_SECONDS bounds the annotation fetch this page makes. A
+ * day, because the scrollback can walk back a long way and a note the operator
+ * cannot see is a note that may as well not exist — but bounded all the same,
+ * because "every annotation ever" is not a request this page has any business
+ * making.
+ */
+export const LIVE_ANNOTATION_RANGE_SECONDS = 24 * 60 * 60;
+
+/**
+ * FeedRow is what the virtualizer actually renders: an event, or a GLOBAL
+ * annotation filed at its own timestamp among them.
+ *
+ * `key` is namespaced (`annotation:<id>`) rather than the bare id, because an
+ * event id ("<seq>-<unixNano>") and an annotation id (a UUID) come from
+ * different issuers and nothing guarantees they never collide — and a duplicate
+ * React key in a virtualized list is a rendering bug that only shows up under
+ * scroll.
+ */
+export type FeedRow =
+  | { kind: "event"; key: string; at: number; event: LiveEvent }
+  | { kind: "annotation"; key: string; at: number; annotation: Annotation };
+
+/**
+ * mergeFeedRows interleaves annotations into the (already filtered, already
+ * newest-first) event list at their own timestamp position.
+ *
+ * Annotations are NOT filtered by the type/severity/scope controls: those
+ * filters describe the controller's event stream, and an operator note is not
+ * one of its rows — hiding a human's note because they picked "topology
+ * changed" would be the feed editing the record.
+ *
+ * The sort is descending on time only, and Array#sort is stable, so events keep
+ * the (timestamp, seq) order pushEvents already gave them and an annotation
+ * sharing a millisecond with an event lands just after it. Deterministic, which
+ * is what a virtualized list with sticky scroll anchoring needs.
+ */
+export function mergeFeedRows(events: LiveEvent[], annotations: Annotation[]): FeedRow[] {
+  const rows: FeedRow[] = events.map((event) => ({ kind: "event", key: event.id, at: timeOf(event), event }));
+  for (const annotation of annotations) {
+    const parsed = Date.parse(annotation.startAt);
+    rows.push({
+      kind: "annotation",
+      key: `annotation:${annotation.id}`,
+      // Same treatment junk timestamps get on the event side (timeOf): sort to
+      // the bottom rather than poison the comparator with NaN.
+      at: Number.isNaN(parsed) ? Number.NEGATIVE_INFINITY : parsed,
+      annotation,
+    });
+  }
+  return rows.sort((a, b) => b.at - a.at);
+}
+
 /* ---------------------------------------------------------------------------
    Presentation. Go's event type and severity are open strings; the TypeScript
    unions are a convenience for us, not a promise from the wire. Every lookup
@@ -261,6 +318,37 @@ function EventRow({ event }: { event: LiveEvent }) {
   );
 }
 
+/**
+ * AnnotationFeedRow is an operator's note wearing the feed's own columns, so it
+ * lines up with the events around it — and nothing else about it is the same.
+ * The badge says "Note" rather than a severity (a note has none), the type
+ * column says whether it is a moment or a span, and the scope column carries
+ * the AUTHOR instead: on this page every annotation is global by construction,
+ * so printing "global" five times would spend the column on a constant, while
+ * "who wrote this" is the thing an operator reading back actually wants.
+ */
+function AnnotationFeedRow({ annotation }: { annotation: Annotation }) {
+  return (
+    <>
+      <span className="nums w-24 shrink-0 text-xs text-muted-foreground">{fmtTime(annotation.startAt)}</span>
+      <span className="w-[5.25rem] shrink-0">
+        <Badge variant="neutral" dot>
+          Note
+        </Badge>
+      </span>
+      <span className="min-w-0 flex-1 truncate text-sm italic" title={annotation.text}>
+        {annotation.text}
+      </span>
+      <span className="hidden w-40 shrink-0 truncate text-xs text-muted-foreground lg:block">
+        {annotation.endAt ? "Annotation (span)" : "Annotation"}
+      </span>
+      <span className="hidden w-52 shrink-0 truncate text-xs text-muted-foreground md:block">
+        {annotation.createdBy}
+      </span>
+    </>
+  );
+}
+
 /* The skeleton mirrors the loaded shape — same columns, same row rhythm — so
    the page does not reflow when the first event lands. h-11 is ROW_HEIGHT. */
 function FeedSkeleton() {
@@ -301,6 +389,9 @@ const EMPTY_FILTERS: LiveFilters = { type: "all", severity: "all", scope: "" };
 export function LivePage() {
   const { realtime, resolved } = useCapabilities();
   const { available: historyAvailable, resolved: historyResolved } = useDatabaseAvailable();
+  const { at } = useTimeContext();
+  const engaged = at !== null;
+  const atKey = at ? at.toISOString() : "";
   const [events, setEvents] = useState<LiveEvent[]>([]);
   const [connected, setConnected] = useState(false);
   const [topicError, setTopicError] = useState<string | null>(null);
@@ -332,7 +423,12 @@ export function LivePage() {
       try {
         const types = filters.type === "all" ? undefined : [filters.type];
         const scope = filters.scope.trim() || undefined;
-        const page = await getEvents({ types, scope, cursor });
+        // Engaged: `to=t` turns the feed into a scrollback ENDING at t. The
+        // cursor pagination underneath is unchanged — "Load older" still walks
+        // backwards from wherever the last page stopped — so the mode only
+        // moves where the walk begins, which is exactly what "scrollback around
+        // t" means. The bound is exclusive server-side (store.EventFilter.To).
+        const page = await getEvents({ types, scope, cursor, ...(at ? { to: at } : {}) });
         // Merged through the exact same dedupe/sort pushEvents uses for the
         // socket: a historical row and one already delivered live share an id
         // ("<seq>-<unixNano>" on both paths), so pushEvents' Set-based dedupe
@@ -345,7 +441,7 @@ export function LivePage() {
         setHistory({ nextCursor: "", loading: false, notice });
       }
     },
-    [filters.type, filters.scope],
+    [filters.type, filters.scope, at],
   );
 
   // Fetches page one on mount, and again whenever the type or scope filter
@@ -397,6 +493,25 @@ export function LivePage() {
     setEvents((prev) => pushEvents(prev, batch));
   }, []);
 
+  /* Moving through time EMPTIES the ring, unlike a filter change (which merges
+     the new page into what is already held). The difference is not stylistic:
+     a filter narrows one stream, while `at` redefines WHICH stream this is, and
+     rows from after t are precisely what a view of t must not contain. Both
+     directions clear — arriving at t drops the live tail, and returning to Live
+     drops the historical page rather than leaving it stranded above rows the
+     socket is about to append. The queues and their counters go with it: a
+     "buffered" number carried over from the other mode counts nothing that is
+     still on screen. */
+  useEffect(() => {
+    setEvents([]);
+    inboxRef.current = [];
+    pendingRef.current = [];
+    bufferedRef.current = 0;
+    discardedRef.current = 0;
+    setBuffered(0);
+    setDiscarded(0);
+  }, [atKey]);
+
   // Subscribed unconditionally, and deliberately NOT through useWsTopic: that
   // hook keeps only the latest envelope, which is right for whole-state
   // snapshot topics and wrong for an append-only feed — two events in one tick
@@ -405,7 +520,19 @@ export function LivePage() {
   // arrive over the Valkey bus; `realtime` therefore drives the badge and the
   // copy, never the subscription. StrictMode double-invokes this in dev; the
   // cleanup makes that a no-op.
+  //
+  // The ONE thing that stops it is the Time Machine: engaged, this page is a
+  // scrollback ending at t, and a live tail appending events from now on top of
+  // it would be the mode lying about what it shows. Not paused — pause holds
+  // arrivals and replays them on resume, which is the opposite of what is
+  // wanted here — simply not subscribed, so returning to Live re-runs this
+  // effect and the feed picks up from a clean ring.
   useEffect(() => {
+    if (engaged) {
+      setConnected(false);
+      setTopicError(null);
+      return;
+    }
     const ws = getWsClient();
     setConnected(ws.state === "open");
     const offState = ws.onStateChange((s) => {
@@ -458,7 +585,7 @@ export function LivePage() {
         frameRef.current = null;
       }
     };
-  }, [flush]);
+  }, [flush, engaged]);
 
   const togglePause = () => {
     // Whatever arrived in the current frame arrived BEFORE the click, so drain
@@ -484,6 +611,14 @@ export function LivePage() {
   };
 
   const visible = useMemo(() => filterEvents(events, filters), [events, filters]);
+  /* GLOBAL annotations only, and that is the whole story on this page: the feed
+     is fleet-wide, so a note scoped to one node or one pair belongs on that
+     object's card, not interleaved with everybody else's events.
+     Read-only here — creating a mark needs a time to pin it to, and this page's
+     one useful default (the row you are looking at) is a canvas-free list with
+     no such affordance in M5. The cards and Explore own create/delete. */
+  const { annotations } = useAnnotations(GLOBAL_SCOPE, LIVE_ANNOTATION_RANGE_SECONDS);
+  const rows = useMemo(() => mergeFeedRows(visible, annotations), [visible, annotations]);
   // Two ways to lose an event, one number: a hole in the controller's numbering
   // (something went missing between the controller and this tab) and a slab
   // trim (this tab could not keep up and dropped its own backlog).
@@ -491,7 +626,7 @@ export function LivePage() {
   const missed = gaps + discarded;
 
   const virtualizer = useVirtualizer({
-    count: visible.length,
+    count: rows.length,
     getScrollElement: () => scrollRef.current,
     estimateSize: () => ROW_HEIGHT,
     overscan: 12,
@@ -513,15 +648,19 @@ export function LivePage() {
     id: null,
     index: 0,
   });
-  const feedRef = useRef({ visible, filterKey });
-  feedRef.current = { visible, filterKey };
+  // The anchor tracks ROWS, not events: an annotation filed into the middle of
+  // the scrollback shifts everything below it exactly the way a late event
+  // does, and an anchor that could not see it would compensate by the wrong
+  // number.
+  const feedRef = useRef({ rows, filterKey });
+  feedRef.current = { rows, filterKey };
 
   const recordAnchor = useCallback(() => {
     const el = scrollRef.current;
     if (!el) return;
-    const { visible: rows, filterKey: key } = feedRef.current;
+    const { rows: current, filterKey: key } = feedRef.current;
     const index = Math.max(0, Math.round(el.scrollTop / ROW_HEIGHT));
-    anchorRef.current = { key, index, id: rows[index]?.id ?? null };
+    anchorRef.current = { key, index, id: current[index]?.key ?? null };
   }, []);
 
   useLayoutEffect(() => {
@@ -532,13 +671,13 @@ export function LivePage() {
       // A new filter is a new list; there is nothing to hold in place.
       el.scrollTop = 0;
     } else if (el.scrollTop > 0 && anchor.id !== null) {
-      const now = visible.findIndex((e) => e.id === anchor.id);
+      const now = rows.findIndex((r) => r.key === anchor.id);
       // Gone (evicted off the tail) reads as -1: nothing left to anchor to, so
       // leave the offset alone and re-record against whatever is there now.
       if (now >= 0 && now !== anchor.index) el.scrollTop += (now - anchor.index) * ROW_HEIGHT;
     }
     recordAnchor();
-  }, [filterKey, visible, recordAnchor]);
+  }, [filterKey, rows, recordAnchor]);
 
   const clearFilters = useCallback(() => setFilters(EMPTY_FILTERS), []);
   // Only a filter can empty a non-empty ring, so `events.length > 0 &&
@@ -548,12 +687,19 @@ export function LivePage() {
   // Unresolved capabilities read as "connecting", never as "no realtime": until
   // /api/v1/version answers, false means unknown, and treating unknown as an
   // answer is what flashes a warning card on every cold load.
-  const connecting = events.length === 0 && (!resolved || (realtime && !connected));
+  // Engaged there is nothing to connect TO — the rows come from GET
+  // /api/v1/events alone — so the socket's state must not be allowed to hold
+  // this page on a skeleton that would never resolve.
+  const connecting = events.length === 0 && !engaged && (!resolved || (realtime && !connected));
 
   return (
     <PageShell
       title="Live"
-      description={`Controller events pushed over the WebSocket, newest first. The browser holds the most recent ${LIVE_RING_CAP}; anything older is Prometheus' job.`}
+      description={
+        at
+          ? `Scrollback ending ${at.toLocaleString()}, newest first. The live tail is off while the Time Machine is engaged — "Load older" walks back from here.`
+          : `Controller events pushed over the WebSocket, newest first. The browser holds the most recent ${LIVE_RING_CAP}; anything older is Prometheus' job.`
+      }
       actions={
         <>
           <Segmented
@@ -594,14 +740,22 @@ export function LivePage() {
               className="pointer-events-none absolute right-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground"
             />
           </span>
-          <Button variant="outline" size="sm" onClick={togglePause}>
+          {/* Pause holds a live tail still. Engaged there is no tail, so the
+              button has nothing to act on — disabled rather than removed, the
+              same rule the mutation affordances follow
+              (lib/timemachine.tsx's useWritesDisabled). */}
+          <Button variant="outline" size="sm" disabled={engaged} onClick={togglePause}>
             {paused ? <Play aria-hidden="true" className="size-3.5" /> : <Pause aria-hidden="true" className="size-3.5" />}
             {paused ? (buffered > 0 ? `Resume (${buffered} buffered)` : "Resume") : "Pause"}
           </Button>
           {/* Pushed or not — the badge states the transport, never colour alone.
               While the capability is still unknown it says so rather than
               guessing "delayed". */}
-          {resolved ? (
+          {/* Engaged the transport question does not arise — the badge would
+              be answering "is the push live?" about a feed that is deliberately
+              not live. The mode itself is the answer, and the top-bar banner
+              says it once for the whole console. */}
+          {engaged ? null : resolved ? (
             <RealtimeBadge realtime={realtime && connected} />
           ) : (
             <Badge variant="neutral" dot>
@@ -618,7 +772,9 @@ export function LivePage() {
         </Card>
       ) : null}
 
-      {resolved && !realtime ? (
+      {/* Not while engaged: "no events will arrive here" is true by design in
+          that mode and reads as a fault. */}
+      {!engaged && resolved && !realtime ? (
         <Card role="status" className="border-l-4 border-l-health-warn bg-health-warn-soft/40 p-5">
           <p className="text-sm font-medium">This replica is not receiving the controller event stream</p>
           <p className="mt-1 max-w-prose text-xs leading-relaxed text-muted-foreground">
@@ -697,10 +853,16 @@ export function LivePage() {
 
         {connecting ? <FeedSkeleton /> : null}
 
-        {!connecting && events.length === 0 ? (
+        {/* rows.length rather than events.length: a window with no events but
+            an operator note in it is not an empty feed. */}
+        {!connecting && events.length === 0 && rows.length === 0 ? (
           <BlankSlate
-            title="Waiting for events"
-            body="Nothing has been pushed since this page opened. Topology changes, observed checks and MTR runs land here the moment the controller emits them."
+            title={engaged ? "No events at or before this time" : "Waiting for events"}
+            body={
+              engaged
+                ? "Event history goes back as far as console.database.retentionDays and no further — an instant older than that has nothing to show, and so does a quiet cluster."
+                : "Nothing has been pushed since this page opened. Topology changes, observed checks and MTR runs land here the moment the controller emits them."
+            }
           />
         ) : null}
 
@@ -716,7 +878,7 @@ export function LivePage() {
           />
         ) : null}
 
-        {visible.length > 0 ? (
+        {rows.length > 0 ? (
           <div ref={scrollRef} onScroll={recordAnchor} className="h-[min(60vh,40rem)] overflow-auto">
             <ul
               role="log"
@@ -733,21 +895,31 @@ export function LivePage() {
               style={{ height: `${virtualizer.getTotalSize()}px` }}
             >
               {virtualizer.getVirtualItems().map((item) => {
-                const event = visible[item.index];
+                const row = rows[item.index];
                 return (
                   <li
-                    key={event.id}
-                    // key is the controller-assigned "<seq>-<unixNano>", the
-                    // same string the hub dedupes on — identical on every
-                    // console replica, which keeps React's reconciliation
-                    // stable as the ring shifts. An index key would not.
+                    key={row.key}
+                    // For an event the key is the controller-assigned
+                    // "<seq>-<unixNano>", the same string the hub dedupes on —
+                    // identical on every console replica, which keeps React's
+                    // reconciliation stable as the ring shifts. An index key
+                    // would not. Annotations carry a namespaced id for the same
+                    // stability (mergeFeedRows).
+                    data-testid={row.kind === "annotation" ? "annotation-feed-row" : undefined}
                     style={{ height: `${item.size}px`, transform: `translateY(${item.start}px)` }}
                     className={cn(
                       "absolute left-0 top-0 flex w-full items-center gap-4 px-4",
                       "border-b border-border/60",
+                      // A note is not an event, and the row says so before it is
+                      // read: recessed, with a left rule in the accent colour.
+                      row.kind === "annotation" && "border-l-2 border-l-primary bg-surface-2/50",
                     )}
                   >
-                    <EventRow event={event} />
+                    {row.kind === "event" ? (
+                      <EventRow event={row.event} />
+                    ) : (
+                      <AnnotationFeedRow annotation={row.annotation} />
+                    )}
                   </li>
                 );
               })}

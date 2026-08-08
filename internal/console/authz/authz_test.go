@@ -69,8 +69,11 @@ func TestOperatorAddsWriteAuthorityOverViewer(t *testing.T) {
 	}
 
 	// PermissionsFor returns AllPermissions order, so this expectation is
-	// order-stable without sorting.
+	// order-stable without sorting. M5: annotations:write is the one M5
+	// permission operator holds that viewer does not (mtr:read and
+	// annotations:read are telemetry and land in BOTH — Plan Decision 11).
 	want := append([]authz.Permission{authz.PermRunsCreate}, m4Permissions...)
+	want = append(want, authz.PermAnnotationsWrite)
 	if len(diff) != len(want) {
 		t.Fatalf("operator - viewer = %v, want %v", diff, want)
 	}
@@ -147,6 +150,9 @@ func TestAdminHoldsEveryPermission(t *testing.T) {
 		authz.PermChecksRead,
 		authz.PermChecksWrite,
 		authz.PermSchedulesWrite,
+		authz.PermMTRRead,
+		authz.PermAnnotationsRead,
+		authz.PermAnnotationsWrite,
 	}
 
 	if len(authz.AllPermissions) != len(expected) {

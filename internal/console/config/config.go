@@ -41,6 +41,102 @@ type Config struct {
 	Database   DatabaseConfig   `yaml:"database"`
 	RateLimit  RateLimitConfig  `yaml:"rateLimit"`
 	Scheduler  SchedulerConfig  `yaml:"scheduler"`
+	MTR        MTRConfig        `yaml:"mtr"`
+}
+
+// MTRConfig groups everything the Console does with MTR path history beyond
+// simply storing it. Today that is exactly one thing — hop enrichment — but
+// the block exists rather than a top-level `enrichment:` key because the next
+// MTR-shaped knob (a projector cap, a snapshot retention override) belongs
+// beside it, not beside `prometheus:`.
+type MTRConfig struct {
+	Enrichment EnrichmentConfig `yaml:"enrichment"`
+}
+
+// EnrichmentConfig configures the hop-address enrichment resolver
+// (internal/console/enrich): a TTL cache in mtr_hop_enrichment over two
+// independently-gated sources, rDNS and MaxMind mmdb files.
+//
+// Enabled defaults to FALSE, for a stronger reason than SchedulerConfig's:
+// enrichment is the only part of the Console that makes the pod talk to
+// something other than the controller, Prometheus, Valkey and PostgreSQL. rDNS
+// sends every hop address in the fleet's traces to whatever resolver the pod's
+// /etc/resolv.conf names. That is a deliberate act with an egress footprint,
+// not a default.
+//
+// The cache lives in PostgreSQL, so the whole block is inert with
+// database.mode=disabled — cmd/console warns and skips the resolver rather
+// than resolving the same address on every single read.
+type EnrichmentConfig struct {
+	// Enabled is the master gate. With it off, nothing below is read and the
+	// snapshot-detail handler keeps serving the cache-only view Task 4 built.
+	Enabled bool `yaml:"enabled"`
+	// RDNS and GeoIP gate INDEPENDENTLY: an air-gapped cluster with mounted
+	// mmdb files and no reachable resolver runs geoip-only, and a cluster with
+	// internal DNS and no MaxMind licence runs rdns-only.
+	RDNS  RDNSConfig  `yaml:"rdns"`
+	GeoIP GeoIPConfig `yaml:"geoip"`
+	// TTL is a cache row's lifetime. A row older than this is re-resolved on
+	// the next read that wants it (M5 Decision 4: no background refresher --
+	// an address nobody looks at costs nothing). 24h by default because the
+	// answers are slow-moving: a hop's PTR record and its ASN change on the
+	// order of months.
+	TTL time.Duration `yaml:"ttl"`
+}
+
+// RDNSConfig gates the reverse-DNS source and bounds it.
+type RDNSConfig struct {
+	Enabled bool `yaml:"enabled"`
+	// TimeoutMs bounds ONE lookup, not the batch. It is milliseconds rather
+	// than a time.Duration because the useful range is 100-1000ms and an
+	// operator who writes `timeoutMs: 500` cannot accidentally mean 500ns --
+	// a resolver budget that quietly rounds to nothing would make every hop
+	// look unresolvable.
+	TimeoutMs int `yaml:"timeoutMs"`
+}
+
+// GeoIPConfig points at the two mmdb files (Decision 5: operator-provided
+// volumes, never downloaded by the Console). An empty path is that source
+// switched off, the same "empty means disabled" convention controller.url,
+// prometheus.url and valkey.address already use. An UNREADABLE path is not a
+// boot failure either: enrich.New warns and disables that one source, because
+// a bad mount must never cost the operator their trace history.
+type GeoIPConfig struct {
+	ASNPath  string `yaml:"asnPath"`  // e.g. /geoip/GeoLite2-ASN.mmdb; empty = ASN/provider lookups off
+	CityPath string `yaml:"cityPath"` // e.g. /geoip/GeoLite2-City.mmdb; empty = geo lookups off
+}
+
+// validate enforces mtr.enrichment.* invariants. Everything is checked ONLY
+// when the master gate is on, SchedulerConfig.validate's convention: rejecting
+// a leftover zero for a feature the operator has not switched on would be a
+// boot failure over nothing.
+//
+// The all-sources-off case fails CLOSED and names all three knobs. It is the
+// one misconfiguration that would otherwise be invisible: the resolver would
+// start, every lookup would resolve to an empty row, and the cache would fill
+// with authoritative-looking nothing that the TTL then protects for a day.
+func (e *EnrichmentConfig) validate() error {
+	if !e.Enabled {
+		return nil
+	}
+	if !e.RDNS.Enabled && e.GeoIP.ASNPath == "" && e.GeoIP.CityPath == "" {
+		return errors.New("mtr.enrichment.enabled is true but every source is off: set mtr.enrichment.rdns.enabled, " +
+			"mtr.enrichment.geoip.asnPath or mtr.enrichment.geoip.cityPath (an enabled resolver with no source " +
+			"would cache empty rows for mtr.enrichment.ttl)")
+	}
+	if e.TTL <= 0 {
+		return fmt.Errorf("mtr.enrichment.ttl must be positive when mtr.enrichment.enabled is true, got %v", e.TTL)
+	}
+	if e.RDNS.Enabled && e.RDNS.TimeoutMs <= 0 {
+		return fmt.Errorf("mtr.enrichment.rdns.timeoutMs must be positive when mtr.enrichment.rdns.enabled is true, got %d",
+			e.RDNS.TimeoutMs)
+	}
+	return nil
+}
+
+// validate delegates to the one block mtr: currently carries.
+func (m *MTRConfig) validate() error {
+	return m.Enrichment.validate()
 }
 
 // SchedulerConfig configures the schedule loop (internal/console/scheduler):
@@ -244,6 +340,13 @@ func defaults() *Config {
 		// enabled stays false (see SchedulerConfig); the interval is still
 		// defaulted so switching the loop on is a one-line change.
 		Scheduler: SchedulerConfig{TickInterval: 5 * time.Second},
+		// Same shape as Scheduler above: every gate stays off, every budget is
+		// pre-defaulted, so turning a source on is a one-line change and never
+		// a two-line one that fails validation on the first try.
+		MTR: MTRConfig{Enrichment: EnrichmentConfig{
+			RDNS: RDNSConfig{TimeoutMs: 500},
+			TTL:  24 * time.Hour,
+		}},
 	}
 }
 
@@ -473,6 +576,9 @@ func (c *Config) Validate() error {
 		return err
 	}
 	if err := c.Scheduler.validate(); err != nil {
+		return err
+	}
+	if err := c.MTR.validate(); err != nil {
 		return err
 	}
 	return nil

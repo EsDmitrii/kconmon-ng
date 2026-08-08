@@ -35,6 +35,17 @@ const (
 	PermChecksRead     Permission = "checks:read"
 	PermChecksWrite    Permission = "checks:write"
 	PermSchedulesWrite Permission = "schedules:write"
+
+	// M5 (MTR Explorer + annotations). mtr:read is TELEMETRY -- path
+	// history the fleet already recorded -- so the viewer role holds it,
+	// unlike the targets/checks CONFIGURATION reads above (M5 Plan
+	// Decision 11); launching a new trace stays behind runs:create.
+	// Annotations split read from write like every other resource: a note
+	// pinned to a chart is visible to anyone who can see the chart, but
+	// writing one is an operator statement about the fleet's history.
+	PermMTRRead          Permission = "mtr:read"
+	PermAnnotationsRead  Permission = "annotations:read"
+	PermAnnotationsWrite Permission = "annotations:write"
 )
 
 // AllPermissions is every permission this build knows, in a stable order.
@@ -57,6 +68,9 @@ var AllPermissions = []Permission{
 	PermChecksRead,
 	PermChecksWrite,
 	PermSchedulesWrite,
+	PermMTRRead,
+	PermAnnotationsRead,
+	PermAnnotationsWrite,
 }
 
 // SubjectKind is how a request was authenticated.

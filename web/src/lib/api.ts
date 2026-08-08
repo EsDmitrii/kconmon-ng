@@ -1,4 +1,8 @@
 import type {
+  Annotation,
+  AnnotationPage,
+  AnnotationQuery,
+  AnnotationRequest,
   CheckDefinition,
   CheckDefinitionPage,
   CheckDefinitionQuery,
@@ -6,8 +10,12 @@ import type {
   Config,
   EventPage,
   EventQuery,
+  MTRDestinationList,
   Matrix,
   Me,
+  PathSnapshot,
+  PathSnapshotPage,
+  PathSnapshotQuery,
   Problem,
   Projection,
   PromResult,
@@ -28,6 +36,9 @@ import type {
   Topology,
   Version,
 } from "./types";
+// The one instant formatter (RFC 3339, UTC, seconds) the URL's ?at= and every
+// request built from it share — see getTopology below.
+import { formatAtParam } from "./timemachine";
 
 export class ApiError extends Error {
   constructor(public problem: Problem) {
@@ -156,8 +167,21 @@ async function handleVoid(resp: Response): Promise<void> {
   throw new ApiError({ type: "about:blank", title: resp.statusText, status: resp.status });
 }
 
-export function getTopology(): Promise<Topology> {
-  return apiFetch("/api/v1/topology").then((r) => handle<Topology>(r));
+/**
+ * getTopology is GET /api/v1/topology: the LIVE controller snapshot, or — with
+ * `at` — the historical fold of `topology_events` up to that instant (M5
+ * Decision 6, handled server-side; client-side replay would ship the whole
+ * event history to the browser on every slider move).
+ *
+ * The instant is rendered by formatAtParam, the SAME formatter the URL's `?at=`
+ * uses, deliberately: a shared link and the request it produces must name the
+ * identical second, or a reader and the person they sent the link to would be
+ * looking at two different topologies. A future `at` is the server's 400, but
+ * lib/timemachine.tsx clamps before it ever gets here.
+ */
+export function getTopology(at?: Date): Promise<Topology> {
+  const suffix = at ? `?at=${encodeURIComponent(formatAtParam(at))}` : "";
+  return apiFetch(`/api/v1/topology${suffix}`).then((r) => handle<Topology>(r));
 }
 
 export function getVersion(): Promise<Version> {
@@ -459,4 +483,101 @@ export function updateSchedule(id: string, req: ScheduleRequest): Promise<Schedu
 // deleteSchedule is DELETE /api/v1/schedules/{id}: 204, so handleVoid.
 export function deleteSchedule(id: string): Promise<void> {
   return apiFetch(`/api/v1/schedules/${encodeURIComponent(id)}`, { method: "DELETE" }).then(handleVoid);
+}
+
+/* ── M5: MTR path history ───────────────────────────────────────────────────
+   All three ride the same apiFetch and the same handle<T> everything above
+   uses. All three require mtr:read, which — unlike M4's five config
+   permissions — EVERY built-in role holds, viewer included (M5 Decision 11:
+   path history is telemetry, not configuration). The permission card on the
+   /mtr page therefore exists for hand-rolled roles only; the far more common
+   degraded state is 503 from a console with no database. */
+
+// getMTRDestinations is GET /api/v1/mtr/destinations: every (source,
+// destination) pair path history knows about, most-recently-traced first, in
+// ONE unpaginated body — the pair count is bounded by the fleet's own size,
+// not by trace volume. The page groups it by destination client-side
+// (pages/mtr.tsx's groupDestinations); the server ships it flat.
+export function getMTRDestinations(): Promise<MTRDestinationList> {
+  return apiFetch("/api/v1/mtr/destinations").then((r) => handle<MTRDestinationList>(r));
+}
+
+// getMTRSnapshots is GET /api/v1/mtr/snapshots: one page of the DISTINCT
+// routes a pair has taken, newest last_seen first, behind the same opaque
+// keyset cursor getRuns/getEvents use. Unlike every other list function here
+// the two filters are not optional — the server answers 422, not a full
+// table, when either is missing (docs/console-api.yaml), which is why
+// PathSnapshotQuery makes them required rather than letting a caller discover
+// it at runtime.
+export function getMTRSnapshots(q: PathSnapshotQuery): Promise<PathSnapshotPage> {
+  const qs = new URLSearchParams({ source: q.source, destination: q.destination });
+  if (q.limit !== undefined) qs.set("limit", String(q.limit));
+  if (q.cursor) qs.set("cursor", q.cursor);
+  return apiFetch(`/api/v1/mtr/snapshots?${qs}`).then((r) => handle<PathSnapshotPage>(r));
+}
+
+// getMTRSnapshot is GET /api/v1/mtr/snapshots/{id}: one stored path with its
+// full hop payload. `enrich` is only ever sent as the literal "true" the
+// server keys on, and ONLY when asked for: without it the response's
+// `enrichment` field is ABSENT — never null, never an empty object — so "did
+// not ask" stays distinguishable from "asked and nothing is known". M5 Task 6
+// never asks; Task 7's hop table is what flips it on.
+export function getMTRSnapshot(id: string, enrich = false): Promise<PathSnapshot> {
+  const suffix = enrich ? "?enrich=true" : "";
+  return apiFetch(`/api/v1/mtr/snapshots/${encodeURIComponent(id)}${suffix}`).then((r) => handle<PathSnapshot>(r));
+}
+
+/* ── M5: annotations ────────────────────────────────────────────────────────
+   Same apiFetch (credentials + CSRF on the two mutations) and the same
+   handle<T>/handleVoid pair as everything above. Reading needs
+   annotations:read, which EVERY built-in role holds; creating and deleting
+   need annotations:write, which only operator and admin do (M5 Decision 11).
+   Neither of those is enforced here — the server is the only real gate, and
+   the surfaces hide their affordances with useAuth().can purely so an operator
+   is not offered a button that is guaranteed to 403. */
+
+/**
+ * listAnnotations is GET /api/v1/annotations: the marks OVERLAPPING [from,to)
+ * — not the ones whose start falls inside it. A span that began before `from`
+ * and is still running at `from` is exactly the mark a chart needs to draw, and
+ * the server's own filter says so (docs/console-api.yaml).
+ *
+ * Read `q.scope`'s serialisation carefully: it is `!== undefined`, NOT the
+ * truthiness test every other filter in this file uses, and the difference is
+ * the whole contract. The endpoint reads three states out of the one
+ * parameter — absent = every scope, present-but-empty (`?scope=`) = the GLOBAL
+ * ones only, anything else = an exact match — because "" is a real scope value
+ * here rather than a missing one. A `q.scope ? ...` guard would silently
+ * collapse "global only" into "everything", which is the exact bug that would
+ * scatter a node's private notes across every chart in the console.
+ */
+export function listAnnotations(q: AnnotationQuery = {}): Promise<AnnotationPage> {
+  const qs = new URLSearchParams();
+  if (q.from) qs.set("from", q.from.toISOString());
+  if (q.to) qs.set("to", q.to.toISOString());
+  if (q.scope !== undefined) qs.set("scope", q.scope);
+  if (q.limit !== undefined) qs.set("limit", String(q.limit));
+  if (q.cursor) qs.set("cursor", q.cursor);
+  const suffix = qs.toString();
+  return apiFetch(`/api/v1/annotations${suffix ? `?${suffix}` : ""}`).then((r) => handle<AnnotationPage>(r));
+}
+
+// createAnnotation is POST /api/v1/annotations (201 + Location). There is
+// deliberately no createdBy in the body: attribution is the SERVER's view of
+// the authenticated subject, never a client claim. An endAt at or after
+// startAt makes a span; omitting it entirely makes an instant mark — so
+// callers must OMIT the key rather than send "" or null for an instant.
+export function createAnnotation(req: AnnotationRequest): Promise<Annotation> {
+  return apiFetch("/api/v1/annotations", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(req),
+  }).then((r) => handle<Annotation>(r));
+}
+
+// deleteAnnotation is DELETE /api/v1/annotations/{id}: 204, so handleVoid.
+// Deleting one that is not there is 404, not success — there is no update in
+// M5, so delete-then-create is the only way to correct a mark.
+export function deleteAnnotation(id: string): Promise<void> {
+  return apiFetch(`/api/v1/annotations/${encodeURIComponent(id)}`, { method: "DELETE" }).then(handleVoid);
 }

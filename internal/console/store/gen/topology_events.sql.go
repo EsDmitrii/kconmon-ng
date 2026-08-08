@@ -140,3 +140,74 @@ func (q *Queries) ListTopologyEvents(ctx context.Context, arg ListTopologyEvents
 	}
 	return items, nil
 }
+
+const listTopologyEventsForFold = `-- name: ListTopologyEventsForFold :many
+SELECT id, event_time, details
+FROM topology_events
+WHERE type = $1::text
+  AND event_time <= $2::timestamptz
+ORDER BY event_time, id
+LIMIT $3
+`
+
+type ListTopologyEventsForFoldParams struct {
+	Type string
+	At   time.Time
+	Lim  int32
+}
+
+type ListTopologyEventsForFoldRow struct {
+	ID        int64
+	EventTime time.Time
+	Details   json.RawMessage
+}
+
+// The topology-at-t fold input: every event of the given type at or before
+// 'at', OLDEST first, so replaying the rows in order reproduces the node/agent
+// set as of that instant. (event_time, id) is a total order -- id breaks ties
+// inside the same microsecond, which the natural key permits -- so the replay
+// is deterministic across replicas. Rides topology_events_type_time_idx.
+//
+// No keyset paging: this returns the whole history up to 'at' in one shot,
+// bounded by 'lim' (store passes topologyFoldLimit). A fold is only correct
+// when it sees EVERY event from the beginning of retention, so a page boundary
+// would silently produce a wrong answer -- the limit is a blast-radius guard
+// that the store reports as truncated, never a pagination cursor.
+func (q *Queries) ListTopologyEventsForFold(ctx context.Context, arg ListTopologyEventsForFoldParams) ([]ListTopologyEventsForFoldRow, error) {
+	rows, err := q.db.Query(ctx, listTopologyEventsForFold, arg.Type, arg.At, arg.Lim)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListTopologyEventsForFoldRow{}
+	for rows.Next() {
+		var i ListTopologyEventsForFoldRow
+		if err := rows.Scan(&i.ID, &i.EventTime, &i.Details); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const oldestTopologyEventTime = `-- name: OldestTopologyEventTime :one
+SELECT event_time FROM topology_events ORDER BY event_time LIMIT 1
+`
+
+// The retention floor for the topology-at-t fold (M5 Task 9): the console can
+// only answer "what did the cluster look like at t" for a t at or after this
+// row, because the pruner has already deleted everything older and no fold can
+// invent what was deleted. ORDER BY + LIMIT 1 rather than MIN(event_time) for
+// two reasons: it is a single lookup on topology_events_time_idx, and an empty
+// table comes back as pgx.ErrNoRows (a NULL aggregate would need a nullable
+// column type the sqlc timestamptz->time.Time override deliberately does not
+// produce, and would then be indistinguishable from a genuine zero time).
+func (q *Queries) OldestTopologyEventTime(ctx context.Context) (time.Time, error) {
+	row := q.db.QueryRow(ctx, oldestTopologyEventTime)
+	var event_time time.Time
+	err := row.Scan(&event_time)
+	return event_time, err
+}

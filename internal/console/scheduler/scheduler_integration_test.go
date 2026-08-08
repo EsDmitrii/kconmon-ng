@@ -93,6 +93,7 @@ func dropSchema(t *testing.T, dsn string) {
 	defer pool.Close()
 
 	_, err = pool.Exec(ctx, `DROP TABLE IF EXISTS
+		mtr_path_snapshots, mtr_hop_enrichment, annotations,
 		check_results, check_runs, check_schedules, check_definitions, targets,
 		audit_log, role_bindings, roles, api_tokens, users, topology_events,
 		goose_db_version CASCADE`)

@@ -311,3 +311,144 @@ func jsonEqual(t *testing.T, a, b json.RawMessage) bool {
 	}
 	return reflect.DeepEqual(va, vb)
 }
+
+// topoRec builds one topology_changed row whose details carry the exact three
+// keys events.topologyChangedDetails marshals.
+func topoRec(seq int64, ts time.Time, reason, node, agent string) store.EventRecord {
+	scope := node
+	if scope == "" {
+		scope = "cluster"
+	}
+	ev := rec(seq, ts, "topology_changed", scope)
+	ev.Summary = fmt.Sprintf("topology changed: %s", reason)
+	ev.Details = json.RawMessage(fmt.Sprintf(
+		`{"reason":%q,"nodeName":%q,"agentId":%q}`, reason, node, agent))
+	return ev
+}
+
+// TestTopologyAtThreeInstantsGiveThreeSets is the fold's end-to-end proof: real
+// rows written through InsertEvent, read back through the real query, folded at
+// three instants that each fall between two changes.
+func TestTopologyAtThreeInstantsGiveThreeSets(t *testing.T) {
+	db := newEventStoreDB(t)
+	es := store.NewEventStore(db, newTestMetrics())
+	ctx := context.Background()
+
+	t0 := time.Date(2026, 8, 5, 12, 0, 0, 0, time.UTC)
+	mustInsert(t, ctx, es, topoRec(1, t0, "agent_registered", "node-a", "agent-a"))
+	mustInsert(t, ctx, es, topoRec(2, t0.Add(time.Hour), "agent_registered", "node-b", "agent-b"))
+	mustInsert(t, ctx, es, topoRec(3, t0.Add(2*time.Hour), "agent_evicted", "node-a", "agent-a"))
+	// A non-topology row at the same times must never reach the fold.
+	mustInsert(t, ctx, es, topoRecNoise(4, t0.Add(90*time.Minute)))
+
+	for _, tc := range []struct {
+		name  string
+		at    time.Time
+		nodes []string
+	}{
+		{"after the first registration", t0.Add(30 * time.Minute), []string{"node-a"}},
+		{"after the second", t0.Add(90 * time.Minute), []string{"node-a", "node-b"}},
+		{"after the eviction", t0.Add(3 * time.Hour), []string{"node-b"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			snap, err := es.TopologyAt(ctx, tc.at)
+			if err != nil {
+				t.Fatalf("TopologyAt: %v", err)
+			}
+			got := make([]string, 0, len(snap.Nodes))
+			for _, n := range snap.Nodes {
+				got = append(got, n.Name)
+			}
+			if !reflect.DeepEqual(got, tc.nodes) {
+				t.Errorf("nodes at %v = %v, want %v", tc.at, got, tc.nodes)
+			}
+			if snap.UnfoldableEvents != 0 {
+				t.Errorf("UnfoldableEvents = %d, want 0: every seeded event names a node", snap.UnfoldableEvents)
+			}
+			if snap.Truncated {
+				t.Error("Truncated = true on a four-row table")
+			}
+			if !snap.OldestRetained.Equal(t0) {
+				t.Errorf("OldestRetained = %v, want the first row's time %v", snap.OldestRetained, t0)
+			}
+		})
+	}
+}
+
+// topoRecNoise is a non-topology event: the fold's WHERE type= clause must
+// skip it, and OldestRetained must still count it (it is a retained row).
+func topoRecNoise(seq int64, ts time.Time) store.EventRecord {
+	ev := rec(seq, ts, "check_observed", "node-a→node-b")
+	ev.Details = json.RawMessage(`{"taskId":"noise"}`)
+	return ev
+}
+
+// TestTopologyAtBeforeAnyEventIsEmptyButRetentionAware pins the two facts the
+// handler's 422 decision rests on: an instant before the oldest row folds to
+// nothing, and OldestRetained still reports where history actually starts.
+func TestTopologyAtBeforeAnyEventIsEmptyButRetentionAware(t *testing.T) {
+	db := newEventStoreDB(t)
+	es := store.NewEventStore(db, newTestMetrics())
+	ctx := context.Background()
+
+	t0 := time.Date(2026, 8, 5, 12, 0, 0, 0, time.UTC)
+	mustInsert(t, ctx, es, topoRec(1, t0, "agent_registered", "node-a", "agent-a"))
+
+	snap, err := es.TopologyAt(ctx, t0.Add(-time.Hour))
+	if err != nil {
+		t.Fatalf("TopologyAt: %v", err)
+	}
+	if len(snap.Nodes) != 0 || len(snap.Agents) != 0 {
+		t.Errorf("pre-history fold = %+v, want empty", snap)
+	}
+	if snap.EventsFolded != 0 {
+		t.Errorf("EventsFolded = %d, want 0", snap.EventsFolded)
+	}
+	if !snap.OldestRetained.Equal(t0) {
+		t.Errorf("OldestRetained = %v, want %v -- the handler needs this to answer 422", snap.OldestRetained, t0)
+	}
+}
+
+// TestTopologyAtOnAnEmptyTableReportsNoRetention is the database-configured
+// but never-ingested case: no error, and a zero OldestRetained the handler
+// reads as "there is no history at all".
+func TestTopologyAtOnAnEmptyTableReportsNoRetention(t *testing.T) {
+	db := newEventStoreDB(t)
+	es := store.NewEventStore(db, newTestMetrics())
+
+	snap, err := es.TopologyAt(context.Background(), time.Date(2026, 8, 5, 12, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatalf("TopologyAt on an empty table: %v", err)
+	}
+	if !snap.OldestRetained.IsZero() {
+		t.Errorf("OldestRetained = %v, want the zero time on an empty table", snap.OldestRetained)
+	}
+	if len(snap.Nodes) != 0 || snap.Nodes == nil {
+		t.Errorf("Nodes = %v, want a non-nil empty slice", snap.Nodes)
+	}
+}
+
+// TestTopologyAtTieBreaksOnID pins the (event_time, id) order against real
+// Postgres: two rows in the SAME microsecond must fold in insertion order, so
+// the later-inserted removal wins.
+func TestTopologyAtTieBreaksOnID(t *testing.T) {
+	db := newEventStoreDB(t)
+	es := store.NewEventStore(db, newTestMetrics())
+	ctx := context.Background()
+
+	ts := time.Date(2026, 8, 5, 12, 0, 0, 0, time.UTC)
+	mustInsert(t, ctx, es, topoRec(1, ts, "agent_registered", "node-a", "agent-a"))
+	// Same event_time, different event_seq, so the natural key lets both in.
+	mustInsert(t, ctx, es, topoRec(2, ts, "agent_deregistered", "node-a", "agent-a"))
+
+	snap, err := es.TopologyAt(ctx, ts)
+	if err != nil {
+		t.Fatalf("TopologyAt: %v", err)
+	}
+	if len(snap.Nodes) != 0 {
+		t.Errorf("nodes = %+v, want empty: the deregistration has the higher id and folds last", snap.Nodes)
+	}
+	if snap.EventsFolded != 2 {
+		t.Errorf("EventsFolded = %d, want 2 -- event_time <= at is INCLUSIVE", snap.EventsFolded)
+	}
+}

@@ -695,3 +695,121 @@ func TestResolveDSNEmptyWhenUnset(t *testing.T) {
 		t.Errorf("ResolveDSN() = %q, want empty", got)
 	}
 }
+
+// TestLoadMTREnrichmentDefaults pins the off-by-default posture of M5's
+// enrichment block: the master gate is false, both geoip paths are empty, and
+// the two budgets are pre-defaulted so switching a source on is a one-line
+// change (SchedulerConfig's exact convention).
+func TestLoadMTREnrichmentDefaults(t *testing.T) {
+	cfg, err := Load(filepath.Join(t.TempDir(), "nope.yaml"))
+	if err != nil {
+		t.Fatalf("Load defaults: %v", err)
+	}
+	e := cfg.MTR.Enrichment
+	if e.Enabled {
+		t.Error("mtr.enrichment.enabled default = true, want false (M5 Decision 4: off by default)")
+	}
+	if e.RDNS.Enabled {
+		t.Error("mtr.enrichment.rdns.enabled default = true, want false")
+	}
+	if e.RDNS.TimeoutMs != 500 {
+		t.Errorf("mtr.enrichment.rdns.timeoutMs default = %d, want 500", e.RDNS.TimeoutMs)
+	}
+	if e.GeoIP.ASNPath != "" || e.GeoIP.CityPath != "" {
+		t.Errorf("mtr.enrichment.geoip defaults = %q/%q, want empty (empty = source off)", e.GeoIP.ASNPath, e.GeoIP.CityPath)
+	}
+	if e.TTL != 24*time.Hour {
+		t.Errorf("mtr.enrichment.ttl default = %v, want 24h", e.TTL)
+	}
+}
+
+// TestLoadMTREnrichmentFromYAML proves the plan-verbatim block parses under
+// KnownFields(true) -- every key spelled exactly as the plan and the chart
+// spell it. A typo here is a boot failure, not a silently ignored knob.
+func TestLoadMTREnrichmentFromYAML(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "config.yaml")
+	const y = "mtr:\n" +
+		"  enrichment:\n" +
+		"    enabled: true\n" +
+		"    rdns:\n" +
+		"      enabled: true\n" +
+		"      timeoutMs: 250\n" +
+		"    geoip:\n" +
+		"      asnPath: /geoip/GeoLite2-ASN.mmdb\n" +
+		"      cityPath: /geoip/GeoLite2-City.mmdb\n" +
+		"    ttl: 6h\n"
+	if err := os.WriteFile(p, []byte(y), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(p)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	e := cfg.MTR.Enrichment
+	if !e.Enabled || !e.RDNS.Enabled {
+		t.Errorf("enabled/rdns.enabled = %v/%v, want true/true", e.Enabled, e.RDNS.Enabled)
+	}
+	if e.RDNS.TimeoutMs != 250 {
+		t.Errorf("rdns.timeoutMs = %d, want 250", e.RDNS.TimeoutMs)
+	}
+	if e.GeoIP.ASNPath != "/geoip/GeoLite2-ASN.mmdb" || e.GeoIP.CityPath != "/geoip/GeoLite2-City.mmdb" {
+		t.Errorf("geoip paths = %q/%q", e.GeoIP.ASNPath, e.GeoIP.CityPath)
+	}
+	if e.TTL != 6*time.Hour {
+		t.Errorf("ttl = %v, want 6h", e.TTL)
+	}
+}
+
+// TestValidateMTREnrichment is the fail-closed table: a master gate that is on
+// with nothing behind it is a configuration error naming the three knobs, and
+// a budget that can never elapse is rejected rather than silently treated as
+// "no cache" or "no timeout".
+func TestValidateMTREnrichment(t *testing.T) {
+	const enabledPrefix = "mtr:\n  enrichment:\n    enabled: true\n"
+	for _, tc := range []struct {
+		name    string
+		yaml    string
+		wantErr bool
+	}{
+		{"disabled ignores every other knob", "mtr:\n  enrichment:\n    enabled: false\n    ttl: 0s\n    rdns:\n      enabled: true\n      timeoutMs: 0\n", false},
+		{"enabled with rdns only", enabledPrefix + "    rdns:\n      enabled: true\n", false},
+		{"enabled with asn only", enabledPrefix + "    geoip:\n      asnPath: /geoip/asn.mmdb\n", false},
+		{"enabled with city only", enabledPrefix + "    geoip:\n      cityPath: /geoip/city.mmdb\n", false},
+		{"enabled with every source off", enabledPrefix, true},
+		{"zero ttl rejected", enabledPrefix + "    rdns:\n      enabled: true\n    ttl: 0s\n", true},
+		{"negative ttl rejected", enabledPrefix + "    rdns:\n      enabled: true\n    ttl: -1h\n", true},
+		{"zero rdns timeout rejected", enabledPrefix + "    rdns:\n      enabled: true\n      timeoutMs: 0\n", true},
+		{"negative rdns timeout rejected", enabledPrefix + "    rdns:\n      enabled: true\n      timeoutMs: -1\n", true},
+		{"rdns timeout ignored when rdns is off", enabledPrefix + "    rdns:\n      timeoutMs: 0\n    geoip:\n      asnPath: /geoip/asn.mmdb\n", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := filepath.Join(t.TempDir(), "config.yaml")
+			if err := os.WriteFile(p, []byte(tc.yaml), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			_, err := Load(p)
+			if tc.wantErr && err == nil {
+				t.Fatal("expected a validation error, got nil")
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("expected the config to validate, got: %v", err)
+			}
+		})
+	}
+}
+
+// TestValidateMTREnrichmentAllSourcesOffNamesTheKnobs: the error an operator
+// reads must say WHICH switches to flip, not just that something is wrong.
+func TestValidateMTREnrichmentAllSourcesOffNamesTheKnobs(t *testing.T) {
+	c := defaults()
+	c.MTR.Enrichment.Enabled = true
+	err := c.Validate()
+	if err == nil {
+		t.Fatal("expected an error when every enrichment source is off, got nil")
+	}
+	for _, knob := range []string{"mtr.enrichment.rdns.enabled", "mtr.enrichment.geoip.asnPath", "mtr.enrichment.geoip.cityPath"} {
+		if !strings.Contains(err.Error(), knob) {
+			t.Errorf("error should name %s, got: %v", knob, err)
+		}
+	}
+}

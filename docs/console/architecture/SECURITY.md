@@ -167,6 +167,16 @@ the Targets page as a permission-explained empty state, not a 500.
 `alert-editor` was identical to `operator` through M3 and diverges here;
 reconfiguring what the fleet probes is not what that role's name promises.
 
+**M5's three permissions split telemetry from statements (Plan Decision
+11).** `mtr:read` and `annotations:read` are TELEMETRY — path history the
+fleet already recorded and notes pinned to charts anyone may see — so every
+built-in role holds them, including `viewer` (and therefore the anonymous
+default): this widens the anonymous surface only by new read-only M5 routes
+and changes nothing that existed before. `annotations:write` stops at
+`operator` and `admin`: a note pinned to the fleet's history is an operator
+statement. Launching a new MTR trace never got its own permission — it is
+`runs:create`, the same authority every other on-demand probe requires.
+
 **WebSocket authorization is per-connection, not per-topic.** `GET /ws`
 requires exactly one permission, `events:read`, and that single decision
 covers every topic multiplexed over the socket — `live`, `topology`,

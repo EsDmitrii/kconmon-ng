@@ -15,16 +15,16 @@ Documentation is written incrementally with the code it describes. A doc marked
 | [architecture/OVERVIEW.md](architecture/OVERVIEW.md) | Component overview (§4) | current |
 | [architecture/BACKEND.md](architecture/BACKEND.md) | Backend stack & module boundaries (§4.2–4.3) | current |
 | [architecture/FRONTEND.md](architecture/FRONTEND.md) | Frontend stack & UX surface (§4.2, §6) | current |
-| [architecture/DATA.md](architecture/DATA.md) | Data architecture: Prometheus/Postgres/Valkey (§5) | draft — §5.2/§5.3 are current for what M3 landed; the still-pending tables in §5.2 are unbuilt design |
+| [architecture/DATA.md](architecture/DATA.md) | Data architecture: Prometheus/Postgres/Valkey (§5) | draft — §5.2/§5.3 are current through M5 (the three M5 tables, the topology fold and the retention sweeps included); the still-pending tables in §5.2 are unbuilt design |
 | [architecture/API.md](architecture/API.md) | REST API surface (§8) | current |
 | [architecture/WEBSOCKET.md](architecture/WEBSOCKET.md) | WebSocket protocol (§8) | current |
 | [architecture/CONFIG.md](architecture/CONFIG.md) | Console config file + Helm mapping | current |
 | [architecture/SECURITY.md](architecture/SECURITY.md) | AuthN/Z, security, observability (§10, §12) | current for §10/§11 (as built in M3); §12's alerting/webhook items are still design |
 | [product/UX_PRINCIPLES.md](product/UX_PRINCIPLES.md) | Product principles & design language (§1.1, §6.1) | current |
-| [product/PAGES.md](product/PAGES.md) | Navigation, object cards (§6.2–6.4), Live (§7.8), Diagnostics (§7.x) | draft — §7.8 Live, §6.4 object cards v1, and §7.x Diagnostics are current; §6.3 Time Machine and the Target card still await M4/M5 |
+| [product/PAGES.md](product/PAGES.md) | Navigation, object cards (§6.2–6.4), MTR (§7.5), Live (§7.8), Explore A/B + annotations (§7.x), Diagnostics (§7.x) | draft — everything except the navigation tree's unbuilt entries is current as of M5 |
 | [product/INVESTIGATION.md](product/INVESTIGATION.md) | Investigation Mode + correlation heuristics (§7.6) | draft |
-| [product/TIME_MACHINE.md](product/TIME_MACHINE.md) | Time Machine global context (§6.3) | draft |
-| [product/MTR_EXPLORER.md](product/MTR_EXPLORER.md) | MTR Explorer (§7.5) | draft |
+| [product/TIME_MACHINE.md](product/TIME_MACHINE.md) | Time Machine global context (§6.3) | current — as built in M5, including the three named limitations |
+| [product/MTR_EXPLORER.md](product/MTR_EXPLORER.md) | MTR Explorer (§7.5) | current — as built in M5 |
 | [product/TOPOLOGY.md](product/TOPOLOGY.md) | Topology view (§7.4) | draft |
 | [product/ALERTING.md](product/ALERTING.md) | Alert rule management (§7.11) | draft |
 | [product/TARGETS.md](product/TARGETS.md) | External targets, schedules, diagnostics runs (§7.2–7.3) | draft |
@@ -61,6 +61,30 @@ replica); `topology_events` persisting all five event types behind
 rail. Chart 1.5.0. Security: [architecture/SECURITY.md](architecture/SECURITY.md);
 config/secrets: [architecture/CONFIG.md](architecture/CONFIG.md); API:
 [architecture/API.md](architecture/API.md); the full deferral list is in
+[roadmap/MILESTONES.md](roadmap/MILESTONES.md).
+
+**M4 shipped** (external targets, schedules, continuous checks): CRUD
+`/api/v1/{targets,checks,schedules}` backed by PostgreSQL with a projection
+guard (400-series limit), the advisory-locked console scheduler
+(`console.scheduler.enabled`, off by default) firing `once`/`interval`
+schedules plus a stuck-run reaper and run cancellation; continuous external
+checks — the controller streams per-agent assignments, the console reconciles
+them, and the agent enforces its own CIDR allowlist
+(`config.checkers.external.enabled`, off by default; the agent, not the
+Console, is authoritative); the `kconmon_ng_external_*` metric family; rate
+limits on runs and login; a committed OpenAPI spec with a router-walking
+drift gate; the Targets page and Target card. Chart 1.6.0. The full deferral
+list is in [roadmap/MILESTONES.md](roadmap/MILESTONES.md).
+
+**M5 shipped** (MTR Explorer + Time Machine): MTR path history — snapshots
+content-hashed per route in `mtr_path_snapshots`, deduped at result-ingest,
+behind `GET /api/v1/mtr/*` and the three-pane `/mtr` Explorer with
+client-side path diff and a loss-overlay changes timeline; optional hop
+enrichment (rDNS + MaxMind mmdb, `console.mtr.enrichment.*`, off by
+default); the Time Machine `?at=` global context (topology folded from
+`topology_events`, PromQL evaluated at `t`, mutations disabled while
+engaged) and chart annotations. Chart 1.7.0. Deferrals — including the
+controller's still-unattributed topology events — are named in
 [roadmap/MILESTONES.md](roadmap/MILESTONES.md).
 
 ## Decisions

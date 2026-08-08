@@ -4,7 +4,10 @@ Owner: @EsDmitrii
 Source: extracted from root DESIGN.md §5 in M0 (2026-07-14); §5.2/§5.3 updated
 from the as-built M3 implementation (2026-08-06):
 internal/console/store/migrations/, internal/console/store/events.go,
-internal/console/authn/session.go.
+internal/console/authn/session.go. §5.2's three M5 tables, the topology fold
+and the retention sweeps written from the as-built M5 implementation
+(2026-08-08): migrations/00005_mtr_timemachine.sql, store/prune.go,
+store/events.go (TopologyAt).
 This document is the source of truth for Data Architecture. Update it (and the ADRs) in the same PR as any deviation.
 -->
 
@@ -44,12 +47,12 @@ and keeps a peer query from silently picking up external series. See
 | `targets`              | External targets: `name` (unique, 1–63 chars), `kind` (`host`/`url`), `address`, `labels` JSONB | **Landed M4** |
 | `check_definitions`    | Saved specs: `source_selection` (`all`/`per-zone`/`one-per-zone`), `destination_kind` (`node`/`target`/`adhoc`) + `destination_target_id`/`destination_address`, `check_type`, `plane`, `params` JSONB, `enabled` | **Landed M4** |
 | `check_schedules`      | `definition_id` + `kind` (`once`/`interval`/`continuous`), `interval_ns`, `run_at`, `enabled`, `last_fired_at`/`next_fire_at` | **Landed M4** |
-| `mtr_path_snapshots`   | Normalized hop lists per (source, destination), content-hashed — powers path diff and "when did the route change?" | pending (M5) |
-| `mtr_hop_enrichment`   | Cache: ip → {rdns, asn, geo, provider}, TTL'd (§7.5) | pending (M5) |
+| `mtr_path_snapshots`   | One row per DISTINCT route a pair has taken: `source_node`, `destination`, `path_hash`, `hop_count`, `hops` JSONB, `first_seen`, `last_seen`, `trace_count`, `run_id` (FK → `check_runs`, `ON DELETE SET NULL`); `UNIQUE (source_node, destination, path_hash)` | **Landed M5** |
+| `mtr_hop_enrichment`   | TTL cache keyed by address: `ip` PK, `rdns`, `asn`, `provider`, `geo` JSONB, `resolved_at` | **Landed M5** |
+| `annotations`          | Operator notes: `id`, `start_at`, `end_at` (NULL = instant mark), `scope` (`''` = global), `text`, `created_by`, `created_at` | **Landed M5** |
 | `k8s_events`           | Filtered, retained copy of relevant K8s events (node/pod in scope) for post-hoc investigation (K8s only keeps ~1h) | pending (M6) |
 | `alert_rules`          | Builder model (JSONB) + rendered PromQL + sync status | pending (M7) |
 | `incidents`            | Investigation sessions: scope, ranges, pinned findings, notes, status | pending (M6) |
-| `annotations`          | Notes pinned to time ranges, shown on charts | pending (M5) |
 | `maintenance_windows`  | Scope + schedule; UI suppression + (optional) AM silences | pending (M6) |
 | `webhooks`             | Outbound endpoints + event filters + secret | pending (M6) |
 | `layouts`              | Saved topology layouts (per-user/global), pinned pairs | pending |
@@ -70,10 +73,57 @@ so `UNIQUE (event_seq, event_time)` plus `ON CONFLICT DO NOTHING` makes
 N-replica ingestion idempotent instead of N-fold duplicated. Persistence
 inherits exactly the hub's dedupe guarantee, no better, no worse.
 
+**The three M5 tables, as built** (`migrations/00005_mtr_timemachine.sql`):
+
+- `mtr_path_snapshots` is a **projection, never the authority**. The authority
+  stays `check_results.result`; the Console's checks runner projects each MTR
+  result into a normalized hop list at ingest time (Decision 1), and a
+  projection that fails to be written loses history, not data. `path_hash` is a
+  hex SHA-256 over the **ordered hop IP list and nothing else** (Decision 2) —
+  not RTTs, which jitter on every trace and would make every trace a new path,
+  and not hostnames, which are enrichment and would turn a PTR record change
+  into a route change. `hops` carries the full payload of the **first** trace at
+  that path rather than a running average: one concrete trace is an honest
+  sample where an average across weeks is a number nothing ever measured.
+  `destination` is a node NAME or a target NAME, never an address, for the same
+  reason `targets.name` is. `run_id` is `ON DELETE SET NULL`, not `CASCADE` — a
+  path outliving the run that first produced it is the entire point of keeping
+  path history.
+- `mtr_hop_enrichment` is a **TTL cache**, not a source of truth (Decision 4):
+  every row is re-derivable from the resolvers that wrote it, so a sweep costs
+  at most one lookup. `resolved_at` is the TTL anchor. There is no background
+  refresher in M5, so an address nobody reads costs nothing and a stale one
+  costs exactly one lookup.
+- `annotations` — `end_at NULL` means an **instant mark**, not "still open";
+  `scope = ''` is the global scope and is a real value, matched exactly. Neither
+  `scope` nor `text` is ever exported as a Prometheus label.
+
+**Time Machine's topology fold** reads `topology_events` and nothing else
+(Decision 6): `GET /api/v1/topology?at=` replays `topology_changed` rows in
+`(event_time, id)` order up to the instant asked about. What that fold can
+honestly reconstruct is bounded by what the events record, and today the
+controller publishes `TopologyChanged` with a **reason only** — no
+`node_name`, no `agent_id` — so a fold over events written by this release
+counts every one of them as unfoldable and returns an empty node set. The
+response says so in numbers (`eventsFolded`, `unfoldableEvents`) rather than
+letting an empty array read as "the cluster was empty". `zone` and `podIP`
+are never recorded by any event type, so both come back empty on every folded
+entry even once attribution lands. See API.md and the M5 carry-forward in
+MILESTONES.md.
+
 Retention: `check_runs`/`check_results`/`topology_events`/`audit_log` are
 pruned by a background job (defaults 90d, Helm-configurable via
-`console.database.retentionDays`; 0 disables pruning). Partition
-`check_results` by month if volume warrants it — not done in M3
+`console.database.retentionDays`; 0 disables pruning), and **M5 added three
+sweeps** — `mtr_path_snapshots` by `last_seen`, `mtr_hop_enrichment` by
+`resolved_at`, `annotations` by `start_at`. Each ages out on the column that
+means "still relevant", not on when the row was written: a route the pair
+still takes is current however long ago it was first observed, and a mark ages
+out with the data it annotates rather than with when it was typed. The three
+are new **closed label values** on
+`kconmon_ng_console_retention_deleted_total{table}` (docs/metrics.md).
+`check_results` has no sweep of its own — `ON DELETE CASCADE` on
+`check_results.run_id` makes deleting the run row enough. Partition
+`check_results` by month if volume warrants it — still not done
 (MILESTONES.md "Deferred out of M3").
 
 Provisioning: chart takes **CNPG as optional dependency**; when enabled it

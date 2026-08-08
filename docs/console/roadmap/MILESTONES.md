@@ -4,7 +4,9 @@ Owner: @EsDmitrii
 Source: extracted from DESIGN.md §13, kept current; M3 rewritten from the
 as-built implementation (2026-08-06), M4 likewise (2026-08-07) — including
 the two shipped shapes that differ from the plan and the correction of a DoD
-line that named a Playwright harness this repo never had.
+line that named a Playwright harness this repo never had. M5 written from the
+as-built implementation (2026-08-08), with four plan deviations and the
+deferral list named rather than reconciled.
 -->
 
 # Milestones
@@ -176,9 +178,107 @@ Deferred out of M4, deliberately and by name:
 - **`check_results` partitioning** — ADR-001's "partition by month if volume
   warrants" follow-up is still not done.
 
-**M5 — MTR Explorer + Time Machine.** Path snapshots/dedupe/diff, hop
-enrichment (rdns/GeoIP, off by default), topology time slider + compare,
-Explore A/B, **Time Machine** global context, annotations.
+**M5 — MTR Explorer + Time Machine (delivered).** Three new tables
+(`mtr_path_snapshots`, `mtr_hop_enrichment`, `annotations` — DATA.md §5.2) and
+six new routes (`/api/v1/mtr/destinations|snapshots|snapshots/{id}`,
+`GET`/`POST`/`DELETE /api/v1/annotations`), all gated on
+`database.mode=cnpg|external` and `503` otherwise; **path history as a
+projection** of the MTR results the Console already persists, deduped by a
+SHA-256 over the ordered hop IPs (Decisions 1–2) with the route-changed
+alerting primitive
+`kconmon_ng_console_mtr_snapshots_total{result="new-path"}`; the **/mtr
+Explorer** — three panes, client-side LCS path diff (Decision 3), a
+path-changes timeline over the pair's loss series, a per-hop trend read from
+snapshot history rather than Prometheus (Decision 13), and a Runner on the
+existing `POST /api/v1/runs`; **hop enrichment** as a synchronous-on-read TTL
+cache over independently-gated rDNS and MaxMind mmdb sources
+(`console.mtr.enrichment.*`, OFF by default, Decisions 4–5) — the milestone's
+**one** new Go dependency, `github.com/oschwald/maxminddb-golang/v2`, with zero
+transitives; **Time Machine** as one global `?at=` context every read surface
+resolves through (Decisions 8–9), with `GET /api/v1/topology?at=` folding
+`topology_events` server-side (Decision 6) and the historical matrix rebuilt
+from PromQL at `t` (Decision 7); **annotations** as chart markers, card
+overlays and inline Live entries (Decision 10); **Explore A/B** compare with a
+metric-B-or-time-shift exclusivity; and three new permissions — `mtr:read` and
+`annotations:read` reaching `viewer` because path history is telemetry, not
+configuration, while `annotations:write` stops at `operator` (Decision 11). See
+`architecture/{DATA,API,CONFIG,SECURITY}.md` and
+`product/{MTR_EXPLORER,TIME_MACHINE,PAGES}.md`. Chart 1.7.0.
+
+Four shipped shapes differ from the plan and are recorded here rather than
+quietly reconciled:
+
+- **The hop table draws `#, Address, Hostname, RTT, Loss` — not
+  `loss/avg/best/worst/jitter`.** The plan's column list was written against
+  the design doc's aspiration; Decision 2's stored shape is one trace's hop
+  payload (`{number, ip, hostname, rttNs, lossRatio}`), deliberately, because a
+  running average across weeks is a number nothing ever measured. Four
+  permanently dashed columns would have read as missing data rather than as a
+  shape that does not exist. The across-time dimension the plan wanted is the
+  per-hop trend chart.
+- **The MTR routes are `mtr/destinations` + `mtr/snapshots`, not
+  `mtr/paths` + `mtr/paths/diff`.** API.md's route sketch predicted a
+  server-side diff endpoint; Decision 3 put the diff client-side, so the
+  endpoint would have duplicated presentation logic for zero authority gain.
+- **`GET /api/v1/matrix` never grew an `at` parameter.** The plan's own
+  Decision 7 said the historical matrix comes from Prometheus, and the frontend
+  reconstructs it in full from the promql proxy at `t`. The route stays
+  live-only.
+- **The mmdb mount is an opaque VolumeSource passthrough at a fixed path.**
+  `console.mtr.enrichment.geoip.volume` is spliced verbatim into the console
+  Pod's `volumes[]` and mounted read-only at `/geoip`; the chart deliberately
+  does not model the `{configMap|secret|hostPath|persistentVolumeClaim}` union,
+  and setting a geoip path without a volume **fails rendering** rather than
+  booting a console with geoip silently off (CONFIG.md).
+
+Deferred out of M5, deliberately and by name:
+
+- **A per-schedule continuous cadence field** — still carried, for the second
+  milestone running. The natural home remains `check_schedules.interval_ns`
+  with the `continuous` prohibition relaxed to mean "the probe interval": one
+  migration-free validation change plus a read in the reconciler
+  (CONFIG.md "Continuous probe cadence is not operator-configurable yet").
+- **Controller attribution of `topology_changed` events** — the controller
+  publishes a *reason* and throws the agent snapshot away
+  (`internal/controller/controller.go`), so `node_name`/`agent_id`/`zone` are
+  empty on every event. Time Machine's topology fold is coded against the full
+  event shape and is therefore structurally complete and **empty in practice**
+  until the controller attributes. The API reports this in numbers
+  (`eventsFolded`, `unfoldableEvents`) and the Topology page renders those
+  numbers rather than an empty cluster. This is the single highest-value
+  follow-up in the list: it is the difference between a working feature and a
+  correct one nobody can use.
+- **Router search-param adoption (`?at=` across in-app navigation)** —
+  Decision 9 kept `?at=` on `window.location`, so a `<Link>` drops the param
+  from the URL while the context keeps the value. The shareable-link guarantee
+  holds for the URL you are on, not across in-app navigations.
+- **An enrichment background refresher** — Decision 4: a cache row past its TTL
+  re-resolves on the next read that wants it, and an address nobody looks at
+  costs nothing. Resolution stays synchronous on the request that missed.
+- **Click-to-annotate at a chart's time anchor** — the create affordance takes
+  a typed timestamp; clicking the canvas does not set it. There is also no
+  edit: M5 is create/list/delete, because a mark is not a document
+  (Decision 10).
+- **A server-advertised `metricsPrefix` capability** — the historical matrix
+  writes `kconmon_ng_*` literally, exactly as `curated-metrics.ts` and the pair
+  card already did before M5. A non-default `config.metricsPrefix` therefore
+  yields an **empty** historical matrix rather than a mis-attributed one. One
+  capability field would fix all three call sites at once; it was named rather
+  than smuggled into this milestone.
+- **`kubectl-kconmon` trace capture** — the CLI talks to the controller
+  directly and never touches the Console, so its traces are **invisible to path
+  history** (Decision 1). Routing the CLI through the Console is an M6+
+  decision, not an oversight.
+- **The `mtr` WebSocket topic** — still rejected with an error frame. The
+  Explorer reads path history over REST and needs no push topic, and an allowed
+  topic that never delivers would be worse than an honest error.
+- **Uniform store instrumentation** — the M5 `mtr`/`annotations` queries are
+  observability-instrumented, but M4's `targets`/`checks` queries still are
+  not. A ledger line in M4 claimed otherwise; this corrects it.
+- **Overview's "recent-events" panel** — still an honest placeholder,
+  untouched since M2 and now deferred for the third milestone running.
+- **`check_results` partitioning** — ADR-001's "partition by month if volume
+  warrants" follow-up is still not done.
 
 **M6 — Investigation + Incidents.** Investigation assembly (timeline,
 heuristic correlation, actions rail), `kubectx` K8s events capture,
@@ -203,12 +303,14 @@ as a description of something in place, which is the worst kind of
 documentation error: it tells a reviewer a gate exists that would have caught
 nothing.
 
-What actually covers the UI today, through M4:
+What actually covers the UI today, through M5:
 
 - **Component and page tests with Vitest + Testing Library** (jsdom),
   colocated as `web/src/pages/*.test.tsx` and run by `npm test`. Every page
-  shipped since M1 has one, the M4 pages (`targets.tsx`, `target-card.tsx`)
-  included.
+  shipped since M1 has one — the M4 pages (`targets.tsx`, `target-card.tsx`)
+  and the M5 surfaces (`mtr.tsx`, the three `mtr-*` components, `timemachine`,
+  `annotations`, and the per-surface `*.timemachine.test.tsx` /
+  `*.annotations.test.tsx` files) included.
 - **Go e2e against a real `kind` cluster** (`e2e/console_test.go`), which
   exercises the served API and the degraded-mode paths but not the rendered
   DOM.

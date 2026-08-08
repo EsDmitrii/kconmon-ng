@@ -7,6 +7,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/EsDmitrii/kconmon-ng/internal/console/store"
 )
 
@@ -27,10 +29,30 @@ const (
 	listRunsDefaultLimit = 100
 )
 
+// memorySnapshotRingSize bounds MemoryStore's retained path snapshots, for the
+// same reason memoryRingSize bounds its runs: with database.mode=disabled
+// there is nowhere durable to put them and an unbounded map is a leak.
+//
+// It is ten times the run ring because the two hold different things. A run is
+// a transient object an operator polls for minutes and then forgets; a
+// snapshot is a pair's ROUTE HISTORY, one row per distinct route, and its
+// whole value is accumulating across many runs. Fifty would evict a stable
+// cluster's history within a single scheduled sweep.
+const memorySnapshotRingSize = 500
+
 // memoryRunEntry is one ring slot: a run plus its per-pair results.
 type memoryRunEntry struct {
 	run     store.Run
 	results []store.RunResult
+}
+
+// snapshotKey is one path snapshot's identity, mirroring the SQL table's
+// UNIQUE (source_node, destination, path_hash) exactly -- a struct rather than
+// a joined string so no separator can ever collide with a destination name.
+type snapshotKey struct {
+	sourceNode  string
+	destination string
+	pathHash    string
 }
 
 // MemoryStore is the database.mode=disabled fallback for store.RunStore and
@@ -45,16 +67,28 @@ type MemoryStore struct {
 	order   []string // insertion order, oldest first
 	runs    map[string]*memoryRunEntry
 	nextRes int64
+
+	// snapOrder/snaps are the path-history half (M5 Task 2), kept in their own
+	// ring rather than hanging off a run: a snapshot deliberately OUTLIVES the
+	// run that first produced it (the SQL column is ON DELETE SET NULL for
+	// exactly that reason), so tying its lifetime to the 50-run ring would
+	// throw route history away every fifty runs.
+	snapOrder []snapshotKey // insertion order, oldest first
+	snaps     map[snapshotKey]*store.PathSnapshot
 }
 
 // NewMemoryStore returns an empty MemoryStore.
 func NewMemoryStore() *MemoryStore {
-	return &MemoryStore{runs: make(map[string]*memoryRunEntry)}
+	return &MemoryStore{
+		runs:  make(map[string]*memoryRunEntry),
+		snaps: make(map[snapshotKey]*store.PathSnapshot),
+	}
 }
 
 var (
-	_ store.RunStore  = (*MemoryStore)(nil)
-	_ store.RunReader = (*MemoryStore)(nil)
+	_ store.RunStore          = (*MemoryStore)(nil)
+	_ store.RunReader         = (*MemoryStore)(nil)
+	_ store.PathSnapshotStore = (*MemoryStore)(nil)
 )
 
 // CreateRun persists a new run in status "pending". A colliding id returns
@@ -210,6 +244,68 @@ func (m *MemoryStore) UpsertRunResult(_ context.Context, in store.RunResultInput
 	}
 	entry.results = append(entry.results, res)
 	return res, nil
+}
+
+// UpsertPathSnapshot records one trace in path history, matching
+// *store.DB.UpsertPathSnapshot's contract (store.PathSnapshotStore): a route
+// this pair has never taken becomes a new entry and reports isNew; a repeat
+// bumps LastSeen and TraceCount and leaves FirstSeen and the hop payload --
+// the FIRST trace's measurements, M5 Decision 2 -- untouched.
+//
+// It exists for the reason every other method on this type does: with
+// database.mode=disabled the runner is handed a *MemoryStore instead of a
+// *store.DB and the MTR projector must not behave differently. What IS
+// different, and honestly labelled: this history vanishes on restart, and the
+// ring (memorySnapshotRingSize) eventually evicts the oldest entries -- after
+// which that route's next trace reports isNew again, so a database-disabled
+// deployment can see a spurious "route changed" for a route it merely forgot.
+// That is the same posture runs already take, not a new compromise.
+//
+// Validate runs first, exactly as it does in *store.DB, so a caller cannot
+// tell the two backends apart by which malformed inputs they accept -- and so
+// the caller-supplied PathHash is cross-checked against the hops here too.
+func (m *MemoryStore) UpsertPathSnapshot(_ context.Context, in store.PathSnapshotInput) (store.PathSnapshot, bool, error) { //nolint:gocritic // hugeParam: matches store.PathSnapshotStore's own signature (store/mtr.go)
+	if err := in.Validate(); err != nil {
+		return store.PathSnapshot{}, false, err
+	}
+	// Marshalled up front, outside the lock: PathSnapshot.Hops is the raw
+	// JSONB the database hands back, and returning the same shape here is what
+	// keeps a caller from having to know which backend answered.
+	hops, err := json.Marshal(in.Hops)
+	if err != nil {
+		return store.PathSnapshot{}, false, fmt.Errorf("checks: memory store: upsert path snapshot: encode hops: %w", err)
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	key := snapshotKey{sourceNode: in.SourceNode, destination: in.Destination, pathHash: in.PathHash}
+	if existing, ok := m.snaps[key]; ok {
+		existing.LastSeen = in.SeenAt
+		existing.TraceCount++
+		return *existing, false, nil
+	}
+
+	snap := &store.PathSnapshot{
+		ID:          uuid.NewString(),
+		SourceNode:  in.SourceNode,
+		Destination: in.Destination,
+		PathHash:    in.PathHash,
+		HopCount:    int32(len(in.Hops)), //nolint:gosec // len is bounded by Validate's maxPathHops (64)
+		Hops:        hops,
+		FirstSeen:   in.SeenAt,
+		LastSeen:    in.SeenAt,
+		TraceCount:  1,
+		RunID:       in.RunID,
+	}
+	m.snaps[key] = snap
+	m.snapOrder = append(m.snapOrder, key)
+	if len(m.snapOrder) > memorySnapshotRingSize {
+		evicted := m.snapOrder[0]
+		m.snapOrder = m.snapOrder[1:]
+		delete(m.snaps, evicted)
+	}
+	return *snap, true, nil
 }
 
 // GetRun returns store.ErrNotFound when id does not name a run -- including

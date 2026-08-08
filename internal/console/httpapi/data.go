@@ -1,17 +1,103 @@
 package httpapi
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"time"
 
 	"github.com/EsDmitrii/kconmon-ng/internal/console/controllerclient"
 	"github.com/EsDmitrii/kconmon-ng/internal/console/matrix"
 	"github.com/EsDmitrii/kconmon-ng/internal/console/promql"
+	"github.com/EsDmitrii/kconmon-ng/internal/console/store"
 )
 
+// TopologyHistory is the read seam GET /api/v1/topology?at= takes: the fold
+// half of store.EventStore, narrowed so httpapi can neither write events nor
+// page through them here. store.EventStore's method set is a superset of this
+// one, so the value store.NewEventStore returns assigns directly, with no cast.
+type TopologyHistory interface {
+	TopologyAt(ctx context.Context, at time.Time) (store.TopologySnapshot, error)
+}
+
+// topologyHistoryUnavailableDetail is ?at='s 503, in annotationsUnavailableDetail's
+// shape. It is deliberately NOT the live route's "controller not configured"
+// message: the two halves of this endpoint have different dependencies, and an
+// operator told to set controller.url when what is actually missing is the
+// database would go looking in the wrong place.
+const topologyHistoryUnavailableDetail = "historical topology is reconstructed from persisted events: " +
+	"set console.database.mode in the console config (Helm: console.database.mode) to enable GET /api/v1/topology?at="
+
+// topologyRetentionDetail is ?at='s 422. It names the value an operator would
+// change, because "we pruned it" is only actionable if you know what to turn up.
+const topologyRetentionDetail = "no events are retained for that instant, so the topology cannot be " +
+	"reconstructed there -- pick a later time, or raise console.database.retentionDays " +
+	"(Helm: console.database.retentionDays) to keep more history in future"
+
+// historicalTopology is GET /api/v1/topology?at='s body. nodes, agents and
+// timestamp are byte-for-byte the live response's fields -- same names, same
+// element types (controllerclient.Node/Agent), so one frontend type reads both
+// -- with five fields appended that mark this one as a RECONSTRUCTION:
+//
+//   - historical is always true here and absent from the live body, which is
+//     what lets a client tell the two apart without inspecting the URL it
+//     asked for.
+//   - asOf echoes the requested instant; timestamp carries the event_time of
+//     the last change AT OR BEFORE it (i.e. when this topology actually came
+//     into being), falling back to asOf when no event was folded. The two
+//     differ on purpose: one is the question, the other is the answer's age.
+//   - eventsFolded / unfoldableEvents / truncated are the fold's honesty
+//     budget -- see the handler comment below.
+type historicalTopology struct {
+	Nodes            []controllerclient.Node  `json:"nodes"`
+	Agents           []controllerclient.Agent `json:"agents"`
+	Timestamp        time.Time                `json:"timestamp"`
+	Historical       bool                     `json:"historical"`
+	AsOf             time.Time                `json:"asOf"`
+	EventsFolded     int                      `json:"eventsFolded"`
+	UnfoldableEvents int                      `json:"unfoldableEvents"`
+	Truncated        bool                     `json:"truncated"`
+}
+
+// handleTopology serves the LIVE controller snapshot, or -- with ?at= set --
+// the topology reconstructed from persisted events as of that instant.
+//
+// ?at= absent (or present and empty, which is the same thing a form submits
+// for an untouched field) is the pre-M5 path verbatim: proxy the controller,
+// no store involved, no new failure mode. Nothing below the branch changed.
+//
+// WHAT THE ?at= ANSWER IS WORTH. The reconstruction is bounded by what a
+// topology_changed event records, which is exactly {reason, nodeName, agentId}
+// (internal/console/events/live_event.go, api/proto/kconmon.proto):
+//
+//   - zone is NEVER recorded -- not even by a zone_updated event -- so every
+//     folded node and agent carries an empty zone;
+//   - podIP is NEVER recorded, so every folded agent carries an empty podIP;
+//   - ready is not recorded either: it is true for whatever the event log has
+//     seen registered and not since removed, i.e. "present", not "kubelet-ready";
+//   - and TODAY'S CONTROLLER (internal/controller/controller.go) publishes
+//     TopologyChanged{Reason: reason} WITHOUT node_name or agent_id, so events
+//     this build persists name nobody at all. History written by it folds to an
+//     EMPTY node set with every event counted in unfoldableEvents -- which is
+//     why that counter is in the response rather than only in a log: an empty
+//     nodes array next to unfoldableEvents=417 says "the events do not name
+//     their subject", not "the cluster was empty". The fold is coded against
+//     the full proto shape, so the day the controller starts attributing its
+//     changes, already-stored history reconstructs correctly with no change
+//     here.
+//
+// Status codes, in the order they are decided: no store -> 503 (the database
+// is what history lives in; the live route stays fine); unparseable at -> 400;
+// at in the future -> 400 (the answer would be a guess, and an empty one);
+// at before the oldest retained event, or no events retained at all -> 422
+// naming console.database.retentionDays.
 func (s *Server) handleTopology(w http.ResponseWriter, r *http.Request) {
+	if at := r.URL.Query().Get("at"); at != "" {
+		s.serveHistoricalTopology(w, r, at)
+		return
+	}
 	if s.ctrl == nil {
 		writeProblem(w, http.StatusServiceUnavailable, "controller not configured",
 			"set controller.url in the console config (Helm: console.controller.url)")
@@ -27,6 +113,71 @@ func (s *Server) handleTopology(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, topo)
+}
+
+// serveHistoricalTopology answers GET /api/v1/topology?at=<RFC3339>. raw is the
+// param verbatim, already known to be non-empty. See handleTopology's comment
+// for the fold's contract and the status-code order.
+func (s *Server) serveHistoricalTopology(w http.ResponseWriter, r *http.Request, raw string) {
+	// The dependency gate comes first, exactly as every other store-backed
+	// handler in this package does it: telling an operator their database is
+	// off is more actionable than telling them their timestamp was malformed
+	// on a route that could not have answered either way.
+	if s.topologyHistory == nil {
+		writeProblem(w, http.StatusServiceUnavailable, "historical topology not available",
+			topologyHistoryUnavailableDetail)
+		return
+	}
+
+	at, err := time.Parse(time.RFC3339, raw)
+	if err != nil {
+		writeProblem(w, http.StatusBadRequest, "invalid at", "at must be an RFC3339 timestamp")
+		return
+	}
+	if at.After(time.Now()) {
+		// Refused rather than clamped to now: silently answering a different
+		// question than the one asked is how a Time Machine starts lying.
+		writeProblem(w, http.StatusBadRequest, "invalid at", "at is in the future; the topology there is not known yet")
+		return
+	}
+
+	snap, err := s.topologyHistory.TopologyAt(r.Context(), at)
+	if err != nil {
+		// Logged, never surfaced: the driver error can carry a DSN or other
+		// upstream detail that has no business in an HTTP response body.
+		slog.Error("topology fold failed", "error", err)
+		writeProblem(w, http.StatusBadGateway, "topology history unavailable", "failed to query event history")
+		return
+	}
+	// An empty table and an at below the floor are the same answer for the
+	// same reason: the events that would have built that set are not there.
+	if snap.OldestRetained.IsZero() || at.Before(snap.OldestRetained) {
+		writeProblem(w, http.StatusUnprocessableEntity, "outside retained history", topologyRetentionDetail)
+		return
+	}
+
+	out := historicalTopology{
+		Nodes:            make([]controllerclient.Node, 0, len(snap.Nodes)),
+		Agents:           make([]controllerclient.Agent, 0, len(snap.Agents)),
+		Timestamp:        snap.LastChange,
+		Historical:       true,
+		AsOf:             at,
+		EventsFolded:     snap.EventsFolded,
+		UnfoldableEvents: snap.UnfoldableEvents,
+		Truncated:        snap.Truncated,
+	}
+	if out.Timestamp.IsZero() {
+		out.Timestamp = at
+	}
+	for _, n := range snap.Nodes {
+		out.Nodes = append(out.Nodes, controllerclient.Node{Name: n.Name, Zone: n.Zone, Ready: n.Ready})
+	}
+	for _, a := range snap.Agents {
+		out.Agents = append(out.Agents, controllerclient.Agent{
+			ID: a.ID, NodeName: a.NodeName, PodIP: a.PodIP, Zone: a.Zone,
+		})
+	}
+	writeJSON(w, out)
 }
 
 func (s *Server) handleMatrix(w http.ResponseWriter, r *http.Request) {

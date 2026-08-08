@@ -1,3 +1,98 @@
+## kconmon-ng v1.7.0
+
+> Console release. MTR Explorer with durable path history and optional hop
+> enrichment, the Time Machine global time context, and chart annotations
+> (M5). Everything is off by default or read-only-additive; a 1.6.0 install
+> that upgrades and changes nothing renders the same manifests.
+
+### Added
+
+- **MTR path history** — every MTR result the Console records is projected
+  into `mtr_path_snapshots`: hop lists content-hashed per (source,
+  destination) route, deduplicated at ingest, with first/last-seen and trace
+  counts. `kconmon_ng_console_mtr_snapshots_total{result="new-path"}` is the
+  "route changed" alerting primitive.
+- **MTR Explorer** — `/mtr` three panes (destinations → path history →
+  trace detail), client-side path diff between any two snapshots, a "path
+  changes" timeline overlaid with the pair's loss series, per-hop RTT
+  trends, and a Runner tab (gated on `runs:create`).
+- **Hop enrichment** — `console.mtr.enrichment.*` (off by default): reverse
+  DNS and/or MaxMind GeoLite2 ASN/City mmdb files mounted read-only at
+  `/geoip` from an operator-supplied volume; resolved server-side into a
+  TTL cache (`mtr_hop_enrichment`), air-gap friendly, per-source
+  degradation.
+- **Time Machine** — a top-bar control and shareable `?at=` URL state:
+  topology reconstructed from `topology_events` up to `t` (`GET
+  /api/v1/topology?at=`), PromQL surfaces evaluated at `t`, the Live feed
+  becomes scrollback, and every mutating control is disabled behind the
+  banner while engaged. Note: today's controller does not yet attribute
+  `topology_changed` events to nodes, so historical topology reconstruction
+  reports honestly-empty results until it does (named deferral).
+- **Annotations** — notes pinned to instants or time ranges
+  (`/api/v1/annotations`), rendered as chart markers on Explore and the
+  object cards and inline in the Live scrollback. `annotations:write` stops
+  at operator/admin; reads are telemetry (every role).
+- **Explore A/B** — a Compare panel: a second curated metric on the same
+  axes, or the same metric time-shifted (1h/24h/7d) against itself.
+- **Permissions** — `mtr:read`, `annotations:read` (all built-in roles) and
+  `annotations:write` (operator/admin).
+
+### Chart
+
+- 1.6.0 → 1.7.0. New value blocks: `console.mtr.enrichment.*` (rendered
+  into the console ConfigMap only when enabled; mmdb volume via an opaque
+  `geoip.volume` VolumeSource passthrough with a render-time guard). An
+  eighth ci profile (`console-mtr-values.yaml`). Default render is
+  key-identical to 1.6.0.
+
+## kconmon-ng v1.6.0
+
+> Console release. External probe targets, saved check definitions and
+> schedules, continuous external checks with agent-side CIDR enforcement,
+> and diagnostics v2 (M4). Off by default throughout: without
+> `console.scheduler.enabled`, `config.checkers.external.enabled` or a
+> database, a 1.5.0 install behaves identically.
+
+### Added
+
+- **Targets, checks, schedules** — CRUD `/api/v1/{targets,checks,schedules}`
+  (PostgreSQL-backed, 503 without a database), with a cardinality projection
+  guard: an enabled definition may project at most 400 series, enforced
+  server-side and mirrored live in the UI.
+- **Console scheduler** — `console.scheduler.{enabled,tickInterval}` (off by
+  default): `once`/`interval` schedules fire diagnostics runs from exactly
+  one replica under a PostgreSQL advisory lock; a stuck-run reaper finishes
+  abandoned runs as `cancelled`; `POST /api/v1/runs/{id}/cancel` cancels an
+  in-flight run.
+- **Continuous external checks** — check definitions of kind `continuous`
+  are reconciled to the controller (`PUT /api/v1/external-checks`,
+  `WatchExternalChecks` stream) and probed by agents on their own cadence.
+  The **agent** is authoritative: `config.checkers.external.enabled` plus a
+  mandatory `allowedCidrs` allowlist (deny-wins, resolved-IP matching,
+  re-checked on every probe); an agent without the opt-in refuses external
+  work and the controller answers 501 for it.
+- **External metrics** — the `kconmon_ng_external_*` family
+  (`{source_node,source_zone,target,target_kind}` labels; the target NAME,
+  never an address) plus `ExternalChecksFailing` in the default rules.
+- **Diagnostics v2** — `POST /api/v1/runs` accepts
+  `destinationKind=node|target|adhoc`; the diagnostics form grows a
+  destination selector and Save-as-definition.
+- **Rate limits** — `console.rateLimit.{runsPerMinute,loginPerMinute}`
+  (fixed-window on the shared KV; fail-open on a Valkey outage; the login
+  limit runs before argon2id).
+- **OpenAPI** — a committed spec (`docs/console-api.yaml`), generated TS
+  types, and a router-walking test that fails on any drift in either
+  direction.
+- **UI** — the Targets & Schedules page and the Target card
+  (`/targets/{id}`).
+
+### Chart
+
+- 1.5.0 → 1.6.0. New value blocks: `config.checkers.external.*` (agent,
+  rendered only when enabled), `console.scheduler.*`,
+  `console.rateLimit.*`; a seventh ci profile; the external-mode Valkey
+  egress NetworkPolicy now derives its port from the configured address.
+
 ## kconmon-ng v1.5.0
 
 > Console release. Adds durable persistence, authentication/RBAC, and an

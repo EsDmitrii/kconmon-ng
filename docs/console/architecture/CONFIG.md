@@ -4,7 +4,10 @@ Owner: @EsDmitrii
 Source: written from the as-built M0–M3 implementation (2026-08-06):
 internal/console/config/config.go, cmd/console/main.go, and the chart's
 templates/console/configmap.yaml + templates/console/deployment.yaml +
-values.yaml at chart 1.5.0.
+values.yaml at chart 1.5.0. The mtr.enrichment section and the fifth render
+guard added from the as-built M5 implementation (2026-08-08): config.go's
+MTRConfig/EnrichmentConfig, internal/console/enrich/enrich.go,
+cmd/console/main.go's enricherDep switch, at chart 1.7.0.
 This document is the source of truth for Console configuration. Update it (and the ADRs) in the same PR as any deviation.
 -->
 
@@ -90,6 +93,16 @@ rateLimit:
 scheduler:
   enabled: false # gates the schedule loop, the stuck-run reaper AND the continuous reconciler
   tickInterval: 5s # poll cadence; the advisory lock is taken and released per tick
+mtr:
+  enrichment:
+    enabled: false # master gate; OFF by default (this is the console's only extra egress)
+    rdns:
+      enabled: false
+      timeoutMs: 500 # bounds ONE lookup, not the batch
+    geoip:
+      asnPath: "" # e.g. /geoip/GeoLite2-ASN.mmdb; empty = ASN/provider lookups off
+      cityPath: "" # e.g. /geoip/GeoLite2-City.mmdb; empty = geo lookups off
+    ttl: 24h # cache row lifetime in mtr_hop_enrichment
 ```
 
 `database` is entirely omitted from the rendered config when
@@ -122,6 +135,9 @@ Startup fails — loudly, before serving — on any of these:
 | `auth.session.cookieName` starts with `__Host-` and `auth.session.secure=false` | error (browsers reject `__Host-` without `Secure`) |
 | `rateLimit.runsPerMinute` or `rateLimit.loginPerMinute` < 0 | error (0 is legal: "disables the limit") |
 | `scheduler.tickInterval` non-positive **while `scheduler.enabled=true`** | error (a disabled loop's interval is not inspected) |
+| `mtr.enrichment.enabled=true` with `rdns.enabled=false` **and** both `geoip` paths empty | error naming all three knobs |
+| `mtr.enrichment.ttl` non-positive **while `mtr.enrichment.enabled=true`** | error |
+| `mtr.enrichment.rdns.timeoutMs` non-positive **while `rdns.enabled=true`** | error |
 
 ### `rateLimit` — what it actually bounds, and where it stops
 
@@ -180,6 +196,77 @@ still useful.
 `scheduler_ticks_total{result="not-leader"}` is the normal case on every
 replica but one. The lock is taken and released per tick, so a replica dying
 mid-tick delays exactly one tick.
+
+### `mtr.enrichment` — the console's only extra egress, and why it is off
+
+Path history itself has **no configuration**. The checks runner projects every
+MTR result into `mtr_path_snapshots` whenever a database is resolved; there is
+no knob to turn that on, off or down. This block is only about **enriching**
+the hop addresses in a stored trace.
+
+`enabled` is `false` by default for a stronger reason than `scheduler.enabled`.
+Enrichment is the only part of the Console that makes the pod talk to something
+other than the controller, Prometheus, Valkey and PostgreSQL: `rdns` sends
+every hop address the fleet ever traced to whatever resolver the pod's
+`/etc/resolv.conf` names. That is a deliberate act with an egress footprint,
+not a default.
+
+**The two sources gate independently.** An air-gapped cluster with mounted mmdb
+files and no reachable resolver runs geoip-only; a cluster with internal DNS
+and no MaxMind licence runs rdns-only. Consequences worth stating:
+
+- **Enabled with every source off is a startup error, not a no-op**, and the
+  message names all three knobs. It is the one misconfiguration that would
+  otherwise be invisible: the resolver would start, every lookup would resolve
+  to an empty row, and the cache would fill with authoritative-looking nothing
+  that `ttl` then protects for a day.
+- **An empty geoip path is that source switched off** — the same "empty means
+  disabled" convention `controller.url`, `prometheus.url` and `valkey.address`
+  already use.
+- **An UNREADABLE mmdb file is not a boot failure.** `enrich.New` warns,
+  disables that one source, and the console serves trace history exactly as
+  before. A bad mount must never cost an operator their history. A corrupt ASN
+  file leaves the City file working, and vice versa.
+- **A source that is off, or whose file failed to open, is never counted** in
+  `kconmon_ng_console_enrichment_lookups_total`. A series pinned at zero would
+  read as "working and finding nothing" (docs/metrics.md).
+
+**With `database.mode=disabled` the whole block is inert.** The cache *is*
+`mtr_hop_enrichment`, so a resolver without a database would re-resolve every
+address on every single read. `cmd/console` logs
+
+```
+WARN mtr.enrichment.enabled is set but no database is configured — hop enrichment is off
+     (the TTL cache lives in PostgreSQL; set console.database.mode)
+```
+
+and wires the handler's cache-only path instead. That path answers `200` with
+an empty `enrichment` map — never a `503` — so a trace still renders. It is a
+warn-and-skip rather than a fatal deliberately: taking the whole Console down
+over an optional decoration would be the wrong trade. The one enrichment
+failure that *is* fatal is a resolver that cannot be **constructed** at all —
+that is a composition bug, not an environment, so it exits 1 rather than
+serving a console whose enrichment silently is not what the config says.
+
+`ttl` is a cache row's lifetime, and 24h because the answers are slow-moving:
+a hop's PTR record and its ASN change on the order of months. A row past its
+TTL is re-resolved **on the next read that wants it**. There is no background
+refresher in M5 (Decision 4), which is what makes an unread address free.
+Resolution happens **synchronously on the request** that missed the cache, with
+a per-lookup timeout under the caller's own context and misses bounded at 8 in
+flight — the snapshot response ships whatever resolved in time and the cache
+catches up on the next read.
+
+`timeoutMs` is milliseconds rather than a duration string on purpose: the
+useful range is 100–1000 ms, and an operator who writes `timeoutMs: 500` cannot
+accidentally mean 500 ns. A resolver budget that quietly rounded to nothing
+would make every hop look unresolvable.
+
+Helm mounts the mmdb files: `console.mtr.enrichment.geoip.volume` is an opaque
+VolumeSource passthrough mounted read-only at the fixed path **`/geoip`**, so
+both paths above must live under it. Setting a path with no volume **fails
+rendering** rather than shipping a config that names a file nothing mounts —
+see "Chart behaviours worth knowing" below.
 
 ### The other half lives in the agent's config, not this file
 
@@ -370,7 +457,7 @@ when `console.database.mode != disabled`**, so the default manifest
 Secrets are read once at boot; rotating one is an operator-initiated restart
 (the Deployment rolls on ConfigMap changes only, never on Secret changes).
 
-## Helm mapping (chart 1.6.0)
+## Helm mapping (chart 1.7.0)
 
 | Config key | Helm value |
 | ---------- | ---------- |
@@ -387,6 +474,8 @@ Secrets are read once at boot; rotating one is an operator-initiated restart
 | `database.dsnFile` | derived: `console.database.mode=cnpg` → the CNPG-operator-generated `<cluster>-app` Secret; `mode=external` → `console.database.existingSecret`/`existingSecretKey` |
 | `rateLimit.*` | `console.rateLimit.*`; emitted unconditionally (the limiter always runs) |
 | `scheduler.*` | `console.scheduler.*`; the whole `scheduler:` block is omitted from the rendered config when `console.scheduler.enabled=false` |
+| `mtr.enrichment.*` | `console.mtr.enrichment.*`; the whole `mtr:` block is omitted from the rendered config when `console.mtr.enrichment.enabled=false` |
+| `mtr.enrichment.geoip.{asnPath,cityPath}` | the same values, but they must name files under `/geoip` — the chart mounts `console.mtr.enrichment.geoip.volume` read-only there and offers no way to put a file anywhere else |
 
 Realtime therefore needs **two** flags, one on each side:
 
@@ -415,7 +504,7 @@ console:
   which is the only thing that makes a byte-identical claim meaningful; 1.5.0
   is a *released* chart that already contains them, so it was never the right
   baseline. (This sentence previously called 1.5.0 a future release. It has
-  shipped; the current chart is 1.6.0.)
+  shipped; the current chart is 1.7.0.)
 - **`config.checkers.external` is emitted into the shared ConfigMap only when
   it is enabled**, for exactly the `controller.events` reason above: a pre-M4
   agent image has no `External` field and `KnownFields(true)` would crashloop
@@ -426,7 +515,15 @@ console:
   three consumers: the schedule loop, the stuck-run reaper, and the continuous
   external-check reconciler. They share the flag *and* the PostgreSQL advisory
   lock, so there is no way to run the reconciler without the scheduler.
-- **`console.rateLimit` is emitted unconditionally**, unlike the two above.
+- **`console.mtr` is emitted only when `console.mtr.enrichment.enabled`**, for
+  the same rolling-image reason as the two above: a pre-M5 console binary has
+  no `MTRConfig` field at all, so `KnownFields(true)` would crashloop the old
+  Pod as the Deployment rolls. Worth being precise about, because it is easy to
+  state the reason wrongly: the *current* console parses `mtr:` happily — the
+  gate is justified by the image being replaced, not by this one. Off by
+  default also means an install that never touched the block renders a console
+  `config.yaml` key-identical to chart 1.6.0's.
+- **`console.rateLimit` is emitted unconditionally**, unlike the three above.
   There is no "off" state to gate on — the limiter always runs, and `0` is a
   value that means "this limit is off", not "this block is absent".
 - **The render-time guard keys on the RESOLVED gRPC address**, not on
@@ -453,6 +550,22 @@ console:
   - `auth.mode=header` with an empty `auth.header.trustedProxyCIDRs` fails: an
     empty list would make an unauthenticated request header an authentication
     bypass.
+- **A fifth `fail` guard landed in M5**, keyed the same way on resolved values:
+  `console.mtr.enrichment.enabled` with a geoip path set and
+  `console.mtr.enrichment.geoip.volume` empty fails rendering. The chart mounts
+  that volume read-only at the fixed path `/geoip` and nothing else can put a
+  file there, so the alternative is a console that boots, warns once and runs
+  with geoip silently off. The volume is an **opaque VolumeSource passthrough**
+  — the chart deliberately does not model the
+  `{configMap|secret|hostPath|persistentVolumeClaim}` union: GeoLite2 files run
+  to ~10 MB (past what many clusters accept in a ConfigMap), operators keep
+  them in genuinely different places, and a union re-declared in
+  `values.schema.json` goes stale the first time Kubernetes grows a source.
+  The API server validates what you wrote. The mount path is fixed rather than
+  a value because the chart would otherwise own two halves of the same fact —
+  a `mountPath` here and an `asnPath` in the ConfigMap — with nothing keeping
+  them agreeing, and a drift between them renders perfectly and fails only at
+  runtime.
 - **Two NetworkPolicy paths were added in M3**, both requiring both layers
   (egress on the console side, ingress on the destination side) exactly like
   the M2 controller-gRPC and Valkey rules:

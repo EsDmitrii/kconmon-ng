@@ -49,8 +49,10 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * Live cluster topology, proxied from the controller.
-         * @description The controller's snapshot verbatim. A non-leader reply is retried with backoff; if every attempt still fails the console answers 502.
+         * Live cluster topology from the controller, or a reconstruction as of an instant.
+         * @description Without `at`, the controller's snapshot verbatim: a non-leader reply is retried with backoff, and if every attempt still fails the console answers 502. With `at`, the topology is instead REBUILT by folding persisted `topology_changed` events up to that instant, and the body carries `historical: true` plus the fold's own counters.
+         *
+         *     A reconstruction is bounded by what those events record, which is `{reason, nodeName, agentId}` and nothing else. `zone` is never recorded (not even by a `zone_updated` event) and `podIP` is never recorded, so both come back empty on every folded entry; `ready` means "seen registered and not since removed", not kubelet readiness. The controller shipped with this release publishes the reason WITHOUT node_name or agent_id, so history written by it folds to an empty `nodes` array with every event counted in `unfoldableEvents` -- that counter, not the empty array, is the honest signal.
          */
         get: operations["getTopology"];
         put?: never;
@@ -355,6 +357,113 @@ export interface paths {
         post?: never;
         /** Delete one schedule. Nothing references a schedule, so there is no 409. */
         delete: operations["deleteSchedule"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/mtr/destinations": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Every (source, destination) pair MTR path history knows about.
+         * @description Unpaged on purpose -- the row count is PAIRS, not traces. A pair with snapshotCount 1 and traceCount 4000 has a stable route.
+         */
+        get: operations["listMTRDestinations"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/mtr/snapshots": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * One pair's route history (distinct paths), newest first.
+         * @description Both source and destination are REQUIRED; omitting either is 422, not an unfiltered listing: the whole table has no UI and no bound. List the pairs with GET /api/v1/mtr/destinations first.
+         */
+        get: operations["listPathSnapshots"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/mtr/snapshots/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Resource id (UUID). A malformed id is 404, indistinguishable from an unknown one. */
+                id: components["parameters"]["PathID"];
+            };
+            cookie?: never;
+        };
+        /**
+         * One stored route. An unknown id and a malformed one are both 404.
+         * @description Without `enrich=true` the `enrichment` field is ABSENT -- never null, never an empty object -- so "did not ask" stays distinguishable from "asked and nothing is known". Enrichment is a cache read and NEVER fails the trace: an unreadable cache yields an empty map, not an error.
+         */
+        get: operations["getPathSnapshot"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/annotations": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * One page of operator notes pinned to moments or spans.
+         * @description from/to bound the window an annotation must OVERLAP, not the window its start must fall in: a span that began before from and is still running at from is exactly the mark a chart needs to draw. Either side absent is unbounded on that side.
+         */
+        get: operations["listAnnotations"];
+        put?: never;
+        /**
+         * Pin one mark. There is no update -- a mark is not a document.
+         * @description createdBy is the SERVER's view of the authenticated subject ("user:<id>", "token:<id>"), never a body field. The audit row for this route records the scope ONLY: the text is free-form operator prose and never enters the audit log.
+         */
+        post: operations["createAnnotation"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/annotations/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Resource id (UUID). A malformed id is 404, indistinguishable from an unknown one. */
+                id: components["parameters"]["PathID"];
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /** Remove one mark; deleting one that is not there is 404, not success. */
+        delete: operations["deleteAnnotation"];
         options?: never;
         head?: never;
         patch?: never;
@@ -690,8 +799,24 @@ export interface components {
         Topology: {
             nodes: components["schemas"]["TopologyNode"][];
             agents: components["schemas"]["TopologyAgent"][];
-            /** Format: date-time */
+            /**
+             * Format: date-time
+             * @description Live: the controller's snapshot time. Historical: when this topology came into being, i.e. the time of the last folded change at or before `asOf` (falling back to `asOf` when nothing folded).
+             */
             timestamp: string;
+            /** @description Present and true ONLY on a `?at=` response. Absent on the live passthrough, which is how a client tells the two apart. */
+            historical?: boolean;
+            /**
+             * Format: date-time
+             * @description The instant `?at=` asked about, echoed back. Historical only.
+             */
+            asOf?: string;
+            /** @description How many topology_changed events the fold consumed. Historical only. */
+            eventsFolded?: number;
+            /** @description How many of those could not move the node set: they named neither a node nor an agent, carried unparseable details, or used a reason this build does not know. A high value beside an empty `nodes` array means the events do not name their subject -- NOT that the cluster was empty. Historical only. */
+            unfoldableEvents?: number;
+            /** @description True when the fold hit its 100k-row guard, so the reconstruction is missing its newest events and must not be trusted. Historical only. */
+            truncated?: boolean;
         };
         MatrixCell: {
             source: string;
@@ -768,6 +893,123 @@ export interface components {
         EventPage: {
             events: components["schemas"]["LiveEvent"][];
             /** @description Empty string when the page proves nothing older is left. */
+            nextCursor: string;
+        };
+        /** @description One (source, destination) pair path history knows about. */
+        MTRDestination: {
+            sourceNode: string;
+            /** @description A node NAME or a target NAME, never an address. */
+            destination: string;
+            /**
+             * Format: int64
+             * @description How many DISTINCT routes the pair has taken.
+             */
+            snapshotCount: number;
+            /**
+             * Format: int64
+             * @description How many traces produced them.
+             */
+            traceCount: number;
+            /** Format: date-time */
+            firstSeen: string;
+            /** Format: date-time */
+            lastSeen: string;
+        };
+        MTRDestinationList: {
+            destinations: components["schemas"]["MTRDestination"][];
+        };
+        /** @description One hop of a stored trace. Only `ip` takes part in the dedupe hash; the rest is the payload of the FIRST trace that took this path. */
+        MTRHop: {
+            number: number;
+            ip: string;
+            /** @description Absent unless the stored trace carried one; enrichment is separate. */
+            hostname?: string;
+            /**
+             * Format: int64
+             * @description Round-trip time in NANOSECONDS, the repo-wide duration convention.
+             */
+            rttNs: number;
+            /** @description 0..1. */
+            lossRatio: number;
+        };
+        /** @description One cached lookup about a hop address (mtr_hop_enrichment). Every field is re-derivable, which is what makes the retention sweep over this cache free of consequence. */
+        Enrichment: {
+            ip: string;
+            rdns?: string;
+            /** Format: int64 */
+            asn?: number;
+            provider?: string;
+            /** @description Resolver-shaped JSON object; absent when nothing geo-located. */
+            geo?: {
+                [key: string]: unknown;
+            };
+            /** Format: date-time */
+            resolvedAt: string;
+        };
+        /** @description One distinct route a pair has been observed taking, with the hop payload of the first trace that took it. */
+        PathSnapshot: {
+            /** Format: uuid */
+            id: string;
+            sourceNode: string;
+            destination: string;
+            /** @description SHA-256 over the ordered hop IP list ONLY -- not RTTs, not hostnames. */
+            pathHash: string;
+            hopCount: number;
+            hops: components["schemas"]["MTRHop"][];
+            /** Format: date-time */
+            firstSeen: string;
+            /** Format: date-time */
+            lastSeen: string;
+            /** Format: int64 */
+            traceCount: number;
+            /**
+             * Format: uuid
+             * @description Absent once the run that first produced this path has aged out.
+             */
+            runId?: string;
+            /** @description Hop address -> cached enrichment row. Present ONLY on GET /api/v1/mtr/snapshots/{id}?enrich=true, and then possibly empty; a cache miss is simply an absent key. */
+            enrichment?: {
+                [key: string]: components["schemas"]["Enrichment"];
+            };
+        };
+        PathSnapshotPage: {
+            snapshots: components["schemas"]["PathSnapshot"][];
+            nextCursor: string;
+        };
+        /** @description One operator note pinned to a moment or a span. */
+        Annotation: {
+            /** Format: uuid */
+            id: string;
+            /** Format: date-time */
+            startAt: string;
+            /**
+             * Format: date-time
+             * @description Absent for an INSTANT mark -- a point in time, not "still open".
+             */
+            endAt?: string;
+            /** @description "" is a real value: the GLOBAL scope. Any other value names a node, a pair or a target. A filter key, NEVER a Prometheus label value. */
+            scope: string;
+            text: string;
+            /** @description The server's view of the subject ("user:<id>", "token:<id>"). */
+            createdBy: string;
+            /** Format: date-time */
+            createdAt: string;
+        };
+        /** @description Create body. There is deliberately no createdBy: attribution comes from the authenticated subject, not from the client. */
+        AnnotationRequest: {
+            /** Format: date-time */
+            startAt: string;
+            /**
+             * Format: date-time
+             * @description Omit for an instant mark; must be at or after startAt.
+             */
+            endAt?: string;
+            /** @description Omitted or "" pins the mark globally. */
+            scope?: string;
+            text: string;
+        };
+        AnnotationPage: {
+            annotations: components["schemas"]["Annotation"][];
             nextCursor: string;
         };
         RunCreateRequest: {
@@ -1239,14 +1481,17 @@ export interface operations {
     };
     getTopology: {
         parameters: {
-            query?: never;
+            query?: {
+                /** @description RFC 3339 instant to reconstruct the topology at. Absent or empty is the live passthrough above, byte-for-byte. A value that does not parse, or one in the future, is 400. A value older than the oldest retained event -- or any value when nothing is retained -- is 422, with a detail naming console.database.retentionDays. Requires a database: with console.database.mode unset this parameter alone is 503, while the live route stays available. */
+                at?: string;
+            };
             header?: never;
             path?: never;
             cookie?: never;
         };
         requestBody?: never;
         responses: {
-            /** @description Topology snapshot. */
+            /** @description Topology snapshot -- live, or a fold marked `historical`. */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -1255,8 +1500,10 @@ export interface operations {
                     "application/json": components["schemas"]["Topology"];
                 };
             };
+            400: components["responses"]["BadRequest"];
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
+            422: components["responses"]["UnprocessableEntity"];
             502: components["responses"]["BadGateway"];
             503: components["responses"]["Unavailable"];
         };
@@ -1958,6 +2205,184 @@ export interface operations {
         };
     };
     deleteSchedule: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Resource id (UUID). A malformed id is 404, indistinguishable from an unknown one. */
+                id: components["parameters"]["PathID"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            204: components["responses"]["NoContent"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            502: components["responses"]["BadGateway"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    listMTRDestinations: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Every known pair, most-recently-traced first. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MTRDestinationList"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            502: components["responses"]["BadGateway"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    listPathSnapshots: {
+        parameters: {
+            query: {
+                /** @description Source node name; exact match. */
+                source: string;
+                /** @description Destination node or target NAME, never an address; exact match. */
+                destination: string;
+                /** @description Page size, clamped into [1,500]. An unparseable value is treated as unset. */
+                limit?: components["parameters"]["Limit"];
+                /** @description Opaque keyset cursor from the previous page's nextCursor. Malformed, or minted by another server, is 400. */
+                cursor?: components["parameters"]["Cursor"];
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description One page of distinct paths this pair has taken. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PathSnapshotPage"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            422: components["responses"]["UnprocessableEntity"];
+            502: components["responses"]["BadGateway"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    getPathSnapshot: {
+        parameters: {
+            query?: {
+                /** @description Only the exact value "true" turns the hop enrichment lookup on. */
+                enrich?: boolean;
+            };
+            header?: never;
+            path: {
+                /** @description Resource id (UUID). A malformed id is 404, indistinguishable from an unknown one. */
+                id: components["parameters"]["PathID"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The snapshot, carrying `enrichment` only when it was asked for. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PathSnapshot"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            502: components["responses"]["BadGateway"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    listAnnotations: {
+        parameters: {
+            query?: {
+                /** @description RFC3339; absent means unbounded on this side. */
+                from?: string;
+                /** @description RFC3339, exclusive; absent means unbounded on this side. */
+                to?: string;
+                /** @description THREE states. Absent means every scope; present-but-empty (`?scope=`) means the GLOBAL ones only, because "" is a real scope value here; any other value is an exact match. */
+                scope?: string;
+                /** @description Page size, clamped into [1,500]. An unparseable value is treated as unset. */
+                limit?: components["parameters"]["Limit"];
+                /** @description Opaque keyset cursor from the previous page's nextCursor. Malformed, or minted by another server, is 400. */
+                cursor?: components["parameters"]["Cursor"];
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description One page of annotations. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AnnotationPage"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            502: components["responses"]["BadGateway"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    createAnnotation: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AnnotationRequest"];
+            };
+        };
+        responses: {
+            /** @description Annotation created. */
+            201: {
+                headers: {
+                    /** @description Permalink to the new annotation. */
+                    Location?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Annotation"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            422: components["responses"]["UnprocessableEntity"];
+            502: components["responses"]["BadGateway"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    deleteAnnotation: {
         parameters: {
             query?: never;
             header?: never;

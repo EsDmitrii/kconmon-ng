@@ -205,6 +205,17 @@ var auditDetailAllowlist = map[string][]string{
 	// therefore no entry, its id being in the resource column already.
 	"POST /api/v1/schedules":     {"definitionId", "kind", "enabled"},
 	"PUT /api/v1/schedules/{id}": {"definitionId", "kind", "enabled"},
+	// Annotations (M5 Task 4): "scope" and NOTHING else. "text" is free-form
+	// operator prose -- the one field on this route that can contain
+	// literally anything a human types, including the credential or hostname
+	// they were mid-incident about -- and an audit log is read by more people
+	// and retained longer than the note itself is. The note stays readable
+	// from GET /api/v1/annotations by whoever holds annotations:read.
+	// "startAt"/"endAt" are left off as noise: the row's own timestamp says
+	// when the mark was pinned, and what it points at is reconstructible from
+	// the annotation. DELETE has no body and therefore no entry -- the id it
+	// names is already in the row's resource column (auditResource).
+	"POST /api/v1/annotations": {"scope"},
 }
 
 // auditDetailFor extracts action's allow-listed subset of body's top-level

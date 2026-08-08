@@ -159,6 +159,25 @@ var routeTable = map[string]routeRule{
 	"PUT /api/v1/schedules/{id}":    {permission: authz.PermSchedulesWrite},
 	"DELETE /api/v1/schedules/{id}": {permission: authz.PermSchedulesWrite},
 
+	// MTR path history is TELEMETRY, not configuration, so mtr:read reaches
+	// VIEWER (M5 Decision 11) -- M4's Decision 3 line, which keeps
+	// targets:read/checks:read out of the role auth.mode=anonymous defaults
+	// to, deliberately does not apply here: a stored traceroute is the same
+	// class of thing as an event or a run result, all of which viewer already
+	// reads. Launching a NEW trace stays behind runs:create; there is no
+	// write route here at all.
+	"GET /api/v1/mtr/destinations":   {permission: authz.PermMTRRead},
+	"GET /api/v1/mtr/snapshots":      {permission: authz.PermMTRRead},
+	"GET /api/v1/mtr/snapshots/{id}": {permission: authz.PermMTRRead},
+
+	// Annotations split read from write on the same Decision 11 line: the
+	// notes drawn on a chart are telemetry a viewer reads, while PINNING one
+	// is an operator statement about the fleet's history -- so
+	// annotations:write stops at operator and admin.
+	"GET /api/v1/annotations":         {permission: authz.PermAnnotationsRead},
+	"POST /api/v1/annotations":        {permission: authz.PermAnnotationsWrite},
+	"DELETE /api/v1/annotations/{id}": {permission: authz.PermAnnotationsWrite},
+
 	"GET /api/v1/rbac/permissions":      {permission: authz.PermRBACManage},
 	"GET /api/v1/rbac/roles":            {permission: authz.PermRBACManage},
 	"POST /api/v1/rbac/roles":           {permission: authz.PermRBACManage},
