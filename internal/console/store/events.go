@@ -100,6 +100,16 @@ const (
 	queryUpdateWebhookDelivery   = "UpdateWebhookDelivery"
 	queryDeleteWebhook           = "DeleteWebhook"
 
+	// The M7 alerting queries (alertrules.go). alert_rules is configuration
+	// and has no sweep at all, so unlike the M5/M6 blocks above there is not
+	// even a Delete*Before to leave out.
+	queryCreateAlertRule           = "CreateAlertRule"
+	queryGetAlertRule              = "GetAlertRule"
+	queryListAlertRules            = "ListAlertRules"
+	queryUpdateAlertRule           = "UpdateAlertRule"
+	queryUpdateAlertRuleSyncStatus = "UpdateAlertRuleSyncStatus"
+	queryDeleteAlertRule           = "DeleteAlertRule"
+
 	resultOK       = "ok"
 	resultConflict = "conflict"
 	resultError    = "error"

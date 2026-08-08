@@ -29,6 +29,11 @@
    --------------------------------------------------------------------------- */
 
 :root {
+  /* Native form controls (the date/time picker indicators, scrollbars,
+     <select> popups) take their palette from color-scheme, not from any CSS
+     below — without this the browser draws dark glyphs on our dark surfaces. */
+  color-scheme: dark;
+
   /* Surfaces: page → card → raised. Each step is a lightness step on one cool
      hue; the inset highlight in the shadows does the "edge", so no outlines. */
   --background: 232 16% 6.5%;
@@ -109,6 +114,8 @@
 }
 
 .light {
+  color-scheme: light;
+
   --background: 220 33% 98%;
   --surface: 0 0% 100%;
   --surface-2: 220 27% 96%;

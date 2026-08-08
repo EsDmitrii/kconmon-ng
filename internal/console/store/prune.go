@@ -47,16 +47,26 @@ import (
 //   - maintenance_windows by end_at -- a window that is still open is still
 //     current however long ago it began.
 //
-// WEBHOOKS ARE NEVER SWEPT, and that is why there is no tableWebhooks label
-// and no fourth M6 entry in PruneOnce's list. A webhook row is CONFIGURATION,
-// not observation: it is what an operator typed, it does not accumulate with
-// time (one row per endpoint, bounded by how many were configured), and its
-// only time column, created_at, records when the endpoint was set up rather
-// than when it last mattered. Ageing rows out of it would silently switch off
-// notifications for a still-wanted endpoint whose only crime was being
-// configured before the retention horizon -- a retention policy is not a
-// deconfiguration policy. Endpoints leave this table exactly one way: an
-// operator deletes them.
+// WEBHOOKS AND ALERT_RULES ARE NEVER SWEPT, and that is why there is no
+// tableWebhooks and no tableAlertRules label, and no entry for either in
+// PruneOnce's list. Both are CONFIGURATION, not observation: they are what an
+// operator typed, they do not accumulate with time (one row per endpoint, one
+// row per rule, bounded by how many were configured), and their time columns
+// record when the thing was set up or last edited rather than when it last
+// mattered. Ageing rows out of them would silently switch off notifications
+// for a still-wanted endpoint, or delete a still-firing alert rule, whose only
+// crime was being configured before the retention horizon -- a retention
+// policy is not a deconfiguration policy. Rows leave these two tables exactly
+// one way: an operator deletes them.
+//
+// alert_rules is the M7 case (Decision 1) and it is the sharper one, because
+// the table LOOKS sweepable: it carries updated_at and last_synced_at, either
+// of which a later reader could mistake for an "ageing" column. They are not.
+// updated_at is when the operator last edited the rule and last_synced_at is
+// when the reconciler last reached the cluster; a rule nobody has touched for
+// a year and that Prometheus has been evaluating the whole time is the most
+// load-bearing row in the table, not the stalest. TestAlertRulesAreNotARetentionTable
+// and TestWebhooksAreNotARetentionTable pin both absences.
 const (
 	tableTopologyEvents = "topology_events"
 	tableAuditLog       = "audit_log"
@@ -278,9 +288,9 @@ func (p *Pruner) PruneOnce(ctx context.Context) (map[string]int64, error) {
 				})
 			},
 		},
-		// NO webhooks sweep. See the block comment on the table labels above:
-		// a webhook row is configuration, and retention is not a
-		// deconfiguration policy.
+		// NO webhooks sweep and NO alert_rules sweep. See the block comment on
+		// the table labels above: both rows are configuration, and retention
+		// is not a deconfiguration policy.
 	})
 }
 

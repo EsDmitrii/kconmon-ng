@@ -149,9 +149,14 @@ func TestPruneOnceDeletesRowsPastRetention(t *testing.T) {
 // deliberate -- it is what makes the test also prove the sweeps are pointed at
 // the columns the writers actually populate.
 //
-// A configured WEBHOOK is seeded too, and must SURVIVE: webhooks are
-// configuration, not observation, and have no sweep at all (prune.go's
-// table-label comment). The row's presence afterwards is the assertion.
+// A configured WEBHOOK and a configured ALERT RULE are seeded too, and both
+// must SURVIVE: they are configuration, not observation, and have no sweep at
+// all (prune.go's table-label comment, M7 Decision 1). Their presence
+// afterwards is the assertion. The alert rule is deliberately backdated on
+// BOTH of its time columns first -- updated_at and last_synced_at -- because
+// those are the two a later reader would most plausibly hang a sweep on, and
+// a rule 200 days past the horizon on both is the row such a sweep would take
+// first.
 func TestPruneOnceSweepsEveryTable(t *testing.T) {
 	db, dsn := newPrunerDB(t)
 	p := store.NewPruner(db, retention90d, newTestMetrics())
@@ -282,6 +287,19 @@ func TestPruneOnceSweepsEveryTable(t *testing.T) {
 		t.Fatalf("CreateWebhook: %v", err)
 	}
 
+	// alert_rules: configuration, NEVER swept -- aged past the horizon on both
+	// of its time columns so no plausible sweep could have spared it by
+	// accident.
+	rule, err := db.CreateAlertRule(ctx, alertRuleInput("PairLossHigh"))
+	if err != nil {
+		t.Fatalf("CreateAlertRule: %v", err)
+	}
+	if _, err := pool.Exec(ctx,
+		`UPDATE alert_rules SET created_at = $1, updated_at = $1, last_synced_at = $1 WHERE id = $2`,
+		expired, rule.ID); err != nil {
+		t.Fatalf("backdate the alert rule: %v", err)
+	}
+
 	deleted, err := p.PruneOnce(ctx)
 	if err != nil {
 		t.Fatalf("PruneOnce: %v", err)
@@ -313,6 +331,9 @@ func TestPruneOnceSweepsEveryTable(t *testing.T) {
 	}
 	if _, ok := deleted["webhooks"]; ok {
 		t.Error("PruneOnce reported a webhooks entry: that table has no sweep and must not gain one")
+	}
+	if _, ok := deleted["alert_rules"]; ok {
+		t.Error("PruneOnce reported an alert_rules entry: that table has no sweep and must not gain one")
 	}
 	if len(deleted) != 9 {
 		t.Errorf("PruneOnce reported %d tables, want 9: %v", len(deleted), deleted)
@@ -377,6 +398,11 @@ func TestPruneOnceSweepsEveryTable(t *testing.T) {
 	// The whole point of the webhooks exclusion, as a read-back.
 	if _, err := db.GetWebhook(ctx, hook.ID); err != nil {
 		t.Errorf("the configured webhook was swept: %v -- webhooks have no retention sweep", err)
+	}
+	// And of the alert_rules exclusion, on a row 200 days stale on every
+	// column a sweep could have keyed off.
+	if _, err := db.GetAlertRule(ctx, rule.ID); err != nil {
+		t.Errorf("the configured alert rule was swept: %v -- alert_rules has no retention sweep", err)
 	}
 }
 
