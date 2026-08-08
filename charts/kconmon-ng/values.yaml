@@ -577,6 +577,73 @@ console:
       # console.database.mode=disabled: the console logs a warning at boot and
       # runs without the resolver rather than re-resolving on every read.
       ttl: 24h
+  # Kubernetes event capture (M6). The ONLY part of the console that talks to
+  # the apiserver: it list+watches core/v1 Events and writes the ones that
+  # concern this fleet into k8s_events, so the Investigate timeline can put
+  # "the kubelet restarted this pod" next to "loss to this node spiked".
+  #
+  # The whole block is rendered into the ConfigMap only when enabled, exactly
+  # like console.scheduler and console.mtr: the console config is parsed with
+  # KnownFields(true) and a pre-M6 console image has no `kubernetesContext:` key
+  # at all, so an unconditional block would crashloop the old Pod as the
+  # Deployment rolls. Off by default also keeps this chart's default render
+  # key-identical to 1.7.0's.
+  kubernetesContext:
+    # Master gate. OFF for the same reason mtr.enrichment is: turning it on
+    # gives the console pod a NEW egress (the apiserver) and a NEW RBAC grant
+    # (events/nodes/pods get,list,watch). Enabling it renders, under this one
+    # flag: the config block, a console-only ServiceAccount + ClusterRole +
+    # ClusterRoleBinding (templates/rbac.yaml — the agent/controller grant is
+    # NEVER widened), serviceAccountName on the console Deployment, the
+    # POD_NAMESPACE downward-API env var, and the apiserver egress rule.
+    #
+    # It also needs console.database.mode=cnpg|external: captured events live
+    # in PostgreSQL. With the database off the console logs a warning and skips
+    # the reader rather than failing to start (the enrichment precedent).
+    enabled: false
+    # The ONE namespace whose POD events are captured. Empty — the default —
+    # means "the namespace this release runs in", which the console reads from
+    # the POD_NAMESPACE env var the Deployment sets via the downward API.
+    #
+    # Deliberately one namespace and not a list: the release namespace is where
+    # the agents and the controller run, and widening this is how a capture
+    # turns into a cluster-wide event firehose. NODE events are cluster-scoped
+    # and filtered differently — kept only for nodes present in the controller's
+    # topology, dropped entirely when no topology is available (fail closed).
+    namespace: ""
+    # Periodic relist even while the watch is healthy — the backstop against a
+    # watch that is silently wedged (connected, delivering nothing), which no
+    # error path can detect. Ten minutes because the apiserver keeps events for
+    # an hour by default, so a relist at this cadence cannot miss one, and every
+    # relisted row the database already holds costs one conflicting INSERT, not
+    # a duplicate row. Must be > 0 when enabled.
+    resyncInterval: 10m
+  # Outbound webhooks (M6). Everything about a webhook endpoint — its URL, its
+  # event filter, its enabled flag, its HMAC signing secret — is a database row
+  # an admin typed through the API. Only ONE thing is a deployment secret and
+  # therefore config: the AES-256-GCM key that encrypts each endpoint's signing
+  # secret at rest.
+  #
+  # Leaving this empty is a supported state, not a broken one: every read,
+  # update, disable and delete route keeps working, and only the two operations
+  # that need the cipher — creating an endpoint and testing one — answer 503
+  # naming this value. A key that IS named but unreadable or malformed is a
+  # broken Secret mount, and the console refuses to start on it exactly as it
+  # refuses to start on an unreadable database.dsnFile.
+  webhooks:
+    # Reference to an existing Secret holding the key, base64 (standard
+    # encoding) of 32 random bytes: `openssl rand -base64 32`. Same posture as
+    # console.database.existingSecret — the chart references this Secret BY NAME
+    # and mounts the key as a file (webhooks.encryptionKeyFile in the rendered
+    # config); it NEVER templates a credential value, and there is deliberately
+    # no inline-key value to make that impossible.
+    #
+    # The file lands in the same projected volume as the DSN, so rotating the
+    # Secret is an operator-initiated restart: it is read once at boot and the
+    # Deployment rolls on ConfigMap changes only.
+    encryptionKeySecret:
+      name: ""
+      key: encryptionKey
   # Pod-level securityContext for the console Deployment. Rendered ONLY when
   # database.mode != disabled, so the default (database off) manifest stays
   # byte-identical to chart 1.4.0. The default fsGroup matches the distroless
@@ -623,6 +690,18 @@ console:
     # must be checked and opened there too, or the IdP stays unreachable
     # even with this rule present.
     oidcEgress: []
+    # Custom egress rule list for console -> the Kubernetes apiserver
+    # (console.kubernetesContext.enabled only); when empty a default rule
+    # allowing TCP 443 and 6443 to 0.0.0.0/0 is rendered. ipBlock and not a
+    # namespaceSelector on purpose: kubernetes.default.svc is a ClusterIP with
+    # no pod behind it, and the real endpoints are the control-plane node
+    # addresses — a namespaceSelector matches only in-cluster Pods and would
+    # silently drop every packet to the apiserver, leaving the event reader
+    # retrying with a backoff and nothing else to say why. Tighten this to your
+    # control plane's actual addresses. Same two-layer warning as the other
+    # egress rules: for a control plane outside the cluster network this
+    # NetworkPolicy is only the cluster-side gate.
+    kubeAPIEgress: []
   service:
     type: ClusterIP
     # Port the console listens on and the Service exposes.

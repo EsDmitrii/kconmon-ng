@@ -38,9 +38,23 @@ spec:
       tolerations:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-      {{- if and (ne .Values.console.database.mode "disabled") .Values.console.podSecurityContext }}
+      {{- /* Keyed on the projected Secret volume, not on the database alone
+      (M6): fsGroup is what lets the nonroot process read a 0440 file the
+      kubelet wrote root-owned, and the webhook encryption key is the first
+      such file that does not imply a database. Without this the key-with-no-
+      database deployment mounts a file the console cannot open, and an
+      unreadable encryptionKeyFile is FATAL. */}}
+      {{- if and (include "kconmon-ng.console.secretsVolumeEnabled" .) .Values.console.podSecurityContext }}
       securityContext:
         {{- toYaml .Values.console.podSecurityContext | nindent 8 }}
+      {{- end }}
+      {{- /* M6: the console gets a Kubernetes identity ONLY when the event
+      reader is on -- see kconmon-ng.console.serviceAccountName for why this is
+      a console-only SA and not the agent/controller one. With the reader off
+      this key is absent and the Pod runs as the namespace `default` SA, which
+      is exactly what every release up to chart 1.7.0 did. */}}
+      {{- if .Values.console.kubernetesContext.enabled }}
+      serviceAccountName: {{ include "kconmon-ng.console.serviceAccountName" . }}
       {{- end }}
       containers:
         - name: console
@@ -53,11 +67,24 @@ spec:
           env:
             - name: KCONMON_NG_CONSOLE_CONFIG
               value: /etc/kconmon-ng-console/config.yaml
+            {{- /* M6: identity, not configuration -- which is why it is its own
+            env var and not a templated kubernetesContext.namespace. The console
+            reads it ONLY as the fallback for an empty
+            console.kubernetesContext.namespace, so "the namespace this release
+            runs in" needs no value at all and cannot drift from where the Pod
+            actually is. Rendered under the reader's own gate: nothing else
+            reads it. */}}
+            {{- if .Values.console.kubernetesContext.enabled }}
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            {{- end }}
           volumeMounts:
             - name: config
               mountPath: /etc/kconmon-ng-console
               readOnly: true
-            {{- if ne .Values.console.database.mode "disabled" }}
+            {{- if include "kconmon-ng.console.secretsVolumeEnabled" . }}
             # Deliberately NOT nested under /etc/kconmon-ng-console: the
             # runtime cannot create a mountpoint inside an already-mounted
             # read-only volume (CreateContainerError). dsnFile in the rendered
@@ -66,7 +93,12 @@ spec:
             # below (Task 18) -- one sibling directory, one mount, multiple
             # projected Secret sources; the same CreateContainerError reasoning
             # rules out a THIRD mountPath nested under /etc/kconmon-ng-console
-            # for those two files.
+            # for those two files. M6 adds webhooks.encryptionKeyFile as a
+            # fourth source on the same mount -- and the FIRST one that does
+            # not imply a database, which is why the gate is
+            # kconmon-ng.console.secretsVolumeEnabled and no longer the
+            # database mode. The volume keeps its 1.4.0 name: renaming it would
+            # roll every console Pod for a label change.
             - name: database-dsn
               mountPath: /etc/kconmon-ng-console-secrets
               readOnly: true
@@ -108,7 +140,7 @@ spec:
         - name: config
           configMap:
             name: {{ include "kconmon-ng.console.fullname" . }}
-        {{- if ne .Values.console.database.mode "disabled" }}
+        {{- if include "kconmon-ng.console.secretsVolumeEnabled" . }}
         # Projected Secret reference — the chart names the Secret, it never
         # holds the DSN itself. 0440 + fsGroup above: see the securityContext
         # comment. Rotation note: read once at boot; rotating the Secret is an
@@ -122,11 +154,24 @@ spec:
           projected:
             defaultMode: 0440
             sources:
+              {{- if ne .Values.console.database.mode "disabled" }}
               - secret:
                   name: {{ include "kconmon-ng.console.databaseSecretName" . }}
                   items:
                     - key: {{ include "kconmon-ng.console.databaseSecretKey" . }}
                       path: database-dsn
+              {{- end }}
+              {{- /* M6 webhook encryption key. The path is what
+              configmap.yaml writes into webhooks.encryptionKeyFile; the two
+              halves are kept together by both being literals in this chart and
+              by the ci/console-investigation-values.yaml render. */}}
+              {{- with (include "kconmon-ng.console.webhooksKeySecretName" .) }}
+              - secret:
+                  name: {{ . }}
+                  items:
+                    - key: {{ $.Values.console.webhooks.encryptionKeySecret.key }}
+                      path: webhooks-encryption-key
+              {{- end }}
               {{- if and (eq .Values.console.auth.mode "local") .Values.console.auth.local.bootstrapAdmin }}
               - secret:
                   name: {{ include "kconmon-ng.console.localAdminSecretName" . }}

@@ -813,3 +813,277 @@ func TestValidateMTREnrichmentAllSourcesOffNamesTheKnobs(t *testing.T) {
 		}
 	}
 }
+
+// TestLoadKubernetesContextDefaults pins M6 Task 2's block: the gate is off,
+// the namespace is empty (= resolve at runtime), and the resync cadence is
+// pre-defaulted so switching the reader on is a one-line change.
+func TestLoadKubernetesContextDefaults(t *testing.T) {
+	cfg, err := Load(filepath.Join(t.TempDir(), "nope.yaml"))
+	if err != nil {
+		t.Fatalf("Load defaults: %v", err)
+	}
+	k := cfg.KubernetesContext
+	if k.Enabled {
+		t.Error("kubernetesContext.enabled default = true, want false (M6 Decision 3: off by default)")
+	}
+	if k.Namespace != "" {
+		t.Errorf("kubernetesContext.namespace default = %q, want empty (empty = POD_NAMESPACE)", k.Namespace)
+	}
+	if k.ResyncInterval != 10*time.Minute {
+		t.Errorf("kubernetesContext.resyncInterval default = %v, want 10m", k.ResyncInterval)
+	}
+}
+
+// TestLoadKubernetesContextFromYAML proves the plan-verbatim block parses under
+// KnownFields(true) -- every key spelled exactly as the plan and the chart
+// spell it.
+func TestLoadKubernetesContextFromYAML(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "config.yaml")
+	const y = "kubernetesContext:\n" +
+		"  enabled: true\n" +
+		"  namespace: kconmon-ng\n" +
+		"  resyncInterval: 2m\n"
+	if err := os.WriteFile(p, []byte(y), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(p)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	k := cfg.KubernetesContext
+	if !k.Enabled {
+		t.Error("kubernetesContext.enabled = false, want true")
+	}
+	if k.Namespace != "kconmon-ng" {
+		t.Errorf("kubernetesContext.namespace = %q, want kconmon-ng", k.Namespace)
+	}
+	if k.ResyncInterval != 2*time.Minute {
+		t.Errorf("kubernetesContext.resyncInterval = %v, want 2m", k.ResyncInterval)
+	}
+}
+
+// TestValidateKubernetesContext is the fail-closed table: a cadence that would
+// fire a relist storm is rejected when the reader is on, and ignored when it
+// is off.
+func TestValidateKubernetesContext(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		yaml    string
+		wantErr bool
+	}{
+		{"disabled ignores the interval", "kubernetesContext:\n  enabled: false\n  resyncInterval: 0s\n", false},
+		{"enabled with the default interval", "kubernetesContext:\n  enabled: true\n", false},
+		{"zero interval rejected", "kubernetesContext:\n  enabled: true\n  resyncInterval: 0s\n", true},
+		{"negative interval rejected", "kubernetesContext:\n  enabled: true\n  resyncInterval: -1m\n", true},
+		{"empty namespace is legal when enabled", "kubernetesContext:\n  enabled: true\n  namespace: \"\"\n", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := filepath.Join(t.TempDir(), "config.yaml")
+			if err := os.WriteFile(p, []byte(tc.yaml), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			_, err := Load(p)
+			if tc.wantErr && err == nil {
+				t.Fatal("expected a validation error, got nil")
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("expected the config to validate, got: %v", err)
+			}
+		})
+	}
+}
+
+// TestValidateKubernetesContextNamesTheKnob: the error an operator reads must
+// say WHICH key to fix.
+func TestValidateKubernetesContextNamesTheKnob(t *testing.T) {
+	c := defaults()
+	c.KubernetesContext.Enabled = true
+	c.KubernetesContext.ResyncInterval = 0
+	err := c.Validate()
+	if err == nil {
+		t.Fatal("expected an error for a zero resyncInterval, got nil")
+	}
+	if !strings.Contains(err.Error(), "kubernetesContext.resyncInterval") {
+		t.Errorf("error should name kubernetesContext.resyncInterval, got: %v", err)
+	}
+}
+
+// TestResolveNamespacePrecedence pins the three-step fallback the reader and
+// the chart both depend on: the explicit key wins, POD_NAMESPACE is the
+// downward-API fallback, and "default" is what a process outside a cluster
+// gets. A whitespace-only POD_NAMESPACE is treated as unset, the same way
+// ResolveDSN trims its file.
+func TestResolveNamespacePrecedence(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		field string
+		env   string
+		want  string
+	}{
+		{"explicit namespace wins", "kconmon-ng", "other-ns", "kconmon-ng"},
+		{"env is the fallback", "", "kconmon-ng", "kconmon-ng"},
+		{"env is trimmed", "", "  kconmon-ng \n", "kconmon-ng"},
+		{"blank env falls through to default", "", "   ", "default"},
+		{"nothing set falls back to default", "", "", "default"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv(podNamespaceEnv, tc.env)
+			k := KubernetesContextConfig{Namespace: tc.field}
+			if got := k.ResolveNamespace(); got != tc.want {
+				t.Errorf("ResolveNamespace() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// validWebhookKey is 32 bytes, base64. Written out rather than computed so the
+// test states the shape an operator has to produce.
+const validWebhookKey = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8="
+
+// The whole block is OPTIONAL: a console that never declares a webhook must
+// not fail to start over a cipher it will never use (M6 Decision 4).
+func TestLoadWebhookDefaults(t *testing.T) {
+	cfg, err := Load("/nonexistent/config.yaml")
+	if err != nil {
+		t.Fatalf("Load defaults: %v", err)
+	}
+	if cfg.Webhooks.EncryptionKey != "" || cfg.Webhooks.EncryptionKeyFile != "" {
+		t.Errorf("webhooks key must default empty, got %q %q",
+			cfg.Webhooks.EncryptionKey, cfg.Webhooks.EncryptionKeyFile)
+	}
+	key, err := cfg.Webhooks.ResolveEncryptionKey()
+	if err != nil {
+		t.Fatalf("ResolveEncryptionKey with nothing set = %v, want no error", err)
+	}
+	if key != nil {
+		t.Errorf("ResolveEncryptionKey with nothing set = %v, want nil (the keyless state)", key)
+	}
+}
+
+func TestLoadWebhooksFromYAML(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(p, []byte("webhooks:\n  encryptionKey: \""+validWebhookKey+"\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(p)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	key, err := cfg.Webhooks.ResolveEncryptionKey()
+	if err != nil {
+		t.Fatalf("ResolveEncryptionKey: %v", err)
+	}
+	if len(key) != webhookKeyLen {
+		t.Errorf("resolved key is %d bytes, want %d", len(key), webhookKeyLen)
+	}
+}
+
+// A key that is CONFIGURED but malformed is the opposite of the keyless state:
+// a wrong Secret, caught at boot rather than at the first webhook an operator
+// tries to create.
+func TestValidateRejectsAMalformedWebhookKey(t *testing.T) {
+	for _, tc := range []struct {
+		name, key string
+	}{
+		{"not base64", "not-base64-!!!"},
+		{"16 bytes", "AAECAwQFBgcICQoLDA0ODw=="},
+		{"24 bytes", "AAECAwQFBgcICQoLDA0ODxAREhMUFRYX"},
+		{"33 bytes", "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8g"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := defaults()
+			c.Webhooks.EncryptionKey = tc.key
+			err := c.Validate()
+			if err == nil {
+				t.Fatalf("Validate with key %q = nil, want an error", tc.key)
+			}
+			if !strings.Contains(err.Error(), "webhooks.encryptionKey") {
+				t.Errorf("error should name webhooks.encryptionKey, got: %v", err)
+			}
+			// The error explains a SECRET's shape, so it must not repeat the
+			// value -- that would put a nearly-correct key in a log line.
+			if strings.Contains(err.Error(), tc.key) {
+				t.Errorf("error echoes the configured key value: %v", err)
+			}
+		})
+	}
+}
+
+func TestValidateRejectsBothWebhookKeyAndKeyFile(t *testing.T) {
+	c := defaults()
+	c.Webhooks.EncryptionKey = validWebhookKey
+	c.Webhooks.EncryptionKeyFile = "/etc/kconmon/webhook.key"
+	err := c.Validate()
+	if err == nil {
+		t.Fatal("expected an error when both webhooks.encryptionKey and encryptionKeyFile are set")
+	}
+	if !strings.Contains(err.Error(), "not both") {
+		t.Errorf("error should say the two are mutually exclusive, got: %v", err)
+	}
+}
+
+// The dsnFile pattern: the mounted file WINS, its contents are trimmed, and a
+// missing or malformed file is an error rather than a silent fall-through to
+// the keyless state.
+func TestResolveEncryptionKeyFilePrecedenceAndErrors(t *testing.T) {
+	dir := t.TempDir()
+	good := filepath.Join(dir, "webhook.key")
+	if err := os.WriteFile(good, []byte("  "+validWebhookKey+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	short := filepath.Join(dir, "short.key")
+	if err := os.WriteFile(short, []byte("AAECAwQFBgcICQoLDA0ODw=="), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("file wins over the inline value", func(t *testing.T) {
+		// Both set is refused by Validate, but ResolveEncryptionKey is also
+		// reachable from a hand-built struct, and there it must not be a coin
+		// flip which one applies.
+		w := WebhooksConfig{EncryptionKey: "not-base64-!!!", EncryptionKeyFile: good}
+		key, err := w.ResolveEncryptionKey()
+		if err != nil {
+			t.Fatalf("ResolveEncryptionKey: %v", err)
+		}
+		if len(key) != webhookKeyLen {
+			t.Errorf("resolved key is %d bytes, want %d from the FILE", len(key), webhookKeyLen)
+		}
+	})
+
+	t.Run("file contents are trimmed", func(t *testing.T) {
+		w := WebhooksConfig{EncryptionKeyFile: good}
+		if _, err := w.ResolveEncryptionKey(); err != nil {
+			t.Errorf("a key file with surrounding whitespace failed: %v", err)
+		}
+	})
+
+	t.Run("unreadable file is an error", func(t *testing.T) {
+		w := WebhooksConfig{EncryptionKeyFile: filepath.Join(dir, "nope.key")}
+		if _, e := w.ResolveEncryptionKey(); e == nil {
+			t.Error("a missing key file resolved to no error -- it must not fall through to keyless")
+		}
+	})
+
+	t.Run("wrong length in the file is an error naming the file knob", func(t *testing.T) {
+		w := WebhooksConfig{EncryptionKeyFile: short}
+		_, e := w.ResolveEncryptionKey()
+		if e == nil {
+			t.Fatal("a 16-byte key file resolved without error")
+		}
+		if !strings.Contains(e.Error(), "webhooks.encryptionKeyFile") {
+			t.Errorf("error should name webhooks.encryptionKeyFile, got: %v", e)
+		}
+	})
+
+	t.Run("an empty file is the keyless state", func(t *testing.T) {
+		empty := filepath.Join(dir, "empty.key")
+		if err := os.WriteFile(empty, []byte("\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		w := WebhooksConfig{EncryptionKeyFile: empty}
+		key, e := w.ResolveEncryptionKey()
+		if e != nil || key != nil {
+			t.Errorf("empty key file = (%v, %v), want (nil, nil)", key, e)
+		}
+	})
+}

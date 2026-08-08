@@ -10,6 +10,7 @@ package store_test
 import (
 	"context"
 	"encoding/json"
+	"strconv"
 	"testing"
 	"time"
 
@@ -142,11 +143,15 @@ func TestPruneOnceDeletesRowsPastRetention(t *testing.T) {
 }
 
 // TestPruneOnceSweepsEveryTable is the whole sweep list in one call: each of
-// the six tables gets one row past retention and one inside it, and PruneOnce
+// the nine tables gets one row past retention and one inside it, and PruneOnce
 // must delete exactly the expired one from each and report it under that
 // table's own key. Seeding through the public store API rather than raw SQL is
 // deliberate -- it is what makes the test also prove the sweeps are pointed at
 // the columns the writers actually populate.
+//
+// A configured WEBHOOK is seeded too, and must SURVIVE: webhooks are
+// configuration, not observation, and have no sweep at all (prune.go's
+// table-label comment). The row's presence afterwards is the assertion.
 func TestPruneOnceSweepsEveryTable(t *testing.T) {
 	db, dsn := newPrunerDB(t)
 	p := store.NewPruner(db, retention90d, newTestMetrics())
@@ -206,17 +211,91 @@ func TestPruneOnceSweepsEveryTable(t *testing.T) {
 		}
 	}
 
+	// k8s_events (by event_time).
+	for i, at := range []time.Time{expired, current} {
+		if _, err := db.InsertK8sEvent(ctx, store.K8sEventInput{
+			UID:             "prune-uid-" + strconv.Itoa(i),
+			ResourceVersion: "1",
+			EventTime:       at,
+			Kind:            "Node",
+			Name:            "node-a",
+			Reason:          "NodeNotReady",
+			Type:            "Warning",
+			Message:         "seeded",
+		}); err != nil {
+			t.Fatalf("InsertK8sEvent: %v", err)
+		}
+	}
+
+	// incidents (by resolved_at). THREE rows, not two: one resolved past the
+	// horizon (swept), one resolved inside it (kept), and one still OPEN and
+	// just as old as the first (kept, because open incidents are never
+	// pruned). The open one is what makes the expected count 1 rather than 2.
+	for i, tc := range []struct {
+		title      string
+		resolvedAt *time.Time
+	}{
+		{"resolved-long-ago", &expired},
+		{"resolved-recently", &current},
+		{"never-closed", nil},
+	} {
+		created, err := db.CreateIncident(ctx, store.IncidentInput{
+			Title: tc.title, FromAt: expired, CreatedBy: "user:admin",
+		})
+		if err != nil {
+			t.Fatalf("CreateIncident(%d): %v", i, err)
+		}
+		if tc.resolvedAt != nil {
+			if _, err := db.UpdateIncidentStatus(ctx, created.ID,
+				store.IncidentStatusResolved, tc.resolvedAt); err != nil {
+				t.Fatalf("resolve %s: %v", tc.title, err)
+			}
+		}
+	}
+
+	// maintenance_windows (by end_at).
+	for _, tc := range []struct {
+		scope string
+		start time.Time
+		end   time.Time
+	}{
+		{"expired-window", expired, expired.Add(time.Hour)},
+		{"current-window", current, current.Add(time.Hour)},
+	} {
+		if _, err := db.CreateMaintenanceWindow(ctx, store.MaintenanceInput{
+			Scope: tc.scope, StartAt: tc.start, EndAt: tc.end, Reason: "seeded", CreatedBy: "user:admin",
+		}); err != nil {
+			t.Fatalf("CreateMaintenanceWindow(%s): %v", tc.scope, err)
+		}
+	}
+
+	// webhooks: configuration, NEVER swept. Created before the sweep and
+	// asserted present after it.
+	hook, err := db.CreateWebhook(ctx, store.WebhookInput{
+		Name:      "ops-slack",
+		URL:       "https://hooks.example.test/x",
+		Events:    []string{store.WebhookEventIncidentCreated},
+		SecretEnc: []byte{0x01, 0x02, 0x03},
+		Enabled:   true,
+	})
+	if err != nil {
+		t.Fatalf("CreateWebhook: %v", err)
+	}
+
 	deleted, err := p.PruneOnce(ctx)
 	if err != nil {
 		t.Fatalf("PruneOnce: %v", err)
 	}
 
 	for table, want := range map[string]int64{
-		"topology_events":    1,
-		"check_runs":         1,
-		"mtr_path_snapshots": 1,
-		"mtr_hop_enrichment": 1,
-		"annotations":        1,
+		"topology_events":     1,
+		"check_runs":          1,
+		"mtr_path_snapshots":  1,
+		"mtr_hop_enrichment":  1,
+		"annotations":         1,
+		"k8s_events":          1,
+		"incidents":           1,
+		"maintenance_windows": 1,
 	} {
 		got, ok := deleted[table]
 		if !ok {
@@ -232,8 +311,11 @@ func TestPruneOnceSweepsEveryTable(t *testing.T) {
 	if _, ok := deleted["audit_log"]; !ok {
 		t.Error("PruneOnce reported no entry for audit_log")
 	}
-	if len(deleted) != 6 {
-		t.Errorf("PruneOnce reported %d tables, want 6: %v", len(deleted), deleted)
+	if _, ok := deleted["webhooks"]; ok {
+		t.Error("PruneOnce reported a webhooks entry: that table has no sweep and must not gain one")
+	}
+	if len(deleted) != 9 {
+		t.Errorf("PruneOnce reported %d tables, want 9: %v", len(deleted), deleted)
 	}
 
 	// The survivors, read back through the store rather than counted in SQL.
@@ -260,6 +342,41 @@ func TestPruneOnceSweepsEveryTable(t *testing.T) {
 	}
 	if len(anns.Annotations) != 1 {
 		t.Errorf("after the sweep %d annotations remain, want 1", len(anns.Annotations))
+	}
+	k8s, err := db.ListK8sEvents(ctx, store.K8sEventFilter{})
+	if err != nil {
+		t.Fatalf("ListK8sEvents: %v", err)
+	}
+	if len(k8s.Events) != 1 {
+		t.Errorf("after the sweep %d k8s events remain, want 1", len(k8s.Events))
+	}
+	// The recently-resolved one AND the open one: two survivors, which is the
+	// open-incidents rule stated as a row count.
+	incidents, err := db.ListIncidents(ctx, store.IncidentFilter{})
+	if err != nil {
+		t.Fatalf("ListIncidents: %v", err)
+	}
+	if len(incidents.Incidents) != 2 {
+		t.Errorf("after the sweep %d incidents remain, want 2 (the recently-resolved one and the open one)",
+			len(incidents.Incidents))
+	}
+	openOnes, err := db.ListIncidents(ctx, store.IncidentFilter{Status: store.IncidentStatusOpen})
+	if err != nil {
+		t.Fatalf("ListIncidents(open): %v", err)
+	}
+	if len(openOnes.Incidents) != 1 || openOnes.Incidents[0].Title != "never-closed" {
+		t.Errorf("the 200-day-old OPEN incident did not survive the sweep: %+v", openOnes.Incidents)
+	}
+	windows, err := db.ListMaintenanceWindows(ctx, store.MaintenanceFilter{})
+	if err != nil {
+		t.Fatalf("ListMaintenanceWindows: %v", err)
+	}
+	if len(windows.Windows) != 1 || windows.Windows[0].Scope != "current-window" {
+		t.Errorf("after the sweep %+v remain, want just the current window", windows.Windows)
+	}
+	// The whole point of the webhooks exclusion, as a read-back.
+	if _, err := db.GetWebhook(ctx, hook.ID); err != nil {
+		t.Errorf("the configured webhook was swept: %v -- webhooks have no retention sweep", err)
 	}
 }
 

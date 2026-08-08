@@ -178,6 +178,51 @@ var routeTable = map[string]routeRule{
 	"POST /api/v1/annotations":        {permission: authz.PermAnnotationsWrite},
 	"DELETE /api/v1/annotations/{id}": {permission: authz.PermAnnotationsWrite},
 
+	// Incidents and maintenance windows split read from write on M5's
+	// Decision 11 line, extended by M6 Decision 8: a saved investigation and a
+	// declared window are CONTEXT on the charts every role already reads, so
+	// the reads reach viewer (and alert-editor); writing one is an operator
+	// statement about the fleet's history, so the writes stop at operator and
+	// admin -- exactly where annotations:write stops.
+	//
+	// PATCH /api/v1/incidents/{id} is the only PATCH in this table. It is a
+	// write row like any other; the method is a data-shape decision (an
+	// incident evolves under collaboration), not an authorization one.
+	"GET /api/v1/incidents":           {permission: authz.PermIncidentsRead},
+	"POST /api/v1/incidents":          {permission: authz.PermIncidentsWrite},
+	"GET /api/v1/incidents/{id}":      {permission: authz.PermIncidentsRead},
+	"PATCH /api/v1/incidents/{id}":    {permission: authz.PermIncidentsWrite},
+	"DELETE /api/v1/incidents/{id}":   {permission: authz.PermIncidentsWrite},
+	"GET /api/v1/maintenance":         {permission: authz.PermMaintenanceRead},
+	"POST /api/v1/maintenance":        {permission: authz.PermMaintenanceWrite},
+	"DELETE /api/v1/maintenance/{id}": {permission: authz.PermMaintenanceWrite},
+
+	// Webhooks get ONE permission for the whole resource, admin-only, and no
+	// read/write split (M6 Decision 8). Two reasons, both about the secret:
+	// an endpoint row is credential-adjacent, which is the tokens:manage and
+	// rbac:manage posture, and there is no useful "read webhooks" audience --
+	// the only thing a reader learns is where this console sends incident
+	// notifications, which is precisely the fact worth keeping to the people
+	// who can change it. An operator therefore CANNOT reach these routes,
+	// deliberately, even though operator holds incidents:write.
+	//
+	// POST /api/v1/webhooks/{id}/test is a write row despite persisting
+	// nothing directly: it makes this console emit an outbound signed request
+	// to an operator-supplied URL, which is the single most abusable thing in
+	// this API.
+	"GET /api/v1/webhooks":            {permission: authz.PermWebhooksManage},
+	"POST /api/v1/webhooks":           {permission: authz.PermWebhooksManage},
+	"GET /api/v1/webhooks/{id}":       {permission: authz.PermWebhooksManage},
+	"PUT /api/v1/webhooks/{id}":       {permission: authz.PermWebhooksManage},
+	"DELETE /api/v1/webhooks/{id}":    {permission: authz.PermWebhooksManage},
+	"POST /api/v1/webhooks/{id}/test": {permission: authz.PermWebhooksManage},
+
+	// Captured Kubernetes events ride events:read rather than a permission of
+	// their own (M6 Decision 8): they ARE events, and a new permission would
+	// gate nothing an operator holding events:read could not already infer
+	// from the topology stream they read.
+	"GET /api/v1/k8s-events": {permission: authz.PermEventsRead},
+
 	"GET /api/v1/rbac/permissions":      {permission: authz.PermRBACManage},
 	"GET /api/v1/rbac/roles":            {permission: authz.PermRBACManage},
 	"POST /api/v1/rbac/roles":           {permission: authz.PermRBACManage},

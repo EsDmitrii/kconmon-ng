@@ -1,10 +1,11 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ThemeProvider } from "@/components/theme-provider";
 import { resetWsClient } from "@/hooks/use-ws-topic";
 import { resetNavigateForTest, setNavigateForTest } from "@/lib/api";
 import { FakeSocket } from "@/lib/fake-websocket";
+import { parseInvestigationParams } from "@/lib/investigation-sources";
 import type { CheckDefinition, RunDetail, Schedule, Target } from "@/lib/types";
 import {
   healthFromVector,
@@ -134,6 +135,7 @@ interface RenderOpts {
   runDetails?: Record<string, RunDetail>;
   rangeResult?: unknown[];
   healthResult?: unknown[];
+  incidents?: unknown[];
 }
 
 function renderPage(pathname = `/targets/${TARGET_ID}`, opts: RenderOpts = {}) {
@@ -148,6 +150,7 @@ function renderPage(pathname = `/targets/${TARGET_ID}`, opts: RenderOpts = {}) {
     runDetails = {},
     rangeResult = [],
     healthResult = [],
+    incidents = [],
   } = opts;
   window.history.pushState({}, "", pathname);
   const fetchMock = vi.fn((url: string, init?: RequestInit) => {
@@ -158,6 +161,7 @@ function renderPage(pathname = `/targets/${TARGET_ID}`, opts: RenderOpts = {}) {
     }
     if (href.includes("/api/v1/config")) return Promise.resolve(json(configBody({ database, prometheus })));
     if (href.includes("/api/v1/auth/me")) return Promise.resolve(json(meBody(permissions)));
+    if (href.startsWith("/api/v1/incidents")) return Promise.resolve(json({ incidents, nextCursor: "" }));
     if (href.startsWith("/api/v1/events")) return Promise.resolve(json({ events: [], nextCursor: "" }));
     if (href.startsWith("/api/v1/targets/")) {
       return Promise.resolve(targetResponse ?? json(target));
@@ -411,5 +415,48 @@ describe("TargetCardPage", () => {
     const { fetchMock } = renderPage("/targets/");
     expect(await screen.findByText("This link is missing a target id.")).toBeInTheDocument();
     expect(called(fetchMock, "/api/v1/targets")).toBe(false);
+  });
+});
+
+/* ── M6 Task 8: the Investigate entry point + the related-incidents rail ── */
+
+describe("TargetCardPage — Investigate entry point", () => {
+  it("links to a TARGET investigation carrying the target's NAME, not its id", async () => {
+    renderPage();
+    const href = (await screen.findByRole("link", { name: "Investigate" })).getAttribute("href") ?? "";
+
+    const p = parseInvestigationParams(href.slice(href.indexOf("?")), new Date());
+    expect(p.kind).toBe("target");
+    expect(p.a).toBe("edge-gw");
+    expect(href).not.toContain(TARGET_ID);
+    expect(p.to.getTime() - p.from.getTime()).toBe(60 * 60 * 1000);
+  });
+});
+
+describe("TargetCardPage — open incidents rail", () => {
+  it("filters the open list to incidents scoped to this target's name", async () => {
+    const row = (over: Record<string, unknown>) => ({
+      id: "inc-1",
+      title: "edge-gw unreachable",
+      scope: "edge-gw",
+      fromAt: "2026-01-01T00:00:00Z",
+      status: "open",
+      notes: "",
+      pinned: [],
+      createdBy: "user:ada",
+      createdAt: "2026-01-01T00:00:00Z",
+      ...over,
+    });
+    renderPage(`/targets/${TARGET_ID}`, {
+      permissions: ["targets:read", "incidents:read"],
+      incidents: [row({}), row({ id: "inc-2", title: "a node's problem", scope: "node-a" })],
+    });
+
+    const rail = await screen.findByRole("complementary", { name: "Open incidents" });
+    const rows = await within(rail).findAllByTestId("related-incident");
+    expect(rows).toHaveLength(1);
+    expect(within(rows[0]).getByRole("link", { name: "edge-gw unreachable" }).getAttribute("href")).toBe(
+      "/investigate?incident=inc-1",
+    );
   });
 });

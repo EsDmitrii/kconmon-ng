@@ -207,6 +207,60 @@ type Metrics struct {
 	// those values is sitting right there in the resolved row.
 	EnrichmentCache   *prometheus.CounterVec
 	EnrichmentLookups *prometheus.CounterVec
+
+	// K8sEvents is the M6 Kubernetes event reader's metric
+	// (internal/console/kubectx, Task 2). ONE increment per event the reader
+	// decided about, and result is the CLOSED set
+	// stored|duplicate|filtered|error:
+	//
+	//	stored    -- a new (uid, resourceVersion) revision landed in k8s_events.
+	//	duplicate -- the revision was already there. Not a failure: the reader
+	//	             relists on watch expiry and on kubernetesContext.resyncInterval,
+	//	             so a healthy capture produces these continuously, and
+	//	             stored/(stored+duplicate) is what says whether a relist
+	//	             cadence is buying anything.
+	//	filtered  -- the fail-closed filter dropped it: a node event for a node
+	//	             that is not in the fleet topology, or one seen while the
+	//	             topology could not be read at all (Decision 3). A rising
+	//	             filtered with a flat stored is the shape of a controller
+	//	             outage, which is exactly why the drop is counted rather
+	//	             than silent.
+	//	error     -- the row was rejected or the INSERT failed.
+	//
+	// It carries NO node name, pod name, namespace, reason or event type. Every
+	// one of those is attacker-influenceable (anything in the cluster can emit
+	// an event about an object it names) and unbounded -- the single easiest
+	// cardinality bomb in the whole console, sitting right next to the label
+	// discipline that forbids it.
+	K8sEvents *prometheus.CounterVec
+
+	// WebhookDeliveries is the M6 outbound dispatcher's metric
+	// (internal/console/webhooks, Task 5). ONE increment per delivery the
+	// dispatcher reached a TERMINAL decision about -- never one per HTTP
+	// attempt -- and result is the CLOSED set ok|failed|filtered:
+	//
+	//	ok       -- the endpoint answered 2xx, on the first attempt or a retry.
+	//	failed   -- every attempt on the 0s/30s/5m ladder was exhausted without
+	//	            a 2xx, OR the delivery was dropped unsent because the
+	//	            bounded worker pool was saturated. Both are the same thing
+	//	            to an operator: this endpoint did not hear about that
+	//	            incident, and the endpoint row's lastStatus says which.
+	//	filtered -- the endpoint is enabled but does not subscribe to the event.
+	//	            This is the STEADY STATE of a correctly narrow subscription,
+	//	            not a problem, and it is what makes ok/(ok+failed)
+	//	            meaningful: without it a console with no matching endpoints
+	//	            and a console with a broken dispatcher look identical.
+	//
+	// A DISABLED endpoint is not counted at all, deliberately. It was switched
+	// off on purpose, so a series climbing forever would report an operator's
+	// own decision back to them as activity.
+	//
+	// It carries NO endpoint id, name, URL, host, event name, incident id or
+	// HTTP status. The URL is the sharp one: it is operator-supplied,
+	// unbounded, and names infrastructure that has no business in a metric an
+	// entire cluster scrapes -- the same rule that keeps a target's address
+	// out of the audit log.
+	WebhookDeliveries *prometheus.CounterVec
 }
 
 // New registers and returns the Console metrics under <prefix>_console_*.
@@ -371,5 +425,19 @@ func New(prefix string, reg prometheus.Registerer) *Metrics {
 				"result (ok, miss, error). miss means the source knew nothing about the address; " +
 				"error means the lookup failed. Disabled sources are never counted.",
 		}, []string{"source", "result"}),
+		K8sEvents: f.NewCounterVec(prometheus.CounterOpts{
+			Name: ns + "_k8s_events_total",
+			Help: "Kubernetes events the console's reader decided about, by result " +
+				"(stored, duplicate, filtered, error). duplicate is the normal outcome of a relist, " +
+				"not a failure; filtered is the fail-closed drop of a node event with no topology to " +
+				"vouch for the node.",
+		}, []string{"result"}),
+		WebhookDeliveries: f.NewCounterVec(prometheus.CounterOpts{
+			Name: ns + "_webhook_deliveries_total",
+			Help: "Webhook deliveries the dispatcher reached a terminal decision about, by result " +
+				"(ok, failed, filtered). One per delivery, never per HTTP attempt; filtered is the " +
+				"steady state of an endpoint that does not subscribe to the event, and a disabled " +
+				"endpoint is not counted at all.",
+		}, []string{"result"}),
 	}
 }

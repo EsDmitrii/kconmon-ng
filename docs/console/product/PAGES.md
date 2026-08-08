@@ -73,6 +73,66 @@ is a wrong fold.
 Implementation note: this is why §4.1 persists `topology_events` — the
 controller only knows *now*.
 
+### 6.1 Overview — the placeholders, and which one is left
+
+The Overview shipped in M1 with three panels drawn as honest placeholders
+rather than fabricated rows. **M6 resolved two of them and left the third.**
+
+- **Recent events** now reads `GET /api/v1/events`, the API that had existed
+  since M3. The deferral chain ends here: the panel was carried as "still an
+  honest placeholder" through the M2, M3, M4 and M5 deferral lists, every time
+  because the milestone had something with a harder dependency to build, and
+  never because the data was missing. Four milestones is exactly how long a
+  cheap panel survives when nothing forces it — worth recording as a process
+  observation, not just a changelog line.
+- **Open incidents** is new in M6: the newest five still-open incidents, each
+  row a permalink (`/investigate?incident={id}`). There is no incident *page* —
+  the permalink hydrates Investigate from the saved row.
+- **Firing alerts stays a placeholder**, and deliberately: nothing evaluates
+  rules until M7, so a panel here would either be empty in a way that reads as
+  "the fleet is fine" or would fabricate rows. `LaterMilestone` still renders
+  it, untouched.
+
+Both new panels are **fully gated**: no permission means no request and a muted
+one-line note (`incidents:read`, `events:read`), and a database-less console
+says so instead of erroring.
+
+### 7.6 Investigate — the entry contract
+
+**Delivered in M6.** Two ways in, and they are deliberately different shapes:
+
+| Entry | URL | Authority |
+| --- | --- | --- |
+| a card action, a matrix cell, or the page's own form | `/investigate?kind=&scope=&from=&to=` | the **URL** |
+| an incident permalink | `/investigate?incident={id}` | the **incident row** |
+
+The scope form is `kind` (`pair`, `node`, `target`, `zone-pair`, `cluster`)
+plus a `scope` string — a bare name, or `src→dst` joined with **U+2192**, the
+same arrow `internal/console/events/live_event.go`'s `pairScope` uses. That is
+not cosmetic: a pair investigation filters `GET /api/v1/events` on exact scope
+equality, so a hyphen instead of the arrow opens an investigation of a node
+that does not exist, with an empty timeline reading as a quiet fleet. One
+writer, `buildInvestigateURL`, exists so four call sites cannot spell it four
+ways, and it composes the parser's own inverse so the round trip is a
+property-tested invariant rather than a convention. `scope` is **omitted** for
+the cluster kind (there is nothing to name) and `from`/`to` are RFC 3339.
+
+**An incident permalink carries the incident id and nothing else.** Scope and
+range come from the row, because a link that also spelled them could disagree
+with the incident it names after a single edit. Saving an investigation
+therefore *rewrites* the URL to `?incident=`, dropping the four scope
+parameters. Re-scoping while in incident mode **leaves incident mode**, on
+purpose: the alternative is a URL that names an incident while showing
+something else.
+
+Two documented lossy edges of that contract:
+
+- A bare-name scope needs `targets:read` to be reopened **as a target** — with
+  only node visibility the same string reopens as a node.
+- `zone-pair` and `cluster` both save as an empty scope string, because the
+  store's scope vocabulary has no zone member. The save popover **warns before
+  the write**, not after.
+
 ### 7.5 MTR
 
 Delivered in M5 at `/mtr`, replacing the stub — three panes, a diff view, a
@@ -158,11 +218,24 @@ own "any deviation updates the doc" rule:
   exist but is not shown here") rather than silently claiming completeness.
   A server-side `?node=`/`?pair=` filter on `GET /api/v1/runs` is a
   plausible follow-up, not yet built.
-- **Quick actions** are narrower than the full design: "Investigate this
-  pair" still waits on Investigation (M6), and the card's MTR actions were
-  **not** added in M5 either — the MTR Explorer has its own Runner
-  (MTR_EXPLORER.md §7.5) and a card-level shortcut into it was not built. Only
-  "Run check" exists today.
+- **Quick actions**, as of M6: **"Investigate this" shipped** on all three
+  cards (`InvestigateLink`, `web/src/components/investigate-entry.tsx`) and on
+  every matrix cell, and each card also grew a **Related incidents** block
+  (`RelatedIncidents`, gated on `incidents:read`, scanning the newest 50 and
+  matching on scope). The card's MTR actions were **not** added in M5 or M6 —
+  the MTR Explorer has its own Runner (MTR_EXPLORER.md §7.5) and a card-level
+  shortcut into it was not built.
+- **Maintenance bars landed on Pair, Target and Explore — not on Node.**
+  `MaintenanceBar` (`web/src/components/maintenance.tsx`) renders the declared
+  windows for the surface's scope plus a create affordance, and
+  `maintenanceOverlaySeries` draws them as `markArea` on the same charts
+  annotations already mark, differentiated by a dashed border and a fainter
+  fill rather than by colour alone (asserted from both sides, since one shared
+  colour token makes colour-only differentiation impossible to verify). The
+  fetch is **zero-request without `maintenance:read`** — a stricter gate than
+  the annotations twin, and an M6 constraint rather than an accident. The Node
+  card was left out and it is a real gap, not a decision about node scope:
+  MILESTONES.md carries it in the M6 deferral list.
 - **Target card ships THREE real tabs and no placeholders** (M4 Plan
   Decision 17):
   - **Checks & Schedules** — the definitions probing this target and their
@@ -177,10 +250,13 @@ own "any deviation updates the doc" rule:
     labelled as such.
 
   The other four designed tabs — **Alerts, Incidents, Maintenance and
-  Audit-per-target** — are **absent, not empty**: their backing tables
-  (`alert_rules`, `incidents`, `maintenance_windows`, and a per-target audit
-  view — DATA.md §5.2) land in M5–M7. An absent tab is honest; an empty one
-  promises something that does not exist.
+  Audit-per-target** — are **absent, not empty**: an absent tab is honest; an
+  empty one promises something that does not exist. M6 did not turn any of them
+  into a tab, but it did surface two of them **in the card body**: a Related
+  incidents block and a maintenance bar, both scoped to the target's name. That
+  is deliberate — an incident and a window are context you want beside the
+  charts, not a place you navigate to. **Alerts** still waits on `alert_rules`
+  (M7), and a per-target audit view was never built.
 
   The whole card requires `console.database.mode=cnpg|external`. With the
   database disabled it renders a one-line explanation rather than an error:

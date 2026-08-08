@@ -29,7 +29,7 @@ Two consequences the UI cannot paper over:
 
 - **`kubectl-kconmon` traces are invisible to path history.** The CLI talks to
   the controller directly and never touches the Console, so a trace launched
-  that way leaves no snapshot. Routing the CLI through the Console is an M6+
+  that way leaves no snapshot. Routing the CLI through the Console is an M7+
   decision, not an oversight. The Runner below exists partly because of this.
 - **With `console.database.mode=disabled` history is in-memory only** — a ring
   of 500 snapshots that vanishes on restart, the same posture run history has.

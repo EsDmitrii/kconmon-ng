@@ -15,14 +15,14 @@ Documentation is written incrementally with the code it describes. A doc marked
 | [architecture/OVERVIEW.md](architecture/OVERVIEW.md) | Component overview (§4) | current |
 | [architecture/BACKEND.md](architecture/BACKEND.md) | Backend stack & module boundaries (§4.2–4.3) | current |
 | [architecture/FRONTEND.md](architecture/FRONTEND.md) | Frontend stack & UX surface (§4.2, §6) | current |
-| [architecture/DATA.md](architecture/DATA.md) | Data architecture: Prometheus/Postgres/Valkey (§5) | draft — §5.2/§5.3 are current through M5 (the three M5 tables, the topology fold and the retention sweeps included); the still-pending tables in §5.2 are unbuilt design |
+| [architecture/DATA.md](architecture/DATA.md) | Data architecture: Prometheus/Postgres/Valkey (§5) | draft — §5.2/§5.3 are current through M6 (the M5 and M6 tables, the topology fold and all nine retention sweeps included); the still-pending tables in §5.2 (`alert_rules`, `layouts`, `settings`) are unbuilt design |
 | [architecture/API.md](architecture/API.md) | REST API surface (§8) | current |
 | [architecture/WEBSOCKET.md](architecture/WEBSOCKET.md) | WebSocket protocol (§8) | current |
 | [architecture/CONFIG.md](architecture/CONFIG.md) | Console config file + Helm mapping | current |
-| [architecture/SECURITY.md](architecture/SECURITY.md) | AuthN/Z, security, observability (§10, §12) | current for §10/§11 (as built in M3); §12's alerting/webhook items are still design |
+| [architecture/SECURITY.md](architecture/SECURITY.md) | AuthN/Z, security, observability (§10, §12) | current — §10/§11 as built in M3, §10.3 and §12.1 (webhook signing, at-rest encryption, SSRF posture) as built in M6; §12's alerting items are still design |
 | [product/UX_PRINCIPLES.md](product/UX_PRINCIPLES.md) | Product principles & design language (§1.1, §6.1) | current |
-| [product/PAGES.md](product/PAGES.md) | Navigation, object cards (§6.2–6.4), MTR (§7.5), Live (§7.8), Explore A/B + annotations (§7.x), Diagnostics (§7.x) | draft — everything except the navigation tree's unbuilt entries is current as of M5 |
-| [product/INVESTIGATION.md](product/INVESTIGATION.md) | Investigation Mode + correlation heuristics (§7.6) | draft |
+| [product/PAGES.md](product/PAGES.md) | Navigation, object cards (§6.2–6.4), MTR (§7.5), Live (§7.8), Explore A/B + annotations (§7.x), Diagnostics (§7.x) | draft — everything except the navigation tree's unbuilt entries (Alerting, Settings) is current as of M6 |
+| [product/INVESTIGATION.md](product/INVESTIGATION.md) | Investigation Mode + correlation heuristics (§7.6) | current — as built in M6; §7.6's own bullet list is the original design text, and the as-built note above it says which parts shipped |
 | [product/TIME_MACHINE.md](product/TIME_MACHINE.md) | Time Machine global context (§6.3) | current — as built in M5, including the three named limitations |
 | [product/MTR_EXPLORER.md](product/MTR_EXPLORER.md) | MTR Explorer (§7.5) | current — as built in M5 |
 | [product/TOPOLOGY.md](product/TOPOLOGY.md) | Topology view (§7.4) | draft |
@@ -85,6 +85,27 @@ default); the Time Machine `?at=` global context (topology folded from
 `topology_events`, PromQL evaluated at `t`, mutations disabled while
 engaged) and chart annotations. Chart 1.7.0. Deferrals — including the
 controller's still-unattributed topology events — are named in
+[roadmap/MILESTONES.md](roadmap/MILESTONES.md).
+
+**M6 shipped** (Investigation Mode + Incidents): the `/investigate` page —
+a merged timeline over eight sources, cursor-synced signal panels and an
+actions rail, all assembled **client-side** over the existing read APIs, with
+correlation v1 as four documented arithmetic steps whose constants
+[product/INVESTIGATION.md](product/INVESTIGATION.md) restates verbatim;
+incidents saved from an investigation and reshared as
+`/investigate?incident={id}`, where the **row**, not the URL, is the authority,
+surfaced on Overview and on all three object cards; maintenance windows as
+data and chart rendering (not suppression — nothing evaluates alerts yet);
+outbound webhooks on incident lifecycle, HMAC-signed with a bounded retry
+ladder and per-endpoint secrets sealed under
+`console.webhooks.encryptionKeySecret`; and `kubectx`, the console's first
+apiserver client (`console.kubernetesContext.enabled`, off by default, zero new
+Go dependencies), capturing cluster events filtered to this fleet. Overview's
+"recent events" placeholder — carried since M2 — is finally a real panel.
+Chart 1.8.0 adds a **console-only** ServiceAccount and ClusterRole rather than
+widening the agent/controller grant. Deviations and deferrals — the dropped
+30 s bucketing, the `PATCH` exception, the zone-pair scope lossiness, the
+never-built DNS-resolution source — are named in
 [roadmap/MILESTONES.md](roadmap/MILESTONES.md).
 
 ## Decisions

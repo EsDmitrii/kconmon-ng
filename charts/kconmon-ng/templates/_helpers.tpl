@@ -212,6 +212,80 @@ would reject it at console boot anyway; failing the render here is faster).
 {{- end }}
 
 {{/*
+M6: name of the Secret holding the webhook AES-GCM encryption key
+(console.webhooks.encryptionKeySecret.name), or empty when no key is
+configured -- the documented keyless state, not a failure. Referenced BY NAME
+only, exactly like databaseSecretName: the chart never templates the key.
+
+The key FIELD is validated here rather than in the schema because "" is a
+legal value for an unset block: an empty `key` with a name set would mount a
+Secret item nobody can name, and the console would fatal on an unreadable
+encryptionKeyFile at boot instead of failing the render.
+*/}}
+{{- define "kconmon-ng.console.webhooksKeySecretName" -}}
+{{- $w := .Values.console.webhooks.encryptionKeySecret -}}
+{{- if $w.name -}}
+{{- if not $w.key -}}
+{{- fail "console.webhooks.encryptionKeySecret.name is set but .key is empty (the key inside that Secret holding the base64 AES-256-GCM key)" -}}
+{{- end -}}
+{{- $w.name -}}
+{{- end -}}
+{{- end }}
+
+{{/*
+Whether the console Pod gets the /etc/kconmon-ng-console-secrets projected
+volume at all. True when a database is configured (the DSN, and with it the
+local-admin / OIDC sources that ride the same volume) OR when a webhook
+encryption key is named.
+
+The webhook key is the first secret file that does NOT imply a database: the
+console's own posture for "key, no db" is a WARNING and a disabled dispatcher
+(cmd/console), not a failure, so the chart must not be stricter than the binary
+and refuse to render it. Without this OR the key would be named in the config
+and mounted nowhere -- the console would then fatal on an unreadable
+encryptionKeyFile, turning a warn-and-continue into a crashloop.
+*/}}
+{{- define "kconmon-ng.console.secretsVolumeEnabled" -}}
+{{- if or (ne .Values.console.database.mode "disabled") (include "kconmon-ng.console.webhooksKeySecretName" .) -}}
+true
+{{- end -}}
+{{- end }}
+
+{{/*
+M6: the console's OWN ServiceAccount name. It exists only when
+console.kubernetesContext.enabled: that is the single feature that needs the
+console pod to hold a Kubernetes identity at all, and creating an SA (plus
+binding a ClusterRole to it) for every install would change the default render
+and hand a token to a pod that never calls the apiserver.
+
+Deliberately NOT kconmon-ng.serviceAccountName. That SA is shared by the agent
+DaemonSet and the controller Deployment (both set serviceAccountName from it);
+the console has never set serviceAccountName at all and runs as the namespace
+`default` SA. Adding events/pods read to the shared ClusterRole would have
+granted it to every agent Pod on every node -- the widening M6 was told not to
+do -- and would not even have reached the console, which is not a subject of
+that binding.
+
+With serviceAccount.create=false the chart creates nothing and resolves to
+serviceAccount.name (or "default"), so an operator who manages ServiceAccounts
+out of band attaches the grant there. NOTE the asymmetry with the two siblings:
+agent/daemonset.yaml and controller/deployment.yaml wrap their own
+serviceAccountName in `{{- with .Values.serviceAccount.create }}`, and `with`
+treats false as falsy, so those two OMIT the key entirely and ignore
+serviceAccount.name in that branch. This template renders the resolved name in
+both branches, which is the behaviour values.yaml documents ("Set false to use
+an existing one"). Rendering "default" is equivalent to omitting the key, so the
+difference only shows when serviceAccount.name is actually set.
+*/}}
+{{- define "kconmon-ng.console.serviceAccountName" -}}
+{{- if .Values.serviceAccount.create -}}
+{{- include "kconmon-ng.console.fullname" . -}}
+{{- else -}}
+{{- default "default" .Values.serviceAccount.name -}}
+{{- end -}}
+{{- end }}
+
+{{/*
 Console -> controller gRPC dial target for the events ingester.
 Empty (realtime off) unless controller.events.enabled. An explicit
 console.controller.grpcAddr always wins; otherwise reuse the SAME

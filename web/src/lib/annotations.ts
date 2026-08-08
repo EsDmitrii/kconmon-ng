@@ -1,6 +1,6 @@
 import type { EChartsOption, LineSeriesOption, SeriesOption } from "echarts";
 import { chartColors } from "./chart-theme";
-import type { Annotation } from "./types";
+import type { Annotation, MaintenanceWindow } from "./types";
 
 /**
  * annotations.ts — the PURE half of M5's annotation overlay: scope constants,
@@ -25,6 +25,17 @@ export const ANNOTATION_TEXT_MAX = 1024;
  *  reading a busy chart can click it off, and a nameless series would be a
  *  blank legend entry rather than no entry at all. */
 export const ANNOTATION_SERIES_NAME = "Annotations";
+
+/** The server's own bound on a maintenance window's reason
+ *  (docs/console-api.yaml's MaintenanceWindowRequest). Mirrored here for the
+ *  same reason ANNOTATION_TEXT_MAX is: the form stops a doomed 422 at the
+ *  textarea rather than at the wire. */
+export const MAINTENANCE_REASON_MAX = 512;
+
+/** The maintenance overlay's series name — separate from the annotations one so
+ *  an operator can switch the bands off from the legend without losing the
+ *  notes, and vice versa. */
+export const MAINTENANCE_SERIES_NAME = "Maintenance";
 
 /**
  * isInstant is the whole INSTANT/RANGE distinction, in one place: an absent
@@ -124,6 +135,72 @@ export function withAnnotations(option: EChartsOption, annotations: Annotation[]
 }
 
 /**
+ * maintenanceOverlaySeries is annotationOverlaySeries' SIBLING: the declared
+ * change windows a surface should draw, as one marker-host line series.
+ *
+ * It was born inline in components/investigation-signals.tsx (M6 Task 7, which
+ * said in as many words that Task 9 would lift it) and lives here now, beside
+ * the overlay it is modelled on, because five surfaces draw these bands and a
+ * band drawn differently per page is a band an operator has to re-learn.
+ *
+ * A window is ALWAYS a span — the store's own CHECK makes endAt strictly after
+ * startAt — so there is no markLine branch here and no isInstant equivalent. A
+ * window with an unparseable edge is SKIPPED rather than drawn with a NaN
+ * bound, which ECharts renders as a band reaching to the end of the axis.
+ *
+ * VISUALLY DISTINCT FROM AN ANNOTATION, deliberately. Both are muted bands off
+ * the same axis colour (chartColors' `other` and `axis` are the same token), so
+ * colour alone could not tell them apart. A maintenance band therefore carries
+ * a DASHED OUTLINE and a fainter fill: "somebody declared this" reads as a
+ * drawn boundary, "somebody wrote this down" reads as a plain wash. The legend
+ * names them apart too. lib/annotations.test.ts asserts the difference from
+ * BOTH sides, so an edit that collapses them fails there rather than in an
+ * operator's eyes at 3am.
+ */
+export function maintenanceOverlaySeries(windows: MaintenanceWindow[], dark: boolean): LineSeriesOption | null {
+  const colors = chartColors(dark ? "dark" : "light");
+  const data: [{ name: string; xAxis: number }, { xAxis: number }][] = [];
+
+  for (const w of windows) {
+    const start = Date.parse(w.startAt);
+    const end = Date.parse(w.endAt);
+    if (Number.isNaN(start) || Number.isNaN(end)) continue;
+    data.push([{ name: w.reason, xAxis: start }, { xAxis: end }]);
+  }
+
+  if (data.length === 0) return null;
+
+  return {
+    name: MAINTENANCE_SERIES_NAME,
+    type: "line",
+    data: [],
+    markArea: {
+      label: { show: false },
+      emphasis: { label: { show: true, formatter: "{b}", color: colors.axis, fontSize: 11, position: "top" } },
+      itemStyle: { color: colors.axis, opacity: 0.08, borderColor: colors.axis, borderWidth: 1, borderType: "dashed" },
+      data,
+    },
+  };
+}
+
+/**
+ * withMaintenance is withAnnotations for the bands. Same contract in every
+ * respect that matters to a caller: never mutates, returns the SAME object when
+ * there is nothing to draw (so a memo keyed on identity survives an empty
+ * list), and composes with withAnnotations in either order.
+ */
+export function withMaintenance(option: EChartsOption, windows: MaintenanceWindow[], dark: boolean): EChartsOption {
+  const overlay = maintenanceOverlaySeries(windows, dark);
+  if (!overlay) return option;
+  const existing: SeriesOption[] = Array.isArray(option.series)
+    ? (option.series as SeriesOption[])
+    : option.series
+      ? [option.series as SeriesOption]
+      : [];
+  return { ...option, series: [...existing, overlay] };
+}
+
+/**
  * mergeAnnotations folds the per-scope listings a surface fetches (its own
  * scope, plus the global ones) into one list.
  *
@@ -136,6 +213,20 @@ export function withAnnotations(option: EChartsOption, annotations: Annotation[]
 export function mergeAnnotations(...lists: Annotation[][]): Annotation[] {
   const byId = new Map<string, Annotation>();
   for (const list of lists) for (const a of list) byId.set(a.id, a);
+  return [...byId.values()].sort((a, b) => {
+    const delta = Date.parse(a.startAt) - Date.parse(b.startAt);
+    if (delta !== 0 && !Number.isNaN(delta)) return delta;
+    return a.id.localeCompare(b.id);
+  });
+}
+
+/** mergeMaintenanceWindows is mergeAnnotations for the windows: same two legs
+ *  (the surface's own scope and the global one), same de-duplication by id, and
+ *  the same total (startAt, id) order so two renders of one fetch never
+ *  disagree about which of two simultaneous windows comes first. */
+export function mergeMaintenanceWindows(...lists: MaintenanceWindow[][]): MaintenanceWindow[] {
+  const byId = new Map<string, MaintenanceWindow>();
+  for (const list of lists) for (const w of list) byId.set(w.id, w);
   return [...byId.values()].sort((a, b) => {
     const delta = Date.parse(a.startAt) - Date.parse(b.startAt);
     if (delta !== 0 && !Number.isNaN(delta)) return delta;

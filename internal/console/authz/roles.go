@@ -20,6 +20,8 @@ var builtinRoles = map[string][]Permission{
 		PermRunsRead,
 		PermMTRRead,
 		PermAnnotationsRead,
+		PermIncidentsRead,
+		PermMaintenanceRead,
 	},
 
 	// operator adds the ability to trigger diagnostic runs, plus M4's
@@ -45,6 +47,13 @@ var builtinRoles = map[string][]Permission{
 		// annotations:write stops at operator and admin: a note pinned to
 		// the fleet's history is an operator statement, not a viewer one.
 		PermAnnotationsWrite,
+		PermIncidentsRead,
+		PermMaintenanceRead,
+		// incidents/maintenance writes are the same statement class as
+		// annotations:write. webhooks:manage is deliberately ABSENT here --
+		// admin-only, the tokens:manage/rbac:manage credential posture.
+		PermIncidentsWrite,
+		PermMaintenanceWrite,
 	},
 
 	// alert-editor has no alerting permissions yet — those land in M7. The
@@ -68,6 +77,11 @@ var builtinRoles = map[string][]Permission{
 		// configuration permissions above.
 		PermMTRRead,
 		PermAnnotationsRead,
+		// M6 telemetry reads, same line: incidents and maintenance windows
+		// are context on the charts an alert editor works with; the writes
+		// stay with operator/admin.
+		PermIncidentsRead,
+		PermMaintenanceRead,
 	},
 
 	// admin holds every permission this build knows.

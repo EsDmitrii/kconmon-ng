@@ -1,10 +1,11 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ThemeProvider } from "@/components/theme-provider";
 import { resetWsClient } from "@/hooks/use-ws-topic";
 import { resetNavigateForTest, setNavigateForTest } from "@/lib/api";
 import { FakeSocket } from "@/lib/fake-websocket";
+import { parseInvestigationParams, scopeFilterValue } from "@/lib/investigation-sources";
 import { findLastRunForPair, PairCardPage, pairFromPath, pairScope, pairSeriesQuery } from "./pair-card";
 import type { RunDetail } from "@/lib/types";
 
@@ -59,9 +60,15 @@ function runDetail(id: string, overrides: Partial<RunDetail> = {}): RunDetail {
 
 function renderPage(
   pathname = "/pairs/node-a/node-b",
-  opts: { permissions?: string[]; runs?: unknown[]; runDetails?: Record<string, RunDetail>; onCreate?: (body: unknown) => Response } = {},
+  opts: {
+    permissions?: string[];
+    runs?: unknown[];
+    runDetails?: Record<string, RunDetail>;
+    onCreate?: (body: unknown) => Response;
+    incidents?: unknown[];
+  } = {},
 ) {
-  const { permissions = ["runs:create"], runs = [], runDetails = {}, onCreate } = opts;
+  const { permissions = ["runs:create"], runs = [], runDetails = {}, onCreate, incidents = [] } = opts;
   window.history.pushState({}, "", pathname);
   const createCalls: unknown[] = [];
   const fetchMock = vi.fn((url: string, init?: RequestInit) => {
@@ -71,6 +78,7 @@ function renderPage(
     if (href.includes("/api/v1/config")) return Promise.resolve(json(configBody()));
     if (href.includes("/api/v1/auth/me")) return Promise.resolve(json(meBody(permissions)));
     if (href.includes("/api/v1/matrix")) return Promise.resolve(json(matrixBody));
+    if (href.startsWith("/api/v1/incidents")) return Promise.resolve(json({ incidents, nextCursor: "" }));
     if (href.startsWith("/api/v1/events")) return Promise.resolve(json({ events: [], nextCursor: "" }));
     if (href === "/api/v1/runs" && method === "POST") {
       const body: unknown = JSON.parse(String(init?.body ?? "{}"));
@@ -210,5 +218,47 @@ describe("PairCardPage", () => {
     fireEvent.click(await screen.findByRole("radio", { name: "Diagnostics" }));
     await screen.findByText("Last run for this pair");
     expect(screen.queryByRole("button", { name: "Run check" })).not.toBeInTheDocument();
+  });
+});
+
+/* ── M6 Task 8: the Investigate entry point + the related-incidents rail ── */
+
+describe("PairCardPage — Investigate entry point", () => {
+  it("links to a PAIR investigation joined by the same separator pairScope uses", async () => {
+    renderPage("/pairs/node-a/node-b", { permissions: [] });
+    const href = (await screen.findByRole("link", { name: "Investigate" })).getAttribute("href") ?? "";
+
+    const p = parseInvestigationParams(href.slice(href.indexOf("?")), new Date());
+    expect(p.kind).toBe("pair");
+    expect(p.a).toBe("node-a");
+    expect(p.b).toBe("node-b");
+    // The very string the events feed and an incident's scope are matched on.
+    expect(scopeFilterValue({ kind: p.kind, a: p.a, b: p.b })).toBe(pairScope("node-a", "node-b"));
+  });
+});
+
+describe("PairCardPage — open incidents rail", () => {
+  it("filters the open list to this pair's own scope string", async () => {
+    const row = (over: Record<string, unknown>) => ({
+      id: "inc-1",
+      title: "loss on the pair",
+      scope: pairScope("node-a", "node-b"),
+      fromAt: "2026-01-01T00:00:00Z",
+      status: "open",
+      notes: "",
+      pinned: [],
+      createdBy: "user:ada",
+      createdAt: "2026-01-01T00:00:00Z",
+      ...over,
+    });
+    renderPage("/pairs/node-a/node-b", {
+      permissions: ["incidents:read"],
+      incidents: [row({}), row({ id: "inc-2", title: "the reverse direction", scope: pairScope("node-b", "node-a") })],
+    });
+
+    const rail = await screen.findByRole("complementary", { name: "Open incidents" });
+    const rows = await within(rail).findAllByTestId("related-incident");
+    expect(rows).toHaveLength(1);
+    expect(within(rows[0]).getByRole("link", { name: "loss on the pair" })).toBeInTheDocument();
   });
 });

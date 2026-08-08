@@ -137,6 +137,80 @@ export interface AnnotationQuery {
   cursor?: string;
 }
 
+/* ── M6: investigation sources (k8s events, incidents, maintenance, audit) ──
+   Generated half again (docs/console-api.yaml), same reasoning as the M4/M5
+   shapes above: five near-identical CRUD bodies are exactly where hand-checking
+   starts to miss a field, and CI fails on a regeneration diff.
+
+   The four *Query shapes below are hand-written for the reason every other
+   *Query in this file is: query PARAMETERS are not a schema in the OpenAPI
+   components map. Two of them carry the annotations `scope` three-state
+   (undefined = every scope, "" = the GLOBAL ones only, anything else = exact),
+   so lib/api.ts serialises those with `!== undefined` rather than truthiness. */
+export type K8sEvent = components["schemas"]["K8sEvent"];
+export type K8sEventKind = components["schemas"]["K8sEventKind"];
+export type K8sEventType = components["schemas"]["K8sEventType"];
+export type K8sEventPage = components["schemas"]["K8sEventPage"];
+
+export type Incident = components["schemas"]["Incident"];
+export type IncidentStatus = components["schemas"]["IncidentStatus"];
+export type IncidentRequest = components["schemas"]["IncidentRequest"];
+export type IncidentPatchRequest = components["schemas"]["IncidentPatchRequest"];
+export type IncidentPage = components["schemas"]["IncidentPage"];
+export type PinnedRef = components["schemas"]["PinnedRef"];
+
+export type MaintenanceWindow = components["schemas"]["MaintenanceWindow"];
+export type MaintenanceWindowRequest = components["schemas"]["MaintenanceWindowRequest"];
+export type MaintenanceWindowPage = components["schemas"]["MaintenanceWindowPage"];
+
+export type AuditEntry = components["schemas"]["AuditEntry"];
+export type AuditPage = components["schemas"]["AuditPage"];
+
+export interface K8sEventQuery {
+  /** Node or pod name; an EXACT match server-side, never a prefix. */
+  name?: string;
+  kind?: K8sEventKind;
+  type?: K8sEventType;
+  from?: Date;
+  to?: Date;
+  limit?: number;
+  cursor?: string;
+}
+
+export interface IncidentQuery {
+  status?: IncidentStatus;
+  /** Three-state, as on /api/v1/annotations — see AnnotationQuery above. */
+  scope?: string;
+  from?: Date;
+  to?: Date;
+  limit?: number;
+  cursor?: string;
+}
+
+export interface MaintenanceQuery {
+  /** Three-state, as on /api/v1/annotations — see AnnotationQuery above. */
+  scope?: string;
+  from?: Date;
+  to?: Date;
+  limit?: number;
+  cursor?: string;
+}
+
+/**
+ * AuditQuery is the shape GET /api/v1/audit actually takes, and the ABSENCE of
+ * from/to here is not an omission: the endpoint has no time filter at all
+ * (docs/console-api.yaml's listAuditEntries takes subjectKind/subjectId/limit/
+ * cursor and nothing else). A caller that wants a window asks for a page and
+ * filters it client-side — and must say so, because a page that fills up with
+ * newer rows can hide older ones inside the window entirely.
+ */
+export interface AuditQuery {
+  subjectKind?: SubjectKind;
+  subjectId?: string;
+  limit?: number;
+  cursor?: string;
+}
+
 export interface TopologyNode {
   name: string;
   zone: string;

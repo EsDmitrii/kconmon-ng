@@ -32,3 +32,5 @@ sql:
             go_type: "encoding/json.RawMessage"
           - column: "mtr_hop_enrichment.geo"
             go_type: "encoding/json.RawMessage"
+          - column: "incidents.pinned"
+            go_type: "encoding/json.RawMessage"

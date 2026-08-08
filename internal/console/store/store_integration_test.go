@@ -49,7 +49,8 @@ func dropSchema(t *testing.T, dsn string) {
 	// One statement listing every table: PostgreSQL resolves the dependencies
 	// among the listed tables itself, so no CASCADE and no ordering by
 	// foreign key is needed here.
-	const tables = `annotations, mtr_hop_enrichment, mtr_path_snapshots, ` +
+	const tables = `webhooks, maintenance_windows, incidents, k8s_events, ` +
+		`annotations, mtr_hop_enrichment, mtr_path_snapshots, ` +
 		`check_schedules, check_definitions, targets, ` +
 		`check_results, check_runs, topology_events, audit_log, api_tokens, role_bindings, roles, users, goose_db_version`
 	if _, err := pool.Exec(ctx, `DROP TABLE IF EXISTS `+tables); err != nil {

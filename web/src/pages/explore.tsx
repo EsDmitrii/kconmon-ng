@@ -4,6 +4,7 @@ import type * as echarts from "echarts";
 import { ChevronDown, LineChart } from "lucide-react";
 import { AnnotationBar, useAnnotations } from "@/components/annotations";
 import { EChart } from "@/components/echart";
+import { MaintenanceBar, useMaintenance } from "@/components/maintenance";
 import { PageShell } from "@/components/page-shell";
 import { Card } from "@/components/ui/card";
 import { Segmented } from "@/components/ui/segmented";
@@ -13,7 +14,7 @@ import { promqlQueryRange } from "@/lib/api";
 import { GLOBAL_SCOPE } from "@/lib/annotations";
 import { CURATED_CHARTS, toSeriesOption, type CuratedChart } from "@/lib/curated-metrics";
 import { useTimeContext } from "@/lib/timemachine";
-import type { Annotation, PromResult } from "@/lib/types";
+import type { Annotation, MaintenanceWindow, PromResult } from "@/lib/types";
 
 const EXPLORE_POLL_MS = 30_000;
 // Datapoints per chart the step is sized for; the server-side guard this
@@ -164,11 +165,13 @@ function ExploreCard({
   rangeSeconds,
   dark,
   annotations,
+  maintenance,
 }: {
   chart: CuratedChart;
   rangeSeconds: number;
   dark: boolean;
   annotations: Annotation[];
+  maintenance: MaintenanceWindow[];
 }) {
   const { data, isLoading, error } = useExploreQuery(chart, rangeSeconds);
   const option = useMemo(() => (data ? toSeriesOption(chart, data, dark) : undefined), [chart, data, dark]);
@@ -193,7 +196,13 @@ function ExploreCard({
         {isLoading && !data ? <ChartSkeleton /> : null}
         {empty ? <ChartEmpty /> : null}
         {option && !empty && !queryError ? (
-          <EChart option={option} annotations={annotations} dark={dark} className="mt-3 h-[16.5rem] w-full" />
+          <EChart
+            option={option}
+            annotations={annotations}
+            maintenance={maintenance}
+            dark={dark}
+            className="mt-3 h-[16.5rem] w-full"
+          />
         ) : null}
       </section>
     </Card>
@@ -248,6 +257,7 @@ function CompareChart({
   rangeSeconds,
   dark,
   annotations,
+  maintenance,
 }: {
   chartA: CuratedChart;
   chartB: CuratedChart | undefined;
@@ -257,6 +267,7 @@ function CompareChart({
   rangeSeconds: number;
   dark: boolean;
   annotations: Annotation[];
+  maintenance: MaintenanceWindow[];
 }) {
   const legB = chartB ?? chartA;
   const a = useExploreQuery(chartA, rangeSeconds);
@@ -282,7 +293,13 @@ function CompareChart({
       ) : null}
       {!option && !error ? <ChartSkeleton /> : null}
       {option && !queryError ? (
-        <EChart option={option} annotations={annotations} dark={dark} className="mt-3 h-[16.5rem] w-full" />
+        <EChart
+          option={option}
+          annotations={annotations}
+          maintenance={maintenance}
+          dark={dark}
+          className="mt-3 h-[16.5rem] w-full"
+        />
       ) : null}
     </>
   );
@@ -302,10 +319,12 @@ function ComparePanel({
   rangeSeconds,
   dark,
   annotations,
+  maintenance,
 }: {
   rangeSeconds: number;
   dark: boolean;
   annotations: Annotation[];
+  maintenance: MaintenanceWindow[];
 }) {
   const [aId, setAId] = useState<string>(CURATED_CHARTS[0].id);
   const [bId, setBId] = useState<string>("");
@@ -374,6 +393,7 @@ function ComparePanel({
             rangeSeconds={rangeSeconds}
             dark={dark}
             annotations={annotations}
+            maintenance={maintenance}
           />
         ) : (
           <p className="mt-3 text-xs text-muted-foreground">
@@ -401,6 +421,15 @@ export function ExplorePage() {
      One hook for the whole page rather than one per card: all five charts share
      the range picker's window, so they share the request and the markers. */
   const { annotations, error: annotationsError, refresh } = useAnnotations(GLOBAL_SCOPE, range.seconds);
+  /* The declared change windows, on exactly the same terms (M6 Task 9): global
+     scope, the range picker's own window, one hook for the whole page. A
+     fleet-wide upgrade is precisely the context these five aggregates are
+     missing when they all bend at once. */
+  const {
+    windows,
+    error: maintenanceError,
+    refresh: refreshMaintenance,
+  } = useMaintenance(GLOBAL_SCOPE, range.seconds);
 
   return (
     <PageShell
@@ -427,7 +456,20 @@ export function ExplorePage() {
         className="mt-0"
       />
 
-      <ComparePanel rangeSeconds={range.seconds} dark={theme === "dark"} annotations={annotations} />
+      <MaintenanceBar
+        scope={GLOBAL_SCOPE}
+        windows={windows}
+        error={maintenanceError}
+        onChanged={() => void refreshMaintenance()}
+        className="mt-0"
+      />
+
+      <ComparePanel
+        rangeSeconds={range.seconds}
+        dark={theme === "dark"}
+        annotations={annotations}
+        maintenance={windows}
+      />
 
       <div className="grid gap-5 md:grid-cols-2">
         {CURATED_CHARTS.map((chart) => (
@@ -437,6 +479,7 @@ export function ExplorePage() {
             rangeSeconds={range.seconds}
             dark={theme === "dark"}
             annotations={annotations}
+            maintenance={windows}
           />
         ))}
       </div>

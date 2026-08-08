@@ -6,7 +6,10 @@ as-built implementation (2026-08-06), M4 likewise (2026-08-07) — including
 the two shipped shapes that differ from the plan and the correction of a DoD
 line that named a Playwright harness this repo never had. M5 written from the
 as-built implementation (2026-08-08), with four plan deviations and the
-deferral list named rather than reconciled.
+deferral list named rather than reconciled. M6 written from the as-built
+implementation (2026-08-08) — six plan deviations, including a narrower
+`kubectx` RBAC grant than the plan specified and a console-only ServiceAccount
+rather than a widened shared one.
 -->
 
 # Milestones
@@ -267,7 +270,7 @@ Deferred out of M5, deliberately and by name:
   than smuggled into this milestone.
 - **`kubectl-kconmon` trace capture** — the CLI talks to the controller
   directly and never touches the Console, so its traces are **invisible to path
-  history** (Decision 1). Routing the CLI through the Console is an M6+
+  history** (Decision 1). Routing the CLI through the Console is an M7+
   decision, not an oversight.
 - **The `mtr` WebSocket topic** — still rejected with an error frame. The
   Explorer reads path history over REST and needs no push topic, and an allowed
@@ -280,9 +283,128 @@ Deferred out of M5, deliberately and by name:
 - **`check_results` partitioning** — ADR-001's "partition by month if volume
   warrants" follow-up is still not done.
 
-**M6 — Investigation + Incidents.** Investigation assembly (timeline,
-heuristic correlation, actions rail), `kubectx` K8s events capture,
-incidents (save/share), maintenance windows, webhooks.
+**M6 — Investigation Mode + Incidents (delivered).** Four new tables
+(`k8s_events`, `incidents`, `maintenance_windows`, `webhooks` — DATA.md §5.2)
+and fifteen new routes across four families
+(`/api/v1/incidents` with the API's one `PATCH`, `/api/v1/maintenance`,
+`/api/v1/webhooks` + `/{id}/test`, `GET /api/v1/k8s-events`), all gated on
+`database.mode=cnpg|external` and `503` otherwise; **Investigation Mode** as a
+three-pane page whose timeline is assembled **client-side** over eight sources
+(Decision 1), each one permission-gated with **zero requests** when denied and
+one muted line per absent or bounded source; **correlation v1** as four
+arithmetic steps an operator can reproduce by hand — edge-triggered threshold
+crossings over a median RTT baseline, onset, a 300 s candidate window, and a
+linear proximity decay against documented class weights — with the exported
+constants restated verbatim in INVESTIGATION.md and linked from the panel
+(Decision 2); **`kubectx`**, the console's first apiserver client, on the
+client-go the controller already depends on — **zero new Go dependencies** —
+list+watching core/v1 Events and failing **closed** on node events when no
+topology vouches for the node (Decision 3); **incidents** as annotations-class
+records with a permalink that rehydrates the page from the row rather than from
+the URL (Decision 7), surfaced on Overview and on all three object cards;
+**maintenance windows** as data and rendering, not suppression, because nothing
+evaluates alerts yet (Decision 6); **outbound webhooks** fired on incident
+lifecycle only (Decision 5), HMAC-SHA256 over the raw body, a 0s/30s/5m ±20%
+ladder, with each endpoint's signing secret sealed under a config-supplied
+AES-256-GCM key (Decision 4); and five new permissions — `incidents:read` and
+`maintenance:read` reaching every role, their `:write` pair stopping at
+`operator`, and `webhooks:manage` admin-ONLY on the `tokens:manage` precedent
+(Decision 8). See `architecture/{DATA,API,CONFIG,SECURITY,BACKEND}.md` and
+`product/{INVESTIGATION,PAGES}.md`. Chart 1.8.0.
+
+Six shipped shapes differ from the plan and are recorded here rather than
+quietly reconciled:
+
+- **Correlation does not bucket events into 30 s windows.** Plan Decision 2(a)
+  called for it; the implementation replaced it with **edge-triggered**
+  detection on the raw series. Quantizing to 30 s blurs an onset the samples
+  already resolve more finely than that, and the whole value of the panel is
+  the "N seconds before" number beside each row. What bucketing was there to
+  prevent — forty rows for one forty-sample degradation — edge triggering
+  prevents better: one entry when the signal crosses, one `info` entry when it
+  recovers, and none in between.
+- **`PATCH /api/v1/incidents/{id}` breaks this repo's full-replace `PUT`
+  convention, on purpose.** Every other mutable resource (M4's targets, checks
+  and schedules; M6's own webhooks) takes a full-replace `PUT`. An incident
+  evolves under collaboration — one operator pinning findings while another
+  writes notes — so a full replace would let the last writer silently discard
+  the other's work. The exception is one route, its patchable subset is exactly
+  `status`/`notes`/`pinned`, and API.md documents it as an exception rather
+  than as a second convention.
+- **Zone-pair and cluster scopes are lossy when saved.** The store's scope
+  vocabulary is the annotations one (`''` global, node, `src→dst`, target
+  name) and has no zone member, so both `zone-pair` and `cluster`
+  investigations save with an empty scope and reopen as global. The save
+  popover **warns before the write**, not after — an operator finding out at
+  save time can retitle the incident to carry what the scope cannot. A related
+  edge: a bare-name scope needs `targets:read` to reopen *as a target*, and
+  reopens as a node otherwise.
+- **The matrix cell's Investigate affordance is a sibling of the cell, not
+  inside its tooltip.** The tooltip is `pointer-events-none` (it has to be, or
+  it would eat the hover it exists to serve) and a nested `<a>` inside the
+  cell's own link is invalid HTML. Placing the affordance beside the cell is
+  the only shape that is both clickable and valid.
+- **The `kubectx` RBAC grant is narrower than the plan wrote it.** Decision 3
+  and SECURITY.md §10.3 both said `events`/`nodes`/`pods` read; the reader
+  calls `Events().List` and `.Watch` and nothing else, because the node set it
+  filters against comes from the controller's topology API. The chart grants
+  `events: list, watch` and no more. Least privilege beat the plan text.
+- **A console-only ServiceAccount, rather than a widened shared one.** The
+  chart's single ClusterRole is bound to the ServiceAccount the agent DaemonSet
+  and the controller Deployment share, and the console set no
+  `serviceAccountName` at all — it ran as the namespace `default` SA. Adding
+  event read to the shared role would have granted it to every agent pod on
+  every node **and still not reached the console**. Chart 1.8.0 adds a second
+  SA + ClusterRole + binding, all three rendered only under
+  `console.kubernetesContext.enabled`, so the default render is unchanged.
+
+Deferred out of M6, deliberately and by name:
+
+- **The `settings` table** — SECURITY.md §12 promised webhook secrets
+  "encrypted at rest (app-level, `settings`-keyed)". That table does not exist
+  and is not pinned to a milestone, and inventing a versioned settings store to
+  hold one key was scope creep. The key is `console.webhooks.encryptionKey`
+  (Decision 4) instead. Rotating it does not re-seal existing rows — an admin
+  must `PUT` each endpoint with a fresh secret — which is the cost of the
+  shortcut, stated rather than discovered.
+- **A webhooks UI.** Endpoints are API-only in M6: there is no Settings page
+  and no webhooks page, so declaring one is a `POST` with `webhooks:manage`.
+  The navigation tree in PAGES.md §6.2 still lists a Settings page; it is
+  design intent.
+- **Alertmanager silences from maintenance windows** — the spec's "(optional)
+  AM silences". There is no Alertmanager client anywhere in this repository,
+  and a window cannot silence what nothing evaluates. It lands with alerting.
+- **Alert-fired webhooks** — dispatch fires on incident lifecycle only
+  (`incident.created|resolved|reopened`), the one event class M6 itself
+  introduces. The `events` column is a `TEXT[]` over a closed set, so widening
+  it in M7 is code plus a vocabulary entry, not a migration.
+- **A delivery-log table** — one row per delivery is unbounded growth for
+  marginal value. The outcome lives on the endpoint row (`last_status`,
+  `last_attempt`, `failures`), the ledger is the console log, and `webhooks` is
+  deliberately **not** a retention table (DATA.md §5.2).
+- **The DNS-resolution-change timeline source** — §7.6's bullet list has named
+  it since M0 and **nothing has ever recorded it**: no table, no API, no agent
+  check that stores a resolution result over time. It was not cut in M6; it was
+  never built, and INVESTIGATION.md now says so rather than leaving a bullet
+  that reads as shipped.
+- **The timeline's "alert fired/resolved" row** — ships **empty and says so**
+  (Decision 12): *"Alert state arrives with alerting (M7) — that is a missing
+  engine, not a quiet fleet."* Carried as a visible, permanent note rather than
+  an absence.
+- **A live WebSocket topic for incidents** — considered as a piggyback on the
+  existing hub and **not built**. Incidents are polled: the Overview card and
+  the cards' Related-incidents block are TanStack queries, and an incident open
+  for three days does not become more legible at minute resolution. Nothing
+  about incidents is live in M6.
+- **A maintenance bar on the Node card** — Pair, Target and Explore have one;
+  Node does not. Not a decision about node scope, just a gap.
+- **Controller attribution of `topology_changed` events** — carried from M5,
+  untouched by M6, and still the single highest-value follow-up in this file.
+  Time Machine's topology fold stays structurally complete and empty in
+  practice until the controller stops throwing the agent snapshot away.
+- **A per-schedule continuous cadence field** — carried for the third
+  milestone running.
+- **`check_results` partitioning** — still not done.
 
 **M7 — Alerting + polish.** PrometheusRule builder/sync/import, config
 export/import, command palette completion, a11y pass, docs, demo

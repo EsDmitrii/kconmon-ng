@@ -3,8 +3,8 @@ apiVersion: v2
 name: kconmon-ng
 description: Kubernetes Node Connectivity Monitor - Next Generation
 type: application
-version: 1.7.0
-appVersion: "1.7.0"
+version: 1.8.0
+appVersion: "1.8.0"
 keywords:
   - kubernetes
   - connectivity
@@ -25,6 +25,50 @@ annotations:
     - name: Documentation
       url: https://github.com/EsDmitrii/kconmon-ng#readme
   artifacthub.io/changes: |
+    - kind: added
+      description: >-
+        Investigation Mode (M6) — /investigate merges eight timeline sources client-side and ranks
+        candidate causes by documented proximity heuristics (INVESTIGATION.md is the authority)
+    - kind: added
+      description: >-
+        Incidents — save an investigation, pin findings, resolve or reopen it; the permalink
+        /investigate?incident={id} rehydrates scope and range, and Overview gained an open-incidents card
+    - kind: added
+      description: >-
+        Maintenance windows — CRUD plus markArea rendering on every scoped chart and a timeline row;
+        M6 renders them, it does not suppress anything (there is no alert engine until M7)
+    - kind: added
+      description: >-
+        Outbound webhooks — incident lifecycle POSTs signed with X-Kconmon-Signature (HMAC-SHA256),
+        3 attempts at 0s/30s/5m with jitter, per-endpoint event filter and last-outcome columns
+    - kind: added
+      description: >-
+        console.webhooks.encryptionKeySecret — the AES-256-GCM key that encrypts each endpoint's signing
+        secret at rest, mounted as a file next to the DSN; keyless leaves create and test answering 503
+    - kind: added
+      description: >-
+        Kubernetes event capture — console.kubernetesContext.{enabled,namespace,resyncInterval}, OFF by
+        default, filtered to nodes in the fleet topology and pods in one namespace
+    - kind: added
+      description: >-
+        A console-only ServiceAccount plus its own ClusterRole (events/nodes/pods get,list,watch),
+        rendered ONLY with kubernetesContext.enabled — the agent/controller grant is never widened
+    - kind: added
+      description: >-
+        console.networkPolicy.kubeAPIEgress — apiserver egress for the event reader, rendered under the
+        same kubernetesContext.enabled gate (a NetworkPolicy is only the cluster-side half of the gate)
+    - kind: added
+      description: >-
+        Five new permissions — incidents:read and maintenance:read reach every role, their :write pair
+        stops at operator and admin, and webhooks:manage is admin-ONLY (credential-adjacent)
+    - kind: added
+      description: >-
+        kconmon_ng_console_k8s_events_total and _webhook_deliveries_total, plus three new table values
+        on _retention_deleted_total (webhooks are deliberately NOT a retention table)
+    - kind: added
+      description: >-
+        console-investigation-values.yaml chart-test profile covering kubernetesContext and the webhook
+        encryption-key mount
     - kind: added
       description: >-
         MTR path history (M5) — every pair's distinct routes deduped by a content hash into

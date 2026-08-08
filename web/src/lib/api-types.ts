@@ -469,6 +469,193 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/incidents": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * One page of saved investigations, newest-created first.
+         * @description from/to bound the window an incident's OWN RANGE must OVERLAP, not the window it was created in: one that began before the range and is still open is exactly the one an operator looking at that range needs. An incident with no toAt has an OPEN-ENDED range -- the opposite of what an annotation's absent endAt means (an instant mark).
+         */
+        get: operations["listIncidents"];
+        put?: never;
+        /**
+         * Open one investigation. Always created OPEN.
+         * @description createdBy is the SERVER's view of the authenticated subject, never a body field, and there is no status/resolvedAt in the request: an incident is always created open, and resolving it is PATCH -- the path that stamps resolvedAt from the server's own clock. The audit row records title, scope and status ONLY: notes and pinned are free-form and never enter the audit log.
+         */
+        post: operations["createIncident"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/incidents/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Resource id (UUID). A malformed id is 404, indistinguishable from an unknown one. */
+                id: components["parameters"]["PathID"];
+            };
+            cookie?: never;
+        };
+        /** One saved investigation. */
+        get: operations["getIncident"];
+        put?: never;
+        post?: never;
+        /** Remove one investigation; deleting one that is not there is 404. */
+        delete: operations["deleteIncident"];
+        options?: never;
+        head?: never;
+        /**
+         * Update a SUBSET of an incident. The one PATCH in this API.
+         * @description THE exception to this API's full-replace PUT convention, and a deliberate one: an incident evolves under collaboration -- one operator types notes while another pins a finding and a third resolves it -- so a full replace would make every edit a read-modify-write over the whole row and let the last writer silently discard the other two's work. The body is any SUBSET of status/notes/pinned; an EMPTY subset is 422, because a patch that asks for nothing is far more likely a typo'd field name than a deliberate no-op. Transitions: open -> resolved stamps resolvedAt from the server's clock, resolved -> open CLEARS it, and a status equal to the current one is a no-op rather than a re-stamp. The whole body is validated before the first write, so a rejected patch changes nothing. The audit row records the status alone.
+         */
+        patch: operations["updateIncident"];
+        trace?: never;
+    };
+    "/api/v1/maintenance": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * One page of declared maintenance windows, newest-starting first.
+         * @description from/to bound the range a window must OVERLAP, not contain: one that opened before the range and is still running inside it is exactly the one that explains what the operator is looking at. Windows are DATA and RENDERING in M6 -- they mark charts and timeline rows; there is no suppression logic, because nothing evaluates alert rules yet.
+         */
+        get: operations["listMaintenanceWindows"];
+        put?: never;
+        /**
+         * Declare one window. There is no update -- delete and recreate.
+         * @description createdBy is the SERVER's view of the authenticated subject. endAt must be strictly after startAt (the table's own CHECK says so too). The audit row records the scope ONLY: reason is free text, which is where a change ticket id or an internal hostname ends up.
+         */
+        post: operations["createMaintenanceWindow"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/maintenance/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Resource id (UUID). A malformed id is 404, indistinguishable from an unknown one. */
+                id: components["parameters"]["PathID"];
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /** Remove one window -- also how a window is CORRECTED. */
+        delete: operations["deleteMaintenanceWindow"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/webhooks": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Every configured outbound endpoint. ADMIN only.
+         * @description UNPAGED and therefore carrying no nextCursor: the row count is endpoints an operator typed, not a function of time. The secret is WRITE-ONLY and appears in NO response -- `hasSecret` plus the last delivery outcome (lastStatus/lastAttempt/failures) is everything a reader learns. All six webhook routes need the single `webhooks:manage` permission, held by admin alone: an endpoint row is credential-adjacent, the tokens:manage and rbac:manage posture.
+         */
+        get: operations["listWebhooks"];
+        put?: never;
+        /**
+         * Declare one endpoint. The secret is REQUIRED and write-only.
+         * @description Every delivery is signed, so an endpoint without a secret could never deliver and `secret` is required here. The console encrypts it at rest with console.webhooks.encryptionKey; that key is OPTIONAL at boot, so a console without one answers 503 NAMING the key rather than failing to start. The audit row records name and events ONLY -- never the secret, and never the url (a hook URL routinely embeds a token in its own path).
+         */
+        post: operations["createWebhook"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/webhooks/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Resource id (UUID). A malformed id is 404, indistinguishable from an unknown one. */
+                id: components["parameters"]["PathID"];
+            };
+            cookie?: never;
+        };
+        /** One endpoint, with hasSecret instead of the secret. */
+        get: operations["getWebhook"];
+        /**
+         * Replace one endpoint in full -- except the secret.
+         * @description A full replace like every other PUT here, with ONE exception: `secret` is three-state. ABSENT keeps the stored secret (which is what makes re-pointing a URL or narrowing an event filter possible without re-typing a secret the operator may not have); an EMPTY STRING is 422, because reading it as "keep" or as "clear" would both be guesses; a non-empty value replaces it. Keeping a secret needs no cipher, so an update that omits it succeeds even with no encryption key configured -- only one that replaces it answers 503.
+         */
+        put: operations["updateWebhook"];
+        post?: never;
+        /** Remove one endpoint. */
+        delete: operations["deleteWebhook"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/webhooks/{id}/test": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Resource id (UUID). A malformed id is 404, indistinguishable from an unknown one. */
+                id: components["parameters"]["PathID"];
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Enqueue one signed ping so an operator can verify an endpoint.
+         * @description 202, not 200: delivery is asynchronous with a retry ladder, so the only honest thing this can report is that the work was accepted. The OUTCOME arrives on the endpoint row -- read it back from GET /api/v1/webhooks/{id} as lastStatus/lastAttempt/failures. Signing the ping needs the secret unsealed, so a console with no console.webhooks.encryptionKey answers 503 naming the key.
+         *
+         *     The ping is a WebhookPayload with `event: "test"` and a synthetic incident -- the SAME envelope a real notification uses, so a receiver needs one parser rather than two. Unlike a real notification it ignores both the enabled flag and the event filter: an operator tests an endpoint precisely when they are about to enable it. ONE attempt, no retry ladder.
+         */
+        post: operations["testWebhook"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/k8s-events": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * One page of captured Kubernetes events, newest first.
+         * @description READ-ONLY: the rows are written by the console's own cluster event reader (console.kubernetesContext.enabled), filtered to nodes in the fleet topology and pods in the kconmon namespace -- an unfiltered cluster firehose would be a cardinality and privacy bug. This route rides `events:read` rather than a permission of its own: these ARE events. With a database but no reader enabled the answer is an EMPTY PAGE, not a 503 -- "nothing was captured" is a different fact from "this endpoint is unavailable".
+         */
+        get: operations["listK8sEvents"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/audit": {
         parameters: {
             query?: never;
@@ -1010,6 +1197,223 @@ export interface components {
         };
         AnnotationPage: {
             annotations: components["schemas"]["Annotation"][];
+            nextCursor: string;
+        };
+        /**
+         * @description Closed set. Widening it is code, not a migration -- the vocabulary is enforced in Go, not by a CHECK constraint.
+         * @enum {string}
+         */
+        IncidentStatus: "open" | "resolved";
+        /** @description One finding pinned to an incident: a typed reference into whichever table the timeline row came from. `id` is a STRING for every kind, including the bigint-keyed ones (event, k8s) -- pinned is one heterogeneous list, and one id spelling across it beats a per-kind type every reader would have to switch on. An unknown kind is REJECTED rather than stored: a pin nothing can resolve renders as nothing and can never be repaired. */
+        PinnedRef: {
+            /** @enum {string} */
+            kind: "event" | "audit" | "annotation" | "snapshot" | "run" | "k8s";
+            id: string;
+            note?: string;
+        };
+        /** @description One saved investigation -- annotations-class, not a ticket. Its permalink is /investigate?incident={id}; the page hydrates scope and range from the incident, so there is no second page. */
+        Incident: {
+            /** Format: uuid */
+            id: string;
+            title: string;
+            /** @description "" is a real value: the GLOBAL scope. Any other value names a node, a pair or a target. A filter key, NEVER a Prometheus label value. */
+            scope: string;
+            /** Format: date-time */
+            fromAt: string;
+            /**
+             * Format: date-time
+             * @description Absent means an OPEN-ENDED range -- "still going". Note this is the OPPOSITE of an annotation's absent endAt, which means an instant.
+             */
+            toAt?: string;
+            status: components["schemas"]["IncidentStatus"];
+            /** @description Markdown. Free-form operator prose; never enters the audit log. */
+            notes: string;
+            pinned: components["schemas"]["PinnedRef"][];
+            /** @description The server's view of the subject ("user:<id>", "token:<id>"). */
+            createdBy: string;
+            /** Format: date-time */
+            createdAt: string;
+            /**
+             * Format: date-time
+             * @description Present exactly when status is "resolved". Reopening CLEARS it -- a reopened incident is not resolved.
+             */
+            resolvedAt?: string;
+        };
+        /** @description Create body. No createdBy (attribution comes from the authenticated subject) and no status/resolvedAt: an incident is always created OPEN, and the resolve path is PATCH. */
+        IncidentRequest: {
+            title: string;
+            /** @description Omitted or "" opens the incident globally. */
+            scope?: string;
+            /** Format: date-time */
+            fromAt: string;
+            /**
+             * Format: date-time
+             * @description Omit for an open-ended range; must be at or after fromAt.
+             */
+            toAt?: string;
+            notes?: string;
+            pinned?: components["schemas"]["PinnedRef"][];
+        };
+        /** @description Any SUBSET of the three fields an incident evolves through. An EMPTY object is 422: a patch that asks for nothing is far more likely a typo'd field name than a deliberate no-op. Each field present replaces that field wholesale -- `pinned` in particular is "the list is now this", which is what the UI actually knows; an add/remove pair would need a server-side merge that two operators pinning at once would race. */
+        IncidentPatchRequest: {
+            status?: components["schemas"]["IncidentStatus"];
+            notes?: string;
+            pinned?: components["schemas"]["PinnedRef"][];
+        };
+        IncidentPage: {
+            incidents: components["schemas"]["Incident"][];
+            nextCursor: string;
+        };
+        /** @description One declared change window. DATA and RENDERING in M6, not suppression logic -- there are no alert rules to suppress yet. */
+        MaintenanceWindow: {
+            /** Format: uuid */
+            id: string;
+            /** @description "" is the GLOBAL scope -- the annotations scope vocabulary. */
+            scope: string;
+            /** Format: date-time */
+            startAt: string;
+            /** Format: date-time */
+            endAt: string;
+            /** @description Free text; never enters the audit log. */
+            reason: string;
+            createdBy: string;
+            /** Format: date-time */
+            createdAt: string;
+        };
+        /** @description Create body. No createdBy -- attribution comes from the subject. */
+        MaintenanceWindowRequest: {
+            scope?: string;
+            /** Format: date-time */
+            startAt: string;
+            /**
+             * Format: date-time
+             * @description Must be strictly AFTER startAt; equal is 422.
+             */
+            endAt: string;
+            reason: string;
+        };
+        MaintenanceWindowPage: {
+            windows: components["schemas"]["MaintenanceWindow"][];
+            nextCursor: string;
+        };
+        /**
+         * @description Closed set. M6 fires on incident lifecycle ONLY -- those are the events M6 itself introduces; alert-fired webhooks belong to alerting.
+         * @enum {string}
+         */
+        WebhookEvent: "incident.created" | "incident.resolved" | "incident.reopened";
+        /** @description One configured outbound endpoint plus its last delivery outcome. There is NO secret field, at any layer: `hasSecret` is all a reader learns. */
+        Webhook: {
+            /** Format: uuid */
+            id: string;
+            name: string;
+            url: string;
+            events: components["schemas"]["WebhookEvent"][];
+            enabled: boolean;
+            /** @description Always true for a stored endpoint (an empty secret is refused), so this is a contract statement -- "this endpoint signs its deliveries" -- rather than a question. */
+            hasSecret: boolean;
+            /** @description "" until something has been delivered. */
+            lastStatus: string;
+            /**
+             * Format: date-time
+             * @description Absent until something has been delivered.
+             */
+            lastAttempt?: string;
+            /**
+             * Format: int32
+             * @description Consecutive failures. SET by the dispatcher after each terminal outcome, never incremented here.
+             */
+            failures: number;
+            /** Format: date-time */
+            createdAt: string;
+        };
+        /** @description Create/update body. Both are FULL replaces except `secret`, which is WRITE-ONLY and three-state -- see the PUT description. */
+        WebhookRequest: {
+            /** @description Lowercase alphanumerics and '-'. Unique; a duplicate is 422, not 409. */
+            name: string;
+            /** @description Must start with http:// or https://. */
+            url: string;
+            events: components["schemas"]["WebhookEvent"][];
+            /**
+             * @description Omitted means TRUE -- an endpoint you just declared is one you want firing.
+             * @default true
+             */
+            enabled: boolean;
+            /** @description The HMAC-SHA256 signing key, WRITE-ONLY. Required on create. On update: omit to KEEP the stored one; an empty string is 422 (neither "keep" nor "clear" would be more than a guess). */
+            secret?: string;
+        };
+        /** @description Unpaged -- the row count is endpoints an operator typed, not a function of time. */
+        WebhookList: {
+            webhooks: components["schemas"]["Webhook"][];
+        };
+        /**
+         * @description The body the console POSTs to a configured endpoint. It is NOT a request or response of this API -- it is the contract the console offers a RECEIVER, documented here because there is nowhere better for a receiver's author to look.
+         *
+         *     Transport: `POST` with `Content-Type: application/json` and `X-Kconmon-Signature: sha256=<hex hmac-sha256(secret, raw body)>`, computed over the exact request bytes. Verify the signature BEFORE parsing. 10s timeout per attempt, and up to three attempts at approximately 0s / 30s / 5m with +/-20% jitter until the endpoint answers 2xx -- so a receiver MUST be idempotent. The body (and therefore the signature) is identical across retries, so (event, incident.id, at) is a usable deduplication key.
+         *
+         *     Delivery lives in the console process: a restart during the retry window loses the remaining attempts. The ledger for a miss is the endpoint row's lastStatus/failures, not a replay queue.
+         *
+         *     The field set is CLOSED and STABLE, with no omitempty anywhere: every key below is present on every delivery, including a null `toAt`.
+         */
+        WebhookPayload: {
+            /**
+             * @description A WebhookEvent value, or "test" for the /test ping. "test" is deliberately NOT in WebhookEvent's enum -- that set is what an endpoint may SUBSCRIBE to, and a ping is addressed by id.
+             * @enum {string}
+             */
+            event: "incident.created" | "incident.resolved" | "incident.reopened" | "test";
+            incident: components["schemas"]["WebhookPayloadIncident"];
+            /**
+             * Format: date-time
+             * @description When the console decided to notify, NOT when this attempt was made. Stable across retries.
+             */
+            at: string;
+        };
+        /**
+         * @description The incident subset a notification carries. `notes` and `pinned` are deliberately ABSENT: notes are free-form operator text up to 16 KiB that can name anything an investigation touched, and pushing them to a third-party endpoint on every status change would export the investigation itself rather than the fact of it. Fetch them from GET /api/v1/incidents/{id} if the receiver is entitled to them.
+         *
+         *     For a `test` ping the object is synthetic: `id` is "", `title` is "kconmon-ng webhook test", `createdBy` is "kconmon-ng".
+         */
+        WebhookPayloadIncident: {
+            /** @description UUID, or "" for a test ping. */
+            id: string;
+            title: string;
+            /** @description "" for a global incident; otherwise a node, a pair or a target name. */
+            scope: string;
+            status: components["schemas"]["IncidentStatus"];
+            /** Format: date-time */
+            fromAt: string;
+            /**
+             * Format: date-time
+             * @description null for an OPEN-ENDED range. Always present as a key.
+             */
+            toAt: string | null;
+            createdBy: string;
+        };
+        /** @enum {string} */
+        K8sEventKind: "Node" | "Pod";
+        /** @enum {string} */
+        K8sEventType: "Normal" | "Warning";
+        /** @description One captured cluster event, one of the Investigate timeline's sources. */
+        K8sEvent: {
+            /** @description The row's bigint key rendered as a STRING, because a pinned ref spells every id that way -- pinned is one heterogeneous list across six tables and one spelling beats a per-source type. */
+            id: string;
+            /** @description The Kubernetes event UID. (uid, resourceVersion) is the dedupe key. */
+            uid: string;
+            resourceVersion: string;
+            /** Format: date-time */
+            eventTime: string;
+            kind: components["schemas"]["K8sEventKind"];
+            /** @description Node name or pod name. */
+            name: string;
+            /** @description "" for the cluster-scoped Node events. */
+            namespace: string;
+            reason: string;
+            type: components["schemas"]["K8sEventType"];
+            message: string;
+            /** Format: int32 */
+            count: number;
+        };
+        K8sEventPage: {
+            events: components["schemas"]["K8sEvent"][];
             nextCursor: string;
         };
         RunCreateRequest: {
@@ -2398,6 +2802,466 @@ export interface operations {
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
+            502: components["responses"]["BadGateway"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    listIncidents: {
+        parameters: {
+            query?: {
+                /** @description Exact match. An unknown value is 400, never a silently empty page. */
+                status?: components["schemas"]["IncidentStatus"];
+                /** @description THREE states, as on /api/v1/annotations. Absent means every scope; present-but-empty (`?scope=`) means the GLOBAL ones only; any other value is an exact match. */
+                scope?: string;
+                /** @description RFC3339; absent means unbounded on this side. */
+                from?: string;
+                /** @description RFC3339, exclusive; absent means unbounded on this side. */
+                to?: string;
+                /** @description Page size, clamped into [1,500]. An unparseable value is treated as unset. */
+                limit?: components["parameters"]["Limit"];
+                /** @description Opaque keyset cursor from the previous page's nextCursor. Malformed, or minted by another server, is 400. */
+                cursor?: components["parameters"]["Cursor"];
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description One page of incidents. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["IncidentPage"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            502: components["responses"]["BadGateway"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    createIncident: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["IncidentRequest"];
+            };
+        };
+        responses: {
+            /** @description Incident created. */
+            201: {
+                headers: {
+                    /** @description Permalink to the new incident. */
+                    Location?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Incident"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            422: components["responses"]["UnprocessableEntity"];
+            502: components["responses"]["BadGateway"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    getIncident: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Resource id (UUID). A malformed id is 404, indistinguishable from an unknown one. */
+                id: components["parameters"]["PathID"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The incident. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Incident"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            502: components["responses"]["BadGateway"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    deleteIncident: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Resource id (UUID). A malformed id is 404, indistinguishable from an unknown one. */
+                id: components["parameters"]["PathID"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            204: components["responses"]["NoContent"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            502: components["responses"]["BadGateway"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    updateIncident: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Resource id (UUID). A malformed id is 404, indistinguishable from an unknown one. */
+                id: components["parameters"]["PathID"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["IncidentPatchRequest"];
+            };
+        };
+        responses: {
+            /** @description The incident as stored after the patch. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Incident"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            422: components["responses"]["UnprocessableEntity"];
+            502: components["responses"]["BadGateway"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    listMaintenanceWindows: {
+        parameters: {
+            query?: {
+                /** @description THREE states, as on /api/v1/annotations. Absent means every scope; present-but-empty means the GLOBAL ones only; any other value is an exact match. */
+                scope?: string;
+                /** @description RFC3339; absent means unbounded on this side. */
+                from?: string;
+                /** @description RFC3339, exclusive; absent means unbounded on this side. */
+                to?: string;
+                /** @description Page size, clamped into [1,500]. An unparseable value is treated as unset. */
+                limit?: components["parameters"]["Limit"];
+                /** @description Opaque keyset cursor from the previous page's nextCursor. Malformed, or minted by another server, is 400. */
+                cursor?: components["parameters"]["Cursor"];
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description One page of maintenance windows. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MaintenanceWindowPage"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            502: components["responses"]["BadGateway"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    createMaintenanceWindow: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["MaintenanceWindowRequest"];
+            };
+        };
+        responses: {
+            /** @description Maintenance window created. */
+            201: {
+                headers: {
+                    /** @description Permalink to the new window. */
+                    Location?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MaintenanceWindow"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            422: components["responses"]["UnprocessableEntity"];
+            502: components["responses"]["BadGateway"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    deleteMaintenanceWindow: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Resource id (UUID). A malformed id is 404, indistinguishable from an unknown one. */
+                id: components["parameters"]["PathID"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            204: components["responses"]["NoContent"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            502: components["responses"]["BadGateway"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    listWebhooks: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Every configured endpoint, newest first. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WebhookList"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            502: components["responses"]["BadGateway"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    createWebhook: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebhookRequest"];
+            };
+        };
+        responses: {
+            /** @description Webhook created. The response carries no secret. */
+            201: {
+                headers: {
+                    /** @description Permalink to the new endpoint. */
+                    Location?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Webhook"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            422: components["responses"]["UnprocessableEntity"];
+            502: components["responses"]["BadGateway"];
+            /** @description No database (console.database.mode) or no encryption key (console.webhooks.encryptionKey). The detail names which. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    getWebhook: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Resource id (UUID). A malformed id is 404, indistinguishable from an unknown one. */
+                id: components["parameters"]["PathID"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The endpoint. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Webhook"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            502: components["responses"]["BadGateway"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    updateWebhook: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Resource id (UUID). A malformed id is 404, indistinguishable from an unknown one. */
+                id: components["parameters"]["PathID"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebhookRequest"];
+            };
+        };
+        responses: {
+            /** @description The endpoint as stored. No secret in the body. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Webhook"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            422: components["responses"]["UnprocessableEntity"];
+            502: components["responses"]["BadGateway"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    deleteWebhook: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Resource id (UUID). A malformed id is 404, indistinguishable from an unknown one. */
+                id: components["parameters"]["PathID"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            204: components["responses"]["NoContent"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            502: components["responses"]["BadGateway"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    testWebhook: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Resource id (UUID). A malformed id is 404, indistinguishable from an unknown one. */
+                id: components["parameters"]["PathID"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Test delivery enqueued. */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            502: components["responses"]["BadGateway"];
+            /** @description No database (console.database.mode) or no encryption key (console.webhooks.encryptionKey). The detail names which. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    listK8sEvents: {
+        parameters: {
+            query?: {
+                /** @description Node or pod name; exact match. */
+                name?: string;
+                /** @description Exact match. An unknown value is 400, never a silently empty page. */
+                kind?: components["schemas"]["K8sEventKind"];
+                /** @description Exact match. An unknown value is 400. */
+                type?: components["schemas"]["K8sEventType"];
+                /** @description RFC3339; absent means unbounded on this side. */
+                from?: string;
+                /** @description RFC3339, exclusive; absent means unbounded on this side. */
+                to?: string;
+                /** @description Page size, clamped into [1,500]. An unparseable value is treated as unset. */
+                limit?: components["parameters"]["Limit"];
+                /** @description Opaque keyset cursor from the previous page's nextCursor. Malformed, or minted by another server, is 400. */
+                cursor?: components["parameters"]["Cursor"];
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description One page of captured Kubernetes events. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["K8sEventPage"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
             502: components["responses"]["BadGateway"];
             503: components["responses"]["Unavailable"];
         };

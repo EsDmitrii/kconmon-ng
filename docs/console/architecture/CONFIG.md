@@ -8,6 +8,10 @@ values.yaml at chart 1.5.0. The mtr.enrichment section and the fifth render
 guard added from the as-built M5 implementation (2026-08-08): config.go's
 MTRConfig/EnrichmentConfig, internal/console/enrich/enrich.go,
 cmd/console/main.go's enricherDep switch, at chart 1.7.0.
+The kubernetesContext and webhooks sections added from the as-built M6
+implementation (2026-08-08): config.go's KubernetesContextConfig/
+WebhooksConfig, internal/console/kubectx, cmd/console/main.go's two
+warn-and-continue switches, at chart 1.8.0.
 This document is the source of truth for Console configuration. Update it (and the ADRs) in the same PR as any deviation.
 -->
 
@@ -103,6 +107,13 @@ mtr:
       asnPath: "" # e.g. /geoip/GeoLite2-ASN.mmdb; empty = ASN/provider lookups off
       cityPath: "" # e.g. /geoip/GeoLite2-City.mmdb; empty = geo lookups off
     ttl: 24h # cache row lifetime in mtr_hop_enrichment
+kubernetesContext:
+  enabled: false # master gate; the console's ONLY apiserver client
+  namespace: "" # pod-event namespace; empty = $POD_NAMESPACE, then "default"
+  resyncInterval: 10m # forced relist even while the watch is healthy; must be > 0 when enabled
+webhooks:
+  encryptionKey: "" # base64 of 32 random bytes; prefer the File form
+  encryptionKeyFile: "" # path to a file holding the same value; WINS over encryptionKey
 ```
 
 `database` is entirely omitted from the rendered config when
@@ -138,6 +149,10 @@ Startup fails — loudly, before serving — on any of these:
 | `mtr.enrichment.enabled=true` with `rdns.enabled=false` **and** both `geoip` paths empty | error naming all three knobs |
 | `mtr.enrichment.ttl` non-positive **while `mtr.enrichment.enabled=true`** | error |
 | `mtr.enrichment.rdns.timeoutMs` non-positive **while `rdns.enabled=true`** | error |
+| `kubernetesContext.resyncInterval` non-positive **while `kubernetesContext.enabled=true`** | error (a disabled reader's interval is not inspected — `scheduler.tickInterval`'s rule) |
+| `webhooks.encryptionKey` and `webhooks.encryptionKeyFile` both set | error ("set either ... not both" — `database.dsnFile`'s rule) |
+| `webhooks.encryptionKey` set and not base64 of **exactly 32** bytes | error naming the field and the byte count; the value is **never echoed** |
+| `webhooks.encryptionKeyFile` set and unreadable, or holding a malformed key | **fatal at boot**, not a validation error: resolution reads the file, and an unreadable key is a broken Secret mount (`database.dsnFile`'s precedent) |
 
 ### `rateLimit` — what it actually bounds, and where it stops
 
@@ -267,6 +282,73 @@ VolumeSource passthrough mounted read-only at the fixed path **`/geoip`**, so
 both paths above must live under it. Setting a path with no volume **fails
 rendering** rather than shipping a config that names a file nothing mounts —
 see "Chart behaviours worth knowing" below.
+
+### `kubernetesContext` — the console's only apiserver client
+
+`enabled` is **false by default** for `mtr.enrichment`'s reason plus one more:
+turning it on gives the console pod both a new egress (the apiserver) *and* a
+new RBAC grant. Enabling it in the chart renders, under that one flag, a
+console-only ServiceAccount, a second ClusterRole (`events: list, watch`) and
+its binding, `serviceAccountName` on the console Deployment, the `POD_NAMESPACE`
+downward-API variable, and an apiserver egress rule — see "Helm mapping" below.
+
+It also wants a database, and **not having one is a warning, not a failure**:
+captured events live in PostgreSQL, so with `database.mode=disabled` the console
+logs that the reader is skipped and starts anyway. Two more degradations are
+warnings by the same rule, because a console that refuses to start over them
+would be worse than one that says what it is missing:
+
+- **no in-cluster config** (running outside a cluster, or a ServiceAccount token
+  that is not mounted) — capture is off, the console serves everything else;
+- **no `controller.url`** — pod events are unaffected, but **node events are
+  dropped**, because M6 Decision 3 fails closed: without a topology nothing
+  vouches for a node, and an unfiltered node-event stream is the cardinality and
+  privacy bug the filter exists to prevent.
+
+`namespace` is **one** namespace, not a list, and empty is the useful value: the
+console then reads `$POD_NAMESPACE` (the chart sets it from `metadata.namespace`
+via the downward API), falling back to `default` off-cluster. That is identity
+rather than configuration, which is why it is an environment variable and not a
+templated value — it cannot drift from where the pod actually is. Node events
+are cluster-scoped and are **not** filtered by this at all; they are filtered
+against the controller's topology.
+
+`resyncInterval` (**10m**) is a forced relist even while the watch looks
+healthy — the backstop against a watch that is silently wedged, connected and
+delivering nothing, which no error path can detect. Ten minutes because the
+apiserver keeps events for about an hour, so a relist at this cadence cannot
+miss one, and every relisted row the database already holds costs one rejected
+INSERT and a `duplicate` counter increment, never a duplicate row.
+
+### `webhooks.encryptionKey` — three states, three different outcomes
+
+One key, AES-256-GCM, encrypting each endpoint's HMAC signing secret at rest
+(M6 Decision 4). Everything else about a webhook is a database row an admin
+typed; only the key is a deployment secret, so only the key is configuration.
+The `settings` table SECURITY.md mentions does not exist, and inventing it for
+one key was rejected as scope creep (MILESTONES.md "Deferred out of M6").
+
+`encryptionKeyFile` **wins** over `encryptionKey` when both reach the struct,
+and setting both in a file is refused outright — `database.dsnFile`'s rule for
+`database.dsnFile`'s reason. The chart only ever renders the **File** form.
+
+| State | Outcome |
+| ----- | ------- |
+| **no key** | Keyless, and supported: list/get/update/disable/delete keep working, and only **create** and **test** answer `503` naming this value. A console that never declares a webhook must not fail to start over a cipher it will never use. |
+| **key, no database** | **Warning**, and the dispatcher stays off — endpoints, their sealed secrets and their delivery outcomes all live in PostgreSQL. The enrichment precedent: an operator asked for something this deployment cannot give, and taking the console down over it would be worse. |
+| **broken key** (unreadable file, not base64, wrong length) | **Fatal at boot**, the `database.dsnFile` precedent. A key that is configured but unusable is a wrong Secret mount, not a deliberate omission, and starting anyway would degrade silently to "webhooks never fire". The error names the field and the required length and **never echoes the value**. |
+
+Generate one with `openssl rand -base64 32`. Rotation is an
+operator-initiated restart: the file is read **once at boot**, and the chart's
+Deployment rolls on ConfigMap changes only. Note that rotating the key does not
+re-seal existing rows — the endpoints' stored secrets become unopenable, and an
+admin must `PUT` each one with a fresh secret.
+
+**The maintenance and incidents surfaces need `database.mode=cnpg|external`.**
+All four M6 tables are PostgreSQL, with no in-memory fallback anywhere: without
+a database `/api/v1/incidents`, `/api/v1/maintenance`, `/api/v1/webhooks` and
+`/api/v1/k8s-events` all answer `503`, and the Investigate page degrades those
+sources with a muted note per source rather than blanking the page.
 
 ### The other half lives in the agent's config, not this file
 
@@ -425,17 +507,18 @@ do not depend on the event pipeline.
 
 ## Secret mounts
 
-`database.dsnFile`, `auth.local.bootstrapAdminPasswordFile` and
-`auth.oidc.clientSecretFile` — whichever apply — all resolve to paths under
-one **sibling** directory, `/etc/kconmon-ng-console-secrets/`, mounted
-alongside (not nested inside) the ConfigMap-backed
-`/etc/kconmon-ng-console/`:
+`database.dsnFile`, `auth.local.bootstrapAdminPasswordFile`,
+`auth.oidc.clientSecretFile` and `webhooks.encryptionKeyFile` — whichever
+apply — all resolve to paths under one **sibling** directory,
+`/etc/kconmon-ng-console-secrets/`, mounted alongside (not nested inside) the
+ConfigMap-backed `/etc/kconmon-ng-console/`:
 
 | Config key | Mounted path |
 | --- | --- |
 | `database.dsnFile` | `/etc/kconmon-ng-console-secrets/database-dsn` |
 | `auth.local.bootstrapAdminPasswordFile` | `/etc/kconmon-ng-console-secrets/local-admin-password` |
 | `auth.oidc.clientSecretFile` | `/etc/kconmon-ng-console-secrets/oidc-client-secret` |
+| `webhooks.encryptionKeyFile` | `/etc/kconmon-ng-console-secrets/webhooks-encryption-key` |
 
 This deviates from the milestone's original plan, which nested a `secrets/`
 subdirectory under the ConfigMap-backed config directory itself: a container
@@ -450,14 +533,19 @@ process can actually read a Secret file the kubelet writes root-owned. The
 milestone's original plan called for `0400`; that mode is owner-only and
 unreadable by the nonroot process without matching UID ownership, which a
 projected Secret volume does not give you — `0440` (group-readable) plus
-`fsGroup` is what actually works. `console.podSecurityContext` renders **only
-when `console.database.mode != disabled`**, so the default manifest
-(database off) stays byte-identical to chart 1.4.0.
+`fsGroup` is what actually works. `console.podSecurityContext` renders whenever
+that projected volume does — which up to chart 1.7.0 meant **only when
+`console.database.mode != disabled`**, keeping the default manifest
+(database off) byte-identical to chart 1.4.0. **Chart 1.8.0 widened the
+condition, not the default**: the webhook encryption key is the first secret
+file that does not imply a database, so the volume, its mount and the `fsGroup`
+now render when a database is configured **or** a key Secret is named. With
+neither, the render is unchanged.
 
 Secrets are read once at boot; rotating one is an operator-initiated restart
 (the Deployment rolls on ConfigMap changes only, never on Secret changes).
 
-## Helm mapping (chart 1.7.0)
+## Helm mapping (chart 1.8.0)
 
 | Config key | Helm value |
 | ---------- | ---------- |
@@ -476,6 +564,8 @@ Secrets are read once at boot; rotating one is an operator-initiated restart
 | `scheduler.*` | `console.scheduler.*`; the whole `scheduler:` block is omitted from the rendered config when `console.scheduler.enabled=false` |
 | `mtr.enrichment.*` | `console.mtr.enrichment.*`; the whole `mtr:` block is omitted from the rendered config when `console.mtr.enrichment.enabled=false` |
 | `mtr.enrichment.geoip.{asnPath,cityPath}` | the same values, but they must name files under `/geoip` — the chart mounts `console.mtr.enrichment.geoip.volume` read-only there and offers no way to put a file anywhere else |
+| `kubernetesContext.*` | `console.kubernetesContext.*`; the whole `kubernetesContext:` block is omitted from the rendered config when `console.kubernetesContext.enabled=false`. That same flag also renders the console ServiceAccount, its ClusterRole + binding, `serviceAccountName`, `POD_NAMESPACE` and the apiserver egress rule — one flag, six manifest effects |
+| `webhooks.encryptionKeyFile` | derived from `console.webhooks.encryptionKeySecret.{name,key}`; the block is absent when no Secret is named. **There is no Helm value for the inline `webhooks.encryptionKey`**, deliberately: it would put 32 bytes of key material in a ConfigMap |
 
 Realtime therefore needs **two** flags, one on each side:
 
@@ -504,7 +594,7 @@ console:
   which is the only thing that makes a byte-identical claim meaningful; 1.5.0
   is a *released* chart that already contains them, so it was never the right
   baseline. (This sentence previously called 1.5.0 a future release. It has
-  shipped; the current chart is 1.7.0.)
+  shipped; the current chart is 1.8.0.)
 - **`config.checkers.external` is emitted into the shared ConfigMap only when
   it is enabled**, for exactly the `controller.events` reason above: a pre-M4
   agent image has no `External` field and `KnownFields(true)` would crashloop

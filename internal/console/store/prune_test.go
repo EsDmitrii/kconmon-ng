@@ -211,14 +211,17 @@ var retentionTables = []string{
 	tableMTRSnapshots,
 	tableMTREnrichment,
 	tableAnnotations,
+	tableK8sEvents,
+	tableIncidents,
+	tableMaintenance,
 }
 
 // TestRetentionTableLabelsAreTheClosedSet pins the label VALUES, not just
-// their count. RetentionDeleted{table} is a closed set (metrics.go), and the
-// three M5 additions are the first widening it has had -- a typo in one of
-// them would not fail any other test, it would just quietly split a
-// dashboard's series in two. The literal strings here are deliberately NOT
-// the constants: a test that compares a constant to itself pins nothing.
+// their count. RetentionDeleted{table} is a closed set (metrics.go), and a typo
+// in one of the M5/M6 additions would not fail any other test, it would just
+// quietly split a dashboard's series in two. The literal strings here are
+// deliberately NOT the constants: a test that compares a constant to itself
+// pins nothing.
 func TestRetentionTableLabelsAreTheClosedSet(t *testing.T) {
 	want := []string{
 		"topology_events",
@@ -227,6 +230,9 @@ func TestRetentionTableLabelsAreTheClosedSet(t *testing.T) {
 		"mtr_path_snapshots",
 		"mtr_hop_enrichment",
 		"annotations",
+		"k8s_events",
+		"incidents",
+		"maintenance_windows",
 	}
 	if len(retentionTables) != len(want) {
 		t.Fatalf("retentionTables has %d entries, want %d", len(retentionTables), len(want))
@@ -243,6 +249,22 @@ func TestRetentionTableLabelsAreTheClosedSet(t *testing.T) {
 			t.Errorf("retention table label %q appears twice: two sweeps would share one series", table)
 		}
 		seen[table] = true
+	}
+}
+
+// TestWebhooksAreNotARetentionTable is the DELIBERATE ABSENCE, pinned so it
+// cannot be "fixed" by a later reader who notices M6 added four tables and
+// only three sweeps. A webhook row is configuration, not observation: it does
+// not accumulate with time, and its only time column records when the endpoint
+// was set up rather than when it last mattered. Ageing rows out of it would
+// silently switch off notifications for a still-wanted endpoint -- a retention
+// policy is not a deconfiguration policy. Endpoints leave that table exactly
+// one way: an operator deletes them.
+func TestWebhooksAreNotARetentionTable(t *testing.T) {
+	for _, table := range retentionTables {
+		if table == "webhooks" {
+			t.Fatal("webhooks has a retention sweep; see prune.go's table-label comment for why it must not")
+		}
 	}
 }
 

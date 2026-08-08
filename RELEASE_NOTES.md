@@ -1,3 +1,88 @@
+## kconmon-ng v1.8.0
+
+> Console release. Investigation Mode with an honest, documented correlation
+> panel; saveable incidents with shareable permalinks; maintenance windows;
+> outbound webhooks; and optional Kubernetes event capture (M6). Everything
+> new is off by default or read-only-additive: a 1.7.0 install that upgrades
+> and changes nothing renders the same manifests.
+
+### Added
+
+- **Investigation Mode** — `/investigate` assembles a merged timeline, synced
+  signal panels (loss/RTT with a matrix delta chip and an MTR path diff) and
+  an actions rail for a scope and a time range. Entry is the URL and only the
+  URL — `?kind=&scope=&from=&to=` — from any node/pair/target card, any matrix
+  cell, or the page's own form. Every source is permission-gated with **zero
+  requests** when denied, and each absent or bounded one leaves a muted line
+  rather than blanking the page.
+- **Correlation v1, documented rather than magic** — edge-triggered threshold
+  crossings (loss > 1%, RTT > 2× the range **median**), an onset, a 300-second
+  candidate window and a linear proximity decay against published class
+  weights. The panel links `docs/console/product/INVESTIGATION.md`, which
+  restates the exported constants verbatim. No ML, and nothing you cannot
+  reproduce by hand.
+- **Incidents** — save an investigation (`/api/v1/incidents`), pin findings
+  from six source kinds, write notes, resolve and reopen. The permalink
+  `/investigate?incident={id}` rehydrates scope and range **from the row**, so
+  the link cannot drift from the incident it names. Open incidents appear on
+  Overview and beside the charts on every object card. `PATCH` is deliberate
+  and is this API's only one: an incident evolves under collaboration, and a
+  full replace would let one writer discard another's notes.
+- **Maintenance windows** — `/api/v1/maintenance`, drawn as `markArea` on
+  Explore, the Pair card and the Target card and as timeline rows. M6 **renders**
+  declared windows; it does not suppress anything, because nothing evaluates
+  alerts until M7.
+- **Outbound webhooks** — `/api/v1/webhooks` (admin-only `webhooks:manage`),
+  firing on incident lifecycle. Deliveries are signed
+  `X-Kconmon-Signature: sha256=<hmac>` over the raw body, retried 3 times
+  (0s / 30s / 5m, ±20% jitter, 10s per attempt), with the outcome kept on the
+  endpoint row. Each endpoint's signing secret is **write-only** over the API
+  and sealed at rest with AES-256-GCM under
+  `console.webhooks.encryptionKeySecret`. `POST /{id}/test` sends one signed
+  ping. Without a key, create and test answer 503 and everything else keeps
+  working.
+- **Kubernetes event capture** — `console.kubernetesContext.*` (off by
+  default) list+watches core/v1 Events into `k8s_events`, filtered to nodes in
+  the fleet topology and pods in one namespace, and read back through
+  `GET /api/v1/k8s-events` under `events:read`. **Zero new Go dependencies** —
+  it reuses the client-go the controller already pulls in. Without a topology
+  it fails closed and drops node events rather than storing an unfiltered
+  firehose.
+- **Overview** — the "Recent events" placeholder that had been carried since
+  M2 is now the real panel, and an "Open incidents" card sits beside it.
+  "Firing alerts" stays an honest placeholder until M7.
+- **Permissions** — `incidents:read` and `maintenance:read` (all built-in
+  roles), `incidents:write` and `maintenance:write` (operator/admin), and
+  `webhooks:manage` (**admin only** — an endpoint carries a signing secret).
+- **Metrics** — `kconmon_ng_console_k8s_events_total{result}` and
+  `kconmon_ng_console_webhook_deliveries_total{result}`, plus three new table
+  values on `kconmon_ng_console_retention_deleted_total`.
+
+### Chart
+
+- 1.7.0 → 1.8.0. New value blocks: `console.kubernetesContext.*` (rendered into
+  the console ConfigMap only when enabled) and
+  `console.webhooks.encryptionKeySecret.{name,key}` (referenced by name,
+  mounted as a file beside the DSN — there is deliberately no inline-key
+  value). Enabling `kubernetesContext` also renders a **console-only**
+  ServiceAccount, its own ClusterRole (`events: list, watch`) and binding,
+  `serviceAccountName` on the console Deployment, a `POD_NAMESPACE` downward-API
+  variable and an apiserver egress rule (`console.networkPolicy.kubeAPIEgress`).
+  The agent/controller ServiceAccount and its grant are **untouched**. A ninth
+  ci profile (`console-investigation-values.yaml`). Default render is
+  key-identical to 1.7.0.
+
+### Upgrade notes
+
+- Nothing to do. All four M6 tables are created by migration `00006` on first
+  start with `console.database.mode=cnpg|external`; with the database disabled
+  the new routes answer 503 exactly as M3–M5's do.
+- Turning on `console.kubernetesContext.enabled` is a deliberate act with an
+  RBAC consequence — read SECURITY.md §10.3 first.
+- Webhook endpoints are **API-only** in M6: there is no Settings page yet.
+- Rotating `console.webhooks.encryptionKeySecret` does not re-seal existing
+  rows. An admin must `PUT` each endpoint with a fresh secret afterwards.
+
 ## kconmon-ng v1.7.0
 
 > Console release. MTR Explorer with durable path history and optional hop

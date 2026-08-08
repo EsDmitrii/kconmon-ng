@@ -30,6 +30,19 @@
 #     own controllerGRPCAddr helper) makes the console derive
 #     console.controller.grpcAddr automatically, wiring up the events
 #     ingester GET /api/v1/events proves is exercised.
+#   - kubernetesContext.enabled=true (M6): the ONE flag that renders the
+#     console's own ServiceAccount + ClusterRole + ClusterRoleBinding, so
+#     this file also LIVE-TESTS that RBAC -- a grant that is too narrow shows
+#     up as an empty GET /api/v1/k8s-events, which TestConsoleK8sEventsCapture
+#     fails on. kind churns Pods throughout an install, so the release
+#     namespace has real Pod events to capture.
+#   - webhooks.encryptionKeySecret: the AES-256-GCM key that seals each
+#     endpoint's HMAC secret at rest. Same posture as database.existingSecret
+#     above -- the Secret is created by the workflow (`kubectl create secret
+#     generic kconmon-e2e-webhooks-key`) and referenced here BY NAME, never
+#     templated. Without it POST /api/v1/webhooks answers 503 and the whole
+#     dispatcher is left nil, so TestConsoleWebhookDelivery would have nothing
+#     to assert against.
 #
 # networkPolicy.enabled is already false in the chart's own default (kind's
 # CNI does not enforce NetworkPolicy, so enabling it would give false
@@ -72,3 +85,27 @@ console:
   # and the poll budgets in e2e/console_test.go are written against it.
   scheduler:
     enabled: true
+  # Kubernetes context capture (M6). namespace is left at the chart default
+  # ("" = the release namespace, read from POD_NAMESPACE via the downward
+  # API), which for this workflow is `default` -- exactly where the agents,
+  # the controller and the console itself run, so the Pod events every helm
+  # install and every DaemonSet restart produce are in scope.
+  #
+  # resyncInterval is the chart default (10m) and is deliberately NOT lowered:
+  # the reader lists on start, so TestConsoleK8sEventsCapture never depends on
+  # a resync firing inside its budget.
+  #
+  # This ALSO makes the degraded-mode rollout meaningful for k8s-events: with
+  # console.database.mode=disabled the console warns and skips the reader
+  # rather than failing to start (chart values.yaml documents the contract),
+  # and GET /api/v1/k8s-events answers 503 -- which TestConsoleDegradedMode
+  # asserts.
+  kubernetesContext:
+    enabled: true
+  # The webhook cipher key, in a Secret the workflow creates from `openssl
+  # rand -base64 32` right before the install. Named, never inlined: the chart
+  # has no value that would take the key itself, on purpose.
+  webhooks:
+    encryptionKeySecret:
+      name: kconmon-e2e-webhooks-key
+      key: encryptionKey

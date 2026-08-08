@@ -50,11 +50,11 @@ and keeps a peer query from silently picking up external series. See
 | `mtr_path_snapshots`   | One row per DISTINCT route a pair has taken: `source_node`, `destination`, `path_hash`, `hop_count`, `hops` JSONB, `first_seen`, `last_seen`, `trace_count`, `run_id` (FK → `check_runs`, `ON DELETE SET NULL`); `UNIQUE (source_node, destination, path_hash)` | **Landed M5** |
 | `mtr_hop_enrichment`   | TTL cache keyed by address: `ip` PK, `rdns`, `asn`, `provider`, `geo` JSONB, `resolved_at` | **Landed M5** |
 | `annotations`          | Operator notes: `id`, `start_at`, `end_at` (NULL = instant mark), `scope` (`''` = global), `text`, `created_by`, `created_at` | **Landed M5** |
-| `k8s_events`           | Filtered, retained copy of relevant K8s events (node/pod in scope) for post-hoc investigation (K8s only keeps ~1h) | pending (M6) |
+| `k8s_events`           | Filtered copy of K8s events for post-hoc investigation (K8s keeps ~1h): `uid`, `resource_ver`, `event_time`, `kind` (`Node`/`Pod`), `name`, `namespace` (`''` for node events), `reason`, `type` (`Normal`/`Warning`), `message`, `count`; `UNIQUE (uid, resource_ver)` | **Landed M6** |
 | `alert_rules`          | Builder model (JSONB) + rendered PromQL + sync status | pending (M7) |
-| `incidents`            | Investigation sessions: scope, ranges, pinned findings, notes, status | pending (M6) |
-| `maintenance_windows`  | Scope + schedule; UI suppression + (optional) AM silences | pending (M6) |
-| `webhooks`             | Outbound endpoints + event filters + secret | pending (M6) |
+| `incidents`            | Investigation sessions: `id` UUID, `title`, `scope` (`''` = global), `from_at`, `to_at` (NULL = open-ended), `status` (`open`/`resolved`), `notes`, `pinned` JSONB array, `created_by`, `created_at`, `resolved_at` | **Landed M6** |
+| `maintenance_windows`  | Declared change windows: `id` UUID, `scope`, `start_at`, `end_at`, `reason`, `created_by`, `created_at`; `CHECK (end_at > start_at)` | **Landed M6** |
+| `webhooks`             | Outbound endpoints: `id` UUID, `name` (UNIQUE), `url`, `events` TEXT[], `secret_enc` BYTEA, `enabled`, `last_status`, `last_attempt`, `failures`, `created_at` | **Landed M6** |
 | `layouts`              | Saved topology layouts (per-user/global), pinned pairs | pending |
 | `settings`             | Versioned Console settings (retention, defaults) | pending |
 
@@ -98,6 +98,43 @@ inherits exactly the hub's dedupe guarantee, no better, no worse.
   `scope = ''` is the global scope and is a real value, matched exactly. Neither
   `scope` nor `text` is ever exported as a Prometheus label.
 
+**The four M6 tables, as built** (`migrations/00006_investigation.sql`):
+
+- `k8s_events` is deduped on **`(uid, resource_ver)`**, not on `uid` alone: the
+  apiserver bumps `resourceVersion` every time an event's `count` or
+  `lastTimestamp` changes, so keying on the UID would either drop the update or
+  need a read-modify-write. `ON CONFLICT DO NOTHING` on that pair makes a
+  relist — which the reader performs every `resyncInterval` by design — cost one
+  rejected INSERT and a `duplicate` counter increment, never a duplicate row.
+  `kind` is a **closed** set (`Node`/`Pod`); `type` and `reason` are only
+  length-bounded, because core/v1 may add values and rejecting a row for an
+  unknown reason would silently lose the very event an operator is looking for.
+  A row whose `event_time` is entirely zero is **rejected**, never re-stamped
+  with `now()`: fabricating a timestamp puts a wrong point on the timeline.
+- `incidents.to_at` NULL means an **open-ended range** — the opposite of
+  `annotations.end_at`, where NULL means an instant. The two conventions live in
+  the same schema because they answer different questions, and both list queries
+  say so in their `coalesce`: incidents use `coalesce(to_at, 'infinity')`.
+  `pinned` is a JSONB array of typed refs whose `kind` is the closed vocabulary
+  `event | audit | annotation | snapshot | run | k8s` (`store/incidents.go`) —
+  an unknown kind is rejected at write time rather than stored as a dangling
+  reference nothing can resolve. `notes` is bounded at 16 KiB, `title` at 255.
+  Updates are deliberately **narrow** (status, notes, pinned), which is what
+  makes the API's `PATCH` exception honest.
+- `maintenance_windows` has a real `CHECK (end_at > start_at)` — the only M6
+  table with a database-level invariant, because a zero-length or inverted
+  window is meaningless rather than merely unusual. `scope = ''` is the global
+  scope, matched exactly, the same convention `annotations` uses.
+- `webhooks.secret_enc` is **opaque BYTEA to the store**: the AES-GCM
+  nonce‖ciphertext is produced and opened by `internal/console/webhooks`, and no
+  query, index or constraint looks inside it. `name` is UNIQUE over a restricted
+  charset (lowercase alphanumerics and hyphens, ≤64), `url` ≤2048, and `events`
+  is a `TEXT[]` over the closed set
+  `incident.created|incident.resolved|incident.reopened` with duplicates
+  rejected. `last_status`/`last_attempt`/`failures` are the delivery ledger:
+  one row per ENDPOINT, updated per delivery — there is no delivery-log table
+  (MILESTONES.md "Deferred out of M6").
+
 **Time Machine's topology fold** reads `topology_events` and nothing else
 (Decision 6): `GET /api/v1/topology?at=` replays `topology_changed` rows in
 `(event_time, id)` order up to the instant asked about. What that fold can
@@ -121,6 +158,21 @@ still takes is current however long ago it was first observed, and a mark ages
 out with the data it annotates rather than with when it was typed. The three
 are new **closed label values** on
 `kconmon_ng_console_retention_deleted_total{table}` (docs/metrics.md).
+
+**M6 added three more sweeps and deliberately not a fourth** — `k8s_events` by
+`event_time` (a capture ages out with the window it describes, exactly as
+`topology_events` does), `incidents` by `resolved_at`, `maintenance_windows` by
+`end_at`. Pruning incidents on `resolved_at` means **an open incident is never
+pruned**, and that falls out of SQL rather than out of a special case: an open
+incident has a NULL `resolved_at`, and `NULL < cutoff` is NULL, never true, so
+no cutoff can select one. An investigation nobody closed is unfinished work,
+not stale data, and a retention sweep that deleted it would be closing it on
+the operator's behalf. **`webhooks` is not a retention table at all** (pinned by
+`TestWebhooksAreNotARetentionTable`): a webhook row is configuration, not
+observation — it does not accumulate with time, and its only time column
+records when the endpoint was set up rather than when it last mattered. Ageing
+rows out of it would silently switch off notifications for a still-wanted
+endpoint, and a retention policy is not a deconfiguration policy.
 `check_results` has no sweep of its own — `ON DELETE CASCADE` on
 `check_results.run_id` makes deleting the run row enough. Partition
 `check_results` by month if volume warrants it — still not done

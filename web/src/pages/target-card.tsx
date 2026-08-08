@@ -3,6 +3,8 @@ import { useQuery } from "@tanstack/react-query";
 import { SearchX } from "lucide-react";
 import { AnnotationBar, useAnnotations } from "@/components/annotations";
 import { EChart } from "@/components/echart";
+import { InvestigateLink, RelatedIncidents } from "@/components/investigate-entry";
+import { MaintenanceBar, useMaintenance } from "@/components/maintenance";
 import { PageShell } from "@/components/page-shell";
 import { RecentChanges } from "@/components/recent-changes";
 import { useTheme } from "@/components/theme-provider";
@@ -14,6 +16,7 @@ import { useAuth } from "@/hooks/use-auth";
 import { useDatabaseAvailable } from "@/hooks/use-capabilities";
 import { ApiError, getConfig, getRun, getRuns, getTarget, listChecks, listSchedules, promqlQuery, promqlQueryRange } from "@/lib/api";
 import { toSeriesOption, type CuratedChart } from "@/lib/curated-metrics";
+import type { InvestigationScope } from "@/lib/investigation-sources";
 import { useTimeContext } from "@/lib/timemachine";
 import type { CheckDefinition, PromResult, RunDetail, Schedule, Target } from "@/lib/types";
 // fmtIntervalNs is imported rather than re-derived so a schedule's cadence
@@ -353,6 +356,15 @@ function HistoryTab({ targetName, promConfigured, promResolved }: { targetName: 
      The annotations do not depend on Prometheus, so unlike the chart above they
      are fetched even when this replica has no Prometheus at all. */
   const { annotations, error: annotationsError, refresh } = useAnnotations(targetName, HISTORY_RANGE_SECONDS);
+  /* The declared change windows over the same hour and the same scope (M6 Task
+     9), and for the same reason the annotations are fetched here: a provider's
+     maintenance on this target does not depend on Prometheus, so the bands are
+     read even where the chart above cannot be. */
+  const {
+    windows,
+    error: maintenanceError,
+    refresh: refreshMaintenance,
+  } = useMaintenance(targetName, HISTORY_RANGE_SECONDS);
   const chart = useMemo<CuratedChart>(
     () => ({
       id: "target-duration",
@@ -420,13 +432,25 @@ function HistoryTab({ targetName, promConfigured, promResolved }: { targetName: 
         ) : null}
 
         {option && !empty && !queryError ? (
-          <EChart option={option} annotations={annotations} dark={theme === "dark"} className="mt-3 h-64 w-full" />
+          <EChart
+            option={option}
+            annotations={annotations}
+            maintenance={windows}
+            dark={theme === "dark"}
+            className="mt-3 h-64 w-full"
+          />
         ) : null}
         <AnnotationBar
           scope={targetName}
           annotations={annotations}
           error={annotationsError}
           onChanged={() => void refresh()}
+        />
+        <MaintenanceBar
+          scope={targetName}
+          windows={windows}
+          error={maintenanceError}
+          onChanged={() => void refreshMaintenance()}
         />
       </section>
     </Card>
@@ -704,6 +728,8 @@ export function TargetCardPage() {
     );
   }
 
+  const investigationScope: InvestigationScope = { kind: "target", a: target.name, b: "" };
+
   return (
     <PageShell
       title={target.name}
@@ -720,6 +746,11 @@ export function TargetCardPage() {
           <Badge variant={TIER_VARIANT[health.tier]} dot>
             {TIER_LABEL[health.tier]}
           </Badge>
+          {/* The entry point into Investigation Mode (plan Decision 11). The
+              scope carries the target's NAME, not its id: that is the label
+              value the external metric family is selected by, and the string
+              an incident's scope is matched against. */}
+          <InvestigateLink scope={investigationScope} />
         </>
       }
     >
@@ -733,6 +764,7 @@ export function TargetCardPage() {
           {tab === "runs" ? <RunsTab targetName={target.name} /> : null}
         </div>
         <div className="flex flex-col gap-2">
+          <RelatedIncidents scope={investigationScope} />
           <RecentChanges scope={target.name} />
           {/* Honest about what this rail can and cannot show today: every event
               a probe of this target produces is scoped per SOURCE node

@@ -8,13 +8,14 @@ import (
 	"math/rand/v2"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/EsDmitrii/kconmon-ng/internal/console/metrics"
 	"github.com/EsDmitrii/kconmon-ng/internal/console/store/gen"
 )
 
-// The RetentionDeleted "table" labels for the six tables this sweep prunes.
+// The RetentionDeleted "table" labels for the nine tables this sweep prunes.
 // This is a closed set enforced only by this file's own usage. check_runs'
 // own results (check_results) never get a label or a deleteBatches call of
 // their own: ON DELETE CASCADE on check_results.run_id means deleting the run
@@ -31,6 +32,31 @@ import (
 //     re-derivable, so this sweep costs at most one lookup to be wrong.
 //   - annotations by start_at -- a mark ages out with the data it annotates,
 //     not with when it was typed.
+//
+// The three M6 tables follow the same rule:
+//
+//   - k8s_events by event_time -- a capture ages out with the window it
+//     describes, exactly as topology_events does.
+//   - incidents by resolved_at, WHICH MEANS AN OPEN INCIDENT IS NEVER PRUNED:
+//     an open incident has a NULL resolved_at, and `NULL < cutoff` is NULL,
+//     never true, so no cutoff can ever select one. That is deliberate. An
+//     investigation nobody closed is not stale data, it is unfinished work,
+//     and a retention sweep that deleted it would be closing it on the
+//     operator's behalf. An operator who wants an old open incident gone
+//     resolves it (and it then ages out normally) or deletes it.
+//   - maintenance_windows by end_at -- a window that is still open is still
+//     current however long ago it began.
+//
+// WEBHOOKS ARE NEVER SWEPT, and that is why there is no tableWebhooks label
+// and no fourth M6 entry in PruneOnce's list. A webhook row is CONFIGURATION,
+// not observation: it is what an operator typed, it does not accumulate with
+// time (one row per endpoint, bounded by how many were configured), and its
+// only time column, created_at, records when the endpoint was set up rather
+// than when it last mattered. Ageing rows out of it would silently switch off
+// notifications for a still-wanted endpoint whose only crime was being
+// configured before the retention horizon -- a retention policy is not a
+// deconfiguration policy. Endpoints leave this table exactly one way: an
+// operator deletes them.
 const (
 	tableTopologyEvents = "topology_events"
 	tableAuditLog       = "audit_log"
@@ -38,6 +64,9 @@ const (
 	tableMTRSnapshots   = "mtr_path_snapshots"
 	tableMTREnrichment  = "mtr_hop_enrichment"
 	tableAnnotations    = "annotations"
+	tableK8sEvents      = "k8s_events"
+	tableIncidents      = "incidents"
+	tableMaintenance    = "maintenance_windows"
 )
 
 // pruneInterval is the steady-state sweep cadence.
@@ -219,6 +248,39 @@ func (p *Pruner) PruneOnce(ctx context.Context) (map[string]int64, error) {
 				})
 			},
 		},
+		{
+			table: tableK8sEvents,
+			del: func(ctx context.Context, limit int32) (int64, error) {
+				return q.DeleteK8sEventsBefore(ctx, gen.DeleteK8sEventsBeforeParams{
+					EventTime: cutoff,
+					Limit:     limit,
+				})
+			},
+		},
+		{
+			// Open incidents are excluded by the query's own NULL semantics,
+			// not by anything here -- see the block comment on the table
+			// labels above, and the query's own comment.
+			table: tableIncidents,
+			del: func(ctx context.Context, limit int32) (int64, error) {
+				return q.DeleteIncidentsBefore(ctx, gen.DeleteIncidentsBeforeParams{
+					ResolvedAt: pgtype.Timestamptz{Time: cutoff, Valid: true},
+					Limit:      limit,
+				})
+			},
+		},
+		{
+			table: tableMaintenance,
+			del: func(ctx context.Context, limit int32) (int64, error) {
+				return q.DeleteMaintenanceWindowsBefore(ctx, gen.DeleteMaintenanceWindowsBeforeParams{
+					EndAt: cutoff,
+					Limit: limit,
+				})
+			},
+		},
+		// NO webhooks sweep. See the block comment on the table labels above:
+		// a webhook row is configuration, and retention is not a
+		// deconfiguration policy.
 	})
 }
 

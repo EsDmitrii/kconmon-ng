@@ -169,6 +169,48 @@ at zero would read as "working and finding nothing".
 values** in M5 — `mtr_path_snapshots`, `mtr_hop_enrichment`, `annotations` —
 alongside the existing `topology_events`, `audit_log` and `check_runs`.
 
+M6 additions:
+
+| Metric                                          | Type    | Labels    | Description                                                                 |
+| ----------------------------------------------- | ------- | --------- | --------------------------------------------------------------------------- |
+| `kconmon_ng_console_k8s_events_total`           | counter | `result`  | Kubernetes events the reader decided about: `stored`, `duplicate`, `filtered`, `error` |
+| `kconmon_ng_console_webhook_deliveries_total`   | counter | `result`  | Webhook deliveries reaching a terminal decision: `ok`, `failed`, `filtered`  |
+
+`k8s_events_total{result="duplicate"}` is the **normal** outcome of a relist,
+not a failure: `kubernetesContext.resyncInterval` forces a periodic list, and
+every already-stored row it returns costs one rejected INSERT and one increment
+here. Alerting on it is alerting on the resync doing its job. `filtered` is the
+**fail-closed** drop — a node event with no topology to vouch for the node —
+and is the counter to watch if the timeline looks quiet: a `filtered` rate that
+tracks the total usually means `controller.url` is unset, not that the cluster
+is calm. Events for kinds the reader does not handle are skipped **uncounted**,
+deliberately, so `filtered` stays readable as the one thing it means.
+
+`webhook_deliveries_total` counts **one per DELIVERY, never per HTTP attempt**:
+a delivery that succeeds on the third rung of the 0s/30s/5m ladder is one `ok`,
+not two `failed` and an `ok`. That is what makes `failed/(ok+failed)` an
+endpoint-health ratio rather than a retry-count artefact. `filtered` is the
+steady state of an endpoint that does not subscribe to the event — the
+equivalent of `repeat` above, and what makes `failed` meaningful — and a
+**disabled** endpoint is not counted at all, since a switched-off endpoint that
+kept incrementing a series would read as a working one.
+
+`kconmon_ng_console_retention_deleted_total{table}` gained **three more closed
+label values** in M6 — `k8s_events`, `incidents`, `maintenance_windows` —
+bringing the set to nine. There is deliberately **no `webhooks` value**: webhook
+rows are configuration, not observation, and are never swept (DATA.md §5.2).
+
+**No M6 metric carries a node name, a pod name, a namespace, an event reason or
+message, a webhook name, a webhook URL, an endpoint secret, or an incident's
+title, scope or notes.** Both counters are `{result}`-only, and that is the
+whole label set. The temptation is real in both places — a
+`{node}`/`{reason}` breakdown of cluster events, a `{webhook}` breakdown of
+deliveries — and both were rejected: the first is an unbounded cardinality bomb
+fed by whatever the cluster decides to emit, and the second puts an
+operator-typed name (and, one refactor later, a URL) into a series that lands in
+long-term storage. Per-endpoint outcome lives on the `webhooks` row, which is
+where a bounded per-endpoint fact belongs.
+
 **No M5 metric carries an IP, a hostname, an ASN, an organization, a country, a
 path hash, a node name, a destination or an annotation's text.** Enrichment is
 where that rule is easiest to break, since every one of those values is sitting

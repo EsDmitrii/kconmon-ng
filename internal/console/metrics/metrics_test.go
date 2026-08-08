@@ -117,10 +117,14 @@ func TestNewRegistersStoreMetrics(t *testing.T) {
 		m.EventsPersisted.WithLabelValues(result).Inc()
 	}
 	// Every RetentionDeleted table label, exercised rather than sampled: the
-	// set is closed (store/prune.go owns it) and M5 widened it by three.
+	// set is closed (store/prune.go owns it), M5 widened it by three and M6 by
+	// three more. "webhooks" is ABSENT on purpose -- that table is
+	// configuration and is never swept, so it has no series here either; see
+	// prune.go's table-label comment.
 	for _, table := range []string{
 		"topology_events", "audit_log", "check_runs",
 		"mtr_path_snapshots", "mtr_hop_enrichment", "annotations",
+		"k8s_events", "incidents", "maintenance_windows",
 	} {
 		m.RetentionDeleted.WithLabelValues(table).Add(5)
 	}
@@ -525,5 +529,106 @@ func TestNewRegistersEnrichmentMetrics(t *testing.T) {
 		if !present[name] {
 			t.Errorf("metric %q was not registered", name)
 		}
+	}
+}
+
+// TestNewRegistersK8sEventsMetric pins M6 Task 2's counter: exactly one label,
+// result, over the CLOSED set stored|duplicate|filtered|error. The label VALUES
+// are pinned, not just the name, because the tempting widening here -- a node
+// or pod name, a reason, an event type -- is unbounded AND attacker-influenced
+// (anything in the cluster can emit an event naming any object), which makes it
+// the single easiest cardinality bomb in the console.
+func TestNewRegistersK8sEventsMetric(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	m := New("kconmon_ng", reg)
+
+	for _, result := range []string{"stored", "duplicate", "filtered", "error"} {
+		m.K8sEvents.WithLabelValues(result).Inc()
+	}
+
+	if got := testutil.ToFloat64(m.K8sEvents.WithLabelValues("filtered")); got != 1 {
+		t.Errorf("K8sEvents(filtered) = %v, want 1", got)
+	}
+
+	families, err := reg.Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	present := make(map[string]bool, len(families))
+	for _, mf := range families {
+		present[mf.GetName()] = true
+		if !strings.HasPrefix(mf.GetName(), "kconmon_ng_console_") {
+			t.Errorf("metric %q not in kconmon_ng_console_ namespace", mf.GetName())
+		}
+		if mf.GetName() != "kconmon_ng_console_k8s_events_total" {
+			continue
+		}
+		for _, metric := range mf.GetMetric() {
+			labels := metric.GetLabel()
+			if len(labels) != 1 || labels[0].GetName() != "result" {
+				t.Errorf("%s has labels %v, want exactly one {result}", mf.GetName(), labels)
+				continue
+			}
+			switch labels[0].GetValue() {
+			case "stored", "duplicate", "filtered", "error":
+			default:
+				t.Errorf("%s has result=%q, outside the closed set stored|duplicate|filtered|error",
+					mf.GetName(), labels[0].GetValue())
+			}
+		}
+	}
+	if !present["kconmon_ng_console_k8s_events_total"] {
+		t.Error("metric \"kconmon_ng_console_k8s_events_total\" was not registered")
+	}
+}
+
+// TestNewRegistersWebhookDeliveryMetric pins M6 Task 5's counter: exactly one
+// label, result, over the CLOSED set ok|failed|filtered. The label VALUES are
+// pinned, not just the name, because every tempting widening here is a leak as
+// well as a cardinality bomb -- an endpoint URL, host or name is
+// operator-supplied and names internal infrastructure, and an incident id is
+// unbounded. One increment per DELIVERY, never per HTTP attempt, so a retried
+// delivery that eventually succeeds is exactly one ok.
+func TestNewRegistersWebhookDeliveryMetric(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	m := New("kconmon_ng", reg)
+
+	for _, result := range []string{"ok", "failed", "filtered"} {
+		m.WebhookDeliveries.WithLabelValues(result).Inc()
+	}
+
+	if got := testutil.ToFloat64(m.WebhookDeliveries.WithLabelValues("filtered")); got != 1 {
+		t.Errorf("WebhookDeliveries(filtered) = %v, want 1", got)
+	}
+
+	families, err := reg.Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	present := make(map[string]bool, len(families))
+	for _, mf := range families {
+		present[mf.GetName()] = true
+		if !strings.HasPrefix(mf.GetName(), "kconmon_ng_console_") {
+			t.Errorf("metric %q not in kconmon_ng_console_ namespace", mf.GetName())
+		}
+		if mf.GetName() != "kconmon_ng_console_webhook_deliveries_total" {
+			continue
+		}
+		for _, metric := range mf.GetMetric() {
+			labels := metric.GetLabel()
+			if len(labels) != 1 || labels[0].GetName() != "result" {
+				t.Errorf("%s has labels %v, want exactly one {result}", mf.GetName(), labels)
+				continue
+			}
+			switch labels[0].GetValue() {
+			case "ok", "failed", "filtered":
+			default:
+				t.Errorf("%s has result=%q, outside the closed set ok|failed|filtered",
+					mf.GetName(), labels[0].GetValue())
+			}
+		}
+	}
+	if !present["kconmon_ng_console_webhook_deliveries_total"] {
+		t.Error("metric \"kconmon_ng_console_webhook_deliveries_total\" was not registered")
 	}
 }

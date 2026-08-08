@@ -1,6 +1,7 @@
 import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { AnnotationBar, useAnnotations } from "@/components/annotations";
+import { InvestigateLink, RelatedIncidents } from "@/components/investigate-entry";
 import { PageShell } from "@/components/page-shell";
 import { RecentChanges } from "@/components/recent-changes";
 import { Badge, type BadgeProps } from "@/components/ui/badge";
@@ -10,6 +11,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { useMatrix } from "@/hooks/use-matrix";
 import { useTopology } from "@/hooks/use-topology";
 import { getRun, getRuns } from "@/lib/api";
+import type { InvestigationScope } from "@/lib/investigation-sources";
 import { useTimeContext } from "@/lib/timemachine";
 import { PROTOCOLS, type MatrixCell, type Protocol, type RunDetail } from "@/lib/types";
 import { cn } from "@/lib/utils";
@@ -360,6 +362,7 @@ export function NodeCardPage() {
   const cells = matrix.data?.cells ?? [];
   const health = nodeHealth(node?.ready, cells, nodeName);
   const loadingIdentity = (topo.isLoading && !topo.data) || (matrix.isLoading && !matrix.data);
+  const investigationScope: InvestigationScope = { kind: "node", a: nodeName, b: "" };
 
   return (
     <PageShell
@@ -392,6 +395,10 @@ export function NodeCardPage() {
           <Badge variant={TIER_VARIANT[health.tier]} dot>
             {TIER_LABEL[health.tier]}
           </Badge>
+          {/* The entry point into Investigation Mode (plan Decision 11): the
+              URL is the whole contract, built by the one helper the matrix and
+              the other two cards also use. */}
+          <InvestigateLink scope={investigationScope} />
         </>
       }
     >
@@ -437,6 +444,7 @@ export function NodeCardPage() {
             )}
           </div>
           <div className="flex flex-col gap-5">
+            <RelatedIncidents scope={investigationScope} />
             <RecentChanges scope={nodeName} />
             <NodeAnnotations nodeName={nodeName} />
           </div>

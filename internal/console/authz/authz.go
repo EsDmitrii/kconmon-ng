@@ -46,6 +46,21 @@ const (
 	PermMTRRead          Permission = "mtr:read"
 	PermAnnotationsRead  Permission = "annotations:read"
 	PermAnnotationsWrite Permission = "annotations:write"
+
+	// M6 (Investigation + incidents). incidents/maintenance follow the M5
+	// telemetry-vs-statement split (Plan Decision 8): reading what happened
+	// -- an incident's record, an active maintenance window -- is context
+	// every role needs; writing one is an operator statement. webhooks are
+	// CREDENTIAL-ADJACENT (each endpoint carries an HMAC secret), so they
+	// take the rbac:manage/tokens:manage shape instead: one combined manage
+	// permission, held by admin alone via AllPermissions. K8s events carry
+	// no permission of their own -- they are events, and events:read
+	// already answers who may read the fleet's history.
+	PermIncidentsRead    Permission = "incidents:read"
+	PermIncidentsWrite   Permission = "incidents:write"
+	PermMaintenanceRead  Permission = "maintenance:read"
+	PermMaintenanceWrite Permission = "maintenance:write"
+	PermWebhooksManage   Permission = "webhooks:manage"
 )
 
 // AllPermissions is every permission this build knows, in a stable order.
@@ -71,6 +86,11 @@ var AllPermissions = []Permission{
 	PermMTRRead,
 	PermAnnotationsRead,
 	PermAnnotationsWrite,
+	PermIncidentsRead,
+	PermIncidentsWrite,
+	PermMaintenanceRead,
+	PermMaintenanceWrite,
+	PermWebhooksManage,
 }
 
 // SubjectKind is how a request was authenticated.

@@ -1,8 +1,9 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { resetWsClient } from "@/hooks/use-ws-topic";
 import { FakeSocket } from "@/lib/fake-websocket";
+import { parseInvestigationParams } from "@/lib/investigation-sources";
 import { NodeCardPage, nodeHealth, nodeNameFromPath } from "./node-card";
 
 const json = (body: unknown, init?: ResponseInit) =>
@@ -38,14 +39,23 @@ const matrixBody = {
   timestamp: "t",
 };
 
-function renderPage(pathname = "/nodes/node-a", opts: { runs?: unknown[] } = {}) {
+function renderPage(
+  pathname = "/nodes/node-a",
+  opts: { runs?: unknown[]; permissions?: string[]; incidents?: unknown[] } = {},
+) {
   window.history.pushState({}, "", pathname);
   const fetchMock = vi.fn((url: string) => {
     const href = String(url);
     if (href.includes("/api/v1/version")) return Promise.resolve(json({ version: "1.6.0", commit: "x", capabilities: [] }));
     if (href.includes("/api/v1/config")) return Promise.resolve(json(configBody()));
+    if (href.includes("/api/v1/auth/me")) {
+      return Promise.resolve(
+        json({ subject: { kind: "user", id: "u1", displayName: "Ada", groups: [], roles: [] }, permissions: opts.permissions ?? [] }),
+      );
+    }
     if (href.includes("/api/v1/topology")) return Promise.resolve(json(topologyBody));
     if (href.includes("/api/v1/matrix")) return Promise.resolve(json(matrixBody));
+    if (href.startsWith("/api/v1/incidents")) return Promise.resolve(json({ incidents: opts.incidents ?? [], nextCursor: "" }));
     if (href.startsWith("/api/v1/events")) return Promise.resolve(json({ events: [], nextCursor: "" }));
     if (href.startsWith("/api/v1/runs")) return Promise.resolve(json({ runs: opts.runs ?? [], nextCursor: "" }));
     return Promise.resolve(json({}));
@@ -137,5 +147,71 @@ describe("NodeCardPage", () => {
     const call = fetchMock.mock.calls.find((c) => String(c[0]).startsWith("/api/v1/events"));
     const url = new URL(String(call?.[0]), "http://localhost");
     expect(url.searchParams.get("scope")).toBe("node-a");
+  });
+});
+
+/* ── M6 Task 8: the Investigate entry point + the related-incidents rail ── */
+
+const nodeIncident = (over: Record<string, unknown> = {}) => ({
+  id: "inc-1",
+  title: "node-a keeps flapping",
+  scope: "node-a",
+  fromAt: "2026-01-01T00:00:00Z",
+  status: "open",
+  notes: "",
+  pinned: [],
+  createdBy: "user:ada",
+  createdAt: "2026-01-01T00:00:00Z",
+  ...over,
+});
+
+describe("NodeCardPage — Investigate entry point", () => {
+  it("links to an investigation of THIS node that parseInvestigationParams reads back", async () => {
+    renderPage("/nodes/node-a");
+    const link = await screen.findByRole("link", { name: "Investigate" });
+    const href = link.getAttribute("href") ?? "";
+    expect(href.startsWith("/investigate?")).toBe(true);
+
+    const p = parseInvestigationParams(href.slice(href.indexOf("?")), new Date());
+    expect(p.kind).toBe("node");
+    expect(p.a).toBe("node-a");
+    expect(p.to.getTime() - p.from.getTime()).toBe(60 * 60 * 1000);
+  });
+
+  it("URL-encodes a node name that needs it", async () => {
+    const name = "ns/pod a";
+    renderPage(`/nodes/${encodeURIComponent(name)}`);
+    const links = await screen.findAllByRole("link", { name: "Investigate" });
+    const href = links[0].getAttribute("href") ?? "";
+    expect(parseInvestigationParams(href.slice(href.indexOf("?")), new Date()).a).toBe(name);
+  });
+});
+
+describe("NodeCardPage — open incidents rail", () => {
+  it("shows only the incidents whose scope IS this node", async () => {
+    renderPage("/nodes/node-a", {
+      permissions: ["incidents:read"],
+      incidents: [nodeIncident(), nodeIncident({ id: "inc-2", title: "somewhere else", scope: "node-b" })],
+    });
+
+    const rail = await screen.findByRole("complementary", { name: "Open incidents" });
+    const rows = await within(rail).findAllByTestId("related-incident");
+    expect(rows).toHaveLength(1);
+    expect(within(rows[0]).getByRole("link", { name: "node-a keeps flapping" }).getAttribute("href")).toBe(
+      "/investigate?incident=inc-1",
+    );
+  });
+
+  it("without incidents:read: a muted line and ZERO requests", async () => {
+    const { fetchMock } = renderPage("/nodes/node-a", { permissions: [] });
+
+    expect(await screen.findByText(/incidents need incidents:read/i)).toBeInTheDocument();
+    await waitFor(() => expect(fetchMock.mock.calls.some((c) => String(c[0]).includes("/api/v1/matrix"))).toBe(true));
+    expect(fetchMock.mock.calls.some((c) => String(c[0]).startsWith("/api/v1/incidents"))).toBe(false);
+  });
+
+  it("says so when no open incident names this node", async () => {
+    renderPage("/nodes/node-a", { permissions: ["incidents:read"], incidents: [nodeIncident({ scope: "node-b" })] });
+    expect(await screen.findByText(/no open incident names this object/i)).toBeInTheDocument();
   });
 });

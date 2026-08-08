@@ -1889,6 +1889,834 @@ func TestConsoleTopologyAt(t *testing.T) {
 	}
 }
 
+// incident is the subset of the Incident schema these tests assert on.
+// ResolvedAt is a POINTER and is deliberately not tagged omitempty here: the
+// whole resolve/reopen assertion below is "is this field null or not", and a
+// value type could not tell an absent resolvedAt from the zero time.
+type incident struct {
+	ID         string          `json:"id"`
+	Title      string          `json:"title"`
+	Scope      string          `json:"scope"`
+	FromAt     time.Time       `json:"fromAt"`
+	Status     string          `json:"status"`
+	Notes      string          `json:"notes"`
+	Pinned     json.RawMessage `json:"pinned"`
+	CreatedBy  string          `json:"createdBy"`
+	ResolvedAt *time.Time      `json:"resolvedAt"`
+}
+
+// pinnedRef is one entry of an incident's pinned list.
+type pinnedRef struct {
+	Kind string `json:"kind"`
+	ID   string `json:"id"`
+	Note string `json:"note"`
+}
+
+// listIncidents reads one page with the given query, built by the caller so a
+// test can express ?status= (open|resolved|absent) without this helper
+// growing a parameter per filter.
+func listIncidents(t *testing.T, base string, query url.Values) []incident {
+	t.Helper()
+	status, _, data := mustRequest(t, http.MethodGet, base+"/api/v1/incidents?"+query.Encode(), nil)
+	if status != http.StatusOK {
+		t.Fatalf("expected GET /api/v1/incidents?%s 200, got %d: %s", query.Encode(), status, data)
+	}
+	var page struct {
+		Incidents []incident `json:"incidents"`
+	}
+	decodeJSON(t, "incidents list", data, &page)
+	return page.Incidents
+}
+
+// containsIncident reports whether a page carries the given id.
+func containsIncident(page []incident, id string) bool {
+	for i := range page {
+		if page[i].ID == id {
+			return true
+		}
+	}
+	return false
+}
+
+// patchIncident PATCHes one incident and returns the row the SERVER answers
+// with -- never an echo of the request: a patch that names one field still
+// returns the whole row, and every assertion below is about what the other
+// fields did while that one changed.
+func patchIncident(t *testing.T, base, id, what string, body map[string]any) incident {
+	t.Helper()
+	status, _, data := mustRequest(t, http.MethodPatch, base+"/api/v1/incidents/"+id, body)
+	if status != http.StatusOK {
+		t.Fatalf("expected PATCH /api/v1/incidents/%s (%s) 200, got %d: %s", id, what, status, data)
+	}
+	var patched incident
+	decodeJSON(t, "patch-incident response ("+what+")", data, &patched)
+	return patched
+}
+
+// decodePinned reads an incident's pinned column as the typed list. The column
+// is json.RawMessage on the wire precisely because the console stores it
+// opaquely, so this is where a test states the shape it expects.
+func decodePinned(t *testing.T, raw json.RawMessage) []pinnedRef {
+	t.Helper()
+	if len(raw) == 0 {
+		t.Fatalf("expected pinned to be a JSON array, got an absent field")
+	}
+	var refs []pinnedRef
+	decodeJSON(t, "incident pinned", raw, &refs)
+	if refs == nil {
+		t.Fatalf("expected pinned to be a JSON array (possibly empty), got null: %s", raw)
+	}
+	return refs
+}
+
+// TestConsoleIncidentLifecycle walks one saved investigation from open to
+// resolved to reopened against the real console and PostgreSQL, and spends its
+// assertions on the two things the route's shape does not give away.
+//
+// First, resolvedAt is STATUS' WITNESS rather than a field of its own: the
+// store's invariant is that it is non-nil exactly when status is "resolved"
+// (store/incidents.go validateIncidentStatus), so a resolve must fill it, a
+// reopen must clear it, and a patch that touches neither must leave both
+// alone. A server that let the two drift would still answer 200 to every
+// request here.
+//
+// Second, pinned refs are validated for SHAPE, not for EXISTENCE. Verified in
+// store.ValidatePinned before this test was written: it checks the kind
+// against a closed vocabulary (event, audit, annotation, snapshot, run, k8s),
+// a non-empty bounded id and a bounded note, and never looks the id up. So the
+// ids below are deliberately synthetic -- pinning a real event id would make
+// this test depend on the events pipeline having produced one, which is a
+// different test's job (TestConsoleEvents), and would prove nothing extra.
+func TestConsoleIncidentLifecycle(t *testing.T) {
+	base := consoleBaseURL(t)
+
+	title := uniqueName("e2e-incident")
+	// A scope value, not a node that must exist: scope is a filter key matched
+	// exactly and is never resolved against the topology.
+	const scope = "e2e-node"
+	// Whole seconds: fromAt round-trips through RFC3339 on the way in.
+	from := time.Now().UTC().Add(-5 * time.Minute).Truncate(time.Second)
+
+	status, header, data := mustRequest(t, http.MethodPost, base+"/api/v1/incidents", map[string]any{
+		"title":  title,
+		"scope":  scope,
+		"fromAt": from.Format(time.RFC3339),
+		"notes":  "opened by " + title,
+	})
+	if status != http.StatusCreated {
+		t.Fatalf("expected POST /api/v1/incidents 201, got %d: %s", status, data)
+	}
+
+	var created incident
+	decodeJSON(t, "create-incident response", data, &created)
+	if created.ID == "" {
+		t.Fatalf("expected a non-empty incident id in the create response")
+	}
+	t.Cleanup(func() { deleteResource(t, base+"/api/v1/incidents/"+created.ID) })
+
+	if want := "/api/v1/incidents/" + created.ID; header.Get("Location") != want {
+		t.Errorf("expected Location %q on the 201 response, got %q", want, header.Get("Location"))
+	}
+	// An incident is ALWAYS created open with no resolvedAt, whatever the body
+	// asked for -- there is no status field on the create request at all.
+	if created.Status != "open" {
+		t.Errorf("expected a new incident to be open, got %q", created.Status)
+	}
+	if created.ResolvedAt != nil {
+		t.Errorf("expected a new incident to have no resolvedAt, got %s", created.ResolvedAt)
+	}
+	if created.Scope != scope {
+		t.Errorf("expected the stored scope to echo %q, got %q", scope, created.Scope)
+	}
+	if !created.FromAt.Equal(from) {
+		t.Errorf("expected fromAt to round-trip as %s, got %s", from, created.FromAt)
+	}
+	// createdBy is the SERVER's view of the subject and was never in the body.
+	if created.CreatedBy == "" {
+		t.Errorf("expected createdBy to be filled in by the server, got %q", created.CreatedBy)
+	}
+	// An omitted pinned is stored as the EMPTY LIST, never null: the UI
+	// iterates it without a nil check.
+	if refs := decodePinned(t, created.Pinned); len(refs) != 0 {
+		t.Errorf("expected a new incident to carry an empty pinned list, got %d entries: %s",
+			len(refs), created.Pinned)
+	}
+
+	getStatus, _, getData := mustRequest(t, http.MethodGet, base+"/api/v1/incidents/"+created.ID, nil)
+	if getStatus != http.StatusOK {
+		t.Fatalf("expected GET /api/v1/incidents/%s 200, got %d: %s", created.ID, getStatus, getData)
+	}
+	var fetched incident
+	decodeJSON(t, "get-incident response", getData, &fetched)
+	if fetched.ID != created.ID || fetched.Title != title || fetched.Status != "open" {
+		t.Errorf("expected GET to return the row just created (id %s, title %q, open), got %+v",
+			created.ID, title, fetched)
+	}
+
+	openQuery := url.Values{}
+	openQuery.Set("status", "open")
+	openQuery.Set("limit", "500")
+	resolvedQuery := url.Values{}
+	resolvedQuery.Set("status", "resolved")
+	resolvedQuery.Set("limit", "500")
+
+	if !containsIncident(listIncidents(t, base, openQuery), created.ID) {
+		t.Errorf("expected a just-opened incident %s in ?status=open", created.ID)
+	}
+
+	resolved := patchIncident(t, base, created.ID, "resolve", map[string]any{"status": "resolved"})
+	if resolved.Status != "resolved" {
+		t.Errorf("expected status resolved after the resolve patch, got %q", resolved.Status)
+	}
+	if resolved.ResolvedAt == nil {
+		t.Fatalf("expected resolvedAt to be set by the resolve patch, got null")
+	}
+	resolvedAt := *resolved.ResolvedAt
+
+	if !containsIncident(listIncidents(t, base, resolvedQuery), created.ID) {
+		t.Errorf("expected the resolved incident %s in ?status=resolved", created.ID)
+	}
+	if containsIncident(listIncidents(t, base, openQuery), created.ID) {
+		t.Errorf("expected the resolved incident %s to be gone from ?status=open", created.ID)
+	}
+
+	// Notes-only: the status side of the row must be untouched. This is the
+	// assertion that catches a patch handler which rebuilds the row from its
+	// request instead of updating the named field.
+	const notes = "notes-only patch, status must not move"
+	noted := patchIncident(t, base, created.ID, "notes only", map[string]any{"notes": notes})
+	if noted.Notes != notes {
+		t.Errorf("expected the notes patch to store %q, got %q", notes, noted.Notes)
+	}
+	if noted.Status != "resolved" {
+		t.Errorf("expected a notes-only patch to leave the status resolved, got %q", noted.Status)
+	}
+	if noted.ResolvedAt == nil || !noted.ResolvedAt.Equal(resolvedAt) {
+		t.Errorf("expected a notes-only patch to leave resolvedAt at %s, got %v", resolvedAt, noted.ResolvedAt)
+	}
+
+	reopened := patchIncident(t, base, created.ID, "reopen", map[string]any{"status": "open"})
+	if reopened.Status != "open" {
+		t.Errorf("expected status open after the reopen patch, got %q", reopened.Status)
+	}
+	if reopened.ResolvedAt != nil {
+		t.Errorf("expected the reopen patch to clear resolvedAt, got %s", reopened.ResolvedAt)
+	}
+	if reopened.Notes != notes {
+		t.Errorf("expected the reopen patch to leave the notes alone, got %q", reopened.Notes)
+	}
+
+	// Pinned is a WHOLESALE replacement, not a merge: two entries in, two
+	// entries out, and the one-entry patch below replaces both rather than
+	// removing one. Both kinds are in ValidatePinned's vocabulary and both ids
+	// are synthetic -- see the doc comment.
+	twoPins := []map[string]any{
+		{"kind": "event", "id": "424242", "note": "the event this investigation started from"},
+		{"kind": "run", "id": "00000000-0000-0000-0000-000000000001"},
+	}
+	withPins := patchIncident(t, base, created.ID, "pin two", map[string]any{"pinned": twoPins})
+	pins := decodePinned(t, withPins.Pinned)
+	if len(pins) != 2 {
+		t.Fatalf("expected two pinned refs after the wholesale patch, got %d: %s", len(pins), withPins.Pinned)
+	}
+	if pins[0].Kind != "event" || pins[0].ID != "424242" || pins[0].Note == "" {
+		t.Errorf("expected the first pin to round-trip as {event,424242,<note>}, got %+v", pins[0])
+	}
+	if pins[1].Kind != "run" || pins[1].ID != "00000000-0000-0000-0000-000000000001" {
+		t.Errorf("expected the second pin to round-trip as the run ref that was sent, got %+v", pins[1])
+	}
+	if withPins.Status != "open" || withPins.Notes != notes {
+		t.Errorf("expected a pinned-only patch to leave status and notes alone, got status %q notes %q",
+			withPins.Status, withPins.Notes)
+	}
+
+	onePin := []map[string]any{{"kind": "k8s", "id": "77", "note": "replaces both, does not merge"}}
+	replaced := patchIncident(t, base, created.ID, "pin one", map[string]any{"pinned": onePin})
+	if pins = decodePinned(t, replaced.Pinned); len(pins) != 1 || pins[0].Kind != "k8s" {
+		t.Errorf("expected the second pinned patch to REPLACE the list with its single k8s ref, got %s",
+			replaced.Pinned)
+	}
+
+	// Delete, then delete again: an investigation that is not there is 404,
+	// never a second success -- annotations' rule, and for the same reason.
+	delStatus, _, delData := mustRequest(t, http.MethodDelete, base+"/api/v1/incidents/"+created.ID, nil)
+	if delStatus != http.StatusNoContent {
+		t.Fatalf("expected DELETE /api/v1/incidents/%s 204, got %d: %s", created.ID, delStatus, delData)
+	}
+	goneStatus, _, goneData := mustRequest(t, http.MethodDelete, base+"/api/v1/incidents/"+created.ID, nil)
+	if goneStatus != http.StatusNotFound {
+		t.Errorf("expected a second DELETE of incident %s to be 404, got %d: %s", created.ID, goneStatus, goneData)
+	}
+}
+
+// maintenanceWindow is the subset of the MaintenanceWindow schema this test
+// asserts on. Both ends are VALUES, not pointers: unlike an annotation, a
+// window with no end is not a window at all (the table's own CHECK).
+type maintenanceWindow struct {
+	ID        string    `json:"id"`
+	Scope     string    `json:"scope"`
+	StartAt   time.Time `json:"startAt"`
+	EndAt     time.Time `json:"endAt"`
+	Reason    string    `json:"reason"`
+	CreatedBy string    `json:"createdBy"`
+}
+
+// listMaintenance reads one page bounded by from/to.
+func listMaintenance(t *testing.T, base string, query url.Values) []maintenanceWindow {
+	t.Helper()
+	status, _, data := mustRequest(t, http.MethodGet, base+"/api/v1/maintenance?"+query.Encode(), nil)
+	if status != http.StatusOK {
+		t.Fatalf("expected GET /api/v1/maintenance?%s 200, got %d: %s", query.Encode(), status, data)
+	}
+	var page struct {
+		Windows []maintenanceWindow `json:"windows"`
+	}
+	decodeJSON(t, "maintenance list", data, &page)
+	return page.Windows
+}
+
+// containsWindow reports whether a page carries the given id.
+func containsWindow(page []maintenanceWindow, id string) bool {
+	for i := range page {
+		if page[i].ID == id {
+			return true
+		}
+	}
+	return false
+}
+
+// TestConsoleMaintenanceWindows covers the declare/see/refuse/withdraw loop of
+// a maintenance window, and puts most of its weight on the ONE thing that
+// separates ?from/?to here from every other listing in this file: they bound a
+// window the row must OVERLAP, not one that must CONTAIN it. A half-hour
+// window that started five minutes ago overlaps a two-minute probe around
+// "now" while containing neither of its bounds, so a server that had
+// implemented containment would answer an empty page to exactly the question
+// an operator asks most ("is anything in maintenance right now?").
+//
+// The scope is global (""), which is a real value here rather than a missing
+// filter -- the same three-state rule TestConsoleAnnotations exercises for
+// ?scope=, restated on the write side.
+func TestConsoleMaintenanceWindows(t *testing.T) {
+	base := consoleBaseURL(t)
+
+	reason := uniqueName("e2e-maintenance")
+	start := time.Now().UTC().Add(-5 * time.Minute).Truncate(time.Second)
+	end := start.Add(35 * time.Minute)
+
+	status, header, data := mustRequest(t, http.MethodPost, base+"/api/v1/maintenance", map[string]any{
+		"scope":   "",
+		"startAt": start.Format(time.RFC3339),
+		"endAt":   end.Format(time.RFC3339),
+		"reason":  reason,
+	})
+	if status != http.StatusCreated {
+		t.Fatalf("expected POST /api/v1/maintenance 201, got %d: %s", status, data)
+	}
+
+	var created maintenanceWindow
+	decodeJSON(t, "create-maintenance response", data, &created)
+	if created.ID == "" {
+		t.Fatalf("expected a non-empty maintenance window id in the create response")
+	}
+	t.Cleanup(func() { deleteResource(t, base+"/api/v1/maintenance/"+created.ID) })
+
+	if want := "/api/v1/maintenance/" + created.ID; header.Get("Location") != want {
+		t.Errorf("expected Location %q on the 201 response, got %q", want, header.Get("Location"))
+	}
+	if created.Scope != "" {
+		t.Errorf("expected a global window to store the empty scope, got %q", created.Scope)
+	}
+	if !created.StartAt.Equal(start) || !created.EndAt.Equal(end) {
+		t.Errorf("expected the window to round-trip as [%s, %s], got [%s, %s]",
+			start, end, created.StartAt, created.EndAt)
+	}
+	if created.Reason != reason {
+		t.Errorf("expected the stored reason to echo %q, got %q", reason, created.Reason)
+	}
+	if created.CreatedBy == "" {
+		t.Errorf("expected createdBy to be filled in by the server, got %q", created.CreatedBy)
+	}
+
+	// A probe strictly INSIDE the window: it contains neither bound, so only
+	// an overlap test can match it.
+	now := time.Now().UTC()
+	overlap := url.Values{}
+	overlap.Set("from", now.Add(-time.Minute).Format(time.RFC3339))
+	overlap.Set("to", now.Add(time.Minute).Format(time.RFC3339))
+	overlap.Set("limit", "500")
+	if !containsWindow(listMaintenance(t, base, overlap), created.ID) {
+		t.Errorf("expected window %s (a half-hour window around now) to overlap a two-minute probe at now",
+			created.ID)
+	}
+
+	// A window an hour past the end: no overlap, so the row must not appear.
+	// Without this the assertion above would pass against a server that
+	// ignored from/to entirely.
+	disjoint := url.Values{}
+	disjoint.Set("from", end.Add(time.Hour).Format(time.RFC3339))
+	disjoint.Set("to", end.Add(2*time.Hour).Format(time.RFC3339))
+	disjoint.Set("limit", "500")
+	if containsWindow(listMaintenance(t, base, disjoint), created.ID) {
+		t.Errorf("expected window %s to be outside a probe an hour after it ends", created.ID)
+	}
+
+	// end == start and end < start are both refusals, and both are 422 rather
+	// than 400: the body is well-formed JSON whose VALUES break a rule.
+	for _, tc := range []struct {
+		name    string
+		startAt time.Time
+		endAt   time.Time
+	}{
+		{"end equal to start", start, start},
+		{"end before start", start, start.Add(-time.Minute)},
+	} {
+		badStatus, _, badData := mustRequest(t, http.MethodPost, base+"/api/v1/maintenance", map[string]any{
+			"startAt": tc.startAt.Format(time.RFC3339),
+			"endAt":   tc.endAt.Format(time.RFC3339),
+			"reason":  reason + "-invalid",
+		})
+		if badStatus != http.StatusUnprocessableEntity {
+			t.Errorf("expected POST /api/v1/maintenance with %s to be 422, got %d: %s",
+				tc.name, badStatus, badData)
+		}
+	}
+
+	delStatus, _, delData := mustRequest(t, http.MethodDelete, base+"/api/v1/maintenance/"+created.ID, nil)
+	if delStatus != http.StatusNoContent {
+		t.Fatalf("expected DELETE /api/v1/maintenance/%s 204, got %d: %s", created.ID, delStatus, delData)
+	}
+	goneStatus, _, goneData := mustRequest(t, http.MethodDelete, base+"/api/v1/maintenance/"+created.ID, nil)
+	if goneStatus != http.StatusNotFound {
+		t.Errorf("expected a second DELETE of window %s to be 404, got %d: %s", created.ID, goneStatus, goneData)
+	}
+	if containsWindow(listMaintenance(t, base, overlap), created.ID) {
+		t.Errorf("expected window %s to be gone from an overlapping listing after the delete", created.ID)
+	}
+}
+
+// unroutableWebhookURL is where every endpoint this file declares points: an
+// RFC 5737 TEST-NET-3 literal on the discard port. Same reasoning as
+// deniedTargetAddr -- an IP literal so no resolver can influence the outcome,
+// and reserved for documentation so it is unroutable from a CI runner
+// regardless. There is no in-cluster receiver to point at, and inventing one
+// would test a fixture; this tests the dispatcher.
+const unroutableWebhookURL = "http://203.0.113.9:9/hook"
+
+// e2eWebhookSecret is the plaintext HMAC signing secret the endpoints below
+// are created with. It is also the needle for the "no secret is ever served
+// back" scan, which is why it is a distinctive literal rather than a uuid.
+const e2eWebhookSecret = "e2e-webhook-signing-secret-do-not-echo"
+
+// webhookOutcomeBudget bounds the wait for a /test ping's outcome to land on
+// the endpoint row. The ceiling is one attempt: the dispatcher's per-attempt
+// timeout is 10s (webhooks/dispatcher.go attemptTimeout) plus a 5s store
+// write, and /test runs a SINGLE-attempt ladder. 90s is that with room for a
+// loaded runner, not a guess.
+const webhookOutcomeBudget = 90 * time.Second
+
+// webhookRow is one endpoint on the wire. There is no secret field because the
+// server has none -- hasSecret is all a reader ever learns.
+type webhookRow struct {
+	ID          string     `json:"id"`
+	Name        string     `json:"name"`
+	URL         string     `json:"url"`
+	Events      []string   `json:"events"`
+	Enabled     bool       `json:"enabled"`
+	HasSecret   bool       `json:"hasSecret"`
+	LastStatus  string     `json:"lastStatus"`
+	LastAttempt *time.Time `json:"lastAttempt"`
+	Failures    int32      `json:"failures"`
+}
+
+// createWebhook POSTs one endpoint, asserts the created-and-point-at-it
+// contract and registers its deletion. It returns the RAW body beside the
+// decoded row: the secret assertions are a string scan over exactly the bytes
+// a client receives, which no typed struct could make -- webhookRow has no
+// field for a secret, which is the point and also why it could never notice
+// one.
+//
+// A 503 here is the HARNESS, not the server: creating an endpoint is one of
+// the two routes that need the cipher, so an unconfigured encryption key takes
+// this whole test down with a message naming the value to set.
+func createWebhook(t *testing.T, base string, body map[string]any) (webhookRow, []byte) {
+	t.Helper()
+	status, header, data := mustRequest(t, http.MethodPost, base+"/api/v1/webhooks", body)
+	if status == http.StatusServiceUnavailable {
+		t.Fatalf("POST /api/v1/webhooks answered 503: this console has no webhook encryption key. "+
+			"e2e/testdata/console-values.yaml must set console.webhooks.encryptionKeySecret and the "+
+			"workflow must create that Secret before the install. Body: %s", data)
+	}
+	if status != http.StatusCreated {
+		t.Fatalf("expected POST /api/v1/webhooks 201, got %d: %s", status, data)
+	}
+
+	var created webhookRow
+	decodeJSON(t, "create-webhook response", data, &created)
+	if created.ID == "" {
+		t.Fatalf("expected a non-empty webhook id in the create response")
+	}
+	if want := "/api/v1/webhooks/" + created.ID; header.Get("Location") != want {
+		t.Errorf("expected Location %q on the 201 response, got %q", want, header.Get("Location"))
+	}
+
+	t.Cleanup(func() { deleteResource(t, base+"/api/v1/webhooks/"+created.ID) })
+	return created, data
+}
+
+// assertNoSecretServed is the whole write-only-secret contract in one place:
+// the body must not carry the plaintext that was sent, and must not carry a
+// "secret" key at all -- a null or empty one would still be a field the UI
+// could bind an input to.
+func assertNoSecretServed(t *testing.T, what string, body []byte) {
+	t.Helper()
+	if strings.Contains(string(body), e2eWebhookSecret) {
+		t.Errorf("%s served the plaintext webhook secret back: %s", what, body)
+	}
+	if strings.Contains(string(body), `"secret"`) {
+		t.Errorf(`%s carries a "secret" key; the webhook secret is write-only: %s`, what, body)
+	}
+}
+
+// webhookDeliveryCount reads one result-label sample off the console's own
+// delivery counter, answering 0 for a label a Prometheus CounterVec has not
+// created a child for yet: an absent series and a zero one mean the same thing
+// here, and only the DELTA is ever asserted on.
+func webhookDeliveryCount(t *testing.T, base, result string) float64 {
+	t.Helper()
+	status, _, data, err := request(t, http.MethodGet, base+"/metrics", nil)
+	if err != nil {
+		t.Logf("console metrics request failed (counted as 0): %v", err)
+		return 0
+	}
+	if status != http.StatusOK {
+		t.Logf("console metrics returned %d (counted as 0)", status)
+		return 0
+	}
+	samples := metricSamples(string(data), "kconmon_ng_console_webhook_deliveries_total",
+		map[string]string{"result": result})
+	if len(samples) == 0 {
+		return 0
+	}
+	return sampleValue(t, samples[0])
+}
+
+// TestConsoleWebhookDelivery proves the outbound dispatcher fires, signs,
+// attempts and records HONESTLY -- with no receiver anywhere in the cluster.
+// That constraint is the whole design of this test, and the split below is
+// forced by what internal/console/webhooks/dispatcher.go actually does:
+//
+//   - deliver() records EXACTLY ONE outcome per delivery, at the END of the
+//     ladder, never per attempt. A failing first attempt writes nothing.
+//   - Notify (the incident lifecycle path) runs retryLadder = {0, 30s, 5m}
+//     with +/-20% jitter, so its row lands four to six and a half MINUTES
+//     after the incident. Waiting that out in e2e is not an option.
+//   - DispatchTest (POST /{id}/test) runs singleAttempt = {0}: one POST, then
+//     record. Against an unroutable address that is one attemptTimeout (10s)
+//     and the row is there.
+//
+// So the OUTCOME assertions ride /test, which is the only path whose terminal
+// state is observable inside a test budget. The LIFECYCLE assertion cannot be
+// the same row, and it is not faked either: creating an incident is asserted
+// to (a) return its 201 well inside one attempt timeout, which is the
+// non-blocking contract -- a dispatcher that delivered inline would stall the
+// 201 for 10s against this dead endpoint -- and (b) advance
+// webhook_deliveries_total{result="filtered"}, which Notify increments
+// SYNCHRONOUSLY for an endpoint that does not subscribe to the event. That
+// counter moving is direct proof the incident create reached the dispatcher
+// and ran its event filter, with no HTTP and no ladder in the way.
+//
+// The endpoint that DOES subscribe to incident.created is declared anyway, so
+// a real ladder is enqueued against a real unreachable address. Its terminal
+// row is deliberately not waited for; the observed lastStatus is logged.
+func TestConsoleWebhookDelivery(t *testing.T) {
+	base := consoleBaseURL(t)
+
+	// probeHook subscribes to incident.resolved ONLY. Two things follow, both
+	// wanted: /test still pings it (the ping ignores the event filter by
+	// design, so an operator can test an endpoint they just narrowed), and the
+	// incident CREATE below cannot enqueue a five-and-a-half-minute ladder
+	// against it that would overwrite the row mid-assertion.
+	probeHook, probeBody := createWebhook(t, base, map[string]any{
+		"name":   uniqueName("e2e-hook-probe"),
+		"url":    unroutableWebhookURL,
+		"events": []string{"incident.resolved"},
+		"secret": e2eWebhookSecret,
+	})
+	assertNoSecretServed(t, "the create-webhook response", probeBody)
+	if !probeHook.HasSecret {
+		t.Errorf("expected hasSecret=true on an endpoint created with a secret, got false")
+	}
+	if !probeHook.Enabled {
+		t.Errorf("expected an omitted enabled to default to true, got false")
+	}
+	if probeHook.LastStatus != "" || probeHook.LastAttempt != nil || probeHook.Failures != 0 {
+		t.Errorf("expected a brand-new endpoint to carry no delivery history, got lastStatus=%q lastAttempt=%v failures=%d",
+			probeHook.LastStatus, probeHook.LastAttempt, probeHook.Failures)
+	}
+
+	// liveHook is the lifecycle subscriber: incident.created, so the incident
+	// below enqueues a REAL ladder against a REAL unreachable address.
+	liveHook, liveBody := createWebhook(t, base, map[string]any{
+		"name":   uniqueName("e2e-hook-live"),
+		"url":    unroutableWebhookURL,
+		"events": []string{"incident.created"},
+		"secret": e2eWebhookSecret,
+	})
+	assertNoSecretServed(t, "the create-webhook response", liveBody)
+
+	// --- The outcome, via the single-attempt /test ladder. ---
+	testStatus, _, testData := mustRequest(t, http.MethodPost,
+		base+"/api/v1/webhooks/"+probeHook.ID+"/test", nil)
+	if testStatus != http.StatusAccepted {
+		t.Fatalf("expected POST /api/v1/webhooks/%s/test 202 (enqueued, not delivered), got %d: %s",
+			probeHook.ID, testStatus, testData)
+	}
+
+	var outcome webhookRow
+	pollUntil(t, webhookOutcomeBudget, 2*time.Second,
+		"the /test ping's failed outcome to land on the endpoint row", func() bool {
+			pollStatus, _, pollData, err := request(t, http.MethodGet,
+				base+"/api/v1/webhooks/"+probeHook.ID, nil)
+			if err != nil {
+				t.Logf("webhook request failed (will retry): %v", err)
+				return false
+			}
+			if pollStatus != http.StatusOK {
+				t.Logf("webhook request returned %d (will retry)", pollStatus)
+				return false
+			}
+			var row webhookRow
+			if decodeErr := json.Unmarshal(pollData, &row); decodeErr != nil {
+				t.Logf("decode webhook response failed (will retry): %v", decodeErr)
+				return false
+			}
+			outcome = row
+			return strings.HasPrefix(row.LastStatus, "failed: ") && row.Failures >= 1
+		})
+
+	t.Logf("/test against %s recorded lastStatus=%q failures=%d",
+		unroutableWebhookURL, outcome.LastStatus, outcome.Failures)
+	if outcome.LastAttempt == nil {
+		t.Errorf("expected lastAttempt to be stamped alongside the failed outcome, got null")
+	}
+	// last_status is a CLASS, never an echo of what the far end said or of
+	// where it was: a column the UI renders must not be an input an endpoint
+	// the console does not control can write to.
+	if strings.Contains(outcome.LastStatus, "203.0.113.9") {
+		t.Errorf("expected lastStatus to be a failure CLASS carrying no destination, got %q", outcome.LastStatus)
+	}
+	if outcome.Failures != 1 {
+		t.Errorf("expected exactly one consecutive failure after one single-attempt ping, got %d", outcome.Failures)
+	}
+
+	// --- The lifecycle path. ---
+	filteredBefore := webhookDeliveryCount(t, base, "filtered")
+
+	incidentBody := map[string]any{
+		"title":  uniqueName("e2e-webhook-incident"),
+		"fromAt": time.Now().UTC().Truncate(time.Second).Format(time.RFC3339),
+	}
+	began := time.Now()
+	incStatus, _, incData := mustRequest(t, http.MethodPost, base+"/api/v1/incidents", incidentBody)
+	elapsed := time.Since(began)
+	if incStatus != http.StatusCreated {
+		t.Fatalf("expected POST /api/v1/incidents 201, got %d: %s", incStatus, incData)
+	}
+	var fired incident
+	decodeJSON(t, "create-incident response", incData, &fired)
+	t.Cleanup(func() { deleteResource(t, base+"/api/v1/incidents/"+fired.ID) })
+
+	// The non-blocking contract, measured against the dispatcher's own
+	// per-attempt timeout: an endpoint that never answers must cost the
+	// caller nothing. Half of attemptTimeout is a generous ceiling for one
+	// unpaged SELECT plus an insert.
+	if elapsed >= 5*time.Second {
+		t.Errorf("expected POST /api/v1/incidents to return without waiting on a dead endpoint, took %s "+
+			"(the dispatcher's per-attempt timeout is 10s -- this looks like an inline delivery)", elapsed)
+	}
+
+	pollUntil(t, 30*time.Second, time.Second,
+		"webhook_deliveries_total{result=\"filtered\"} to advance (incident.created reaching the dispatcher's filter)",
+		func() bool {
+			return webhookDeliveryCount(t, base, "filtered") >= filteredBefore+1
+		})
+
+	// The ladder against liveHook is running RIGHT NOW and will not record for
+	// another four to six minutes (see the doc comment). Reported, never
+	// asserted: waiting it out would add five and a half minutes to every e2e
+	// run to learn what /test already proved above.
+	live, liveRowBody := getWebhookRow(t, base, liveHook.ID)
+	t.Logf("incident.created subscriber %s mid-ladder: lastStatus=%q failures=%d "+
+		"(the {0s,30s,5m} ladder records ONE terminal outcome, so this is expected to be empty here)",
+		live.ID, live.LastStatus, live.Failures)
+
+	// --- The secret, on every read path. ---
+	assertNoSecretServed(t, "GET /api/v1/webhooks/{id}", liveRowBody)
+	if !live.HasSecret {
+		t.Errorf("expected hasSecret to stay true on a read-back endpoint, got false")
+	}
+
+	listStatus, _, listData := mustRequest(t, http.MethodGet, base+"/api/v1/webhooks", nil)
+	if listStatus != http.StatusOK {
+		t.Fatalf("expected GET /api/v1/webhooks 200, got %d: %s", listStatus, listData)
+	}
+	assertNoSecretServed(t, "GET /api/v1/webhooks", listData)
+	var page struct {
+		Webhooks []webhookRow `json:"webhooks"`
+	}
+	decodeJSON(t, "webhooks list", listData, &page)
+	var seen int
+	for i := range page.Webhooks {
+		row := &page.Webhooks[i]
+		if row.ID != probeHook.ID && row.ID != liveHook.ID {
+			continue
+		}
+		seen++
+		if !row.HasSecret {
+			t.Errorf("expected hasSecret=true for endpoint %s in the listing, got false", row.ID)
+		}
+		if row.URL != unroutableWebhookURL {
+			t.Errorf("expected endpoint %s to carry the url it was created with, got %q", row.ID, row.URL)
+		}
+	}
+	if seen != 2 {
+		t.Errorf("expected both e2e endpoints in GET /api/v1/webhooks, found %d", seen)
+	}
+}
+
+// getWebhookRow reads one endpoint, returning the decoded row AND the raw body
+// the secret scan needs.
+func getWebhookRow(t *testing.T, base, id string) (webhookRow, []byte) {
+	t.Helper()
+	status, _, data := mustRequest(t, http.MethodGet, base+"/api/v1/webhooks/"+id, nil)
+	if status != http.StatusOK {
+		t.Fatalf("expected GET /api/v1/webhooks/%s 200, got %d: %s", id, status, data)
+	}
+	var row webhookRow
+	decodeJSON(t, "webhook response", data, &row)
+	return row, data
+}
+
+// k8sEventRow is one captured cluster event on the wire.
+type k8sEventRow struct {
+	ID        string    `json:"id"`
+	EventTime time.Time `json:"eventTime"`
+	Kind      string    `json:"kind"`
+	Name      string    `json:"name"`
+	Namespace string    `json:"namespace"`
+	Reason    string    `json:"reason"`
+	Type      string    `json:"type"`
+	Message   string    `json:"message"`
+}
+
+// k8sCaptureBudget is how long the reader gets to put a first row in the
+// database. Generous because it covers a cold start (the console Pod's watch
+// opening, its initial list, and the batched insert behind it), not because
+// the events themselves are in doubt.
+const k8sCaptureBudget = 120 * time.Second
+
+// TestConsoleK8sEventsCapture is the live test of the whole M6 Kubernetes
+// context path: console.kubernetesContext.enabled renders a console-only
+// ServiceAccount, ClusterRole and ClusterRoleBinding (charts' rbac.yaml), the
+// console watches the apiserver with that identity, and the rows land in
+// PostgreSQL where GET /api/v1/k8s-events serves them. A grant that is too
+// narrow shows up here -- and ONLY here -- as an endpoint that answers 200
+// with an empty page forever, which is why this is a hard assertion rather
+// than a skip.
+//
+// It is a hard assertion for a second reason too: a helm install churns Pods.
+// The release namespace holds the controller Deployment, the agent DaemonSet
+// (which the workflow deliberately RESTARTS mid-run), the console itself, the
+// bundled Valkey and the Postgres fixture, so Scheduled/Pulled/Created/Started
+// events for that namespace are not a maybe. The apiserver keeps events for an
+// hour by default and the reader lists on start, so even the ones emitted
+// before the console came up are in scope.
+//
+// The risk worth naming: this was written against the code and the chart, not
+// against a live kind cluster (no kind locally -- the M4/M5 precedent). If it
+// ever fails on an empty page, the two candidates are the RBAC grant and the
+// namespace the reader was pointed at, in that order.
+func TestConsoleK8sEventsCapture(t *testing.T) {
+	base := consoleBaseURL(t)
+
+	var page struct {
+		Events []k8sEventRow `json:"events"`
+	}
+	pollUntil(t, k8sCaptureBudget, 3*time.Second,
+		"at least one captured Kubernetes event (console.kubernetesContext.enabled + the console's own RBAC)",
+		func() bool {
+			status, _, data, err := request(t, http.MethodGet, base+"/api/v1/k8s-events?limit=50", nil)
+			if err != nil {
+				t.Logf("k8s-events request failed (will retry): %v", err)
+				return false
+			}
+			if status != http.StatusOK {
+				t.Logf("k8s-events request returned %d (will retry): %s", status, data)
+				return false
+			}
+			if decodeErr := json.Unmarshal(data, &page); decodeErr != nil {
+				t.Logf("decode k8s-events response failed (will retry): %v", decodeErr)
+				return false
+			}
+			return len(page.Events) > 0
+		})
+
+	kinds := map[string]int{}
+	for i := range page.Events {
+		row := &page.Events[i]
+		kinds[row.Kind]++
+		// The kind vocabulary is CLOSED on the write side (store/k8sevents.go),
+		// so anything else here means a row was stored that the read filters
+		// can never match.
+		if row.Kind != "Pod" && row.Kind != "Node" {
+			t.Errorf("expected every captured event to be Pod or Node, got %q on %s", row.Kind, row.ID)
+		}
+		if row.Name == "" {
+			t.Errorf("expected a non-empty object name on captured event %s (%s)", row.ID, row.Kind)
+		}
+		if row.Reason == "" {
+			t.Errorf("expected a non-empty reason on captured event %s (%s/%s)", row.ID, row.Kind, row.Name)
+		}
+		if row.Type != "Normal" && row.Type != "Warning" {
+			t.Errorf("expected type Normal or Warning on captured event %s, got %q", row.ID, row.Type)
+		}
+		if row.EventTime.IsZero() {
+			t.Errorf("expected an event time on captured event %s, got the zero time", row.ID)
+		}
+		// Node events are cluster-scoped and carry no namespace; a Pod event
+		// without one would mean the namespace column was dropped on the way
+		// in, which is exactly what the capture is scoped BY.
+		if row.Kind == "Pod" && row.Namespace == "" {
+			t.Errorf("expected a namespace on captured Pod event %s (%s)", row.ID, row.Name)
+		}
+	}
+	t.Logf("captured %d Kubernetes events in the newest page, by kind: %v", len(page.Events), kinds)
+
+	// ?kind=Pod is asserted separately: it exercises the filter AND states the
+	// stronger claim, that POD events -- the ones scoped to the release
+	// namespace, and therefore the ones the RBAC and the namespace wiring both
+	// have to be right for -- were captured, not just cluster-scoped Node ones.
+	podStatus, _, podData := mustRequest(t, http.MethodGet, base+"/api/v1/k8s-events?kind=Pod&limit=50", nil)
+	if podStatus != http.StatusOK {
+		t.Fatalf("expected GET /api/v1/k8s-events?kind=Pod 200, got %d: %s", podStatus, podData)
+	}
+	var pods struct {
+		Events []k8sEventRow `json:"events"`
+	}
+	decodeJSON(t, "k8s-events ?kind=Pod list", podData, &pods)
+	if len(pods.Events) == 0 {
+		t.Errorf("expected at least one captured Pod event: a helm install churns Pods in the release "+
+			"namespace throughout this run. Captured kinds on the unfiltered page: %v", kinds)
+	}
+	for i := range pods.Events {
+		if pods.Events[i].Kind != "Pod" {
+			t.Errorf("expected ?kind=Pod to return Pod events only, got %q on %s",
+				pods.Events[i].Kind, pods.Events[i].ID)
+		}
+	}
+}
+
 // TestConsoleDegradedMode runs against a SEPARATE console rollout with
 // console.database.mode=disabled (.github/workflows/e2e.yaml's "Reinstall
 // console with database disabled" + "Run degraded-mode E2E tests" steps
@@ -1911,6 +2739,13 @@ func TestConsoleTopologyAt(t *testing.T) {
 // One route, two answers, decided purely by whether a parameter is present --
 // history needs a database and the live passthrough does not, so a rollout
 // with no database must degrade the parameter without taking the route down.
+//
+// M6 adds incidents, maintenance windows, webhook endpoints and captured
+// Kubernetes events. The last one is the interesting case: this rollout keeps
+// console-values.yaml's console.kubernetesContext.enabled, so the console
+// starts with the capture CONFIGURED and no database to write to -- it warns
+// and skips the reader rather than failing to start, and the endpoint answers
+// 503 rather than an empty 200.
 func TestConsoleDegradedMode(t *testing.T) {
 	base := consoleBaseURL(t)
 
@@ -1971,6 +2806,30 @@ func TestConsoleDegradedMode(t *testing.T) {
 		// 200 on the same path in the same rollout.
 		{http.MethodGet, "/api/v1/topology?at=" +
 			url.QueryEscape(time.Now().UTC().Add(-2*time.Minute).Format(time.RFC3339)), nil},
+		// M6. Four more surfaces with no in-memory fallback, and the reasons
+		// differ enough to be worth naming:
+		//
+		//   - incidents and maintenance windows are operator RECORDS, the
+		//     annotations rule verbatim: one that vanishes on a pod restart is
+		//     worse than one that was never accepted.
+		//   - webhook endpoints are persisted CONFIGURATION (the targets /
+		//     checks / schedules rule), and their signing secrets live in the
+		//     same rows.
+		//   - k8s-events is the sharpest of the four, because this rollout
+		//     ALSO has console.kubernetesContext.enabled: the capture is
+		//     configured and the endpoint is still 503, since captured events
+		//     live in PostgreSQL and there is nowhere for the reader to have
+		//     written them. Turning the capture on must not make this route
+		//     answer an empty 200, which would report "nothing happened in
+		//     your cluster" for "this console has no database".
+		{http.MethodGet, "/api/v1/incidents", nil},
+		{http.MethodPost, "/api/v1/incidents", map[string]any{
+			"title":  uniqueName("e2e-degraded"),
+			"fromAt": time.Now().UTC().Format(time.RFC3339),
+		}},
+		{http.MethodGet, "/api/v1/maintenance", nil},
+		{http.MethodGet, "/api/v1/webhooks", nil},
+		{http.MethodGet, "/api/v1/k8s-events", nil},
 	} {
 		status, _, data := mustRequest(t, tc.method, base+tc.path, tc.body)
 		if status != http.StatusServiceUnavailable {

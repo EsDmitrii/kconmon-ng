@@ -1,0 +1,49 @@
+---
+# Console + investigation values for chart testing (M6 surface: Kubernetes
+# event capture and the webhook encryption key). The two knobs this profile
+# exists for are the two that change the console Pod's IDENTITY and its SECRET
+# mounts, which no other profile touches:
+#
+#   - console.kubernetesContext.enabled renders a console-only ServiceAccount,
+#     a second ClusterRole + ClusterRoleBinding, serviceAccountName on the
+#     Deployment, the POD_NAMESPACE downward-API env var and the apiserver
+#     egress rule. Every one of those is absent from a 1.7.0 render, so this is
+#     the profile that proves they render at all.
+#   - console.webhooks.encryptionKeySecret adds a fourth source to the projected
+#     Secret volume and the matching encryptionKeyFile line in the ConfigMap.
+#
+# Both Secret names below are DUMMIES that nothing creates, exactly like
+# console-auth-values.yaml's console-db-dummy: a ci profile is rendered and
+# linted, never installed, and the chart only ever references a Secret by name.
+# A real install needs `openssl rand -base64 32` in a Secret under this key.
+#
+# database.mode=external rather than cnpg to keep the profile installable-shaped
+# without the CNPG CRDs, and because kubernetesContext is inert without a
+# database (the console warns and skips the reader) — a profile that rendered
+# the RBAC while the feature could not run would be testing half the change.
+controller:
+  events:
+    enabled: true
+console:
+  enabled: true
+  replicas: 2
+  valkey:
+    mode: bundled
+  database:
+    mode: external
+    existingSecret: console-db-dummy
+  kubernetesContext:
+    enabled: true
+    # Left empty on purpose: the empty value is the interesting one, because it
+    # is what makes the console read POD_NAMESPACE, and POD_NAMESPACE is only
+    # set when this render is correct.
+    namespace: ""
+    resyncInterval: 5m
+  webhooks:
+    encryptionKeySecret:
+      name: console-webhooks-key-dummy
+      key: encryptionKey
+  prometheus:
+    url: http://prometheus-operated.monitoring:9090
+networkPolicy:
+  enabled: true
