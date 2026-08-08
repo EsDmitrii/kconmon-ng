@@ -58,9 +58,10 @@ header (identity, health %, status), tab strip, and a persistent right rail
 upgrades, config edits — from the event stream / `topology_events`).
 
 **Node and Pair cards shipped v1 in M3** (`web/src/pages/node-card.tsx`,
-`pair-card.tsx`); the Target card is entirely deferred (M4, once `targets`
-exists to have a card at all). What v1 actually ships, versus the fuller
-design above, per this doc's own "any deviation updates the doc" rule:
+`pair-card.tsx`); **the Target card shipped in M4**
+(`web/src/pages/target-card.tsx`), once `targets` existed to have a card at
+all. What each actually ships, versus the fuller design above, per this doc's
+own "any deviation updates the doc" rule:
 
 - **The shared right rail is real**, `RecentChanges` (`web/src/components/recent-changes.tsx`),
   scope-pinned per card (a bare node name for Node, `` `${src}→${dst}` `` —
@@ -90,11 +91,28 @@ design above, per this doc's own "any deviation updates the doc" rule:
 - **Quick actions** are narrower than the full design: "Investigate this
   pair" and MTR actions wait on Investigation (M6) and MTR (M5)
   respectively; only "Run check" exists today.
-- **Target card tabs** (Checks & Schedules, MTR/DNS/HTTP history, Alerts,
-  Incidents, Maintenance, Audit-per-target) all wait on their backing
-  tables (`targets`, `check_definitions`, `check_schedules`, `mtr_*`,
-  `alert_rules`, `incidents`, `maintenance_windows` — DATA.md §5.2), none of
-  which exist yet.
+- **Target card ships THREE real tabs and no placeholders** (M4 Plan
+  Decision 17):
+  - **Checks & Schedules** — the definitions probing this target and their
+    schedules, gated on `checks:read`.
+  - **History** — the target's `kconmon_ng_external_*` series through the
+    PromQL proxy: probe latency p95 per source node. This is the only tab
+    that needs `console.prometheus.url`; it degrades to an explanatory note
+    when Prometheus is unconfigured, and the other two tabs do not depend
+    on it.
+  - **Runs** — diagnostics runs that touched this target, by the same honest
+    client-side scan of the most recent runs the Node and Pair cards use, and
+    labelled as such.
+
+  The other four designed tabs — **Alerts, Incidents, Maintenance and
+  Audit-per-target** — are **absent, not empty**: their backing tables
+  (`alert_rules`, `incidents`, `maintenance_windows`, and a per-target audit
+  view — DATA.md §5.2) land in M5–M7. An absent tab is honest; an empty one
+  promises something that does not exist.
+
+  The whole card requires `console.database.mode=cnpg|external`. With the
+  database disabled it renders a one-line explanation rather than an error:
+  targets are configuration, and configuration gets no in-memory fallback.
 
 ### 7.x Diagnostics
 

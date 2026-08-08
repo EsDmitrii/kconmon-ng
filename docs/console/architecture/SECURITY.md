@@ -228,6 +228,59 @@ restart. **Unsetting `bootstrapAdmin` is what stops the re-grant**: leaving
 it set means the console will keep re-granting `admin` to that username
 forever, even after an operator has deliberately demoted or disabled it.
 
+### 10.2.1 External-check destinations: the AGENT is the authority
+
+RBAC decides who may *write* a target. It does not decide what an agent will
+*probe*. Those are two separate gates on purpose, and the second one does not
+live in the Console at all.
+
+`config.checkers.external.allowedCidrs` / `deniedCidrs` are evaluated by the
+**agent**, in-process, against the **resolved** address, immediately before the
+probe. The Console never sends a "this destination is approved" flag, and the
+agent never trusts one: it re-derives the answer from its own config every
+time.
+
+**Why the agent and not the Console.** Consider the blast radius of a
+compromised Console — a stolen `targets:write` token, an authz bug, a
+supply-chain problem in the console image. If the Console were authoritative,
+that single compromise turns every agent in the fleet into an outbound probe
+source aimed wherever the attacker chooses: cloud metadata endpoints
+(`169.254.169.254`), internal admin planes the cluster can reach but the
+attacker cannot, or an external host being flooded from N nodes at once. With
+the agent authoritative, the same compromise gets the attacker rows in a
+database and 403s on the wire. The blast radius stops at configuration.
+
+That is the same reasoning as `auth.header.trustedProxyCIDRs`: the component
+that would be *used* by the attack is the component that must hold the
+allowlist.
+
+Consequences an operator should expect, rather than debug:
+
+- **An empty `allowedCidrs` with the feature enabled fails agent startup.** It
+  is never read as allow-everything. An empty list denies everything, and an
+  operator who wanted "everything" has to type a CIDR that says so.
+- **A refused probe is `kconmon_ng_external_denied_total`, not a failed
+  check.** `external_results_total` counts probes that reached the network;
+  denials are counted separately with `reason=cidr|resolve|disabled`, so
+  "the Console assigned something the agents will not probe" is a distinct,
+  alertable signal rather than an indistinguishable failure.
+- **Agents can disagree with each other, legitimately.** The allowlist is per
+  agent config. Denials on one node and clean probes on its peers means that
+  node's DaemonSet pod is running different config — which is a real finding,
+  and the Node Detail dashboard's denial panel is where it shows up.
+- **A NetworkPolicy is not a substitute and cannot be one.** A Kubernetes
+  NetworkPolicy has no useful expression of "the whole internet except these
+  ranges" for agent egress, and default-deny egress at the node/CNI layer is a
+  *separate* gate the chart does not manage. Egress permitted by the agent's
+  allowlist and still refused on the wire almost always means that layer was
+  missed; the reverse — open at the node layer, denied by the agent — is the
+  posture this design wants.
+
+`maxTargets` belongs to this same gate in intent but **is not enforced yet**:
+it is validated at agent startup and nothing checks the pushed assignment
+against it. Do not count it as a control (see MILESTONES.md's M4 deferral
+list).
+
 ### 10.3 Console ServiceAccount (K8s RBAC, Helm-gated)
 
 - `monitoring.coreos.com/prometheusrules`: CRUD in its namespace

@@ -59,11 +59,15 @@ spec:
         - protocol: TCP
           port: {{ .Values.console.valkey.port | int64 }}
     {{- else if eq .Values.console.valkey.mode "external" }}
-    # Console to an external Valkey. Namespace/port are deployment-specific;
-    # default allows TCP console.valkey.port cluster-wide, tighten via
-    # console.networkPolicy.valkeyEgress. NOTE: for a Valkey outside the
-    # cluster this NetworkPolicy is only one of two gates — the destination
-    # host's own firewall (iptables/nftables/security group) must allow it too.
+    # Console to an external Valkey. Namespace is deployment-specific; the
+    # default allows the dialled port cluster-wide, tighten via
+    # console.networkPolicy.valkeyEgress. The port comes from the port INSIDE
+    # console.valkey.address, not console.valkey.port — see
+    # kconmon-ng.console.valkeyEgressPort: console.valkey.port describes the
+    # bundled listener, and opening it here would render a rule for a port
+    # nothing dials. NOTE: for a Valkey outside the cluster this NetworkPolicy
+    # is only one of two gates — the destination host's own firewall
+    # (iptables/nftables/security group) must allow it too.
     {{- if .Values.console.networkPolicy.valkeyEgress }}
     {{- toYaml .Values.console.networkPolicy.valkeyEgress | nindent 4 }}
     {{- else }}
@@ -71,7 +75,7 @@ spec:
         - namespaceSelector: {}
       ports:
         - protocol: TCP
-          port: {{ .Values.console.valkey.port | int64 }}
+          port: {{ include "kconmon-ng.console.valkeyEgressPort" . | int64 }}
     {{- end }}
     {{- end }}
     {{- if eq .Values.console.database.mode "cnpg" }}

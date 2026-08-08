@@ -23,6 +23,7 @@ import (
 	"github.com/EsDmitrii/kconmon-ng/internal/console/metrics"
 	"github.com/EsDmitrii/kconmon-ng/internal/console/promql"
 	"github.com/EsDmitrii/kconmon-ng/internal/console/push"
+	"github.com/EsDmitrii/kconmon-ng/internal/console/scheduler"
 	"github.com/EsDmitrii/kconmon-ng/internal/console/store"
 	"github.com/EsDmitrii/kconmon-ng/internal/console/ui"
 	"github.com/EsDmitrii/kconmon-ng/internal/console/ws"
@@ -272,6 +273,14 @@ func main() {
 	// database.mode=disabled all five /api/v1/targets routes answer 503
 	// rather than accepting writes that would vanish on the next restart.
 	var targetsDep httpapi.TargetService
+	// definitionsDep/schedulesDep share targetsDep's exact posture: persisted
+	// configuration, no in-memory fallback (Decision 13) -- nil means every
+	// /api/v1/checks and /api/v1/schedules route answers 503. Caught missing
+	// by the M4 final-gate browser smoke: the handlers, tests and OpenAPI
+	// entries all existed while this wiring did not, so a real console
+	// answered 503 with the database fully configured.
+	var definitionsDep httpapi.DefinitionService
+	var schedulesDep httpapi.ScheduleService
 	policy := authz.NewPolicy(nil)
 	if db != nil {
 		rolesDep = roleResolver{db: db}
@@ -280,6 +289,8 @@ func main() {
 		rbacDep = db
 		tokensDep = db
 		targetsDep = db
+		definitionsDep = db
+		schedulesDep = db
 
 		if cfg.Auth.Mode == "local" {
 			bootstrapLocalAdmin(bgCtx, db, cfg.Auth.Local)
@@ -385,6 +396,11 @@ func main() {
 		Users: usersDep, OIDC: oidcDep,
 		Audit: auditDep, RBAC: rbacDep, Tokens: tokensDep,
 		Runner: runnerDep, Targets: targetsDep,
+		Definitions: definitionsDep, Schedules: schedulesDep,
+		// The SAME kv SessionStore and the OIDC state stash ride on, so the
+		// rate limiter is cluster-wide exactly when Valkey is (and
+		// per-replica, weaker but never stronger, when it is not).
+		KV: kv,
 	})
 
 	var wg sync.WaitGroup
@@ -415,6 +431,61 @@ func main() {
 		// pool gauge describes the pool, not the retention policy.
 		spawn("store-pool-stats", store.NewPoolStatsPoller(db, m).Run)
 		spawn("rbac-policy-refresh", func(ctx context.Context) { refreshCustomRoles(ctx, db, policy) })
+	}
+
+	// The schedule loop is opt-in (console.scheduler.enabled, default false)
+	// and needs BOTH a database -- check_schedules and the cross-replica
+	// advisory lock live there -- and a runner, since a fired schedule becomes
+	// an ordinary diagnostics run. A misconfiguration here warns and leaves
+	// the loop off rather than refusing to boot: everything else the console
+	// serves still works, and taking the whole deployment down over a feature
+	// flag would be the worse failure. It is spawned through the same `spawn`
+	// helper as the pruner, so bgCtx cancellation stops it and wg.Wait covers
+	// its exit in the shutdown sequence below -- and because the advisory lock
+	// is taken and released PER TICK, a replica stopped mid-tick costs the
+	// fleet one tick, never a wedged lock.
+	switch {
+	case !cfg.Scheduler.Enabled:
+	case db == nil:
+		slog.Warn("scheduler.enabled is set but no database is configured — the schedule loop is off " +
+			"(check schedules and its cross-replica advisory lock both live in PostgreSQL)")
+	case runner == nil:
+		slog.Warn("scheduler.enabled is set but controller.url is empty — the schedule loop is off " +
+			"(a fired schedule is an ordinary diagnostics run, which needs a controller to dispatch to)")
+	default:
+		spawn("check-scheduler", scheduler.New(scheduler.Deps{
+			Lock: db, Store: db, Runner: runner, Topology: ctrl,
+			Metrics: m, Interval: cfg.Scheduler.TickInterval,
+		}).Run)
+		// The continuous external-check reconciler rides the SAME gate, the
+		// same cadence and the same advisory lock key as the schedule loop,
+		// and that is deliberate on all three counts.
+		//
+		// Same gate: it consumes kind='continuous' check_schedules rows, the
+		// half of that table the scheduler deliberately skips (see
+		// scheduler.fireOne), so "schedules are being acted on" is one switch,
+		// not two an operator can set inconsistently. Same requirements too --
+		// no database means no continuous definitions to read and no
+		// cross-replica lock to take, so there is nothing for it to do, which
+		// is why it is wired inside this arm rather than beside it.
+		//
+		// Same cadence: both are seconds-scale polls whose whole design
+		// assumes a short tick (the lock is taken and released per tick), and
+		// a second interval knob would be one more number to keep consistent
+		// with the first for no behavioural gain.
+		//
+		// Same key: scheduler.LockKey is passed in rather than read from this
+		// package, because internal/console/scheduler imports
+		// internal/console/checks and the reconciler lives in the latter -- see
+		// checks.ReconcilerDeps.LockKey. Sharing it is what keeps N replicas
+		// from issuing N identical PUTs per interval; the cost is that the two
+		// ticks serialize against each other, which checks.Reconciler's own doc
+		// comment explains is acceptable at this cadence.
+		spawn("external-check-reconciler", checks.NewReconciler(checks.ReconcilerDeps{
+			Lock: db, Store: db, Topology: ctrl, Controller: ctrl,
+			Metrics: m, Interval: cfg.Scheduler.TickInterval, LockKey: scheduler.LockKey,
+		}).Run)
+		slog.Info("schedule loop enabled", "tickInterval", cfg.Scheduler.TickInterval)
 	}
 
 	srv.SetReady(true)

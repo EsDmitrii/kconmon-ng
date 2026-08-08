@@ -2,6 +2,8 @@ package cache
 
 import (
 	"context"
+	"fmt"
+	"strconv"
 	"sync"
 	"time"
 )
@@ -91,6 +93,47 @@ func (kv *InProcessKV) Delete(_ context.Context, key string) error {
 	defer kv.mu.Unlock()
 	delete(kv.entries, key)
 	return nil
+}
+
+// IncrWithTTL increments key's counter under the write lock and returns the
+// new value, arming expiresAt ONLY when this call created the window --
+// mirroring ValkeyKV's INCR + PEXPIRE NX exactly, so switching
+// console.valkey.mode between disabled and enabled cannot change a rate
+// limit's window behavior, only its scope (per-replica vs cluster-wide).
+//
+// "Created the window" is decided the same way both backends decide it: an
+// absent key, or one whose expiresAt has already passed. An expired entry is
+// treated as absent here rather than being left for the sweeper, so a counter
+// whose window ended always restarts at 1 no matter when the sweeper last ran
+// (the same belt-and-braces split Get already uses).
+//
+// The whole read-modify-write happens under kv.mu, so the concurrent-first-hit
+// race is structurally impossible: exactly one goroutine can observe the key
+// as absent, and it is the one that sets expiresAt.
+func (kv *InProcessKV) IncrWithTTL(_ context.Context, key string, ttl time.Duration) (int64, error) {
+	now := time.Now()
+
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+
+	e, present := kv.entries[key]
+	if !present || e.expired(now) {
+		kv.entries[key] = kvEntry{val: []byte("1"), expiresAt: now.Add(ttl)}
+		return 1, nil
+	}
+
+	n, err := strconv.ParseInt(string(e.val), 10, 64)
+	if err != nil {
+		// Valkey answers "value is not an integer or out of range" here; the
+		// shape a caller can act on is the same either way -- an error, never
+		// a silent reset that would erase whatever the limit had counted.
+		return 0, fmt.Errorf("inprocess kv incr %s: value is not an integer: %w", key, err)
+	}
+	n++
+	// expiresAt is deliberately carried over untouched: this is what makes the
+	// window FIXED rather than sliding.
+	kv.entries[key] = kvEntry{val: []byte(strconv.FormatInt(n, 10)), expiresAt: e.expiresAt}
+	return n, nil
 }
 
 // Len reports the number of entries currently held, including any not yet

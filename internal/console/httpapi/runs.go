@@ -15,6 +15,7 @@ import (
 	"github.com/EsDmitrii/kconmon-ng/internal/console/store"
 	"github.com/EsDmitrii/kconmon-ng/internal/console/ws"
 	"github.com/go-chi/chi/v5"
+	"github.com/google/uuid"
 )
 
 // RunService is the subset of *checks.Runner that httpapi needs: start a new
@@ -27,6 +28,10 @@ type RunService interface {
 	Get(ctx context.Context, runID string) (checks.Run, error)
 	GetResults(ctx context.Context, runID string) ([]store.RunResult, error)
 	List(ctx context.Context, f checks.ListFilter) (checks.RunPage, error)
+	// Cancel stops a run in flight. See checks.Runner.Cancel for the two
+	// deliberate non-errors this endpoint inherits: cancelling an already
+	// terminal run, and cancelling one another replica started, both succeed.
+	Cancel(ctx context.Context, runID string) error
 }
 
 var _ RunService = (*checks.Runner)(nil)
@@ -59,6 +64,20 @@ type runCreateRequest struct {
 	Type         string   `json:"type"`
 	Plane        string   `json:"plane"`
 	TimeoutNs    int64    `json:"timeoutNs"`
+
+	// DestinationKind is "node" (the default, and the ONLY value that existed
+	// before M4), "target" or "adhoc" -- the diagnostics form's destination
+	// selector (M4 Task 14; the same kind vocabulary DefinitionInput uses).
+	// "node" keeps Destinations as node names, byte-identical to the M3
+	// contract. "target" resolves a saved targets row Console-side --
+	// DestinationTargetID carries its UUID -- and "adhoc" probes the
+	// operator-typed DestinationAddress. Both external kinds travel to the
+	// controller as destinationKind=external, and both leave Destinations
+	// empty: mixing node and external destinations in one run is refused
+	// rather than half-honored.
+	DestinationKind     string `json:"destinationKind,omitempty"`
+	DestinationTargetID string `json:"destinationTargetId,omitempty"`
+	DestinationAddress  string `json:"destinationAddress,omitempty"`
 }
 
 // runCreateResponse is POST /api/v1/runs's 202 body (task-23-brief.md
@@ -82,6 +101,13 @@ func writeJSONStatus(w http.ResponseWriter, status int, v any) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 
+// runsRateLimitDetail is the 429 body's detail for POST /api/v1/runs. It
+// names the config key an operator would change, since a legitimate power
+// user hitting this needs to know it is tunable, not just that they were
+// refused.
+const runsRateLimitDetail = "too many diagnostics runs started; retry shortly " +
+	"(limit: console.rateLimit.runsPerMinute per subject per minute)"
+
 // handleRunsCreate plans and starts a new diagnostics run. s.runner nil
 // (no controller.url configured -- there is no meaningful run path without
 // one) answers 503. A malformed body answers 400. A well-formed spec Plan
@@ -96,6 +122,18 @@ func (s *Server) handleRunsCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Rate limit BEFORE anything expensive: a run fans out to up to 400 agent
+	// pairs, so this is the endpoint where an authenticated caller can turn a
+	// cheap request into controller-wide load (TARGETS.md §7.3). The subject
+	// is already on the context (authenticate ran in the middleware chain), so
+	// no body decoding is needed to key it -- and refusing before the decode
+	// means a flood of malformed bodies is just as cheap to refuse.
+	subject, _ := SubjectFrom(r.Context())
+	if !s.rateLimitAllow(r.Context(), rateLimitRuns, s.cfg.RateLimit.RunsPerMinute, runsRateLimitKey(subject)) {
+		writeRateLimited(w, runsRateLimitDetail)
+		return
+	}
+
 	var req runCreateRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeProblem(w, http.StatusBadRequest, "invalid request",
@@ -103,13 +141,15 @@ func (s *Server) handleRunsCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	subject, _ := SubjectFrom(r.Context())
 	spec := checks.Spec{
 		Sources:      req.Sources,
 		Destinations: req.Destinations,
 		Type:         req.Type,
 		Plane:        req.Plane,
 		Timeout:      time.Duration(req.TimeoutNs),
+	}
+	if !s.resolveRunDestination(w, r, &req, &spec) {
+		return
 	}
 
 	id, err := s.runner.Start(r.Context(), spec, subject)
@@ -135,6 +175,97 @@ func (s *Server) handleRunsCreate(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// resolveRunDestination turns runCreateRequest's destination fields into
+// spec's, writing the refusal and returning false when the request cannot
+// proceed. Split from handleRunsCreate so the M3 node path stays visibly
+// untouched: kind "node" (or absent) returns immediately without touching
+// spec, so a pre-M4 body takes exactly the code path it always took.
+//
+// The kind vocabulary and field names mirror store.DefinitionInput
+// (destinationKind/destinationTargetId/destinationAddress), so an operator
+// who has written a check definition already knows this shape. Status-code
+// split follows handleRunsCreate's own doc comment: a malformed field value
+// (unknown kind, non-UUID target id) is 400; a well-formed reference the
+// system refuses -- an unknown target row -- is 422; targets unavailable
+// (database.mode=disabled) is 503 with the same actionable detail the
+// targets routes serve.
+func (s *Server) resolveRunDestination(w http.ResponseWriter, r *http.Request, req *runCreateRequest, spec *checks.Spec) bool {
+	switch req.DestinationKind {
+	case "", "node":
+		// The M3 contract, byte-identical: Destinations are node names. The
+		// external-only fields are refused rather than ignored -- a body that
+		// names both a kind and fields the kind cannot use is a caller bug
+		// worth surfacing, not guessing over.
+		if req.DestinationTargetID != "" || req.DestinationAddress != "" {
+			writeProblem(w, http.StatusBadRequest, "invalid destination",
+				"destinationTargetId and destinationAddress require destinationKind target or adhoc")
+			return false
+		}
+		return true
+	case "target", "adhoc":
+	default:
+		writeProblem(w, http.StatusBadRequest, "invalid destination",
+			"destinationKind must be node, target or adhoc")
+		return false
+	}
+
+	// Both external kinds: node-name Destinations must be empty -- one run
+	// probes either the mesh or one external destination, never a mix.
+	if len(req.Destinations) != 0 {
+		writeProblem(w, http.StatusBadRequest, "invalid destination",
+			"destinations must be empty when destinationKind is target or adhoc")
+		return false
+	}
+
+	if req.DestinationKind == "target" {
+		if s.targets == nil {
+			writeProblem(w, http.StatusServiceUnavailable, "targets not available", targetsUnavailableDetail)
+			return false
+		}
+		if _, err := uuid.Parse(req.DestinationTargetID); err != nil {
+			writeProblem(w, http.StatusBadRequest, "invalid destination",
+				"destinationTargetId must be a UUID")
+			return false
+		}
+		target, err := s.targets.GetTarget(r.Context(), req.DestinationTargetID)
+		switch {
+		case errors.Is(err, store.ErrNotFound):
+			writeProblem(w, http.StatusUnprocessableEntity, "unknown target",
+				"destinationTargetId does not name a saved target")
+			return false
+		case err != nil:
+			slog.Error("httpapi: resolve run target failed", "error", err)
+			writeProblem(w, http.StatusBadGateway, "targets unavailable",
+				"failed to read the target the run would probe")
+			return false
+		}
+		spec.Destinations = nil
+		spec.TypedDestinations = []checks.Destination{{
+			Kind:    checks.DestKindTarget,
+			Name:    target.Name,
+			Address: target.Address,
+		}}
+		return true
+	}
+
+	// adhoc -- the first switch admits only target|adhoc past it.
+	if req.DestinationAddress == "" {
+		writeProblem(w, http.StatusBadRequest, "invalid destination",
+			"destinationAddress is required when destinationKind is adhoc")
+		return false
+	}
+	spec.Destinations = nil
+	// Name deliberately repeats the address: for an ad-hoc probe the address
+	// IS the operator's name for it, matching the controller's own destName
+	// fallback -- and it is the label the run's results carry.
+	spec.TypedDestinations = []checks.Destination{{
+		Kind:    checks.DestKindAdhoc,
+		Name:    req.DestinationAddress,
+		Address: req.DestinationAddress,
+	}}
+	return true
+}
+
 // writeRunStartError maps a checks.Runner.Start error to a response.
 // ErrTooManyPairs/ErrNoPairs/ErrNoNodes are all a well-formed spec refused
 // for what it would produce, not for how it is shaped -- 422, per this
@@ -152,12 +283,82 @@ func (s *Server) writeRunStartError(w http.ResponseWriter, err error) {
 		writeProblem(w, http.StatusUnprocessableEntity, "no nodes available", err.Error())
 	case errors.Is(err, checks.ErrUnknownType):
 		writeProblem(w, http.StatusBadRequest, "invalid type", err.Error())
+	case errors.Is(err, checks.ErrInvalidDestination):
+		// Task 12 carry-forward: a typed destination the planner refuses is a
+		// malformed field value, same class as ErrUnknownType -- 400, not the
+		// 502 the default arm would produce.
+		writeProblem(w, http.StatusBadRequest, "invalid destination", err.Error())
 	case errors.Is(err, controllerclient.ErrUnavailable):
 		writeProblem(w, http.StatusBadGateway, "controller unavailable", "no controller leader answered after retries")
 	default:
 		slog.Error("httpapi: start run failed", "error", err)
 		writeProblem(w, http.StatusBadGateway, "controller error", err.Error())
 	}
+}
+
+// runIDFrom resolves the {id} path parameter for POST
+// /api/v1/runs/{id}/cancel, answering 404 for anything that is not a
+// canonical UUID -- the same guard, and the same reasoning, as
+// definitionIDFrom/scheduleIDFrom: an id that cannot name a row in a
+// UUID-keyed table has "not found" as its truthful answer, and without the
+// pre-check the catch-all below would report 502 for something that simply
+// cannot exist.
+//
+// GET /api/v1/runs/{id} needs no such helper because store.DB.GetRun already
+// maps an unparseable id to ErrNotFound at the seam (store/checks.go). Cancel
+// cannot rely on that: checks.Runner.Cancel answers nil, without consulting
+// the store at all, for any id that happens to be in its in-flight map -- so
+// the shape check belongs here, before the runner is asked anything.
+func runIDFrom(w http.ResponseWriter, r *http.Request) (string, bool) {
+	id := chi.URLParam(r, "id")
+	if _, err := uuid.Parse(id); err != nil {
+		writeProblem(w, http.StatusNotFound, "run not found", "")
+		return "", false
+	}
+	return id, true
+}
+
+// handleRunsCancel stops a run in flight (Plan Decision 15).
+//
+// It answers 204 No Content on success, with no body, and that ALSO covers the
+// two outcomes checks.Runner.Cancel deliberately treats as non-errors:
+// cancelling a run that already reached a terminal status a moment earlier,
+// and cancelling one this replica did not start. Both are 204, not 409 and not
+// 202. An operator who clicks cancel on a run that just finished has not done
+// anything wrong, and an endpoint that answered differently depending on which
+// replica the request happened to land on would be reporting routing, not run
+// state. 204 over 200 for the same reason DELETE uses it here: there is
+// nothing to say beyond "done", and the run's actual state is one GET
+// /api/v1/runs/{id} away -- which is where a client should read it, since
+// cancellation is asynchronous (the run's own goroutine writes the terminal
+// "cancelled" status after its in-flight pairs settle).
+//
+// An id naming no run at all is 404. s.runner nil is 503, same convention as
+// the other three runs routes.
+//
+// Gated on runs:create, not a permission of its own: starting fleet-wide probe
+// traffic and stopping it are the same operational class, and a role that can
+// start a 400-pair run must not need a second grant to stop it.
+func (s *Server) handleRunsCancel(w http.ResponseWriter, r *http.Request) {
+	if s.runner == nil {
+		writeProblem(w, http.StatusServiceUnavailable, "runs not available", runsUnavailableDetail)
+		return
+	}
+	id, ok := runIDFrom(w, r)
+	if !ok {
+		return
+	}
+
+	if err := s.runner.Cancel(r.Context(), id); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			writeProblem(w, http.StatusNotFound, "run not found", "")
+			return
+		}
+		slog.Error("cancel run failed", "run", id, "error", err) //nolint:gosec // G706: structured slog fields, not string-built log injection
+		writeProblem(w, http.StatusBadGateway, "run history unavailable", "failed to query run history")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // runSummary is one row of GET /api/v1/runs's body, and the run half of GET

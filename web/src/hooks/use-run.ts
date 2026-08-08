@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { ApiError, getRun } from "@/lib/api";
 import {
@@ -18,6 +18,13 @@ export function runTopic(runId: string): string {
   return `run:${runId}`;
 }
 
+/**
+ * isTerminalRunStatus answers "is there anything left to poll for". The set
+ * it reads (RUN_TERMINAL_STATUSES) includes "cancelled": a cancelled run is
+ * FINISHED, not paused, so treating it as anything else would leave this hook
+ * polling a run whose status can never change again — one GET every
+ * RUN_POLL_MS, forever, for every open cancelled permalink.
+ */
 export function isTerminalRunStatus(status: string | undefined): boolean {
   return status !== undefined && (RUN_TERMINAL_STATUSES as string[]).includes(status);
 }
@@ -83,6 +90,12 @@ export interface UseRunResult {
   notFound: boolean;
   error: Error | null;
   live: boolean;
+  /** One immediate re-read of GET /api/v1/runs/{id}, outside the poll's own
+   *  cadence. Exists for POST /api/v1/runs/{id}/cancel: the 204 means only
+   *  "accepted", so the page asks the server for the run's real status
+   *  instead of writing "cancelled" into the cache itself — and once that
+   *  status IS terminal the poll stops on its own (refetchInterval below). */
+  refetch: () => Promise<unknown>;
 }
 
 /**
@@ -181,6 +194,8 @@ export function useRun(runId: string): UseRunResult {
 
   const notFound = query.error instanceof ApiError && query.error.problem.status === 404;
 
+  const refetch = useCallback(() => query.refetch(), [query]);
+
   return {
     run: query.data,
     pairs,
@@ -188,5 +203,6 @@ export function useRun(runId: string): UseRunResult {
     notFound,
     error: query.error,
     live: socketEnabled,
+    refetch,
   };
 }

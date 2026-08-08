@@ -309,6 +309,12 @@ func detailLines(res *model.CheckResult) []string {
 		if d, ok := decodeMTRDetails(res.Details); ok && d != nil {
 			return []string{fmt.Sprintf("target=%s hops=%d", orDash(d.Target), len(d.Hops))}
 		}
+	case model.CheckExternal:
+		// The CLI renders ON-DEMAND diagnostics, and "external" is the wrapper
+		// type of a continuous assignment sweep that no on-demand task can
+		// produce (agent.executeOne refuses it). Named here only to keep the
+		// switch exhaustive over model.CheckType.
+		return nil
 	default:
 		return nil
 	}

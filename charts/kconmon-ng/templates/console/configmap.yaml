@@ -105,4 +105,18 @@ data:
       migrateOnStart: {{ .Values.console.database.migrateOnStart }}
       retentionDays: {{ .Values.console.database.retentionDays | int }}
     {{- end }}
+    rateLimit:
+      runsPerMinute: {{ .Values.console.rateLimit.runsPerMinute | int }}
+      loginPerMinute: {{ .Values.console.rateLimit.loginPerMinute | int }}
+    {{- /* Emitted only when ON. SchedulerConfig.Enabled's Go zero value makes
+    an omitted block identical to an explicit false, and a tickInterval in a
+    rendered config nothing reads is noise an operator has to reason about.
+    The one gate covers all three consumers: the schedule loop, the stuck-run
+    reaper, and the continuous external-check reconciler, which share this flag
+    and the same PostgreSQL advisory lock. */}}
+    {{- if .Values.console.scheduler.enabled }}
+    scheduler:
+      enabled: true
+      tickInterval: {{ .Values.console.scheduler.tickInterval | quote }}
+    {{- end }}
 {{- end }}

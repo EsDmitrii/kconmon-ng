@@ -12,12 +12,14 @@ import (
 	"net/http"
 	"runtime/debug"
 	"strconv"
+	"sync"
 	"sync/atomic"
 	"time"
 
 	appconfig "github.com/EsDmitrii/kconmon-ng/internal/config"
 	"github.com/EsDmitrii/kconmon-ng/internal/console/authn"
 	"github.com/EsDmitrii/kconmon-ng/internal/console/authz"
+	"github.com/EsDmitrii/kconmon-ng/internal/console/cache"
 	"github.com/EsDmitrii/kconmon-ng/internal/console/config"
 	"github.com/EsDmitrii/kconmon-ng/internal/console/controllerclient"
 	"github.com/EsDmitrii/kconmon-ng/internal/console/metrics"
@@ -114,6 +116,21 @@ type Server struct {
 	definitions DefinitionService
 	schedules   ScheduleService
 	topology    TopologySource
+
+	// kv is the short-TTL key/value store the fixed-window rate limiter counts
+	// in (ratelimit.go) -- the SAME cache.KV cmd/console already builds for
+	// SessionStore and the OIDC state stash, so a Valkey-backed console gets
+	// cluster-wide limits with no extra dependency and a
+	// console.valkey.mode=disabled one gets per-replica limits (weaker, never
+	// stronger). Never nil once NewServer has run: it falls back to an
+	// in-process KV rather than leave a configured limit silently unenforced.
+	kv cache.KV
+
+	// rateLimitWarnOnce keeps a KV outage to ONE warning per process. Every
+	// request during the outage increments RateLimitFailOpen (that is the
+	// alertable signal); logging each one would turn a backend outage into a
+	// log-volume incident.
+	rateLimitWarnOnce sync.Once
 
 	// auditDropped counts the audit rows recordAudit had to throw away
 	// because the drain could not keep up, for the shutdown log flushAudit
@@ -212,6 +229,16 @@ type Deps struct {
 	Definitions DefinitionService
 	Schedules   ScheduleService
 
+	// KV backs the fixed-window rate limiter (ratelimit.go). In production
+	// this is the very same cache.KV cmd/console builds for Sessions and the
+	// OIDC state stash -- Valkey-backed when console.valkey.mode=valkey, so
+	// the limits are cluster-wide, and in-process otherwise. Left nil,
+	// NewServer substitutes its OWN in-process KV whenever any limit is
+	// configured: unlike every other optional field here, a nil KV must not
+	// mean "feature off", because that would turn a forgotten wire-up into a
+	// silently unenforced security control.
+	KV cache.KV
+
 	// Topology is the snapshot source the projection guard resolves a
 	// definition's agent selection against (Decision 12). Left nil, NewServer
 	// falls back to Controller when one is wired -- which is what production
@@ -248,6 +275,19 @@ func NewServer(d Deps) *Server { //nolint:gocritic // hugeParam: Deps is the pin
 		audit: d.Audit, roleAdmin: d.RBAC, tokens: d.Tokens,
 		runner: d.Runner, targets: d.Targets,
 		definitions: d.Definitions, schedules: d.Schedules, topology: d.Topology,
+		kv: d.KV,
+	}
+
+	// A configured rate limit with no KV wired would be a security control
+	// that reports itself as on and enforces nothing, so NewServer substitutes
+	// an in-process one -- the same single-replica fallback cmd/console itself
+	// uses when Valkey is disabled (ADR-002). Built only when a limit is
+	// actually enabled, so the overwhelming majority of compositions (and
+	// every test that leaves rateLimit at its zero value) start no sweeper
+	// goroutine they would never use.
+	if s.kv == nil && d.Config != nil &&
+		(d.Config.RateLimit.RunsPerMinute > 0 || d.Config.RateLimit.LoginPerMinute > 0) {
+		s.kv = cache.NewInProcessKV()
 	}
 
 	// The projection guard reads the same topology GET /api/v1/topology
@@ -316,6 +356,7 @@ func NewServer(d Deps) *Server { //nolint:gocritic // hugeParam: Deps is the pin
 		api.Post("/api/v1/runs", s.handleRunsCreate)
 		api.Get("/api/v1/runs", s.handleRunsList)
 		api.Get("/api/v1/runs/{id}", s.handleRunsGet)
+		api.Post("/api/v1/runs/{id}/cancel", s.handleRunsCancel)
 
 		api.Get("/api/v1/targets", s.handleTargetsList)
 		api.Post("/api/v1/targets", s.handleTargetsCreate)

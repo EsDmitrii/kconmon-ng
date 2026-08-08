@@ -9,6 +9,14 @@ import (
 	"github.com/EsDmitrii/kconmon-ng/internal/console/checks"
 )
 
+// nodePair is a node->node pair -- M3's only shape, and still the shape every
+// test in this file asserts. Pair.Destination is a typed checks.Destination
+// since M4 (Decision 14); for a node destination it carries Kind "node" and
+// the node name, which is exactly what checks.NodeDestination builds.
+func nodePair(src, dst string) checks.Pair {
+	return checks.Pair{Source: src, Destination: checks.NodeDestination(dst)}
+}
+
 func equalPairs(t *testing.T, got, want []checks.Pair) {
 	t.Helper()
 	if len(got) != len(want) {
@@ -27,9 +35,9 @@ func TestPlanFullMeshFromEmptySpec(t *testing.T) {
 		t.Fatalf("Plan: %v", err)
 	}
 	want := []checks.Pair{
-		{Source: "a", Destination: "b"}, {Source: "a", Destination: "c"},
-		{Source: "b", Destination: "a"}, {Source: "b", Destination: "c"},
-		{Source: "c", Destination: "a"}, {Source: "c", Destination: "b"},
+		nodePair("a", "b"), nodePair("a", "c"),
+		nodePair("b", "a"), nodePair("b", "c"),
+		nodePair("c", "a"), nodePair("c", "b"),
 	}
 	equalPairs(t, pairs, want)
 }
@@ -41,7 +49,7 @@ func TestPlanExplicitSourcesAndDestinations(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Plan: %v", err)
 	}
-	want := []checks.Pair{{Source: "a", Destination: "c"}, {Source: "b", Destination: "c"}}
+	want := []checks.Pair{nodePair("a", "c"), nodePair("b", "c")}
 	equalPairs(t, pairs, want)
 }
 
@@ -52,7 +60,7 @@ func TestPlanOneSidedFallsBackToNodes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Plan: %v", err)
 	}
-	want := []checks.Pair{{Source: "a", Destination: "b"}, {Source: "a", Destination: "c"}}
+	want := []checks.Pair{nodePair("a", "b"), nodePair("a", "c")}
 	equalPairs(t, pairs, want)
 }
 
@@ -61,7 +69,7 @@ func TestPlanDropsSelfPairs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Plan: %v", err)
 	}
-	equalPairs(t, pairs, []checks.Pair{{Source: "a", Destination: "b"}})
+	equalPairs(t, pairs, []checks.Pair{nodePair("a", "b")})
 }
 
 func TestPlanCollapsesDuplicates(t *testing.T) {
@@ -71,7 +79,7 @@ func TestPlanCollapsesDuplicates(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Plan: %v", err)
 	}
-	equalPairs(t, pairs, []checks.Pair{{Source: "a", Destination: "b"}})
+	equalPairs(t, pairs, []checks.Pair{nodePair("a", "b")})
 }
 
 func TestPlanExactly400PairsSucceeds(t *testing.T) {
@@ -123,7 +131,7 @@ func TestPlanExplicitBothSidesIgnoresEmptyNodes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Plan: %v", err)
 	}
-	equalPairs(t, pairs, []checks.Pair{{Source: "a", Destination: "b"}})
+	equalPairs(t, pairs, []checks.Pair{nodePair("a", "b")})
 }
 
 // A spec whose Sources/Destinations are both explicit and non-empty, but

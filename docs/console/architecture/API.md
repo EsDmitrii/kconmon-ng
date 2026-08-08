@@ -11,10 +11,10 @@ This document is the source of truth for Console API. Update it (and the ADRs) i
 ## 8. Console API
 
 REST under `/api/v1/*`, JSON, cursor pagination, RFC 7807 errors, durations
-in **nanoseconds** (consistent with controller). Target end state: OpenAPI
-spec generated and committed (`docs/console-api.yaml`), TS client generated
-from it — this is **deferred past M3, to M4**; see "Deferred: OpenAPI + codegen"
-below.
+in **nanoseconds** (consistent with controller). The OpenAPI spec landed in
+M4 as `docs/console-api.yaml`, with TypeScript **types** generated from it
+into `web/src/lib/api-types.ts` — see "OpenAPI + codegen (landed M4)" below
+for what shipped and what deliberately did not.
 
 ```
 GET    /api/v1/topology?at=                  live or reconstructed @t        -- implemented (M1): live only, no ?at= yet
@@ -22,7 +22,9 @@ GET    /api/v1/matrix?protocol&plane&at=                                     -- 
 GET    /api/v1/events?filters&from&to        history for Live scrollback      -- implemented (M3)
 POST   /api/v1/runs        GET /runs/{id}    diagnostics fan-out + results    -- implemented (M3)
 GET    /api/v1/runs                          run history, paged               -- implemented (M3)
-CRUD   /api/v1/targets|checks|schedules
+POST   /api/v1/runs/{id}/cancel              cancel an in-flight run          -- implemented (M4)
+CRUD   /api/v1/targets|checks|schedules      external targets + saved specs   -- implemented (M4)
+POST   /api/v1/checks/projection             cardinality preview              -- implemented (M4)
 GET    /api/v1/mtr/paths?src&dst&from&to     ; GET /mtr/paths/diff?a&b
 POST   /api/v1/investigations                assemble; GET result; save→incident
 CRUD   /api/v1/incidents|annotations|maintenance|webhooks
@@ -37,10 +39,12 @@ GET    /ws                                   authenticated WebSocket          --
 ```
 
 `?at=` (Time Machine — historical topology/matrix reconstruction) is not
-implemented yet; it lands with M5. `targets`/`checks`/`schedules`,
-`mtr/paths`, `investigations`, `incidents`/`annotations`/`maintenance`/
-`webhooks`, `alert-rules`, and `export`/`import` remain entirely unimplemented
-past M3.
+implemented yet; it lands with M5. `targets`/`checks`/`schedules` shipped in
+M4 and are **not** on this list any more; every one of them needs
+`database.mode=cnpg|external` and answers `503` otherwise (Decision 13), the
+same way the M3 history endpoints do. `mtr/paths`, `investigations`,
+`incidents`/`annotations`/`maintenance`/`webhooks`, `alert-rules`, and
+`export`/`import` remain entirely unimplemented past M4.
 
 WebSocket: single multiplexed socket at `/ws`, topic subscribe, messages
 `{"topic","type":"snapshot|delta|event|error|closed","seq","data"}`, ping/pong
@@ -247,6 +251,45 @@ subscribe to:
 {"id": "b8f9...", "status": "pending", "pairTotal": 2, "wsTopic": "run:b8f9..."}
 ```
 
+**M4 added an external destination** via three optional fields —
+`destinationKind`, `destinationTargetId`, `destinationAddress` — using the
+same kind vocabulary as `check_definitions`, so an operator who has written a
+check definition already knows the shape:
+
+- `destinationKind` absent or `"node"` is the M3 contract, byte-identical:
+  `destinations` holds node names. Sending either external field with this
+  kind is `400`, not silently ignored.
+- `"target"` resolves a saved `targets` row named by `destinationTargetId`
+  (a UUID). A non-UUID is `400`; a UUID naming no row is `422`; targets
+  unavailable (`database.mode=disabled`) is `503`.
+- `"adhoc"` probes the operator-typed `destinationAddress` with no stored row.
+- Both external kinds require `destinations` to be **empty**: one run probes
+  either the mesh or one external destination, never a mix, and the mixed body
+  is refused rather than half-honored.
+
+Both external kinds reach the controller as `destinationKind=external`. The
+audit log records `destinationKind` but **never** `destinationAddress` — the
+address is the operator's data, not an audit field.
+
+### `POST /api/v1/runs/{id}/cancel`
+
+Stops a run in flight. `204 No Content`, no body — and that same `204` also
+covers the two outcomes cancellation deliberately treats as non-errors:
+cancelling a run that reached a terminal status a moment earlier, and
+cancelling one this replica did not start. Neither is a `409`, because an
+operator who clicked cancel on a run that just finished did nothing wrong, and
+an endpoint answering differently depending on which replica took the request
+would be reporting routing rather than run state.
+
+An id naming no run is `404`; no runner (`database.mode=disabled`) is `503`.
+Cancellation is **asynchronous** — the run's own goroutine writes the terminal
+`cancelled` status once its in-flight pairs settle — so read the outcome from
+`GET /api/v1/runs/{id}`, not from this response.
+
+Gated on `runs:create`, not a permission of its own: starting fleet-wide probe
+traffic and stopping it are the same operational class, and a role that can
+start a 400-pair run must not need a second grant to stop it.
+
 ### `GET /api/v1/runs`
 
 Run history, paged, newest first, `?type=`/`?status=` filters, opaque keyset
@@ -323,15 +366,34 @@ allow-list let through for that route — `{}` for almost everything
   `auth.mode=oidc` only; `404` otherwise. `?returnTo=` must be a
   same-origin relative path (`400` otherwise).
 
-## Deferred: OpenAPI + codegen (now targeting M4)
+## OpenAPI + codegen (landed M4)
 
-`docs/console-api.yaml` OpenAPI generation and a generated TS client remain
-**deferred**, moved from its original M3 target to **M4** (Decision 12): M3
-grew the hand-written-types surface substantially (events, runs, RBAC,
-tokens, auth) but every field was still checked by hand against the Go
-structs in code review, the same M1 process, and none of the M3 tasks hit a
-correctness bug that spec-first codegen would have caught. Investing in the
-tooling now, before M4 adds targets/schedules/CRUD (a materially larger and
-more repetitive surface where hand-checking starts to actually miss
-things), would be paying the cost before the surface justifies it.
-`web/src/lib/types.ts` stays hand-written through M3.
+Deferred out of M3 (Decision 12) and delivered in M4, but **not in the shape
+the M3 note predicted**. What actually shipped:
+
+- **Spec-first, hand-authored.** `docs/console-api.yaml` is written by hand
+  and is the source of truth. It is not generated from the Go handlers —
+  generating it from code would have made the spec a description of whatever
+  the handlers currently do, which cannot catch a handler that does the wrong
+  thing.
+- **Types only, no client.** `make openapi` runs `openapi-typescript` over the
+  spec into `web/src/lib/api-types.ts`, which is committed exactly like
+  `api/proto/*.pb.go` and `internal/console/store/gen/`. CI regenerates and
+  fails on a diff, so a spec edit without a regenerate cannot land. There is
+  **no generated runtime client**: the fetch layer stays hand-written, because
+  the value was in the types agreeing with the wire, not in replacing a
+  fetch wrapper that already works.
+- **A router-walking gate.** `internal/console/httpapi/openapi_test.go` walks
+  the live chi router and joins it against the spec's `paths` in both
+  directions, keyed on `METHOD /path` so a documented path that lost one of
+  its verbs is drift too. A route added without a spec entry fails the test,
+  and a spec entry naming no route fails it as well — which is the half that
+  matters, since documentation drifts by describing endpoints that quietly
+  went away. `/healthz`, `/readyz`, `/metrics` and `/ws` are deliberately
+  outside the spec (probe/scrape endpoints, and a protocol documented in
+  WEBSOCKET.md rather than a REST path), so only `/api/v1/*` is required to
+  appear.
+
+The generator is pinned by `web/package-lock.json` rather than by a
+`go run tool@version` line, which is the same guarantee by another means. It
+needs Node and an installed `web/` tree (`cd web && npm ci`).

@@ -690,9 +690,12 @@ func TestAuditDetailAllowlistIsPinned(t *testing.T) {
 		"POST /api/v1/rbac/roles":    {"name", "permissions"},
 		"POST /api/v1/rbac/bindings": {"roleName", "subjectKind", "subjectId"},
 		"POST /api/v1/tokens":        {"name", "expiresAt"},
-		"POST /api/v1/runs":          {"type", "plane"},
-		"POST /api/v1/targets":       {"name", "kind"},
-		"PUT /api/v1/targets/{id}":   {"name", "kind"},
+		// destinationKind joined the runs entry in M4 (diagnostics form v2):
+		// a closed enum, safe by the same reasoning as type/plane; the
+		// external address and target id stay banned.
+		"POST /api/v1/runs":        {"type", "plane", "destinationKind"},
+		"POST /api/v1/targets":     {"name", "kind"},
+		"PUT /api/v1/targets/{id}": {"name", "kind"},
 		// checks: name + the three safe non-body fields (enum, bool) — NEVER
 		// destinationAddress (internal infrastructure) or params (an open
 		// object that can carry anything).

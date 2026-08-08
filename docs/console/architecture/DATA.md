@@ -19,8 +19,16 @@ Hard rule: **metrics live only in Prometheus.**
 Queried via `/api/v1/query`, `/query_range`, `/series`, `/labels` with
 configurable base URL / auth / TLS (Thanos/Mimir/VM compatible). Consumers:
 Explore, matrix history, object cards, Investigation, Time Machine, alert
-rule preview. New external-check metrics are exported by agents through the
-existing pipeline with `target` / `target_kind="external"` labels.
+rule preview. External-check metrics (M4) are exported by agents as a **new
+metric family**, `kconmon_ng_external_*` (Decision 6) — not as `target` labels
+bolted onto the peer pipeline. The peer families keep their exact label set
+(`source_node`, `destination_node`, `source_zone`, `destination_zone`); the
+external families carry `source_node`, `source_zone`, `target`, `target_kind`
+instead, where `target` is the operator's NAME for the destination and
+`target_kind` is the closed set `host|url`. Two families rather than one
+widened family is what keeps every 1.5.0 dashboard and recording rule valid
+and keeps a peer query from silently picking up external series. See
+[metrics.md](../../metrics.md) "Agent — External".
 
 ### 5.2 PostgreSQL (via CloudNativePG)
 
@@ -33,9 +41,9 @@ existing pipeline with `target` / `target_kind="external"` labels.
 | `check_runs`           | Every diagnostics run: type/plane, spec snapshot, status, timings, initiator, pair counters | **Landed M3** |
 | `check_results`        | One row per (run, source, destination): success, duration, error, the full `CheckResult` JSONB (incl. MTR hops) | **Landed M3** |
 | `topology_events`      | Persisted controller events, all five types (see below) — Time Machine's future topology source | **Landed M3** |
-| `targets`              | External targets: name, kind (host/url), address, labels | pending (M4) |
-| `check_definitions`    | Saved specs: source selector, destination (node/target/adhoc), type, plane, params | pending (M4) |
-| `check_schedules`      | one-shot / cron / interval / continuous bindings | pending (M4) |
+| `targets`              | External targets: `name` (unique, 1–63 chars), `kind` (`host`/`url`), `address`, `labels` JSONB | **Landed M4** |
+| `check_definitions`    | Saved specs: `source_selection` (`all`/`per-zone`/`one-per-zone`), `destination_kind` (`node`/`target`/`adhoc`) + `destination_target_id`/`destination_address`, `check_type`, `plane`, `params` JSONB, `enabled` | **Landed M4** |
+| `check_schedules`      | `definition_id` + `kind` (`once`/`interval`/`continuous`), `interval_ns`, `run_at`, `enabled`, `last_fired_at`/`next_fire_at` | **Landed M4** |
 | `mtr_path_snapshots`   | Normalized hop lists per (source, destination), content-hashed — powers path diff and "when did the route change?" | pending (M5) |
 | `mtr_hop_enrichment`   | Cache: ip → {rdns, asn, geo, provider}, TTL'd (§7.5) | pending (M5) |
 | `k8s_events`           | Filtered, retained copy of relevant K8s events (node/pod in scope) for post-hoc investigation (K8s only keeps ~1h) | pending (M6) |
@@ -99,15 +107,34 @@ alternative. See §11.
   both a `ValkeyKV` and an `InProcessKV` implementation, mirroring `Bus`'s own
   two backends and inheriting the same single-replica caveat when
   `console.valkey.mode=disabled`.
-- **Locks/queues**: scheduler singleton ticks (`SET NX PX`), per-user
-  diagnostics rate limits, background-job queue. Still *not implemented* — M4,
-  with the scheduler.
+- **Rate limits** (M4, implemented): the fixed-window counters behind
+  `console.rateLimit.runsPerMinute` and `console.rateLimit.loginPerMinute` are
+  ordinary `cache.KV` entries, so the limit is cluster-wide with Valkey and
+  per-replica with `console.valkey.mode=disabled` (N replicas admit up to N
+  times the rate — weaker than configured, never stronger). Both **fail open**
+  when the KV is unreadable (Decision 8: a Valkey outage must not become a
+  login outage), counted by
+  `kconmon_ng_console_rate_limit_failopen_total`.
+- **Locks**: the scheduler singleton is **NOT** a Valkey `SET NX PX` lock. It
+  is a **PostgreSQL advisory lock** (Decision 2), and deliberately so: the rows
+  the loop reads (`check_schedules`) and the lock guarding them then live in
+  the same store and the same transaction boundary, so a replica cannot hold a
+  lock in one system while another system's view of the work moved on. It also
+  means the loop has exactly one hard dependency (`database.mode=cnpg|external`)
+  rather than two. The continuous external-check reconciler shares that same
+  lock and the same tick gate. The advisory lock is released per tick, so a
+  replica dying mid-tick costs one tick, not a wedged fleet.
+- **Background-job queue**: still *not implemented*, and not scheduled to a
+  milestone — the scheduler landing on an advisory lock removed the reason
+  M4 was going to need one.
 
 So the Console's use of Valkey is two independent seams on the same client:
 pub/sub (`Bus`: `Publish`/`Subscribe`, no liveness API by design) for
 cross-replica event fan-out, and key/value (`KV`: `Get`/`Set`/`Delete`) for
-sessions. Both are `rueidis`-backed (`internal/console/cache`) with an
-in-process fallback for `console.valkey.mode=disabled`.
+sessions and rate-limit windows. Both are `rueidis`-backed
+(`internal/console/cache`) with an in-process fallback for
+`console.valkey.mode=disabled`. Cross-replica **mutual exclusion** is not one
+of those seams: it lives in PostgreSQL.
 
 Helm: bundled single-replica Valkey (`console.valkey.mode=bundled`, an ephemeral
 Deployment with **no PersistentVolumeClaim** — per ADR-002 a flush must lose zero

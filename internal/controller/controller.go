@@ -88,6 +88,14 @@ func New(cfg *config.Config) *Controller {
 		c.grpcServer,
 	))
 
+	c.httpServer.SetExternalChecksHandler(NewExternalChecksHandler(
+		registry,
+		c.grpcServer.ExternalCheckManager(),
+		m,
+		cfg.Controller.LeaderElection,
+		c.IsLeader,
+	))
+
 	return c
 }
 

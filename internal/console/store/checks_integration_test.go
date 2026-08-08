@@ -520,3 +520,150 @@ func TestPrunerRemovesOldRunsAndResults(t *testing.T) {
 		t.Errorf("check_results rows remaining for pruned run = %d, want 0 (cascade)", n)
 	}
 }
+
+// TestFinishRunAcceptsRunningToCancelled pins the one lifecycle transition M4
+// adds: 'cancelled' has been a legal check_runs.status since migration 00003,
+// but nothing ever wrote it. FinishRun's `AND status = 'running'` guard must
+// accept it exactly like every other terminal status -- and must still refuse
+// it from 'pending', so a cancel can never skip the run's own start.
+func TestFinishRunAcceptsRunningToCancelled(t *testing.T) {
+	db, _ := newChecksDB(t)
+	ctx := context.Background()
+
+	run := mustCreateRun(t, ctx, db, 5)
+	if err := db.FinishRun(ctx, run.ID, "cancelled", 0, 0); !errors.Is(err, store.ErrWrongState) {
+		t.Fatalf("FinishRun(pending -> cancelled) err = %v, want store.ErrWrongState", err)
+	}
+
+	if err := db.MarkRunStarted(ctx, run.ID); err != nil {
+		t.Fatalf("MarkRunStarted: %v", err)
+	}
+	if err := db.FinishRun(ctx, run.ID, "cancelled", 2, 1); err != nil {
+		t.Fatalf("FinishRun(running -> cancelled): %v", err)
+	}
+
+	got, err := db.GetRun(ctx, run.ID)
+	if err != nil {
+		t.Fatalf("GetRun: %v", err)
+	}
+	if got.Status != "cancelled" {
+		t.Errorf("status = %q, want cancelled", got.Status)
+	}
+	if got.FinishedAt == nil {
+		t.Error("FinishedAt is nil, want it stamped")
+	}
+	if got.PairOK != 2 || got.PairFailed != 1 {
+		t.Errorf("pair counts = ok:%d failed:%d, want ok:2 failed:1 (whatever landed before the cancel)", got.PairOK, got.PairFailed)
+	}
+}
+
+// TestReapStuckRunsForceFinishesOnlyOldRunningRuns is follow-up #6's store
+// half: a run left 'running' past the cutoff is force-finished as 'cancelled';
+// a healthy running run, a never-started pending run, and an already-terminal
+// run are all left untouched. The scheduler that calls this arrives in Task 13
+// -- this is only the query.
+func TestReapStuckRunsForceFinishesOnlyOldRunningRuns(t *testing.T) {
+	db, dsn := newChecksDB(t)
+	ctx := context.Background()
+
+	stuck := mustCreateRun(t, ctx, db, 1)
+	if err := db.MarkRunStarted(ctx, stuck.ID); err != nil {
+		t.Fatalf("MarkRunStarted(stuck): %v", err)
+	}
+	healthy := mustCreateRun(t, ctx, db, 1)
+	if err := db.MarkRunStarted(ctx, healthy.ID); err != nil {
+		t.Fatalf("MarkRunStarted(healthy): %v", err)
+	}
+	pending := mustCreateRun(t, ctx, db, 1)
+	finished := mustCreateRun(t, ctx, db, 1)
+	if err := db.MarkRunStarted(ctx, finished.ID); err != nil {
+		t.Fatalf("MarkRunStarted(finished): %v", err)
+	}
+	if err := db.FinishRun(ctx, finished.ID, "succeeded", 1, 0); err != nil {
+		t.Fatalf("FinishRun(finished): %v", err)
+	}
+
+	// Backdate the stuck run AND the already-terminal one past the cutoff:
+	// age alone must not be enough to be reaped -- status = 'running' is the
+	// other half of the predicate.
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer pool.Close()
+	for _, id := range []string{stuck.ID, pending.ID, finished.ID} {
+		if _, err := pool.Exec(ctx, `UPDATE check_runs SET created_at = now() - interval '3 hours' WHERE id = $1`, id); err != nil {
+			t.Fatalf("backdate %s: %v", id, err)
+		}
+	}
+
+	n, err := db.ReapStuckRuns(ctx, time.Now().UTC().Add(-2*time.Hour), 100)
+	if err != nil {
+		t.Fatalf("ReapStuckRuns: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("ReapStuckRuns reaped %d rows, want 1", n)
+	}
+
+	want := map[string]string{
+		stuck.ID: "cancelled", healthy.ID: "running", pending.ID: "pending", finished.ID: "succeeded",
+	}
+	for id, wantStatus := range want {
+		got, err := db.GetRun(ctx, id)
+		if err != nil {
+			t.Fatalf("GetRun(%s): %v", id, err)
+		}
+		if got.Status != wantStatus {
+			t.Errorf("run %s status = %q, want %q", id, got.Status, wantStatus)
+		}
+	}
+
+	reaped, err := db.GetRun(ctx, stuck.ID)
+	if err != nil {
+		t.Fatalf("GetRun(stuck): %v", err)
+	}
+	if reaped.FinishedAt == nil {
+		t.Error("reaped run FinishedAt is nil, want it stamped so the row is genuinely terminal")
+	}
+
+	// Idempotent: a second sweep finds nothing left to reap.
+	again, err := db.ReapStuckRuns(ctx, time.Now().UTC().Add(-2*time.Hour), 100)
+	if err != nil {
+		t.Fatalf("second ReapStuckRuns: %v", err)
+	}
+	if again != 0 {
+		t.Errorf("second sweep reaped %d rows, want 0", again)
+	}
+}
+
+// The reaper's limit bounds one sweep, so a backlog cannot hold a long
+// transaction open over thousands of rows -- same posture DeleteRunsBefore's
+// own limit takes.
+func TestReapStuckRunsHonoursLimit(t *testing.T) {
+	db, dsn := newChecksDB(t)
+	ctx := context.Background()
+
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer pool.Close()
+
+	for i := 0; i < 5; i++ {
+		run := mustCreateRun(t, ctx, db, 1)
+		if err := db.MarkRunStarted(ctx, run.ID); err != nil {
+			t.Fatalf("MarkRunStarted: %v", err)
+		}
+		if _, err := pool.Exec(ctx, `UPDATE check_runs SET created_at = now() - interval '3 hours' WHERE id = $1`, run.ID); err != nil {
+			t.Fatalf("backdate: %v", err)
+		}
+	}
+
+	n, err := db.ReapStuckRuns(ctx, time.Now().UTC().Add(-2*time.Hour), 2)
+	if err != nil {
+		t.Fatalf("ReapStuckRuns: %v", err)
+	}
+	if n != 2 {
+		t.Fatalf("reaped %d rows, want 2 (the limit)", n)
+	}
+}

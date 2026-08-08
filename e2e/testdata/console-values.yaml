@@ -17,6 +17,14 @@
 #     Secret (kconmon-e2e-postgres, key "dsn" -- the chart default
 #     existingSecretKey, left unset here on purpose). NOT cnpg -- see
 #     postgres.yaml's header for why.
+#   - scheduler.enabled=true: turns on the advisory-locked tick that fires due
+#     check_schedules rows (TestConsoleSchedule) AND -- same flag, same lock,
+#     same cadence -- reconciles continuous external checks onto agents
+#     (TestConsoleExternalCheckAssignment / TestConsoleExternalCheckDenied).
+#     It needs the database above, which is why it is set here and not in the
+#     base file.
+#   - rateLimit.runsPerMinute raised well above the chart default of 10: see
+#     the block itself for why.
 #   - controller.events.enabled=true (top-level, not console-scoped): makes
 #     the controller publish its domain-event stream, and (via the chart's
 #     own controllerGRPCAddr helper) makes the console derive
@@ -49,3 +57,18 @@ console:
     mode: external
     existingSecret: kconmon-e2e-postgres
     existingSecretKey: dsn
+  # The chart default is 10 POST /api/v1/runs per SUBJECT per minute, and
+  # auth.mode=anonymous above makes EVERY e2e request one and the same
+  # subject. TestConsoleRuns, the runs the schedule loop's own dispatches are
+  # not counted for (they never traverse the HTTP handler), and a re-run of the
+  # suite against a still-warm window would then collide on a limit that is an
+  # abuse control, not behavior under test -- a 429 there would look exactly
+  # like a broken run path. Raised, not disabled (0), so the middleware itself
+  # stays on the exercised path.
+  rateLimit:
+    runsPerMinute: 1000
+  # Drives TestConsoleSchedule and both external-check tests. tickInterval is
+  # left at the chart default (5s) on purpose: it is the reconcile cadence too,
+  # and the poll budgets in e2e/console_test.go are written against it.
+  scheduler:
+    enabled: true

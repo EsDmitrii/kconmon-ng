@@ -79,6 +79,20 @@ type Metrics struct {
 	// must be alertable). Zero labels.
 	ProjectionGuardFailOpen *prometheus.CounterVec
 
+	// RateLimited counts requests the fixed-window rate limiter REFUSED with
+	// a 429 (M4 Task 8). RateLimitFailOpen counts requests it ALLOWED because
+	// the KV backend could not be counted against -- the same Decision 8
+	// posture ProjectionGuardFailOpen above states: fail open, but make
+	// failing-open visible and alertable rather than silent, because a Valkey
+	// outage must never become a login outage.
+	//
+	// Both carry ONE label, limit, whose value set is CLOSED: runs|login. The
+	// limiter never puts a username, a subject ID, or a source IP in a label
+	// -- those are unbounded and attacker-chosen, which is exactly the
+	// cardinality bomb the whole package's label discipline exists to prevent.
+	RateLimited       *prometheus.CounterVec
+	RateLimitFailOpen *prometheus.CounterVec
+
 	// Diagnostics runner (M3, Task 22): checks.Runner's fan-out lifecycle.
 	// Closed label sets, same convention as WSTopics -- a run ID must never
 	// become a label value. RunsTotal's status is succeeded|partial|failed
@@ -88,6 +102,61 @@ type Metrics struct {
 	RunsTotal   *prometheus.CounterVec
 	RunPairs    *prometheus.CounterVec
 	RunDuration *prometheus.HistogramVec
+
+	// Schedule loop (M4 Task 13): internal/console/scheduler's per-tick
+	// lifecycle. Every label set below is CLOSED, and none of them ever
+	// carries a schedule ID, a definition ID or a run ID -- the same
+	// discipline WSTopics and RunsTotal follow.
+	//
+	// SchedulerTicks' result is ok|not-leader|error, one increment per tick
+	// on EVERY replica: not-leader is the expected steady state on N-1 of
+	// them (the advisory lock admits one), so a fleet-wide sum of ok is what
+	// says the loop is alive, and error is the only one worth alerting on.
+	// SchedulerFired's kind is once|interval -- 'continuous' is deliberately
+	// NOT a value here: those schedules are agent-side and this loop never
+	// fires one, so a series that could only ever be zero would just invite
+	// the wrong conclusion. SchedulerSkipped's reason is overrun|disabled:
+	// a due schedule whose previous run is still in flight, and a due
+	// schedule whose definition is switched off. RunsReaped counts run rows
+	// the stuck-run reaper force-finished (checks.Runner.ReapStuckRuns),
+	// zero labels like AuditDropped.
+	SchedulerTicks   *prometheus.CounterVec
+	SchedulerFired   *prometheus.CounterVec
+	SchedulerSkipped *prometheus.CounterVec
+	RunsReaped       *prometheus.CounterVec
+
+	// Continuous external-check reconciler (M4 Task 17):
+	// internal/console/checks' assignment ticker. Same closed-label discipline
+	// as the scheduler block above -- no definition ID, no agent ID, no target
+	// name anywhere.
+	//
+	// ExternalSeriesProjected is the number of Prometheus series the CURRENTLY
+	// assigned continuous checks project to (checks.AssignAgents' second
+	// return). Zero labels, and a GAUGE rather than a counter because it
+	// describes a standing state, not an event: it is refreshed on every
+	// reconcile whose outcome is known-good, which includes the "nothing
+	// changed" outcome -- the number is current either way, and letting it go
+	// stale on the steady state (which is almost every tick) would make it
+	// useless.
+	//
+	// ExternalReconciles' result is pushed|unchanged|not-leader|error.
+	// not-leader is the expected steady state on N-1 replicas (the reconciler
+	// shares the scheduler's advisory lock), unchanged is the expected steady
+	// state on the leader, and pushed marks a tick that actually PUT. error
+	// covers both a failed read and a failed PUT: in every error case the
+	// last-pushed state is left dirty so the next tick retries.
+	//
+	// ExternalSpecsSkipped counts DEFINITIONS dropped from the desired state,
+	// by reason: check-type (mtr/udp -- the controller 400s the whole PUT on
+	// those, so one ineligible definition would cost every other agent its
+	// assignment) and destination-kind (a continuous definition pointed at
+	// cluster nodes, which is the agents' own peer mesh and not an external
+	// check). It increments once per skipped definition per tick, so a
+	// misconfiguration shows up as a steady rate rather than a single spike
+	// that scrolls out of the retention window.
+	ExternalSeriesProjected *prometheus.GaugeVec
+	ExternalReconciles      *prometheus.CounterVec
+	ExternalSpecsSkipped    *prometheus.CounterVec
 }
 
 // New registers and returns the Console metrics under <prefix>_console_*.
@@ -186,6 +255,14 @@ func New(prefix string, reg prometheus.Registerer) *Metrics {
 			Name: ns + "_projection_guard_failopen_total",
 			Help: "Definition writes the cardinality projection guard allowed because the topology was unreadable (fail-open, Decision 8).",
 		}, []string{}),
+		RateLimited: f.NewCounterVec(prometheus.CounterOpts{
+			Name: ns + "_rate_limited_total",
+			Help: "Requests refused with 429 by the fixed-window rate limiter, by limit (runs, login).",
+		}, []string{"limit"}),
+		RateLimitFailOpen: f.NewCounterVec(prometheus.CounterOpts{
+			Name: ns + "_rate_limit_failopen_total",
+			Help: "Requests the rate limiter allowed because the KV backend was unreadable (fail-open, Decision 8), by limit (runs, login).",
+		}, []string{"limit"}),
 		RunsTotal: f.NewCounterVec(prometheus.CounterOpts{
 			Name: ns + "_runs_total",
 			Help: "Diagnostics runs completed, by check type and terminal status (succeeded, partial, failed).",
@@ -199,5 +276,33 @@ func New(prefix string, reg prometheus.Registerer) *Metrics {
 			Help:    "Diagnostics run wall-clock duration in seconds, by check type.",
 			Buckets: runDurationBuckets,
 		}, []string{"type"}),
+		SchedulerTicks: f.NewCounterVec(prometheus.CounterOpts{
+			Name: ns + "_scheduler_ticks_total",
+			Help: "Schedule loop ticks, by result (ok, not-leader, error). not-leader is the normal case on every replica but one.",
+		}, []string{"result"}),
+		SchedulerFired: f.NewCounterVec(prometheus.CounterOpts{
+			Name: ns + "_scheduler_fired_total",
+			Help: "Runs started by the schedule loop, by schedule kind (once, interval).",
+		}, []string{"kind"}),
+		SchedulerSkipped: f.NewCounterVec(prometheus.CounterOpts{
+			Name: ns + "_scheduler_skipped_total",
+			Help: "Due schedules the loop declined to fire, by reason (overrun, disabled).",
+		}, []string{"reason"}),
+		RunsReaped: f.NewCounterVec(prometheus.CounterOpts{
+			Name: ns + "_runs_reaped_total",
+			Help: "Runs force-finished as cancelled by the stuck-run reaper.",
+		}, []string{}),
+		ExternalSeriesProjected: f.NewGaugeVec(prometheus.GaugeOpts{
+			Name: ns + "_external_series_projected",
+			Help: "Prometheus series the currently assigned continuous external checks project to.",
+		}, []string{}),
+		ExternalReconciles: f.NewCounterVec(prometheus.CounterOpts{
+			Name: ns + "_external_reconciles_total",
+			Help: "Continuous external-check reconcile ticks, by result (pushed, unchanged, not-leader, error).",
+		}, []string{"result"}),
+		ExternalSpecsSkipped: f.NewCounterVec(prometheus.CounterOpts{
+			Name: ns + "_external_specs_skipped_total",
+			Help: "Continuous definitions left out of the desired assignment, by reason (check-type, destination-kind).",
+		}, []string{"reason"}),
 	}
 }

@@ -22,6 +22,8 @@ import { LoginPage } from "@/pages/login";
 import { NodeCardPage } from "@/pages/node-card";
 import { PairCardPage } from "@/pages/pair-card";
 import { RunDetailPage } from "@/pages/run-detail";
+import { TargetCardPage } from "@/pages/target-card";
+import { TargetsPage } from "@/pages/targets";
 
 /**
  * AppShell is the chrome around every route's Outlet: sidebar, anonymous-
@@ -72,11 +74,13 @@ const routes = NAV_ITEMS.map((item) =>
               ? TopologyPage
               : item.path === "/diagnostics"
                 ? DiagnosticsPage
-                : item.path === "/explore"
-                  ? ExplorePage
-                  : item.path === "/console"
-                    ? PromQLConsolePage
-                    : () => <StubPage title={item.label} description={item.description} />,
+                : item.path === "/targets"
+                  ? TargetsPage
+                  : item.path === "/explore"
+                    ? ExplorePage
+                    : item.path === "/console"
+                      ? PromQLConsolePage
+                      : () => <StubPage title={item.label} description={item.description} />,
   }),
 );
 
@@ -124,7 +128,28 @@ const pairCardRoute = createRoute({
   component: PairCardPage,
 });
 
-const routeTree = rootRoute.addChildren([...routes, loginRoute, runDetailRoute, nodeCardRoute, pairCardRoute]);
+// /targets/$id (M4's Target object card, task-20-brief.md) follows the same
+// pattern as the three detail routes above: not in NAV_ITEMS -- no sidebar
+// entry, only reachable from a row on the Targets page or from a bookmark --
+// and TargetCardPage reads its own id off window.location.pathname
+// (targetIdFromPath) rather than through this route's $id param. It is a
+// SIBLING of the "/targets" nav route, not a child of it, exactly as
+// /diagnostics/runs/$runId is a sibling of "/diagnostics": this route's only
+// job is to make the URL resolve instead of falling through to a 404.
+const targetCardRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/targets/$id",
+  component: TargetCardPage,
+});
+
+const routeTree = rootRoute.addChildren([
+  ...routes,
+  loginRoute,
+  runDetailRoute,
+  nodeCardRoute,
+  pairCardRoute,
+  targetCardRoute,
+]);
 
 export const router = createRouter({ routeTree });
 

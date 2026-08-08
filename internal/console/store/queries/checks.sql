@@ -77,3 +77,41 @@ RETURNING id, run_id, source_node, destination_node, success, duration_ns, error
 -- separate check_results sweep exists or is needed.
 DELETE FROM check_runs
 WHERE id IN (SELECT cr.id FROM check_runs cr WHERE cr.created_at < $1 ORDER BY cr.created_at LIMIT $2);
+
+-- name: ReapStuckRuns :execrows
+-- Force-finish runs left 'running' long past any deadline the runner could
+-- have given them (M4 follow-up #6): a Console killed mid-run never writes its
+-- FinishRun, and nothing else would ever move that row out of 'running'.
+-- 'cancelled' is the honest outcome -- the run did not fail its checks, it was
+-- abandoned.
+--
+-- status = 'running' is half the predicate on purpose: age alone must never be
+-- enough. A pending run that never started, and one that already reached a
+-- terminal status, are both left untouched no matter how old they are (the
+-- retention Pruner is what removes those, not this).
+--
+-- NO NEW INDEX, and the honest reason is that no existing one helps and no new
+-- one is worth a migration here. check_runs_created_idx (created_at DESC, id
+-- DESC) cannot serve this: created_at < cutoff matches almost the whole table
+-- (every run older than the cutoff, i.e. nearly all of them), so it is not a
+-- selective bound and the planner correctly prefers a sequential scan --
+-- measured at ~667 buffers / ~2ms over 50k rows on postgres:17-alpine, with
+-- the ORDER BY's sort on the 100-row LIMIT costing nothing. The selective
+-- predicate is status = 'running', which would want a PARTIAL index, and that
+-- needs a migration this task does not add. The trade is fine because
+-- check_runs is bounded by the retention sweep (DeleteRunsBefore) and this
+-- query runs on a slow scheduler tick, not per request -- revisit it if run
+-- volume ever makes check_runs large enough for a seq scan to matter.
+--
+-- ORDER BY created_at (oldest first) matches DeleteRunsBefore's own shape so a
+-- limit that cannot cover the whole backlog still makes forward progress
+-- instead of re-examining the same rows. cr alias on the subquery's own FROM
+-- for the same sqlc v1.31.1 analyzer quirk documented on DeleteRunsBefore above.
+UPDATE check_runs
+SET status = 'cancelled', finished_at = now()
+WHERE id IN (
+    SELECT cr.id FROM check_runs cr
+    WHERE cr.status = 'running' AND cr.created_at < $1
+    ORDER BY cr.created_at
+    LIMIT $2
+);

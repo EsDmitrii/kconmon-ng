@@ -3,6 +3,7 @@ package httpapi
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -20,12 +21,14 @@ import (
 // paths, error mapping, RBAC, audit) without wiring a real controller, hub,
 // bus, or store the way a real *checks.Runner would need.
 type fakeRunner struct {
-	mu       sync.Mutex
-	runs     map[string]checks.Run
-	results  map[string][]store.RunResult
-	nextID   int
-	startErr error
-	started  []checks.Spec
+	mu        sync.Mutex
+	runs      map[string]checks.Run
+	results   map[string][]store.RunResult
+	nextID    int
+	startErr  error
+	started   []checks.Spec
+	cancelErr error
+	cancelled []string
 }
 
 func newFakeRunner() *fakeRunner {
@@ -76,6 +79,35 @@ func (f *fakeRunner) List(_ context.Context, _ checks.ListFilter) (checks.RunPag
 		out = append(out, r)
 	}
 	return checks.RunPage{Runs: out}, nil
+}
+
+// Cancel mirrors checks.Runner.Cancel's contract closely enough for the
+// handler's own mapping to be exercised: an unknown id is store.ErrNotFound,
+// and everything else -- including a run that already reached a terminal
+// status -- succeeds, because cancelling a run that just finished is a no-op
+// there, not an error.
+func (f *fakeRunner) Cancel(_ context.Context, runID string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.cancelErr != nil {
+		return f.cancelErr
+	}
+	if _, ok := f.runs[runID]; !ok {
+		return fmt.Errorf("fake runner: cancel run: %w", store.ErrNotFound)
+	}
+	f.cancelled = append(f.cancelled, runID)
+	return nil
+}
+
+// seedRun registers a run under cancelRunID, which the cancel tests need:
+// Start mints "run-N" ids, and POST /api/v1/runs/{id}/cancel rejects anything
+// that is not a canonical UUID before the runner is ever consulted.
+func (f *fakeRunner) seedRun(status string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.runs[cancelRunID] = checks.Run{
+		ID: cancelRunID, CreatedAt: time.Now().UTC(), Status: status, CheckType: "tcp", Plane: "pod",
+	}
 }
 
 var _ RunService = (*fakeRunner)(nil)
@@ -343,6 +375,10 @@ func TestRunsRouteTableCoversAllThreeRoutes(t *testing.T) {
 		"POST /api/v1/runs":     authz.PermRunsCreate,
 		"GET /api/v1/runs":      authz.PermRunsRead,
 		"GET /api/v1/runs/{id}": authz.PermRunsRead,
+		// M4 Task 13: cancelling rides on runs:create, deliberately -- see
+		// routeTable's own comment. Pinned here so a later edit cannot quietly
+		// relax it to runs:read and let every viewer stop an operator's run.
+		"POST /api/v1/runs/{id}/cancel": authz.PermRunsCreate,
 	}
 	for key, want := range cases {
 		rule, ok := routeTable[key]
@@ -357,5 +393,268 @@ func TestRunsRouteTableCoversAllThreeRoutes(t *testing.T) {
 		if rule.permission != want {
 			t.Errorf("%s permission = %q, want %q", key, rule.permission, want)
 		}
+	}
+}
+
+// cancelRunID is a fixed, canonical UUID the cancel tests address. A literal
+// rather than uuid.NewString() so a failure message names the same id every
+// run and the "not a UUID" case below has an unambiguous counterpart.
+const cancelRunID = "6f1c9a10-2a6f-4d6e-9a4c-0f0c1b2d3e4f"
+
+// TestRunsCancelHappyPathReturns204 pins the endpoint's whole success
+// contract: 204, an empty body, and the runner actually asked to cancel THAT
+// run.
+func TestRunsCancelHappyPathReturns204(t *testing.T) {
+	runner := newFakeRunner()
+	runner.seedRun("running")
+	s := newRunsTestServer(t, runner, "operator")
+
+	w := doRequest(t, s, http.MethodPost, "/api/v1/runs/"+cancelRunID+"/cancel", nil, mutateWithCSRF)
+	if w.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204: %s", w.Code, w.Body)
+	}
+	if body := w.Body.String(); body != "" {
+		t.Errorf("body = %q, want empty (204 carries no content)", body)
+	}
+	if len(runner.cancelled) != 1 || runner.cancelled[0] != cancelRunID {
+		t.Errorf("cancelled = %v, want [%s]", runner.cancelled, cancelRunID)
+	}
+}
+
+// TestRunsCancelTerminalRunIsANoOp204 is the documented decision: an operator
+// clicking cancel on a run that finished a moment earlier has not done
+// anything wrong, so the button must not lie with a 409.
+func TestRunsCancelTerminalRunIsANoOp204(t *testing.T) {
+	runner := newFakeRunner()
+	runner.seedRun("succeeded")
+	s := newRunsTestServer(t, runner, "operator")
+
+	w := doRequest(t, s, http.MethodPost, "/api/v1/runs/"+cancelRunID+"/cancel", nil, mutateWithCSRF)
+	if w.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204 for an already-terminal run: %s", w.Code, w.Body)
+	}
+}
+
+// TestRunsCancelUnknownRunReturns404 covers both shapes of "no such run": a
+// well-formed UUID nothing was ever stored under, and an id that cannot name
+// a row in a UUID-keyed table at all. Neither is a 502 -- a typo in a run URL
+// must never read as an outage (M3 follow-up #5).
+func TestRunsCancelUnknownRunReturns404(t *testing.T) {
+	s := newRunsTestServer(t, newFakeRunner(), "operator")
+
+	for name, path := range map[string]string{
+		"unknown uuid": "/api/v1/runs/" + cancelRunID + "/cancel",
+		"not a uuid":   "/api/v1/runs/not-a-uuid/cancel",
+	} {
+		w := doRequest(t, s, http.MethodPost, path, nil, mutateWithCSRF)
+		if w.Code != http.StatusNotFound {
+			t.Errorf("%s: status = %d, want 404: %s", name, w.Code, w.Body)
+		}
+	}
+}
+
+// TestRunsCancelBackendFailureIs502 keeps the not-found mapping honest: a
+// store error that is NOT ErrNotFound must stay a 502, or the 404 above would
+// be indistinguishable from an outage.
+func TestRunsCancelBackendFailureIs502(t *testing.T) {
+	runner := newFakeRunner()
+	runner.seedRun("running")
+	runner.cancelErr = errors.New("connection refused")
+	s := newRunsTestServer(t, runner, "operator")
+
+	w := doRequest(t, s, http.MethodPost, "/api/v1/runs/"+cancelRunID+"/cancel", nil, mutateWithCSRF)
+	if w.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502: %s", w.Code, w.Body)
+	}
+}
+
+// TestRunsCancelRequiresRunsCreate is the RBAC half of the routeTable pin: a
+// viewer holds runs:read and must NOT be able to stop an operator's run.
+func TestRunsCancelRequiresRunsCreate(t *testing.T) {
+	runner := newFakeRunner()
+	runner.seedRun("running")
+	s := newRunsTestServer(t, runner, "viewer")
+
+	w := doRequest(t, s, http.MethodPost, "/api/v1/runs/"+cancelRunID+"/cancel", nil, mutateWithCSRF)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403 for a viewer: %s", w.Code, w.Body)
+	}
+	if len(runner.cancelled) != 0 {
+		t.Errorf("cancelled = %v, want none: the request was denied", runner.cancelled)
+	}
+}
+
+// TestRunsCancelWithoutRunnerReturns503 keeps the route on the same "nil
+// dependency -> 503" convention as the other three runs routes.
+func TestRunsCancelWithoutRunnerReturns503(t *testing.T) {
+	authr := fakeAuthenticator{subject: authz.Subject{Kind: authz.SubjectUser, ID: "u1"}}
+	s := newAuthzServer(t, authr, authz.NewPolicy(nil), Deps{Roles: fakeRoleResolver{roles: []string{"operator"}}})
+
+	w := doRequest(t, s, http.MethodPost, "/api/v1/runs/"+cancelRunID+"/cancel", nil, mutateWithCSRF)
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503: %s", w.Code, w.Body)
+	}
+}
+
+// TestRunsCancelIsAuditedWithEmptyDetail pins the audit decision this route
+// makes by NOT appearing in auditDetailAllowlist: it is still recorded (every
+// POST is), attributed to the run through the resource column, and its detail
+// stays the default {} because there is no request body to allow-list keys
+// from.
+func TestRunsCancelIsAuditedWithEmptyDetail(t *testing.T) {
+	fs := &fakeAuditStore{}
+	runner := newFakeRunner()
+	runner.seedRun("running")
+	authr := fakeAuthenticator{subject: authz.Subject{Kind: authz.SubjectUser, ID: "u1"}}
+	s := newAuthzServer(t, authr, authz.NewPolicy(nil), Deps{
+		Runner: runner, Audit: fs, Roles: fakeRoleResolver{roles: []string{"operator"}},
+	})
+
+	w := doRequest(t, s, http.MethodPost, "/api/v1/runs/"+cancelRunID+"/cancel", nil, mutateWithCSRF)
+	if w.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204: %s", w.Code, w.Body)
+	}
+
+	e := waitForOneAuditEntry(t, fs)[0]
+	if e.Action != "POST /api/v1/runs/{id}/cancel" {
+		t.Errorf("action = %q, want the route pattern", e.Action)
+	}
+	if e.Resource != cancelRunID {
+		t.Errorf("resource = %q, want the run id %q", e.Resource, cancelRunID)
+	}
+	if e.Outcome != auditOutcomeAllowed {
+		t.Errorf("outcome = %q, want %q", e.Outcome, auditOutcomeAllowed)
+	}
+	if string(e.Detail) != "{}" {
+		t.Errorf("detail = %s, want {} (no body, no allow-list entry)", e.Detail)
+	}
+}
+
+// newRunsTargetsTestServer is newRunsTestServer with a TargetService wired,
+// for the destinationKind=target path.
+func newRunsTargetsTestServer(t *testing.T, runner RunService, targets TargetService) *Server {
+	t.Helper()
+	authr := fakeAuthenticator{subject: authz.Subject{Kind: authz.SubjectUser, ID: "u1"}}
+	extra := Deps{Runner: runner, Targets: targets, Roles: fakeRoleResolver{roles: []string{"operator"}}}
+	return newAuthzServer(t, authr, authz.NewPolicy(nil), extra)
+}
+
+// TestRunsCreateNodeKindIsTheM3Path pins the regression the M4 destination
+// fields must never break: a body without them (and one saying "node"
+// explicitly) produces a Spec with plain node-name Destinations and NO
+// TypedDestinations -- the exact Spec the M3 handler built.
+func TestRunsCreateNodeKindIsTheM3Path(t *testing.T) {
+	for _, body := range []string{
+		`{"sources":["n1"],"destinations":["n2"],"type":"tcp","plane":"pod","timeoutNs":1000000000}`,
+		`{"sources":["n1"],"destinations":["n2"],"type":"tcp","plane":"pod","timeoutNs":1000000000,"destinationKind":"node"}`,
+	} {
+		runner := newFakeRunner()
+		s := newRunsTestServer(t, runner, "operator")
+		w := doRequest(t, s, http.MethodPost, "/api/v1/runs", strings.NewReader(body), mutateWithCSRF)
+		if w.Code != http.StatusAccepted {
+			t.Fatalf("status = %d, want 202: %s", w.Code, w.Body)
+		}
+		spec := runner.started[0]
+		if len(spec.TypedDestinations) != 0 {
+			t.Errorf("node-kind run grew TypedDestinations: %+v", spec.TypedDestinations)
+		}
+		if len(spec.Destinations) != 1 || spec.Destinations[0] != "n2" {
+			t.Errorf("Destinations = %v, want [n2]", spec.Destinations)
+		}
+	}
+}
+
+func TestRunsCreateTargetKindResolvesTheTargetsRow(t *testing.T) {
+	runner := newFakeRunner()
+	targets := newFakeTargetService()
+	created, err := targets.CreateTarget(t.Context(), store.TargetInput{
+		Name: "corp-dns", Kind: "host", Address: "10.66.6.6",
+	})
+	if err != nil {
+		t.Fatalf("seed target: %v", err)
+	}
+	s := newRunsTargetsTestServer(t, runner, targets)
+
+	body := `{"sources":["n1"],"type":"tcp","plane":"pod","timeoutNs":1000000000,` +
+		`"destinationKind":"target","destinationTargetId":"` + created.ID + `"}`
+	w := doRequest(t, s, http.MethodPost, "/api/v1/runs", strings.NewReader(body), mutateWithCSRF)
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202: %s", w.Code, w.Body)
+	}
+	spec := runner.started[0]
+	if len(spec.TypedDestinations) != 1 {
+		t.Fatalf("TypedDestinations = %+v, want exactly one", spec.TypedDestinations)
+	}
+	d := spec.TypedDestinations[0]
+	if d.Kind != checks.DestKindTarget || d.Name != "corp-dns" || d.Address != "10.66.6.6" {
+		t.Errorf("destination = %+v, want target corp-dns 10.66.6.6", d)
+	}
+	if len(spec.Destinations) != 0 {
+		t.Errorf("Destinations = %v, want empty for an external run", spec.Destinations)
+	}
+}
+
+func TestRunsCreateAdhocKindUsesTheAddressAsName(t *testing.T) {
+	runner := newFakeRunner()
+	s := newRunsTestServer(t, runner, "operator")
+	body := `{"sources":["n1"],"type":"icmp","plane":"pod","timeoutNs":1000000000,` +
+		`"destinationKind":"adhoc","destinationAddress":"192.0.2.7"}`
+	w := doRequest(t, s, http.MethodPost, "/api/v1/runs", strings.NewReader(body), mutateWithCSRF)
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202: %s", w.Code, w.Body)
+	}
+	d := runner.started[0].TypedDestinations[0]
+	if d.Kind != checks.DestKindAdhoc || d.Name != "192.0.2.7" || d.Address != "192.0.2.7" {
+		t.Errorf("destination = %+v, want adhoc with address doubling as name", d)
+	}
+}
+
+// TestRunsCreateDestinationValidation walks every refusal
+// resolveRunDestination produces, plus the 422/503 target cases.
+func TestRunsCreateDestinationValidation(t *testing.T) {
+	cases := []struct {
+		name, body string
+		want       int
+		useTargets bool
+	}{
+		{"unknown kind", `{"sources":["n1"],"type":"tcp","plane":"pod","destinationKind":"pod"}`, http.StatusBadRequest, false},
+		{"external fields with node kind", `{"sources":["n1"],"destinations":["n2"],"type":"tcp","plane":"pod","destinationAddress":"10.0.0.1"}`, http.StatusBadRequest, false},
+		{"destinations with target kind", `{"sources":["n1"],"destinations":["n2"],"type":"tcp","plane":"pod","destinationKind":"target","destinationTargetId":"3f0e8f7e-58a4-4b7a-9a63-8f6e1c2d4b5a"}`, http.StatusBadRequest, false},
+		{"adhoc without address", `{"sources":["n1"],"type":"tcp","plane":"pod","destinationKind":"adhoc"}`, http.StatusBadRequest, false},
+		{"target id not a uuid", `{"sources":["n1"],"type":"tcp","plane":"pod","destinationKind":"target","destinationTargetId":"nope"}`, http.StatusBadRequest, true},
+		{"unknown target row", `{"sources":["n1"],"type":"tcp","plane":"pod","destinationKind":"target","destinationTargetId":"3f0e8f7e-58a4-4b7a-9a63-8f6e1c2d4b5a"}`, http.StatusUnprocessableEntity, true},
+		{"target kind without targets store", `{"sources":["n1"],"type":"tcp","plane":"pod","destinationKind":"target","destinationTargetId":"3f0e8f7e-58a4-4b7a-9a63-8f6e1c2d4b5a"}`, http.StatusServiceUnavailable, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			runner := newFakeRunner()
+			var s *Server
+			if c.useTargets {
+				s = newRunsTargetsTestServer(t, runner, newFakeTargetService())
+			} else {
+				s = newRunsTestServer(t, runner, "operator")
+			}
+			w := doRequest(t, s, http.MethodPost, "/api/v1/runs", strings.NewReader(c.body), mutateWithCSRF)
+			if w.Code != c.want {
+				t.Fatalf("status = %d, want %d: %s", w.Code, c.want, w.Body)
+			}
+			if len(runner.started) != 0 {
+				t.Errorf("refused request still started a run: %+v", runner.started)
+			}
+		})
+	}
+}
+
+// TestRunsCreateInvalidDestinationFromPlannerIs400 covers the Task 12
+// carry-forward: checks.ErrInvalidDestination out of Runner.Start maps to
+// 400, not the 502 default.
+func TestRunsCreateInvalidDestinationFromPlannerIs400(t *testing.T) {
+	runner := newFakeRunner()
+	runner.startErr = fmt.Errorf("checks: plan: %w: empty address", checks.ErrInvalidDestination)
+	s := newRunsTestServer(t, runner, "operator")
+	body := `{"sources":["n1"],"type":"tcp","plane":"pod","destinationKind":"adhoc","destinationAddress":"x"}`
+	w := doRequest(t, s, http.MethodPost, "/api/v1/runs", strings.NewReader(body), mutateWithCSRF)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400: %s", w.Code, w.Body)
 	}
 }

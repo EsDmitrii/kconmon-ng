@@ -260,6 +260,70 @@ func TestSchedulerNodeLocalRunsOnce(t *testing.T) {
 	}
 }
 
+// A failing CONTINUOUS external check must never trigger an MTR trace. Its
+// destination is an internet host: tracing it on every probe interval would
+// send traffic the operator never asked for and blow up mtr_hop_rtt_seconds,
+// which is labelled by hop_ip.
+//
+// The assertion is twofold: no MTR result reaches the handler, and the
+// per-pair cooldown token is still available — triggerMTR consumes it via
+// TryAcquire before running, so an untouched token proves it returned early.
+func TestTriggerMTRSkipsExternalFailures(t *testing.T) {
+	var mu sync.Mutex
+	var results []model.CheckResult
+	s := NewScheduler(checker.Target{AgentID: "a", NodeName: "self"}, func(r model.CheckResult) {
+		mu.Lock()
+		results = append(results, r)
+		mu.Unlock()
+	})
+
+	mtr := checker.NewMTRChecker(5, time.Second, time.Minute)
+	s.SetMTRChecker(mtr)
+
+	// PodIP is deliberately empty: if the exclusion ever regresses, MTRChecker
+	// bails on the invalid IP instead of tracing a real path from a unit test.
+	peer := checker.Target{NodeName: "external-target"}
+	failed := model.CheckResult{Type: checker.CheckExternal, Success: false, Error: "external check failed"}
+
+	s.triggerMTR(context.Background(), peer, &failed)
+
+	mu.Lock()
+	got := len(results)
+	mu.Unlock()
+	if got != 0 {
+		t.Fatalf("external failure must not produce an MTR result, got %d", got)
+	}
+	if !mtr.TryAcquire("self", "external-target") {
+		t.Fatal("external failure consumed the MTR cooldown token, so triggerMTR did not return early")
+	}
+}
+
+// Control for the test above: a peer TCP failure still triggers a trace, so the
+// exclusion is narrow and not an accidental blanket disable.
+func TestTriggerMTRStillFiresForPeerFailures(t *testing.T) {
+	var mu sync.Mutex
+	var results []model.CheckResult
+	s := NewScheduler(checker.Target{AgentID: "a", NodeName: "self"}, func(r model.CheckResult) {
+		mu.Lock()
+		results = append(results, r)
+		mu.Unlock()
+	})
+	s.SetMTRChecker(checker.NewMTRChecker(5, time.Second, time.Minute))
+
+	// Empty PodIP makes MTRChecker fail fast on the invalid address, so the
+	// trace never leaves the machine.
+	peer := checker.Target{NodeName: "peer-node"}
+	failed := model.CheckResult{Type: model.CheckTCP, Success: false, Error: "tcp failed"}
+
+	s.triggerMTR(context.Background(), peer, &failed)
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(results) != 1 || results[0].Type != model.CheckMTR {
+		t.Fatalf("a peer TCP failure must still trigger MTR, got %+v", results)
+	}
+}
+
 func TestSchedulerNoPeers(t *testing.T) {
 	source := checker.Target{AgentID: "test", NodeName: "test-node"}
 

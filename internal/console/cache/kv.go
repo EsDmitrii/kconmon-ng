@@ -22,4 +22,20 @@ type KV interface {
 	// Delete removes key. It is idempotent: deleting an absent key is not
 	// an error.
 	Delete(ctx context.Context, key string) error
+	// IncrWithTTL atomically increments key and returns the new value, setting
+	// ttl only when the key was created by THIS call (Valkey: INCR + a
+	// conditional EXPIRE, so a fixed window starts at its first hit and is not
+	// extended by later ones). It is the fixed-window primitive behind both the
+	// per-user diagnostics limit (TARGETS.md §7.3) and the login limit
+	// (follow-up ticket 3); Bus stays frozen, KV does not (DATA.md §5.3).
+	//
+	// Unlike Get, a backend failure IS reported here: a rate limiter cannot
+	// tell "you are under the limit" apart from "I could not count" on its
+	// own, so the decision of what to do about an unreadable backend belongs
+	// to the caller (httpapi's limiter fails OPEN and counts it -- a Valkey
+	// outage must not become a login outage).
+	//
+	// A key holding a non-integer value is an error, mirroring Valkey's own
+	// INCR contract, rather than a silent reset to 1.
+	IncrWithTTL(ctx context.Context, key string, ttl time.Duration) (int64, error)
 }

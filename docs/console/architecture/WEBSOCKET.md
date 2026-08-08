@@ -84,6 +84,22 @@ reserves room in the topic namespace rather than selecting anything.
 Explorer. MTR activity is not invisible in the meantime — `mtr_triggered` /
 `mtr_completed` events flow through `live` like everything else.
 
+**M4 added no topic and no frame type.** The protocol above is unchanged. Two
+things worth knowing anyway:
+
+- **Cancellation is not a new frame.** `POST /api/v1/runs/{id}/cancel`
+  (API.md) makes the run terminate with status `cancelled`, which travels as
+  the ordinary `RunFinishedFrame` + empty `{}` `closed` control frame the
+  topic already used for `succeeded`/`partial`/`failed`. A watcher needs no
+  protocol change to observe a cancellation, only to recognise one more
+  status string. Cancellation is asynchronous, so the terminal frame arrives
+  after the run's in-flight pairs settle, not when the HTTP `204` returns.
+- **Continuous external checks do not stream here.** The
+  agent → controller → Console path for continuous checks is gRPC and their
+  results land in Prometheus (`kconmon_ng_external_*`), not on this socket.
+  The Target card's History tab reads them through the PromQL proxy. Only
+  *runs* — including one-shot external runs — produce `run:{id}` traffic.
+
 ## Ephemeral `run:{id}` topics (M3)
 
 Unlike the allowlisted topics above, `run:{id}` topics are **opened and

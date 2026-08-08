@@ -1,10 +1,14 @@
+import { useState } from "react";
 import { SearchX } from "lucide-react";
 import { PageShell } from "@/components/page-shell";
 import { RealtimeBadge } from "@/components/realtime-badge";
 import { Badge, type BadgeProps } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
-import { type RunPairRow, useRun } from "@/hooks/use-run";
+import { useAuth } from "@/hooks/use-auth";
+import { isTerminalRunStatus, type RunPairRow, useRun } from "@/hooks/use-run";
+import { ApiError, cancelRun } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
 const RUN_PATH_PREFIX = "/diagnostics/runs/";
@@ -28,6 +32,9 @@ const STATUS_VARIANT: Record<string, NonNullable<BadgeProps["variant"]>> = {
   succeeded: "ok",
   failed: "bad",
   partial: "warn",
+  // Cancelled is an operator's own decision, not a fault: neutral, so it
+  // never reads as a failure someone has to investigate.
+  cancelled: "neutral",
 };
 
 const PAIR_VARIANT: Record<string, NonNullable<BadgeProps["variant"]>> = {
@@ -112,6 +119,50 @@ function PairTable({ pairs }: { pairs: RunPairRow[] }) {
   );
 }
 
+/**
+ * CancelRunButton is POST /api/v1/runs/{id}/cancel (Plan Decision 15). It is
+ * rendered ONLY for a non-terminal run and only with runs:create — the same
+ * permission that started the run, since starting fleet-wide probe traffic
+ * and stopping it are the same operational class (middleware_auth.go) — and
+ * it is ABSENT rather than disabled otherwise, the pattern PAGES.md:126-129
+ * pins for every affordance a subject does not hold.
+ *
+ * The 204 means "accepted", not "cancelled": the run's own goroutine writes
+ * the terminal status once its in-flight pairs settle. So this asks for ONE
+ * immediate re-read rather than writing a status into the cache — and when
+ * that read comes back "cancelled" the poll stops by itself (useRun's
+ * refetchInterval), which is also what makes this button disappear.
+ */
+function CancelRunButton({ runId, onCancelled }: { runId: string; onCancelled: () => Promise<unknown> }) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string>();
+
+  async function handleCancel() {
+    setBusy(true);
+    setError(undefined);
+    try {
+      await cancelRun(runId);
+      await onCancelled();
+    } catch (err) {
+      setError(err instanceof ApiError ? (err.problem.detail ?? err.problem.title) : "Failed to cancel this run");
+    }
+    setBusy(false);
+  }
+
+  return (
+    <>
+      <Button size="sm" variant="outline" loading={busy} onClick={handleCancel}>
+        Cancel run
+      </Button>
+      {error ? (
+        <span role="alert" className="text-xs text-health-bad">
+          {error}
+        </span>
+      ) : null}
+    </>
+  );
+}
+
 function NotFound({ runId }: { runId: string }) {
   return (
     <PageShell title="Run not found" description={runId ? `No run matches “${runId}”.` : "No run id in the URL."}>
@@ -137,7 +188,8 @@ function NotFound({ runId }: { runId: string }) {
 
 export function RunDetailPage() {
   const runId = runIdFromPath(window.location.pathname);
-  const { run, pairs, isLoading, notFound, error, live } = useRun(runId);
+  const { run, pairs, isLoading, notFound, error, live, refetch } = useRun(runId);
+  const { can } = useAuth();
 
   if (notFound) return <NotFound runId={runId} />;
 
@@ -178,6 +230,9 @@ export function RunDetailPage() {
         <>
           <StatusBadge status={run.status} />
           <RealtimeBadge realtime={live} />
+          {can("runs:create") && !isTerminalRunStatus(run.status) ? (
+            <CancelRunButton runId={run.id} onCancelled={refetch} />
+          ) : null}
         </>
       }
     >

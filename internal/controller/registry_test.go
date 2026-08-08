@@ -1,13 +1,69 @@
 package controller
 
 import (
+	"context"
 	"fmt"
+	"slices"
 	"sync"
 	"testing"
 	"time"
 
+	pb "github.com/EsDmitrii/kconmon-ng/api/proto"
 	"github.com/EsDmitrii/kconmon-ng/internal/model"
 )
+
+// TestRegistryRetainsAgentCapabilities pins the round-trip the external
+// destination gate depends on: what an agent advertises in RegisterRequest must
+// survive registry storage and come back out of GetByNodeName and
+// agentInfoToProto, otherwise the controller can never tell an M4 agent from a
+// pre-M4 one.
+func TestRegistryRetainsAgentCapabilities(t *testing.T) {
+	srv, reg := newTestGRPCServer()
+
+	resp, err := srv.Register(context.Background(), &pb.RegisterRequest{
+		Agent: &pb.AgentMeta{
+			Id: "agent-cap", NodeName: "node-cap", PodIp: "10.0.0.9",
+			Capabilities: []string{capabilityExternalChecks},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	if got := resp.GetAgent().GetCapabilities(); !slices.Equal(got, []string{capabilityExternalChecks}) {
+		t.Errorf("RegisterResponse.agent.capabilities = %v, want [%s]", got, capabilityExternalChecks)
+	}
+
+	info, ok := reg.GetByNodeName("node-cap")
+	if !ok {
+		t.Fatal("agent not found by node name after Register")
+	}
+	if !slices.Equal(info.Capabilities, []string{capabilityExternalChecks}) {
+		t.Errorf("AgentInfo.Capabilities = %v, want [%s]", info.Capabilities, capabilityExternalChecks)
+	}
+	if got := agentInfoToProto(info).GetCapabilities(); !slices.Equal(got, []string{capabilityExternalChecks}) {
+		t.Errorf("agentInfoToProto capabilities = %v, want [%s]", got, capabilityExternalChecks)
+	}
+}
+
+// A pre-M4 agent registers without the field; the registry must surface an
+// empty capability set rather than inventing one.
+func TestRegistryAgentWithoutCapabilities(t *testing.T) {
+	srv, reg := newTestGRPCServer()
+
+	if _, err := srv.Register(context.Background(), &pb.RegisterRequest{
+		Agent: &pb.AgentMeta{Id: "agent-old", NodeName: "node-old"},
+	}); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	info, ok := reg.GetByNodeName("node-old")
+	if !ok {
+		t.Fatal("agent not found by node name after Register")
+	}
+	if len(info.Capabilities) != 0 {
+		t.Errorf("expected no capabilities for a pre-M4 agent, got %v", info.Capabilities)
+	}
+}
 
 func TestRegistryRegisterAndGetPeers(t *testing.T) {
 	r := NewRegistry(30 * time.Second)

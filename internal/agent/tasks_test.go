@@ -3,6 +3,9 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"net/netip"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -15,12 +18,13 @@ import (
 // fakeChecker is a controllable checker.Checker used to observe how the task
 // executor drives it, without doing any real network I/O.
 type fakeChecker struct {
-	name   model.CheckType
-	mu     sync.Mutex
-	calls  int
-	inCall chan struct{} // signalled on entry to Check, if non-nil
-	block  chan struct{} // Check blocks until closed, if non-nil
-	result model.CheckResult
+	name    model.CheckType
+	mu      sync.Mutex
+	calls   int
+	lastTgt checker.Target
+	inCall  chan struct{} // signalled on entry to Check, if non-nil
+	block   chan struct{} // Check blocks until closed, if non-nil
+	result  model.CheckResult
 }
 
 func (f *fakeChecker) Name() model.CheckType { return f.name }
@@ -28,6 +32,7 @@ func (f *fakeChecker) Name() model.CheckType { return f.name }
 func (f *fakeChecker) Check(ctx context.Context, target checker.Target) model.CheckResult {
 	f.mu.Lock()
 	f.calls++
+	f.lastTgt = target
 	f.mu.Unlock()
 
 	if f.inCall != nil {
@@ -52,6 +57,12 @@ func (f *fakeChecker) callCount() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.calls
+}
+
+func (f *fakeChecker) lastTarget() checker.Target {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.lastTgt
 }
 
 // fakeReporter captures reported task results.
@@ -88,7 +99,7 @@ func newTestExecutor(reporter taskReporter, checkers ...*fakeChecker) *TaskExecu
 		cmap[c.name] = c
 	}
 	src := checker.Target{AgentID: "a1", NodeName: "node-a", Zone: "zone-a"}
-	return NewTaskExecutor(cmap, nil, src, 8080, reporter, 4)
+	return NewTaskExecutor(cmap, nil, src, 8080, reporter, 4, ExternalPolicy{})
 }
 
 func waitForReport(t *testing.T, r *fakeReporter) {
@@ -208,7 +219,7 @@ func TestMTRBypassesCooldown(t *testing.T) {
 	mtr := checker.NewMTRChecker(1, 10*time.Millisecond, time.Hour)
 	rep := newFakeReporter()
 	src := checker.Target{AgentID: "a1", NodeName: "node-a", Zone: "zone-a"}
-	ex := NewTaskExecutor(map[model.CheckType]checker.Checker{}, mtr, src, 8080, rep, 4)
+	ex := NewTaskExecutor(map[model.CheckType]checker.Checker{}, mtr, src, 8080, rep, 4, ExternalPolicy{})
 
 	req := &pb.TaskRequest{
 		CheckType: "mtr",
@@ -241,7 +252,7 @@ func TestSaturationReportsImmediateError(t *testing.T) {
 
 	src := checker.Target{AgentID: "a1", NodeName: "node-a"}
 	// Semaphore of 1: one in-flight task saturates the executor.
-	ex := NewTaskExecutor(map[model.CheckType]checker.Checker{model.CheckTCP: fc}, nil, src, 8080, rep, 1)
+	ex := NewTaskExecutor(map[model.CheckType]checker.Checker{model.CheckTCP: fc}, nil, src, 8080, rep, 1, ExternalPolicy{})
 
 	req := func(id string) *pb.TaskRequest {
 		return &pb.TaskRequest{
@@ -282,7 +293,7 @@ func TestContextCancelAbortsExecution(t *testing.T) {
 	fc := &fakeChecker{name: model.CheckTCP, inCall: inCall, block: block, result: model.CheckResult{Success: true}}
 	rep := newFakeReporter()
 	src := checker.Target{AgentID: "a1", NodeName: "node-a"}
-	ex := NewTaskExecutor(map[model.CheckType]checker.Checker{model.CheckTCP: fc}, nil, src, 8080, rep, 4)
+	ex := NewTaskExecutor(map[model.CheckType]checker.Checker{model.CheckTCP: fc}, nil, src, 8080, rep, 4, ExternalPolicy{})
 
 	ctx, cancel := context.WithCancel(context.Background())
 	req := &pb.TaskRequest{
@@ -303,4 +314,406 @@ func TestContextCancelAbortsExecution(t *testing.T) {
 	}
 	// unblock in case the checker did not observe cancellation
 	close(block)
+}
+
+// stubResolver is the injected DNS for every external-destination test, so the
+// executor tests never touch a network.
+type stubResolver struct {
+	mu    sync.Mutex
+	calls int
+	hosts map[string][]netip.Addr
+	err   error
+}
+
+func (s *stubResolver) LookupNetIP(_ context.Context, _, host string) ([]netip.Addr, error) {
+	s.mu.Lock()
+	s.calls++
+	s.mu.Unlock()
+	if s.err != nil {
+		return nil, s.err
+	}
+	return s.hosts[host], nil
+}
+
+func (s *stubResolver) callCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.calls
+}
+
+// newExternalExecutor builds an executor whose external gate is enabled with
+// the given allow/deny lists and a stub resolver.
+// The reporter is always nil here: every external test drives executeOne
+// directly, so nothing is reported.
+func newExternalExecutor(t *testing.T, r checker.Resolver, allowed, denied []string, checkers ...*fakeChecker) *TaskExecutor {
+	t.Helper()
+	cmap := make(map[model.CheckType]checker.Checker, len(checkers))
+	for _, c := range checkers {
+		cmap[c.name] = c
+	}
+	list, err := checker.NewAllowlist(allowed, denied)
+	if err != nil {
+		t.Fatalf("building allowlist: %v", err)
+	}
+	src := checker.Target{AgentID: "a1", NodeName: "node-a", Zone: "zone-a"}
+	return NewTaskExecutor(cmap, nil, src, 8080, nil, 4, ExternalPolicy{
+		Enabled:   true,
+		Allowlist: list,
+		Resolver:  r,
+		Timeout:   5 * time.Second,
+	})
+}
+
+func externalReq(taskID, checkType, address string) *pb.TaskRequest {
+	return &pb.TaskRequest{
+		TaskId:         taskID,
+		CheckType:      checkType,
+		Plane:          "pod",
+		ExternalTarget: &pb.ExternalTarget{Name: "edge-gw", Kind: "host", Address: address},
+	}
+}
+
+// Exactly one of target/external_target is ever populated (see the proto
+// comment). Both set is malformed: the executor refuses rather than guessing
+// which destination the controller meant.
+func TestExternalAndPeerTargetBothSetIsMalformed(t *testing.T) {
+	fc := &fakeChecker{name: model.CheckTCP, result: model.CheckResult{Success: true}}
+	r := &stubResolver{}
+	ex := newExternalExecutor(t, r, []string{"0.0.0.0/0", "::/0"}, nil, fc)
+
+	req := externalReq("both", "tcp", "10.0.0.9")
+	req.Target = &pb.AgentMeta{NodeName: "node-b", PodIp: "10.0.0.2"}
+
+	res := ex.executeOne(context.Background(), req)
+	if res.GetSuccess() {
+		t.Error("a malformed both-destinations task must fail")
+	}
+	if res.GetError() == "" {
+		t.Error("expected an error string for a malformed task")
+	}
+	if fc.callCount() != 0 {
+		t.Errorf("no checker may run for a malformed task, ran %d", fc.callCount())
+	}
+	if r.callCount() != 0 {
+		t.Errorf("no resolution may happen for a malformed task, resolved %d times", r.callCount())
+	}
+}
+
+// An operator who never opted in gets a refusal that names the value to flip,
+// not a silent probe or a mystifying timeout.
+func TestExternalTargetWithFeatureDisabledNamesTheHelmValue(t *testing.T) {
+	fc := &fakeChecker{name: model.CheckTCP, result: model.CheckResult{Success: true}}
+	rep := newFakeReporter()
+	ex := newTestExecutor(rep, fc) // ExternalPolicy{} => disabled
+
+	res := ex.executeOne(context.Background(), externalReq("off", "tcp", "10.0.0.9"))
+	if res.GetSuccess() {
+		t.Error("an external task must fail while the feature is disabled")
+	}
+	if !strings.Contains(res.GetError(), "checkers.external.enabled") {
+		t.Errorf("refusal must name checkers.external.enabled, got: %q", res.GetError())
+	}
+	if fc.callCount() != 0 {
+		t.Errorf("checker must not run while the feature is disabled, ran %d", fc.callCount())
+	}
+}
+
+// An enabled feature with a nil allowlist (a state config validation forbids,
+// asserted here as defence in depth) still denies.
+func TestExternalTargetEnabledWithoutAllowlistDenies(t *testing.T) {
+	fc := &fakeChecker{name: model.CheckTCP, result: model.CheckResult{Success: true}}
+	src := checker.Target{AgentID: "a1", NodeName: "node-a"}
+	ex := NewTaskExecutor(map[model.CheckType]checker.Checker{model.CheckTCP: fc}, nil, src, 8080, nil, 4,
+		ExternalPolicy{Enabled: true})
+
+	res := ex.executeOne(context.Background(), externalReq("noallow", "tcp", "10.0.0.9"))
+	if res.GetSuccess() {
+		t.Error("an enabled-but-unconfigured external gate must deny")
+	}
+	if fc.callCount() != 0 {
+		t.Errorf("checker must not run without an allowlist, ran %d", fc.callCount())
+	}
+}
+
+// The refusal travels back through the controller into the event stream, so it
+// must never echo the address or the hostname the caller supplied.
+func TestExternalDeniedAddressNeverRunsCheckerAndLeaksNothing(t *testing.T) {
+	fc := &fakeChecker{name: model.CheckTCP, result: model.CheckResult{Success: true}}
+	r := &stubResolver{}
+	ex := newExternalExecutor(t, r, []string{"10.0.0.0/8"}, nil, fc)
+
+	res := ex.executeOne(context.Background(), externalReq("denied", "tcp", "169.254.169.254"))
+	if res.GetSuccess() {
+		t.Fatal("a denied destination must produce a failed result")
+	}
+	msg := res.GetError()
+	for _, leak := range []string{"169.254.169.254", "edge-gw"} {
+		if strings.Contains(msg, leak) {
+			t.Errorf("refusal leaked %q: %s", leak, msg)
+		}
+	}
+	if !strings.Contains(msg, "IPv4") {
+		t.Errorf("refusal must name the refused address family, got: %s", msg)
+	}
+	if fc.callCount() != 0 {
+		t.Errorf("checker must never run for a denied destination, ran %d", fc.callCount())
+	}
+	if r.callCount() != 0 {
+		t.Errorf("a literal address must not be sent to DNS, resolved %d times", r.callCount())
+	}
+}
+
+func TestExternalDeniedIPv6RefusalNamesIPv6(t *testing.T) {
+	fc := &fakeChecker{name: model.CheckTCP, result: model.CheckResult{Success: true}}
+	ex := newExternalExecutor(t, &stubResolver{}, []string{"10.0.0.0/8"}, nil, fc)
+
+	res := ex.executeOne(context.Background(), externalReq("denied6", "tcp", "2001:db8::dead"))
+	if res.GetSuccess() {
+		t.Fatal("a denied IPv6 destination must produce a failed result")
+	}
+	if strings.Contains(res.GetError(), "2001:db8") {
+		t.Errorf("refusal leaked the address: %s", res.GetError())
+	}
+	if !strings.Contains(res.GetError(), "IPv6") {
+		t.Errorf("refusal must name the refused address family, got: %s", res.GetError())
+	}
+	if fc.callCount() != 0 {
+		t.Errorf("checker must never run for a denied destination, ran %d", fc.callCount())
+	}
+}
+
+// An allowed destination reaches the checker as the APPROVED IP, not as the
+// hostname: the probe dials exactly what the allowlist authorised, so there is
+// no second resolution to race.
+func TestExternalAllowedRunsCheckerWithApprovedAddress(t *testing.T) {
+	fc := &fakeChecker{name: model.CheckTCP, result: model.CheckResult{Success: true}}
+	r := &stubResolver{hosts: map[string][]netip.Addr{
+		"gw.internal": {netip.MustParseAddr("::ffff:10.4.5.6")},
+	}}
+	ex := newExternalExecutor(t, r, []string{"10.0.0.0/8"}, nil, fc)
+
+	res := ex.executeOne(context.Background(), externalReq("ok", "tcp", "gw.internal"))
+	if !res.GetSuccess() {
+		t.Fatalf("an allowed destination must run: %q", res.GetError())
+	}
+	if fc.callCount() != 1 {
+		t.Fatalf("expected the checker to run once, ran %d", fc.callCount())
+	}
+	tgt := fc.lastTarget()
+	if tgt.PodIP != "10.4.5.6" {
+		t.Errorf("checker dialled %q, want the approved unmapped address 10.4.5.6", tgt.PodIP)
+	}
+	if tgt.NodeName != "edge-gw" {
+		t.Errorf("destination label = %q, want the external target NAME edge-gw", tgt.NodeName)
+	}
+	if r.callCount() != 1 {
+		t.Errorf("expected exactly one resolution, got %d", r.callCount())
+	}
+
+	var cr model.CheckResult
+	if err := json.Unmarshal(res.GetDetailsJson(), &cr); err != nil {
+		t.Fatalf("details_json invalid: %v", err)
+	}
+	if cr.Destination != "edge-gw" {
+		t.Errorf("result destination = %q, want the target name (the address must never become a label)", cr.Destination)
+	}
+}
+
+func TestExternalAllowedUsesExplicitPortAndTCPDefault(t *testing.T) {
+	fc := &fakeChecker{name: model.CheckTCP, result: model.CheckResult{Success: true}}
+	ex := newExternalExecutor(t, &stubResolver{}, []string{"10.0.0.0/8"}, nil, fc)
+
+	res := ex.executeOne(context.Background(), externalReq("defport", "tcp", "10.0.0.9"))
+	if !res.GetSuccess() {
+		t.Fatalf("allowed destination must run: %q", res.GetError())
+	}
+	if got := fc.lastTarget().Port; got != defaultExternalTCPPort {
+		t.Errorf("port = %d, want the %d default for an external TCP probe", got, defaultExternalTCPPort)
+	}
+
+	req := externalReq("explicitport", "tcp", "10.0.0.9")
+	req.ExternalTarget.Port = 8443
+	if res2 := ex.executeOne(context.Background(), req); !res2.GetSuccess() {
+		t.Fatalf("allowed destination must run: %q", res2.GetError())
+	}
+	if got := fc.lastTarget().Port; got != 8443 {
+		t.Errorf("port = %d, want the requested 8443", got)
+	}
+}
+
+func TestExternalOutOfRangePortIsRefused(t *testing.T) {
+	fc := &fakeChecker{name: model.CheckTCP, result: model.CheckResult{Success: true}}
+	ex := newExternalExecutor(t, &stubResolver{}, []string{"10.0.0.0/8"}, nil, fc)
+
+	req := externalReq("badport", "tcp", "10.0.0.9")
+	req.ExternalTarget.Port = 70000
+	res := ex.executeOne(context.Background(), req)
+	if res.GetSuccess() {
+		t.Error("an out-of-range port must be refused")
+	}
+	if fc.callCount() != 0 {
+		t.Errorf("checker must not run for an out-of-range port, ran %d", fc.callCount())
+	}
+}
+
+// A name resolving to one permitted and one forbidden address is denied
+// outright: the connection, not the allowlist, would pick which one is dialled.
+func TestExternalPartialResolutionIsDenied(t *testing.T) {
+	fc := &fakeChecker{name: model.CheckTCP, result: model.CheckResult{Success: true}}
+	r := &stubResolver{hosts: map[string][]netip.Addr{
+		"rebind.example.com": {
+			netip.MustParseAddr("10.0.0.1"),
+			netip.MustParseAddr("169.254.169.254"),
+		},
+	}}
+	ex := newExternalExecutor(t, r, []string{"10.0.0.0/8"}, nil, fc)
+
+	res := ex.executeOne(context.Background(), externalReq("partial", "tcp", "rebind.example.com"))
+	if res.GetSuccess() {
+		t.Fatal("a partially allowed resolution must be denied")
+	}
+	if strings.Contains(res.GetError(), "rebind.example.com") || strings.Contains(res.GetError(), "169.254") {
+		t.Errorf("refusal leaked the destination: %s", res.GetError())
+	}
+	if fc.callCount() != 0 {
+		t.Errorf("checker must never run for a partially allowed name, ran %d", fc.callCount())
+	}
+}
+
+func TestExternalResolutionFailureIsDenial(t *testing.T) {
+	fc := &fakeChecker{name: model.CheckTCP, result: model.CheckResult{Success: true}}
+	r := &stubResolver{err: errors.New("lookup nowhere.example.com: no such host")}
+	ex := newExternalExecutor(t, r, []string{"0.0.0.0/0", "::/0"}, nil, fc)
+
+	res := ex.executeOne(context.Background(), externalReq("dnsfail", "tcp", "nowhere.example.com"))
+	if res.GetSuccess() {
+		t.Fatal("a resolution failure must deny")
+	}
+	if strings.Contains(res.GetError(), "nowhere.example.com") {
+		t.Errorf("refusal leaked the hostname: %s", res.GetError())
+	}
+	if fc.callCount() != 0 {
+		t.Errorf("checker must never run when resolution failed, ran %d", fc.callCount())
+	}
+}
+
+func TestExternalDeniedPrefixWinsOverAllowed(t *testing.T) {
+	fc := &fakeChecker{name: model.CheckICMP, result: model.CheckResult{Success: true}}
+	ex := newExternalExecutor(t, &stubResolver{}, []string{"10.0.0.0/8"}, []string{"10.1.2.0/24"}, fc)
+
+	res := ex.executeOne(context.Background(), externalReq("denywins", "icmp", "10.1.2.3"))
+	if res.GetSuccess() {
+		t.Error("a destination inside a denied prefix must be refused even though it is also allowed")
+	}
+	if fc.callCount() != 0 {
+		t.Errorf("checker must not run, ran %d", fc.callCount())
+	}
+}
+
+// dns and http are node-local checks that ignore the destination entirely.
+// Running one for an external destination would report the agent's own probes
+// as if they had targeted that destination, so they are refused.
+func TestExternalNodeLocalCheckTypesAreRefused(t *testing.T) {
+	for _, ct := range []string{"dns", "http"} {
+		t.Run(ct, func(t *testing.T) {
+			fc := &fakeChecker{name: model.CheckType(ct), result: model.CheckResult{Success: true}}
+			r := &stubResolver{}
+			ex := newExternalExecutor(t, r, []string{"0.0.0.0/0", "::/0"}, nil, fc)
+
+			res := ex.executeOne(context.Background(), externalReq("nodelocal", ct, "10.0.0.9"))
+			if res.GetSuccess() {
+				t.Errorf("%s must not accept an external destination", ct)
+			}
+			if fc.callCount() != 0 {
+				t.Errorf("checker must not run, ran %d", fc.callCount())
+			}
+			if r.callCount() != 0 {
+				t.Errorf("no resolution may happen for an unsupported check type, resolved %d times", r.callCount())
+			}
+		})
+	}
+}
+
+func TestExternalEmptyAddressIsRefused(t *testing.T) {
+	fc := &fakeChecker{name: model.CheckTCP, result: model.CheckResult{Success: true}}
+	ex := newExternalExecutor(t, &stubResolver{}, []string{"0.0.0.0/0", "::/0"}, nil, fc)
+
+	res := ex.executeOne(context.Background(), externalReq("empty", "tcp", ""))
+	if res.GetSuccess() {
+		t.Error("an empty external address must be refused")
+	}
+	if fc.callCount() != 0 {
+		t.Errorf("checker must not run, ran %d", fc.callCount())
+	}
+}
+
+// The gate applies to the check type the agent does not even have enabled: a
+// denied destination is refused before the "not enabled" answer, so a probe of
+// a forbidden range never becomes a checker-enumeration oracle.
+func TestExternalDeniedDestinationRefusedBeforeCheckerLookup(t *testing.T) {
+	ex := newExternalExecutor(t, &stubResolver{}, []string{"10.0.0.0/8"}, nil)
+
+	res := ex.executeOne(context.Background(), externalReq("noenabled", "tcp", "203.0.113.9"))
+	if res.GetSuccess() {
+		t.Fatal("a denied destination must be refused")
+	}
+	if strings.Contains(res.GetError(), "not enabled on this agent") {
+		t.Errorf("the allowlist refusal must come first, got: %q", res.GetError())
+	}
+}
+
+// TestExternalAddressWithEmbeddedPortIsSplitNotResolved pins the M4
+// final-gate smoke finding: the Console's one-shot path sends the operator's
+// "host:port" spelling verbatim with port 0, and handing that raw to the
+// allowlist turned every such probe into a "resolve" denial. The boundary
+// split must authorise the bare host and dial the embedded port.
+func TestExternalAddressWithEmbeddedPortIsSplitNotResolved(t *testing.T) {
+	allow, err := checker.NewAllowlist([]string{"127.0.0.0/8"}, nil)
+	if err != nil {
+		t.Fatalf("NewAllowlist: %v", err)
+	}
+	fake := &fakeChecker{}
+	e := NewTaskExecutor(map[model.CheckType]checker.Checker{model.CheckTCP: fake}, nil,
+		checker.Target{NodeName: "n1", Zone: "z1"}, 8080, nil, 1,
+		ExternalPolicy{Enabled: true, Allowlist: allow, Resolver: &stubResolver{}})
+
+	res := e.executeOne(t.Context(), &pb.TaskRequest{
+		TaskId: "t-split", CheckType: "tcp", Plane: "pod",
+		ExternalTarget: &pb.ExternalTarget{Name: "svc", Kind: "host", Address: "127.0.0.9:18201"},
+	})
+	if !res.GetSuccess() && res.GetError() != "" {
+		t.Fatalf("expected the probe to reach the checker, got error %q", res.GetError())
+	}
+	if fake.calls != 1 {
+		t.Fatalf("checker calls = %d, want 1", fake.calls)
+	}
+	got := fake.lastTgt
+	if got.PodIP != "127.0.0.9" || got.Port != 18201 {
+		t.Errorf("dialled %s:%d, want 127.0.0.9:18201 (split host + embedded port)", got.PodIP, got.Port)
+	}
+}
+
+// TestExternalExplicitPortFieldWinsOverEmbeddedPort: when BOTH the port field
+// and an embedded port are present, the explicit proto field wins -- it is
+// the schema's own channel for the value.
+func TestExternalExplicitPortFieldWinsOverEmbeddedPort(t *testing.T) {
+	allow, err := checker.NewAllowlist([]string{"127.0.0.0/8"}, nil)
+	if err != nil {
+		t.Fatalf("NewAllowlist: %v", err)
+	}
+	fake := &fakeChecker{}
+	e := NewTaskExecutor(map[model.CheckType]checker.Checker{model.CheckTCP: fake}, nil,
+		checker.Target{NodeName: "n1", Zone: "z1"}, 8080, nil, 1,
+		ExternalPolicy{Enabled: true, Allowlist: allow, Resolver: &stubResolver{}})
+
+	res := e.executeOne(t.Context(), &pb.TaskRequest{
+		TaskId: "t-split2", CheckType: "tcp", Plane: "pod",
+		ExternalTarget: &pb.ExternalTarget{Name: "svc", Kind: "host", Address: "127.0.0.9:18201", Port: 443},
+	})
+	if res.GetError() != "" {
+		t.Fatalf("unexpected error %q", res.GetError())
+	}
+	if got := fake.lastTgt; got.Port != 443 || got.PodIP != "127.0.0.9" {
+		t.Errorf("dialled %s:%d, want 127.0.0.9:443 (explicit field wins)", got.PodIP, got.Port)
+	}
 }

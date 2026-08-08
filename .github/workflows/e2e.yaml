@@ -244,15 +244,52 @@ jobs:
           kubectl rollout restart daemonset/kconmon-ng-agent
           kubectl rollout status daemonset/kconmon-ng-agent --timeout=90s
 
+          # The agent port-forward is established HERE, strictly AFTER the
+          # rollout above, and that ordering is load-bearing: a forward opened
+          # alongside the controller/console ones would point at a Pod the
+          # restart then deletes, and every external-check assertion would fail
+          # on a dead tunnel rather than on the pipeline it is testing.
+          #
+          # ONE agent Pod is enough. The continuous external-check tests use
+          # sourceSelection "all", so whichever Pod this picks is in the
+          # assignment, and the agent's own /metrics is the only place an
+          # external result or refusal is ever observable -- it never travels
+          # back to the console.
+          AGENT_POD=$(kubectl get pods \
+            -l app.kubernetes.io/component=agent \
+            --field-selector=status.phase=Running \
+            -o jsonpath='{.items[0].metadata.name}')
+          echo "Forwarding agent metrics from pod/$AGENT_POD"
+          kubectl port-forward "pod/$AGENT_POD" 8082:8080 &
+          AGENT_PF_PID=$!
+          sleep 3
+
           # TestConsoleDegradedMode needs a SECOND rollout with the database
           # disabled (see the two steps below) -- excluded here so it does
           # not run against this (database-enabled) deployment.
-          go test -tags=e2e -v -count=1 ./e2e/... -timeout 5m -skip TestConsoleDegradedMode
+          #
+          # The timeout is 15m, not 5m: TestConsoleSchedule waits out several
+          # 10s schedule intervals to prove a DISABLED schedule stops firing,
+          # and the two external-check tests each poll an agent's /metrics for
+          # up to 180s while the reconcile -> controller -> agent chain
+          # converges. Those budgets are wide on purpose (see their comments),
+          # so the package budget has to clear their sum.
+          go test -tags=e2e -v -count=1 ./e2e/... -timeout 15m -skip TestConsoleDegradedMode
 
-          kill "$CONTROLLER_PF_PID" "$CONSOLE_PF_PID" || true
+          kill "$CONTROLLER_PF_PID" "$CONSOLE_PF_PID" "$AGENT_PF_PID" || true
         env:
           KCONMON_CONTROLLER_URL: http://localhost:8080
           KCONMON_CONSOLE_URL: http://localhost:8081
+          KCONMON_AGENT_URL: http://localhost:8082
+          # The in-cluster destination the continuous external-check test
+          # probes: the controller's own ClusterIP Service, whose address sits
+          # inside the kind Service CIDR that e2e/testdata/values.yaml's
+          # allowedCidrs covers. No internet egress anywhere in this test.
+          KCONMON_EXTERNAL_TARGET_ADDR: kconmon-ng-controller.default.svc.cluster.local:8080
+          # RFC 5737 TEST-NET-3: outside allowedCidrs, an IP literal so no
+          # resolver can influence the outcome, and reserved for documentation
+          # so it is unroutable regardless.
+          KCONMON_DENIED_TARGET_ADDR: 203.0.113.10:80
 
       # Phase A guarantee (M3 plan): with console.database.mode=disabled the
       # M1/M2 surface stays up and only the M3 database-backed endpoints

@@ -212,18 +212,12 @@ func runSweeps(ctx context.Context, m *metrics.Metrics, sweeps []sweep) (map[str
 	return deleted, errors.Join(errs...)
 }
 
-// releaseLock runs pg_advisory_unlock on conn using a fresh, short-lived
-// context rather than the sweep's own ctx: the unlock must still happen when
-// ctx is already cancelled, or this pooled connection would keep holding
-// pruneLockKey for the rest of its life in the pool, silently starving every
-// future sweep this same replica ever attempts (pg_try_advisory_lock would
-// keep reporting "already locked" against its own earlier, orphaned lock).
+// releaseLock releases pruneLockKey on conn. The fresh-context reasoning --
+// the unlock must outlive a cancelled sweep or this pooled connection carries
+// an orphaned lock for the rest of its life -- lives with the shared
+// implementation in lock.go.
 func (p *Pruner) releaseLock(conn *pgxpool.Conn) {
-	ctx, cancel := context.WithTimeout(context.Background(), unlockTimeout)
-	defer cancel()
-	if _, err := conn.Exec(ctx, "SELECT pg_advisory_unlock($1)", pruneLockKey); err != nil {
-		slog.Warn("prune: release advisory lock failed", "error", err)
-	}
+	releaseAdvisoryLock(conn, pruneLockKey)
 }
 
 // deleteBatches calls del repeatedly with limit=pruneBatchSize, pausing

@@ -14,6 +14,14 @@ const (
 	CheckDNS  CheckType = "dns"
 	CheckHTTP CheckType = "http"
 	CheckMTR  CheckType = "mtr"
+	// CheckExternal is the result type of the CONTINUOUS external checker. It
+	// lives here rather than in the checker package because an external result
+	// travels the same CheckResult path as every other one, and the result
+	// handler's switch over CheckType has to name it to stay exhaustive. The
+	// per-target CHECK TYPE (tcp/icmp/dns/http) of an external probe is carried
+	// inside ExternalDetails, not here: one external result covers every
+	// assigned target at once.
+	CheckExternal CheckType = "external"
 )
 
 type CheckResult struct {
@@ -65,6 +73,54 @@ type HTTPDetails struct {
 	TLSTime      time.Duration `json:"tlsTime"`
 	TTFBTime     time.Duration `json:"ttfbTime"`
 	TotalTime    time.Duration `json:"totalTime"`
+}
+
+// ExternalDenyReason is why the allowlist refused a probe. It is a CLOSED set
+// because it becomes a metric label value: the refusal errors themselves are
+// deliberately vague (they must never echo an attacker-chosen name back to the
+// controller), so the reason has to travel as a type rather than be recovered
+// by matching error text.
+type ExternalDenyReason string
+
+const (
+	// ExternalDenyCIDR: the destination resolved to an address the allowlist
+	// does not permit, including zone-scoped addresses.
+	ExternalDenyCIDR ExternalDenyReason = "cidr"
+	// ExternalDenyResolve: the destination could not be turned into an address
+	// at all -- resolution failed, returned nothing, or the host was blank.
+	ExternalDenyResolve ExternalDenyReason = "resolve"
+	// ExternalDenyDisabled: this agent has no allowlist or resolver configured,
+	// so external checks are off and every destination is refused.
+	ExternalDenyDisabled ExternalDenyReason = "disabled"
+)
+
+// ExternalDetails is one target's outcome inside an external CheckResult.
+// CheckResult.Details carries a SLICE of these, the same shape the DNS and
+// HTTP checkers use, because one Check probes every assigned target.
+//
+// Name is the ONLY field that may ever become a metric label value (see the
+// ExternalTarget comment in api/proto/kconmon.proto); DefinitionID is
+// correlation only and the address appears nowhere at all. ResolvedIPs is a
+// COUNT rather than the addresses: an external DNS answer is attacker-
+// influenced and unbounded, so it must never reach a label.
+type ExternalDetails struct {
+	DefinitionID string    `json:"definitionId,omitempty"`
+	Name         string    `json:"name"`
+	CheckType    CheckType `json:"checkType"`
+	Success      bool      `json:"success"`
+	// Denied marks a probe that never happened because the allowlist refused
+	// the destination. It is not a network failure and it is counted apart, on
+	// external_denied_total rather than external_results_total.
+	Denied bool `json:"denied,omitempty"`
+	// DenyReason is set only when Denied. It is the closed-set label value of
+	// external_denied_total.
+	DenyReason  ExternalDenyReason `json:"denyReason,omitempty"`
+	Duration    time.Duration      `json:"duration"`
+	Error       string             `json:"error,omitempty"`
+	StatusCode  int                `json:"statusCode,omitempty"`
+	RTT         time.Duration      `json:"rtt,omitempty"`
+	LossRatio   float64            `json:"lossRatio,omitempty"`
+	ResolvedIPs int                `json:"resolvedIps,omitempty"`
 }
 
 type MTRHop struct {

@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
@@ -14,6 +15,7 @@ import (
 	"github.com/EsDmitrii/kconmon-ng/internal/metrics"
 	"github.com/EsDmitrii/kconmon-ng/internal/model"
 	"github.com/prometheus/client_golang/prometheus"
+	"google.golang.org/protobuf/proto"
 )
 
 // fakeDispatcher is a stand-in TaskDispatcher for handler tests.
@@ -509,6 +511,254 @@ func TestDiagnosticsHandlerFailurePathSharesTaskID(t *testing.T) {
 	}
 	if fail.GetState() != "error" {
 		t.Errorf("expected state=error, got %q", fail.GetState())
+	}
+}
+
+// --- M4: external destinations -------------------------------------------
+
+// newDiagTestHandlerExternal builds a handler whose source agent advertises
+// exactly srcCaps, so the external-destination capability gate can be exercised
+// from both sides.
+func newDiagTestHandlerExternal(t *testing.T, disp TaskDispatcher, events EventPublisher, srcCaps []string) *DiagnosticsHandler {
+	t.Helper()
+	reg := NewRegistry(30 * time.Second)
+	reg.Register(model.AgentInfo{ID: "src-agent", NodeName: "node-a", Capabilities: srcCaps})
+	reg.Register(model.AgentInfo{ID: "dst-agent", NodeName: "node-b"})
+	m := metrics.NewPrometheusMetrics("test", prometheus.NewRegistry())
+	return NewDiagnosticsHandler(reg, disp, m, false, nil, events)
+}
+
+// TestDiagnosticsM3RequestShapeUnchanged is the regression gate for M4: a body
+// carrying none of the new fields must dispatch the exact same TaskRequest and
+// return the exact same bytes and headers as before external destinations
+// existed.
+func TestDiagnosticsM3RequestShapeUnchanged(t *testing.T) {
+	details := []byte(`{"type":"icmp","success":true,"source":"node-a","destination":"node-b"}`)
+	disp := &fakeDispatcher{result: &pb.TaskResult{Success: true, DetailsJson: details}}
+	h := newDiagTestHandler(t, disp, false, false)
+
+	w := doDiag(h, `{"source":"node-a","destination":"node-b","type":"icmp","plane":"pod"}`)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d (%s)", w.Code, w.Body.String())
+	}
+	if got := w.Body.Bytes(); !bytes.Equal(got, details) {
+		t.Errorf("response body = %q, want the agent's details_json verbatim %q", got, details)
+	}
+	if ct := w.Header().Get("Content-Type"); ct != "application/json" {
+		t.Errorf("Content-Type = %q, want application/json", ct)
+	}
+	if nosniff := w.Header().Get("X-Content-Type-Options"); nosniff != "nosniff" {
+		t.Errorf("X-Content-Type-Options = %q, want nosniff", nosniff)
+	}
+
+	if disp.gotAgent != "agent-a" {
+		t.Errorf("dispatched to %q, want agent-a", disp.gotAgent)
+	}
+	if disp.gotReq.GetTaskId() == "" {
+		t.Fatal("dispatched request carries no task_id")
+	}
+	want := &pb.TaskRequest{
+		TaskId:    disp.gotReq.GetTaskId(),
+		CheckType: "icmp",
+		Plane:     "pod",
+		Target:    &pb.AgentMeta{Id: "agent-b", NodeName: "node-b", PodIp: "10.0.0.2", Zone: "z2"},
+	}
+	if !proto.Equal(disp.gotReq, want) {
+		t.Errorf("dispatched TaskRequest = %v, want %v", disp.gotReq, want)
+	}
+	if disp.gotReq.GetExternalTarget() != nil {
+		t.Error("external_target must stay nil for a node destination")
+	}
+}
+
+func TestDiagnosticsExternalDestinationDispatchesExternalTarget(t *testing.T) {
+	disp := &fakeDispatcher{result: &pb.TaskResult{Success: true, DetailsJson: []byte(`{}`)}}
+	h := newDiagTestHandlerExternal(t, disp, nil, []string{capabilityExternalChecks})
+
+	w := doDiag(h, `{"source":"node-a","destination":"edge-gw","destinationKind":"external",`+
+		`"destinationAddress":"10.10.0.1","type":"tcp"}`)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d (%s)", w.Code, w.Body.String())
+	}
+	if disp.gotAgent != "src-agent" {
+		t.Errorf("dispatched to %q, want src-agent", disp.gotAgent)
+	}
+	// The proto forbids both being set; the target side must stay empty.
+	if disp.gotReq.GetTarget() != nil {
+		t.Errorf("target must be nil for an external destination, got %v", disp.gotReq.GetTarget())
+	}
+	et := disp.gotReq.GetExternalTarget()
+	if et == nil {
+		t.Fatal("external_target not set")
+	}
+	want := &pb.ExternalTarget{Name: "edge-gw", Kind: "host", Address: "10.10.0.1", Port: 0}
+	if !proto.Equal(et, want) {
+		t.Errorf("external_target = %v, want %v", et, want)
+	}
+	if disp.gotReq.GetPlane() != "pod" || disp.gotReq.GetCheckType() != "tcp" {
+		t.Errorf("unexpected plane/check type: %v", disp.gotReq)
+	}
+}
+
+// With no destination name supplied the address doubles as the name, so the
+// event stream and any downstream identifier still have something to show.
+func TestDiagnosticsExternalNameFallsBackToAddress(t *testing.T) {
+	disp := &fakeDispatcher{result: &pb.TaskResult{Success: true, DetailsJson: []byte(`{}`)}}
+	h := newDiagTestHandlerExternal(t, disp, nil, []string{capabilityExternalChecks})
+
+	w := doDiag(h, `{"source":"node-a","destinationKind":"external","destinationAddress":"1.1.1.1","type":"icmp"}`)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d (%s)", w.Code, w.Body.String())
+	}
+	if got := disp.gotReq.GetExternalTarget().GetName(); got != "1.1.1.1" {
+		t.Errorf("external_target.name = %q, want the address 1.1.1.1", got)
+	}
+}
+
+// A source agent that never advertised external-checks gets a specific,
+// actionable 501 naming its node instead of a task it would silently mishandle.
+func TestDiagnosticsExternalWithoutCapabilityIsNotImplemented(t *testing.T) {
+	disp := &fakeDispatcher{result: &pb.TaskResult{Success: true, DetailsJson: []byte(`{}`)}}
+	h := newDiagTestHandlerExternal(t, disp, nil, nil)
+
+	w := doDiag(h, `{"source":"node-a","destinationKind":"external","destinationAddress":"1.1.1.1","type":"icmp"}`)
+
+	if w.Code != http.StatusNotImplemented {
+		t.Fatalf("expected 501, got %d (%s)", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "node-a") {
+		t.Errorf("501 detail must name the agent's node, got %q", w.Body.String())
+	}
+	if disp.gotReq != nil {
+		t.Error("dispatch must not run when the source agent lacks external-checks")
+	}
+}
+
+// An unrelated capability must not open the gate.
+func TestDiagnosticsExternalUnrelatedCapabilityIsNotImplemented(t *testing.T) {
+	disp := &fakeDispatcher{result: &pb.TaskResult{Success: true, DetailsJson: []byte(`{}`)}}
+	h := newDiagTestHandlerExternal(t, disp, nil, []string{"mtr"})
+
+	w := doDiag(h, `{"source":"node-a","destinationKind":"external","destinationAddress":"1.1.1.1","type":"icmp"}`)
+
+	if w.Code != http.StatusNotImplemented {
+		t.Fatalf("expected 501, got %d (%s)", w.Code, w.Body.String())
+	}
+}
+
+func TestDiagnosticsDestinationValidation(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+	}{
+		{
+			name: "destination and destinationAddress both empty",
+			body: `{"source":"node-a","type":"icmp"}`,
+		},
+		{
+			name: "external with empty address",
+			body: `{"source":"node-a","destination":"edge-gw","destinationKind":"external","type":"icmp"}`,
+		},
+		{
+			name: "external with both empty",
+			body: `{"source":"node-a","destinationKind":"external","type":"icmp"}`,
+		},
+		{
+			name: "unknown destinationKind",
+			body: `{"source":"node-a","destination":"node-b","destinationKind":"pod","type":"icmp"}`,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			disp := &fakeDispatcher{result: &pb.TaskResult{Success: true, DetailsJson: []byte(`{}`)}}
+			h := newDiagTestHandlerExternal(t, disp, nil, []string{capabilityExternalChecks})
+
+			w := doDiag(h, tc.body)
+			if w.Code != http.StatusBadRequest {
+				t.Errorf("expected 400, got %d (%s)", w.Code, w.Body.String())
+			}
+			if disp.gotReq != nil {
+				t.Error("dispatch must not run for a rejected request")
+			}
+		})
+	}
+}
+
+// destinationKind=node is the explicit spelling of the default and keeps the
+// registry lookup, including its 404.
+func TestDiagnosticsExplicitNodeKindResolvesRegistry(t *testing.T) {
+	disp := &fakeDispatcher{result: &pb.TaskResult{Success: true, DetailsJson: []byte(`{}`)}}
+	h := newDiagTestHandlerExternal(t, disp, nil, []string{capabilityExternalChecks})
+
+	w := doDiag(h, `{"source":"node-a","destination":"node-b","destinationKind":"node","type":"icmp"}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d (%s)", w.Code, w.Body.String())
+	}
+	if disp.gotReq.GetTarget().GetNodeName() != "node-b" {
+		t.Errorf("target = %v, want node-b", disp.gotReq.GetTarget())
+	}
+	if disp.gotReq.GetExternalTarget() != nil {
+		t.Error("external_target must stay nil for destinationKind=node")
+	}
+
+	disp2 := &fakeDispatcher{}
+	h2 := newDiagTestHandlerExternal(t, disp2, nil, []string{capabilityExternalChecks})
+	w2 := doDiag(h2, `{"source":"node-a","destination":"ghost","destinationKind":"node","type":"icmp"}`)
+	if w2.Code != http.StatusNotFound {
+		t.Errorf("expected 404 for unknown node destination, got %d", w2.Code)
+	}
+}
+
+// The leader gate runs before anything external-specific.
+func TestDiagnosticsExternalNotLeader(t *testing.T) {
+	disp := &fakeDispatcher{result: &pb.TaskResult{Success: true, DetailsJson: []byte(`{}`)}}
+	reg := NewRegistry(30 * time.Second)
+	reg.Register(model.AgentInfo{ID: "src-agent", NodeName: "node-a", Capabilities: []string{capabilityExternalChecks}})
+	m := metrics.NewPrometheusMetrics("test", prometheus.NewRegistry())
+	h := NewDiagnosticsHandler(reg, disp, m, true, func() bool { return false }, nil)
+
+	w := doDiag(h, `{"source":"node-a","destinationKind":"external","destinationAddress":"1.1.1.1","type":"icmp"}`)
+	if w.Code != http.StatusServiceUnavailable {
+		t.Errorf("expected 503 when not leader, got %d", w.Code)
+	}
+	if disp.gotReq != nil {
+		t.Error("dispatch must not run on a non-leader replica")
+	}
+}
+
+// The Live feed reads names, never addresses: destination_node must carry the
+// external target's name on every published event of the run.
+func TestDiagnosticsExternalEventsCarryTargetName(t *testing.T) {
+	details, _ := json.Marshal(model.CheckResult{Type: model.CheckTCP, Success: true, Duration: 3 * time.Millisecond})
+	disp := &fakeDispatcher{result: &pb.TaskResult{Success: true, DetailsJson: details}}
+	pub := &fakeEventPublisher{}
+	h := newDiagTestHandlerExternal(t, disp, pub, []string{capabilityExternalChecks})
+
+	w := doDiag(h, `{"source":"node-a","destination":"edge-gw","destinationKind":"external",`+
+		`"destinationAddress":"10.10.0.1","type":"tcp"}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d (%s)", w.Code, w.Body.String())
+	}
+
+	events := pub.events()
+	if len(events) != 2 {
+		t.Fatalf("expected dispatched + check_observed, got %d: %+v", len(events), events)
+	}
+	if got := events[0].GetDiagnosticProgress().GetDestinationNode(); got != "edge-gw" {
+		t.Errorf("dispatched event destination_node = %q, want edge-gw", got)
+	}
+	co := events[1].GetCheckObserved()
+	if co == nil {
+		t.Fatalf("expected CheckObserved as the terminal event, got %+v", events[1])
+	}
+	if co.GetDestinationNode() != "edge-gw" {
+		t.Errorf("CheckObserved destination_node = %q, want the target name edge-gw", co.GetDestinationNode())
+	}
+	if strings.Contains(co.GetDestinationNode(), "10.10.0.1") {
+		t.Error("the address must never leak into destination_node")
 	}
 }
 

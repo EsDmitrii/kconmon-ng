@@ -17,6 +17,7 @@ type HTTPServer struct {
 	ready           atomic.Bool
 	topologyHandler *TopologyHandler
 	diagHandler     atomic.Pointer[DiagnosticsHandler]
+	externalHandler atomic.Pointer[ExternalChecksHandler]
 	capabilities    []string
 }
 
@@ -41,6 +42,7 @@ func NewHTTPServer(registry *Registry, nodeWatcher *NodeWatcher, promReg *promet
 	s.mux.Handle("GET /api/v1/topology", s.topologyHandler)
 	s.mux.HandleFunc("GET /api/v1/version", s.handleVersion)
 	s.mux.HandleFunc("POST /api/v1/diagnostics", s.handleDiagnostics)
+	s.mux.HandleFunc("PUT /api/v1/external-checks", s.handleExternalChecks)
 
 	return s
 }
@@ -62,6 +64,23 @@ func (s *HTTPServer) handleDiagnostics(w http.ResponseWriter, r *http.Request) {
 	h := s.diagHandler.Load()
 	if h == nil {
 		http.Error(w, "diagnostics not available", http.StatusServiceUnavailable)
+		return
+	}
+	h.ServeHTTP(w, r)
+}
+
+// SetExternalChecksHandler hot-injects the continuous external-check
+// assignment handler, mirroring SetDiagnosticsHandler: both need pieces built
+// after the HTTP server. Until set, the route returns 503, which the Console's
+// reconcile client already retries.
+func (s *HTTPServer) SetExternalChecksHandler(h *ExternalChecksHandler) {
+	s.externalHandler.Store(h)
+}
+
+func (s *HTTPServer) handleExternalChecks(w http.ResponseWriter, r *http.Request) {
+	h := s.externalHandler.Load()
+	if h == nil {
+		http.Error(w, "external checks not available", http.StatusServiceUnavailable)
 		return
 	}
 	h.ServeHTTP(w, r)

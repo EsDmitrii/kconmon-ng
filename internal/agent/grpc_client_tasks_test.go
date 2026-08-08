@@ -48,6 +48,65 @@ func startTaskTestServer(t *testing.T) (*controller.GRPCServer, *GRPCClient) {
 	return srv, client
 }
 
+// TestWatchExternalChecksReceivesAssignments exercises the agent client against
+// a real controller: subscribe, receive the immediate current assignment (empty
+// on a fresh controller — the send that tells a restarting agent to stop
+// probing), then receive a pushed one.
+func TestWatchExternalChecksReceivesAssignments(t *testing.T) {
+	srv, client := startTaskTestServer(t)
+
+	received := make(chan *pb.ExternalCheckAssignment, 4)
+	client.OnExternalAssignment(func(a *pb.ExternalCheckAssignment) { received <- a })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	watchErr := make(chan error, 1)
+	go func() { watchErr <- client.WatchExternalChecks(ctx) }()
+
+	select {
+	case a := <-received:
+		if len(a.GetSpecs()) != 0 {
+			t.Fatalf("a fresh controller must open with an EMPTY assignment, got %d specs", len(a.GetSpecs()))
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("no initial assignment received")
+	}
+
+	mgr := srv.ExternalCheckManager()
+	mgr.Apply(map[string][]*pb.ExternalCheckSpec{
+		"agent-1": {{
+			DefinitionId: "def-1",
+			Target:       &pb.ExternalTarget{Name: "dns-root", Kind: "host", Address: "10.0.0.53", Port: 53},
+			CheckType:    "dns",
+			IntervalNs:   int64(30 * time.Second),
+			TimeoutNs:    int64(5 * time.Second),
+			ParamsJson:   []byte(`{"query":"example.com"}`),
+		}},
+	})
+
+	select {
+	case a := <-received:
+		if len(a.GetSpecs()) != 1 || a.GetSpecs()[0].GetDefinitionId() != "def-1" {
+			t.Fatalf("pushed assignment not delivered intact: %+v", a.GetSpecs())
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("pushed assignment never arrived")
+	}
+
+	// Reconnect discipline: the stream returns an error the caller's loop uses
+	// to re-subscribe, exactly as WatchTasks does.
+	cancel()
+	select {
+	case err := <-watchErr:
+		if err == nil {
+			t.Error("expected WatchExternalChecks to return an error on stream teardown")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("WatchExternalChecks did not return after context cancel")
+	}
+}
+
 // TestWatchTasksReceivesDispatchedTaskAndReportsResult exercises the full agent
 // client path against a real controller: subscribe via WatchTasks, receive a
 // dispatched task, run it through a TaskExecutor, and report the result back so
@@ -63,6 +122,7 @@ func TestWatchTasksReceivesDispatchedTaskAndReportsResult(t *testing.T) {
 		8080,
 		client,
 		4,
+		ExternalPolicy{},
 	)
 	client.OnTask(func(taskCtx context.Context, task *pb.TaskRequest) {
 		ex.Handle(taskCtx, task)

@@ -80,6 +80,10 @@ describe("isTerminalRunStatus", () => {
     expect(isTerminalRunStatus("running")).toBe(false);
     expect(isTerminalRunStatus(undefined)).toBe(false);
   });
+
+  it("treats cancelled as terminal -- a cancelled run is finished, not paused", () => {
+    expect(isTerminalRunStatus("cancelled")).toBe(true);
+  });
 });
 
 describe("mergeRunPairs", () => {
@@ -172,6 +176,61 @@ describe("useRun with realtime off", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+describe("useRun and a cancelled run", () => {
+  it("stops polling once the status is cancelled -- the run-fetch count plateaus", async () => {
+    let status = "running";
+    const fetchMock = vi.fn((url: string) => {
+      const href = String(url);
+      if (href.includes("/api/v1/version")) return Promise.resolve(json({ version: "1.6.0", commit: "x", capabilities: [] }));
+      if (href.startsWith("/api/v1/runs/")) return Promise.resolve(json(runBody({ status })));
+      return Promise.resolve(json({}));
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: Infinity } } });
+    qc.setQueryData(["version"], { version: "1.6.0", commit: "x", capabilities: [] });
+    const wrapper = ({ children }: { children: ReactNode }) => (
+      <QueryClientProvider client={qc}>{children}</QueryClientProvider>
+    );
+
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const { result } = renderHook(() => useRun(RUN_ID), { wrapper });
+      await waitFor(() => expect(result.current.run?.status).toBe("running"));
+
+      // While it is running the poll is alive -- the control half of this
+      // test, so the plateau below cannot pass by the timer never firing.
+      const whileRunning = runFetchCount(fetchMock);
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(RUN_POLL_MS + 100);
+      });
+      expect(runFetchCount(fetchMock)).toBeGreaterThan(whileRunning);
+
+      status = "cancelled";
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(RUN_POLL_MS + 100);
+      });
+      await waitFor(() => expect(result.current.run?.status).toBe("cancelled"));
+
+      const settled = runFetchCount(fetchMock);
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(RUN_POLL_MS * 3);
+      });
+      expect(runFetchCount(fetchMock)).toBe(settled);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("opens no socket for a run that is already cancelled on first load", async () => {
+    const { wrapper } = setup(["events"], runBody({ status: "cancelled" }));
+    const { result } = renderHook(() => useRun(RUN_ID), { wrapper });
+
+    await waitFor(() => expect(result.current.run?.status).toBe("cancelled"));
+    expect(result.current.live).toBe(false);
+    expect(FakeSocket.instances).toHaveLength(0);
   });
 });
 

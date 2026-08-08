@@ -1,4 +1,68 @@
-// types.ts — hand-written mirrors of the Go JSON types (no codegen in M1)
+// types.ts — the browser's view of the Console API, in two halves.
+//
+// M1–M3 shapes (below) stay HAND-WRITTEN mirrors of the Go JSON types: they
+// were checked field by field in review as they landed, they carry the
+// narrowing the wire cannot express (LiveEventType, RunStatus, the browser-only
+// EventQuery/RunQuery request shapes), and rewriting them onto generated
+// aliases would be churn with no correctness gain (M4 Decision 4).
+//
+// M4 shapes — targets, check definitions, schedules, the projection — are
+// RE-EXPORTED from ./api-types, which `npm run gen:api` generates from
+// docs/console-api.yaml. That is the half where hand-checking had started to
+// miss things: five CRUD resources with near-identical, repetitive bodies.
+// A router-walking test (internal/console/httpapi/openapi_test.go) keeps the
+// spec's route list joined to the live chi router, and CI regenerates
+// api-types.ts and fails on a diff, so neither half can drift silently.
+import type { components } from "./api-types";
+
+export type Target = components["schemas"]["Target"];
+export type TargetKind = components["schemas"]["TargetKind"];
+export type TargetRequest = components["schemas"]["TargetRequest"];
+export type TargetPage = components["schemas"]["TargetPage"];
+
+export type CheckDefinition = components["schemas"]["CheckDefinition"];
+export type CheckDefinitionRequest = components["schemas"]["CheckDefinitionRequest"];
+export type CheckDefinitionPage = components["schemas"]["CheckDefinitionPage"];
+export type SourceSelection = components["schemas"]["SourceSelection"];
+export type DestinationKind = components["schemas"]["DestinationKind"];
+
+// Projection is what POST /api/v1/checks/projection answers: what ONE
+// definition would project against the CURRENT topology. `overLimit` true is
+// exactly what create/update refuse with 422 for an enabled definition.
+export type Projection = components["schemas"]["Projection"];
+
+// TargetQuery/CheckDefinitionQuery/ScheduleQuery are the browser-side request
+// shapes for the three M4 list endpoints — the same half of this file
+// EventQuery/RunQuery live in, and for the same reason: a request shape is not
+// in the OpenAPI components map (its fields are individual query PARAMETERS,
+// not a schema), so it cannot be re-exported from api-types.ts. Same
+// convention as getEvents/getRuns: a field is present only when the caller
+// supplied it, and an absent field means "server default", never an explicit
+// empty value on the wire.
+export interface TargetQuery {
+  kind?: TargetKind;
+  limit?: number;
+  cursor?: string;
+}
+export interface CheckDefinitionQuery {
+  targetId?: string;
+  enabled?: boolean;
+  limit?: number;
+  cursor?: string;
+}
+export interface ScheduleQuery {
+  definitionId?: string;
+  limit?: number;
+  cursor?: string;
+}
+
+export type Schedule = components["schemas"]["Schedule"];
+// "cron" is deliberately absent from ScheduleKind — the server refuses it with
+// a 422 naming the milestone it lands in, so the form must not offer it.
+export type ScheduleKind = components["schemas"]["ScheduleKind"];
+export type ScheduleRequest = components["schemas"]["ScheduleRequest"];
+export type SchedulePage = components["schemas"]["SchedulePage"];
+
 export interface TopologyNode {
   name: string;
   zone: string;
@@ -148,21 +212,38 @@ export type CheckType = "tcp" | "udp" | "icmp" | "dns" | "http" | "mtr";
 export const CHECK_TYPES: CheckType[] = ["tcp", "udp", "icmp", "dns", "http", "mtr"];
 
 // RunStatus mirrors checks.Runner's lifecycle (memory.go: "pending" ->
-// "running" -> finalStatus's "succeeded" | "failed" | "partial").
-export type RunStatus = "pending" | "running" | "succeeded" | "failed" | "partial";
-export const RUN_TERMINAL_STATUSES: RunStatus[] = ["succeeded", "failed", "partial"];
+// "running" -> finalStatus's "succeeded" | "failed" | "partial"), plus
+// "cancelled" — the status a run reaches after POST /api/v1/runs/{id}/cancel
+// (docs/console-api.yaml's cancelRun: "the run reaches status `cancelled`").
+// NOTE: the spec's own RunStatus enum does NOT list "cancelled" yet, so
+// api-types.ts cannot supply it; this hand-written mirror is the only place
+// the browser learns that a cancelled run is finished, which is what stops
+// useRun's poll.
+export type RunStatus = "pending" | "running" | "succeeded" | "failed" | "partial" | "cancelled";
+export const RUN_TERMINAL_STATUSES: RunStatus[] = ["succeeded", "failed", "partial", "cancelled"];
 
 // RunCreateRequest is POST /api/v1/runs's body (internal/console/httpapi
 // runCreateRequest). An absent/empty sources or destinations means "every
 // node in the current topology" (checks.Spec's own doc comment); timeoutNs
 // stays optional here so an unset value lets the server apply its own
 // per-pair default/clamp (checks.clampTimeout).
+//
+// The three destination* fields are M4's external-destination half and mirror
+// docs/console-api.yaml's RunCreateRequest exactly: destinationKind defaults
+// to "node" (the pre-M4 contract, which is why a node run still sends none of
+// them at all — an absent field, not an explicit "node"), "target" resolves a
+// saved target row by destinationTargetId, "adhoc" probes destinationAddress,
+// and both external kinds require `destinations` to be empty
+// (resolveRunDestination in internal/console/httpapi/runs.go).
 export interface RunCreateRequest {
   type: CheckType;
   plane?: string;
   sources?: string[];
   destinations?: string[];
   timeoutNs?: number;
+  destinationKind?: DestinationKind;
+  destinationTargetId?: string;
+  destinationAddress?: string;
 }
 
 // RunCreateResponse mirrors POST /api/v1/runs's 202 body (httpapi

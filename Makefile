@@ -10,7 +10,7 @@ LDFLAGS := -s -w \
 
 BIN_DIR := bin
 
-.PHONY: all build build-agent build-controller build-console test test-race test-cover lint fmt proto sqlc clean help \
+.PHONY: all build build-agent build-controller build-console test test-race test-cover lint fmt proto sqlc openapi clean help \
 	local-up local-down local-status local-smoke local-urls
 
 all: lint test build
@@ -71,6 +71,20 @@ SQLC_VERSION ?= v1.31.1
 sqlc:
 	go run github.com/sqlc-dev/sqlc/cmd/sqlc@$(SQLC_VERSION) generate
 
+## OpenAPI
+
+# Regenerates web/src/lib/api-types.ts from the hand-authored
+# docs/console-api.yaml. Unlike proto:/sqlc: above there is no `go run` to pin
+# the tool with -- the generator is openapi-typescript, so this needs NODE and
+# an installed web/ tree (`cd web && npm ci`). The version is pinned by
+# web/package-lock.json instead, which is the same guarantee by another means.
+# CI runs this and fails on a diff, so a spec edit without a regenerate cannot
+# land; api-types.ts is committed, exactly like api/proto/*.pb.go and
+# internal/console/store/gen/.
+
+openapi:
+	cd web && npm run gen:api
+
 ## Helm
 
 helm-lint:
@@ -81,12 +95,18 @@ helm-lint:
 	helm lint charts/kconmon-ng -f charts/kconmon-ng/ci/console-values.yaml
 	helm lint charts/kconmon-ng -f charts/kconmon-ng/ci/console-db-values.yaml
 	helm lint charts/kconmon-ng -f charts/kconmon-ng/ci/console-auth-values.yaml
+	helm lint charts/kconmon-ng -f charts/kconmon-ng/ci/console-targets-values.yaml
 
+# full-values.yaml is templated as well as linted: `helm lint` validates values
+# against values.schema.json but does not prove every template renders, and the
+# profile that turns the most knobs on is exactly the one worth rendering.
 helm-template:
 	helm template kconmon-ng charts/kconmon-ng
+	helm template kconmon-ng charts/kconmon-ng -f charts/kconmon-ng/ci/full-values.yaml
 	helm template kconmon-ng charts/kconmon-ng -f charts/kconmon-ng/ci/console-values.yaml
 	helm template kconmon-ng charts/kconmon-ng -f charts/kconmon-ng/ci/console-db-values.yaml
 	helm template kconmon-ng charts/kconmon-ng -f charts/kconmon-ng/ci/console-auth-values.yaml
+	helm template kconmon-ng charts/kconmon-ng -f charts/kconmon-ng/ci/console-targets-values.yaml
 
 helm-package:
 	helm package charts/kconmon-ng -d dist/
@@ -133,6 +153,7 @@ help:
 	@echo "  fmt              - Format code"
 	@echo "  proto            - Generate protobuf code"
 	@echo "  sqlc             - Generate database query code"
+	@echo "  openapi          - Generate TS API types from docs/console-api.yaml (needs Node + web deps)"
 	@echo "  helm-lint        - Lint Helm chart"
 	@echo "  helm-template    - Render Helm templates"
 	@echo "  helm-package     - Package Helm chart"

@@ -106,7 +106,7 @@ func TestExecuteFinishesRunAfterRunCtxDeadlineFiresMidDispatch(t *testing.T) {
 	r := NewRunner(ctrl, hub, bus, st, m)
 
 	spec := Spec{Sources: []string{"n1"}, Destinations: []string{"n2"}, Type: "tcp", Plane: "pod", Timeout: 1 * time.Second}
-	pairs := []Pair{{Source: "n1", Destination: "n2"}}
+	pairs := []Pair{{Source: "n1", Destination: NodeDestination("n2")}}
 	specJSON, err := json.Marshal(spec)
 	if err != nil {
 		t.Fatalf("marshal spec: %v", err)
@@ -159,7 +159,7 @@ func TestRunOneRecoveredSurvivesAPanicAndRecordsTheirPairFailed(t *testing.T) {
 	r := NewRunner(ctrl, hub, bus, st, m)
 
 	spec := Spec{Sources: []string{"n1"}, Destinations: []string{"n2", "n3"}, Type: "tcp", Plane: "pod", Timeout: 2 * time.Second}
-	pairs := []Pair{{Source: "n1", Destination: "n2"}, {Source: "n1", Destination: "n3"}}
+	pairs := []Pair{{Source: "n1", Destination: NodeDestination("n2")}, {Source: "n1", Destination: NodeDestination("n3")}}
 	specJSON, err := json.Marshal(spec)
 	if err != nil {
 		t.Fatalf("marshal spec: %v", err)
