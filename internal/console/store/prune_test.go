@@ -268,6 +268,23 @@ func TestWebhooksAreNotARetentionTable(t *testing.T) {
 	}
 }
 
+// TestAlertRulesAreNotARetentionTable is the same DELIBERATE ABSENCE for M7's
+// one new table (Decision 1), and the sharper case of the two: alert_rules
+// carries updated_at and last_synced_at, either of which reads like an ageing
+// column to someone extending the sweep list. Neither is. updated_at is when
+// the operator last edited the rule; last_synced_at is when the reconciler
+// last reached the cluster. A rule nobody has touched for a year, that
+// Prometheus has been evaluating the whole time, is the most load-bearing row
+// in the table -- and a sweep on either column would delete exactly that one
+// first. Rules leave the table one way: an operator deletes them.
+func TestAlertRulesAreNotARetentionTable(t *testing.T) {
+	for _, table := range retentionTables {
+		if table == "alert_rules" {
+			t.Fatal("alert_rules has a retention sweep; see prune.go's table-label comment for why it must not")
+		}
+	}
+}
+
 // TestRunSweepsCreditsEveryTableIndependently runs one sweep per closed label
 // value with a distinct row count and asserts each landed on its own series.
 // The M5 sweeps share runSweeps with the M3 ones, so the risk being tested is

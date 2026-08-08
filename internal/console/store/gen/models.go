@@ -11,6 +11,24 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+type AlertRule struct {
+	ID           pgtype.UUID
+	Name         string
+	Kind         string
+	Params       json.RawMessage
+	Severity     string
+	ForNs        int64
+	Labels       json.RawMessage
+	Annotations  json.RawMessage
+	Enabled      bool
+	RenderedExpr string
+	SyncStatus   string
+	SyncMessage  string
+	LastSyncedAt pgtype.Timestamptz
+	CreatedAt    time.Time
+	UpdatedAt    time.Time
+}
+
 type Annotation struct {
 	ID        pgtype.UUID
 	StartAt   time.Time

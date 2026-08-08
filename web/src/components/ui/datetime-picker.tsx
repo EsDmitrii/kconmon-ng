@@ -142,6 +142,47 @@ function monthGrid(view: Date): Date[] {
   return Array.from({ length: 42 }, (_, i) => addDays(start, i));
 }
 
+/** WheelColumn is one scrollable option list of the two wheel panels (time,
+ *  month & year). Options are tabIndex -1 on purpose: the wheels are the
+ *  pointer path, the inputs and the grid are the keyboard path, and the
+ *  popover's soft Tab trap must not grow 60 stops. */
+function WheelColumn({
+  label,
+  width,
+  options,
+  onPick,
+}: {
+  label: string;
+  width: string;
+  options: { value: number; text: string; selected: boolean; disabled?: boolean }[];
+  onPick: (value: number) => void;
+}) {
+  return (
+    <div role="listbox" aria-label={label} className={cn("max-h-44 overflow-y-auto overscroll-contain", width)}>
+      {options.map((o) => (
+        <button
+          key={o.value}
+          type="button"
+          role="option"
+          aria-selected={o.selected}
+          tabIndex={-1}
+          disabled={o.disabled}
+          onClick={() => onPick(o.value)}
+          className={cn(
+            "block w-full rounded-md px-2 py-1 text-center text-[13px] tabular-nums transition-colors duration-(--dur-fast) ease-(--ease)",
+            "disabled:pointer-events-none disabled:opacity-30",
+            o.selected
+              ? "bg-primary font-medium text-primary-foreground"
+              : "text-foreground hover:bg-accent hover:text-accent-foreground",
+          )}
+        >
+          {o.text}
+        </button>
+      ))}
+    </div>
+  );
+}
+
 export interface DateTimePickerProps {
   /** The instant the trigger shows and the popover opens on. null means "no
    *  instant chosen yet" — the popover then opens on now. */
@@ -202,6 +243,21 @@ export function DateTimePicker({
   const [timeStr, setTimeStr] = React.useState(() => toTimeInputValue(seed()));
   const [view, setView] = React.useState(() => startOfDay(seed()));
   const [focusedDay, setFocusedDay] = React.useState(() => startOfDay(seed()));
+  /* The time wheel: two scrollable columns that open on the time field itself.
+     The native indicator (and the browser dropdown behind it) is hidden — one
+     popover should not sprout a second, foreign-looking one — so this panel is
+     the pointer path for the wall clock, and typing in the field remains the
+     keyboard path. */
+  const [timeOpen, setTimeOpen] = React.useState(false);
+  const timeWrapRef = React.useRef<HTMLDivElement>(null);
+  const timeInputRef = React.useRef<HTMLInputElement>(null);
+  /* The month & year panel: same wheel pattern, hung off the header, so a
+     date three years back is two clicks instead of forty chevrons. */
+  const [monthYearOpen, setMonthYearOpen] = React.useState(false);
+  const monthYearWrapRef = React.useRef<HTMLDivElement>(null);
+  /* pickMinute hands focus back to the field; without this flag that very
+     focus would re-open the wheel the pick just closed. */
+  const suppressWheelRef = React.useRef(false);
 
   const today = startOfDay(new Date());
 
@@ -218,6 +274,8 @@ export function DateTimePicker({
     setTimeStr(toTimeInputValue(base));
     setView(startOfDay(base));
     setFocusedDay(startOfDay(base));
+    setTimeOpen(false);
+    setMonthYearOpen(false);
     pendingFocusRef.current = true;
     setOpen(true);
   }
@@ -272,8 +330,63 @@ export function DateTimePicker({
     }
   }
 
+  /* The wheels close like any menu: a press anywhere they don't own, or
+     Escape (handled at their own element, where it stops short of the
+     popover's own Escape — one key, one layer). */
+  React.useEffect(() => {
+    if (!timeOpen && !monthYearOpen) return;
+    function onPointerDown(e: MouseEvent) {
+      const t = e.target as Node;
+      if (timeOpen && timeWrapRef.current && !timeWrapRef.current.contains(t)) setTimeOpen(false);
+      if (monthYearOpen && monthYearWrapRef.current && !monthYearWrapRef.current.contains(t)) setMonthYearOpen(false);
+    }
+    document.addEventListener("mousedown", onPointerDown);
+    return () => document.removeEventListener("mousedown", onPointerDown);
+  }, [timeOpen, monthYearOpen]);
+
+  /* Opening centres each column on its selected row — a wheel that greets the
+     user at 00 when the draft says 15:34 is a list, not a wheel. Guarded:
+     jsdom has no scrollIntoView. */
+  React.useEffect(() => {
+    if (!timeOpen && !monthYearOpen) return;
+    for (const wrap of [timeWrapRef.current, monthYearWrapRef.current]) {
+      const selected = wrap?.querySelectorAll<HTMLElement>('[aria-selected="true"]') ?? [];
+      for (const el of selected) el.scrollIntoView?.({ block: "center" });
+    }
+  }, [timeOpen, monthYearOpen]);
+
   const composed = composeLocal(dateStr, timeStr);
   const selectedDay = composeLocal(dateStr, "00:00");
+  const timeParts = TIME_RE.test(timeStr) ? timeStr.split(":").map(Number) : null;
+
+  function pickHour(h: number) {
+    // Hour first, minute second is the natural reading order; the wheel stays
+    // up between the two so the pick is one gesture, not two round trips.
+    setTimeStr(`${pad(h)}:${pad(timeParts ? timeParts[1] : 0)}`);
+  }
+
+  function pickMinute(m: number) {
+    setTimeStr(`${pad(timeParts ? timeParts[0] : 0)}:${pad(m)}`);
+    setTimeOpen(false);
+    suppressWheelRef.current = true;
+    timeInputRef.current?.focus();
+  }
+
+  const thisMonthStart = new Date(today.getFullYear(), today.getMonth(), 1);
+
+  function pickViewMonth(m: number) {
+    // Year first, month second is how "March 2024" is aimed at; the month is
+    // the closing pick, mirroring the time wheel's hour-then-minute.
+    setView(new Date(view.getFullYear(), m, 1));
+    setMonthYearOpen(false);
+  }
+
+  function pickViewYear(y: number) {
+    const candidate = new Date(y, view.getMonth(), 1);
+    // A year hop can strand the view in a month that hasn't happened
+    // (December 2024 -> 2026): land on today's month instead of an all-dead grid.
+    setView(!allowFuture && candidate > thisMonthStart ? thisMonthStart : candidate);
+  }
 
   function pickDay(d: Date) {
     // The time of day is deliberately untouched: an operator narrowing down an
@@ -345,6 +458,10 @@ export function DateTimePicker({
     }
   }
 
+  /* Ten years of history is beyond any retention this console will hold;
+     allowFuture (maintenance windows) adds two years of advance planning. */
+  const yearRange = Array.from({ length: 10 + (allowFuture ? 2 : 0) }, (_, i) => today.getFullYear() - 9 + i);
+
   const days = monthGrid(view);
   const atLastMonth =
     !allowFuture && view.getFullYear() === today.getFullYear() && view.getMonth() === today.getMonth();
@@ -398,9 +515,55 @@ export function DateTimePicker({
             >
               <ChevronLeft aria-hidden="true" className="size-4" />
             </button>
-            <span aria-live="polite" className="text-[13px] font-medium text-foreground">
-              {MONTHS[view.getMonth()]} {view.getFullYear()}
-            </span>
+            <div ref={monthYearWrapRef} className="relative">
+              <button
+                type="button"
+                aria-haspopup="listbox"
+                aria-expanded={monthYearOpen}
+                aria-label="Choose the month and year"
+                onClick={() => setMonthYearOpen((v) => !v)}
+                onKeyDown={(e) => {
+                  if (e.key === "Escape" && monthYearOpen) {
+                    e.stopPropagation();
+                    setMonthYearOpen(false);
+                  }
+                }}
+                className="rounded-md px-2 py-0.5 text-[13px] font-medium text-foreground transition-colors duration-(--dur-fast) ease-(--ease) hover:bg-accent hover:text-accent-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              >
+                <span aria-live="polite">
+                  {MONTHS[view.getMonth()]} {view.getFullYear()}
+                </span>
+              </button>
+              {monthYearOpen ? (
+                <div
+                  role="group"
+                  aria-label="Pick a month and year"
+                  className="absolute left-1/2 top-full z-50 mt-1 flex -translate-x-1/2 gap-1 rounded-lg border border-border bg-popover p-1 shadow-card"
+                >
+                  <WheelColumn
+                    label="Month"
+                    width="w-26"
+                    options={MONTHS.map((name, m) => ({
+                      value: m,
+                      text: name,
+                      selected: m === view.getMonth(),
+                      disabled: !allowFuture && new Date(view.getFullYear(), m, 1) > thisMonthStart,
+                    }))}
+                    onPick={pickViewMonth}
+                  />
+                  <WheelColumn
+                    label="Year"
+                    width="w-16"
+                    options={yearRange.map((y) => ({
+                      value: y,
+                      text: String(y),
+                      selected: y === view.getFullYear(),
+                    }))}
+                    onPick={pickViewYear}
+                  />
+                </div>
+              ) : null}
+            </div>
             <button
               type="button"
               aria-label="Next month"
@@ -470,28 +633,87 @@ export function DateTimePicker({
           </table>
 
           <div className="mt-2.5 flex items-center gap-1.5 border-t border-border pt-2.5">
+            {/* The native indicators are hidden on BOTH fields: the date one
+                opens the browser's own calendar right under ours — two
+                calendars for one instant. And with the icons gone the fields
+                are sized to their digits — a box wider than its text reads as
+                a control with something missing. The grid above is the pointer
+                path for the date, the wheel below for the time; these fields
+                are the typing path, and they stay plain text boxes. */}
             <input
               type="date"
               aria-label="Date"
               value={dateStr}
               max={allowFuture ? undefined : toDateInputValue(today)}
               onChange={(e) => onManualDate(e.target.value)}
-              className="h-8 min-w-0 flex-1 rounded-md bg-surface-2 px-2 text-[13px] text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              className="h-8 w-[6.75rem] rounded-md bg-surface-2 px-2 text-center text-[13px] tabular-nums text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring [&::-webkit-calendar-picker-indicator]:hidden"
             />
-            <input
-              type="time"
-              aria-label="Time"
-              value={timeStr}
-              onChange={(e) => setTimeStr(e.target.value)}
-              className="h-8 w-[5.5rem] rounded-md bg-surface-2 px-2 text-[13px] tabular-nums text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-            />
+            <div ref={timeWrapRef} className="relative">
+              <input
+                ref={timeInputRef}
+                type="time"
+                aria-label="Time"
+                value={timeStr}
+                onChange={(e) => setTimeStr(e.target.value)}
+                onFocus={() => {
+                  if (suppressWheelRef.current) {
+                    suppressWheelRef.current = false;
+                    return;
+                  }
+                  setTimeOpen(true);
+                }}
+                onClick={() => setTimeOpen(true)}
+                onKeyDown={(e) => {
+                  if (e.key === "Escape" && timeOpen) {
+                    e.stopPropagation();
+                    setTimeOpen(false);
+                  }
+                }}
+                className="h-8 w-[4.5rem] rounded-md bg-surface-2 px-2 text-center text-[13px] tabular-nums text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring [&::-webkit-calendar-picker-indicator]:hidden"
+              />
+              {timeOpen ? (
+                <div
+                  role="group"
+                  aria-label="Pick a time"
+                  className="absolute right-0 top-full z-50 mt-1 flex gap-1 rounded-lg border border-border bg-popover p-1 shadow-card"
+                >
+                  {(
+                    [
+                      { label: "Hour", count: 24, selected: timeParts?.[0], pick: pickHour },
+                      { label: "Minute", count: 60, selected: timeParts?.[1], pick: pickMinute },
+                    ] as const
+                  ).map((col) => (
+                    <WheelColumn
+                      key={col.label}
+                      label={col.label}
+                      width="w-12"
+                      options={Array.from({ length: col.count }, (_, n) => ({
+                        value: n,
+                        text: pad(n),
+                        selected: col.selected === n,
+                      }))}
+                      onPick={col.pick}
+                    />
+                  ))}
+                </div>
+              ) : null}
+            </div>
             <Button
               type="button"
               variant="ghost"
               size="sm"
-              aria-label="Set the time to now"
-              onClick={() => setTimeStr(toTimeInputValue(new Date()))}
-              className="h-8 px-2 text-muted-foreground"
+              aria-label="Set the date and time to now"
+              onClick={() => {
+                // The whole instant, not just the wall clock: "Now" is an
+                // escape hatch back to the present, and a draft parked three
+                // weeks deep in the grid must come home on both axes.
+                const now = new Date();
+                setDateStr(toDateInputValue(now));
+                setTimeStr(toTimeInputValue(now));
+                setView(startOfDay(now));
+                setFocusedDay(startOfDay(now));
+              }}
+              className="ml-auto h-8 px-2 text-muted-foreground"
             >
               Now
             </Button>

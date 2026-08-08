@@ -121,6 +121,46 @@ describe("DateTimePicker calendar", () => {
     expect(screen.getByText("August 2026")).toBeInTheDocument();
   });
 
+  it("the header opens a month & year panel centred on the view", () => {
+    renderPicker();
+    open();
+    fireEvent.click(screen.getByRole("button", { name: /choose the month and year/i }));
+    const months = screen.getByRole("listbox", { name: "Month" });
+    const years = screen.getByRole("listbox", { name: "Year" });
+    expect(within(months).getByRole("option", { name: "August" })).toHaveAttribute("aria-selected", "true");
+    expect(within(years).getByRole("option", { name: "2026" })).toHaveAttribute("aria-selected", "true");
+  });
+
+  it("picking a year keeps the panel up; picking a month closes it and pages the grid", () => {
+    renderPicker();
+    open();
+    fireEvent.click(screen.getByRole("button", { name: /choose the month and year/i }));
+    fireEvent.click(within(screen.getByRole("listbox", { name: "Year" })).getByRole("option", { name: "2024" }));
+    expect(screen.getByRole("listbox", { name: "Month" })).toBeInTheDocument();
+
+    fireEvent.click(within(screen.getByRole("listbox", { name: "Month" })).getByRole("option", { name: "March" }));
+    expect(screen.queryByRole("listbox", { name: "Month" })).not.toBeInTheDocument();
+    expect(screen.getByText("March 2024")).toBeInTheDocument();
+    expect(day("14 March 2024")).toBeInTheDocument();
+  });
+
+  it("never offers a future month or year without allowFuture", () => {
+    renderPicker();
+    open();
+    fireEvent.click(screen.getByRole("button", { name: /choose the month and year/i }));
+    expect(within(screen.getByRole("listbox", { name: "Month" })).getByRole("option", { name: "September" })).toBeDisabled();
+    expect(within(screen.getByRole("listbox", { name: "Year" })).queryByRole("option", { name: "2027" })).not.toBeInTheDocument();
+  });
+
+  it("clamps the view month down when a year pick would land it in the future", () => {
+    renderPicker(new Date(2024, 11, 25, 9, 0, 0)); // view: December 2024
+    open();
+    fireEvent.click(screen.getByRole("button", { name: /choose the month and year/i }));
+    fireEvent.click(within(screen.getByRole("listbox", { name: "Year" })).getByRole("option", { name: "2026" }));
+    // December 2026 has not happened; the view lands on today's month instead.
+    expect(screen.getByText("August 2026")).toBeInTheDocument();
+  });
+
   it("disables future days and the next-month chevron — the clamp is never offered", () => {
     renderPicker();
     open();
@@ -252,14 +292,63 @@ describe("DateTimePicker manual path", () => {
     expect(onApply.mock.calls[0][0]).toEqual(new Date(2027, 0, 1, 15, 34, 0));
   });
 
-  it("sets the time of day to now with the Now button, leaving the date alone", () => {
+  it("resets both the date and the time with the Now button, wherever the draft wandered", () => {
     const { onApply } = renderPicker();
     open();
-    fireEvent.click(screen.getByRole("button", { name: /set the time to now/i }));
+    // Wander far from today on both axes first, so the reset is observable.
+    fireEvent.change(dateField(), { target: { value: "2026-07-01" } });
+    fireEvent.change(timeField(), { target: { value: "03:15" } });
+    fireEvent.click(screen.getByRole("button", { name: /set the date and time to now/i }));
+    expect(dateField().value).toBe("2026-08-08");
     expect(timeField().value).toBe("12:00");
-    expect(dateField().value).toBe("2026-08-07");
+    // The grid follows the reset: back to today's month, today selected.
+    expect(screen.getByText("August 2026")).toBeInTheDocument();
+    expect(within(screen.getByRole("gridcell", { selected: true })).getByRole("button")).toHaveTextContent("8");
     fireEvent.click(screen.getByRole("button", { name: "Apply" }));
-    expect(onApply.mock.calls[0][0]).toEqual(new Date(2026, 7, 7, 12, 0, 0));
+    expect(onApply.mock.calls[0][0]).toEqual(new Date(2026, 7, 8, 12, 0, 0));
+  });
+
+  it("opens the time wheel on the time field, scrolled to the draft's hour and minute", () => {
+    renderPicker();
+    open();
+    fireEvent.focus(timeField());
+    const hours = screen.getByRole("listbox", { name: "Hour" });
+    const minutes = screen.getByRole("listbox", { name: "Minute" });
+    expect(within(hours).getByRole("option", { name: "15" })).toHaveAttribute("aria-selected", "true");
+    expect(within(minutes).getByRole("option", { name: "34" })).toHaveAttribute("aria-selected", "true");
+  });
+
+  it("picking an hour keeps the wheel open; picking a minute closes it", () => {
+    const { onApply } = renderPicker();
+    open();
+    fireEvent.focus(timeField());
+    fireEvent.click(within(screen.getByRole("listbox", { name: "Hour" })).getByRole("option", { name: "02" }));
+    expect(timeField().value).toBe("02:34");
+    expect(screen.getByRole("listbox", { name: "Minute" })).toBeInTheDocument();
+
+    fireEvent.click(within(screen.getByRole("listbox", { name: "Minute" })).getByRole("option", { name: "05" }));
+    expect(timeField().value).toBe("02:05");
+    expect(screen.queryByRole("listbox", { name: "Hour" })).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Apply" }));
+    expect(onApply.mock.calls[0][0]).toEqual(new Date(2026, 7, 7, 2, 5, 0));
+  });
+
+  it("Escape closes the wheel and only the wheel", () => {
+    renderPicker();
+    open();
+    fireEvent.focus(timeField());
+    fireEvent.keyDown(timeField(), { key: "Escape" });
+    expect(screen.queryByRole("listbox", { name: "Hour" })).not.toBeInTheDocument();
+    expect(screen.getByRole("dialog", { name: /choose a date and time/i })).toBeInTheDocument();
+  });
+
+  it("a click elsewhere in the popover puts the wheel away", () => {
+    renderPicker();
+    open();
+    fireEvent.focus(timeField());
+    fireEvent.mouseDown(day("3 August 2026"));
+    expect(screen.queryByRole("listbox", { name: "Hour" })).not.toBeInTheDocument();
   });
 
   it("cannot apply a cleared field", () => {

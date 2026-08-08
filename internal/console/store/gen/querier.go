@@ -14,6 +14,12 @@ import (
 type Querier interface {
 	CountUsers(ctx context.Context) (int64, error)
 	// id is caller-supplied, same as CreateTarget (targets.sql): the column has a
+	// gen_random_uuid() DEFAULT for anything writing this table by hand, but the
+	// Go layer mints its own so a create is retry-identifiable. The sync columns
+	// are deliberately absent from the INSERT: a rule that has just been typed has
+	// never been applied, and 'unsynced' is exactly the column DEFAULT.
+	CreateAlertRule(ctx context.Context, arg CreateAlertRuleParams) (AlertRule, error)
+	// id is caller-supplied, same as CreateTarget (targets.sql): the column has a
 	// DEFAULT, but minting the UUID in Go keeps the package's one id story and
 	// makes a retried create identifiable rather than a second mark on the chart.
 	CreateAnnotation(ctx context.Context, arg CreateAnnotationParams) (Annotation, error)
@@ -47,6 +53,10 @@ type Querier interface {
 	// secret_enc travels in and out of this layer as OPAQUE BYTES: the store never
 	// encrypts, decrypts or inspects it (migration 00006's comment on the column).
 	CreateWebhook(ctx context.Context, arg CreateWebhookParams) (Webhook, error)
+	// No cascade and no dependents: a rule references nothing and nothing
+	// references it. The CRD object it rendered into is the reconciler's to
+	// withdraw, not this statement's.
+	DeleteAlertRule(ctx context.Context, id pgtype.UUID) (int64, error)
 	// No cascade and nothing references an annotation: deleting a mark removes
 	// the mark and nothing else. M5 has no edit (Decision 10), so delete-and-
 	// recreate is the only correction path and it has to be clean.
@@ -131,6 +141,7 @@ type Querier interface {
 	// 'pending' does: a run that never started, or already finished, is left
 	// untouched (0 rows) rather than silently overwritten by a retry.
 	FinishRun(ctx context.Context, arg FinishRunParams) (int64, error)
+	GetAlertRule(ctx context.Context, id pgtype.UUID) (AlertRule, error)
 	GetAnnotation(ctx context.Context, id pgtype.UUID) (Annotation, error)
 	GetDefinition(ctx context.Context, id pgtype.UUID) (CheckDefinition, error)
 	// The read half of the TTL cache. Callers ask for a whole trace's hop IPs at
@@ -171,6 +182,19 @@ type Querier interface {
 	// and the timeline can show the recurrence.
 	InsertK8sEvent(ctx context.Context, arg InsertK8sEventParams) (int64, error)
 	InsertTopologyEvent(ctx context.Context, arg InsertTopologyEventParams) (int64, error)
+	// UNPAGED by design, the same call ListWebhooks makes: the row count is rules
+	// an operator typed -- dozens, not thousands -- bounded by how many were
+	// configured rather than by how long the system has been running. A keyset
+	// cursor over that would be machinery with nothing to do.
+	//
+	// ORDER BY lower(name) is the alert_rules_name_lower_idx order, and it is
+	// TOTAL rather than merely stable: that index is UNIQUE, so no two rows can
+	// share a sort key and no tiebreaker column is needed.
+	//
+	// enabled_only is a plain boolean rather than a nullable narg: "every rule" and
+	// "the enabled ones" are the only two questions this list is ever asked, and
+	// a three-state filter would invent a third nobody has.
+	ListAlertRules(ctx context.Context, enabledOnly bool) ([]AlertRule, error)
 	// The chart-marker query: every annotation whose interval OVERLAPS the
 	// requested window, newest first. An instant mark (end_at NULL) is treated as
 	// the zero-length interval [start_at, start_at], which coalesce spells out --
@@ -379,6 +403,24 @@ type Querier interface {
 	// query is intentionally a plain, cheap single-row UPDATE with no such logic
 	// baked in, so the debounce policy stays entirely in the caller's hands.
 	TouchTokenLastUsed(ctx context.Context, id pgtype.UUID) (int64, error)
+	// The BUILDER half of the row, and only that half. sync_status is reset to
+	// 'unsynced' and sync_message cleared in the same statement rather than left
+	// alone: a rule whose expression just changed is BY DEFINITION not the rule
+	// that was applied to the cluster, and a stale 'synced' would tell the drift
+	// view -- and the operator -- the opposite. sync_message goes with it because
+	// a message is the explanation OF a status, and an explanation outliving the
+	// status it explained is a lie the UI would render verbatim.
+	//
+	// last_synced_at is deliberately KEPT. It is a historical fact ("the last time
+	// our bytes reached the cluster"), not a claim about the current row, and
+	// clearing it would erase the only evidence that this rule was ever applied.
+	UpdateAlertRule(ctx context.Context, arg UpdateAlertRuleParams) (AlertRule, error)
+	// The RECONCILER's write-back (M7 Decision 5), touching the three sync columns
+	// and nothing else -- not even updated_at. updated_at means "when the operator
+	// last changed this rule", and a 60s reconcile loop bumping it would make every
+	// rule in the list look freshly edited every minute, which is the one thing the
+	// column exists to answer.
+	UpdateAlertRuleSyncStatus(ctx context.Context, arg UpdateAlertRuleSyncStatusParams) (AlertRule, error)
 	// Full replace, same contract as UpdateTarget.
 	UpdateDefinition(ctx context.Context, arg UpdateDefinitionParams) (CheckDefinition, error)
 	UpdateIncidentNotes(ctx context.Context, arg UpdateIncidentNotesParams) (Incident, error)
