@@ -151,7 +151,7 @@ func TestRegistryOnChange(t *testing.T) {
 	var received []model.AgentInfo
 	var mu sync.Mutex
 
-	r.OnChange(func(agents []model.AgentInfo, _ string) {
+	r.OnChange(func(agents []model.AgentInfo, _ TopologyChange) {
 		mu.Lock()
 		received = agents
 		mu.Unlock()
@@ -224,7 +224,7 @@ func TestRegistryUpdateZone(t *testing.T) {
 	var mu sync.Mutex
 	var notifications int
 	var lastSnapshot []model.AgentInfo
-	r.OnChange(func(agents []model.AgentInfo, _ string) {
+	r.OnChange(func(agents []model.AgentInfo, _ TopologyChange) {
 		mu.Lock()
 		notifications++
 		lastSnapshot = agents
@@ -263,7 +263,7 @@ func TestRegistryUpdateZoneNoAgentsNoNotify(t *testing.T) {
 	r := NewRegistry(30 * time.Second)
 
 	var notifications int
-	r.OnChange(func([]model.AgentInfo, string) { notifications++ })
+	r.OnChange(func([]model.AgentInfo, TopologyChange) { notifications++ })
 
 	r.UpdateZone("node-unknown", "zone-a")
 	if notifications != 0 {
@@ -290,7 +290,7 @@ func TestRegistryDeregisterBroadcasts(t *testing.T) {
 	var mu sync.Mutex
 	var notifications int
 	var lastSnapshot []model.AgentInfo
-	r.OnChange(func(agents []model.AgentInfo, _ string) {
+	r.OnChange(func(agents []model.AgentInfo, _ TopologyChange) {
 		mu.Lock()
 		notifications++
 		lastSnapshot = agents
@@ -320,7 +320,7 @@ func TestRegistryDeregisterUnknownNoOp(t *testing.T) {
 	r := NewRegistry(30 * time.Second)
 
 	var notifications int
-	r.OnChange(func([]model.AgentInfo, string) { notifications++ })
+	r.OnChange(func([]model.AgentInfo, TopologyChange) { notifications++ })
 
 	r.Register(model.AgentInfo{ID: "agent-1", NodeName: "node-1"})
 	base := notifications
@@ -332,5 +332,185 @@ func TestRegistryDeregisterUnknownNoOp(t *testing.T) {
 	}
 	if r.Count() != 1 {
 		t.Errorf("expected registry unchanged at 1 agent, got %d", r.Count())
+	}
+}
+
+// --- topology attribution (M7 Task 11) -----------------------------------
+//
+// Every registry mutation that fires OnChange must name WHO it was about.
+// These four tests are the attribution matrix, one per emission site: they are
+// what stops the M3 regression (a Reason with no subject) from coming back,
+// because an unattributed event is invisible to the console's topology fold.
+
+// recordChanges subscribes to r and returns a snapshot-taking accessor for
+// every TopologyChange observed since subscription.
+func recordChanges(r *Registry) func() []TopologyChange {
+	var mu sync.Mutex
+	var seen []TopologyChange
+	r.OnChange(func(_ []model.AgentInfo, change TopologyChange) {
+		mu.Lock()
+		seen = append(seen, change)
+		mu.Unlock()
+	})
+	return func() []TopologyChange {
+		mu.Lock()
+		defer mu.Unlock()
+		return slices.Clone(seen)
+	}
+}
+
+func TestRegisterAttributesTheRegisteringAgent(t *testing.T) {
+	r := NewRegistry(30 * time.Second)
+	r.SetZoneResolver(stubZoneResolver{zones: map[string]string{"node-1": "zone-a"}})
+	changes := recordChanges(r)
+
+	r.Register(model.AgentInfo{ID: "agent-1", NodeName: "node-1"})
+
+	got := changes()
+	if len(got) != 1 {
+		t.Fatalf("expected 1 change, got %d: %+v", len(got), got)
+	}
+	if got[0].Reason != "agent_registered" {
+		t.Errorf("reason = %q, want agent_registered", got[0].Reason)
+	}
+	want := []TopologySubject{{AgentID: "agent-1", NodeName: "node-1", Zone: "zone-a"}}
+	if !slices.Equal(got[0].Subjects, want) {
+		t.Errorf("subjects = %+v, want %+v", got[0].Subjects, want)
+	}
+}
+
+// The enriched zone, not the (empty) zone the agent sent, is what the event
+// carries: the registry stores the enriched value, so history must match it.
+func TestRegisterCarriesTheEnrichedZoneNotTheSubmittedOne(t *testing.T) {
+	r := NewRegistry(30 * time.Second)
+	r.SetZoneResolver(stubZoneResolver{zones: map[string]string{"node-1": "zone-a"}})
+	changes := recordChanges(r)
+
+	r.Register(model.AgentInfo{ID: "agent-1", NodeName: "node-1", Zone: ""})
+
+	if got := changes()[0].Subjects[0].Zone; got != "zone-a" {
+		t.Errorf("zone = %q, want the enriched zone-a", got)
+	}
+}
+
+// zone_updated is the one reason whose whole subject is the NEW zone, and it
+// can touch several agents on one node at once — each gets its own subject.
+func TestUpdateZoneAttributesEveryAgentOnTheNodeWithTheNewZone(t *testing.T) {
+	r := NewRegistry(30 * time.Second)
+	r.Register(model.AgentInfo{ID: "agent-1", NodeName: "node-1"})
+	r.Register(model.AgentInfo{ID: "agent-1b", NodeName: "node-1"})
+	r.Register(model.AgentInfo{ID: "agent-2", NodeName: "node-2"})
+	changes := recordChanges(r)
+
+	r.UpdateZone("node-1", "zone-a")
+
+	got := changes()
+	if len(got) != 1 {
+		t.Fatalf("expected 1 change, got %d: %+v", len(got), got)
+	}
+	if got[0].Reason != "zone_updated" {
+		t.Errorf("reason = %q, want zone_updated", got[0].Reason)
+	}
+	want := []TopologySubject{
+		{AgentID: "agent-1", NodeName: "node-1", Zone: "zone-a"},
+		{AgentID: "agent-1b", NodeName: "node-1", Zone: "zone-a"},
+	}
+	if !slices.Equal(got[0].Subjects, want) {
+		t.Errorf("subjects = %+v, want %+v (agent-2 is on another node)", got[0].Subjects, want)
+	}
+}
+
+// A departure must still name the node and zone the agent HAD — the map entry
+// is gone by the time the callback runs, so it has to be captured before the
+// delete or the leave is unattributable and the fold can never remove anything.
+func TestDeregisterAttributesTheDepartedAgentsLastKnownPlacement(t *testing.T) {
+	r := NewRegistry(30 * time.Second)
+	r.Register(model.AgentInfo{ID: "agent-1", NodeName: "node-1", Zone: "zone-a"})
+	r.Register(model.AgentInfo{ID: "agent-2", NodeName: "node-2", Zone: "zone-b"})
+	changes := recordChanges(r)
+
+	r.Deregister("agent-1")
+
+	got := changes()
+	if len(got) != 1 {
+		t.Fatalf("expected 1 change, got %d: %+v", len(got), got)
+	}
+	if got[0].Reason != "agent_deregistered" {
+		t.Errorf("reason = %q, want agent_deregistered", got[0].Reason)
+	}
+	want := []TopologySubject{{AgentID: "agent-1", NodeName: "node-1", Zone: "zone-a"}}
+	if !slices.Equal(got[0].Subjects, want) {
+		t.Errorf("subjects = %+v, want %+v", got[0].Subjects, want)
+	}
+}
+
+// One TTL sweep can take several agents out at once. They are DIFFERENT nodes,
+// so a single subject would attribute the sweep to whichever one the map
+// iteration happened to reach first; the change carries all of them, sorted so
+// the emitted event order is deterministic.
+func TestEvictStaleAttributesEveryEvictedAgent(t *testing.T) {
+	r := NewRegistry(time.Nanosecond)
+	r.Register(model.AgentInfo{ID: "agent-2", NodeName: "node-2", Zone: "zone-b"})
+	r.Register(model.AgentInfo{ID: "agent-1", NodeName: "node-1", Zone: "zone-a"})
+	changes := recordChanges(r)
+
+	time.Sleep(time.Millisecond)
+	if n := r.EvictStale(); n != 2 {
+		t.Fatalf("expected 2 evictions, got %d", n)
+	}
+
+	got := changes()
+	if len(got) != 1 {
+		t.Fatalf("expected 1 change, got %d: %+v", len(got), got)
+	}
+	if got[0].Reason != "agent_evicted" {
+		t.Errorf("reason = %q, want agent_evicted", got[0].Reason)
+	}
+	want := []TopologySubject{
+		{AgentID: "agent-1", NodeName: "node-1", Zone: "zone-a"},
+		{AgentID: "agent-2", NodeName: "node-2", Zone: "zone-b"},
+	}
+	if !slices.Equal(got[0].Subjects, want) {
+		t.Errorf("subjects = %+v, want %+v (sorted by agent id)", got[0].Subjects, want)
+	}
+}
+
+// Events() is what the controller emits from, so it is pinned here rather than
+// left to the caller: one event per subject, every field carried through.
+func TestTopologyChangeEventsAreOnePerSubject(t *testing.T) {
+	change := TopologyChange{
+		Reason: "agent_evicted",
+		Subjects: []TopologySubject{
+			{AgentID: "agent-1", NodeName: "node-1", Zone: "zone-a"},
+			{AgentID: "agent-2", NodeName: "node-2", Zone: "zone-b"},
+		},
+	}
+
+	evs := change.Events()
+	if len(evs) != 2 {
+		t.Fatalf("expected 2 events, got %d", len(evs))
+	}
+	for i, ev := range evs {
+		if ev.GetReason() != "agent_evicted" {
+			t.Errorf("event %d reason = %q", i, ev.GetReason())
+		}
+		if ev.GetAgentId() != change.Subjects[i].AgentID ||
+			ev.GetNodeName() != change.Subjects[i].NodeName ||
+			ev.GetZone() != change.Subjects[i].Zone {
+			t.Errorf("event %d = %+v, want subject %+v", i, ev, change.Subjects[i])
+		}
+	}
+}
+
+// The unattributed shape is not dead code to delete: it is what a future reason
+// with no agent subject would emit, and dropping the event entirely would lose
+// the refetch signal the live Console runs on. One event, reason only.
+func TestTopologyChangeWithNoSubjectsStillEmitsTheRefetchSignal(t *testing.T) {
+	evs := TopologyChange{Reason: "something_new"}.Events()
+	if len(evs) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(evs))
+	}
+	if evs[0].GetReason() != "something_new" || evs[0].GetNodeName() != "" || evs[0].GetAgentId() != "" {
+		t.Errorf("unattributed event = %+v", evs[0])
 	}
 }

@@ -32,14 +32,32 @@ func TestToLiveEventEveryPayloadType(t *testing.T) {
 		{
 			name: "topology_changed with a node",
 			event: &pb.Event{Seq: 3, Timestamp: fixedTime(), Payload: &pb.Event_TopologyChanged{
-				TopologyChanged: &pb.TopologyChanged{Reason: "agent_registered", NodeName: "node-a", AgentId: "agent-a"},
+				TopologyChanged: &pb.TopologyChanged{
+					Reason: "agent_registered", NodeName: "node-a", AgentId: "agent-a", Zone: "zone-a",
+				},
 			}},
 			wantID:      "3-1753400000000000000",
 			wantType:    "topology_changed",
 			wantSever:   "info",
 			wantScope:   "node-a",
 			wantSummary: "topology changed: agent_registered (node-a)",
-			wantDetails: `{"reason":"agent_registered","nodeName":"node-a","agentId":"agent-a"}`,
+			wantDetails: `{"reason":"agent_registered","nodeName":"node-a","agentId":"agent-a","zone":"zone-a"}`,
+		},
+		{
+			// zone_updated's whole subject is the new zone, so it is the one
+			// reason whose details would be meaningless without it.
+			name: "topology_changed carries the new zone on a zone_updated",
+			event: &pb.Event{Seq: 5, Timestamp: fixedTime(), Payload: &pb.Event_TopologyChanged{
+				TopologyChanged: &pb.TopologyChanged{
+					Reason: "zone_updated", NodeName: "node-a", AgentId: "agent-a", Zone: "zone-b",
+				},
+			}},
+			wantID:      "5-1753400000000000000",
+			wantType:    "topology_changed",
+			wantSever:   "info",
+			wantScope:   "node-a",
+			wantSummary: "topology changed: zone_updated (node-a)",
+			wantDetails: `{"reason":"zone_updated","nodeName":"node-a","agentId":"agent-a","zone":"zone-b"}`,
 		},
 		{
 			name: "topology_changed without a node scopes to the cluster",
@@ -51,7 +69,7 @@ func TestToLiveEventEveryPayloadType(t *testing.T) {
 			wantSever:   "info",
 			wantScope:   "cluster",
 			wantSummary: "topology changed: agent_evicted",
-			wantDetails: `{"reason":"agent_evicted","nodeName":"","agentId":""}`,
+			wantDetails: `{"reason":"agent_evicted","nodeName":"","agentId":"","zone":""}`,
 		},
 		{
 			name: "check_observed failure is severity error",

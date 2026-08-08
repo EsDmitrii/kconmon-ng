@@ -6,6 +6,9 @@ added from the as-built implementation (2026-08-06): internal/console/httpapi/{e
 "Implemented in M5" written from the as-built implementation (2026-08-08):
 internal/console/httpapi/{mtr,annotations,data}.go, middleware_auth.go's
 routeTable, audit.go's allow-list, and docs/console-api.yaml.
+"Implemented in M7" written from the as-built implementation (2026-08-08):
+internal/console/httpapi/{alertrules,export}.go, middleware_auth.go's
+routeTable, internal/console/promrules, and docs/console-api.yaml.
 This document is the source of truth for Console API. Update it (and the ADRs) in the same PR as any deviation.
 -->
 
@@ -32,11 +35,17 @@ GET    /api/v1/mtr/destinations              pairs path history knows about   --
 GET    /api/v1/mtr/snapshots?source&destination  one pair's distinct routes   -- implemented (M5)
 GET    /api/v1/mtr/snapshots/{id}?enrich     one route + optional hop enrichment -- implemented (M5)
 GET/POST /api/v1/annotations ; DELETE /annotations/{id}                      -- implemented (M5)
-POST   /api/v1/investigations                assemble; GET result; save→incident
-CRUD   /api/v1/incidents|maintenance|webhooks
-CRUD   /api/v1/alert-rules (+ /{id}/preview, /{id}/sync)
+POST   /api/v1/investigations                assemble; GET result; save→incident -- NOT built: assembly is client-side (M6)
+CRUD   /api/v1/incidents|maintenance|webhooks                                -- implemented (M6)
+GET    /api/v1/k8s-events                    captured K8s events              -- implemented (M6)
+GET/POST /api/v1/alert-rules ; GET/PUT/DELETE /alert-rules/{id}              -- implemented (M7)
+GET    /api/v1/alert-rules/foreign           PrometheusRules we do NOT own    -- implemented (M7)
+POST   /api/v1/alert-rules/import            ADOPT one foreign object (copy)  -- implemented (M7)
+POST   /api/v1/alert-rules/preview           render + run it right now        -- implemented (M7)
+POST   /api/v1/alert-rules/{id}/sync         kick the reconciler              -- implemented (M7)
+GET    /api/v1/alerts?managedOnly            what Prometheus is firing        -- implemented (M7)
 POST   /api/v1/promql/query|query_range      guarded proxy                   -- implemented (M1)
-GET    /api/v1/export      POST /api/v1/import
+GET    /api/v1/export      POST /api/v1/import  versioned bundle v1, admin    -- implemented (M7)
 CRUD   /api/v1/rbac/roles|bindings                                           -- implemented (M3)
 CRUD   /api/v1/tokens                                                        -- implemented (M3)
 GET    /api/v1/audit                                                         -- implemented (M3)
@@ -56,9 +65,13 @@ so a diff endpoint would have duplicated presentation logic server-side for
 zero authority gain. `targets`/`checks`/`schedules` shipped in M4 and are
 **not** on this list any more; every one of them needs
 `database.mode=cnpg|external` and answers `503` otherwise (Decision 13), the
-same way the M3 history endpoints and every M5 route do. `investigations`,
-`incidents`/`maintenance`/`webhooks`, `alert-rules`, and `export`/`import`
-remain entirely unimplemented past M5.
+same way the M3 history endpoints and every M5 route do.
+`incidents`/`maintenance`/`webhooks` shipped in M6 and `alert-rules` /
+`alerts` / `export`/`import` in M7 — all on the same `503` rule. The one line
+still unbuilt is **`POST /api/v1/investigations`**, and deliberately: M6
+assembles the timeline client-side from endpoints that already exist, so a
+server-side assembler would have been a second implementation of the same merge
+(see INVESTIGATION.md).
 
 WebSocket: single multiplexed socket at `/ws`, topic subscribe, messages
 `{"topic","type":"snapshot|delta|event|error|closed","seq","data"}`, ping/pong
@@ -413,15 +426,15 @@ a live response — `historical: true`, `asOf`, `eventsFolded`,
 Two honest bounds on what a fold can say:
 
 - **The fold is only as good as what the events record.** They carry
-  `{reason, nodeName, agentId}` and nothing more, so `zone` and `podIP` are
-  empty on every folded entry and `ready` means "seen registered and not since
-  removed", not kubelet readiness. **The controller shipped with this release
-  publishes the reason with `node_name` and `agent_id` empty**, so history
-  written by it folds to an empty `nodes` array with every event counted in
-  `unfoldableEvents`. That counter, not the empty array, is the honest signal
-  — and the UI reads the counter rather than the array (PAGES.md §6.3). The
-  fold is coded against the full event shape, so history works the day the
-  controller starts attributing.
+  `{reason, nodeName, agentId, zone}` and nothing more, so `podIP` is empty on
+  every folded entry and `ready` means "seen registered and not since removed",
+  not kubelet readiness. **Since M7 the controller attributes every change** —
+  one event per affected agent, naming its node and zone — so current history
+  folds into a real node set. History written by an **earlier** controller
+  carries the reason alone: those rows name nobody, fold to an empty `nodes`
+  array and are counted in `unfoldableEvents` until retention removes them.
+  That counter, not the empty array, is the honest signal — and the UI reads
+  the counter rather than the array (PAGES.md §6.3).
 - **100 000 rows is a hard fold ceiling.** Past it the answer carries
   `truncated: true` and the reconstruction is missing its newest events. A
   partial fold is a *wrong* fold, so the flag exists to be believed rather
@@ -584,6 +597,88 @@ so while also naming the second knob, because an operator told only half of it
 fixes the wrong thing: with a database and `kubernetesContext.enabled=false`,
 the route answers `200` with an **empty page**, which is the honest report of
 "nothing was captured", not "this endpoint is unavailable".
+
+## Implemented in M7
+
+Ten routes: the `alert-rules` family, the firing-set read, and the
+configuration bundle. ALERTING.md is the source of truth for the semantics;
+this section is the wire contract.
+
+### `/api/v1/alert-rules` — the builder CRUD
+
+| Route | Permission | Notes |
+| --- | --- | --- |
+| `GET /api/v1/alert-rules` | `alerts:read` | **Unpaged**, ordered by `lower(name)`. There are dozens of rules at most; a cursor here would be ceremony. |
+| `POST /api/v1/alert-rules` | `alerts:manage` | `201` + `Location`. Kicks the reconciler. |
+| `GET /api/v1/alert-rules/{id}` | `alerts:read` | |
+| `PUT /api/v1/alert-rules/{id}` | `alerts:manage` | **Whole-rule replace.** Omitting `enabled` on a PUT would *enable* the rule — the UI always sends the full object, and that is pinned. |
+| `DELETE /api/v1/alert-rules/{id}` | `alerts:manage` | `204`. Kicks the reconciler, which then applies a bundle without it. |
+| `POST /api/v1/alert-rules/preview` | `alerts:read` | A **read** row despite being a POST: a body is how an unsaved draft is sent. |
+| `POST /api/v1/alert-rules/{id}/sync` | `alerts:manage` | A **write** row despite writing nothing itself. `202` — the body says "requested", never "synced". |
+| `GET /api/v1/alert-rules/foreign` | `alerts:read` | Objects in the namespace this console did **not** write. |
+| `POST /api/v1/alert-rules/import` | `alerts:manage` | Adopts one foreign object by **copy**. |
+| `GET /api/v1/alerts?managedOnly=` | `alerts:read` | What Prometheus is firing, projected. |
+
+### The status map, and the two distinctions that matter
+
+| Status | Means |
+| --- | --- |
+| `503` | **No database.** The detail names `console.database.mode`. Same rule as every M3/M4/M5/M6 persistence route. |
+| `409` | **The feature is off.** The detail names `console.alerting.enabled`. Only two routes can produce it: `GET /foreign` and `POST /{id}/sync` — both need the apiserver client. Everything else is a database write and keeps working, because an operator building rules before switching the reconciler on is a normal thing to do. |
+| `422` | Validation, including a render failure on `preview`. Problems carry the offending **field**. |
+| `404` | The id is not a rule; on `import`, the name is not in the foreign list. **An object this console already owns answers 404 too** — there is no self-re-adopt path. |
+| `400` | On `import`, a blank name — deliberately not a `404`, which would send the caller hunting their cluster for an object they never named. On `/alerts`, an unparseable `managedOnly`. |
+| `502` | The apiserver or Prometheus answered badly. |
+
+**`409` is not `503`.** A missing database means the route cannot answer at all;
+a disabled feature means the route *could* answer and the operator has said not
+to. Conflating them would send somebody to fix the wrong knob.
+
+**`GET /api/v1/alerts` diverges from `GET /api/v1/matrix` on a missing
+Prometheus**, and this is the one intentional inconsistency in the API's
+degradation rules:
+
+- Prometheus **unconfigured** → `200` `{alerts: [], promConfigured: false}` —
+  *not* `503`. The matrix **is** the Prometheus data, so without it there is no
+  answer; the firing set is a list that is legitimately empty, and its emptiness
+  has two causes (`nothing is firing` / `nobody is watching`) that the Overview
+  card must be able to say apart. `promConfigured` is in the **body** so it can.
+- Prometheus **configured and failing** → `502`. Pretending that is an empty
+  firing list would be the most dangerous lie in this API.
+
+`POST /alert-rules/preview` splits the same way, in one body: the render and
+the query fail **independently**. A render failure is a `422` with no preview
+body at all; a query failure is a `200` carrying `{expr, series: 0, error}` —
+the expression rendered, it just could not be evaluated. Only the first is a
+status code.
+
+**Drift** is reported per rule, never as a route status: `sync_status` on the
+row, with `sync_message` whose first token is a closed cause class
+(`crd-missing`, `forbidden`, `other`). A rule showing `drift` also carries a
+**fresh** `lastSyncedAt`, and both are true — the reconciler records drift and
+then corrects it in the same pass (ALERTING.md §5.1).
+
+### `GET /api/v1/export` and `POST /api/v1/import`
+
+One permission for both, **`settings:write`**, admin-only in the builtins, with
+no read/write split: an export is whole-configuration exfiltration in a single
+file, so gating the read on the write permission is the deliberate posture (the
+same reasoning as `webhooks:manage`, one step stronger).
+
+Bundle **v1**, six collections. Two properties are load-bearing:
+
+- **`dryRun` is a body flag, not a query parameter.** A proxy that drops query
+  params would turn a preview into an apply.
+- **Dry-run writes nothing and reports exactly what an apply would do.** The
+  store mints every id, so a bundle id can never be a primary key; imports
+  remap through natural keys, and in dry-run mode the map is identity
+  (`bundleID → bundleID`), which is what makes `dry == apply` an assertable
+  byte-equality rather than a claim.
+
+Webhook endpoints export with **`hasSecret` only** — never the sealed bytes —
+and therefore **cannot be created by import**: the store hard-requires a secret,
+so a webhook in a bundle is a skip with a warning naming the re-import path.
+Expired maintenance windows are omitted from the export entirely.
 
 ## OpenAPI + codegen (landed M4)
 

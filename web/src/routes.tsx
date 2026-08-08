@@ -9,10 +9,13 @@ import { useQuery } from "@tanstack/react-query";
 import { NAV_ITEMS } from "@/nav";
 import { AppSidebar } from "@/components/app-sidebar";
 import { AnonymousBanner } from "@/components/anonymous-banner";
+import { CommandPalette } from "@/components/command-palette";
 import { StubPage } from "@/components/stub-page";
 import { TimeMachineBar } from "@/components/timemachine-bar";
 import { getConfig } from "@/lib/api";
 import { TimeMachineProvider } from "@/lib/timemachine";
+import { cn } from "@/lib/utils";
+import { AlertingPage } from "@/pages/alerting";
 import { OverviewPage } from "@/pages/overview";
 import { LivePage } from "@/pages/live";
 import { MatrixPage } from "@/pages/matrix";
@@ -26,6 +29,7 @@ import { MTRPage } from "@/pages/mtr";
 import { NodeCardPage } from "@/pages/node-card";
 import { PairCardPage } from "@/pages/pair-card";
 import { RunDetailPage } from "@/pages/run-detail";
+import { SettingsPage } from "@/pages/settings";
 import { TargetCardPage } from "@/pages/target-card";
 import { TargetsPage } from "@/pages/targets";
 
@@ -52,12 +56,42 @@ export function AppShell({ children }: { children: ReactNode }) {
     // drive with their own router (anonymous-banner.test.tsx's shell test) —
     // main.tsx has no test seam at all.
     <TimeMachineProvider>
+      {/* The ⌘K palette (M7 Task 9, plan Decision 8) mounts HERE rather than in
+          main.tsx: it reads the Time Machine (Return to Live, and the
+          DISABLE=time treatment on its create actions), so it has to sit
+          inside this provider — and mounting it in the shell means the one
+          test seam that already drives AppShell drives the palette too.
+          It renders null until a hotkey opens it, so the shell's existing
+          pinned structure is untouched. */}
+      <CommandPalette />
+      {/* Twelve nav links plus the theme toggle and the user menu sit ahead of
+          the page on EVERY route, so a keyboard user pays for the sidebar once
+          per navigation. This is the standard escape hatch, and it is the
+          first thing Tab reaches: off-screen until focused (Tailwind's
+          sr-only / focus:not-sr-only pair), so the shell's pinned M2 layout is
+          unchanged for everyone else. */}
+      <a
+        href="#main-content"
+        className={cn(
+          "sr-only focus:not-sr-only",
+          "focus:fixed focus:left-3 focus:top-3 focus:z-50 focus:rounded-md focus:bg-popover focus:px-3 focus:py-2",
+          "focus:text-[13px] focus:text-foreground focus:shadow-card focus:outline-none focus:ring-2 focus:ring-ring",
+        )}
+      >
+        Skip to main content
+      </a>
       <div className="flex h-screen w-screen overflow-hidden">
         <AppSidebar />
         <div className="flex flex-1 flex-col overflow-hidden">
           <AnonymousBanner mode={config?.auth.mode} />
           <TimeMachineBar />
-          <main className="flex-1 overflow-auto">{children}</main>
+          {/* tabIndex -1 so the skip link's jump actually MOVES focus rather
+              than only scrolling: a <main> is not focusable on its own, and a
+              fragment jump to a non-focusable target leaves the keyboard back
+              in the sidebar on the next Tab. */}
+          <main id="main-content" tabIndex={-1} className="flex-1 overflow-auto outline-none">
+            {children}
+          </main>
         </div>
       </div>
     </TimeMachineProvider>
@@ -97,7 +131,11 @@ const routes = NAV_ITEMS.map((item) =>
                         ? PromQLConsolePage
                         : item.path === "/investigate"
                           ? InvestigatePage
-                          : () => <StubPage title={item.label} description={item.description} />,
+                          : item.path === "/settings"
+                            ? SettingsPage
+                            : item.path === "/alerting"
+                              ? AlertingPage
+                              : () => <StubPage title={item.label} description={item.description} />,
   }),
 );
 

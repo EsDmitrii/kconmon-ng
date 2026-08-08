@@ -30,21 +30,43 @@ const (
 // cannot be confused with another by case.
 var webhookNameRE = regexp.MustCompile(`^[a-z0-9-]+$`)
 
-// The closed webhook event vocabulary. M6 fires on incident lifecycle ONLY
-// (Decision 5): those are the events M6 itself introduces, and alert-fired
-// webhooks belong to M7 alerting. The set is closed here rather than by a
-// CHECK so M7 widens it in code, not in a migration.
+// The closed webhook event vocabulary. M6 shipped the incident lifecycle three
+// (Decision 5); M7 added the two alert transitions (Decision 7) HERE, in code,
+// which is exactly what closing the set in Go rather than in a CHECK
+// constraint bought -- widening the vocabulary cost no migration and no
+// downtime, and a row already in the table is unaffected.
+//
+// The two families are named as families on purpose: a delivery's PAYLOAD
+// shape is per-family (see webhooks.Payload and webhooks.AlertPayload), and a
+// receiver dispatches on the event field. Adding a third family means adding a
+// third payload shape, not widening one of these two.
 const (
 	WebhookEventIncidentCreated  = "incident.created"
 	WebhookEventIncidentResolved = "incident.resolved"
 	WebhookEventIncidentReopened = "incident.reopened"
+
+	// The alert transitions are edges the console DETECTS by polling
+	// Prometheus' alert state (M7 Decision 6), not events it is told about.
+	// alert.resolved's timestamp therefore carries the poll interval's
+	// granularity, which webhooks.AlertPayload states in full.
+	WebhookEventAlertFired    = "alert.fired"
+	WebhookEventAlertResolved = "alert.resolved"
 )
 
 var webhookEvents = map[string]bool{
 	WebhookEventIncidentCreated:  true,
 	WebhookEventIncidentResolved: true,
 	WebhookEventIncidentReopened: true,
+	WebhookEventAlertFired:       true,
+	WebhookEventAlertResolved:    true,
 }
+
+// webhookEventList is the vocabulary as an operator-facing sentence, built
+// once. It is a literal ordering rather than a range over webhookEvents
+// because map iteration order is randomised, and an error message whose word
+// order changes between two runs is one an operator cannot diff.
+const webhookEventList = "incident.created, incident.resolved, incident.reopened, " +
+	"alert.fired, alert.resolved"
 
 // Webhook is one configured outbound endpoint plus its last delivery outcome
 // (M6 Decision 5). The outcome lives on this row rather than in a delivery-log
@@ -142,8 +164,7 @@ func (in *WebhookInput) Validate() error {
 	seen := make(map[string]bool, len(in.Events))
 	for i, ev := range in.Events {
 		if !webhookEvents[ev] {
-			return fmt.Errorf("store: webhook: events[%d]: %q must be one of "+
-				"incident.created, incident.resolved, incident.reopened", i, ev)
+			return fmt.Errorf("store: webhook: events[%d]: %q must be one of %s", i, ev, webhookEventList)
 		}
 		if seen[ev] {
 			return fmt.Errorf("store: webhook: events[%d]: %q appears twice", i, ev)

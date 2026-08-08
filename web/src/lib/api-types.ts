@@ -52,7 +52,7 @@ export interface paths {
          * Live cluster topology from the controller, or a reconstruction as of an instant.
          * @description Without `at`, the controller's snapshot verbatim: a non-leader reply is retried with backoff, and if every attempt still fails the console answers 502. With `at`, the topology is instead REBUILT by folding persisted `topology_changed` events up to that instant, and the body carries `historical: true` plus the fold's own counters.
          *
-         *     A reconstruction is bounded by what those events record, which is `{reason, nodeName, agentId}` and nothing else. `zone` is never recorded (not even by a `zone_updated` event) and `podIP` is never recorded, so both come back empty on every folded entry; `ready` means "seen registered and not since removed", not kubelet readiness. The controller shipped with this release publishes the reason WITHOUT node_name or agent_id, so history written by it folds to an empty `nodes` array with every event counted in `unfoldableEvents` -- that counter, not the empty array, is the honest signal.
+         *     A reconstruction is bounded by what those events record, which since M7 is `{reason, nodeName, agentId, zone}` -- the controller attributes every emission site, one event per affected agent, and a stated `zone` wins while an omitted one never erases a known one. `podIP` is still never recorded and comes back empty on every folded entry; `ready` means "seen registered and not since removed", not kubelet readiness. Events written by pre-M7 controllers carry the reason alone: that stretch of history folds to an empty `nodes` array with every such event counted in `unfoldableEvents` -- the counter, not the empty array, is the honest signal, and it shrinks as those rows age out of retention.
          */
         get: operations["getTopology"];
         put?: never;
@@ -636,6 +636,189 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/alert-rules": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Every console-managed alert rule, ordered by name.
+         * @description UNPAGED and therefore carrying no nextCursor: the row count is rules an operator configured, not a function of how long the system has been running -- ListWebhooks' reasoning. `renderedExpr` is what the SERVER rendered from the builder fields (the console never accepts an expression on a template rule), and syncStatus/syncMessage/lastSyncedAt are the reconciler's outcomes, read-only on every route here.
+         */
+        get: operations["listAlertRules"];
+        put?: never;
+        /**
+         * Declare one rule. The server renders the expression before storing it.
+         * @description The order is the contract: RENDER, then store. A row whose renderedExpr came from a different version of its own params is what the store's write payload refuses to allow, so the one HTTP write path renders on the way in -- which also means an unrenderable rule is a 422 naming the param, at write time, instead of a stored row that first reports a problem a minute later as a per-rule sync error.
+         *
+         *     Note that the store's `kind` set and the renderer's template set are not identical: `cert-expiry` is accepted by the column's CHECK and has no template, so it is rejected here with a 422 naming it.
+         *
+         *     A successful write nudges the reconciler (a non-blocking, coalescing kick) so the rule reaches the cluster without waiting out the jittered 60s loop. On a console with alerting off the write still succeeds -- the rule lives in PostgreSQL and nothing is applying it. The audit row records the rule NAME and nothing else: params can carry a raw PromQL expression, and labels/annotations carry operator-typed values.
+         */
+        post: operations["createAlertRule"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/alert-rules/foreign": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * PrometheusRule objects in the namespace that this console does NOT own.
+         * @description Read-only in the strongest sense: the console never mutates a foreign object under any circumstance, and adoption is an explicit import that copies the groups into builder rows and creates a NEW object. Only four projected fields are served -- the raw object is somebody else's, its annotations can hold anything their tooling put there and its expressions name their infrastructure.
+         *
+         *     `managedBy` is app.kubernetes.io/managed-by, or "" when the object carries no such label: "managed by some other chart" and "managed by nobody" are different facts for an operator deciding whether to import.
+         *
+         *     Needs no database (the answer comes from the cluster) but does need the reconciler -- see the 409 below.
+         */
+        get: operations["listForeignAlertRules"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/alert-rules/import": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Adopt a foreign PrometheusRule by COPYING its alerting rules into console rules.
+         * @description Adoption COPIES. The foreign object named in the body is never mutated and never deleted -- not by this route and not by anything it calls -- and there is no code path from here to a write against somebody else's object. What it does is read that object's spec.groups[].rules[] and create console-managed rows from the alerting entries, which the console then owns and applies in its OWN PrometheusRule bundle on the next reconcile.
+         *
+         *     The consequence is worth stating plainly, because the UI says it too: after a successful import the same alerts are defined TWICE in the cluster -- once by the object its owner still controls, once by the console's bundle. Removing the original is that owner's decision, and the console will not make it for them.
+         *
+         *     Every adopted rule arrives as kind `raw`, carrying the foreign expression verbatim in `params.expr`, enabled, with `severity` lifted off labels.severity, `for` parsed from the Prometheus duration string (composites like "1h30m" included), and labels/annotations copied verbatim minus the two names the renderer owns (`severity`, which becomes the column, and `kconmon_ng_rule_id`, which the console stamps itself).
+         *
+         *     PER-ITEM and NON-TRANSACTIONAL, the POST /api/v1/import precedent: one entry the store refuses does not roll back the entries before it, and the response says which is which. `skipped` is what did NOT become a rule (recording rules, names this store's charset rejects, names already taken, an unreadable `for`); `notes` is what DID become a rule about which the console had to choose something. Zero created with a non-empty `skipped` is still a 200 -- the report IS the result, and no status code could carry it.
+         *
+         *     Names are used AS IS or not at all: adoption never sanitizes or renames, because a rule stored under a name its author never wrote is a rule they cannot find.
+         */
+        post: operations["importForeignAlertRules"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/alert-rules/preview": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Render a draft rule and report what its expression matches right now.
+         * @description This build carries no Prometheus parser dependency, so "is this expression valid" is answered by RUNNING it: an instant query that errors is an invalid expression, and one that returns N series is the preview.
+         *
+         *     The two halves fail independently and are reported differently. A RENDER failure is a 422 -- there is no expression, so there is nothing partial to be honest about. A QUERY failure, or a console with no Prometheus configured at all, is a 200 carrying the rendered expression and an `error` string: the render succeeded, which is the half the builder form is asking about, and refusing the whole request would hide a correct expression behind an unrelated outage.
+         *
+         *     Gated on alerts:READ, not alerts:manage -- the mirror image of POST /api/v1/checks/projection's write row. It persists nothing AND asks nothing a reader could not ask directly. It is still a POST and is therefore still audited, with an empty {} detail: its body is a draft that routinely carries a raw expression.
+         */
+        post: operations["previewAlertRule"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/alert-rules/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Resource id (UUID). A malformed id is 404, indistinguishable from an unknown one. */
+                id: components["parameters"]["PathID"];
+            };
+            cookie?: never;
+        };
+        /** One rule, with its rendered expression and sync state. */
+        get: operations["getAlertRule"];
+        /**
+         * Replace one rule's builder fields in full, re-rendering the expression.
+         * @description A FULL REPLACE, with no PATCH counterpart: PATCH /api/v1/incidents/{id} is the one exception in this API and stays unique to incidents, because an incident evolves under collaboration and a rule is a definition one person edits in a form. Omitting a field here CLEARS it -- omitting `labels` removes every label -- so the form always sends the complete rule.
+         *
+         *     The store resets the row to syncStatus=unsynced on every update (an edited rule is by definition not the rule that was applied), so the response's syncStatus flips back the moment anything changes, before the kick this route issues has had time to do anything.
+         */
+        put: operations["updateAlertRule"];
+        post?: never;
+        /**
+         * Remove one rule.
+         * @description The ROW is what goes away here. The cluster catches up on the next reconcile, which re-renders the bundle from the enabled rules that remain and applies it -- the console owns ONE PrometheusRule object holding every rule, so a deletion is a smaller bundle, never a delete call against the apiserver. The kick this route issues makes that "in a moment" rather than "within the jittered interval".
+         */
+        delete: operations["deleteAlertRule"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/alert-rules/{id}/sync": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Resource id (UUID). A malformed id is 404, indistinguishable from an unknown one. */
+                id: components["parameters"]["PathID"];
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Ask the reconciler for a pass now.
+         * @description 202, not 200: the kick is a non-blocking, coalescing nudge, so the only honest thing this can report is that the work was requested. The OUTCOME lands on the rules themselves -- read it back from GET /api/v1/alert-rules as syncStatus/syncMessage/lastSyncedAt.
+         *
+         *     The route is per-rule but the reconcile is WHOLE-BUNDLE, because the console owns one PrometheusRule object holding every enabled rule. The id is not a filter; it is the rule the operator was looking at, and it is what the audit row records. Existence is still checked, so an id that names nothing is a 404 rather than a 202 promising an outcome that never arrives.
+         *
+         *     A console with prometheus rule sync switched off answers 409, NOT 503 -- see that response.
+         */
+        post: operations["syncAlertRules"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/alerts": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * The alerts Prometheus is currently firing or pending.
+         * @description The console does NOT evaluate anything: Prometheus evaluates, the console manages. This is a read of Prometheus's own /api/v1/alerts, projected onto this API's vocabulary. `ruleId` is lifted off the kconmon_ng_rule_id label the renderer stamps on every managed rule, and is absent for an alert this console does not manage -- which is a fact worth serving, not a reason to hide the alert.
+         *
+         *     Prometheus UNCONFIGURED is a 200 with an empty list and promConfigured:false, NOT a 503 -- deliberately unlike GET /api/v1/matrix, which answers 503 for the same missing dependency. The matrix IS the Prometheus data, so without it there is no answer at all, while the firing set is a list that is legitimately empty and whose emptiness has two causes promConfigured tells apart. A Prometheus that is configured and FAILS is neither, and stays a 502: pretending that is an empty firing list would be the most dangerous lie in this API.
+         */
+        get: operations["listAlerts"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/k8s-events": {
         parameters: {
             query?: never;
@@ -670,6 +853,62 @@ export interface paths {
         get: operations["listAuditEntries"];
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/export": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * The whole declarative configuration as one versioned bundle. ADMIN only.
+         * @description Targets, check definitions, check schedules, alert rules, webhooks (WITHOUT secrets) and maintenance windows, in dependency order. DATA IS NOT INCLUDED: no runs, no results, no events, no incidents, no annotations, no MTR snapshots, no k8s events, no audit rows. A bundle is what an operator DECLARED, so it can be declared again somewhere else.
+         *
+         *     NO SECRET EVER LEAVES THROUGH THIS ROUTE. A webhook exports its name, url, events and enabled flag plus a `hasSecret` boolean; the sealed signing key appears in no field, and there is no query parameter, header or role that changes that.
+         *
+         *     Observation fields are stripped per collection: a schedule loses lastFiredAt/nextFireAt (scheduler bookkeeping), an alert rule loses syncStatus/syncMessage/lastSyncedAt (the reconciler's view of a cluster the destination has never talked to) and a webhook loses lastStatus/lastAttempt/failures (delivery outcomes). Maintenance windows that have already ENDED are omitted -- a closed window is history.
+         *
+         *     Gated on `settings:write`, held by admin alone. One permission for both routes and no read/write split, the `webhooks:manage` posture: an export is every probe address, every webhook URL and every alert expression this console holds, in one file, so there is no audience that should read it without being trusted to write it.
+         */
+        get: operations["exportConfiguration"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/import": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Merge a bundle into this console's configuration. ADMIN only.
+         * @description Merge by NATURAL KEY, not by id: name for targets, check definitions and webhooks, lower(name) for alert rules (migration 00007 makes that unique), (definition, kind) for schedules -- which have no name column -- and (scope, startAt, endAt) for maintenance windows. Present means update, absent means create.
+         *
+         *     IDS ARE REMAPPED. No store call anywhere accepts a caller-chosen primary key, so nothing in a bundle keeps its exported UUID. A definition's destinationTargetId and a schedule's definitionId are re-pointed at the id this console actually has -- freshly minted for a create, the pre-existing row's for an update -- which is also how a bundle cross-references a row that already exists here under a different id but the same name. A reference in neither the bundle nor this console fails THAT ITEM, naming both sides.
+         *
+         *     NOT ONE TRANSACTION. Every item is its own statement and an item that fails is reported and stepped past, so a bundle of 40 definitions with one bad row imports 39 and names the fortieth. The cost is stated plainly: a failed import leaves a partially-merged console, which is what `dryRun` exists for.
+         *
+         *     WEBHOOKS ARE THE ONE ASYMMETRY. A bundle never carries a secret and the store refuses a secret-less endpoint (every delivery is signed), so an endpoint this console does not already have is SKIPPED with a warning naming the remedy -- never created, and never given a fabricated key. An endpoint that DOES exist is updated with its stored ciphertext carried through untouched.
+         *
+         *     MAINTENANCE WINDOWS ARE NEVER UPDATED. The store has no update for them by design (a window is two timestamps and a reason; delete-and-recreate is the correction path), so an identical window is skipped.
+         *
+         *     Audited as ONE row carrying the dryRun flag and the per-collection COUNTS. No item names reach the audit log, and the bundle never does.
+         */
+        post: operations["importConfiguration"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1297,10 +1536,12 @@ export interface components {
             nextCursor: string;
         };
         /**
-         * @description Closed set. M6 fires on incident lifecycle ONLY -- those are the events M6 itself introduces; alert-fired webhooks belong to alerting.
+         * @description Closed set, in TWO families. `incident.*` is a lifecycle change the console was told about, by the request that caused it. `alert.*` is a Prometheus alert transition the console DETECTED, by polling alert state on its own schedule -- so `alert.resolved` carries the poll interval's granularity (`console.webhooks.alertPollInterval`, 30s by default), and the console never resolves anything while Prometheus is unreachable.
+         *
+         *     The PAYLOAD shape is per family: `incident.*` delivers a WebhookPayload, `alert.*` delivers a WebhookAlertPayload. A receiver reads `event` first and then picks its parser. One endpoint may subscribe to both families.
          * @enum {string}
          */
-        WebhookEvent: "incident.created" | "incident.resolved" | "incident.reopened";
+        WebhookEvent: "incident.created" | "incident.resolved" | "incident.reopened" | "alert.fired" | "alert.resolved";
         /** @description One configured outbound endpoint plus its last delivery outcome. There is NO secret field, at any layer: `hasSecret` is all a reader learns. */
         Webhook: {
             /** Format: uuid */
@@ -1346,17 +1587,188 @@ export interface components {
             webhooks: components["schemas"]["Webhook"][];
         };
         /**
-         * @description The body the console POSTs to a configured endpoint. It is NOT a request or response of this API -- it is the contract the console offers a RECEIVER, documented here because there is nowhere better for a receiver's author to look.
+         * @description The template a rule's `params` is interpreted against, or `raw` for a hand-written PromQL expression carried in params.expr.
          *
-         *     Transport: `POST` with `Content-Type: application/json` and `X-Kconmon-Signature: sha256=<hex hmac-sha256(secret, raw body)>`, computed over the exact request bytes. Verify the signature BEFORE parsing. 10s timeout per attempt, and up to three attempts at approximately 0s / 30s / 5m with +/-20% jitter until the endpoint answers 2xx -- so a receiver MUST be idempotent. The body (and therefore the signature) is identical across retries, so (event, incident.id, at) is a usable deduplication key.
+         *     NOTE the asymmetry with the database: the alert_rules.kind CHECK constraint additionally accepts `cert-expiry`, for which no template exists in this build. It is absent here because this enum describes what the API accepts, and a cert-expiry rule is rejected with a 422 at write time.
+         * @enum {string}
+         */
+        AlertRuleKind: "pair-loss" | "zone-latency" | "dns-failures" | "http-ttfb" | "agent-missing" | "external-target-down" | "raw";
+        /**
+         * @description The label Alertmanager routes on. A fourth value would route nowhere.
+         * @enum {string}
+         */
+        AlertSeverity: "info" | "warning" | "critical";
+        /**
+         * @description The reconciler's view of whether the cluster agrees. `unsynced` is the state of every freshly created or freshly edited rule and is NOT an error. `drift` is past tense and always carries a fresh lastSyncedAt: a reconcile ALWAYS re-asserts the console's bytes, so drift means "the cluster had diverged as of lastSyncedAt, and we corrected it", never "the cluster is diverged right now and we left it". `error` carries a syncMessage whose first token is a cause class (crd-missing, forbidden, other).
+         * @enum {string}
+         */
+        AlertSyncStatus: "unsynced" | "synced" | "drift" | "error";
+        /** @description One console-managed Prometheus alert rule: the builder fields an operator typed, the expression the SERVER rendered from them, and the reconciler's view of whether the cluster agrees. */
+        AlertRule: {
+            /** Format: uuid */
+            id: string;
+            /** @description Unique CASE-INSENSITIVELY. It seeds the rendered alert's `alertname`, so it is bounded by what may become a Prometheus label value (1-63 bytes), and mixed case is expected -- Prometheus alert names are conventionally CamelCase. */
+            name: string;
+            kind: components["schemas"]["AlertRuleKind"];
+            /** @description The template's parameters, CLOSED per kind -- an unknown key is a 422, never a default. Always an object on the wire, never null. */
+            params: {
+                [key: string]: unknown;
+            };
+            severity: components["schemas"]["AlertSeverity"];
+            /**
+             * Format: int64
+             * @description How long the expression must hold before the alert fires, in NANOSECONDS.
+             */
+            forNs: number;
+            /** @description Extra labels on the rendered alert. `severity` and kconmon_ng_rule_id are RESERVED -- supplying either is an error, never a silent override. Always an object, never null. */
+            labels: {
+                [key: string]: string;
+            };
+            /** @description Annotations on the rendered alert. Always an object, never null. */
+            annotations: {
+                [key: string]: string;
+            };
+            /** @description Only enabled rules are rendered into the bundle the reconciler applies. */
+            enabled: boolean;
+            /** @description The PromQL the server rendered from the builder fields. READ-ONLY: there is no request field for it, and for a template kind the console never accepts one -- it is on the row so the drift view can diff rendered-against-live without re-running the renderer. */
+            renderedExpr: string;
+            syncStatus: components["schemas"]["AlertSyncStatus"];
+            /** @description The reconciler's operator-facing one-liner; empty unless there is something to say. */
+            syncMessage: string;
+            /**
+             * Format: date-time
+             * @description Absent until an apply has actually happened.
+             */
+            lastSyncedAt?: string;
+            /** Format: date-time */
+            createdAt: string;
+            /** Format: date-time */
+            updatedAt: string;
+        };
+        /**
+         * @description The BUILDER fields, and only those, for POST /api/v1/alert-rules, PUT /api/v1/alert-rules/{id} and POST /api/v1/alert-rules/preview.
+         *
+         *     Both writes are FULL REPLACES: there is deliberately no PATCH on this resource. renderedExpr and the three sync fields are absent by construction -- the first is the server's, the others are the reconciler's, and a caller editing a rule has no honest value to put in any of them.
+         */
+        AlertRuleRequest: {
+            name: string;
+            kind: components["schemas"]["AlertRuleKind"];
+            /** @description Closed per kind. Omitted, null and {} are the same thing. */
+            params?: {
+                [key: string]: unknown;
+            };
+            severity: components["schemas"]["AlertSeverity"];
+            /**
+             * Format: int64
+             * @description Nanoseconds. Omitted means 0 -- fire as soon as the expression holds.
+             */
+            forNs?: number;
+            labels?: {
+                [key: string]: string;
+            };
+            annotations?: {
+                [key: string]: string;
+            };
+            /** @description OMITTED means true -- a rule you just declared is one you want evaluated -- not false. On a PUT, omitting it therefore ENABLES the rule; send it explicitly to keep a rule disabled. */
+            enabled?: boolean;
+        };
+        /** @description Unpaged -- the row count is rules an operator configured, not a function of time. */
+        AlertRuleList: {
+            rules: components["schemas"]["AlertRule"][];
+        };
+        /** @description The two halves of a preview, which fail independently. `series` is meaningful only when `error` is absent: a preview that could not run the query reports 0 series AND says why, and 0 series with no error is the real answer "this expression currently matches nothing". */
+        AlertRulePreview: {
+            /** @description The rendered PromQL. Always present -- a render failure is a 422, not this shape. */
+            expr: string;
+            /** @description How many series the instant query returned. */
+            series: number;
+            /** @description Set exactly when the evaluation half did not run or did not answer. Prometheus's own message is forwarded for a rejected expression (it is about the expression the caller just sent); every other failure is reported in the console's words, because those errors carry the configured Prometheus URL. */
+            error?: string;
+        };
+        /** @description A reconcile was requested. The outcome lands on the rules, not here. */
+        SyncKick: {
+            /** @enum {string} */
+            status: "kicked";
+        };
+        /** @description One PrometheusRule in the console's namespace that the console does not own, projected down to four facts. The raw object is never served. */
+        ForeignRule: {
+            name: string;
+            /** @description How many entries spec.groups holds. */
+            groups: number;
+            /** @description Total rule entries across all groups -- alerting and recording alike, because a recording rule is still something an import would have to carry. */
+            rules: number;
+            /** @description app.kubernetes.io/managed-by, or "" when the object carries no such label. */
+            managedBy: string;
+        };
+        ForeignRuleList: {
+            foreign: components["schemas"]["ForeignRule"][];
+        };
+        /** @description The NAME of a foreign PrometheusRule object, and nothing else. One field because there is one decision to make: there is no "which groups", no "rename to" and no dryRun -- the response reports item by item what happened, which is the preview and the apply in one round trip for an operation whose whole output is a few dozen rows. */
+        AlertRuleImportRequest: {
+            /** @description As listed by GET /api/v1/alert-rules/foreign. An object this console owns is not foreign and answers 404. */
+            name: string;
+        };
+        /** @description One rule entry the import had something to say about, named as the FOREIGN object spells it -- including spellings this API's own name charset rejects, because that is the line the operator has to find in their object. */
+        AlertRuleImportItem: {
+            name: string;
+            reason: string;
+        };
+        AlertRuleImportNote: {
+            name: string;
+            note: string;
+        };
+        /**
+         * @description What the adoption did. `skipped` and `notes` are two different statements and are deliberately not one list: a SKIP means "this is not in your console" (a recording rule, a name already taken, a name this store's charset rejects, an unreadable `for`), while a NOTE means "this IS in your console, and one field is the console's choice rather than your object's" (a severity outside the closed set, a dropped reserved label). Collapsing them would make an operator re-check rules that imported perfectly.
+         *
+         *     All three arrays are always present and never null.
+         */
+        AlertRuleImportReport: {
+            /** @description The names of the rules now stored, in the order they were adopted. */
+            created: string[];
+            skipped: components["schemas"]["AlertRuleImportItem"][];
+            notes: components["schemas"]["AlertRuleImportNote"][];
+        };
+        /** @description One alert Prometheus is currently firing or pending, mapped from its own /api/v1/alerts shape. `name` and `severity` are LIFTED off the label set because every consumer needs them; `labels` keeps them too, since it is the upstream set verbatim and deleting keys from it would make this a different alert than the one Prometheus is firing. */
+        Alert: {
+            /** @description The `alertname` label. */
+            name: string;
+            /** @description Prometheus's own state string -- `firing` or `pending`. */
+            state: string;
+            /** @description The `severity` label; empty for an alert that carries none. */
+            severity: string;
+            labels: {
+                [key: string]: string;
+            };
+            annotations: {
+                [key: string]: string;
+            };
+            /** Format: date-time */
+            activeAt?: string;
+            /** @description The sample value as a STRING, verbatim ("7e+00"). Not parsed to a number: the upstream field is a string precisely because it carries NaN and infinities, which JSON cannot express. */
+            value: string;
+            /**
+             * Format: uuid
+             * @description The alert_rules row this came from, lifted off the kconmon_ng_rule_id label. Absent for an alert this console does not manage.
+             */
+            ruleId?: string;
+        };
+        /** @description promConfigured is IN THE BODY rather than implied by a status code: "nothing is firing" and "nobody is watching" are two different sentences the Overview card must be able to render, and neither is an error. */
+        AlertList: {
+            alerts: components["schemas"]["Alert"][];
+            promConfigured: boolean;
+        };
+        /**
+         * @description The body the console POSTs to a configured endpoint for an INCIDENT-family event. It is NOT a request or response of this API -- it is the contract the console offers a RECEIVER, documented here because there is nowhere better for a receiver's author to look.
+         *
+         *     Transport: `POST` with `Content-Type: application/json` and `X-Kconmon-Signature: sha256=<hex hmac-sha256(secret, raw body)>`, computed over the exact request bytes. Verify the signature BEFORE parsing. 10s timeout per attempt, and up to three attempts at approximately 0s / 30s / 5m with +/-20% jitter until the endpoint answers 2xx -- so a receiver MUST be idempotent. The body (and therefore the signature) is identical across retries, so (event, incident.id, at) is a usable deduplication key. The transport is IDENTICAL for WebhookAlertPayload -- only the body differs.
          *
          *     Delivery lives in the console process: a restart during the retry window loses the remaining attempts. The ledger for a miss is the endpoint row's lastStatus/failures, not a replay queue.
          *
-         *     The field set is CLOSED and STABLE, with no omitempty anywhere: every key below is present on every delivery, including a null `toAt`.
+         *     There is ONE SHAPE PER FAMILY and the families are closed: dispatch on `event`, then parse. Within a family the field set is CLOSED and STABLE, with no omitempty anywhere -- every key below is present on every delivery, including a null `toAt`. Splitting rather than widening was deliberate: a union shape would have meant either a synthetic incident object on every alert delivery or omitempty on half the keys, and a shape that changes per delivery is exactly what "stable" forbids.
          */
         WebhookPayload: {
             /**
-             * @description A WebhookEvent value, or "test" for the /test ping. "test" is deliberately NOT in WebhookEvent's enum -- that set is what an endpoint may SUBSCRIBE to, and a ping is addressed by id.
+             * @description An incident-family WebhookEvent value, or "test" for the /test ping. "test" is deliberately NOT in WebhookEvent's enum -- that set is what an endpoint may SUBSCRIBE to, and a ping is addressed by id. A /test ping always carries THIS shape, whatever the endpoint subscribes to: it answers "can I reach you and does my signature verify", which is not a question about alerts.
              * @enum {string}
              */
             event: "incident.created" | "incident.resolved" | "incident.reopened" | "test";
@@ -1366,6 +1778,60 @@ export interface components {
              * @description When the console decided to notify, NOT when this attempt was made. Stable across retries.
              */
             at: string;
+        };
+        /**
+         * @description The body the console POSTs for an ALERT-family event. Same transport, same signature, same retry ladder as WebhookPayload -- the delivery path does not fork, only the body does.
+         *
+         *     The console does not evaluate alerts. It polls Prometheus alert state every `console.webhooks.alertPollInterval` (30s default) and delivers the EDGES: a managed alert that appears in a poll is `alert.fired`, one that disappears is `alert.resolved`. Three consequences a receiver should plan around, all deliberate:
+         *
+         *     1. The first successful poll after a console restart is a BASELINE -- it records what is firing and delivers nothing. A restart never pages about alerts that were already firing, and a transition during the restart window is missed rather than replayed.
+         *
+         *     2. A poll that fails FREEZES the firing set. Nothing is resolved while Prometheus is unreachable or answering something unreadable.
+         *
+         *     3. Every console replica polls independently, so N replicas deliver N copies of each edge. Deduplicate on (event, alert.ruleId, alert.labels, alert.firedAt) -- all four are stable across replicas and across the retry ladder. `sentAt` is NOT: it is per delivery.
+         *
+         *     Only alerts this console MANAGES are delivered (those carrying the `kconmon_ng_rule_id` label). A foreign firing alert is listed by GET /api/v1/alerts but never delivered: it belongs to whoever wrote that rule. Alerts in the `pending` state are not delivered either -- pending is not fired.
+         */
+        WebhookAlertPayload: {
+            /** @enum {string} */
+            event: "alert.fired" | "alert.resolved";
+            /**
+             * Format: date-time
+             * @description When this delivery was built. Stable across the retry ladder, NOT across replicas -- do not deduplicate on it.
+             */
+            sentAt: string;
+            alert: components["schemas"]["WebhookPayloadAlert"];
+        };
+        /** @description One alert instance. The identity is (ruleId, labels): one rule fires once per series, so a per-zone rule produces one of these per zone and each resolves independently. */
+        WebhookPayloadAlert: {
+            /**
+             * Format: uuid
+             * @description The alert_rules row, off the `kconmon_ng_rule_id` label. Never empty.
+             */
+            ruleId: string;
+            /** @description The console row's name when the rule was resolvable, otherwise the `alertname` label (Prometheus' sanitized spelling). */
+            ruleName: string;
+            severity: string;
+            /** @description The rendered PromQL the rule evaluates. "" when the row could not be read -- Prometheus' alert API does not carry the expression, so this is looked up, and an unavailable lookup gives an empty string rather than a guess. Never a missing key. */
+            expr: string;
+            /** @description Prometheus' label set for this instance, verbatim. Always an object, never null. */
+            labels: {
+                [key: string]: string;
+            };
+            /** @description The alert's annotations, verbatim. Always an object, never null. */
+            annotations: {
+                [key: string]: string;
+            };
+            /**
+             * Format: date-time
+             * @description Prometheus' `activeAt` -- when the expression started matching, not when the console noticed. Identical on every replica, which is what makes it usable in a deduplication key. Falls back to the observing poll's clock only when Prometheus reported no activeAt at all.
+             */
+            firedAt: string;
+            /**
+             * Format: date-time
+             * @description null on `alert.fired`. Always present as a key. On `alert.resolved` it is WHEN THE CONSOLE NOTICED the alert was gone, not when Prometheus stopped firing: an absence has no timestamp of its own, so the honest reading is "resolved at some point in the poll interval ending here".
+             */
+            resolvedAt: string | null;
         };
         /**
          * @description The incident subset a notification carries. `notes` and `pinned` are deliberately ABSENT: notes are free-form operator text up to 16 KiB that can name anything an investigation touched, and pushing them to a third-party endpoint on every status change would export the investigation itself rather than the fact of it. Fetch them from GET /api/v1/incidents/{id} if the receiver is entitled to them.
@@ -1736,6 +2202,106 @@ export interface components {
             /** Format: password */
             password: string;
         };
+        /** @description Schedule as a bundle carries it: Schedule MINUS lastFiredAt and nextFireAt. Those two are scheduler bookkeeping -- an observation of a running console, not the cadence an operator declared. nextFireAt is re-seeded on import exactly as POST /api/v1/schedules seeds it. */
+        ExportedSchedule: {
+            /**
+             * Format: uuid
+             * @description The SOURCE console's id. Remapped on import; never reused as a primary key.
+             */
+            id: string;
+            /**
+             * Format: uuid
+             * @description A reference into this bundle's checkDefinitions, or into a definition the destination already has. Remapped on import.
+             */
+            definitionId: string;
+            kind: components["schemas"]["ScheduleKind"];
+            /** Format: int64 */
+            intervalNs: number;
+            /** Format: date-time */
+            runAt?: string;
+            enabled: boolean;
+        };
+        /** @description Endpoint as a bundle carries it. NO SECRET FIELD -- `hasSecret` is a boolean statement about the SOURCE row and never a licence to create one here -- and no delivery outcomes (lastStatus/lastAttempt/failures), which are what happened rather than what was configured. */
+        ExportedWebhook: {
+            /** Format: uuid */
+            id: string;
+            name: string;
+            url: string;
+            events: components["schemas"]["WebhookEvent"][];
+            enabled: boolean;
+            /** @description Informational. Always true for a stored row (the store refuses an empty secret); an endpoint the destination lacks is SKIPPED on import, never created secret-less. */
+            hasSecret: boolean;
+        };
+        /** @description Alert rule as a bundle carries it: the BUILDER half only. syncStatus, syncMessage and lastSyncedAt are the reconciler's view of a cluster the destination has never talked to, so importing them would let a bundle claim a sync that never happened. renderedExpr DOES travel: it is derived, but derived at write time, so carrying it keeps a round trip lossless. */
+        ExportedAlertRule: {
+            /** Format: uuid */
+            id: string;
+            /** @description Unique CASE-INSENSITIVELY (migration 00007's lower(name) index), which is also the natural key the import merges on. */
+            name: string;
+            /** @enum {string} */
+            kind: "pair-loss" | "zone-latency" | "dns-failures" | "http-ttfb" | "cert-expiry" | "agent-missing" | "external-target-down" | "raw";
+            /** @description Interpreted against `kind` by the renderer. "raw" requires params.expr. */
+            params: Record<string, never>;
+            /** @enum {string} */
+            severity: "info" | "warning" | "critical";
+            /**
+             * Format: int64
+             * @description Nanoseconds, the repo-wide duration convention.
+             */
+            forNs: number;
+            labels: Record<string, never>;
+            annotations: Record<string, never>;
+            enabled: boolean;
+            renderedExpr: string;
+        };
+        /** @description The whole declarative configuration, versioned. Collections are in DEPENDENCY ORDER and the importer walks them in exactly this order. */
+        ConfigBundle: {
+            /**
+             * @description Checked for EQUALITY on import. A bundle from a future console may describe collections this build has never heard of, and importing the recognised subset would be a partial restore presented as a complete one.
+             * @constant
+             */
+            version: 1;
+            /** Format: date-time */
+            exportedAt: string;
+            targets: components["schemas"]["Target"][];
+            checkDefinitions: components["schemas"]["CheckDefinition"][];
+            checkSchedules: components["schemas"]["ExportedSchedule"][];
+            alertRules: components["schemas"]["ExportedAlertRule"][];
+            webhooks: components["schemas"]["ExportedWebhook"][];
+            maintenanceWindows: components["schemas"]["MaintenanceWindow"][];
+        };
+        /** @description dryRun is a BODY FLAG rather than a query parameter deliberately: the flag and the bundle it applies to are one indivisible statement, and a query parameter dropped by a proxy would turn a preview into an apply. */
+        ConfigImportRequest: {
+            /**
+             * @description true predicts the outcome and writes NOTHING. The response is byte-identical in shape to the apply's.
+             * @default false
+             */
+            dryRun: boolean;
+            bundle: components["schemas"]["ConfigBundle"];
+        };
+        /** @description One item and what happened to it. `name` is the item's natural key as a human reads it -- a name, a "definition/kind" pair for a schedule, a "scope@start" pair for a window -- never a bare UUID. */
+        ConfigImportItemNote: {
+            name: string;
+            reason: string;
+        };
+        /** @description One collection's outcome. The three counters are disjoint and every bundle item lands in exactly one of them or in `errors`. An ERROR is an item that did not import and that the operator can fix in the bundle; a WARNING is an item handled correctly whose outcome still needs a human (today: the secret-less webhook). */
+        ConfigImportCollectionResult: {
+            created: number;
+            updated: number;
+            skipped: number;
+            errors: components["schemas"]["ConfigImportItemNote"][];
+            warnings: components["schemas"]["ConfigImportItemNote"][];
+        };
+        /** @description Keyed by collection, with the bundle's own key names. */
+        ConfigImportResult: {
+            dryRun: boolean;
+            targets: components["schemas"]["ConfigImportCollectionResult"];
+            checkDefinitions: components["schemas"]["ConfigImportCollectionResult"];
+            checkSchedules: components["schemas"]["ConfigImportCollectionResult"];
+            alertRules: components["schemas"]["ConfigImportCollectionResult"];
+            webhooks: components["schemas"]["ConfigImportCollectionResult"];
+            maintenanceWindows: components["schemas"]["ConfigImportCollectionResult"];
+        };
     };
     responses: {
         /** @description Done; no body. */
@@ -1785,6 +2351,15 @@ export interface components {
         };
         /** @description Refused because of the state of OTHER rows (something still references this one). */
         Conflict: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/problem+json": components["schemas"]["Problem"];
+            };
+        };
+        /** @description Prometheus rule sync is not running on this console, so the routes that need the CLUSTER refuse. This is a 409 and not a 503 on purpose, and it is the one place in this API where the two come apart: 503 always means "the dependency this route reads from is not configured", and here the database is fine, every rule is right where it was, and the whole CRUD surface keeps working. What is off is the sync loop -- an opt-in feature (console.alerting.enabled, default false). Answering 503 would send an operator looking at their database for a reconciler that was never asked to start. */
+        AlertingDisabled: {
             headers: {
                 [name: string]: unknown;
             };
@@ -3226,6 +3801,324 @@ export interface operations {
             };
         };
     };
+    listAlertRules: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Every configured rule. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AlertRuleList"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            502: components["responses"]["BadGateway"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    createAlertRule: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AlertRuleRequest"];
+            };
+        };
+        responses: {
+            /** @description Rule created, with the server-rendered expression on it. */
+            201: {
+                headers: {
+                    /** @description Permalink to the new rule. */
+                    Location?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AlertRule"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            /** @description A rejected field value, OR a well-formed rule the renderer cannot turn into an expression. The detail names the field or the param. */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            502: components["responses"]["BadGateway"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    listForeignAlertRules: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Every PrometheusRule in the namespace the console does not own, by name. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ForeignRuleList"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            409: components["responses"]["AlertingDisabled"];
+            502: components["responses"]["BadGateway"];
+        };
+    };
+    importForeignAlertRules: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AlertRuleImportRequest"];
+            };
+        };
+        responses: {
+            /** @description The adoption report: what was created, what was skipped and why, and what was imported with a caveat. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AlertRuleImportReport"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            /** @description No FOREIGN PrometheusRule with that name. An object this console already owns answers the same 404: the lookup is the /foreign list, which excludes anything carrying the managed-by label, so one of the console's own bundles is simply not in the set being searched -- and re-adopting it would duplicate every rule already stored. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            409: components["responses"]["AlertingDisabled"];
+            /** @description The body carried no usable `name`. */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            502: components["responses"]["BadGateway"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    previewAlertRule: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AlertRuleRequest"];
+            };
+        };
+        responses: {
+            /** @description The rendered expression, plus either a series count or an `error` saying why the evaluation half did not run. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AlertRulePreview"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            /** @description The rule could not be rendered; the detail names the param. */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    getAlertRule: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Resource id (UUID). A malformed id is 404, indistinguishable from an unknown one. */
+                id: components["parameters"]["PathID"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The rule. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AlertRule"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            502: components["responses"]["BadGateway"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    updateAlertRule: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Resource id (UUID). A malformed id is 404, indistinguishable from an unknown one. */
+                id: components["parameters"]["PathID"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AlertRuleRequest"];
+            };
+        };
+        responses: {
+            /** @description The rule as stored, with the freshly rendered expression. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AlertRule"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            /** @description A rejected field value, OR a well-formed rule the renderer cannot turn into an expression. The detail names the field or the param. */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            502: components["responses"]["BadGateway"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    deleteAlertRule: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Resource id (UUID). A malformed id is 404, indistinguishable from an unknown one. */
+                id: components["parameters"]["PathID"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            204: components["responses"]["NoContent"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            502: components["responses"]["BadGateway"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    syncAlertRules: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Resource id (UUID). A malformed id is 404, indistinguishable from an unknown one. */
+                id: components["parameters"]["PathID"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description A reconcile was requested. */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SyncKick"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["AlertingDisabled"];
+            502: components["responses"]["BadGateway"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    listAlerts: {
+        parameters: {
+            query?: {
+                /** @description Keep only alerts carrying a kconmon_ng_rule_id label (rules this console manages). An unparseable value is 400, never silently false -- guessing here would return MORE than was asked for. */
+                managedOnly?: boolean;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The mapped firing set, or an empty one with promConfigured:false when no Prometheus is configured. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AlertList"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            502: components["responses"]["BadGateway"];
+        };
+    };
     listK8sEvents: {
         parameters: {
             query?: {
@@ -3294,6 +4187,68 @@ export interface operations {
             400: components["responses"]["BadRequest"];
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
+            502: components["responses"]["BadGateway"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    exportConfiguration: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The configuration bundle. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ConfigBundle"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            502: components["responses"]["BadGateway"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    importConfiguration: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ConfigImportRequest"];
+            };
+        };
+        responses: {
+            /** @description The per-collection ledger. Identical in shape for a dry run and an apply -- that is the point of the dry run. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ConfigImportResult"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            /** @description No bundle, or a bundle whose `version` this build does not read. The detail names the version it was given. */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
             502: components["responses"]["BadGateway"];
             503: components["responses"]["Unavailable"];
         };

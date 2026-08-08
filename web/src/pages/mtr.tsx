@@ -214,7 +214,11 @@ function DestinationsPane({
           {queryErrorMessage(query.error, "Path history is unavailable")}
         </p>
       ) : null}
-      {query.isLoading ? <ListSkeleton /> : null}
+      {/* isPending, not isLoading: a paused retry (react-query pauses while
+          the browser thinks it is offline) is pending-but-not-fetching, and
+          the old !isLoading && !isError empty-guard would present "nothing
+          traced" as a settled answer. M7 final-gate finding. */}
+      {query.isPending ? <ListSkeleton /> : null}
 
       {/* The honest empty state: path history is a PROJECTION of MTR results
           the console ingested, so "nothing here" means "nobody has run one",
@@ -222,7 +226,7 @@ function DestinationsPane({
           Diagnostics. (Task 8 adds a Runner tab to this very page; until it
           lands, sending the reader somewhere that exists beats naming a tab
           that does not.) */}
-      {!query.isLoading && !query.isError && groups.length === 0 ? (
+      {query.isSuccess && groups.length === 0 ? (
         <EmptyNote>
           Nothing traced yet.{" "}
           <a href="/diagnostics" className="text-primary hover:underline">

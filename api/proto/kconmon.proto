@@ -201,14 +201,24 @@ message Event {
   }
 }
 
-// TopologyChanged is a lightweight "refetch" signal, not a full snapshot: the
-// Console already has an authoritative HTTP topology endpoint
-// (GET /api/v1/topology) and re-queries it rather than duplicating node/zone
-// enrichment logic in the event stream.
+// TopologyChanged is a lightweight "refetch" signal for a LIVE Console: it
+// names the subject of one change, never the resulting cluster. The Console
+// already has an authoritative HTTP topology endpoint (GET /api/v1/topology)
+// and re-queries it rather than duplicating node/zone enrichment here.
+//
+// The subject fields are also the ONLY thing a persisted event history can be
+// folded back into a topology from (internal/console/store/events.go
+// foldTopology), so the controller fills every one it knows at the emission
+// site: one event per affected agent, not one per registry mutation.
+//
+// zone carries the agent's failure domain AT THE TIME OF THE CHANGE. For
+// zone_updated it is the NEW zone, which is that reason's entire subject —
+// without it, a zone change is indistinguishable from a no-op in history.
 message TopologyChanged {
   string reason = 1;    // agent_registered|zone_updated|agent_deregistered|agent_evicted
   string node_name = 2;
   string agent_id = 3;
+  string zone = 4;
 }
 
 // CheckObserved reports the outcome of a completed ON-DEMAND diagnostic check

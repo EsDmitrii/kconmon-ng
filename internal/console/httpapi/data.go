@@ -69,24 +69,26 @@ type historicalTopology struct {
 // no store involved, no new failure mode. Nothing below the branch changed.
 //
 // WHAT THE ?at= ANSWER IS WORTH. The reconstruction is bounded by what a
-// topology_changed event records, which is exactly {reason, nodeName, agentId}
-// (internal/console/events/live_event.go, api/proto/kconmon.proto):
+// topology_changed event records, which is exactly
+// {reason, nodeName, agentId, zone} (internal/console/events/live_event.go,
+// api/proto/kconmon.proto):
 //
-//   - zone is NEVER recorded -- not even by a zone_updated event -- so every
-//     folded node and agent carries an empty zone;
 //   - podIP is NEVER recorded, so every folded agent carries an empty podIP;
 //   - ready is not recorded either: it is true for whatever the event log has
 //     seen registered and not since removed, i.e. "present", not "kubelet-ready";
-//   - and TODAY'S CONTROLLER (internal/controller/controller.go) publishes
-//     TopologyChanged{Reason: reason} WITHOUT node_name or agent_id, so events
-//     this build persists name nobody at all. History written by it folds to an
-//     EMPTY node set with every event counted in unfoldableEvents -- which is
-//     why that counter is in the response rather than only in a log: an empty
-//     nodes array next to unfoldableEvents=417 says "the events do not name
-//     their subject", not "the cluster was empty". The fold is coded against
-//     the full proto shape, so the day the controller starts attributing its
-//     changes, already-stored history reconstructs correctly with no change
-//     here.
+//   - zone IS recorded since M7, so folded nodes and agents carry the zone
+//     their events last stated -- which is what lets a reconstruction be drawn
+//     with the same zone lanes as the live map;
+//   - and identity depends on the CONTROLLER THAT WROTE THE ROW. Since M7 the
+//     controller attributes every change at its emission site (one event per
+//     affected agent, carrying agent id, node and zone), so current history
+//     folds into a real node set. Rows written BEFORE that carry a reason and
+//     nothing else and are still inside retention on an upgraded console: they
+//     name nobody and land in unfoldableEvents. That is why the counter is in
+//     the response rather than only in a log -- an empty nodes array next to
+//     unfoldableEvents=417 says "these events do not name their subject", not
+//     "the cluster was empty", and the UI quotes both numbers back rather than
+//     assuming either story.
 //
 // Status codes, in the order they are decided: no store -> 503 (the database
 // is what history lives in; the live route stays fine); unparseable at -> 400;

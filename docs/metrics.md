@@ -226,11 +226,22 @@ Deployed when `prometheusRule.enabled: true`. The metric prefix in `expr` is
 substituted automatically from `config.metricsPrefix`. Additional rules can be
 appended under `prometheusRule.rules` in Helm values.
 
-That substitution applies to the **PrometheusRule only**. The Grafana
+That substitution applies to **this** `PrometheusRule` only. The Grafana
 dashboards in `dashboards/` are imported as plain JSON with `kconmon_ng_`
 written out literally and nothing rewrites them, so a non-default
 `config.metricsPrefix` means editing the dashboard JSON by hand — the same
 caveat `values.yaml` states next to `metricsPrefix`.
+
+**There are two different `PrometheusRule` objects once the Console is
+running, and neither implies the other.** This one is static: rendered from
+`prometheusRule.rules` values, edited in Git, gated on
+`prometheusRule.enabled`. The other is written by the Console's alerting
+reconciler (`console.alerting.enabled`) from rules operators build in the UI
+and stored in PostgreSQL. Run both, either, or neither. The Console's renderer
+takes the configured prefix as a constructor argument rather than defaulting to
+`kconmon_ng`, so rules it emits follow `config.metricsPrefix` the way this
+template's `replace` does — the dashboards remain the one surface that does
+not. See `docs/console/product/ALERTING.md`.
 
 ```yaml
 - alert: UDPLossHigh

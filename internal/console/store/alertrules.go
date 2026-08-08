@@ -187,8 +187,10 @@ type AlertRuleStore interface {
 	UpdateAlertRule(ctx context.Context, id string, in AlertRuleInput) (AlertRule, error)
 	// UpdateAlertRuleSyncStatus records one reconcile outcome and touches
 	// NOTHING else -- not the builder fields, not updated_at. lastSyncedAt is
-	// nil for an outcome that did not apply anything (an error, or a drift
-	// observation), which writes SQL NULL rather than year 1.
+	// nil for an outcome that did not apply anything (an error), which writes
+	// SQL NULL rather than year 1. A drift observation DOES carry it: the
+	// reconciler records drift and then re-asserts our bytes in the same pass,
+	// so the apply did happen (promrules' record-then-fix semantics).
 	UpdateAlertRuleSyncStatus(ctx context.Context, id, status, message string, lastSyncedAt *time.Time) (AlertRule, error)
 	// DeleteAlertRule returns ErrNotFound when id does not name a rule,
 	// including when it is not a UUID at all.

@@ -177,5 +177,45 @@ data:
     {{- with (include "kconmon-ng.console.webhooksKeySecretName" .) }}
     webhooks:
       encryptionKeyFile: "/etc/kconmon-ng-console-secrets/webhooks-encryption-key"
+      {{- /* M7: the alert-transition watcher's poll cadence, and directly the
+      resolution granularity of every alert.resolved delivery (WebhooksConfig.
+      AlertPollInterval). Nested under the SAME key-secret gate the line above
+      lives behind, because the watcher exists only to fire deliveries and a
+      keyless console has no delivery path to fire down -- config.validate
+      requires it only when a key is named AND alerting is on, which is exactly
+      this pair of conditions.
+
+      Gated additionally on alerting.enabled for the emission reason
+      kubernetesContext and mtr are gated: config.Load parses with
+      KnownFields(true), and a pre-M7 console image has no alertPollInterval
+      field under webhooks, so an unconditional line would crashloop the OLD
+      Pod while the Deployment rolls. Nobody turns alerting on while rolling
+      backwards onto an image that does not have it. Off by default also keeps
+      a default render key-identical to chart 1.8.0's. */}}
+      {{- if $.Values.console.alerting.enabled }}
+      alertPollInterval: {{ $.Values.console.webhooks.alertPollInterval | quote }}
+      {{- end }}
+    {{- end }}
+    {{- /* M7 PrometheusRule reconciler. Emitted only when ON, for the same
+    KnownFields(true) rolling-image reason as kubernetesContext above, and the
+    same key-identical-default-render reason.
+
+    NOT guarded against database.mode=disabled, deliberately, and the console's
+    posture there is stronger than a warning: cmd/console SKIPS the reconciler
+    entirely without a database rather than degrading, because the rules live in
+    alert_rules and applying an EMPTY bundle over whatever is already in the
+    cluster would silently stop yesterday's alerts from evaluating. The chart
+    does not get to be stricter than the binary about a knob the binary already
+    reports on -- and here the binary's answer is the safe one.
+
+    An empty namespace is resolved from POD_NAMESPACE, which the Deployment sets
+    under this same gate (kconmon-ng.console.k8sIdentity), exactly as it does
+    for kubernetesContext. */}}
+    {{- if .Values.console.alerting.enabled }}
+    alerting:
+      enabled: true
+      namespace: {{ .Values.console.alerting.namespace | quote }}
+      syncInterval: {{ .Values.console.alerting.syncInterval | quote }}
+      bundleName: {{ .Values.console.alerting.bundleName | quote }}
     {{- end }}
 {{- end }}

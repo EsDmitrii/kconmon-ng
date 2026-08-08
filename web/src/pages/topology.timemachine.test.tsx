@@ -108,6 +108,19 @@ describe("TopologyPage engaged at t", () => {
     expect(screen.queryByText("No nodes reported by the controller yet")).not.toBeInTheDocument();
   });
 
+  // The controller attributes its topology events now, so the only history
+  // that folds to nothing is what an older one wrote. The note has to blame
+  // that stretch of the past and point forward — the old copy blamed the
+  // running controller, which would now send an operator to fix a bug that no
+  // longer exists.
+  it("blames the age of the events, not the controller that is running", async () => {
+    renderPage(historical({ unfoldableEvents: 417, eventsFolded: 3 }));
+    await screen.findByText("Nothing to reconstruct at this time");
+    expect(screen.getByText(/recorded before the controller started attributing/)).toBeInTheDocument();
+    expect(screen.getByText(/pick a more recent instant/i)).toBeInTheDocument();
+    expect(screen.queryByText(/after the controller starts attributing/)).not.toBeInTheDocument();
+  });
+
   it("says an empty-with-nothing-skipped answer is an empty PAST, not a broken fold", async () => {
     renderPage(historical({ unfoldableEvents: 0, eventsFolded: 0 }));
     await screen.findByText("No nodes existed at this time");

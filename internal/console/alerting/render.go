@@ -12,11 +12,14 @@
 //
 // The constants that are NOT obvious, stated once:
 //
-//   - MetricPrefix is "kconmon_ng" — the DEFAULT of config.metricsPrefix.
-//     A deployment that overrides metricsPrefix renders rules that never fire,
-//     exactly like the Grafana dashboards in dashboards/ (docs/metrics.md
-//     "Default alerting rules"). Render's signature carries no prefix, so this
-//     is a pinned limitation, not an oversight.
+//   - MetricPrefix is "kconmon_ng" — the DEFAULT of config.metricsPrefix, and
+//     only the default. Rendering hangs off a Renderer VALUE carrying the
+//     prefix (NewRenderer), because config.metricsPrefix is operator-settable
+//     and a rule rendered against the wrong family name is a rule that can
+//     never fire — the exact failure the Grafana dashboards in dashboards/
+//     still have (docs/metrics.md "Default alerting rules"). There is no
+//     package-level Render: a free function would have to pick a prefix for
+//     the caller, and picking the default silently is the bug.
 //   - RateWindow is "5m" for every rate()/histogram_quantile template. It is
 //     not a builder param: a per-rule window is a second knob that changes what
 //     the threshold MEANS, and the plan's builder model has one threshold.
@@ -76,6 +79,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 )
@@ -92,18 +96,56 @@ const (
 	// TTFBQuantile is the fixed quantile of the http-ttfb template.
 	TTFBQuantile = 0.95
 
-	metricUDPLoss        = MetricPrefix + "_udp_packet_loss_ratio"
-	metricICMPLoss       = MetricPrefix + "_icmp_packet_loss_ratio"
-	metricTCPResults     = MetricPrefix + "_tcp_results_total"
-	metricUDPRTT         = MetricPrefix + "_udp_rtt_seconds"
-	metricICMPRTT        = MetricPrefix + "_icmp_rtt_seconds"
-	metricTCPDuration    = MetricPrefix + "_tcp_total_duration_seconds"
-	metricDNSResults     = MetricPrefix + "_dns_results_total"
-	metricHTTPTTFB       = MetricPrefix + "_http_ttfb_seconds"
-	metricExternalResult = MetricPrefix + "_external_results_total"
-	metricRegisteredAgts = MetricPrefix + "_controller_registered_agents"
-	metricExpectedAgts   = MetricPrefix + "_controller_expected_agents"
+	// The metric-family SUFFIXES. Everything after the configurable prefix is
+	// fixed by the exporter, so these are constants and the prefix is not.
+	suffixUDPLoss        = "_udp_packet_loss_ratio"
+	suffixICMPLoss       = "_icmp_packet_loss_ratio"
+	suffixTCPResults     = "_tcp_results_total"
+	suffixUDPRTT         = "_udp_rtt_seconds"
+	suffixICMPRTT        = "_icmp_rtt_seconds"
+	suffixTCPDuration    = "_tcp_total_duration_seconds"
+	suffixDNSResults     = "_dns_results_total"
+	suffixHTTPTTFB       = "_http_ttfb_seconds"
+	suffixExternalResult = "_external_results_total"
+	suffixRegisteredAgts = "_controller_registered_agents"
+	suffixExpectedAgts   = "_controller_expected_agents"
 )
+
+// Renderer renders alert rules against ONE metric prefix.
+//
+// It is a value, not a package-level function set, for exactly one reason:
+// config.metricsPrefix is operator-settable and every expression this package
+// emits names a metric family. A renderer built from the wrong prefix produces
+// syntactically perfect PromQL over series that do not exist — an alert that
+// can never fire and never errors. Making the prefix a constructor argument
+// forces every caller to say which deployment it is rendering for.
+//
+// The type is immutable and carries no state beyond the prefix, so one value
+// is shared by the reconciler loop and every HTTP request without locking.
+type Renderer struct {
+	// prefix is the resolved metric prefix, never empty (NewRenderer folds ""
+	// into MetricPrefix).
+	prefix string
+}
+
+// NewRenderer builds a Renderer for prefix. An empty or whitespace-only prefix
+// means MetricPrefix — the config package already defaults metricsPrefix and
+// refuses an empty one, so this is a repair for a hand-built caller, not a
+// supported configuration.
+func NewRenderer(prefix string) Renderer {
+	p := strings.TrimSpace(prefix)
+	if p == "" {
+		p = MetricPrefix
+	}
+	return Renderer{prefix: p}
+}
+
+// Prefix reports the metric prefix this renderer emits, so cmd/console can log
+// what it actually settled on.
+func (r Renderer) Prefix() string { return r.prefix }
+
+// metric joins the renderer's prefix to a family suffix.
+func (r Renderer) metric(suffix string) string { return r.prefix + suffix }
 
 // Bundle-object constants. See Decision 4 (ownership) and the single-bundle
 // strategy in Task 2 of the M7 plan.
@@ -254,7 +296,7 @@ func ValidKind(kind string) bool {
 // param that caused it.
 //
 //nolint:gocritic // hugeParam: the value receiver is the signature pinned by the M7 Task 2 brief.
-func Render(rule Rule) (expr string, err error) {
+func (r Renderer) Render(rule Rule) (expr string, err error) {
 	schema, ok := kindSchemas[rule.Kind]
 	if !ok {
 		return "", fmt.Errorf("unknown kind %q (known: %s)", rule.Kind, strings.Join(KnownKinds(), ", "))
@@ -265,17 +307,17 @@ func Render(rule Rule) (expr string, err error) {
 
 	switch rule.Kind {
 	case KindPairLoss:
-		return renderPairLoss(rule.Params)
+		return r.renderPairLoss(rule.Params)
 	case KindZoneLatency:
-		return renderZoneLatency(rule.Params)
+		return r.renderZoneLatency(rule.Params)
 	case KindDNSFailures:
-		return renderDNSFailures(rule.Params)
+		return r.renderDNSFailures(rule.Params)
 	case KindHTTPTTFB:
-		return renderHTTPTTFB(rule.Params)
+		return r.renderHTTPTTFB(rule.Params)
 	case KindAgentMissing:
-		return metricRegisteredAgts + " < " + metricExpectedAgts, nil
+		return r.metric(suffixRegisteredAgts) + " < " + r.metric(suffixExpectedAgts), nil
 	case KindExternalTargetDown:
-		return renderExternalTargetDown(rule.Params)
+		return r.renderExternalTargetDown(rule.Params)
 	case KindRaw:
 		return renderRaw(rule.Params)
 	default:
@@ -284,7 +326,7 @@ func Render(rule Rule) (expr string, err error) {
 	}
 }
 
-func renderPairLoss(params map[string]any) (expr string, err error) {
+func (r Renderer) renderPairLoss(params map[string]any) (expr string, err error) {
 	protocol, err := enumParam(KindPairLoss, params, "protocol", validProtocols)
 	if err != nil {
 		return "", err
@@ -302,16 +344,16 @@ func renderPairLoss(params map[string]any) (expr string, err error) {
 	// stream): its loss is the failure share of the results counter. UDP and
 	// ICMP publish a ratio gauge and are read directly.
 	if protocol == "tcp" {
-		return failureRatioExpr(metricTCPResults, peerGroupBy, scope, threshold), nil
+		return failureRatioExpr(r.metric(suffixTCPResults), peerGroupBy, scope, threshold), nil
 	}
-	metric := metricUDPLoss
+	suffix := suffixUDPLoss
 	if protocol == "icmp" {
-		metric = metricICMPLoss
+		suffix = suffixICMPLoss
 	}
-	return metric + selector(scope) + " * 100 > " + formatNumber(threshold), nil
+	return r.metric(suffix) + selector(scope) + " * 100 > " + formatNumber(threshold), nil
 }
 
-func renderZoneLatency(params map[string]any) (expr string, err error) {
+func (r Renderer) renderZoneLatency(params map[string]any) (expr string, err error) {
 	protocol, err := enumParam(KindZoneLatency, params, "protocol", validProtocols)
 	if err != nil {
 		return "", err
@@ -332,11 +374,11 @@ func renderZoneLatency(params map[string]any) (expr string, err error) {
 	var histogram string
 	switch protocol {
 	case "tcp":
-		histogram = metricTCPDuration
+		histogram = r.metric(suffixTCPDuration)
 	case "udp":
-		histogram = metricUDPRTT
+		histogram = r.metric(suffixUDPRTT)
 	default:
-		histogram = metricICMPRTT
+		histogram = r.metric(suffixICMPRTT)
 	}
 
 	matchers := make([]matcher, 0, 2)
@@ -356,15 +398,15 @@ func renderZoneLatency(params map[string]any) (expr string, err error) {
 	return quantileExpr(quantile, histogram, zoneGroupBy, matchers, thresholdMs), nil
 }
 
-func renderDNSFailures(params map[string]any) (expr string, err error) {
+func (r Renderer) renderDNSFailures(params map[string]any) (expr string, err error) {
 	threshold, err := percentParam(KindDNSFailures, params, "thresholdPercent")
 	if err != nil {
 		return "", err
 	}
-	return failureRatioExpr(metricDNSResults, dnsGroupBy, nil, threshold), nil
+	return failureRatioExpr(r.metric(suffixDNSResults), dnsGroupBy, nil, threshold), nil
 }
 
-func renderHTTPTTFB(params map[string]any) (expr string, err error) {
+func (r Renderer) renderHTTPTTFB(params map[string]any) (expr string, err error) {
 	thresholdMs, err := positiveParam(KindHTTPTTFB, params, "thresholdMs")
 	if err != nil {
 		return "", err
@@ -377,10 +419,10 @@ func renderHTTPTTFB(params map[string]any) (expr string, err error) {
 	if ok {
 		matchers = append(matchers, matcher{"url", url})
 	}
-	return quantileExpr(TTFBQuantile, metricHTTPTTFB, httpGroupBy, matchers, thresholdMs), nil
+	return quantileExpr(TTFBQuantile, r.metric(suffixHTTPTTFB), httpGroupBy, matchers, thresholdMs), nil
 }
 
-func renderExternalTargetDown(params map[string]any) (expr string, err error) {
+func (r Renderer) renderExternalTargetDown(params map[string]any) (expr string, err error) {
 	var matchers []matcher
 	target, ok, err := optionalStringParam(KindExternalTargetDown, params, "targetName")
 	if err != nil {
@@ -396,7 +438,7 @@ func renderExternalTargetDown(params map[string]any) (expr string, err error) {
 	// not exist never fires.
 	failing := append(slices.Clone(matchers), matcher{"result", "fail"})
 	return "sum by (" + strings.Join(externalGroupBy, ", ") + ") (rate(" +
-		metricExternalResult + selector(failing) + "[" + RateWindow + "])) > 0", nil
+		r.metric(suffixExternalResult) + selector(failing) + "[" + RateWindow + "])) > 0", nil
 }
 
 func renderRaw(params map[string]any) (expr string, err error) {
@@ -670,6 +712,136 @@ func FormatPromDuration(ns int64) (duration string, err error) {
 }
 
 // ---------------------------------------------------------------------------
+// ParsePromDuration
+// ---------------------------------------------------------------------------
+
+// promDurationUnit is one entry of the Prometheus duration grammar, in the
+// DESCENDING order the grammar itself requires. The order is load-bearing
+// twice: it is the legality check for a composite string (a unit may only be
+// followed by a smaller one), and it is the reason "ms" can sit next to "m"
+// without ambiguity -- the scanner reads a whole letter run, so "500ms" yields
+// the unit "ms" and never "m" followed by a stray "s".
+//
+// y and w are 365d and 7d, Prometheus's own definitions. They are DELIBERATELY
+// absent from FormatPromDuration's output side (see its doc comment: a 7-day
+// window rendered as "1w" reads as a different setting than the one entered),
+// which is why the two functions are inverses in one direction only -- pinned
+// by TestParsePromDurationIsNotOnto.
+var promDurationUnits = []struct {
+	name string
+	size int64
+}{
+	{"y", 365 * 24 * int64(time.Hour)},
+	{"w", 7 * 24 * int64(time.Hour)},
+	{"d", 24 * int64(time.Hour)},
+	{"h", int64(time.Hour)},
+	{"m", int64(time.Minute)},
+	{"s", int64(time.Second)},
+	{"ms", int64(time.Millisecond)},
+}
+
+// ParsePromDuration reads a Prometheus duration string and returns
+// nanoseconds. It is FormatPromDuration's inverse, and it exists for exactly
+// one caller: adopting a FOREIGN PrometheusRule (M7 Decision 4), whose `for:`
+// was written by a human in whatever spelling they liked.
+//
+// It is therefore WIDER than the formatter on purpose:
+//
+//   - COMPOSITE strings are accepted ("1h30m", "1y2w3d4h5m6s7ms"). The
+//     formatter never emits one, but a hand-written rule routinely is one, and
+//     refusing it would drop somebody's rule on the floor over a spelling.
+//   - y and w are accepted, as 365d and 7d. The formatter stops at days.
+//
+// It is STRICT everywhere else, because a misread duration is silent: a `for`
+// of 5m that parses as 0 turns a rule that waits five minutes into one that
+// fires instantly, and nobody reviews an import for that. So the grammar is
+// the whole grammar and nothing beside it -- decimal digits only (no sign, no
+// decimal point: "1.5h" is an error rather than 90m, matching Prometheus,
+// which has no fractional durations), units strictly descending and each used
+// at most once, no whitespace anywhere, the entire string consumed, and an
+// int64-nanosecond overflow reported rather than wrapped.
+//
+// The ONE special case is Prometheus's own: the bare string "0" is zero. Every
+// other unit-less number is an error.
+func ParsePromDuration(s string) (ns int64, err error) {
+	if s == "" {
+		return 0, errors.New("duration must not be empty")
+	}
+	if s == "0" {
+		return 0, nil
+	}
+
+	var (
+		total int64
+		next  int // the first promDurationUnits index the next component may use
+	)
+	for i := 0; i < len(s); {
+		digits, unit, rest, err := scanPromDurationComponent(s, i)
+		if err != nil {
+			return 0, err
+		}
+		i = rest
+
+		idx := slices.IndexFunc(promDurationUnits, func(u struct {
+			name string
+			size int64
+		},
+		) bool {
+			return u.name == unit
+		})
+		if idx < 0 {
+			return 0, fmt.Errorf("duration %q: unknown unit %q, want one of ms, s, m, h, d, w, y", s, unit)
+		}
+		if idx < next {
+			return 0, fmt.Errorf("duration %q: unit %q is repeated or out of order; "+
+				"units must descend through y, w, d, h, m, s, ms and appear at most once", s, unit)
+		}
+		next = idx + 1
+
+		value, convErr := strconv.ParseInt(digits, 10, 64)
+		if convErr != nil {
+			return 0, fmt.Errorf("duration %q: %s%s does not fit in an int64", s, digits, unit)
+		}
+		size := promDurationUnits[idx].size
+		part := value * size
+		if value != 0 && part/size != value {
+			return 0, fmt.Errorf("duration %q overflows int64 nanoseconds", s)
+		}
+		if total > math.MaxInt64-part {
+			return 0, fmt.Errorf("duration %q overflows int64 nanoseconds", s)
+		}
+		total += part
+	}
+	return total, nil
+}
+
+// scanPromDurationComponent reads ONE number+unit pair starting at from,
+// returning the digits, the unit and the offset just past them. Both halves
+// are required: a number with no unit and a unit with no number are each an
+// error naming what is missing, because "5" meaning five of something
+// unstated is exactly the guess this parser refuses to make.
+func scanPromDurationComponent(s string, from int) (digits, unit string, rest int, err error) {
+	i := from
+	for i < len(s) && s[i] >= '0' && s[i] <= '9' {
+		i++
+	}
+	if i == from {
+		return "", "", 0, fmt.Errorf("duration %q: expected a number at offset %d, got %q", s, from, s[from:])
+	}
+	digits = s[from:i]
+
+	unitStart := i
+	for i < len(s) && s[i] >= 'a' && s[i] <= 'z' {
+		i++
+	}
+	if i == unitStart {
+		return "", "", 0, fmt.Errorf("duration %q: %q has no unit, want one of ms, s, m, h, d, w, y "+
+			`(only the bare string "0" may omit one)`, s, digits)
+	}
+	return digits, s[unitStart:i], i, nil
+}
+
+// ---------------------------------------------------------------------------
 // SanitizeAlertName
 // ---------------------------------------------------------------------------
 
@@ -733,7 +905,7 @@ func SanitizeAlertName(name string) (alert string, err error) {
 // live object): rules are ordered by lower(Name), ties broken by ID, and every
 // map that reaches the object is serialized by a key-sorting marshaller. Map
 // iteration never reaches the output.
-func RenderBundle(rules []Rule, namespace, bundleName string) (*unstructured.Unstructured, error) {
+func (r Renderer) RenderBundle(rules []Rule, namespace, bundleName string) (*unstructured.Unstructured, error) {
 	if strings.TrimSpace(namespace) == "" {
 		return nil, errors.New("RenderBundle: namespace must not be empty")
 	}
@@ -758,17 +930,17 @@ func RenderBundle(rules []Rule, namespace, bundleName string) (*unstructured.Uns
 	ids := make([]string, 0, len(enabled))
 	seen := make(map[string]string, len(enabled))
 	for i := range enabled {
-		r := &enabled[i]
-		entry, alert, err := ruleEntry(r)
+		rule := &enabled[i]
+		entry, alert, err := r.ruleEntry(rule)
 		if err != nil {
 			return nil, err
 		}
 		if prev, dup := seen[alert]; dup {
-			return nil, fmt.Errorf("alert name collision: %q and %q both sanitize to %q", prev, r.Name, alert)
+			return nil, fmt.Errorf("alert name collision: %q and %q both sanitize to %q", prev, rule.Name, alert)
 		}
-		seen[alert] = r.Name
+		seen[alert] = rule.Name
 		entries = append(entries, entry)
-		ids = append(ids, r.ID)
+		ids = append(ids, rule.ID)
 	}
 	slices.Sort(ids)
 
@@ -802,7 +974,7 @@ func RenderBundle(rules []Rule, namespace, bundleName string) (*unstructured.Uns
 	}}, nil
 }
 
-func ruleEntry(r *Rule) (entry map[string]any, alert string, err error) {
+func (rr Renderer) ruleEntry(r *Rule) (entry map[string]any, alert string, err error) {
 	if strings.TrimSpace(r.ID) == "" {
 		return nil, "", fmt.Errorf("alert rule %q: ID must not be empty", r.Name)
 	}
@@ -819,7 +991,7 @@ func ruleEntry(r *Rule) (entry map[string]any, alert string, err error) {
 		return nil, "", fmt.Errorf("alert rule %q: %w", r.Name, err)
 	}
 
-	expr, err := Render(*r)
+	expr, err := rr.Render(*r)
 	if err != nil {
 		return nil, "", fmt.Errorf("alert rule %q: %w", r.Name, err)
 	}

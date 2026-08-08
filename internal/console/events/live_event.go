@@ -62,10 +62,19 @@ type LiveEvent struct {
 // Details payloads: one struct per event type, so the JSON keys are a compiled
 // contract rather than a map literal. These are what the payload table in
 // docs/console/architecture/WEBSOCKET.md documents.
+// topologyChangedDetails is also the durable shape: the ingester persists it
+// verbatim into topology_events.details, and the store's fold parses it back
+// (internal/console/store/events.go, topologyChangeDetails, mirrored by hand).
+// Adding a key here without adding it there loses the field to history.
+//
+// Zone is the agent's failure domain at the moment of the change -- for
+// zone_updated, the NEW one. It is what lets a reconstructed topology group
+// nodes into the same zone lanes the live map draws.
 type topologyChangedDetails struct {
 	Reason   string `json:"reason"`
 	NodeName string `json:"nodeName"`
 	AgentID  string `json:"agentId"`
+	Zone     string `json:"zone"`
 }
 
 type checkObservedDetails struct {
@@ -152,6 +161,7 @@ func ToLiveEvent(ev *pb.Event) (LiveEvent, error) {
 			Reason:   p.GetReason(),
 			NodeName: p.GetNodeName(),
 			AgentID:  p.GetAgentId(),
+			Zone:     p.GetZone(),
 		}
 	case ev.GetCheckObserved() != nil:
 		p := ev.GetCheckObserved()

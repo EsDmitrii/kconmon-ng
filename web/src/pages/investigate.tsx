@@ -29,6 +29,7 @@ import {
   getMaintenance,
   getRun,
   getRuns,
+  listAlerts,
   listAnnotations,
   listTargets,
   patchIncident,
@@ -50,6 +51,7 @@ import {
   PAIR_SEPARATOR,
   PIN_NOTE_MAX,
   RANGE_PRESETS,
+  alertEntries,
   annotationEntries,
   auditEntries,
   buildExportPayload,
@@ -103,9 +105,11 @@ import { buildRunRequest, CONTROL_CLASS } from "@/pages/diagnostics";
  * from it must stop claiming to be it.
  *
  * ASSEMBLY IS CLIENT-SIDE (Decision 1) and PER-SOURCE GATED (Decision 12 + M6
- * Global Constraints): eight sources, each behind its own read permission, each
- * degrading to ONE muted line and ZERO requests rather than to a failed fetch —
- * a viewer without audit:read loses the config-change rows, not the page.
+ * Global Constraints): nine sources — M7 Task 8 turned the ninth, firing
+ * alerts, from an honest-empty note into a real one — each behind its own read
+ * permission, each degrading to ONE muted line and ZERO requests rather than to
+ * a failed fetch: a viewer without audit:read loses the config-change rows, not
+ * the page.
  * lib/investigation.ts merges and ranks; nothing here re-implements it.
  *
  * THREE MODULES, one page. This file is orchestration and chrome only:
@@ -929,6 +933,23 @@ export function InvestigatePage() {
   });
   const samples = useMemo(() => samplesFromMatrix(lossQuery.data, rttQuery.data), [lossQuery.data, rttQuery.data]);
 
+  /* ── source 9: firing alerts (alerts:read + Prometheus) ──
+     NOT store-backed and therefore not behind dbReady: the firing set lives in
+     Prometheus. The request is skipped entirely when Prometheus is not
+     configured — the route would answer 200 with promConfigured:false, and the
+     note below already says that without spending a round trip on it.
+
+     There is no window here to ask for: /api/v1/alerts serves CURRENT state
+     and no alert history endpoint exists. alertEntries does the placing, and
+     the note states the consequence. */
+  const canAlerts = can("alerts:read");
+  const alertsQuery = useQuery({
+    queryKey: ["investigate", "alerts"],
+    queryFn: listAlerts,
+    enabled: ready && canAlerts && promConfigured,
+  });
+  const firingAlerts = useMemo(() => alertsQuery.data?.alerts ?? [], [alertsQuery.data]);
+
   /* ── assembly ── */
   const entries = useMemo(
     () =>
@@ -941,6 +962,7 @@ export function InvestigatePage() {
         k8sEntries(k8sQuery.data ?? []),
         maintenanceEntries(windows),
         thresholdCrossings(samples),
+        alertEntries(firingAlerts, params.from, params.to),
       ),
     [
       eventsQuery.data,
@@ -951,6 +973,7 @@ export function InvestigatePage() {
       k8sQuery.data,
       windows,
       samples,
+      firingAlerts,
       params.from,
       params.to,
     ],
@@ -1023,10 +1046,19 @@ export function InvestigatePage() {
         text: "Threshold crossings read Prometheus — set console.prometheus.address. Nothing was requested.",
       });
     }
-    out.push({
-      id: "alerts",
-      text: "Alert state arrives with alerting (M7) — nothing evaluates rules yet, so this timeline has no alert-fired or alert-resolved rows. That is a missing engine, not a quiet fleet.",
-    });
+    if (!canAlerts) {
+      out.push({ id: "alerts", text: "Firing alerts need alerts:read — no alert state was requested." });
+    } else if (!promConfigured) {
+      out.push({
+        id: "alerts-config",
+        text: "Firing alerts read Prometheus — set console.prometheus.address. Nothing was requested.",
+      });
+    } else {
+      out.push({
+        id: "alerts-now",
+        text: "Alerts are the set firing NOW: a row at activeAt for each one that started inside this window, and a row at the window's start for each one that was already firing. Resolutions are not recorded; only what is firing now is visible.",
+      });
+    }
     return out;
   }, [
     dbResolved,
@@ -1038,6 +1070,7 @@ export function InvestigatePage() {
     canRuns,
     canMaintenance,
     canPromQL,
+    canAlerts,
     promConfigured,
     mtrMode,
   ]);
@@ -1049,7 +1082,8 @@ export function InvestigatePage() {
     snapshotsQuery.isLoading ||
     k8sQuery.isLoading ||
     maintenanceQuery.isLoading ||
-    lossQuery.isLoading;
+    lossQuery.isLoading ||
+    alertsQuery.isLoading;
 
   const sourceError =
     eventsQuery.error ??
@@ -1058,6 +1092,7 @@ export function InvestigatePage() {
     snapshotsQuery.error ??
     k8sQuery.error ??
     maintenanceQuery.error ??
+    alertsQuery.error ??
     null;
 
   /* ── the entry form ── */

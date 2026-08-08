@@ -79,3 +79,60 @@ subjects:
     name: {{ include "kconmon-ng.console.serviceAccountName" . }}
     namespace: {{ .Release.Namespace }}
 {{- end }}
+{{- if and .Values.console.enabled .Values.console.alerting.enabled .Values.serviceAccount.create }}
+---
+{{/*
+M7: the alerting reconciler's grant. A namespaced Role, not a third
+ClusterRole, and that is the whole point of SECURITY.md §10.3: the console
+writes exactly ONE PrometheusRule object, into ONE namespace -- its own -- and a
+Role cannot be made to reach further even by mistake. Pointing
+console.alerting.namespace somewhere else does not widen anything; it makes
+every apply fail with a forbidden the reconciler writes into each rule's
+sync_message, which is a far better failure than a console that can quietly
+create rules in a namespace nobody expected it to touch.
+
+Bound to the SAME console-only ServiceAccount the M6 ClusterRole above uses
+(kconmon-ng.console.serviceAccountName), under its OWN flag: an install with
+alerting on and kubernetesContext off gets this Role and no event grant, and
+the reverse install gets the event grant and no rule-writing power. The shared
+subject is why kconmon-ng.console.k8sIdentity exists.
+
+The verbs are what a server-side apply actually needs and nothing more.
+create/update/patch: SSA is a PATCH with the apply content type, but the
+apiserver charges the create verb when the object does not exist yet and
+update on some paths, so all three are required for one Apply call -- this is
+not three code paths. get/list/watch: the drift comparison reads the live
+object back (promrules.Compare), and list is what ListForeign walks to find
+rules written by other tools. DELETE IS ABSENT ON PURPOSE: the reconciler
+converges by applying an empty bundle when no rule is enabled, it never removes
+the object, and a grant to delete PrometheusRules is a grant to delete somebody
+else's alerting.
+*/}}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "kconmon-ng.console.fullname" . }}-alerting
+  labels:
+    {{- include "kconmon-ng.labels" . | nindent 4 }}
+    app.kubernetes.io/component: console
+rules:
+  - apiGroups: ["monitoring.coreos.com"]
+    resources: ["prometheusrules"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "kconmon-ng.console.fullname" . }}-alerting
+  labels:
+    {{- include "kconmon-ng.labels" . | nindent 4 }}
+    app.kubernetes.io/component: console
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "kconmon-ng.console.fullname" . }}-alerting
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "kconmon-ng.console.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}

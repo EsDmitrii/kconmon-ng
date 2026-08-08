@@ -77,6 +77,10 @@ func TestOperatorAddsWriteAuthorityOverViewer(t *testing.T) {
 	// M6: the two statement-class writes (webhooks:manage stays admin-only
 	// and so is in NEITHER role's diff).
 	want = append(want, authz.PermIncidentsWrite, authz.PermMaintenanceWrite)
+	// M7: alerts:manage is the statement half of the alerting pair, on the
+	// incidents:write line. alerts:read is telemetry-class and lands in BOTH
+	// roles, so it is in neither side of this diff.
+	want = append(want, authz.PermAlertsManage)
 	if len(diff) != len(want) {
 		t.Fatalf("operator - viewer = %v, want %v", diff, want)
 	}
@@ -130,6 +134,48 @@ func TestM4PermissionsAreGrantedToOperatorAndAdmin(t *testing.T) {
 	}
 }
 
+// TestM7AlertPermissionsFollowTheIncidentsPosture is M7 Task 4's grant
+// decision as a test, in TestM4PermissionsAre*'s two-halves shape.
+//
+// alerts:read is TELEMETRY on M5 Decision 11's line, extended by M6 Decision
+// 8: a rendered alert rule and the set Prometheus is currently firing are
+// CONTEXT on the same charts every role already reads, and the Overview card
+// that shows them is on the landing page. So all four built-in roles hold it,
+// viewer -- the anonymous default -- included.
+//
+// alerts:manage is the STATEMENT half and stops at operator and admin — plus
+// alert-editor, the one deliberate exception, decided by the M7 coordinator:
+// delegated alert editing is that role's entire charter (it sat as a
+// placeholder from M3 to M6 waiting for exactly this permission), and a
+// builtin named alert-editor that cannot edit an alert rule breaks its
+// promise on first click. Narrowing it back is the conscious diff this
+// test guards.
+func TestM7AlertPermissionsFollowTheIncidentsPosture(t *testing.T) {
+	t.Parallel()
+
+	policy := authz.NewPolicy(nil)
+
+	for _, role := range []string{"viewer", "operator", "alert-editor", "admin"} {
+		s := authz.Subject{Kind: authz.SubjectUser, ID: "x", Roles: []string{role}}
+		if !policy.Can(s, authz.PermAlertsRead) {
+			t.Errorf("%s denied %q, want grant (alerts:read is telemetry-class)", role, authz.PermAlertsRead)
+		}
+	}
+
+	for _, role := range []string{"operator", "alert-editor", "admin"} {
+		s := authz.Subject{Kind: authz.SubjectUser, ID: "x", Roles: []string{role}}
+		if !policy.Can(s, authz.PermAlertsManage) {
+			t.Errorf("%s denied %q, want grant", role, authz.PermAlertsManage)
+		}
+	}
+	for _, role := range []string{"viewer"} {
+		s := authz.Subject{Kind: authz.SubjectUser, ID: "x", Roles: []string{role}}
+		if policy.Can(s, authz.PermAlertsManage) {
+			t.Errorf("%s holds %q, want deny (statement-class)", role, authz.PermAlertsManage)
+		}
+	}
+}
+
 // TestAdminHoldsEveryPermission pins AllPermissions against an explicit
 // expected list (rather than the constant block itself) so that a new
 // Permission constant added without a matching AllPermissions entry fails
@@ -161,6 +207,8 @@ func TestAdminHoldsEveryPermission(t *testing.T) {
 		authz.PermMaintenanceRead,
 		authz.PermMaintenanceWrite,
 		authz.PermWebhooksManage,
+		authz.PermAlertsRead,
+		authz.PermAlertsManage,
 	}
 
 	if len(authz.AllPermissions) != len(expected) {

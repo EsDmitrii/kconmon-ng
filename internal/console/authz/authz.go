@@ -61,6 +61,28 @@ const (
 	PermMaintenanceRead  Permission = "maintenance:read"
 	PermMaintenanceWrite Permission = "maintenance:write"
 	PermWebhooksManage   Permission = "webhooks:manage"
+
+	// M7 (console-managed Prometheus alert rules). The pair follows the
+	// incidents/maintenance groove exactly, not webhooks' single combined
+	// permission: an alert rule carries no secret, so nothing here is
+	// credential-adjacent.
+	//
+	// alerts:read is TELEMETRY. What it opens is the rule list, the expression
+	// the console rendered from it, and the set Prometheus is currently firing
+	// -- context on the very charts every role already reads, and the Overview
+	// card that shows it is on the landing page. Every built-in role holds it,
+	// viewer (the anonymous default) included. It also gates the PREVIEW route,
+	// which persists nothing: previewing is asking what a draft expression
+	// would match right now, which is a read of Prometheus, not a change to
+	// anything.
+	//
+	// alerts:manage is the STATEMENT half: creating, editing, deleting and
+	// force-syncing a rule are all "this fleet should page someone when X",
+	// which is an operator statement about the fleet in the same class as
+	// opening an incident. It stops at operator and admin, exactly where
+	// incidents:write does.
+	PermAlertsRead   Permission = "alerts:read"
+	PermAlertsManage Permission = "alerts:manage"
 )
 
 // AllPermissions is every permission this build knows, in a stable order.
@@ -91,6 +113,8 @@ var AllPermissions = []Permission{
 	PermMaintenanceRead,
 	PermMaintenanceWrite,
 	PermWebhooksManage,
+	PermAlertsRead,
+	PermAlertsManage,
 }
 
 // SubjectKind is how a request was authenticated.

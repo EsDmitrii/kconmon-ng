@@ -160,6 +160,19 @@ type Querier interface {
 	// already knows the hash it looked up by, and there is never a reason to hand
 	// a hash value back across this boundary.
 	GetTokenByHash(ctx context.Context, tokenHash []byte) (GetTokenByHashRow, error)
+	// The single-row counterpart to ListTokens, for the callers that already know
+	// WHICH token they want: the mint path (httpapi.resolveInheritedOwner) needs
+	// one parent row and used to pay for the whole admin-scale list to find it.
+	// token_hash is NEVER selected here either -- for the same reason it is absent
+	// from GetTokenByHash's SELECT list: the hash must not leave the database, and
+	// this row type must stay structurally identical to the other three so
+	// store/auth.go's single tokenRow conversion keeps working.
+	//
+	// No revoked_at/expires_at filtering: revoked and expired tokens are returned
+	// as-is, exactly like GetTokenByHash, so the caller decides what those states
+	// mean for it. Attributing a new token to a revoked parent's owner is still
+	// correct attribution.
+	GetTokenByID(ctx context.Context, id pgtype.UUID) (GetTokenByIDRow, error)
 	// password_hash is NEVER selected here: this lookup exists solely to back
 	// authn's owner-disabled check (GetUserByID, store/auth.go), which only ever
 	// needs Disabled -- same guarantee ListUsers' own comment gives, producing a

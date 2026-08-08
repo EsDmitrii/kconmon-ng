@@ -644,6 +644,85 @@ console:
     encryptionKeySecret:
       name: ""
       key: encryptionKey
+    # How often the alert-transition watcher (M7) reads Prometheus' current
+    # alert set to detect fired/resolved edges and POST alert.fired /
+    # alert.resolved. It lives under webhooks and not under alerting on
+    # purpose: alerting.syncInterval pushes rules INTO Prometheus, this reads
+    # alert STATE back out, and it exists for exactly one purpose — firing
+    # deliveries. With no encryption key (no webhooks) or with alerting off it
+    # does nothing at all, which is why it is rendered into the config only
+    # when BOTH are on.
+    #
+    # It is also, directly, the RESOLUTION GRANULARITY of every alert.resolved
+    # delivery: a resolution is detected by an alert's absence from a poll, so
+    # "resolved at" means "resolved somewhere in the interval ending here".
+    # Shortening it sharpens that number and costs one more GET per interval
+    # per replica; lengthening it blunts it. Must be > 0 when it is emitted.
+    #
+    # NOTE there is no leader election on this watcher: N console replicas
+    # deliver N copies of every edge. That is deliberate (a lock trades
+    # duplicates for MISSED edges when the holder dies mid-interval) —
+    # receivers should dedupe on the fingerprint in the payload. See
+    # ALERTING.md.
+    alertPollInterval: 30s
+  # Prometheus alert rules (M7). The console MANAGES rules; Prometheus
+  # EVALUATES them. Every rule an operator creates on /alerting is a row in
+  # alert_rules, and this reconciler renders all the enabled ones into ONE
+  # PrometheusRule object and server-side-applies it on an interval and on
+  # every write. Nothing here evaluates anything, and turning it off does not
+  # delete the object it last applied.
+  #
+  # The whole block is rendered into the ConfigMap only when enabled, exactly
+  # like console.kubernetesContext and console.mtr: the console config is
+  # parsed with KnownFields(true) and a pre-M7 console image has no `alerting:`
+  # key at all, so an unconditional block would crashloop the old Pod as the
+  # Deployment rolls. Off by default also keeps this chart's default render
+  # key-identical to 1.8.0's.
+  alerting:
+    # Master gate. OFF because turning it on gives the console pod a Kubernetes
+    # identity and the power to WRITE a monitoring.coreos.com object. Enabling
+    # it renders, under this one flag: the config block, the console-only
+    # ServiceAccount (shared with kubernetesContext), a namespaced Role +
+    # RoleBinding for prometheusrules (templates/rbac.yaml — a Role, not a
+    # ClusterRole, so it cannot reach past this namespace), serviceAccountName
+    # on the console Deployment, the POD_NAMESPACE downward-API env var and the
+    # apiserver egress rule.
+    #
+    # It needs the Prometheus Operator's PrometheusRule CRD to exist in the
+    # cluster; without it every apply fails with a crd-missing cause the
+    # console reports per rule rather than at boot. It also needs
+    # console.database.mode=cnpg|external — the rules live in PostgreSQL, and
+    # with the database off the console SKIPS the reconciler rather than
+    # applying an empty bundle over rules that are already evaluating.
+    enabled: false
+    # The namespace the single PrometheusRule object is applied into. Empty —
+    # the default — means "the namespace this release runs in", read from the
+    # POD_NAMESPACE env var the Deployment sets via the downward API.
+    #
+    # Deliberately one namespace and deliberately this one: the grant is a Role
+    # in the release namespace, so pointing this elsewhere does not widen
+    # anything, it just makes every apply fail with a forbidden that lands in
+    # each rule's sync_message. Whether your Prometheus PICKS UP a rule object
+    # in this namespace is a ruleNamespaceSelector question on the Prometheus
+    # CR, not a chart one.
+    namespace: ""
+    # Reconcile cadence. Sixty seconds because a reconcile is a single
+    # server-side apply of a few kilobytes and the loop exists to CONVERGE, not
+    # to react — reacting is what every create/update/delete through the API
+    # already does, so this interval only ever covers drift somebody introduced
+    # out of band. Jittered ±20% in the loop so N replicas do not apply in
+    # lockstep. Must be > 0 when enabled.
+    syncInterval: 60s
+    # Name of the ONE PrometheusRule object the console owns. One object and
+    # not one per rule: a single apply target means drift is one comparison and
+    # a partial apply is impossible.
+    #
+    # Configurable only so two consoles can share a namespace without fighting
+    # over the same object. CHANGING IT ON A LIVE INSTALL ORPHANS THE PREVIOUS
+    # OBJECT — the reconciler owns what it is pointed at and deletes nothing —
+    # which is why the default is spelled out here rather than derived from the
+    # release name. Must be a DNS-1123 subdomain when enabled.
+    bundleName: kconmon-ng-console-rules
   # Pod-level securityContext for the console Deployment. Rendered ONLY when
   # database.mode != disabled, so the default (database off) manifest stays
   # byte-identical to chart 1.4.0. The default fsGroup matches the distroless

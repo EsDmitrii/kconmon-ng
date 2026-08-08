@@ -101,7 +101,10 @@ export function AppSidebar() {
         </span>
         <ThemeToggle />
       </div>
-      <nav className="flex-1 overflow-y-auto px-3 pb-4 pt-2">
+      {/* Named, like every other role in this kit (the palette's listbox is
+          "Commands", the picker's grid is "Calendar"): "navigation" alone is
+          what a landmark list would otherwise announce. */}
+      <nav aria-label="Main" className="flex-1 overflow-y-auto px-3 pb-4 pt-2">
         {groupItems().map((group) => (
           <div key={group.label} className="mb-5">
             <div className="mb-1.5 px-2.5 text-[10.5px] font-semibold uppercase tracking-[0.1em] text-muted-foreground/70">

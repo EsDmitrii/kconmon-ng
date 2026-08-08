@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import type * as echarts from "echarts";
 import { useMutation } from "@tanstack/react-query";
 import { SquareTerminal } from "lucide-react";
@@ -141,6 +141,127 @@ const TABS: { id: ResultTab; label: string }[] = [
   { id: "json", label: "JSON" },
 ];
 
+/* One console, one result switcher, so the ids can be constants rather than
+   useId() values — and constants keep the tab⇄panel wiring readable in the
+   markup below. */
+const tabDomId = (id: ResultTab) => `promql-result-tab-${id}`;
+const panelDomId = (id: ResultTab) => `promql-result-panel-${id}`;
+
+/**
+ * ResultTabs is the result switcher, and it declares role="tablist" — so it
+ * owes the whole tab contract, not the half of it that is easy.
+ *
+ * What it was: three independent tab stops carrying role="tab" and
+ * aria-selected, with no keyboard relationship between them and three panels
+ * that carried no role at all. A screen-reader user was told "tab, selected"
+ * and then had nothing to move to.
+ *
+ * What it is: ONE tab stop for the strip (roving tabindex — the idiom
+ * ui/segmented.tsx already uses for its radiogroup, which is what every OTHER
+ * switcher on this page is), arrows/Home/End moving selection and focus
+ * together, and each tab pointing at the panel it reveals via aria-controls.
+ *
+ * A disabled tab is STEPPED OVER rather than landed on: Chart is disabled in
+ * instant mode, a disabled button is not focusable, and an arrow key that
+ * moved selection onto it would strand the keyboard on an element that cannot
+ * take focus.
+ *
+ * Exported for its own test: this page mounts PromQLEditor (CodeMirror) and
+ * EChart, neither of which is a comfortable jsdom render, so the strip is
+ * pinned directly — the same seam pages/topology.tsx opened with
+ * nodeNavigationPath and pages/diagnostics.tsx with NodeSelector.
+ */
+export function ResultTabs({
+  active,
+  onChange,
+  isDisabled,
+}: {
+  active: ResultTab;
+  onChange: (id: ResultTab) => void;
+  isDisabled: (id: ResultTab) => boolean;
+}) {
+  const refs = useRef<(HTMLButtonElement | null)[]>([]);
+
+  const move = (from: number, delta: number) => {
+    for (let step = 1; step <= TABS.length; step++) {
+      const next = (((from + delta * step) % TABS.length) + TABS.length) % TABS.length;
+      if (isDisabled(TABS[next].id)) continue;
+      onChange(TABS[next].id);
+      refs.current[next]?.focus();
+      return;
+    }
+  };
+
+  const onKeyDown = (e: KeyboardEvent, i: number) => {
+    if (e.key === "ArrowRight" || e.key === "ArrowDown") {
+      e.preventDefault();
+      move(i, 1);
+    } else if (e.key === "ArrowLeft" || e.key === "ArrowUp") {
+      e.preventDefault();
+      move(i, -1);
+    } else if (e.key === "Home") {
+      e.preventDefault();
+      move(-1, 1);
+    } else if (e.key === "End") {
+      e.preventDefault();
+      move(TABS.length, -1);
+    }
+  };
+
+  return (
+    <div role="tablist" aria-label="Result view" className="flex w-fit gap-1 rounded-md bg-surface-2 p-1">
+      {TABS.map((tab, i) => {
+        const disabled = isDisabled(tab.id);
+        const selected = tab.id === active;
+        return (
+          <button
+            key={tab.id}
+            ref={(el) => {
+              refs.current[i] = el;
+            }}
+            type="button"
+            id={tabDomId(tab.id)}
+            role="tab"
+            aria-selected={selected}
+            aria-controls={panelDomId(tab.id)}
+            tabIndex={selected ? 0 : -1}
+            onClick={() => onChange(tab.id)}
+            onKeyDown={(e) => onKeyDown(e, i)}
+            disabled={disabled}
+            className={cn(
+              "h-8 rounded-sm px-3.5 text-sm transition-colors duration-(--dur) ease-(--ease)",
+              "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+              selected ? "bg-card font-medium text-foreground shadow-card" : "text-muted-foreground hover:text-foreground",
+              disabled && "cursor-not-allowed opacity-40 hover:text-muted-foreground",
+            )}
+            title={disabled ? "Chart is only available for range queries" : undefined}
+          >
+            {tab.label}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+/* The panel half of the same contract: a labelled tabpanel that is itself a
+   tab stop, because none of the three (a table, a chart canvas, a <pre>) holds
+   anything focusable of its own — without this, Tab off the strip leaves the
+   result behind entirely. */
+function ResultPanel({ tab, children }: { tab: ResultTab; children: ReactNode }) {
+  return (
+    <div
+      role="tabpanel"
+      id={panelDomId(tab)}
+      aria-labelledby={tabDomId(tab)}
+      tabIndex={0}
+      className="rounded-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+    >
+      {children}
+    </div>
+  );
+}
+
 export function PromQLConsolePage() {
   const { theme } = useTheme();
   const [query, setQuery] = useState<string>(readLastQuery);
@@ -267,80 +388,67 @@ export function PromQLConsolePage() {
           </Card>
         ) : null}
 
-        <div role="tablist" aria-label="Result view" className="flex w-fit gap-1 rounded-md bg-surface-2 p-1">
-          {TABS.map((tab) => {
-            const disabled = tab.id === "chart" && mode === "instant";
-            const active = tab.id === activeTab;
-            return (
-              <button
-                key={tab.id}
-                role="tab"
-                aria-selected={active}
-                onClick={() => setActiveTab(tab.id)}
-                disabled={disabled}
-                className={cn(
-                  "h-8 rounded-sm px-3.5 text-sm transition-colors duration-(--dur) ease-(--ease)",
-                  "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
-                  active ? "bg-card font-medium text-foreground shadow-card" : "text-muted-foreground hover:text-foreground",
-                  disabled && "cursor-not-allowed opacity-40 hover:text-muted-foreground",
-                )}
-                title={disabled ? "Chart is only available for range queries" : undefined}
-              >
-                {tab.label}
-              </button>
-            );
-          })}
-        </div>
+        <ResultTabs
+          active={activeTab}
+          onChange={setActiveTab}
+          isDisabled={(id) => id === "chart" && mode === "instant"}
+        />
 
         {activeTab === "table" ? (
-          table && table.rows.length > 0 ? (
-            <Card className="overflow-x-auto p-0">
-              <table className="w-full border-separate border-spacing-0 text-sm">
-                <thead>
-                  <tr>
-                    {table.columns.map((c) => (
-                      <th
-                        key={c}
-                        className="border-b border-border bg-surface px-4 py-2.5 text-left text-[11px] font-medium uppercase tracking-[0.06em] text-muted-foreground"
-                        scope="col"
-                      >
-                        {c}
-                      </th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody>
-                  {table.rows.map((row, i) => (
-                    <tr key={i} className="transition-colors duration-(--dur-fast) hover:bg-accent/40">
-                      {row.map((cell, j) => (
-                        <td key={j} className="nums border-b border-border px-4 py-2.5">{cell}</td>
+          <ResultPanel tab="table">
+            {table && table.rows.length > 0 ? (
+              <Card className="overflow-x-auto p-0">
+                <table className="w-full border-separate border-spacing-0 text-sm">
+                  <thead>
+                    <tr>
+                      {table.columns.map((c) => (
+                        <th
+                          key={c}
+                          className="border-b border-border bg-surface px-4 py-2.5 text-left text-[11px] font-medium uppercase tracking-[0.06em] text-muted-foreground"
+                          scope="col"
+                        >
+                          {c}
+                        </th>
                       ))}
                     </tr>
-                  ))}
-                </tbody>
-              </table>
-            </Card>
-          ) : (
-            <ResultPlaceholder text={data ? "No data — the query returned an empty result." : "Run a query to see results."} />
-          )
+                  </thead>
+                  <tbody>
+                    {table.rows.map((row, i) => (
+                      <tr key={i} className="transition-colors duration-(--dur-fast) hover:bg-accent/40">
+                        {row.map((cell, j) => (
+                          <td key={j} className="nums border-b border-border px-4 py-2.5">{cell}</td>
+                        ))}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </Card>
+            ) : (
+              <ResultPlaceholder text={data ? "No data — the query returned an empty result." : "Run a query to see results."} />
+            )}
+          </ResultPanel>
         ) : null}
 
         {activeTab === "chart" && mode === "range" ? (
-          chartOption && chartOption.series && (chartOption.series as unknown[]).length > 0 ? (
-            <Card className="p-5">
-              <EChart option={chartOption} className="h-80 w-full" />
-            </Card>
-          ) : (
-            <ResultPlaceholder text={data ? "No series to chart." : "Run a range query to see a chart."} />
-          )
+          <ResultPanel tab="chart">
+            {chartOption && chartOption.series && (chartOption.series as unknown[]).length > 0 ? (
+              <Card className="p-5">
+                <EChart option={chartOption} className="h-80 w-full" />
+              </Card>
+            ) : (
+              <ResultPlaceholder text={data ? "No series to chart." : "Run a range query to see a chart."} />
+            )}
+          </ResultPanel>
         ) : null}
 
         {activeTab === "json" ? (
-          <Card className="overflow-hidden p-0">
-            <pre className="max-h-[32rem] overflow-auto bg-surface-2/50 p-4 font-mono text-xs leading-relaxed">
-              {data ? JSON.stringify(data, null, 2) : "Run a query to see the raw response."}
-            </pre>
-          </Card>
+          <ResultPanel tab="json">
+            <Card className="overflow-hidden p-0">
+              <pre className="max-h-[32rem] overflow-auto bg-surface-2/50 p-4 font-mono text-xs leading-relaxed">
+                {data ? JSON.stringify(data, null, 2) : "Run a query to see the raw response."}
+              </pre>
+            </Card>
+          </ResultPanel>
         ) : null}
       </div>
     </PageShell>

@@ -134,7 +134,7 @@ const bundleGolden = `{
 `
 
 func TestRenderBundleGolden(t *testing.T) {
-	obj, err := RenderBundle(bundleFixture(), "kconmon-ng", "kconmon-ng-console-rules")
+	obj, err := defaultRenderer.RenderBundle(bundleFixture(), "kconmon-ng", "kconmon-ng-console-rules")
 	if err != nil {
 		t.Fatalf("RenderBundle() error = %v", err)
 	}
@@ -145,7 +145,7 @@ func TestRenderBundleGolden(t *testing.T) {
 
 // The expr values inside the object are single-line strings.
 func TestRenderBundleGoldenExpressions(t *testing.T) {
-	obj, err := RenderBundle(bundleFixture(), "kconmon-ng", "kconmon-ng-console-rules")
+	obj, err := defaultRenderer.RenderBundle(bundleFixture(), "kconmon-ng", "kconmon-ng-console-rules")
 	if err != nil {
 		t.Fatalf("RenderBundle() error = %v", err)
 	}
@@ -180,7 +180,7 @@ func TestRenderBundleGoldenExpressions(t *testing.T) {
 func TestRenderBundleIsByteIdenticalAcrossCalls(t *testing.T) {
 	var first string
 	for i := range 25 {
-		obj, err := RenderBundle(bundleFixture(), "kconmon-ng", "kconmon-ng-console-rules")
+		obj, err := defaultRenderer.RenderBundle(bundleFixture(), "kconmon-ng", "kconmon-ng-console-rules")
 		if err != nil {
 			t.Fatalf("RenderBundle() error = %v", err)
 		}
@@ -203,11 +203,11 @@ func TestRenderBundleIsOrderInsensitive(t *testing.T) {
 		reversed = append(reversed, forward[i])
 	}
 
-	a, err := RenderBundle(forward, "kconmon-ng", "kconmon-ng-console-rules")
+	a, err := defaultRenderer.RenderBundle(forward, "kconmon-ng", "kconmon-ng-console-rules")
 	if err != nil {
 		t.Fatalf("RenderBundle(forward) error = %v", err)
 	}
-	b, err := RenderBundle(reversed, "kconmon-ng", "kconmon-ng-console-rules")
+	b, err := defaultRenderer.RenderBundle(reversed, "kconmon-ng", "kconmon-ng-console-rules")
 	if err != nil {
 		t.Fatalf("RenderBundle(reversed) error = %v", err)
 	}
@@ -217,7 +217,7 @@ func TestRenderBundleIsOrderInsensitive(t *testing.T) {
 }
 
 func TestRenderBundleObjectShape(t *testing.T) {
-	obj, err := RenderBundle(bundleFixture(), "kconmon-ng", "kconmon-ng-console-rules")
+	obj, err := defaultRenderer.RenderBundle(bundleFixture(), "kconmon-ng", "kconmon-ng-console-rules")
 	if err != nil {
 		t.Fatalf("RenderBundle() error = %v", err)
 	}
@@ -273,7 +273,7 @@ func TestRenderBundleObjectShape(t *testing.T) {
 // The unstructured content must be JSON-safe: DeepCopy panics on any other
 // type, and the dynamic client marshals it as JSON.
 func TestRenderBundleContentIsDeepCopyable(t *testing.T) {
-	obj, err := RenderBundle(bundleFixture(), "kconmon-ng", "kconmon-ng-console-rules")
+	obj, err := defaultRenderer.RenderBundle(bundleFixture(), "kconmon-ng", "kconmon-ng-console-rules")
 	if err != nil {
 		t.Fatalf("RenderBundle() error = %v", err)
 	}
@@ -289,7 +289,7 @@ func TestRenderBundleEmptyAndAllDisabled(t *testing.T) {
 		"empty slice":  {},
 		"all disabled": {{ID: "x", Name: "n", Kind: KindAgentMissing, Severity: "info", Enabled: false}},
 	} {
-		obj, err := RenderBundle(rules, "kconmon-ng", "kconmon-ng-console-rules")
+		obj, err := defaultRenderer.RenderBundle(rules, "kconmon-ng", "kconmon-ng-console-rules")
 		if err != nil {
 			t.Fatalf("%s: RenderBundle() error = %v", name, err)
 		}
@@ -420,7 +420,7 @@ func TestRenderBundleErrors(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := RenderBundle(tt.rules, tt.namespace, tt.bundle)
+			_, err := defaultRenderer.RenderBundle(tt.rules, tt.namespace, tt.bundle)
 			if tt.wantSub == nil {
 				if err != nil {
 					t.Fatalf("RenderBundle() error = %v, want nil", err)
@@ -442,7 +442,7 @@ func TestRenderBundleErrors(t *testing.T) {
 // for is OMITTED when ForNS is zero rather than written as "0s" — a live
 // object will not carry the key either, so drift stays quiet.
 func TestRenderBundleOmitsZeroFor(t *testing.T) {
-	obj, err := RenderBundle([]Rule{{
+	obj, err := defaultRenderer.RenderBundle([]Rule{{
 		ID: "id-1", Name: "n", Kind: KindAgentMissing, Severity: "info", Enabled: true,
 	}}, "ns", "b")
 	if err != nil {

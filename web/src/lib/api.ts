@@ -10,6 +10,9 @@ import type {
   CheckDefinitionQuery,
   CheckDefinitionRequest,
   Config,
+  ConfigBundle,
+  ConfigImportRequest,
+  ConfigImportResult,
   EventPage,
   EventQuery,
   Incident,
@@ -48,6 +51,9 @@ import type {
   TargetRequest,
   Topology,
   Version,
+  Webhook,
+  WebhookList,
+  WebhookRequest,
 } from "./types";
 // The one instant formatter (RFC 3339, UTC, seconds) the URL's ?at= and every
 // request built from it share — see getTopology below.
@@ -767,4 +773,310 @@ export function getAuditEntries(q: AuditQuery = {}): Promise<AuditPage> {
   if (q.cursor) qs.set("cursor", q.cursor);
   const suffix = qs.toString();
   return apiFetch(`/api/v1/audit${suffix ? `?${suffix}` : ""}`).then((r) => handle<AuditPage>(r));
+}
+
+/* ── M6 webhooks / M7 configuration export-import ───────────────────────────
+   The Settings page's transport (M7 Task 10, plan Decision 10). Same apiFetch
+   — credentials + the CSRF header on every mutation — and the same
+   handle<T>/handleVoid pair as everything above; there is deliberately no
+   second fetch path for the one page whose bodies carry a secret.
+
+   Permissions: all six webhook routes take webhooks:manage and BOTH bundle
+   routes take settings:write, each of them admin-only and with no read/write
+   split (internal/console/httpapi/middleware_auth.go). Neither is enforced
+   here — the page HIDES the sections it has no permission for, and the server
+   remains the only real gate. */
+
+/**
+ * listWebhooks is GET /api/v1/webhooks. UNPAGED and therefore carrying no
+ * cursor: the row count is endpoints an operator typed, not a function of time
+ * (docs/console-api.yaml's WebhookList).
+ *
+ * No secret comes back, at any layer. `hasSecret` is all a reader learns, and
+ * it is always true for a stored row — the store refuses an empty one — so it
+ * reads as the contract statement "this endpoint signs its deliveries" rather
+ * than as a question.
+ */
+export function listWebhooks(): Promise<WebhookList> {
+  return apiFetch("/api/v1/webhooks").then((r) => handle<WebhookList>(r));
+}
+
+/**
+ * createWebhook is POST /api/v1/webhooks (201 + Location + the row, minus the
+ * secret it was just given). `secret` is REQUIRED here: every delivery is
+ * signed (M6 Decision 5), so a body without one is 422 and there is no such
+ * thing as an endpoint that cannot sign.
+ */
+export function createWebhook(req: WebhookRequest): Promise<Webhook> {
+  return apiFetch("/api/v1/webhooks", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(req),
+  }).then((r) => handle<Webhook>(r));
+}
+
+/**
+ * updateWebhook is PUT /api/v1/webhooks/{id}: a FULL replace like every other
+ * write in this API, with exactly ONE field that is not — `secret`.
+ *
+ * OMIT the key to keep the stored ciphertext; send a non-empty string to
+ * replace it. Sending "" is 422 on purpose (neither "keep" nor "clear" would
+ * be more than a guess about what an operator meant by a blank box), which is
+ * why callers must delete the key rather than pass an empty string through.
+ * JSON.stringify drops an `undefined` property, so a WebhookRequest built
+ * without the field puts no `secret` on the wire at all.
+ */
+export function updateWebhook(id: string, req: WebhookRequest): Promise<Webhook> {
+  return apiFetch(`/api/v1/webhooks/${encodeURIComponent(id)}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(req),
+  }).then((r) => handle<Webhook>(r));
+}
+
+// deleteWebhook is DELETE /api/v1/webhooks/{id}: 204, so handleVoid. Deleting
+// one that is not there is 404, not success.
+export function deleteWebhook(id: string): Promise<void> {
+  return apiFetch(`/api/v1/webhooks/${encodeURIComponent(id)}`, { method: "DELETE" }).then(handleVoid);
+}
+
+/**
+ * testWebhook is POST /api/v1/webhooks/{id}/test: 202 with no body, so
+ * handleVoid rather than handle.
+ *
+ * 202 and not 200 is the whole contract. Delivery is asynchronous behind a
+ * retry ladder, so the only honest thing this can report is that the work was
+ * ACCEPTED; the outcome lands on the endpoint row and is read back with
+ * listWebhooks — lastStatus/lastAttempt/failures. A caller that renders "test
+ * succeeded" off this resolved promise would be inventing a result.
+ */
+export function testWebhook(id: string): Promise<void> {
+  return apiFetch(`/api/v1/webhooks/${encodeURIComponent(id)}/test`, { method: "POST" }).then(handleVoid);
+}
+
+/**
+ * exportConfig is GET /api/v1/export: the whole declarative configuration as
+ * one versioned JSON bundle (plan Decision 9).
+ *
+ * It returns the PARSED bundle rather than triggering a browser download,
+ * deliberately: the download is an anchor + object URL built by the caller
+ * (pages/settings.tsx), so the request rides this module's apiFetch like every
+ * other — credentials, the 401 redirect, problem+json surfaced as an ApiError.
+ * Navigating the tab to /api/v1/export instead would leave a 403 or a 503
+ * rendering as raw JSON in place of the console.
+ *
+ * No secret ever travels in the body: webhooks arrive as a name/url/events
+ * triple plus a `hasSecret` boolean about the SOURCE row.
+ */
+export function exportConfig(): Promise<ConfigBundle> {
+  return apiFetch("/api/v1/export").then((r) => handle<ConfigBundle>(r));
+}
+
+/**
+ * importConfig is POST /api/v1/import. `dryRun` is a BODY flag rather than a
+ * query parameter because the flag and the bundle it applies to are one
+ * indivisible statement — a parameter dropped by a proxy would turn a preview
+ * into an apply — and it is REQUIRED here rather than defaulted, so no caller
+ * can write an apply by forgetting an argument.
+ *
+ * The response shape is byte-identical for a dry run and an apply. That is the
+ * entire point of the dry run: what it predicts is what the apply does.
+ */
+export function importConfig(bundle: ConfigBundle, dryRun: boolean): Promise<ConfigImportResult> {
+  const req: ConfigImportRequest = { dryRun, bundle };
+  return apiFetch("/api/v1/import", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(req),
+  }).then((r) => handle<ConfigImportResult>(r));
+}
+
+/* ── M7 alert rules (pages/alerting.tsx) ─────────────────────────────────────
+   An APPEND-ONLY block, imports included. The second `import type` statement
+   below is not an accident and not a style slip: M7 Task 7 lands concurrently
+   with two other implementers, one of which regenerates api-types.ts, and
+   growing the import list at the top of this file would put an edit in the one
+   region every other change to this module also touches. TypeScript is happy
+   with a second type-only import from the same module, it costs nothing at
+   runtime (type imports are erased), and the whole of this task's transport is
+   then one contiguous block that cannot conflict with anything above it. */
+import type {
+  AlertRule,
+  AlertRuleImportReport,
+  AlertRuleImportRequest,
+  AlertRuleList,
+  AlertRulePreview,
+  AlertRuleRequest,
+  ForeignRuleList,
+  SyncKick,
+} from "./types";
+
+/**
+ * listAlertRules is GET /api/v1/alert-rules: every console-managed rule,
+ * ordered by name. UNPAGED, listWebhooks' reasoning — the row count is rules an
+ * operator configured, not a function of time.
+ *
+ * 503 (problem+json, surfaced as an ApiError) is the answer on a console with
+ * no database: alert rules are persisted CONFIGURATION with no in-memory
+ * fallback. That is the ONLY dependency this route has — it does not need the
+ * reconciler, and a console with alerting switched off still lists, creates and
+ * edits rules perfectly well. See syncAlertRules for the other half of that
+ * split.
+ */
+export function listAlertRules(): Promise<AlertRuleList> {
+  return apiFetch("/api/v1/alert-rules").then((r) => handle<AlertRuleList>(r));
+}
+
+/**
+ * createAlertRule is POST /api/v1/alert-rules (201 + the stored row, including
+ * the `renderedExpr` the SERVER produced from the builder fields).
+ *
+ * The expression is never sent: for a template kind the console does not accept
+ * one at all, and for `raw` it travels as params.expr like any other parameter.
+ * A body the renderer cannot turn into PromQL is a 422 naming the param.
+ */
+export function createAlertRule(req: AlertRuleRequest): Promise<AlertRule> {
+  return apiFetch("/api/v1/alert-rules", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(req),
+  }).then((r) => handle<AlertRule>(r));
+}
+
+/**
+ * updateAlertRule is PUT /api/v1/alert-rules/{id} — a FULL replace, with no
+ * PATCH counterpart anywhere on this resource (the incidents PATCH stays the
+ * one exception in this API).
+ *
+ * Which makes one omission dangerous enough to state here: `enabled` OMITTED
+ * means TRUE, not false, so a PUT built by spreading a partial draft ENABLES a
+ * rule somebody deliberately turned off. pages/alerting.tsx's
+ * alertRuleRequestFrom always writes the field explicitly, and it is the single
+ * place any body on this route is built.
+ */
+export function updateAlertRule(id: string, req: AlertRuleRequest): Promise<AlertRule> {
+  return apiFetch(`/api/v1/alert-rules/${encodeURIComponent(id)}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(req),
+  }).then((r) => handle<AlertRule>(r));
+}
+
+// deleteAlertRule is DELETE /api/v1/alert-rules/{id}: 204, so handleVoid.
+// Deleting a rule that is not there is 404, not success.
+export function deleteAlertRule(id: string): Promise<void> {
+  return apiFetch(`/api/v1/alert-rules/${encodeURIComponent(id)}`, { method: "DELETE" }).then(handleVoid);
+}
+
+/**
+ * syncAlertRules is POST /api/v1/alert-rules/{id}/sync: 202 with `{"status":
+ * "kicked"}`, which is the whole of what it can honestly say.
+ *
+ * The kick is a non-blocking, coalescing nudge at a reconciler that applies the
+ * WHOLE bundle (one PrometheusRule object holds every enabled rule), so the id
+ * is not a filter — it is the rule the operator was looking at when they
+ * pressed the button. The OUTCOME lands on the rules themselves and is read
+ * back with listAlertRules as syncStatus/syncMessage/lastSyncedAt. A caller
+ * that renders "synced" off this resolved promise is inventing a result.
+ *
+ * 409 — not 503 — is the answer when console.alerting.enabled is false. This is
+ * the one place in the API where those two come apart: the database is fine and
+ * every rule is right where it was, so 503 ("the dependency this route reads
+ * from is not configured") would send an operator looking at their database for
+ * a reconciler nobody asked to start.
+ */
+export function syncAlertRules(id: string): Promise<SyncKick> {
+  return apiFetch(`/api/v1/alert-rules/${encodeURIComponent(id)}/sync`, { method: "POST" }).then((r) =>
+    handle<SyncKick>(r),
+  );
+}
+
+/**
+ * previewAlertRule is POST /api/v1/alert-rules/preview: render the builder
+ * fields into PromQL, then run that expression as an instant query and count
+ * the series.
+ *
+ * A POST that writes nothing and is gated on alerts:READ — the mirror image of
+ * the checks projection route. It takes the SAME body as create/update, which
+ * is the point: what it previews is what a save would store.
+ *
+ * The two halves fail independently, so a 200 here is not "it worked". Read
+ * `error` first: when it is set the evaluation half did not run or did not
+ * answer, and `series` is 0 because nobody counted, not because nothing
+ * matched.
+ */
+export function previewAlertRule(req: AlertRuleRequest): Promise<AlertRulePreview> {
+  return apiFetch("/api/v1/alert-rules/preview", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(req),
+  }).then((r) => handle<AlertRulePreview>(r));
+}
+
+/**
+ * listForeignAlertRules is GET /api/v1/alert-rules/foreign: the PrometheusRule
+ * objects in the console's namespace that it does NOT own, projected down to
+ * four facts (name, group count, rule count, managed-by label).
+ *
+ * It needs no database — the answer comes from the cluster — but it does need
+ * the reconciler, so a console with alerting off answers 409 naming the flag
+ * while the rules list beside it keeps working. That asymmetry is exactly what
+ * the Alerting page renders as two different section states.
+ */
+export function listForeignAlertRules(): Promise<ForeignRuleList> {
+  return apiFetch("/api/v1/alert-rules/foreign").then((r) => handle<ForeignRuleList>(r));
+}
+
+/**
+ * importForeignAlertRules is POST /api/v1/alert-rules/import: adopt a foreign
+ * PrometheusRule by COPYING its alerting rules into console-managed rows.
+ *
+ * COPYING is the whole contract. The named object is never mutated and never
+ * deleted — there is no code path from this route to a write against somebody
+ * else's object — so after a successful import the same alerts are defined
+ * TWICE in the cluster: once by the object its owner still controls, once by
+ * the console's own bundle. Removing the original is that owner's decision.
+ * pages/alerting.tsx prints that consequence next to the button.
+ *
+ * The response IS the result: per-item created/skipped/notes, non-transactional
+ * (one refused entry does not roll back the ones before it). There is no dryRun
+ * because the report is the preview and the apply in one round trip.
+ */
+export function importForeignAlertRules(name: string): Promise<AlertRuleImportReport> {
+  const req: AlertRuleImportRequest = { name };
+  return apiFetch("/api/v1/alert-rules/import", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(req),
+  }).then((r) => handle<AlertRuleImportReport>(r));
+}
+
+/* ── M7 alert STATE (pages/overview.tsx + pages/investigate.tsx) ─────────────
+   Task 8's transport, appended after Task 7's block for the reason Task 7's own
+   header gives: an append-only block cannot collide with a concurrent edit. */
+import type { AlertList } from "./types";
+
+/**
+ * listAlerts is GET /api/v1/alerts: what Prometheus is firing RIGHT NOW,
+ * projected onto this console's vocabulary. There is no history endpoint and
+ * this is not one — the answer is a snapshot, and both consumers say so.
+ *
+ * THREE outcomes, and telling them apart is this route's whole design:
+ *   - 200 with `promConfigured:false` and an empty list — nobody is watching.
+ *     NOT an error and NOT a 503: "nothing is firing" and "nothing is
+ *     evaluating" are two different sentences the Overview card must render.
+ *   - 502 (an ApiError carrying the detail) — Prometheus IS wired and did not
+ *     answer. Rendering that as an empty firing list would be the most
+ *     dangerous lie either surface can tell, so both surface the error.
+ *   - 200 with the set.
+ *
+ * `managedOnly` is deliberately NOT plumbed through. Both callers want the
+ * FLEET's firing state: the Overview card is an operator's morning view, and
+ * hiding a firing alert because somebody else wrote its rule would make the
+ * console's silence mean less than it does. Foreign alerts arrive with no
+ * `ruleId` and are tagged in the UI instead. The parameter exists on the route
+ * for the webhook watcher, which has the opposite requirement.
+ */
+export function listAlerts(): Promise<AlertList> {
+  return apiFetch("/api/v1/alerts").then((r) => handle<AlertList>(r));
 }

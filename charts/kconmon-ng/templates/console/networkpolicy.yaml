@@ -142,8 +142,11 @@ spec:
         - protocol: TCP
           port: 9090
     {{- end }}
-    # Console to the Kubernetes apiserver (M6 event reader,
-    # console.kubernetesContext.enabled only). ipBlock and not a
+    # Console to the Kubernetes apiserver (M6 event reader and, since M7, the
+    # alerting reconciler's PrometheusRule apply — see
+    # kconmon-ng.console.k8sIdentity; either flag opens this, neither leaves it
+    # closed, and the reconciler's forbidden/dial errors are otherwise
+    # indistinguishable in a rule's sync_message). ipBlock and not a
     # namespaceSelector for the same reason as the OIDC rule above and one more:
     # kubernetes.default.svc is a ClusterIP with no Pod behind it, so a
     # namespaceSelector matches nothing and every packet is dropped — the
@@ -154,7 +157,7 @@ spec:
     # POST-DNAT destination on most CNIs. Tighten via
     # console.networkPolicy.kubeAPIEgress once you know your control plane's
     # addresses.
-    {{- if .Values.console.kubernetesContext.enabled }}
+    {{- if include "kconmon-ng.console.k8sIdentity" . }}
     {{- if .Values.console.networkPolicy.kubeAPIEgress }}
     {{- toYaml .Values.console.networkPolicy.kubeAPIEgress | nindent 4 }}
     {{- else }}

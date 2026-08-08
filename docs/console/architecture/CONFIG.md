@@ -12,6 +12,10 @@ The kubernetesContext and webhooks sections added from the as-built M6
 implementation (2026-08-08): config.go's KubernetesContextConfig/
 WebhooksConfig, internal/console/kubectx, cmd/console/main.go's two
 warn-and-continue switches, at chart 1.8.0.
+The alerting and webhooks.alertPollInterval sections added from the as-built M7
+implementation (2026-08-08): config.go's AlertingConfig/WebhooksConfig,
+internal/console/promrules, internal/console/webhooks/watcher.go,
+cmd/console/main.go's reconciler skip, at chart 1.9.0.
 This document is the source of truth for Console configuration. Update it (and the ADRs) in the same PR as any deviation.
 -->
 
@@ -114,6 +118,12 @@ kubernetesContext:
 webhooks:
   encryptionKey: "" # base64 of 32 random bytes; prefer the File form
   encryptionKeyFile: "" # path to a file holding the same value; WINS over encryptionKey
+  alertPollInterval: 30s # alert-state poll cadence AND the resolution granularity of alert.resolved
+alerting:
+  enabled: false # master gate; the PrometheusRule reconciler (the console's SECOND apiserver client)
+  namespace: "" # where the bundle object is applied; empty = $POD_NAMESPACE, then "default"
+  syncInterval: 60s # reconcile cadence, jittered ±20%; must be > 0 when enabled
+  bundleName: kconmon-ng-console-rules # the ONE PrometheusRule object; DNS-1123 subdomain
 ```
 
 `database` is entirely omitted from the rendered config when
@@ -153,6 +163,10 @@ Startup fails — loudly, before serving — on any of these:
 | `webhooks.encryptionKey` and `webhooks.encryptionKeyFile` both set | error ("set either ... not both" — `database.dsnFile`'s rule) |
 | `webhooks.encryptionKey` set and not base64 of **exactly 32** bytes | error naming the field and the byte count; the value is **never echoed** |
 | `webhooks.encryptionKeyFile` set and unreadable, or holding a malformed key | **fatal at boot**, not a validation error: resolution reads the file, and an unreadable key is a broken Secret mount (`database.dsnFile`'s precedent) |
+| `webhooks.alertPollInterval` non-positive **while a key is named AND `alerting.enabled=true`** | error naming the field and what it costs (it is the granularity of every `alert.resolved`). Both conditions, not either: with no key there is no delivery path, and with alerting off there is nothing to watch — a leftover zero in an operator's file must not be a boot failure for a feature they never switched on |
+| `alerting.syncInterval` non-positive **while `alerting.enabled=true`** | error (`scheduler.tickInterval`'s rule) |
+| `alerting.bundleName` empty **while `alerting.enabled=true`** | error |
+| `alerting.bundleName` not a DNS-1123 subdomain **while `alerting.enabled=true`** | error naming the key. Checked at boot rather than discovered as a rejected apply 60 seconds into the process's life: a boot error names the key, an apply rejection names nothing an operator can grep for |
 
 ### `rateLimit` — what it actually bounds, and where it stops
 
@@ -283,7 +297,7 @@ both paths above must live under it. Setting a path with no volume **fails
 rendering** rather than shipping a config that names a file nothing mounts —
 see "Chart behaviours worth knowing" below.
 
-### `kubernetesContext` — the console's only apiserver client
+### `kubernetesContext` — the console's *first* apiserver client
 
 `enabled` is **false by default** for `mtr.enrichment`'s reason plus one more:
 turning it on gives the console pod both a new egress (the apiserver) *and* a
@@ -319,6 +333,79 @@ delivering nothing, which no error path can detect. Ten minutes because the
 apiserver keeps events for about an hour, so a relist at this cadence cannot
 miss one, and every relisted row the database already holds costs one rejected
 INSERT and a `duplicate` counter increment, never a duplicate row.
+
+### `alerting` — the console's *second* apiserver client (M7)
+
+`enabled` is **false by default**, for `kubernetesContext`'s reasons and a
+sharper version of the second one: this grant does not just read, it **writes**
+a `monitoring.coreos.com` object. Enabling it in the chart renders, under that
+one flag, the config block, the console-only ServiceAccount (shared with
+`kubernetesContext` — one identity, two grants), a **namespaced** `Role` +
+`RoleBinding` over `prometheusrules`, `serviceAccountName` on the Deployment,
+`POD_NAMESPACE`, and the apiserver egress rule. SECURITY.md §10.3 has the verbs
+and why `delete` is not among them.
+
+**Without a database the reconciler is SKIPPED, and that is stronger than
+`kubernetesContext`'s warning-and-continue.** The rules are rows in
+`alert_rules`; with no database the desired state is "no rules", and asserting
+that would apply an **empty bundle over rules that are already evaluating**.
+`cmd/console` refuses to run the loop rather than converge the cluster to
+nothing. Everything else — the API, the builder, the list — keeps working.
+
+**No CRD is not a boot failure either.** The Prometheus Operator is not a
+dependency of this chart. A missing `PrometheusRule` CRD, a missing `Role` and a
+down apiserver all land as `sync_status=error` on every enabled rule, with a
+closed cause class (`crd-missing`, `forbidden`, `other`) as the first token of
+the message, and the loop keeps its cadence.
+
+`namespace` is **one** namespace and empty is the useful value, exactly as for
+`kubernetesContext` and through the same `resolveNamespace` helper: the console
+reads `$POD_NAMESPACE`, falling back to `default` off-cluster. Pointing it
+elsewhere does **not** widen the grant — the `Role` lives in the release
+namespace — it just makes every apply fail with a `forbidden` that lands in each
+rule's `sync_message`. Whether your Prometheus *picks up* an object in that
+namespace is a `ruleNamespaceSelector` question on the `Prometheus` CR, not a
+console one.
+
+`syncInterval` (**60s**) is a convergence cadence, not a reaction time. Every
+create, update, delete and successful import kicks the loop immediately, so this
+interval only ever covers drift somebody introduced out of band. It is jittered
+±20% so N replicas do not apply in lockstep — and every replica *does* run the
+loop, deliberately, because this asserts state rather than firing side effects
+(ALERTING.md §5).
+
+`bundleName` (**`kconmon-ng-console-rules`**) is configurable only so two
+consoles can share a namespace without fighting over one object. **Changing it
+on a live install orphans the previous object** — the reconciler owns what it is
+pointed at and deletes nothing — which is why the default is spelled out rather
+than derived from the release name.
+
+It is spelled as durations (`60s`), not `*Ns` integers: the nanosecond
+convention belongs to the wire and the database, not to operator-typed
+configuration — the same rule `scheduler.tickInterval`,
+`kubernetesContext.resyncInterval` and `mtr.enrichment.ttl` already follow.
+
+### `webhooks.alertPollInterval` — under `webhooks`, and not by accident
+
+**30s.** How often the alert-transition watcher reads Prometheus' current alert
+set to detect fired/resolved edges. It sits under `webhooks` rather than under
+`alerting`, and the distinction is not cosmetic: `alerting.syncInterval` pushes
+rules **into** Prometheus, this reads alert **state** back out, and it exists for
+exactly one purpose — firing deliveries. Reusing the reconcile cadence would tie
+two unrelated frequencies together, and an operator wanting alert deliveries
+within ten seconds would have had to reconcile CRDs every ten seconds to get
+them.
+
+It is inert twice over: with no encryption key there are no webhooks, and with
+`alerting.enabled=false` there is nothing to watch. The chart therefore renders
+the line only when **both** are on.
+
+It is also, directly, the **resolution granularity** of every `alert.resolved`
+delivery: a resolution is detected by an alert's absence from a poll, so
+"resolved at" means "resolved somewhere in the interval ending here". Shortening
+it sharpens that number and costs one more GET per interval per replica;
+lengthening it blunts it. The poll is deliberately **unjittered**, unlike the
+reconcile loop, so the error bar is a number an operator can reason about.
 
 ### `webhooks.encryptionKey` — three states, three different outcomes
 
@@ -545,7 +632,7 @@ neither, the render is unchanged.
 Secrets are read once at boot; rotating one is an operator-initiated restart
 (the Deployment rolls on ConfigMap changes only, never on Secret changes).
 
-## Helm mapping (chart 1.8.0)
+## Helm mapping (chart 1.9.0)
 
 | Config key | Helm value |
 | ---------- | ---------- |
@@ -564,8 +651,10 @@ Secrets are read once at boot; rotating one is an operator-initiated restart
 | `scheduler.*` | `console.scheduler.*`; the whole `scheduler:` block is omitted from the rendered config when `console.scheduler.enabled=false` |
 | `mtr.enrichment.*` | `console.mtr.enrichment.*`; the whole `mtr:` block is omitted from the rendered config when `console.mtr.enrichment.enabled=false` |
 | `mtr.enrichment.geoip.{asnPath,cityPath}` | the same values, but they must name files under `/geoip` — the chart mounts `console.mtr.enrichment.geoip.volume` read-only there and offers no way to put a file anywhere else |
-| `kubernetesContext.*` | `console.kubernetesContext.*`; the whole `kubernetesContext:` block is omitted from the rendered config when `console.kubernetesContext.enabled=false`. That same flag also renders the console ServiceAccount, its ClusterRole + binding, `serviceAccountName`, `POD_NAMESPACE` and the apiserver egress rule — one flag, six manifest effects |
+| `kubernetesContext.*` | `console.kubernetesContext.*`; the whole `kubernetesContext:` block is omitted from the rendered config when `console.kubernetesContext.enabled=false`. That same flag also renders the console ServiceAccount, `serviceAccountName`, `POD_NAMESPACE`, the apiserver egress rule and its own ClusterRole + binding — **since chart 1.9.0 the first four are shared with `console.alerting.enabled` through one `kconmon-ng.console.k8sIdentity` helper**, so either flag alone renders them and neither can disagree with the other |
 | `webhooks.encryptionKeyFile` | derived from `console.webhooks.encryptionKeySecret.{name,key}`; the block is absent when no Secret is named. **There is no Helm value for the inline `webhooks.encryptionKey`**, deliberately: it would put 32 bytes of key material in a ConfigMap |
+| `webhooks.alertPollInterval` | `console.webhooks.alertPollInterval` (chart 1.9.0). Rendered only when a key Secret is named **and** `console.alerting.enabled=true` — the two conditions the binary's own validation checks. Before 1.9.0 the key existed in the binary but was **unreachable from Helm**: the default worked, it just could not be tuned |
+| `alerting.*` | `console.alerting.*`; the whole `alerting:` block is omitted from the rendered config when `console.alerting.enabled=false`. That same flag also renders the namespaced `Role` + `RoleBinding` over `prometheusrules`, plus the four shared identity effects above |
 
 Realtime therefore needs **two** flags, one on each side:
 
@@ -594,7 +683,7 @@ console:
   which is the only thing that makes a byte-identical claim meaningful; 1.5.0
   is a *released* chart that already contains them, so it was never the right
   baseline. (This sentence previously called 1.5.0 a future release. It has
-  shipped; the current chart is 1.8.0.)
+  shipped; the current chart is 1.9.0.)
 - **`config.checkers.external` is emitted into the shared ConfigMap only when
   it is enabled**, for exactly the `controller.events` reason above: a pre-M4
   agent image has no `External` field and `KnownFields(true)` would crashloop
@@ -613,6 +702,16 @@ console:
   gate is justified by the image being replaced, not by this one. Off by
   default also means an install that never touched the block renders a console
   `config.yaml` key-identical to chart 1.6.0's.
+- **`console.alerting` is emitted only when enabled**, and
+  **`console.webhooks.alertPollInterval` only when a key Secret is named AND
+  alerting is on** — the same `KnownFields(true)` rolling-image reason as the
+  three above. `alertPollInterval` is the sharper case: the `webhooks:` block
+  itself has existed since chart 1.8.0, so the *new key inside it* is what a
+  pre-M7 console image would reject, and gating it on `alerting.enabled`
+  guarantees nobody meets that combination (turning alerting on while rolling
+  backwards onto an image that has no alerting). Off by default also means an
+  install that never touched either block renders a console `config.yaml`
+  key-identical to chart 1.8.0's.
 - **`console.rateLimit` is emitted unconditionally**, unlike the three above.
   There is no "off" state to gate on — the limiter always runs, and `0` is a
   value that means "this limit is off", not "this block is absent".

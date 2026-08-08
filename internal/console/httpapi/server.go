@@ -142,6 +142,23 @@ type Server struct {
 	webhooks    WebhookService
 	k8sEvents   K8sEventService
 
+	// alertRules backs the console-managed Prometheus alert rules (M7 Task 1
+	// store): the /api/v1/alert-rules CRUD routes and the configuration
+	// export/import pair, which needs every config table at once. Same
+	// Decision 13 rule as targets: nil = database.mode=disabled, and every
+	// alert-rule route -- plus GET /api/v1/export and POST /api/v1/import,
+	// which refuse to serve a bundle with a hole in it -- answers 503.
+	alertRules AlertRuleService
+
+	// ruleSync is the PrometheusRule reconciler (M7 Task 3), and it is the
+	// ONE dependency in this struct whose absence is a 409 rather than a 503.
+	// nil does not mean "the database is off": it means console.alerting.enabled
+	// is false, or the console is not running in a cluster -- the rules are all
+	// still there and still editable, and only the two routes that need the
+	// cluster (sync, foreign) refuse. See alertingDisabledDetail for the full
+	// reasoning.
+	ruleSync RuleSyncer
+
 	// webhookSealer encrypts a plaintext endpoint secret on its way to the
 	// store, and webhookTester enqueues the /test ping. BOTH are implemented
 	// by M6 Task 5's dispatcher package, which owns the AES-GCM key
@@ -301,6 +318,29 @@ type Deps struct {
 	Webhooks    WebhookService
 	K8sEvents   K8sEventService
 
+	// AlertRules backs the alert_rules table (M7 Task 1) for both the
+	// /api/v1/alert-rules CRUD routes and the configuration export/import
+	// pair, which reads and writes it alongside every other config table --
+	// GET /api/v1/export refuses to answer at all unless this is wired, since
+	// a bundle missing one collection because a seam happened to be nil is a
+	// restore point with a hole in it. Same Decision 13 rule as Targets
+	// otherwise: nil means database.mode=disabled.
+	AlertRules AlertRuleService
+
+	// RuleSync is the PrometheusRule reconciler (M7 Task 3), used by POST
+	// /api/v1/alert-rules/{id}/sync and GET /api/v1/alert-rules/foreign, and
+	// nudged after every alert-rule write so an operator does not wait out the
+	// jittered 60s loop.
+	//
+	// nil is NOT this struct's usual "feature off, answer 503": it means
+	// console.alerting.enabled is false or the console has no in-cluster
+	// Kubernetes config, and the two routes that genuinely need the cluster
+	// answer 409 naming the flag while everything else -- list, create, edit,
+	// delete, preview -- keeps working against the database alone. cmd/console
+	// builds it only in the same branch that spawns the reconcile loop, so
+	// there is no state where this is wired and nothing is converging.
+	RuleSync RuleSyncer
+
 	// WebhookSealer seals a plaintext endpoint secret and WebhookTestDispatcher
 	// enqueues the /test ping. In production both are M6 Task 5's dispatcher,
 	// built only when console.webhooks.encryptionKey is configured -- the key
@@ -396,6 +436,7 @@ func NewServer(d Deps) *Server { //nolint:gocritic // hugeParam: Deps is the pin
 		topologyHistory: d.TopologyHistory,
 		mtr:             d.MTR, annotations: d.Annotations, enricher: d.Enricher,
 		incidents: d.Incidents, maintenance: d.Maintenance, webhooks: d.Webhooks, k8sEvents: d.K8sEvents,
+		alertRules: d.AlertRules, ruleSync: d.RuleSync,
 		webhookSealer: d.WebhookSealer, webhookTester: d.WebhookTestDispatcher,
 		notifier: d.IncidentNotifier,
 		kv:       d.KV,
@@ -548,10 +589,44 @@ func NewServer(d Deps) *Server { //nolint:gocritic // hugeParam: Deps is the pin
 		api.Delete("/api/v1/webhooks/{id}", s.handleWebhooksDelete)
 		api.Post("/api/v1/webhooks/{id}/test", s.handleWebhooksTest)
 
+		// Console-managed Prometheus alert rules (M7 Task 4). /foreign and
+		// /preview are registered before the {id} routes for readability only
+		// -- chi matches a static segment ahead of a wildcard regardless of
+		// registration order, and neither competes with a same-method {id}
+		// route in any case (there is no POST /api/v1/alert-rules/{id}).
+		//
+		// PUT, not PATCH: a rule is a definition one person edits in a form, so
+		// a full replace is what makes "what you see is what is stored" true.
+		// The incidents PATCH stays the ONE exception in this API.
+		api.Get("/api/v1/alert-rules", s.handleAlertRulesList)
+		api.Post("/api/v1/alert-rules", s.handleAlertRulesCreate)
+		api.Get("/api/v1/alert-rules/foreign", s.handleAlertRulesForeign)
+		api.Post("/api/v1/alert-rules/import", s.handleAlertRulesImport)
+		api.Post("/api/v1/alert-rules/preview", s.handleAlertRulesPreview)
+		api.Get("/api/v1/alert-rules/{id}", s.handleAlertRulesGet)
+		api.Put("/api/v1/alert-rules/{id}", s.handleAlertRulesUpdate)
+		api.Delete("/api/v1/alert-rules/{id}", s.handleAlertRulesDelete)
+		api.Post("/api/v1/alert-rules/{id}/sync", s.handleAlertRulesSync)
+
+		// The firing set (M7 Decision 6). Read from Prometheus, never
+		// evaluated here, and it is NOT under /alert-rules: an alert is an
+		// observation, and most of them may not belong to a rule this console
+		// manages at all.
+		api.Get("/api/v1/alerts", s.handleAlerts)
+
 		// Captured Kubernetes events are READ-ONLY over HTTP: they are written
 		// by internal/console/kubectx (M6 Task 2) from the cluster's own event
 		// stream, and there is nothing a client could legitimately add.
 		api.Get("/api/v1/k8s-events", s.handleK8sEvents)
+
+		// Configuration export/import (M7 Task 6, Decision 9). Two routes, one
+		// admin-only permission, and no {id} anywhere: the unit is the WHOLE
+		// declarative configuration, not a row. The import is a POST rather
+		// than a PUT even though it is idempotent under its natural keys --
+		// it is a merge with a per-item result, not a replace of a named
+		// resource, and there is no path it could replace.
+		api.Get("/api/v1/export", s.handleExport)
+		api.Post("/api/v1/import", s.handleImport)
 
 		api.Get("/api/v1/rbac/permissions", s.handleRBACPermissions)
 		api.Get("/api/v1/rbac/roles", s.handleRBACRolesList)
@@ -684,13 +759,19 @@ func (s *Server) capabilities() []string {
 // 503 with an RFC 7807 body, matching how a missing controller/Prometheus is
 // handled: the route always exists, so the browser gets a diagnosable answer
 // instead of the SPA fallback HTML.
+//
+// The socket carries a SECOND authorization decision beyond the route's own
+// (M7, M3 follow-up #10): the upgrade admits events:read OR runs:read, and
+// wsTopicAuthorizer (ws_authz.go) narrows what the runs:read-only half may
+// then subscribe to. See that file for the whole rationale.
 func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	if s.hub == nil {
 		writeProblem(w, http.StatusServiceUnavailable, "realtime not available",
 			"this console instance has no websocket hub wired")
 		return
 	}
-	s.hub.ServeWS(w, r)
+	subject, _ := SubjectFrom(r.Context())
+	s.hub.ServeWSAuthorized(w, r, s.wsTopicAuthorizer(subject))
 }
 
 // authLoginPath returns the endpoint the frontend should navigate to (GET,

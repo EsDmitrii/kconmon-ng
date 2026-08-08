@@ -893,6 +893,60 @@ func TestIngesterPersistsAfterPublish(t *testing.T) {
 	}
 }
 
+// TestIngesterPersistsTopologyAttribution is the M7 carry's ingestion half:
+// the controller now names the agent, node and zone behind every topology
+// change, and this is what proves the console does not drop that on the way to
+// the durable row. Scope and summary come from it too, but Details is the
+// load-bearing one -- it is the ONLY thing store.foldTopology reads, so an
+// attribution lost here is a reconstructed topology that stays empty.
+func TestIngesterPersistsTopologyAttribution(t *testing.T) {
+	_, ctrl := startFakeController(t, "events")
+	fake, addr := startFakeEventStream(t)
+
+	bus := cache.NewInProcessBus()
+	_, unsubscribe := bus.Subscribe(liveBusTopic)
+	defer unsubscribe()
+
+	sink := &fakeSink{}
+	m := newTestMetrics()
+	ing := events.NewIngester(ctrl, addr, bus, m, events.WithEventSink(sink))
+	ing.SetConnectGrace(preconditionGrace)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() { defer close(done); ing.Run(ctx) }()
+
+	waitFor(t, "the ingester to establish a stream", ing.Healthy)
+
+	fake.send(t, &pb.Event{Seq: 7, Timestamp: fixedTime(), Payload: &pb.Event_TopologyChanged{
+		TopologyChanged: &pb.TopologyChanged{
+			Reason: "agent_registered", NodeName: "node-a", AgentId: "agent-a", Zone: "zone-a",
+		},
+	}})
+
+	waitFor(t, "the sink to be called once", func() bool { return sink.callCount() == 1 })
+
+	got := sink.calls()[0]
+	if got.Scope != "node-a" {
+		t.Errorf("scope = %q, want the node the change was about", got.Scope)
+	}
+	if got.Summary != "topology changed: agent_registered (node-a)" {
+		t.Errorf("summary = %q", got.Summary)
+	}
+	const wantDetails = `{"reason":"agent_registered","nodeName":"node-a","agentId":"agent-a","zone":"zone-a"}`
+	if string(got.Details) != wantDetails {
+		t.Errorf("details =\n  %s\nwant\n  %s", got.Details, wantDetails)
+	}
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run did not return after ctx cancel")
+	}
+}
+
 // TestIngesterSinkErrorDoesNotStopPublishing drives three events through a
 // sink that fails on every call. All three must still reach the bus, the
 // ingester must stay connected, and every failure must be counted as

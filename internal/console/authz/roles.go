@@ -22,6 +22,11 @@ var builtinRoles = map[string][]Permission{
 		PermAnnotationsRead,
 		PermIncidentsRead,
 		PermMaintenanceRead,
+		// M7 telemetry read, same line again: the rules this console manages
+		// and the alerts Prometheus is firing are context on the charts viewer
+		// already sees, and the Overview card that lists them is the landing
+		// page. alerts:manage is deliberately absent -- see the operator role.
+		PermAlertsRead,
 	},
 
 	// operator adds the ability to trigger diagnostic runs, plus M4's
@@ -54,16 +59,31 @@ var builtinRoles = map[string][]Permission{
 		// admin-only, the tokens:manage/rbac:manage credential posture.
 		PermIncidentsWrite,
 		PermMaintenanceWrite,
+		// M7's alerting pair, on the same telemetry-vs-statement split: the
+		// read is context, and declaring "page someone when X" is an operator
+		// statement about the fleet -- exactly incidents:write's class.
+		PermAlertsRead,
+		PermAlertsManage,
 	},
 
-	// alert-editor has no alerting permissions yet — those land in M7. The
-	// role exists now so bindings written today (e.g. via the roles table in
-	// Task 12) stay valid once alerting permissions are added; it is not a
-	// lie, it is a placeholder with an honest permission set. It was
-	// identical to operator through M3; M4 deliberately did NOT give it the
-	// targets/checks/schedules permissions (Decision 3), so the two roles
-	// have diverged — an alert editor reconfiguring what the fleet probes is
-	// not what the name promises.
+	// alert-editor holds BOTH of M7's alerting permissions — the one
+	// deliberate exception to the "statement-class writes stop at operator
+	// and admin" groove, and the exception is the role's entire charter.
+	//
+	// The role existed as a placeholder from M3 through M6 (M4 deliberately
+	// withheld the targets/checks/schedules permissions from it, Decision 3)
+	// precisely so that, when alerting landed, an on-call engineer could be
+	// delegated rule editing WITHOUT operator's wider fleet authority. A
+	// role named alert-editor that cannot edit an alert rule would be a
+	// promise the console breaks on first click; renaming the builtin
+	// instead would break every existing role_binding row and
+	// auth.anonymous.role reference that names it. So the name means what
+	// it says: full alerts:read + alerts:manage, and nothing else beyond
+	// the telemetry-read context below.
+	//
+	// Decided by the M7 coordinator over the uniform-groove alternative;
+	// pinned by TestM7AlertPermissionsFollowTheIncidentsPosture, so
+	// narrowing it back has to happen in that test's diff, consciously.
 	"alert-editor": {
 		PermTopologyRead,
 		PermMatrixRead,
@@ -82,6 +102,10 @@ var builtinRoles = map[string][]Permission{
 		// stay with operator/admin.
 		PermIncidentsRead,
 		PermMaintenanceRead,
+		// M7's pair — see this role's doc comment for why manage lands here
+		// despite the operator/admin groove: alerting IS this role's charter.
+		PermAlertsRead,
+		PermAlertsManage,
 	},
 
 	// admin holds every permission this build knows.

@@ -11,7 +11,10 @@
 // them through the bus would make N replicas deliver every snapshot N times.
 package ws
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"strings"
+)
 
 // Envelope is every server→client frame. Mirrored by hand as WsEnvelope in
 // web/src/lib/ws.ts (repo convention: no codegen).
@@ -72,6 +75,15 @@ const runTopicPrefix = "run:"
 // run. ADR-003 names run:{id}; M2 deferred it for want of a consumer
 // (WEBSOCKET.md lines 79-82), and the M3 runner is that consumer.
 func RunTopic(runID string) string { return runTopicPrefix + runID }
+
+// IsRunTopic reports whether topic is a run:{id} topic. Exported because the
+// run topics are the ONE class an authorizer has to be able to name (a
+// runs:read-only subject may watch its own run and nothing else --
+// httpapi.wsTopicAuthorizer), and a caller re-deriving that from a literal
+// "run:" prefix of its own would silently diverge the day this constructor
+// changes. Deliberately a predicate rather than an exported prefix constant,
+// so the topic grammar stays this package's to define.
+func IsRunTopic(topic string) bool { return strings.HasPrefix(topic, runTopicPrefix) }
 
 // allowedTopics is the M2 static allowlist. mtr is named by ADR-003 but has no
 // consumer before M5, so subscribing to it is an error rather than a topic

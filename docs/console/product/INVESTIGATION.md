@@ -1,7 +1,11 @@
 <!--
 Status: draft
 Owner: @EsDmitrii
-Source: extracted from root DESIGN.md §7.6 in M0 (2026-07-14).
+Source: extracted from root DESIGN.md §7.6 in M0 (2026-07-14). "The alert
+source, as built" and the `alert` row of CAUSE_WEIGHTS written from the
+as-built M7 implementation (2026-08-08): web/src/lib/investigation.ts's
+CAUSE_WEIGHTS (the authority for that table), web/src/pages/investigate.tsx
+source 9.
 This document is the source of truth for Investigation Mode. Update it (and the ADRs) in the same PR as any deviation.
 -->
 
@@ -17,10 +21,9 @@ This document is the source of truth for Investigation Mode. Update it (and the 
 >    are pure TypeScript in `web/src/lib/investigation.ts` over
 >    `web/src/lib/investigation-sources.ts` (M6 Decision 1 — a server-side
 >    assembler would re-expose five APIs behind a sixth for no authority gain).
-> 2. **The alert row ships empty, and says so.** Nothing evaluates rules until
->    M7, so the page carries a permanent line — *"Alert state arrives with
->    alerting (M7)… That is a missing engine, not a quiet fleet"* — rather than
->    an absence the operator has to interpret (M6 Decision 12).
+> 2. **The alert row is real as of M7** — source 9, and the M6 placeholder line
+>    is gone. See "The alert source, as built" below: it is the one source that
+>    is not store-backed, and it carries three deliberate absences.
 > 3. **DNS-resolution changes were never built.** They have no source: nothing
 >    in the fleet records a resolution result over time, so there is no table,
 >    no API and no timeline row. The bullet in §7.6 below is design intent, not
@@ -35,6 +38,42 @@ This document is the source of truth for Investigation Mode. Update it (and the 
 >    (the audit scan and the run scan read a newest-N page and filter client-
 >    side, because neither endpoint has the filter the timeline wants) — the
 >    page states both bounds rather than implying completeness.
+
+## The alert source, as built (M7)
+
+Source 9 reads `GET /api/v1/alerts` under `alerts:read`. It is the only source
+that is **not** store-backed, so it is not behind the `dbReady` gate — the
+firing set lives in Prometheus. With Prometheus unconfigured the request is
+skipped entirely rather than spent: the route would answer `200` with
+`promConfigured: false`, and the source-list note already says that.
+
+**There is no window to ask for.** `/api/v1/alerts` serves **current** state and
+no alert-history endpoint exists. Everything below follows from that one fact.
+
+- **A fired row is placed at the alert's `activeAt`**, when that falls inside
+  the investigated window.
+- **An alert that was already firing before the window opens** gets a row at
+  the window's `from`, **titled honestly** as such, with the true ISO start in
+  the row detail. The row is not silently relocated to a time the alert did not
+  begin.
+- **No `activeAt` means no row.** A `from` placement without a known start
+  would be a claim the data does not support.
+- **There are NEVER resolved rows.** Absence from the current firing set is not
+  a resolution — it could be a rule that was deleted, disabled, renamed, or a
+  Prometheus that is not answering. This is asserted **negatively** in the
+  tests: the timeline is not allowed to grow a resolution row by accident.
+- **Pending alerts are excluded**, the same line the webhook contract and the
+  Overview card draw: inside a rule's `for` window nothing has fired.
+- **Row identity is the SERIES, not the rule.** Keying on `ruleId` would
+  collapse two different pairs firing the same rule into one row — pinned.
+- The source is **unscoped**: `/api/v1/alerts` takes no scope filter, and
+  label-filtering client-side would silently hide rules grouped differently
+  from the way this scope is expressed. Showing an alert that turns out to be
+  unrelated costs a glance; hiding the relevant one costs the investigation.
+
+Ranking treats these rows as **weight 0** — see `CAUSE_WEIGHTS` below. A pin on
+an alert row is `PIN_KIND`-null by design: it would dangle, because there is no
+durable object behind a current-state row to pin to.
 
 ### 7.6 Investigation Mode (flagship)
 
@@ -132,6 +171,7 @@ An entry is a candidate cause when all three hold:
 | `annotation` | 0 | **never a cause** — a human note *about* the problem |
 | `run` | 0 | **never a cause** — a probe fired *at* the problem |
 | `threshold` | 0 | **never a cause** — the symptom itself; a symptom is not its own cause |
+| `alert` | 0 | **never a cause** (M7) — a firing alert is a *restatement* of the symptom, usually of the very series the `threshold` row already derived. Weighting it above zero would let the page rank a page about the outage as the outage's cause, and rank it twice |
 
 **4. Score (`rankCauses`) — linear proximity decay.** With `delta` = the
 seconds between the candidate and the onset, and `window` = 300:

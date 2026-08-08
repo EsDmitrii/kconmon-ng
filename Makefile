@@ -95,22 +95,33 @@ helm-lint:
 	helm lint charts/kconmon-ng -f charts/kconmon-ng/ci/console-values.yaml
 	helm lint charts/kconmon-ng -f charts/kconmon-ng/ci/console-db-values.yaml
 	helm lint charts/kconmon-ng -f charts/kconmon-ng/ci/console-auth-values.yaml
+	helm lint charts/kconmon-ng -f charts/kconmon-ng/ci/console-auth-local-values.yaml
+	helm lint charts/kconmon-ng -f charts/kconmon-ng/ci/console-auth-header-values.yaml
 	helm lint charts/kconmon-ng -f charts/kconmon-ng/ci/console-targets-values.yaml
 	helm lint charts/kconmon-ng -f charts/kconmon-ng/ci/console-mtr-values.yaml
 	helm lint charts/kconmon-ng -f charts/kconmon-ng/ci/console-investigation-values.yaml
+	helm lint charts/kconmon-ng -f charts/kconmon-ng/ci/console-alerting-values.yaml
 
-# full-values.yaml is templated as well as linted: `helm lint` validates values
-# against values.schema.json but does not prove every template renders, and the
-# profile that turns the most knobs on is exactly the one worth rendering.
+# EVERY ci profile is templated as well as linted, and the two are not
+# interchangeable: `helm lint` validates values against values.schema.json and
+# renders, but it reports template failures as lint warnings on a chart it
+# still calls linted, while `helm template` fails the build. The default and
+# minimal profiles are here for the same reason the console ones are — a
+# schema-clean profile that no longer renders must not pass a chart task.
 helm-template:
 	helm template kconmon-ng charts/kconmon-ng
+	helm template kconmon-ng charts/kconmon-ng -f charts/kconmon-ng/ci/default-values.yaml
 	helm template kconmon-ng charts/kconmon-ng -f charts/kconmon-ng/ci/full-values.yaml
+	helm template kconmon-ng charts/kconmon-ng -f charts/kconmon-ng/ci/minimal-values.yaml
 	helm template kconmon-ng charts/kconmon-ng -f charts/kconmon-ng/ci/console-values.yaml
 	helm template kconmon-ng charts/kconmon-ng -f charts/kconmon-ng/ci/console-db-values.yaml
 	helm template kconmon-ng charts/kconmon-ng -f charts/kconmon-ng/ci/console-auth-values.yaml
+	helm template kconmon-ng charts/kconmon-ng -f charts/kconmon-ng/ci/console-auth-local-values.yaml
+	helm template kconmon-ng charts/kconmon-ng -f charts/kconmon-ng/ci/console-auth-header-values.yaml
 	helm template kconmon-ng charts/kconmon-ng -f charts/kconmon-ng/ci/console-targets-values.yaml
 	helm template kconmon-ng charts/kconmon-ng -f charts/kconmon-ng/ci/console-mtr-values.yaml
 	helm template kconmon-ng charts/kconmon-ng -f charts/kconmon-ng/ci/console-investigation-values.yaml
+	helm template kconmon-ng charts/kconmon-ng -f charts/kconmon-ng/ci/console-alerting-values.yaml
 
 helm-package:
 	helm package charts/kconmon-ng -d dist/

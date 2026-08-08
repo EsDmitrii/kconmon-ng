@@ -40,6 +40,16 @@ func TestWebhookInputValidateAcceptsWellFormed(t *testing.T) {
 			}
 			return in
 		}()},
+		{"the two alert transitions", func() WebhookInput {
+			in := validWebhookInput()
+			in.Events = []string{WebhookEventAlertFired, WebhookEventAlertResolved}
+			return in
+		}()},
+		{"an incident event and an alert event on one endpoint", func() WebhookInput {
+			in := validWebhookInput()
+			in.Events = []string{WebhookEventIncidentCreated, WebhookEventAlertFired}
+			return in
+		}()},
 		{"http url", func() WebhookInput { in := validWebhookInput(); in.URL = "http://receiver.svc:8080/h"; return in }()},
 		{"disabled", func() WebhookInput { in := validWebhookInput(); in.Enabled = false; return in }()},
 		{"digits and hyphens in the name", func() WebhookInput {
@@ -88,7 +98,7 @@ func TestWebhookInputValidateRejects(t *testing.T) {
 		}},
 		{"nil events", func(in *WebhookInput) { in.Events = nil }},
 		{"empty events", func(in *WebhookInput) { in.Events = []string{} }},
-		{"unknown event", func(in *WebhookInput) { in.Events = []string{"alert.fired"} }},
+		{"unknown event", func(in *WebhookInput) { in.Events = []string{"alert.acknowledged"} }},
 		{"one unknown among known", func(in *WebhookInput) {
 			in.Events = []string{WebhookEventIncidentCreated, "incident.escalated"}
 		}},
@@ -112,17 +122,20 @@ func TestWebhookInputValidateRejects(t *testing.T) {
 	}
 }
 
-// TestWebhookEventsAreTheClosedM6Set pins the VALUES, not just the count. M6
-// fires on incident lifecycle only (Decision 5); alert-fired webhooks belong
-// to M7. The literal strings here are deliberately NOT the constants -- a test
-// that compares a constant to itself pins nothing -- so a typo in one of the
-// exported names fails here rather than silently shipping a wire value no
-// receiver filters on.
-func TestWebhookEventsAreTheClosedM6Set(t *testing.T) {
+// TestWebhookEventsAreTheClosedSet pins the VALUES, not just the count. M6
+// shipped the incident lifecycle three (Decision 5) and M7 widened the set
+// with the two alert transitions -- in CODE, not in a migration, exactly as
+// the M6 comment on the constant block planned. The literal strings here are
+// deliberately NOT the constants -- a test that compares a constant to itself
+// pins nothing -- so a typo in one of the exported names fails here rather
+// than silently shipping a wire value no receiver filters on.
+func TestWebhookEventsAreTheClosedSet(t *testing.T) {
 	want := map[string]bool{
 		"incident.created":  true,
 		"incident.resolved": true,
 		"incident.reopened": true,
+		"alert.fired":       true,
+		"alert.resolved":    true,
 	}
 	if len(webhookEvents) != len(want) {
 		t.Fatalf("webhookEvents has %d entries, want %d: %v", len(webhookEvents), len(want), webhookEvents)
@@ -136,9 +149,32 @@ func TestWebhookEventsAreTheClosedM6Set(t *testing.T) {
 		WebhookEventIncidentCreated,
 		WebhookEventIncidentResolved,
 		WebhookEventIncidentReopened,
+		WebhookEventAlertFired,
+		WebhookEventAlertResolved,
 	} {
 		if !want[got] {
-			t.Errorf("exported constant %q is not one of the three M6 events", got)
+			t.Errorf("exported constant %q is not one of the five subscribable events", got)
+		}
+	}
+}
+
+// The Validate error is what an operator reads when the API rejects their
+// events array, so it has to list the WHOLE vocabulary. A message that still
+// named only the M6 three would send someone hunting for a bug that is not
+// there.
+func TestWebhookEventRejectionNamesEveryAcceptedValue(t *testing.T) {
+	in := validWebhookInput()
+	in.Events = []string{"alert.acknowledged"}
+	err := in.Validate()
+	if err == nil {
+		t.Fatal("Validate accepted an unknown event")
+	}
+	for _, ev := range []string{
+		"incident.created", "incident.resolved", "incident.reopened",
+		"alert.fired", "alert.resolved",
+	} {
+		if !strings.Contains(err.Error(), ev) {
+			t.Errorf("rejection message does not name %q: %v", ev, err)
 		}
 	}
 }

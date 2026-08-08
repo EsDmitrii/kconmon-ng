@@ -30,6 +30,7 @@ export const KIND_LABEL: Record<TimelineKind, string> = {
   k8s: "k8s",
   maintenance: "maintenance",
   threshold: "threshold",
+  alert: "alert",
 };
 
 const SEVERITY_VARIANT: Record<TimelineEntry["severity"], NonNullable<BadgeProps["variant"]>> = {

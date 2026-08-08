@@ -1,0 +1,858 @@
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { TimeMachineProvider } from "@/lib/timemachine";
+import {
+  AlertingPage,
+  alertRuleRequestFrom,
+  formatPromDuration,
+  KIND_PARAMS,
+  parsePromDuration,
+  problemField,
+  relativeTime,
+  reservedLabelMessage,
+} from "./alerting";
+
+/**
+ * The Alerting page is one read floor (alerts:read) over one write permission
+ * (alerts:manage) over TWO independent dependencies that fail in different
+ * ways — the database and the reconciler — so most of what is asserted here is
+ * a BOUNDARY:
+ *
+ *   which permission makes a control exist (HIDE=permission),
+ *   which of the two failures a section is in (503 store vs 409 sync),
+ *   which body a write puts on the wire (PUT is a full replace),
+ *   and which facts the page is allowed to state (a 202 is not a success, a
+ *   preview error is not "0 series", an import report is not a toast).
+ *
+ * The last one is where this page could most easily lie, so the preview panel,
+ * the sync ack and the import report each get their own case.
+ */
+
+const AT = "2026-08-01T12:00:00Z";
+const NOW = new Date("2026-08-08T12:00:00Z");
+
+const json = (body: unknown, init?: ResponseInit) =>
+  new Response(JSON.stringify(body), { status: 200, headers: { "Content-Type": "application/json" }, ...init });
+
+const problem = (status: number, title: string, detail: string) =>
+  new Response(JSON.stringify({ type: "about:blank", title, status, detail }), {
+    status,
+    headers: { "Content-Type": "application/problem+json" },
+  });
+
+/** The two permissions this page gates on. viewer holds the READ (the firing
+ *  set and the rules that produce it are context on charts viewer already
+ *  sees); alert-editor, operator and admin all hold BOTH — alert-editor is the
+ *  deliberate exception to the "writes stop at operator" groove, because
+ *  editing alert rules is that role's entire charter
+ *  (internal/console/authz/roles.go). */
+const VIEWER = ["topology:read", "matrix:read", "alerts:read"];
+const ALERT_EDITOR = ["topology:read", "alerts:read", "alerts:manage"];
+const NO_ALERTS = ["topology:read", "matrix:read", "events:read"];
+
+/** The 409 the sync family answers with alerting switched off, and the 503 the
+ *  store family answers with no database — both VERBATIM from
+ *  internal/console/httpapi/alertrules.go, because the page renders the
+ *  server's sentence rather than a paraphrase of it. */
+const ALERTING_DISABLED_DETAIL =
+  "prometheus rule sync is not running on this console: the alert rules themselves are unaffected and stay " +
+  "readable and editable, but nothing is applying them to the cluster -- set console.alerting.enabled=true " +
+  "(Helm: console.alerting.enabled) on a console running in-cluster with the PrometheusRule CRD present";
+
+const NO_DATABASE_DETAIL =
+  "alert rules are persisted configuration with no in-memory fallback: set console.database.mode in the " +
+  "console config (Helm: console.database.mode) to enable /api/v1/alert-rules";
+
+function meBody(permissions: string[], roles: string[] = ["admin"]) {
+  return { subject: { kind: "user", id: "u1", displayName: "Ada", groups: [], roles }, permissions };
+}
+
+const configBody = {
+  auth: { mode: "local", role: "viewer", loginPath: "/api/v1/auth/login" },
+  anonymousBanner: false,
+  controller: { configured: true },
+  prometheus: { configured: true },
+  database: { configured: true },
+};
+
+function ruleRow(over: Record<string, unknown> = {}) {
+  return {
+    id: "11111111-1111-1111-1111-111111111111",
+    name: "PairLossHigh",
+    kind: "pair-loss",
+    params: { protocol: "udp", thresholdPercent: 5 },
+    severity: "warning",
+    forNs: 300_000_000_000,
+    labels: { team: "net" },
+    annotations: { summary: "loss is up" },
+    enabled: true,
+    renderedExpr: "kconmon_ng_udp_packet_loss_ratio * 100 > 5",
+    syncStatus: "synced",
+    syncMessage: "",
+    lastSyncedAt: "2026-08-08T11:59:00Z",
+    createdAt: "2026-08-01T00:00:00Z",
+    updatedAt: "2026-08-01T00:00:00Z",
+    ...over,
+  };
+}
+
+function foreignRow(over: Record<string, unknown> = {}) {
+  return { name: "kube-prometheus-rules", groups: 2, rules: 7, managedBy: "prometheus-operator", ...over };
+}
+
+const EMPTY_REPORT = { created: [], skipped: [], notes: [] };
+
+interface Call {
+  method: string;
+  url: string;
+  body?: unknown;
+}
+
+function renderPage(
+  opts: {
+    permissions?: string[];
+    rules?: Record<string, unknown>[];
+    foreign?: Record<string, unknown>[];
+    /** Replaces the 200 the rules list would otherwise answer with. */
+    rulesResponse?: () => Response;
+    /** Replaces the 200 the foreign list would otherwise answer with. */
+    foreignResponse?: () => Response;
+    onWrite?: (method: string, url: string, body: unknown) => Response | undefined;
+    preview?: (body: unknown) => Response;
+    importReport?: Record<string, unknown>;
+    engaged?: boolean;
+  } = {},
+) {
+  const {
+    permissions = ALERT_EDITOR,
+    rules = [],
+    foreign = [],
+    rulesResponse,
+    foreignResponse,
+    onWrite,
+    preview,
+    importReport,
+    engaged = false,
+  } = opts;
+  const rows = [...rules];
+  const calls: Call[] = [];
+
+  const fetchMock = vi.fn((url: string, init?: RequestInit) => {
+    const href = String(url);
+    const method = (init?.method ?? "GET").toUpperCase();
+    const body: unknown = init?.body ? JSON.parse(String(init.body)) : undefined;
+    calls.push({ method, url: href, body });
+
+    if (href.includes("/api/v1/auth/me")) return Promise.resolve(json(meBody(permissions)));
+    if (href.includes("/api/v1/config")) return Promise.resolve(json(configBody));
+
+    // Longest-prefix first: /alert-rules/foreign, /import and /preview all
+    // start with /alert-rules, and the list route would swallow them.
+    if (href.startsWith("/api/v1/alert-rules/foreign")) {
+      return Promise.resolve(foreignResponse ? foreignResponse() : json({ foreign }));
+    }
+    if (href.startsWith("/api/v1/alert-rules/preview")) {
+      return Promise.resolve(
+        preview ? preview(body) : json({ expr: "rendered_expr > 1", series: 3 }),
+      );
+    }
+    if (href.startsWith("/api/v1/alert-rules/import")) {
+      const override = onWrite?.(method, href, body);
+      if (override) return Promise.resolve(override);
+      return Promise.resolve(json(importReport ?? EMPTY_REPORT));
+    }
+    if (href.startsWith("/api/v1/alert-rules")) {
+      const override = onWrite?.(method, href, body);
+      if (override) return Promise.resolve(override);
+      if (href.endsWith("/sync") && method === "POST") {
+        return Promise.resolve(json({ status: "kicked" }, { status: 202 }));
+      }
+      if (method === "POST") {
+        const created = ruleRow({ id: "created-id", ...(body as Record<string, unknown>) });
+        rows.push(created);
+        return Promise.resolve(json(created, { status: 201 }));
+      }
+      if (method === "PUT") {
+        const id = href.slice("/api/v1/alert-rules/".length);
+        const at = rows.findIndex((r) => r.id === id);
+        const updated = ruleRow({ ...(rows[at] ?? {}), ...(body as Record<string, unknown>), id });
+        if (at >= 0) rows[at] = updated;
+        return Promise.resolve(json(updated));
+      }
+      if (method === "DELETE") {
+        const id = href.slice("/api/v1/alert-rules/".length);
+        const at = rows.findIndex((r) => r.id === id);
+        if (at >= 0) rows.splice(at, 1);
+        return Promise.resolve(new Response(null, { status: 204 }));
+      }
+      return Promise.resolve(rulesResponse ? rulesResponse() : json({ rules: rows }));
+    }
+    return Promise.resolve(json({}));
+  });
+  vi.stubGlobal("fetch", fetchMock);
+
+  // `?at=` is the only way the app itself engages the Time Machine, so the
+  // tests engage it the same way rather than by faking the context.
+  window.history.pushState({}, "", engaged ? `/alerting?at=${AT}` : "/alerting");
+
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const utils = render(
+    <QueryClientProvider client={qc}>
+      <TimeMachineProvider>
+        <AlertingPage />
+      </TimeMachineProvider>
+    </QueryClientProvider>,
+  );
+
+  /** Every request the PAGE itself makes, i.e. excluding the /auth/me and
+   *  /config chrome every route fetches regardless of what it renders. */
+  const resourceCalls = () => calls.filter((c) => c.url.startsWith("/api/v1/alert-rules"));
+  const previewCalls = () => calls.filter((c) => c.url.startsWith("/api/v1/alert-rules/preview"));
+  return { ...utils, fetchMock, calls, resourceCalls, previewCalls, qc };
+}
+
+afterEach(() => {
+  cleanup();
+  vi.unstubAllGlobals();
+  vi.restoreAllMocks();
+  window.history.pushState({}, "", "/");
+});
+
+/* ── pure helpers ───────────────────────────────────────────────────────── */
+
+describe("parsePromDuration", () => {
+  it("reads the single-unit strings an operator actually types", () => {
+    expect(parsePromDuration("30s")).toEqual({ ok: true, ns: 30_000_000_000 });
+    expect(parsePromDuration("5m")).toEqual({ ok: true, ns: 300_000_000_000 });
+    expect(parsePromDuration("2h")).toEqual({ ok: true, ns: 7_200_000_000_000 });
+  });
+
+  it("reads a composite in descending order, Prometheus's own grammar", () => {
+    expect(parsePromDuration("1h30m")).toEqual({ ok: true, ns: 5_400_000_000_000 });
+  });
+
+  it("reads ms as ms and never as m followed by a stray s", () => {
+    expect(parsePromDuration("500ms")).toEqual({ ok: true, ns: 500_000_000 });
+  });
+
+  it("treats an empty box as 0 — fire as soon as the expression holds", () => {
+    expect(parsePromDuration("")).toEqual({ ok: true, ns: 0 });
+    expect(parsePromDuration("   ")).toEqual({ ok: true, ns: 0 });
+  });
+
+  it("refuses a bare number: a duration without a unit is a guess", () => {
+    const parsed = parsePromDuration("30");
+    expect(parsed.ok).toBe(false);
+    if (!parsed.ok) expect(parsed.message).toContain("unit");
+  });
+
+  it("refuses an unknown unit and an ascending composite", () => {
+    expect(parsePromDuration("5x").ok).toBe(false);
+    expect(parsePromDuration("30s5m").ok).toBe(false);
+  });
+});
+
+describe("formatPromDuration", () => {
+  it("renders the largest unit that divides evenly, never a compound", () => {
+    expect(formatPromDuration(0)).toBe("0s");
+    expect(formatPromDuration(300_000_000_000)).toBe("5m");
+    expect(formatPromDuration(90_000_000_000)).toBe("90s");
+    expect(formatPromDuration(500_000_000)).toBe("500ms");
+  });
+
+  it("round-trips every value the input box can produce", () => {
+    for (const text of ["30s", "5m", "2h", "500ms"]) {
+      const parsed = parsePromDuration(text);
+      expect(parsed.ok).toBe(true);
+      if (parsed.ok) expect(formatPromDuration(parsed.ns)).toBe(text);
+    }
+  });
+});
+
+describe("alertRuleRequestFrom", () => {
+  it("writes `enabled` explicitly, because omitting it on a PUT ENABLES the rule", () => {
+    const req = alertRuleRequestFrom(ruleRow({ enabled: false }) as never);
+    expect(req.enabled).toBe(false);
+    expect("enabled" in req).toBe(true);
+  });
+
+  it("carries the builder half and nothing the server owns", () => {
+    const req = alertRuleRequestFrom(ruleRow() as never);
+    expect(req).toEqual({
+      name: "PairLossHigh",
+      kind: "pair-loss",
+      params: { protocol: "udp", thresholdPercent: 5 },
+      severity: "warning",
+      forNs: 300_000_000_000,
+      labels: { team: "net" },
+      annotations: { summary: "loss is up" },
+      enabled: true,
+    });
+  });
+});
+
+describe("reservedLabelMessage", () => {
+  it("refuses both reserved names in the server's own words", () => {
+    expect(reservedLabelMessage("severity")).toBe('label "severity" is reserved by the console');
+    expect(reservedLabelMessage("kconmon_ng_rule_id")).toBe('label "kconmon_ng_rule_id" is reserved by the console');
+  });
+
+  it("says nothing about any other name: the server is the authority on those", () => {
+    expect(reservedLabelMessage("team")).toBeUndefined();
+    expect(reservedLabelMessage("")).toBeUndefined();
+  });
+});
+
+describe("problemField", () => {
+  it("routes a renderer error to the param it names", () => {
+    expect(problemField('alert rule: cannot render an expression from these fields: pair-loss: param "protocol" is required')).toBe(
+      "protocol",
+    );
+  });
+
+  it("routes the store's own field errors to their fields", () => {
+    expect(problemField('alert rule: name "x y" must match ...')).toBe("name");
+    expect(problemField('alert rule: severity "loud" must be one of info, warning, critical')).toBe("severity");
+  });
+
+  it("returns undefined for anything it cannot place, so the page banners it", () => {
+    expect(problemField("alert rules are persisted configuration with no in-memory fallback")).toBeUndefined();
+  });
+});
+
+describe("relativeTime", () => {
+  it("says — when there is no instant, rather than inventing one", () => {
+    expect(relativeTime(undefined, NOW)).toBe("—");
+  });
+
+  it("counts back in the largest whole unit", () => {
+    expect(relativeTime("2026-08-08T11:59:30Z", NOW)).toBe("30s ago");
+    expect(relativeTime("2026-08-08T11:30:00Z", NOW)).toBe("30m ago");
+    expect(relativeTime("2026-08-08T09:00:00Z", NOW)).toBe("3h ago");
+    expect(relativeTime("2026-08-05T12:00:00Z", NOW)).toBe("3d ago");
+  });
+});
+
+describe("KIND_PARAMS", () => {
+  it("mirrors internal/console/alerting/render.go's closed schemas exactly", () => {
+    expect(KIND_PARAMS["pair-loss"].map((p) => p.key)).toEqual([
+      "protocol",
+      "thresholdPercent",
+      "scope.sourceNode",
+      "scope.destNode",
+    ]);
+    expect(KIND_PARAMS["zone-latency"].map((p) => p.key)).toEqual([
+      "protocol",
+      "quantile",
+      "thresholdMs",
+      "sourceZone",
+      "destZone",
+    ]);
+    expect(KIND_PARAMS["dns-failures"].map((p) => p.key)).toEqual(["thresholdPercent"]);
+    expect(KIND_PARAMS["http-ttfb"].map((p) => p.key)).toEqual(["thresholdMs", "url"]);
+    // agent-missing takes NO params: `for` lives on the rule, so a forMinutes
+    // param here would be a second place that means the same thing.
+    expect(KIND_PARAMS["agent-missing"]).toEqual([]);
+    expect(KIND_PARAMS["external-target-down"].map((p) => p.key)).toEqual(["targetName"]);
+    expect(KIND_PARAMS["raw"].map((p) => p.key)).toEqual(["expr"]);
+  });
+
+  it("marks exactly the required ones required", () => {
+    const required = (kind: keyof typeof KIND_PARAMS) =>
+      KIND_PARAMS[kind].filter((p) => p.required).map((p) => p.key);
+    expect(required("pair-loss")).toEqual(["protocol", "thresholdPercent"]);
+    expect(required("zone-latency")).toEqual(["protocol", "quantile", "thresholdMs"]);
+    expect(required("http-ttfb")).toEqual(["thresholdMs"]);
+    expect(required("external-target-down")).toEqual([]);
+    expect(required("raw")).toEqual(["expr"]);
+  });
+});
+
+/* ── the page: permission floor ─────────────────────────────────────────── */
+
+describe("AlertingPage gating", () => {
+  it("a subject without alerts:read gets one card and the page asks for NOTHING", async () => {
+    const { resourceCalls } = renderPage({ permissions: NO_ALERTS });
+    expect(await screen.findByText(/Requires the alerts:read permission/)).toBeTruthy();
+    await waitFor(() => expect(screen.queryByLabelText("Alert rules")).toBeNull());
+    expect(resourceCalls()).toEqual([]);
+  });
+
+  it("viewer reads everything and can write nothing — HIDE, not disable", async () => {
+    renderPage({ permissions: VIEWER, rules: [ruleRow()], foreign: [foreignRow()] });
+
+    const list = await screen.findByLabelText("Alert rules");
+    expect(within(list).getByText("PairLossHigh")).toBeTruthy();
+    // The STATUS is still readable; only the control is gone.
+    expect(within(list).getByText("enabled")).toBeTruthy();
+    expect(screen.queryByLabelText("Enabled PairLossHigh")).toBeNull();
+    expect(screen.queryByRole("button", { name: "New rule" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Edit PairLossHigh" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Delete PairLossHigh" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Sync PairLossHigh now" })).toBeNull();
+
+    const foreign = await screen.findByLabelText("Foreign PrometheusRule objects");
+    expect(within(foreign).getByText("kube-prometheus-rules")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Import kube-prometheus-rules" })).toBeNull();
+  });
+
+  it("alert-editor gets every write control: alerts:manage is that role's charter", async () => {
+    renderPage({ permissions: ALERT_EDITOR, rules: [ruleRow()], foreign: [foreignRow()] });
+    expect(await screen.findByRole("button", { name: "New rule" })).toBeTruthy();
+    expect(await screen.findByLabelText("Enabled PairLossHigh")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Edit PairLossHigh" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Sync PairLossHigh now" })).toBeTruthy();
+    expect(await screen.findByRole("button", { name: "Import kube-prometheus-rules" })).toBeTruthy();
+  });
+});
+
+/* ── the page: the two dependencies, which fail differently ─────────────── */
+
+describe("AlertingPage degraded states", () => {
+  it("no database: BOTH families report the store 503 in the server's own words", async () => {
+    renderPage({
+      rulesResponse: () => problem(503, "alert rules not available", NO_DATABASE_DETAIL),
+      foreignResponse: () => problem(503, "alert rules not available", NO_DATABASE_DETAIL),
+    });
+    await waitFor(() => expect(screen.getAllByText(NO_DATABASE_DETAIL).length).toBe(2));
+  });
+
+  it("alerting off: the rules list keeps WORKING and only the sync family 409s", async () => {
+    renderPage({
+      rules: [ruleRow()],
+      foreignResponse: () => problem(409, "prometheus rule sync is disabled", ALERTING_DISABLED_DETAIL),
+    });
+
+    // CRUD is untouched: the rule is listed and the builder is offered.
+    const list = await screen.findByLabelText("Alert rules");
+    expect(within(list).getByText("PairLossHigh")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "New rule" })).toBeTruthy();
+
+    // Only the half that needs the cluster says so.
+    expect(await screen.findByText(ALERTING_DISABLED_DETAIL)).toBeTruthy();
+    expect(screen.queryByLabelText("Foreign PrometheusRule objects")).toBeNull();
+  });
+
+  it("a 409 from Sync now becomes the rules section's own banner", async () => {
+    renderPage({
+      rules: [ruleRow()],
+      onWrite: (method, url) =>
+        method === "POST" && url.endsWith("/sync")
+          ? problem(409, "prometheus rule sync is disabled", ALERTING_DISABLED_DETAIL)
+          : undefined,
+    });
+    fireEvent.click(await screen.findByRole("button", { name: "Sync PairLossHigh now" }));
+    const banner = await screen.findByTestId("rules-sync-banner");
+    expect(banner.textContent).toContain(ALERTING_DISABLED_DETAIL);
+  });
+});
+
+/* ── the page: the list ─────────────────────────────────────────────────── */
+
+describe("AlertingPage rule list", () => {
+  it("renders drift as its own chip and keeps the reconciler's sentence reachable", async () => {
+    renderPage({
+      permissions: VIEWER,
+      rules: [
+        ruleRow({
+          syncStatus: "drift",
+          syncMessage: "the live object diverged and was re-asserted",
+          lastSyncedAt: "2026-08-08T11:30:00Z",
+        }),
+      ],
+    });
+    const list = await screen.findByLabelText("Alert rules");
+    const chip = within(list).getByTestId("sync-status");
+    expect(chip.textContent).toContain("drift");
+    // Reachable without expanding (title), and visible once expanded.
+    expect(chip.getAttribute("title")).toBe("the live object diverged and was re-asserted");
+    fireEvent.click(within(list).getByRole("button", { name: "Details for PairLossHigh" }));
+    expect(within(list).getByText("the live object diverged and was re-asserted")).toBeTruthy();
+  });
+
+  it("shows the rendered expression on expand, and never before", async () => {
+    renderPage({ permissions: VIEWER, rules: [ruleRow()] });
+    const list = await screen.findByLabelText("Alert rules");
+    expect(within(list).queryByText("kconmon_ng_udp_packet_loss_ratio * 100 > 5")).toBeNull();
+    fireEvent.click(within(list).getByRole("button", { name: "Details for PairLossHigh" }));
+    expect(within(list).getByText("kconmon_ng_udp_packet_loss_ratio * 100 > 5")).toBeTruthy();
+  });
+
+  /* M7 Task 12b: aria-expanded alone said "something opened" and named
+     nothing. components/mtr-hop-table.tsx's expander is the repo's bar for
+     this exact shape and it carries aria-controls. */
+  it("the details toggle names the block it opens", async () => {
+    renderPage({ permissions: VIEWER, rules: [ruleRow()] });
+    const list = await screen.findByLabelText("Alert rules");
+    const toggle = within(list).getByRole("button", { name: "Details for PairLossHigh" });
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    const target = toggle.getAttribute("aria-controls");
+    expect(target).toBeTruthy();
+    // Collapsed there is nothing to point at; expanded the id must resolve, or
+    // aria-controls is a dangling reference.
+    expect(document.getElementById(target as string)).toBeNull();
+    fireEvent.click(toggle);
+    expect(toggle).toHaveAttribute("aria-expanded", "true");
+    expect(document.getElementById(target as string)).toBeTruthy();
+  });
+
+  it("an unsynced rule is not an error state", async () => {
+    renderPage({ permissions: VIEWER, rules: [ruleRow({ syncStatus: "unsynced", lastSyncedAt: undefined })] });
+    const chip = await screen.findByTestId("sync-status");
+    expect(chip.textContent).toContain("unsynced");
+    expect(screen.getByTestId("last-synced").textContent).toBe("—");
+  });
+
+  it("the enabled toggle PUTs the WHOLE rule back, flipping one field", async () => {
+    const { resourceCalls } = renderPage({ rules: [ruleRow()] });
+    fireEvent.click(await screen.findByLabelText("Enabled PairLossHigh"));
+    await waitFor(() => expect(resourceCalls().some((c) => c.method === "PUT")).toBe(true));
+    const put = resourceCalls().find((c) => c.method === "PUT");
+    expect(put?.url).toBe("/api/v1/alert-rules/11111111-1111-1111-1111-111111111111");
+    expect(put?.body).toEqual({
+      name: "PairLossHigh",
+      kind: "pair-loss",
+      params: { protocol: "udp", thresholdPercent: 5 },
+      severity: "warning",
+      forNs: 300_000_000_000,
+      labels: { team: "net" },
+      annotations: { summary: "loss is up" },
+      enabled: false,
+    });
+  });
+
+  it("delete asks once, then DELETEs the id", async () => {
+    const { resourceCalls } = renderPage({ rules: [ruleRow()] });
+    fireEvent.click(await screen.findByRole("button", { name: "Delete PairLossHigh" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Confirm delete PairLossHigh" }));
+    await waitFor(() => expect(resourceCalls().some((c) => c.method === "DELETE")).toBe(true));
+    expect(resourceCalls().find((c) => c.method === "DELETE")?.url).toBe(
+      "/api/v1/alert-rules/11111111-1111-1111-1111-111111111111",
+    );
+  });
+
+  it("a 202 sync ack says the work was REQUESTED and claims no outcome", async () => {
+    const { resourceCalls } = renderPage({ rules: [ruleRow()] });
+    fireEvent.click(await screen.findByRole("button", { name: "Sync PairLossHigh now" }));
+    const ack = await screen.findByTestId("sync-ack");
+    // aria-live, so a screen reader hears the ack it cannot see appear.
+    expect(ack.getAttribute("role")).toBe("status");
+    expect(ack.textContent).toMatch(/requested/i);
+    expect(ack.textContent).not.toMatch(/synced|succeeded|applied/i);
+    expect(resourceCalls().some((c) => c.method === "POST" && c.url.endsWith("/sync"))).toBe(true);
+  });
+});
+
+/* ── the page: the builder ──────────────────────────────────────────────── */
+
+async function openBuilder() {
+  fireEvent.click(await screen.findByRole("button", { name: "New rule" }));
+  return screen.findByRole("form", { name: "New alert rule" });
+}
+
+function setKind(kind: string) {
+  fireEvent.change(screen.getByLabelText("Kind"), { target: { value: kind } });
+}
+
+describe("AlertingPage builder", () => {
+  it("renders the param fields of the SELECTED kind and nothing else", async () => {
+    renderPage();
+    await openBuilder();
+
+    // pair-loss is the default kind.
+    expect(screen.getByLabelText("Protocol")).toBeTruthy();
+    expect(screen.getByLabelText("Loss threshold (%)")).toBeTruthy();
+    expect(screen.getByLabelText("Source node")).toBeTruthy();
+    expect(screen.queryByLabelText("PromQL expression")).toBeNull();
+
+    setKind("raw");
+    expect(screen.getByLabelText("PromQL expression")).toBeTruthy();
+    expect(screen.queryByLabelText("Protocol")).toBeNull();
+
+    setKind("agent-missing");
+    expect(screen.getByTestId("no-params").textContent).toMatch(/no parameters/i);
+  });
+
+  it("opens a row whose kind has no template in this build without falling over", async () => {
+    // alert_rules.kind's CHECK constraint accepts cert-expiry; no template
+    // renders it and the API enum leaves it out, so such a row can only arrive
+    // from another build. Listing it must work and editing it must say so.
+    renderPage({ rules: [ruleRow({ kind: "cert-expiry", params: {} })] });
+    fireEvent.click(await screen.findByRole("button", { name: "Edit PairLossHigh" }));
+    expect((await screen.findByTestId("unknown-kind")).textContent).toContain("cert-expiry");
+    expect(screen.queryByTestId("no-params")).toBeNull();
+  });
+
+  it("refuses a reserved label CLIENT-side, in the server's words, without a request", async () => {
+    const { resourceCalls } = renderPage();
+    await openBuilder();
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "PairLossHigh" } });
+    fireEvent.change(screen.getByLabelText("Protocol"), { target: { value: "udp" } });
+    fireEvent.change(screen.getByLabelText("Loss threshold (%)"), { target: { value: "5" } });
+    fireEvent.click(screen.getByRole("button", { name: "Add label" }));
+    fireEvent.change(screen.getByLabelText("Label name 1"), { target: { value: "severity" } });
+    fireEvent.change(screen.getByLabelText("Label value 1"), { target: { value: "critical" } });
+    fireEvent.click(screen.getByRole("button", { name: "Create rule" }));
+
+    expect(await screen.findByText('label "severity" is reserved by the console')).toBeTruthy();
+    await waitFor(() => expect(resourceCalls().some((c) => c.method === "POST" && !c.url.includes("preview"))).toBe(false));
+  });
+
+  it("previews on a debounce: three keystrokes are one request", async () => {
+    const { previewCalls } = renderPage();
+    await openBuilder();
+    fireEvent.change(screen.getByLabelText("Protocol"), { target: { value: "udp" } });
+    fireEvent.change(screen.getByLabelText("Loss threshold (%)"), { target: { value: "1" } });
+    fireEvent.change(screen.getByLabelText("Loss threshold (%)"), { target: { value: "12" } });
+    fireEvent.change(screen.getByLabelText("Loss threshold (%)"), { target: { value: "123" } });
+    await waitFor(() => expect(previewCalls().length).toBe(1), { timeout: 3000 });
+    expect(previewCalls()[0]?.body).toMatchObject({ kind: "pair-loss", params: { protocol: "udp", thresholdPercent: 123 } });
+  });
+
+  it("a preview that rendered but could not be EVALUATED says so, and does not claim 0 series", async () => {
+    renderPage({
+      preview: () =>
+        json({
+          expr: "kconmon_ng_udp_packet_loss_ratio * 100 > 5",
+          series: 0,
+          error: "prometheus is not configured on this console, so the expression could not be evaluated",
+        }),
+    });
+    await openBuilder();
+    fireEvent.change(screen.getByLabelText("Protocol"), { target: { value: "udp" } });
+    fireEvent.change(screen.getByLabelText("Loss threshold (%)"), { target: { value: "5" } });
+
+    const panel = await screen.findByLabelText("Expression preview");
+    await waitFor(() => expect(panel.textContent).toContain("kconmon_ng_udp_packet_loss_ratio * 100 > 5"));
+    expect(panel.textContent).toContain(
+      "prometheus is not configured on this console, so the expression could not be evaluated",
+    );
+    expect(panel.textContent).toMatch(/unknown/i);
+    expect(panel.textContent).not.toMatch(/matches 0 series/i);
+  });
+
+  it("a clean preview states the count as the answer it is", async () => {
+    renderPage({ preview: () => json({ expr: "up > 0", series: 0 }) });
+    await openBuilder();
+    setKind("raw");
+    fireEvent.change(screen.getByLabelText("PromQL expression"), { target: { value: "up > 0" } });
+    const panel = await screen.findByLabelText("Expression preview");
+    await waitFor(() => expect(panel.textContent).toMatch(/0 series/));
+    expect(panel.textContent).not.toMatch(/unknown/i);
+  });
+
+  it("does not preview until the required params are there — no request to collect a 422", async () => {
+    const { previewCalls } = renderPage();
+    await openBuilder();
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Half" } });
+    fireEvent.change(screen.getByLabelText("Protocol"), { target: { value: "udp" } });
+    await new Promise((r) => setTimeout(r, 600));
+    expect(previewCalls()).toEqual([]);
+  });
+
+  it("creates with the whole builder body, params TYPED and the duration in nanoseconds", async () => {
+    const { resourceCalls } = renderPage();
+    await openBuilder();
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "PairLossHigh" } });
+    fireEvent.change(screen.getByLabelText("Protocol"), { target: { value: "udp" } });
+    fireEvent.change(screen.getByLabelText("Loss threshold (%)"), { target: { value: "5" } });
+    fireEvent.change(screen.getByLabelText("Source node"), { target: { value: "node-a" } });
+    fireEvent.change(screen.getByLabelText("Severity"), { target: { value: "critical" } });
+    fireEvent.change(screen.getByLabelText("For"), { target: { value: "5m" } });
+    fireEvent.click(screen.getByRole("button", { name: "Add annotation" }));
+    fireEvent.change(screen.getByLabelText("Annotation name 1"), { target: { value: "summary" } });
+    fireEvent.change(screen.getByLabelText("Annotation value 1"), { target: { value: "loss is up" } });
+    fireEvent.click(screen.getByRole("button", { name: "Create rule" }));
+
+    await waitFor(() =>
+      expect(resourceCalls().some((c) => c.method === "POST" && !c.url.includes("preview"))).toBe(true),
+    );
+    const post = resourceCalls().find((c) => c.method === "POST" && !c.url.includes("preview"));
+    expect(post?.url).toBe("/api/v1/alert-rules");
+    expect(post?.body).toEqual({
+      name: "PairLossHigh",
+      kind: "pair-loss",
+      params: { protocol: "udp", thresholdPercent: 5, scope: { sourceNode: "node-a" } },
+      severity: "critical",
+      forNs: 300_000_000_000,
+      labels: {},
+      annotations: { summary: "loss is up" },
+      enabled: true,
+    });
+  });
+
+  it("omits an empty optional param entirely: params are CLOSED per kind", async () => {
+    const { resourceCalls } = renderPage();
+    await openBuilder();
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Bare" } });
+    fireEvent.change(screen.getByLabelText("Protocol"), { target: { value: "tcp" } });
+    fireEvent.change(screen.getByLabelText("Loss threshold (%)"), { target: { value: "1" } });
+    fireEvent.click(screen.getByRole("button", { name: "Create rule" }));
+    await waitFor(() =>
+      expect(resourceCalls().some((c) => c.method === "POST" && !c.url.includes("preview"))).toBe(true),
+    );
+    const post = resourceCalls().find((c) => c.method === "POST" && !c.url.includes("preview"));
+    expect((post?.body as { params: unknown }).params).toEqual({ protocol: "tcp", thresholdPercent: 1 });
+  });
+
+  it("edit loads the stored rule and PUTs a full replace", async () => {
+    const { resourceCalls } = renderPage({ rules: [ruleRow()] });
+    fireEvent.click(await screen.findByRole("button", { name: "Edit PairLossHigh" }));
+    const form = await screen.findByRole("form", { name: "Edit PairLossHigh" });
+    expect((within(form).getByLabelText("For") as HTMLInputElement).value).toBe("5m");
+    expect((within(form).getByLabelText("Loss threshold (%)") as HTMLInputElement).value).toBe("5");
+    fireEvent.change(within(form).getByLabelText("Severity"), { target: { value: "critical" } });
+    fireEvent.click(within(form).getByRole("button", { name: "Save rule" }));
+
+    await waitFor(() => expect(resourceCalls().some((c) => c.method === "PUT")).toBe(true));
+    const put = resourceCalls().find((c) => c.method === "PUT");
+    expect(put?.url).toBe("/api/v1/alert-rules/11111111-1111-1111-1111-111111111111");
+    expect(put?.body).toEqual({
+      name: "PairLossHigh",
+      kind: "pair-loss",
+      params: { protocol: "udp", thresholdPercent: 5 },
+      severity: "critical",
+      forNs: 300_000_000_000,
+      labels: { team: "net" },
+      annotations: { summary: "loss is up" },
+      enabled: true,
+    });
+  });
+
+  it("renders a server 422 on the field it names, verbatim", async () => {
+    const detail =
+      'alert rule: cannot render an expression from these fields: pair-loss: param "thresholdPercent" must be ' +
+      "between 0 and 100, got 400";
+    renderPage({
+      onWrite: (method, url) =>
+        method === "POST" && url === "/api/v1/alert-rules" ? problem(422, "invalid alert rule", detail) : undefined,
+    });
+    await openBuilder();
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "TooBig" } });
+    fireEvent.change(screen.getByLabelText("Protocol"), { target: { value: "udp" } });
+    fireEvent.change(screen.getByLabelText("Loss threshold (%)"), { target: { value: "400" } });
+    fireEvent.click(screen.getByRole("button", { name: "Create rule" }));
+    const field = await screen.findByTestId("field-error-thresholdPercent");
+    expect(field.textContent).toBe(detail);
+  });
+
+  it("banners a 422 it cannot place on a field", async () => {
+    const detail = 'alert rule: name "PairLossHigh" is already taken; alert rule names are unique, case-insensitively';
+    renderPage({
+      onWrite: (method, url) =>
+        method === "POST" && url === "/api/v1/alert-rules" ? problem(422, "invalid alert rule", detail) : undefined,
+    });
+    await openBuilder();
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "PairLossHigh" } });
+    fireEvent.change(screen.getByLabelText("Protocol"), { target: { value: "udp" } });
+    fireEvent.change(screen.getByLabelText("Loss threshold (%)"), { target: { value: "5" } });
+    fireEvent.click(screen.getByRole("button", { name: "Create rule" }));
+    expect((await screen.findByTestId("field-error-name")).textContent).toBe(detail);
+  });
+});
+
+/* ── the page: foreign rules and adoption ───────────────────────────────── */
+
+describe("AlertingPage foreign rules", () => {
+  it("lists the four facts and writes — for an unlabelled object, not blank", async () => {
+    renderPage({ permissions: VIEWER, foreign: [foreignRow({ name: "hand-written", managedBy: "" })] });
+    const list = await screen.findByLabelText("Foreign PrometheusRule objects");
+    const row = within(list).getByText("hand-written").closest("li");
+    expect(row).not.toBeNull();
+    expect(row?.textContent).toContain("2 groups");
+    expect(row?.textContent).toContain("7 rules");
+    expect(within(row as HTMLElement).getByTestId("managed-by").textContent).toBe("—");
+  });
+
+  it("renders created, skipped AND notes — all three, verbatim, never a toast", async () => {
+    renderPage({
+      foreign: [foreignRow()],
+      importReport: {
+        created: ["HighLatency", "PodLoss"],
+        skipped: [
+          { name: "job:rate5m", reason: "recording rule -- the console builder has no recording model, only alerting rules" },
+          { name: "PairLossHigh", reason: "name already taken: alert rule names are unique case-insensitively, and adoption will not rename a rule to make room for it" },
+        ],
+        notes: [
+          { name: "HighLatency", note: "severity \"page\" is outside the closed set; stored as warning" },
+        ],
+      },
+    });
+    fireEvent.click(await screen.findByRole("button", { name: "Import kube-prometheus-rules" }));
+
+    const report = await screen.findByTestId("import-report");
+    // Each array lands in its OWN block. A note names a rule that was created,
+    // so the same name legitimately appears twice — scoping the query is what
+    // proves the page did not fold the three lists into one.
+    const created = within(report).getByTestId("import-created");
+    expect(within(created).getByText("HighLatency")).toBeTruthy();
+    expect(within(created).getByText("PodLoss")).toBeTruthy();
+
+    const skipped = within(report).getByTestId("import-skipped");
+    expect(
+      within(skipped).getByText("recording rule -- the console builder has no recording model, only alerting rules"),
+    ).toBeTruthy();
+    expect(
+      within(skipped).getByText(
+        "name already taken: alert rule names are unique case-insensitively, and adoption will not rename a rule to make room for it",
+      ),
+    ).toBeTruthy();
+
+    const notes = within(report).getByTestId("import-notes");
+    expect(within(notes).getByText('severity "page" is outside the closed set; stored as warning')).toBeTruthy();
+
+    expect(report.textContent).toContain("the original object is untouched");
+    expect(report.textContent).toContain("until its owner removes it");
+  });
+
+  it("an import that adopted nothing still shows all three headings", async () => {
+    renderPage({ foreign: [foreignRow()], importReport: EMPTY_REPORT });
+    fireEvent.click(await screen.findByRole("button", { name: "Import kube-prometheus-rules" }));
+    const report = await screen.findByTestId("import-report");
+    for (const heading of ["Created", "Skipped", "Notes"]) {
+      expect(within(report).getByText(heading)).toBeTruthy();
+    }
+  });
+
+  /* M7 Task 12b: the report arrives when the POST answers, far below the
+     button that was pressed. Polite, not assertive — the import succeeded;
+     its refusal is the role="alert" line beside it. */
+  it("announces the report politely instead of landing silently", async () => {
+    renderPage({ foreign: [foreignRow()], importReport: EMPTY_REPORT });
+    fireEvent.click(await screen.findByRole("button", { name: "Import kube-prometheus-rules" }));
+    const report = await screen.findByTestId("import-report");
+    expect(report).toHaveAttribute("role", "status");
+  });
+
+  it("sends the object NAME and nothing else", async () => {
+    const { resourceCalls } = renderPage({ foreign: [foreignRow()] });
+    fireEvent.click(await screen.findByRole("button", { name: "Import kube-prometheus-rules" }));
+    await waitFor(() => expect(resourceCalls().some((c) => c.url.includes("/import"))).toBe(true));
+    expect(resourceCalls().find((c) => c.url.includes("/import"))?.body).toEqual({ name: "kube-prometheus-rules" });
+  });
+});
+
+/* ── the page: Time Machine ─────────────────────────────────────────────── */
+
+describe("AlertingPage under the Time Machine", () => {
+  it("disables every write and leaves every read alone", async () => {
+    const { resourceCalls } = renderPage({ rules: [ruleRow()], foreign: [foreignRow()], engaged: true });
+
+    // Reads still happened, and still rendered.
+    const list = await screen.findByLabelText("Alert rules");
+    expect(within(list).getByText("PairLossHigh")).toBeTruthy();
+    expect(resourceCalls().some((c) => c.method === "GET" && c.url === "/api/v1/alert-rules")).toBe(true);
+    expect(resourceCalls().some((c) => c.url.startsWith("/api/v1/alert-rules/foreign"))).toBe(true);
+
+    // Writes EXIST (the permission is held) and are DISABLED (the time is not now).
+    expect((screen.getByRole("button", { name: "New rule" }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByLabelText("Enabled PairLossHigh") as HTMLInputElement).disabled).toBe(true);
+    expect((screen.getByRole("button", { name: "Edit PairLossHigh" }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole("button", { name: "Delete PairLossHigh" }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole("button", { name: "Sync PairLossHigh now" }) as HTMLButtonElement).disabled).toBe(true);
+    expect(
+      (await screen.findByRole("button", { name: "Import kube-prometheus-rules" })) as HTMLButtonElement,
+    ).toHaveProperty("disabled", true);
+  });
+});

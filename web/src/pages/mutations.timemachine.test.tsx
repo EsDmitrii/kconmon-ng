@@ -5,10 +5,12 @@ import { ThemeProvider } from "@/components/theme-provider";
 import { resetWsClient } from "@/hooks/use-ws-topic";
 import { FakeSocket } from "@/lib/fake-websocket";
 import { TimeMachineProvider } from "@/lib/timemachine";
+import { AlertingPage } from "./alerting";
 import { DiagnosticsPage } from "./diagnostics";
 import { MTRPage } from "./mtr";
 import { PairCardPage } from "./pair-card";
 import { RunDetailPage } from "./run-detail";
+import { SettingsPage } from "./settings";
 import { TargetsPage } from "./targets";
 
 /**
@@ -36,6 +38,10 @@ const configBody = {
   database: { configured: true },
 };
 
+/* M7 Task 12b joined Settings and Alerting to this matrix, so the subject has
+   to hold their write permissions too — the rule under test is "permissions
+   HIDE, time DISABLES", and a control the subject cannot hold would be absent
+   for the wrong reason. */
 const ADMIN = [
   "runs:create",
   "targets:read",
@@ -44,6 +50,10 @@ const ADMIN = [
   "checks:write",
   "schedules:write",
   "mtr:read",
+  "webhooks:manage",
+  "settings:write",
+  "alerts:read",
+  "alerts:manage",
 ];
 
 const meBody = {
@@ -80,6 +90,38 @@ const scheduleRow = {
   updatedAt: AT,
 };
 
+const webhookRow = {
+  id: "w-1",
+  name: "pagerduty",
+  url: "https://hooks.example.test/pd",
+  events: ["incident.created"],
+  enabled: true,
+  hasSecret: true,
+  lastStatus: "",
+  failures: 0,
+  createdAt: AT,
+};
+
+const alertRuleRow = {
+  id: "11111111-1111-1111-1111-111111111111",
+  name: "PairLossHigh",
+  kind: "pair-loss",
+  params: { protocol: "udp", thresholdPercent: 5 },
+  severity: "warning",
+  forNs: 300_000_000_000,
+  labels: {},
+  annotations: {},
+  enabled: true,
+  renderedExpr: "kconmon_ng_udp_packet_loss_ratio * 100 > 5",
+  syncStatus: "synced",
+  syncMessage: "",
+  lastSyncedAt: AT,
+  createdAt: AT,
+  updatedAt: AT,
+};
+
+const foreignRuleRow = { name: "kube-prometheus-rules", groups: 2, rules: 7, managedBy: "prometheus-operator" };
+
 const runningRun = {
   id: "run-1",
   type: "tcp",
@@ -113,6 +155,11 @@ function stubFetch() {
       if (href.startsWith("/api/v1/targets")) return Promise.resolve(json({ targets: [targetRow], nextCursor: "" }));
       if (href.startsWith("/api/v1/checks")) return Promise.resolve(json({ definitions: [definitionRow], nextCursor: "" }));
       if (href.startsWith("/api/v1/schedules")) return Promise.resolve(json({ schedules: [scheduleRow], nextCursor: "" }));
+      if (href.startsWith("/api/v1/webhooks")) return Promise.resolve(json({ webhooks: [webhookRow] }));
+      // Foreign BEFORE the collection: "/api/v1/alert-rules/foreign" also
+      // starts with "/api/v1/alert-rules".
+      if (href.startsWith("/api/v1/alert-rules/foreign")) return Promise.resolve(json({ foreign: [foreignRuleRow] }));
+      if (href.startsWith("/api/v1/alert-rules")) return Promise.resolve(json({ rules: [alertRuleRow] }));
       if (href.startsWith("/api/v1/mtr/destinations")) return Promise.resolve(json({ destinations: [] }));
       if (href.startsWith("/api/v1/mtr/snapshots")) return Promise.resolve(json({ snapshots: [], nextCursor: "" }));
       if (href === "/api/v1/runs/run-1") return Promise.resolve(json(runningRun));
@@ -259,5 +306,71 @@ describe("Targets, definitions and schedules CRUD", () => {
     (await screen.findByRole("radio", { name: "Schedules" })).click();
     expect(await screen.findByRole("button", { name: "Disable edge-tcp" })).toBeEnabled();
     expect(screen.getByRole("button", { name: "New schedule" })).toBeEnabled();
+  });
+});
+
+/* M7 Task 12b (plan Decision 12, checklist item 8) added the two surfaces this
+   matrix was missing. Both pages already implemented the rule; what was absent
+   was the SHARED pin — the file that fails when a new mutating page forgets
+   it, rather than each page's own suite deciding for itself. */
+
+describe("Settings webhooks and configuration import", () => {
+  it("disables webhook create, edit, delete and test while engaged", async () => {
+    engaged("/settings");
+    renderPage(<SettingsPage />);
+    expect(await screen.findByRole("button", { name: "Edit pagerduty" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "New endpoint" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Delete pagerduty" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Send test to pagerduty" })).toBeDisabled();
+  });
+
+  it("leaves them enabled while live", async () => {
+    live("/settings");
+    renderPage(<SettingsPage />);
+    expect(await screen.findByRole("button", { name: "Edit pagerduty" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "New endpoint" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Delete pagerduty" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Send test to pagerduty" })).toBeEnabled();
+  });
+
+  /* Export is a READ and stays live from a historical view — pages/settings.tsx
+     says so in as many words. Pinning it here keeps a later "disable
+     everything while engaged" sweep from quietly taking it out. */
+  it("leaves Export configuration alone in both modes", async () => {
+    engaged("/settings");
+    renderPage(<SettingsPage />);
+    expect(await screen.findByRole("button", { name: "Export configuration" })).toBeEnabled();
+  });
+});
+
+describe("Alerting rules", () => {
+  it("disables create, edit, delete, sync, the enable toggle and import while engaged", async () => {
+    engaged("/alerting");
+    renderPage(<AlertingPage />);
+    expect(await screen.findByRole("button", { name: "Edit PairLossHigh" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "New rule" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Delete PairLossHigh" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Sync PairLossHigh now" })).toBeDisabled();
+    expect(screen.getByRole("checkbox", { name: "Enabled PairLossHigh" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Import kube-prometheus-rules" })).toBeDisabled();
+  });
+
+  it("leaves them enabled while live", async () => {
+    live("/alerting");
+    renderPage(<AlertingPage />);
+    expect(await screen.findByRole("button", { name: "Edit PairLossHigh" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "New rule" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Delete PairLossHigh" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Sync PairLossHigh now" })).toBeEnabled();
+    expect(screen.getByRole("checkbox", { name: "Enabled PairLossHigh" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Import kube-prometheus-rules" })).toBeEnabled();
+  });
+
+  /* Details is a read of a row already on screen, and Cancel dismisses a form
+     — neither writes, so neither is time's business. */
+  it("leaves the read-only row controls alone while engaged", async () => {
+    engaged("/alerting");
+    renderPage(<AlertingPage />);
+    expect(await screen.findByRole("button", { name: "Details for PairLossHigh" })).toBeEnabled();
   });
 });

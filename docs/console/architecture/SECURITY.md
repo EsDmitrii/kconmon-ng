@@ -189,29 +189,64 @@ events deliberately got NO permission of their own: they are events, and
 `events:read` already decides who may read the fleet's history — a second
 gate on the same class of data would only drift from the first.
 
-**WebSocket authorization is per-connection, not per-topic.** `GET /ws`
-requires exactly one permission, `events:read`, and that single decision
-covers every topic multiplexed over the socket — `live`, `topology`,
-`matrix:*:pod`, and the ephemeral `run:{id}` topics alike. `ws.Hub` never
-receives an `authz.Subject` (`ServeWS` takes only the request; `subscribe`
-and `topicAllowed` decide on the topic *name* alone), so there is no layer
-that could gate one topic differently from another. Two consequences worth
-knowing before you write a custom role:
+**M7's two permissions take the incidents groove, and bring `AllPermissions`
+to 25.** `alerts:read` is telemetry-class — the managed rule list, the
+expression the console rendered from each rule, and the set Prometheus is
+currently firing are context on charts every role already reads, and the
+Overview card showing them is the landing page — so all four built-in roles
+hold it, `viewer` (the anonymous default) included. It also gates
+`POST /api/v1/alert-rules/preview`, which persists nothing: previewing asks
+what a draft expression matches right now, which is a read of Prometheus.
+`alerts:manage` is statement-class — creating, editing, deleting or
+force-syncing a rule is "this fleet should page someone when X" — and lands on
+`operator`, `admin`, **and `alert-editor`**: the one deliberate exception to
+the incidents:write groove, because delegated alert editing is that role's
+entire charter (it sat as a placeholder from M3 to M6 waiting for exactly this
+permission, and a builtin named alert-editor that cannot edit an alert rule
+breaks its promise on first click; see `roles.go`'s comment). Alert rules
+carry no secret, so nothing here takes `webhooks:manage`'s
+combined-permission posture.
 
-- A role holding only `runs:read` **cannot open the socket** to watch its
-  own run's progress. It gets `403 missing permission: events:read` and must
-  fall back to polling `GET /api/v1/runs/{id}`. Grant `events:read`
-  alongside `runs:read` for any role that should watch runs live.
-- Conversely, `events:read` alone already covers `run:{id}` topics. It is
-  not a narrower grant than it looks.
+**WebSocket authorization is two decisions, not one (M7).** The socket
+multiplexes topics whose permissions genuinely differ, so it is authorized at
+two layers:
 
-Lowering `/ws` to `runs:read` was considered in M4 and rejected: with
-per-connection granularity it would hand every run watcher the `live`
-events stream too, which is a genuine widening of exactly what `events:read`
-gates on `GET /api/v1/events`. Splitting the two properly means teaching the
-hub subject-aware subscribe authorization — a hub change, not a route-table
-change — and is not scheduled. Both directions are pinned by tests in
-`internal/console/httpapi/auth_test.go`.
+1. **The upgrade.** `GET /ws` is the API's only `anyOf` route: it admits a
+   subject holding **`events:read` OR `runs:read`**. Holding neither is still
+   `403`, naming both.
+2. **Each subscribe.** `httpapi.Server.wsTopicAuthorizer` builds a
+   per-connection `ws.TopicAuthorizer` from the subject the auth middleware
+   already resolved, and `ws.Hub.ServeWSAuthorized` captures it on that one
+   connection. A subject with `events:read` gets `nil` — every topic, no
+   per-frame work, behaviour identical to pre-M7. A subject admitted on
+   `runs:read` alone gets the ephemeral `run:{id}` topics and nothing else;
+   `live`, `topology` and `matrix:*:pod` come back as an error frame naming
+   `events:read`, on a socket that stays open and keeps serving its run
+   topics.
+
+What that buys, and what it deliberately does not:
+
+- A custom role granted `runs:read` can now **watch the run it started**,
+  live, instead of polling `GET /api/v1/runs/{id}`. That was M3 follow-up #10,
+  carried from M3 to M7.
+- The fleet-wide event stream is **not** widened. `live` still needs
+  `events:read` on the socket exactly as on `GET /api/v1/events` — which is
+  why simply lowering the route to `runs:read` was rejected in M4, and why the
+  route change and the per-topic gate are only correct together.
+- `events:read` alone still covers `run:{id}` topics. It is not a narrower
+  grant than it looks.
+- This is **not** a per-run ownership check. `runs:read` is fleet-wide (its
+  holder may already `GET` any run by id), so the authorizer permits the
+  *class* of topic, not one subject's own runs.
+
+`ws` itself still knows nothing about permissions: `TopicAuthorizer` is a
+`func(topic string) error`, so every permission name stays in `httpapi`, the
+package that owns the route table. All of the above is pinned by tests in
+`internal/console/httpapi/auth_test.go` (`TestWSAdmitsRunsReadForRunWatching`,
+`TestWSRunsReadOnlyIsRefusedTheFleetWideTopics`,
+`TestWSRefusesTheUpgradeWithoutEitherPermission`,
+`TestWSEventsReadAloneCoversRunTopics`) and
+`internal/console/ws/conn_test.go`.
 
 **Custom-role API guard rails**, both `422 Unprocessable Entity`:
 
@@ -305,10 +340,38 @@ list).
 
 ### 10.3 Console ServiceAccount (K8s RBAC, Helm-gated)
 
-- `monitoring.coreos.com/prometheusrules`: CRUD in its namespace
-  (`alerting.enabled`).
+- `monitoring.coreos.com/prometheusrules`: **`get`, `list`, `watch`, `create`,
+  `update`, `patch`** — a namespaced `Role` in the release namespace
+  (`console.alerting.enabled`). **Landed M7** — chart 1.9.0.
 - `events`: **`list`, `watch`**, cluster-scoped, for `kubectx`
   (`kubernetesContext.enabled`). **Landed M6** — chart 1.8.0.
+
+**The alerting grant is a `Role`, never a `ClusterRole`, and that is the whole
+posture.** The console writes exactly one `PrometheusRule` object into exactly
+one namespace — its own — so a `Role` is not a tightening of something wider,
+it is the shape the feature actually has. Pointing
+`console.alerting.namespace` somewhere else does not widen anything: it makes
+every apply fail with a `forbidden` that the reconciler faithfully writes into
+each rule's `sync_message`, which is a far better failure than a console that
+can quietly create rules in a namespace nobody expected it to touch.
+
+The verbs are what one server-side apply actually needs and no more.
+`create`/`update`/`patch` are all three required for a **single** `Apply` call —
+SSA is a PATCH with the apply content type, but the apiserver charges `create`
+when the object does not exist yet and `update` on some paths; this is not three
+code paths. `get`/`list`/`watch` cover reading the live object back for the
+drift comparison and walking the namespace for `GET /alert-rules/foreign`.
+**`delete` is absent on purpose**: the reconciler converges by applying an
+*empty* bundle when no rule is enabled, it never removes the object, and a grant
+to delete `PrometheusRule`s is a grant to delete somebody else's alerting.
+
+Both grants bind to the **same** console-only ServiceAccount, each under its own
+feature flag: alerting on with `kubernetesContext` off gets the `Role` and no
+event grant, and the reverse install gets the event grant and no rule-writing
+power. The shared subject (plus `serviceAccountName`, `POD_NAMESPACE` and the
+apiserver egress rule, which both features need identically) is why chart 1.9.0
+routes all four through one `kconmon-ng.console.k8sIdentity` helper instead of
+four copies of the same `or`.
 
 The `kubectx` grant is **narrower than this section originally specified**, and
 deliberately. `nodes` and `pods` are NOT granted: the reader calls exactly
@@ -334,10 +397,9 @@ Widening that role would have granted event read to **every agent pod on every
 node** and still not reached the console. Chart 1.8.0 therefore renders a
 console-only ServiceAccount plus its own ClusterRole and binding, all three
 gated on `console.kubernetesContext.enabled` — off by default, so a console
-that never calls the apiserver is never handed a token that could.
-
-- `monitoring.coreos.com/prometheusrules` CRUD remains **not implemented**
-  (M7 — alerting sync).
+that never calls the apiserver is never handed a token that could. Chart 1.9.0
+adds `console.alerting.enabled` as a second reason to mint that identity, and
+nothing else changed about it.
 
 ## 11. Session and CSRF
 
@@ -399,9 +461,23 @@ attach without a CORS preflight this server never grants.
   milestone, and inventing it to hold one key was scope creep. See §12.1 and
   MILESTONES.md "Deferred out of M6".
 - Console exports `kconmon_ng_console_*` metrics (HTTP/WS, scheduler lag,
-  event-stream health, DB pool, proxy latency) **and ships self-monitoring
-  alert rules** — a broken monitor alerts instead of going quiet. The alert
-  rules themselves are not yet implemented (M7 — alerting sync).
+  event-stream health, DB pool, proxy latency). The self-monitoring **alert
+  rules** ship the way they always have: as `prometheusRule.rules` values in
+  the chart, rendered into a static `PrometheusRule` under
+  `prometheusRule.enabled` and edited in Git. That set covers the agent and the
+  control plane (`KconmonAgentsMissing`, `KconmonControllerDown`,
+  `UDPLossHigh`, `TCPChecksFailing`, `DNSChecksFailing`,
+  `ExternalChecksFailing`) and **nothing over `kconmon_ng_console_*` — the
+  console still does not self-monitor out of the box**.
+  M7 did *not* change that. The alert **builder**
+  (`console.alerting.enabled`) can now hold rules of this shape — a `raw` rule
+  over any console metric family takes thirty seconds to declare — but **nothing
+  auto-installs them**: the builder starts empty, the reconciler applies only
+  what an operator typed, and the two `PrometheusRule` objects (the chart's
+  static one and the console-owned bundle) are separate and neither implies the
+  other. "A broken monitor alerts instead of going quiet" remains an
+  operator-assembled property, not a default. See ALERTING.md §4 and
+  MILESTONES.md.
 - Scale target: 200 nodes / 40k pairs. Canvas heatmap; WS deltas coalesced
   (≤1 update/pair/5s); zone roll-up default above 60 nodes; Live feed
   virtualized; event ingestion backpressure documented.

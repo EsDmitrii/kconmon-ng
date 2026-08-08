@@ -510,7 +510,7 @@ func TestWebhookCreateValidation(t *testing.T) {
 		{"empty events", `{"name":"n","url":"https://x.test","events":[],"secret":"s"}`, http.StatusUnprocessableEntity},
 		{
 			"unknown event",
-			`{"name":"n","url":"https://x.test","events":["alert.fired"],"secret":"s"}`,
+			`{"name":"n","url":"https://x.test","events":["alert.acknowledged"],"secret":"s"}`,
 			http.StatusUnprocessableEntity,
 		},
 		{
@@ -529,6 +529,41 @@ func TestWebhookCreateValidation(t *testing.T) {
 		if w.Code >= http.StatusBadRequest && !strings.Contains(w.Body.String(), "webhook") {
 			t.Errorf("%s: detail = %s, want it to name the resource", c.name, w.Body)
 		}
+	}
+}
+
+// The M7 vocabulary reaches the API surface: an endpoint may subscribe to the
+// two alert transitions, alone or alongside incident events (Decision 7). The
+// handler passes events straight through to the store, so what this pins is
+// that nothing in the API layer -- no allow-list, no DTO enum -- kept a copy of
+// the M6 three and quietly rejects the new ones.
+func TestWebhookCreateAcceptsTheAlertEvents(t *testing.T) {
+	for _, c := range []struct {
+		name, events string
+		wantCount    int
+	}{
+		{"alert transitions only", `["alert.fired","alert.resolved"]`, 2},
+		{"mixed with an incident event", `["incident.created","alert.fired"]`, 2},
+		{"every subscribable event", `["incident.created","incident.resolved","incident.reopened",` +
+			`"alert.fired","alert.resolved"]`, 5},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			st := newFakeWebhookStore()
+			s := newM5TestServer(t, "admin", Deps{Webhooks: st, WebhookSealer: &fakeSealer{}})
+			body := `{"name":"alerts-slack","url":"https://x.test","events":` + c.events +
+				`,"secret":"` + testWebhookSecret + `"}`
+			w := doRequest(t, s, http.MethodPost, "/api/v1/webhooks", strings.NewReader(body), mutateWithCSRF)
+			if w.Code != http.StatusCreated {
+				t.Fatalf("POST = %d, want 201: %s", w.Code, w.Body)
+			}
+			var got webhookResponse
+			if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			if len(got.Events) != c.wantCount {
+				t.Errorf("events = %v, want %d of them echoed back", got.Events, c.wantCount)
+			}
+		})
 	}
 }
 

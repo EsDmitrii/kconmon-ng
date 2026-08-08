@@ -54,6 +54,7 @@ const (
 	queryCreateBinding            = "CreateBinding"
 	queryDeleteBinding            = "DeleteBinding"
 	queryGetTokenByHash           = "GetTokenByHash"
+	queryGetTokenByID             = "GetTokenByID"
 	queryCreateToken              = "CreateToken"
 	queryListTokens               = "ListTokens"
 	queryRevokeToken              = "RevokeToken"
@@ -291,24 +292,28 @@ func (s *eventStore) ListEvents(ctx context.Context, f EventFilter) (EventPage, 
 // fold can and cannot reconstruct. The persisted details JSON is exactly
 // events.topologyChangedDetails (internal/console/events/live_event.go):
 //
-//	{"reason": "...", "nodeName": "...", "agentId": "..."}
+//	{"reason": "...", "nodeName": "...", "agentId": "...", "zone": "..."}
 //
 // reason is the controller registry's own label -- agent_registered,
 // zone_updated, agent_deregistered, agent_evicted (api/proto/kconmon.proto,
 // internal/controller/registry.go). That is the WHOLE payload:
 //
 //   - Node/agent IDENTITY is reconstructible ONLY when the event names it.
-//     Today's controller (internal/controller/controller.go, the
-//     registry.OnChange callback) publishes pb.TopologyChanged{Reason: reason}
-//     and sets NEITHER node_name NOR agent_id, so events written by this build
-//     name nobody and the fold's honest answer for such history is an EMPTY
-//     node set with every event counted in UnfoldableEvents. The fold is
-//     written against the full proto shape anyway, so the day the controller
-//     starts attributing changes, stored history folds correctly with no
-//     change here.
-//   - ZONE is never recorded, not even by zone_updated (whose entire subject
-//     is the new zone). Folded nodes and agents always carry an empty Zone.
-//   - POD IP is never recorded. Folded agents always carry an empty PodIP.
+//     Since M7 the controller attributes every change at its emission site --
+//     one event per affected agent, carrying agent id, node and zone -- so
+//     current history folds into a real node set. History written BEFORE that
+//     (still inside retention on an upgraded console) carries a reason and
+//     nothing else: those rows name nobody, and the fold's honest answer for
+//     them is to change nothing and count them in UnfoldableEvents. A large
+//     UnfoldableEvents next to an empty node set means the window is mostly
+//     pre-M7 history, not that the cluster was empty.
+//   - ZONE is recorded since M7, including by zone_updated (whose entire
+//     subject is the new zone), so folded nodes and agents carry the zone the
+//     events last stated. It stays empty for pre-M7 rows, and an event that
+//     omits it never ERASES a zone already folded -- see the zone rule in
+//     foldTopology.
+//   - POD IP is never recorded, at any version. Folded agents always carry an
+//     empty PodIP.
 //   - READINESS is not recorded. Ready is true for every node the fold has
 //     seen registered and not since removed -- "present per the event log",
 //     which is the only readiness this history contains.
@@ -340,8 +345,9 @@ const topologyFoldLimit = 100_000
 
 // TopologyNode is one node in a reconstructed topology. Field-for-field the
 // durable twin of controllerclient.Node, so httpapi can serve the same JSON
-// keys for a folded snapshot as for the live passthrough. Zone is ALWAYS
-// empty and Ready is presence-derived -- see the block comment above.
+// keys for a folded snapshot as for the live passthrough. Zone comes from the
+// events and is empty for pre-M7 history; Ready is presence-derived -- see the
+// block comment above.
 type TopologyNode struct {
 	Name  string
 	Zone  string
@@ -349,8 +355,8 @@ type TopologyNode struct {
 }
 
 // TopologyAgent is one agent in a reconstructed topology, the durable twin of
-// controllerclient.Agent. PodIP and Zone are ALWAYS empty -- no event ever
-// recorded them.
+// controllerclient.Agent. PodIP is ALWAYS empty -- no event ever recorded it.
+// Zone comes from the events and is empty for pre-M7 history.
 type TopologyAgent struct {
 	ID       string
 	NodeName string
@@ -381,10 +387,10 @@ type TopologySnapshot struct {
 	EventsFolded int
 
 	// UnfoldableEvents counts rows that could NOT move the set: they named
-	// neither a node nor an agent (today's controller: all of them), carried
-	// unparseable details, or used a reason this build does not know. A large
-	// value next to an empty node set is the signal that the history is thin,
-	// not that the cluster was empty.
+	// neither a node nor an agent (every pre-M7 row, none written since),
+	// carried unparseable details, or used a reason this build does not know.
+	// A large value next to an empty node set is the signal that the history
+	// is thin, not that the cluster was empty.
 	UnfoldableEvents int
 
 	// Truncated reports that topologyFoldLimit cut the history off, so the
@@ -399,6 +405,7 @@ type topologyChangeDetails struct {
 	Reason   string `json:"reason"`
 	NodeName string `json:"nodeName"`
 	AgentID  string `json:"agentId"`
+	Zone     string `json:"zone"`
 }
 
 // TopologyAt reconstructs the node/agent set as of at by replaying every
@@ -468,8 +475,15 @@ func (s *eventStore) TopologyAt(ctx context.Context, at time.Time) (TopologySnap
 // no package state, so the whole contract is unit-testable over synthetic
 // records. OldestRetained is NOT set here; only the caller knows it.
 func foldTopology(recs []EventRecord) TopologySnapshot {
-	nodes := map[string]bool{}
-	agents := map[string]string{} // agent id -> node name last seen with it
+	// Membership plus the last placement each subject was seen with. Zone is
+	// carried rather than recomputed because only the event that mentions it
+	// knows it -- see the zone rule inside the loop.
+	type placement struct {
+		nodeName string
+		zone     string
+	}
+	nodes := map[string]string{}     // node name -> zone last stated for it
+	agents := map[string]placement{} // agent id -> where it was last seen
 
 	snap := TopologySnapshot{EventsFolded: len(recs)}
 	for i := range recs {
@@ -490,14 +504,23 @@ func foldTopology(recs []EventRecord) TopologySnapshot {
 
 		switch d.Reason {
 		case topologyReasonRegistered, topologyReasonZoneUpdated:
-			// zone_updated adds nothing but membership -- the NEW zone is not
-			// in the payload -- but it does prove the subject existed at this
-			// instant, which is worth folding.
+			// The zone rule: an event that states one WINS (zone_updated
+			// exists precisely to restate it), an event that omits one leaves
+			// what is already known ALONE. Overwriting with "" would blank
+			// zones at random across the mixed history an upgraded console
+			// holds -- pre-M7 rows carry no zone key at all -- while ignoring
+			// a stated zone would make a relabel invisible.
 			if d.NodeName != "" {
-				nodes[d.NodeName] = true
+				if _, seen := nodes[d.NodeName]; d.Zone != "" || !seen {
+					nodes[d.NodeName] = d.Zone
+				}
 			}
 			if d.AgentID != "" {
-				agents[d.AgentID] = d.NodeName
+				zone := d.Zone
+				if zone == "" {
+					zone = agents[d.AgentID].zone
+				}
+				agents[d.AgentID] = placement{nodeName: d.NodeName, zone: zone}
 			}
 		case topologyReasonDeregistered, topologyReasonEvicted:
 			// Removing something absent is a no-op, not an error: retention
@@ -512,16 +535,17 @@ func foldTopology(recs []EventRecord) TopologySnapshot {
 	}
 
 	snap.Nodes = make([]TopologyNode, 0, len(nodes))
-	for name := range nodes {
-		// Zone stays empty and Ready is presence-derived: see the block
-		// comment on this section for why neither is reconstructible.
-		snap.Nodes = append(snap.Nodes, TopologyNode{Name: name, Ready: true})
+	for name, zone := range nodes {
+		// Ready is presence-derived, and Zone is whatever the events said --
+		// empty for history a pre-M7 controller wrote. See the block comment
+		// on this section.
+		snap.Nodes = append(snap.Nodes, TopologyNode{Name: name, Zone: zone, Ready: true})
 	}
 	sort.Slice(snap.Nodes, func(i, j int) bool { return snap.Nodes[i].Name < snap.Nodes[j].Name })
 
 	snap.Agents = make([]TopologyAgent, 0, len(agents))
-	for id, node := range agents {
-		snap.Agents = append(snap.Agents, TopologyAgent{ID: id, NodeName: node})
+	for id, p := range agents {
+		snap.Agents = append(snap.Agents, TopologyAgent{ID: id, NodeName: p.nodeName, Zone: p.zone})
 	}
 	sort.Slice(snap.Agents, func(i, j int) bool { return snap.Agents[i].ID < snap.Agents[j].ID })
 

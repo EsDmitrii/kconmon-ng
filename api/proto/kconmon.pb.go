@@ -1383,15 +1383,25 @@ func (*Event_MtrCompleted) isEvent_Payload() {}
 
 func (*Event_DiagnosticProgress) isEvent_Payload() {}
 
-// TopologyChanged is a lightweight "refetch" signal, not a full snapshot: the
-// Console already has an authoritative HTTP topology endpoint
-// (GET /api/v1/topology) and re-queries it rather than duplicating node/zone
-// enrichment logic in the event stream.
+// TopologyChanged is a lightweight "refetch" signal for a LIVE Console: it
+// names the subject of one change, never the resulting cluster. The Console
+// already has an authoritative HTTP topology endpoint (GET /api/v1/topology)
+// and re-queries it rather than duplicating node/zone enrichment here.
+//
+// The subject fields are also the ONLY thing a persisted event history can be
+// folded back into a topology from (internal/console/store/events.go
+// foldTopology), so the controller fills every one it knows at the emission
+// site: one event per affected agent, not one per registry mutation.
+//
+// zone carries the agent's failure domain AT THE TIME OF THE CHANGE. For
+// zone_updated it is the NEW zone, which is that reason's entire subject —
+// without it, a zone change is indistinguishable from a no-op in history.
 type TopologyChanged struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Reason        string                 `protobuf:"bytes,1,opt,name=reason,proto3" json:"reason,omitempty"` // agent_registered|zone_updated|agent_deregistered|agent_evicted
 	NodeName      string                 `protobuf:"bytes,2,opt,name=node_name,json=nodeName,proto3" json:"node_name,omitempty"`
 	AgentId       string                 `protobuf:"bytes,3,opt,name=agent_id,json=agentId,proto3" json:"agent_id,omitempty"`
+	Zone          string                 `protobuf:"bytes,4,opt,name=zone,proto3" json:"zone,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1443,6 +1453,13 @@ func (x *TopologyChanged) GetNodeName() string {
 func (x *TopologyChanged) GetAgentId() string {
 	if x != nil {
 		return x.AgentId
+	}
+	return ""
+}
+
+func (x *TopologyChanged) GetZone() string {
+	if x != nil {
+		return x.Zone
 	}
 	return ""
 }
@@ -1955,11 +1972,12 @@ const file_kconmon_proto_rawDesc = "" +
 	"\rmtr_triggered\x18\x05 \x01(\v2\x1a.kconmonng.v1.MTRTriggeredH\x00R\fmtrTriggered\x12A\n" +
 	"\rmtr_completed\x18\x06 \x01(\v2\x1a.kconmonng.v1.MTRCompletedH\x00R\fmtrCompleted\x12S\n" +
 	"\x13diagnostic_progress\x18\a \x01(\v2 .kconmonng.v1.DiagnosticProgressH\x00R\x12diagnosticProgressB\t\n" +
-	"\apayload\"a\n" +
+	"\apayload\"u\n" +
 	"\x0fTopologyChanged\x12\x16\n" +
 	"\x06reason\x18\x01 \x01(\tR\x06reason\x12\x1b\n" +
 	"\tnode_name\x18\x02 \x01(\tR\bnodeName\x12\x19\n" +
-	"\bagent_id\x18\x03 \x01(\tR\aagentId\"\xfa\x01\n" +
+	"\bagent_id\x18\x03 \x01(\tR\aagentId\x12\x12\n" +
+	"\x04zone\x18\x04 \x01(\tR\x04zone\"\xfa\x01\n" +
 	"\rCheckObserved\x12\x17\n" +
 	"\atask_id\x18\x01 \x01(\tR\x06taskId\x12\x1d\n" +
 	"\n" +

@@ -24,7 +24,8 @@ export type TimelineKind =
   | "run"
   | "k8s"
   | "maintenance"
-  | "threshold";
+  | "threshold"
+  | "alert";
 
 export interface TimelineEntry {
   at: Date;
@@ -259,7 +260,16 @@ export function anomalyOnset(entries: TimelineEntry[]): Date | null {
  *     below the real suspects so it never outranks one.
  * 0 — never a cause: annotations and runs are things a human did ABOUT the
  *     problem, and threshold entries are the symptom itself. Ranking a symptom
- *     as its own cause is the classic way these panels start lying.
+ *     as its own cause is the classic way these panels start lying. `alert`
+ *     (M7 Task 8) joins them for exactly the threshold row's reason: a firing
+ *     alert is a RESTATEMENT of the symptom — usually of the very series the
+ *     threshold row already derived — so weighting it above zero would let the
+ *     page rank a page about the outage as the outage's cause, and rank it
+ *     twice.
+ *
+ * TODO(M7 Task 13): this table gained `alert: 0`. INVESTIGATION.md restates
+ * CAUSE_WEIGHTS verbatim and names this file as the authority, so the doc's
+ * table must gain the same row.
  */
 export const CAUSE_WEIGHTS: Record<TimelineKind, number> = {
   "path-change": 3,
@@ -270,6 +280,7 @@ export const CAUSE_WEIGHTS: Record<TimelineKind, number> = {
   annotation: 0,
   run: 0,
   threshold: 0,
+  alert: 0,
 };
 
 /** The candidate window, in seconds, before the onset. Five minutes is long
