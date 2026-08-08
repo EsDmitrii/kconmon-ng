@@ -2,6 +2,8 @@ import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { AnnotationBar, useAnnotations } from "@/components/annotations";
 import { EChart } from "@/components/echart";
+import { InvestigateLink, RelatedIncidents } from "@/components/investigate-entry";
+import { MaintenanceBar, useMaintenance } from "@/components/maintenance";
 import { PageShell } from "@/components/page-shell";
 import { RecentChanges } from "@/components/recent-changes";
 import { useTheme } from "@/components/theme-provider";
@@ -14,6 +16,7 @@ import { useAuth } from "@/hooks/use-auth";
 import { useMatrix } from "@/hooks/use-matrix";
 import { ApiError, createRun, getRun, getRuns, goTo, promqlQueryRange } from "@/lib/api";
 import { toSeriesOption, type CuratedChart } from "@/lib/curated-metrics";
+import type { InvestigationScope } from "@/lib/investigation-sources";
 import { useTimeContext, useWritesDisabled } from "@/lib/timemachine";
 import type { MatrixCell, RunDetail, RunResult } from "@/lib/types";
 import { escapeLabelValue } from "@/lib/utils";
@@ -130,6 +133,16 @@ function PairOverviewTab({ source, destination }: { source: string; destination:
      single pair's chart is missing. */
   const scope = pairScope(source, destination);
   const { annotations, error: annotationsError, refresh } = useAnnotations(scope, PAIR_RANGE_SECONDS);
+  /* The declared change windows over the same hour and the same scope (M6 Task
+     9). A separate hook and a separate bar rather than one merged list: a note
+     somebody wrote and a window somebody declared answer different questions,
+     ride different permissions, and are drawn differently on the chart on
+     purpose. */
+  const {
+    windows,
+    error: maintenanceError,
+    refresh: refreshMaintenance,
+  } = useMaintenance(scope, PAIR_RANGE_SECONDS);
   const chart = useMemo<CuratedChart>(
     () => ({ id: "pair-rtt", title: "RTT p95 by protocol", unit: "seconds", query: pairSeriesQuery(source, destination) }),
     [source, destination],
@@ -181,13 +194,25 @@ function PairOverviewTab({ source, destination }: { source: string; destination:
           </p>
         ) : null}
         {option && !empty && !queryError ? (
-          <EChart option={option} annotations={annotations} dark={theme === "dark"} className="mt-3 h-64 w-full" />
+          <EChart
+            option={option}
+            annotations={annotations}
+            maintenance={windows}
+            dark={theme === "dark"}
+            className="mt-3 h-64 w-full"
+          />
         ) : null}
         <AnnotationBar
           scope={scope}
           annotations={annotations}
           error={annotationsError}
           onChanged={() => void refresh()}
+        />
+        <MaintenanceBar
+          scope={scope}
+          windows={windows}
+          error={maintenanceError}
+          onChanged={() => void refreshMaintenance()}
         />
       </section>
     </Card>
@@ -362,6 +387,7 @@ export function PairCardPage() {
   const forward = cells.find((c) => c.source === source && c.destination === destination);
   const reverse = cells.find((c) => c.source === destination && c.destination === source);
   const scope = pairScope(source, destination);
+  const investigationScope: InvestigationScope = { kind: "pair", a: source, b: destination };
 
   return (
     <PageShell
@@ -371,6 +397,10 @@ export function PairCardPage() {
         <>
           <DirectionStat label={`${source} → ${destination}`} cell={forward} />
           <DirectionStat label={`${destination} → ${source}`} cell={reverse} />
+          {/* The entry point into Investigation Mode (plan Decision 11) —
+              buildInvestigateURL joins the two node names with the very
+              separator pairScope above uses, so the two never drift. */}
+          <InvestigateLink scope={investigationScope} />
         </>
       }
     >
@@ -390,7 +420,10 @@ export function PairCardPage() {
             <PairDiagnosticsTab source={source} destination={destination} canCreate={can("runs:create")} />
           )}
         </div>
-        <RecentChanges scope={scope} />
+        <div className="flex flex-col gap-5">
+          <RelatedIncidents scope={investigationScope} />
+          <RecentChanges scope={scope} />
+        </div>
       </div>
     </PageShell>
   );

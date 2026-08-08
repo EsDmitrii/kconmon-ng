@@ -150,6 +150,25 @@ jobs:
             -l app=kconmon-e2e-postgres \
             --timeout=90s
 
+      # The AES-256-GCM key that seals each webhook endpoint's HMAC secret at
+      # rest (M6). Same shape as the Postgres DSN Secret above -- created
+      # here, referenced BY NAME from e2e/testdata/console-values.yaml, never
+      # templated by the chart -- and applied BEFORE the install for the same
+      # reason: the console mounts it as a file and an unreadable
+      # encryptionKeyFile is fatal at boot, not a warning.
+      #
+      # Generated inline and thrown away with the cluster. It is a throwaway
+      # key for a throwaway database in a throwaway kind cluster, so it is
+      # deliberately NOT a repository secret: a fixed one would be a real key
+      # checked into CI config, and this one protects nothing that outlives
+      # the job. --dry-run=client | apply keeps the step re-runnable.
+      - name: Create the webhook encryption key Secret
+        if: ${{ steps.meta.outputs.skip != 'true' }}
+        run: |
+          kubectl create secret generic kconmon-e2e-webhooks-key \
+            --from-literal=encryptionKey="$(openssl rand -base64 32)" \
+            --dry-run=client -o yaml | kubectl apply -f -
+
       - name: Install Helm chart
         if: ${{ steps.meta.outputs.skip != 'true' }}
         run: |
@@ -268,13 +287,15 @@ jobs:
           # disabled (see the two steps below) -- excluded here so it does
           # not run against this (database-enabled) deployment.
           #
-          # The timeout is 15m, not 5m: TestConsoleSchedule waits out several
+          # The timeout is 20m, not 5m: TestConsoleSchedule waits out several
           # 10s schedule intervals to prove a DISABLED schedule stops firing,
           # and the two external-check tests each poll an agent's /metrics for
           # up to 180s while the reconcile -> controller -> agent chain
-          # converges. Those budgets are wide on purpose (see their comments),
-          # so the package budget has to clear their sum.
-          go test -tags=e2e -v -count=1 ./e2e/... -timeout 15m -skip TestConsoleDegradedMode
+          # converges. M6 adds two more wide budgets on top -- 120s for the
+          # first captured Kubernetes event and 90s for a webhook /test ping's
+          # outcome to land. Those budgets are wide on purpose (see their
+          # comments), so the package budget has to clear their sum.
+          go test -tags=e2e -v -count=1 ./e2e/... -timeout 20m -skip TestConsoleDegradedMode
 
           kill "$CONTROLLER_PF_PID" "$CONSOLE_PF_PID" "$AGENT_PF_PID" || true
         env:

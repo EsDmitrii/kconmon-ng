@@ -149,6 +149,13 @@ export interface DateTimePickerProps {
   /** Called with the composed instant on Apply or on a preset click. Never
    *  called by Cancel, Escape or a click outside. */
   onApply: (d: Date) => void;
+  /** Opt IN to days after today. Default false, because the control was built
+   *  for the Time Machine, where a future instant is a state nothing has
+   *  measured yet and offering it is a promise the console cannot keep.
+   *  M6's maintenance form is the exception the flag exists for: a change
+   *  window is normally DECLARED IN ADVANCE, so clamping it to the past would
+   *  make the common case unexpressible. */
+  allowFuture?: boolean;
   disabled?: boolean;
   /** Trigger text. Defaults to the formatted value (or "Pick a time"); pass it
    *  when the trigger has a name of its own, as the Live-state bar does. */
@@ -163,6 +170,7 @@ export interface DateTimePickerProps {
 export function DateTimePicker({
   value,
   onApply,
+  allowFuture = false,
   disabled,
   label,
   icon,
@@ -299,7 +307,8 @@ export function DateTimePicker({
     const next = addDays(focusedDay, delta);
     // Never walk into a day the Time Machine would clamp away — offering it and
     // then silently correcting it is the confusing half of the old control.
-    if (next > today) return;
+    // A picker opened with allowFuture has no such clamp to respect.
+    if (!allowFuture && next > today) return;
     pendingFocusRef.current = true;
     setFocusedDay(next);
     setView(startOfDay(next));
@@ -337,7 +346,8 @@ export function DateTimePicker({
   }
 
   const days = monthGrid(view);
-  const viewIsCurrentMonth = view.getFullYear() === today.getFullYear() && view.getMonth() === today.getMonth();
+  const atLastMonth =
+    !allowFuture && view.getFullYear() === today.getFullYear() && view.getMonth() === today.getMonth();
   const triggerText = label ?? (value ? formatInstant(value) : "Pick a time");
 
   return (
@@ -394,7 +404,7 @@ export function DateTimePicker({
             <button
               type="button"
               aria-label="Next month"
-              disabled={viewIsCurrentMonth}
+              disabled={atLastMonth}
               onClick={() => setView(new Date(view.getFullYear(), view.getMonth() + 1, 1))}
               className="grid size-7 place-items-center rounded-md text-muted-foreground transition-colors duration-(--dur-fast) ease-(--ease) hover:bg-accent hover:text-accent-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-30"
             >
@@ -422,7 +432,7 @@ export function DateTimePicker({
                 <tr key={row}>
                   {days.slice(row * 7, row * 7 + 7).map((d) => {
                     const outside = d.getMonth() !== view.getMonth();
-                    const isFuture = d > today;
+                    const isFuture = !allowFuture && d > today;
                     const isToday = sameDay(d, today);
                     const isSelected = selectedDay !== null && sameDay(d, selectedDay);
                     const isFocused = sameDay(d, focusedDay);
@@ -464,7 +474,7 @@ export function DateTimePicker({
               type="date"
               aria-label="Date"
               value={dateStr}
-              max={toDateInputValue(today)}
+              max={allowFuture ? undefined : toDateInputValue(today)}
               onChange={(e) => onManualDate(e.target.value)}
               className="h-8 min-w-0 flex-1 rounded-md bg-surface-2 px-2 text-[13px] text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
             />

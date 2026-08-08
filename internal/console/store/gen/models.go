@@ -100,6 +100,44 @@ type CheckSchedule struct {
 	UpdatedAt    time.Time
 }
 
+type Incident struct {
+	ID         pgtype.UUID
+	Title      string
+	Scope      string
+	FromAt     time.Time
+	ToAt       pgtype.Timestamptz
+	Status     string
+	Notes      string
+	Pinned     json.RawMessage
+	CreatedBy  string
+	CreatedAt  time.Time
+	ResolvedAt pgtype.Timestamptz
+}
+
+type K8sEvent struct {
+	ID          int64
+	Uid         string
+	ResourceVer string
+	EventTime   time.Time
+	Kind        string
+	Name        string
+	Namespace   string
+	Reason      string
+	Type        string
+	Message     string
+	Count       int32
+}
+
+type MaintenanceWindow struct {
+	ID        pgtype.UUID
+	Scope     string
+	StartAt   time.Time
+	EndAt     time.Time
+	Reason    string
+	CreatedBy string
+	CreatedAt time.Time
+}
+
 type MtrHopEnrichment struct {
 	Ip         string
 	Rdns       string
@@ -166,4 +204,17 @@ type User struct {
 	Disabled     bool
 	CreatedAt    time.Time
 	UpdatedAt    time.Time
+}
+
+type Webhook struct {
+	ID          pgtype.UUID
+	Name        string
+	Url         string
+	Events      []string
+	SecretEnc   []byte
+	Enabled     bool
+	LastStatus  string
+	LastAttempt pgtype.Timestamptz
+	Failures    int32
+	CreatedAt   time.Time
 }

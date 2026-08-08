@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -21,15 +22,41 @@ import (
 	"github.com/EsDmitrii/kconmon-ng/internal/console/enrich"
 	"github.com/EsDmitrii/kconmon-ng/internal/console/events"
 	"github.com/EsDmitrii/kconmon-ng/internal/console/httpapi"
+	"github.com/EsDmitrii/kconmon-ng/internal/console/kubectx"
 	"github.com/EsDmitrii/kconmon-ng/internal/console/metrics"
 	"github.com/EsDmitrii/kconmon-ng/internal/console/promql"
 	"github.com/EsDmitrii/kconmon-ng/internal/console/push"
 	"github.com/EsDmitrii/kconmon-ng/internal/console/scheduler"
 	"github.com/EsDmitrii/kconmon-ng/internal/console/store"
 	"github.com/EsDmitrii/kconmon-ng/internal/console/ui"
+	"github.com/EsDmitrii/kconmon-ng/internal/console/webhooks"
 	"github.com/EsDmitrii/kconmon-ng/internal/console/ws"
 	"github.com/prometheus/client_golang/prometheus"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
 )
+
+// buildInClusterClientset builds a Kubernetes clientset from the in-cluster
+// service account. Returns an error when running outside a cluster (e.g. local
+// development), which the caller treats as "the feature is off", never as a
+// reason to fail.
+//
+// It is a VERBATIM copy of internal/controller's helper of the same name, and
+// the duplication is deliberate: internal/console must not import
+// internal/controller (they are separate binaries with separate config,
+// metrics and dependency budgets), and exporting ten lines from the controller
+// to create that edge would be a worse trade than repeating them.
+func buildInClusterClientset() (*kubernetes.Clientset, error) {
+	restCfg, err := rest.InClusterConfig()
+	if err != nil {
+		return nil, fmt.Errorf("in-cluster config: %w", err)
+	}
+	clientset, err := kubernetes.NewForConfig(restCfg)
+	if err != nil {
+		return nil, fmt.Errorf("kubernetes client: %w", err)
+	}
+	return clientset, nil
+}
 
 // rbacPolicyRefreshInterval is how often cmd/console re-reads the roles
 // table and applies it to the live authz.Policy via Reload. Role BINDINGS
@@ -290,6 +317,24 @@ func main() {
 	// in-memory fallback either.
 	var mtrDep httpapi.MTRService
 	var annotationsDep httpapi.AnnotationService
+	// incidentsDep/maintenanceDep/webhooksDep/k8sEventsDep (M6 Task 4) share
+	// the identical posture, and are wired in the SAME task as their handlers
+	// for the same M4 lesson recorded above: nil means every /api/v1/incidents,
+	// /api/v1/maintenance, /api/v1/webhooks and /api/v1/k8s-events route
+	// answers 503. A saved investigation, a declared change window and a
+	// configured outbound endpoint are worth exactly as much as they are
+	// durable, so none of them gets an in-memory fallback either.
+	//
+	// Note what k8sEventsDep does NOT depend on: console.kubernetesContext. The
+	// READ route needs a database and nothing else -- with the capture off the
+	// table is simply empty and the endpoint answers an empty page, which is
+	// the honest report. Gating the route on the reader would turn "nothing was
+	// captured" into "endpoint unavailable" and send an operator hunting an API
+	// bug that is not there.
+	var incidentsDep httpapi.IncidentService
+	var maintenanceDep httpapi.MaintenanceService
+	var webhooksDep httpapi.WebhookService
+	var k8sEventsDep httpapi.K8sEventService
 	policy := authz.NewPolicy(nil)
 	if db != nil {
 		rolesDep = roleResolver{db: db}
@@ -302,6 +347,10 @@ func main() {
 		schedulesDep = db
 		mtrDep = db
 		annotationsDep = db
+		incidentsDep = db
+		maintenanceDep = db
+		webhooksDep = db
+		k8sEventsDep = db
 
 		if cfg.Auth.Mode == "local" {
 			bootstrapLocalAdmin(bgCtx, db, cfg.Auth.Local)
@@ -441,6 +490,58 @@ func main() {
 			"ttl", cfg.MTR.Enrichment.TTL)
 	}
 
+	// The webhook dispatcher (M6 Task 5) needs BOTH a database -- endpoints,
+	// their encrypted secrets and their delivery outcomes are all rows -- and
+	// an encryption key, which is what the cipher is built from. It supplies
+	// THREE httpapi seams at once (seal a secret, ping an endpoint, notify on
+	// an incident), and they are wired together on purpose: there is no state
+	// where endpoints can be created but nothing ever fires.
+	//
+	// The three ways this ends, and why each is what it is:
+	//
+	//	no key       -- the documented keyless state (Decision 4). Silent: an
+	//	                unconfigured optional feature is not news, and httpapi
+	//	                already answers 503 naming the key on the two routes
+	//	                that need it.
+	//	key, no db   -- warn and skip, the enrichment precedent: an operator
+	//	                asked for something this deployment cannot give, and
+	//	                taking the whole console down over it would be worse.
+	//	broken key   -- FATAL, the database.dsnFile precedent. A key that is
+	//	                configured but unreadable or malformed is a wrong Secret
+	//	                mount, not a deliberate omission, and starting anyway
+	//	                would silently degrade to "webhooks never fire".
+	// keyErr rather than err, for the reason enrichErr above states: reading
+	// the function-scoped err this far down turns every earlier `x, err :=`
+	// into a govet shadow report.
+	webhookKey, keyErr := cfg.Webhooks.ResolveEncryptionKey()
+	if keyErr != nil {
+		slog.Error("failed to resolve the webhook encryption key", "error", keyErr)
+		os.Exit(1)
+	}
+	var dispatcher *webhooks.Dispatcher
+	var webhookSealerDep httpapi.SecretSealer
+	var webhookTesterDep httpapi.TestDispatcher
+	var incidentNotifierDep httpapi.IncidentNotifier
+	switch {
+	case len(webhookKey) == 0:
+	case db == nil:
+		slog.Warn("webhooks.encryptionKey is set but no database is configured — webhook delivery is off " +
+			"(endpoints, their encrypted secrets and their delivery outcomes all live in PostgreSQL; " +
+			"set console.database.mode)")
+	default:
+		// dispatcherErr rather than err: assigning the function-scoped err
+		// this far down would make every earlier `x, err :=` a govet shadow
+		// report (the same reason enrichErr exists above).
+		d, dispatcherErr := webhooks.New(webhookKey, db, m)
+		if dispatcherErr != nil {
+			slog.Error("failed to build the webhook dispatcher", "error", dispatcherErr)
+			os.Exit(1)
+		}
+		dispatcher = d
+		webhookSealerDep, webhookTesterDep, incidentNotifierDep = d, d, d
+		slog.Info("webhook delivery enabled")
+	}
+
 	srv := httpapi.NewServer(httpapi.Deps{
 		Config: cfg, Metrics: m, PromRegistry: promReg, UI: uiHandler,
 		Controller: ctrl, Prometheus: prom, Hub: hub, Realtime: ingester,
@@ -452,6 +553,17 @@ func main() {
 		Runner: runnerDep, Targets: targetsDep,
 		Definitions: definitionsDep, Schedules: schedulesDep,
 		MTR: mtrDep, Annotations: annotationsDep, Enricher: enricherDep,
+		Incidents: incidentsDep, Maintenance: maintenanceDep,
+		Webhooks: webhooksDep, K8sEvents: k8sEventsDep,
+		// All three are the same *webhooks.Dispatcher, or all three are nil.
+		// nil is NOT "webhooks off": listing, reading, updating, disabling and
+		// deleting an endpoint keep working, and only creating one, testing
+		// one, and firing on an incident need the cipher (M6 Decision 4).
+		// Assigned through the interface-typed vars above so a nil dispatcher
+		// stays a genuine nil interface rather than the typed-nil trap.
+		WebhookSealer:         webhookSealerDep,
+		WebhookTestDispatcher: webhookTesterDep,
+		IncidentNotifier:      incidentNotifierDep,
 		// The SAME kv SessionStore and the OIDC state stash ride on, so the
 		// rate limiter is cluster-wide exactly when Valkey is (and
 		// per-replica, weaker but never stronger, when it is not).
@@ -486,6 +598,13 @@ func main() {
 		// pool gauge describes the pool, not the retention policy.
 		spawn("store-pool-stats", store.NewPoolStatsPoller(db, m).Run)
 		spawn("rbac-policy-refresh", func(ctx context.Context) { refreshCustomRoles(ctx, db, policy) })
+	}
+	if dispatcher != nil {
+		// Dispatcher.Run only waits for cancellation and then drains, so
+		// spawning it here is what puts its 5s drain budget inside wg.Wait --
+		// which is in turn ahead of db.Close(), so a delivery finishing during
+		// shutdown can still write its outcome row.
+		spawn("webhook-dispatcher", dispatcher.Run)
 	}
 
 	// The schedule loop is opt-in (console.scheduler.enabled, default false)
@@ -541,6 +660,49 @@ func main() {
 			Metrics: m, Interval: cfg.Scheduler.TickInterval, LockKey: scheduler.LockKey,
 		}).Run)
 		slog.Info("schedule loop enabled", "tickInterval", cfg.Scheduler.TickInterval)
+	}
+
+	// The Kubernetes event reader is opt-in (console.kubernetesContext.enabled,
+	// default false) and needs a database -- k8s_events is where it puts what it
+	// captures, and watching the apiserver to throw the result away would be an
+	// RBAC grant spent on nothing.
+	//
+	// EVERY failure here is a warn-and-continue, and the in-cluster config one
+	// most of all: `kubernetesContext.enabled: true` on a console running
+	// outside a cluster (local development, a laptop against a port-forwarded
+	// database) must degrade to "no k8s context", never to a console that
+	// refuses to start. That is the controller's own posture at
+	// controller.go:247, copied rather than imported -- internal/console must
+	// not depend on internal/controller, and the helper is ten lines.
+	switch {
+	case !cfg.KubernetesContext.Enabled:
+	case db == nil:
+		slog.Warn("kubernetesContext.enabled is set but no database is configured — kubernetes event " +
+			"capture is off (captured events live in PostgreSQL; set console.database.mode)")
+	default:
+		clientset, kubeErr := buildInClusterClientset()
+		if kubeErr != nil {
+			slog.Warn("kubernetesContext.enabled is set but the in-cluster Kubernetes config is "+
+				"unavailable — kubernetes event capture is off (the console is not running in a "+
+				"cluster, or its ServiceAccount token is not mounted)", "error", kubeErr)
+			break
+		}
+		// ctrl is a TYPED nil when controller.url is unset, and a typed nil in
+		// an interface is not a nil interface -- assigning it directly would
+		// hand the reader something that panics instead of something it knows
+		// to treat as "no topology" (and fail closed on node events).
+		var topo kubectx.TopologySource
+		if ctrl != nil {
+			topo = ctrl
+		} else {
+			slog.Warn("kubernetesContext.enabled is set but controller.url is empty — node events " +
+				"will be dropped (M6 Decision 3 fails closed: without a topology nothing vouches " +
+				"for a node); pod events are unaffected")
+		}
+		reader := kubectx.New(cfg.KubernetesContext, clientset, topo, db, m)
+		spawn("k8s-events-reader", reader.Run)
+		slog.Info("kubernetes event capture enabled", //nolint:gosec // G706: namespace comes from operator config or the downward API, structured slog field
+			"namespace", reader.Namespace(), "resyncInterval", cfg.KubernetesContext.ResyncInterval)
 	}
 
 	srv.SetReady(true)

@@ -216,6 +216,53 @@ var auditDetailAllowlist = map[string][]string{
 	// the annotation. DELETE has no body and therefore no entry -- the id it
 	// names is already in the row's resource column (auditResource).
 	"POST /api/v1/annotations": {"scope"},
+	// Incidents (M6 Task 4): "title", "scope" and "status" — what was opened,
+	// about what, and where it stands. "notes" is annotations' "text" one
+	// milestone later, and the ban is the same one for the same reason: it is
+	// free-form incident prose, the field most likely to hold the credential
+	// or hostname the operator was mid-incident about, and it stays readable
+	// from GET /api/v1/incidents/{id} by whoever holds incidents:read.
+	// "pinned" is banned too, and for a sharper reason than noise: it is an
+	// open JSON array whose "note" on each ref is more free-form prose,
+	// so allow-listing it would allow-list exactly what banning "notes" set
+	// out to keep out. "fromAt"/"toAt" are left off as noise — the row's own
+	// timestamp says when the incident was opened.
+	"POST /api/v1/incidents": {"title", "scope", "status"},
+	// PATCH allow-lists "status" ALONE. It is the one bit of an incident's
+	// evolution an audit log is read to answer for ("who resolved this, and
+	// when"); notes and pinned are the same banned free-form fields as above.
+	// Note that "status" is present here even though POST never accepts one:
+	// the key names a body field, and only PATCH has a body that carries it.
+	"PATCH /api/v1/incidents/{id}": {"status"},
+	// Maintenance (M6 Task 4): the SCOPE alone, on the annotations precedent.
+	// "reason" is free text — the field an operator explains a change window
+	// in, which is exactly where a change ticket id, a vendor name or an
+	// internal hostname ends up — and it stays readable from GET
+	// /api/v1/maintenance by whoever holds maintenance:read. "startAt"/"endAt"
+	// are left off as noise, reconstructible from the window itself.
+	"POST /api/v1/maintenance": {"scope"},
+	// Webhooks (M6 Task 4): "name" and "events" — WHICH endpoint changed and
+	// what it now fires on. Two bans, both absolute:
+	//
+	//   - "secret" NEVER. It is the HMAC key every delivery is signed with.
+	//     An audit log is read by more people and retained far longer than an
+	//     endpoint row is, and a signing key that reaches it is a signing key
+	//     that has to be rotated. M6's global constraint states this at the
+	//     milestone level: webhook secrets appear in no audit row, no API
+	//     read, no log, no metric label.
+	//   - "url" NEVER, on the targets "address" precedent one step stronger:
+	//     it names infrastructure OUTSIDE this cluster (a Slack hook, a
+	//     PagerDuty ingest), and such URLs routinely embed a token in the path
+	//     itself — allow-listing the field would be allow-listing the
+	//     credential it may contain. It stays readable from GET
+	//     /api/v1/webhooks by whoever holds webhooks:manage, which is admin.
+	//
+	// POST /api/v1/webhooks/{id}/test has NO entry, the conscious decision the
+	// default-deny rule forces: it carries no body, and the endpoint it names
+	// is already in the row's resource column (auditResource reads {id}). It
+	// is still audited like every other mutation, with the empty {} detail.
+	"POST /api/v1/webhooks":     {"name", "events"},
+	"PUT /api/v1/webhooks/{id}": {"name", "events"},
 }
 
 // auditDetailFor extracts action's allow-listed subset of body's top-level

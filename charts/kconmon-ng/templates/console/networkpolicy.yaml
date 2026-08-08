@@ -142,6 +142,32 @@ spec:
         - protocol: TCP
           port: 9090
     {{- end }}
+    # Console to the Kubernetes apiserver (M6 event reader,
+    # console.kubernetesContext.enabled only). ipBlock and not a
+    # namespaceSelector for the same reason as the OIDC rule above and one more:
+    # kubernetes.default.svc is a ClusterIP with no Pod behind it, so a
+    # namespaceSelector matches nothing and every packet is dropped — the
+    # reader would retry on its backoff forever with no diagnostic beyond a
+    # dial timeout. Both 443 (the in-cluster Service) and 6443 (the usual
+    # control-plane listener the Service's endpoints point at) because the
+    # kube-proxy DNAT rewrites the port and the policy is evaluated against the
+    # POST-DNAT destination on most CNIs. Tighten via
+    # console.networkPolicy.kubeAPIEgress once you know your control plane's
+    # addresses.
+    {{- if .Values.console.kubernetesContext.enabled }}
+    {{- if .Values.console.networkPolicy.kubeAPIEgress }}
+    {{- toYaml .Values.console.networkPolicy.kubeAPIEgress | nindent 4 }}
+    {{- else }}
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+      ports:
+        - protocol: TCP
+          port: 443
+        - protocol: TCP
+          port: 6443
+    {{- end }}
+    {{- end }}
     # DNS
     - to:
         - namespaceSelector: {}

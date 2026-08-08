@@ -177,6 +177,18 @@ and changes nothing that existed before. `annotations:write` stops at
 statement. Launching a new MTR trace never got its own permission — it is
 `runs:create`, the same authority every other on-demand probe requires.
 
+**M6's five permissions follow the same two grooves.** `incidents:read` and
+`maintenance:read` are telemetry-class — an incident's record and an active
+maintenance window are context every role needs, so all four built-in roles
+hold them; `incidents:write` and `maintenance:write` are statement-class and
+stop at `operator`/`admin`, exactly like `annotations:write`. `webhooks:manage`
+is the exception: each endpoint carries an HMAC signing secret, which makes it
+credential-adjacent, so it takes the `rbac:manage`/`tokens:manage` posture —
+one combined permission, held by `admin` alone via `AllPermissions`. K8s
+events deliberately got NO permission of their own: they are events, and
+`events:read` already decides who may read the fleet's history — a second
+gate on the same class of data would only drift from the first.
+
 **WebSocket authorization is per-connection, not per-topic.** `GET /ws`
 requires exactly one permission, `events:read`, and that single decision
 covers every topic multiplexed over the socket — `live`, `topology`,
@@ -295,11 +307,37 @@ list).
 
 - `monitoring.coreos.com/prometheusrules`: CRUD in its namespace
   (`alerting.enabled`).
-- `events`, `nodes`, `pods`: **read-only**, for `kubectx`
-  (`kubernetesContext.enabled`; node/event reads are cluster-scoped —
-  document this clearly).
+- `events`: **`list`, `watch`**, cluster-scoped, for `kubectx`
+  (`kubernetesContext.enabled`). **Landed M6** — chart 1.8.0.
 
-Neither is implemented yet (M6/M7).
+The `kubectx` grant is **narrower than this section originally specified**, and
+deliberately. `nodes` and `pods` are NOT granted: the reader calls exactly
+`CoreV1().Events(ns).List` and `.Watch` and nothing else, because the node set
+it filters against comes from the **controller's topology over the controller's
+own HTTP API**, not from the apiserver. `get` is absent for the same reason —
+the reader never fetches a single event by name. The grant is what the code
+calls, not what the plan predicted.
+
+Cluster-scoped rather than a namespaced `Role` because node events are the
+point: the kubelet writes them into whatever namespace it chooses, so the
+node-event stream cannot be expressed as a `Role` in the release namespace. The
+leak-consciousness therefore lives in the READER's filter, not in the grant —
+node events are kept only for nodes present in the topology (and **all** of them
+dropped when no topology is available: fail closed), pod events only from the
+one configured namespace.
+
+**The console does not share the agent/controller ServiceAccount.** Up to chart
+1.7.0 the console Deployment set no `serviceAccountName` at all and ran as the
+namespace `default` SA, while one ClusterRole (`nodes: get,list,watch`) was
+bound to the SA the agent DaemonSet and the controller Deployment share.
+Widening that role would have granted event read to **every agent pod on every
+node** and still not reached the console. Chart 1.8.0 therefore renders a
+console-only ServiceAccount plus its own ClusterRole and binding, all three
+gated on `console.kubernetesContext.enabled` — off by default, so a console
+that never calls the apiserver is never handed a token that could.
+
+- `monitoring.coreos.com/prometheusrules` CRUD remains **not implemented**
+  (M7 — alerting sync).
 
 ## 11. Session and CSRF
 
@@ -355,9 +393,11 @@ attach without a CORS preflight this server never grants.
   mutations, same-origin CORS default. See §11 above for the as-built detail.
 - PromQL proxy guards: timeout, max range/step, response size cap,
   per-role gating. Response cache is not yet implemented (DATA.md §5.3).
-- Webhook payloads HMAC-signed; secrets encrypted at rest (app-level,
-  `settings`-keyed). Not yet implemented (M6/M7 — `webhooks`/`settings`
-  tables are still pending, DATA.md §5.2).
+- Webhook payloads HMAC-signed; secrets encrypted at rest (app-level).
+  **Landed M6** — but keyed on **config**, not on the `settings` table this
+  line originally promised: that table does not exist and is not pinned to a
+  milestone, and inventing it to hold one key was scope creep. See §12.1 and
+  MILESTONES.md "Deferred out of M6".
 - Console exports `kconmon_ng_console_*` metrics (HTTP/WS, scheduler lag,
   event-stream health, DB pool, proxy latency) **and ships self-monitoring
   alert rules** — a broken monitor alerts instead of going quiet. The alert
@@ -366,6 +406,53 @@ attach without a CORS preflight this server never grants.
   (≤1 update/pair/5s); zone roll-up default above 60 nodes; Live feed
   virtualized; event ingestion backpressure documented.
 - slog structured logging consistent with existing binaries.
+
+### 12.1 Outbound webhooks — signing, at-rest encryption, and the SSRF posture
+
+**Signing.** Every delivery carries `X-Kconmon-Signature: sha256=<hex>`, an
+HMAC-SHA256 over the **raw request body bytes** — the exact bytes on the wire,
+not a re-serialization of them, so a receiver that verifies against what it
+read cannot disagree with what was signed. The payload is deliberately
+**closed** (no `omitempty` anywhere: `toAt` is always a key, `notes` and
+`pinned` are always absent), which makes the body **byte-identical across
+retries** and therefore usable as a receiver-side dedupe key.
+
+**At rest.** Each endpoint's signing secret is stored as
+`nonce ‖ AES-256-GCM(secret)` in `webhooks.secret_enc` (BYTEA), with a fresh
+12-byte random nonce per seal. The key is `webhooks.encryptionKey(File)` — one
+deployment secret, mounted as a file, never inline in a ConfigMap. The store
+layer is typed to accept **ciphertext only** and never sees a plaintext secret;
+`httpapi` never returns one (there is no field for it on the response type, so
+there is no masked form to un-mask); no log line, metric label or audit row
+carries either the secret or its ciphertext, pinned by leak-ban assertions in
+the httpapi and webhooks suites. An unreadable secret still runs the full retry
+ladder and reports a failure rather than short-circuiting — one exit path, so a
+decryption failure cannot be distinguished from a delivery failure by timing.
+
+**The SSRF posture, stated plainly.** A webhook URL is **admin-supplied**
+(`webhooks:manage` is admin-only) and the only validation applied to it is the
+scheme: it must start with `http://` or `https://`. There is **no allowlist, no
+denylist, and no private-range or link-local check in M6**, and the delivery
+client follows redirects with Go's default policy (up to 10 hops). An admin can
+therefore point an endpoint at `169.254.169.254` or an in-cluster Service and
+the console will POST a signed incident payload to it.
+
+That is an accepted risk under one specific assumption: **`webhooks:manage` is
+already the most privileged non-`rbac` permission in the system**, an admin who
+holds it can create API tokens and rewrite role bindings, and none of those are
+harder to abuse than an outbound POST. What would force an allowlist is that
+assumption failing — specifically, if `webhooks:manage` is ever delegated below
+`admin` (a custom role, a scoped operator), or if webhook creation is ever
+exposed to a non-admin path such as an alerting integration that mints endpoints
+on a user's behalf. Either change makes the URL attacker-controlled by someone
+who cannot already do worse, and the allowlist has to land in the same
+milestone.
+
+Two further bounds already limit the blast radius: one attempt is capped at
+**10 s**, and a delivery is at most **3 attempts** (0s / 30s / 5m, ±20%
+jitter), so a hostile URL cannot be used as an unbounded outbound channel. The
+error text is never echoed from the response body, so an endpoint cannot be used
+to read the contents of what it points at — only whether it answered.
 
 ### The audit log's documented lossiness
 

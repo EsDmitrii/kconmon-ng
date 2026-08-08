@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef } from "react";
 import * as echarts from "echarts";
-import { withAnnotations } from "@/lib/annotations";
-import type { Annotation } from "@/lib/types";
+import { withAnnotations, withMaintenance } from "@/lib/annotations";
+import type { Annotation, MaintenanceWindow } from "@/lib/types";
 
 /**
  * EChart is the one mount point for every chart in the console.
@@ -13,6 +13,13 @@ import type { Annotation } from "@/lib/types";
  * in each caller means a page passes the annotations it fetched and gets the
  * same marker treatment on every surface, with no per-page option surgery.
  *
+ * `maintenance` (M6 Task 9) is the SECOND overlay, on exactly the same terms:
+ * declared change windows become one more markArea series, muted and dashed so
+ * a band an operator declared cannot be mistaken for a note somebody wrote. It
+ * rides here rather than in each page for the reason the annotations do — a
+ * page passes what it fetched and every chart in the console draws it the same
+ * way, with no per-page option surgery.
+ *
  * `dark` is a separate prop rather than a useTheme() call on purpose. Not every
  * tree that mounts a chart carries a ThemeProvider (useTheme throws without
  * one), and the caller already knows which theme it built its own option for —
@@ -23,23 +30,25 @@ export function EChart({
   option,
   className,
   annotations,
+  maintenance,
   dark = true,
 }: {
   option: echarts.EChartsOption;
   className?: string;
   annotations?: Annotation[];
+  maintenance?: MaintenanceWindow[];
   dark?: boolean;
 }) {
   const ref = useRef<HTMLDivElement>(null);
   const chart = useRef<echarts.ECharts | null>(null);
 
-  // withAnnotations returns the SAME object when there is nothing to overlay,
-  // so a chart with no annotations keeps the caller's own memo identity and
-  // setOption below does not re-run for an empty list.
-  const merged = useMemo(
-    () => (annotations && annotations.length > 0 ? withAnnotations(option, annotations, dark) : option),
-    [option, annotations, dark],
-  );
+  // Both helpers return the SAME object when there is nothing to overlay, so a
+  // chart with neither keeps the caller's own memo identity and setOption below
+  // does not re-run for two empty lists.
+  const merged = useMemo(() => {
+    const withNotes = annotations && annotations.length > 0 ? withAnnotations(option, annotations, dark) : option;
+    return maintenance && maintenance.length > 0 ? withMaintenance(withNotes, maintenance, dark) : withNotes;
+  }, [option, annotations, maintenance, dark]);
 
   useEffect(() => {
     if (!ref.current) return;

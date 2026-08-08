@@ -4,13 +4,18 @@ import {
   ANNOTATION_SERIES_NAME,
   ANNOTATION_TEXT_MAX,
   GLOBAL_SCOPE,
+  MAINTENANCE_REASON_MAX,
+  MAINTENANCE_SERIES_NAME,
   annotationOverlaySeries,
   isInstant,
+  maintenanceOverlaySeries,
   mergeAnnotations,
+  mergeMaintenanceWindows,
   withAnnotations,
+  withMaintenance,
 } from "./annotations";
 import { CHART_FALLBACK } from "./chart-theme";
-import type { Annotation } from "./types";
+import type { Annotation, MaintenanceWindow } from "./types";
 
 /**
  * The option-builder is a pure function on purpose: EChart is mocked in every
@@ -173,5 +178,133 @@ describe("constants", () => {
 
   it("pins the text bound the server enforces", () => {
     expect(ANNOTATION_TEXT_MAX).toBe(1024);
+  });
+
+  it("pins the reason bound the maintenance endpoint enforces", () => {
+    expect(MAINTENANCE_REASON_MAX).toBe(512);
+  });
+});
+
+/* ── M6 Task 9: the maintenance overlay, annotations' sibling ─────────────── */
+
+function win(over: Partial<MaintenanceWindow> = {}): MaintenanceWindow {
+  return {
+    id: "m-1",
+    scope: "",
+    startAt: "2026-08-01T11:30:00Z",
+    endAt: "2026-08-01T11:45:00Z",
+    reason: "switch upgrade",
+    createdBy: "user:ada",
+    createdAt: "2026-08-01T10:00:00Z",
+    ...over,
+  };
+}
+
+describe("maintenanceOverlaySeries", () => {
+  it("returns null for an empty list — nothing to overlay", () => {
+    expect(maintenanceOverlaySeries([], true)).toBeNull();
+  });
+
+  it("turns each window into a markArea spanning [startAt, endAt]", () => {
+    const series = maintenanceOverlaySeries([win()], true) as LineSeriesOption;
+    const data = series.markArea?.data as [{ name: string; xAxis: number }, { xAxis: number }][];
+    expect(data).toHaveLength(1);
+    expect(data[0][0].xAxis).toBe(START_MS);
+    expect(data[0][1].xAxis).toBe(END_MS);
+  });
+
+  it("has NO markLine at all — a window is always a span, never an instant", () => {
+    const series = maintenanceOverlaySeries([win()], true) as LineSeriesOption;
+    expect(series.markLine).toBeUndefined();
+    expect(series.type).toBe("line");
+    expect(series.data).toEqual([]);
+    expect(series.name).toBe(MAINTENANCE_SERIES_NAME);
+  });
+
+  it("carries the reason as the hover label rather than showing it at rest", () => {
+    const series = maintenanceOverlaySeries([win({ reason: "core switch reboot" })], true) as LineSeriesOption;
+    const data = series.markArea?.data as [{ name: string }, unknown][];
+    expect(data[0][0].name).toBe("core switch reboot");
+    expect(series.markArea?.label?.show).toBe(false);
+    expect(series.markArea?.emphasis?.label?.show).toBe(true);
+    expect(series.markArea?.emphasis?.label?.formatter).toBe("{b}");
+  });
+
+  /* THE differentiating property. Both overlays are muted bands drawn from the
+     same axis colour, so the thing that tells them apart on a busy chart is the
+     DASHED OUTLINE and the fainter fill a declared window carries — an
+     annotation's band has neither. Asserted on both sides so a future edit that
+     makes them identical fails here rather than in an operator's eyes. */
+  it("is visually DISTINCT from an annotation band: dashed outline, fainter fill", () => {
+    const maintenance = maintenanceOverlaySeries([win()], true) as LineSeriesOption;
+    const annotation = annotationOverlaySeries([ann({ endAt: "2026-08-01T11:45:00Z" })], true) as LineSeriesOption;
+    const mStyle = maintenance.markArea?.itemStyle as { borderType?: string; borderWidth?: number; opacity?: number };
+    const aStyle = annotation.markArea?.itemStyle as { borderType?: string; opacity?: number };
+    expect(mStyle.borderType).toBe("dashed");
+    expect(mStyle.borderWidth).toBeGreaterThan(0);
+    expect(aStyle.borderType).toBeUndefined();
+    expect(mStyle.opacity).toBeLessThan(aStyle.opacity as number);
+    expect(maintenance.name).not.toBe(annotation.name);
+  });
+
+  it("draws in the muted house colour, per theme", () => {
+    const dark = maintenanceOverlaySeries([win()], true) as LineSeriesOption;
+    const light = maintenanceOverlaySeries([win()], false) as LineSeriesOption;
+    expect((dark.markArea?.itemStyle as { color?: string }).color).toBe(CHART_FALLBACK.dark.axis);
+    expect((light.markArea?.itemStyle as { color?: string }).color).toBe(CHART_FALLBACK.light.axis);
+  });
+
+  it("SKIPS a window with an unparseable edge rather than drawing a band with a NaN bound", () => {
+    expect(maintenanceOverlaySeries([win({ endAt: "later" })], true)).toBeNull();
+    expect(maintenanceOverlaySeries([win({ startAt: "not-a-time" })], true)).toBeNull();
+  });
+});
+
+describe("withMaintenance", () => {
+  const base = { series: [{ type: "line" as const, name: "tcp", data: [] }] };
+
+  it("appends the overlay after the real series", () => {
+    const out = withMaintenance(base, [win()], true);
+    const series = out.series as LineSeriesOption[];
+    expect(series.map((s) => s.name)).toEqual(["tcp", MAINTENANCE_SERIES_NAME]);
+  });
+
+  it("returns the option UNCHANGED when there is nothing to draw", () => {
+    expect(withMaintenance(base, [], true)).toBe(base);
+  });
+
+  it("does not mutate the option it was given", () => {
+    withMaintenance(base, [win()], true);
+    expect(base.series).toHaveLength(1);
+  });
+
+  it("composes with withAnnotations — both overlays land on one option", () => {
+    const out = withMaintenance(withAnnotations(base, [ann()], true), [win()], true);
+    expect((out.series as LineSeriesOption[]).map((s) => s.name)).toEqual([
+      "tcp",
+      ANNOTATION_SERIES_NAME,
+      MAINTENANCE_SERIES_NAME,
+    ]);
+  });
+});
+
+describe("mergeMaintenanceWindows", () => {
+  it("folds the scoped and global legs into one, oldest first", () => {
+    const a = win({ id: "a", startAt: "2026-08-01T12:00:00Z" });
+    const b = win({ id: "b", startAt: "2026-08-01T11:00:00Z" });
+    expect(mergeMaintenanceWindows([a], [b]).map((x) => x.id)).toEqual(["b", "a"]);
+  });
+
+  it("de-duplicates by id — a global window fetched twice renders once", () => {
+    const a = win({ id: "a" });
+    expect(mergeMaintenanceWindows([a], [a, win({ id: "b" })])).toHaveLength(2);
+  });
+
+  it("breaks a startAt tie on id so the order is total and stable", () => {
+    expect(mergeMaintenanceWindows([win({ id: "y" })], [win({ id: "x" })]).map((w) => w.id)).toEqual(["x", "y"]);
+  });
+
+  it("is empty for no input", () => {
+    expect(mergeMaintenanceWindows()).toEqual([]);
   });
 });

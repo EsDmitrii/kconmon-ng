@@ -74,6 +74,9 @@ func TestOperatorAddsWriteAuthorityOverViewer(t *testing.T) {
 	// annotations:read are telemetry and land in BOTH — Plan Decision 11).
 	want := append([]authz.Permission{authz.PermRunsCreate}, m4Permissions...)
 	want = append(want, authz.PermAnnotationsWrite)
+	// M6: the two statement-class writes (webhooks:manage stays admin-only
+	// and so is in NEITHER role's diff).
+	want = append(want, authz.PermIncidentsWrite, authz.PermMaintenanceWrite)
 	if len(diff) != len(want) {
 		t.Fatalf("operator - viewer = %v, want %v", diff, want)
 	}
@@ -153,6 +156,11 @@ func TestAdminHoldsEveryPermission(t *testing.T) {
 		authz.PermMTRRead,
 		authz.PermAnnotationsRead,
 		authz.PermAnnotationsWrite,
+		authz.PermIncidentsRead,
+		authz.PermIncidentsWrite,
+		authz.PermMaintenanceRead,
+		authz.PermMaintenanceWrite,
+		authz.PermWebhooksManage,
 	}
 
 	if len(authz.AllPermissions) != len(expected) {

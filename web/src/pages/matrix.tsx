@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { Inbox } from "lucide-react";
+import { Inbox, Search } from "lucide-react";
 import { PageShell } from "@/components/page-shell";
 import { RealtimeBadge } from "@/components/realtime-badge";
 import { Badge } from "@/components/ui/badge";
@@ -8,6 +8,7 @@ import { Segmented } from "@/components/ui/segmented";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tooltip } from "@/components/ui/tooltip";
 import { useMatrix } from "@/hooks/use-matrix";
+import { buildInvestigateURL } from "@/lib/investigation-sources";
 import { useTimeContext } from "@/lib/timemachine";
 import { PROTOCOLS, type MatrixCell, type Protocol } from "@/lib/types";
 import { cn } from "@/lib/utils";
@@ -143,8 +144,21 @@ function GridCell({
   // hover/focus Tooltip wrapper attach its handlers exactly as before.
   const pairHref = `/pairs/${encodeURIComponent(src)}/${encodeURIComponent(dst)}`;
 
+  /* The Investigate affordance (plan Decision 11) lives INSIDE the cell, as a
+     sibling of the pair link rather than a new column or a new row: the cell IS
+     the pair's affordance, and a second grid layer would double the width of a
+     table that is already N x N.
+     It cannot go in the tooltip, which is the other thing this cell has: that
+     bubble is `pointer-events-none` by construction (components/ui/tooltip.tsx
+     renders it in a body portal at a measured position), so a link inside it
+     could be read but never clicked.
+     Nested anchors are invalid HTML, hence the sibling + `absolute` rather than
+     an <a> within the <a>. It stays in the tab order and is only VISUALLY
+     revealed on hover/focus-within, so the grid does not sprout N x N icons. */
+  const investigateHref = buildInvestigateURL({ kind: "pair", a: src, b: dst }, new Date());
+
   return (
-    <td className="p-0.5">
+    <td className="group relative p-0.5">
       <Tooltip content={tooltip}>
         <a
           href={pairHref}
@@ -171,6 +185,17 @@ function GridCell({
           )}
         </a>
       </Tooltip>
+      <a
+        href={investigateHref}
+        aria-label={`Investigate ${src} → ${dst}`}
+        className={cn(
+          "absolute right-1 top-1 rounded p-0.5 text-muted-foreground opacity-0",
+          "group-hover:opacity-100 focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+          "hover:bg-accent hover:text-accent-foreground",
+        )}
+      >
+        <Search aria-hidden="true" className="size-3" />
+      </a>
     </td>
   );
 }

@@ -1136,6 +1136,564 @@ paths:
         "503":
           $ref: "#/components/responses/Unavailable"
 
+  /api/v1/incidents:
+    get:
+      operationId: listIncidents
+      tags: [observability]
+      summary: One page of saved investigations, newest-created first.
+      description: >-
+        from/to bound the window an incident's OWN RANGE must OVERLAP, not the
+        window it was created in: one that began before the range and is still
+        open is exactly the one an operator looking at that range needs. An
+        incident with no toAt has an OPEN-ENDED range -- the opposite of what an
+        annotation's absent endAt means (an instant mark).
+      parameters:
+        - name: status
+          in: query
+          description: Exact match. An unknown value is 400, never a silently empty page.
+          schema:
+            $ref: "#/components/schemas/IncidentStatus"
+        - name: scope
+          in: query
+          description: >-
+            THREE states, as on /api/v1/annotations. Absent means every scope;
+            present-but-empty (`?scope=`) means the GLOBAL ones only; any other
+            value is an exact match.
+          schema:
+            type: string
+        - name: from
+          in: query
+          description: RFC3339; absent means unbounded on this side.
+          schema:
+            type: string
+            format: date-time
+        - name: to
+          in: query
+          description: RFC3339, exclusive; absent means unbounded on this side.
+          schema:
+            type: string
+            format: date-time
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Cursor"
+      responses:
+        "200":
+          description: One page of incidents.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/IncidentPage"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "502":
+          $ref: "#/components/responses/BadGateway"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+    post:
+      operationId: createIncident
+      tags: [observability]
+      summary: Open one investigation. Always created OPEN.
+      description: >-
+        createdBy is the SERVER's view of the authenticated subject, never a
+        body field, and there is no status/resolvedAt in the request: an
+        incident is always created open, and resolving it is PATCH -- the path
+        that stamps resolvedAt from the server's own clock. The audit row
+        records title, scope and status ONLY: notes and pinned are free-form
+        and never enter the audit log.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/IncidentRequest"
+      responses:
+        "201":
+          description: Incident created.
+          headers:
+            Location:
+              description: Permalink to the new incident.
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Incident"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "422":
+          $ref: "#/components/responses/UnprocessableEntity"
+        "502":
+          $ref: "#/components/responses/BadGateway"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
+  /api/v1/incidents/{id}:
+    parameters:
+      - $ref: "#/components/parameters/PathID"
+    get:
+      operationId: getIncident
+      tags: [observability]
+      summary: One saved investigation.
+      responses:
+        "200":
+          description: The incident.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Incident"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "502":
+          $ref: "#/components/responses/BadGateway"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+    patch:
+      operationId: updateIncident
+      tags: [observability]
+      summary: Update a SUBSET of an incident. The one PATCH in this API.
+      description: >-
+        THE exception to this API's full-replace PUT convention, and a
+        deliberate one: an incident evolves under collaboration -- one operator
+        types notes while another pins a finding and a third resolves it -- so a
+        full replace would make every edit a read-modify-write over the whole
+        row and let the last writer silently discard the other two's work. The
+        body is any SUBSET of status/notes/pinned; an EMPTY subset is 422,
+        because a patch that asks for nothing is far more likely a typo'd field
+        name than a deliberate no-op. Transitions: open -> resolved stamps
+        resolvedAt from the server's clock, resolved -> open CLEARS it, and a
+        status equal to the current one is a no-op rather than a re-stamp. The
+        whole body is validated before the first write, so a rejected patch
+        changes nothing. The audit row records the status alone.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/IncidentPatchRequest"
+      responses:
+        "200":
+          description: The incident as stored after the patch.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Incident"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/UnprocessableEntity"
+        "502":
+          $ref: "#/components/responses/BadGateway"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+    delete:
+      operationId: deleteIncident
+      tags: [observability]
+      summary: Remove one investigation; deleting one that is not there is 404.
+      responses:
+        "204":
+          $ref: "#/components/responses/NoContent"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "502":
+          $ref: "#/components/responses/BadGateway"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
+  /api/v1/maintenance:
+    get:
+      operationId: listMaintenanceWindows
+      tags: [observability]
+      summary: One page of declared maintenance windows, newest-starting first.
+      description: >-
+        from/to bound the range a window must OVERLAP, not contain: one that
+        opened before the range and is still running inside it is exactly the
+        one that explains what the operator is looking at. Windows are DATA and
+        RENDERING in M6 -- they mark charts and timeline rows; there is no
+        suppression logic, because nothing evaluates alert rules yet.
+      parameters:
+        - name: scope
+          in: query
+          description: >-
+            THREE states, as on /api/v1/annotations. Absent means every scope;
+            present-but-empty means the GLOBAL ones only; any other value is an
+            exact match.
+          schema:
+            type: string
+        - name: from
+          in: query
+          description: RFC3339; absent means unbounded on this side.
+          schema:
+            type: string
+            format: date-time
+        - name: to
+          in: query
+          description: RFC3339, exclusive; absent means unbounded on this side.
+          schema:
+            type: string
+            format: date-time
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Cursor"
+      responses:
+        "200":
+          description: One page of maintenance windows.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MaintenanceWindowPage"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "502":
+          $ref: "#/components/responses/BadGateway"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+    post:
+      operationId: createMaintenanceWindow
+      tags: [observability]
+      summary: Declare one window. There is no update -- delete and recreate.
+      description: >-
+        createdBy is the SERVER's view of the authenticated subject. endAt must
+        be strictly after startAt (the table's own CHECK says so too). The audit
+        row records the scope ONLY: reason is free text, which is where a change
+        ticket id or an internal hostname ends up.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MaintenanceWindowRequest"
+      responses:
+        "201":
+          description: Maintenance window created.
+          headers:
+            Location:
+              description: Permalink to the new window.
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MaintenanceWindow"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "422":
+          $ref: "#/components/responses/UnprocessableEntity"
+        "502":
+          $ref: "#/components/responses/BadGateway"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
+  /api/v1/maintenance/{id}:
+    parameters:
+      - $ref: "#/components/parameters/PathID"
+    delete:
+      operationId: deleteMaintenanceWindow
+      tags: [observability]
+      summary: Remove one window -- also how a window is CORRECTED.
+      responses:
+        "204":
+          $ref: "#/components/responses/NoContent"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "502":
+          $ref: "#/components/responses/BadGateway"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
+  /api/v1/webhooks:
+    get:
+      operationId: listWebhooks
+      tags: [administration]
+      summary: Every configured outbound endpoint. ADMIN only.
+      description: >-
+        UNPAGED and therefore carrying no nextCursor: the row count is endpoints
+        an operator typed, not a function of time. The secret is WRITE-ONLY and
+        appears in NO response -- `hasSecret` plus the last delivery outcome
+        (lastStatus/lastAttempt/failures) is everything a reader learns. All six
+        webhook routes need the single `webhooks:manage` permission, held by
+        admin alone: an endpoint row is credential-adjacent, the tokens:manage
+        and rbac:manage posture.
+      responses:
+        "200":
+          description: Every configured endpoint, newest first.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WebhookList"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "502":
+          $ref: "#/components/responses/BadGateway"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+    post:
+      operationId: createWebhook
+      tags: [administration]
+      summary: Declare one endpoint. The secret is REQUIRED and write-only.
+      description: >-
+        Every delivery is signed, so an endpoint without a secret could never
+        deliver and `secret` is required here. The console encrypts it at rest
+        with console.webhooks.encryptionKey; that key is OPTIONAL at boot, so a
+        console without one answers 503 NAMING the key rather than failing to
+        start. The audit row records name and events ONLY -- never the secret,
+        and never the url (a hook URL routinely embeds a token in its own path).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/WebhookRequest"
+      responses:
+        "201":
+          description: Webhook created. The response carries no secret.
+          headers:
+            Location:
+              description: Permalink to the new endpoint.
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Webhook"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "422":
+          $ref: "#/components/responses/UnprocessableEntity"
+        "502":
+          $ref: "#/components/responses/BadGateway"
+        "503":
+          description: >-
+            No database (console.database.mode) or no encryption key
+            (console.webhooks.encryptionKey). The detail names which.
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+
+  /api/v1/webhooks/{id}:
+    parameters:
+      - $ref: "#/components/parameters/PathID"
+    get:
+      operationId: getWebhook
+      tags: [administration]
+      summary: One endpoint, with hasSecret instead of the secret.
+      responses:
+        "200":
+          description: The endpoint.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Webhook"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "502":
+          $ref: "#/components/responses/BadGateway"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+    put:
+      operationId: updateWebhook
+      tags: [administration]
+      summary: Replace one endpoint in full -- except the secret.
+      description: >-
+        A full replace like every other PUT here, with ONE exception: `secret`
+        is three-state. ABSENT keeps the stored secret (which is what makes
+        re-pointing a URL or narrowing an event filter possible without
+        re-typing a secret the operator may not have); an EMPTY STRING is 422,
+        because reading it as "keep" or as "clear" would both be guesses; a
+        non-empty value replaces it. Keeping a secret needs no cipher, so an
+        update that omits it succeeds even with no encryption key configured --
+        only one that replaces it answers 503.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/WebhookRequest"
+      responses:
+        "200":
+          description: The endpoint as stored. No secret in the body.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Webhook"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/UnprocessableEntity"
+        "502":
+          $ref: "#/components/responses/BadGateway"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+    delete:
+      operationId: deleteWebhook
+      tags: [administration]
+      summary: Remove one endpoint.
+      responses:
+        "204":
+          $ref: "#/components/responses/NoContent"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "502":
+          $ref: "#/components/responses/BadGateway"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
+  /api/v1/webhooks/{id}/test:
+    parameters:
+      - $ref: "#/components/parameters/PathID"
+    post:
+      operationId: testWebhook
+      tags: [administration]
+      summary: Enqueue one signed ping so an operator can verify an endpoint.
+      description: >-
+        202, not 200: delivery is asynchronous with a retry ladder, so the only
+        honest thing this can report is that the work was accepted. The OUTCOME
+        arrives on the endpoint row -- read it back from GET
+        /api/v1/webhooks/{id} as lastStatus/lastAttempt/failures. Signing the
+        ping needs the secret unsealed, so a console with no
+        console.webhooks.encryptionKey answers 503 naming the key.
+
+
+        The ping is a WebhookPayload with `event: "test"` and a synthetic
+        incident -- the SAME envelope a real notification uses, so a receiver
+        needs one parser rather than two. Unlike a real notification it ignores
+        both the enabled flag and the event filter: an operator tests an
+        endpoint precisely when they are about to enable it. ONE attempt, no
+        retry ladder.
+      responses:
+        "202":
+          description: Test delivery enqueued.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "502":
+          $ref: "#/components/responses/BadGateway"
+        "503":
+          description: >-
+            No database (console.database.mode) or no encryption key
+            (console.webhooks.encryptionKey). The detail names which.
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+
+  /api/v1/k8s-events:
+    get:
+      operationId: listK8sEvents
+      tags: [observability]
+      summary: One page of captured Kubernetes events, newest first.
+      description: >-
+        READ-ONLY: the rows are written by the console's own cluster event
+        reader (console.kubernetesContext.enabled), filtered to nodes in the
+        fleet topology and pods in the kconmon namespace -- an unfiltered
+        cluster firehose would be a cardinality and privacy bug. This route
+        rides `events:read` rather than a permission of its own: these ARE
+        events. With a database but no reader enabled the answer is an EMPTY
+        PAGE, not a 503 -- "nothing was captured" is a different fact from "this
+        endpoint is unavailable".
+      parameters:
+        - name: name
+          in: query
+          description: Node or pod name; exact match.
+          schema:
+            type: string
+        - name: kind
+          in: query
+          description: Exact match. An unknown value is 400, never a silently empty page.
+          schema:
+            $ref: "#/components/schemas/K8sEventKind"
+        - name: type
+          in: query
+          description: Exact match. An unknown value is 400.
+          schema:
+            $ref: "#/components/schemas/K8sEventType"
+        - name: from
+          in: query
+          description: RFC3339; absent means unbounded on this side.
+          schema:
+            type: string
+            format: date-time
+        - name: to
+          in: query
+          description: RFC3339, exclusive; absent means unbounded on this side.
+          schema:
+            type: string
+            format: date-time
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Cursor"
+      responses:
+        "200":
+          description: One page of captured Kubernetes events.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/K8sEventPage"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "502":
+          $ref: "#/components/responses/BadGateway"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
   /api/v1/audit:
     get:
       operationId: listAuditEntries
@@ -2204,6 +2762,455 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/Annotation"
+        nextCursor:
+          type: string
+      additionalProperties: false
+
+    IncidentStatus:
+      type: string
+      description: >-
+        Closed set. Widening it is code, not a migration -- the vocabulary is
+        enforced in Go, not by a CHECK constraint.
+      enum: [open, resolved]
+
+    PinnedRef:
+      type: object
+      description: >-
+        One finding pinned to an incident: a typed reference into whichever
+        table the timeline row came from. `id` is a STRING for every kind,
+        including the bigint-keyed ones (event, k8s) -- pinned is one
+        heterogeneous list, and one id spelling across it beats a per-kind type
+        every reader would have to switch on. An unknown kind is REJECTED
+        rather than stored: a pin nothing can resolve renders as nothing and
+        can never be repaired.
+      required: [kind, id]
+      properties:
+        kind:
+          type: string
+          enum: [event, audit, annotation, snapshot, run, k8s]
+        id:
+          type: string
+          maxLength: 128
+        note:
+          type: string
+          maxLength: 512
+      additionalProperties: false
+
+    Incident:
+      type: object
+      description: >-
+        One saved investigation -- annotations-class, not a ticket. Its
+        permalink is /investigate?incident={id}; the page hydrates scope and
+        range from the incident, so there is no second page.
+      required: [id, title, scope, fromAt, status, notes, pinned, createdBy, createdAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+        title:
+          type: string
+          maxLength: 255
+        scope:
+          type: string
+          description: >-
+            "" is a real value: the GLOBAL scope. Any other value names a node,
+            a pair or a target. A filter key, NEVER a Prometheus label value.
+        fromAt:
+          type: string
+          format: date-time
+        toAt:
+          type: string
+          format: date-time
+          description: >-
+            Absent means an OPEN-ENDED range -- "still going". Note this is the
+            OPPOSITE of an annotation's absent endAt, which means an instant.
+        status:
+          $ref: "#/components/schemas/IncidentStatus"
+        notes:
+          type: string
+          maxLength: 16384
+          description: Markdown. Free-form operator prose; never enters the audit log.
+        pinned:
+          type: array
+          maxItems: 64
+          items:
+            $ref: "#/components/schemas/PinnedRef"
+        createdBy:
+          type: string
+          description: The server's view of the subject ("user:<id>", "token:<id>").
+        createdAt:
+          type: string
+          format: date-time
+        resolvedAt:
+          type: string
+          format: date-time
+          description: >-
+            Present exactly when status is "resolved". Reopening CLEARS it -- a
+            reopened incident is not resolved.
+      additionalProperties: false
+
+    IncidentRequest:
+      type: object
+      description: >-
+        Create body. No createdBy (attribution comes from the authenticated
+        subject) and no status/resolvedAt: an incident is always created OPEN,
+        and the resolve path is PATCH.
+      required: [title, fromAt]
+      properties:
+        title:
+          type: string
+          maxLength: 255
+        scope:
+          type: string
+          maxLength: 255
+          description: Omitted or "" opens the incident globally.
+        fromAt:
+          type: string
+          format: date-time
+        toAt:
+          type: string
+          format: date-time
+          description: Omit for an open-ended range; must be at or after fromAt.
+        notes:
+          type: string
+          maxLength: 16384
+        pinned:
+          type: array
+          maxItems: 64
+          items:
+            $ref: "#/components/schemas/PinnedRef"
+      additionalProperties: false
+
+    IncidentPatchRequest:
+      type: object
+      description: >-
+        Any SUBSET of the three fields an incident evolves through. An EMPTY
+        object is 422: a patch that asks for nothing is far more likely a typo'd
+        field name than a deliberate no-op. Each field present replaces that
+        field wholesale -- `pinned` in particular is "the list is now this",
+        which is what the UI actually knows; an add/remove pair would need a
+        server-side merge that two operators pinning at once would race.
+      minProperties: 1
+      properties:
+        status:
+          $ref: "#/components/schemas/IncidentStatus"
+        notes:
+          type: string
+          maxLength: 16384
+        pinned:
+          type: array
+          maxItems: 64
+          items:
+            $ref: "#/components/schemas/PinnedRef"
+      additionalProperties: false
+
+    IncidentPage:
+      type: object
+      required: [incidents, nextCursor]
+      properties:
+        incidents:
+          type: array
+          items:
+            $ref: "#/components/schemas/Incident"
+        nextCursor:
+          type: string
+      additionalProperties: false
+
+    MaintenanceWindow:
+      type: object
+      description: >-
+        One declared change window. DATA and RENDERING in M6, not suppression
+        logic -- there are no alert rules to suppress yet.
+      required: [id, scope, startAt, endAt, reason, createdBy, createdAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+        scope:
+          type: string
+          description: '"" is the GLOBAL scope -- the annotations scope vocabulary.'
+        startAt:
+          type: string
+          format: date-time
+        endAt:
+          type: string
+          format: date-time
+        reason:
+          type: string
+          maxLength: 512
+          description: Free text; never enters the audit log.
+        createdBy:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+      additionalProperties: false
+
+    MaintenanceWindowRequest:
+      type: object
+      description: Create body. No createdBy -- attribution comes from the subject.
+      required: [startAt, endAt, reason]
+      properties:
+        scope:
+          type: string
+          maxLength: 255
+        startAt:
+          type: string
+          format: date-time
+        endAt:
+          type: string
+          format: date-time
+          description: Must be strictly AFTER startAt; equal is 422.
+        reason:
+          type: string
+          maxLength: 512
+      additionalProperties: false
+
+    MaintenanceWindowPage:
+      type: object
+      required: [windows, nextCursor]
+      properties:
+        windows:
+          type: array
+          items:
+            $ref: "#/components/schemas/MaintenanceWindow"
+        nextCursor:
+          type: string
+      additionalProperties: false
+
+    WebhookEvent:
+      type: string
+      description: >-
+        Closed set. M6 fires on incident lifecycle ONLY -- those are the events
+        M6 itself introduces; alert-fired webhooks belong to alerting.
+      enum: [incident.created, incident.resolved, incident.reopened]
+
+    Webhook:
+      type: object
+      description: >-
+        One configured outbound endpoint plus its last delivery outcome. There
+        is NO secret field, at any layer: `hasSecret` is all a reader learns.
+      required: [id, name, url, events, enabled, hasSecret, lastStatus, failures, createdAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+          maxLength: 64
+        url:
+          type: string
+          maxLength: 2048
+        events:
+          type: array
+          items:
+            $ref: "#/components/schemas/WebhookEvent"
+        enabled:
+          type: boolean
+        hasSecret:
+          type: boolean
+          description: >-
+            Always true for a stored endpoint (an empty secret is refused), so
+            this is a contract statement -- "this endpoint signs its
+            deliveries" -- rather than a question.
+        lastStatus:
+          type: string
+          maxLength: 255
+          description: '"" until something has been delivered.'
+        lastAttempt:
+          type: string
+          format: date-time
+          description: Absent until something has been delivered.
+        failures:
+          type: integer
+          format: int32
+          description: Consecutive failures. SET by the dispatcher after each terminal outcome, never incremented here.
+        createdAt:
+          type: string
+          format: date-time
+      additionalProperties: false
+
+    WebhookRequest:
+      type: object
+      description: >-
+        Create/update body. Both are FULL replaces except `secret`, which is
+        WRITE-ONLY and three-state -- see the PUT description.
+      required: [name, url, events]
+      properties:
+        name:
+          type: string
+          maxLength: 64
+          pattern: "^[a-z0-9-]+$"
+          description: Lowercase alphanumerics and '-'. Unique; a duplicate is 422, not 409.
+        url:
+          type: string
+          maxLength: 2048
+          description: Must start with http:// or https://.
+        events:
+          type: array
+          minItems: 1
+          items:
+            $ref: "#/components/schemas/WebhookEvent"
+        enabled:
+          type: boolean
+          default: true
+          description: Omitted means TRUE -- an endpoint you just declared is one you want firing.
+        secret:
+          type: string
+          minLength: 1
+          description: >-
+            The HMAC-SHA256 signing key, WRITE-ONLY. Required on create.
+            On update: omit to KEEP the stored one; an empty string is 422
+            (neither "keep" nor "clear" would be more than a guess).
+      additionalProperties: false
+
+    WebhookList:
+      type: object
+      description: Unpaged -- the row count is endpoints an operator typed, not a function of time.
+      required: [webhooks]
+      properties:
+        webhooks:
+          type: array
+          items:
+            $ref: "#/components/schemas/Webhook"
+      additionalProperties: false
+
+    WebhookPayload:
+      type: object
+      description: >-
+        The body the console POSTs to a configured endpoint. It is NOT a
+        request or response of this API -- it is the contract the console
+        offers a RECEIVER, documented here because there is nowhere better for
+        a receiver's author to look.
+
+
+        Transport: `POST` with `Content-Type: application/json` and
+        `X-Kconmon-Signature: sha256=<hex hmac-sha256(secret, raw body)>`,
+        computed over the exact request bytes. Verify the signature BEFORE
+        parsing. 10s timeout per attempt, and up to three attempts at
+        approximately 0s / 30s / 5m with +/-20% jitter until the endpoint
+        answers 2xx -- so a receiver MUST be idempotent. The body (and
+        therefore the signature) is identical across retries, so
+        (event, incident.id, at) is a usable deduplication key.
+
+
+        Delivery lives in the console process: a restart during the retry
+        window loses the remaining attempts. The ledger for a miss is the
+        endpoint row's lastStatus/failures, not a replay queue.
+
+
+        The field set is CLOSED and STABLE, with no omitempty anywhere: every
+        key below is present on every delivery, including a null `toAt`.
+      required: [event, incident, at]
+      properties:
+        event:
+          type: string
+          description: >-
+            A WebhookEvent value, or "test" for the /test ping. "test" is
+            deliberately NOT in WebhookEvent's enum -- that set is what an
+            endpoint may SUBSCRIBE to, and a ping is addressed by id.
+          enum: [incident.created, incident.resolved, incident.reopened, test]
+        incident:
+          $ref: "#/components/schemas/WebhookPayloadIncident"
+        at:
+          type: string
+          format: date-time
+          description: >-
+            When the console decided to notify, NOT when this attempt was made.
+            Stable across retries.
+      additionalProperties: false
+
+    WebhookPayloadIncident:
+      type: object
+      description: >-
+        The incident subset a notification carries. `notes` and `pinned` are
+        deliberately ABSENT: notes are free-form operator text up to 16 KiB
+        that can name anything an investigation touched, and pushing them to a
+        third-party endpoint on every status change would export the
+        investigation itself rather than the fact of it. Fetch them from GET
+        /api/v1/incidents/{id} if the receiver is entitled to them.
+
+
+        For a `test` ping the object is synthetic: `id` is "", `title` is
+        "kconmon-ng webhook test", `createdBy` is "kconmon-ng".
+      required: [id, title, scope, status, fromAt, toAt, createdBy]
+      properties:
+        id:
+          type: string
+          description: UUID, or "" for a test ping.
+        title:
+          type: string
+        scope:
+          type: string
+          description: '"" for a global incident; otherwise a node, a pair or a target name.'
+        status:
+          $ref: "#/components/schemas/IncidentStatus"
+        fromAt:
+          type: string
+          format: date-time
+        toAt:
+          type: string
+          format: date-time
+          nullable: true
+          description: null for an OPEN-ENDED range. Always present as a key.
+        createdBy:
+          type: string
+      additionalProperties: false
+
+    K8sEventKind:
+      type: string
+      enum: [Node, Pod]
+
+    K8sEventType:
+      type: string
+      enum: [Normal, Warning]
+
+    K8sEvent:
+      type: object
+      description: One captured cluster event, one of the Investigate timeline's sources.
+      required: [id, uid, resourceVersion, eventTime, kind, name, namespace, reason, type, message, count]
+      properties:
+        id:
+          type: string
+          description: >-
+            The row's bigint key rendered as a STRING, because a pinned ref
+            spells every id that way -- pinned is one heterogeneous list across
+            six tables and one spelling beats a per-source type.
+        uid:
+          type: string
+          description: The Kubernetes event UID. (uid, resourceVersion) is the dedupe key.
+        resourceVersion:
+          type: string
+        eventTime:
+          type: string
+          format: date-time
+        kind:
+          $ref: "#/components/schemas/K8sEventKind"
+        name:
+          type: string
+          description: Node name or pod name.
+        namespace:
+          type: string
+          description: '"" for the cluster-scoped Node events.'
+        reason:
+          type: string
+        type:
+          $ref: "#/components/schemas/K8sEventType"
+        message:
+          type: string
+        count:
+          type: integer
+          format: int32
+      additionalProperties: false
+
+    K8sEventPage:
+      type: object
+      required: [events, nextCursor]
+      properties:
+        events:
+          type: array
+          items:
+            $ref: "#/components/schemas/K8sEvent"
         nextCursor:
           type: string
       additionalProperties: false

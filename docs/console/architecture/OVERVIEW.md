@@ -66,7 +66,7 @@ Rules:
 | DB              | `pgx` + `sqlc`, migrations via `goose` (embedded, advisory-locked) | Type-safe, no ORM magic. **Landed in M3** — `internal/console/store`, the only package touching `pgx` |
 | Cache/pubsub    | Valkey via `rueidis`, in-process fallback      | Pub/sub since M2; a sibling `cache.KV` seam landed in M3 for sessions. `InProcessBus`/`InProcessKV` cover `valkey.mode=disabled` (ADR-002) |
 | OIDC            | `coreos/go-oidc`, code flow + PKCE             | Battle-tested. **Landed in M3**, with `auth.mode=oidc` |
-| K8s client      | client-go (reuse controller's patterns)        | Events/nodes read, PrometheusRule SSA. **Not yet** — M6+ |
+| K8s client      | client-go (reuse controller's patterns)        | **Landed in M6** — `internal/console/kubectx`, core/v1 Events list+watch only, on the client-go the controller already depends on (zero new deps). No nodes read (the controller's topology API answers that) and no PrometheusRule SSA yet (M7). Off by default: `kubernetesContext.enabled` |
 
 Frontend is embedded via `go:embed` — single image, no nginx sidecar.
 `Dockerfile.console` mirrors the existing multi-stage pattern

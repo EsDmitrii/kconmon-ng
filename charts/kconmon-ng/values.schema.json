@@ -196,6 +196,29 @@
             }
           }
         },
+        "kubernetesContext": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "namespace": { "type": "string" },
+            "resyncInterval": { "type": "string" }
+          }
+        },
+        "webhooks": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "encryptionKeySecret": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "name": { "type": "string" },
+                "key": { "type": "string" }
+              }
+            }
+          }
+        },
         "podSecurityContext": { "type": "object" },
         "database": {
           "type": "object",
@@ -243,7 +266,8 @@
             "prometheusEgress": { "type": "array" },
             "valkeyEgress": { "type": "array" },
             "databaseEgress": { "type": "array" },
-            "oidcEgress": { "type": "array" }
+            "oidcEgress": { "type": "array" },
+            "kubeAPIEgress": { "type": "array" }
           }
         },
         "service": {

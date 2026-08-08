@@ -3,6 +3,8 @@ import type {
   AnnotationPage,
   AnnotationQuery,
   AnnotationRequest,
+  AuditPage,
+  AuditQuery,
   CheckDefinition,
   CheckDefinitionPage,
   CheckDefinitionQuery,
@@ -10,7 +12,18 @@ import type {
   Config,
   EventPage,
   EventQuery,
+  Incident,
+  IncidentPage,
+  IncidentPatchRequest,
+  IncidentQuery,
+  IncidentRequest,
+  K8sEventPage,
+  K8sEventQuery,
   MTRDestinationList,
+  MaintenanceQuery,
+  MaintenanceWindow,
+  MaintenanceWindowPage,
+  MaintenanceWindowRequest,
   Matrix,
   Me,
   PathSnapshot,
@@ -580,4 +593,178 @@ export function createAnnotation(req: AnnotationRequest): Promise<Annotation> {
 // M5, so delete-then-create is the only way to correct a mark.
 export function deleteAnnotation(id: string): Promise<void> {
   return apiFetch(`/api/v1/annotations/${encodeURIComponent(id)}`, { method: "DELETE" }).then(handleVoid);
+}
+
+/* ── M6: the Investigate page's read sources ────────────────────────────────
+   Same apiFetch and the same handle<T> as everything above. All four are READS
+   and each rides a DIFFERENT permission — events:read for the K8s events,
+   incidents:read, maintenance:read, audit:read — which is the whole reason
+   pages/investigate.tsx calls them one per source behind its own can() check
+   rather than through a single "load the timeline" helper: a subject missing
+   one permission must lose exactly one row of the timeline, not the page (M6
+   Global Constraints: "ZERO requests for sources the operator's role cannot
+   read").
+
+   Incidents' write half (POST/PATCH/DELETE) lands below with M6 Task 8, the
+   task that owns the UI calling it. */
+
+/**
+ * getK8sEvents is GET /api/v1/k8s-events: captured cluster events, newest
+ * first, behind the same opaque keyset cursor every other list here uses.
+ *
+ * Worth knowing before reading an empty page as an outage: with a database but
+ * no cluster reader enabled (console.kubernetesContext.enabled) this answers an
+ * EMPTY PAGE rather than 503 — "nothing was captured" and "this endpoint is
+ * unavailable" are different facts and the API keeps them apart. `name` is an
+ * EXACT match on a node or pod name, so a caller that wants both ends of a pair
+ * genuinely issues two requests.
+ */
+export function getK8sEvents(q: K8sEventQuery = {}): Promise<K8sEventPage> {
+  const qs = new URLSearchParams();
+  if (q.name) qs.set("name", q.name);
+  if (q.kind) qs.set("kind", q.kind);
+  if (q.type) qs.set("type", q.type);
+  if (q.from) qs.set("from", q.from.toISOString());
+  if (q.to) qs.set("to", q.to.toISOString());
+  if (q.limit !== undefined) qs.set("limit", String(q.limit));
+  if (q.cursor) qs.set("cursor", q.cursor);
+  const suffix = qs.toString();
+  return apiFetch(`/api/v1/k8s-events${suffix ? `?${suffix}` : ""}`).then((r) => handle<K8sEventPage>(r));
+}
+
+/**
+ * getIncidents is GET /api/v1/incidents. `scope` is serialised with the same
+ * `!== undefined` test listAnnotations uses, for the same reason: the endpoint
+ * reads three states out of one parameter and "" is the GLOBAL scope, not a
+ * missing filter.
+ *
+ * from/to bound the window an incident's OWN RANGE must OVERLAP — one that
+ * began before `from` and is still open is exactly the one an operator looking
+ * at that window needs to see.
+ */
+export function getIncidents(q: IncidentQuery = {}): Promise<IncidentPage> {
+  const qs = new URLSearchParams();
+  if (q.status) qs.set("status", q.status);
+  if (q.scope !== undefined) qs.set("scope", q.scope);
+  if (q.from) qs.set("from", q.from.toISOString());
+  if (q.to) qs.set("to", q.to.toISOString());
+  if (q.limit !== undefined) qs.set("limit", String(q.limit));
+  if (q.cursor) qs.set("cursor", q.cursor);
+  const suffix = qs.toString();
+  return apiFetch(`/api/v1/incidents${suffix ? `?${suffix}` : ""}`).then((r) => handle<IncidentPage>(r));
+}
+
+// getIncident is GET /api/v1/incidents/{id} — the permalink's own read
+// (/investigate?incident={id} hydrates scope and range from this body, M6 Task
+// 8). An unknown id is 404 problem+json, i.e. an ApiError here.
+export function getIncident(id: string): Promise<Incident> {
+  return apiFetch(`/api/v1/incidents/${encodeURIComponent(id)}`).then((r) => handle<Incident>(r));
+}
+
+/**
+ * createIncident is POST /api/v1/incidents (201 + Location + the row).
+ *
+ * No createdBy and no status in the body, exactly as with createAnnotation:
+ * attribution is the server's view of the authenticated subject, and an
+ * incident is ALWAYS created open — resolving it is the PATCH below, the path
+ * that stamps resolvedAt from the server's own clock.
+ *
+ * `toAt` must be OMITTED rather than sent empty for an open-ended incident:
+ * its absence means "still going" (note this is the opposite of an
+ * annotation's absent endAt, which means an instant).
+ */
+export function createIncident(req: IncidentRequest): Promise<Incident> {
+  return apiFetch("/api/v1/incidents", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(req),
+  }).then((r) => handle<Incident>(r));
+}
+
+/**
+ * patchIncident is PATCH /api/v1/incidents/{id} — the ONE PATCH in this API,
+ * and the reason it is a PATCH rather than this codebase's usual full-replace
+ * PUT is collaboration: one operator types notes while another pins a finding
+ * and a third resolves it, and a full replace would let the last writer discard
+ * the other two.
+ *
+ * Each field PRESENT replaces that field wholesale. `pinned` in particular is
+ * "the list is now this" — which is exactly what a UI holding the rendered list
+ * knows — so a caller adding one pin sends the whole array, never a delta. An
+ * EMPTY body is 422 rather than a no-op.
+ */
+export function patchIncident(id: string, req: IncidentPatchRequest): Promise<Incident> {
+  return apiFetch(`/api/v1/incidents/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(req),
+  }).then((r) => handle<Incident>(r));
+}
+
+// deleteIncident is DELETE /api/v1/incidents/{id}: 204, so handleVoid.
+// Deleting one that is not there is 404, not success.
+export function deleteIncident(id: string): Promise<void> {
+  return apiFetch(`/api/v1/incidents/${encodeURIComponent(id)}`, { method: "DELETE" }).then(handleVoid);
+}
+
+/**
+ * getMaintenance is GET /api/v1/maintenance: declared change windows whose own
+ * span OVERLAPS [from,to), newest-starting first. Same three-state `scope` as
+ * getIncidents/listAnnotations.
+ */
+export function getMaintenance(q: MaintenanceQuery = {}): Promise<MaintenanceWindowPage> {
+  const qs = new URLSearchParams();
+  if (q.scope !== undefined) qs.set("scope", q.scope);
+  if (q.from) qs.set("from", q.from.toISOString());
+  if (q.to) qs.set("to", q.to.toISOString());
+  if (q.limit !== undefined) qs.set("limit", String(q.limit));
+  if (q.cursor) qs.set("cursor", q.cursor);
+  const suffix = qs.toString();
+  return apiFetch(`/api/v1/maintenance${suffix ? `?${suffix}` : ""}`).then((r) => handle<MaintenanceWindowPage>(r));
+}
+
+/**
+ * createMaintenance is POST /api/v1/maintenance (201 + Location + the row).
+ *
+ * No createdBy, exactly as with createAnnotation and createIncident:
+ * attribution is the server's view of the authenticated subject, never a client
+ * claim. `endAt` is REQUIRED and must be strictly after `startAt` — the store
+ * carries that as a CHECK and the API answers 422 for equal-or-before, so the
+ * form mirrors the rule client-side and this call is the last line rather than
+ * the first (a maintenance window with no end is an annotation, and that
+ * endpoint already exists).
+ */
+export function createMaintenance(req: MaintenanceWindowRequest): Promise<MaintenanceWindow> {
+  return apiFetch("/api/v1/maintenance", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(req),
+  }).then((r) => handle<MaintenanceWindow>(r));
+}
+
+// deleteMaintenance is DELETE /api/v1/maintenance/{id}: 204, so handleVoid.
+// There is no update: a window declared wrong is deleted and re-declared, the
+// same correction path annotations have.
+export function deleteMaintenance(id: string): Promise<void> {
+  return apiFetch(`/api/v1/maintenance/${encodeURIComponent(id)}`, { method: "DELETE" }).then(handleVoid);
+}
+
+/**
+ * getAuditEntries is GET /api/v1/audit, newest first.
+ *
+ * Note what is NOT in AuditQuery: a time window. The endpoint has no from/to
+ * (docs/console-api.yaml), so a caller wanting "the config changes inside this
+ * investigation's range" asks for a page and filters it by `at` client-side —
+ * and owes the operator a sentence saying that a busy console can push older
+ * in-range rows off the end of that page. pages/investigate.tsx says exactly
+ * that next to the rows.
+ */
+export function getAuditEntries(q: AuditQuery = {}): Promise<AuditPage> {
+  const qs = new URLSearchParams();
+  if (q.subjectKind) qs.set("subjectKind", q.subjectKind);
+  if (q.subjectId) qs.set("subjectId", q.subjectId);
+  if (q.limit !== undefined) qs.set("limit", String(q.limit));
+  if (q.cursor) qs.set("cursor", q.cursor);
+  const suffix = qs.toString();
+  return apiFetch(`/api/v1/audit${suffix ? `?${suffix}` : ""}`).then((r) => handle<AuditPage>(r));
 }

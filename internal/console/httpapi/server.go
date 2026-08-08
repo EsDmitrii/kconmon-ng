@@ -132,6 +132,33 @@ type Server struct {
 	mtr         MTRService
 	annotations AnnotationService
 
+	// incidents, maintenance and webhooks back the three M6 CRUD resources
+	// (M6 Task 4), and k8sEvents backs GET /api/v1/k8s-events. Same Decision
+	// 13 rule as targets: nil = database.mode=disabled = 503, never an
+	// in-memory fallback -- a saved investigation, a declared window and a
+	// configured endpoint are worth exactly as much as they are durable.
+	incidents   IncidentService
+	maintenance MaintenanceService
+	webhooks    WebhookService
+	k8sEvents   K8sEventService
+
+	// webhookSealer encrypts a plaintext endpoint secret on its way to the
+	// store, and webhookTester enqueues the /test ping. BOTH are implemented
+	// by M6 Task 5's dispatcher package, which owns the AES-GCM key
+	// (console.webhooks.encryptionKey); this package only ever holds the two
+	// narrow interfaces. nil is not "database off" but "no key configured",
+	// which Decision 4 makes a legitimate state -- so the operations that
+	// need the cipher answer 503 naming the key, and every other webhook
+	// route keeps working.
+	webhookSealer SecretSealer
+	webhookTester TestDispatcher
+
+	// notifier is the outbound half of the same dispatcher: the incident
+	// handlers hand it created/resolved/reopened and it decides who hears
+	// about it. nil is the ordinary no-key state, and every incident route
+	// behaves identically with or without it -- see IncidentNotifier.
+	notifier IncidentNotifier
+
 	// enricher OVERRIDES the enrichment half of s.mtr (M5 Task 5). nil is the
 	// Task 4 behaviour, unchanged: hop enrichment is served cache-only,
 	// straight out of mtr_hop_enrichment. Non-nil is an *enrich.Resolver,
@@ -263,6 +290,41 @@ type Deps struct {
 	MTR         MTRService
 	Annotations AnnotationService
 
+	// Incidents, Maintenance and Webhooks back the three M6 CRUD resources,
+	// and K8sEvents backs GET /api/v1/k8s-events. Same Decision 13 rule as
+	// Targets: nil means database.mode=disabled and every one of those routes
+	// answers 503. Typed to the local service interfaces, so leaving them
+	// unset is Deps{}'s ordinary zero value -- a genuine nil interface, never
+	// the typed-nil trap Deps.Events' doc comment describes.
+	Incidents   IncidentService
+	Maintenance MaintenanceService
+	Webhooks    WebhookService
+	K8sEvents   K8sEventService
+
+	// WebhookSealer seals a plaintext endpoint secret and WebhookTestDispatcher
+	// enqueues the /test ping. In production both are M6 Task 5's dispatcher,
+	// built only when console.webhooks.encryptionKey is configured -- the key
+	// is OPTIONAL at boot (Decision 4), because a console that never declares
+	// a webhook must not fail to start over a cipher it will never use.
+	//
+	// nil therefore does NOT mean "webhooks off": listing, reading, deleting,
+	// disabling and re-pointing an endpoint all keep working. Only the two
+	// operations that actually need the cipher -- creating an endpoint (its
+	// secret must be sealed) and testing one (its secret must be unsealed to
+	// sign the ping) -- answer 503, naming the key.
+	WebhookSealer         SecretSealer
+	WebhookTestDispatcher TestDispatcher
+
+	// IncidentNotifier is the THIRD face of the same dispatcher, and the one
+	// that makes webhooks do anything on their own: the incident handlers call
+	// it after a successful create and after a status-CHANGING patch. It is
+	// wired from the same construction as the two above, so a console with a
+	// key notifies and a console without one does not -- there is no third
+	// state where endpoints exist but nothing ever fires.
+	//
+	// Deliberately fire-and-forget (no error return): see IncidentNotifier.
+	IncidentNotifier IncidentNotifier
+
 	// Enricher swaps the cache-only hop enrichment read for a resolving one
 	// (M5 Task 5). cmd/console builds an *enrich.Resolver here only when
 	// mtr.enrichment.enabled is true AND a database is configured -- the TTL
@@ -333,7 +395,10 @@ func NewServer(d Deps) *Server { //nolint:gocritic // hugeParam: Deps is the pin
 		definitions: d.Definitions, schedules: d.Schedules, topology: d.Topology,
 		topologyHistory: d.TopologyHistory,
 		mtr:             d.MTR, annotations: d.Annotations, enricher: d.Enricher,
-		kv: d.KV,
+		incidents: d.Incidents, maintenance: d.Maintenance, webhooks: d.Webhooks, k8sEvents: d.K8sEvents,
+		webhookSealer: d.WebhookSealer, webhookTester: d.WebhookTestDispatcher,
+		notifier: d.IncidentNotifier,
+		kv:       d.KV,
 	}
 
 	// A configured rate limit with no KV wired would be a security control
@@ -454,6 +519,39 @@ func NewServer(d Deps) *Server { //nolint:gocritic // hugeParam: Deps is the pin
 		api.Get("/api/v1/annotations", s.handleAnnotationsList)
 		api.Post("/api/v1/annotations", s.handleAnnotationsCreate)
 		api.Delete("/api/v1/annotations/{id}", s.handleAnnotationsDelete)
+
+		// Incidents are the ONE resource in this API with a PATCH, and the one
+		// exception to the repo's full-replace PUT convention: an incident
+		// evolves under collaboration, so a full replace would let the last
+		// writer discard a colleague's notes (handleIncidentsUpdate says why
+		// at length).
+		api.Get("/api/v1/incidents", s.handleIncidentsList)
+		api.Post("/api/v1/incidents", s.handleIncidentsCreate)
+		api.Get("/api/v1/incidents/{id}", s.handleIncidentsGet)
+		api.Patch("/api/v1/incidents/{id}", s.handleIncidentsUpdate)
+		api.Delete("/api/v1/incidents/{id}", s.handleIncidentsDelete)
+
+		// Maintenance windows are create/list/delete and deliberately have no
+		// update: a window is two timestamps and a reason, so delete and
+		// recreate is both the correction path and the whole of it.
+		api.Get("/api/v1/maintenance", s.handleMaintenanceList)
+		api.Post("/api/v1/maintenance", s.handleMaintenanceCreate)
+		api.Delete("/api/v1/maintenance/{id}", s.handleMaintenanceDelete)
+
+		// Webhooks are full CRUD plus a test ping. /api/v1/webhooks/{id}/test
+		// is registered after the {id} routes for readability only -- chi
+		// matches the longer pattern regardless of registration order.
+		api.Get("/api/v1/webhooks", s.handleWebhooksList)
+		api.Post("/api/v1/webhooks", s.handleWebhooksCreate)
+		api.Get("/api/v1/webhooks/{id}", s.handleWebhooksGet)
+		api.Put("/api/v1/webhooks/{id}", s.handleWebhooksUpdate)
+		api.Delete("/api/v1/webhooks/{id}", s.handleWebhooksDelete)
+		api.Post("/api/v1/webhooks/{id}/test", s.handleWebhooksTest)
+
+		// Captured Kubernetes events are READ-ONLY over HTTP: they are written
+		// by internal/console/kubectx (M6 Task 2) from the cluster's own event
+		// stream, and there is nothing a client could legitimately add.
+		api.Get("/api/v1/k8s-events", s.handleK8sEvents)
 
 		api.Get("/api/v1/rbac/permissions", s.handleRBACPermissions)
 		api.Get("/api/v1/rbac/roles", s.handleRBACRolesList)

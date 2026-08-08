@@ -19,6 +19,7 @@ import { MatrixPage } from "@/pages/matrix";
 import { TopologyPage } from "@/pages/topology";
 import { DiagnosticsPage } from "@/pages/diagnostics";
 import { ExplorePage } from "@/pages/explore";
+import { InvestigatePage } from "@/pages/investigate";
 import { PromQLConsolePage } from "@/pages/promql-console";
 import { LoginPage } from "@/pages/login";
 import { MTRPage } from "@/pages/mtr";
@@ -94,7 +95,9 @@ const routes = NAV_ITEMS.map((item) =>
                       ? ExplorePage
                       : item.path === "/console"
                         ? PromQLConsolePage
-                        : () => <StubPage title={item.label} description={item.description} />,
+                        : item.path === "/investigate"
+                          ? InvestigatePage
+                          : () => <StubPage title={item.label} description={item.description} />,
   }),
 );
 

@@ -5,6 +5,7 @@ package config
 
 import (
 	"bytes"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
@@ -42,6 +43,174 @@ type Config struct {
 	RateLimit  RateLimitConfig  `yaml:"rateLimit"`
 	Scheduler  SchedulerConfig  `yaml:"scheduler"`
 	MTR        MTRConfig        `yaml:"mtr"`
+
+	KubernetesContext KubernetesContextConfig `yaml:"kubernetesContext"`
+	Webhooks          WebhooksConfig          `yaml:"webhooks"`
+}
+
+// WebhooksConfig carries the ONE thing the outbound webhook dispatcher
+// (internal/console/webhooks, M6 Task 5) cannot derive for itself: the AES-GCM
+// key that encrypts each endpoint's HMAC signing secret at rest (M6 Decision
+// 4). Everything else about a webhook -- its URL, its event filter, its
+// enabled flag -- is a database row an admin typed; only the key is a
+// deployment secret, so only the key is config.
+//
+// The whole block is OPTIONAL, and that is deliberate. A console that never
+// declares a webhook must not fail to start over a cipher it will never use,
+// so an empty block leaves the feature keyless: every read/update/delete route
+// keeps working and the two operations that actually need the cipher --
+// creating an endpoint and testing one -- answer 503 naming this value
+// (httpapi's webhookKeyUnavailableDetail). A key that IS configured but
+// unusable is the opposite case: that is a broken Secret mount, not a
+// deliberate omission, and cmd/console refuses to start on it the same way it
+// refuses to start on an unreadable database.dsnFile.
+type WebhooksConfig struct {
+	// EncryptionKey is 32 raw bytes, base64-encoded (standard encoding). It
+	// belongs in a Secret, not a ConfigMap -- prefer EncryptionKeyFile.
+	EncryptionKey string `yaml:"encryptionKey"`
+	// EncryptionKeyFile is a path to a file holding the same base64 value;
+	// it WINS over EncryptionKey when both somehow reach this struct, and
+	// setting both in a config file is refused outright -- database.dsnFile's
+	// rule, for database.dsnFile's reason.
+	EncryptionKeyFile string `yaml:"encryptionKeyFile"`
+}
+
+// webhookKeyLen is the AES-256-GCM key length. Pinned rather than "whatever
+// aes.NewCipher accepts" (16/24/32) so a 16-byte key is a boot error an
+// operator can fix, not a quietly weaker cipher nothing reports.
+const webhookKeyLen = 32
+
+// ResolveEncryptionKey returns the decoded webhook encryption key: the trimmed
+// contents of EncryptionKeyFile when set, otherwise EncryptionKey. A nil
+// return with a nil error means NO key is configured, which is the documented
+// keyless state, not a failure. Called once at boot by cmd/console -- never per
+// delivery.
+//
+// Mirrors DatabaseConfig.ResolveDSN's shape exactly: the mounted file wins, and
+// resolution is an explicit method rather than something Load bakes in, so a
+// test can pin either side.
+func (w *WebhooksConfig) ResolveEncryptionKey() ([]byte, error) {
+	raw := w.EncryptionKey
+	source := "webhooks.encryptionKey"
+	if w.EncryptionKeyFile != "" {
+		data, err := os.ReadFile(w.EncryptionKeyFile) //nolint:gosec // path comes from operator config, not user input
+		if err != nil {
+			return nil, fmt.Errorf("read webhooks.encryptionKeyFile %q: %w", w.EncryptionKeyFile, err)
+		}
+		raw, source = string(data), "webhooks.encryptionKeyFile"
+	}
+	return decodeWebhookKey(source, raw)
+}
+
+// decodeWebhookKey turns a base64 string into the 32-byte key, or reports why
+// it cannot. The error NEVER echoes the value: a decode failure is about the
+// shape of a secret, and repeating the secret to say it is malformed would put
+// it in a log line.
+func decodeWebhookKey(field, raw string) ([]byte, error) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return nil, nil
+	}
+	key, err := base64.StdEncoding.DecodeString(trimmed)
+	if err != nil {
+		return nil, fmt.Errorf("%s must be base64 (standard encoding) of %d random bytes: %w",
+			field, webhookKeyLen, err)
+	}
+	if len(key) != webhookKeyLen {
+		return nil, fmt.Errorf("%s decodes to %d bytes, must be exactly %d "+
+			"(generate one with: openssl rand -base64 %d)", field, len(key), webhookKeyLen, webhookKeyLen)
+	}
+	return key, nil
+}
+
+// validate enforces webhooks.* invariants that need no I/O: the two ways of
+// naming the key are mutually exclusive, and an INLINE key must already be
+// well-formed. The FILE is not read here -- validation is pure by convention in
+// this package, and cmd/console's ResolveEncryptionKey call is where a bad
+// mount is caught, on the same footing as an unreadable database.dsnFile.
+func (w *WebhooksConfig) validate() error {
+	if w.EncryptionKey != "" && w.EncryptionKeyFile != "" {
+		return errors.New("set either webhooks.encryptionKey or webhooks.encryptionKeyFile, not both")
+	}
+	if _, err := decodeWebhookKey("webhooks.encryptionKey", w.EncryptionKey); err != nil {
+		return err
+	}
+	return nil
+}
+
+// KubernetesContextConfig configures the Kubernetes event reader
+// (internal/console/kubectx, M6 Decision 3): the only part of the Console that
+// talks to the apiserver. It captures core/v1 Events for nodes in the fleet
+// topology and for pods in one namespace, so the Investigate timeline can show
+// "the kubelet restarted this pod" next to "loss to this node spiked".
+//
+// Enabled defaults to FALSE for the same reason mtr.enrichment does: turning it
+// on gives the console pod a NEW egress and a NEW RBAC grant (events/nodes/pods
+// read), and an unfiltered cluster event firehose is a cardinality and privacy
+// bug, not a feature. Switching it on is a deliberate act by an operator who
+// has also applied the RBAC.
+//
+// The captured rows live in PostgreSQL, so the whole block is inert with
+// database.mode=disabled — cmd/console warns and skips the reader rather than
+// watching events it has nowhere to put.
+type KubernetesContextConfig struct {
+	// Enabled is the master gate.
+	Enabled bool `yaml:"enabled"`
+	// Namespace is the ONE namespace whose pod events are captured. Empty --
+	// the default -- means "the namespace this pod runs in", read from the
+	// POD_NAMESPACE environment variable (the chart sets it from
+	// metadata.namespace via the downward API), falling back to "default" when
+	// even that is unset, which is what a non-cluster process gets.
+	//
+	// It is deliberately one namespace and not a list: the release namespace is
+	// where the agents and the controller run, and widening this is how a
+	// capture turns into a cluster-wide event firehose (Decision 3, and the
+	// leak-conscious constraint the milestone opens with).
+	Namespace string `yaml:"namespace"`
+	// ResyncInterval forces a periodic relist even while the watch is healthy.
+	// It is the reader's backstop against a watch that is silently wedged --
+	// connected, delivering nothing -- which no error path can detect. Ten
+	// minutes because the apiserver keeps events for an hour by default, so a
+	// relist at this cadence cannot miss one, and every relisted row the
+	// database already holds costs one conflicting INSERT and a duplicate
+	// counter increment, never a duplicate row.
+	ResyncInterval time.Duration `yaml:"resyncInterval"`
+}
+
+// podNamespaceEnv is the downward-API variable the chart sets on the console
+// pod. It is read ONLY as the fallback for an empty
+// kubernetesContext.namespace: KCONMON_NG_CONSOLE_CONFIG stays the console's
+// one true env var for configuration, and this is identity, not configuration.
+const podNamespaceEnv = "POD_NAMESPACE"
+
+// ResolveNamespace returns the effective namespace for pod-event capture:
+// Namespace when set, else $POD_NAMESPACE, else "default". Called once at
+// startup (kubectx.New and cmd/console's log line) -- never per event.
+//
+// It mirrors DatabaseConfig.ResolveDSN's shape: the config field wins, the
+// mounted/injected value is the fallback, and resolution is an explicit method
+// rather than something Load bakes in, so a test can pin either side.
+func (k *KubernetesContextConfig) ResolveNamespace() string {
+	if k.Namespace != "" {
+		return k.Namespace
+	}
+	if ns := strings.TrimSpace(os.Getenv(podNamespaceEnv)); ns != "" {
+		return ns
+	}
+	return "default"
+}
+
+// validate enforces kubernetesContext.* invariants. Like SchedulerConfig's, the
+// interval is only checked when the feature is enabled: a leftover zero in the
+// values.yaml of an operator who never switched the reader on must not be a
+// boot failure. When it IS on, a non-positive resync would fire a relist
+// storm, so it is rejected rather than silently re-defaulted.
+func (k *KubernetesContextConfig) validate() error {
+	if k.Enabled && k.ResyncInterval <= 0 {
+		return fmt.Errorf("kubernetesContext.resyncInterval must be positive when kubernetesContext.enabled is true, got %v",
+			k.ResyncInterval)
+	}
+	return nil
 }
 
 // MTRConfig groups everything the Console does with MTR path history beyond
@@ -347,6 +516,9 @@ func defaults() *Config {
 			RDNS: RDNSConfig{TimeoutMs: 500},
 			TTL:  24 * time.Hour,
 		}},
+		// Same shape again: the gate stays off, the namespace stays empty (=
+		// resolve from POD_NAMESPACE), and the cadence is pre-defaulted.
+		KubernetesContext: KubernetesContextConfig{ResyncInterval: 10 * time.Minute},
 	}
 }
 
@@ -579,6 +751,12 @@ func (c *Config) Validate() error {
 		return err
 	}
 	if err := c.MTR.validate(); err != nil {
+		return err
+	}
+	if err := c.KubernetesContext.validate(); err != nil {
+		return err
+	}
+	if err := c.Webhooks.validate(); err != nil {
 		return err
 	}
 	return nil

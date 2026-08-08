@@ -3,6 +3,7 @@ import { act, cleanup, fireEvent, render, screen } from "@testing-library/react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { resetWsClient } from "@/hooks/use-ws-topic";
 import { FakeSocket } from "@/lib/fake-websocket";
+import { parseInvestigationParams } from "@/lib/investigation-sources";
 import { MatrixPage } from "./matrix";
 
 const matrixBody = {
@@ -156,7 +157,10 @@ describe("MatrixPage", () => {
       timestamp: "t",
     });
     renderPage();
-    const cell = await screen.findByLabelText(/ns\/pod a → b/);
+    // ANCHORED: the same cell now carries a second labelled affordance,
+    // "Investigate ns/pod a → b" (M6 Task 8), and an unanchored substring
+    // match would find both.
+    const cell = await screen.findByLabelText(/^ns\/pod a → b/);
     expect(cell).toHaveAttribute("href", `/pairs/${encodeURIComponent("ns/pod a")}/b`);
   });
 
@@ -167,5 +171,39 @@ describe("MatrixPage", () => {
     );
     renderPage();
     expect(await screen.findByRole("alert")).toHaveTextContent("prometheus not configured");
+  });
+});
+
+/* ── M6 Task 8: the Investigate affordance inside the cell ──────────────── */
+
+describe("MatrixPage — Investigate affordance", () => {
+  it("gives every non-self cell an Investigate link for that exact pair", async () => {
+    stubFetch(matrixBody);
+    renderPage();
+
+    const link = await screen.findByLabelText("Investigate a → b");
+    const href = link.getAttribute("href") ?? "";
+    const p = parseInvestigationParams(href.slice(href.indexOf("?")), new Date());
+    expect(p.kind).toBe("pair");
+    expect(p.a).toBe("a");
+    expect(p.b).toBe("b");
+    expect(p.to.getTime() - p.from.getTime()).toBe(60 * 60 * 1000);
+  });
+
+  it("keeps the cell itself pointing at the pair card — the affordance is added, not replaced", async () => {
+    stubFetch(matrixBody);
+    renderPage();
+
+    expect((await screen.findByLabelText(/^a → b:/)).getAttribute("href")).toBe("/pairs/a/b");
+    // A cell with no probe data still gets both: an operator investigates a
+    // silent pair more often than a noisy one.
+    expect(screen.getByLabelText("Investigate b → a")).toBeInTheDocument();
+  });
+
+  it("gives the self-cells nothing to investigate", async () => {
+    stubFetch(matrixBody);
+    renderPage();
+    await screen.findByLabelText("Investigate a → b");
+    expect(screen.queryByLabelText("Investigate a → a")).toBeNull();
   });
 });

@@ -25,3 +25,57 @@ subjects:
     name: {{ include "kconmon-ng.serviceAccountName" . }}
     namespace: {{ .Release.Namespace }}
 {{- end }}
+{{- if and .Values.console.enabled .Values.console.kubernetesContext.enabled .Values.serviceAccount.create }}
+---
+{{/*
+M6: a SECOND ClusterRole, for the console only. The grant above is bound to the
+ServiceAccount the agent DaemonSet and the controller Deployment both run as
+(see their serviceAccountName), so adding event read to it would put that grant
+on every agent Pod on every node — and would still not reach the console, which
+until this release set no serviceAccountName at all and ran as the namespace
+`default` SA. A second role bound to a console-only SA is the only shape that
+gives the reader what it needs without widening what the fleet already has.
+
+The verbs are exactly what internal/console/kubectx calls and nothing more:
+CoreV1().Events(ns).List and .Watch, twice (one stream for the release
+namespace's Pod events, one cluster-scoped stream field-selected to Node
+events). It reads NO nodes and NO pods: the node set it filters against comes
+from the controller's topology over the controller's own HTTP API, not from the
+apiserver, which is why the plan's "events/nodes/pods" grant is narrower here
+than it was written. `get` is absent for the same reason — the reader never
+fetches a single event by name.
+
+Cluster-scoped rather than a namespaced Role because Node events are the point:
+the kubelet writes them into whatever namespace it likes (usually "default"),
+so the cluster-scoped stream cannot be expressed as a Role in the release
+namespace. The leak-consciousness lives in the READER's filter, not in the
+grant — see DATA.md and Decision 3.
+*/}}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "kconmon-ng.console.fullname" . }}
+  labels:
+    {{- include "kconmon-ng.labels" . | nindent 4 }}
+    app.kubernetes.io/component: console
+rules:
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "kconmon-ng.console.fullname" . }}
+  labels:
+    {{- include "kconmon-ng.labels" . | nindent 4 }}
+    app.kubernetes.io/component: console
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "kconmon-ng.console.fullname" . }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "kconmon-ng.console.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}

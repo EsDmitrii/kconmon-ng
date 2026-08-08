@@ -710,6 +710,22 @@ func TestAuditDetailAllowlistIsPinned(t *testing.T) {
 		// asserted per-route by
 		// TestAnnotationsCreateAuditDetailIsScopeOnlyAndNeverText.
 		"POST /api/v1/annotations": {"scope"},
+		// incidents: what was opened, about what, and where it stands. "notes"
+		// (free-form prose) and "pinned" (an open array whose refs carry more
+		// free-form prose) must never reach an audit row — pinned here and
+		// asserted per-route by
+		// TestIncidentsCreateAuditDetailIsTitleScopeStatusOnly.
+		"POST /api/v1/incidents":       {"title", "scope", "status"},
+		"PATCH /api/v1/incidents/{id}": {"status"},
+		// maintenance: the SCOPE alone. "reason" is free text, on the exact
+		// annotations "text" line.
+		"POST /api/v1/maintenance": {"scope"},
+		// webhooks: name + the event filter. NEVER "secret" (the HMAC signing
+		// key) and NEVER "url" (external infrastructure whose path routinely
+		// embeds a token) — asserted per-route by
+		// TestWebhookAuditDetailNeverCarriesSecretOrURL.
+		"POST /api/v1/webhooks":     {"name", "events"},
+		"PUT /api/v1/webhooks/{id}": {"name", "events"},
 	}
 	if len(auditDetailAllowlist) != len(want) {
 		t.Fatalf("auditDetailAllowlist has %d routes, pinned copy has %d — update BOTH, consciously",

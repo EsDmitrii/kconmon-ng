@@ -23,6 +23,12 @@ type Querier interface {
 	// foreign_key_violation, which the Go layer reports as ErrNotFound (the
 	// reference is missing) rather than ErrInUse (which is the DELETE direction).
 	CreateDefinition(ctx context.Context, arg CreateDefinitionParams) (CheckDefinition, error)
+	// id is caller-supplied, same as CreateTarget and CreateAnnotation: the column
+	// has a DEFAULT, but minting the UUID in Go keeps the package's one id story
+	// and makes a retried create identifiable rather than a second incident.
+	CreateIncident(ctx context.Context, arg CreateIncidentParams) (Incident, error)
+	// id is caller-supplied, same as CreateAnnotation: see that query's comment.
+	CreateMaintenanceWindow(ctx context.Context, arg CreateMaintenanceWindowParams) (MaintenanceWindow, error)
 	// status is always the literal 'pending' -- a caller never gets to create a
 	// run in any other status; the lifecycle only ever advances it forward via
 	// MarkRunStarted and FinishRun below. id is caller-supplied (not DB-default,
@@ -38,6 +44,9 @@ type Querier interface {
 	CreateTarget(ctx context.Context, arg CreateTargetParams) (Target, error)
 	CreateToken(ctx context.Context, arg CreateTokenParams) (CreateTokenRow, error)
 	CreateUser(ctx context.Context, arg CreateUserParams) (User, error)
+	// secret_enc travels in and out of this layer as OPAQUE BYTES: the store never
+	// encrypts, decrypts or inspects it (migration 00006's comment on the column).
+	CreateWebhook(ctx context.Context, arg CreateWebhookParams) (Webhook, error)
 	// No cascade and nothing references an annotation: deleting a mark removes
 	// the mark and nothing else. M5 has no edit (Decision 10), so delete-and-
 	// recreate is the only correction path and it has to be clean.
@@ -59,6 +68,33 @@ type Querier interface {
 	// resolvers that wrote it, so this deletes cheerfully: the cost of being
 	// wrong is one lookup, not lost data. e alias for the same analyzer quirk.
 	DeleteEnrichmentBefore(ctx context.Context, arg DeleteEnrichmentBeforeParams) (int64, error)
+	// Nothing references an incident, so deleting one removes the incident and
+	// nothing else. Its permalink (/investigate?incident={id}) simply stops
+	// resolving, which is the honest outcome for a link to something deleted.
+	DeleteIncident(ctx context.Context, id pgtype.UUID) (int64, error)
+	// Retention by resolved_at, and note what that does NOT match: an OPEN
+	// incident has a NULL resolved_at, and `NULL < $1` is NULL, never true, so an
+	// open incident can never be selected here however old it is. That is the
+	// point -- an investigation nobody closed is not stale data, it is unfinished
+	// work, and the retention sweep must not close it by deleting it.
+	//
+	// i alias on the subquery's own FROM for the sqlc v1.31.1 analyzer quirk
+	// documented on DeleteRunsBefore (checks.sql).
+	DeleteIncidentsBefore(ctx context.Context, arg DeleteIncidentsBeforeParams) (int64, error)
+	// Retention by event_time: the capture ages out with the window it describes.
+	// k alias on the subquery's own FROM for the sqlc v1.31.1 analyzer quirk
+	// documented on DeleteTopologyEventsBefore (topology_events.sql).
+	DeleteK8sEventsBefore(ctx context.Context, arg DeleteK8sEventsBeforeParams) (int64, error)
+	// There is no edit by design (M6 Task 4): a window is two timestamps and a
+	// reason, so delete-and-recreate is both the correction path and the whole of
+	// it. Nothing references a window, so this removes it and nothing else.
+	DeleteMaintenanceWindow(ctx context.Context, id pgtype.UUID) (int64, error)
+	// Retention by end_at, not start_at: a window that is still open is still
+	// current however long ago it began -- the same reasoning
+	// DeletePathSnapshotsBefore applies to last_seen. m alias on the subquery's
+	// own FROM for the sqlc v1.31.1 analyzer quirk documented on DeleteRunsBefore
+	// (checks.sql).
+	DeleteMaintenanceWindowsBefore(ctx context.Context, arg DeleteMaintenanceWindowsBeforeParams) (int64, error)
 	// Retention by last_seen, not first_seen: a route the pair still takes is
 	// still current however long ago it was first observed. s alias on the
 	// subquery's own FROM for the sqlc v1.31.1 analyzer quirk documented on
@@ -87,6 +123,7 @@ type Querier interface {
 	// against the subquery's own FROM. The alias is a no-op for Postgres and
 	// changes nothing about the query's semantics or its plan.
 	DeleteTopologyEventsBefore(ctx context.Context, arg DeleteTopologyEventsBeforeParams) (int64, error)
+	DeleteWebhook(ctx context.Context, id pgtype.UUID) (int64, error)
 	// status + finished_at + both pair counters in one UPDATE, so a reader never
 	// observes a run whose status says "succeeded" while pair_ok/pair_failed
 	// still read their zero-value default. AND status = 'running' guards the
@@ -102,6 +139,7 @@ type Querier interface {
 	// simply absent from the result -- a miss is not an error, it is the signal
 	// to resolve.
 	GetEnrichment(ctx context.Context, ips []string) ([]MtrHopEnrichment, error)
+	GetIncident(ctx context.Context, id pgtype.UUID) (Incident, error)
 	GetPathSnapshot(ctx context.Context, id pgtype.UUID) (MtrPathSnapshot, error)
 	GetRun(ctx context.Context, id pgtype.UUID) (CheckRun, error)
 	GetRunResults(ctx context.Context, runID pgtype.UUID) ([]CheckResult, error)
@@ -117,7 +155,21 @@ type Querier interface {
 	// distinct row type (no password_hash column in its SELECT list at all).
 	GetUserByID(ctx context.Context, id pgtype.UUID) (GetUserByIDRow, error)
 	GetUserByUsername(ctx context.Context, username string) (User, error)
+	GetWebhook(ctx context.Context, id pgtype.UUID) (Webhook, error)
 	InsertAuditEntry(ctx context.Context, arg InsertAuditEntryParams) (InsertAuditEntryRow, error)
+	// The idempotent capture write (M6 Decision 3). ON CONFLICT DO NOTHING over
+	// (uid, resource_ver) is the same shape InsertTopologyEvent uses over its own
+	// natural key, and for the same reason: the writer re-lists on every watch
+	// expiry, so it re-offers every event it has already stored on every relist,
+	// and "already there" is the NORMAL outcome rather than an error. :execrows
+	// makes that observable -- 0 rows means the conflict fired, 1 means the
+	// revision is new -- which is what the reader's stored|duplicate metric split
+	// is built on.
+	//
+	// Note the key is the PAIR: a recurring event keeps its uid and gets a new
+	// resourceVersion and a bumped count, so each revision lands as its own row
+	// and the timeline can show the recurrence.
+	InsertK8sEvent(ctx context.Context, arg InsertK8sEventParams) (int64, error)
 	InsertTopologyEvent(ctx context.Context, arg InsertTopologyEventParams) (int64, error)
 	// The chart-marker query: every annotation whose interval OVERLAPS the
 	// requested window, newest first. An instant mark (end_at NULL) is treated as
@@ -161,11 +213,56 @@ type Querier interface {
 	// index's own order, so the scheduler's due poll is an index range scan with
 	// no sort, however large the table grows.
 	ListDueSchedules(ctx context.Context, arg ListDueSchedulesParams) ([]CheckSchedule, error)
+	// The incidents listing, newest-created first. status and scope are exact
+	// matches; from/to bound the window an incident's OWN RANGE must overlap, not
+	// the window it was created in -- an incident that began before the window and
+	// is still open is exactly the one an operator looking at that window needs.
+	//
+	// to_at NULL is an OPEN-ENDED range, so it coalesces to 'infinity' rather than
+	// back onto from_at (which is what annotations does, because there NULL means
+	// an instant mark -- the two columns look alike and mean opposite things).
+	//
+	// scope takes the annotations NULL/'' treatment: '' is the GLOBAL scope, a real
+	// value a caller must be able to ask for, so "no filter" is a SQL NULL
+	// argument and an empty-string argument selects exactly the global incidents.
+	//
+	// (created_at DESC, id DESC) is both index's trailing key order, so a listing
+	// filtered by status rides incidents_status_created_idx and one filtered by
+	// scope rides incidents_scope_idx, neither with a sort.
+	ListIncidents(ctx context.Context, arg ListIncidentsParams) ([]Incident, error)
+	// The timeline's K8s source, newest first. Every filter is optional and every
+	// one of them is spelled as a narg so an unbound filter folds out of the plan
+	// entirely -- with name bound the WHERE/ORDER BY pair matches
+	// k8s_events_name_time_idx exactly (equality on the leading column, then the
+	// (event_time DESC, id DESC) keyset), and with name unbound the same query
+	// rides k8s_events_time_idx.
+	//
+	// The window is half-open, [from, to), the same convention every other
+	// listing in this package uses. The cursor is the (event_time, id) bigint
+	// keyset, i.e. the topology_events family, because the primary key here is a
+	// BIGSERIAL rather than a UUID.
+	ListK8sEvents(ctx context.Context, arg ListK8sEventsParams) ([]K8sEvent, error)
 	// The MTR Explorer's left pane: every (source, destination) pair path history
 	// knows about, with how many distinct routes it has taken and when it was
 	// last traced. Unbounded by design -- the row count is pairs, not traces, so
 	// it is bounded by the cluster's own size rather than by time.
 	ListMTRDestinations(ctx context.Context) ([]ListMTRDestinationsRow, error)
+	// Every window whose interval OVERLAPS the requested range, newest first --
+	// the chart-markArea query, so containment would be the wrong test: a window
+	// that opened before the range and is still running inside it is exactly the
+	// one that explains what the operator is looking at.
+	//
+	// Both ends are closed here (the table's own CHECK guarantees end_at >
+	// start_at), so no coalesce is needed: the overlap is `end_at >= from AND
+	// start_at < to`, half-open on the upper bound like every other window in this
+	// package.
+	//
+	// scope takes the annotations NULL/'' treatment -- '' is the global scope, a
+	// real value, so "no filter" is a SQL NULL argument.
+	//
+	// (start_at DESC, id DESC) is maintenance_time_idx's own order, so the listing
+	// pages without a sort.
+	ListMaintenanceWindows(ctx context.Context, arg ListMaintenanceWindowsParams) ([]MaintenanceWindow, error)
 	// The pair's route history, newest first. The WHERE/ORDER BY pair is written
 	// to match mtr_snapshots_pair_seen_idx exactly: equality on the two leading
 	// columns, then the (last_seen, id) keyset the cursor carries, then the
@@ -208,6 +305,11 @@ type Querier interface {
 	// UI and API responses, and the hash must never leave the database once
 	// written (same guarantee ListTokens gives token_hash).
 	ListUsers(ctx context.Context) ([]ListUsersRow, error)
+	// Unpaged by design, the same call ListMTRDestinations makes: the row count is
+	// configured endpoints, bounded by how many an operator typed, not by time. A
+	// keyset cursor over a table that will hold single digits of rows would be
+	// machinery with nothing to do.
+	ListWebhooks(ctx context.Context) ([]Webhook, error)
 	// AND status = 'pending' guards the pending->running transition: a run
 	// that's already running, or already terminal, is left untouched (0 rows),
 	// so a caller can tell "no such run" apart from "wrong state" -- see
@@ -279,6 +381,19 @@ type Querier interface {
 	TouchTokenLastUsed(ctx context.Context, id pgtype.UUID) (int64, error)
 	// Full replace, same contract as UpdateTarget.
 	UpdateDefinition(ctx context.Context, arg UpdateDefinitionParams) (CheckDefinition, error)
+	UpdateIncidentNotes(ctx context.Context, arg UpdateIncidentNotesParams) (Incident, error)
+	UpdateIncidentPinned(ctx context.Context, arg UpdateIncidentPinnedParams) (Incident, error)
+	// One of THREE narrow updates, deliberately not one full replace. An incident
+	// evolves while several people look at it: a full-replace PUT would let a
+	// collaborator's stale copy of `notes` silently overwrite an edit made a second
+	// earlier, and the three fields that actually change (status, notes, pinned)
+	// change for three unrelated reasons. PATCH semantics are assembled from these
+	// in httpapi; the store's surface stays this narrow on purpose.
+	//
+	// resolved_at travels WITH status, never separately: it is status' witness, and
+	// reopening (status back to 'open' with a NULL resolved_at) has to clear it in
+	// the same statement or a reopened incident keeps a resolution time.
+	UpdateIncidentStatus(ctx context.Context, arg UpdateIncidentStatusParams) (Incident, error)
 	// definition_id is deliberately NOT updatable: re-pointing a schedule at a
 	// different definition is a different schedule, and letting it move would
 	// silently reinterpret last_fired_at/next_fire_at against a cadence they were
@@ -291,6 +406,16 @@ type Querier interface {
 	// trip; an id matching nothing yields pgx.ErrNoRows -> ErrNotFound.
 	UpdateTarget(ctx context.Context, arg UpdateTargetParams) (Target, error)
 	UpdateUserPassword(ctx context.Context, arg UpdateUserPasswordParams) (int64, error)
+	// A full replace of the CONFIGURED half of the row, and only that half:
+	// last_status/last_attempt/failures are delivery OUTCOMES, written by
+	// UpdateWebhookDelivery, and an operator editing the URL must not reset the
+	// endpoint's failure history along with it.
+	UpdateWebhook(ctx context.Context, arg UpdateWebhookParams) (Webhook, error)
+	// The dispatcher's write-back after a terminal delivery outcome (M6 Decision
+	// 5). failures is set, not incremented, because the dispatcher -- not this
+	// layer -- knows whether the attempt ended a streak (0) or extended one, and a
+	// SET is idempotent under the retry that a += is not.
+	UpdateWebhookDelivery(ctx context.Context, arg UpdateWebhookDeliveryParams) (int64, error)
 	// The dedupe write (M5 Decision 2). A trace over a path the pair has already
 	// taken bumps last_seen and trace_count on the existing row; a trace over a
 	// new path inserts one. Which of the two happened is the observable the

@@ -148,4 +148,34 @@ data:
           cityPath: {{ .Values.console.mtr.enrichment.geoip.cityPath | quote }}
         ttl: {{ .Values.console.mtr.enrichment.ttl | quote }}
     {{- end }}
+    {{- /* M6 Kubernetes event capture. Emitted only when ON, for the reason
+    mtr above is: config.Load parses with KnownFields(true) and a pre-M6 console
+    image has no kubernetesContext field, so an unconditional block would
+    crashloop the OLD Pod while the Deployment rolls. Off by default also keeps
+    the default render key-identical to chart 1.7.0's.
+
+    NOT guarded against database.mode=disabled, unlike auth.mode=local|oidc
+    above: the console's own posture there is a warning and a skipped reader
+    (cmd/console), because captured events live in PostgreSQL and having
+    nowhere to put them is a degraded feature, not an unsafe one. The chart
+    does not get to be stricter than the binary about a knob the binary
+    already reports on. Same reasoning for the empty namespace: the console
+    resolves it from POD_NAMESPACE, which the Deployment sets under this same
+    gate. */}}
+    {{- if .Values.console.kubernetesContext.enabled }}
+    kubernetesContext:
+      enabled: true
+      namespace: {{ .Values.console.kubernetesContext.namespace | quote }}
+      resyncInterval: {{ .Values.console.kubernetesContext.resyncInterval | quote }}
+    {{- end }}
+    {{- /* M6 webhook secret encryption. encryptionKeyFile, never encryptionKey:
+    the file comes out of the projected Secret volume the DSN already uses, and
+    the inline form would put 32 bytes of key material in a ConfigMap. The
+    console refuses a config that sets both, so only ever one is emitted.
+    Absent when no Secret is named -- that is the keyless state, where create
+    and test answer 503 and every other webhook route keeps working. */}}
+    {{- with (include "kconmon-ng.console.webhooksKeySecretName" .) }}
+    webhooks:
+      encryptionKeyFile: "/etc/kconmon-ng-console-secrets/webhooks-encryption-key"
+    {{- end }}
 {{- end }}

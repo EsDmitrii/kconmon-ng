@@ -77,6 +77,29 @@ const (
 	queryListAnnotations     = "ListAnnotations"
 	queryDeleteAnnotation    = "DeleteAnnotation"
 
+	// The M6 investigation queries (k8sevents.go, incidents.go,
+	// maintenance.go, webhooks.go). The Delete*Before sweeps are absent for
+	// the same reason M5's are: the pruner reports its own work through
+	// RetentionDeleted{table}.
+	queryInsertK8sEvent          = "InsertK8sEvent"
+	queryListK8sEvents           = "ListK8sEvents"
+	queryCreateIncident          = "CreateIncident"
+	queryGetIncident             = "GetIncident"
+	queryListIncidents           = "ListIncidents"
+	queryUpdateIncidentStatus    = "UpdateIncidentStatus"
+	queryUpdateIncidentNotes     = "UpdateIncidentNotes"
+	queryUpdateIncidentPinned    = "UpdateIncidentPinned"
+	queryDeleteIncident          = "DeleteIncident"
+	queryCreateMaintenanceWindow = "CreateMaintenanceWindow"
+	queryListMaintenanceWindows  = "ListMaintenanceWindows"
+	queryDeleteMaintenanceWindow = "DeleteMaintenanceWindow"
+	queryCreateWebhook           = "CreateWebhook"
+	queryGetWebhook              = "GetWebhook"
+	queryListWebhooks            = "ListWebhooks"
+	queryUpdateWebhook           = "UpdateWebhook"
+	queryUpdateWebhookDelivery   = "UpdateWebhookDelivery"
+	queryDeleteWebhook           = "DeleteWebhook"
+
 	resultOK       = "ok"
 	resultConflict = "conflict"
 	resultError    = "error"

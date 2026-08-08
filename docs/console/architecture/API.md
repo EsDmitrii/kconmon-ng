@@ -487,6 +487,104 @@ rather than a `503`.
 There is **no update verb**, deliberately: a mark is not a document
 (Decision 10).
 
+## Implemented in M6
+
+Four route families, all under the M4/M5 house shape: keyset cursor, `[1,500]`
+limit defaulting to 100, RFC 7807 problems, `Location` on every `201`, and a
+`createdBy` that is the server's view of the subject rather than a body field.
+
+### `/api/v1/incidents` — and the one `PATCH` in this API
+
+- `GET` — one page, newest first. `?status=` is an exact match against the
+  closed `open|resolved` vocabulary and an unknown value is a **`400`**, not a
+  silently empty page (`?type=`'s precedent on `/api/v1/events`). `?scope=` has
+  the annotations **three states** (absent = every scope, `?scope=` = the global
+  ones, anything else exact). `from`/`to` bound the window the incident's **own
+  range** must overlap — an incident that began before the range and is still
+  open is exactly the one an operator looking at that range needs — and an
+  inverted window is an empty page, not a `400`, because the range comes from a
+  chart's visible extent.
+- `POST` — `201`. The incident is **always created open with no `resolvedAt`**,
+  whatever the body says: resolving is a transition, and a transition has to be
+  made from somewhere. Resolution is therefore always stamped from the server
+  clock on a later `PATCH`.
+- **`PATCH /{id}` is the documented exception** to this repo's full-replace
+  `PUT` convention (M4's `/targets`, `/checks`, `/schedules`, M6's own
+  `/webhooks` all use `PUT`). An incident evolves under collaboration — two
+  operators in the same investigation, one pinning findings while the other
+  writes notes — so a full replace would let the last writer silently discard
+  the other's work. The patchable subset is exactly `status`, `notes`, `pinned`;
+  `title`, `scope` and the range are immutable. An **empty subset is `422`**
+  (a patch naming none of the three is a client bug, not a no-op), a body that
+  is not JSON is `400`, and a mixed-validity body applies **nothing**: the whole
+  body is validated before the first store call. `pinned` is replaced
+  **wholesale**, not merged, because a pin list is a set an operator curates.
+  Re-sending the current `status` is a **no-op, not a re-stamp** — `resolvedAt`
+  records when the incident was resolved, and a second `PATCH` did not re-resolve
+  it — and it fires no webhook either, for the same reason.
+- `DELETE /{id}` — `204`; deleting what is not there is `404`.
+
+### `/api/v1/maintenance`
+
+`GET`/`POST`/`DELETE` and deliberately **no update**: a window is two
+timestamps and a reason, so delete-and-recreate is both the correction path and
+the whole of it. `from`/`to` bound **overlap**, `?scope=` has the same three
+states, an inverted range is an empty page. `end_at > start_at` is enforced by
+the database, not only by the handler.
+
+### `/api/v1/webhooks` — the write-only secret
+
+Full CRUD plus `POST /{id}/test`, all of it behind `webhooks:manage`, which is
+**admin-only** (SECURITY.md §10.2). The signing secret's lifecycle is the part
+worth stating precisely, because it is what keeps the secret one-way:
+
+- The secret is **write-only**. `webhookResponse` has no field for it at all, so
+  `GET` (list or single) cannot leak one however the caller asks — there is no
+  masked form to un-mask.
+- `POST` **requires** a `secret`: every delivery is signed, so an endpoint
+  without one could never deliver.
+- `PUT` reads it in **three states**: omitted keeps the stored ciphertext
+  untouched (and calls the sealer zero times), a non-empty value replaces it,
+  and an explicit `""` is a **`422`** — an empty string is far more likely a
+  serializer's default than an operator's intent. Keeping "omitted" working is
+  deliberate: it is what lets an admin **disable a misfiring endpoint mid-
+  incident** without possessing its secret.
+- With **no encryption key configured**, exactly two operations answer `503`
+  naming `console.webhooks.encryptionKey` — create and test, the two that need
+  the cipher. List, get, update, disable and delete keep working. That is the
+  documented keyless state, not a degraded one.
+- `POST /{id}/test` answers **`202`, not `200`**: delivery is asynchronous with
+  a retry ladder, so acceptance is the only honest thing to report. The outcome
+  arrives on the endpoint row (`lastStatus`, `lastAttempt`, `failures`) and is
+  read back with `GET /{id}`. The id is checked for existence **before**
+  enqueuing, so a `202` is never issued for work that can never happen. The
+  request body carries **only the id** — a sealed secret never travels through
+  this API in either direction, which is what stops `/test` becoming a
+  decryption oracle.
+- The audit rows for this family record the endpoint's **name and id** and
+  never its `url` or `secret` (pinned by leak-ban assertions in the httpapi
+  suite), the same allow-listed-detail rule `annotations` follows.
+
+### `GET /api/v1/k8s-events`
+
+Read-only: the writer is `internal/console/kubectx`, and the HTTP layer must not
+be able to forge a cluster event. It rides **`events:read`** and has no
+permission of its own (M6 Decision 8) — these are events, and a separate
+permission would gate nothing an operator holding `events:read` could not
+already infer from the streams they can read.
+
+Filters are exact matches: `?name=` (a node or pod name), `?kind=`
+(`Node|Pod`), `?type=` (`Normal|Warning`), plus the usual `from`/`to` window
+over `event_time`. A `kind`/`type` outside the closed vocabulary is rejected as
+a likely typo rather than answered with an empty page; an inverted window is
+**not** a `400` (the caller is the timeline, driven by a chart's extent).
+
+The `503` on this route means **one** thing — no database — and its detail says
+so while also naming the second knob, because an operator told only half of it
+fixes the wrong thing: with a database and `kubernetesContext.enabled=false`,
+the route answers `200` with an **empty page**, which is the honest report of
+"nothing was captured", not "this endpoint is unavailable".
+
 ## OpenAPI + codegen (landed M4)
 
 Deferred out of M3 (Decision 12) and delivered in M4, but **not in the shape

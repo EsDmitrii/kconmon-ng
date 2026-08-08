@@ -1,10 +1,16 @@
 import type { ReactNode } from "react";
+import { useQuery } from "@tanstack/react-query";
 import { PageShell } from "@/components/page-shell";
 import { Badge } from "@/components/ui/badge";
 import { Card } from "@/components/ui/card";
+import { Skeleton } from "@/components/ui/skeleton";
+import { useAuth } from "@/hooks/use-auth";
+import { useDatabaseAvailable } from "@/hooks/use-capabilities";
 import { useMatrix } from "@/hooks/use-matrix";
 import { useTopology } from "@/hooks/use-topology";
-import type { Matrix, MatrixCell, Topology } from "@/lib/types";
+import { getEvents, getIncidents } from "@/lib/api";
+import { incidentPermalink } from "@/lib/investigation-sources";
+import type { LiveEvent, LiveEventSeverity, Matrix, MatrixCell, Topology } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 export interface OverviewSummary {
@@ -142,15 +148,203 @@ function OverviewSkeleton() {
   );
 }
 
-// Sections whose data plane lands in a later milestone (firing alerts →
-// Alertmanager, M2+; recent events → events store, M7). Rendered as honest
-// placeholders rather than fabricated rows.
+// A section whose data plane lands in a later milestone (firing alerts →
+// alerting, M7). Rendered as an honest placeholder rather than fabricated rows.
+// "Recent events" and "Open incidents" left this shape in M6 — both now read
+// real APIs below.
 function LaterMilestone({ title, note }: { title: string; note: string }) {
   return (
     <Card asChild className="p-6">
       <section>
         <h2 className="text-sm font-semibold">{title}</h2>
         <p className="mt-2 text-xs leading-relaxed text-muted-foreground">{note}</p>
+      </section>
+    </Card>
+  );
+}
+
+/* ── M6: the two panels that used to be placeholders (plan Decision 9) ─────
+   Both follow the house degradation pattern the object cards already use: a
+   missing READ permission and a console with no database are DIFFERENT facts
+   and get different sentences, and neither issues a request. An empty list
+   after a successful read is a third fact again — "nothing is open" is an
+   answer, not a failure. */
+
+const OPEN_INCIDENTS_LIMIT = 5;
+const RECENT_EVENTS_LIMIT = 10;
+
+/** The one-line database note, worded once so both panels say the same thing
+ *  the Investigate page and the object cards already say. */
+const DB_NOTE = "History needs a database — set console.database.mode. Nothing was requested.";
+
+function PanelNote({ children }: { children: ReactNode }) {
+  return <p className="mt-2 text-xs leading-relaxed text-muted-foreground">{children}</p>;
+}
+
+function PanelSkeleton({ rows }: { rows: number }) {
+  return (
+    <div role="status" aria-live="polite" className="mt-3 flex flex-col gap-2">
+      <span className="sr-only">Loading…</span>
+      {Array.from({ length: rows }, (_, i) => (
+        <Skeleton key={i} className="h-6 w-full" />
+      ))}
+    </div>
+  );
+}
+
+/** fmtAge is the "how long has this been going" column — coarse on purpose:
+ *  an incident open for three days does not become more legible at minute
+ *  precision, and a bare timestamp makes the reader do the subtraction. */
+export function fmtAge(iso: string, now: Date): string {
+  const then = new Date(iso);
+  if (Number.isNaN(then.getTime())) return "—";
+  const seconds = Math.max(0, Math.round((now.getTime() - then.getTime()) / 1000));
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 48) return `${hours}h`;
+  return `${Math.round(hours / 24)}d`;
+}
+
+/**
+ * OpenIncidents is the Overview's link into Investigation Mode: the newest five
+ * incidents still open, each one a permalink that hydrates the whole page from
+ * the saved row (/investigate?incident={id} — there is no incident page).
+ */
+function OpenIncidents() {
+  const { me, can } = useAuth();
+  const { available, resolved } = useDatabaseAvailable();
+  const canRead = can("incidents:read");
+  const enabled = me !== undefined && canRead && resolved && available;
+
+  const query = useQuery({
+    queryKey: ["overview", "incidents"],
+    queryFn: () => getIncidents({ status: "open", limit: OPEN_INCIDENTS_LIMIT }),
+    enabled,
+  });
+  const incidents = query.data?.incidents ?? [];
+  const now = new Date();
+
+  return (
+    <Card asChild className="p-6">
+      <section aria-label="Open incidents">
+        <h2 className="text-sm font-semibold">Open incidents</h2>
+
+        {me !== undefined && !canRead ? (
+          <PanelNote>Open incidents need incidents:read — none was requested.</PanelNote>
+        ) : resolved && !available ? (
+          <PanelNote>{DB_NOTE}</PanelNote>
+        ) : query.isError ? (
+          <PanelNote>The incident list is unavailable right now.</PanelNote>
+        ) : !enabled || query.isLoading ? (
+          <PanelSkeleton rows={3} />
+        ) : incidents.length === 0 ? (
+          <PanelNote>No open incidents. Saving an investigation on /investigate opens one.</PanelNote>
+        ) : (
+          <ul className="mt-3 flex flex-col divide-y divide-border">
+            {incidents.map((i) => (
+              <li key={i.id} data-testid="open-incident" className="flex items-center gap-3 py-2">
+                <a href={incidentPermalink(i.id)} className="min-w-0 flex-1 truncate text-sm text-primary hover:underline">
+                  {i.title}
+                </a>
+                <Badge variant="neutral">{i.scope === "" ? "global" : i.scope}</Badge>
+                <span className="nums w-10 shrink-0 text-right text-xs text-muted-foreground">
+                  {fmtAge(i.fromAt, now)}
+                </span>
+              </li>
+            ))}
+          </ul>
+        )}
+      </section>
+    </Card>
+  );
+}
+
+const SEVERITY_VARIANT: Record<LiveEventSeverity, "neutral" | "warn" | "bad"> = {
+  info: "neutral",
+  warn: "warn",
+  error: "bad",
+};
+
+function isKnownSeverity(v: string): v is LiveEventSeverity {
+  return v === "info" || v === "warn" || v === "error";
+}
+
+function fmtEventTime(timestamp: string): string {
+  const d = new Date(timestamp);
+  return Number.isNaN(d.getTime()) ? timestamp : d.toLocaleTimeString();
+}
+
+/**
+ * OverviewEventRow is a deliberately MINIMAL copy of pages/live.tsx's EventRow
+ * (the seam: live.tsx does not export it, and exporting a row built for a
+ * full-width virtualised feed into a half-width summary card would drag its
+ * five fixed-width columns along).
+ *
+ * Same vocabulary — clock, severity badge, summary, scope — in the space this
+ * card actually has. If the Live row ever becomes exported and fluid, this is
+ * the thing to delete.
+ */
+function OverviewEventRow({ event }: { event: LiveEvent }) {
+  return (
+    <li data-testid="overview-event" className="flex items-center gap-3 py-2">
+      <span className="nums w-16 shrink-0 text-xs text-muted-foreground">{fmtEventTime(event.timestamp)}</span>
+      <Badge variant={isKnownSeverity(event.severity) ? SEVERITY_VARIANT[event.severity] : "unknown"} dot>
+        {event.severity}
+      </Badge>
+      <span className="min-w-0 flex-1 truncate text-sm" title={event.summary}>
+        {event.summary}
+      </span>
+      <span className="hidden w-36 shrink-0 truncate text-xs text-muted-foreground sm:block" title={event.scope}>
+        {event.scope}
+      </span>
+    </li>
+  );
+}
+
+/** RecentEvents finally wires the events API M3 shipped: the newest ten, and a
+ *  link to the page that streams them live rather than a poll on this one. */
+function RecentEvents() {
+  const { me, can } = useAuth();
+  const { available, resolved } = useDatabaseAvailable();
+  const canRead = can("events:read");
+  const enabled = me !== undefined && canRead && resolved && available;
+
+  const query = useQuery({
+    queryKey: ["overview", "events"],
+    queryFn: () => getEvents({ limit: RECENT_EVENTS_LIMIT }),
+    enabled,
+  });
+  const events = query.data?.events ?? [];
+
+  return (
+    <Card asChild className="p-6">
+      <section aria-label="Recent events">
+        <div className="flex flex-wrap items-baseline justify-between gap-2">
+          <h2 className="text-sm font-semibold">Recent events</h2>
+          <a href="/live" className="text-xs text-primary hover:underline">
+            open Live
+          </a>
+        </div>
+
+        {me !== undefined && !canRead ? (
+          <PanelNote>Fleet events need events:read — none was requested.</PanelNote>
+        ) : resolved && !available ? (
+          <PanelNote>{DB_NOTE}</PanelNote>
+        ) : query.isError ? (
+          <PanelNote>The event feed is unavailable right now.</PanelNote>
+        ) : !enabled || query.isLoading ? (
+          <PanelSkeleton rows={4} />
+        ) : events.length === 0 ? (
+          <PanelNote>Nothing has happened yet. Agent restarts, node readiness changes and MTR triggers land here.</PanelNote>
+        ) : (
+          <ul className="mt-3 flex flex-col divide-y divide-border">
+            {events.map((e) => (
+              <OverviewEventRow key={e.id} event={e} />
+            ))}
+          </ul>
+        )}
       </section>
     </Card>
   );
@@ -316,15 +510,17 @@ export function OverviewPage() {
             </Card>
 
             <div className="grid gap-4 sm:grid-cols-2">
+              {/* Still a placeholder, and deliberately so: nothing evaluates
+                  alert rules until M7, and a fabricated "0 firing" would read
+                  as a quiet fleet rather than as a missing engine. */}
               <LaterMilestone
                 title="Firing alerts"
                 note="Arrives with a later milestone (Alertmanager wiring)."
               />
-              <LaterMilestone
-                title="Recent events"
-                note="Arrives with a later milestone (events store)."
-              />
+              <OpenIncidents />
             </div>
+
+            <RecentEvents />
           </>
         ) : null}
       </div>

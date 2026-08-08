@@ -25,7 +25,7 @@ This document is the source of truth for Backend Architecture. Update it (and th
 | DB              | `pgx` + `sqlc`, migrations via `goose` (embedded, advisory-locked) | Type-safe, no ORM magic. **Landed in M3** — `internal/console/store` (the only package touching `pgx`), pinned `github.com/jackc/pgx/v5 v5.10.0`, `github.com/pressly/goose/v3 v3.27.3` (both in `go.mod`), and `sqlc` `v1.31.1` as a pinned CI/dev tool (`Makefile`'s `SQLC_VERSION`, invoked via `go run .../sqlc@$(SQLC_VERSION)` — never a locally-installed sqlc of a different version) |
 | Cache/pubsub    | Valkey via `rueidis`, in-process fallback      | Pub/sub (`cache.Bus`) since M2; a sibling key/value seam, `cache.KV` (`Get`/`Set`/`Delete`), **landed in M3** for sessions (DATA.md §5.3) — same `ValkeyKV`/`InProcessKV` split as `Bus`. `cache.InProcessBus`/`InProcessKV` keep a single-replica console working with Valkey disabled (ADR-002) |
 | OIDC            | `coreos/go-oidc`, code flow + PKCE             | Battle-tested. **Landed in M3** — `github.com/coreos/go-oidc/v3 v3.20.0`, `internal/console/authn/oidc.go`; `auth.mode` now selects `anonymous\|local\|header\|oidc` (SECURITY.md §10.1) |
-| K8s client      | client-go (reuse controller's patterns)        | Events/nodes read, PrometheusRule SSA. **Not yet** — M6+ (`kubectx` M6, alerting sync M7); the console still has no K8s client as of M3 |
+| K8s client      | client-go (reuse controller's patterns)        | **Landed in M6** — `internal/console/kubectx` list+watches core/v1 Events on the client-go the controller already pulls in (**zero new module dependencies**), using a copy of the controller's `InClusterConfig` pattern rather than an import, since `internal/console` must not depend on `internal/controller`. Events **only**: no nodes read (topology comes from the controller's HTTP API) and no PrometheusRule SSA (M7 — alerting sync). Gated off by default on `kubernetesContext.enabled` |
 
 Frontend is embedded via `go:embed` — single image, no nginx sidecar.
 `Dockerfile.console` mirrors the existing multi-stage pattern
@@ -52,20 +52,39 @@ internal/console/
 ├── store/          sqlc-generated repos; the ONLY package touching pgx     — M3, shipped
 ├── checks/         run orchestration, fan-out, result normalization        — M3, shipped
 ├── authn/ authz/   modes, sessions, RBAC middleware, audit                 — M3, shipped
-├── scheduler/      cron ticks → checks; Valkey-locked                      — M4
-├── mtr/            path normalization, hashing, diffing, enrichment        — M5
-├── timemachine/    time-context resolution (live vs @t)                    — M5
-├── investigate/    Investigation assembly heuristics                       — M6
-├── kubectx/        K8s events/nodes reader                                 — M6
+├── scheduler/      cron ticks → checks; Valkey-locked                      — M4, shipped
+├── enrich/         hop enrichment: rDNS + MaxMind, TTL-cached              — M5, shipped
+├── kubectx/        K8s EVENTS reader (list+watch, filtered)                — M6, shipped
+├── webhooks/       outbound dispatcher: seal/open, HMAC, retry ladder      — M6, shipped
 ├── alerting/       rule model, rendering, k8s sync (SSA), drift            — M7
 └── domain/         shared types; no dependencies on the above
 ```
 
-Everything marked M0–M3 exists on disk today; everything marked M4+ does not.
+Everything listed above except `alerting/` and `domain/` exists on disk today.
+Three lines this tree used to carry never became packages, and saying so is
+worth more than quietly deleting them:
+
+- **`mtr/`** (predicted M5) — path normalization and hashing landed inside
+  `checks/mtrproject.go` instead, because the projector runs at result-ingest
+  time and a separate package would have been one type and one function reached
+  only from there. The enrichment half *did* get its own package, `enrich/`,
+  since it owns egress and a cache.
+- **`timemachine/`** (predicted M5) — `?at=` resolution is a parameter, not a
+  subsystem: it lives in `httpapi/data.go` and the fold query in
+  `store/events.go`.
+- **`investigate/`** (predicted M6) — **timeline assembly and correlation are
+  client-side** (M6 Decision 1). Every source is an existing read API plus two
+  new ones, so a server-side assembler would have re-exposed five APIs behind a
+  sixth for no authority gain. The merge, the threshold-crossing detector and
+  the cause ranking are pure TypeScript in `web/src/lib/investigation.ts` with
+  `web/src/lib/investigation-sources.ts` as the fetch seam, unit-tested there.
+  `INVESTIGATION.md` restates the exported constants verbatim and is the
+  authority the UI links to.
+
 `promql/` shipped without the response cache its original line promised, and
 `cache/` was narrowed in M2 to pub/sub only, then widened in M3 with a
 sibling `KV` seam (sessions only) — the locks/queues and PromQL response
-cache DATA.md §5.3 lists still have no consumer before M4.
+cache DATA.md §5.3 lists still have no consumer.
 
 The event bus is the future plugin seam: v2 plugins would be consumers/producers
 on `cache.Bus` plus registered UI routes. Do **not** build the registration
