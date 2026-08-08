@@ -7,12 +7,75 @@ import (
 	"testing"
 )
 
+// defaultRenderer is the MetricPrefix renderer every pre-existing golden below
+// was written against. It exists so the goldens keep asserting the shipped
+// default while the prefix itself became a constructor argument (M7 Task 3).
+var defaultRenderer = NewRenderer("")
+
 // ---------------------------------------------------------------------------
 // Render — golden expressions, one per kind x representative params.
 //
 // These strings ARE the contract. A metric family rename, a window change or a
 // unit conversion has to break here first.
 // ---------------------------------------------------------------------------
+
+// TestRenderHonoursACustomMetricPrefix is the one golden that proves the
+// prefix is CARRIED rather than baked in: a deployment that sets
+// config.metricsPrefix gets expressions over its own families, in every
+// position a family name can appear -- a bare gauge, both sides of a
+// comparison between two families, and inside a rate() within a
+// histogram_quantile.
+func TestRenderHonoursACustomMetricPrefix(t *testing.T) {
+	r := NewRenderer("acme_net")
+	if r.Prefix() != "acme_net" {
+		t.Fatalf("Prefix() = %q, want acme_net", r.Prefix())
+	}
+	for _, tt := range []struct {
+		name   string
+		rule   Rule
+		golden string
+	}{
+		{
+			name:   "gauge family",
+			rule:   Rule{Kind: KindPairLoss, Params: map[string]any{"protocol": "udp", "thresholdPercent": 5.0}},
+			golden: `acme_net_udp_packet_loss_ratio * 100 > 5`,
+		},
+		{
+			name:   "two families in one comparison",
+			rule:   Rule{Kind: KindAgentMissing},
+			golden: `acme_net_controller_registered_agents < acme_net_controller_expected_agents`,
+		},
+		{
+			name: "family inside a histogram_quantile",
+			rule: Rule{Kind: KindHTTPTTFB, Params: map[string]any{"thresholdMs": 500.0}},
+			golden: `histogram_quantile(0.95, sum by (le, url, source_node, source_zone) ` +
+				`(rate(acme_net_http_ttfb_seconds_bucket[5m]))) * 1000 > 500`,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := r.Render(tt.rule)
+			if err != nil {
+				t.Fatalf("Render() error = %v", err)
+			}
+			if got != tt.golden {
+				t.Errorf("Render()\n got: %s\nwant: %s", got, tt.golden)
+			}
+			if strings.Contains(got, MetricPrefix) {
+				t.Errorf("Render() leaked the default prefix %q into %s", MetricPrefix, got)
+			}
+		})
+	}
+}
+
+// TestNewRendererFoldsAnEmptyPrefix pins the repair: a hand-built caller with
+// no prefix gets the shipped default, never a family named "_udp_...".
+func TestNewRendererFoldsAnEmptyPrefix(t *testing.T) {
+	for _, in := range []string{"", "   ", "\t\n"} {
+		if got := NewRenderer(in).Prefix(); got != MetricPrefix {
+			t.Errorf("NewRenderer(%q).Prefix() = %q, want %q", in, got, MetricPrefix)
+		}
+	}
+}
 
 func TestRenderGoldenExpressions(t *testing.T) {
 	tests := []struct {
@@ -160,7 +223,7 @@ func TestRenderGoldenExpressions(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := Render(tt.rule)
+			got, err := defaultRenderer.Render(tt.rule)
 			if err != nil {
 				t.Fatalf("Render() error = %v", err)
 			}
@@ -208,12 +271,12 @@ func TestRenderIsDeterministic(t *testing.T) {
 		"protocol": "tcp", "thresholdPercent": 3.0,
 		"scope": map[string]any{"sourceNode": "a", "destNode": "b"},
 	}}
-	first, err := Render(r)
+	first, err := defaultRenderer.Render(r)
 	if err != nil {
 		t.Fatalf("Render() error = %v", err)
 	}
 	for i := range 50 {
-		got, err := Render(r)
+		got, err := defaultRenderer.Render(r)
 		if err != nil {
 			t.Fatalf("Render() iteration %d error = %v", i, err)
 		}
@@ -247,7 +310,7 @@ func TestRenderAcceptsJSONNumberShapes(t *testing.T) {
 		"json float":  viaJSON,
 		"json.Number": viaNumber,
 	} {
-		got, err := Render(Rule{Kind: KindPairLoss, Params: params})
+		got, err := defaultRenderer.Render(Rule{Kind: KindPairLoss, Params: params})
 		if err != nil {
 			t.Fatalf("%s: Render() error = %v", name, err)
 		}
@@ -258,7 +321,7 @@ func TestRenderAcceptsJSONNumberShapes(t *testing.T) {
 }
 
 func TestRenderEscapesLabelValues(t *testing.T) {
-	got, err := Render(Rule{Kind: KindExternalTargetDown, Params: map[string]any{
+	got, err := defaultRenderer.Render(Rule{Kind: KindExternalTargetDown, Params: map[string]any{
 		"targetName": `he said "hi"\n`,
 	}})
 	if err != nil {
@@ -472,7 +535,7 @@ func TestRenderParamValidation(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := Render(tt.rule)
+			got, err := defaultRenderer.Render(tt.rule)
 			if err == nil {
 				t.Fatalf("Render() returned %q, want error", got)
 			}
@@ -491,7 +554,7 @@ func TestUnknownParamErrorIsDeterministic(t *testing.T) {
 	r := Rule{Kind: KindDNSFailures, Params: map[string]any{
 		"thresholdPercent": 1.0, "zzz": 1, "aaa": 2, "mmm": 3,
 	}}
-	_, err := Render(r)
+	_, err := defaultRenderer.Render(r)
 	if err == nil {
 		t.Fatal("want error")
 	}
@@ -500,7 +563,7 @@ func TestUnknownParamErrorIsDeterministic(t *testing.T) {
 		t.Errorf("expected the alphabetically first unknown param in %q", first)
 	}
 	for range 50 {
-		_, err := Render(r)
+		_, err := defaultRenderer.Render(r)
 		if err == nil || err.Error() != first {
 			t.Fatalf("non-deterministic error: %v vs %q", err, first)
 		}
@@ -559,6 +622,148 @@ func TestFormatPromDurationErrors(t *testing.T) {
 	}
 	if _, err := FormatPromDuration(1_000_001); err == nil {
 		t.Error("non-millisecond-aligned duration must error")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// ParsePromDuration
+// ---------------------------------------------------------------------------
+
+// promDurationUnitsForTest mirrors the parser's own table. Declared in the test
+// so a silent change to a unit size (a "y" that stops being 365d) fails here
+// rather than quietly re-interpreting every adopted foreign rule.
+const (
+	testMS = int64(1_000_000)
+	testS  = 1000 * testMS
+	testM  = 60 * testS
+	testH  = 60 * testM
+	testD  = 24 * testH
+	testW  = 7 * testD
+	testY  = 365 * testD
+)
+
+func TestParsePromDuration(t *testing.T) {
+	tests := []struct {
+		in   string
+		want int64
+	}{
+		// Every unit, alone.
+		{"0", 0},
+		{"0s", 0},
+		{"500ms", 500 * testMS},
+		{"30s", 30 * testS},
+		{"5m", 5 * testM},
+		{"2h", 2 * testH},
+		{"1d", testD},
+		{"1w", testW},
+		{"1y", testY},
+		// COMPOSITE, which is the whole reason this exists: a foreign
+		// PrometheusRule is written by a human and "1h30m" is what humans type.
+		{"1h30m", testH + 30*testM},
+		{"1m30s", testM + 30*testS},
+		{"2w3d", 2*testW + 3*testD},
+		{"1h30m10s500ms", testH + 30*testM + 10*testS + 500*testMS},
+		{"1y2w3d4h5m6s7ms", testY + 2*testW + 3*testD + 4*testH + 5*testM + 6*testS + 7*testMS},
+		// A zero component is legal and contributes nothing.
+		{"1h0m", testH},
+		// Multi-digit values in a non-canonical unit stay verbatim, never
+		// normalised: 90m is 90m, not 1h30m.
+		{"90m", 90 * testM},
+		{"1500ms", 1500 * testMS},
+	}
+	for _, tt := range tests {
+		got, err := ParsePromDuration(tt.in)
+		if err != nil {
+			t.Errorf("ParsePromDuration(%q) error = %v", tt.in, err)
+			continue
+		}
+		if got != tt.want {
+			t.Errorf("ParsePromDuration(%q) = %d, want %d", tt.in, got, tt.want)
+		}
+	}
+}
+
+func TestParsePromDurationErrors(t *testing.T) {
+	tests := []struct {
+		in  string
+		why string
+	}{
+		{"", "empty"},
+		{"   ", "whitespace only"},
+		{"1.5h", "fractional values are not a Prometheus duration"},
+		{"-5m", "negative"},
+		{"+5m", "signed"},
+		{"5", "a bare number with no unit (only \"0\" is legal)"},
+		{"m", "a unit with no number"},
+		{"5x", "unknown unit"},
+		{"5 m", "internal whitespace"},
+		{"1h ", "trailing whitespace"},
+		{" 1h", "leading whitespace"},
+		{"abc", "garbage"},
+		{"30s1m", "units ascending"},
+		{"1m1m", "a repeated unit"},
+		{"1h30m10s5m", "a unit that reappears later"},
+		{"1H", "upper-case unit"},
+		{"9223372036854775808ms", "a value that does not fit in an int64"},
+		{"100000y", "a duration that overflows int64 nanoseconds"},
+		{"1y1y", "y repeated"},
+	}
+	for _, tt := range tests {
+		if got, err := ParsePromDuration(tt.in); err == nil {
+			t.Errorf("ParsePromDuration(%q) = %d, want an error (%s)", tt.in, got, tt.why)
+		}
+	}
+}
+
+// The two functions are inverses, and this is the assertion that keeps them
+// that way: FormatPromDuration's whole output space parses back to the
+// nanoseconds it came from, and every canonical single-unit string it can
+// produce round-trips through Parse and back to itself.
+func TestPromDurationRoundTrips(t *testing.T) {
+	for _, ns := range []int64{
+		0,
+		testMS, 500 * testMS, 1500 * testMS,
+		testS, 30 * testS, 90 * testS,
+		testM, 5 * testM, 90 * testM,
+		testH, 2 * testH, 36 * testH,
+		testD, 7 * testD, 365 * testD,
+	} {
+		formatted, err := FormatPromDuration(ns)
+		if err != nil {
+			t.Errorf("FormatPromDuration(%d) error = %v", ns, err)
+			continue
+		}
+		back, err := ParsePromDuration(formatted)
+		if err != nil {
+			t.Errorf("ParsePromDuration(FormatPromDuration(%d)=%q) error = %v", ns, formatted, err)
+			continue
+		}
+		if back != ns {
+			t.Errorf("round trip %d -> %q -> %d", ns, formatted, back)
+		}
+		again, err := FormatPromDuration(back)
+		if err != nil || again != formatted {
+			t.Errorf("FormatPromDuration(ParsePromDuration(%q)) = %q, %v; want %q", formatted, again, err, formatted)
+		}
+	}
+}
+
+// The inverse direction is NOT total, and this pins which way it fails: a
+// composite string parses fine and formats back to the single unit that
+// divides evenly, because FormatPromDuration deliberately never emits a
+// compound string (its own doc comment says why). "1h30m" is 90m, and 90m is
+// what comes back.
+func TestParsePromDurationIsNotOnto(t *testing.T) {
+	ns, err := ParsePromDuration("1h30m")
+	if err != nil {
+		t.Fatalf("ParsePromDuration: %v", err)
+	}
+	got, err := FormatPromDuration(ns)
+	if err != nil {
+		t.Fatalf("FormatPromDuration: %v", err)
+	}
+	if got != "90m" {
+		t.Errorf("FormatPromDuration(ParsePromDuration(%q)) = %q, want %q", "1h30m", got, "90m")
 	}
 }
 

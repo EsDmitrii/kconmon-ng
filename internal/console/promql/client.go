@@ -81,13 +81,39 @@ func (c *Client) QueryRange(ctx context.Context, query string, start, end time.T
 	return c.post(ctx, "/api/v1/query_range", form)
 }
 
+// Alerts reads Prometheus's CURRENT alert set (/api/v1/alerts) verbatim, with
+// the same guards every other call here carries: the client's request timeout
+// and the response size cap.
+//
+// It is a GET with no parameters because that is the whole of the upstream
+// endpoint -- there is nothing to filter server-side, and Prometheus does not
+// accept a POST here (unlike /api/v1/query, which is POSTed precisely so a
+// long expression is not a URL). Filtering is the API layer's job, on the
+// decoded set.
+//
+// The envelope is returned unre-shaped, exactly like Query's: this package
+// never interprets what Prometheus said.
+func (c *Client) Alerts(ctx context.Context) (json.RawMessage, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.base+"/api/v1/alerts", http.NoBody)
+	if err != nil {
+		return nil, err
+	}
+	return c.do(req, "/api/v1/alerts")
+}
+
 func (c *Client) post(ctx context.Context, path string, form url.Values) (json.RawMessage, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.base+path, strings.NewReader(form.Encode()))
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	return c.do(req, path)
+}
 
+// do issues req and applies the response guards. Shared by post and Alerts so
+// the size cap and the UpstreamError shape have exactly one implementation --
+// a second copy is how a new call quietly loses a guard.
+func (c *Client) do(req *http.Request, path string) (json.RawMessage, error) {
 	resp, err := c.hc.Do(req) //nolint:gosec // G704: base URL is operator config, not user input
 	if err != nil {
 		return nil, fmt.Errorf("prometheus %s: %w", path, err)

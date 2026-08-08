@@ -16,6 +16,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/gorilla/websocket"
 )
 
 // consoleBaseURL returns KCONMON_CONSOLE_URL, or skips the test when unset.
@@ -2717,6 +2719,1462 @@ func TestConsoleK8sEventsCapture(t *testing.T) {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// M7: alert rules, PrometheusRule sync, export/import, the WebSocket gate
+// ---------------------------------------------------------------------------
+
+// alertRuleRow is one alert rule on the wire. The three JSONB columns are
+// RawMessage rather than typed maps for the reason the API serves them as
+// objects: the tests below assert on their SHAPE (never null, `{}` when
+// cleared), which a decoded map would silently normalise away.
+type alertRuleRow struct {
+	ID           string          `json:"id"`
+	Name         string          `json:"name"`
+	Kind         string          `json:"kind"`
+	Params       json.RawMessage `json:"params"`
+	Severity     string          `json:"severity"`
+	ForNs        int64           `json:"forNs"`
+	Labels       json.RawMessage `json:"labels"`
+	Annotations  json.RawMessage `json:"annotations"`
+	Enabled      bool            `json:"enabled"`
+	RenderedExpr string          `json:"renderedExpr"`
+	SyncStatus   string          `json:"syncStatus"`
+	SyncMessage  string          `json:"syncMessage"`
+	LastSyncedAt *time.Time      `json:"lastSyncedAt"`
+}
+
+// foreignRuleRow is one PrometheusRule in the namespace that the console does
+// NOT own, as GET /api/v1/alert-rules/foreign projects it. There is
+// deliberately no raw object on the wire (httpapi.foreignRuleResponse's doc
+// comment), so these four fields are everything a client -- or this test --
+// can learn about somebody else's rule.
+type foreignRuleRow struct {
+	Name      string `json:"name"`
+	Groups    int    `json:"groups"`
+	Rules     int    `json:"rules"`
+	ManagedBy string `json:"managedBy"`
+}
+
+// e2eRawExpr is the expression every rule these tests declare renders to.
+// kind "raw" is verbatim (alerting.renderRaw: "there is no Prometheus parser
+// in this module, so the console must not pretend to normalise an expression
+// it cannot read"), which is what lets renderedExpr be asserted for EQUALITY
+// below rather than merely for non-emptiness.
+//
+// `vector(1) > 0` is chosen because it is well-formed PromQL that depends on
+// no scrape target, no series and no Prometheus at all -- and nothing in this
+// cluster ever evaluates it: the Prometheus Operator is not installed (M7
+// Decision 14), only its CRD is.
+const e2eRawExpr = "vector(1) > 0"
+
+// consoleBundleName is the ONE PrometheusRule object the console owns. It is
+// the chart default (console.alerting.bundleName), left unset in
+// e2e/testdata/console-values.yaml on purpose, and it is asserted by NAME
+// below -- as the object that must NOT appear in the foreign list, because it
+// is ours.
+const consoleBundleName = "kconmon-ng-console-rules"
+
+// foreignFixtureName, foreignFixtureAlert and foreignFixtureRecord name the
+// harness fixture .github/workflows/e2e.yaml applies from
+// e2e/testdata/foreign-prometheusrule.yaml. Changing either file means
+// changing these.
+const (
+	foreignFixtureName      = "e2e-foreign-rules"
+	foreignFixtureManagedBy = "e2e-fixture"
+	foreignFixtureAlert     = "E2eForeignTargetDown"
+	foreignFixtureRecord    = "e2e_foreign_recording"
+)
+
+// alertSyncBudget bounds the wait for a reconcile to land its outcome on a
+// rule. The KICK is what this budget is written against -- every CRUD write
+// and every POST /{id}/sync nudges the reconciler immediately
+// (httpapi.kickSync), so the normal path here is seconds. The jittered 60s
+// loop (console.alerting.syncInterval) is the backstop for a kick that
+// coalesced away, and 90s clears one full jittered interval plus an apply.
+const alertSyncBudget = 90 * time.Second
+
+// alertRuleBody builds a create/replace body. Both writes are FULL REPLACES
+// -- there is no PATCH on this resource by design (httpapi.alertRuleRequest:
+// "an alert rule is a definition one person edits in a form") -- so this
+// helper takes every field rather than merging, which is what makes the
+// omitted-field-clears-it assertion below meaningful.
+func alertRuleBody(name, severity string, forNs int64, enabled bool) map[string]any {
+	return map[string]any{
+		"name":     name,
+		"kind":     "raw",
+		"params":   map[string]any{"expr": e2eRawExpr},
+		"severity": severity,
+		"forNs":    forNs,
+		"enabled":  enabled,
+	}
+}
+
+// createAlertRule POSTs one rule, asserts the created-and-point-at-it
+// contract and registers its deletion.
+//
+// A 503 here is the HARNESS, not the server -- createWebhook's posture: alert
+// rules are persisted configuration with no in-memory fallback, so an
+// unconfigured database takes the whole alerting surface down with a message
+// naming the value to set rather than with fifteen confusing assertion
+// failures.
+func createAlertRule(t *testing.T, base string, body map[string]any) alertRuleRow {
+	t.Helper()
+	status, header, data := mustRequest(t, http.MethodPost, base+"/api/v1/alert-rules", body)
+	if status == http.StatusServiceUnavailable {
+		t.Fatalf("POST /api/v1/alert-rules answered 503: this console has no database, so there is nowhere "+
+			"for an alert rule to live. e2e/testdata/console-values.yaml must set console.database.mode. Body: %s", data)
+	}
+	if status != http.StatusCreated {
+		t.Fatalf("expected POST /api/v1/alert-rules 201, got %d: %s", status, data)
+	}
+
+	var created alertRuleRow
+	decodeJSON(t, "create-alert-rule response", data, &created)
+	if created.ID == "" {
+		t.Fatalf("expected a non-empty alert rule id in the create response")
+	}
+	if want := "/api/v1/alert-rules/" + created.ID; header.Get("Location") != want {
+		t.Errorf("expected Location %q on the 201 response, got %q", want, header.Get("Location"))
+	}
+
+	t.Cleanup(func() { deleteResource(t, base+"/api/v1/alert-rules/"+created.ID) })
+	return created
+}
+
+// getAlertRule reads one rule, failing the test on anything but a 200.
+func getAlertRule(t *testing.T, base, id string) alertRuleRow {
+	t.Helper()
+	status, _, data := mustRequest(t, http.MethodGet, base+"/api/v1/alert-rules/"+id, nil)
+	if status != http.StatusOK {
+		t.Fatalf("expected GET /api/v1/alert-rules/%s 200, got %d: %s", id, status, data)
+	}
+	var row alertRuleRow
+	decodeJSON(t, "get-alert-rule response", data, &row)
+	return row
+}
+
+// pollAlertRule reads one rule from inside a poll body: a transport error or a
+// non-200 is "not yet", never a failure, so a console restarting mid-budget
+// does not end the test on the wrong assertion.
+func pollAlertRule(t *testing.T, base, id string) (alertRuleRow, bool) {
+	t.Helper()
+	status, _, data, err := request(t, http.MethodGet, base+"/api/v1/alert-rules/"+id, nil)
+	if err != nil {
+		t.Logf("alert rule request failed (will retry): %v", err)
+		return alertRuleRow{}, false
+	}
+	if status != http.StatusOK {
+		t.Logf("alert rule request returned %d (will retry): %s", status, data)
+		return alertRuleRow{}, false
+	}
+	var row alertRuleRow
+	if decodeErr := json.Unmarshal(data, &row); decodeErr != nil {
+		t.Logf("decode alert rule response failed (will retry): %v", decodeErr)
+		return alertRuleRow{}, false
+	}
+	return row, true
+}
+
+// listAlertRules reads the whole (unpaged, by design) rule list.
+func listAlertRules(t *testing.T, base string) []alertRuleRow {
+	t.Helper()
+	status, _, data := mustRequest(t, http.MethodGet, base+"/api/v1/alert-rules", nil)
+	if status != http.StatusOK {
+		t.Fatalf("expected GET /api/v1/alert-rules 200, got %d: %s", status, data)
+	}
+	var page struct {
+		Rules []alertRuleRow `json:"rules"`
+	}
+	decodeJSON(t, "alert rules list", data, &page)
+	return page.Rules
+}
+
+// findAlertRuleByName looks one rule up the way an operator does. The match is
+// CASE-INSENSITIVE because the store's uniqueness is (migration 00007's
+// lower(name) index) -- a lookup that missed "EdgeLoss" when asked for
+// "edgeloss" would report "not created" for a row that is very much there.
+func findAlertRuleByName(t *testing.T, base, name string) (alertRuleRow, bool) {
+	t.Helper()
+	rules := listAlertRules(t, base)
+	for i := range rules {
+		if strings.EqualFold(rules[i].Name, name) {
+			return rules[i], true
+		}
+	}
+	return alertRuleRow{}, false
+}
+
+// dropAlertRuleByName deletes a rule if it is there, and says nothing if it is
+// not. It exists for RE-RUNNABILITY and nothing else: adoption refuses a name
+// already taken, so a run that died between an import and its cleanup would
+// otherwise turn every later run's "created" assertion into a "skipped: name
+// already taken" -- a harness scar reported as a product failure.
+func dropAlertRuleByName(t *testing.T, base, name string) {
+	t.Helper()
+	if row, found := findAlertRuleByName(t, base, name); found {
+		t.Logf("removing a leftover alert rule %q (%s) from an earlier run", row.Name, row.ID)
+		deleteResource(t, base+"/api/v1/alert-rules/"+row.ID)
+	}
+}
+
+// listForeignRules reads the PrometheusRules in the console's namespace that
+// it does not own, returning the STATUS beside the list: this route answers
+// 409 (not 503) on a console with alerting off, and that distinction is itself
+// an assertion in TestConsoleDegradedMode.
+func listForeignRules(t *testing.T, base string) (int, []foreignRuleRow, []byte) {
+	t.Helper()
+	status, _, data := mustRequest(t, http.MethodGet, base+"/api/v1/alert-rules/foreign", nil)
+	if status != http.StatusOK {
+		return status, nil, data
+	}
+	var page struct {
+		Foreign []foreignRuleRow `json:"foreign"`
+	}
+	decodeJSON(t, "foreign rules list", data, &page)
+	return status, page.Foreign, data
+}
+
+// mustListForeignRules is listForeignRules for a caller that cannot continue
+// without the cluster read. A 409 is called out as the harness problem it is:
+// the flag is set in e2e/testdata/console-values.yaml, and the console drops
+// the reconciler when it cannot build one.
+func mustListForeignRules(t *testing.T, base string) []foreignRuleRow {
+	t.Helper()
+	status, foreign, data := listForeignRules(t, base)
+	switch status {
+	case http.StatusOK:
+		return foreign
+	case http.StatusConflict:
+		t.Fatalf("GET /api/v1/alert-rules/foreign answered 409: this console is not running the PrometheusRule "+
+			"reconciler. e2e/testdata/console-values.yaml sets console.alerting.enabled=true, so the console "+
+			"either has no database or could not reach the apiserver -- check its logs. Body: %s", data)
+	default:
+		t.Fatalf("expected GET /api/v1/alert-rules/foreign 200, got %d: %s", status, data)
+	}
+	return nil
+}
+
+// findForeignRule returns the named object out of a foreign listing.
+func findForeignRule(foreign []foreignRuleRow, name string) (foreignRuleRow, bool) {
+	for i := range foreign {
+		if foreign[i].Name == name {
+			return foreign[i], true
+		}
+	}
+	return foreignRuleRow{}, false
+}
+
+// TestConsoleAlertRulesCRUD walks one rule through the whole surface against
+// the real console and PostgreSQL, and spends its assertions on the three
+// things the route shape does not give away.
+//
+// First, renderedExpr is the SERVER's, computed at write time and never the
+// caller's. httpapi.alertRuleInputFrom renders BEFORE it stores, precisely so
+// a row can never hold an expression rendered from a different version of its
+// own params; kind "raw" makes that observable, because its render is verbatim
+// and the expected value is therefore knowable here.
+//
+// Second, syncStatus is RESET BY THE WRITE. store's update query flips the row
+// back to "unsynced" on every change ("an edited rule is by definition not the
+// rule that was applied"), and the assertion has to be made on the PUT's own
+// RESPONSE rather than on a later GET -- the create/update kick means a
+// reconcile may well have moved it to synced by the time a second request
+// lands, which is correct behaviour and would make a GET-based assertion a
+// race.
+//
+// Third, a duplicate name is 422 and not 409. On this ONE resource those two
+// codes mean different things (httpapi.alertingDisabledDetail), so the
+// case-flipped create below is checking the code as much as the constraint.
+func TestConsoleAlertRulesCRUD(t *testing.T) {
+	base := consoleBaseURL(t)
+
+	name := uniqueName("e2e-alertrule")
+	const forNs = int64(60 * time.Second)
+	created := createAlertRule(t, base, alertRuleBody(name, "warning", forNs, true))
+
+	if created.Name != name {
+		t.Errorf("expected the stored name to echo %q, got %q", name, created.Name)
+	}
+	if created.Kind != "raw" {
+		t.Errorf("expected kind raw, got %q", created.Kind)
+	}
+	if created.Severity != "warning" {
+		t.Errorf("expected severity warning, got %q", created.Severity)
+	}
+	if created.ForNs != forNs {
+		t.Errorf("expected forNs %d to round-trip, got %d", forNs, created.ForNs)
+	}
+	if !created.Enabled {
+		t.Errorf("expected the rule to be created enabled, got false")
+	}
+	if created.RenderedExpr != e2eRawExpr {
+		t.Errorf("expected kind raw to render its params.expr VERBATIM as %q, got %q", e2eRawExpr, created.RenderedExpr)
+	}
+	// A brand-new rule has never been applied to anything, whatever the kick
+	// is doing in the background: the row is written unsynced and the create
+	// response is built from that row.
+	if created.SyncStatus != "unsynced" {
+		t.Errorf("expected a new alert rule to be unsynced, got %q (message %q)",
+			created.SyncStatus, created.SyncMessage)
+	}
+	// The three JSONB columns are {} and never null on the wire: the UI
+	// indexes all three by key (httpapi.orEmptyJSONObject).
+	for _, tc := range []struct {
+		field string
+		raw   json.RawMessage
+	}{
+		{"params", created.Params},
+		{"labels", created.Labels},
+		{"annotations", created.Annotations},
+	} {
+		if len(tc.raw) == 0 || string(tc.raw) == "null" {
+			t.Errorf("expected %s to be a JSON object on the wire, got %q", tc.field, tc.raw)
+		}
+	}
+
+	fetched := getAlertRule(t, base, created.ID)
+	if fetched.ID != created.ID || fetched.Name != name || fetched.RenderedExpr != e2eRawExpr {
+		t.Errorf("expected GET to return the row just created (id %s, name %q), got %+v", created.ID, name, fetched)
+	}
+
+	found := false
+	for _, row := range listAlertRules(t, base) {
+		if row.ID == created.ID {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected alert rule %s in GET /api/v1/alert-rules", created.ID)
+	}
+
+	// A FULL replace: severity and forNs change, and the labels/annotations
+	// that were never set stay empty rather than becoming null.
+	const replacedForNs = int64(5 * time.Minute)
+	putStatus, _, putData := mustRequest(t, http.MethodPut, base+"/api/v1/alert-rules/"+created.ID,
+		alertRuleBody(name, "critical", replacedForNs, true))
+	if putStatus != http.StatusOK {
+		t.Fatalf("expected PUT /api/v1/alert-rules/%s 200, got %d: %s", created.ID, putStatus, putData)
+	}
+	var replaced alertRuleRow
+	decodeJSON(t, "replace-alert-rule response", putData, &replaced)
+	if replaced.Severity != "critical" {
+		t.Errorf("expected severity critical after the replace, got %q", replaced.Severity)
+	}
+	if replaced.ForNs != replacedForNs {
+		t.Errorf("expected forNs %d after the replace, got %d", replacedForNs, replaced.ForNs)
+	}
+	if replaced.SyncStatus != "unsynced" {
+		t.Errorf("expected the replace to reset syncStatus to unsynced, got %q (message %q)",
+			replaced.SyncStatus, replaced.SyncMessage)
+	}
+	if replaced.RenderedExpr != e2eRawExpr {
+		t.Errorf("expected the replace to re-render the expression as %q, got %q", e2eRawExpr, replaced.RenderedExpr)
+	}
+
+	// Case-flipped: a DIFFERENT string, the SAME row as far as the store's
+	// lower(name) index is concerned.
+	dupStatus, _, dupData := mustRequest(t, http.MethodPost, base+"/api/v1/alert-rules",
+		alertRuleBody(strings.ToUpper(name), "info", 0, true))
+	if dupStatus != http.StatusUnprocessableEntity {
+		t.Errorf("expected a case-flipped duplicate name to be 422 (a rejected field value, not a 409 -- "+
+			"409 on this resource means alerting is disabled), got %d: %s", dupStatus, dupData)
+		if dupStatus == http.StatusCreated {
+			var dup alertRuleRow
+			decodeJSON(t, "duplicate create response", dupData, &dup)
+			t.Cleanup(func() { deleteResource(t, base+"/api/v1/alert-rules/"+dup.ID) })
+		}
+	}
+
+	// Delete, then delete again: a rule that is not there is 404, never a
+	// second success -- the incidents rule, and for the same reason.
+	delStatus, _, delData := mustRequest(t, http.MethodDelete, base+"/api/v1/alert-rules/"+created.ID, nil)
+	if delStatus != http.StatusNoContent {
+		t.Fatalf("expected DELETE /api/v1/alert-rules/%s 204, got %d: %s", created.ID, delStatus, delData)
+	}
+	goneStatus, _, goneData := mustRequest(t, http.MethodDelete, base+"/api/v1/alert-rules/"+created.ID, nil)
+	if goneStatus != http.StatusNotFound {
+		t.Errorf("expected a second DELETE of alert rule %s to be 404, got %d: %s", created.ID, goneStatus, goneData)
+	}
+}
+
+// awaitAlertRuleSynced drives one rule to syncStatus=synced, RE-KICKING the
+// reconciler on every iteration that finds it anywhere else.
+//
+// The re-kick is not impatience, it is the model. promrules.Reconcile compares
+// the live object against the desired one BEFORE applying it, so the first
+// pass after any rule change legitimately reports `drift` (the live bundle is
+// the previous one) even though that same pass then applies the correction --
+// the package doc says so in as many words: "drift is past tense here, the
+// correction already happened". `synced` is therefore the state of the SECOND
+// pass, and the honest way to wait for a converged bundle is to ask for
+// another pass rather than to accept drift as success.
+func awaitAlertRuleSynced(t *testing.T, base, id, what string) alertRuleRow {
+	t.Helper()
+	var row alertRuleRow
+	pollUntil(t, alertSyncBudget, 3*time.Second, what, func() bool {
+		got, ok := pollAlertRule(t, base, id)
+		if !ok {
+			return false
+		}
+		row = got
+		if row.SyncStatus == "synced" {
+			return true
+		}
+		if row.SyncStatus == "error" {
+			// Reported every iteration on purpose: the cause classes
+			// (crd-missing, forbidden, other) are the first token of the
+			// message, and a job that times out here should say WHICH of the
+			// two fixable causes it hit in its own log rather than only in a
+			// final one-line failure.
+			t.Logf("alert rule %s is in sync error: %s", id, row.SyncMessage)
+		}
+		mustRequest(t, http.MethodPost, base+"/api/v1/alert-rules/"+id+"/sync", nil)
+		return false
+	})
+	return row
+}
+
+// TestConsoleAlertRuleSyncAgainstRealCRD is the live test of the whole M7
+// alerting path: console.alerting.enabled renders a console-only Role and
+// RoleBinding for prometheusrules (charts' rbac.yaml -- M7 Decision 3, a Role
+// and NOT a ClusterRole), the console server-side-applies ONE PrometheusRule
+// object into its own namespace with that identity, and the outcome comes back
+// on each rule's syncStatus. The workflow applies the CRD before the install
+// (e2e/testdata/prometheusrule-crd.yaml); the Prometheus Operator itself is
+// deliberately absent, because SSA needs the resource to be served, not the
+// controller behind it.
+//
+// WHY THE ASSERTIONS ARE API READS AND NOT `kubectl get prometheusrule`.
+// Nothing in this package shells out -- every kubectl call in the harness
+// lives in the workflow, and the K8s-events e2e (M6) set the precedent of
+// asserting a cluster fact through the console route that reads it. Keeping
+// that line has a concrete payoff here: the suite stays runnable against any
+// console reachable at KCONMON_CONSOLE_URL, including a port-forward from a
+// laptop with no cluster credentials at all, instead of silently degrading to
+// "kubectl not found" on the one assertion that matters most. What is given up
+// is a direct read of the object's own bytes; what replaces it is two API
+// facts that cannot both be true unless the object is there and is ours:
+//
+//   - syncStatus reaching `synced` (or `drift`, its one-pass-behind sibling)
+//     happens ONLY after promrules.Client.Apply returned without error. A
+//     missing CRD, a missing Role or a wrong namespace each produce
+//     syncStatus=error with a named cause instead.
+//   - the bundle is ABSENT from GET /api/v1/alert-rules/foreign, which is a
+//     LIVE list of the namespace's PrometheusRules filtered on exactly one
+//     thing -- the app.kubernetes.io/managed-by label. An object that existed
+//     without our label would be in that list under its own name; an object
+//     with our label is excluded, which is the fact being asserted. The
+//     fixture object IS in the same list on the same read, so an empty answer
+//     cannot be mistaken for a passing one.
+func TestConsoleAlertRuleSyncAgainstRealCRD(t *testing.T) {
+	base := consoleBaseURL(t)
+
+	// TWO rules, and the second one is not padding. A disabled rule is dropped
+	// from the bundle entirely (alerting.RenderBundle) and the reconciler only
+	// ever walks ENABLED rows, so nothing is written onto a rule after it is
+	// switched off -- its own status can therefore say nothing about whether
+	// the cluster caught up. The keeper is what makes that observable: its
+	// lastSyncedAt advancing is proof that an apply happened AFTER the
+	// disable, and the bundle that apply carried was rendered without the
+	// disabled rule by construction.
+	keeperName := uniqueName("e2e-alertsync-keeper")
+	keeper := createAlertRule(t, base, alertRuleBody(keeperName, "info", 0, true))
+	subjectName := uniqueName("e2e-alertsync")
+	subject := createAlertRule(t, base, alertRuleBody(subjectName, "warning", int64(time.Minute), true))
+
+	syncStatus, _, syncData := mustRequest(t, http.MethodPost,
+		base+"/api/v1/alert-rules/"+subject.ID+"/sync", nil)
+	if syncStatus == http.StatusConflict {
+		t.Fatalf("POST /api/v1/alert-rules/%s/sync answered 409: this console is not running the "+
+			"PrometheusRule reconciler, so nothing can be applied. e2e/testdata/console-values.yaml sets "+
+			"console.alerting.enabled=true -- check the console logs. Body: %s", subject.ID, syncData)
+	}
+	if syncStatus != http.StatusAccepted {
+		t.Fatalf("expected POST /api/v1/alert-rules/%s/sync 202 (a kick is enqueued, never awaited), got %d: %s",
+			subject.ID, syncStatus, syncData)
+	}
+	var kick struct {
+		Status string `json:"status"`
+	}
+	decodeJSON(t, "sync-kick response", syncData, &kick)
+	if kick.Status != "kicked" {
+		t.Errorf("expected the sync response to report status kicked, got %q", kick.Status)
+	}
+	// A sync kick for an id that names nothing would promise an outcome that
+	// never arrives, so existence is checked even though the reconcile is
+	// whole-bundle.
+	missingStatus, _, missingData := mustRequest(t, http.MethodPost,
+		base+"/api/v1/alert-rules/00000000-0000-0000-0000-000000000000/sync", nil)
+	if missingStatus != http.StatusNotFound {
+		t.Errorf("expected a sync kick for an unknown rule id to be 404, got %d: %s", missingStatus, missingData)
+	}
+
+	synced := awaitAlertRuleSynced(t, base, subject.ID,
+		"alert rule "+subjectName+" to reach syncStatus=synced against the real PrometheusRule CRD")
+	if synced.LastSyncedAt == nil {
+		t.Errorf("expected lastSyncedAt to be stamped alongside syncStatus=synced, got null")
+	}
+	if synced.SyncMessage != "" {
+		t.Errorf("expected a synced rule to carry no sync message, got %q", synced.SyncMessage)
+	}
+	t.Logf("alert rule %s synced at %v", subjectName, synced.LastSyncedAt)
+
+	syncedKeeper := awaitAlertRuleSynced(t, base, keeper.ID,
+		"alert rule "+keeperName+" to reach syncStatus=synced")
+	if syncedKeeper.LastSyncedAt == nil {
+		t.Fatalf("expected the keeper rule to carry a lastSyncedAt once synced, got null")
+	}
+	baseline := *syncedKeeper.LastSyncedAt
+
+	// The object is in the cluster AND it is ours -- see the doc comment for
+	// why these two reads are the assertion.
+	foreign := mustListForeignRules(t, base)
+	if _, isForeign := findForeignRule(foreign, consoleBundleName); isForeign {
+		t.Errorf("expected the console's own bundle %q to be EXCLUDED from the foreign list: it carries "+
+			"app.kubernetes.io/managed-by=kconmon-ng-console, and an object listed as foreign is one that "+
+			"does not. Foreign listing: %+v", consoleBundleName, foreign)
+	}
+	if _, haveFixture := findForeignRule(foreign, foreignFixtureName); !haveFixture {
+		t.Errorf("expected the harness fixture %q in the foreign list -- without it, the assertion above "+
+			"cannot tell 'our bundle is correctly labelled' from 'this list is empty because the cluster read "+
+			"returned nothing'. Applied by .github/workflows/e2e.yaml from "+
+			"e2e/testdata/foreign-prometheusrule.yaml. Foreign listing: %+v", foreignFixtureName, foreign)
+	}
+
+	// --- Disable, and prove the cluster caught up. ---
+	disableStatus, _, disableData := mustRequest(t, http.MethodPut, base+"/api/v1/alert-rules/"+subject.ID,
+		alertRuleBody(subjectName, "warning", int64(time.Minute), false))
+	if disableStatus != http.StatusOK {
+		t.Fatalf("expected PUT /api/v1/alert-rules/%s (disable) 200, got %d: %s",
+			subject.ID, disableStatus, disableData)
+	}
+	var disabled alertRuleRow
+	decodeJSON(t, "disable-alert-rule response", disableData, &disabled)
+	if disabled.Enabled {
+		t.Fatalf("expected the rule to be disabled by the replace, got enabled")
+	}
+	if disabled.SyncStatus != "unsynced" {
+		t.Errorf("expected the disabling replace to reset syncStatus to unsynced, got %q", disabled.SyncStatus)
+	}
+
+	mustRequest(t, http.MethodPost, base+"/api/v1/alert-rules/"+subject.ID+"/sync", nil)
+
+	var afterDisable alertRuleRow
+	pollUntil(t, alertSyncBudget, 3*time.Second,
+		"a PrometheusRule apply to land AFTER "+subjectName+" was disabled (the keeper's lastSyncedAt moving "+
+			"past "+baseline.Format(time.RFC3339Nano)+")", func() bool {
+			got, ok := pollAlertRule(t, base, keeper.ID)
+			if !ok {
+				return false
+			}
+			afterDisable = got
+			if got.LastSyncedAt != nil && got.LastSyncedAt.After(baseline) {
+				return true
+			}
+			mustRequest(t, http.MethodPost, base+"/api/v1/alert-rules/"+keeper.ID+"/sync", nil)
+			return false
+		})
+	// An empty bundle is legal and a shrunken one is ordinary: what the apply
+	// carried was rendered from the ENABLED rules only, so the disabled rule
+	// is not in the object that just landed.
+	t.Logf("keeper %s re-applied at %v with status %q (message %q) after %s was disabled",
+		keeperName, afterDisable.LastSyncedAt, afterDisable.SyncStatus, afterDisable.SyncMessage, subjectName)
+
+	// The disabled rule is now OUTSIDE the reconciler's world: it walks
+	// enabled rows only, so nothing will ever write a status onto this one
+	// again. unsynced is the honest state for a rule that is not applied
+	// anywhere, and a console that reported it as synced would be claiming the
+	// cluster is evaluating a rule its owner switched off.
+	stillOff := getAlertRule(t, base, subject.ID)
+	if stillOff.SyncStatus != "unsynced" {
+		t.Errorf("expected a DISABLED rule to stay unsynced (the reconciler walks enabled rules only, "+
+			"so it is in no bundle and nothing updates its status), got %q (message %q)",
+			stillOff.SyncStatus, stillOff.SyncMessage)
+	}
+}
+
+// TestConsoleAlertRuleForeignImport is M7 Decision 4 end to end: a
+// PrometheusRule this console does not own is LISTED read-only, adoption is an
+// explicit import that COPIES its rules into builder rows, and the foreign
+// object is never touched.
+//
+// The last clause is the one worth a test rather than a comment. After an
+// adoption the same alerts are defined twice in the cluster -- once by the
+// object its owner still controls, once by the console's own bundle -- and
+// deleting theirs is THEIR decision. A console that "helpfully" cleaned up
+// after itself would be silently editing somebody else's alerting, so the
+// fixture is re-read after the import and its projection compared field by
+// field.
+//
+// The fixture is harness state, not test state: .github/workflows/e2e.yaml
+// applies it from e2e/testdata/foreign-prometheusrule.yaml and nothing here
+// creates or deletes it. What this test does clean up is the console ROW the
+// import mints, which is what keeps the suite re-runnable -- and it drops a
+// leftover of the same name up front, so a run that died mid-import does not
+// poison every run after it.
+func TestConsoleAlertRuleForeignImport(t *testing.T) {
+	base := consoleBaseURL(t)
+
+	before := mustListForeignRules(t, base)
+	fixture, found := findForeignRule(before, foreignFixtureName)
+	if !found {
+		t.Fatalf("expected the foreign PrometheusRule fixture %q in GET /api/v1/alert-rules/foreign. It is "+
+			"applied by .github/workflows/e2e.yaml from e2e/testdata/foreign-prometheusrule.yaml, into the "+
+			"release namespace, before the test run. Foreign listing: %+v", foreignFixtureName, before)
+	}
+	if fixture.ManagedBy != foreignFixtureManagedBy {
+		t.Errorf("expected the fixture's managedBy to be served verbatim as %q, got %q "+
+			"(the API surfaces this because 'managed by another tool' and 'managed by nobody' are different "+
+			"facts for an operator deciding whether to adopt)", foreignFixtureManagedBy, fixture.ManagedBy)
+	}
+	if fixture.Groups != 1 || fixture.Rules != 2 {
+		t.Errorf("expected the fixture to project as 1 group / 2 rule entries (one alert, one record), got %d/%d",
+			fixture.Groups, fixture.Rules)
+	}
+
+	dropAlertRuleByName(t, base, foreignFixtureAlert)
+
+	importStatus, _, importData := mustRequest(t, http.MethodPost, base+"/api/v1/alert-rules/import",
+		map[string]any{"name": foreignFixtureName})
+	if importStatus != http.StatusOK {
+		t.Fatalf("expected POST /api/v1/alert-rules/import 200, got %d: %s", importStatus, importData)
+	}
+	var report struct {
+		Created []string `json:"created"`
+		Skipped []struct {
+			Name   string `json:"name"`
+			Reason string `json:"reason"`
+		} `json:"skipped"`
+		Notes []struct {
+			Name string `json:"name"`
+			Note string `json:"note"`
+		} `json:"notes"`
+	}
+	decodeJSON(t, "import report", importData, &report)
+	// All three lists are non-nil on the wire: the UI renders all three after
+	// pressing Import, and a null would be a runtime error in exactly the
+	// place somebody is looking.
+	if report.Created == nil || report.Skipped == nil || report.Notes == nil {
+		t.Errorf("expected created/skipped/notes to be arrays (possibly empty) and never null: %s", importData)
+	}
+	if !slices.Contains(report.Created, foreignFixtureAlert) {
+		t.Fatalf("expected the import to create %q, got created=%v skipped=%+v", foreignFixtureAlert,
+			report.Created, report.Skipped)
+	}
+	t.Cleanup(func() { dropAlertRuleByName(t, base, foreignFixtureAlert) })
+
+	// The record entry is not a failure and not a rendering problem: a
+	// recording rule produces a time series, an alert rule produces an alert,
+	// and alert_rules has no column that could mean the first.
+	skippedRecord := false
+	for _, s := range report.Skipped {
+		if s.Name == foreignFixtureRecord {
+			skippedRecord = true
+			if !strings.Contains(s.Reason, "recording rule") {
+				t.Errorf("expected the recording rule's skip reason to say so, got %q", s.Reason)
+			}
+		}
+	}
+	if !skippedRecord {
+		t.Errorf("expected the fixture's recording rule %q in the import's skipped list, got %+v",
+			foreignFixtureRecord, report.Skipped)
+	}
+
+	adopted, ok := findAlertRuleByName(t, base, foreignFixtureAlert)
+	if !ok {
+		t.Fatalf("expected an alert rule named %q after the import reported creating it", foreignFixtureAlert)
+	}
+	// Adoption copies into the ONE kind the builder has no model for: raw,
+	// carrying the foreign expression verbatim.
+	if adopted.Kind != "raw" {
+		t.Errorf("expected an adopted rule to land as kind raw, got %q", adopted.Kind)
+	}
+	if adopted.RenderedExpr != e2eRawExpr {
+		t.Errorf("expected the adopted rule to carry the fixture's expression %q, got %q",
+			e2eRawExpr, adopted.RenderedExpr)
+	}
+	// severity is LIFTED out of the label set into its own column, and the
+	// label is dropped: one fact editable in two places is a fact that can
+	// disagree with itself.
+	if adopted.Severity != "critical" {
+		t.Errorf("expected labels.severity=critical to be lifted into the severity column, got %q", adopted.Severity)
+	}
+	var adoptedLabels map[string]string
+	decodeJSON(t, "adopted rule labels", adopted.Labels, &adoptedLabels)
+	if _, present := adoptedLabels["severity"]; present {
+		t.Errorf("expected the reserved severity label to be dropped from the adopted label set, got %v", adoptedLabels)
+	}
+	if adoptedLabels["origin"] != foreignFixtureManagedBy {
+		t.Errorf("expected the fixture's own labels to survive adoption (origin=%q), got %v",
+			foreignFixtureManagedBy, adoptedLabels)
+	}
+	// "2m" in the object, nanoseconds in the column. Asserted because a
+	// misparsed `for` is the single most consequential thing this importer
+	// could get wrong: 0 means "fire the instant the expression holds".
+	if want := int64(2 * time.Minute); adopted.ForNs != want {
+		t.Errorf("expected the fixture's `for: 2m` to import as %dns, got %d", want, adopted.ForNs)
+	}
+	if !adopted.Enabled {
+		t.Errorf("expected an adopted rule to arrive enabled, got false")
+	}
+
+	// The foreign object is UNCHANGED and still foreign. Re-read on the same
+	// route the import read it through, so a mutation of any kind -- an added
+	// label, a rewritten group, a deletion -- shows up as a changed projection
+	// or a missing entry.
+	after := mustListForeignRules(t, base)
+	stillThere, present := findForeignRule(after, foreignFixtureName)
+	if !present {
+		t.Fatalf("expected the foreign object %q to still exist after being adopted: the console COPIES a "+
+			"foreign rule and never owns, edits or deletes it. Foreign listing: %+v", foreignFixtureName, after)
+	}
+	if stillThere != fixture {
+		t.Errorf("expected the foreign object to be untouched by the import, got %+v before and %+v after",
+			fixture, stillThere)
+	}
+
+	// Adopting twice does not duplicate: the name is taken, by the row the
+	// first import made.
+	againStatus, _, againData := mustRequest(t, http.MethodPost, base+"/api/v1/alert-rules/import",
+		map[string]any{"name": foreignFixtureName})
+	if againStatus != http.StatusOK {
+		t.Fatalf("expected a second POST /api/v1/alert-rules/import 200, got %d: %s", againStatus, againData)
+	}
+	var second struct {
+		Created []string `json:"created"`
+		Skipped []struct {
+			Name   string `json:"name"`
+			Reason string `json:"reason"`
+		} `json:"skipped"`
+	}
+	decodeJSON(t, "second import report", againData, &second)
+	if len(second.Created) != 0 {
+		t.Errorf("expected a repeated import to create nothing, got %v", second.Created)
+	}
+	takenReported := false
+	for _, s := range second.Skipped {
+		if s.Name == foreignFixtureAlert && strings.Contains(s.Reason, "already taken") {
+			takenReported = true
+		}
+	}
+	if !takenReported {
+		t.Errorf("expected the repeated import to skip %q naming the taken name, got %+v",
+			foreignFixtureAlert, second.Skipped)
+	}
+
+	// An object this console already owns is not foreign, and neither is one
+	// that does not exist: ONE 404 covers both, deliberately (the import's own
+	// lookup is the foreign list, which excludes our bundle).
+	for _, name := range []string{uniqueName("e2e-no-such-object"), consoleBundleName} {
+		status, _, data := mustRequest(t, http.MethodPost, base+"/api/v1/alert-rules/import",
+			map[string]any{"name": name})
+		if status != http.StatusNotFound {
+			t.Errorf("expected importing %q to be 404, got %d: %s", name, status, data)
+		}
+	}
+	// A blank name is a rejected field VALUE, not a 404: answering "no foreign
+	// rule is called nothing" would send the caller to look at their cluster
+	// for a bug that is in their request.
+	blankStatus, _, blankData := mustRequest(t, http.MethodPost, base+"/api/v1/alert-rules/import",
+		map[string]any{"name": "   "})
+	if blankStatus != http.StatusUnprocessableEntity {
+		t.Errorf("expected an import with a blank name to be 422, got %d: %s", blankStatus, blankData)
+	}
+}
+
+// TestConsoleAlertsWithoutPrometheus pins the honest-empty branch of GET
+// /api/v1/alerts against the harness as it really is.
+//
+// e2e/testdata/console-values.yaml sets no console.prometheus.url, and the
+// chart default is the empty string, so this console genuinely has no
+// Prometheus. That is not a gap in the harness -- it is the case the route's
+// shape exists for. The firing list answers 200 with an empty array and
+// promConfigured:false rather than 503, because the Overview card that
+// consumes it has to be able to render "nothing is firing" and "nobody is
+// watching" without treating one of them as an error. GET /api/v1/matrix
+// answers 503 for the same missing dependency, and the difference is the
+// point: the matrix IS the Prometheus data, while the firing set is a list
+// that is legitimately empty.
+//
+// If a future harness DOES point the console at a Prometheus, this test says
+// so instead of failing: the assertions below fork on promConfigured, and the
+// configured branch checks the only invariant that survives -- the list is an
+// array, never null.
+func TestConsoleAlertsWithoutPrometheus(t *testing.T) {
+	base := consoleBaseURL(t)
+
+	status, _, data := mustRequest(t, http.MethodGet, base+"/api/v1/alerts", nil)
+	if status != http.StatusOK {
+		t.Fatalf("expected GET /api/v1/alerts 200 (an unconfigured Prometheus is an honest empty list, "+
+			"never a 503 -- that divergence from /api/v1/matrix is deliberate), got %d: %s", status, data)
+	}
+	var page struct {
+		Alerts         *[]firingAlertRow `json:"alerts"`
+		PromConfigured bool              `json:"promConfigured"`
+	}
+	decodeJSON(t, "alerts response", data, &page)
+	if page.Alerts == nil {
+		t.Fatalf("expected alerts to be an array (possibly empty) and never null: %s", data)
+	}
+	if page.PromConfigured {
+		t.Logf("this console HAS a Prometheus configured (%d alerts): the honest-empty branch is not "+
+			"exercised by this harness", len(*page.Alerts))
+	} else if len(*page.Alerts) != 0 {
+		t.Errorf("expected an empty firing list when promConfigured is false, got %d entries: %s",
+			len(*page.Alerts), data)
+	}
+
+	// managedOnly is a real filter on this route and must parse as a boolean.
+	okStatus, _, okData := mustRequest(t, http.MethodGet, base+"/api/v1/alerts?managedOnly=true", nil)
+	if okStatus != http.StatusOK {
+		t.Errorf("expected GET /api/v1/alerts?managedOnly=true 200, got %d: %s", okStatus, okData)
+	}
+	// Refused rather than defaulted to false: an unparseable filter silently
+	// read as "no filter" returns MORE than was asked for, which is the wrong
+	// direction to guess in.
+	badStatus, _, badData := mustRequest(t, http.MethodGet, base+"/api/v1/alerts?managedOnly=perhaps", nil)
+	if badStatus != http.StatusBadRequest {
+		t.Errorf("expected an unparseable managedOnly to be 400, got %d: %s", badStatus, badData)
+	}
+}
+
+// firingAlertRow is one entry of GET /api/v1/alerts. Only the fields this file
+// asserts on; value is a STRING upstream because it carries NaN and +/-Inf.
+type firingAlertRow struct {
+	Name     string `json:"name"`
+	State    string `json:"state"`
+	Severity string `json:"severity"`
+	RuleID   string `json:"ruleId"`
+}
+
+// exportBundleMap is a bundle as this file handles it: the raw JSON object,
+// decoded into a map rather than into six mirrored Go structs.
+//
+// Deliberate. The round trip below has to POST BACK BYTE-FOR-BYTE what the
+// export served (that is the whole idempotence claim), and re-encoding through
+// hand-written structs would quietly drop any field this file forgot to
+// mirror -- turning "the console round-trips its own configuration" into "the
+// console round-trips the subset e2e knows about". A map carries every key,
+// including the ones a future milestone adds.
+type exportBundleMap map[string]any
+
+// bundleCollection returns one collection of a bundle as a []any, failing the
+// test when it is absent or not an array -- the bundle's shape claim, checked
+// once, where every caller benefits.
+func bundleCollection(t *testing.T, bundle exportBundleMap, key string) []any {
+	t.Helper()
+	raw, present := bundle[key]
+	if !present {
+		t.Fatalf("expected the export bundle to carry a %q collection, got keys %v", key, bundleKeys(bundle))
+	}
+	items, ok := raw.([]any)
+	if !ok {
+		t.Fatalf("expected bundle collection %q to be an array, got %T", key, raw)
+	}
+	return items
+}
+
+func bundleKeys(bundle exportBundleMap) []string {
+	keys := make([]string, 0, len(bundle))
+	for key := range bundle {
+		keys = append(keys, key)
+	}
+	slices.Sort(keys)
+	return keys
+}
+
+// bundleItemNamed finds the item whose "name" is name, so a test can mutate
+// exactly its own row in a bundle that also carries every other test's.
+func bundleItemNamed(t *testing.T, items []any, name string) map[string]any {
+	t.Helper()
+	for _, raw := range items {
+		item, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		if item["name"] == name {
+			return item
+		}
+	}
+	t.Fatalf("expected an item named %q in the bundle collection", name)
+	return nil
+}
+
+// importCollection is one collection's outcome in an import response.
+type importCollection struct {
+	Created int `json:"created"`
+	Updated int `json:"updated"`
+	Skipped int `json:"skipped"`
+	Errors  []struct {
+		Name   string `json:"name"`
+		Reason string `json:"reason"`
+	} `json:"errors"`
+	Warnings []struct {
+		Name   string `json:"name"`
+		Reason string `json:"reason"`
+	} `json:"warnings"`
+}
+
+// importReport is POST /api/v1/import's body. Identical in shape for a dry run
+// and an apply -- that is the entire point of the dry run, and the assertions
+// below compare the two directly.
+type importReport struct {
+	DryRun             bool             `json:"dryRun"`
+	Targets            importCollection `json:"targets"`
+	CheckDefinitions   importCollection `json:"checkDefinitions"`
+	CheckSchedules     importCollection `json:"checkSchedules"`
+	AlertRules         importCollection `json:"alertRules"`
+	Webhooks           importCollection `json:"webhooks"`
+	MaintenanceWindows importCollection `json:"maintenanceWindows"`
+}
+
+// collections returns the six results beside their bundle key names, so an
+// assertion that holds for every collection is written once.
+func (r *importReport) collections() []struct {
+	name string
+	res  *importCollection
+} {
+	return []struct {
+		name string
+		res  *importCollection
+	}{
+		{"targets", &r.Targets},
+		{"checkDefinitions", &r.CheckDefinitions},
+		{"checkSchedules", &r.CheckSchedules},
+		{"alertRules", &r.AlertRules},
+		{"webhooks", &r.Webhooks},
+		{"maintenanceWindows", &r.MaintenanceWindows},
+	}
+}
+
+// postImport runs one import and returns its report.
+func postImport(t *testing.T, base string, dryRun bool, bundle exportBundleMap) importReport {
+	t.Helper()
+	what := "apply"
+	if dryRun {
+		what = "dry run"
+	}
+	status, _, data := mustRequest(t, http.MethodPost, base+"/api/v1/import",
+		map[string]any{"dryRun": dryRun, "bundle": bundle})
+	if status != http.StatusOK {
+		t.Fatalf("expected POST /api/v1/import (%s) 200, got %d: %s", what, status, data)
+	}
+	var report importReport
+	decodeJSON(t, "import report ("+what+")", data, &report)
+	if report.DryRun != dryRun {
+		t.Errorf("expected the import response to echo dryRun=%v, got %v", dryRun, report.DryRun)
+	}
+	return report
+}
+
+// TestConsoleExportImportRoundTrip proves M7 Decision 9's central claim: the
+// bundle a console exports is a bundle it can import, the dry run predicts
+// exactly what the apply does, and a re-import of an unmodified bundle changes
+// nothing.
+//
+// That last property is what makes this more than a serialisation test. Every
+// collection is merged by NATURAL KEY, not by id -- no store call anywhere
+// accepts a caller-chosen primary key -- so a bundle round-tripped into its own
+// source console must resolve every item to the row it came from and update or
+// skip it. A single spurious create here would mean a restore duplicates the
+// configuration it was meant to restore.
+//
+// The secret scan is the second claim and it is made on RAW BYTES, not on a
+// decoded struct: a bundle carries webhooks as name/url/events/enabled plus a
+// hasSecret BOOLEAN, and the sealed bytes never leave the store through this
+// package. A typed assertion could not notice a secret field, because the type
+// has none -- which is the point and also why it could never catch a
+// regression that added one.
+func TestConsoleExportImportRoundTrip(t *testing.T) {
+	base := consoleBaseURL(t)
+
+	// The two rows the IMPORT mints have no create call to hang a cleanup off,
+	// so their names are minted here and their cleanups registered FIRST --
+	// which, t.Cleanup being LIFO, is what makes them run LAST.
+	//
+	// That ordering is load-bearing rather than tidy. The renamed target below
+	// becomes the destination the seeded definition points at (the importer
+	// remaps the bundle's target id onto the row it actually created), and a
+	// target with a definition still pointing at it is a 409 by design. A
+	// cleanup registered at the point of mutation would run BEFORE the
+	// definition's and fail on that 409 -- in cleanup, where the failure would
+	// name the wrong thing entirely.
+	renamedTarget := uniqueName("e2e-import-target")
+	t.Cleanup(func() { dropTargetByName(t, base, renamedTarget) })
+	newRuleName := uniqueName("e2e-import-rule")
+	t.Cleanup(func() { dropAlertRuleByName(t, base, newRuleName) })
+
+	// --- Seed one item in each of the six collections. ---
+	targetName := uniqueName("e2e-export-target")
+	targetID := createTarget(t, base, map[string]any{
+		"name":    targetName,
+		"kind":    "host",
+		"address": "e2e-export.invalid:80",
+		"labels":  map[string]string{"origin": "e2e-export"},
+	})
+	definitionName := uniqueName("e2e-export-def")
+	definitionID := createDefinition(t, base, map[string]any{
+		"name":                definitionName,
+		"sourceSelection":     "one-per-zone",
+		"destinationKind":     "target",
+		"destinationTargetId": targetID,
+		"checkType":           "tcp",
+		"plane":               "pod",
+		"enabled":             false,
+	})
+	createSchedule(t, base, map[string]any{
+		"definitionId": definitionID,
+		"kind":         "interval",
+		"intervalNs":   int64(10 * time.Minute),
+		"enabled":      false,
+	})
+	alertRuleName := uniqueName("e2e-export-rule")
+	createAlertRule(t, base, alertRuleBody(alertRuleName, "warning", int64(time.Minute), true))
+	webhookName := uniqueName("e2e-export-hook")
+	createWebhook(t, base, map[string]any{
+		"name":   webhookName,
+		"url":    unroutableWebhookURL,
+		"events": []string{"incident.resolved"},
+		"secret": e2eWebhookSecret,
+	})
+	// The window must END IN THE FUTURE: an export carries only windows that
+	// have not ended (a closed window is history, and carrying every window
+	// ever declared would make the bundle grow with time).
+	windowStart := time.Now().UTC().Add(-2 * time.Minute).Truncate(time.Second)
+	windowEnd := windowStart.Add(2 * time.Hour)
+	windowScope := uniqueName("e2e-export-scope")
+	windowStatus, _, windowData := mustRequest(t, http.MethodPost, base+"/api/v1/maintenance", map[string]any{
+		"scope":   windowScope,
+		"startAt": windowStart.Format(time.RFC3339),
+		"endAt":   windowEnd.Format(time.RFC3339),
+		"reason":  "e2e export/import round trip",
+	})
+	if windowStatus != http.StatusCreated {
+		t.Fatalf("expected POST /api/v1/maintenance 201, got %d: %s", windowStatus, windowData)
+	}
+	var window maintenanceWindow
+	decodeJSON(t, "create-maintenance response", windowData, &window)
+	t.Cleanup(func() { deleteResource(t, base+"/api/v1/maintenance/"+window.ID) })
+
+	// --- Export. ---
+	exportStatus, _, exportData := mustRequest(t, http.MethodGet, base+"/api/v1/export", nil)
+	if exportStatus == http.StatusForbidden {
+		t.Fatalf("GET /api/v1/export answered 403: export/import is admin-only (settings:write), and "+
+			"auth.mode=anonymous stamps ONE role on every request. e2e/testdata/console-values.yaml must set "+
+			"console.auth.anonymous.role=admin. Body: %s", exportData)
+	}
+	if exportStatus != http.StatusOK {
+		t.Fatalf("expected GET /api/v1/export 200, got %d: %s", exportStatus, exportData)
+	}
+	// The whole claim, on the bytes a client actually receives.
+	assertNoSecretServed(t, "GET /api/v1/export", exportData)
+
+	var bundle exportBundleMap
+	decodeJSON(t, "export bundle", exportData, &bundle)
+	if version, _ := bundle["version"].(float64); int(version) != 1 {
+		t.Errorf("expected the bundle to declare version 1 (checked for EQUALITY on import, never >=), got %v",
+			bundle["version"])
+	}
+	if _, present := bundle["exportedAt"]; !present {
+		t.Errorf("expected the bundle to carry exportedAt, got keys %v", bundleKeys(bundle))
+	}
+	// All six collections, each carrying the item seeded above -- so the
+	// assertions below are about a bundle that is actually populated.
+	for _, tc := range []struct {
+		key  string
+		name string
+	}{
+		{"targets", targetName},
+		{"checkDefinitions", definitionName},
+		{"alertRules", alertRuleName},
+		{"webhooks", webhookName},
+	} {
+		bundleItemNamed(t, bundleCollection(t, bundle, tc.key), tc.name)
+	}
+	if len(bundleCollection(t, bundle, "checkSchedules")) == 0 {
+		t.Errorf("expected the bundle's checkSchedules collection to be populated")
+	}
+	if len(bundleCollection(t, bundle, "maintenanceWindows")) == 0 {
+		t.Errorf("expected the bundle's maintenanceWindows collection to carry the still-open window")
+	}
+	// hasSecret is informational and TRUE for a stored row (the store refuses
+	// an empty secret); it is never a licence to create one on import.
+	exportedHook := bundleItemNamed(t, bundleCollection(t, bundle, "webhooks"), webhookName)
+	if hasSecret, _ := exportedHook["hasSecret"].(bool); !hasSecret {
+		t.Errorf("expected the exported webhook to carry hasSecret=true, got %v", exportedHook["hasSecret"])
+	}
+	if _, present := exportedHook["secret"]; present {
+		t.Errorf("expected no secret key on an exported webhook at all, got %v", exportedHook)
+	}
+
+	// --- Idempotence: the same bundle, into the console it came from. ---
+	dry := postImport(t, base, true, bundle)
+	for _, c := range dry.collections() {
+		if c.res.Created != 0 {
+			t.Errorf("expected a dry run of an UNMODIFIED bundle to create nothing in %s (every item merges by "+
+				"natural key onto the row it came from), got created=%d", c.name, c.res.Created)
+		}
+		if len(c.res.Errors) != 0 {
+			t.Errorf("expected no errors in %s on a round-tripped bundle, got %+v", c.name, c.res.Errors)
+		}
+	}
+	if dry.Targets.Updated == 0 || dry.CheckDefinitions.Updated == 0 || dry.Webhooks.Updated == 0 {
+		t.Errorf("expected targets/checkDefinitions/webhooks to be UPDATED by a re-import of their own bundle, "+
+			"got %d/%d/%d", dry.Targets.Updated, dry.CheckDefinitions.Updated, dry.Webhooks.Updated)
+	}
+	// Windows are SKIPPED and never updated: the store has no update for one
+	// by design (a window is two timestamps and a reason, so delete-and-
+	// recreate is the whole of the correction path).
+	if dry.MaintenanceWindows.Skipped == 0 || dry.MaintenanceWindows.Updated != 0 {
+		t.Errorf("expected an identical maintenance window to be SKIPPED and never updated, got "+
+			"skipped=%d updated=%d", dry.MaintenanceWindows.Skipped, dry.MaintenanceWindows.Updated)
+	}
+
+	applied := postImport(t, base, false, bundle)
+	for _, c := range applied.collections() {
+		if c.res.Created != 0 {
+			t.Errorf("expected APPLYING an unmodified bundle to create nothing in %s, got created=%d",
+				c.name, c.res.Created)
+		}
+		if len(c.res.Errors) != 0 {
+			t.Errorf("expected no errors in %s on an applied round-trip, got %+v", c.name, c.res.Errors)
+		}
+	}
+
+	// --- Mutate: what the dry run predicts is what the apply does. ---
+	bundleItemNamed(t, bundleCollection(t, bundle, "targets"), targetName)["name"] = renamedTarget
+
+	bundle["alertRules"] = append(bundleCollection(t, bundle, "alertRules"), map[string]any{
+		"id":           "00000000-0000-0000-0000-000000000000",
+		"name":         newRuleName,
+		"kind":         "raw",
+		"params":       map[string]any{"expr": e2eRawExpr},
+		"severity":     "critical",
+		"forNs":        int64(30 * time.Second),
+		"labels":       map[string]any{},
+		"annotations":  map[string]any{},
+		"enabled":      true,
+		"renderedExpr": e2eRawExpr,
+	})
+
+	// A webhook the destination does not have. It is the ONE asymmetry in the
+	// whole import and it is the store's rule, not the importer's: every
+	// delivery is signed, a bundle never carries a secret, and the only
+	// alternatives to skipping would be fabricating a signing key or weakening
+	// that rule.
+	freshHookName := uniqueName("e2e-import-hook")
+	bundle["webhooks"] = append(bundleCollection(t, bundle, "webhooks"), map[string]any{
+		"id":        "00000000-0000-0000-0000-000000000000",
+		"name":      freshHookName,
+		"url":       unroutableWebhookURL,
+		"events":    []any{"incident.created"},
+		"enabled":   true,
+		"hasSecret": true,
+	})
+
+	mutatedDry := postImport(t, base, true, bundle)
+	if mutatedDry.Targets.Created != 1 {
+		t.Errorf("expected the renamed target to be predicted as ONE create, got created=%d updated=%d errors=%+v",
+			mutatedDry.Targets.Created, mutatedDry.Targets.Updated, mutatedDry.Targets.Errors)
+	}
+	if mutatedDry.AlertRules.Created != 1 {
+		t.Errorf("expected the added alert rule to be predicted as ONE create, got created=%d errors=%+v",
+			mutatedDry.AlertRules.Created, mutatedDry.AlertRules.Errors)
+	}
+	if mutatedDry.Webhooks.Skipped != 1 {
+		t.Errorf("expected the secret-less webhook to be predicted as ONE skip, got skipped=%d created=%d",
+			mutatedDry.Webhooks.Skipped, mutatedDry.Webhooks.Created)
+	}
+	assertWebhookSkipWarning(t, &mutatedDry.Webhooks, freshHookName, "dry run")
+	// A dry run WRITES NOTHING. Checked rather than assumed, because it is the
+	// property everything above rests on.
+	if _, exists := findAlertRuleByName(t, base, newRuleName); exists {
+		t.Errorf("expected a dry run to persist nothing, but alert rule %q exists", newRuleName)
+	}
+
+	mutatedApply := postImport(t, base, false, bundle)
+	if mutatedApply.Targets.Created != mutatedDry.Targets.Created ||
+		mutatedApply.AlertRules.Created != mutatedDry.AlertRules.Created ||
+		mutatedApply.Webhooks.Skipped != mutatedDry.Webhooks.Skipped {
+		t.Errorf("expected the apply to match what the dry run predicted; dry: targets.created=%d "+
+			"alertRules.created=%d webhooks.skipped=%d, apply: %d/%d/%d",
+			mutatedDry.Targets.Created, mutatedDry.AlertRules.Created, mutatedDry.Webhooks.Skipped,
+			mutatedApply.Targets.Created, mutatedApply.AlertRules.Created, mutatedApply.Webhooks.Skipped)
+	}
+	assertWebhookSkipWarning(t, &mutatedApply.Webhooks, freshHookName, "apply")
+
+	// --- Verify the apply through the ordinary read routes. ---
+	importedRule, ok := findAlertRuleByName(t, base, newRuleName)
+	if !ok {
+		t.Fatalf("expected the imported alert rule %q to exist after the apply", newRuleName)
+	}
+	if importedRule.Severity != "critical" || importedRule.RenderedExpr != e2eRawExpr {
+		t.Errorf("expected the imported rule to arrive as declared (critical, %q), got severity %q expr %q",
+			e2eRawExpr, importedRule.Severity, importedRule.RenderedExpr)
+	}
+	if _, found := findTargetByName(t, base, renamedTarget); !found {
+		t.Errorf("expected the renamed target %q to exist after the apply", renamedTarget)
+	}
+	// The endpoint that arrived without a secret was SKIPPED, so it is not
+	// there -- and must not be, because a webhook the console cannot sign is
+	// an endpoint it must not have created.
+	if _, found := findWebhookByName(t, base, freshHookName); found {
+		t.Errorf("expected the secret-less webhook %q NOT to be created by the import", freshHookName)
+	}
+
+	// A bundle version this build does not read is refused whole, never
+	// partially applied: silently importing the subset a future console
+	// described would be a partial restore presented as a complete one.
+	bundle["version"] = 999
+	badStatus, _, badData := mustRequest(t, http.MethodPost, base+"/api/v1/import",
+		map[string]any{"bundle": bundle})
+	if badStatus != http.StatusUnprocessableEntity {
+		t.Errorf("expected an unsupported bundle version to be 422, got %d: %s", badStatus, badData)
+	}
+	missingStatus, _, missingData := mustRequest(t, http.MethodPost, base+"/api/v1/import",
+		map[string]any{"dryRun": true})
+	if missingStatus != http.StatusUnprocessableEntity {
+		t.Errorf("expected an import with no bundle to be 422, got %d: %s", missingStatus, missingData)
+	}
+}
+
+// assertWebhookSkipWarning checks the one WARNING this API has: an endpoint the
+// import handled correctly and completely, whose outcome still needs a human.
+// A warning is not an error -- nothing failed, and the operator's next step is
+// to create the endpoint with a secret and re-import.
+func assertWebhookSkipWarning(t *testing.T, res *importCollection, name, what string) {
+	t.Helper()
+	for _, w := range res.Warnings {
+		if w.Name == name {
+			if !strings.Contains(w.Reason, "without secret") {
+				t.Errorf("expected the %s webhook warning for %q to name the missing secret, got %q",
+					what, name, w.Reason)
+			}
+			return
+		}
+	}
+	t.Errorf("expected a %s WARNING (not an error) for the secret-less webhook %q, got warnings=%+v errors=%+v",
+		what, name, res.Warnings, res.Errors)
+}
+
+// findTargetByName looks one target up by its natural key.
+func findTargetByName(t *testing.T, base, name string) (string, bool) {
+	t.Helper()
+	status, _, data := mustRequest(t, http.MethodGet, base+"/api/v1/targets?limit=500", nil)
+	if status != http.StatusOK {
+		t.Fatalf("expected GET /api/v1/targets 200, got %d: %s", status, data)
+	}
+	var page struct {
+		Targets []struct {
+			ID   string `json:"id"`
+			Name string `json:"name"`
+		} `json:"targets"`
+	}
+	decodeJSON(t, "targets list", data, &page)
+	for i := range page.Targets {
+		if page.Targets[i].Name == name {
+			return page.Targets[i].ID, true
+		}
+	}
+	return "", false
+}
+
+// dropTargetByName removes a target the IMPORT created, which no createTarget
+// cleanup can know the id of.
+func dropTargetByName(t *testing.T, base, name string) {
+	t.Helper()
+	if id, found := findTargetByName(t, base, name); found {
+		deleteResource(t, base+"/api/v1/targets/"+id)
+	}
+}
+
+// findWebhookByName reports whether an endpoint with that name exists.
+func findWebhookByName(t *testing.T, base, name string) (string, bool) {
+	t.Helper()
+	status, _, data := mustRequest(t, http.MethodGet, base+"/api/v1/webhooks", nil)
+	if status != http.StatusOK {
+		t.Fatalf("expected GET /api/v1/webhooks 200, got %d: %s", status, data)
+	}
+	var page struct {
+		Webhooks []webhookRow `json:"webhooks"`
+	}
+	decodeJSON(t, "webhooks list", data, &page)
+	for i := range page.Webhooks {
+		if page.Webhooks[i].Name == name {
+			return page.Webhooks[i].ID, true
+		}
+	}
+	return "", false
+}
+
+// wsEnvelope is every server->client frame, mirrored here rather than imported
+// from internal/console/ws: these tests assert on the WIRE, and sharing the
+// server's own type would make a rename invisible to exactly the test whose
+// job is to notice it.
+type wsEnvelope struct {
+	Topic string          `json:"topic"`
+	Type  string          `json:"type"`
+	Seq   uint64          `json:"seq"`
+	Data  json.RawMessage `json:"data"`
+}
+
+// wsErrorDetail reads the `error` string out of an error frame's payload.
+func wsErrorDetail(t *testing.T, env *wsEnvelope) string {
+	t.Helper()
+	var payload struct {
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(env.Data, &payload); err != nil {
+		t.Errorf("decode ws error frame payload %q: %v", env.Data, err)
+		return ""
+	}
+	return payload.Error
+}
+
+// wsSubscribe writes one subscribe frame.
+func wsSubscribe(t *testing.T, conn *websocket.Conn, topic string) {
+	t.Helper()
+	if err := conn.WriteJSON(map[string]any{"action": "subscribe", "topic": topic}); err != nil {
+		t.Fatalf("subscribe to %q failed: %v", topic, err)
+	}
+}
+
+// wsAwait reads frames until match returns true or budget elapses, returning
+// every frame it saw. A read deadline bounds each read so a socket that simply
+// goes quiet ends the wait instead of the package timeout.
+func wsAwait(t *testing.T, conn *websocket.Conn, budget time.Duration, match func(*wsEnvelope) bool) ([]wsEnvelope, bool) {
+	t.Helper()
+	deadline := time.Now().Add(budget)
+	var seen []wsEnvelope
+	for {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return seen, false
+		}
+		if err := conn.SetReadDeadline(time.Now().Add(remaining)); err != nil {
+			t.Fatalf("set ws read deadline: %v", err)
+		}
+		var env wsEnvelope
+		if err := conn.ReadJSON(&env); err != nil {
+			t.Logf("ws read ended after %d frame(s): %v", len(seen), err)
+			return seen, false
+		}
+		seen = append(seen, env)
+		if match(&env) {
+			return seen, true
+		}
+	}
+}
+
+// TestConsoleWSSubscribeGate covers the /ws surface M7 touched: the upgrade
+// row became `anyOf{events:read, runs:read}` (M3 follow-up #10, Decision 13)
+// and each SUBSCRIBE gained a second, per-connection decision
+// (httpapi.wsTopicAuthorizer).
+//
+// WHAT THIS TEST DOES NOT DO, AND WHY. The interesting half of that change --
+// a runs:read-ONLY subject that is admitted to the socket and then refused the
+// `live` topic by name -- is NOT REACHABLE in this harness, and no amount of
+// test code can make it so. e2e/testdata/console-values.yaml runs
+// auth.mode=anonymous, and internal/console/authn.NewAnonymous returns the SAME
+// fixed Subject for every request "regardless of what the request carries": a
+// Bearer token, a session cookie and a spoofed header are all ignored by
+// construction (its own test asserts exactly that). So the M3 RBAC surface can
+// happily mint a custom role {runs:read}, a binding and a PAT -- and the socket
+// would still see the one configured role. There is no in-harness path from a
+// created token to an authenticated connection.
+//
+// The both-permissions-absent 403 is unreachable for a second, independent
+// reason: EVERY builtin role (viewer, operator, alert-editor, admin) holds
+// events:read, so no value of console.auth.anonymous.role produces a subject
+// the /ws row refuses. Covering it would need a whole third console rollout on
+// auth.mode=token plus a bootstrap credential -- a harness of its own, for one
+// status code that internal/console/httpapi's unit tests already pin against
+// the live router.
+//
+// What IS asserted here is the part that only a real socket can prove, and it
+// is not nothing: the route still admits an ordinary role after the anyOf
+// rewrite, a refused subscribe is answered with an error FRAME rather than a
+// closed connection, the refusal names the topic it refused, and the socket
+// keeps working afterwards -- which is the property that makes a multiplexed
+// socket usable at all, and the one a rewrite of the subscribe path is most
+// likely to break.
+func TestConsoleWSSubscribeGate(t *testing.T) {
+	base := consoleBaseURL(t)
+
+	wsURL := strings.Replace(strings.Replace(base, "https://", "wss://", 1), "http://", "ws://", 1) + "/ws"
+	dialer := &websocket.Dialer{HandshakeTimeout: 30 * time.Second}
+	conn, resp, err := dialer.Dial(wsURL, nil) //nolint:bodyclose // closed immediately below
+	if resp != nil {
+		if cerr := resp.Body.Close(); cerr != nil {
+			t.Logf("close ws handshake response body: %v", cerr)
+		}
+	}
+	if err != nil {
+		status := 0
+		if resp != nil {
+			status = resp.StatusCode
+		}
+		t.Fatalf("expected the /ws upgrade to be admitted (the route takes events:read OR runs:read, and "+
+			"every builtin role holds the first), dial %s failed with status %d: %v", wsURL, status, err)
+	}
+	defer func() {
+		if cerr := conn.Close(); cerr != nil {
+			t.Logf("close ws connection: %v", cerr)
+		}
+	}()
+
+	// A topic ADR-003 names but nothing implements: subscribing is an error
+	// rather than a topic that silently never delivers.
+	wsSubscribe(t, conn, "mtr")
+	frames, got := wsAwait(t, conn, 15*time.Second, func(env *wsEnvelope) bool {
+		return env.Type == "error" && env.Topic == "mtr"
+	})
+	if !got {
+		t.Fatalf("expected an error frame for the unimplemented topic %q, saw %d frame(s): %+v", "mtr", len(frames), frames)
+	}
+	if detail := wsErrorDetail(t, &frames[len(frames)-1]); !strings.Contains(detail, "unknown topic") {
+		t.Errorf("expected the refusal to say the topic is unknown and list the subscribable ones, got %q", detail)
+	}
+
+	// A run topic for a run that is not streaming here. EXISTENCE is checked
+	// before permission, deliberately (ws.Hub.handleClientMessage says why):
+	// answering "forbidden" for a run that simply is not open on this replica
+	// would send a browser to fix its RBAC instead of falling back to polling.
+	const absentRunTopic = "run:00000000-0000-0000-0000-000000000000"
+	wsSubscribe(t, conn, absentRunTopic)
+	runFrames, gotRun := wsAwait(t, conn, 15*time.Second, func(env *wsEnvelope) bool {
+		return env.Type == "error" && env.Topic == absentRunTopic
+	})
+	if !gotRun {
+		t.Fatalf("expected an error frame for a run topic that is not open, saw %d frame(s): %+v",
+			len(runFrames), runFrames)
+	}
+	if detail := wsErrorDetail(t, &runFrames[len(runFrames)-1]); !strings.Contains(detail, "unknown topic") {
+		t.Errorf("expected an unopened run topic to be refused as UNKNOWN rather than as forbidden "+
+			"(existence is checked first, on purpose), got %q", detail)
+	}
+
+	// The socket survives both refusals. This is the assertion the two above
+	// exist to set up: a refused subscribe must not cost the connection its
+	// other topics, which is the whole premise of multiplexing N topics onto
+	// one socket per browser tab.
+	wsSubscribe(t, conn, "topology")
+	topoFrames, gotTopo := wsAwait(t, conn, 60*time.Second, func(env *wsEnvelope) bool {
+		return env.Topic == "topology" && env.Type != "error"
+	})
+	if !gotTopo {
+		t.Fatalf("expected a topology frame after two refused subscribes -- the socket must stay usable -- "+
+			"saw %d frame(s): %+v", len(topoFrames), topoFrames)
+	}
+	for i := range topoFrames {
+		if topoFrames[i].Topic == "topology" && topoFrames[i].Type == "error" {
+			t.Errorf("expected topology to be admitted for this subject, got an error frame: %s",
+				wsErrorDetail(t, &topoFrames[i]))
+		}
+	}
+}
+
 // TestConsoleDegradedMode runs against a SEPARATE console rollout with
 // console.database.mode=disabled (.github/workflows/e2e.yaml's "Reinstall
 // console with database disabled" + "Run degraded-mode E2E tests" steps
@@ -2830,11 +4288,112 @@ func TestConsoleDegradedMode(t *testing.T) {
 		{http.MethodGet, "/api/v1/maintenance", nil},
 		{http.MethodGet, "/api/v1/webhooks", nil},
 		{http.MethodGet, "/api/v1/k8s-events", nil},
+		// M7. Alert rules are persisted CONFIGURATION with no in-memory
+		// fallback -- the targets/checks/schedules rule verbatim -- and the
+		// three routes below are the three shapes of that gate:
+		//
+		//   - the CRUD surface, read and write side.
+		//   - the SYNC kick, which is 503 and not 409 even though this
+		//     rollout also has no reconciler: the two gates are ordered
+		//     store-first on purpose, because a console with no database has
+		//     no rules to sync in the first place, so naming the feature flag
+		//     here would be the less actionable of two true statements.
+		//   - the IMPORT, for the same ordering: there is nowhere to adopt TO
+		//     before there is nothing to adopt FROM.
+		{http.MethodGet, "/api/v1/alert-rules", nil},
+		{http.MethodPost, "/api/v1/alert-rules", map[string]any{
+			"name": uniqueName("e2e-degraded"), "kind": "raw",
+			"params": map[string]any{"expr": e2eRawExpr}, "severity": "warning", "forNs": 0,
+		}},
+		{http.MethodPost, "/api/v1/alert-rules/00000000-0000-0000-0000-000000000000/sync", nil},
+		{http.MethodPost, "/api/v1/alert-rules/import", map[string]any{"name": "anything"}},
+		// Export/import reads EVERY persisted config table and is
+		// all-or-nothing about it: a bundle with targets but no alert rules
+		// because that one seam happened to be nil would be a restore point
+		// with a hole in it, which is worse than no restore point.
+		{http.MethodGet, "/api/v1/export", nil},
+		{http.MethodPost, "/api/v1/import", map[string]any{
+			"dryRun": true,
+			"bundle": map[string]any{"version": 1},
+		}},
 	} {
 		status, _, data := mustRequest(t, tc.method, base+tc.path, tc.body)
 		if status != http.StatusServiceUnavailable {
 			t.Errorf("expected %s %s 503 with console.database.mode=disabled, got %d: %s",
 				tc.method, tc.path, status, data)
+		}
+	}
+
+	// --- The three M7 routes that must NOT be 503, and each for its own
+	// reason. This rollout keeps console.alerting.enabled=true from
+	// console-values.yaml, so it is the only place these can be observed. ---
+
+	// 1. The firing list needs Prometheus, not a database, and this console
+	// has neither. It answers an honest empty 200: the Overview card must be
+	// able to render "nothing is firing" and "nobody is watching" without
+	// treating either as an error, and promConfigured is how it tells them
+	// apart. A 503 here would make a console with no database report a
+	// Prometheus outage.
+	alertsStatus, _, alertsData := mustRequest(t, http.MethodGet, base+"/api/v1/alerts", nil)
+	if alertsStatus != http.StatusOK {
+		t.Errorf("expected /api/v1/alerts 200 in degraded mode (it needs no database at all), got %d: %s",
+			alertsStatus, alertsData)
+	} else {
+		var page struct {
+			Alerts         *[]firingAlertRow `json:"alerts"`
+			PromConfigured bool              `json:"promConfigured"`
+		}
+		decodeJSON(t, "degraded alerts response", alertsData, &page)
+		if page.PromConfigured {
+			t.Errorf("expected promConfigured=false: e2e/testdata/console-values.yaml sets no "+
+				"console.prometheus.url, so this console has nothing to read alerts from: %s", alertsData)
+		}
+		if page.Alerts == nil || len(*page.Alerts) != 0 {
+			t.Errorf("expected an empty (never null) alerts array with no Prometheus configured: %s", alertsData)
+		}
+	}
+
+	// 2. The foreign list is the ONE place in this API where 409 and 503 come
+	// apart, and this rollout is where that is provable. The route reads the
+	// CLUSTER, not the database, so the database being off is not its problem
+	// -- what is missing is the reconciler, which the console drops when there
+	// is no store to keep rules in. 409 says "the request is fine and the
+	// resource exists, but it conflicts with the state this console is
+	// configured to be in", and it names the flag to set. 503 would send an
+	// operator to look at their database for a reconciler nobody asked to
+	// start.
+	foreignStatus, _, foreignData := mustRequest(t, http.MethodGet, base+"/api/v1/alert-rules/foreign", nil)
+	if foreignStatus != http.StatusConflict {
+		t.Errorf("expected /api/v1/alert-rules/foreign 409 (not 503) on a console with no PrometheusRule "+
+			"reconciler, got %d: %s", foreignStatus, foreignData)
+	} else if !strings.Contains(string(foreignData), "console.alerting.enabled") {
+		t.Errorf("expected the 409 detail to name console.alerting.enabled -- the value an operator would "+
+			"set to fix it -- got %s", foreignData)
+	}
+
+	// 3. Preview is gated on NEITHER: it renders an expression from a request
+	// body and asks Prometheus what that expression currently matches. With no
+	// Prometheus the render half still succeeds, so the honest answer is a 200
+	// carrying the expression plus an error string for the half that could not
+	// run -- refusing the whole request would hide a correct expression behind
+	// an unrelated outage.
+	previewStatus, _, previewData := mustRequest(t, http.MethodPost, base+"/api/v1/alert-rules/preview",
+		alertRuleBody(uniqueName("e2e-degraded-preview"), "info", 0, true))
+	if previewStatus != http.StatusOK {
+		t.Errorf("expected /api/v1/alert-rules/preview 200 in degraded mode (it persists nothing and needs "+
+			"no store), got %d: %s", previewStatus, previewData)
+	} else {
+		var preview struct {
+			Expr  string `json:"expr"`
+			Error string `json:"error"`
+		}
+		decodeJSON(t, "degraded preview response", previewData, &preview)
+		if preview.Expr != e2eRawExpr {
+			t.Errorf("expected the preview to render kind raw verbatim as %q, got %q", e2eRawExpr, preview.Expr)
+		}
+		if preview.Error == "" {
+			t.Errorf("expected the preview to report that it could not evaluate the expression with no "+
+				"Prometheus configured, got an empty error: %s", previewData)
 		}
 	}
 }

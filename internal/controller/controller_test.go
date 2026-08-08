@@ -10,6 +10,7 @@ import (
 
 	pb "github.com/EsDmitrii/kconmon-ng/api/proto"
 	"github.com/EsDmitrii/kconmon-ng/internal/config"
+	"github.com/EsDmitrii/kconmon-ng/internal/model"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 )
@@ -42,6 +43,77 @@ func TestCapabilitiesFor(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestControllerPublishesAttributedTopologyEvents is the end-to-end pin for the
+// M7 attribution carry: what a registry mutation causes to appear on the event
+// stream, not just what TopologyChange.Events() renders.
+//
+// Since M3 this wiring published pb.TopologyChanged{Reason: reason} and threw
+// the subject away, so the Console's topology fold reconstructed an empty
+// cluster from any amount of history. This asserts every emission site now
+// names its agent, node and zone -- and that a multi-agent eviction produces
+// one event PER agent rather than a single ambiguous one.
+func TestControllerPublishesAttributedTopologyEvents(t *testing.T) {
+	cfg := &config.Config{MetricsPrefix: "test"}
+	cfg.Controller.AgentTTL = time.Nanosecond
+	cfg.Controller.LeaderElection = false
+	cfg.Controller.Events.Enabled = true
+
+	c := New(cfg)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	stream := newFakeEventStream(ctx)
+	go func() { _ = c.grpcServer.WatchEvents(&pb.WatchEventsRequest{}, stream) }()
+
+	deadline := time.After(2 * time.Second)
+	for c.grpcServer.EventSubscriberCount() == 0 {
+		select {
+		case <-deadline:
+			t.Fatal("WatchEvents never registered a subscriber")
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+
+	next := func() *pb.TopologyChanged {
+		t.Helper()
+		select {
+		case ev := <-stream.sent:
+			tc := ev.GetTopologyChanged()
+			if tc == nil {
+				t.Fatalf("expected a topology_changed event, got %+v", ev)
+			}
+			return tc
+		case <-time.After(2 * time.Second):
+			t.Fatal("expected a topology event that never arrived")
+			return nil
+		}
+	}
+	assertEvent := func(what string, got *pb.TopologyChanged, reason, agentID, node, zone string) {
+		t.Helper()
+		if got.GetReason() != reason || got.GetAgentId() != agentID ||
+			got.GetNodeName() != node || got.GetZone() != zone {
+			t.Errorf("%s: got %+v, want reason=%q agent=%q node=%q zone=%q",
+				what, got, reason, agentID, node, zone)
+		}
+	}
+
+	c.registry.Register(model.AgentInfo{ID: "agent-1", NodeName: "node-1", Zone: "zone-a"})
+	assertEvent("register", next(), "agent_registered", "agent-1", "node-1", "zone-a")
+
+	c.registry.Register(model.AgentInfo{ID: "agent-2", NodeName: "node-2", Zone: "zone-b"})
+	assertEvent("register", next(), "agent_registered", "agent-2", "node-2", "zone-b")
+
+	c.registry.UpdateZone("node-2", "zone-c")
+	assertEvent("zone update", next(), "zone_updated", "agent-2", "node-2", "zone-c")
+
+	// Both agents are already past the nanosecond TTL: one sweep, two events.
+	if n := c.registry.EvictStale(); n != 2 {
+		t.Fatalf("expected 2 evictions, got %d", n)
+	}
+	assertEvent("evict", next(), "agent_evicted", "agent-1", "node-1", "zone-a")
+	assertEvent("evict", next(), "agent_evicted", "agent-2", "node-2", "zone-c")
 }
 
 // freePort reserves an ephemeral port and releases it, so Run can bind it. The

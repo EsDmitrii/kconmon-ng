@@ -25,21 +25,21 @@ results as Prometheus metrics.
 The chart is published as an OCI artifact on GHCR.
 
 ```bash
-helm install kconmon-ng oci://ghcr.io/esdmitrii/charts/kconmon-ng --version 1.5.0
+helm install kconmon-ng oci://ghcr.io/esdmitrii/charts/kconmon-ng --version 1.9.0
 ```
 
 With custom values:
 
 ```bash
 helm install kconmon-ng oci://ghcr.io/esdmitrii/charts/kconmon-ng \
-  --version 1.5.0 -f values.yaml
+  --version 1.9.0 -f values.yaml
 ```
 
 ### Upgrading
 
 ```bash
 helm upgrade kconmon-ng oci://ghcr.io/esdmitrii/charts/kconmon-ng \
-  --version 1.5.0 -f values.yaml
+  --version 1.9.0 -f values.yaml
 ```
 
 ### Uninstalling
@@ -89,6 +89,9 @@ for the full architecture and configuration reference.
 | `console.replicas` | `2` | Console replica count (stateless; realtime fan-out needs `console.valkey.mode` set for `replicas > 1`) |
 | `console.auth.mode` | `anonymous` | `anonymous \| local \| header \| oidc` |
 | `console.database.mode` | `disabled` | `disabled \| cnpg \| external` — PostgreSQL persistence |
+| `console.kubernetesContext.enabled` | `false` | Capture core/v1 Events into the Investigate timeline; renders a console-only ServiceAccount and a `ClusterRole` for events |
+| `console.alerting.enabled` | `false` | Manage Prometheus alert rules from the Console; renders a **namespaced** `Role` for `monitoring.coreos.com/prometheusrules` and applies one `PrometheusRule` object (`console.alerting.bundleName`). Needs a database and the Prometheus Operator CRD |
+| `console.webhooks.encryptionKeySecret.name` | `""` | Secret holding the AES-256-GCM key that encrypts webhook signing secrets at rest; empty leaves webhook create/test answering 503 |
 
 ## Metrics & Alerts
 
@@ -109,6 +112,13 @@ including:
 - `TCPChecksFailing` — TCP connectivity checks failing
 - `KconmonAgentsMissing` — fewer agents registered than schedulable nodes
 - `KconmonControllerDown` — no active controller leader
+
+`prometheusRule.enabled` and `console.alerting.enabled` are two different things
+and neither implies the other. The former renders a static `PrometheusRule` from
+the `prometheusRule.rules` values — the self-monitoring set above, edited in Git.
+The latter lets operators build rules in the Console UI, stores them in
+PostgreSQL and reconciles them into a *separate*, console-owned `PrometheusRule`
+object. Run both, either, or neither.
 
 ## Links
 

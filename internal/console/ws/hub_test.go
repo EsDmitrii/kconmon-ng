@@ -114,7 +114,7 @@ func TestTopicLiveIsTheBusTopicTheIngesterPublishesOn(t *testing.T) {
 
 func TestHubBroadcastAssignsIndependentPerTopicSequences(t *testing.T) {
 	h, m := newTestHub(t, cache.NewInProcessBus())
-	c := h.register()
+	c := h.register(nil)
 	defer h.unregister(c)
 
 	subscribeClient(h, c, TopicTopology, 0)
@@ -146,9 +146,9 @@ func TestHubBroadcastAssignsIndependentPerTopicSequences(t *testing.T) {
 
 func TestHubBroadcastOnlyReachesSubscribers(t *testing.T) {
 	h, _ := newTestHub(t, cache.NewInProcessBus())
-	subscribed := h.register()
+	subscribed := h.register(nil)
 	defer h.unregister(subscribed)
-	idle := h.register()
+	idle := h.register(nil)
 	defer h.unregister(idle)
 
 	subscribeClient(h, subscribed, TopicTopology, 0)
@@ -162,7 +162,7 @@ func TestHubBroadcastOnlyReachesSubscribers(t *testing.T) {
 
 func TestHubUnsubscribeStopsDelivery(t *testing.T) {
 	h, _ := newTestHub(t, cache.NewInProcessBus())
-	c := h.register()
+	c := h.register(nil)
 	defer h.unregister(c)
 
 	subscribeClient(h, c, TopicTopology, 0)
@@ -178,7 +178,7 @@ func TestHubUnsubscribeStopsDelivery(t *testing.T) {
 // indistinguishable from a healthy-but-idle topic in the browser.
 func TestHubUnknownTopicIsRejectedAndNotSubscribed(t *testing.T) {
 	h, _ := newTestHub(t, cache.NewInProcessBus())
-	c := h.register()
+	c := h.register(nil)
 	defer h.unregister(c)
 
 	subscribeClient(h, c, "matrix:sctp:pod", 0)
@@ -210,7 +210,7 @@ func TestHubUnknownTopicIsRejectedAndNotSubscribed(t *testing.T) {
 // mint unbounded ws_messages_sent_total series by looping junk subscribes.
 func TestHubErrorFramesDoNotMintTopicMetricLabels(t *testing.T) {
 	h, m := newTestHub(t, cache.NewInProcessBus())
-	c := h.register()
+	c := h.register(nil)
 	defer h.unregister(c)
 
 	for i := 0; i < 5; i++ {
@@ -227,7 +227,7 @@ func TestHubErrorFramesDoNotMintTopicMetricLabels(t *testing.T) {
 
 func TestHubUnknownActionIsRejected(t *testing.T) {
 	h, _ := newTestHub(t, cache.NewInProcessBus())
-	c := h.register()
+	c := h.register(nil)
 	defer h.unregister(c)
 
 	h.handleClientMessage(c, ClientMessage{Action: "resubscribe", Topic: TopicLive})
@@ -250,7 +250,7 @@ func TestHubSnapshotRingReplaysOnlyTheNewest(t *testing.T) {
 		h.Broadcast(TopicTopology, TypeSnapshot, json.RawMessage(`{"n":`+strconv.Itoa(i)+`}`))
 	}
 
-	c := h.register()
+	c := h.register(nil)
 	defer h.unregister(c)
 	subscribeClient(h, c, TopicTopology, 0)
 
@@ -268,7 +268,7 @@ func TestHubLiveRingReplaysOnlyFramesAfterLastSeq(t *testing.T) {
 		h.Broadcast(TopicLive, TypeEvent, json.RawMessage(`{"i":`+strconv.Itoa(i)+`}`))
 	}
 
-	c := h.register()
+	c := h.register(nil)
 	defer h.unregister(c)
 	subscribeClient(h, c, TopicLive, 3)
 
@@ -288,7 +288,7 @@ func TestHubLiveRingIsBounded(t *testing.T) {
 		h.Broadcast(TopicLive, TypeEvent, json.RawMessage(`{"i":`+strconv.Itoa(i)+`}`))
 	}
 
-	c := h.register()
+	c := h.register(nil)
 	defer h.unregister(c)
 	subscribeClient(h, c, TopicLive, 0)
 
@@ -325,7 +325,7 @@ func TestHubDedupesLiveEventsByID(t *testing.T) {
 	done := make(chan struct{})
 	go func() { defer close(done); h.Run(ctx) }()
 
-	c := h.register()
+	c := h.register(nil)
 	subscribeClient(h, c, TopicLive, 0)
 
 	duplicate := liveEventBytes(t, "17-1753400000000000000", 17)
@@ -399,7 +399,7 @@ func TestHubDropsMalformedAndIDLessLiveMessages(t *testing.T) {
 	done := make(chan struct{})
 	go func() { defer close(done); h.Run(ctx) }()
 
-	c := h.register()
+	c := h.register(nil)
 	subscribeClient(h, c, TopicLive, 0)
 
 	// Barrier: publish valid events with UNIQUE ids until one is delivered, so
@@ -489,7 +489,7 @@ func TestHubDropsMalformedAndIDLessLiveMessages(t *testing.T) {
 
 func TestHubDropsSlowClientInsteadOfBlocking(t *testing.T) {
 	h, m := newTestHub(t, cache.NewInProcessBus())
-	c := h.register()
+	c := h.register(nil)
 	subscribeClient(h, c, TopicTopology, 0)
 
 	// Nothing drains c.send, so one frame past the buffer must drop the client.
@@ -531,8 +531,8 @@ func TestHubDropsSlowClientInsteadOfBlocking(t *testing.T) {
 func TestHubClientCountAndGaugeTrackRegistration(t *testing.T) {
 	h, m := newTestHub(t, cache.NewInProcessBus())
 
-	a := h.register()
-	b := h.register()
+	a := h.register(nil)
+	b := h.register(nil)
 	if got := h.ClientCount(); got != 2 {
 		t.Fatalf("ClientCount = %d, want 2", got)
 	}
@@ -565,8 +565,8 @@ func TestHubRunClosesEveryClientOnContextCancel(t *testing.T) {
 	done := make(chan struct{})
 	go func() { defer close(done); h.Run(ctx) }()
 
-	a := h.register()
-	b := h.register()
+	a := h.register(nil)
+	b := h.register(nil)
 
 	cancel()
 	select {
@@ -606,7 +606,7 @@ func TestHubRegisterAfterShutdownClosesClientImmediately(t *testing.T) {
 		t.Fatal("Run did not return after ctx cancel")
 	}
 
-	c := h.register()
+	c := h.register(nil)
 	select {
 	case <-c.done:
 	case <-time.After(time.Second):
@@ -634,7 +634,7 @@ func TestRunTopicShape(t *testing.T) {
 // a silently-idle topic.
 func TestSubscribeToUnopenedRunTopicIsRejected(t *testing.T) {
 	h, _ := newTestHub(t, cache.NewInProcessBus())
-	c := h.register()
+	c := h.register(nil)
 	defer h.unregister(c)
 
 	topic := RunTopic("never-opened")
@@ -667,7 +667,7 @@ func TestOpenTopicMakesSubscribeSucceedAndDeliversBusMessages(t *testing.T) {
 		t.Errorf("ws_topics = %v, want 1", got)
 	}
 
-	c := h.register()
+	c := h.register(nil)
 	defer h.unregister(c)
 	subscribeClient(h, c, topic, 0)
 	expectNoEnvelope(t, c) // subscribing alone delivers nothing; the ring is empty
@@ -707,7 +707,7 @@ func TestOpenTopicDataFramesDoNotMintTopicMetricLabels(t *testing.T) {
 	if !h.OpenTopic(context.Background(), topic) {
 		t.Fatal("OpenTopic returned false")
 	}
-	c := h.register()
+	c := h.register(nil)
 	defer h.unregister(c)
 	subscribeClient(h, c, topic, 0)
 
@@ -739,7 +739,7 @@ func TestCloseTopicKeepsReplayThenReapsAfterDelay(t *testing.T) {
 	h.CloseTopic(topic) // idempotent
 
 	// Immediately after close: replay still works.
-	c := h.register()
+	c := h.register(nil)
 	defer h.unregister(c)
 	subscribeClient(h, c, topic, 0)
 	if got := nextEnvelope(t, c); got.Seq != 1 || string(got.Data) != `{"n":1}` {
@@ -777,7 +777,7 @@ func TestCloseTopicKeepsReplayThenReapsAfterDelay(t *testing.T) {
 		t.Error("h.ephemeral still holds the reaped topic's key")
 	}
 
-	c2 := h.register()
+	c2 := h.register(nil)
 	defer h.unregister(c2)
 	subscribeClient(h, c2, topic, 0)
 	if got := nextEnvelope(t, c2); got.Type != TypeError {
@@ -800,7 +800,7 @@ func TestRunTopicRingIsAppendOnlyAndBounded(t *testing.T) {
 		h.Broadcast(topic, TypeEvent, json.RawMessage(`{"i":`+strconv.Itoa(i)+`}`))
 	}
 
-	c := h.register()
+	c := h.register(nil)
 	defer h.unregister(c)
 	subscribeClient(h, c, topic, 0)
 
@@ -1003,7 +1003,7 @@ func TestHubEphemeralTopicsConcurrentAccessRace(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			c := h.register()
+			c := h.register(nil)
 			defer h.unregister(c)
 			drain := func() {
 				for {
@@ -1236,7 +1236,7 @@ func TestCloseTopicBroadcastsTerminalFrameToSubscribedClient(t *testing.T) {
 		t.Fatal("OpenTopic returned false")
 	}
 
-	c := h.register()
+	c := h.register(nil)
 	defer h.unregister(c)
 	subscribeClient(h, c, topic, 0)
 	expectNoEnvelope(t, c) // nothing yet -- the ring is empty
@@ -1272,7 +1272,7 @@ func TestCloseTopicWithFinalOrdersFinalFrameStrictlyBeforeClosed(t *testing.T) {
 		t.Fatal("OpenTopic returned false")
 	}
 
-	c := h.register()
+	c := h.register(nil)
 	defer h.unregister(c)
 	subscribeClient(h, c, topic, 0)
 	expectNoEnvelope(t, c) // nothing yet -- the ring is empty
@@ -1315,7 +1315,7 @@ func TestReapTopicLockedClearsTopicFromSubscribedClientsTopicsMap(t *testing.T) 
 		t.Fatal("OpenTopic returned false")
 	}
 
-	c := h.register()
+	c := h.register(nil)
 	defer h.unregister(c)
 	subscribeClient(h, c, topic, 0)
 

@@ -211,6 +211,34 @@ export interface AuditQuery {
   cursor?: string;
 }
 
+/* ── M6 webhooks + M7 configuration bundle (the Settings page's two halves) ──
+   Generated half again, same reasoning as every block above. Two things about
+   these shapes are contracts rather than incidental typing, and the Settings
+   page leans on both:
+
+   WebhookRequest.secret is OPTIONAL in the type because it is three-state on
+   the wire (docs/console-api.yaml's PUT description): absent = KEEP the stored
+   ciphertext, "" = 422 on both create and update, present = seal and replace.
+   So an edit that leaves the secret field blank must OMIT the key, never send
+   "" — see pages/settings.tsx's webhookRequestFrom, which is the one place
+   that decision is made.
+
+   WebhookEvent is a CLOSED set and this build's copy of it is
+   incident-lifecycle only. M7 Task 5 widens it (alert.fired/alert.resolved,
+   plan Decision 7); pages/settings.tsx's checkbox group is typed against this
+   alias, so a widened enum keeps compiling and the new events appear the
+   moment that regeneration lands. */
+export type Webhook = components["schemas"]["Webhook"];
+export type WebhookEvent = components["schemas"]["WebhookEvent"];
+export type WebhookRequest = components["schemas"]["WebhookRequest"];
+export type WebhookList = components["schemas"]["WebhookList"];
+
+export type ConfigBundle = components["schemas"]["ConfigBundle"];
+export type ConfigImportRequest = components["schemas"]["ConfigImportRequest"];
+export type ConfigImportResult = components["schemas"]["ConfigImportResult"];
+export type ConfigImportCollectionResult = components["schemas"]["ConfigImportCollectionResult"];
+export type ConfigImportItemNote = components["schemas"]["ConfigImportItemNote"];
+
 export interface TopologyNode {
   name: string;
   zone: string;
@@ -234,8 +262,11 @@ export interface TopologyAgent {
  * more were seen and could NOT be — they carry no node identity — and
  * `truncated` says the fold hit its own bound. An EMPTY node set next to a
  * large `unfoldableEvents` is therefore not a broken response: it is the
- * console saying the events do not name anybody. pages/topology.tsx renders
- * exactly that case, from these numbers rather than from a hardcoded guess.
+ * console saying those events do not name anybody. Since the controller
+ * learned to attribute topology changes (M7) that only happens for history an
+ * OLDER controller wrote and retention still holds, so the case thins out on
+ * its own. pages/topology.tsx renders it from these numbers rather than from a
+ * hardcoded guess, which is why it needs no change as that window shrinks.
  */
 export interface Topology {
   nodes: TopologyNode[];
@@ -498,3 +529,72 @@ export interface RunFinishedFrame {
   state: "finished";
   status: string;
 }
+
+/* ── M7 alert rules (the Alerting page's three sections) ─────────────────────
+   Generated half again. This block is APPENDED rather than filed next to the
+   webhook/bundle aliases above on purpose: M7 Task 7 lands alongside two other
+   implementers, and an append-only block cannot collide with an edit somewhere
+   else in this file.
+
+   Three of these shapes carry contracts the page leans on, and none of them is
+   visible from the type alone:
+
+   AlertRuleRequest is the BUILDER half and both writes are FULL REPLACES --
+   there is no PATCH on this resource. So flipping one checkbox on a row means
+   sending the whole rule back, which is why pages/alerting.tsx has exactly one
+   function (alertRuleRequestFrom) that turns a stored AlertRule into the body,
+   and every write goes through it. `enabled` OMITTED means true on the wire, so
+   that function always sends it explicitly.
+
+   AlertRulePreview's two halves fail INDEPENDENTLY: `expr` is always present
+   (a render failure is a 422, not this shape), and `series` is meaningful only
+   when `error` is absent -- 0 series with no error is the real answer "this
+   matches nothing right now", while 0 series WITH an error means nobody
+   counted. The preview panel renders those as two different sentences.
+
+   AlertRuleImportReport keeps `skipped` and `notes` apart because they are two
+   different statements -- "this is NOT in your console" versus "this IS, and
+   one field is the console's choice" -- so the page renders all three arrays
+   and never folds them into one.
+
+   Alert/AlertList (the FIRING set, GET /api/v1/alerts) are deliberately absent:
+   they belong to the Overview card and the /investigate timeline (M7 Task 8),
+   which is a different task's file to append to. */
+export type AlertRule = components["schemas"]["AlertRule"];
+export type AlertRuleKind = components["schemas"]["AlertRuleKind"];
+export type AlertRuleRequest = components["schemas"]["AlertRuleRequest"];
+export type AlertRuleList = components["schemas"]["AlertRuleList"];
+export type AlertRulePreview = components["schemas"]["AlertRulePreview"];
+export type AlertSeverity = components["schemas"]["AlertSeverity"];
+export type AlertSyncStatus = components["schemas"]["AlertSyncStatus"];
+export type SyncKick = components["schemas"]["SyncKick"];
+
+export type ForeignRule = components["schemas"]["ForeignRule"];
+export type ForeignRuleList = components["schemas"]["ForeignRuleList"];
+export type AlertRuleImportRequest = components["schemas"]["AlertRuleImportRequest"];
+export type AlertRuleImportItem = components["schemas"]["AlertRuleImportItem"];
+export type AlertRuleImportNote = components["schemas"]["AlertRuleImportNote"];
+export type AlertRuleImportReport = components["schemas"]["AlertRuleImportReport"];
+
+/* ── M7 alert STATE (Task 8, Decision 6) ────────────────────────────────────
+   The two aliases the block above deliberately left out, appended after it for
+   the same reason it was appended: three implementers land in this file at
+   once, and an append cannot collide with an edit.
+
+   These are the FIRING set, not configuration, and two of their fields carry
+   contracts a consumer gets wrong by reading the type alone:
+
+   `activeAt` is OPTIONAL. Prometheus omits it for an alert it has no start
+   instant for, and the timeline treats that as "cannot be placed" rather than
+   as now — a row invented at the wrong instant is worse than an absent one.
+
+   `ruleId` absent means this console does not MANAGE the rule, not that the
+   alert is unimportant. Both surfaces show foreign alerts; the Overview card
+   tags them so the console never implies ownership it does not have.
+
+   `severity` is a free string lifted off the label set (`""` when the rule
+   carries no severity label at all) — NOT AlertSeverity. The enum is what this
+   console's builder writes; this field is whatever Prometheus is firing, and
+   narrowing it here would make a foreign rule's "page" unrenderable. */
+export type Alert = components["schemas"]["Alert"];
+export type AlertList = components["schemas"]["AlertList"];

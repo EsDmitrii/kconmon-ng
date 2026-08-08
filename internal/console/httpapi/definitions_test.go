@@ -726,24 +726,67 @@ func TestAuditDetailAllowlistIsPinned(t *testing.T) {
 		// TestWebhookAuditDetailNeverCarriesSecretOrURL.
 		"POST /api/v1/webhooks":     {"name", "events"},
 		"PUT /api/v1/webhooks/{id}": {"name", "events"},
+		// alert rules: the NAME alone. "params" carries a raw rule's PromQL
+		// expression (a pile of label matchers naming internal addresses) and
+		// "labels"/"annotations" are operator-typed maps whose values carry
+		// runbook URLs and hostnames — all three banned outright, and asserted
+		// per-route by TestAlertRuleAuditDetailIsNameOnly. /preview has NO
+		// entry on purpose (its body is a draft carrying exactly that
+		// expression) — pinned by TestAlertRulePreviewAuditDetailIsAlwaysEmpty.
+		"POST /api/v1/alert-rules":     {"name"},
+		"PUT /api/v1/alert-rules/{id}": {"name"},
+		// import (adopt-foreign): the FOREIGN OBJECT's name, which is the whole
+		// body. The names of the rules it adopted stay off the row — they follow
+		// somebody else's naming convention and routinely carry a customer or a
+		// hostname — and so do the counts, which are derivable from the object
+		// and from GET /api/v1/alert-rules. Asserted per-route by
+		// TestAlertRulesImportAuditDetailIsTheObjectNameOnly.
+		"POST /api/v1/alert-rules/import": {"name"},
+		// import: the dryRun FLAG alone. "bundle" is the whole declarative
+		// configuration of a console — every probe address and every webhook
+		// URL in one object — and is banned outright; what the import did
+		// reaches the row as counts, through auditResultAllowlist below.
+		"POST /api/v1/import": {"dryRun"},
 	}
-	if len(auditDetailAllowlist) != len(want) {
-		t.Fatalf("auditDetailAllowlist has %d routes, pinned copy has %d — update BOTH, consciously",
-			len(auditDetailAllowlist), len(want))
+	assertAllowlistPinned(t, "auditDetailAllowlist", auditDetailAllowlist, want)
+}
+
+// TestAuditResultAllowlistIsPinned is TestAuditDetailAllowlistIsPinned for the
+// second, handler-computed channel (M7 Task 6). Same default-deny posture,
+// same conscious-widening guard: every key here must name a COUNT, because a
+// count is the one class of value that cannot carry a name, an address, an
+// expression or a secret.
+func TestAuditResultAllowlistIsPinned(t *testing.T) {
+	want := map[string][]string{
+		"POST /api/v1/import": {
+			"dryRun",
+			"targets", "checkDefinitions", "checkSchedules",
+			"alertRules", "webhooks", "maintenanceWindows",
+		},
+	}
+	assertAllowlistPinned(t, "auditResultAllowlist", auditResultAllowlist, want)
+}
+
+// assertAllowlistPinned compares one allow-list against its hand-pinned copy,
+// route by route and key by key, order included.
+func assertAllowlistPinned(t *testing.T, name string, got, want map[string][]string) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Fatalf("%s has %d routes, pinned copy has %d — update BOTH, consciously", name, len(got), len(want))
 	}
 	for route, wantKeys := range want {
-		gotKeys, ok := auditDetailAllowlist[route]
+		gotKeys, ok := got[route]
 		if !ok {
-			t.Errorf("allow-list is missing pinned route %q", route)
+			t.Errorf("%s is missing pinned route %q", name, route)
 			continue
 		}
 		if len(gotKeys) != len(wantKeys) {
-			t.Errorf("%s allow-list = %v, pinned %v", route, gotKeys, wantKeys)
+			t.Errorf("%s[%s] = %v, pinned %v", name, route, gotKeys, wantKeys)
 			continue
 		}
 		for i := range wantKeys {
 			if gotKeys[i] != wantKeys[i] {
-				t.Errorf("%s allow-list[%d] = %q, pinned %q", route, i, gotKeys[i], wantKeys[i])
+				t.Errorf("%s[%s][%d] = %q, pinned %q", name, route, i, gotKeys[i], wantKeys[i])
 			}
 		}
 	}

@@ -85,17 +85,17 @@ button meaning either.
 
 #### Three limitations worth knowing before you rely on them
 
-- **The topology fold is structurally ready and, with the controller shipped in
-  this release, empty.** The controller publishes `TopologyChanged` with a
-  *reason* only — `node_name` and `agent_id` are left empty
-  (`internal/controller/controller.go`) — so every event folded today is
-  unfoldable and the reconstructed node set comes back empty. This is **not**
-  the UI failing to render, and the page says so with the server's own numbers
-  ("found *N* events at or before this instant and could fold *M* of them"),
-  naming the limitation as a property of what the controller records rather
-  than of the instant you picked. The fold is coded against the full event
-  shape, so history becomes real the day the controller attributes its events.
-  Carried forward by name in MILESTONES.md.
+- **The topology fold reconstructs history written from M7 onwards, and
+  nothing older.** The controller now attributes every topology change at its
+  emission site — one event per affected agent, carrying `node_name`,
+  `agent_id` and `zone` (`internal/controller/registry.go`) — so an instant
+  inside that history comes back as a real node set, in real zone lanes.
+  Events written by an **earlier** controller carry a *reason* only, name
+  nobody, and cannot be folded; an instant that far back still reconstructs
+  nothing until retention ages those rows out. This is **not** the UI failing
+  to render, and the page says so with the server's own numbers ("found *N*
+  events at or before this instant and could fold *M* of them"), pointing you
+  at a more recent instant rather than at your own cluster.
 - **`?at=` does not survive in-app navigation.** TanStack Router owns
   navigation, and a `<Link>` to another page carries no `at` in its href — the
   context keeps the value and every surface stays engaged, but the URL loses

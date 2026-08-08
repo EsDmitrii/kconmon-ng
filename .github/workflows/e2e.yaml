@@ -138,6 +138,36 @@ jobs:
           kind load docker-image kconmon-ng-controller:test --name kconmon-ng-e2e
           kind load docker-image kconmon-ng-console:test --name kconmon-ng-e2e
 
+      # M7 Decision 14: the console's PrometheusRule reconciler is a
+      # server-side apply against monitoring.coreos.com/v1, and SSA needs the
+      # CRD -- not the Prometheus Operator behind it, which is deliberately
+      # NOT installed here (nothing in this cluster ever evaluates a rule).
+      # See e2e/testdata/prometheusrule-crd.yaml's header for what the
+      # vendored CRD does and does not cover.
+      #
+      # Applied BEFORE the Helm install for the same reason as the Secrets
+      # above: console.alerting.enabled=true (e2e/testdata/console-values.yaml)
+      # builds the reconciler at boot, and a console that came up before the
+      # resource was served would spend its first reconciles reporting a
+      # crd-missing cause on every rule.
+      #
+      # The `wait --for condition=established` is load-bearing, not belt and
+      # braces: `kubectl apply` on a CRD returns as soon as the object is
+      # accepted, and the FIRST write to the new resource races the
+      # apiserver's discovery refresh. The foreign fixture below is exactly
+      # such a write.
+      - name: Apply the PrometheusRule CRD and the foreign rule fixture
+        if: ${{ steps.meta.outputs.skip != 'true' }}
+        run: |
+          kubectl apply -f e2e/testdata/prometheusrule-crd.yaml
+          kubectl wait --for condition=established \
+            crd/prometheusrules.monitoring.coreos.com \
+            --timeout=60s
+          kubectl apply -f e2e/testdata/foreign-prometheusrule.yaml
+          kubectl get prometheusrule -n default e2e-foreign-rules \
+            -o jsonpath='{.metadata.labels}'
+          echo
+
       # Deliberately a plain postgres:17-alpine Deployment/Service, not CNPG
       # -- see e2e/testdata/postgres.yaml's header for why. Applied BEFORE
       # the Helm install: the console Pod mounts the Secret's "dsn" key at
@@ -193,6 +223,27 @@ jobs:
           kubectl wait --for=condition=ready pod \
             -l app.kubernetes.io/name=kconmon-ng \
             --timeout=180s
+
+      # M7 Task 13's RBAC, asserted as a MANIFEST fact before any test asserts
+      # it as a BEHAVIOUR. The console's sync path fails identically ("this
+      # ServiceAccount may not write prometheusrules") whether the Role was
+      # never rendered, was rendered with the wrong name, or was bound to the
+      # wrong subject -- and TestConsoleAlertRuleSyncAgainstRealCRD can only
+      # report the symptom. This step names the cause first, and fails the job
+      # 20 minutes earlier than the test would.
+      #
+      # A Role and a RoleBinding, NOT a ClusterRole (M7 Decision 3,
+      # SECURITY.md §10.3): the console writes one PrometheusRule into its own
+      # namespace, and a Role cannot be made to reach further.
+      - name: Verify the alerting RBAC rendered
+        if: ${{ steps.meta.outputs.skip != 'true' }}
+        run: |
+          kubectl get role kconmon-ng-console-alerting \
+            -o jsonpath='{.rules}'
+          echo
+          kubectl get rolebinding kconmon-ng-console-alerting \
+            -o jsonpath='{.subjects[0].name}'
+          echo
 
       - name: Smoke tests
         if: ${{ steps.meta.outputs.skip != 'true' }}
@@ -287,7 +338,7 @@ jobs:
           # disabled (see the two steps below) -- excluded here so it does
           # not run against this (database-enabled) deployment.
           #
-          # The timeout is 20m, not 5m: TestConsoleSchedule waits out several
+          # The timeout is 25m, not 5m: TestConsoleSchedule waits out several
           # 10s schedule intervals to prove a DISABLED schedule stops firing,
           # and the two external-check tests each poll an agent's /metrics for
           # up to 180s while the reconcile -> controller -> agent chain
@@ -295,7 +346,14 @@ jobs:
           # first captured Kubernetes event and 90s for a webhook /test ping's
           # outcome to land. Those budgets are wide on purpose (see their
           # comments), so the package budget has to clear their sum.
-          go test -tags=e2e -v -count=1 ./e2e/... -timeout 20m -skip TestConsoleDegradedMode
+          #
+          # M7 raised it from 20m by arithmetic, not by superstition: the
+          # existing pollUntil budgets already sum to ~18m worst case, and the
+          # alerting tests add two more (alertSyncBudget 90s twice, in
+          # TestConsoleAlertRuleSyncAgainstRealCRD) plus a 30s wait for the
+          # first topology frame on the WebSocket. 18m + 3m10s has no headroom
+          # under 20m; 25m does.
+          go test -tags=e2e -v -count=1 ./e2e/... -timeout 25m -skip TestConsoleDegradedMode
 
           kill "$CONTROLLER_PF_PID" "$CONSOLE_PF_PID" "$AGENT_PF_PID" || true
         env:
@@ -317,6 +375,15 @@ jobs:
       # degrade to 503. Verified here in a real cluster via a second rollout,
       # not just in a unit test. --wait blocks until the new console Pod is
       # ready, so no separate rollout-status step is needed.
+      #
+      # M7 note: console.alerting.enabled stays TRUE across this rollout (it
+      # comes from console-values.yaml and is not overridden below), which is
+      # deliberate. The console skips the reconciler when there is no database
+      # -- alert rules live in PostgreSQL -- so this rollout is also the only
+      # place the API's 409-vs-503 split can be observed: the CRUD surface
+      # answers 503 (no store) while GET /api/v1/alert-rules/foreign answers
+      # 409 naming the feature flag (no reconciler). TestConsoleDegradedMode
+      # asserts both.
       - name: Reinstall console with database disabled
         if: ${{ steps.meta.outputs.skip != 'true' }}
         run: |
@@ -363,5 +430,9 @@ jobs:
           kubectl logs -l app.kubernetes.io/component=console --tail=50 || true
           echo "=== Postgres logs ==="
           kubectl logs -l app=kconmon-e2e-postgres --tail=50 || true
+          echo "=== PrometheusRule objects (M7) ==="
+          kubectl get prometheusrules -o yaml || true
+          echo "=== Alerting RBAC (M7) ==="
+          kubectl get role,rolebinding -l app.kubernetes.io/component=console || true
           echo "=== Events ==="
           kubectl get events --sort-by='.lastTimestamp' | tail -30

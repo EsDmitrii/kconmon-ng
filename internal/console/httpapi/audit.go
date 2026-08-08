@@ -263,6 +263,160 @@ var auditDetailAllowlist = map[string][]string{
 	// is still audited like every other mutation, with the empty {} detail.
 	"POST /api/v1/webhooks":     {"name", "events"},
 	"PUT /api/v1/webhooks/{id}": {"name", "events"},
+	// Alert rules (M7 Task 4): the rule NAME and nothing else. Everything else
+	// on this body is banned, and unusually the ban covers fields that look
+	// harmless:
+	//
+	//   - "params" is where a raw rule's PromQL EXPRESSION lives, and an
+	//     expression is a pile of label matchers -- {instance="10.4.2.9:9100"},
+	//     {url="https://payments.internal/health"} -- which is the targets
+	//     "address" ban applied to a field that can hold a dozen of them.
+	//   - "labels" and "annotations" are operator-typed maps whose VALUES carry
+	//     runbook URLs, team handles and hostnames, on the same line. Their key
+	//     names would be safe; their values are what an audit row would echo,
+	//     and this allow-list works on keys, so the only correct answer is to
+	//     leave both out entirely.
+	//   - "kind" and "severity" are closed enums and would in fact be safe, and
+	//     are still left off: the row's resource column plus the name answer
+	//     "which rule changed", and GET /api/v1/alert-rules/{id} answers
+	//     everything else for whoever holds alerts:read.
+	//
+	// The rendered expression is never in a body at all -- the SERVER renders
+	// it -- so it cannot reach a row through this channel by construction.
+	//
+	// POST /api/v1/alert-rules/preview and POST /api/v1/alert-rules/{id}/sync
+	// have NO entry, and preview's absence is the consequential one: its body
+	// is a DRAFT that routinely carries exactly the raw expression banned
+	// above, and it is a POST, so it IS audited -- with the empty {} detail
+	// this map's default-deny rule gives a route it does not name. DELETE
+	// carries no body and its id is already in the resource column.
+	"POST /api/v1/alert-rules":     {"name"},
+	"PUT /api/v1/alert-rules/{id}": {"name"},
+	// Import (M7 Decision 4): the FOREIGN OBJECT's name, which is the whole
+	// body. The names of the rules it adopted stay off the row for the exact
+	// reason the create/update entries ban everything but "name" -- an adopted
+	// rule's name follows somebody else's naming convention and routinely
+	// carries a customer, a cluster or a hostname in it, and there can be
+	// dozens of them from one call.
+	//
+	// The COUNTS are not recorded either, and that is the one place this route
+	// diverges from POST /api/v1/import's auditResultAllowlist. The reason is
+	// that the import bundle's counts answer a question nothing else can
+	// ("what did that opaque blob change"), while an adoption's counts are
+	// derivable: the object is named on the row, its rules are readable from
+	// the cluster, and the rows it produced are readable from GET
+	// /api/v1/alert-rules by whoever holds alerts:read. A second audit channel
+	// that adds no un-derivable fact is a second channel to keep honest.
+	"POST /api/v1/alert-rules/import": {"name"},
+	// Configuration import (M7 Task 6): "dryRun" and nothing else. It is
+	// listed HERE, off the request body, rather than only in
+	// auditResultAllowlist below, because a rejected import -- an unsupported
+	// bundle version, a body with no bundle -- never reaches the handler and
+	// would otherwise be recorded as an unattributed {} mutation. Which of
+	// the two an audit reader is looking at is the single most important bit
+	// on the row.
+	//
+	// "bundle" is NOT listed and never will be: it is the whole declarative
+	// configuration of a console, every probe address and every webhook URL
+	// included, and echoing it into a table read by more people and retained
+	// longer than the configuration itself would be the largest single leak
+	// this allow-list exists to prevent. What the import DID lands on the row
+	// as counts, from auditResultAllowlist.
+	"POST /api/v1/import": {"dryRun"},
+}
+
+// auditResultAllowlist is auditDetailAllowlist's counterpart for detail a
+// handler computes rather than receives: "METHOD route-pattern" -> the
+// top-level keys that handler may add to its audit row.
+//
+// It exists because a request body cannot answer the question an import's
+// audit row is read to answer. "Who imported a bundle" is on the row already;
+// "and what did it change" is only knowable AFTER the merge ran, and the
+// counts are the honest, bounded summary of it.
+//
+// The posture is identical to the request-body list's, in every respect that
+// matters:
+//
+//   - DEFAULT-DENY. A route with no entry here gets no mailbox installed at
+//     all (auditMutation), so setAuditResult is a no-op for it and a future
+//     handler cannot smuggle detail onto its row by omission.
+//   - KEY-NAME allow-listing, not value inspection. Every key listed below
+//     names a COUNT -- created/updated/skipped/errors/warnings per collection
+//     -- and counts are the one class of value that cannot carry a name, an
+//     address, an expression or a secret.
+//
+// Pinned, together with the request-body list, by
+// TestAuditDetailAllowlistIsPinned.
+var auditResultAllowlist = map[string][]string{
+	"POST /api/v1/import": {
+		"dryRun",
+		"targets", "checkDefinitions", "checkSchedules",
+		"alertRules", "webhooks", "maintenanceWindows",
+	},
+}
+
+// auditResultKey is the context key auditMutation stores its one-slot result
+// mailbox under. An unexported struct type, the same forgery-proof convention
+// subjectContextKey uses.
+type auditResultKey struct{}
+
+// auditResultHolder is the mailbox itself: the closed key set this route may
+// record, and whatever the handler put there. No mutex -- the write
+// (setAuditResult, from the handler) happens-before the read (auditMutation,
+// after next.ServeHTTP returns) on the request's own goroutine.
+type auditResultHolder struct {
+	allowed []string
+	fields  map[string]json.RawMessage
+}
+
+// setAuditResult records handler-computed detail for this request's audit
+// row, keeping only the keys auditResultAllowlist names for the route. A
+// complete no-op for a route with no entry, for a request that is not being
+// audited (database.mode=disabled), and for a key that is not allow-listed --
+// so a handler can call it unconditionally.
+func setAuditResult(r *http.Request, fields map[string]any) {
+	holder, _ := r.Context().Value(auditResultKey{}).(*auditResultHolder)
+	if holder == nil {
+		return
+	}
+	out := make(map[string]json.RawMessage, len(holder.allowed))
+	for _, key := range holder.allowed {
+		v, present := fields[key]
+		if !present {
+			continue
+		}
+		encoded, err := json.Marshal(v)
+		if err != nil {
+			continue
+		}
+		out[key] = encoded
+	}
+	holder.fields = out
+}
+
+// mergeAuditResult folds a holder's recorded fields into the detail extracted
+// from the request body. Result keys WIN on a collision: they are computed
+// from what actually happened, while the body key is only what was asked for
+// (POST /api/v1/import's "dryRun" is deliberately in both lists for exactly
+// that reason -- the response echoes the flag the handler acted on).
+func mergeAuditResult(detail json.RawMessage, holder *auditResultHolder) json.RawMessage {
+	if holder == nil || len(holder.fields) == 0 {
+		return detail
+	}
+	merged := map[string]json.RawMessage{}
+	if len(detail) > 0 {
+		// A detail that does not decode is emptyDetail or a marshal this
+		// package produced; either way starting from {} is correct.
+		_ = json.Unmarshal(detail, &merged)
+	}
+	for key, value := range holder.fields {
+		merged[key] = value
+	}
+	encoded, err := json.Marshal(merged)
+	if err != nil {
+		return detail
+	}
+	return encoded
 }
 
 // auditDetailFor extracts action's allow-listed subset of body's top-level
@@ -328,13 +482,24 @@ func (s *Server) captureAuditDetail(r *http.Request) json.RawMessage {
 // add zero overhead on this path.
 func (s *Server) auditMutation(w http.ResponseWriter, r *http.Request, subject authz.Subject, next http.Handler) { //nolint:gocritic // Subject is a value type by design
 	detail := s.captureAuditDetail(r)
+
+	// The result mailbox is installed ONLY for a route auditResultAllowlist
+	// names, so every other mutating route pays nothing at all -- not a
+	// context value, not an allocation.
+	var holder *auditResultHolder
+	pattern := chi.RouteContext(r.Context()).RoutePattern()
+	if allowed, ok := auditResultAllowlist[r.Method+" "+pattern]; ok {
+		holder = &auditResultHolder{allowed: allowed}
+		r = r.WithContext(context.WithValue(r.Context(), auditResultKey{}, holder))
+	}
+
 	rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
 	next.ServeHTTP(rec, r)
 	outcome := auditOutcomeAllowed
 	if rec.status >= http.StatusBadRequest {
 		outcome = auditOutcomeError
 	}
-	s.recordAudit(r, subject, outcome, detail)
+	s.recordAudit(r, subject, outcome, mergeAuditResult(detail, holder))
 }
 
 // Limit bounds for GET /api/v1/audit, mirroring GET /api/v1/events'

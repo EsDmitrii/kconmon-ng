@@ -333,7 +333,15 @@ describe("CAUSE_WEIGHTS", () => {
       annotation: 0,
       run: 0,
       threshold: 0,
+      alert: 0,
     });
+  });
+
+  // M7 Task 8: an alert is the SYMPTOM being paged about, exactly like a
+  // threshold crossing — never the thing that caused it.
+  it("weights alerts 0, the same as the threshold rows they restate", () => {
+    expect(CAUSE_WEIGHTS.alert).toBe(0);
+    expect(CAUSE_WEIGHTS.alert).toBe(CAUSE_WEIGHTS.threshold);
   });
 
   it("scores every TimelineKind — a new kind cannot slip in unweighted", () => {
@@ -346,6 +354,7 @@ describe("CAUSE_WEIGHTS", () => {
       "k8s",
       "maintenance",
       "threshold",
+      "alert",
     ];
     expect(Object.keys(CAUSE_WEIGHTS).sort()).toEqual([...kinds].sort());
   });
@@ -402,7 +411,7 @@ describe("rankCauses", () => {
     expect(rankCauses([entry(600, "k8s", "x")], onset, { windowSeconds })).toEqual([]);
   });
 
-  it.each(["annotation", "run", "threshold"] as const)("never ranks zero-weight kind %s", (kind) => {
+  it.each(["annotation", "run", "threshold", "alert"] as const)("never ranks zero-weight kind %s", (kind) => {
     expect(rankCauses([entry(600, kind, "x")], onset)).toEqual([]);
   });
 

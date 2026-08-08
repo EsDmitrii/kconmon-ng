@@ -7,10 +7,19 @@
 # Chart surface exercised here (task-27-brief.md, owner-approved):
 #   - console.enabled + a single replica (kind has no spare capacity, and one
 #     replica keeps the in-process paths deterministic).
-#   - auth.mode=anonymous with role=operator (not the chart default
-#     "viewer"): the run endpoint (POST /api/v1/runs, permission
-#     runs:create) is only on the operator role, and anonymous auth keeps
-#     the e2e barrier low -- no login flow to build into these tests.
+#   - auth.mode=anonymous with role=admin (not the chart default "viewer"):
+#     anonymous auth keeps the e2e barrier low -- no login flow to build into
+#     these tests -- and the role has to clear the HIGHEST permission any
+#     asserted route needs, because auth.mode=anonymous stamps ONE fixed role
+#     on every request and no Authorization header can change it
+#     (internal/console/authn.NewAnonymous). That bar is admin, in three
+#     places and rising: webhooks:manage is admin-only (M6 -- every
+#     /api/v1/webhooks route, which TestConsoleWebhookDelivery drives),
+#     settings:write is admin-only (M7 Decision 9 -- GET /api/v1/export and
+#     POST /api/v1/import, TestConsoleExportImportRoundTrip), and alerting's
+#     own pair rides operator anyway. admin is a strict superset of the
+#     operator role this file used through M6, so nothing that passed before
+#     can start failing: no console e2e test asserts a 403.
 #   - valkey.mode=bundled: exercises the chart's own bundled Valkey
 #     Deployment/Service, never covered by e2e before this.
 #   - database.mode=external against e2e/testdata/postgres.yaml's fixture
@@ -36,6 +45,17 @@
 #     up as an empty GET /api/v1/k8s-events, which TestConsoleK8sEventsCapture
 #     fails on. kind churns Pods throughout an install, so the release
 #     namespace has real Pod events to capture.
+#   - alerting.enabled=true (M7): the ONE flag that renders the console's
+#     alerting config block, the namespaced Role + RoleBinding for
+#     prometheusrules (templates/rbac.yaml, bound to the SAME console-only
+#     ServiceAccount kubernetesContext already renders) and the POD_NAMESPACE
+#     downward-API env var. So this file LIVE-TESTS Task 13's chart RBAC:
+#     a Role that is missing, misnamed or bound to the wrong subject shows up
+#     as every alert rule stuck on syncStatus=error with a "forbidden" cause,
+#     which TestConsoleAlertRuleSyncAgainstRealCRD fails on. The workflow
+#     applies e2e/testdata/prometheusrule-crd.yaml BEFORE the install -- the
+#     Prometheus Operator itself is NOT installed (M7 Decision 14), and a
+#     server-side apply needs the CRD, not the controller behind it.
 #   - webhooks.encryptionKeySecret: the AES-256-GCM key that seals each
 #     endpoint's HMAC secret at rest. Same posture as database.existingSecret
 #     above -- the Secret is created by the workflow (`kubectl create secret
@@ -63,7 +83,7 @@ console:
   auth:
     mode: anonymous
     anonymous:
-      role: operator
+      role: admin
   valkey:
     mode: bundled
   database:
@@ -101,6 +121,29 @@ console:
   # and GET /api/v1/k8s-events answers 503 -- which TestConsoleDegradedMode
   # asserts.
   kubernetesContext:
+    enabled: true
+  # PrometheusRule sync (M7). namespace, syncInterval and bundleName are all
+  # left at the chart defaults on purpose:
+  #
+  #   - namespace "" resolves to POD_NAMESPACE, which for this workflow is
+  #     `default` -- the same namespace the CRD fixture's foreign object is
+  #     applied into, so GET /api/v1/alert-rules/foreign has something real
+  #     to list.
+  #   - syncInterval 60s is the BACKSTOP, never the thing under test: every
+  #     CRUD write kicks the reconciler immediately (httpapi.kickSync), so
+  #     the e2e poll budgets are written against the kick and the interval
+  #     only covers a kick that coalesced away.
+  #   - bundleName kconmon-ng-console-rules is asserted BY NAME in
+  #     TestConsoleAlertRuleSyncAgainstRealCRD (it must NOT appear in the
+  #     foreign list -- it is ours), so changing it here changes that test.
+  #
+  # NOTE the degraded rollout: the second `helm upgrade` in the workflow adds
+  # console.database.mode=disabled while keeping this flag, and the console
+  # then SKIPS the reconciler entirely (alert rules live in PostgreSQL). That
+  # is not a gap, it is the assertion -- GET /api/v1/alert-rules/foreign
+  # answers 409 naming console.alerting.enabled rather than 503, which is the
+  # one place in this API where those two codes come apart.
+  alerting:
     enabled: true
   # The webhook cipher key, in a Secret the workflow creates from `openssl
   # rand -base64 32` right before the install. Named, never inlined: the chart

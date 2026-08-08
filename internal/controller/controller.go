@@ -67,12 +67,28 @@ func New(cfg *config.Config) *Controller {
 	c.grpcServer = NewGRPCServer(registry, m, cfg.Controller.LeaderElection, c.IsLeader, cfg.Controller.Events.Enabled)
 	c.httpServer = NewHTTPServer(registry, nil, promReg, capabilitiesFor(cfg))
 
-	registry.OnChange(func(agents []model.AgentInfo, reason string) {
+	// One registry mutation, one peer broadcast and one gauge write -- but ONE
+	// EVENT PER AFFECTED AGENT.
+	//
+	// The peer update and the gauge are about the resulting cluster, so they
+	// fire once with the snapshot. The events are about the change itself, and
+	// a single event cannot name several agents: a TTL sweep that evicts three
+	// nodes has to say which three, or the console's topology fold (which
+	// replays these events to reconstruct history) can only apply one of them.
+	// Until M7 this published a bare reason with no subject at all, which is
+	// why reconstructed topology was always empty. See TopologyChange.
+	//
+	// Fan-out is bounded by how many agents one mutation can touch (all of them
+	// only in a full-cluster eviction, which is already a refetch-everything
+	// event for the Console); the subscriber channels are lossy by design, so a
+	// pathological sweep degrades to dropped events with a warning, not to a
+	// blocked registry.
+	registry.OnChange(func(agents []model.AgentInfo, change TopologyChange) {
 		c.grpcServer.BroadcastPeerUpdate(agents)
 		m.ControllerRegisteredAgents.WithLabelValues().Set(float64(len(agents)))
-		c.grpcServer.PublishEvent(&pb.Event{Payload: &pb.Event_TopologyChanged{
-			TopologyChanged: &pb.TopologyChanged{Reason: reason},
-		}})
+		for _, tc := range change.Events() {
+			c.grpcServer.PublishEvent(&pb.Event{Payload: &pb.Event_TopologyChanged{TopologyChanged: tc}})
+		}
 	})
 
 	// No leader-election loop is wired yet; default to leader so behavior is

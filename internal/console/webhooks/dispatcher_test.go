@@ -446,6 +446,206 @@ func TestPayloadFieldSetIsClosedAndStable(t *testing.T) {
 	}
 }
 
+// --- alert family (M7 Decision 7) -------------------------------------------
+
+func testAlert() Alert {
+	return Alert{
+		RuleID:      "9c5a1d20-0000-4000-8000-0000000000ab",
+		RuleName:    "PairLossHigh",
+		Severity:    "critical",
+		Expr:        `kconmon_ng_pair_loss_ratio > 0.2`,
+		Labels:      map[string]string{"alertname": "PairLossHigh", "severity": "critical", "zone": "a"},
+		Annotations: map[string]string{"summary": "loss between racks"},
+		FiredAt:     time.Date(2026, 8, 8, 12, 0, 0, 0, time.UTC),
+	}
+}
+
+// The alert family is its OWN closed shape. Pinned by KEY, exactly the way the
+// incident family is, because "stable per family" is only a contract if both
+// halves are asserted the same way.
+func TestAlertPayloadFieldSetIsClosedAndStable(t *testing.T) {
+	for _, event := range []string{store.WebhookEventAlertFired, store.WebhookEventAlertResolved} {
+		t.Run(event, func(t *testing.T) {
+			rec := newReceiver(t, http.StatusOK)
+			st := newFakeStore()
+			d, _, _ := newTestDispatcher(t, st)
+			st.add(t, d, rec.srv.URL, []string{event}, true, 0)
+
+			a := testAlert()
+			if event == store.WebhookEventAlertResolved {
+				at := time.Date(2026, 8, 8, 12, 45, 0, 0, time.UTC)
+				a.ResolvedAt = &at
+			}
+			d.NotifyAlert(context.Background(), event, a)
+			st.waitOutcomes(t, 1)
+
+			body := rec.received()[0].body
+			var envelope map[string]json.RawMessage
+			if err := json.Unmarshal(body, &envelope); err != nil {
+				t.Fatalf("payload is not a JSON object: %v", err)
+			}
+			assertKeys(t, "alert payload", envelope, "event", "sentAt", "alert")
+
+			var alert map[string]json.RawMessage
+			if err := json.Unmarshal(envelope["alert"], &alert); err != nil {
+				t.Fatalf("alert is not a JSON object: %v", err)
+			}
+			assertKeys(t, "alert", alert, "ruleId", "ruleName", "severity", "expr",
+				"labels", "annotations", "firedAt", "resolvedAt")
+
+			// The incident family's keys must be ABSENT: a receiver that
+			// dispatches on `event` and then reaches for `.incident` on an
+			// alert delivery has to get nothing, not a synthetic object.
+			if _, ok := envelope["incident"]; ok {
+				t.Errorf("alert payload carries an incident object: %s", body)
+			}
+			if _, ok := envelope["at"]; ok {
+				t.Errorf("alert payload carries the incident family's `at`: %s", body)
+			}
+
+			var decoded AlertPayload
+			if err := json.Unmarshal(body, &decoded); err != nil {
+				t.Fatal(err)
+			}
+			if decoded.Event != event {
+				t.Errorf("event = %q, want %q", decoded.Event, event)
+			}
+			if decoded.Alert.RuleID != a.RuleID || decoded.Alert.RuleName != a.RuleName ||
+				decoded.Alert.Severity != a.Severity || decoded.Alert.Expr != a.Expr {
+				t.Errorf("alert = %+v, want the notified one echoed", decoded.Alert)
+			}
+			if !decoded.Alert.FiredAt.Equal(a.FiredAt) {
+				t.Errorf("firedAt = %v, want %v", decoded.Alert.FiredAt, a.FiredAt)
+			}
+			if decoded.Alert.Labels["zone"] != "a" || decoded.Alert.Annotations["summary"] != "loss between racks" {
+				t.Errorf("labels/annotations = %v / %v, want them echoed verbatim",
+					decoded.Alert.Labels, decoded.Alert.Annotations)
+			}
+
+			// resolvedAt is the key the M6 reasoning is repeated for: PRESENT
+			// on both events, null on fired. Asserted on the RAW bytes,
+			// because a `null` and a missing key decode identically into a
+			// *time.Time and only one of them is the contract.
+			raw := string(body)
+			switch event {
+			case store.WebhookEventAlertFired:
+				if !strings.Contains(raw, `"resolvedAt":null`) {
+					t.Errorf("alert.fired must carry resolvedAt:null, got: %s", raw)
+				}
+				if decoded.Alert.ResolvedAt != nil {
+					t.Errorf("resolvedAt = %v on a fired event, want nil", decoded.Alert.ResolvedAt)
+				}
+			case store.WebhookEventAlertResolved:
+				if strings.Contains(raw, `"resolvedAt":null`) {
+					t.Errorf("alert.resolved must carry a real resolvedAt, got: %s", raw)
+				}
+				if decoded.Alert.ResolvedAt == nil || !decoded.Alert.ResolvedAt.Equal(*a.ResolvedAt) {
+					t.Errorf("resolvedAt = %v, want %v", decoded.Alert.ResolvedAt, a.ResolvedAt)
+				}
+			}
+		})
+	}
+}
+
+// labels and annotations are ALWAYS objects. A nil Go map marshals to `null`,
+// which is a second shape for anyone who iterates the object without checking
+// -- the same class of bug the closed field set exists to prevent.
+func TestAlertPayloadLabelsAndAnnotationsAreAlwaysObjects(t *testing.T) {
+	rec := newReceiver(t, http.StatusOK)
+	st := newFakeStore()
+	d, _, _ := newTestDispatcher(t, st)
+	st.add(t, d, rec.srv.URL, []string{store.WebhookEventAlertFired}, true, 0)
+
+	a := testAlert()
+	a.Labels, a.Annotations = nil, nil
+	d.NotifyAlert(context.Background(), store.WebhookEventAlertFired, a)
+	st.waitOutcomes(t, 1)
+
+	raw := string(rec.received()[0].body)
+	if !strings.Contains(raw, `"labels":{}`) {
+		t.Errorf("nil labels must marshal to {}, got: %s", raw)
+	}
+	if !strings.Contains(raw, `"annotations":{}`) {
+		t.Errorf("nil annotations must marshal to {}, got: %s", raw)
+	}
+}
+
+// The delivery PATH does not fork: an alert payload is signed, laddered and
+// recorded by exactly the code an incident payload goes through. Asserted the
+// way a receiver checks it -- recompute over the raw bytes that arrived.
+func TestAlertDeliverySignatureIsVerifiableOverTheRawBody(t *testing.T) {
+	rec := newReceiver(t, http.StatusOK)
+	st := newFakeStore()
+	d, m, _ := newTestDispatcher(t, st)
+	id := st.add(t, d, rec.srv.URL, []string{store.WebhookEventAlertFired}, true, 0)
+
+	d.NotifyAlert(context.Background(), store.WebhookEventAlertFired, testAlert())
+	got := st.waitOutcomes(t, 1)
+
+	req := rec.received()[0]
+	mac := hmac.New(sha256.New, []byte(testSecret))
+	mac.Write(req.body)
+	if want := "sha256=" + hex.EncodeToString(mac.Sum(nil)); req.signature != want {
+		t.Errorf("%s = %q, want %q", SignatureHeader, req.signature, want)
+	}
+	if req.contentTy != "application/json" {
+		t.Errorf("Content-Type = %q, want application/json", req.contentTy)
+	}
+	if got[0] != (delivery{id: id, lastStatus: "ok", failures: 0}) {
+		t.Errorf("outcome = %+v, want the same terminal outcome an incident delivery records", got[0])
+	}
+	if n := deliveryCount(t, m, resultOK); n != 1 {
+		t.Errorf("WebhookDeliveries(ok) = %v, want 1 -- one pool, one counter, both families", n)
+	}
+}
+
+// Subscription is per EVENT, not per family: an incident-only endpoint is
+// filtered out of an alert fan-out and vice versa, through the one filter.
+func TestFamiliesAreFilteredThroughTheOneSubscription(t *testing.T) {
+	incOnly := newReceiver(t, http.StatusOK)
+	alertOnly := newReceiver(t, http.StatusOK)
+	st := newFakeStore()
+	d, m, _ := newTestDispatcher(t, st)
+	st.add(t, d, incOnly.srv.URL, []string{store.WebhookEventIncidentCreated}, true, 0)
+	st.add(t, d, alertOnly.srv.URL, []string{store.WebhookEventAlertFired}, true, 0)
+
+	d.NotifyAlert(context.Background(), store.WebhookEventAlertFired, testAlert())
+	st.waitOutcomes(t, 1)
+
+	if n := len(incOnly.received()); n != 0 {
+		t.Errorf("the incident-only endpoint saw %d alert deliveries, want 0", n)
+	}
+	if n := len(alertOnly.received()); n != 1 {
+		t.Fatalf("the alert endpoint saw %d deliveries, want 1", n)
+	}
+	if n := deliveryCount(t, m, resultFiltered); n != 1 {
+		t.Errorf("WebhookDeliveries(filtered) = %v, want 1", n)
+	}
+	var envelope map[string]json.RawMessage
+	if err := json.Unmarshal(alertOnly.received()[0].body, &envelope); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := envelope["alert"]; !ok {
+		t.Errorf("the alert endpoint was sent an incident-shaped body: %s", alertOnly.received()[0].body)
+	}
+}
+
+// A store the dispatcher cannot read is survivable on the alert path too:
+// Notify's contract, asserted for the family that was added later.
+func TestNotifyAlertWithAnUnreadableStoreIsSilentlySurvivable(t *testing.T) {
+	st := newFakeStore()
+	st.listErr = errors.New("connection refused")
+	d, m, _ := newTestDispatcher(t, st)
+
+	d.NotifyAlert(context.Background(), store.WebhookEventAlertFired, testAlert())
+
+	for _, result := range []string{resultOK, resultFailed, resultFiltered} {
+		if n := deliveryCount(t, m, result); n != 0 {
+			t.Errorf("WebhookDeliveries(%s) = %v, want 0", result, n)
+		}
+	}
+}
+
 func assertKeys(t *testing.T, what string, obj map[string]json.RawMessage, want ...string) {
 	t.Helper()
 	if len(obj) != len(want) {

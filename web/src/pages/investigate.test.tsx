@@ -4,10 +4,11 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { ThemeProvider } from "@/components/theme-provider";
 import { TimeMachineProvider } from "@/lib/timemachine";
 import { CAUSE_WEIGHTS } from "@/lib/investigation";
-import type { AuditEntry, Incident, PromResult } from "@/lib/types";
+import type { Alert, AuditEntry, Incident, PromResult } from "@/lib/types";
 import { InvestigatePage } from "./investigate";
 import {
   PIN_KIND_BY_TIMELINE_KIND,
+  alertEntries,
   auditEntries,
   buildExportPayload,
   buildInvestigateURL,
@@ -21,6 +22,7 @@ import {
   runTouchesScope,
   samplesFromMatrix,
   scopeFilterValue,
+  scopeFromAlertLabels,
   scopeFromIncidentScope,
   type InvestigationScope,
 } from "@/lib/investigation-sources";
@@ -56,6 +58,7 @@ const ALL_READS = [
   "promql:query",
   "targets:read",
   "topology:read",
+  "alerts:read",
 ];
 
 /** The write half of M6 Task 8. Added only by the tests that exercise it, so
@@ -161,6 +164,8 @@ interface Options {
   maintenance?: unknown[];
   snapshots?: unknown[];
   runs?: unknown[];
+  /** The FIRING set GET /api/v1/alerts answers (M7 Task 8, Decision 6). */
+  alerts?: unknown[];
   runDetail?: (id: string) => unknown;
   /** The stored incident this console has. `null` = the id in the URL matches
    *  nothing, i.e. GET /api/v1/incidents/{id} answers 404. */
@@ -180,6 +185,7 @@ function renderPage(opts: Options = {}) {
     maintenance = [],
     snapshots = [],
     runs = [],
+    alerts = [],
     runDetail,
     incident = null,
   } = opts;
@@ -212,6 +218,9 @@ function renderPage(opts: Options = {}) {
       return Promise.resolve(json({ annotations, nextCursor: "" }));
     }
     if (href.startsWith("/api/v1/maintenance")) return Promise.resolve(json({ windows: maintenance, nextCursor: "" }));
+    if (href.startsWith("/api/v1/alerts")) {
+      return Promise.resolve(json({ alerts, promConfigured: prometheusConfigured }));
+    }
     if (method === "POST" && href === "/api/v1/incidents") {
       const b = (body ?? {}) as Record<string, unknown>;
       stored = {
@@ -493,6 +502,127 @@ describe("auditEntries", () => {
   });
 });
 
+/* ── M7 Task 8: the alert source (Decision 6) ───────────────────────────── */
+
+function alertRow(over: Record<string, unknown> = {}): Alert {
+  return {
+    name: "PairLossHigh",
+    state: "firing",
+    severity: "critical",
+    labels: { alertname: "PairLossHigh", severity: "critical", source_node: "node-a", destination_node: "node-b" },
+    annotations: {},
+    activeAt: "2026-08-08T00:20:00Z",
+    value: "1e+00",
+    ruleId: "11111111-1111-4111-8111-111111111111",
+    ...over,
+  } as Alert;
+}
+
+describe("alertEntries", () => {
+  it("puts an alert that STARTED inside the window at its activeAt", () => {
+    const [entry] = alertEntries([alertRow()], new Date(FROM), new Date(TO));
+    expect(entry.at.toISOString()).toBe("2026-08-08T00:20:00.000Z");
+    expect(entry.kind).toBe("alert");
+    expect(entry.title).toBe("Alert firing: PairLossHigh");
+    expect(entry.severity).toBe("error");
+  });
+
+  it("puts an alert that was ALREADY firing at the window's start, and says so", () => {
+    const [entry] = alertEntries(
+      [alertRow({ activeAt: "2026-08-07T12:00:00Z" })],
+      new Date(FROM),
+      new Date(TO),
+    );
+    expect(entry.at.toISOString()).toBe(new Date(FROM).toISOString());
+    expect(entry.title).toContain("already firing when this window opens");
+    // The row is deliberately NOT at the instant it names, so the detail spells
+    // the real one out unambiguously.
+    expect(entry.detail).toContain("2026-08-07T12:00:00.000Z");
+  });
+
+  it("never fabricates a resolution — there is no row for an alert that stopped", () => {
+    const out = alertEntries([alertRow(), alertRow({ name: "Other", activeAt: "2026-08-07T12:00:00Z" })], new Date(FROM), new Date(TO));
+    expect(out).toHaveLength(2);
+    expect(out.every((e) => /firing/i.test(e.title))).toBe(true);
+    expect(out.some((e) => /resolv/i.test(e.title) || /resolv/i.test(e.detail ?? ""))).toBe(false);
+    // An alert that is gone from the firing set contributes NOTHING, rather
+    // than a synthesized "resolved" row nothing recorded.
+    expect(alertEntries([], new Date(FROM), new Date(TO))).toEqual([]);
+  });
+
+  it("drops an alert that started after the window closed", () => {
+    expect(alertEntries([alertRow({ activeAt: "2026-08-08T02:00:00Z" })], new Date(FROM), new Date(TO))).toEqual([]);
+  });
+
+  it("drops a PENDING alert: pending is not fired", () => {
+    expect(alertEntries([alertRow({ state: "pending" })], new Date(FROM), new Date(TO))).toEqual([]);
+  });
+
+  it("drops an alert with no activeAt rather than guessing an instant for it", () => {
+    const row = alertRow();
+    delete (row as Record<string, unknown>).activeAt;
+    expect(alertEntries([row], new Date(FROM), new Date(TO))).toEqual([]);
+  });
+
+  it.each([
+    ["critical", "error"],
+    ["warning", "warn"],
+    ["info", "info"],
+    ["", "info"],
+  ])("maps severity %s onto %s", (severity, want) => {
+    const [entry] = alertEntries([alertRow({ severity })], new Date(FROM), new Date(TO));
+    expect(entry.severity).toBe(want);
+  });
+
+  it("carries the label set in the detail and identifies the row by it", () => {
+    const [entry] = alertEntries([alertRow()], new Date(FROM), new Date(TO));
+    expect(entry.detail).toContain("source_node=node-a");
+    expect(entry.ref?.kind).toBe("alert");
+    expect(entry.ref?.id).toContain("PairLossHigh");
+  });
+
+  it("keeps two series of the SAME rule apart — one row each, not one deduped row", () => {
+    const out = alertEntries(
+      [
+        alertRow(),
+        alertRow({ labels: { alertname: "PairLossHigh", source_node: "node-c", destination_node: "node-b" } }),
+      ],
+      new Date(FROM),
+      new Date(TO),
+    );
+    expect(out).toHaveLength(2);
+    expect(new Set(out.map((e) => e.ref?.id)).size).toBe(2);
+  });
+});
+
+describe("scopeFromAlertLabels", () => {
+  it("reads a pair off source_node + destination_node", () => {
+    expect(scopeFromAlertLabels({ source_node: "node-a", destination_node: "node-b" })).toEqual({
+      kind: "pair",
+      a: "node-a",
+      b: "node-b",
+    });
+  });
+
+  it("reads a node off source_node alone", () => {
+    expect(scopeFromAlertLabels({ source_node: "node-a" })).toEqual({ kind: "node", a: "node-a", b: "" });
+  });
+
+  it("reads a target off the target label", () => {
+    expect(scopeFromAlertLabels({ target: "api-gw" })).toEqual({ kind: "target", a: "api-gw", b: "" });
+  });
+
+  it("is null when the labels name nothing this page can scope to", () => {
+    expect(scopeFromAlertLabels({})).toBeNull();
+    expect(scopeFromAlertLabels({ severity: "critical", instance: "10.0.0.1:9100" })).toBeNull();
+    // A destination with no source is NOT a node investigation: the node scope
+    // asks the peer family as a SOURCE, which would be a different question.
+    expect(scopeFromAlertLabels({ destination_node: "node-b" })).toBeNull();
+    // An empty label value is an absent one, not a scope named "".
+    expect(scopeFromAlertLabels({ source_node: "" })).toBeNull();
+  });
+});
+
 describe("buildExportPayload", () => {
   it("pins params, entries and causes into one JSON-safe object", () => {
     const params = { kind: "pair" as const, a: "node-a", b: "node-b", from: new Date(FROM), to: new Date(TO) };
@@ -648,9 +778,70 @@ describe("InvestigatePage — per-source permission gating", () => {
     expect(urlsFor("/api/v1/promql")).toEqual([]);
   });
 
-  it("always states that nothing evaluates alert rules yet", async () => {
-    renderPage({ permissions: [] });
-    expect(await screen.findByText(/alert state arrives with alerting/i)).toBeTruthy();
+  it("a subject without alerts:read gets the muted line and ZERO alert requests", async () => {
+    const { urlsFor } = renderPage({ permissions: ALL_READS.filter((p) => p !== "alerts:read") });
+
+    expect(await screen.findByText(/firing alerts need alerts:read/i)).toBeTruthy();
+    await waitFor(() => expect(urlsFor("/api/v1/events").length).toBeGreaterThan(0));
+    expect(urlsFor("/api/v1/alerts")).toEqual([]);
+  });
+});
+
+/* ── M7 Task 8: the alert source on the page (Decision 6) ───────────────── */
+
+describe("InvestigatePage — firing alerts as timeline rows", () => {
+  const firing = (over: Record<string, unknown> = {}) => ({
+    name: "PairLossHigh",
+    state: "firing",
+    severity: "critical",
+    labels: { alertname: "PairLossHigh", severity: "critical", source_node: "node-a", destination_node: "node-b" },
+    annotations: {},
+    activeAt: "2026-08-08T00:20:00Z",
+    value: "1e+00",
+    ruleId: "11111111-1111-4111-8111-111111111111",
+    ...over,
+  });
+
+  it("asks /api/v1/alerts once and renders the alert that started inside the window", async () => {
+    const { urlsFor } = renderPage({ alerts: [firing()] });
+
+    expect(await screen.findByText("Alert firing: PairLossHigh")).toBeTruthy();
+    await waitFor(() => expect(urlsFor("/api/v1/alerts").length).toBe(1));
+  });
+
+  it("places an alert that predates the window at the window's start and says so", async () => {
+    renderPage({ alerts: [firing({ activeAt: "2026-08-07T09:00:00Z" })] });
+
+    const row = await screen.findByText(/already firing when this window opens/i);
+    expect(row).toBeTruthy();
+  });
+
+  it("states the granularity: resolutions are not recorded", async () => {
+    renderPage();
+    expect(await screen.findByText(/resolutions are not recorded; only what is firing now is visible/i)).toBeTruthy();
+  });
+
+  it("the M6 'missing engine' note is GONE", async () => {
+    renderPage({ alerts: [firing()] });
+    await screen.findByText("Alert firing: PairLossHigh");
+    expect(screen.queryByText(/alert state arrives with alerting/i)).toBeNull();
+    expect(screen.queryByText(/missing engine/i)).toBeNull();
+  });
+
+  it("without Prometheus configured: the honest line and ZERO alert requests", async () => {
+    const { urlsFor } = renderPage({ prometheusConfigured: false });
+
+    expect(await screen.findByText(/firing alerts read prometheus — set console\.prometheus\.address/i)).toBeTruthy();
+    await waitFor(() => expect(urlsFor("/api/v1/events").length).toBeGreaterThan(0));
+    expect(urlsFor("/api/v1/alerts")).toEqual([]);
+  });
+
+  it("an alert row cannot be pinned — there is no row anywhere to point at", async () => {
+    renderPage({ permissions: WRITE, alerts: [firing()], incident: incidentRow(), search: "?incident=inc-1" });
+
+    const title = await screen.findByText("Alert firing: PairLossHigh");
+    const row = title.closest("li") as HTMLElement;
+    expect(within(row).queryByRole("button", { name: /^Pin:/ })).toBeNull();
   });
 });
 
@@ -928,6 +1119,9 @@ describe("the pin vocabulary", () => {
     expect(PIN_KIND_BY_TIMELINE_KIND.k8s).toBe("k8s");
     expect(PIN_KIND_BY_TIMELINE_KIND.maintenance).toBeNull();
     expect(PIN_KIND_BY_TIMELINE_KIND.threshold).toBeNull();
+    // M7 Task 8: an alert lives in Prometheus, not in a table the pin
+    // vocabulary has a member for.
+    expect(PIN_KIND_BY_TIMELINE_KIND.alert).toBeNull();
   });
 
   it("turns a path-change row into a SNAPSHOT ref carrying the snapshot's own id", () => {

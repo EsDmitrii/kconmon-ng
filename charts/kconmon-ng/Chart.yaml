@@ -3,8 +3,8 @@ apiVersion: v2
 name: kconmon-ng
 description: Kubernetes Node Connectivity Monitor - Next Generation
 type: application
-version: 1.8.0
-appVersion: "1.8.0"
+version: 1.9.0
+appVersion: "1.9.0"
 keywords:
   - kubernetes
   - connectivity
@@ -25,6 +25,53 @@ annotations:
     - name: Documentation
       url: https://github.com/EsDmitrii/kconmon-ng#readme
   artifacthub.io/changes: |
+    - kind: added
+      description: >-
+        Alerting (M7) — the console MANAGES Prometheus alert rules and Prometheus EVALUATES them:
+        /alerting builds a rule from six typed templates or raw PromQL, and the reconciler
+        server-side-applies every enabled one into ONE PrometheusRule object
+    - kind: added
+      description: >-
+        console.alerting.{enabled,namespace,syncInterval,bundleName} — OFF by default; enabling it
+        renders a NAMESPACED Role for monitoring.coreos.com/prometheusrules (get,list,watch,create,
+        update,patch — never delete) on the console-only ServiceAccount
+    - kind: added
+      description: >-
+        Foreign rules — PrometheusRule objects the console did not write are listed read-only, and
+        POST /api/v1/alert-rules/import COPIES one into a builder rule; the foreign object is never
+        mutated, so both copies then evaluate until you remove one
+    - kind: added
+      description: >-
+        alert.fired and alert.resolved webhooks with their own payload family, plus
+        console.webhooks.alertPollInterval (30s) — which is also the resolution granularity of every
+        alert.resolved delivery
+    - kind: added
+      description: >-
+        Two new permissions — alerts:read reaches every role and alerts:manage stops at operator,
+        admin and the alert-editor built-in, bringing the total to 25
+    - kind: added
+      description: >-
+        Versioned config export/import (bundle v1, admin-only, dry-run first) and a Settings page
+        carrying it alongside webhook CRUD and read-only deployment info
+    - kind: added
+      description: >-
+        Command palette (Ctrl/Cmd+K) over navigation, actions and Time Machine, and firing alerts on
+        Overview plus an alert row on the Investigate timeline
+    - kind: added
+      description: >-
+        console-alerting-values.yaml chart-test profile — the fullest console: alerting, a database,
+        the webhook encryption key and a non-default alertPollInterval
+    - kind: fixed
+      description: >-
+        Topology events now carry {reason,nodeName,agentId,zone} from all four emission sites, so
+        Time Machine folds a real node set instead of an unattributed one
+    - kind: fixed
+      description: >-
+        values.schema.json closes 44 chart-owned levels with additionalProperties:false and adds the
+        nameOverride/fullnameOverride and agent.nodeSelector/affinity keys the templates always used
+    - kind: fixed
+      description: >-
+        A null console.database.cnpg override (or a null sub-block) no longer crashes rendering
     - kind: added
       description: >-
         Investigation Mode (M6) — /investigate merges eight timeline sources client-side and ranks

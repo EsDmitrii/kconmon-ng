@@ -291,6 +291,12 @@ func TestEveryAPIRouteHasAPermissionDecision(t *testing.T) {
 // TestRoutePermissionTable exercises every non-public row of routeTable: a
 // subject holding the permission gets through (never 401/403); a subject
 // without it gets 403 problem+json naming the permission.
+//
+// The granted half iterates rule.accepted() rather than reading
+// rule.permission, so an anyOf row (GET /ws, the only one -- see routeRule's
+// doc comment) is proven to admit EACH of its permissions on its own, not
+// merely to admit somebody. The denied half asserts the 403 names all of
+// them, since a caller holding none needs to know which one to ask for.
 func TestRoutePermissionTable(t *testing.T) {
 	for key, rule := range routeTable {
 		if rule.public {
@@ -300,44 +306,54 @@ func TestRoutePermissionTable(t *testing.T) {
 		parts := strings.SplitN(key, " ", 2)
 		method, path := parts[0], parts[1]
 
-		t.Run(key+"/granted", func(t *testing.T) {
-			// Roles come from a RoleResolver, not from the Authenticator's
-			// returned Subject directly -- resolveRoles (middleware_auth.go)
-			// always re-derives Roles for a non-anonymous subject, exactly
-			// as every real authenticator (local/header/oidc/token) leaves
-			// Roles unset on the Subject it returns.
-			policy := authz.NewPolicy(map[string][]authz.Permission{"tester": {rule.permission}})
-			authr := fakeAuthenticator{subject: authz.Subject{Kind: authz.SubjectUser, ID: "u1"}}
-			s := newAuthzServer(t, authr, policy, Deps{Roles: fakeRoleResolver{roles: []string{"tester"}}})
-			// Kind == authz.SubjectUser requires the CSRF double-submit
-			// pair for a mutating method now (I-2), regardless of whether
-			// a session cookie happens to be on the request -- add it for
-			// POST routes so this sub-test still isolates the permission
-			// decision, not the CSRF one (which has its own tests below).
-			w := doRequest(t, s, method, path, strings.NewReader(`{"query":"up"}`), func(r *http.Request) {
-				if isMutatingMethod(method) {
-					r.AddCookie(&http.Cookie{Name: csrfCookieName, Value: "tok-1"})
-					r.Header.Set(csrfHeaderName, "tok-1")
+		accepted := rule.accepted()
+		if len(accepted) == 0 {
+			t.Errorf("%s: a non-public routeTable row requires no permission at all", key)
+			continue
+		}
+
+		for _, perm := range accepted {
+			t.Run(key+"/granted/"+string(perm), func(t *testing.T) {
+				// Roles come from a RoleResolver, not from the Authenticator's
+				// returned Subject directly -- resolveRoles (middleware_auth.go)
+				// always re-derives Roles for a non-anonymous subject, exactly
+				// as every real authenticator (local/header/oidc/token) leaves
+				// Roles unset on the Subject it returns.
+				policy := authz.NewPolicy(map[string][]authz.Permission{"tester": {perm}})
+				authr := fakeAuthenticator{subject: authz.Subject{Kind: authz.SubjectUser, ID: "u1"}}
+				s := newAuthzServer(t, authr, policy, Deps{Roles: fakeRoleResolver{roles: []string{"tester"}}})
+				// Kind == authz.SubjectUser requires the CSRF double-submit
+				// pair for a mutating method now (I-2), regardless of whether
+				// a session cookie happens to be on the request -- add it for
+				// POST routes so this sub-test still isolates the permission
+				// decision, not the CSRF one (which has its own tests below).
+				w := doRequest(t, s, method, path, strings.NewReader(`{"query":"up"}`), func(r *http.Request) {
+					if isMutatingMethod(method) {
+						r.AddCookie(&http.Cookie{Name: csrfCookieName, Value: "tok-1"})
+						r.Header.Set(csrfHeaderName, "tok-1")
+					}
+				})
+				if w.Code == http.StatusUnauthorized || w.Code == http.StatusForbidden {
+					t.Errorf("%s %s with permission %s = %d, want to pass authorization; body=%s",
+						method, path, perm, w.Code, w.Body.String())
 				}
 			})
-			if w.Code == http.StatusUnauthorized || w.Code == http.StatusForbidden {
-				t.Errorf("%s %s with permission %s = %d, want to pass authorization; body=%s",
-					method, path, rule.permission, w.Code, w.Body.String())
-			}
-		})
+		}
 
 		t.Run(key+"/denied", func(t *testing.T) {
 			authr := fakeAuthenticator{subject: authz.Subject{Kind: authz.SubjectUser, ID: "u1"}} // no roles
 			s := newAuthzServer(t, authr, nil, Deps{})
 			w := doRequest(t, s, method, path, strings.NewReader(`{"query":"up"}`), nil)
 			if w.Code != http.StatusForbidden {
-				t.Fatalf("%s %s without permission %s = %d, want 403", method, path, rule.permission, w.Code)
+				t.Fatalf("%s %s without permission %v = %d, want 403", method, path, accepted, w.Code)
 			}
 			if ct := w.Header().Get("Content-Type"); ct != "application/problem+json" {
 				t.Errorf("Content-Type = %q, want application/problem+json", ct)
 			}
-			if !strings.Contains(w.Body.String(), string(rule.permission)) {
-				t.Errorf("403 body = %s, want it to name permission %q", w.Body.String(), rule.permission)
+			for _, perm := range accepted {
+				if !strings.Contains(w.Body.String(), string(perm)) {
+					t.Errorf("403 body = %s, want it to name permission %q", w.Body.String(), perm)
+				}
 			}
 		})
 	}
@@ -534,26 +550,27 @@ func TestWSUpgradesThroughAuthMiddlewareForPermittedSubject(t *testing.T) {
 	}
 }
 
-// TestWSRequiresEventsReadEvenForRunWatching pins M4 Task 2's answer to
-// follow-up #10: GET /ws is gated by ONE permission, events:read, and that
-// gate covers every topic multiplexed over the socket -- including the
-// ephemeral run:{id} topics a run watcher wants. A custom role granted only
-// runs:read therefore cannot open the socket at all and must fall back to
-// REST polling of GET /api/v1/runs/{id}.
+// M7 rewrites the M4 pin that used to live here
+// (TestWSRequiresEventsReadEvenForRunWatching), consciously and exactly as
+// that test's own doc comment instructed a later milestone to. The property it
+// pinned -- "the socket has ONE permission and it covers every topic" -- was
+// never the goal; it was the honest description of a hub that could not tell
+// its connections apart. Now that ws.Hub takes a per-connection
+// ws.TopicAuthorizer, the three tests below pin the property that was actually
+// wanted all along, and each of them would have failed against the M4 code:
 //
-// This is deliberate, not an oversight: ws.Hub never sees an authz.Subject
-// (ServeWS takes only the request; subscribe/topicAllowed in hub.go decide
-// on the topic NAME alone), so the socket's authorization is necessarily
-// per-connection, not per-topic. Lowering /ws's bar to runs:read would hand
-// every run watcher the "live" events topic too -- a real widening, since
-// events:read is exactly the permission that gates GET /api/v1/events.
-// Splitting it properly means teaching the hub subject-aware subscribe
-// authorization, which is a hub change, not a routeTable change. Documented
-// in SECURITY.md §10.2 under "WebSocket authorization is per-connection".
+//   - runs:read alone OPENS the socket and may watch a run (was: 403).
+//   - that same connection is refused live/topology/matrix (the leak M4 was
+//     protecting against by keeping the bar at events:read).
+//   - holding NEITHER permission is still 403 at the upgrade.
 //
-// If a later milestone does add per-topic authorization, this test is the
-// one that must be rewritten -- consciously.
-func TestWSRequiresEventsReadEvenForRunWatching(t *testing.T) {
+// TestWSEventsReadAloneCoversRunTopics, below, is unchanged and still true.
+
+// TestWSAdmitsRunsReadForRunWatching is the M3 follow-up #10 fix seen from the
+// affected role: a custom role granted runs:read so it can start a diagnostics
+// run can now WATCH the run it started, over the socket, instead of polling
+// GET /api/v1/runs/{id}.
+func TestWSAdmitsRunsReadForRunWatching(t *testing.T) {
 	hub := ws.NewHub(cache.NewInProcessBus(), metrics.New("kconmon_ng", prometheus.NewRegistry()))
 	policy := authz.NewPolicy(map[string][]authz.Permission{
 		"run-watcher": {authz.PermRunsRead},
@@ -561,17 +578,151 @@ func TestWSRequiresEventsReadEvenForRunWatching(t *testing.T) {
 	authr := fakeAuthenticator{subject: authz.Subject{Kind: authz.SubjectUser, ID: "u1"}, mode: "local"}
 	s := newAuthzServer(t, authr, policy, Deps{Hub: hub, Roles: fakeRoleResolver{roles: []string{"run-watcher"}}})
 
+	topic := ws.RunTopic("run-1")
+	if !hub.OpenTopic(t.Context(), topic) {
+		t.Fatal("OpenTopic refused the run topic")
+	}
+
+	httpSrv := httptest.NewServer(s.Handler())
+	defer httpSrv.Close()
+
+	conn, resp, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(httpSrv.URL, "http")+"/ws", nil)
+	if err != nil {
+		status := 0
+		if resp != nil {
+			status = resp.StatusCode
+			_ = resp.Body.Close()
+		}
+		t.Fatalf("dial /ws with runs:read only: %v (http status %d) -- the upgrade must admit runs:read", err, status)
+	}
+	defer func() { _ = conn.Close() }()
+	if resp != nil {
+		_ = resp.Body.Close()
+	}
+
+	if writeErr := conn.WriteJSON(ws.ClientMessage{Action: ws.ActionSubscribe, Topic: topic}); writeErr != nil {
+		t.Fatalf("subscribe %s: %v", topic, writeErr)
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	var env ws.Envelope
+	for {
+		hub.Broadcast(topic, ws.TypeSnapshot, json.RawMessage(`{"progress":1}`))
+		if deadlineErr := conn.SetReadDeadline(time.Now().Add(100 * time.Millisecond)); deadlineErr != nil {
+			t.Fatalf("set read deadline: %v", deadlineErr)
+		}
+		if readErr := conn.ReadJSON(&env); readErr == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("no frame on %s within 5s -- runs:read must cover its own run's topic", topic)
+		}
+	}
+	if env.Topic != topic || env.Type == ws.TypeError {
+		t.Errorf("envelope = %+v, want a frame on %s, not an error", env, topic)
+	}
+}
+
+// TestWSRunsReadOnlyIsRefusedTheFleetWideTopics is the other half, and the
+// reason the upgrade may be widened at all: the runs:read-only connection that
+// TestWSAdmitsRunsReadForRunWatching just proved can open the socket must NOT
+// be able to read the fleet-wide topics over it. Widening the route without
+// this second, per-topic decision would hand every run watcher the "live"
+// event stream that events:read gates on GET /api/v1/events -- precisely the
+// leak M4 refused, and the reason both halves have to land together.
+//
+// The refusal is an error frame on a socket that stays open, not a close: the
+// connection is legitimately serving run topics, and one denied subscribe must
+// not cost it the ones it is entitled to.
+func TestWSRunsReadOnlyIsRefusedTheFleetWideTopics(t *testing.T) {
+	hub := ws.NewHub(cache.NewInProcessBus(), metrics.New("kconmon_ng", prometheus.NewRegistry()))
+	policy := authz.NewPolicy(map[string][]authz.Permission{
+		"run-watcher": {authz.PermRunsRead},
+	})
+	authr := fakeAuthenticator{subject: authz.Subject{Kind: authz.SubjectUser, ID: "u1"}, mode: "local"}
+	s := newAuthzServer(t, authr, policy, Deps{Hub: hub, Roles: fakeRoleResolver{roles: []string{"run-watcher"}}})
+
+	httpSrv := httptest.NewServer(s.Handler())
+	defer httpSrv.Close()
+
+	conn, resp, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(httpSrv.URL, "http")+"/ws", nil)
+	if err != nil {
+		t.Fatalf("dial /ws with runs:read only: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+	if resp != nil {
+		_ = resp.Body.Close()
+	}
+
+	for _, topic := range []string{ws.TopicLive, ws.TopicTopology, ws.MatrixTopic("tcp")} {
+		if writeErr := conn.WriteJSON(ws.ClientMessage{Action: ws.ActionSubscribe, Topic: topic}); writeErr != nil {
+			t.Fatalf("subscribe %s: %v", topic, writeErr)
+		}
+		if deadlineErr := conn.SetReadDeadline(time.Now().Add(5 * time.Second)); deadlineErr != nil {
+			t.Fatalf("set read deadline: %v", deadlineErr)
+		}
+		var env ws.Envelope
+		if readErr := conn.ReadJSON(&env); readErr != nil {
+			t.Fatalf("read the refusal for %s: %v", topic, readErr)
+		}
+		if env.Type != ws.TypeError {
+			t.Fatalf("subscribe to %s on a runs:read-only socket: envelope = %+v, want an error frame", topic, env)
+		}
+		if !strings.Contains(string(env.Data), string(authz.PermEventsRead)) {
+			t.Errorf("refusal for %s = %s, want it to name the missing permission %q", topic, env.Data, authz.PermEventsRead)
+		}
+	}
+
+	// Still usable afterwards: the socket survived three refusals.
+	topic := ws.RunTopic("run-after-refusals")
+	if !hub.OpenTopic(t.Context(), topic) {
+		t.Fatal("OpenTopic refused the run topic")
+	}
+	if writeErr := conn.WriteJSON(ws.ClientMessage{Action: ws.ActionSubscribe, Topic: topic}); writeErr != nil {
+		t.Fatalf("subscribe %s: %v", topic, writeErr)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		hub.Broadcast(topic, ws.TypeSnapshot, json.RawMessage(`{"progress":1}`))
+		if deadlineErr := conn.SetReadDeadline(time.Now().Add(100 * time.Millisecond)); deadlineErr != nil {
+			t.Fatalf("set read deadline: %v", deadlineErr)
+		}
+		var env ws.Envelope
+		if readErr := conn.ReadJSON(&env); readErr == nil {
+			if env.Topic != topic || env.Type == ws.TypeError {
+				t.Fatalf("envelope after the refusals = %+v, want a frame on %s", env, topic)
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the socket stopped serving run topics after a denied subscribe")
+		}
+	}
+}
+
+// TestWSRefusesTheUpgradeWithoutEitherPermission pins that widening the row to
+// anyOf did not make it public: a role holding neither events:read nor
+// runs:read is still stopped at the upgrade, with a 403 naming both
+// acceptable permissions so the caller knows which to ask an admin for.
+func TestWSRefusesTheUpgradeWithoutEitherPermission(t *testing.T) {
+	hub := ws.NewHub(cache.NewInProcessBus(), metrics.New("kconmon_ng", prometheus.NewRegistry()))
+	policy := authz.NewPolicy(map[string][]authz.Permission{
+		"topology-only": {authz.PermTopologyRead},
+	})
+	authr := fakeAuthenticator{subject: authz.Subject{Kind: authz.SubjectUser, ID: "u1"}, mode: "local"}
+	s := newAuthzServer(t, authr, policy, Deps{Hub: hub, Roles: fakeRoleResolver{roles: []string{"topology-only"}}})
+
 	w := doRequest(t, s, http.MethodGet, "/ws", nil, nil)
 	if w.Code != http.StatusForbidden {
-		t.Fatalf("GET /ws for a runs:read-only role = %d, want 403", w.Code)
+		t.Fatalf("GET /ws for a role holding neither events:read nor runs:read = %d, want 403", w.Code)
 	}
-	if !strings.Contains(w.Body.String(), string(authz.PermEventsRead)) {
-		t.Errorf("403 body = %s, want it to name the missing permission %q",
-			w.Body.String(), authz.PermEventsRead)
+	for _, perm := range []authz.Permission{authz.PermEventsRead, authz.PermRunsRead} {
+		if !strings.Contains(w.Body.String(), string(perm)) {
+			t.Errorf("403 body = %s, want it to name %q", w.Body.String(), perm)
+		}
 	}
-	if got := routeTable["GET /ws"].permission; got != authz.PermEventsRead {
-		t.Errorf(`routeTable["GET /ws"] = %q, want %q -- see this test's doc comment before changing it`,
-			got, authz.PermEventsRead)
+	if got := routeTable["GET /ws"].anyOf; len(got) != 2 {
+		t.Errorf(`routeTable["GET /ws"].anyOf = %v, want exactly {events:read, runs:read} -- read wsTopicAuthorizer before changing it`, got)
 	}
 }
 

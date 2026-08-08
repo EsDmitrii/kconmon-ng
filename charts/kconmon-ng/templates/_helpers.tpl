@@ -252,10 +252,35 @@ true
 {{- end }}
 
 {{/*
-M6: the console's OWN ServiceAccount name. It exists only when
-console.kubernetesContext.enabled: that is the single feature that needs the
-console pod to hold a Kubernetes identity at all, and creating an SA (plus
-binding a ClusterRole to it) for every install would change the default render
+M7: does the console pod need a Kubernetes identity at all? TWO features now
+answer yes, and every gate that used to name kubernetesContext.enabled directly
+(the SA, the Deployment's serviceAccountName, POD_NAMESPACE, the apiserver
+egress rule) routes through here instead, so the two can never disagree:
+
+  - console.kubernetesContext.enabled (M6) — the core/v1 Event reader.
+  - console.alerting.enabled (M7) — the PrometheusRule reconciler, which SSAs
+    the bundle object through a dynamic client against the same apiserver.
+
+Both need POD_NAMESPACE for the same reason (an empty namespace value means
+"where this Pod runs"), both need the apiserver egress rule, and both need a
+subject to bind a grant to. What they do NOT share is the grant itself: M6's is
+a cluster-scoped ClusterRole (Node events are written into whatever namespace
+the kubelet likes), M7's is a namespaced Role (SECURITY.md §10.3). See
+rbac.yaml.
+
+Still off by default, so a chart 1.8.0 render is unchanged.
+*/}}
+{{- define "kconmon-ng.console.k8sIdentity" -}}
+{{- if or .Values.console.kubernetesContext.enabled .Values.console.alerting.enabled -}}
+true
+{{- end -}}
+{{- end }}
+
+{{/*
+M6: the console's OWN ServiceAccount name. It exists only when the console
+needs a Kubernetes identity (kconmon-ng.console.k8sIdentity): those are the
+features that need the console pod to hold one at all, and creating an SA (plus
+binding a role to it) for every install would change the default render
 and hand a token to a pod that never calls the apiserver.
 
 Deliberately NOT kconmon-ng.serviceAccountName. That SA is shared by the agent

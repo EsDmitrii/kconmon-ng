@@ -46,6 +46,7 @@ type Config struct {
 
 	KubernetesContext KubernetesContextConfig `yaml:"kubernetesContext"`
 	Webhooks          WebhooksConfig          `yaml:"webhooks"`
+	Alerting          AlertingConfig          `yaml:"alerting"`
 }
 
 // WebhooksConfig carries the ONE thing the outbound webhook dispatcher
@@ -73,7 +74,39 @@ type WebhooksConfig struct {
 	// setting both in a config file is refused outright -- database.dsnFile's
 	// rule, for database.dsnFile's reason.
 	EncryptionKeyFile string `yaml:"encryptionKeyFile"`
+	// AlertPollInterval is how often the alert-transition watcher
+	// (internal/console/webhooks.AlertWatcher, M7 Decision 7) reads
+	// Prometheus' current alert set to detect fired/resolved edges.
+	//
+	// It lives under webhooks rather than under alerting, and the distinction
+	// is not cosmetic: alerting.syncInterval is how often rules are pushed
+	// INTO Prometheus, while this is how often alert STATE is read back out,
+	// and it exists for exactly one purpose -- firing deliveries. Turn
+	// webhooks off (no key) and this knob does nothing; turn alerting off and
+	// it does nothing either. Reusing the reconcile cadence would have tied
+	// two unrelated frequencies together, and an operator who wants alert
+	// deliveries within ten seconds would have had to reconcile CRDs every ten
+	// seconds to get them.
+	//
+	// It is also, directly, the RESOLUTION GRANULARITY of every alert.resolved
+	// delivery: the console detects a resolution by an alert's absence from a
+	// poll, so "resolved at" means "resolved somewhere in the interval ending
+	// here". Shortening it sharpens that number and costs one more GET per
+	// interval per replica; lengthening it blunts it.
+	//
+	// Spelled as a duration, AlertingConfig.SyncInterval's reasoning: the
+	// ns-integer convention belongs to the wire and the database, not to
+	// operator-typed configuration.
+	AlertPollInterval time.Duration `yaml:"alertPollInterval"`
 }
+
+// DefaultWebhookAlertPollInterval is the alert-state poll cadence. Thirty
+// seconds: a resolution notice that is up to half a minute late is still
+// useful, and the read is a single unfiltered GET that Prometheus answers from
+// memory. Exported so cmd/console's log line and the chart's docs quote one
+// number, and repeated as webhooks.DefaultAlertPollInterval so that package can
+// be constructed without importing config.
+const DefaultWebhookAlertPollInterval = 30 * time.Second
 
 // webhookKeyLen is the AES-256-GCM key length. Pinned rather than "whatever
 // aes.NewCipher accepts" (16/24/32) so a 16-byte key is a boot error an
@@ -128,12 +161,31 @@ func decodeWebhookKey(field, raw string) ([]byte, error) {
 // well-formed. The FILE is not read here -- validation is pure by convention in
 // this package, and cmd/console's ResolveEncryptionKey call is where a bad
 // mount is caught, on the same footing as an unreadable database.dsnFile.
-func (w *WebhooksConfig) validate() error {
+//
+// alertingEnabled is passed IN rather than reached for, because the alert-poll
+// cadence is the one webhooks.* setting whose validity depends on another
+// block: the watcher only runs when a key is configured AND alerting is on, and
+// checking the interval on a console with neither would turn a leftover zero in
+// somebody's values.yaml into a boot failure over a loop that will never start.
+// That is AlertingConfig.validate's own posture -- check a knob only when the
+// feature that reads it is on -- applied across a block boundary, the way
+// validateAuth already reaches for the database DSN.
+func (w *WebhooksConfig) validate(alertingEnabled bool) error {
 	if w.EncryptionKey != "" && w.EncryptionKeyFile != "" {
 		return errors.New("set either webhooks.encryptionKey or webhooks.encryptionKeyFile, not both")
 	}
 	if _, err := decodeWebhookKey("webhooks.encryptionKey", w.EncryptionKey); err != nil {
 		return err
+	}
+	// "Webhooks enabled" is "a key is named", which is exactly the condition
+	// cmd/console builds the dispatcher on. The FILE is not read to decide it:
+	// naming a key file is the operator's declaration of intent, and whether
+	// the mount is actually there is cmd/console's question, not validation's.
+	keyed := w.EncryptionKey != "" || w.EncryptionKeyFile != ""
+	if keyed && alertingEnabled && w.AlertPollInterval <= 0 {
+		return fmt.Errorf("webhooks.alertPollInterval must be positive when a webhook encryption key "+
+			"is configured and alerting.enabled is true (it is the alert-transition poll cadence, and "+
+			"the granularity of every alert.resolved delivery), got %v", w.AlertPollInterval)
 	}
 	return nil
 }
@@ -191,8 +243,18 @@ const podNamespaceEnv = "POD_NAMESPACE"
 // mounted/injected value is the fallback, and resolution is an explicit method
 // rather than something Load bakes in, so a test can pin either side.
 func (k *KubernetesContextConfig) ResolveNamespace() string {
-	if k.Namespace != "" {
-		return k.Namespace
+	return resolveNamespace(k.Namespace)
+}
+
+// resolveNamespace is the shared three-step fallback both namespace-bearing
+// blocks use (kubernetesContext and alerting). It is one function rather than
+// two copies because the two blocks MUST agree: the console's alert bundle
+// belongs in the same namespace the event reader watches -- its own -- and two
+// implementations of "which namespace am I in" is exactly how they would come
+// to disagree after a later edit to one of them.
+func resolveNamespace(explicit string) string {
+	if explicit != "" {
+		return explicit
 	}
 	if ns := strings.TrimSpace(os.Getenv(podNamespaceEnv)); ns != "" {
 		return ns
@@ -209,6 +271,141 @@ func (k *KubernetesContextConfig) validate() error {
 	if k.Enabled && k.ResyncInterval <= 0 {
 		return fmt.Errorf("kubernetesContext.resyncInterval must be positive when kubernetesContext.enabled is true, got %v",
 			k.ResyncInterval)
+	}
+	return nil
+}
+
+// AlertingConfig configures the PrometheusRule reconciler
+// (internal/console/promrules, M7 Decision 3): the loop that renders the
+// alert_rules table into ONE PrometheusRule object and server-side-applies it
+// into the console's own namespace.
+//
+// Enabled defaults to FALSE for kubernetesContext's reason and one more. The
+// shared reason: switching it on grants the console pod a NEW RBAC verb set
+// (get/list/watch/patch on monitoring.coreos.com/prometheusrules, Role-scoped,
+// SECURITY.md §10.3) that an operator has to apply deliberately. The extra
+// one: the CRD may not exist at all -- the Prometheus Operator is not a
+// dependency of this chart -- and a reconciler that is on by default would
+// turn "no operator installed" into a permanent error state on a console that
+// never asked for alerting.
+//
+// The rules themselves live in PostgreSQL (alert_rules, M7 Task 1), so the
+// whole block is inert with database.mode=disabled -- cmd/console warns and
+// skips the reconciler rather than applying an empty bundle over whatever is
+// already there.
+type AlertingConfig struct {
+	// Enabled is the master gate.
+	Enabled bool `yaml:"enabled"`
+	// Namespace is the namespace the bundle object is applied into. Empty --
+	// the default -- means "the namespace this pod runs in", read from
+	// POD_NAMESPACE exactly the way kubernetesContext.namespace is.
+	//
+	// It is deliberately ONE namespace and deliberately the console's own:
+	// Decision 3 pins the grant to a Role + RoleBinding, and a Role cannot
+	// reach across namespaces. Pointing this elsewhere does not widen the
+	// grant, it just makes every apply fail with a forbidden that the
+	// reconciler will faithfully write into every rule's sync_message.
+	Namespace string `yaml:"namespace"`
+	// SyncInterval is the reconcile cadence. Sixty seconds because a reconcile
+	// is a single SSA of a few kilobytes and the loop exists to CONVERGE, not
+	// to react -- reacting is what Kick() is for, and every CRUD write through
+	// the API calls it, so this interval only ever covers drift somebody
+	// introduced out of band. It is jittered +/-20% in the loop so N replicas
+	// do not apply in lockstep.
+	//
+	// Spelled as a duration, not a *Ns integer: every other cadence in this
+	// file (scheduler.tickInterval, kubernetesContext.resyncInterval,
+	// mtr.enrichment.ttl) is a yaml duration, and the ns-integer convention
+	// belongs to the WIRE and the DATABASE (ADR: durations ns), not to
+	// operator-typed configuration.
+	SyncInterval time.Duration `yaml:"syncInterval"`
+	// BundleName is the name of the single PrometheusRule object the console
+	// owns. One object, not one per rule (M7 Task 2's RenderBundle): a single
+	// SSA target means drift is one comparison and a partial apply is
+	// impossible.
+	//
+	// It is configurable only so two consoles can share a namespace without
+	// fighting over the same object. Changing it on a live install ORPHANS the
+	// previous object -- the reconciler owns what it is pointed at and deletes
+	// nothing -- which is why the default is spelled out rather than derived
+	// from the release name.
+	BundleName string `yaml:"bundleName"`
+}
+
+// DefaultAlertingBundleName is the name of the console-owned PrometheusRule
+// object. Exported so the chart's RBAC docs and cmd/console's log line quote
+// one spelling.
+const DefaultAlertingBundleName = "kconmon-ng-console-rules"
+
+// DefaultAlertingSyncInterval is the reconcile cadence. See SyncInterval.
+const DefaultAlertingSyncInterval = 60 * time.Second
+
+// ResolveNamespace returns the namespace the bundle is applied into:
+// Namespace when set, else $POD_NAMESPACE, else "default". Called once at
+// startup by cmd/console -- never per reconcile.
+func (a *AlertingConfig) ResolveNamespace() string {
+	return resolveNamespace(a.Namespace)
+}
+
+// validate enforces alerting.* invariants, and like KubernetesContextConfig's
+// it only checks them when the feature is ON: a leftover zero in the values.yaml
+// of an operator who never switched the reconciler on must not be a boot
+// failure.
+func (a *AlertingConfig) validate() error {
+	if !a.Enabled {
+		return nil
+	}
+	if a.SyncInterval <= 0 {
+		return fmt.Errorf("alerting.syncInterval must be positive when alerting.enabled is true, got %v",
+			a.SyncInterval)
+	}
+	if a.BundleName == "" {
+		return errors.New("alerting.bundleName must not be empty when alerting.enabled is true")
+	}
+	// The name becomes a Kubernetes object name, so it is checked HERE rather
+	// than discovered as a rejected apply 60 seconds into the process's life.
+	// A boot error names the key; an apply rejection names nothing an operator
+	// can grep for.
+	if err := validateDNS1123Subdomain("alerting.bundleName", a.BundleName); err != nil {
+		return err
+	}
+	// The namespace is checked only when it is EXPLICIT: the resolved value
+	// comes from the downward API, which the apiserver already guarantees is a
+	// legal namespace name, and reading the environment during validation would
+	// make Validate impure.
+	if a.Namespace != "" {
+		if err := validateDNS1123Subdomain("alerting.namespace", a.Namespace); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// dns1123SubdomainMaxLen is the Kubernetes object-name bound (RFC 1123).
+const dns1123SubdomainMaxLen = 253
+
+// validateDNS1123Subdomain applies the Kubernetes object-name grammar
+// (lowercase alphanumerics, '-' and '.', starting and ending alphanumeric).
+// Hand-rolled rather than imported from k8s.io/apimachinery/pkg/util/validation
+// so internal/console/config keeps its zero-Kubernetes-import posture: this
+// package is loaded by every console test and by the config-lint path, and it
+// has no business dragging the apimachinery validation tree in for one grammar.
+func validateDNS1123Subdomain(field, value string) error {
+	bad := func() error {
+		return fmt.Errorf("%s must be a valid Kubernetes object name "+
+			"(lowercase alphanumerics, '-' or '.', starting and ending alphanumeric, at most %d characters), got %q",
+			field, dns1123SubdomainMaxLen, value)
+	}
+	if len(value) > dns1123SubdomainMaxLen {
+		return bad()
+	}
+	for i, r := range value {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
+		case (r == '-' || r == '.') && i > 0 && i < len(value)-1:
+		default:
+			return bad()
+		}
 	}
 	return nil
 }
@@ -519,6 +716,19 @@ func defaults() *Config {
 		// Same shape again: the gate stays off, the namespace stays empty (=
 		// resolve from POD_NAMESPACE), and the cadence is pre-defaulted.
 		KubernetesContext: KubernetesContextConfig{ResyncInterval: 10 * time.Minute},
+		// The key stays empty (= the documented keyless state) and only the
+		// cadence is pre-defaulted, so a console that turns webhooks and
+		// alerting on gets a working alert-transition watcher without a third
+		// line of config.
+		Webhooks: WebhooksConfig{AlertPollInterval: DefaultWebhookAlertPollInterval},
+		// Same shape once more: the gate stays off, the namespace stays empty
+		// (= resolve from POD_NAMESPACE), and both the cadence and the object
+		// name are pre-defaulted, so turning the reconciler on is a one-line
+		// change.
+		Alerting: AlertingConfig{
+			SyncInterval: DefaultAlertingSyncInterval,
+			BundleName:   DefaultAlertingBundleName,
+		},
 	}
 }
 
@@ -756,7 +966,10 @@ func (c *Config) Validate() error {
 	if err := c.KubernetesContext.validate(); err != nil {
 		return err
 	}
-	if err := c.Webhooks.validate(); err != nil {
+	if err := c.Webhooks.validate(c.Alerting.Enabled); err != nil {
+		return err
+	}
+	if err := c.Alerting.validate(); err != nil {
 		return err
 	}
 	return nil

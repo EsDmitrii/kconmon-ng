@@ -37,6 +37,62 @@ kubectl port-forward -n monitoring svc/monitoring-kube-prometheus-prometheus 909
 kubectl port-forward -n monitoring svc/monitoring-grafana 3000:80   # admin/admin
 ```
 
+### Optional: bring up the Console too
+
+Everything below works without it, and the Console section near the end of this
+walkthrough needs it. It is a second Deployment in the same release:
+
+```bash
+kubectl create secret generic console-webhook-key \
+  --from-literal=encryptionKey="$(openssl rand -base64 32)"
+
+helm upgrade -i kconmon-ng ./charts/kconmon-ng \
+  -f hack/values-local.yaml \
+  --set-string agent.image.tag=local \
+  --set-string controller.image.tag=local \
+  --set console.enabled=true \
+  --set console.replicas=1 \
+  --set console.valkey.mode=bundled \
+  --set console.database.mode=cnpg \
+  --set controller.events.enabled=true \
+  --set console.prometheus.url=http://monitoring-kube-prometheus-prometheus.monitoring:9090 \
+  --set console.alerting.enabled=true \
+  --set console.webhooks.encryptionKeySecret.name=console-webhook-key \
+  --wait --timeout 5m
+
+kubectl port-forward svc/kconmon-ng-console 8081:8080
+```
+
+Four things that flag matters for, so nothing below is a surprise:
+
+- **`console.database.mode=cnpg` needs the CloudNativePG operator** in the
+  cluster. Without a database the Console still serves topology, matrix and
+  Explore — but incidents, saved alert rules and the audit log all answer `503`,
+  and the alerting reconciler is skipped rather than running against nothing.
+  Use `external` with your own PostgreSQL if you prefer.
+- **`console.alerting.enabled=true` needs the `PrometheusRule` CRD**, which
+  kube-prometheus-stack installs. It also renders a namespaced `Role` letting
+  the Console write exactly that one resource, in this namespace.
+- **Your Prometheus must select the object the Console writes.**
+  `hack/local-test.sh` passes `ruleSelectorNilUsesHelmValues=false`, so this
+  stand's Prometheus picks up every `PrometheusRule` in every namespace. On a
+  stack that scopes `ruleSelector` by label, the Console's bundle will be
+  ignored until you widen it — the rules will show as `synced` and never fire,
+  which looks like a Console bug and is not one.
+- **This stand runs with `alertmanager.enabled=false`.** That is fine: the
+  Console's webhooks are dispatched by the Console itself off Prometheus' alert
+  state, not by Alertmanager.
+
+Default auth is anonymous-viewer, which is read-only. For the alert-rule step
+you need write permissions:
+
+```bash
+helm upgrade -i kconmon-ng ./charts/kconmon-ng --reuse-values \
+  --set console.auth.anonymous.role=admin
+```
+
+That is a demo shortcut on a disposable cluster, not a deployment pattern.
+
 ### Topology used in this run
 
 | node | zone | agent pod IP |
@@ -148,6 +204,120 @@ sustained loss.
 Timing summary for this run: loss visible in metrics within ~one scrape
 (15s + probe interval); alert `pending` ~26s after the break; `firing` after the
 5-minute hold.
+
+## The same break, through the Console
+
+Everything above is PromQL and Grafana. The same minute looks like this in the
+Console at <http://localhost:8081>.
+
+### Watch it go red on `/matrix`
+
+Open **Matrix**, protocol **UDP**. Five cells stay green and the
+`m02 → m03` cell turns red — the same single-cell failure the PromQL above
+proves, without writing a query. The badge in the top bar reads **Live** while
+the event stream is connected. Switch the protocol selector to TCP or ICMP and
+the same cell is green: the Console is showing you the protocol isolation, not
+just a red square.
+
+Clicking the cell opens the **pair card**: the pair's loss and RTT charts, its
+recent MTR path history, and a "Recent changes" rail of the topology and
+diagnostic events around it.
+
+### Correlate it on `/investigate`
+
+From the pair card, **Investigate**. The page arrives already scoped to
+`m02 → m03` over a window around now, and it assembles a merged timeline from
+every source it has permission and data for: the threshold crossing it derives
+from the loss series, the MTR path change, the diagnostic runs, topology and
+K8s events, audit writes, maintenance windows, annotations, and any firing
+alerts.
+
+Two things worth noticing rather than skipping past:
+
+- **The candidate-causes panel ranks by documented arithmetic**, not by
+  cleverness: class weight times a linear decay over the five minutes before
+  onset. A path change outranks a config write outranks a maintenance window,
+  and the threshold crossing itself scores zero — a symptom is not its own
+  cause. The rules are written down in
+  [`docs/console/product/INVESTIGATION.md`](../console/product/INVESTIGATION.md).
+- **Sources you have not enabled say so.** With `kubernetesContext` off, the
+  K8s-events row is one muted line naming the flag, not a silent absence you
+  could read as "nothing happened in the cluster".
+
+In this demo the honest answer is that nothing in the timeline caused it —
+you typed an iptables rule on a node, and the Console has no source that sees
+that. That is the correct outcome to see once: the ranking does not invent a
+culprit when there is none.
+
+Press **Save as incident**, give it a title, and the incident appears on
+Overview with a permalink that rehydrates this exact scope and window.
+
+### Declare an alert rule for it
+
+Open **Alerting** → **New rule**:
+
+- **Kind**: `pair-loss`
+- **Protocol**: `udp`
+- **Threshold**: `50` (percent — the builder takes operator units and converts
+  to the metric's ratio at render time)
+- **Scope**: source `kconmon-test-m02`, destination `kconmon-test-m03`
+- **For**: `2m` (shorter than the bundled rule's 5m so this demo does not
+  outlast your patience)
+- **Severity**: `warning`
+
+The **preview** panel renders the PromQL and runs it against Prometheus right
+now, reporting how many series it currently matches. That is the validation:
+there is no expression parser in this codebase, so "is this valid" is answered
+by the server that will evaluate it. While the blackhole is in place the
+preview matches the pair; after you revert it matches nothing.
+
+Save. The Console renders every enabled rule into **one** `PrometheusRule`
+object and server-side-applies it:
+
+```bash
+kubectl get prometheusrule kconmon-ng-console-rules -o yaml
+```
+
+The rule row shows `synced` with a timestamp. Prometheus picks the object up on
+its next config reload, and `/alerts` in the Console — and the Overview page's
+firing-alerts card — show it `firing` once the `for` window elapses. Pending
+alerts are deliberately not shown: inside `for`, nothing has fired.
+
+If the row shows `error` instead, the message's first word is the cause class:
+`crd-missing` (no Prometheus Operator), `forbidden` (the `Role` did not apply),
+or `other`. The rule stays in the database either way — a failed sync costs you
+the alerting, not the rule.
+
+### Get it delivered
+
+Settings → **Webhooks** → add an endpoint pointed at anything that will accept
+a POST, with `alert.fired` and `alert.resolved` selected. **Test** sends an
+incident-shaped probe that answers "can I reach you", and the row records the
+outcome verbatim.
+
+When the rule fires, the Console POSTs a signed payload — `X-Kconmon-Signature:
+sha256=…`, HMAC over the exact body bytes. When it stops firing, an
+`alert.resolved` follows with a `resolvedAt`.
+
+Two properties to know before you wire this to a pager:
+
+- **`resolvedAt` is only as precise as `console.webhooks.alertPollInterval`**
+  (30s by default). A resolution is detected by the alert's absence from a poll,
+  so the timestamp means "somewhere in the interval ending here".
+- **Every replica delivers.** There is no leader election on the watcher, so
+  `console.replicas: 2` means two copies of each edge. The payload carries a
+  stable `(event, ruleId, labels, firedAt)` tuple precisely so a receiver can
+  dedupe on it.
+
+### Adopt rules you already have
+
+If your cluster already has hand-written `PrometheusRule` objects in this
+namespace, **Alerting → Foreign rules** lists them read-only, and **Import**
+copies one into the builder. It never touches the object it read — which means
+that until you delete one of the two, **the same alerts now exist twice and
+both evaluate**. The import report says so, and lists every rule it skipped
+(recording rules, unparseable `for` values, names already taken) with the
+reason.
 
 ## Revert and recovery
 

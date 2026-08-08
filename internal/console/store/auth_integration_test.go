@@ -538,6 +538,69 @@ func TestListTokensNeverExposesHash(t *testing.T) {
 	}
 }
 
+// TestGetTokenByIDRoundTrip is the primitive ListTokens' full scan used to
+// stand in for on the mint path: one row, by id, with every field intact and
+// -- structurally, since store.Token has no field for it -- no hash. It also
+// pins the three boundaries a single-row lookup has to get right:
+// a well-formed id naming no row is ErrNotFound, a malformed id is a DISTINCT
+// error (never folded into ErrNotFound), and a REVOKED token is still
+// returned, because this is a lookup and not an admission decision -- the
+// mint-path caller (httpapi.resolveInheritedOwner) attributes a new token to
+// the parent's owner, and a parent being revoked does not make that
+// attribution wrong.
+func TestGetTokenByIDRoundTrip(t *testing.T) {
+	db, _ := newAuthDB(t)
+	ctx := context.Background()
+
+	expires := time.Now().Add(24 * time.Hour).UTC().Truncate(time.Millisecond)
+	created, err := db.CreateToken(ctx, "ci-runner", tokenHash("by-id"), "alice", &expires)
+	if err != nil {
+		t.Fatalf("CreateToken: %v", err)
+	}
+
+	got, err := db.GetTokenByID(ctx, created.ID)
+	if err != nil {
+		t.Fatalf("GetTokenByID(%s): %v", created.ID, err)
+	}
+	if got.ID != created.ID || got.Name != "ci-runner" || got.Owner != "alice" {
+		t.Errorf("GetTokenByID = %+v, want id/name/owner to match the created token %+v", got, created)
+	}
+	if got.ExpiresAt == nil || !got.ExpiresAt.Equal(expires) {
+		t.Errorf("GetTokenByID: ExpiresAt = %v, want %v", got.ExpiresAt, expires)
+	}
+	if got.RevokedAt != nil || got.LastUsedAt != nil {
+		t.Errorf("GetTokenByID on a fresh token: RevokedAt = %v, LastUsedAt = %v, want both nil", got.RevokedAt, got.LastUsedAt)
+	}
+
+	// A well-formed id that names no row: ErrNotFound.
+	const absent = "0e2a6b3c-1f4d-4a7b-9c8e-3d5f7a9b1c2e"
+	if _, err := db.GetTokenByID(ctx, absent); !errors.Is(err, store.ErrNotFound) {
+		t.Errorf("GetTokenByID(unknown uuid): err = %v, want ErrNotFound", err)
+	}
+
+	// A malformed id is NOT ErrNotFound (see the unit test in auth_test.go for
+	// the full table; this pins the distinction against a real database too,
+	// so the answer cannot differ between the pre-check and the query).
+	if _, err := db.GetTokenByID(ctx, "not-a-uuid"); err == nil || errors.Is(err, store.ErrNotFound) {
+		t.Errorf("GetTokenByID(malformed): err = %v, want a parse error that is not ErrNotFound", err)
+	}
+
+	// Revoked still resolves, with RevokedAt now set.
+	if err := db.RevokeToken(ctx, created.ID); err != nil {
+		t.Fatalf("RevokeToken: %v", err)
+	}
+	revoked, err := db.GetTokenByID(ctx, created.ID)
+	if err != nil {
+		t.Fatalf("GetTokenByID after revoke: %v", err)
+	}
+	if revoked.RevokedAt == nil {
+		t.Error("GetTokenByID after revoke: RevokedAt is nil, want it set")
+	}
+	if revoked.Owner != "alice" {
+		t.Errorf("GetTokenByID after revoke: Owner = %q, want it unchanged", revoked.Owner)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Audit log
 // ---------------------------------------------------------------------------

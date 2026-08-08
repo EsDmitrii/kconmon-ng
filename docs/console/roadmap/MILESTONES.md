@@ -9,7 +9,10 @@ as-built implementation (2026-08-08), with four plan deviations and the
 deferral list named rather than reconciled. M6 written from the as-built
 implementation (2026-08-08) — six plan deviations, including a narrower
 `kubectx` RBAC grant than the plan specified and a console-only ServiceAccount
-rather than a widened shared one.
+rather than a widened shared one. M7 written from the as-built implementation
+(2026-08-08) — ten plan deviations, two long-running carries closed, and the
+FINAL deferral ledger: M7 is the last planned milestone, so that list is what
+this project has not built rather than what is queued next.
 -->
 
 # Milestones
@@ -377,7 +380,9 @@ Deferred out of M6, deliberately and by name:
 - **Alert-fired webhooks** — dispatch fires on incident lifecycle only
   (`incident.created|resolved|reopened`), the one event class M6 itself
   introduces. The `events` column is a `TEXT[]` over a closed set, so widening
-  it in M7 is code plus a vocabulary entry, not a migration.
+  it in M7 is code plus a vocabulary entry, not a migration. **That prediction
+  held exactly**: M7 added `alert.fired`/`alert.resolved` with one const-list
+  edit and no migration.
 - **A delivery-log table** — one row per delivery is unbounded growth for
   marginal value. The outcome lives on the endpoint row (`last_status`,
   `last_attempt`, `failures`), the ledger is the console log, and `webhooks` is
@@ -390,7 +395,8 @@ Deferred out of M6, deliberately and by name:
 - **The timeline's "alert fired/resolved" row** — ships **empty and says so**
   (Decision 12): *"Alert state arrives with alerting (M7) — that is a missing
   engine, not a quiet fleet."* Carried as a visible, permanent note rather than
-  an absence.
+  an absence. **Closed in M7** — and only half of it: fired rows landed,
+  resolved rows never will (INVESTIGATION.md).
 - **A live WebSocket topic for incidents** — considered as a piggyback on the
   existing hub and **not built**. Incidents are polled: the Overview card and
   the cards' Related-incidents block are TanStack queries, and an incident open
@@ -399,17 +405,157 @@ Deferred out of M6, deliberately and by name:
 - **A maintenance bar on the Node card** — Pair, Target and Explore have one;
   Node does not. Not a decision about node scope, just a gap.
 - **Controller attribution of `topology_changed` events** — carried from M5,
-  untouched by M6, and still the single highest-value follow-up in this file.
-  Time Machine's topology fold stays structurally complete and empty in
-  practice until the controller stops throwing the agent snapshot away.
+  untouched by M6, and named here as the single highest-value follow-up in this
+  file. **M7 closed it** — see the M7 section below. It took two milestones of
+  carrying because the fix was not "add a field": a single event cannot name
+  three evicted nodes, so the emission shape had to become one event per
+  subject before the field had anywhere to go.
 - **A per-schedule continuous cadence field** — carried for the third
   milestone running.
 - **`check_results` partitioning** — still not done.
 
-**M7 — Alerting + polish.** PrometheusRule builder/sync/import, config
-export/import, command palette completion, a11y pass, docs, demo
-walkthrough extension (breaking-cni.md gains Console steps), README
-screenshots.
+**M7 — Alerting + polish (delivered).** One new table (`alert_rules`,
+migration `00007`), ten new routes, two new permissions (**25 total**), two new
+webhook events, two new pages, and chart **1.9.0**. The console **manages**
+Prometheus alert rules; Prometheus **evaluates** them, and nothing in the
+console ever decides that an alert fired.
+
+What shipped:
+
+- **The builder and the renderer.** Seven template kinds plus `raw`, rendered
+  by a pure, total function into deterministic PromQL. Every constant is named
+  in `internal/console/alerting/render.go` and pinned by byte-exact goldens;
+  ALERTING.md restates them and says the code wins.
+- **The reconciler.** Every enabled rule renders into **one** `PrometheusRule`
+  object, server-side-applied every 60s (jittered ±20%) and on every write.
+  Drift is **recorded, then fixed** in the same pass. Failure is a per-rule
+  status with a closed cause class, never a crash.
+- **Foreign rules and adoption.** `GET /alert-rules/foreign` lists what the
+  console did not write; `POST /alert-rules/import` **copies** one into builder
+  rows and **never mutates the foreign object** — so until an operator removes
+  one copy, the same alerts exist twice. Said plainly in the API, in the UI and
+  in ALERTING.md.
+- **Alert state and alert webhooks.** `GET /api/v1/alerts` projects the firing
+  set; `alert.fired`/`alert.resolved` deliver on a polled edge detector with
+  baseline-on-boot, freeze-on-failure and no leader election.
+- **Config export/import.** Versioned bundle v1, admin-only, dry-run first.
+- **The command palette** (`⌘K`), the **Settings** page, the **Alerting** page,
+  firing alerts on Overview, an alert row on the Investigate timeline.
+
+Deviations from the plan, each on evidence:
+
+- **No Prometheus parser dependency.** Decision 2 called for validating with
+  `prometheus/prometheus` as a library. It was not taken. Validation is **render
+  goldens plus a live preview that runs the expression against the real
+  Prometheus** — which is a stronger answer than a parser gives, because the
+  thing that will evaluate the rule is the thing that vets it. ALERTING.md §3.
+- **`cert-expiry` was DROPPED**, with grep evidence: no certificate-expiry
+  metric family exists anywhere in this codebase, so the template would have
+  rendered an alert that can never fire. Pinned by `ValidKind` and the
+  golden-coverage test. The migration's `CHECK` still lists the value, so a
+  legacy row lists and opens honestly; the builder just cannot create one.
+- **`agent-missing` is a controller-side count comparison** and
+  **`external-target-down` is a fail RATE**, both because the per-node /
+  success-series shapes the plan assumed do not exist in the exporter.
+- **`alert-editor` was granted `alerts:manage`** — a coordinator decision over
+  the uniform "statement writes stop at operator/admin" groove. The builtin had
+  sat as a placeholder since M3 waiting for exactly this permission; a role
+  named `alert-editor` that cannot edit an alert rule breaks its promise on
+  first click, and renaming it would break existing `role_bindings` rows and
+  `auth.anonymous.role` references. Pinned so narrowing it back is a conscious
+  diff.
+- **`GET /alert-rules/{id}/state` was not built.** Decision 6 sketched it;
+  `/alerts?managedOnly=true` covers it set-wise, and the decision was amended
+  rather than shipping a second read of the same upstream call.
+- **`GET /api/v1/alerts` answers `200` where `/matrix` answers `503`** on a
+  missing Prometheus. Deliberate, and the one intentional inconsistency in the
+  API's degradation rules — API.md and ALERTING.md §7.1 both state why.
+- **Adoption skips an unparseable `for`** rather than importing it as `0`. A
+  misread `5m` silently becoming fire-instantly is a 3am page nobody asked for.
+- **No leader election on the alert watcher.** N replicas deliver N copies of
+  every edge; a lock would trade duplicates for **missed** edges when the holder
+  dies. The dedupe key is documented for receivers.
+- **The palette does not jump to an arbitrary node, target or pair.** The
+  roadmap called the palette "completion"; it was built from scratch, and
+  object jumping needs a live object search, not a static registry. PAGES.md
+  §6.2 says so rather than implying it.
+- **`console.webhooks.alertPollInterval` was unreachable from Helm** until
+  chart 1.9.0 — the binary had the key and the default worked, but no value
+  rendered it. Closed here.
+
+Two carries closed, both long-running:
+
+- **Controller attribution of `topology_changed`** — carried from M5 through
+  M6 as "the single highest-value follow-up in this file", **closed in M7**. All
+  four emission sites attribute, one event per subject, carrying `nodeName`,
+  `agentId` and `zone`. Deregistration read the placement *before* the map
+  delete; eviction had already built the list and thrown it away. Pre-M7 rows
+  still fold to an honest empty and shrink with retention.
+- **WebSocket per-topic authorization** — M3 follow-up #10, carried to M7. `/ws`
+  is now the API's only `anyOf` route (`events:read` OR `runs:read`), with a
+  per-connection topic authorizer.
+
+Also in M7: `values.schema.json` closed at 44 chart-owned levels (which
+immediately exposed four keys the templates had always used and the schema
+never declared), two new chart-test profiles for the auth modes, and a **real
+nil-pointer class fixed** in the CNPG block — a `null` override of
+`console.database.cnpg` or any of its sub-blocks crashed rendering.
+
+### The final deferral ledger
+
+M7 is the last planned milestone, so this list is not "deferred to M8" — it is
+**what this project has not built**, stated once, in one place.
+
+- **OIDC provisioning items** — group-to-role auto-provisioning and
+  just-in-time user creation beyond the virtual-user model. Carried since M3.
+- **Alertmanager silences from maintenance windows.** There is still no
+  Alertmanager client anywhere in this repository. M6 deferred this on "a
+  window cannot silence what nothing evaluates"; M7 built the evaluator's
+  *input* and still did not build the client. A maintenance window renders on
+  charts and explains a degradation; **it suppresses nothing**.
+- **The `settings` table** — declined twice now, by M6 (for one webhook key)
+  and by M7 (for export/import, which reads the collections that exist). It is
+  **not pinned to any milestone**. The Settings page's About section renders
+  only what `GET /api/v1/config` already serves, and where the API serves
+  nothing — retention numbers — the page says so and names
+  `console.retention.*` rather than inventing a value.
+- **The `layouts` table** — saved topology layouts and pinned pairs. Named in
+  DATA.md §5.2 since M0, never pinned to a milestone, never built.
+- **`check_results` partitioning** — carried through M4, M5, M6 and M7. The
+  table has the growth profile that wants it and `ON DELETE CASCADE` plus the
+  retention sweep have been sufficient at the documented scale target.
+- **A browser-driven smoke suite.** This is a **commitment**, not a gap in
+  scope — see the honest note below. Vitest + jsdom covers components and
+  pages, Go e2e covers the served API against a real `kind` cluster, and a
+  human still loads the pages before a milestone closes.
+- **The DNS-resolution-change timeline source.** Named in §7.6 since M0 and
+  never built, because nothing in the fleet records a resolution result over
+  time: no table, no API, no agent check. It is design intent in that bullet
+  list, and INVESTIGATION.md says so.
+- **A live WebSocket topic for incidents** — and now for alerts too. Both are
+  polled. An incident open for three days does not become more legible at
+  minute resolution, and the firing set is a read the Overview card refetches.
+- **A maintenance bar on the Node card.** Pair, Target and Explore have one;
+  Node still does not (`web/src/pages/node-card.tsx` has no maintenance
+  affordance). Carried from M6 and not picked up by M7's polish pass. Not a
+  decision about node scope — still just a gap.
+- **A per-schedule continuous cadence field** — carried for the fourth
+  milestone running.
+- **A delivery-log table for webhooks.** The outcome stays on the endpoint row.
+- **`GET /alert-rules/{id}/state`** — see the deviations above; covered
+  set-wise by `/alerts?managedOnly=true`.
+- **A server-advertised `metricsPrefix` capability.** M7 fixed the prefix
+  problem **server-side** — the renderer is built from `config.metricsPrefix`
+  and a hardcoded-default renderer is impossible to construct — but the
+  frontend still writes `kconmon_ng_*` literally in `matrix-promql.ts`,
+  `curated-metrics.ts` and the pair card, and the Grafana dashboards in
+  `dashboards/` do the same. On a custom prefix those surfaces come back
+  **empty rather than wrong**, which is the visible failure, not the silent
+  one. Named in the M5 carry-forwards and still open.
+- **Alert rule scoping on the Investigate timeline.** `/api/v1/alerts` takes no
+  scope filter, and filtering client-side on labels would silently hide rules
+  grouped differently from the way a scope is expressed. The source is
+  deliberately unscoped; flagged for the QA phase rather than guessed at.
 
 DoD per milestone: unit tests, e2e in `e2e/` (extend the CI harness — `kind`
 via `helm/kind-action@v1` in `.github/workflows/e2e.yaml`, **not** Minikube;
@@ -425,17 +571,20 @@ as a description of something in place, which is the worst kind of
 documentation error: it tells a reviewer a gate exists that would have caught
 nothing.
 
-What actually covers the UI today, through M5:
+What actually covers the UI today, through M7:
 
 - **Component and page tests with Vitest + Testing Library** (jsdom),
   colocated as `web/src/pages/*.test.tsx` and run by `npm test`. Every page
   shipped since M1 has one — the M4 pages (`targets.tsx`, `target-card.tsx`)
   and the M5 surfaces (`mtr.tsx`, the three `mtr-*` components, `timemachine`,
   `annotations`, and the per-surface `*.timemachine.test.tsx` /
-  `*.annotations.test.tsx` files) included.
+  `*.annotations.test.tsx` files) included, plus the M6 investigation surfaces
+  and the M7 pages (`alerting.tsx`, `settings.tsx`, `commands.ts`).
 - **Go e2e against a real `kind` cluster** (`e2e/console_test.go`), which
   exercises the served API and the degraded-mode paths but not the rendered
-  DOM.
+  DOM. The Prometheus Operator is **not** installed in the `kind` harness, so
+  any alerting coverage there has to apply the `PrometheusRule` CRD manifest
+  itself.
 - **Manual browser smoke**, the M3 precedent: a human loads the pages against
   a local install before the milestone closes.
 

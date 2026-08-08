@@ -63,15 +63,20 @@ func newTopologyServer(t *testing.T, ctrlURL string, history httpapi.TopologyHis
 
 // seededHistory is the snapshot every happy-path test folds to: two nodes, two
 // agents, a retention floor well before the instants asked about.
+//
+// It carries zones because the M7 controller attributes them, which is what
+// lets a reconstructed map draw the same zone lanes as the live one. The two
+// unfoldable events are the pre-M7 rows still inside the same retention
+// window -- a real upgraded console's history is exactly this mixture.
 func seededHistory() *fakeTopologyHistory {
 	return &fakeTopologyHistory{snap: store.TopologySnapshot{
 		Nodes: []store.TopologyNode{
-			{Name: "node-a", Ready: true},
-			{Name: "node-b", Ready: true},
+			{Name: "node-a", Zone: "zone-a", Ready: true},
+			{Name: "node-b", Zone: "zone-b", Ready: true},
 		},
 		Agents: []store.TopologyAgent{
-			{ID: "agent-a", NodeName: "node-a"},
-			{ID: "agent-b", NodeName: "node-b"},
+			{ID: "agent-a", NodeName: "node-a", Zone: "zone-a"},
+			{ID: "agent-b", NodeName: "node-b", Zone: "zone-b"},
 		},
 		LastChange:       time.Date(2026, 8, 5, 9, 0, 0, 0, time.UTC),
 		OldestRetained:   time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC),
@@ -154,12 +159,21 @@ func TestTopologyAtFoldsAndMarksTheResponseHistorical(t *testing.T) {
 	if len(got.Nodes) != 2 || got.Nodes[0].Name != "node-a" || !got.Nodes[0].Ready {
 		t.Errorf("nodes = %+v, want the folded pair", got.Nodes)
 	}
-	// The two fields no event ever records must come back EMPTY, not guessed.
-	if got.Nodes[0].Zone != "" {
-		t.Errorf("node zone = %q, want empty: zone is not reconstructible", got.Nodes[0].Zone)
+	// Zone is attributed, so it must reach the response under the SAME key the
+	// live passthrough uses -- one frontend type reads both bodies, and a
+	// reconstruction that dropped the zone would collapse every node into one
+	// nameless lane on the map.
+	if got.Nodes[0].Zone != "zone-a" || got.Nodes[1].Zone != "zone-b" {
+		t.Errorf("node zones = %q/%q, want zone-a/zone-b from the folded events",
+			got.Nodes[0].Zone, got.Nodes[1].Zone)
 	}
-	if len(got.Agents) != 2 || got.Agents[0].PodIP != "" || got.Agents[0].Zone != "" {
-		t.Errorf("agents = %+v, want podIP and zone empty: neither is reconstructible", got.Agents)
+	// podIP is the one field no event records at any version: still empty,
+	// never guessed.
+	if len(got.Agents) != 2 || got.Agents[0].PodIP != "" {
+		t.Errorf("agents = %+v, want podIP empty: it is not reconstructible", got.Agents)
+	}
+	if got.Agents[0].Zone != "zone-a" {
+		t.Errorf("agent zone = %q, want zone-a", got.Agents[0].Zone)
 	}
 	if got.Agents[0].ID != "agent-a" || got.Agents[0].NodeName != "node-a" {
 		t.Errorf("agent[0] = %+v, want agent-a on node-a", got.Agents[0])
@@ -207,6 +221,134 @@ func TestTopologyAtEmptyFoldStillServes200(t *testing.T) {
 		`"asOf":"2026-08-02T00:00:00Z","eventsFolded":3,"unfoldableEvents":3,"truncated":false}` + "\n"
 	if got := rec.Body.String(); got != wantBody {
 		t.Errorf("body = %q, want %q", got, wantBody)
+	}
+}
+
+// timelineHistory answers each instant with the membership that held at it --
+// the attributed-history behaviour the M7 controller finally makes possible.
+// The fold itself is proven over real records in the store package
+// (TestFoldTopologyPrefixesGiveTheMembershipAtEachInstant); what belongs HERE
+// is that the handler asks about the instant it was given and serves back
+// whatever that instant folded to, unmixed between requests.
+type timelineHistory struct {
+	byInstant map[time.Time]store.TopologySnapshot
+	askedA    []time.Time
+}
+
+func (h *timelineHistory) TopologyAt(_ context.Context, at time.Time) (store.TopologySnapshot, error) {
+	h.askedA = append(h.askedA, at)
+	snap, ok := h.byInstant[at.UTC()]
+	if !ok {
+		return store.TopologySnapshot{}, errors.New("test timeline has no entry for that instant")
+	}
+	return snap, nil
+}
+
+// TestTopologyAtWalksAJoinAndALeaveAcrossThreeInstants is the carry's payoff at
+// the API surface: node-b joins, then leaves, and ?at= before / between /
+// after must show three different node sets instead of the empty one every
+// instant returned while the controller published unattributed events.
+func TestTopologyAtWalksAJoinAndALeaveAcrossThreeInstants(t *testing.T) {
+	floor := time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)
+	t1 := time.Date(2026, 8, 5, 10, 0, 0, 0, time.UTC) // node-b joins
+	t2 := time.Date(2026, 8, 5, 12, 0, 0, 0, time.UTC) // node-b leaves
+
+	nodeA := store.TopologyNode{Name: "node-a", Zone: "zone-a", Ready: true}
+	nodeB := store.TopologyNode{Name: "node-b", Zone: "zone-b", Ready: true}
+	snap := func(last time.Time, folded int, nodes ...store.TopologyNode) store.TopologySnapshot {
+		return store.TopologySnapshot{
+			Nodes: nodes, Agents: []store.TopologyAgent{}, LastChange: last,
+			OldestRetained: floor, EventsFolded: folded,
+		}
+	}
+
+	before := t1.Add(-time.Hour)
+	between := t1.Add(time.Hour)
+	after := t2.Add(time.Hour)
+
+	history := &timelineHistory{byInstant: map[time.Time]store.TopologySnapshot{
+		before:  snap(floor, 1, nodeA),
+		between: snap(t1, 2, nodeA, nodeB),
+		after:   snap(t2, 3, nodeA),
+	}}
+	srv := newTopologyServer(t, "", history)
+
+	for _, tc := range []struct {
+		name  string
+		at    time.Time
+		nodes []string
+	}{
+		{"before the join", before, []string{"node-a"}},
+		{"between the join and the leave", between, []string{"node-a", "node-b"}},
+		{"after the leave", after, []string{"node-a"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := do(t, srv, http.MethodGet,
+				"/api/v1/topology?at="+url.QueryEscape(tc.at.Format(time.RFC3339)), "")
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status %d: %s", rec.Code, rec.Body)
+			}
+
+			var got struct {
+				Nodes []struct {
+					Name string `json:"name"`
+					Zone string `json:"zone"`
+				} `json:"nodes"`
+				Historical       bool `json:"historical"`
+				UnfoldableEvents int  `json:"unfoldableEvents"`
+			}
+			if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+				t.Fatalf("unmarshal %s: %v", rec.Body, err)
+			}
+
+			names := make([]string, 0, len(got.Nodes))
+			for _, n := range got.Nodes {
+				names = append(names, n.Name)
+			}
+			if strings.Join(names, ",") != strings.Join(tc.nodes, ",") {
+				t.Errorf("nodes at %v = %v, want %v", tc.at, names, tc.nodes)
+			}
+			if !got.Historical {
+				t.Error("historical = false on an ?at= response")
+			}
+			// The whole point of attribution: a non-empty set with NOTHING
+			// counted as unfoldable. An empty set plus a big counter is the
+			// pre-M7 answer, and it must not come back.
+			if got.UnfoldableEvents != 0 {
+				t.Errorf("unfoldableEvents = %d, want 0 for fully attributed history", got.UnfoldableEvents)
+			}
+		})
+	}
+
+	if len(history.askedA) != 3 {
+		t.Errorf("store consulted %d times, want once per instant", len(history.askedA))
+	}
+}
+
+// TestTopologyAtPreM7HistoryStillFoldsToTheHonestEmpty keeps the OTHER half of
+// the contract pinned. Attribution does not rewrite rows already on disk: an
+// instant whose window holds only pre-M7 events folds to an empty node set
+// with every row counted unfoldable, and that must stay a 200 carrying the
+// counter -- it is what the UI's honest-empty note quotes.
+func TestTopologyAtPreM7HistoryStillFoldsToTheHonestEmpty(t *testing.T) {
+	history := &fakeTopologyHistory{snap: store.TopologySnapshot{
+		Nodes:            []store.TopologyNode{},
+		Agents:           []store.TopologyAgent{},
+		OldestRetained:   time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC),
+		EventsFolded:     417,
+		UnfoldableEvents: 417,
+	}}
+	srv := newTopologyServer(t, "", history)
+
+	rec := do(t, srv, http.MethodGet, "/api/v1/topology?at=2026-08-02T00:00:00Z", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body)
+	}
+	if !strings.Contains(rec.Body.String(), `"unfoldableEvents":417`) {
+		t.Errorf("body = %s, want the unfoldable counter reported verbatim", rec.Body)
+	}
+	if !strings.Contains(rec.Body.String(), `"nodes":[]`) {
+		t.Errorf("body = %s, want an empty nodes ARRAY, never null", rec.Body)
 	}
 }
 

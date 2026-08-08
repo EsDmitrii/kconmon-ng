@@ -260,10 +260,13 @@ func TestWebhookInvalidInputNeverReachesTheDatabase(t *testing.T) {
 		t.Fatal("CreateWebhook(file:// url) succeeded, want a validation error")
 	}
 
+	// alert.acknowledged, not alert.fired: M7 widened the closed set to the
+	// two real alert events, so the probe for "outside the set" moved with it
+	// (the unit twin in webhooks_test.go made the same M7 move).
 	worse := webhookInput("ops-slack")
-	worse.Events = []string{"alert.fired"}
+	worse.Events = []string{"alert.acknowledged"}
 	if _, err := db.CreateWebhook(ctx, worse); err == nil {
-		t.Fatal("CreateWebhook(alert.fired) succeeded, want the closed event set to reject it")
+		t.Fatal("CreateWebhook(alert.acknowledged) succeeded, want the closed event set to reject it")
 	}
 
 	hooks, err := db.ListWebhooks(ctx)

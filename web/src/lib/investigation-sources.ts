@@ -1,5 +1,6 @@
 import type { RankedCause, SignalSample, TimelineEntry, TimelineKind } from "./investigation";
 import type {
+  Alert,
   Annotation,
   AuditEntry,
   Incident,
@@ -195,16 +196,20 @@ export type PinKind = PinnedRef["kind"];
 /**
  * PIN_KIND_BY_TIMELINE_KIND maps a timeline row's class onto that closed set.
  *
- * Two of the eight are deliberately UNPINNABLE, and `null` is the honest answer
- * rather than a fallback kind:
+ * Three of the nine are deliberately UNPINNABLE, and `null` is the honest
+ * answer rather than a fallback kind:
  *   - `maintenance` — a declared window lives in maintenance_windows, a table
  *     the pin vocabulary has no member for. Pinning it as, say, "annotation"
  *     would store an id that resolves to nothing.
  *   - `threshold` — a derived row. Its "id" is a synthetic signal:direction:
  *     instant string computed from a PromQL response; there is no row anywhere
  *     to point at, and re-deriving it needs the query, not the id.
- * The UI hides the pin toggle on both rather than offering a control the server
- * would reject.
+ *   - `alert` (M7 Task 8) — the same problem one step further out: a firing
+ *     alert lives in PROMETHEUS, not in any table this console owns, and its
+ *     id here is a fingerprint of the label set. It also stops existing the
+ *     moment the alert resolves, so a pin would dangle by design.
+ * The UI hides the pin toggle on all three rather than offering a control the
+ * server would reject.
  *
  * `path-change` is the one RENAME: the timeline calls the class what an
  * operator calls it, and the store names the TABLE the id came from
@@ -219,6 +224,7 @@ export const PIN_KIND_BY_TIMELINE_KIND: Record<TimelineKind, PinKind | null> = {
   k8s: "k8s",
   maintenance: null,
   threshold: null,
+  alert: null,
 };
 
 /** pinKey is the identity a pinned list is deduped and toggled by: the store
@@ -670,6 +676,120 @@ export function maintenanceEntries(windows: MaintenanceWindow[]): TimelineEntry[
     });
   }
   return out;
+}
+
+/* ── source 9: firing alerts (M7 Task 8, plan Decision 6) ────────────────── */
+
+/** ALERT_SEVERITY maps Prometheus's severity LABEL onto the timeline's three
+ *  levels. The label is a free string (a foreign rule may carry anything, or
+ *  nothing), so an unrecognised value reads as info rather than as an error —
+ *  the console does not know what somebody else's word means, and colouring it
+ *  red on a guess would be a claim it cannot support. */
+const ALERT_SEVERITY: Record<string, TimelineEntry["severity"]> = {
+  critical: "error",
+  warning: "warn",
+  info: "info",
+};
+
+/** alertLabelLine renders the label set deterministically (sorted by key) so
+ *  the same alert produces the same line — and the same ref id — on every
+ *  render and in every permalink. */
+function alertLabelLine(labels: Record<string, string>): string {
+  return Object.keys(labels)
+    .sort()
+    .map((k) => `${k}=${labels[k]}`)
+    .join(" ");
+}
+
+/**
+ * alertEntries: the alerts Prometheus is firing NOW, placed on the window.
+ *
+ * THE HONESTY THIS SOURCE IS BUILT AROUND. GET /api/v1/alerts serves current
+ * state and nothing else — no alert history endpoint exists anywhere in this
+ * system — so this mapper can only say what is firing at fetch time, and it
+ * says exactly that in two shapes:
+ *
+ *   - `activeAt` INSIDE the window → one row at activeAt. This alert started
+ *     during the investigation, which is the fact a timeline wants.
+ *   - `activeAt` BEFORE the window → one row at `from`, titled "already firing
+ *     when this window opens". The row is deliberately NOT at the instant it
+ *     names, so the detail spells the true start out in ISO — an operator
+ *     reading a local clock in the left column must not be able to mistake the
+ *     displaced row for a start inside the window.
+ *
+ * There are NO resolved rows, and their absence is a decision rather than an
+ * omission: nothing records when an alert stopped. An alert missing from this
+ * response might have resolved a second ago or an hour ago, or have never
+ * fired in this window at all, and synthesizing a "resolved" row from an
+ * absence would date an event that was never observed. The page's source note
+ * states this out loud.
+ *
+ * PENDING alerts are dropped: pending is not fired (the same line the webhook
+ * contract draws), and `activeAt` on a pending alert is when it went ACTIVE,
+ * not when it fired — a row from it would be an early lie about a state that
+ * may never arrive. An alert with no `activeAt` is dropped too: there is no
+ * instant to place it at, and `from` is a claim, not a default.
+ *
+ * `to` bounds the future edge: an alert that started after the window closed
+ * belongs to a different investigation.
+ */
+export function alertEntries(alerts: Alert[], from: Date, to: Date): TimelineEntry[] {
+  const out: TimelineEntry[] = [];
+  for (const a of alerts) {
+    if (a.state !== "firing") continue;
+    const started = a.activeAt === undefined ? null : validAt(a.activeAt);
+    if (started === null || started.getTime() > to.getTime()) continue;
+
+    const labels = alertLabelLine(a.labels);
+    const severity = ALERT_SEVERITY[a.severity] ?? "info";
+    const before = started.getTime() < from.getTime();
+    out.push({
+      at: before ? from : started,
+      kind: "alert",
+      severity,
+      title: before ? `Alert ${a.name} — already firing when this window opens` : `Alert firing: ${a.name}`,
+      detail: before
+        ? `${a.severity === "" ? "no severity" : a.severity} · firing since ${started.toISOString()} · ${labels}`
+        : `${a.severity === "" ? "no severity" : a.severity} · ${labels}`,
+      /* The identity is the SERIES, not the rule: one rule fires once per label
+         set, and keying on ruleId (or on the name) would let mergeTimeline
+         dedupe two genuinely different firing pairs into one row. */
+      ref: { kind: "alert", id: `${a.name}{${labels}}` },
+    });
+  }
+  return out;
+}
+
+/**
+ * scopeFromAlertLabels reads an investigation scope out of an alert's labels,
+ * or null when they name nothing this page can open.
+ *
+ * The label names are the probe metrics' own (internal/metrics/prometheus.go,
+ * restated in internal/console/alerting/render.go's groupBy lists), which is
+ * why a rule built from a template lands here with a usable scope for free and
+ * a raw expression only does so if its author grouped by the same labels.
+ *
+ * NULL IS THE POINT. A link built from labels that do not name an object opens
+ * an investigation of something that does not exist — an empty timeline that
+ * reads as a quiet fleet. The three shapes below are the only ones the label
+ * set can support, and everything else gets no link rather than a wrong one:
+ *   - source_node + destination_node → the pair
+ *   - source_node alone              → that node
+ *   - target alone                   → that external target
+ * A destination_node with no source is deliberately NOT a node scope: the node
+ * kind asks the peer metric family as a SOURCE, so it would silently answer a
+ * different question. An empty label VALUE is an absent label, never a scope
+ * named "".
+ */
+export function scopeFromAlertLabels(labels: Record<string, string>): InvestigationScope | null {
+  const at = (key: string): string => labels[key] ?? "";
+  const source = at("source_node");
+  const destination = at("destination_node");
+  const target = at("target");
+  if (source !== "" && destination !== "") return { kind: "pair", a: source, b: destination };
+  if (source !== "") return { kind: "node", a: source, b: "" };
+  if (target !== "") return { kind: "target", a: target, b: "" };
+  return null;
 }
 
 /**

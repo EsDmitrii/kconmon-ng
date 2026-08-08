@@ -1,0 +1,38 @@
+---
+# Console + auth.mode=header values for chart testing (M3 carry, the second
+# half of the auth gap: header mode had no profile at all).
+#
+# Header mode is the ONLY non-anonymous mode that renders with
+# console.database.mode=disabled — identity comes from a header a trusted
+# in-cluster reverse proxy sets, there is no session cookie, no users table and
+# no bootstrap admin — so this profile deliberately leaves the database OFF.
+# That is the render shape no other console profile has: a non-anonymous
+# auth.mode with NO projected Secret volume and NO database egress rule.
+#
+# trustedProxyCIDRs is the point of the profile. It is REQUIRED and non-empty
+# both in the chart (templates/console/configmap.yaml fails on an empty list)
+# and in the binary (config.go's HeaderConfig.validate), because an empty list
+# would turn an unauthenticated request header into an authentication bypass:
+# any client could send X-Remote-User and be anyone. A ci profile that is
+# merely renderable is not enough here — this one must be VALID, so the CIDRs
+# below are real, parseable ones (a pod CIDR and its IPv6 counterpart).
+console:
+  enabled: true
+  replicas: 2
+  auth:
+    mode: header
+    header:
+      # All four non-default on purpose, so each is proven to reach the
+      # rendered config.yaml rather than matching the chart default by
+      # coincidence.
+      userHeader: X-Forwarded-User
+      groupsHeader: X-Forwarded-Groups
+      groupsDelimiter: "|"
+      trustedProxyCIDRs:
+        - 10.42.0.0/16
+        - fd00:10:42::/48
+    defaultRole: viewer
+  prometheus:
+    url: http://prometheus-operated.monitoring:9090
+networkPolicy:
+  enabled: true

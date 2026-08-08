@@ -7,7 +7,10 @@ Source: extracted from root DESIGN.md §6.2–6.4 in M0 (2026-07-14); §6.4 and
 web/src/hooks/use-run.ts. §6.3, §7.5 and §7.x Annotations written from the
 as-built M5 implementation (2026-08-08): web/src/lib/{timemachine.tsx,
 annotations.ts}, web/src/components/{timemachine-bar,annotations}.tsx,
-web/src/pages/{mtr,topology,live,explore}.tsx.
+web/src/pages/{mtr,topology,live,explore}.tsx. §7.11, §7.12, the §6.2 palette
+block and the §6.3/§6.1 as-built corrections written from the as-built M7
+implementation (2026-08-08): web/src/pages/{alerting,settings,overview}.tsx,
+web/src/lib/commands.ts, internal/console/events/live_event.go.
 This document is the source of truth for Pages & Navigation. Update it (and the ADRs) in the same PR as any deviation.
 -->
 
@@ -25,15 +28,50 @@ This document is the source of truth for Pages & Navigation. Update it (and the 
 ├── Diagnostics          run checks, run history
 ├── Targets & Schedules  external targets, definitions, schedules
 ├── Explore              curated metrics + A/B compare
-├── Alerting             rule list + builder
+├── Alerting             rule list + builder + foreign rules (§7.11)
 ├── Console              PromQL dev-tools
-└── Settings             auth, RBAC, retention, maintenance, webhooks, export/import
+└── Settings             webhooks, export/import, read-only deployment info (§7.12)
 ```
 
-Command palette (`⌘K`): jump to any node/target/pair, run a check, start an
-investigation, create alert/maintenance/annotation, toggle Time Machine,
-switch theme. Palette actions are the same registry the UI buttons use —
-every action gets a palette entry for free.
+**The Settings line above is narrower than the M0 draft promised**, and the
+difference is recorded rather than quietly corrected: `auth`, `RBAC`,
+`retention` and `maintenance` are **not** on the page. RBAC has an API
+(`/api/v1/rbac/*`) and no UI; retention is `console.database.retentionDays`, a
+Helm value with no runtime setter; maintenance windows are created where they
+are used, on Explore's global-scope bar. See §7.12.
+
+**Command palette (`⌘K` / `Ctrl-K`) — delivered in M7.** Hand-rolled
+(`web/src/lib/commands.ts` for the registry and the scoring,
+`web/src/components/command-palette.tsx` for the overlay), no palette or fuzzy
+library. What it holds:
+
+- **Navigation** — one entry per nav item, built from `web/src/nav.ts` itself,
+  so a label or a description can never drift away from the sidebar. The query
+  matches the description too, not only the label.
+- **Actions**, each a deep link to the page that already owns the affordance,
+  not a form inside the overlay: run a diagnostic check (`/diagnostics`), start
+  an investigation (`/investigate`), create an alert rule (`/alerting`),
+  declare a maintenance window and add an annotation (both `/explore`, where
+  the global-scope bars live).
+- **View** — switch theme, and the Time Machine pair: *Return to Live* while
+  engaged, and while Live an entry that OPENS the Time Machine picker. The
+  palette deliberately does not engage at an instant of its own choosing —
+  picking "an hour ago" for you would be inventing the answer to the only
+  question that matters.
+
+Gating follows the console-wide split: permissions **hide** an entry
+(`alerts:manage`, `maintenance:write`, `annotations:write`, `runs:create`), the
+Time Machine **disables** the create actions in place with a "Live only" tag.
+Ranking is word-boundary-prefix > substring > keyword, every word of a
+multi-word query must match, ties broken by title.
+
+**Not as originally drafted, and worth saying plainly:** this is a registry the
+palette OWNS. The sidebar links, the page buttons and the annotation /
+maintenance bars were not migrated onto it, so an action does *not* get a
+palette entry "for free" — each one is listed here by hand. Jumping to an
+arbitrary node/target/pair is also absent: that needs a live object search, not
+a static registry, and it is not in M7. What the palette does share is
+navigation, which is generated from `nav.ts`.
 
 ### 6.3 Time Machine (global time context)
 
@@ -60,15 +98,34 @@ the two hooks, and the three named limitations — is
   URL while the context keeps the value, because Decision 9 deliberately did
   not adopt router search params.
 
-**The Topology page's historical view is honest about being empty.** The
-controller shipped with this release publishes `topology_changed` with a reason
-and no node or agent identity, so a fold over its events reconstructs nothing.
-The page does not render that as an empty cluster: it reads the server's own
-`unfoldableEvents`/`eventsFolded` counters and says it found *N* events at or
-before that instant and could fold *M* of them — a statement about what the
-controller records, not about the instant you picked. A separate card appears
-when the fold hit its 100 000-row guard (`truncated`), because a partial fold
-is a wrong fold.
+**The Topology page's historical view reconstructs a real cluster now — M7
+closed the carry.** Through M6 the controller published `topology_changed` with
+a reason and no node or agent identity, so a fold over its events reconstructed
+nothing, and this section said so. M7 attributes every change at all four
+emission sites — register, zone update, deregister and stale eviction — as
+**one event per affected agent** carrying `nodeName`, `agentId` and `zone`. A
+single event cannot name three evicted nodes, which is exactly why the old fold
+never worked.
+
+What the page still says out loud, and should:
+
+- **Events written by an earlier controller are unfoldable.** They carry a
+  reason and nobody's name, they cannot be repaired retroactively, and they age
+  out with retention. The page reads the server's own
+  `eventsFolded`/`unfoldableEvents` counters and reports both, so a thin
+  historical view is legible as "the controller was not recording this yet"
+  rather than as "the cluster was empty". That counter shrinks on its own.
+- The copy blames the **age of the events**, not the running controller. The
+  pre-M7 wording would have sent an operator hunting a bug that is already
+  fixed, and a pin asserts the old phrasing is gone.
+- The fold's zone rule: a **stated** zone wins, an **omitted** one leaves the
+  known zone alone (pre-M7 rows have no zone key at all, and overwriting with
+  `""` would blank lanes at random), and a removal clears it so a rejoin starts
+  fresh.
+- A separate card still appears when the fold hit its 100 000-row guard
+  (`truncated`), because a partial fold is a wrong fold.
+- `podIP` is still never recorded by any event type and comes back empty on
+  every folded entry.
 
 Implementation note: this is why §4.1 persists `topology_events` — the
 controller only knows *now*.
@@ -76,7 +133,8 @@ controller only knows *now*.
 ### 6.1 Overview — the placeholders, and which one is left
 
 The Overview shipped in M1 with three panels drawn as honest placeholders
-rather than fabricated rows. **M6 resolved two of them and left the third.**
+rather than fabricated rows. M6 resolved two of them; **M7 resolved the last
+one and `LaterMilestone` is now deleted from the page.**
 
 - **Recent events** now reads `GET /api/v1/events`, the API that had existed
   since M3. The deferral chain ends here: the panel was carried as "still an
@@ -88,14 +146,26 @@ rather than fabricated rows. **M6 resolved two of them and left the third.**
 - **Open incidents** is new in M6: the newest five still-open incidents, each
   row a permalink (`/investigate?incident={id}`). There is no incident *page* —
   the permalink hydrates Investigate from the saved row.
-- **Firing alerts stays a placeholder**, and deliberately: nothing evaluates
-  rules until M7, so a panel here would either be empty in a way that reads as
-  "the fleet is fine" or would fabricate rows. `LaterMilestone` still renders
-  it, untouched.
+- **Firing alerts is real in M7.** It reads `GET /api/v1/alerts` with **no**
+  `managedOnly` filter — this is the fleet's morning view, and an alert somebody
+  else wrote is still firing at you. Unmanaged rows carry a badge and never
+  link anywhere the console cannot go. Sorted by severity, ties broken
+  **oldest-first**, so the alert nobody has dealt with does not drift off the
+  bottom. Capped at 8 with the remainder stated rather than silently dropped.
+  Four honest states, and they are four because "nothing is firing" and "nobody
+  is watching" are different sentences: Prometheus unconfigured (`200`,
+  `promConfigured: false`), Prometheus failing (the `502` detail, verbatim),
+  nothing firing, and rows. **Pending alerts are excluded** — the same line the
+  webhook contract draws, because inside a rule's `for` window nothing has
+  fired.
+  Each row links into `/investigate` **only when its labels support a scope**,
+  through a pure `scopeFromAlertLabels`: a destination with no source is
+  deliberately *not* treated as a node scope, because it would scope the
+  investigation to the wrong end of the pair.
 
-Both new panels are **fully gated**: no permission means no request and a muted
-one-line note (`incidents:read`, `events:read`), and a database-less console
-says so instead of erroring.
+All three panels are **fully gated**: no permission means no request and a muted
+one-line note (`incidents:read`, `events:read`, `alerts:read`), and a
+database-less console says so instead of erroring.
 
 ### 7.6 Investigate — the entry contract
 
@@ -376,12 +446,91 @@ opaque keyset-cursor "Load older" convention as Diagnostics' run history and
 other two limits remain as of M5: the feed's `check_observed` entries are
 on-demand diagnostic completions, not continuous background probes — those
 never reach the controller (see [WEBSOCKET.md](../architecture/WEBSOCKET.md)
-"Payloads"). And `topology_changed` rows **still** always read scope `cluster`,
-because the controller does not yet attribute a registry change to a node —
-the same gap that makes M5's historical topology fold empty (§6.3).
+"Payloads"). The second limit **closed in M7**: `topology_changed` rows carry
+`nodeName`, `agentId` and `zone` from all four emission sites, one event per
+affected agent, and the feed's scope is now that node name — `cluster` is what
+is left when the row names nobody, which is what a pre-M7 row does (§6.3). Old
+rows keep their old shape and age out with retention.
 
 **Time Machine scrollback landed in M5.** Engaging `?at=` turns this feed into
 a scrollback *ending* at `t`, by passing `to=t` to the same
 `GET /api/v1/events` the M3 scrollback already used — the events API's time
 filtering was already there end to end, so this cost no server change at all.
 Global annotations render inline at their timestamps in the same feed.
+
+### 7.11 Alerting
+
+**Delivered in M7.** Rule list, builder, foreign rules, import report.
+[ALERTING.md](ALERTING.md) is the source of truth for what a rule *is*; this is
+what the page does with it.
+
+**Floor: `alerts:read`.** Without it the page renders a `PermissionCard` and
+issues **zero** requests — not an empty table behind a spinner. Above the
+floor, `alerts:manage` is the write split: `viewer` gets a read-only page where
+even the per-row enabled checkbox is downgraded to a `Badge`, because a
+checkbox that refuses to move is worse than a label that never claimed to.
+
+**The builder mirrors `render.go`'s `kindSchemas` field for field**, and the
+mirroring is cited in the code so a template change has one obvious second
+place to visit. Two consequences worth stating:
+
+- **`cert-expiry` is absent from the create form** but a legacy row **lists
+  fine** and opens the builder with a named honest note. The lookup is total —
+  an unknown kind does not throw.
+- **One text box for the `for` duration**, accepting Prometheus' own spelling.
+  Parse and format mirror `render.go`, round-trip pinned, and it refuses a bare
+  number and an ascending composite (`30s5m`) rather than guessing.
+
+**Preview is debounced 300ms and keyed on kind + params + labels**, so typing a
+name costs no query. It has **four** honest states and never prints "0 series"
+for an expression that was not evaluated — that is asserted negatively, because
+"0 series" for an unrun query is the single most misleading thing this page
+could say.
+
+**Errors are routed, not dumped.** A `422` lands on the field it names
+(nested scope fields resolve by their last path segment). A `409` from sync
+lifts to a section banner. The sync button's `202` says **"requested"** — never
+"synced", "succeeded" or "applied", asserted by name.
+
+The **enabled toggle sends the whole rule**, because omitting `enabled` on a
+`PUT` would enable it. Pinned.
+
+**With `console.alerting.enabled=false` the page still fully CRUDs.** Only the
+foreign section carries the `409` banner. Preparing rules before switching the
+reconciler on is a normal way to roll this out.
+
+The **import report** renders `created`, `skipped` and `notes` verbatim, each
+with an explicit "none" rather than a blank, and states the consequence in
+plain words: **the adopted alerts now exist twice** until one copy is removed.
+
+### 7.12 Settings
+
+**Delivered in M7**, and narrower than §6.2's original line — see the note
+there. Three sections:
+
+- **Webhooks** — full CRUD. The secret is a conditionally-added key: on the
+  keep-path `"secret"` is not merely empty, it is **absent from the body**
+  (asserted on `Object.keys`). Creating with a blank secret is refused
+  client-side — the **one** rule mirrored from the server; everything else is
+  the server's `422` shown verbatim. "Test" is honest about being asynchronous:
+  *"Test queued; the outcome lands on this row"*, then a refetch. `lastStatus`
+  is rendered verbatim and an unknown status is never toned as OK.
+- **Export / import** — export is a **blob download**, never a navigation (the
+  object URL is revoked, asserted). Import parses the file, runs an
+  **automatic dry-run**, and shows a per-collection table with errors and
+  warnings verbatim before anything is applied. Apply stays enabled on an
+  all-zero report *and* on a report with errors — a no-op and a partial are both
+  valid operator choices; it is disabled only with no bundle loaded. Export is
+  deliberately **enabled under Time Machine**: it is a read, and it takes no
+  `?at=`.
+- **About** — renders **only what `GET /api/v1/config` actually serves**. A
+  finding worth recording: the config endpoint serves **no retention numbers**,
+  so the page says so and names `console.retention.*` instead of inventing a
+  value. `auth.role` is surfaced only in anonymous mode.
+
+**Gating:** `webhooks:manage` and `settings:write` are both admin-only in the
+builtins, so `admin` sees both sections, `operator` and `viewer` see neither —
+and when both are hidden the page says that in one line rather than rendering an
+empty shell. The page waits for the subject to resolve before deciding, because
+`can()` fails closed while in flight and a flash of "you have no access" is a
+lie with a 200ms lifetime.

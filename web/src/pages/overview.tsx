@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import { useMemo, type ReactNode } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { PageShell } from "@/components/page-shell";
 import { Badge } from "@/components/ui/badge";
@@ -8,9 +8,9 @@ import { useAuth } from "@/hooks/use-auth";
 import { useDatabaseAvailable } from "@/hooks/use-capabilities";
 import { useMatrix } from "@/hooks/use-matrix";
 import { useTopology } from "@/hooks/use-topology";
-import { getEvents, getIncidents } from "@/lib/api";
-import { incidentPermalink } from "@/lib/investigation-sources";
-import type { LiveEvent, LiveEventSeverity, Matrix, MatrixCell, Topology } from "@/lib/types";
+import { getEvents, getIncidents, listAlerts } from "@/lib/api";
+import { buildInvestigateURL, incidentPermalink, scopeFromAlertLabels } from "@/lib/investigation-sources";
+import type { Alert, LiveEvent, LiveEventSeverity, Matrix, MatrixCell, Topology } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 export interface OverviewSummary {
@@ -145,21 +145,6 @@ function OverviewSkeleton() {
         </div>
       </Card>
     </div>
-  );
-}
-
-// A section whose data plane lands in a later milestone (firing alerts →
-// alerting, M7). Rendered as an honest placeholder rather than fabricated rows.
-// "Recent events" and "Open incidents" left this shape in M6 — both now read
-// real APIs below.
-function LaterMilestone({ title, note }: { title: string; note: string }) {
-  return (
-    <Card asChild className="p-6">
-      <section>
-        <h2 className="text-sm font-semibold">{title}</h2>
-        <p className="mt-2 text-xs leading-relaxed text-muted-foreground">{note}</p>
-      </section>
-    </Card>
   );
 }
 
@@ -350,6 +335,189 @@ function RecentEvents() {
   );
 }
 
+/* ── M7 Task 8: Firing alerts (plan Decision 6) ──────────────────────────────
+   The card that replaced the "arrives with a later milestone" placeholder. It
+   is the operator's morning view, which is why it asks for the WHOLE fleet's
+   firing state rather than only the rules this console manages: an alert
+   somebody else wrote is still firing in this cluster, and a console that hid
+   it would make its own silence mean less than it does. Foreign rows are shown
+   and TAGGED — displayed, never claimed. */
+
+const ALERT_SEVERITY_RANK: Record<string, number> = { critical: 0, warning: 1, info: 2 };
+const ALERT_SEVERITY_TONE: Record<string, "neutral" | "warn" | "bad"> = {
+  critical: "bad",
+  warning: "warn",
+  info: "neutral",
+};
+
+/** How many rows the card shows before it stops. The firing set is unbounded
+ *  (a bad afternoon in a big cluster is hundreds of series) and this is a
+ *  summary card, so it truncates and SAYS the number it left out rather than
+ *  ending in a silent cliff. */
+const FIRING_ALERTS_LIMIT = 8;
+
+/**
+ * sortFiringAlerts is the card's order: severity first, then the OLDEST
+ * firing first inside a severity band.
+ *
+ * Oldest-first is the deliberate half. "Newest first" is the feed instinct, but
+ * this is not a feed: the alert that has been critical for three hours is the
+ * one nobody has dealt with, and it is exactly the one a newest-first list
+ * pushes off the bottom of a truncated card.
+ *
+ * An unrecognised severity sorts LAST rather than being dropped or guessed at:
+ * a foreign rule may label anything at all, and the console does not know what
+ * somebody else's word ranks as. The order is total (severity, then start, then
+ * name) so two renders of the same firing set never disagree, and the input is
+ * not mutated.
+ */
+export function sortFiringAlerts(alerts: Alert[]): Alert[] {
+  const rank = (a: Alert) => ALERT_SEVERITY_RANK[a.severity] ?? Object.keys(ALERT_SEVERITY_RANK).length;
+  const started = (a: Alert) => (a.activeAt === undefined ? Number.POSITIVE_INFINITY : Date.parse(a.activeAt));
+  return [...alerts].sort((x, y) => {
+    if (rank(x) !== rank(y)) return rank(x) - rank(y);
+    const sx = started(x);
+    const sy = started(y);
+    if (sx !== sy) return sx < sy ? -1 : 1;
+    return x.name < y.name ? -1 : x.name > y.name ? 1 : 0;
+  });
+}
+
+function alertLabelLine(labels: Record<string, string>): string {
+  return Object.keys(labels)
+    .sort()
+    .map((k) => `${k}=${labels[k]}`)
+    .join(" ");
+}
+
+/** One firing row. The label set travels in a `title` attribute on a truncated
+ *  line — the worst-pairs table's own idiom for detail that will not fit. */
+function FiringAlertRow({ alert, now }: { alert: Alert; now: Date }) {
+  const managed = alert.ruleId !== undefined && alert.ruleId !== "";
+  const scope = scopeFromAlertLabels(alert.labels);
+  const labels = alertLabelLine(alert.labels);
+
+  return (
+    <li data-testid="firing-alert" className="flex flex-wrap items-baseline gap-x-3 gap-y-1 py-2">
+      {managed ? (
+        <a
+          href="/alerting"
+          data-testid="firing-alert-name"
+          className="min-w-0 flex-1 truncate text-sm text-primary hover:underline"
+        >
+          {alert.name}
+        </a>
+      ) : (
+        <span data-testid="firing-alert-name" className="min-w-0 flex-1 truncate text-sm" title={alert.name}>
+          {alert.name}
+        </span>
+      )}
+      <Badge variant={ALERT_SEVERITY_TONE[alert.severity] ?? "unknown"} dot>
+        {alert.severity === "" ? "no severity" : alert.severity}
+      </Badge>
+      {managed ? null : (
+        // Not a warning, a FACT: this console does not own the rule, so it
+        // offers no edit path to it and says why the link is missing.
+        <Badge variant="neutral" title="This console does not manage the rule behind this alert.">
+          unmanaged
+        </Badge>
+      )}
+      <span className="nums w-10 shrink-0 text-right text-xs text-muted-foreground">
+        {alert.activeAt === undefined ? "—" : fmtAge(alert.activeAt, now)}
+      </span>
+      <span
+        data-testid="firing-alert-labels"
+        title={labels}
+        className="w-full truncate text-xs text-muted-foreground"
+      >
+        {labels}
+      </span>
+      {scope ? (
+        <a href={buildInvestigateURL(scope, now)} className="text-xs text-primary hover:underline">
+          investigate
+        </a>
+      ) : null}
+    </li>
+  );
+}
+
+/**
+ * FiringAlerts reads GET /api/v1/alerts, whose degraded shape is the reason
+ * this card can be honest at all: `promConfigured` rides IN the 200 body, so
+ * "nothing is firing" and "nobody is watching" are two different sentences
+ * here rather than one empty list. A 502 is neither — Prometheus is wired and
+ * did not answer — and it is surfaced with the server's own detail, because
+ * rendering a failing evaluator as a quiet fleet is the worst lie this page
+ * could tell.
+ *
+ * No database gating: the firing set is Prometheus's, not the store's.
+ */
+function FiringAlerts() {
+  const { me, can } = useAuth();
+  const canRead = can("alerts:read");
+  const enabled = me !== undefined && canRead;
+
+  const query = useQuery({ queryKey: ["overview", "alerts"], queryFn: listAlerts, enabled });
+  const now = new Date();
+  /* PENDING is not firing. The route serves both states (a rule's `for` window
+     is exactly the gap between them) and a card called "Firing alerts" that
+     listed pending rows would be claiming a page that has not happened — the
+     same line the webhook contract draws, and the same one the /investigate
+     source draws. A response carrying only pending alerts therefore renders
+     "Nothing is firing", which is true. */
+  const alerts = useMemo(
+    () => sortFiringAlerts((query.data?.alerts ?? []).filter((a) => a.state === "firing")),
+    [query.data],
+  );
+  const shown = alerts.slice(0, FIRING_ALERTS_LIMIT);
+  const hidden = alerts.length - shown.length;
+
+  return (
+    <Card asChild className="p-6">
+      <section aria-label="Firing alerts">
+        <div className="flex flex-wrap items-baseline justify-between gap-2">
+          <h2 className="text-sm font-semibold">Firing alerts</h2>
+          {canRead ? (
+            <a href="/alerting" className="text-xs text-primary hover:underline">
+              open Alerting
+            </a>
+          ) : null}
+        </div>
+
+        {me !== undefined && !canRead ? (
+          <PanelNote>Firing alerts need alerts:read — none was requested.</PanelNote>
+        ) : query.isError ? (
+          <PanelNote>
+            {query.error instanceof Error ? query.error.message : "The firing set is unavailable right now."}
+          </PanelNote>
+        ) : !enabled || query.isLoading ? (
+          <PanelSkeleton rows={3} />
+        ) : query.data?.promConfigured === false ? (
+          <PanelNote>
+            Prometheus is not configured for this console — set console.prometheus.address. There is no firing state to
+            show.
+          </PanelNote>
+        ) : alerts.length === 0 ? (
+          <PanelNote>Nothing is firing. Rules live on /alerting; Prometheus evaluates them.</PanelNote>
+        ) : (
+          <>
+            <ul className="mt-3 flex flex-col divide-y divide-border">
+              {shown.map((a) => (
+                <FiringAlertRow key={`${a.name}{${alertLabelLine(a.labels)}}`} alert={a} now={now} />
+              ))}
+            </ul>
+            {hidden > 0 ? (
+              <PanelNote>
+                {hidden} more firing alert{hidden === 1 ? " is" : "s are"} not shown here.
+              </PanelNote>
+            ) : null}
+          </>
+        )}
+      </section>
+    </Card>
+  );
+}
+
 function WorstPairsTable({ pairs }: { pairs: MatrixCell[] }) {
   return (
     <div className="overflow-x-auto">
@@ -510,13 +678,7 @@ export function OverviewPage() {
             </Card>
 
             <div className="grid gap-4 sm:grid-cols-2">
-              {/* Still a placeholder, and deliberately so: nothing evaluates
-                  alert rules until M7, and a fabricated "0 firing" would read
-                  as a quiet fleet rather than as a missing engine. */}
-              <LaterMilestone
-                title="Firing alerts"
-                note="Arrives with a later milestone (Alertmanager wiring)."
-              />
+              <FiringAlerts />
               <OpenIncidents />
             </div>
 

@@ -1,6 +1,14 @@
 // Package webhooks is the Console's outbound notifier: it turns an incident
-// lifecycle change into a signed HTTP POST to every endpoint an admin
-// configured for that event (M6 Decision 5).
+// lifecycle change (M6 Decision 5) or a Prometheus alert transition (M7
+// Decision 7) into a signed HTTP POST to every endpoint an admin configured
+// for that event.
+//
+// The two sources reach it from opposite directions, and the difference is
+// worth stating up front. An incident event is something the console was TOLD
+// about -- an HTTP handler calls Notify on the request that caused it. An
+// alert transition is something the console DETECTED, by polling Prometheus'
+// alert state on its own schedule: that is AlertWatcher, in this package, and
+// it calls NotifyAlert. Everything downstream of those two calls is one path.
 //
 // It is also the ONE place in the Console that owns the webhook cipher. The
 // per-endpoint HMAC signing secret is stored encrypted (M6 Decision 4,
@@ -311,14 +319,32 @@ func (d *Dispatcher) Open(sealed []byte) ([]byte, error) {
 	return plain, nil
 }
 
-// Payload is the wire body of every delivery, test pings included. The field
-// set is CLOSED and STABLE (documented as WebhookPayload in
-// docs/console-api.yaml): a receiver writes one parser, and a later milestone
-// that widens this without a version marker breaks every one of them.
+// Payload is the wire body of every INCIDENT-family delivery, test pings
+// included (documented as WebhookPayload in docs/console-api.yaml).
+//
+// The invariant M6 wrote as "one shape" is, as of M7, one shape PER FAMILY,
+// and the families are CLOSED. There are two: incident.* carries this type,
+// alert.* carries AlertPayload, and a receiver dispatches on the `event` field
+// -- read it first, then pick the parser. Within a family the field set never
+// changes, so a receiver that dispatches correctly writes each parser once; a
+// later milestone that widened either shape without a version marker would
+// break every one of them, exactly as it would have in M6.
+//
+// Splitting rather than widening was the deliberate choice. A single union
+// shape would have meant either an incident object full of empty strings on
+// every alert delivery -- a synthetic incident that never existed -- or
+// omitempty on half the keys, which is a shape that changes per delivery and
+// is precisely what "closed and stable" exists to forbid. Two honest shapes
+// cost a receiver one switch statement; one dishonest shape costs it a guess
+// on every field.
 //
 // No omitempty anywhere, including on the nullable toAt: a key that sometimes
 // vanishes is a second shape, and "stable" has to mean the JSON object has the
-// same keys every time.
+// same keys every time. AlertPayload repeats the rule for resolvedAt.
+//
+// This type's BYTES are frozen at their M6 layout. A delivery that an M6
+// console would have produced and one this console produces are identical, and
+// the tests assert that on the raw body rather than through the struct.
 type Payload struct {
 	// Event is one of the store vocabulary values, or "test".
 	Event string `json:"event"`
@@ -358,6 +384,87 @@ func newPayload(event string, inc *store.Incident, at time.Time) Payload {
 	}
 }
 
+// AlertPayload is the wire body of every ALERT-family delivery (M7 Decision 7,
+// documented as WebhookAlertPayload in docs/console-api.yaml). Its own closed,
+// stable field set -- see Payload's comment for why the families are two
+// shapes and not one.
+//
+// The envelope key is `sentAt` rather than the incident family's `at` on
+// purpose: they do not mean the same thing. `at` is when the console DECIDED
+// to notify about an incident and is the incident family's deduplication
+// component; `sentAt` is only when this alert transition was observed and
+// enqueued, and it is NOT a deduplication key -- every console replica polls
+// independently (see AlertWatcher), so two replicas observing the same edge
+// produce two deliveries with two different sentAt values. Deduplicate on
+// (event, alert.ruleId, alert.labels, alert.firedAt), all four of which are
+// stable across replicas and across the retry ladder.
+type AlertPayload struct {
+	// Event is store.WebhookEventAlertFired or store.WebhookEventAlertResolved.
+	Event string `json:"event"`
+	// SentAt is when this delivery was built. Stable across the retry ladder
+	// (the body is marshalled once), NOT stable across replicas.
+	SentAt time.Time `json:"sentAt"`
+	Alert  Alert     `json:"alert"`
+}
+
+// Alert is BOTH the notification seam's input and the payload's `alert` object
+// -- one type, not a pair like store.Incident/PayloadIncident. There is no
+// alert row to project from: the console does not evaluate alerts, it observes
+// Prometheus' state (M7 Decision 6), so the thing a caller hands the
+// dispatcher and the thing a receiver reads are the same set of facts, and a
+// second struct would only be an opportunity for the two to drift.
+type Alert struct {
+	// RuleID is the alert_rules row this alert came from, off the
+	// kconmon_ng_rule_id label. Never empty on a delivery: the watcher only
+	// fires for MANAGED alerts (an unmanaged firing alert belongs to whoever
+	// owns that rule, not to this console's endpoints).
+	RuleID string `json:"ruleId"`
+	// RuleName is the alert's name as PROMETHEUS knows it -- the sanitized
+	// alertname, not necessarily the console row's name -- when it had to be
+	// read off the label set, and the row's own name when the rule was
+	// resolvable. Either way it is the name an operator will search for.
+	RuleName string `json:"ruleName"`
+	Severity string `json:"severity"`
+	// Expr is the rendered PromQL the rule evaluates. It is "" when the row
+	// could not be resolved (deleted between the poll and the lookup, or no
+	// rule source wired) -- an empty string, never a missing key, and never a
+	// guess.
+	Expr string `json:"expr"`
+	// Labels is Prometheus' label set for this alert instance, verbatim,
+	// including alertname/severity/kconmon_ng_rule_id. Never null on the wire.
+	Labels map[string]string `json:"labels"`
+	// Annotations is the alert's annotation set, verbatim. Never null.
+	Annotations map[string]string `json:"annotations"`
+	// FiredAt is Prometheus' activeAt for this alert instance -- when the
+	// expression started matching, not when the console noticed. Stable across
+	// replicas, which is what makes it part of the dedupe key.
+	FiredAt time.Time `json:"firedAt"`
+	// ResolvedAt is null on alert.fired and set on alert.resolved. The key is
+	// PRESENT on both, no omitempty -- Payload's rule, repeated here for
+	// Payload's reason.
+	//
+	// Its value is WHEN THE CONSOLE NOTICED, not when Prometheus stopped
+	// firing: the console detects a resolution by an alert's ABSENCE from a
+	// poll, and an absence has no timestamp of its own. The honest reading is
+	// "resolved at some point in the alertPollInterval ending here". That is
+	// the granularity, stated rather than papered over.
+	ResolvedAt *time.Time `json:"resolvedAt"`
+}
+
+func newAlertPayload(event string, a *Alert, sentAt time.Time) AlertPayload {
+	out := AlertPayload{Event: event, SentAt: sentAt, Alert: *a}
+	// A nil Go map marshals to `null`, which is a second shape for a receiver
+	// that iterates the object. Normalised HERE rather than at every call site
+	// so there is one place the guarantee lives.
+	if out.Alert.Labels == nil {
+		out.Alert.Labels = map[string]string{}
+	}
+	if out.Alert.Annotations == nil {
+		out.Alert.Annotations = map[string]string{}
+	}
+	return out
+}
+
 // job is one delivery: everything a worker needs, captured at ENQUEUE time so
 // nothing it does depends on a store read that could fail later.
 type job struct {
@@ -390,19 +497,48 @@ type job struct {
 // the dispatcher's own context, so a client that disconnects the moment its
 // 201 lands does not cancel the notification it just caused.
 func (d *Dispatcher) Notify(ctx context.Context, event string, inc store.Incident) { //nolint:gocritic // hugeParam: mirrors store.Incident's shape across the httpapi seam
-	hooks, err := d.store.ListWebhooks(ctx)
-	if err != nil {
-		slog.Error("webhooks: listing endpoints for an incident notification failed",
-			"event", event, "error", err)
-		return
-	}
-	at := d.now().UTC()
-	body, err := json.Marshal(newPayload(event, &inc, at))
+	body, err := json.Marshal(newPayload(event, &inc, d.now().UTC()))
 	if err != nil {
 		// Unreachable in practice: every field is a string, a time or a
 		// pointer to one. Reported rather than ignored, because reaching it
 		// would mean the payload type grew something unmarshalable.
 		slog.Error("webhooks: building the notification payload failed", "event", event, "error", err)
+		return
+	}
+	d.fanOut(ctx, event, body)
+}
+
+// NotifyAlert is the ALERT transition seam (M7 Decision 7), called by
+// AlertWatcher on an edge it detected. Same contract as Notify in every
+// respect that matters -- non-blocking, no error, one unpaged SELECT on the
+// caller's context and nothing else -- and the same delivery path afterwards.
+//
+// The ONLY thing that differs between the two is the payload constructor. The
+// signing, the ladder, the pool bound, the outcome write and the metric are
+// literally the same code: a delivery path that forked per family is how one
+// family quietly loses a guard the other keeps.
+func (d *Dispatcher) NotifyAlert(ctx context.Context, event string, a Alert) { //nolint:gocritic // hugeParam: Alert is the payload object itself, passed by value so the caller keeps no aliasing claim on the maps
+	body, err := json.Marshal(newAlertPayload(event, &a, d.now().UTC()))
+	if err != nil {
+		slog.Error("webhooks: building the alert notification payload failed", "event", event, "error", err)
+		return
+	}
+	d.fanOut(ctx, event, body)
+}
+
+// fanOut lists the endpoints, applies the enabled flag and the event filter,
+// and enqueues one delivery per subscriber of an ALREADY-MARSHALLED body.
+//
+// It takes bytes rather than a payload so the two families share it without
+// either of them becoming an interface: the body is opaque from here down, and
+// that is exactly the property that keeps the delivery path single.
+//
+// ctx belongs to the caller and is used only for the list read.
+func (d *Dispatcher) fanOut(ctx context.Context, event string, body []byte) {
+	hooks, err := d.store.ListWebhooks(ctx)
+	if err != nil {
+		slog.Error("webhooks: listing endpoints for a notification failed",
+			"event", event, "error", err)
 		return
 	}
 

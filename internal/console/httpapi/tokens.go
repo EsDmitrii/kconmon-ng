@@ -24,6 +24,11 @@ import (
 type TokenAdmin interface {
 	CreateToken(ctx context.Context, name string, hash []byte, owner string, expiresAt *time.Time) (store.Token, error)
 	ListTokens(ctx context.Context) ([]store.Token, error)
+	// GetTokenByID backs resolveInheritedOwner ONLY -- it is not a route.
+	// The admin CRUD surface never needs a single token by id (there is no
+	// GET /api/v1/tokens/{id}); this is here because the mint path knows
+	// which parent row it wants and must not pay for ListTokens to find it.
+	GetTokenByID(ctx context.Context, id string) (store.Token, error)
 	RevokeToken(ctx context.Context, id string) error
 }
 
@@ -210,9 +215,8 @@ func (s *Server) handleTokensCreate(w http.ResponseWriter, r *http.Request) {
 // being used to create another token), parentID is that existing token's own
 // id (subject.ID) and fallback is ownerFor's pre-inheritance answer -- the
 // same parentID, since that is what ownerFor returns for SubjectToken. This
-// looks the parent token up (via the same admin-scale ListTokens tokens:manage
-// callers already pay for through GET /api/v1/tokens -- no new store query)
-// and, if found with a non-empty Owner, returns THAT owner instead: the new
+// looks the parent token up BY ID (store.TokenStore.GetTokenByID -- one row,
+// one index hit) and, if found with a non-empty Owner, returns THAT owner instead: the new
 // token is attributed directly to whatever the parent was ultimately
 // attributed to (a users.id UUID, for a chain rooted at a local user), not to
 // the parent's own id one more link down. This collapses an arbitrarily deep
@@ -223,26 +227,32 @@ func (s *Server) handleTokensCreate(w http.ResponseWriter, r *http.Request) {
 // GetUserByID, gets ErrNotFound, and is wrongly allowed).
 //
 // Falls back to fallback whenever the parent cannot be attributed with
-// confidence: ListTokens itself failing, no row matching parentID (should
+// confidence: the lookup itself failing, no row matching parentID (should
 // not happen -- the parent token that just authenticated this very request
 // must exist -- but a fake/incomplete TokenAdmin or a race is not worth
 // failing the mint over), or a parent whose own Owner is empty. Minting a
 // token must never fail over attribution bookkeeping.
+//
+// The two failure modes are logged at different levels on purpose, because
+// they say different things to whoever reads the log. ErrNotFound is a WARN:
+// it is the "should not happen" branch above, and if it ever fires regularly
+// something is wrong with the token lifecycle, not with the database. Anything
+// else is a backend failure and stays an ERROR, the level the ListTokens
+// version of this function used for the same class of thing.
 func (s *Server) resolveInheritedOwner(ctx context.Context, parentID, fallback string) string {
-	tokens, err := s.tokens.ListTokens(ctx)
-	if err != nil {
-		slog.Error("resolve inherited token owner: list tokens failed", "error", err, "parent_token_id", parentID) //nolint:gosec // G706: structured slog fields, not string-built log injection
+	parent, err := s.tokens.GetTokenByID(ctx, parentID)
+	switch {
+	case errors.Is(err, store.ErrNotFound):
+		slog.Warn("resolve inherited token owner: parent token not found", "parent_token_id", parentID) //nolint:gosec // G706: structured slog fields, not string-built log injection
+		return fallback
+	case err != nil:
+		slog.Error("resolve inherited token owner: get token by id failed", "error", err, "parent_token_id", parentID) //nolint:gosec // G706: structured slog fields, not string-built log injection
+		return fallback
+	case parent.Owner != "":
+		return parent.Owner
+	default:
 		return fallback
 	}
-	for i := range tokens {
-		if tokens[i].ID == parentID {
-			if tokens[i].Owner != "" {
-				return tokens[i].Owner
-			}
-			break
-		}
-	}
-	return fallback
 }
 
 func (s *Server) handleTokensDelete(w http.ResponseWriter, r *http.Request) {

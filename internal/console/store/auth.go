@@ -506,6 +506,22 @@ type TokenStore interface {
 	// event of a token_hash collision. expiresAt == nil means the token never
 	// expires.
 	CreateToken(ctx context.Context, name string, hash []byte, owner string, expiresAt *time.Time) (Token, error)
+	// GetTokenByID returns ErrNotFound when id does not name a token. A
+	// malformed (non-UUID) id is its own, distinct error -- the same house
+	// style GetUserByID's doc comment states for this whole file -- never
+	// silently folded into ErrNotFound.
+	//
+	// This is ListTokens' single-row counterpart, and it exists because the
+	// mint path had no such primitive: httpapi.resolveInheritedOwner knows
+	// exactly which parent token it wants and used to page the ENTIRE
+	// api_tokens table in to find it, on every POST /api/v1/tokens made by a
+	// token. Like every other query in this file it never returns a hash --
+	// Token has no field to hold one.
+	//
+	// Revoked and expired tokens are returned as-is, exactly like
+	// GetTokenByHash: this is a lookup, not an admission decision, and the
+	// caller owns what those states mean for it.
+	GetTokenByID(ctx context.Context, id string) (Token, error)
 	// ListTokens never returns a token's hash -- there is no field in Token
 	// to hold one.
 	ListTokens(ctx context.Context) ([]Token, error)
@@ -575,6 +591,21 @@ func (db *DB) CreateToken(ctx context.Context, name string, hash []byte, owner s
 	db.observe(queryCreateToken, start, queryResult(wrapUniqueViolation(err)))
 	if err != nil {
 		return Token{}, fmt.Errorf("store: create token: %w", wrapUniqueViolation(err))
+	}
+	tr := tokenRow(r)
+	return tokenFromRow(&tr), nil
+}
+
+func (db *DB) GetTokenByID(ctx context.Context, id string) (Token, error) {
+	tid, err := parseUUID(id)
+	if err != nil {
+		return Token{}, fmt.Errorf("store: get token by id: %w", err)
+	}
+	start := time.Now()
+	r, err := gen.New(db.pool).GetTokenByID(ctx, tid)
+	db.observe(queryGetTokenByID, start, queryResult(wrapNoRows(err)))
+	if err != nil {
+		return Token{}, fmt.Errorf("store: get token by id: %w", wrapNoRows(err))
 	}
 	tr := tokenRow(r)
 	return tokenFromRow(&tr), nil

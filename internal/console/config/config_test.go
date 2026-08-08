@@ -936,6 +936,162 @@ func TestResolveNamespacePrecedence(t *testing.T) {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// alerting.* (M7 Task 3)
+// ---------------------------------------------------------------------------
+
+// TestLoadAlertingDefaults pins the block's defaults: the gate is off, the
+// namespace is empty (= resolve from POD_NAMESPACE), and both the cadence and
+// the bundle name are pre-defaulted so switching the reconciler on is a
+// one-line change.
+func TestLoadAlertingDefaults(t *testing.T) {
+	cfg, err := Load(filepath.Join(t.TempDir(), "nope.yaml"))
+	if err != nil {
+		t.Fatalf("Load defaults: %v", err)
+	}
+	a := cfg.Alerting
+	if a.Enabled {
+		t.Error("alerting.enabled default = true, want false (M7 Decision 3: off by default)")
+	}
+	if a.Namespace != "" {
+		t.Errorf("alerting.namespace default = %q, want empty (empty = POD_NAMESPACE)", a.Namespace)
+	}
+	if a.SyncInterval != 60*time.Second {
+		t.Errorf("alerting.syncInterval default = %v, want 60s", a.SyncInterval)
+	}
+	if a.BundleName != "kconmon-ng-console-rules" {
+		t.Errorf("alerting.bundleName default = %q, want kconmon-ng-console-rules", a.BundleName)
+	}
+}
+
+// TestLoadAlertingFromYAML proves the block parses under KnownFields(true) --
+// every key spelled exactly as the chart will spell it.
+func TestLoadAlertingFromYAML(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "config.yaml")
+	const y = "alerting:\n" +
+		"  enabled: true\n" +
+		"  namespace: kconmon-ng\n" +
+		"  syncInterval: 30s\n" +
+		"  bundleName: my-console-rules\n"
+	if err := os.WriteFile(p, []byte(y), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(p)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	a := cfg.Alerting
+	if !a.Enabled {
+		t.Error("alerting.enabled = false, want true")
+	}
+	if a.Namespace != "kconmon-ng" {
+		t.Errorf("alerting.namespace = %q, want kconmon-ng", a.Namespace)
+	}
+	if a.SyncInterval != 30*time.Second {
+		t.Errorf("alerting.syncInterval = %v, want 30s", a.SyncInterval)
+	}
+	if a.BundleName != "my-console-rules" {
+		t.Errorf("alerting.bundleName = %q, want my-console-rules", a.BundleName)
+	}
+}
+
+// TestValidateAlerting is the fail-closed table: everything is checked only
+// when the gate is on, and every name that would be rejected by the apiserver
+// is rejected at boot instead.
+func TestValidateAlerting(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		yaml    string
+		wantErr bool
+	}{
+		{"disabled ignores everything", "alerting:\n  enabled: false\n  syncInterval: 0s\n  bundleName: \"\"\n", false},
+		{"enabled with the defaults", "alerting:\n  enabled: true\n", false},
+		{"zero interval rejected", "alerting:\n  enabled: true\n  syncInterval: 0s\n", true},
+		{"negative interval rejected", "alerting:\n  enabled: true\n  syncInterval: -1m\n", true},
+		{"empty bundleName rejected", "alerting:\n  enabled: true\n  bundleName: \"\"\n", true},
+		{"uppercase bundleName rejected", "alerting:\n  enabled: true\n  bundleName: Rules\n", true},
+		{"underscore in bundleName rejected", "alerting:\n  enabled: true\n  bundleName: my_rules\n", true},
+		{"leading dash in bundleName rejected", "alerting:\n  enabled: true\n  bundleName: -rules\n", true},
+		{"trailing dot in bundleName rejected", "alerting:\n  enabled: true\n  bundleName: rules.\n", true},
+		{"dots and dashes accepted", "alerting:\n  enabled: true\n  bundleName: a.b-c9\n", false},
+		{"empty namespace is legal when enabled", "alerting:\n  enabled: true\n  namespace: \"\"\n", false},
+		{"uppercase namespace rejected", "alerting:\n  enabled: true\n  namespace: Kconmon\n", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := filepath.Join(t.TempDir(), "config.yaml")
+			if err := os.WriteFile(p, []byte(tc.yaml), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			_, err := Load(p)
+			if tc.wantErr && err == nil {
+				t.Fatal("expected a validation error, got nil")
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("expected the config to validate, got: %v", err)
+			}
+		})
+	}
+}
+
+// TestValidateAlertingNamesTheKnob: every rejection an operator reads must say
+// WHICH key to fix.
+func TestValidateAlertingNamesTheKnob(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		mutate func(*Config)
+		want   string
+	}{
+		{"interval", func(c *Config) { c.Alerting.SyncInterval = 0 }, "alerting.syncInterval"},
+		{"bundle name", func(c *Config) { c.Alerting.BundleName = "" }, "alerting.bundleName"},
+		{"bad bundle name", func(c *Config) { c.Alerting.BundleName = "NOPE" }, "alerting.bundleName"},
+		{"bad namespace", func(c *Config) { c.Alerting.Namespace = "NOPE" }, "alerting.namespace"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := defaults()
+			c.Alerting.Enabled = true
+			tc.mutate(c)
+			err := c.Validate()
+			if err == nil {
+				t.Fatal("expected a validation error, got nil")
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("error should name %s, got: %v", tc.want, err)
+			}
+		})
+	}
+}
+
+// TestAlertingResolveNamespacePrecedence pins the same three-step fallback
+// kubernetesContext carries, because the two MUST agree: the console's bundle
+// belongs in the namespace the console runs in.
+func TestAlertingResolveNamespacePrecedence(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		field string
+		env   string
+		want  string
+	}{
+		{"explicit namespace wins", "kconmon-ng", "other-ns", "kconmon-ng"},
+		{"env is the fallback", "", "kconmon-ng", "kconmon-ng"},
+		{"env is trimmed", "", "  kconmon-ng \n", "kconmon-ng"},
+		{"blank env falls through to default", "", "   ", "default"},
+		{"nothing set falls back to default", "", "", "default"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv(podNamespaceEnv, tc.env)
+			a := AlertingConfig{Namespace: tc.field}
+			if got := a.ResolveNamespace(); got != tc.want {
+				t.Errorf("ResolveNamespace() = %q, want %q", got, tc.want)
+			}
+			// The two blocks resolve identically, by construction.
+			k := KubernetesContextConfig{Namespace: tc.field}
+			if got := k.ResolveNamespace(); got != tc.want {
+				t.Errorf("KubernetesContextConfig.ResolveNamespace() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 // validWebhookKey is 32 bytes, base64. Written out rather than computed so the
 // test states the shape an operator has to produce.
 const validWebhookKey = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8="
@@ -957,6 +1113,104 @@ func TestLoadWebhookDefaults(t *testing.T) {
 	}
 	if key != nil {
 		t.Errorf("ResolveEncryptionKey with nothing set = %v, want nil (the keyless state)", key)
+	}
+}
+
+// alertPollInterval lives under webhooks, not under alerting, because it is
+// not a property of alerting at all: alerting.syncInterval is how often rules
+// are pushed INTO Prometheus, and this is how often alert STATE is read back
+// out for the sole purpose of firing deliveries. Switch webhooks off and this
+// knob does nothing; switch alerting off and it does nothing either.
+func TestLoadWebhookAlertPollIntervalDefault(t *testing.T) {
+	cfg, err := Load("/nonexistent/config.yaml")
+	if err != nil {
+		t.Fatalf("Load defaults: %v", err)
+	}
+	if cfg.Webhooks.AlertPollInterval != DefaultWebhookAlertPollInterval {
+		t.Errorf("webhooks.alertPollInterval = %v, want the default %v",
+			cfg.Webhooks.AlertPollInterval, DefaultWebhookAlertPollInterval)
+	}
+	if DefaultWebhookAlertPollInterval != 30*time.Second {
+		t.Errorf("the default poll interval is %v, want 30s -- it is also the granularity of "+
+			"every alert.resolved timestamp, so changing it is a contract change",
+			DefaultWebhookAlertPollInterval)
+	}
+}
+
+func TestLoadWebhookAlertPollIntervalFromYAML(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(p, []byte("webhooks:\n  alertPollInterval: 90s\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(p)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Webhooks.AlertPollInterval != 90*time.Second {
+		t.Errorf("webhooks.alertPollInterval = %v, want 90s", cfg.Webhooks.AlertPollInterval)
+	}
+}
+
+// The interval is only load-bearing when BOTH gates are on -- a key is
+// configured (so deliveries can be signed at all) and alerting is enabled (so
+// there is alert state to read). A leftover zero on a console with neither
+// must not be a boot failure, exactly as AlertingConfig treats its own
+// intervals.
+func TestWebhookAlertPollIntervalIsValidatedOnlyWhenBothGatesAreOn(t *testing.T) {
+	for _, tc := range []struct {
+		name            string
+		key             string
+		alertingEnabled bool
+		interval        time.Duration
+		wantErr         bool
+		wantErrMentions string
+	}{
+		{name: "both gates on, positive", key: validWebhookKey, alertingEnabled: true, interval: time.Minute},
+		{
+			name: "both gates on, zero", key: validWebhookKey, alertingEnabled: true, interval: 0,
+			wantErr: true, wantErrMentions: "webhooks.alertPollInterval",
+		},
+		{
+			name: "both gates on, negative", key: validWebhookKey, alertingEnabled: true, interval: -time.Second,
+			wantErr: true, wantErrMentions: "webhooks.alertPollInterval",
+		},
+		{name: "no key, alerting on, zero", alertingEnabled: true, interval: 0},
+		{name: "key, alerting off, zero", key: validWebhookKey, interval: 0},
+		{name: "neither gate, zero", interval: 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w := WebhooksConfig{EncryptionKey: tc.key, AlertPollInterval: tc.interval}
+			err := w.validate(tc.alertingEnabled)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("validate(%v) = nil, want an error", tc.alertingEnabled)
+				}
+				if !strings.Contains(err.Error(), tc.wantErrMentions) {
+					t.Errorf("error must name the knob %q, got: %v", tc.wantErrMentions, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Errorf("validate(%v) = %v, want nil", tc.alertingEnabled, err)
+			}
+		})
+	}
+}
+
+// The cross-block rule has to be reachable through the top-level Validate, not
+// only through the block's own method -- that is the entry point cmd/console
+// actually calls.
+func TestConfigValidateCatchesANonPositiveAlertPollInterval(t *testing.T) {
+	cfg := defaults()
+	cfg.Webhooks.EncryptionKey = validWebhookKey
+	cfg.Alerting.Enabled = true
+	cfg.Webhooks.AlertPollInterval = 0
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("Validate accepted a zero alertPollInterval with both gates on")
+	}
+	if !strings.Contains(err.Error(), "webhooks.alertPollInterval") {
+		t.Errorf("error must name the knob, got: %v", err)
 	}
 }
 

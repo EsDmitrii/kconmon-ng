@@ -29,6 +29,15 @@ import { useTimeMachine } from "@/lib/timemachine";
  * Engaging is now one explicit Apply (or one preset chip) rather than a change
  * event per keystroke, which also stops half-typed years from engaging.
  */
+/**
+ * TIME_MACHINE_TRIGGER_LABEL is the Live-state trigger's accessible name, and
+ * the seam the command palette engages through: "Toggle Time Machine" needs an
+ * INSTANT, which a palette has no honest way to choose, so it opens THIS
+ * control instead of guessing one (components/command-palette.tsx). Exported
+ * rather than duplicated so the selector and the label can never drift apart.
+ */
+export const TIME_MACHINE_TRIGGER_LABEL = "Time Machine — view the console at a past time";
+
 export function TimeMachineBar() {
   const { at, isLive, engage, returnToLive } = useTimeMachine();
 
@@ -38,7 +47,7 @@ export function TimeMachineBar() {
         <DateTimePicker
           value={null}
           onApply={engage}
-          aria-label="Time Machine — view the console at a past time"
+          aria-label={TIME_MACHINE_TRIGGER_LABEL}
           label="Time Machine"
           icon={<History aria-hidden="true" className="size-3.5 shrink-0" />}
           variant="ghost"

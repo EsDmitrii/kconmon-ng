@@ -29,6 +29,29 @@ func startServer(t *testing.T, bus cache.Bus) (*ws.Hub, *metrics.Metrics, *httpt
 	return hub, m, srv
 }
 
+// startAuthorizedServer is startServer's per-connection-authorization
+// variant: authorize is applied to every subscribe that arrives on any socket
+// this handler serves.
+func startAuthorizedServer(t *testing.T, bus cache.Bus, authorize ws.TopicAuthorizer) (*ws.Hub, *httptest.Server) {
+	t.Helper()
+	hub := ws.NewHub(bus, metrics.New("kconmon_ng", prometheus.NewRegistry()))
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hub.ServeWSAuthorized(w, r, authorize)
+	}))
+	t.Cleanup(srv.Close)
+	return hub, srv
+}
+
+// runsReadOnly is the authorizer the whole M3-carry exists for: a custom role
+// holding runs:read but NOT events:read. It may watch its own run and nothing
+// else.
+func runsReadOnly(topic string) error {
+	if strings.HasPrefix(topic, "run:") {
+		return nil
+	}
+	return errors.New("this connection may subscribe to run:{id} topics only; " + topic + " needs events:read")
+}
+
 // wsURL turns the test server's http URL into a ws one.
 func wsURL(srv *httptest.Server) string { return "ws" + strings.TrimPrefix(srv.URL, "http") }
 
@@ -148,6 +171,115 @@ func TestServeWSUnknownTopicGetsAnErrorFrameOverTheWire(t *testing.T) {
 	}
 	if env.Topic != "run:42" {
 		t.Errorf("envelope topic = %q, want the requested topic echoed back", env.Topic)
+	}
+}
+
+// TestServeWSAuthorizedDeniesTopicsTheConnectionMayNotRead is the wire-level
+// half of the M3-carry fix (SECURITY.md §10.2's "splitting the two properly
+// means teaching the hub subject-aware subscribe authorization"). A connection
+// opened by a subject holding runs:read but not events:read may watch its own
+// run and must be refused the fleet-wide topics — with an error frame, not
+// silence, and with the topic genuinely NOT subscribed, which the second half
+// of this test is what proves.
+func TestServeWSAuthorizedDeniesTopicsTheConnectionMayNotRead(t *testing.T) {
+	hub, srv := startAuthorizedServer(t, cache.NewInProcessBus(), runsReadOnly)
+	const runTopic = "run:42"
+	if !hub.OpenTopic(context.Background(), runTopic) {
+		t.Fatal("OpenTopic(run:42) = false")
+	}
+	conn := dial(t, srv, nil)
+	waitForClients(t, hub, 1)
+
+	send(t, conn, ws.ClientMessage{Action: ws.ActionSubscribe, Topic: ws.TopicLive})
+	env := readEnvelope(t, conn)
+	if env.Type != ws.TypeError {
+		t.Fatalf("subscribe to live on a runs:read-only connection: envelope = %+v, want an error frame", env)
+	}
+	if env.Topic != ws.TopicLive {
+		t.Errorf("error frame topic = %q, want the requested topic echoed back", env.Topic)
+	}
+	if !strings.Contains(string(env.Data), "events:read") {
+		t.Errorf("error frame data = %s, want the authorizer's own detail (naming the missing permission)", env.Data)
+	}
+
+	// The refusal must be a refusal, not a warning: a subsequent broadcast on
+	// the denied topic must not reach this client at all. If the denied
+	// subscribe had still set c.topics[live], this live frame would arrive
+	// BEFORE the run frame below and the read would fail the assertion.
+	hub.Broadcast(ws.TopicLive, ws.TypeEvent, json.RawMessage(`{"leaked":true}`))
+
+	send(t, conn, ws.ClientMessage{Action: ws.ActionSubscribe, Topic: runTopic})
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		hub.Broadcast(runTopic, ws.TypeEvent, json.RawMessage(`{"progress":1}`))
+		if err := conn.SetReadDeadline(time.Now().Add(100 * time.Millisecond)); err != nil {
+			t.Fatalf("set read deadline: %v", err)
+		}
+		var got ws.Envelope
+		if err := conn.ReadJSON(&got); err != nil {
+			if time.Now().After(deadline) {
+				t.Fatalf("no run:42 frame arrived within 5s: %v", err)
+			}
+			continue
+		}
+		if got.Topic == ws.TopicLive {
+			t.Fatalf("a live frame reached a connection whose subscribe to live was denied: %+v", got)
+		}
+		if got.Topic != runTopic {
+			t.Fatalf("envelope = %+v, want a run:42 frame", got)
+		}
+		return
+	}
+}
+
+// TestServeWSAuthorizedIsPerConnectionNotPerHub is what makes the fix honest:
+// the two sockets below are served by ONE hub, and the same subscribe gets
+// opposite answers on each. A hub-level (or handler-level) gate could not
+// produce this, and a hub-level gate is exactly what SECURITY.md §10.2
+// documented as the reason /ws could not be lowered to runs:read.
+func TestServeWSAuthorizedIsPerConnectionNotPerHub(t *testing.T) {
+	m := metrics.New("kconmon_ng", prometheus.NewRegistry())
+	hub := ws.NewHub(cache.NewInProcessBus(), m)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// One header decides which authorizer this connection gets, standing
+		// in for the two different subjects httpapi resolves per request.
+		if r.Header.Get("X-Test-Role") == "runs-only" {
+			hub.ServeWSAuthorized(w, r, runsReadOnly)
+			return
+		}
+		hub.ServeWSAuthorized(w, r, nil)
+	}))
+	t.Cleanup(srv.Close)
+
+	restricted := dial(t, srv, http.Header{"X-Test-Role": []string{"runs-only"}})
+	full := dial(t, srv, nil)
+	waitForClients(t, hub, 2)
+
+	send(t, restricted, ws.ClientMessage{Action: ws.ActionSubscribe, Topic: ws.TopicTopology})
+	if env := readEnvelope(t, restricted); env.Type != ws.TypeError {
+		t.Errorf("restricted connection: envelope = %+v, want an error frame for topology", env)
+	}
+
+	hub.Broadcast(ws.TopicTopology, ws.TypeSnapshot, json.RawMessage(`{"nodes":[]}`))
+	send(t, full, ws.ClientMessage{Action: ws.ActionSubscribe, Topic: ws.TopicTopology})
+	if env := readEnvelope(t, full); env.Type != ws.TypeSnapshot || env.Topic != ws.TopicTopology {
+		t.Errorf("unrestricted connection on the SAME hub: envelope = %+v, want the topology snapshot", env)
+	}
+}
+
+// TestServeWSNilAuthorizerAllowsEverySubscribableTopic pins the back-compat
+// half of the seam: plain ServeWS (and ServeWSAuthorized with a nil
+// authorizer) keeps the pre-M7 behaviour, where the route's single permission
+// decided the whole socket. Every other test in this file relies on it.
+func TestServeWSNilAuthorizerAllowsEverySubscribableTopic(t *testing.T) {
+	hub, srv := startAuthorizedServer(t, cache.NewInProcessBus(), nil)
+	conn := dial(t, srv, nil)
+	waitForClients(t, hub, 1)
+
+	hub.Broadcast(ws.TopicTopology, ws.TypeSnapshot, json.RawMessage(`{"nodes":[]}`))
+	send(t, conn, ws.ClientMessage{Action: ws.ActionSubscribe, Topic: ws.TopicTopology})
+	if env := readEnvelope(t, conn); env.Type != ws.TypeSnapshot {
+		t.Errorf("nil authorizer: envelope = %+v, want the topology snapshot", env)
 	}
 }
 

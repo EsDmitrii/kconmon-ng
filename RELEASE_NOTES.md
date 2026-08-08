@@ -1,3 +1,139 @@
+## kconmon-ng v1.9.0
+
+> Console release, and the last planned milestone. Alert rules you build in the
+> Console and Prometheus evaluates; alert webhooks; configuration
+> export/import; a command palette; a Settings page. Plus one long-carried fix:
+> the controller finally attributes topology changes, so Time Machine
+> reconstructs a real cluster. Everything new is off by default or
+> read-only-additive: a 1.8.0 install that upgrades and changes nothing renders
+> the same manifests.
+
+### Added
+
+- **Alert rule management** — `/alerting` builds a Prometheus alert rule from
+  six typed templates (pair loss, zone latency, DNS failures, HTTP TTFB,
+  agent missing, external target down) or raw PromQL — seven kinds in all —
+  and the Console
+  reconciles every enabled rule into **one** `PrometheusRule` object by
+  server-side apply. **The Console manages; Prometheus evaluates.** Nothing
+  here decides that an alert fired.
+- **Validation by running it, not by parsing it** — there is deliberately **no
+  `prometheus/prometheus` parser dependency**. Every template has a byte-exact
+  render golden, and `POST /api/v1/alert-rules/preview` runs the expression as
+  an instant query against your actual Prometheus and reports how many series
+  it matches. The render and the query fail independently: a render failure is
+  a `422`, a query failure is a `200` carrying the expression and the error.
+- **Drift is recorded, then fixed** — a reconcile always re-asserts the
+  Console's bytes. A rule showing `drift` also carries a fresh `lastSyncedAt`,
+  and both are true: the divergence was observed and corrected in the same
+  pass. Failures never crash the loop; they land per rule as `sync_status=error`
+  with a closed cause class (`crd-missing`, `forbidden`, `other`).
+- **Foreign rules and explicit adoption** — `PrometheusRule` objects the
+  Console did not write are listed read-only, and
+  `POST /api/v1/alert-rules/import` **copies** one into builder rows. The
+  foreign object is never mutated, which means **the same alerts then exist
+  twice until you remove one copy**. The import report says so, and names every
+  skipped rule with its reason.
+- **`GET /api/v1/alerts`** — the firing set, projected onto this API's
+  vocabulary, with `?managedOnly=`. With no Prometheus configured it answers
+  `200` and `promConfigured: false` rather than `503`: "nothing is firing" and
+  "nobody is watching" are different sentences.
+- **Alert webhooks** — `alert.fired` and `alert.resolved`, their own payload
+  family, dispatched from a poller that diffs Prometheus' alert state on
+  `console.webhooks.alertPollInterval` (30s). It baselines on boot rather than
+  paging the fleet about what was already broken, freezes on a failed or
+  undecodable poll rather than "resolving" everything, and ignores rules the
+  Console does not manage. The M6 incident payload bytes are unchanged.
+- **Configuration export/import** — `GET /api/v1/export` and
+  `POST /api/v1/import`, versioned bundle v1, admin-only under
+  `settings:write`, **dry-run first**. Webhook endpoints export with
+  `hasSecret` only and therefore cannot be created by import — a sealed secret
+  never leaves this API.
+- **Settings page** — webhook CRUD, export/import with a per-collection dry-run
+  report, and read-only deployment info that renders only what
+  `GET /api/v1/config` actually serves.
+- **Command palette** (`⌘K` / `Ctrl-K`) — hand-rolled, zero dependencies, over
+  navigation (generated from the sidebar so it cannot drift), five actions and
+  the Time Machine pair. It does **not** jump to an arbitrary node, target or
+  pair: that needs a live object search, not a static registry.
+- **Overview** — the "Firing alerts" placeholder carried since M1 is now the
+  real panel, severity-sorted with oldest-first ties, and the Investigate
+  timeline gained an alert row.
+- **Permissions** — `alerts:read` (all built-in roles) and `alerts:manage`
+  (operator, admin, **and `alert-editor`** — the builtin has waited for exactly
+  this permission since M3, and a role by that name that cannot edit an alert
+  rule breaks its promise on first click). `AllPermissions` is now **25**.
+
+### Fixed
+
+- **Topology events are attributed** — the controller now emits one
+  `topology_changed` event **per affected agent**, carrying `nodeName`,
+  `agentId` and `zone`, from all four sites (register, zone update,
+  deregister, stale eviction). Time Machine's topology fold reconstructs a real
+  node set with real zone lanes instead of an honest empty one. Events written
+  by an earlier controller are counted as unfoldable and age out with
+  retention; the page reports both numbers rather than rendering an empty
+  cluster.
+- **WebSocket topics are authorized individually** — `/ws` admits
+  `events:read` **or** `runs:read`, and a subject admitted on `runs:read` alone
+  gets `run:{id}` topics and an error frame for the fleet-wide ones, on a socket
+  that stays open. A custom role can finally watch the run it started. Carried
+  from M3.
+- **A `null` `console.database.cnpg` override no longer crashes rendering** —
+  nor does a null sub-block. Real nil-pointer class, found by the schema work.
+- One redundant token listing on the ownership-resolution path is now a
+  targeted lookup.
+
+### Chart
+
+- 1.8.0 → 1.9.0. New value blocks: `console.alerting.*`
+  (`enabled`/`namespace`/`syncInterval`/`bundleName`, rendered into the console
+  ConfigMap only when enabled) and `console.webhooks.alertPollInterval`
+  (rendered only when a key Secret is named **and** alerting is on — the key
+  existed in the binary since M7 but was unreachable from Helm).
+- Enabling `console.alerting` renders a **namespaced `Role`** and `RoleBinding`
+  over `monitoring.coreos.com/prometheusrules`
+  (`get,list,watch,create,update,patch` — **never `delete`**), bound to the
+  console-only ServiceAccount. Not a ClusterRole: the Console writes one object
+  into one namespace, and pointing `namespace` elsewhere fails with a
+  `forbidden` rather than widening anything.
+- The console ServiceAccount, `serviceAccountName`, `POD_NAMESPACE` and the
+  apiserver egress rule are now shared between `console.kubernetesContext` and
+  `console.alerting` through one helper, so either flag renders them.
+- `values.schema.json` closes **44 chart-owned levels** with
+  `additionalProperties: false`, and gained the `nameOverride`,
+  `fullnameOverride`, `agent.nodeSelector` and `agent.affinity` keys the
+  templates always used and the schema never declared. Pod/container
+  `securityContext` stay deliberately **open** — Kubernetes grows union members
+  every release, and closing them would turn a cluster upgrade into an install
+  failure.
+- Three new ci profiles: `console-alerting-values.yaml` (the fullest console),
+  `console-auth-local-values.yaml` and `console-auth-header-values.yaml`.
+  Default render is key-identical to 1.8.0.
+
+### Upgrade notes
+
+- Nothing to do. `alert_rules` is created by migration `00007` on first start
+  with `console.database.mode=cnpg|external`; with the database disabled the
+  new routes answer 503 exactly as M3–M6's do.
+- **Turning on `console.alerting.enabled` needs three things the chart cannot
+  check**: the Prometheus Operator's `PrometheusRule` CRD, a database, and a
+  Prometheus whose `ruleSelector`/`ruleNamespaceSelector` actually selects the
+  object the Console writes. A rule that syncs cleanly and never fires is
+  almost always the third one.
+- **Changing `console.alerting.bundleName` on a live install orphans the
+  previous object.** The reconciler owns what it is pointed at and deletes
+  nothing.
+- There is **no leader election** on the alert-webhook watcher: N console
+  replicas deliver N copies of every edge. The payload carries a stable
+  `(event, ruleId, labels, firedAt)` tuple so a receiver can dedupe.
+- `alert-editor` gained `alerts:manage`. If you granted that builtin to
+  somebody expecting it to stay inert, it is now able to create, edit and
+  delete alert rules.
+- If you set values the schema never declared, `helm upgrade` may now reject
+  them. That is the typo protection working — check the key against
+  `values.yaml`.
+
 ## kconmon-ng v1.8.0
 
 > Console release. Investigation Mode with an honest, documented correlation

@@ -58,7 +58,7 @@ for the controller's node watch.
 
 ```bash
 helm upgrade --install kconmon-ng oci://ghcr.io/esdmitrii/charts/kconmon-ng \
-  --version 1.3.3 \
+  --version 1.9.0 \
   --set serviceMonitor.enabled=true \
   --set prometheusRule.enabled=true
 ```
@@ -96,6 +96,61 @@ done
 To build from source or run a full local playground (Minikube + Prometheus +
 Grafana + kconmon-ng in one command), see
 [CONTRIBUTING.md](CONTRIBUTING.md) and [hack/README.md](hack/README.md).
+
+## Console (optional web UI)
+
+Grafana answers "what do the numbers look like". The Console answers "what
+happened here, and what should page me next time". It is a separate Deployment,
+**off by default**, that reads the same Prometheus and the same controller you
+already run:
+
+- **Topology, matrix and Explore** — the fleet as a map, an N×N heatmap and
+  curated charts, with a **Time Machine**: put `?at=` on the URL and every read
+  surface resolves through that instant instead of now.
+- **Investigate** — one page that merges nine timeline sources around a scope
+  and a window (topology events, K8s events, audit writes, MTR path changes,
+  diagnostic runs, maintenance windows, annotations, threshold crossings and
+  firing alerts), then ranks candidate causes by documented arithmetic. No ML,
+  and the heuristics are written down. Save one as an **incident** and the
+  permalink rehydrates it.
+- **Alerting** — build Prometheus alert rules from typed templates (or raw
+  PromQL), preview what an expression matches *right now*, and let the console
+  reconcile them into a `PrometheusRule` object. Prometheus still evaluates;
+  the console only manages. Rules other tools wrote are listed read-only and
+  can be adopted by an explicit copy.
+- **Diagnostics, MTR Explorer, external targets and schedules**, a live event
+  feed, RBAC with four built-in roles, an audit log, signed outbound webhooks,
+  and versioned config export/import.
+
+Install it by turning it on. Nothing else in the chart changes:
+
+```bash
+helm upgrade --install kconmon-ng oci://ghcr.io/esdmitrii/charts/kconmon-ng \
+  --version 1.9.0 \
+  --set console.enabled=true \
+  --set console.prometheus.url=http://prometheus-operated.monitoring:9090
+```
+
+That gets you the read-only pages against an anonymous viewer. History, auth,
+incidents and alert rules need PostgreSQL (`console.database.mode=cnpg` or
+`external`); alerting needs `console.alerting.enabled=true` and the Prometheus
+Operator's `PrometheusRule` CRD. Every knob is documented in
+[charts/kconmon-ng/values.yaml](charts/kconmon-ng/values.yaml) and
+[docs/console/architecture/CONFIG.md](docs/console/architecture/CONFIG.md).
+
+<!--
+SCREENSHOTS: to be captured at the M7 final gate against a live stack.
+Expected files, referenced by the block below once they exist:
+  docs/img/console-overview.png
+  docs/img/console-investigate.png
+  docs/img/console-alerting.png
+Do not add the <img> tags before the files are committed — a broken image is
+worse than no image.
+-->
+
+The full architecture, API, data model, security posture and page-by-page
+behaviour live under [docs/console/](docs/console/). For a hands-on tour, the
+demo walkthrough below now drives the Console end to end.
 
 ## How it works
 
@@ -204,6 +259,8 @@ or API errors), so it composes in shell pipelines. This drives the new
 - [HTTP API](docs/api.md) — health endpoints and the topology API.
 - [charts/kconmon-ng/values.yaml](charts/kconmon-ng/values.yaml) — every
   Helm value, documented inline.
+- [docs/console/](docs/console/) — the Console: architecture, API, data model,
+  security, per-page behaviour and the milestone record.
 
 ## See it catch a failure
 
@@ -212,7 +269,10 @@ walkthrough on a disposable Minikube cluster: blackhole UDP between two
 nodes, watch exactly one cell of the matrix go red while TCP and ICMP on the
 same pair stay green, watch MTR fire and the bundled alert go pending — then
 break TCP, ICMP and HTTP in three other places at once and see each failure
-isolated to its own pair and protocol.
+isolated to its own pair and protocol. The last part of the walkthrough runs
+the same break through the Console: watch the cell go red on `/matrix`,
+correlate it on `/investigate`, save it as an incident, and declare an alert
+rule that fires a webhook when the pair loses packets again.
 
 ## Development
 

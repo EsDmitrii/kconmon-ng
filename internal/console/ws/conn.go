@@ -63,11 +63,32 @@ func checkOrigin(r *http.Request) bool {
 	return strings.EqualFold(u.Host, r.Host)
 }
 
-// ServeWS upgrades one HTTP request to the multiplexed WebSocket protocol and
-// runs its two pumps: the read pump on this goroutine (so the handler — and with
-// it the request's metrics observation — lives exactly as long as the socket),
-// and the write pump on one more.
+// ServeWS upgrades one HTTP request with NO per-topic authorization: every
+// topic the hub considers subscribable is subscribable on the resulting
+// socket. It is the plain http.HandlerFunc form and the pre-M7 behaviour,
+// correct wherever the route's own permission gate is already the whole
+// decision.
+//
+// Console's own /ws route does NOT use it — see ServeWSAuthorized.
 func (h *Hub) ServeWS(w http.ResponseWriter, r *http.Request) {
+	h.ServeWSAuthorized(w, r, nil)
+}
+
+// ServeWSAuthorized upgrades one HTTP request to the multiplexed WebSocket
+// protocol and runs its two pumps: the read pump on this goroutine (so the
+// handler — and with it the request's metrics observation — lives exactly as
+// long as the socket), and the write pump on one more.
+//
+// authorize (nil = allow every subscribable topic) is captured on the
+// connection and consulted on every subscribe frame. It is what lets ONE hub
+// serve two sockets with different topic sets, which is the whole point: the
+// /ws upgrade can then be admitted for a subject holding runs:read alone —
+// so a custom role can watch its own run live instead of polling — while the
+// fleet-wide topics (live, topology, matrix:*) stay behind events:read on that
+// same socket. Before this seam existed the route's single permission decided
+// the entire socket, and SECURITY.md §10.2 named this ("teaching the hub
+// subject-aware subscribe authorization") as the change that would be needed.
+func (h *Hub) ServeWSAuthorized(w http.ResponseWriter, r *http.Request, authorize TopicAuthorizer) {
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		// Upgrade has already written the HTTP error response (400 for a
@@ -77,7 +98,7 @@ func (h *Hub) ServeWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	c := h.register()
+	c := h.register(authorize)
 	slog.Debug("websocket client connected", "clients", h.ClientCount())
 
 	// Teardown is symmetric in both directions. If the read side ends first,

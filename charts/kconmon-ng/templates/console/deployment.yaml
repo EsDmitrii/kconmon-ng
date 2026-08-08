@@ -48,12 +48,14 @@ spec:
       securityContext:
         {{- toYaml .Values.console.podSecurityContext | nindent 8 }}
       {{- end }}
-      {{- /* M6: the console gets a Kubernetes identity ONLY when the event
-      reader is on -- see kconmon-ng.console.serviceAccountName for why this is
-      a console-only SA and not the agent/controller one. With the reader off
-      this key is absent and the Pod runs as the namespace `default` SA, which
-      is exactly what every release up to chart 1.7.0 did. */}}
-      {{- if .Values.console.kubernetesContext.enabled }}
+      {{- /* M6: the console gets a Kubernetes identity ONLY when a feature
+      needs one -- see kconmon-ng.console.serviceAccountName for why this is
+      a console-only SA and not the agent/controller one, and
+      kconmon-ng.console.k8sIdentity for the two features (the M6 event reader
+      and the M7 alerting reconciler). With both off this key is absent and the
+      Pod runs as the namespace `default` SA, which is exactly what every
+      release up to chart 1.7.0 did. */}}
+      {{- if include "kconmon-ng.console.k8sIdentity" . }}
       serviceAccountName: {{ include "kconmon-ng.console.serviceAccountName" . }}
       {{- end }}
       containers:
@@ -72,9 +74,11 @@ spec:
             reads it ONLY as the fallback for an empty
             console.kubernetesContext.namespace, so "the namespace this release
             runs in" needs no value at all and cannot drift from where the Pod
-            actually is. Rendered under the reader's own gate: nothing else
-            reads it. */}}
-            {{- if .Values.console.kubernetesContext.enabled }}
+            actually is. M7 gave it a SECOND reader with the identical rule --
+            an empty console.alerting.namespace resolves through the same
+            helper (config.resolveNamespace) -- so the gate is the shared
+            kconmon-ng.console.k8sIdentity. Nothing else reads it. */}}
+            {{- if include "kconmon-ng.console.k8sIdentity" . }}
             - name: POD_NAMESPACE
               valueFrom:
                 fieldRef:

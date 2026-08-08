@@ -7,7 +7,10 @@ internal/console/store/migrations/, internal/console/store/events.go,
 internal/console/authn/session.go. §5.2's three M5 tables, the topology fold
 and the retention sweeps written from the as-built M5 implementation
 (2026-08-08): migrations/00005_mtr_timemachine.sql, store/prune.go,
-store/events.go (TopologyAt).
+store/events.go (TopologyAt). §5.2's `alert_rules` row, the M7 retention line
+and the topology-fold paragraph written from the as-built M7 implementation
+(2026-08-08): migrations/00007_alert_rules.sql, store/alertrules.go,
+internal/controller (topology attribution).
 This document is the source of truth for Data Architecture. Update it (and the ADRs) in the same PR as any deviation.
 -->
 
@@ -51,12 +54,12 @@ and keeps a peer query from silently picking up external series. See
 | `mtr_hop_enrichment`   | TTL cache keyed by address: `ip` PK, `rdns`, `asn`, `provider`, `geo` JSONB, `resolved_at` | **Landed M5** |
 | `annotations`          | Operator notes: `id`, `start_at`, `end_at` (NULL = instant mark), `scope` (`''` = global), `text`, `created_by`, `created_at` | **Landed M5** |
 | `k8s_events`           | Filtered copy of K8s events for post-hoc investigation (K8s keeps ~1h): `uid`, `resource_ver`, `event_time`, `kind` (`Node`/`Pod`), `name`, `namespace` (`''` for node events), `reason`, `type` (`Normal`/`Warning`), `message`, `count`; `UNIQUE (uid, resource_ver)` | **Landed M6** |
-| `alert_rules`          | Builder model (JSONB) + rendered PromQL + sync status | pending (M7) |
+| `alert_rules`          | Builder model + rendered PromQL + sync status: `id` UUID, `name` (1–63, UNIQUE on `lower(name)`), `kind` (CHECK, 8 values), `params` JSONB, `severity` (CHECK `info`/`warning`/`critical`), `for_ns` BIGINT ≥ 0, `labels`/`annotations` JSONB, `enabled`, `rendered_expr`, `sync_status` (CHECK `unsynced`/`synced`/`drift`/`error`), `sync_message`, `last_synced_at`, `created_at`, `updated_at` | **Landed M7** |
 | `incidents`            | Investigation sessions: `id` UUID, `title`, `scope` (`''` = global), `from_at`, `to_at` (NULL = open-ended), `status` (`open`/`resolved`), `notes`, `pinned` JSONB array, `created_by`, `created_at`, `resolved_at` | **Landed M6** |
 | `maintenance_windows`  | Declared change windows: `id` UUID, `scope`, `start_at`, `end_at`, `reason`, `created_by`, `created_at`; `CHECK (end_at > start_at)` | **Landed M6** |
 | `webhooks`             | Outbound endpoints: `id` UUID, `name` (UNIQUE), `url`, `events` TEXT[], `secret_enc` BYTEA, `enabled`, `last_status`, `last_attempt`, `failures`, `created_at` | **Landed M6** |
-| `layouts`              | Saved topology layouts (per-user/global), pinned pairs | pending |
-| `settings`             | Versioned Console settings (retention, defaults) | pending |
+| `layouts`              | Saved topology layouts (per-user/global), pinned pairs | pending — **not pinned to any milestone**, M7 included |
+| `settings`             | Versioned Console settings (retention, defaults) | pending — **not pinned to any milestone**. M6 declined to invent it for one webhook key and M7 declined again for export/import: the config export reads the collections that exist and the Settings page's About section renders only what `GET /api/v1/config` already serves |
 
 `topology_events` holds **all five** WebSocket event types (`topology_changed`,
 `check_observed`, `mtr_triggered`, `mtr_completed`, `diagnostic_progress` —
@@ -130,23 +133,51 @@ inherits exactly the hub's dedupe guarantee, no better, no worse.
   query, index or constraint looks inside it. `name` is UNIQUE over a restricted
   charset (lowercase alphanumerics and hyphens, ≤64), `url` ≤2048, and `events`
   is a `TEXT[]` over the closed set
-  `incident.created|incident.resolved|incident.reopened` with duplicates
-  rejected. `last_status`/`last_attempt`/`failures` are the delivery ledger:
+  `incident.created|incident.resolved|incident.reopened|alert.fired|alert.resolved`
+  with duplicates rejected. The set is closed **in Go, not by a CHECK** — which
+  is what let M7 add the two alert transitions (Decision 7) with no migration
+  and no downtime. `last_status`/`last_attempt`/`failures` are the delivery ledger:
   one row per ENDPOINT, updated per delivery — there is no delivery-log table
   (MILESTONES.md "Deferred out of M6").
+
+**The one M7 table, as built** (`migrations/00007_alert_rules.sql`):
+
+- `alert_rules` splits into a **builder half** an operator writes and a
+  **derived half** the reconciler writes, and they are never updated together.
+  `rendered_expr` is what was last rendered from the builder columns, kept
+  alongside them so drift can be diffed without re-running the renderer and so a
+  rule whose template changed under it is visible as stored bytes that no longer
+  match. `sync_status`/`sync_message`/`last_synced_at` come from two **narrow**
+  UPDATEs that touch nothing else: a sync result must never disturb what the
+  operator typed, and an edit must never claim a sync that has not happened. The
+  sync-status write also deliberately does **not** bump `updated_at`, or a
+  60-second reconcile loop would make every rule look freshly edited.
+  Uniqueness is enforced **case-insensitively**, by a `UNIQUE INDEX on
+  lower(name)` rather than the plain column constraint `targets` and
+  `check_definitions` use — two rules named `PairLoss` and `pairloss` render
+  into two alerts an operator reads as one, and no dashboard or notification
+  can tell them apart. The index is also the listing's own order
+  (`ORDER BY lower(name)`), so the unpaged list comes out of it rather than out
+  of a sort. `kind`, `severity` and `sync_status` **are** CHECK-constrained,
+  which is the opposite of M4's `targets.kind` choice, because these three
+  vocabularies are not ours to widen freely: `kind` is the set of templates the
+  renderer knows, `severity` is what Alertmanager routes on, `sync_status` is
+  the reconciler's state machine. `params` is guaranteed only to be a JSON
+  object here; it is validated **closed** by the renderer.
 
 **Time Machine's topology fold** reads `topology_events` and nothing else
 (Decision 6): `GET /api/v1/topology?at=` replays `topology_changed` rows in
 `(event_time, id)` order up to the instant asked about. What that fold can
-honestly reconstruct is bounded by what the events record, and today the
-controller publishes `TopologyChanged` with a **reason only** — no
-`node_name`, no `agent_id` — so a fold over events written by this release
-counts every one of them as unfoldable and returns an empty node set. The
-response says so in numbers (`eventsFolded`, `unfoldableEvents`) rather than
-letting an empty array read as "the cluster was empty". `zone` and `podIP`
-are never recorded by any event type, so both come back empty on every folded
-entry even once attribution lands. See API.md and the M5 carry-forward in
-MILESTONES.md.
+honestly reconstruct is bounded by what the events record. **M7 closed the M5
+carry-forward**: the controller now attributes every topology change at its
+emission site — one event per affected agent, carrying `node_name`, `agent_id`
+and `zone` — so a fold over current history returns a real node set with real
+zone lanes. Events written by an **earlier** controller carry a reason only,
+name nobody, and are counted as unfoldable; they age out with retention. The
+response reports both numbers (`eventsFolded`, `unfoldableEvents`) rather than
+letting an empty array read as "the cluster was empty". `podIP` is still never
+recorded by any event type and comes back empty on every folded entry. See
+API.md and MILESTONES.md.
 
 Retention: `check_runs`/`check_results`/`topology_events`/`audit_log` are
 pruned by a background job (defaults 90d, Helm-configurable via
@@ -173,6 +204,12 @@ observation — it does not accumulate with time, and its only time column
 records when the endpoint was set up rather than when it last mattered. Ageing
 rows out of it would silently switch off notifications for a still-wanted
 endpoint, and a retention policy is not a deconfiguration policy.
+**M7 added no sweep either**, and `alert_rules` is the same class for the same
+reason (pinned by `TestAlertRulesAreNotARetentionTable`): a rule is what an
+operator typed, there are dozens of them at most, and they do not accumulate
+with time. Ageing one out would silently stop paging for a condition somebody
+still cares about. The pin exists specifically so a later reader does not
+"complete" the sweep list with it.
 `check_results` has no sweep of its own — `ON DELETE CASCADE` on
 `check_results.run_id` makes deleting the run row enough. Partition
 `check_results` by month if volume warrants it — still not done

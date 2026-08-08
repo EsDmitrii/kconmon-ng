@@ -27,6 +27,14 @@ type fakeTokenStore struct {
 	tokens map[string]store.Token
 	hashes map[string]string // hex(hash) -> id
 	nextN  int
+
+	// listCalls / getByIDCalls count the two read paths separately, so
+	// TestTokensCreateResolvesParentByIDWithoutAFullScan can assert on WHICH
+	// query the mint path pays for and not merely on the owner it ends up
+	// storing (the full scan produced the identical owner -- that is exactly
+	// why the cost sat unnoticed from M3 to M7).
+	listCalls    int
+	getByIDCalls int
 }
 
 func newFakeTokenStore() *fakeTokenStore {
@@ -47,11 +55,31 @@ func (f *fakeTokenStore) CreateToken(_ context.Context, name string, hash []byte
 func (f *fakeTokenStore) ListTokens(context.Context) ([]store.Token, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.listCalls++
 	out := make([]store.Token, 0, len(f.tokens))
 	for _, t := range f.tokens {
 		out = append(out, t)
 	}
 	return out, nil
+}
+
+func (f *fakeTokenStore) GetTokenByID(_ context.Context, id string) (store.Token, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.getByIDCalls++
+	t, ok := f.tokens[id]
+	if !ok {
+		return store.Token{}, store.ErrNotFound
+	}
+	return t, nil
+}
+
+// callCounts reports the two read paths' call counts, taken together under one
+// lock so a caller cannot observe a torn pair.
+func (f *fakeTokenStore) callCounts() (list, getByID int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.listCalls, f.getByIDCalls
 }
 
 func (f *fakeTokenStore) RevokeToken(_ context.Context, id string) error {
@@ -363,6 +391,71 @@ func TestTokensCreateFallsBackToSubjectIDWhenParentTokenNotFound(t *testing.T) {
 	}
 	if child.Owner != missingParentID {
 		t.Errorf("child token Owner = %q, want fallback to subject.ID %q (parent not found)", child.Owner, missingParentID)
+	}
+}
+
+// TestTokensCreateResolvesParentByIDWithoutAFullScan is the M3-carry half of
+// the owner-inheritance fix: the ATTRIBUTION was already correct (the two
+// tests above pin it), what was wrong was its cost. resolveInheritedOwner
+// looked the parent up by paging the entire api_tokens table in through
+// ListTokens -- the admin-scale query behind GET /api/v1/tokens -- and then
+// scanning it in Go for one id it already had. On a fleet with thousands of
+// tokens that is the whole table decoded, allocated and discarded on every
+// POST /api/v1/tokens made BY a token, which is the automation path and so
+// the one most likely to be hot.
+//
+// The assertion is deliberately on the call counts and not on the owner: both
+// implementations store the same owner, so an owner-only test would go on
+// passing if the full scan came back.
+func TestTokensCreateResolvesParentByIDWithoutAFullScan(t *testing.T) {
+	tokens := newFakeTokenStore()
+	const rootUserID = "22222222-2222-2222-2222-222222222222"
+	parent, err := tokens.CreateToken(context.Background(), "parent", []byte("parent-hash"), rootUserID, nil)
+	if err != nil {
+		t.Fatalf("seed parent token: %v", err)
+	}
+	// Noise rows: a full scan would have to walk these, a by-id lookup never
+	// sees them. They also make the fake's map iteration order irrelevant.
+	for i := range 5 {
+		if _, seedErr := tokens.CreateToken(context.Background(), fmt.Sprintf("noise-%d", i),
+			[]byte(fmt.Sprintf("noise-hash-%d", i)), rootUserID, nil); seedErr != nil {
+			t.Fatalf("seed noise token %d: %v", i, seedErr)
+		}
+	}
+
+	policy := authz.NewPolicy(map[string][]authz.Permission{"tester": {authz.PermTokensManage}})
+	authr := fakeAuthenticator{subject: authz.Subject{Kind: authz.SubjectToken, ID: parent.ID, DisplayName: parent.Name}}
+	s := newAuthzServer(t, authr, policy, Deps{Roles: fakeRoleResolver{roles: []string{"tester"}}, Tokens: tokens})
+
+	listBefore, getBefore := tokens.callCounts()
+
+	w := doRequest(t, s, http.MethodPost, "/api/v1/tokens", strings.NewReader(`{"name":"child"}`), mutateWithCSRF)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status %d: %s", w.Code, w.Body)
+	}
+
+	listAfter, getAfter := tokens.callCounts()
+	if listAfter != listBefore {
+		t.Errorf("minting a token called ListTokens %d time(s); the mint path must not full-scan api_tokens", listAfter-listBefore)
+	}
+	if getAfter-getBefore != 1 {
+		t.Errorf("minting a token called GetTokenByID %d time(s), want exactly 1", getAfter-getBefore)
+	}
+}
+
+// TestTokensCreateByUserSubjectMakesNoParentLookup pins the negative case the
+// by-id swap must not regress: a token minted by a USER has no parent token to
+// inherit from, so neither read path may be touched at all.
+func TestTokensCreateByUserSubjectMakesNoParentLookup(t *testing.T) {
+	tokens := newFakeTokenStore()
+	s := newTokensTestServer(t, tokens)
+
+	w := doRequest(t, s, http.MethodPost, "/api/v1/tokens", strings.NewReader(`{"name":"by-a-human"}`), mutateWithCSRF)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status %d: %s", w.Code, w.Body)
+	}
+	if list, getByID := tokens.callCounts(); list != 0 || getByID != 0 {
+		t.Errorf("mint by a SubjectUser made %d ListTokens and %d GetTokenByID calls, want 0 and 0", list, getByID)
 	}
 }
 

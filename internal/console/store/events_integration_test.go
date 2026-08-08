@@ -312,9 +312,11 @@ func jsonEqual(t *testing.T, a, b json.RawMessage) bool {
 	return reflect.DeepEqual(va, vb)
 }
 
-// topoRec builds one topology_changed row whose details carry the exact three
-// keys events.topologyChangedDetails marshals.
-func topoRec(seq int64, ts time.Time, reason, node, agent string) store.EventRecord {
+// topoRec builds one topology_changed row whose details carry the exact four
+// keys events.topologyChangedDetails marshals, with the zone the M7 controller
+// attributes. The zone travels through real JSONB storage here, which is the
+// only place that round trip is exercised.
+func topoRec(seq int64, ts time.Time, reason, node, agent, zone string) store.EventRecord {
 	scope := node
 	if scope == "" {
 		scope = "cluster"
@@ -322,7 +324,7 @@ func topoRec(seq int64, ts time.Time, reason, node, agent string) store.EventRec
 	ev := rec(seq, ts, "topology_changed", scope)
 	ev.Summary = fmt.Sprintf("topology changed: %s", reason)
 	ev.Details = json.RawMessage(fmt.Sprintf(
-		`{"reason":%q,"nodeName":%q,"agentId":%q}`, reason, node, agent))
+		`{"reason":%q,"nodeName":%q,"agentId":%q,"zone":%q}`, reason, node, agent, zone))
 	return ev
 }
 
@@ -335,9 +337,9 @@ func TestTopologyAtThreeInstantsGiveThreeSets(t *testing.T) {
 	ctx := context.Background()
 
 	t0 := time.Date(2026, 8, 5, 12, 0, 0, 0, time.UTC)
-	mustInsert(t, ctx, es, topoRec(1, t0, "agent_registered", "node-a", "agent-a"))
-	mustInsert(t, ctx, es, topoRec(2, t0.Add(time.Hour), "agent_registered", "node-b", "agent-b"))
-	mustInsert(t, ctx, es, topoRec(3, t0.Add(2*time.Hour), "agent_evicted", "node-a", "agent-a"))
+	mustInsert(t, ctx, es, topoRec(1, t0, "agent_registered", "node-a", "agent-a", "zone-a"))
+	mustInsert(t, ctx, es, topoRec(2, t0.Add(time.Hour), "agent_registered", "node-b", "agent-b", "zone-b"))
+	mustInsert(t, ctx, es, topoRec(3, t0.Add(2*time.Hour), "agent_evicted", "node-a", "agent-a", "zone-a"))
 	// A non-topology row at the same times must never reach the fold.
 	mustInsert(t, ctx, es, topoRecNoise(4, t0.Add(90*time.Minute)))
 
@@ -345,10 +347,11 @@ func TestTopologyAtThreeInstantsGiveThreeSets(t *testing.T) {
 		name  string
 		at    time.Time
 		nodes []string
+		zones []string
 	}{
-		{"after the first registration", t0.Add(30 * time.Minute), []string{"node-a"}},
-		{"after the second", t0.Add(90 * time.Minute), []string{"node-a", "node-b"}},
-		{"after the eviction", t0.Add(3 * time.Hour), []string{"node-b"}},
+		{"after the first registration", t0.Add(30 * time.Minute), []string{"node-a"}, []string{"zone-a"}},
+		{"after the second", t0.Add(90 * time.Minute), []string{"node-a", "node-b"}, []string{"zone-a", "zone-b"}},
+		{"after the eviction", t0.Add(3 * time.Hour), []string{"node-b"}, []string{"zone-b"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			snap, err := es.TopologyAt(ctx, tc.at)
@@ -356,11 +359,18 @@ func TestTopologyAtThreeInstantsGiveThreeSets(t *testing.T) {
 				t.Fatalf("TopologyAt: %v", err)
 			}
 			got := make([]string, 0, len(snap.Nodes))
+			gotZones := make([]string, 0, len(snap.Nodes))
 			for _, n := range snap.Nodes {
 				got = append(got, n.Name)
+				gotZones = append(gotZones, n.Zone)
 			}
 			if !reflect.DeepEqual(got, tc.nodes) {
 				t.Errorf("nodes at %v = %v, want %v", tc.at, got, tc.nodes)
+			}
+			// The zone survives the JSONB round trip, so a reconstructed map
+			// can draw the same zone lanes the live one does.
+			if !reflect.DeepEqual(gotZones, tc.zones) {
+				t.Errorf("zones at %v = %v, want %v", tc.at, gotZones, tc.zones)
 			}
 			if snap.UnfoldableEvents != 0 {
 				t.Errorf("UnfoldableEvents = %d, want 0: every seeded event names a node", snap.UnfoldableEvents)
@@ -392,7 +402,7 @@ func TestTopologyAtBeforeAnyEventIsEmptyButRetentionAware(t *testing.T) {
 	ctx := context.Background()
 
 	t0 := time.Date(2026, 8, 5, 12, 0, 0, 0, time.UTC)
-	mustInsert(t, ctx, es, topoRec(1, t0, "agent_registered", "node-a", "agent-a"))
+	mustInsert(t, ctx, es, topoRec(1, t0, "agent_registered", "node-a", "agent-a", "zone-a"))
 
 	snap, err := es.TopologyAt(ctx, t0.Add(-time.Hour))
 	if err != nil {
@@ -437,9 +447,9 @@ func TestTopologyAtTieBreaksOnID(t *testing.T) {
 	ctx := context.Background()
 
 	ts := time.Date(2026, 8, 5, 12, 0, 0, 0, time.UTC)
-	mustInsert(t, ctx, es, topoRec(1, ts, "agent_registered", "node-a", "agent-a"))
+	mustInsert(t, ctx, es, topoRec(1, ts, "agent_registered", "node-a", "agent-a", "zone-a"))
 	// Same event_time, different event_seq, so the natural key lets both in.
-	mustInsert(t, ctx, es, topoRec(2, ts, "agent_deregistered", "node-a", "agent-a"))
+	mustInsert(t, ctx, es, topoRec(2, ts, "agent_deregistered", "node-a", "agent-a", "zone-a"))
 
 	snap, err := es.TopologyAt(ctx, ts)
 	if err != nil {

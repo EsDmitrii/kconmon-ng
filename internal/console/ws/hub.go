@@ -55,14 +55,56 @@ const (
 	reapInterval = 30 * time.Second
 )
 
+// TopicAuthorizer decides, per CONNECTION, whether that connection's subject
+// may subscribe to topic. A nil error means allowed; a non-nil error's Error()
+// string is delivered VERBATIM to that client as the error frame's detail, so
+// an implementation must write it for the caller's eyes (name the missing
+// permission, not the internals) and must never put anything in it that the
+// caller may not already learn some other way.
+//
+// It is a function and not an authz.Subject on purpose. This package knows
+// nothing about permissions, roles or subjects — teaching it would drag the
+// whole authz vocabulary into the fan-out layer and put the permission names
+// in two places. httpapi builds the closure from the Subject its own
+// middleware already resolved (server.go's handleWS), which keeps every
+// permission decision, and every string naming one, inside the package that
+// owns the route table.
+//
+// It is called on the read pump's goroutine, once per subscribe frame, while
+// no hub lock is held. It must not block.
+type TopicAuthorizer func(topic string) error
+
 // client is one connected browser. Its topic set is guarded by Hub.mu, so
 // subscribe and Broadcast can be made atomic against each other.
 type client struct {
 	send   chan Envelope
 	topics map[string]bool
 
+	// authorize is this connection's per-topic gate, captured at upgrade
+	// time from the request's already-resolved subject and never changed
+	// afterwards: a socket's authorization is fixed for its lifetime, exactly
+	// like the route-level permission decision that admitted the upgrade.
+	// nil means "every subscribable topic", which is what plain ServeWS
+	// (and every pre-M7 caller) gets.
+	//
+	// It is read only from the read pump — one goroutine per client — so it
+	// needs no lock, unlike topics, which Broadcast reads from the hub's.
+	authorize TopicAuthorizer
+
 	done     chan struct{}
 	doneOnce sync.Once
+}
+
+// allowedToSubscribe applies c's authorizer. It returns the detail string for
+// the error frame, and false, when the subscribe must be refused.
+func (c *client) allowedToSubscribe(topic string) (detail string, ok bool) {
+	if c.authorize == nil {
+		return "", true
+	}
+	if err := c.authorize(topic); err != nil {
+		return err.Error(), false
+	}
+	return "", true
 }
 
 // close signals the client's pumps to shut down. Idempotent.
@@ -217,7 +259,7 @@ func (h *Hub) fanOutLive(msg cache.Message) {
 // while it still has one.
 func (h *Hub) Broadcast(topic, msgType string, data json.RawMessage) {
 	h.mu.Lock()
-	if strings.HasPrefix(topic, runTopicPrefix) {
+	if IsRunTopic(topic) {
 		if _, open := h.ephemeral[topic]; !open {
 			h.mu.Unlock()
 			return
@@ -246,17 +288,19 @@ func (h *Hub) ClientCount() int {
 	return len(h.clients)
 }
 
-// register adds a client. Called by ServeWS once the upgrade succeeded. On a
-// hub that Run has already shut down, the client is refused: its done channel
-// is closed immediately and it never enters the clients map — otherwise an
-// upgrade racing shutdown would leak a hijacked connection forever (nothing
-// runs closeAllClients twice) and push the WSClients gauge back up after
-// shutdown zeroed it.
-func (h *Hub) register() *client {
+// register adds a client whose subscribes are gated by authorize (nil = every
+// subscribable topic, the pre-M7 behaviour). Called by ServeWSAuthorized once
+// the upgrade succeeded. On a hub that Run has already shut down, the client
+// is refused: its done channel is closed immediately and it never enters the
+// clients map — otherwise an upgrade racing shutdown would leak a hijacked
+// connection forever (nothing runs closeAllClients twice) and push the
+// WSClients gauge back up after shutdown zeroed it.
+func (h *Hub) register(authorize TopicAuthorizer) *client {
 	c := &client{
-		send:   make(chan Envelope, sendBuffer),
-		topics: make(map[string]bool),
-		done:   make(chan struct{}),
+		send:      make(chan Envelope, sendBuffer),
+		topics:    make(map[string]bool),
+		authorize: authorize,
+		done:      make(chan struct{}),
 	}
 	h.mu.Lock()
 	if h.closed {
@@ -321,6 +365,17 @@ func (h *Hub) handleClientMessage(c *client, msg ClientMessage) {
 		if !h.topicAllowed(msg.Topic) {
 			h.sendError(c, msg.Topic, "unknown topic; subscribable topics are "+
 				"live, topology, matrix:tcp:pod, matrix:udp:pod, matrix:icmp:pod")
+			return
+		}
+		// Existence first, then permission. The order costs nothing here:
+		// every subject that got this far already holds a permission that
+		// lets it enumerate run ids over REST (see the /ws upgrade gate),
+		// so "no such topic" reveals nothing "forbidden" would have hidden —
+		// and answering "forbidden" for a run that is not streaming on this
+		// replica would send a browser to fix its RBAC instead of falling
+		// back to polling, which is the actual remedy.
+		if detail, ok := c.allowedToSubscribe(msg.Topic); !ok {
+			h.sendError(c, msg.Topic, detail)
 			return
 		}
 		for _, env := range h.subscribe(c, msg.Topic, msg.LastSeq) {

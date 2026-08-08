@@ -156,14 +156,15 @@ const LEGEND = [
  * unfoldableEmpty is the Time Machine's honest empty state, DERIVED from the
  * response rather than assumed.
  *
- * Task 9's finding, unchanged by anything this page can do: the topology events
- * this controller emits today carry no node identity, so folding them yields an
- * empty node set no matter how many events there were. The server reports that
- * precisely — `unfoldableEvents` counted, `eventsFolded` folded — and the note
- * this gates quotes those two numbers back. The alternative, a hardcoded "your
- * history is probably empty" on every historical view, would be a lie the day
- * the controller starts attributing events, and would say nothing useful before
- * then either.
+ * Deriving it is what made this survive the controller learning to attribute
+ * its topology events (M7). Before that, every event carried a reason and no
+ * node identity, so any fold came back empty; now events name their agent, node
+ * and zone and history reconstructs for real. The only history that still folds
+ * to nothing is what an OLDER controller wrote and retention has not yet cut
+ * away — a shrinking window, not a permanent property. A hardcoded "your
+ * history is probably empty" would have had to be deleted; a note driven by the
+ * server's own two numbers — `unfoldableEvents` counted, `eventsFolded` folded
+ * — simply stops appearing on its own.
  *
  * The three conditions are all load-bearing: `historical` (a live body has none
  * of these fields), an EMPTY node set (a fold that produced nodes is a success
@@ -261,9 +262,9 @@ export function TopologyPage() {
             {`This console found ${unfoldable.unfoldableEvents} topology event${
               unfoldable.unfoldableEvents === 1 ? "" : "s"
             } at or before this instant and could fold ${unfoldable.eventsFolded} of them into a node set: `}
-            the rest name no node, so there is nothing to rebuild the map from. That is a property of what this
-            controller records today, not of the instant you picked — historical topology fills in for events emitted
-            after the controller starts attributing them.
+            the rest name no node, so there is nothing to rebuild the map from. Those were recorded before the
+            controller started attributing topology changes, so that stretch of history cannot be reconstructed — pick
+            a more recent instant, where events name the node they are about.
           </p>
         </Card>
       ) : null}

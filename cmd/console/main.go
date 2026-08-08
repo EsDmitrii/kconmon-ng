@@ -13,6 +13,7 @@ import (
 	"time"
 
 	appconfig "github.com/EsDmitrii/kconmon-ng/internal/config"
+	"github.com/EsDmitrii/kconmon-ng/internal/console/alerting"
 	"github.com/EsDmitrii/kconmon-ng/internal/console/authn"
 	"github.com/EsDmitrii/kconmon-ng/internal/console/authz"
 	"github.com/EsDmitrii/kconmon-ng/internal/console/cache"
@@ -25,6 +26,7 @@ import (
 	"github.com/EsDmitrii/kconmon-ng/internal/console/kubectx"
 	"github.com/EsDmitrii/kconmon-ng/internal/console/metrics"
 	"github.com/EsDmitrii/kconmon-ng/internal/console/promql"
+	"github.com/EsDmitrii/kconmon-ng/internal/console/promrules"
 	"github.com/EsDmitrii/kconmon-ng/internal/console/push"
 	"github.com/EsDmitrii/kconmon-ng/internal/console/scheduler"
 	"github.com/EsDmitrii/kconmon-ng/internal/console/store"
@@ -32,6 +34,7 @@ import (
 	"github.com/EsDmitrii/kconmon-ng/internal/console/webhooks"
 	"github.com/EsDmitrii/kconmon-ng/internal/console/ws"
 	"github.com/prometheus/client_golang/prometheus"
+	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 )
@@ -46,6 +49,11 @@ import (
 // internal/controller (they are separate binaries with separate config,
 // metrics and dependency budgets), and exporting ten lines from the controller
 // to create that edge would be a worse trade than repeating them.
+//
+// There is exactly ONE such copy in this binary. The M7 alerting reconciler
+// needs a DYNAMIC client from the same service account, and it gets it from
+// buildInClusterDynamic below, which shares this file's rest.InClusterConfig
+// call rather than adding a third copy of it.
 func buildInClusterClientset() (*kubernetes.Clientset, error) {
 	restCfg, err := rest.InClusterConfig()
 	if err != nil {
@@ -56,6 +64,29 @@ func buildInClusterClientset() (*kubernetes.Clientset, error) {
 		return nil, fmt.Errorf("kubernetes client: %w", err)
 	}
 	return clientset, nil
+}
+
+// buildInClusterDynamic builds an unstructured (dynamic) Kubernetes client
+// from the same in-cluster service account, for the PrometheusRule reconciler
+// (internal/console/promrules, M7 Decision 3).
+//
+// Dynamic and not typed, and that is the whole point of Decision 2: a typed
+// PrometheusRule client means depending on the prometheus-operator module,
+// which drags its whole API surface into a binary that needs one CRD. The
+// dynamic client ships with client-go, which this binary already has.
+//
+// Same posture as buildInClusterClientset: an error means "not running in a
+// cluster", which the caller degrades on rather than dies on.
+func buildInClusterDynamic() (dynamic.Interface, error) {
+	restCfg, err := rest.InClusterConfig()
+	if err != nil {
+		return nil, fmt.Errorf("in-cluster config: %w", err)
+	}
+	client, err := dynamic.NewForConfig(restCfg)
+	if err != nil {
+		return nil, fmt.Errorf("dynamic kubernetes client: %w", err)
+	}
+	return client, nil
 }
 
 // rbacPolicyRefreshInterval is how often cmd/console re-reads the roles
@@ -335,6 +366,11 @@ func main() {
 	var maintenanceDep httpapi.MaintenanceService
 	var webhooksDep httpapi.WebhookService
 	var k8sEventsDep httpapi.K8sEventService
+	// alertRulesDep (M7 Task 6) shares the identical posture: nil means
+	// /api/v1/export and /api/v1/import answer 503 — configUnavailable is
+	// all-or-nothing, because a bundle missing a collection is a restore
+	// point with a hole in it.
+	var alertRulesDep httpapi.AlertRuleService
 	policy := authz.NewPolicy(nil)
 	if db != nil {
 		rolesDep = roleResolver{db: db}
@@ -351,6 +387,7 @@ func main() {
 		maintenanceDep = db
 		webhooksDep = db
 		k8sEventsDep = db
+		alertRulesDep = db
 
 		if cfg.Auth.Mode == "local" {
 			bootstrapLocalAdmin(bgCtx, db, cfg.Auth.Local)
@@ -542,6 +579,144 @@ func main() {
 		slog.Info("webhook delivery enabled")
 	}
 
+	// The PrometheusRule reconciler is opt-in (console.alerting.enabled,
+	// default false) and needs a database, for a stronger reason than the
+	// event reader's: alert_rules is the SOURCE, not the sink. With no
+	// database there are no rules to render, and a reconciler that ran anyway
+	// would server-side-apply an EMPTY bundle over whatever the previous
+	// deployment left in the namespace -- a config change that silently
+	// deletes an operator's alerts. Skipping is the only safe degradation.
+	//
+	// Every other failure is warn-and-continue, the same posture kubectx has
+	// and for the same reason: `alerting.enabled: true` on a console running
+	// outside a cluster must degrade to "no sync", never to a console that
+	// refuses to start. A cluster that is reachable but has no PrometheusRule
+	// CRD is NOT handled here at all -- that is a running reconciler writing
+	// crd-missing onto every rule, which is the informative failure Decision 3
+	// asks for.
+	//
+	// It is BUILT here, ahead of NewServer, and SPAWNED further down next to
+	// every other background component -- the webhook dispatcher's shape,
+	// for the same reason: httpapi needs the seam at construction time (M7
+	// Task 4 wires POST /api/v1/alert-rules/{id}/sync and GET
+	// /api/v1/alert-rules/foreign to it, and kicks it after every write),
+	// while `spawn` does not exist until the WaitGroup below does. There is
+	// deliberately no state in which the API holds a reconciler that is not
+	// running: one branch produces both, or neither.
+	var ruleReconciler *promrules.Reconciler
+	switch {
+	case !cfg.Alerting.Enabled:
+	case db == nil:
+		slog.Warn("alerting.enabled is set but no database is configured — prometheus rule sync is off " +
+			"(alert rules live in PostgreSQL; set console.database.mode)")
+	default:
+		dyn, dynErr := buildInClusterDynamic()
+		if dynErr != nil {
+			slog.Warn("alerting.enabled is set but the in-cluster Kubernetes config is unavailable — "+
+				"prometheus rule sync is off (the console is not running in a cluster, or its "+
+				"ServiceAccount token is not mounted); the alert-rule builder and API are unaffected",
+				"error", dynErr)
+			break
+		}
+		namespace := cfg.Alerting.ResolveNamespace()
+		ruleClient, clientErr := promrules.NewClient(dyn, namespace)
+		if clientErr != nil {
+			slog.Warn("prometheus rule sync is off", "error", clientErr)
+			break
+		}
+		// The renderer carries cfg.MetricsPrefix, not the package default: a
+		// deployment that renamed its metric families must get rules over the
+		// families it actually publishes, or every rendered alert is one that
+		// can never fire (M7 Task 3). httpapi builds its own renderer from the
+		// very same cfg.MetricsPrefix, so the expression a POST stores and the
+		// expression this loop applies are rendered by identical renderers.
+		reconciler, recErr := promrules.New(promrules.Deps{
+			Client:     ruleClient,
+			Store:      db,
+			Renderer:   alerting.NewRenderer(cfg.MetricsPrefix),
+			BundleName: cfg.Alerting.BundleName,
+			Interval:   cfg.Alerting.SyncInterval,
+		})
+		if recErr != nil {
+			slog.Warn("prometheus rule sync is off", "error", recErr)
+			break
+		}
+		ruleReconciler = reconciler
+		slog.Info("prometheus rule sync enabled", //nolint:gosec // G706: namespace/bundle come from operator config or the downward API, structured slog fields
+			"namespace", namespace, "bundle", cfg.Alerting.BundleName,
+			"syncInterval", cfg.Alerting.SyncInterval, "metricsPrefix", cfg.MetricsPrefix)
+	}
+	// The alert-transition watcher (M7 Task 5, Decision 7) turns Prometheus'
+	// alert STATE into alert.fired/alert.resolved deliveries. It needs three
+	// things at once, and every one of them is a hard prerequisite rather than
+	// a degradable nicety:
+	//
+	//	a dispatcher   -- it exists only to fire deliveries. With no cipher
+	//	                  and no database there is nothing to deliver to, and a
+	//	                  watcher that polled anyway would be a loop whose
+	//	                  entire output is discarded.
+	//	alerting on    -- the alerts it acts on are the ones this console
+	//	                  MANAGES, matched by the rule-id label the reconciler
+	//	                  stamps. With the reconciler off, nothing in Prometheus
+	//	                  carries that label and every poll is empty.
+	//	prometheus     -- it is the source. Nothing else can answer "what is
+	//	                  firing".
+	//
+	// Each miss is warn-and-continue, never fatal: exactly the reconciler's
+	// posture above, for the reconciler's reason. A console that cannot watch
+	// alert state still serves every page and every route.
+	//
+	// It is built here and SPAWNED further down, unlike the reconciler for a
+	// simpler reason: httpapi holds no seam onto it at all. Nothing in the API
+	// can start, stop or query the watcher -- it is a closed loop from
+	// Prometheus to the dispatcher.
+	var alertWatcher *webhooks.AlertWatcher
+	switch {
+	case dispatcher == nil:
+		// Silent when webhooks are simply not configured (the keyless state is
+		// not news), and already warned about just above when they are
+		// configured but unbuildable.
+	case !cfg.Alerting.Enabled:
+		slog.Info("alert webhooks are configured but alerting.enabled is false — no alert.fired/" +
+			"alert.resolved deliveries (the watcher only reports alerts this console manages, and " +
+			"with the rule reconciler off there are none)")
+	case prom == nil:
+		slog.Warn("alert webhooks are configured but prometheus.url is not set — no alert.fired/" +
+			"alert.resolved deliveries (Prometheus evaluates the alerts; the console only reads " +
+			"their state)")
+	default:
+		// watcherErr rather than err, enrichErr's reason: assigning the
+		// function-scoped err this far down turns every earlier `x, err :=`
+		// into a govet shadow report.
+		aw, watcherErr := webhooks.NewAlertWatcher(webhooks.AlertWatcherDeps{
+			Alerts:   prom,
+			Notifier: dispatcher,
+			// db, not nil: the rule source is what fills the payload's expr and
+			// the rule's own name, neither of which /api/v1/alerts carries. It
+			// is non-nil here by construction -- a dispatcher exists only when
+			// a database does.
+			Rules:    db,
+			Interval: cfg.Webhooks.AlertPollInterval,
+		})
+		if watcherErr != nil {
+			slog.Warn("alert transition webhooks are off", "error", watcherErr)
+			break
+		}
+		alertWatcher = aw
+		slog.Info("alert transition webhooks enabled",
+			"alertPollInterval", cfg.Webhooks.AlertPollInterval)
+	}
+
+	// Assigned through an interface-typed var behind an explicit nil check, so
+	// an absent reconciler stays a GENUINE nil interface rather than the
+	// typed-nil trap httpapi.Deps.Events' doc comment describes -- httpapi's
+	// own gate is `s.ruleSync == nil`, and a typed nil would sail past it into
+	// a nil-receiver call instead of answering 409.
+	var ruleSyncDep httpapi.RuleSyncer
+	if ruleReconciler != nil {
+		ruleSyncDep = ruleReconciler
+	}
+
 	srv := httpapi.NewServer(httpapi.Deps{
 		Config: cfg, Metrics: m, PromRegistry: promReg, UI: uiHandler,
 		Controller: ctrl, Prometheus: prom, Hub: hub, Realtime: ingester,
@@ -555,6 +730,7 @@ func main() {
 		MTR: mtrDep, Annotations: annotationsDep, Enricher: enricherDep,
 		Incidents: incidentsDep, Maintenance: maintenanceDep,
 		Webhooks: webhooksDep, K8sEvents: k8sEventsDep,
+		AlertRules: alertRulesDep, RuleSync: ruleSyncDep,
 		// All three are the same *webhooks.Dispatcher, or all three are nil.
 		// nil is NOT "webhooks off": listing, reading, updating, disabling and
 		// deleting an endpoint keep working, and only creating one, testing
@@ -605,6 +781,23 @@ func main() {
 		// which is in turn ahead of db.Close(), so a delivery finishing during
 		// shutdown can still write its outcome row.
 		spawn("webhook-dispatcher", dispatcher.Run)
+	}
+	if alertWatcher != nil {
+		// Spawned AHEAD of nothing in particular but stopped by the same bgCtx,
+		// which matters in one specific way: cancellation ends the poll loop
+		// immediately, so the last thing the watcher can do is enqueue a
+		// delivery into a dispatcher that is still inside its own drain budget.
+		// Every replica runs it -- there is no leader election here, and
+		// AlertWatcher's doc says why, and says what a receiver deduplicates on
+		// as a result.
+		spawn("alert-webhook-watcher", alertWatcher.Run)
+	}
+	if ruleReconciler != nil {
+		// Every replica runs it (M7 Decision 5): the apply is idempotent SSA of
+		// identical bytes, so there is no advisory lock here and deliberately
+		// so -- see the promrules package doc for the contrast with the
+		// scheduler's lock.
+		spawn("prometheus-rule-sync", ruleReconciler.Run)
 	}
 
 	// The schedule loop is opt-in (console.scheduler.enabled, default false)

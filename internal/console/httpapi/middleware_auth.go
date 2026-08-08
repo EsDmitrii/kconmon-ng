@@ -73,10 +73,82 @@ func subjectHolderFrom(ctx context.Context) *subjectHolder {
 // routeRule is the route->permission table's value: exactly one closed
 // authz.Permission the caller must hold, or public == true meaning the
 // route is reachable with no permission decision at all (the login flow
-// itself, and the pre-login version/config probes).
+// itself, and the pre-login version/config probes), or -- for the ONE route
+// that needs it -- anyOf, a closed set of which the caller must hold at
+// least one.
+//
+// anyOf exists for GET /ws and should stay that way. An OR of permissions is
+// a weaker, harder-to-audit statement than a single one ("what can this role
+// reach" stops being a map lookup), and every other route in this API has a
+// single permission that names what it does. /ws is the exception because the
+// socket is not one resource: it multiplexes topics whose permissions genuinely
+// differ, and the second, per-topic decision that makes the OR honest lives on
+// the connection (wsTopicAuthorizer, ws_authz.go). A route reaching for anyOf
+// WITHOUT such a second decision is almost certainly asking for a new
+// permission instead.
+//
+// permission and anyOf are mutually exclusive; a public rule uses neither.
+// TestRouteTableRulesAreWellFormed pins that no row sets both.
 type routeRule struct {
 	permission authz.Permission
+	anyOf      []authz.Permission
 	public     bool
+}
+
+// accepted returns, in table order, the permissions any ONE of which
+// satisfies r: the single permission, or every member of anyOf. Nil for a
+// public rule. It is the one place the two spellings are reconciled, so
+// satisfiedBy, the metric label, the 403 detail and
+// TestRoutePermissionTable's coverage can never disagree about what a row
+// requires.
+func (r routeRule) accepted() []authz.Permission {
+	if len(r.anyOf) > 0 {
+		return r.anyOf
+	}
+	if r.permission == "" {
+		return nil
+	}
+	return []authz.Permission{r.permission}
+}
+
+// satisfiedBy reports whether subject holds what r requires. A public rule is
+// never asked (authorize short-circuits it first), and would be denied here if
+// it were -- accepted() is empty, so nothing satisfies it: fail closed.
+func (r routeRule) satisfiedBy(policy *authz.Policy, subject authz.Subject) bool { //nolint:gocritic // Subject is a value type by design (authz package doc)
+	for _, p := range r.accepted() {
+		if policy.Can(subject, p) {
+			return true
+		}
+	}
+	return false
+}
+
+// deniedLabel is r's value for metrics.AuthzDenied's permission label. The
+// label set stays CLOSED (metrics.go's convention): every value it can produce
+// comes from routeTable, a compile-time constant, so an anyOf row contributes
+// exactly one extra series ("events:read|runs:read") and never a per-request
+// string.
+func (r routeRule) deniedLabel() string {
+	accepted := r.accepted()
+	if len(accepted) == 0 {
+		return ""
+	}
+	label := string(accepted[0])
+	for _, p := range accepted[1:] {
+		label += "|" + string(p)
+	}
+	return label
+}
+
+// deniedDetail is the RFC 7807 detail for a 403 against r -- the same
+// "missing permission: x" sentence the single-permission rules have always
+// produced, widened to name all the acceptable ones for an anyOf row so the
+// caller can ask an admin for either.
+func (r routeRule) deniedDetail() string {
+	if len(r.anyOf) == 0 {
+		return "missing permission: " + string(r.permission)
+	}
+	return "missing permission: one of " + r.deniedLabel()
 }
 
 // routeTable is the authoritative route->permission map task-16-brief.md
@@ -217,11 +289,85 @@ var routeTable = map[string]routeRule{
 	"DELETE /api/v1/webhooks/{id}":    {permission: authz.PermWebhooksManage},
 	"POST /api/v1/webhooks/{id}/test": {permission: authz.PermWebhooksManage},
 
+	// Alert rules split read from write on M5's Decision 11 line, extended by
+	// M6 Decision 8 and applied unchanged in M7: the rule list, the expression
+	// the console rendered from each rule and the set Prometheus is currently
+	// firing are CONTEXT on charts every role already reads (the Overview card
+	// showing them is the landing page), so the reads reach viewer; declaring
+	// "page someone when X" is an operator statement about the fleet, so the
+	// writes stop at operator and admin -- exactly where incidents:write stops.
+	//
+	// Two rows need their own justification:
+	//
+	//   - POST /api/v1/alert-rules/preview is a READ row despite being a POST,
+	//     the mirror image of POST /api/v1/checks/projection's write row. It
+	//     persists nothing AND asks nothing a reader could not ask directly:
+	//     its answer is "how many series does this expression match right now",
+	//     which is a PromQL read, and anyone holding alerts:read can already
+	//     see every stored rule's expression. Gating it on alerts:manage would
+	//     mean an operator cannot check an expression before proposing it.
+	//   - POST /api/v1/alert-rules/{id}/sync is a write row even though it
+	//     changes no row: it makes this console server-side-apply a
+	//     PrometheusRule into its own namespace, which is a change to the
+	//     CLUSTER, and that is the most consequential thing on this resource.
+	//   - POST /api/v1/alert-rules/import is alerts:MANAGE even though it
+	//     reads a foreign object (which alerts:read may already list through
+	//     /foreign), because reading is not what it does: it CREATES rules,
+	//     potentially dozens in one call, and those rules then reach the
+	//     cluster on the next reconcile. It is the same permission a rule
+	//     declared by hand needs, which is what it produces.
+	//
+	// GET /api/v1/alerts rides alerts:read rather than promql:query, even
+	// though it proxies Prometheus: what it serves is this API's own DTO of the
+	// firing set, not a query surface, and a role able to see the rules should
+	// be able to see whether they are firing.
+	"GET /api/v1/alert-rules":            {permission: authz.PermAlertsRead},
+	"POST /api/v1/alert-rules":           {permission: authz.PermAlertsManage},
+	"GET /api/v1/alert-rules/foreign":    {permission: authz.PermAlertsRead},
+	"POST /api/v1/alert-rules/import":    {permission: authz.PermAlertsManage},
+	"POST /api/v1/alert-rules/preview":   {permission: authz.PermAlertsRead},
+	"GET /api/v1/alert-rules/{id}":       {permission: authz.PermAlertsRead},
+	"PUT /api/v1/alert-rules/{id}":       {permission: authz.PermAlertsManage},
+	"DELETE /api/v1/alert-rules/{id}":    {permission: authz.PermAlertsManage},
+	"POST /api/v1/alert-rules/{id}/sync": {permission: authz.PermAlertsManage},
+	"GET /api/v1/alerts":                 {permission: authz.PermAlertsRead},
+
 	// Captured Kubernetes events ride events:read rather than a permission of
 	// their own (M6 Decision 8): they ARE events, and a new permission would
 	// gate nothing an operator holding events:read could not already infer
 	// from the topology stream they read.
 	"GET /api/v1/k8s-events": {permission: authz.PermEventsRead},
+
+	// Configuration export/import (M7 Decision 9) takes ONE permission for
+	// both routes, admin-only, and no read/write split -- webhooks:manage's
+	// posture, for a stronger version of webhooks:manage's reason.
+	//
+	// The permission is settings:write, which has existed in the closed list
+	// since M3 and has never gated a route. Three alternatives were weighed
+	// and rejected:
+	//
+	//   - webhooks:manage. A bundle is not a webhook. Gating the fleet's
+	//     probe configuration, alert rules and maintenance windows behind the
+	//     endpoint-management permission would make webhooks:manage mean
+	//     "everything", which is the drift a closed permission list exists to
+	//     prevent.
+	//   - rbac:manage. Same objection, plus it would tie configuration
+	//     restore to identity administration -- two different jobs.
+	//   - a NEW config:manage. It would sit next to an existing, admin-only,
+	//     never-used permission that already means what it would mean; adding
+	//     a second spelling of one idea is how a closed list stops being one.
+	//     (The Settings page is where Decision 10 puts both routes, so
+	//     settings:write is also where an operator would look for them.)
+	//
+	// The read is gated on a :write permission deliberately, and that is not
+	// an oversight but the same statement webhooks' single permission makes:
+	// an export is every webhook URL, every probe address and every alert
+	// expression this console holds, in one file. There is no audience that
+	// should be able to READ all of that and not be trusted to write it, so
+	// splitting the pair would only create a role that can exfiltrate the
+	// whole configuration while looking read-only.
+	"GET /api/v1/export":  {permission: authz.PermSettingsWrite},
+	"POST /api/v1/import": {permission: authz.PermSettingsWrite},
 
 	"GET /api/v1/rbac/permissions":      {permission: authz.PermRBACManage},
 	"GET /api/v1/rbac/roles":            {permission: authz.PermRBACManage},
@@ -235,20 +381,24 @@ var routeTable = map[string]routeRule{
 	"POST /api/v1/tokens":        {permission: authz.PermTokensManage},
 	"DELETE /api/v1/tokens/{id}": {permission: authz.PermTokensManage},
 
-	// One permission gates the WHOLE socket, every multiplexed topic
-	// included -- ws.Hub never receives an authz.Subject, so its subscribe
-	// path (hub.go's topicAllowed/subscribe) decides on the topic NAME
-	// alone and cannot be per-topic-authorized from here. Consequence, made
-	// explicit by M4 Task 2 (M3 follow-up #10): a custom role holding only
-	// runs:read cannot open the socket to watch its own run's progress and
-	// must poll GET /api/v1/runs/{id} instead; conversely events:read alone
-	// already covers run:{id} topics. Lowering this row to runs:read would
-	// hand every run watcher the "live" events stream too -- a real
-	// widening. Splitting it properly is a hub change (subject-aware
-	// subscribe), not a routeTable change. Pinned by
-	// TestWSRequiresEventsReadEvenForRunWatching and documented in
-	// SECURITY.md §10.2.
-	"GET /ws": {permission: authz.PermEventsRead},
+	// The ONE anyOf row (M7, M3 follow-up #10), and the only route in this
+	// table whose authorization does not end here. Until M7 it read
+	// {permission: PermEventsRead}, and that single decision covered every
+	// topic multiplexed over the socket, because ws.Hub could not tell its
+	// connections apart -- so a custom role holding runs:read could START a
+	// diagnostics run and then not WATCH it, while simply lowering the row to
+	// runs:read would have handed every run watcher the fleet-wide "live"
+	// stream that events:read gates on GET /api/v1/events. The hub change
+	// SECURITY.md §10.2 named as the prerequisite for splitting them
+	// (ws.Hub.ServeWSAuthorized taking a per-connection ws.TopicAuthorizer)
+	// now exists, so the UPGRADE admits either permission and the second,
+	// per-topic decision is made on the connection by
+	// Server.wsTopicAuthorizer (ws_authz.go): events:read keeps every topic,
+	// runs:read alone gets run:{id} topics and nothing else. Read that
+	// function before touching this row -- the two halves are only correct
+	// together, and widening this one alone would restore exactly the leak
+	// M4 refused.
+	"GET /ws": {anyOf: []authz.Permission{authz.PermEventsRead, authz.PermRunsRead}},
 }
 
 // routeRuleFor looks up r's matched chi route pattern (already resolved by
@@ -411,10 +561,10 @@ func (s *Server) authorize(next http.Handler) http.Handler {
 				write401(w)
 				return
 			}
-			if !s.policy.Can(subject, rule.permission) {
-				s.metrics.AuthzDenied.WithLabelValues(string(rule.permission)).Inc()
+			if !rule.satisfiedBy(s.policy, subject) {
+				s.metrics.AuthzDenied.WithLabelValues(rule.deniedLabel()).Inc()
 				s.recordAudit(r, subject, auditOutcomeDenied, nil)
-				writeProblem(w, http.StatusForbidden, "permission denied", "missing permission: "+string(rule.permission))
+				writeProblem(w, http.StatusForbidden, "permission denied", rule.deniedDetail())
 				return
 			}
 		}
