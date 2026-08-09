@@ -69,10 +69,11 @@ const webhookImportNoSecretReason = "imported without secret: a bundle never car
 // ---------------------------------------------------------------------------
 
 // exportSchedule is a check schedule as a bundle carries it: scheduleResponse
-// (schedules.go) MINUS lastFiredAt and nextFireAt. Those two are scheduler
-// BOOKKEEPING -- when this schedule last fired and when the due index should
-// hand it out next -- which is an observation of a running console, not the
-// cadence an operator declared. Importing them would assert a fire history the
+// (schedules.go) MINUS lastFiredAt, nextFireAt and the lastError pair. Those
+// are scheduler BOOKKEEPING -- when this schedule last fired, when the due
+// index should hand it out next, and why the last fire produced no run --
+// which is an observation of a running console, not the cadence an operator
+// declared. Importing them would assert a fire history (and a failure) the
 // destination never had; nextFireAt is re-seeded on import exactly as POST
 // /api/v1/schedules seeds it (seedNextFireAt).
 //

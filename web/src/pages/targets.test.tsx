@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   DEFINITION_FIELD_PHRASES,
@@ -84,6 +84,8 @@ function scheduleRow(over: Record<string, unknown> = {}) {
     enabled: true,
     lastFiredAt: null,
     nextFireAt: "2026-01-02T00:00:00Z",
+    lastError: "",
+    lastErrorAt: null,
     createdAt: "2026-01-01T00:00:00Z",
     updatedAt: "2026-01-01T00:00:00Z",
     ...over,
@@ -212,6 +214,25 @@ afterEach(() => {
 
 async function openTab(name: RegExp) {
   fireEvent.click(await screen.findByRole("radio", { name }));
+}
+
+/**
+ * pickRunAt drives the schedule form's "Run at" DateTimePicker (QA round 3,
+ * finding #12): open the trigger, type the local day and wall clock into the
+ * picker's own manual fields, apply.
+ *
+ * The raw `<input type="datetime-local">` this replaced was the LAST one in
+ * web/src, and it is why the console now asks for an instant exactly one way.
+ * The picker composes through the LOCAL Date constructor, so an expected
+ * instant is built the same way rather than from a UTC string — the same
+ * helper components/maintenance.test.tsx and components/annotations.test.tsx
+ * already use.
+ */
+function pickRunAt(date: string, time: string) {
+  fireEvent.click(screen.getByRole("button", { name: "Run at" }));
+  fireEvent.change(screen.getByLabelText("Date"), { target: { value: date } });
+  fireEvent.change(screen.getByLabelText("Time"), { target: { value: time } });
+  fireEvent.click(screen.getByRole("button", { name: "Apply" }));
 }
 
 describe("fieldForDetail", () => {
@@ -440,6 +461,46 @@ describe("TargetsPage — definitions tab and the projection", () => {
     expect(screen.getByLabelText("Destination kind")).not.toHaveAttribute("aria-invalid");
   });
 
+  /**
+   * QA round 4, finding #13, client half. The store now refuses an ad-hoc
+   * address the agent could never dial; this form says so at the field rather
+   * than spending a round trip to be told.
+   */
+  it("refuses a malformed ad-hoc address at the field, and never POSTs it", async () => {
+    const { calls } = renderPage({});
+
+    await openTab(/definitions/i);
+    fireEvent.click(await screen.findByRole("button", { name: /new definition/i }));
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "gw-tcp" } });
+    fireEvent.change(screen.getByLabelText("Destination kind"), { target: { value: "adhoc" } });
+    fireEvent.change(screen.getByLabelText("Destination address"), { target: { value: "sdfsdfsdf !!" } });
+    fireEvent.click(screen.getByRole("button", { name: /create definition/i }));
+
+    const field = await screen.findByLabelText("Destination address");
+    await waitFor(() => expect(field).toHaveAttribute("aria-invalid", "true"));
+    expect(document.getElementById(field.getAttribute("aria-describedby")!)).toHaveTextContent(
+      /must be a host, an IP, host:port, or an http\(s\) URL/i,
+    );
+    expect(calls.some((c) => c.url === "/api/v1/checks" && c.method === "POST")).toBe(false);
+  });
+
+  it("lets every shape the agent CAN dial through", async () => {
+    const { calls } = renderPage({});
+
+    await openTab(/definitions/i);
+    fireEvent.click(await screen.findByRole("button", { name: /new definition/i }));
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "gw-tcp" } });
+    fireEvent.change(screen.getByLabelText("Destination kind"), { target: { value: "adhoc" } });
+    fireEvent.change(screen.getByLabelText("Destination address"), {
+      target: { value: "https://example.test/health" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /create definition/i }));
+
+    await waitFor(() =>
+      expect(calls.some((c) => c.url === "/api/v1/checks" && c.method === "POST")).toBe(true),
+    );
+  });
+
   // The projection 422 (httpapi's projectionDetail) names no form field at
   // all: it is about the definition as a whole. It must still render in full,
   // one level up, rather than being swallowed because the phrase table did
@@ -557,7 +618,7 @@ describe("TargetsPage — schedules tab", () => {
     await openTab(/schedules/i);
     fireEvent.click(await screen.findByRole("button", { name: /new schedule/i }));
     fireEvent.change(screen.getByLabelText("Kind"), { target: { value: "once" } });
-    fireEvent.change(screen.getByLabelText("Run at"), { target: { value: "2030-01-01T10:00" } });
+    pickRunAt("2030-01-01", "10:00");
     fireEvent.click(screen.getByRole("button", { name: /create schedule/i }));
 
     await waitFor(() =>
@@ -570,6 +631,46 @@ describe("TargetsPage — schedules tab", () => {
         runAt: new Date("2030-01-01T10:00").toISOString(),
       }),
     );
+  });
+
+  /* QA round 3, finding #12: the LAST raw <input type="datetime-local"> in
+     web/src. Both halves are pinned — the control is the M5 picker (its trigger
+     announces the popover it opens), and the field is really optional even
+     though the server requires it for this kind, because an operator must be
+     able to un-set it while changing their mind about the kind. */
+  it("asks for the run-at through the M5 picker, whose trigger announces its popover", async () => {
+    renderPage({ definitions: [definitionRow()] });
+    await openTab(/schedules/i);
+    fireEvent.click(await screen.findByRole("button", { name: /new schedule/i }));
+    fireEvent.change(screen.getByLabelText("Kind"), { target: { value: "once" } });
+
+    const trigger = screen.getByRole("button", { name: "Run at" });
+    expect(trigger.tagName).toBe("BUTTON");
+    expect(trigger).toHaveAttribute("aria-haspopup", "dialog");
+    expect(trigger.textContent).toContain("Not set");
+  });
+
+  it("lets the run-at be cleared again", async () => {
+    renderPage({ definitions: [definitionRow()] });
+    await openTab(/schedules/i);
+    fireEvent.click(await screen.findByRole("button", { name: /new schedule/i }));
+    fireEvent.change(screen.getByLabelText("Kind"), { target: { value: "once" } });
+
+    pickRunAt("2030-01-01", "10:00");
+    expect(screen.getByRole("button", { name: "Run at" }).textContent).not.toContain("Not set");
+    fireEvent.click(screen.getByRole("button", { name: "Clear run at" }));
+    expect(screen.getByRole("button", { name: "Run at" }).textContent).toContain("Not set");
+  });
+
+  it("refuses a once schedule with no run-at at all, without going near the network", async () => {
+    const { calls } = renderPage({ definitions: [definitionRow()] });
+    await openTab(/schedules/i);
+    fireEvent.click(await screen.findByRole("button", { name: /new schedule/i }));
+    fireEvent.change(screen.getByLabelText("Kind"), { target: { value: "once" } });
+    fireEvent.click(screen.getByRole("button", { name: /create schedule/i }));
+
+    expect(await screen.findByText("kind once requires a run at time")).toBeInTheDocument();
+    expect(calls.filter((c) => c.method === "POST" && c.url === "/api/v1/schedules")).toEqual([]);
   });
 
   it("creates a continuous schedule carrying neither interval nor runAt", async () => {
@@ -599,7 +700,7 @@ describe("TargetsPage — schedules tab", () => {
     await openTab(/schedules/i);
     fireEvent.click(await screen.findByRole("button", { name: /new schedule/i }));
     fireEvent.change(screen.getByLabelText("Kind"), { target: { value: "once" } });
-    fireEvent.change(screen.getByLabelText("Run at"), { target: { value: "2030-01-01T10:00" } });
+    pickRunAt("2030-01-01", "10:00");
     fireEvent.click(screen.getByRole("button", { name: /create schedule/i }));
 
     const runAt = await screen.findByLabelText("Run at");
@@ -665,6 +766,8 @@ describe("scheduleRequestFrom", () => {
       enabled: true,
       lastFiredAt: null,
       nextFireAt: null,
+      lastError: "",
+      lastErrorAt: null,
       createdAt: "t",
       updatedAt: "t",
     };
@@ -687,5 +790,120 @@ describe("scheduleRequestFrom", () => {
       kind: "continuous",
       enabled: true,
     });
+  });
+});
+
+/* ── QA round 5 ─────────────────────────────────────────────────────────── */
+
+/* #5. A schedule ALWAYS advances its cadence, fired or not — fireOne must, or
+   a broken row stays due and becomes a hot loop — so before this a schedule
+   whose definition pointed at a deleted target was indistinguishable from a
+   healthy one: enabled, a fresh "last", a "next" a minute out. */
+describe("a failing schedule says so (#5)", () => {
+  const failing = scheduleRow({
+    lastError: "get destination target 0f1d1a2f: store: not found",
+    lastErrorAt: "2026-01-02T00:00:00Z",
+    lastFiredAt: "2026-01-02T00:00:00Z",
+  });
+
+  it("renders the reason VERBATIM on the row", async () => {
+    renderPage({ definitions: [definitionRow()], schedules: [failing] });
+    await openTab(/schedules/i);
+    const line = await screen.findByTestId("schedule-failure");
+    expect(line).toHaveTextContent("failing: get destination target 0f1d1a2f: store: not found");
+  });
+
+  it("turns the enabled pill warn-tone, so the row reads wrong at a glance", async () => {
+    renderPage({ definitions: [definitionRow()], schedules: [failing] });
+    await openTab(/schedules/i);
+    const row = (await screen.findByTestId("schedule-failure")).closest("li") as HTMLElement;
+    const pill = within(row).getByText("enabled");
+    expect(pill.className).toContain("warn");
+    expect(pill.className).not.toContain("health-ok");
+  });
+
+  it("says nothing at all for a healthy schedule — silence is the good state", async () => {
+    renderPage({ definitions: [definitionRow()], schedules: [scheduleRow()] });
+    await openTab(/schedules/i);
+    expect(await screen.findByLabelText("Schedules")).toBeInTheDocument();
+    expect(screen.queryByTestId("schedule-failure")).toBeNull();
+  });
+
+  it("says nothing for a DISABLED schedule carrying an old error — it is not failing, it is off", async () => {
+    renderPage({
+      definitions: [definitionRow()],
+      schedules: [scheduleRow({ enabled: false, lastError: "stale", lastErrorAt: "2026-01-02T00:00:00Z" })],
+    });
+    await openTab(/schedules/i);
+    expect(await screen.findByText("disabled")).toBeInTheDocument();
+    expect(screen.queryByTestId("schedule-failure")).toBeNull();
+  });
+});
+
+/* #12. allowFuture only lifts the ceiling; the picker still offered ten years
+   of past days, every one of which the server answers with "kind once requires
+   a run at time in the future". */
+describe("the Run-at picker refuses the past (#12)", () => {
+  const NOW = new Date(2026, 7, 8, 12, 0, 0);
+
+  async function openRunAt() {
+    renderPage({ definitions: [definitionRow()] });
+    await openTab(/schedules/i);
+    fireEvent.click(await screen.findByRole("button", { name: "New schedule" }));
+    fireEvent.change(screen.getByLabelText("Kind"), { target: { value: "once" } });
+    fireEvent.click(screen.getByRole("button", { name: "Run at" }));
+  }
+
+  it("disables yesterday and leaves today and tomorrow live", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    vi.setSystemTime(NOW);
+    try {
+      await openRunAt();
+      expect(screen.getByRole("button", { name: "Choose 7 August 2026" })).toBeDisabled();
+      expect(screen.getByRole("button", { name: "Choose 8 August 2026" })).toBeEnabled();
+      expect(screen.getByRole("button", { name: "Choose 9 August 2026" })).toBeEnabled();
+      // …and the presets all point forward.
+      const quick = within(screen.getByRole("group", { name: "Quick ranges" }));
+      expect(quick.getAllByRole("button").map((b) => b.textContent)).toEqual(["in 15m", "in 1h", "in 6h", "tomorrow"]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+/* #16. A select is a promise of a choice, and a greyed one with a single
+   option promises a choice that is coming. M4 fixed the plane to "pod". */
+describe("the Plane field is a value, not a dead select (#16)", () => {
+  it("renders static text with a title saying why, and no select at all", async () => {
+    renderPage({ targets: [targetRow()] });
+    await openTab(/definitions/i);
+    fireEvent.click(await screen.findByRole("button", { name: "New definition" }));
+
+    const plane = screen.getByTestId("definition-plane");
+    expect(plane).toHaveTextContent("pod");
+    expect(plane.getAttribute("title")).toMatch(/no second plane/i);
+    expect(screen.queryByLabelText("Plane")).toBeNull();
+  });
+});
+
+/* #17, the targets family. */
+describe("one target per click storm (#17)", () => {
+  it("POSTs once for three rapid clicks", async () => {
+    const { resourceCalls } = renderPage();
+    fireEvent.click(await screen.findByRole("button", { name: "New target" }));
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "api-gw" } });
+    fireEvent.change(screen.getByLabelText("Address"), { target: { value: "10.0.0.1" } });
+
+    const submit = screen.getByRole("button", { name: "Create target" });
+    /* One task, three clicks, no render between them — the shape an impatient
+       double-click has, and the one a useState flag cannot survive. */
+    await act(async () => {
+      submit.click();
+      submit.click();
+      submit.click();
+    });
+
+    await waitFor(() => expect(resourceCalls().filter((c) => c.method === "POST").length).toBe(1));
+    expect(resourceCalls().filter((c) => c.method === "POST")).toHaveLength(1);
   });
 });

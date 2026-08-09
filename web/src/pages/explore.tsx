@@ -244,6 +244,37 @@ function CompareSelect({
   );
 }
 
+/**
+ * isEmptyMatrix is "the query succeeded and matched nothing" — as opposed to
+ * "it failed" or "it has not answered yet", which are three different facts a
+ * chart owes three different sentences.
+ */
+function isEmptyMatrix(res: PromResult | undefined): boolean {
+  return (
+    res?.status === "success" && (res.data?.resultType !== "matrix" || (res.data?.result ?? []).length === 0)
+  );
+}
+
+/**
+ * shiftedLegEmptyNote is what the compare panel says when the EARLIER leg came
+ * back with nothing (QA round 4, finding #6).
+ *
+ * The silent case is the whole finding. Picking "7d earlier" on a Prometheus
+ * whose retention is 24h drew leg A alone — one line, no legend entry for B,
+ * no error, nothing — and the honest reading of that picture is "the fleet
+ * behaved identically a week ago", which is the opposite of the truth. A
+ * shifted leg that returns nothing is almost always retention, so the note
+ * names it and names the distance, which is the number an operator has to
+ * compare against their own `--storage.tsdb.retention.time`.
+ *
+ * Only for the SHIFTED leg: a second METRIC coming back empty is a fact about
+ * that metric over the visible window, which ExploreCard's own ChartEmpty
+ * already covers wherever it matters.
+ */
+export function shiftedLegEmptyNote(shiftLabel: string): string {
+  return `No data ${shiftLabel} ago — Prometheus's retention does not reach that far back.`;
+}
+
 /* Mounted only once a comparison is actually chosen — an idle panel must not
    cost a request. Both legs go through useExploreQuery, so Time Machine
    anchoring, stepping and polling are the page's, not a second implementation
@@ -254,6 +285,7 @@ function CompareChart({
   labelA,
   labelB,
   shiftSeconds,
+  shiftLabel,
   rangeSeconds,
   dark,
   annotations,
@@ -264,6 +296,10 @@ function CompareChart({
   labelA: string;
   labelB: string;
   shiftSeconds: number;
+  /** The preset's own label ("24h", "7d"), so the note below can say how far
+   *  back the missing window was rather than printing seconds. Empty while no
+   *  shift is chosen. */
+  shiftLabel: string;
   rangeSeconds: number;
   dark: boolean;
   annotations: Annotation[];
@@ -284,6 +320,9 @@ function CompareChart({
 
   const error = a.error ?? b.error;
   const queryError = [a.data, b.data].find((d) => d?.status === "error");
+  // The reference leg answered, and answered with nothing. Only meaningful for
+  // a time shift — see shiftedLegEmptyNote.
+  const shiftedLegEmpty = shiftSeconds > 0 && isEmptyMatrix(b.data);
 
   return (
     <>
@@ -300,6 +339,14 @@ function CompareChart({
           dark={dark}
           className="mt-3 h-[16.5rem] w-full"
         />
+      ) : null}
+      {/* Under the chart, not instead of it: leg A is real data and stays
+          drawn. What the note removes is the silent reading that B is
+          identical to it. */}
+      {shiftedLegEmpty && !queryError ? (
+        <p role="status" className="mt-2 text-xs leading-relaxed text-muted-foreground">
+          {shiftedLegEmptyNote(shiftLabel)}
+        </p>
       ) : null}
     </>
   );
@@ -390,6 +437,7 @@ function ComparePanel({
             labelA={`A: ${chartA.title}`}
             labelB={shifted ? `A (${shift.label} earlier)` : `B: ${chartB?.title ?? ""}`}
             shiftSeconds={shift.seconds}
+            shiftLabel={shift.label}
             rangeSeconds={rangeSeconds}
             dark={dark}
             annotations={annotations}

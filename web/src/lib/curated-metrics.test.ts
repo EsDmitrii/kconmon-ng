@@ -101,6 +101,29 @@ describe("toSeriesOption", () => {
     expect(formatter(0.215, 0)).toBe("215ms");
   });
 
+  /* QA round 2, finding #8: a sub-10ms chart's ticks all rounded to the same
+     integer, so the axis read "1ms, 1ms, 2ms, 2ms" — five ticks, three
+     labels. One decimal below 10ms separates them; above it the decimal is
+     noise. */
+  it("switches to one decimal below 10ms so adjacent ticks stop colliding", () => {
+    const option = toSeriesOption(tcpP95, matrixResult, false);
+    const yAxis = option.yAxis as echarts.YAXisComponentOption;
+    const formatter = yAxis.axisLabel?.formatter as (value: number, index: number) => string;
+    expect(formatter(0.0012, 0)).toBe("1.2ms");
+    expect(formatter(0.0018, 0)).toBe("1.8ms");
+    // The boundary itself is the integer side.
+    expect(formatter(0.01, 0)).toBe("10ms");
+    expect(formatter(0.0099, 0)).toBe("9.9ms");
+  });
+
+  /* QA round 2, finding #19: below ~700px the time axis drew every tick on
+     top of the last one. */
+  it("lets ECharts thin out colliding time-axis labels", () => {
+    const option = toSeriesOption(tcpP95, matrixResult, false);
+    const xAxis = option.xAxis as echarts.XAXisComponentOption;
+    expect(xAxis.axisLabel?.hideOverlap).toBe(true);
+  });
+
   it("formats ratio-unit values as a percent on the y axis", () => {
     const udpLoss = CURATED_CHARTS.find((c) => c.id === "udp-loss")!;
     const option = toSeriesOption(udpLoss, matrixResult, false);

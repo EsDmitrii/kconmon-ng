@@ -6,7 +6,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
+	"net/netip"
+	"net/url"
 	"regexp"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -134,6 +139,13 @@ var targetKinds = map[string]bool{"host": true, "url": true}
 // not enforce at all -- is applied at the only layer that can. Malformed
 // Labels are rejected here for the same reason: the driver's own complaint
 // about a jsonb literal does not say which field carried it.
+//
+// It NORMALISES Address (trims it) before checking it, and that trimmed value
+// is what CreateTarget/UpdateTarget then write: both take TargetInput by
+// value, so the mutation is confined to the store's own copy. The alternative
+// -- validate the trimmed string and store the raw one -- is how "  10.0.0.1  "
+// used to become a stored target the agent could never dial, because every
+// sender trims before RESOLVING but nothing trims before STORING.
 func (in *TargetInput) Validate() error {
 	if err := validateName(in.Name); err != nil {
 		return fmt.Errorf("store: target: %w", err)
@@ -141,13 +153,84 @@ func (in *TargetInput) Validate() error {
 	if !targetKinds[in.Kind] {
 		return fmt.Errorf("store: target: kind %q must be one of host, url", in.Kind)
 	}
+	in.Address = strings.TrimSpace(in.Address)
 	if in.Address == "" {
 		return errors.New("store: target: address must not be empty")
+	}
+	if err := validateTargetAddress(in.Kind, in.Address); err != nil {
+		return fmt.Errorf("store: target: %w", err)
 	}
 	if err := validateJSON("labels", in.Labels); err != nil {
 		return fmt.Errorf("store: target: %w", err)
 	}
 	return nil
+}
+
+// validateTargetAddress rejects an address the agent could never dial FOR THE
+// KIND IT WAS FILED UNDER (QA round 5, finding #11).
+//
+// Before it, targets.address was checked for emptiness alone: "   " was a
+// legal host target, "sdfsdfsdf !!" was a legal url one, and both travelled
+// the whole way to an agent that refused them once per interval, forever, with
+// the only evidence being an ExternalDenyResolve counter -- the exact failure
+// round 4's finding #13 fixed one layer down, on check_definitions.
+//
+// The two kinds are checked SEPARATELY rather than through one permissive
+// union, because targets.kind is what tells the agent WHICH parser to use:
+//
+//   - url  -> checker.validateExternalHTTP, which parses the address as a URL
+//     and demands an http:// or https:// scheme with a non-empty host. It
+//     reads u.Port() and uses u.Path, so a port and a path are both legal
+//     here; that is derived from the function, not assumed about URLs.
+//   - host -> checker.ResolveAllowed, which takes a literal IP verbatim and
+//     sends anything else to LookupNetIP as a NAME, with an optional ":port"
+//     split off first by both senders.
+//
+// So a URL is NOT accepted for kind=host: ResolveAllowed would hand
+// "https://example.test" to DNS whole. And a bare hostname is not accepted for
+// kind=url: url.Parse yields no scheme and validateExternalHTTP refuses it.
+// Accepting either "because it is nearly right" would only move the failure to
+// the agent, which is where it already was.
+func validateTargetAddress(kind, address string) error {
+	if kind == "url" {
+		return validateHTTPAddress("address", address)
+	}
+	return validateHostAddress("address", address)
+}
+
+// validateHTTPAddress is checker.validateExternalHTTP's rule: an http(s) URL
+// with a host. field names the caller's own column so the message routes to
+// the right form field (targets' "address", a definition's "destination
+// address").
+func validateHTTPAddress(field, address string) error {
+	u, err := url.Parse(strings.TrimSpace(address))
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" {
+		return fmt.Errorf("%s %q must be an http(s) URL with a host", field, address)
+	}
+	return nil
+}
+
+// validateHostAddress is the allowlist half of the same derivation: an IP
+// literal or a resolvable name, optionally with a numeric port both senders'
+// own SplitHostPort+parse would accept. No URL form -- that is
+// validateHTTPAddress's job, and the caller picks by kind.
+func validateHostAddress(field, address string) error {
+	value := strings.TrimSpace(address)
+	host := value
+	if h, p, err := net.SplitHostPort(value); err == nil {
+		// SplitHostPort accepted it, which is exactly the branch both senders
+		// take -- so the port has to survive their own parse too, or the whole
+		// string travels to DNS as a name and cannot resolve.
+		n, convErr := strconv.ParseUint(p, 10, 16)
+		if convErr != nil || n == 0 {
+			return fmt.Errorf("%s %q has no usable port; a port must be 1-65535", field, address)
+		}
+		host = h
+	}
+	if isIPLiteral(host) || isHostname(host) {
+		return nil
+	}
+	return fmt.Errorf("%s %q must be a host, an IP, or host:port", field, address)
 }
 
 // validateName applies the shared name rule targets and check_definitions
@@ -400,13 +483,119 @@ func (in *DefinitionInput) Validate() error {
 	if in.DestinationKind != "target" && in.DestinationTargetID != "" {
 		return fmt.Errorf("store: definition: destination target id is only valid for destination kind target, not %q", in.DestinationKind)
 	}
-	if in.DestinationKind == "adhoc" && in.DestinationAddress == "" {
-		return errors.New("store: definition: destination kind adhoc requires a destination address")
+	if in.DestinationKind == "adhoc" {
+		if in.DestinationAddress == "" {
+			return errors.New("store: definition: destination kind adhoc requires a destination address")
+		}
+		if err := validateAdhocAddress(in.DestinationAddress); err != nil {
+			return fmt.Errorf("store: definition: %w", err)
+		}
 	}
 	if err := validateJSON("params", in.Params); err != nil {
 		return fmt.Errorf("store: definition: %w", err)
 	}
 	return nil
+}
+
+// hostLabelRE bounds ONE label of a DNS name. Underscores are permitted
+// because Go's own resolver permits them (net.isDomainName): this rule must
+// not refuse a name the agent would happily resolve.
+var hostLabelRE = regexp.MustCompile(`^[A-Za-z0-9_]([A-Za-z0-9_-]*[A-Za-z0-9_])?$`)
+
+const (
+	hostnameMaxLen  = 253
+	hostLabelMaxLen = 63
+)
+
+// validateAdhocAddress rejects a destination_address the agent could never
+// dial (QA round 4, finding #13). Before it, "sdfsdfsdf !!" was accepted,
+// written to check_definitions, pushed to every assigned agent by the
+// reconciler and refused there once per interval, forever -- with the only
+// evidence being an ExternalDenyResolve counter and a rate-limited agent log.
+//
+// THE RULE IS DERIVED FROM WHAT THE AGENT ACCEPTS, not from what looks tidy.
+// Three files decide that, and this mirrors them rather than tightening them:
+//
+//   - internal/checker/external.go's validateExternalHTTP is the ONLY place an
+//     address is parsed as a URL, and it demands an http:// or https:// scheme
+//     with a non-empty host. So a URL is legal, and only with those schemes.
+//   - internal/checker/allowlist.go's ResolveAllowed takes a literal IP
+//     verbatim (parseLiteral, which also strips the "[::1]" brackets) and
+//     sends anything else to LookupNetIP as a NAME. So an IP or a DNS name is
+//     legal.
+//   - both senders split a ":port" suffix off before authorising -- the
+//     continuous path in checks.externalTarget (net.SplitHostPort, then Atoi
+//     range-checked to [1,65535]) and the one-shot path in
+//     agent.approveExternalTarget (net.SplitHostPort, then ParseUint > 0). A
+//     suffix that does NOT parse that way is left attached and goes to DNS as
+//     part of the name, where it can only fail -- so "host:port" is legal
+//     exactly when the port is a number in range, and "example.test:http" is
+//     not.
+//
+// Deliberately NOT stricter than that. A zone-scoped literal
+// (fe80::1%eth0) parses here and is refused by the allowlist at probe time;
+// that refusal is a POLICY answer belonging to the agent, and encoding it here
+// would make the store the second, quietly diverging arbiter of what an
+// operator may point a check at. Likewise the address is not cross-checked
+// against CheckType: an http URL on a tcp definition is a mistake the
+// reconciler's own classification (adhocTargetKind) already handles.
+//
+// Round 5's finding #11 split the two halves out (validateHTTPAddress,
+// validateHostAddress) so targets can pick ONE of them by kind. This function
+// keeps its own union shape and its own wording: an ad-hoc destination carries
+// no kind column to choose with, so it must accept both forms, and its
+// messages are pinned by DEFINITION_FIELD_PHRASES on the web side.
+func validateAdhocAddress(address string) error {
+	value := strings.TrimSpace(address)
+	if value == "" {
+		return errors.New("destination address must not be blank")
+	}
+
+	lower := strings.ToLower(value)
+	if strings.HasPrefix(lower, "http://") || strings.HasPrefix(lower, "https://") {
+		// The prefix already settled the scheme, so only the host is left to
+		// check -- and the message stays the URL-specific one round 4 pinned.
+		if err := validateHTTPAddress("destination address", value); err != nil {
+			return fmt.Errorf("destination address %q is not a valid http(s) URL", address)
+		}
+		return nil
+	}
+
+	if err := validateHostAddress("destination address", value); err != nil {
+		if strings.Contains(err.Error(), "usable port") {
+			return fmt.Errorf("destination address %q has no usable port; a port must be 1-65535", address)
+		}
+		return fmt.Errorf(
+			"destination address %q must be a host, an IP, host:port, or an http(s) URL", address)
+	}
+	return nil
+}
+
+// isIPLiteral mirrors checker.parseLiteral: an address the allowlist checks as
+// typed and never sends to DNS, bracketed IPv6 included.
+func isIPLiteral(host string) bool {
+	s := host
+	if len(s) > 1 && s[0] == '[' && s[len(s)-1] == ']' {
+		s = s[1 : len(s)-1]
+	}
+	_, err := netip.ParseAddr(s)
+	return err == nil
+}
+
+// isHostname is "could LookupNetIP be asked this". One trailing dot is the
+// fully-qualified spelling and is legal; any other empty label is a doubled
+// dot and is not.
+func isHostname(host string) bool {
+	if host == "" || len(host) > hostnameMaxLen {
+		return false
+	}
+	trimmed := strings.TrimSuffix(host, ".")
+	for _, label := range strings.Split(trimmed, ".") {
+		if label == "" || len(label) > hostLabelMaxLen || !hostLabelRE.MatchString(label) {
+			return false
+		}
+	}
+	return true
 }
 
 func definitionFromRow(d *gen.CheckDefinition) Definition {
@@ -573,8 +762,15 @@ type Schedule struct {
 	Enabled      bool
 	LastFiredAt  *time.Time
 	NextFireAt   *time.Time
-	CreatedAt    time.Time
-	UpdatedAt    time.Time
+	// LastError is why the LAST fire produced no run, "" when it produced one
+	// (QA round 5, finding #5). It is the whole failure story this table
+	// keeps -- the last attempt, not a history -- and it is cleared by the
+	// next attempt that goes through. LastErrorAt is non-nil exactly when
+	// LastError is non-empty; MarkScheduleFired derives one from the other.
+	LastError   string
+	LastErrorAt *time.Time
+	CreatedAt   time.Time
+	UpdatedAt   time.Time
 }
 
 // ScheduleInput is CreateSchedule/UpdateSchedule's write payload. DefinitionID
@@ -616,7 +812,13 @@ type ScheduleStore interface {
 	// MarkScheduleFired records a fire and the next one in a single UPDATE.
 	// nextFireAt == nil retires the schedule from the due index without
 	// disabling it. Returns ErrNotFound when id does not name a schedule.
-	MarkScheduleFired(ctx context.Context, id string, firedAt time.Time, nextFireAt *time.Time) error
+	//
+	// lastError is why this attempt produced no run, or "" when it produced
+	// one -- the SAME statement, so a reader can never see a fresh
+	// last_fired_at beside a stale failure. Passing "" is how a recovered
+	// schedule goes green again: the column describes the LAST attempt, not
+	// the last bad one.
+	MarkScheduleFired(ctx context.Context, id string, firedAt time.Time, nextFireAt *time.Time, lastError string) error
 }
 
 var _ ScheduleStore = (*DB)(nil)
@@ -694,6 +896,8 @@ func scheduleFromRow(s *gen.CheckSchedule) Schedule {
 		Enabled:      s.Enabled,
 		LastFiredAt:  nullTime(s.LastFiredAt),
 		NextFireAt:   nullTime(s.NextFireAt),
+		LastError:    s.LastError,
+		LastErrorAt:  nullTime(s.LastErrorAt),
 		CreatedAt:    s.CreatedAt,
 		UpdatedAt:    s.UpdatedAt,
 	}
@@ -763,7 +967,41 @@ func (db *DB) DeleteSchedule(ctx context.Context, id string) error {
 	return nil
 }
 
-func (db *DB) MarkScheduleFired(ctx context.Context, id string, firedAt time.Time, nextFireAt *time.Time) error {
+// scheduleErrorMaxLen bounds what one fire may write into last_error. The
+// column is unbounded TEXT and the messages it normally carries are one line,
+// but "normally" is not a guarantee: an error joined out of a fan-out failure
+// can be kilobytes, and this string is rendered on a LIST ROW in the console
+// and shipped in every schedules response. Truncating at the store is the one
+// place that bounds every caller, including a future one.
+const scheduleErrorMaxLen = 500
+
+// truncateScheduleError caps lastError at scheduleErrorMaxLen BYTES INCLUDING
+// the ellipsis it appends, so the stored value never exceeds the bound the
+// constant states -- a cap that its own marker can push past is not a cap.
+// The marker is there so a reader knows the message continues (the full text
+// is in the console log, which is where a multi-kilobyte error belongs).
+//
+// The cut lands on a RUNE boundary: a byte-sliced UTF-8 message would put a
+// replacement character on the operator's screen.
+func truncateScheduleError(lastError string) string {
+	if len(lastError) <= scheduleErrorMaxLen {
+		return lastError
+	}
+	const ellipsis = "…"
+	budget := scheduleErrorMaxLen - len(ellipsis)
+	cut := 0
+	for i := range lastError { // range over a string yields rune-start offsets
+		if i > budget {
+			break
+		}
+		cut = i
+	}
+	return lastError[:cut] + ellipsis
+}
+
+func (db *DB) MarkScheduleFired(
+	ctx context.Context, id string, firedAt time.Time, nextFireAt *time.Time, lastError string,
+) error {
 	sid, err := parseUUID(id)
 	if err != nil {
 		return fmt.Errorf("store: mark schedule fired: %w", err)
@@ -772,6 +1010,7 @@ func (db *DB) MarkScheduleFired(ctx context.Context, id string, firedAt time.Tim
 		ID:          sid,
 		LastFiredAt: pgtype.Timestamptz{Time: firedAt, Valid: true},
 		NextFireAt:  timestamptzFromPtr(nextFireAt),
+		LastError:   truncateScheduleError(lastError),
 	})
 	if err != nil {
 		return fmt.Errorf("store: mark schedule fired: %w", err)

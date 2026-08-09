@@ -1,7 +1,7 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
 
 /**
- * Time Machine — the global time context (docs/console/product/TIME_MACHINE.md).
+ * Time Machine — the console-wide global time context.
  *
  * Two states, Live and "@ t", held in ONE place so every data hook resolves
  * through it (Task 11 wires the consumers; this module is the plumbing).
@@ -141,7 +141,20 @@ export function TimeMachineProvider({ children }: { children: ReactNode }) {
     [at, engage, returnToLive],
   );
 
-  return <TimeMachineContext.Provider value={value}>{children}</TimeMachineContext.Provider>;
+  return (
+    <TimeMachineContext.Provider value={value}>
+      {/* The description every time-disabled control points its
+          aria-describedby at, mounted ONCE and only while engaged — an
+          always-present "Time Machine is engaged" in the accessibility tree
+          would be a lie for the whole time the console is Live. */}
+      {at ? (
+        <span id={TIME_MACHINE_REASON_ID} className="sr-only">
+          {TIME_MACHINE_DISABLED_REASON}
+        </span>
+      ) : null}
+      {children}
+    </TimeMachineContext.Provider>
+  );
 }
 
 export function useTimeMachine(): TimeMachineValue {
@@ -195,15 +208,58 @@ export function useTimeContext(): TimeMachineValue {
  *   view, stays VISIBLE and goes `disabled`. Hiding it would read as "you lost
  *   the permission" and send an operator hunting for an RBAC bug that does not
  *   exist; leaving it in place, greyed, says "this is yours, but not from
- *   here", and the single top-bar banner (Task 10) is the whole explanation —
- *   deliberately no per-button tooltip.
+ *   here".
  *
  * So the composition is always `permission ? <Button disabled={writesDisabled}
  * .../> : null`, never the other way round.
  *
- * Task 12's annotation-create affordance inherits this exact pattern: call this
- * hook, spread the boolean onto the control's `disabled`, add no copy.
+ * This hook answers the boolean. useWriteGuard below answers the boolean AND
+ * the reason, and is what a control should actually spread.
  */
 export function useWritesDisabled(): boolean {
   return !useTimeContext().isLive;
+}
+
+/** The one sentence a time-disabled control gives for itself. Worded as the
+ *  way OUT, not as a complaint: the operator has the permission and one click
+ *  ("Return to Live") gets them the action back. */
+export const TIME_MACHINE_DISABLED_REASON = "Time Machine is engaged — return to Live to act.";
+
+/** The id the reason paragraph is mounted under, referenced by every
+ *  time-disabled control's aria-describedby. One node, however many controls
+ *  point at it — the sentence is a property of the MODE, not of the button. */
+export const TIME_MACHINE_REASON_ID = "timemachine-writes-disabled-reason";
+
+/**
+ * useWriteGuard is the props a TM-disabled control wears (QA round 2, finding
+ * #18).
+ *
+ * The original decision here was "the single top-bar banner is the whole
+ * explanation — deliberately no per-button tooltip". That held for a sighted
+ * reader who has the banner in view; it did not hold for anyone who tabs
+ * straight to a greyed Delete, nor for a long page scrolled past the bar. A
+ * disabled control that gives no reason for being disabled is indistinguishable
+ * from a broken one. So the reason now travels WITH the control — `title` for
+ * the pointer, `aria-describedby` for the screen reader — while the banner
+ * keeps saying it once for the page.
+ *
+ * Nothing is added while Live: an enabled control with a "why are you
+ * disabled" tooltip would be worse than the silence it replaced. That is also
+ * what keeps the aria-describedby honest — the target node is only mounted
+ * while engaged (see TimeMachineProvider), and only referenced then.
+ *
+ * Spread it, then compose any other reason on top:
+ *   <Button {...guard} disabled={guard.disabled || busy} />
+ */
+export interface WriteGuard {
+  disabled: boolean;
+  title?: string;
+  "aria-describedby"?: string;
+}
+
+export function useWriteGuard(): WriteGuard {
+  const disabled = useWritesDisabled();
+  return disabled
+    ? { disabled: true, title: TIME_MACHINE_DISABLED_REASON, "aria-describedby": TIME_MACHINE_REASON_ID }
+    : { disabled: false };
 }

@@ -52,6 +52,7 @@ func TestTargetInputValidateRejects(t *testing.T) {
 		{"unknown kind", func(in *TargetInput) { in.Kind = "tcp" }},
 		{"kind case mismatch", func(in *TargetInput) { in.Kind = "Host" }},
 		{"empty address", func(in *TargetInput) { in.Address = "" }},
+		{"whitespace-only address", func(in *TargetInput) { in.Address = "   " }},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -71,6 +72,115 @@ func TestTargetInputValidateRejects(t *testing.T) {
 func TestTargetNameLengthRuleMatchesMigration(t *testing.T) {
 	if nameMaxLen != 63 {
 		t.Fatalf("nameMaxLen = %d, want 63 to match migration 00004's CHECK", nameMaxLen)
+	}
+}
+
+// TestTargetAddressIsValidatedByKind pins QA round 5's finding #11. A target's
+// address used to be checked for EMPTINESS and nothing else, so "   " was a
+// legal host target and "sdfsdfsdf !!" was a legal URL one -- both written to
+// targets, both reaching the agent, both failing there once per interval with
+// no evidence in the console.
+//
+// The rule is validateAdhocAddress's, SPLIT BY KIND rather than widened: the
+// two kinds mean different things to the agent (checker.validateExternalHTTP
+// parses a url target, checker.ResolveAllowed resolves a host one), and a
+// target that carries the wrong shape for its own kind is exactly the mistake
+// this catches. So a URL is not a legal `host` address, and a bare hostname is
+// not a legal `url` one -- neither is "nearly right".
+func TestTargetAddressIsValidatedByKind(t *testing.T) {
+	cases := []struct {
+		name    string
+		kind    string
+		address string
+		wantOK  bool
+	}{
+		// host: everything validateAdhocAddress takes MINUS the URL form.
+		{"host bare name", "host", "example.test", true},
+		{"host fully-qualified", "host", "example.test.", true},
+		{"host single label", "host", "gateway", true},
+		{"host IPv4", "host", "10.0.0.1", true},
+		{"host bracketed IPv6", "host", "[::1]", true},
+		{"host with a port", "host", "example.test:8443", true},
+		{"host surrounded by whitespace", "host", "  10.0.0.1  ", true},
+		{"host that is whitespace only", "host", "   ", false},
+		{"host that is the finding's garbage", "host", "sdfsdfsdf !!", false},
+		{"host with a non-numeric port", "host", "example.test:http", false},
+		{"host with a doubled dot", "host", "example..test", false},
+		// A URL in the host slot is the wrong SHAPE for the kind, not a
+		// generous synonym: ResolveAllowed would send the whole string to DNS.
+		{"host carrying a URL", "host", "https://example.test", false},
+
+		// url: checker.validateExternalHTTP's rule, verbatim. It reads
+		// u.Port() and uses u.Path, so a port and a path are both legal --
+		// derived from that function, not assumed.
+		{"url plain", "url", "https://example.test", true},
+		{"url with a path", "url", "https://example.test/health", true},
+		{"url with a port and a path", "url", "https://example.test:8443/health", true},
+		{"url with a query", "url", "https://example.test/health?deep=1", true},
+		{"url plain http", "url", "http://example.test", true},
+		{"url with an IP host", "url", "http://10.0.0.1:8080/", true},
+		{"url surrounded by whitespace", "url", "  https://example.test  ", true},
+		{"url that is whitespace only", "url", "   ", false},
+		{"url that is the finding's garbage", "url", "sdfsdfsdf !!", false},
+		{"url with no scheme", "url", "example.test", false},
+		{"url with the wrong scheme", "url", "ftp://example.test", false},
+		{"url with no host", "url", "http://", false},
+		{"url that is a bare path", "url", "/health", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			in := TargetInput{Name: "edge-gw", Kind: tc.kind, Address: tc.address}
+			err := in.Validate()
+			switch {
+			case tc.wantOK && err != nil:
+				t.Fatalf("Validate(kind=%s, address=%q) = %v, want nil", tc.kind, tc.address, err)
+			case !tc.wantOK && err == nil:
+				t.Fatalf("Validate(kind=%s, address=%q) = nil, want an error", tc.kind, tc.address)
+			}
+			if err == nil {
+				return
+			}
+			// The 422 detail is routed to a form field by phrase
+			// (web/src/pages/targets.tsx's TARGET_FIELD_PHRASES), so every
+			// message here has to keep naming the address field.
+			if !strings.Contains(strings.ToLower(err.Error()), "address") {
+				t.Errorf("error %q does not name the address field", err)
+			}
+		})
+	}
+}
+
+// Validate NORMALISES the address it accepts, so what is stored is the string
+// that was checked. Without this, "  10.0.0.1  " passed validation (every
+// sender trims) and was then written verbatim, and the agent -- which does NOT
+// trim before dialling -- got an address it could never resolve.
+func TestTargetInputValidateTrimsTheAddressItAccepts(t *testing.T) {
+	in := TargetInput{Name: "edge-gw", Kind: "host", Address: "  10.0.0.1  "}
+	if err := in.Validate(); err != nil {
+		t.Fatalf("Validate() = %v, want nil", err)
+	}
+	if in.Address != "10.0.0.1" {
+		t.Errorf("Address = %q after Validate, want the trimmed %q", in.Address, "10.0.0.1")
+	}
+}
+
+// The two address failures are different operator mistakes with different
+// fixes, and the console routes both to the same field -- so they must not
+// collapse into one message.
+func TestTargetInputValidateAddressMessages(t *testing.T) {
+	blank := TargetInput{Name: "edge-gw", Kind: "host", Address: "   "}
+	if err := blank.Validate(); err == nil || !strings.Contains(err.Error(), "address must not be empty") {
+		t.Errorf("Validate() with a blank address = %v, want the required-field message", err)
+	}
+
+	badHost := TargetInput{Name: "edge-gw", Kind: "host", Address: "sdfsdfsdf !!"}
+	if err := badHost.Validate(); err == nil || !strings.Contains(err.Error(), "must be a host, an IP, or host:port") {
+		t.Errorf("Validate() with a malformed host address = %v, want the host shape message", err)
+	}
+
+	badURL := TargetInput{Name: "edge-gw", Kind: "url", Address: "example.test"}
+	if err := badURL.Validate(); err == nil || !strings.Contains(err.Error(), "must be an http(s) URL with a host") {
+		t.Errorf("Validate() with a malformed url address = %v, want the url shape message", err)
 	}
 }
 
@@ -124,6 +234,119 @@ func TestDefinitionInputValidateRejects(t *testing.T) {
 				t.Errorf("Validate(%+v) = nil, want an error", in)
 			}
 		})
+	}
+}
+
+// TestValidateAdhocAddress pins QA round 4's finding #13: an ad-hoc
+// destination_address the agent could never dial used to be accepted, written,
+// pushed to every assigned agent and refused there once per interval, forever.
+//
+// The accepted set is DERIVED FROM THE AGENT, not invented -- see
+// validateAdhocAddress's own doc for the three files it mirrors. Each case
+// below names which of them makes it legal (or not), so a future edit that
+// tightens this rule past what the checker accepts fails here with the reason
+// written down.
+func TestValidateAdhocAddress(t *testing.T) {
+	accepted := []struct{ name, address string }{
+		// allowlist.ResolveAllowed sends a non-literal host to LookupNetIP.
+		{"bare host", "example.test"},
+		{"fully-qualified host", "example.test."},
+		{"host with an underscore, which net.isDomainName permits", "my_svc.example.test"},
+		{"single-label host, which is legal inside a cluster", "gateway"},
+		// allowlist.parseLiteral takes these verbatim and never asks DNS.
+		{"IPv4 literal", "10.0.0.1"},
+		{"bare IPv6 literal", "2001:db8::1"},
+		{"bracketed IPv6 literal", "[::1]"},
+		// checks.externalTarget / agent.approveExternalTarget split the port.
+		{"host:port", "example.test:8443"},
+		{"ip:port", "10.0.0.1:8080"},
+		{"bracketed IPv6 with a port", "[::1]:443"},
+		{"lowest port", "10.0.0.1:1"},
+		{"highest port", "10.0.0.1:65535"},
+		// checker.validateExternalHTTP parses exactly these two schemes.
+		{"http URL", "http://example.test"},
+		{"https URL with a port and a path", "https://example.test:8443/health"},
+		// Every sender trims before resolving.
+		{"surrounding whitespace", "  10.0.0.1  "},
+		// A refusal by the allowlist is a POLICY answer belonging to the
+		// agent: this rule must not become a second, quietly diverging
+		// arbiter of what an operator may point a check at.
+		{"loopback, which the allowlist will very likely deny at probe time", "127.0.0.1"},
+		{"zone-scoped literal, which the allowlist ALWAYS denies at probe time", "fe80::1%eth0"},
+	}
+	for _, tc := range accepted {
+		t.Run("accepts "+tc.name, func(t *testing.T) {
+			if err := validateAdhocAddress(tc.address); err != nil {
+				t.Errorf("validateAdhocAddress(%q) = %v, want nil", tc.address, err)
+			}
+		})
+	}
+
+	rejected := []struct{ name, address string }{
+		{"the finding's own garbage", "sdfsdfsdf !!"},
+		{"blank", "   "},
+		{"an inner space", "example test"},
+		{"a doubled dot", "example..test"},
+		{"a leading-hyphen label", "-example.test"},
+		{"a trailing-hyphen label", "example-.test"},
+		// SplitHostPort accepts these, both senders' own port parse does not,
+		// so the whole string travels to DNS as a name and cannot resolve.
+		{"a non-numeric port", "example.test:http"},
+		{"port zero", "example.test:0"},
+		{"a port out of range", "example.test:99999"},
+		{"a trailing colon", "example.test:"},
+		// Not one of the two schemes validateExternalHTTP parses, and not a
+		// resolvable name either.
+		{"an ftp URL", "ftp://example.test"},
+		{"a scheme with no host", "http://"},
+		{"a bare path", "/health"},
+		{"a quote, which would have to survive a metric label", `exa"mple.test`},
+	}
+	for _, tc := range rejected {
+		t.Run("rejects "+tc.name, func(t *testing.T) {
+			err := validateAdhocAddress(tc.address)
+			if err == nil {
+				t.Fatalf("validateAdhocAddress(%q) = nil, want an error", tc.address)
+			}
+			// The console's 422 detail is routed to a form field by phrase
+			// (web/src/pages/targets.tsx's DEFINITION_FIELD_PHRASES), so the
+			// message has to keep naming the field.
+			if !strings.Contains(strings.ToLower(err.Error()), "destination address") {
+				t.Errorf("validateAdhocAddress(%q) error %q does not name the destination address field",
+					tc.address, err)
+			}
+		})
+	}
+}
+
+// A blank address reaching Validate must still get the REQUIRED-field message,
+// not the shape one: they are two different operator mistakes and the console
+// routes them to the same field with different fixes.
+func TestDefinitionInputValidateAdhocAddressMessages(t *testing.T) {
+	missing := validDefinitionInput()
+	missing.DestinationKind = "adhoc"
+	err := missing.Validate()
+	if err == nil || !strings.Contains(err.Error(), "requires a destination address") {
+		t.Errorf("Validate() with an empty adhoc address = %v, want the required-field message", err)
+	}
+
+	malformed := validDefinitionInput()
+	malformed.DestinationKind = "adhoc"
+	malformed.DestinationAddress = "sdfsdfsdf !!"
+	err = malformed.Validate()
+	if err == nil || !strings.Contains(err.Error(), "must be a host, an IP, host:port, or an http(s) URL") {
+		t.Errorf("Validate() with a malformed adhoc address = %v, want the shape message", err)
+	}
+}
+
+// The rule applies ONLY to the kind that carries a literal address. A node or
+// target definition is untouched by it -- destination_address is not its
+// field, and a stray value there is the pre-existing (unrelated) case.
+func TestValidateAdhocAddressAppliesOnlyToAdhoc(t *testing.T) {
+	in := validDefinitionInput()
+	in.DestinationAddress = "sdfsdfsdf !!"
+	if err := in.Validate(); err != nil {
+		t.Errorf("Validate() on a NODE definition carrying a stray address = %v, want nil", err)
 	}
 }
 

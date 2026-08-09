@@ -195,6 +195,75 @@ func TestListEventsFiltersByScope(t *testing.T) {
 	}
 }
 
+// TestListEventsFiltersByScopeNode asserts the pair-aware filter a node card
+// needs: the node's OWN scope plus every pair scope naming it on either side,
+// and nothing else. The near-miss rows ("a-x→b", "b→x-a") are the whole point
+// -- a substring or unanchored match would drag them in.
+func TestListEventsFiltersByScopeNode(t *testing.T) {
+	db := newEventStoreDB(t)
+	m := newTestMetrics()
+	es := store.NewEventStore(db, m)
+	ctx := context.Background()
+
+	base := time.Date(2026, 8, 5, 12, 0, 0, 0, time.UTC)
+	mustInsert(t, ctx, es, rec(1, base, "topology_changed", "a"))                      // the node's own scope
+	mustInsert(t, ctx, es, rec(2, base.Add(time.Second), "check_observed", "a→b"))     // pair, source side
+	mustInsert(t, ctx, es, rec(3, base.Add(2*time.Second), "check_observed", "c→a"))   // pair, destination side
+	mustInsert(t, ctx, es, rec(4, base.Add(3*time.Second), "check_observed", "c→d"))   // unrelated pair
+	mustInsert(t, ctx, es, rec(5, base.Add(4*time.Second), "check_observed", "a-x→b")) // near miss on the source side
+	mustInsert(t, ctx, es, rec(6, base.Add(5*time.Second), "check_observed", "b→x-a")) // near miss on the destination side
+	mustInsert(t, ctx, es, rec(7, base.Add(6*time.Second), "topology_changed", "ab"))  // near miss on the bare scope
+
+	page, err := es.ListEvents(ctx, store.EventFilter{ScopeNode: "a"})
+	if err != nil {
+		t.Fatalf("ListEvents: %v", err)
+	}
+	got := map[int64]string{}
+	for _, e := range page.Events {
+		got[e.EventSeq] = e.Scope
+	}
+	want := map[int64]string{1: "a", 2: "a→b", 3: "c→a"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("ListEvents(ScopeNode=a): got %v, want %v", got, want)
+	}
+}
+
+// TestListEventsScopeNodeEscapesLIKEMetacharacters is the escaping gate. Node
+// names cannot contain _ or %, but a scope is not always a node name: targets
+// carry store.validateName's charset (internal/console/store/targets.go
+// nameRE), which ALLOWS underscore, and a target name reaches this column
+// through pairScope the same way a node name does. Unescaped, "a_c" would
+// LIKE-match "abc→b" -- a card quietly showing another object's events.
+func TestListEventsScopeNodeEscapesLIKEMetacharacters(t *testing.T) {
+	db := newEventStoreDB(t)
+	m := newTestMetrics()
+	es := store.NewEventStore(db, m)
+	ctx := context.Background()
+
+	base := time.Date(2026, 8, 5, 12, 0, 0, 0, time.UTC)
+	mustInsert(t, ctx, es, rec(1, base, "check_observed", "abc→b"))                    // the wildcard victim
+	mustInsert(t, ctx, es, rec(2, base.Add(time.Second), "check_observed", "b→abc"))   // ... on the other side
+	mustInsert(t, ctx, es, rec(3, base.Add(2*time.Second), "check_observed", "a_c→b")) // the literal match
+
+	page, err := es.ListEvents(ctx, store.EventFilter{ScopeNode: "a_c"})
+	if err != nil {
+		t.Fatalf("ListEvents: %v", err)
+	}
+	if len(page.Events) != 1 || page.Events[0].Scope != "a_c→b" {
+		t.Fatalf("ListEvents(ScopeNode=a_c): got %+v, want exactly the a_c→b row", page.Events)
+	}
+
+	// '%' is the other metacharacter, and a bare '%' would otherwise match
+	// every pair scope in the table.
+	page, err = es.ListEvents(ctx, store.EventFilter{ScopeNode: "%"})
+	if err != nil {
+		t.Fatalf("ListEvents(ScopeNode=%%): %v", err)
+	}
+	if len(page.Events) != 0 {
+		t.Fatalf("ListEvents(ScopeNode=%%): got %d events, want 0 -- the wildcard was not escaped", len(page.Events))
+	}
+}
+
 // TestListEventsFiltersByTimeWindow asserts From is inclusive and To is
 // exclusive.
 func TestListEventsFiltersByTimeWindow(t *testing.T) {

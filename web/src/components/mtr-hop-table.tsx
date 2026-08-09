@@ -4,8 +4,9 @@ import type { EChartsOption, LineSeriesOption } from "echarts";
 import { EChart } from "@/components/echart";
 import { useTheme } from "@/components/theme-provider";
 import { chartColors, seriesColor } from "@/lib/chart-theme";
+import { formatMillis } from "@/lib/curated-metrics";
 import type { Enrichment, MTRHop, PathSnapshot } from "@/lib/types";
-import { cn } from "@/lib/utils";
+import { cn, plural } from "@/lib/utils";
 
 /* ── pure helpers (exported for their own tests) ────────────────────────── */
 
@@ -190,9 +191,46 @@ function EnrichmentDetail({ entry }: { entry: Enrichment | undefined }) {
 
 /* ── the trend chart ────────────────────────────────────────────────────── */
 
+/** SINGLE_POINT_PAD_MS is the window a lone sample gets: an hour either side.
+ *  A time axis whose min equals its max is degenerate — ECharts widens it by
+ *  an arbitrary amount and labels both ends with the same stamp — so one
+ *  measurement has to be given a window rather than a point, and an hour is
+ *  the smallest one that still reads as "around then" on a locale time label. */
+const SINGLE_POINT_PAD_MS = 60 * 60 * 1000;
+/** How much air a multi-point extent gets at each end, as a fraction of its
+ *  own span: enough that the first and last symbol are not drawn half over the
+ *  axis line. */
+const EXTENT_PAD_RATIO = 0.05;
+
+/**
+ * trendExtent pins the trend chart's x-axis (QA round 4, finding #11).
+ *
+ * ECharts auto-scales a time axis to a "nice" interval, which for a pair with
+ * ONE stored path meant a single symbol marooned at the left edge of a window
+ * spanning whatever round number the algorithm liked — days wide, for a chart
+ * describing one instant. Pinning min/max to the data's own extent, padded,
+ * makes the axis describe the data instead of the other way round.
+ *
+ * Returns undefined when there is nothing to measure, so the caller leaves the
+ * axis alone rather than pinning it to NaN.
+ */
+export function trendExtent(points: [number, number | null][]): { min: number; max: number } | undefined {
+  const xs = points.filter(([, v]) => v !== null).map(([ts]) => ts);
+  if (xs.length === 0) return undefined;
+  const lo = Math.min(...xs);
+  const hi = Math.max(...xs);
+  if (lo === hi) return { min: lo - SINGLE_POINT_PAD_MS, max: hi + SINGLE_POINT_PAD_MS };
+  const pad = (hi - lo) * EXTENT_PAD_RATIO;
+  return { min: lo - pad, max: hi + pad };
+}
+
 function trendOption(points: [number, number | null][], ip: string, dark: boolean): EChartsOption {
   const colors = chartColors(dark ? "dark" : "light");
-  const fmt = (ms: number) => `${ms.toFixed(1)}ms`;
+  // The console's ONE millisecond rule (QA round 2, finding #8; lifted to its
+  // own export in round 4's #11). The private `toFixed(1)` this replaces
+  // printed "123.4ms" where every Prometheus chart prints "123ms".
+  const fmt = formatMillis;
+  const extent = trendExtent(points);
   return {
     animation: false,
     textStyle: { color: colors.axis },
@@ -205,8 +243,9 @@ function trendOption(points: [number, number | null][], ip: string, dark: boolea
     xAxis: {
       type: "time",
       axisLine: { lineStyle: { color: colors.grid } },
-      axisLabel: { color: colors.axis },
+      axisLabel: { color: colors.axis, hideOverlap: true },
       splitLine: { show: false },
+      ...(extent ? { min: extent.min, max: extent.max } : {}),
     },
     yAxis: {
       type: "value",
@@ -259,9 +298,9 @@ function HopTrend({ ip, history }: { ip: string; history: TrendHistory }) {
           than trust it. */}
       {partial ? (
         <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
-          Trend covers the {history.snapshots.length} paths loaded here
+          Trend covers the {plural(history.snapshots.length, "path")} loaded here
           {history.traceTotal !== null && traces < history.traceTotal
-            ? ` (${traces} of the pair's ${history.traceTotal} traces)`
+            ? ` (${traces} of the pair's ${plural(history.traceTotal, "trace")})`
             : ""}{" "}
           — use Load older in the path history to widen it.
         </p>

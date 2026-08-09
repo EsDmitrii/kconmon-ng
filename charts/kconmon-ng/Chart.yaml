@@ -3,7 +3,7 @@ apiVersion: v2
 name: kconmon-ng
 description: Kubernetes Node Connectivity Monitor - Next Generation
 type: application
-version: 1.9.0
+version: 1.10.0
 appVersion: "1.9.0"
 keywords:
   - kubernetes

@@ -28,17 +28,27 @@ const (
 )
 
 // Plan's errors.
+//
+// None of these sentinels carries the "checks: " package prefix, and none of
+// them ever should: every site that returns one wraps it with this package's
+// own "checks: <op>: " context (Plan's "checks: plan: ", planDestinations'
+// "checks: plan: destination %d: "), exactly the way memory.go, runner.go and
+// reconciler.go do. A prefix on the sentinel TOO renders twice --
+// httpapi.handleRunError puts err.Error() straight into the problem+json
+// detail, so the console once showed operators
+// "checks: plan: checks: no nodes available to plan against".
+// TestPlanErrorsCarryExactlyOnePackagePrefix pins the rendered strings.
 var (
 	// ErrTooManyPairs is returned when a Spec expands past maxPairs (400)
 	// pairs.
-	ErrTooManyPairs = errors.New("checks: too many pairs")
+	ErrTooManyPairs = errors.New("too many pairs")
 	// ErrUnknownType is returned when Spec.Type is not one of the
 	// controller's validCheckTypes.
-	ErrUnknownType = errors.New("checks: unknown check type")
+	ErrUnknownType = errors.New("unknown check type")
 	// ErrNoNodes is returned when Plan needs the current topology's node
 	// list (Spec.Sources or Spec.Destinations is empty) and that list is
 	// itself empty -- a clear error rather than a silent zero-pair run.
-	ErrNoNodes = errors.New("checks: no nodes available to plan against")
+	ErrNoNodes = errors.New("no nodes available to plan against")
 	// ErrNoPairs is returned when a Spec's Sources/Destinations are both
 	// individually non-empty (so ErrNoNodes does not apply) but every
 	// combination is a self-pair or a duplicate -- e.g. Sources ==
@@ -46,7 +56,7 @@ var (
 	// immediately finish a run with PairTotal 0, which finalStatus reports as
 	// "succeeded": a vacuous, misleading result rather than the clear error a
 	// spec that can never dispatch anything deserves.
-	ErrNoPairs = errors.New("checks: no pairs to check (every combination is a self-pair or duplicate)")
+	ErrNoPairs = errors.New("no pairs to check (every combination is a self-pair or duplicate)")
 	// ErrInvalidDestination is returned when a Spec.TypedDestinations entry
 	// names a Kind that is not node|target|adhoc, or omits the field that
 	// Kind requires (Node for a node destination, Address for a target or
@@ -54,7 +64,7 @@ var (
 	// destination this package cannot describe is not one it may guess at,
 	// and a run that dispatched a half-built destination would report a
 	// failure that says nothing about the network.
-	ErrInvalidDestination = errors.New("checks: invalid destination")
+	ErrInvalidDestination = errors.New("invalid destination")
 )
 
 // The destination kinds a Spec may name (Plan Decision 14). Only DestKindNode

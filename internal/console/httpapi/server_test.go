@@ -289,13 +289,21 @@ func TestWSWithoutHubReturns503Problem(t *testing.T) {
 	}
 }
 
-// /ws is top level. If it were registered under /api/v1 this path would upgrade
-// instead of falling through to the SPA.
+// /ws is top level. If it were registered under /api/v1 this path would
+// upgrade; instead it is an unknown API route.
+//
+// The expected answer here changed with QA round 5's finding #20: it used to
+// be the SPA's 200, which is what that finding was about. The CLAIM this test
+// makes is unchanged and is the one that matters -- /api/v1/ws does not
+// upgrade, so /ws is not registered under the API prefix.
 func TestWSIsNotUnderAPIV1(t *testing.T) {
 	hub := ws.NewHub(cache.NewInProcessBus(), metrics.New("kconmon_ng", prometheus.NewRegistry()))
 	w := do(t, newRealtimeTestServer(t, hub, nil), "/api/v1/ws")
-	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `id="root"`) {
-		t.Fatalf("/api/v1/ws = %d %q, want the SPA fallback", w.Code, w.Body.String())
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("/api/v1/ws = %d %q, want 404 — it must not upgrade", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "no such API route") {
+		t.Errorf("/api/v1/ws body = %q, want the API catch-all's problem body", w.Body.String())
 	}
 }
 
@@ -360,4 +368,83 @@ func TestWSRouteUpgradesThroughTheMiddlewareChain(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Errorf(`/metrics never recorded path="/ws"; body was:\n%s`, metricsBody)
+}
+
+/* ── QA round 5, finding #20: an unknown /api/* route is a 404, not the SPA ── */
+
+// TestUnknownAPIRouteIs404ProblemJSON pins the catch-all. Before it,
+// GET /api/v1/nope fell through to r.NotFound and got the SPA's index.html
+// with a 200: a client (or a curl, or a test) asking for a route that does not
+// exist was told everything is fine and handed HTML, which is the single most
+// confusing answer an API can give.
+//
+// The whole /api prefix is covered, not just /api/v1: an operator who types
+// /api/targets has the same right to be told there is no such route.
+func TestUnknownAPIRouteIs404ProblemJSON(t *testing.T) {
+	s := newTestServer(t)
+	for _, target := range []string{
+		"/api/v1/nope",
+		"/api/v1/targets/extra/segments",
+		"/api/v2/version",
+		"/api/nope",
+		"/api",
+	} {
+		t.Run(target, func(t *testing.T) {
+			w := do(t, s, target)
+			if w.Code != http.StatusNotFound {
+				t.Fatalf("GET %s = %d, want 404 (body: %s)", target, w.Code, w.Body.String())
+			}
+			if ct := w.Header().Get("Content-Type"); ct != "application/problem+json" {
+				t.Errorf("GET %s Content-Type = %q, want application/problem+json", target, ct)
+			}
+			var p map[string]any
+			if err := json.Unmarshal(w.Body.Bytes(), &p); err != nil {
+				t.Fatalf("GET %s body is not JSON: %v (%s)", target, err, w.Body.String())
+			}
+			if p["title"] != "no such API route" {
+				t.Errorf("GET %s title = %v, want %q", target, p["title"], "no such API route")
+			}
+		})
+	}
+}
+
+// The catch-all answers every METHOD, not just GET: a POST to a route that
+// does not exist is the same mistake and deserves the same answer, not an
+// HTML page a client will try to parse as a create response.
+func TestUnknownAPIRouteIs404ForEveryMethod(t *testing.T) {
+	s := newTestServer(t)
+	for _, method := range []string{
+		http.MethodGet, http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete,
+	} {
+		req := httptest.NewRequestWithContext(context.Background(), method, "/api/v1/nope", http.NoBody)
+		w := httptest.NewRecorder()
+		s.Handler().ServeHTTP(w, req)
+		if w.Code != http.StatusNotFound {
+			t.Errorf("%s /api/v1/nope = %d, want 404", method, w.Code)
+		}
+	}
+}
+
+// …and it must not have eaten anything. The SPA fallback, the probes and a
+// real API route all keep answering exactly as before.
+func TestAPICatchAllLeavesEveryOtherRouteAlone(t *testing.T) {
+	s := newTestServer(t)
+	for _, tc := range []struct {
+		target string
+		code   int
+		body   string
+	}{
+		{"/", http.StatusOK, `<div id="root"></div>`},
+		{"/targets", http.StatusOK, `<div id="root"></div>`},
+		{"/api-keys", http.StatusOK, `<div id="root"></div>`}, // a UI path that merely STARTS with "api"
+		{"/healthz", http.StatusOK, "ok"},
+	} {
+		w := do(t, s, tc.target)
+		if w.Code != tc.code || w.Body.String() != tc.body {
+			t.Errorf("GET %s = %d %q, want %d %q", tc.target, w.Code, w.Body.String(), tc.code, tc.body)
+		}
+	}
+	if w := do(t, s, "/api/v1/version"); w.Code != http.StatusOK {
+		t.Errorf("GET /api/v1/version = %d, want 200 — the catch-all must not shadow a real route", w.Code)
+	}
 }

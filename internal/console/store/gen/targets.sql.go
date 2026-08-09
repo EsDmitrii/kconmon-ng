@@ -75,7 +75,7 @@ const createSchedule = `-- name: CreateSchedule :one
 INSERT INTO check_schedules (id, definition_id, kind, interval_ns, run_at, enabled, next_fire_at)
 VALUES ($1, $2, $3, $4, $5, $6, $7)
 RETURNING id, definition_id, kind, interval_ns, run_at, enabled,
-          last_fired_at, next_fire_at, created_at, updated_at
+          last_fired_at, next_fire_at, created_at, updated_at, last_error, last_error_at
 `
 
 type CreateScheduleParams struct {
@@ -110,6 +110,8 @@ func (q *Queries) CreateSchedule(ctx context.Context, arg CreateScheduleParams) 
 		&i.NextFireAt,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.LastError,
+		&i.LastErrorAt,
 	)
 	return i, err
 }
@@ -223,7 +225,7 @@ func (q *Queries) GetDefinition(ctx context.Context, id pgtype.UUID) (CheckDefin
 
 const getSchedule = `-- name: GetSchedule :one
 SELECT id, definition_id, kind, interval_ns, run_at, enabled,
-       last_fired_at, next_fire_at, created_at, updated_at
+       last_fired_at, next_fire_at, created_at, updated_at, last_error, last_error_at
 FROM check_schedules
 WHERE id = $1
 `
@@ -242,6 +244,8 @@ func (q *Queries) GetSchedule(ctx context.Context, id pgtype.UUID) (CheckSchedul
 		&i.NextFireAt,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.LastError,
+		&i.LastErrorAt,
 	)
 	return i, err
 }
@@ -331,7 +335,7 @@ func (q *Queries) ListDefinitions(ctx context.Context, arg ListDefinitionsParams
 
 const listDueSchedules = `-- name: ListDueSchedules :many
 SELECT id, definition_id, kind, interval_ns, run_at, enabled,
-       last_fired_at, next_fire_at, created_at, updated_at
+       last_fired_at, next_fire_at, created_at, updated_at, last_error, last_error_at
 FROM check_schedules
 WHERE enabled AND next_fire_at <= $1::timestamptz
 ORDER BY next_fire_at
@@ -370,6 +374,8 @@ func (q *Queries) ListDueSchedules(ctx context.Context, arg ListDueSchedulesPara
 			&i.NextFireAt,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.LastError,
+			&i.LastErrorAt,
 		); err != nil {
 			return nil, err
 		}
@@ -383,7 +389,7 @@ func (q *Queries) ListDueSchedules(ctx context.Context, arg ListDueSchedulesPara
 
 const listSchedules = `-- name: ListSchedules :many
 SELECT id, definition_id, kind, interval_ns, run_at, enabled,
-       last_fired_at, next_fire_at, created_at, updated_at
+       last_fired_at, next_fire_at, created_at, updated_at, last_error, last_error_at
 FROM check_schedules
 WHERE ($1::uuid IS NULL OR definition_id = $1::uuid)
   AND ($2::timestamptz IS NULL OR
@@ -424,6 +430,8 @@ func (q *Queries) ListSchedules(ctx context.Context, arg ListSchedulesParams) ([
 			&i.NextFireAt,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.LastError,
+			&i.LastErrorAt,
 		); err != nil {
 			return nil, err
 		}
@@ -492,7 +500,16 @@ func (q *Queries) ListTargets(ctx context.Context, arg ListTargetsParams) ([]Tar
 
 const markScheduleFired = `-- name: MarkScheduleFired :execrows
 UPDATE check_schedules
-SET last_fired_at = $2, next_fire_at = $3, updated_at = now()
+SET last_fired_at = $2,
+    next_fire_at  = $3,
+    last_error    = $4::text,
+    -- $2::timestamptz, not a bare $2: inside a CASE whose other branch is a
+    -- bare NULL, PostgreSQL has nothing to deduce the parameter's type from
+    -- and reports "inconsistent types deduced for parameter $2" (42P08) at
+    -- PREPARE time, because the same placeholder is already pinned to
+    -- timestamptz by the assignment above. The cast states it once.
+    last_error_at = CASE WHEN $4::text = '' THEN NULL ELSE $2::timestamptz END,
+    updated_at    = now()
 WHERE id = $1
 `
 
@@ -500,6 +517,7 @@ type MarkScheduleFiredParams struct {
 	ID          pgtype.UUID
 	LastFiredAt pgtype.Timestamptz
 	NextFireAt  pgtype.Timestamptz
+	LastError   string
 }
 
 // The scheduler's post-dispatch bookkeeping: stamp what just fired and when
@@ -508,8 +526,22 @@ type MarkScheduleFiredParams struct {
 // happened (which would make ListDueSchedules hand it out a second time).
 // next_fire_at = NULL retires the schedule from the due index without
 // disabling it -- the terminal state of a kind='once' schedule.
+//
+// last_error rides in the SAME statement, and its stamp is DERIVED from it
+// rather than passed (QA round 5, finding #5): last_error_at is the fire's own
+// timestamp when there is an error and NULL when there is not, so the pair can
+// never disagree and a caller cannot write "a failure with no time" or "a time
+// with no failure". Passing ” is how the scheduler CLEARS a previous failure
+// on a tick that went through -- the column always describes the LAST attempt,
+// never the last bad one, or a row would stay red forever after one bad
+// minute.
 func (q *Queries) MarkScheduleFired(ctx context.Context, arg MarkScheduleFiredParams) (int64, error) {
-	result, err := q.db.Exec(ctx, markScheduleFired, arg.ID, arg.LastFiredAt, arg.NextFireAt)
+	result, err := q.db.Exec(ctx, markScheduleFired,
+		arg.ID,
+		arg.LastFiredAt,
+		arg.NextFireAt,
+		arg.LastError,
+	)
 	if err != nil {
 		return 0, err
 	}
@@ -576,7 +608,7 @@ UPDATE check_schedules
 SET kind = $2, interval_ns = $3, run_at = $4, enabled = $5, next_fire_at = $6, updated_at = now()
 WHERE id = $1
 RETURNING id, definition_id, kind, interval_ns, run_at, enabled,
-          last_fired_at, next_fire_at, created_at, updated_at
+          last_fired_at, next_fire_at, created_at, updated_at, last_error, last_error_at
 `
 
 type UpdateScheduleParams struct {
@@ -592,6 +624,13 @@ type UpdateScheduleParams struct {
 // different definition is a different schedule, and letting it move would
 // silently reinterpret last_fired_at/next_fire_at against a cadence they were
 // never computed for.
+//
+// last_error/last_error_at are not touched here either, and that is a separate
+// decision from the one above: they are a FACT about the last fire, and an
+// edit is not a fire. Clearing them on save would let an operator make a red
+// row green by pressing Save on a schedule that is still broken; leaving them
+// means the row keeps saying what went wrong, with the stamp that says when,
+// until the next tick either repeats it or clears it (queries below).
 func (q *Queries) UpdateSchedule(ctx context.Context, arg UpdateScheduleParams) (CheckSchedule, error) {
 	row := q.db.QueryRow(ctx, updateSchedule,
 		arg.ID,
@@ -613,6 +652,8 @@ func (q *Queries) UpdateSchedule(ctx context.Context, arg UpdateScheduleParams) 
 		&i.NextFireAt,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.LastError,
+		&i.LastErrorAt,
 	)
 	return i, err
 }

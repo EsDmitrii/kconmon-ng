@@ -11,285 +11,1511 @@
   "panels": [
     {
       "collapsed": false,
-      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
       "id": 1,
       "panels": [],
-      "title": "Cross-Zone Latency Heatmap",
+      "title": "Zone to zone right now (last 15m)",
       "type": "row"
     },
     {
-      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "description": "Rows are the source zone, columns the destination zone. The diagonal is in-zone traffic; anything off-diagonal crossed a zone boundary.",
+      "gridPos": {
+        "h": 9,
+        "w": 8,
+        "x": 0,
+        "y": 1
+      },
+      "id": 2,
+      "type": "table",
       "fieldConfig": {
         "defaults": {
-          "color": { "mode": "continuous-GrYlRd" },
           "custom": {
-            "align": "auto",
-            "cellOptions": { "type": "color-background" },
-            "inspect": false
+            "align": "center",
+            "cellOptions": {
+              "type": "color-background",
+              "mode": "gradient"
+            },
+            "filterable": false,
+            "inspect": false,
+            "minWidth": 70
           },
+          "decimals": 3,
           "mappings": [],
-          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "yellow", "value": 0.01 }, { "color": "orange", "value": 0.05 }, { "color": "red", "value": 0.1 }] },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 0.05
+              },
+              {
+                "color": "red",
+                "value": 0.5
+              }
+            ]
+          },
+          "unit": "percentunit"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "source_zone\\destination_zone"
+            },
+            "properties": [
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "auto"
+                }
+              },
+              {
+                "id": "custom.align",
+                "value": "left"
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "countRows": false,
+          "fields": "",
+          "reducer": [
+            "sum"
+          ],
+          "show": false
+        },
+        "showHeader": true,
+        "sortBy": []
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "avg by (source_zone, destination_zone) (avg_over_time(kconmon_ng_udp_packet_loss_ratio[15m]))",
+          "refId": "A",
+          "instant": true,
+          "range": false,
+          "format": "table"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "groupingToMatrix",
+          "options": {
+            "columnField": "destination_zone",
+            "rowField": "source_zone",
+            "valueField": "Value"
+          }
+        }
+      ],
+      "title": "UDP packet loss"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "description": "Cross-zone cells sitting well above the diagonal is the normal shape; a diagonal cell that is worse than its row is a problem inside that zone.",
+      "gridPos": {
+        "h": 9,
+        "w": 8,
+        "x": 8,
+        "y": 1
+      },
+      "id": 3,
+      "type": "table",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "center",
+            "cellOptions": {
+              "type": "color-background",
+              "mode": "gradient"
+            },
+            "filterable": false,
+            "inspect": false,
+            "minWidth": 70
+          },
+          "decimals": 4,
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 0.005
+              },
+              {
+                "color": "red",
+                "value": 0.02
+              }
+            ]
+          },
           "unit": "s"
         },
         "overrides": [
           {
-            "matcher": { "id": "byName", "options": "source_zone" },
-            "properties": [{ "id": "custom.cellOptions", "value": { "type": "auto" } }, { "id": "thresholds", "value": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] } }
-          ]
-          },
-          {
-            "matcher": { "id": "byName", "options": "destination_zone" },
-            "properties": [{ "id": "custom.cellOptions", "value": { "type": "auto" } }, { "id": "thresholds", "value": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] } }
-          ]
+            "matcher": {
+              "id": "byName",
+              "options": "source_zone\\destination_zone"
+            },
+            "properties": [
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "auto"
+                }
+              },
+              {
+                "id": "custom.align",
+                "value": "left"
+              }
+            ]
           }
         ]
       },
-      "gridPos": { "h": 10, "w": 8, "x": 0, "y": 1 },
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "countRows": false,
+          "fields": "",
+          "reducer": [
+            "sum"
+          ],
+          "show": false
+        },
+        "showHeader": true,
+        "sortBy": []
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "histogram_quantile(0.95, sum by (source_zone, destination_zone, le) (rate(kconmon_ng_udp_rtt_seconds_bucket[15m])))",
+          "refId": "A",
+          "instant": true,
+          "range": false,
+          "format": "table"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "groupingToMatrix",
+          "options": {
+            "columnField": "destination_zone",
+            "rowField": "source_zone",
+            "valueField": "Value"
+          }
+        }
+      ],
+      "title": "p95 UDP RTT"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "description": "ICMP is handled by a different kernel path than UDP. Divergence between this matrix and the UDP one points at prioritisation or filtering rather than distance.",
+      "gridPos": {
+        "h": 9,
+        "w": 8,
+        "x": 16,
+        "y": 1
+      },
+      "id": 4,
+      "type": "table",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "center",
+            "cellOptions": {
+              "type": "color-background",
+              "mode": "gradient"
+            },
+            "filterable": false,
+            "inspect": false,
+            "minWidth": 70
+          },
+          "decimals": 4,
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 0.005
+              },
+              {
+                "color": "red",
+                "value": 0.02
+              }
+            ]
+          },
+          "unit": "s"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "source_zone\\destination_zone"
+            },
+            "properties": [
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "auto"
+                }
+              },
+              {
+                "id": "custom.align",
+                "value": "left"
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "countRows": false,
+          "fields": "",
+          "reducer": [
+            "sum"
+          ],
+          "show": false
+        },
+        "showHeader": true,
+        "sortBy": []
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "histogram_quantile(0.95, sum by (source_zone, destination_zone, le) (rate(kconmon_ng_icmp_rtt_seconds_bucket[15m])))",
+          "refId": "A",
+          "instant": true,
+          "range": false,
+          "format": "table"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "groupingToMatrix",
+          "options": {
+            "columnField": "destination_zone",
+            "rowField": "source_zone",
+            "valueField": "Value"
+          }
+        }
+      ],
+      "title": "p95 ICMP RTT"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "description": "Failed TCP probes over all TCP probes, aggregated per zone pair over 15m. A whole red column means the destination zone is the problem, a red row means the source zone is.",
+      "gridPos": {
+        "h": 9,
+        "w": 8,
+        "x": 0,
+        "y": 10
+      },
+      "id": 5,
+      "type": "table",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "center",
+            "cellOptions": {
+              "type": "color-background",
+              "mode": "gradient"
+            },
+            "filterable": false,
+            "inspect": false,
+            "minWidth": 70
+          },
+          "decimals": 3,
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 0.02
+              },
+              {
+                "color": "red",
+                "value": 0.05
+              }
+            ]
+          },
+          "unit": "percentunit"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "source_zone\\destination_zone"
+            },
+            "properties": [
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "auto"
+                }
+              },
+              {
+                "id": "custom.align",
+                "value": "left"
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "countRows": false,
+          "fields": "",
+          "reducer": [
+            "sum"
+          ],
+          "show": false
+        },
+        "showHeader": true,
+        "sortBy": []
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "(sum by (source_zone, destination_zone) (increase(kconmon_ng_tcp_results_total{result=\"fail\"}[15m])) or 0 * sum by (source_zone, destination_zone) (increase(kconmon_ng_tcp_results_total[15m]))) / sum by (source_zone, destination_zone) (increase(kconmon_ng_tcp_results_total[15m]))",
+          "refId": "A",
+          "instant": true,
+          "range": false,
+          "format": "table"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "groupingToMatrix",
+          "options": {
+            "columnField": "destination_zone",
+            "rowField": "source_zone",
+            "valueField": "Value"
+          }
+        }
+      ],
+      "title": "TCP failure ratio"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "description": "Same aggregation for UDP. TCP and UDP red in the same cell is a path fault; only one of them is usually a policy or listener fault.",
+      "gridPos": {
+        "h": 9,
+        "w": 8,
+        "x": 8,
+        "y": 10
+      },
+      "id": 6,
+      "type": "table",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "center",
+            "cellOptions": {
+              "type": "color-background",
+              "mode": "gradient"
+            },
+            "filterable": false,
+            "inspect": false,
+            "minWidth": 70
+          },
+          "decimals": 3,
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 0.02
+              },
+              {
+                "color": "red",
+                "value": 0.05
+              }
+            ]
+          },
+          "unit": "percentunit"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "source_zone\\destination_zone"
+            },
+            "properties": [
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "auto"
+                }
+              },
+              {
+                "id": "custom.align",
+                "value": "left"
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "countRows": false,
+          "fields": "",
+          "reducer": [
+            "sum"
+          ],
+          "show": false
+        },
+        "showHeader": true,
+        "sortBy": []
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "(sum by (source_zone, destination_zone) (increase(kconmon_ng_udp_results_total{result=\"fail\"}[15m])) or 0 * sum by (source_zone, destination_zone) (increase(kconmon_ng_udp_results_total[15m]))) / sum by (source_zone, destination_zone) (increase(kconmon_ng_udp_results_total[15m]))",
+          "refId": "A",
+          "instant": true,
+          "range": false,
+          "format": "table"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "groupingToMatrix",
+          "options": {
+            "columnField": "destination_zone",
+            "rowField": "source_zone",
+            "valueField": "Value"
+          }
+        }
+      ],
+      "title": "UDP failure ratio"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "description": "Where the agents themselves decided a trace was warranted, folded to zone pairs. The `or 0 *` term keeps quiet zone pairs on the matrix as zeros instead of dropping the cell.",
+      "gridPos": {
+        "h": 9,
+        "w": 8,
+        "x": 16,
+        "y": 10
+      },
+      "id": 7,
+      "type": "table",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "center",
+            "cellOptions": {
+              "type": "color-background",
+              "mode": "gradient"
+            },
+            "filterable": false,
+            "inspect": false,
+            "minWidth": 70
+          },
+          "decimals": 0,
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 1
+              },
+              {
+                "color": "red",
+                "value": 10
+              }
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "source_zone\\destination_zone"
+            },
+            "properties": [
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "auto"
+                }
+              },
+              {
+                "id": "custom.align",
+                "value": "left"
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "countRows": false,
+          "fields": "",
+          "reducer": [
+            "sum"
+          ],
+          "show": false
+        },
+        "showHeader": true,
+        "sortBy": []
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "sum by (source_zone, destination_zone) (increase(kconmon_ng_mtr_triggered_total[1h])) or 0 * sum by (source_zone, destination_zone) (kconmon_ng_udp_results_total)",
+          "refId": "A",
+          "instant": true,
+          "range": false,
+          "format": "table"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "groupingToMatrix",
+          "options": {
+            "columnField": "destination_zone",
+            "rowField": "source_zone",
+            "valueField": "Value"
+          }
+        }
+      ],
+      "title": "MTR traces triggered (1h)"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 19
+      },
+      "id": 8,
+      "panels": [],
+      "title": "In-zone vs cross-zone over time",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "description": "PromQL cannot compare two labels, so the in-zone set is built by copying source_zone onto destination_zone and intersecting on both. Cross-zone is the same set subtracted with `unless`.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 20
+      },
+      "id": 9,
+      "type": "timeseries",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 8,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "decimals": 4,
+          "mappings": [],
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(kconmon_ng_udp_rtt_seconds_bucket[5m]) and on (source_zone, destination_zone) label_replace(count by (source_zone) (kconmon_ng_udp_results_total), \"destination_zone\", \"$1\", \"source_zone\", \"(.*)\")))",
+          "refId": "A",
+          "instant": false,
+          "range": true,
+          "legendFormat": "in-zone"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(kconmon_ng_udp_rtt_seconds_bucket[5m]) unless on (source_zone, destination_zone) label_replace(count by (source_zone) (kconmon_ng_udp_results_total), \"destination_zone\", \"$1\", \"source_zone\", \"(.*)\")))",
+          "refId": "B",
+          "instant": false,
+          "range": true,
+          "legendFormat": "cross-zone"
+        }
+      ],
+      "title": "p95 UDP RTT: in-zone vs cross-zone"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "description": "Cross-zone loss rising while in-zone stays flat isolates the fault to the inter-zone fabric rather than any single node.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 20
+      },
       "id": 10,
+      "type": "timeseries",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 8,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "decimals": 4,
+          "mappings": [],
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "percentunit"
+        },
+        "overrides": []
+      },
       "options": {
-        "cellHeight": "sm",
-        "footer": { "countRows": false, "fields": "", "reducer": ["sum"], "show": false },
-        "showHeader": true,
-        "sortBy": [{ "desc": false, "displayName": "source_zone" }]
+        "legend": {
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
       },
       "targets": [
         {
-          "datasource": { "type": "prometheus", "uid": "${datasource}" },
-          "expr": "histogram_quantile(0.50, sum(rate(kconmon_ng_tcp_connect_duration_seconds_bucket[5m])) by (le, source_zone, destination_zone))",
-          "format": "table",
-          "instant": true,
-          "legendFormat": "",
-          "refId": "A"
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "avg(kconmon_ng_udp_packet_loss_ratio and on (source_zone, destination_zone) label_replace(count by (source_zone) (kconmon_ng_udp_results_total), \"destination_zone\", \"$1\", \"source_zone\", \"(.*)\"))",
+          "refId": "A",
+          "instant": false,
+          "range": true,
+          "legendFormat": "in-zone"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "avg(kconmon_ng_udp_packet_loss_ratio unless on (source_zone, destination_zone) label_replace(count by (source_zone) (kconmon_ng_udp_results_total), \"destination_zone\", \"$1\", \"source_zone\", \"(.*)\"))",
+          "refId": "B",
+          "instant": false,
+          "range": true,
+          "legendFormat": "cross-zone"
         }
       ],
-      "title": "TCP Connect Latency (p50) by Zone",
-      "transformations": [
-        { "id": "merge", "options": {} },
-        { "id": "organize", "options": { "excludeByName": { "Time": true }, "indexByName": {}, "renameByName": { "Value": "TCP p50 (s)", "destination_zone": "destination_zone", "source_zone": "source_zone" } } }
-      ],
-      "type": "table"
+      "title": "UDP packet loss: in-zone vs cross-zone"
     },
     {
-      "datasource": { "type": "prometheus", "uid": "${datasource}" },
-      "fieldConfig": {
-        "defaults": {
-          "color": { "mode": "continuous-GrYlRd" },
-          "custom": {
-            "align": "auto",
-            "cellOptions": { "type": "color-background" },
-            "inspect": false
-          },
-          "mappings": [],
-          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "yellow", "value": 0.01 }, { "color": "orange", "value": 0.05 }, { "color": "red", "value": 0.1 }] },
-          "unit": "s"
-        },
-        "overrides": [
-          {
-            "matcher": { "id": "byName", "options": "source_zone" },
-            "properties": [{ "id": "custom.cellOptions", "value": { "type": "auto" } }, { "id": "thresholds", "value": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] } }
-          ]
-          },
-          {
-            "matcher": { "id": "byName", "options": "destination_zone" },
-            "properties": [{ "id": "custom.cellOptions", "value": { "type": "auto" } }, { "id": "thresholds", "value": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] } }
-          ]
-          }
-        ]
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
       },
-      "gridPos": { "h": 10, "w": 8, "x": 8, "y": 1 },
+      "description": "Failed probes over all probes, split by whether the probe crossed a zone boundary.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 28
+      },
       "id": 11,
+      "type": "timeseries",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 8,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "decimals": 4,
+          "mappings": [],
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "percentunit"
+        },
+        "overrides": []
+      },
       "options": {
-        "cellHeight": "sm",
-        "footer": { "countRows": false, "fields": "", "reducer": ["sum"], "show": false },
-        "showHeader": true,
-        "sortBy": [{ "desc": false, "displayName": "source_zone" }]
+        "legend": {
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
       },
       "targets": [
         {
-          "datasource": { "type": "prometheus", "uid": "${datasource}" },
-          "expr": "histogram_quantile(0.50, sum(rate(kconmon_ng_udp_rtt_seconds_bucket[5m])) by (le, source_zone, destination_zone))",
-          "format": "table",
-          "instant": true,
-          "legendFormat": "",
-          "refId": "A"
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "(sum(rate(kconmon_ng_udp_results_total{result=\"fail\"}[5m]) and on (source_zone, destination_zone) label_replace(count by (source_zone) (kconmon_ng_udp_results_total), \"destination_zone\", \"$1\", \"source_zone\", \"(.*)\")) or vector(0)) / sum(rate(kconmon_ng_udp_results_total[5m]) and on (source_zone, destination_zone) label_replace(count by (source_zone) (kconmon_ng_udp_results_total), \"destination_zone\", \"$1\", \"source_zone\", \"(.*)\"))",
+          "refId": "A",
+          "instant": false,
+          "range": true,
+          "legendFormat": "in-zone"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "(sum(rate(kconmon_ng_udp_results_total{result=\"fail\"}[5m]) unless on (source_zone, destination_zone) label_replace(count by (source_zone) (kconmon_ng_udp_results_total), \"destination_zone\", \"$1\", \"source_zone\", \"(.*)\")) or vector(0)) / sum(rate(kconmon_ng_udp_results_total[5m]) unless on (source_zone, destination_zone) label_replace(count by (source_zone) (kconmon_ng_udp_results_total), \"destination_zone\", \"$1\", \"source_zone\", \"(.*)\"))",
+          "refId": "B",
+          "instant": false,
+          "range": true,
+          "legendFormat": "cross-zone"
         }
       ],
-      "title": "UDP RTT (p50) by Zone",
-      "transformations": [
-        { "id": "merge", "options": {} },
-        { "id": "organize", "options": { "excludeByName": { "Time": true }, "indexByName": {}, "renameByName": { "Value": "UDP p50 (s)", "destination_zone": "destination_zone", "source_zone": "source_zone" } } }
-      ],
-      "type": "table"
+      "title": "UDP failure ratio: in-zone vs cross-zone"
     },
     {
-      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "description": "The connect phase alone, which is the part a zone boundary actually lengthens.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 28
+      },
+      "id": 12,
+      "type": "timeseries",
       "fieldConfig": {
         "defaults": {
-          "color": { "mode": "continuous-GrYlRd" },
-          "custom": {
-            "align": "auto",
-            "cellOptions": { "type": "color-background" },
-            "inspect": false
+          "color": {
+            "mode": "palette-classic"
           },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 8,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "decimals": 4,
           "mappings": [],
-          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "yellow", "value": 0.01 }, { "color": "orange", "value": 0.05 }, { "color": "red", "value": 0.1 }] },
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
           "unit": "s"
         },
-        "overrides": [
-          {
-            "matcher": { "id": "byName", "options": "source_zone" },
-            "properties": [{ "id": "custom.cellOptions", "value": { "type": "auto" } }, { "id": "thresholds", "value": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] } }
-          ]
-          },
-          {
-            "matcher": { "id": "byName", "options": "destination_zone" },
-            "properties": [{ "id": "custom.cellOptions", "value": { "type": "auto" } }, { "id": "thresholds", "value": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] } }
-          ]
-          }
-        ]
+        "overrides": []
       },
-      "gridPos": { "h": 10, "w": 8, "x": 16, "y": 1 },
-      "id": 12,
       "options": {
-        "cellHeight": "sm",
-        "footer": { "countRows": false, "fields": "", "reducer": ["sum"], "show": false },
-        "showHeader": true,
-        "sortBy": [{ "desc": false, "displayName": "source_zone" }]
+        "legend": {
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
       },
       "targets": [
         {
-          "datasource": { "type": "prometheus", "uid": "${datasource}" },
-          "expr": "histogram_quantile(0.50, sum(rate(kconmon_ng_icmp_rtt_seconds_bucket[5m])) by (le, source_zone, destination_zone))",
-          "format": "table",
-          "instant": true,
-          "legendFormat": "",
-          "refId": "A"
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(kconmon_ng_tcp_connect_duration_seconds_bucket[5m]) and on (source_zone, destination_zone) label_replace(count by (source_zone) (kconmon_ng_udp_results_total), \"destination_zone\", \"$1\", \"source_zone\", \"(.*)\")))",
+          "refId": "A",
+          "instant": false,
+          "range": true,
+          "legendFormat": "in-zone"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(kconmon_ng_tcp_connect_duration_seconds_bucket[5m]) unless on (source_zone, destination_zone) label_replace(count by (source_zone) (kconmon_ng_udp_results_total), \"destination_zone\", \"$1\", \"source_zone\", \"(.*)\")))",
+          "refId": "B",
+          "instant": false,
+          "range": true,
+          "legendFormat": "cross-zone"
         }
       ],
-      "title": "ICMP RTT (p50) by Zone",
-      "transformations": [
-        { "id": "merge", "options": {} },
-        { "id": "organize", "options": { "excludeByName": { "Time": true }, "indexByName": {}, "renameByName": { "Value": "ICMP p50 (s)", "destination_zone": "destination_zone", "source_zone": "source_zone" } } }
-      ],
-      "type": "table"
+      "title": "p95 TCP connect: in-zone vs cross-zone"
     },
     {
-      "datasource": { "type": "prometheus", "uid": "${datasource}" },
-      "fieldConfig": {
-        "defaults": {
-          "color": { "mode": "continuous-BlYlRd" },
-          "custom": {
-            "align": "auto",
-            "cellOptions": { "type": "color-background" },
-            "inspect": false
-          },
-          "mappings": [],
-          "max": 1,
-          "min": 0,
-          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "yellow", "value": 0.01 }, { "color": "orange", "value": 0.05 }, { "color": "red", "value": 0.1 }] },
-          "unit": "percentunit"
-        },
-        "overrides": [
-          {
-            "matcher": { "id": "byName", "options": "source_zone" },
-            "properties": [{ "id": "custom.cellOptions", "value": { "type": "auto" } }, { "id": "thresholds", "value": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] } }
-          ]
-          },
-          {
-            "matcher": { "id": "byName", "options": "destination_zone" },
-            "properties": [{ "id": "custom.cellOptions", "value": { "type": "auto" } }, { "id": "thresholds", "value": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] } }
-          ]
-          }
-        ]
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 36
       },
-      "gridPos": { "h": 10, "w": 12, "x": 0, "y": 11 },
-      "id": 20,
-      "options": {
-        "cellHeight": "sm",
-        "footer": { "countRows": false, "fields": "", "reducer": ["sum"], "show": false },
-        "showHeader": true,
-        "sortBy": [{ "desc": false, "displayName": "source_zone" }]
-      },
-      "targets": [
-        {
-          "datasource": { "type": "prometheus", "uid": "${datasource}" },
-          "expr": "avg(avg_over_time(kconmon_ng_udp_packet_loss_ratio[5m])) by (source_zone, destination_zone)",
-          "format": "table",
-          "instant": true,
-          "legendFormat": "",
-          "refId": "A"
-        }
-      ],
-      "title": "UDP Packet Loss Ratio by Zone",
-      "transformations": [
-        { "id": "merge", "options": {} },
-        { "id": "organize", "options": { "excludeByName": { "Time": true }, "indexByName": {}, "renameByName": { "Value": "Loss Ratio", "destination_zone": "destination_zone", "source_zone": "source_zone" } } }
-      ],
-      "type": "table"
+      "id": 13,
+      "panels": [],
+      "title": "Per zone-pair over time",
+      "type": "row"
     },
     {
-      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "description": "One line per zone pair, so a regional fault shows up as a group of lines moving together.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 37
+      },
+      "id": 14,
+      "type": "timeseries",
       "fieldConfig": {
         "defaults": {
-          "color": { "mode": "continuous-BlYlRd" },
-          "custom": {
-            "align": "auto",
-            "cellOptions": { "type": "color-background" },
-            "inspect": false
+          "color": {
+            "mode": "palette-classic"
           },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 8,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "decimals": 4,
           "mappings": [],
-          "max": 1,
           "min": 0,
-          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "yellow", "value": 0.01 }, { "color": "orange", "value": 0.05 }, { "color": "red", "value": 0.1 }] },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
           "unit": "percentunit"
         },
-        "overrides": [
-          {
-            "matcher": { "id": "byName", "options": "source_zone" },
-            "properties": [{ "id": "custom.cellOptions", "value": { "type": "auto" } }, { "id": "thresholds", "value": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] } }
-          ]
-          },
-          {
-            "matcher": { "id": "byName", "options": "destination_zone" },
-            "properties": [{ "id": "custom.cellOptions", "value": { "type": "auto" } }, { "id": "thresholds", "value": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] } }
-          ]
-          }
-        ]
+        "overrides": []
       },
-      "gridPos": { "h": 10, "w": 12, "x": 12, "y": 11 },
-      "id": 21,
       "options": {
-        "cellHeight": "sm",
-        "footer": { "countRows": false, "fields": "", "reducer": ["sum"], "show": false },
-        "showHeader": true,
-        "sortBy": [{ "desc": false, "displayName": "source_zone" }]
+        "legend": {
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
       },
       "targets": [
         {
-          "datasource": { "type": "prometheus", "uid": "${datasource}" },
-          "expr": "avg(avg_over_time(kconmon_ng_icmp_packet_loss_ratio[5m])) by (source_zone, destination_zone)",
-          "format": "table",
-          "instant": true,
-          "legendFormat": "",
-          "refId": "A"
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "(sum by (source_zone, destination_zone) (rate(kconmon_ng_udp_results_total{result=\"fail\"}[5m])) or 0 * sum by (source_zone, destination_zone) (rate(kconmon_ng_udp_results_total[5m]))) / sum by (source_zone, destination_zone) (rate(kconmon_ng_udp_results_total[5m]))",
+          "refId": "A",
+          "instant": false,
+          "range": true,
+          "legendFormat": "{{source_zone}} -> {{destination_zone}}"
         }
       ],
-      "title": "ICMP Packet Loss Ratio by Zone",
-      "transformations": [
-        { "id": "merge", "options": {} },
-        { "id": "organize", "options": { "excludeByName": { "Time": true }, "indexByName": {}, "renameByName": { "Value": "Loss Ratio", "destination_zone": "destination_zone", "source_zone": "source_zone" } } }
+      "title": "UDP failure ratio by zone pair"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "description": "Latency per zone pair. The diagonal pairs should be the lowest lines on this chart.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 37
+      },
+      "id": 15,
+      "type": "timeseries",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 8,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "decimals": 4,
+          "mappings": [],
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "histogram_quantile(0.95, sum by (source_zone, destination_zone, le) (rate(kconmon_ng_udp_rtt_seconds_bucket[5m])))",
+          "refId": "A",
+          "instant": false,
+          "range": true,
+          "legendFormat": "{{source_zone}} -> {{destination_zone}}"
+        }
       ],
-      "type": "table"
+      "title": "p95 UDP RTT by zone pair"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "description": "Averaged over every pair in the zone pair, so one broken node is diluted here and obvious on Overview.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 45
+      },
+      "id": 16,
+      "type": "timeseries",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 8,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "decimals": 4,
+          "mappings": [],
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "percentunit"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "avg by (source_zone, destination_zone) (kconmon_ng_udp_packet_loss_ratio)",
+          "refId": "A",
+          "instant": false,
+          "range": true,
+          "legendFormat": "{{source_zone}} -> {{destination_zone}}"
+        }
+      ],
+      "title": "UDP packet loss by zone pair"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "description": "The same numbers as the matrix above, ordered so the worst zone pair is readable at a glance.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 45
+      },
+      "id": 17,
+      "type": "bargauge",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "decimals": 4,
+          "mappings": [],
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 0.005
+              },
+              {
+                "color": "red",
+                "value": 0.02
+              }
+            ]
+          },
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "options": {
+        "displayMode": "gradient",
+        "maxVizHeight": 300,
+        "minVizHeight": 16,
+        "minVizWidth": 8,
+        "namePlacement": "auto",
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showUnfilled": true,
+        "sizing": "auto",
+        "valueMode": "color"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "histogram_quantile(0.95, sum by (source_zone, destination_zone, le) (rate(kconmon_ng_udp_rtt_seconds_bucket[15m])))",
+          "refId": "A",
+          "instant": true,
+          "range": false,
+          "legendFormat": "{{source_zone}} -> {{destination_zone}}"
+        }
+      ],
+      "title": "Zone pairs by p95 UDP RTT (now)"
     }
   ],
   "refresh": "30s",
   "schemaVersion": 39,
   "style": "dark",
-  "tags": ["kconmon-ng", "zone-heatmap"],
+  "tags": [
+    "kconmon-ng",
+    "zone-heatmap"
+  ],
   "templating": {
     "list": [
       {
-        "current": { "selected": true, "text": "Prometheus", "value": "Prometheus" },
+        "current": {
+          "selected": true,
+          "text": "Prometheus",
+          "value": "Prometheus"
+        },
         "hide": 0,
         "includeAll": false,
         "label": "Datasource",
@@ -304,7 +1530,10 @@
       }
     ]
   },
-  "time": { "from": "now-6h", "to": "now" },
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
   "timepicker": {},
   "timezone": "browser",
   "title": "kconmon-ng / Zone Heatmap",

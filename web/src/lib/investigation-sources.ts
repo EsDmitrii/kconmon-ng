@@ -138,6 +138,151 @@ export function investigationParamsToSearch(p: InvestigationParams): string {
   return `?${qs.toString()}`;
 }
 
+/* ── what the entry form is allowed to commit (QA round 3) ─────────────── */
+
+/**
+ * scopeIncompleteReason answers "may the Investigate button fire yet?" for a
+ * DRAFT scope, in the operator's words, or null when the draft is complete
+ * (QA round 3, finding #6).
+ *
+ * Every incomplete scope used to commit happily and produce a URL naming an
+ * object that does not exist: `?kind=pair&scope=node-a→` filters events by a
+ * scope string nothing was ever written under, so the page rendered an empty
+ * timeline — which reads exactly like a quiet fleet. An empty answer that looks
+ * like a healthy answer is the worst failure mode this page has, so the commit
+ * is refused BEFORE it can produce one, with the reason next to the button.
+ *
+ * A pair of one node with itself is refused too: the peer metric family carries
+ * no self-pair, and every source would answer empty for the same reason.
+ * `cluster` is always complete — it names no object by definition.
+ */
+export function scopeIncompleteReason(scope: InvestigationScope): string | null {
+  switch (scope.kind) {
+    case "pair":
+      if (scope.a === "") return "Choose a source node.";
+      if (scope.b === "") return "Choose a destination node.";
+      if (scope.a === scope.b) return "A pair needs two different nodes.";
+      return null;
+    case "zone-pair":
+      if (scope.a === "") return "Choose a source zone.";
+      if (scope.b === "") return "Choose a destination zone.";
+      return null;
+    case "node":
+      return scope.a === "" ? "Choose a node." : null;
+    case "target":
+      return scope.a === "" ? "Choose a target." : null;
+    default:
+      return null;
+  }
+}
+
+/** WindowCommit is what commitWindow answers: the range to investigate, or the
+ *  one sentence saying why there isn't one. `clamped` is true only when the
+ *  Time Machine actually moved an edge — the banner is drawn from it, and a
+ *  banner that appears when nothing changed is noise. */
+export type WindowCommit =
+  | { ok: true; from: Date; to: Date; clamped: boolean }
+  | { ok: false; reason: string };
+
+/**
+ * commitWindow is the ONE gate between the range fields and `params`
+ * (QA round 3, findings #2 and #3).
+ *
+ * Two rules, in this order:
+ *
+ *  1. AN INVERTED RANGE IS REFUSED AT THE FORM. `from >= to` produced a
+ *     negative span, which every range query answered with an error the charts
+ *     rendered as dead space and the timeline rendered as "nothing happened".
+ *     Refusing costs a sentence; committing costs an investigation that lies.
+ *
+ *  2. THE VIEWED INSTANT CLAMPS THE FUTURE EDGE. While the Time Machine is
+ *     engaged at `t` the whole console is showing the fleet as of `t`, and an
+ *     investigation whose window ran past it was quietly mixing data from after
+ *     the instant the operator pinned — the one thing "@ t" promises not to do.
+ *     So `to` becomes min(to, t). A window that lies ENTIRELY after `t` cannot
+ *     be clamped into anything meaningful (it would collapse to a point or
+ *     invert), so it is refused rather than silently rewritten.
+ *
+ * `at === null` (Live) is the identity case: nothing to clamp against.
+ */
+export function commitWindow(from: Date, to: Date, at: Date | null): WindowCommit {
+  if (from.getTime() >= to.getTime()) {
+    return { ok: false, reason: "The range end must be after its start." };
+  }
+  if (at === null) return { ok: true, from, to, clamped: false };
+  if (from.getTime() >= at.getTime()) {
+    return {
+      ok: false,
+      reason: "The window is after the viewed instant — move the range back, or return to Live.",
+    };
+  }
+  if (to.getTime() > at.getTime()) return { ok: true, from, to: at, clamped: true };
+  return { ok: true, from, to, clamped: false };
+}
+
+/** The banner line the page shows under its header when commitWindow moved an
+ *  edge. One sentence, stated as a fact about the window rather than as a
+ *  warning about the mode — the Time Machine bar already explains the mode. */
+export const CLAMPED_BANNER = "Window clamped to the viewed instant.";
+
+/**
+ * scopeCaptionValue is what the annotation / maintenance bars should CALL the
+ * scope they are showing (QA round 3, finding #7).
+ *
+ * It exists because scopeFilterValue and scopesToQuery disagree on purpose for
+ * the two wide scopes: the filter value is "" (there is no zone member in that
+ * vocabulary) but scopesToQuery turns "" into ONE UNFILTERED request, i.e.
+ * every scope in the console. The bars captioned that "scope global", which
+ * named the one scope value they were NOT filtering by — an operator reading
+ * "3 annotations · scope global" next to three per-node notes has been told
+ * something false about where those rows came from.
+ */
+export function scopeCaptionValue(scope: InvestigationScope): string {
+  return scopesToQuery(scope)[0] === undefined ? "all scopes" : scopeFilterValue(scope);
+}
+
+/* ── the scope selects' options (QA round 3, finding #5) ────────────────── */
+
+/** The shape scopeNodeOptions/scopeZoneOptions read. Structural rather than
+ *  lib/types.ts's Topology so a caller can pass a partial response (and a test
+ *  a two-line fixture) without inventing the fields neither function reads. */
+export interface ScopeOptionSource {
+  nodes?: readonly { name: string; zone: string }[];
+  agents?: readonly { nodeName: string; zone: string }[];
+}
+
+/** dedupeSorted drops "" (an absent name is not an option) and any repeat, and
+ *  returns the rest in one stable order — the selects must not reshuffle
+ *  between two renders of the same topology. */
+function dedupeSorted(values: (string | undefined)[]): string[] {
+  return [...new Set(values.filter((v): v is string => v !== undefined && v !== ""))].sort();
+}
+
+/**
+ * scopeNodeOptions is the node/pair selects' option list: the union of the
+ * topology's NODES and the node names its AGENTS report (QA round 3, #5).
+ *
+ * GET /api/v1/topology answers two lists, and `nodes` is the CONTROLLER's view
+ * — empty whenever the console has no controller wired, which is precisely the
+ * console that still has agents reporting in and metrics to investigate. The
+ * selects read `nodes` alone and were therefore empty on exactly that console:
+ * every scope but `cluster` was unreachable from the form, with no explanation,
+ * on a page whose whole job is to be pointed at an object.
+ *
+ * The union is the honest set — an agent's nodeName IS a node this fleet has
+ * measurements for — and dedupe means a node in both lists appears once.
+ */
+export function scopeNodeOptions(topo: ScopeOptionSource | undefined): string[] {
+  return dedupeSorted([...(topo?.nodes ?? []).map((n) => n.name), ...(topo?.agents ?? []).map((a) => a.nodeName)]);
+}
+
+/** scopeZoneOptions is the zone-pair selects' list, from the same two sources:
+ *  agents carry their own `zone`, so a controller-less console can still name
+ *  its failure domains. */
+export function scopeZoneOptions(topo: ScopeOptionSource | undefined): string[] {
+  return dedupeSorted([...(topo?.nodes ?? []).map((n) => n.zone), ...(topo?.agents ?? []).map((a) => a.zone)]);
+}
+
 /* ── the entry-point URL (plan Decision 11) ─────────────────────────────── */
 
 export const INVESTIGATE_PATH = "/investigate";
@@ -386,6 +531,15 @@ const tag = (expr: string, value: string) => `label_replace(${expr}, "signal", "
  *
  * The result feeds BOTH the signal chart and lib/investigation.ts's
  * thresholdCrossings, which is why it is one query and not two.
+ *
+ * DELIBERATELY NOT `or vector(0)`-guarded, unlike investigationFailRatioQuery
+ * (QA round 3, finding #4 named this function as the sibling to check). The
+ * empty-sum trap needs a BINARY operator to bite, and there is none here: the
+ * three protocol arms are joined with `or`, which already unions rather than
+ * intersecting, and `max()` over the union is defined for whichever arms
+ * exist. Adding `or vector(0)` would be worse than useless — it would make a
+ * scope nothing is probing report a confident 0% packet loss, which is the
+ * exact lie the chip's "—" exists to avoid.
  */
 export function investigationLossQuery(scope: InvestigationScope): string {
   if (scope.kind === "target") {
@@ -423,27 +577,53 @@ export function investigationRttQuery(scope: InvestigationScope): string {
 }
 
 /**
+ * orZero guards ONE aggregate against being absent (QA round 3, finding #4).
+ *
+ * PromQL's `+` is a binary operator between two instant VECTORS and it drops
+ * every sample whose label set has no partner on the other side. A bare
+ * `sum(rate(...))` over a metric family that has no series at all evaluates to
+ * the EMPTY vector, and empty + anything is empty — so on a fleet running ICMP
+ * only, `(tcp + udp + icmp)` was empty, the whole ratio was empty, and the delta
+ * chip read "—" for a scope that was measurably failing every probe.
+ *
+ * `expr or vector(0)` is the documented replacement: `or` yields the left side
+ * when it has samples and the right side only for the label sets the left is
+ * missing, and both operands here carry the EMPTY label set (an unaggregated
+ * `sum()` drops every label, and `vector(0)` has none), so the guard fires
+ * exactly when the operand is absent and never adds a spurious second sample.
+ *
+ * A denominator of literally zero (nothing probed at all) then makes the ratio
+ * 0/0 = NaN, which lib/investigation-signals.tsx's firstSample already reads as
+ * "not measured" and renders as "—". That is the honest answer, and it is a
+ * different answer from "measured, and none of it failed".
+ */
+const orZero = (expr: string) => `(${expr} or vector(0))`;
+
+/**
  * investigationFailRatioQuery is the matrix delta chip's number: failed probes
  * over all probes for the scope, the same ratio internal/console/matrix's
  * failRatioQuery computes per cell, aggregated across the three peer protocols
  * (or the external family for a target).
+ *
+ * Every per-protocol sum wears orZero above, so an absent protocol contributes
+ * 0 to both halves instead of erasing the ratio (finding #4).
  */
 export function investigationFailRatioQuery(scope: InvestigationScope): string {
   if (scope.kind === "target") {
     const sel = externalSelector(scope);
     const m = `${METRICS_PREFIX}_external_results_total`;
     return (
-      `sum(rate(${m}${withResult(sel, "fail")}[${RATE_WINDOW}])) / ` +
-      `sum(rate(${m}${braces(sel)}[${RATE_WINDOW}]))`
+      `${orZero(`sum(rate(${m}${withResult(sel, "fail")}[${RATE_WINDOW}]))`)} / ` +
+      `${orZero(`sum(rate(${m}${braces(sel)}[${RATE_WINDOW}]))`)}`
     );
   }
   const sel = peerSelector(scope);
   const protocols = ["tcp", "udp", "icmp"];
   const fails = protocols
-    .map((p) => `sum(rate(${METRICS_PREFIX}_${p}_results_total${withResult(sel, "fail")}[${RATE_WINDOW}]))`)
+    .map((p) => orZero(`sum(rate(${METRICS_PREFIX}_${p}_results_total${withResult(sel, "fail")}[${RATE_WINDOW}]))`))
     .join(" + ");
   const totals = protocols
-    .map((p) => `sum(rate(${METRICS_PREFIX}_${p}_results_total${braces(sel)}[${RATE_WINDOW}]))`)
+    .map((p) => orZero(`sum(rate(${METRICS_PREFIX}_${p}_results_total${braces(sel)}[${RATE_WINDOW}]))`))
     .join(" + ");
   return `(${fails}) / (${totals})`;
 }
@@ -526,16 +706,24 @@ export function eventEntries(events: LiveEvent[]): TimelineEntry[] {
   return out;
 }
 
-/** auditDetailLine renders the row's allow-listed `detail` map next to who did
- *  it. The map is whatever the per-route allow-list let through — {} for almost
- *  everything (SECURITY.md's documented lossiness) — so the subject and the
- *  resource carry the line when it is empty, rather than an empty "{}". */
-function auditDetailLine(row: AuditEntry): string {
+/**
+ * auditDetailLine renders the row's allow-listed `detail` map next to who did
+ * it. The map is whatever the per-route allow-list let through — {} for almost
+ * everything (SECURITY.md's documented lossiness) — so the subject and the
+ * resource carry the line when it is empty, rather than an empty "{}".
+ *
+ * EMPTY SEGMENTS ARE DROPPED, not rendered as a gap (QA round 3, finding #18).
+ * `resource` is optional in practice — a login row names no object — and the
+ * old fixed template printed the separator anyway, producing "user:ada ·  ·
+ * ok" and, on a row whose outcome was also blank, a line ending in a dangling
+ * "· ·". A separator is a joint between two things; with nothing on one side it
+ * is punctuation claiming a field that is not there.
+ */
+export function auditDetailLine(row: AuditEntry): string {
   const kv = Object.entries(row.detail ?? {})
     .map(([k, v]) => `${k}=${typeof v === "string" ? v : JSON.stringify(v)}`)
     .join(" ");
-  const who = `${row.subjectKind}:${row.subjectId}`;
-  return kv === "" ? `${who} · ${row.resource} · ${row.outcome}` : `${who} · ${row.resource} · ${row.outcome} · ${kv}`;
+  return [`${row.subjectKind}:${row.subjectId}`, row.resource, row.outcome, kv].filter((s) => s !== "").join(" · ");
 }
 
 /**

@@ -241,7 +241,7 @@ and stored in PostgreSQL. Run both, either, or neither. The Console's renderer
 takes the configured prefix as a constructor argument rather than defaulting to
 `kconmon_ng`, so rules it emits follow `config.metricsPrefix` the way this
 template's `replace` does — the dashboards remain the one surface that does
-not. See `docs/console/product/ALERTING.md`.
+not.
 
 ```yaml
 - alert: UDPLossHigh

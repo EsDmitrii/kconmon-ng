@@ -1,6 +1,6 @@
 import { History } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { DateTimePicker, formatInstant } from "@/components/ui/datetime-picker";
+import { DateTimePicker } from "@/components/ui/datetime-picker";
 import { useTimeMachine } from "@/lib/timemachine";
 
 /**
@@ -38,6 +38,24 @@ import { useTimeMachine } from "@/lib/timemachine";
  */
 export const TIME_MACHINE_TRIGGER_LABEL = "Time Machine — view the console at a past time";
 
+/**
+ * stamp is the bar's ONE clock (QA round 1, finding #15).
+ *
+ * The banner and the picker chip sat two inches apart naming the same instant
+ * in two formats — "8/8/2026, 3:04:05 PM" beside "Aug 8, 2026, 03:04 PM" — and
+ * a reader comparing them has to work out whether they even agree. They are
+ * now the same string from the same call. toLocaleString with no options is
+ * deliberate: it is the viewer's own full date and time, seconds included,
+ * and the console has no business overriding a locale's own answer to "what
+ * time is it".
+ *
+ * ui/datetime-picker's formatInstant keeps its callers — it is the trigger's
+ * DEFAULT label, sized for a control that has no instant of its own to state.
+ */
+function stamp(d: Date): string {
+  return d.toLocaleString();
+}
+
 export function TimeMachineBar() {
   const { at, isLive, engage, returnToLive } = useTimeMachine();
 
@@ -64,16 +82,19 @@ export function TimeMachineBar() {
     >
       <History aria-hidden="true" className="size-3.5 shrink-0 text-health-warn" />
       <span className="min-w-0">
-        <span className="font-medium">You are viewing {at!.toLocaleString()}</span>{" "}
+        <span className="font-medium">You are viewing {stamp(at!)}</span>{" "}
         <span className="text-muted-foreground">— return to Live to act.</span>
       </span>
       <DateTimePicker
         value={at}
         onApply={engage}
+        // The chip states the instant in the banner's own words, not the
+        // picker's default format.
+        label={stamp(at!)}
         // The visible label is the instant itself, so the accessible name
         // carries it too (never replaces it) — a name that dropped the value
         // would leave a screen reader with an unlabelled "button".
-        aria-label={`Change the viewing time — currently ${formatInstant(at!)}`}
+        aria-label={`Change the viewing time — currently ${stamp(at!)}`}
         variant="outline"
       />
       <Button variant="outline" size="sm" className="h-7" onClick={() => returnToLive()}>

@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useAuth } from "@/hooks/use-auth";
+import { useSubmitGuard } from "@/hooks/use-submit-guard";
 import {
   ApiError,
   createAlertRule,
@@ -13,6 +14,7 @@ import {
   importForeignAlertRules,
   listAlertRules,
   listForeignAlertRules,
+  listTargets,
   previewAlertRule,
   syncAlertRules,
   updateAlertRule,
@@ -20,7 +22,7 @@ import {
 // Read in each mutating component rather than threaded down as a prop, the same
 // way pages/settings.tsx and pages/targets.tsx do it: a permission decides
 // whether a control EXISTS, this decides whether it is usable right now.
-import { useWritesDisabled } from "@/lib/timemachine";
+import { useWriteGuard } from "@/lib/timemachine";
 import type {
   AlertRule,
   AlertRuleImportReport,
@@ -31,7 +33,7 @@ import type {
   AlertSyncStatus,
   ForeignRule,
 } from "@/lib/types";
-import { cn } from "@/lib/utils";
+import { CHECKBOX_CLASS, cn } from "@/lib/utils";
 
 /**
  * The Alerting page (M7 Task 7, plan Decisions 2/4/5/6).
@@ -286,7 +288,11 @@ export interface ParamField {
   /** The WIRE key. A dot means the param is nested (pair-loss's `scope`). */
   key: string;
   label: string;
-  type: "number" | "text" | "expr" | "enum";
+  /** "target" is "text" that KNOWS what it names (QA round 5, finding #15):
+   *  rendered as a select over the console's own targets when the reader holds
+   *  targets:read, and as the plain box otherwise. It is a rendering hint, not
+   *  a wire type — the value on the wire is the target's NAME either way. */
+  type: "number" | "text" | "expr" | "enum" | "target";
   required: boolean;
   /** Set for `enum`; values are the wire values. */
   options?: readonly string[];
@@ -385,7 +391,10 @@ export const KIND_PARAMS: Record<AlertRuleKind, readonly ParamField[]> = {
   ],
   "agent-missing": [],
   "external-target-down": [
-    { key: "targetName", label: "Target name", type: "text", required: false, hint: "Optional. Blank means every external target." },
+    /* type "target", not "text": the value has to match a target's name
+       EXACTLY or the rendered expression selects nothing, and a free box gave
+       an operator no way to know what the names are (finding #15). */
+    { key: "targetName", label: "Target name", type: "target", required: false, hint: "Optional. Blank means every external target." },
   ],
   raw: [
     {
@@ -611,18 +620,38 @@ const SEVERITY_TONE: Record<AlertSeverity, "neutral" | "warn" | "bad"> = {
 function RuleRow({
   rule,
   canManage,
+  focused,
   onEdit,
   onSyncConflict,
 }: {
   rule: AlertRule;
   canManage: boolean;
+  /** This row is the one ?rule= named: open on arrival, and scroll to. */
+  focused: boolean;
   onEdit: () => void;
   onSyncConflict: (detail: string) => void;
 }) {
   const qc = useQueryClient();
-  const writesDisabled = useWritesDisabled();
+  /* guard carries the DISABLED flag AND the reason for it — lib/timemachine's
+     useWriteGuard (QA round 2, finding #18). Spread it onto the control; the
+     alias below is for the controls that compose it with a local condition,
+     which must be applied AFTER the spread to win. */
+  const guard = useWriteGuard();
+  const writesDisabled = guard.disabled;
   const detailsId = useId();
-  const [expanded, setExpanded] = useState(false);
+  const rowRef = useRef<HTMLLIElement>(null);
+  const [expanded, setExpanded] = useState(focused);
+
+  /* The deep link's landing (QA round 1, finding #17): a firing alert on the
+     Overview used to drop the reader at the top of an unsorted list to find
+     the rule themselves. The row opens and comes into view ONCE, on arrival —
+     not on every render, or collapsing it by hand would fight the effect.
+     scrollIntoView is guarded: jsdom has none, the same guard the palette and
+     the picker's wheels carry. */
+  useEffect(() => {
+    if (!focused) return;
+    rowRef.current?.scrollIntoView?.({ block: "center" });
+  }, [focused]);
   const [confirming, setConfirming] = useState(false);
   const [busy, setBusy] = useState(false);
   const [kicked, setKicked] = useState(false);
@@ -673,7 +702,7 @@ function RuleRow({
   }
 
   return (
-    <li className="flex flex-wrap items-center gap-3 py-3 text-sm">
+    <li ref={rowRef} data-testid="rule-row" className="flex flex-wrap items-center gap-3 py-3 text-sm">
       <span className="font-medium">{rule.name}</span>
       <Badge variant="neutral">{rule.kind}</Badge>
       <Badge variant={SEVERITY_TONE[rule.severity]}>{rule.severity}</Badge>
@@ -691,8 +720,9 @@ function RuleRow({
           type="checkbox"
           aria-label={`Enabled ${rule.name}`}
           checked={rule.enabled}
-          disabled={writesDisabled || busy}
+          {...guard} disabled={writesDisabled || busy}
           onChange={() => void handleToggle()}
+          className={CHECKBOX_CLASS}
         />
       ) : (
         <Badge variant={rule.enabled ? "ok" : "unknown"}>{rule.enabled ? "enabled" : "disabled"}</Badge>
@@ -715,7 +745,7 @@ function RuleRow({
         {canManage ? (
           confirming ? (
             <>
-              <Button size="sm" variant="outline" loading={busy} disabled={writesDisabled} onClick={() => void handleDelete()}>
+              <Button size="sm" variant="outline" loading={busy} {...guard} onClick={() => void handleDelete()}>
                 Confirm delete {rule.name}
               </Button>
               <Button size="sm" variant="ghost" onClick={() => setConfirming(false)}>
@@ -724,13 +754,13 @@ function RuleRow({
             </>
           ) : (
             <>
-              <Button size="sm" variant="ghost" disabled={writesDisabled || busy} onClick={() => void handleSync()}>
+              <Button size="sm" variant="ghost" {...guard} disabled={writesDisabled || busy} onClick={() => void handleSync()}>
                 Sync {rule.name} now
               </Button>
-              <Button size="sm" variant="ghost" disabled={writesDisabled} onClick={onEdit}>
+              <Button size="sm" variant="ghost" {...guard} onClick={onEdit}>
                 Edit {rule.name}
               </Button>
-              <Button size="sm" variant="ghost" disabled={writesDisabled} onClick={() => setConfirming(true)}>
+              <Button size="sm" variant="ghost" {...guard} onClick={() => setConfirming(true)}>
                 Delete {rule.name}
               </Button>
             </>
@@ -830,14 +860,21 @@ function PairEditor({
       <legend className="text-muted-foreground">{legend}</legend>
       {pairs.map((pair, i) => (
         <div key={i} className="flex flex-wrap items-center gap-2">
+          {/* Placeholders, because "Add label" produces TWO identical empty
+              boxes and nothing on screen says which is which (QA round 5,
+              finding #15). The aria-labels have always been right; a sighted
+              operator had only the order to go on, and the order is the one
+              thing a two-box row does not communicate. */}
           <input
             aria-label={`${noun} name ${i + 1}`}
+            placeholder="name"
             value={pair.key}
             onChange={(e) => onChange(pairs.map((p, j) => (i === j ? { ...p, key: e.target.value } : p)))}
             className={fieldClasses(reservedLabelMessage(pair.key.trim()) !== undefined)}
           />
           <input
             aria-label={`${noun} value ${i + 1}`}
+            placeholder="value"
             value={pair.value}
             onChange={(e) => onChange(pairs.map((p, j) => (i === j ? { ...p, value: e.target.value } : p)))}
             className={fieldClasses(false)}
@@ -911,15 +948,40 @@ function PreviewPanel({
 
 function RuleForm({ initial, onDone }: { initial?: AlertRule; onDone: () => void }) {
   const qc = useQueryClient();
-  const writesDisabled = useWritesDisabled();
+  /* guard carries the DISABLED flag AND the reason for it — lib/timemachine's
+     useWriteGuard (QA round 2, finding #18). Spread it onto the control. */
+  const guard = useWriteGuard();
   const [draft, setDraft] = useState<RuleDraft>(() => draftFrom(initial));
-  const [submitting, setSubmitting] = useState(false);
+  /* The in-flight guard, not just a disabled look (QA round 5, finding #17):
+     begin() is a REF write, so three clicks in one task produce one request.
+     hooks/use-submit-guard.ts says why a useState flag cannot do this. */
+  const { submitting, begin, end } = useSubmitGuard();
   const [formError, setFormError] = useState<{ message: string; field?: string }>();
   const [preview, setPreview] = useState<AlertRulePreview>();
   const [previewError, setPreviewError] = useState<string>();
   const [previewLoading, setPreviewLoading] = useState(false);
 
   const fields = paramFieldsFor(draft.kind);
+
+  /* The target list behind a "target" param (QA round 5, finding #15).
+     PERMISSION-GATED and KIND-GATED at the request, the same rule every other
+     source in this console follows: a form with no target field, or a reader
+     without targets:read, costs the API nothing. Falling back to the free box
+     rather than hiding the field is the honest direction — a reader who cannot
+     LIST targets may still know the name of one. */
+  const { can } = useAuth();
+  const needsTargets = fields.some((f) => f.type === "target");
+  const canReadTargets = can("targets:read");
+  const targetsQuery = useQuery({
+    queryKey: ["targets"],
+    queryFn: () => listTargets(),
+    enabled: needsTargets && canReadTargets,
+  });
+  const targetNames = (targetsQuery.data?.targets ?? []).map((t) => t.name);
+  /* Only once the list has ARRIVED. Rendering the select while the query is in
+     flight would show an operator editing an existing rule an empty dropdown
+     that silently does not contain their own stored value. */
+  const targetsReady = canReadTargets && targetsQuery.isSuccess;
 
   // Live, not on submit: a reserved label is refused before a request is built,
   // so the message sits next to the box the whole time it is wrong.
@@ -1000,7 +1062,7 @@ function RuleForm({ initial, onDone }: { initial?: AlertRule; onDone: () => void
       setFormError({ message: duration.message, field: "for" });
       return;
     }
-    setSubmitting(true);
+    if (!begin()) return;
     try {
       const req = requestFromDraft(draft, duration.ns);
       if (initial) await updateAlertRule(initial.id, req);
@@ -1010,7 +1072,7 @@ function RuleForm({ initial, onDone }: { initial?: AlertRule; onDone: () => void
     } catch (err) {
       const message = queryErrorMessage(err, "Failed to save the rule");
       setFormError({ message, field: problemField(message) });
-      setSubmitting(false);
+      end();
     }
   }
 
@@ -1060,12 +1122,41 @@ function RuleForm({ initial, onDone }: { initial?: AlertRule; onDone: () => void
             <Field
               key={field.key}
               label={field.label}
-              hint={field.hint}
+              hint={
+                field.type === "target" && !targetsReady
+                  ? `${field.hint ?? ""} Type the exact target name — this console cannot list them for you here.`.trim()
+                  : field.hint
+              }
               testId={field.key.split(".").pop() ?? field.key}
               error={errorFor(field.key)}
             >
               {(id, invalid) =>
-                field.type === "enum" ? (
+                field.type === "target" && targetsReady ? (
+                  <select
+                    id={id}
+                    value={draft.params[field.key] ?? ""}
+                    onChange={(e) => setDraft((d) => ({ ...d, params: { ...d.params, [field.key]: e.target.value } }))}
+                    className={fieldClasses(invalid)}
+                  >
+                    {/* "" is a real, meaningful value here — every external
+                        target — so it is named rather than left as an em dash
+                        the enum select uses for "unset". */}
+                    <option value="">every external target</option>
+                    {targetNames.map((name) => (
+                      <option key={name} value={name}>
+                        {name}
+                      </option>
+                    ))}
+                    {/* A stored value the list does not contain — a target
+                        deleted since the rule was written — stays selectable
+                        rather than being silently rewritten to "" on the next
+                        save, which would widen the rule to every target. */}
+                    {(draft.params[field.key] ?? "") !== "" &&
+                    !targetNames.includes(draft.params[field.key] ?? "") ? (
+                      <option value={draft.params[field.key]}>{draft.params[field.key]} (no such target)</option>
+                    ) : null}
+                  </select>
+                ) : field.type === "enum" ? (
                   <select
                     id={id}
                     value={draft.params[field.key] ?? ""}
@@ -1173,6 +1264,7 @@ function RuleForm({ initial, onDone }: { initial?: AlertRule; onDone: () => void
             type="checkbox"
             checked={draft.enabled}
             onChange={(e) => setDraft((d) => ({ ...d, enabled: e.target.checked }))}
+            className={CHECKBOX_CLASS}
           />
           <span>Enabled</span>
         </label>
@@ -1182,7 +1274,7 @@ function RuleForm({ initial, onDone }: { initial?: AlertRule; onDone: () => void
         {bannerError ? <ErrorLine testId="builder-error">{bannerError}</ErrorLine> : null}
 
         <div className="flex gap-2">
-          <Button type="submit" loading={submitting} disabled={writesDisabled}>
+          <Button type="submit" loading={submitting} {...guard}>
             {initial ? "Save rule" : "Create rule"}
           </Button>
           {/* Cancel closes a form and touches nothing, so it stays live even
@@ -1198,8 +1290,27 @@ function RuleForm({ initial, onDone }: { initial?: AlertRule; onDone: () => void
 
 /* ── sections ───────────────────────────────────────────────────────────── */
 
+/**
+ * RULE_PARAM is the deep link the Overview's firing-alert rows point at:
+ * /alerting?rule=<id> opens THAT rule's details instead of dropping the reader
+ * at the top of the list (QA round 1, finding #17). Read straight off
+ * window.location, the same way lib/timemachine.tsx reads `?at=` — no router
+ * search-param framework is adopted here either.
+ */
+export const RULE_PARAM = "rule";
+
+function focusedRuleId(): string {
+  return new URLSearchParams(window.location.search).get(RULE_PARAM) ?? "";
+}
+
 function RulesSection({ canManage }: { canManage: boolean }) {
-  const writesDisabled = useWritesDisabled();
+  /* guard carries the DISABLED flag AND the reason for it — lib/timemachine's
+     useWriteGuard (QA round 2, finding #18). Spread it onto the control. */
+  const guard = useWriteGuard();
+  /* Read ONCE, on mount: the param is where the reader arrived from, not a
+     control. Re-reading it on every render would re-open a row the operator
+     has since collapsed. */
+  const [focusedRule] = useState(focusedRuleId);
   const [editing, setEditing] = useState<{ mode: "none" } | { mode: "create" } | { mode: "edit"; rule: AlertRule }>({
     mode: "none",
   });
@@ -1207,12 +1318,22 @@ function RulesSection({ canManage }: { canManage: boolean }) {
   const query = useQuery({ queryKey: ["alert-rules"], queryFn: listAlertRules });
   const rules = query.data?.rules ?? [];
 
+  /* A ?rule= that names nothing SAYS SO (QA round 5, finding #18). Before it,
+     an operator following a link to a rule somebody had since deleted got the
+     ordinary rules list with nothing opened and nothing said — indistinguishable
+     from a link that worked and a rule that happens to be collapsed, so the
+     natural conclusion was "the deep link is broken".
+     Only once the list has SETTLED: while the query is pending there is no
+     evidence either way, and a notice that flashes on every cold load is worse
+     than the silence it replaces. */
+  const unknownRule = focusedRule !== "" && query.isSuccess && !rules.some((r) => r.id === focusedRule);
+
   return (
     <div className="flex flex-col gap-4">
       {canManage ? (
         editing.mode === "none" ? (
           <div>
-            <Button size="sm" disabled={writesDisabled} onClick={() => setEditing({ mode: "create" })}>
+            <Button size="sm" {...guard} onClick={() => setEditing({ mode: "create" })}>
               New rule
             </Button>
           </div>
@@ -1231,6 +1352,15 @@ function RulesSection({ canManage }: { canManage: boolean }) {
           object; the status on each row is the reconciler's view of whether the cluster agrees, as of the instant next
           to it.
         </p>
+        {unknownRule ? (
+          <p
+            role="status"
+            data-testid="unknown-rule-notice"
+            className="mt-3 text-xs leading-relaxed text-muted-foreground"
+          >
+            No rule matches this link — it may have been deleted.
+          </p>
+        ) : null}
         {syncConflict ? <ErrorLine testId="rules-sync-banner">{syncConflict}</ErrorLine> : null}
         {query.isError ? <ErrorLine>{queryErrorMessage(query.error, "Alert rules are unavailable")}</ErrorLine> : null}
         {/* isPending, not isLoading: a query whose retry is PAUSED (react-query
@@ -1252,6 +1382,7 @@ function RulesSection({ canManage }: { canManage: boolean }) {
                 key={rule.id}
                 rule={rule}
                 canManage={canManage}
+                focused={focusedRule !== "" && rule.id === focusedRule}
                 onEdit={() => setEditing({ mode: "edit", rule })}
                 onSyncConflict={setSyncConflict}
               />
@@ -1334,7 +1465,9 @@ function ImportReport({ report }: { report: AlertRuleImportReport }) {
 
 function ForeignRow({ rule, canManage }: { rule: ForeignRule; canManage: boolean }) {
   const qc = useQueryClient();
-  const writesDisabled = useWritesDisabled();
+  /* guard carries the DISABLED flag AND the reason for it — lib/timemachine's
+     useWriteGuard (QA round 2, finding #18). Spread it onto the control. */
+  const guard = useWriteGuard();
   const [busy, setBusy] = useState(false);
   const [report, setReport] = useState<AlertRuleImportReport>();
   const [error, setError] = useState<string>();
@@ -1369,7 +1502,7 @@ function ForeignRow({ rule, canManage }: { rule: ForeignRule; canManage: boolean
       </span>
       {canManage ? (
         <span className="ml-auto">
-          <Button size="sm" variant="ghost" loading={busy} disabled={writesDisabled} onClick={() => void handleImport()}>
+          <Button size="sm" variant="ghost" loading={busy} {...guard} onClick={() => void handleImport()}>
             Import {rule.name}
           </Button>
         </span>

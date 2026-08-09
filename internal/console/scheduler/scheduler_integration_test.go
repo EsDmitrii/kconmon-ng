@@ -287,3 +287,120 @@ func TestReaperFinishesAStuckRunUnderTheLock(t *testing.T) {
 		t.Error("finishedAt is nil, want it stamped by the reaper")
 	}
 }
+
+// TestAFailingScheduleRecordsItAgainstPostgres is finding #5 end to end, on a
+// real database: the schedule advances its cadence exactly as a healthy one
+// does (which is why it used to be invisible), AND the row now says why no run
+// came out of it, with the stamp derived by the UPDATE's own CASE.
+func TestAFailingScheduleRecordsItAgainstPostgres(t *testing.T) {
+	dsn := testDSN(t)
+	dropSchema(t, dsn)
+	t.Cleanup(func() { dropSchema(t, dsn) })
+
+	db := openDB(t, dsn)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	schedID := seedDueInterval(t, db, time.Hour)
+
+	// Delete the definition out from under the schedule -- the exact shape the
+	// finding describes. ON DELETE CASCADE would take the schedule with it, so
+	// the failure is staged by pointing the schedule's definition lookup at a
+	// row that is gone: disable the FK for one statement's worth of surgery is
+	// not available, so instead the DESTINATION target is what disappears.
+	sched, err := db.GetSchedule(ctx, schedID)
+	if err != nil {
+		t.Fatalf("GetSchedule: %v", err)
+	}
+	target, err := db.CreateTarget(ctx, store.TargetInput{
+		Name: "gone-" + uuid.NewString()[:8], Kind: "host", Address: "10.0.0.9",
+	})
+	if err != nil {
+		t.Fatalf("CreateTarget: %v", err)
+	}
+	if _, err = db.UpdateDefinition(ctx, sched.DefinitionID, store.DefinitionInput{
+		Name: "sched-it-broken-" + uuid.NewString()[:8], SourceSelection: "all",
+		DestinationKind: "target", DestinationTargetID: target.ID,
+		CheckType: "tcp", Plane: "pod", Enabled: true,
+	}); err != nil {
+		t.Fatalf("UpdateDefinition: %v", err)
+	}
+	// Drop the target row directly: DeleteTarget is refused by ON DELETE
+	// RESTRICT while the definition points at it, and a definition pointing at
+	// a target that no longer exists is exactly the state a restore or a
+	// hand-edited database produces.
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer pool.Close()
+	if _, err = pool.Exec(ctx,
+		`ALTER TABLE check_definitions DROP CONSTRAINT check_definitions_destination_target_id_fkey`); err != nil {
+		t.Fatalf("drop fk: %v", err)
+	}
+	if _, err = pool.Exec(ctx, `DELETE FROM targets WHERE id = $1`, target.ID); err != nil {
+		t.Fatalf("delete target: %v", err)
+	}
+
+	// countingRunner, not a bare checks.Runner: the RECOVERY half below reaches
+	// Start for real, and a Runner built with no controller client has no
+	// topology to resolve nodes against. The failure half never gets that far
+	// -- specFor refuses before Start is called, which is the point.
+	runner := &countingRunner{Runner: checks.NewRunner(nil, nil, nil, db, metrics.New("kconmon_ng_it_lasterr", prometheus.NewRegistry()))}
+	newScheduler(t, db, runner).Tick(ctx)
+
+	after, err := db.GetSchedule(ctx, schedID)
+	if err != nil {
+		t.Fatalf("GetSchedule after the tick: %v", err)
+	}
+	if after.LastError == "" {
+		t.Fatal("LastError is empty after a fire that could not resolve its target")
+	}
+	if !strings.Contains(after.LastError, "target") {
+		t.Errorf("LastError = %q, want it to name the destination target failure", after.LastError)
+	}
+	if after.LastErrorAt == nil {
+		t.Error("LastErrorAt is nil beside a non-empty LastError")
+	}
+	// The cadence advanced anyway -- which is the whole reason the error column
+	// had to exist rather than the row simply staying due.
+	if after.LastFiredAt == nil || after.NextFireAt == nil {
+		t.Errorf("a failed fire left LastFiredAt=%v NextFireAt=%v, want both stamped",
+			after.LastFiredAt, after.NextFireAt)
+	}
+
+	// Point the definition back at something that works and let it fire again:
+	// the row goes green, and NOTHING but a real fire could have done that.
+	if _, err = db.UpdateDefinition(ctx, sched.DefinitionID, store.DefinitionInput{
+		Name: "sched-it-fixed-" + uuid.NewString()[:8], SourceSelection: "all",
+		DestinationKind: "adhoc", DestinationAddress: "10.0.0.1:53",
+		CheckType: "tcp", Plane: "pod", Enabled: true,
+	}); err != nil {
+		t.Fatalf("UpdateDefinition (repair): %v", err)
+	}
+	past := time.Now().UTC().Add(-time.Minute)
+	if _, err = db.UpdateSchedule(ctx, schedID, store.ScheduleInput{
+		DefinitionID: sched.DefinitionID, Kind: "interval", IntervalNs: int64(time.Hour),
+		Enabled: true, NextFireAt: &past,
+	}); err != nil {
+		t.Fatalf("UpdateSchedule: %v", err)
+	}
+	// The edit alone must NOT have cleared it.
+	edited, err := db.GetSchedule(ctx, schedID)
+	if err != nil {
+		t.Fatalf("GetSchedule after the edit: %v", err)
+	}
+	if edited.LastError == "" {
+		t.Error("the edit cleared LastError; only a fire may do that")
+	}
+
+	newScheduler(t, db, runner).Tick(ctx)
+
+	healthy, err := db.GetSchedule(ctx, schedID)
+	if err != nil {
+		t.Fatalf("GetSchedule after the good fire: %v", err)
+	}
+	if healthy.LastError != "" || healthy.LastErrorAt != nil {
+		t.Errorf("after a good fire = %q/%v, want the empty pair", healthy.LastError, healthy.LastErrorAt)
+	}
+}

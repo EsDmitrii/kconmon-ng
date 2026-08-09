@@ -81,3 +81,43 @@ func TestComputeRejectsProtocol(t *testing.T) {
 		t.Fatalf("expected ErrBadProtocol, got %v", err)
 	}
 }
+
+// Prometheus serializes 0/0 (a pair whose series went stale mid-window) and
+// empty-bucket histogram_quantile as the STRING "NaN" — and
+// strconv.ParseFloat accepts "NaN" without error, so it used to flow into the
+// cell and kill json.Marshal for the WHOLE matrix: the REST handler answered
+// 200 with an empty body ("Unexpected end of JSON input" in the UI) and the
+// WS pusher dropped every snapshot. Caught live: pausing one fleet node took
+// the entire matrix API down five minutes later. NaN/±Inf is "no sample",
+// never a value.
+func TestComputeTreatsNaNAndInfAsNoData(t *testing.T) {
+	q := &fakeQuerier{byContains: map[string]string{
+		"results_total":              vec(sample("a", "b", "NaN"), sample("b", "a", "0.25")),
+		"tcp_total_duration_seconds": vec(sample("a", "b", "+Inf")),
+	}}
+	m, err := matrix.Compute(context.Background(), q, "kconmon_ng", "tcp")
+	if err != nil {
+		t.Fatalf("Compute: %v", err)
+	}
+	var ab, ba *matrix.Cell
+	for i := range m.Cells {
+		c := &m.Cells[i]
+		if c.Source == "a" && c.Destination == "b" {
+			ab = c
+		}
+		if c.Source == "b" && c.Destination == "a" {
+			ba = c
+		}
+	}
+	// Every metric for a→b was NaN/Inf, so the pair has no samples at all and
+	// gets NO cell — the UI's honest "no data" slate, not a lying zero.
+	if ab != nil {
+		t.Errorf("all-NaN pair must have no cell, got %+v", *ab)
+	}
+	if ba == nil || ba.FailRatio == nil || *ba.FailRatio != 0.25 {
+		t.Errorf("the healthy pair must keep its value, got %+v", ba)
+	}
+	if _, err := json.Marshal(m); err != nil {
+		t.Fatalf("the matrix must always be marshalable, got: %v", err)
+	}
+}

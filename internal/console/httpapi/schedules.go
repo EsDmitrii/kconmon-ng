@@ -72,6 +72,13 @@ func (s *Server) schedulesUnavailable(w http.ResponseWriter) bool {
 // are nullable and marshal as JSON null when unset, which is the honest
 // encoding of "this schedule has never fired" -- a zero timestamp would read
 // as the year 1.
+//
+// LastError/LastErrorAt are the failing-schedule pair (QA round 5, finding
+// #5). LastError is a plain string with "" for "the last attempt went
+// through", never omitempty: a client rendering "failing: <lastError>" needs
+// the field to be PRESENT and empty to know the schedule is healthy, and an
+// absent key would be indistinguishable from an older server that had no such
+// concept.
 type scheduleResponse struct {
 	ID           string     `json:"id"`
 	DefinitionID string     `json:"definitionId"`
@@ -81,6 +88,8 @@ type scheduleResponse struct {
 	Enabled      bool       `json:"enabled"`
 	LastFiredAt  *time.Time `json:"lastFiredAt"`
 	NextFireAt   *time.Time `json:"nextFireAt"`
+	LastError    string     `json:"lastError"`
+	LastErrorAt  *time.Time `json:"lastErrorAt"`
 	CreatedAt    time.Time  `json:"createdAt"`
 	UpdatedAt    time.Time  `json:"updatedAt"`
 }
@@ -89,6 +98,7 @@ func scheduleResponseFrom(s *store.Schedule) scheduleResponse {
 	return scheduleResponse{
 		ID: s.ID, DefinitionID: s.DefinitionID, Kind: s.Kind, IntervalNs: s.IntervalNs,
 		RunAt: s.RunAt, Enabled: s.Enabled, LastFiredAt: s.LastFiredAt, NextFireAt: s.NextFireAt,
+		LastError: s.LastError, LastErrorAt: s.LastErrorAt,
 		CreatedAt: s.CreatedAt, UpdatedAt: s.UpdatedAt,
 	}
 }

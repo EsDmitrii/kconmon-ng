@@ -11,7 +11,12 @@ export function AnonymousBanner({ mode = "anonymous" }: { mode?: string }) {
   if (mode !== "anonymous") return null;
   return (
     <div
-      role="alert"
+      /* role="status", not "alert" (QA round 1, finding #18). An alert is an
+         assertive live region — it interrupts a screen-reader user mid-sentence
+         — and this banner reports a DEPLOYMENT posture that is true for the
+         whole session and changes nothing while anyone reads it. Polite says
+         the same thing without talking over the page. */
+      role="status"
       className="flex items-center gap-2.5 border-b border-border bg-health-warn-soft/60 px-5 py-1.5 text-[13px] text-foreground"
     >
       <AlertTriangle aria-hidden="true" className="size-3.5 shrink-0 text-health-warn" />

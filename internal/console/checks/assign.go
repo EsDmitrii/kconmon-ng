@@ -18,20 +18,23 @@ import (
 // projection arithmetic below does not change shape.
 const protocolsPerDefinitionMirror = 1
 
-// AssignAgents's errors.
+// AssignAgents's errors. Prefix-free for the same reason Plan's are (see the
+// var block in checks.go): AssignAgents wraps every one of them with
+// "checks: assign: " itself, so a "checks: " on the sentinel would render the
+// package name twice in the message an operator actually reads.
 var (
 	// ErrNoAgents is returned when at least one ENABLED definition needs
 	// agents to run on and the topology snapshot has none -- a clear error
 	// rather than a silent zero-assignment push that would look like a
 	// successful reconcile while nothing is being probed. It mirrors
 	// ErrNoNodes's posture for Plan.
-	ErrNoAgents = errors.New("checks: no agents available to assign against")
+	ErrNoAgents = errors.New("no agents available to assign against")
 	// ErrUnknownSelection is returned when a Definition.Selection is not one
 	// of SelectAll, SelectPerZone or SelectOnePerZone. It mirrors
 	// ErrUnknownType: an unrecognized mode is rejected up front, never
 	// silently treated as the default, because guessing here would quietly
 	// change how many series a definition exports.
-	ErrUnknownSelection = errors.New("checks: unknown selection")
+	ErrUnknownSelection = errors.New("unknown selection")
 )
 
 // Selection is a definition's agent-selection strategy (TARGETS.md 7.2).

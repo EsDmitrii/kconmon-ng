@@ -144,9 +144,9 @@ read-only pages over Prometheus and the controller API; M2 added the realtime
 path — the `/ws` WebSocket, the Live page and pushed matrix snapshots; M3
 added optional PostgreSQL persistence and authentication/RBAC. Full detail —
 the config file's every key/default/validation rule, the auth-mode matrix,
-and the secret-mount layout — lives in
-[docs/console/architecture/CONFIG.md](console/architecture/CONFIG.md); this
-section stays a summary.
+and the secret-mount layout — lives in the
+[chart README](../charts/kconmon-ng/README.md) and the commented
+`charts/kconmon-ng/values.yaml`; this section stays a summary.
 
 ```yaml
 controller:
@@ -250,10 +250,9 @@ Deployment rolls on ConfigMap changes only. `auth.mode=local|oidc` requires
 `database.mode` to be `cnpg` or `external`, and — with `console.replicas > 1`
 — `console.valkey.mode` to be `bundled` or `external` (sessions live in
 Valkey/PostgreSQL, not the single-replica in-process fallback); the chart
-refuses to render otherwise, with a message naming the fix. See
-[docs/console/architecture/CONFIG.md](console/architecture/CONFIG.md) for
-every validation rule and [SECURITY.md](console/architecture/SECURITY.md)
-for the auth-mode/RBAC/audit detail.
+refuses to render otherwise, with a message naming the fix. The
+[chart README](../charts/kconmon-ng/README.md) carries every validation rule
+and the auth-mode/RBAC/audit detail.
 
 ## Zone auto-discovery
 

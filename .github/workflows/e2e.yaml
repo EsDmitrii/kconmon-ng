@@ -77,7 +77,7 @@ jobs:
         uses: helm/kind-action@v1
         with:
           cluster_name: kconmon-ng-e2e
-          node_image: kindest/node:v1.31.0
+          node_image: kindest/node:v1.36.1
           config_file: kind-config.yaml
 
       - name: Set up Docker Buildx

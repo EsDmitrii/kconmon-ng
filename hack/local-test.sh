@@ -13,7 +13,9 @@ err() { printf '\033[1;31mERROR: %s\033[0m\n' "$1" >&2; exit 1; }
 
 check_deps() {
     local missing=()
-    for cmd in minikube docker helm kubectl; do
+    # openssl: the webhook encryption key. python3: JSON parsing in the smoke
+    # step (the console's API answers are objects, not greppable lines).
+    for cmd in minikube docker helm kubectl openssl python3 curl; do
         command -v "$cmd" >/dev/null 2>&1 || missing+=("$cmd")
     done
     if [[ ${#missing[@]} -gt 0 ]]; then
@@ -46,10 +48,17 @@ build_images() {
     log "Building Docker images locally (tag: $IMAGE_TAG)..."
     docker build --target agent -t "kconmon-ng-agent:$IMAGE_TAG" "$PROJECT_DIR"
     docker build --target controller -t "kconmon-ng-controller:$IMAGE_TAG" "$PROJECT_DIR"
+    # The console lives in its OWN Dockerfile (Makefile's docker-build does the
+    # same): it needs a Node stage to build the SPA before the Go stage, which
+    # the agent/controller Dockerfile has no reason to carry. Expect this one to
+    # take considerably longer than the other two on a cold cache.
+    docker build -f "$PROJECT_DIR/Dockerfile.console" \
+        --target console -t "kconmon-ng-console:$IMAGE_TAG" "$PROJECT_DIR"
 
     log "Loading images into minikube (all nodes)..."
     minikube image load "kconmon-ng-agent:$IMAGE_TAG" -p "$PROFILE"
     minikube image load "kconmon-ng-controller:$IMAGE_TAG" -p "$PROFILE"
+    minikube image load "kconmon-ng-console:$IMAGE_TAG" -p "$PROFILE"
 
     log "Images loaded into minikube"
 }
@@ -101,15 +110,41 @@ install_monitoring() {
         --timeout=120s
 }
 
+# Both console prerequisites, applied BEFORE the Helm install. The console
+# mounts each of them as a FILE at boot: a missing DSN file leaves the pod
+# short of readiness, and an unreadable encryptionKeyFile is fatal outright,
+# so neither can be created after the fact.
+install_console_secrets() {
+    log "Applying the local Postgres fixture (console database)..."
+    kubectl apply -n "$NAMESPACE_APP" -f "$PROJECT_DIR/hack/postgres-local.yaml"
+    kubectl wait --for=condition=ready pod \
+        -l app=kconmon-local-postgres \
+        -n "$NAMESPACE_APP" \
+        --timeout=180s
+
+    # Generated here and thrown away with the cluster — a fixed key checked
+    # into the repo would be a real key in version control, and this one seals
+    # nothing that outlives the minikube profile. --dry-run=client | apply keeps
+    # `up` re-runnable; note that re-running it ROTATES the key, which makes any
+    # webhook secret stored under the previous one undecryptable. That is fine
+    # for a stand and would not be fine anywhere else.
+    log "Creating the webhook encryption key Secret..."
+    kubectl create secret generic kconmon-local-webhooks-key \
+        --from-literal=encryptionKey="$(openssl rand -base64 32)" \
+        -n "$NAMESPACE_APP" \
+        --dry-run=client -o yaml | kubectl apply -f -
+}
+
 install_kconmon() {
     log "Installing kconmon-ng..."
     helm upgrade -i kconmon-ng "$PROJECT_DIR/charts/kconmon-ng" \
         -f "$PROJECT_DIR/hack/values-local.yaml" \
         --set-string agent.image.tag="$IMAGE_TAG" \
         --set-string controller.image.tag="$IMAGE_TAG" \
+        --set-string console.image.tag="$IMAGE_TAG" \
         -n "$NAMESPACE_APP" \
         --wait \
-        --timeout 3m
+        --timeout 5m
 
     log "Waiting for all kconmon-ng pods..."
     kubectl wait --for=condition=ready pod \
@@ -178,6 +213,195 @@ smoke_test() {
     kubectl logs "$agent_pod" -n "$NAMESPACE_APP" --tail=20
 }
 
+# --- Console smoke -----------------------------------------------------------
+
+# Local port for the console port-forward (18080 controller, 18081 agent,
+# 13000 Grafana are already taken above).
+CONSOLE_PORT=18082
+# The ONE PrometheusRule object the console owns. The chart default
+# (console.alerting.bundleName), left unset in hack/values-local.yaml on
+# purpose -- changing it there means changing it here.
+CONSOLE_BUNDLE="kconmon-ng-console-rules"
+# Alert-rule sync budget: 30 polls x 3s, the same 90s e2e/console_test.go
+# allows. It is wide because the reconcile is jittered and the FIRST pass after
+# a write legitimately reports drift.
+SYNC_POLLS=30
+SYNC_SLEEP=3
+
+# Failures are counted, never fatal: a smoke run that dies on its first
+# problem hides the other five, and `up` still has URLs to print. The count is
+# turned into the exit code at the very end.
+SMOKE_FAILURES=0
+pass() { printf '  PASS: %s\n' "$1"; }
+fail() { printf '  FAIL: %s\n' "$1"; SMOKE_FAILURES=$((SMOKE_FAILURES + 1)); }
+
+# console_api METHOD PATH [JSON_BODY] -- prints the HTTP status code, writes the
+# response body to $API_BODY. curl's own "000" stands for "never got an answer".
+API_BODY=""
+console_api() {
+    local method="$1" path="$2" body="${3:-}"
+    local url="http://localhost:$CONSOLE_PORT$path"
+    if [[ -n "$body" ]]; then
+        curl -sS -o "$API_BODY" -w '%{http_code}' \
+            -X "$method" -H 'Content-Type: application/json' -d "$body" "$url" 2>/dev/null || true
+    else
+        curl -sS -o "$API_BODY" -w '%{http_code}' -X "$method" "$url" 2>/dev/null || true
+    fi
+}
+
+# json_field KEY -- one top-level string field out of $API_BODY, or "" if the
+# body is not an object / the key is absent. python3 because the console
+# answers objects, and grep on JSON is how a smoke test starts lying.
+json_field() {
+    python3 -c 'import json,sys
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+print(d.get(sys.argv[1], "") if isinstance(d, dict) else "")' "$1" <"$API_BODY" 2>/dev/null || true
+}
+
+smoke_console() {
+    log "Console smoke tests..."
+
+    local console_pod
+    console_pod=$(kubectl get pods \
+        -l app.kubernetes.io/component=console,app.kubernetes.io/name=kconmon-ng \
+        -n "$NAMESPACE_APP" \
+        -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+    if [[ -z "$console_pod" ]]; then
+        fail "no console pod found (is console.enabled still true in hack/values-local.yaml?)"
+        return 0
+    fi
+
+    if kubectl wait --for=condition=ready "pod/$console_pod" \
+        -n "$NAMESPACE_APP" --timeout=120s >/dev/null 2>&1; then
+        pass "console pod $console_pod is Ready"
+    else
+        fail "console pod $console_pod never became Ready"
+        log "Console logs (last 40 lines):"
+        kubectl logs "$console_pod" -n "$NAMESPACE_APP" --tail=40 || true
+        return 0
+    fi
+
+    API_BODY=$(mktemp)
+    lsof -ti:"$CONSOLE_PORT" | xargs kill -9 2>/dev/null || true
+    kubectl port-forward -n "$NAMESPACE_APP" "$console_pod" "$CONSOLE_PORT:8080" >/dev/null 2>&1 &
+    local console_pf=$!
+    sleep 3
+
+    local status probe
+    for probe in healthz readyz; do
+        status=$(console_api GET "/$probe")
+        if [[ "$status" == "200" ]]; then
+            pass "console /$probe -> 200"
+        else
+            fail "console /$probe -> $status"
+        fi
+    done
+
+    # Proxied through to the controller, so a 200 here proves the console
+    # resolved console.controller.url (chart-derived) and the controller
+    # answered -- two links of the chain in one call.
+    status=$(console_api GET /api/v1/topology)
+    if [[ "$status" == "200" ]]; then
+        pass "console /api/v1/topology -> 200"
+        head -c 400 "$API_BODY"; echo
+    else
+        fail "console /api/v1/topology -> $status"
+        head -c 400 "$API_BODY"; echo
+    fi
+
+    alerting_round
+
+    kill "$console_pf" 2>/dev/null; wait "$console_pf" 2>/dev/null || true
+    rm -f "$API_BODY"
+}
+
+# The M7 round trip, end to end against a REAL prometheus-operator (not just
+# its CRD, which is all the e2e job has): declare a rule through the API, wait
+# for the reconciler to server-side-apply the bundle, then read the
+# PrometheusRule object back out of the cluster.
+alerting_round() {
+    log "Alerting round trip (POST rule -> syncStatus=synced -> PrometheusRule)..."
+
+    local rule_name
+    rule_name="local-smoke-$(date +%s)"
+    # kind "raw" is verbatim -- there is no PromQL parser in the console, so the
+    # expression lands in the bundle unchanged and can be asserted by equality.
+    # `vector(1) > 0` is well-formed and depends on no scrape target, no series
+    # and nothing this cluster monitors.
+    local body
+    body=$(printf '{"name":"%s","kind":"raw","params":{"expr":"vector(1) > 0"},%s}' \
+        "$rule_name" '"severity":"warning","forNs":0,"enabled":true')
+
+    local status
+    status=$(console_api POST /api/v1/alert-rules "$body")
+    if [[ "$status" != "201" ]]; then
+        if [[ "$status" == "503" ]]; then
+            fail "POST /api/v1/alert-rules -> 503: the console has no database. Check the \
+kconmon-local-postgres pod and console.database.* in hack/values-local.yaml"
+        else
+            fail "POST /api/v1/alert-rules -> $status (expected 201)"
+        fi
+        head -c 400 "$API_BODY"; echo
+        return 0
+    fi
+
+    local rule_id
+    rule_id=$(json_field id)
+    if [[ -z "$rule_id" ]]; then
+        fail "POST /api/v1/alert-rules answered 201 with no rule id"
+        return 0
+    fi
+    pass "alert rule $rule_name created (id $rule_id)"
+
+    local sync_status="" sync_message="" synced="" i
+    for i in $(seq 1 "$SYNC_POLLS"); do
+        status=$(console_api GET "/api/v1/alert-rules/$rule_id")
+        if [[ "$status" == "200" ]]; then
+            sync_status=$(json_field syncStatus)
+            sync_message=$(json_field syncMessage)
+            if [[ "$sync_status" == "synced" ]]; then
+                synced="yes"
+                break
+            fi
+            if [[ "$sync_status" == "error" ]]; then
+                echo "    sync error (attempt $i): $sync_message"
+            fi
+        fi
+        # Re-kicking is the model, not impatience: the reconciler compares the
+        # live bundle against the desired one BEFORE applying, so the pass
+        # right after a write reports `drift` while already applying the fix.
+        # `synced` is the state of the SECOND pass.
+        console_api POST "/api/v1/alert-rules/$rule_id/sync" >/dev/null
+        sleep "$SYNC_SLEEP"
+    done
+
+    if [[ -n "$synced" ]]; then
+        pass "alert rule reached syncStatus=synced"
+    else
+        fail "alert rule stuck at syncStatus=${sync_status:-<unknown>} after \
+$((SYNC_POLLS * SYNC_SLEEP))s: ${sync_message:-no message}"
+    fi
+
+    if kubectl get prometheusrule -n "$NAMESPACE_APP" "$CONSOLE_BUNDLE" >/dev/null 2>&1; then
+        pass "PrometheusRule/$CONSOLE_BUNDLE exists in namespace $NAMESPACE_APP"
+        log "Bundle expressions:"
+        kubectl get prometheusrule -n "$NAMESPACE_APP" "$CONSOLE_BUNDLE" \
+            -o jsonpath='{range .spec.groups[*].rules[*]}{.alert}{"  "}{.expr}{"\n"}{end}' || true
+        echo
+    else
+        fail "PrometheusRule/$CONSOLE_BUNDLE not found in namespace $NAMESPACE_APP \
+(the console never applied its bundle -- check the console logs for a forbidden or crd-missing cause)"
+    fi
+
+    # Housekeeping: a fresh name per run would otherwise pile up rules in the
+    # database across repeated `smoke` invocations. The bundle object survives
+    # (it is the console's, not this run's) and simply loses this group.
+    console_api DELETE "/api/v1/alert-rules/$rule_id" >/dev/null
+}
+
 check_prometheus() {
     log "Checking Prometheus targets..."
 
@@ -239,6 +463,13 @@ show_access() {
     echo "    http://localhost:8080/api/v1/topology"
     echo "    http://localhost:8080/metrics"
     echo
+    echo "  kconmon-ng Console (anonymous auth, admin role - no login):"
+    echo "    kubectl port-forward -n $NAMESPACE_APP svc/kconmon-ng-console 8081:8080"
+    echo "    http://localhost:8081/            # overview"
+    echo "    http://localhost:8081/matrix      # node-to-node matrix"
+    echo "    http://localhost:8081/investigate # per-pair drilldown, MTR traces"
+    echo "    http://localhost:8081/alerting    # alert rules -> PrometheusRule"
+    echo
 }
 
 cluster_down() {
@@ -256,6 +487,9 @@ status() {
     log "kconmon-ng pods:"
     kubectl get pods -l app.kubernetes.io/name=kconmon-ng -o wide 2>/dev/null || true
     echo
+    log "Console Postgres fixture:"
+    kubectl get pods -l app=kconmon-local-postgres -o wide 2>/dev/null || true
+    echo
     log "Monitoring pods:"
     kubectl get pods -n "$NAMESPACE_MONITORING" 2>/dev/null || true
 }
@@ -263,13 +497,25 @@ status() {
 usage() {
     echo "Usage: $0 {up|down|status|smoke|urls|dashboards}"
     echo
-    echo "  up         - Start cluster, build images, install monitoring + kconmon-ng, run smoke tests"
+    echo "  up         - Start cluster, build images, install monitoring, Postgres + secrets,"
+    echo "               kconmon-ng (agents + controller + console), run smoke tests"
     echo "  down       - Delete the minikube cluster"
     echo "  status     - Show cluster and pod status"
-    echo "  smoke      - Run smoke tests against running cluster"
-    echo "  urls       - Show access URLs for Grafana, Prometheus, kconmon-ng"
+    echo "  smoke      - Run smoke tests against running cluster (includes the console"
+    echo "               health checks and the alerting round trip)"
+    echo "  urls       - Show access URLs for Grafana, Prometheus, kconmon-ng, Console"
     echo "  dashboards - Import Grafana dashboards via API"
     exit 1
+}
+
+# Non-zero exit when any PASS/FAIL check failed. Reported at the very end so
+# `up` still gets to print its URLs and `smoke` still runs every check.
+smoke_verdict() {
+    if [[ "$SMOKE_FAILURES" -gt 0 ]]; then
+        printf '\n\033[1;31m%s smoke check(s) FAILED\033[0m\n' "$SMOKE_FAILURES" >&2
+        exit 1
+    fi
+    printf '\n\033[1;32mAll smoke checks passed\033[0m\n'
 }
 
 # --- Main ---
@@ -280,13 +526,16 @@ case "${1:-}" in
         cluster_up
         build_images
         install_monitoring
+        install_console_secrets
         install_kconmon
         sleep 15  # let agents register and run a few check cycles
         smoke_test
+        smoke_console
         check_prometheus
         import_dashboards
         show_access
         log "Local test environment is ready!"
+        smoke_verdict
         ;;
     down)
         cluster_down
@@ -296,7 +545,9 @@ case "${1:-}" in
         ;;
     smoke)
         smoke_test
+        smoke_console
         check_prometheus
+        smoke_verdict
         ;;
     urls)
         show_access

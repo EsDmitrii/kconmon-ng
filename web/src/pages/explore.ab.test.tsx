@@ -187,6 +187,84 @@ describe("toCompareOption", () => {
 /* The panel on the page                                               */
 /* ------------------------------------------------------------------ */
 
+/**
+ * QA round 4, finding #6. Picking "7d earlier" on a Prometheus whose retention
+ * is 24h drew leg A alone — no legend entry for B, no error, nothing — and the
+ * honest reading of that picture is "the fleet behaved identically a week
+ * ago", which is the opposite of the truth.
+ */
+describe("ExplorePage compare panel — a shifted leg that has no data", () => {
+  /** Answers the SHIFTED window (any request whose end is older than now by
+   *  roughly the shift) with an empty matrix, and everything else normally. */
+  function stubShiftedEmpty(shiftMs: number) {
+    const fetchMock = vi.fn((url: string, init?: RequestInit) => {
+      if (String(url).includes("/api/v1/promql/query_range")) {
+        const body = JSON.parse(String(init?.body)) as RangeBody;
+        const age = Date.now() - Date.parse(body.end);
+        const empty = age > shiftMs / 2;
+        return Promise.resolve(
+          json({
+            status: "success",
+            data: {
+              resultType: "matrix",
+              result: empty ? [] : [{ metric: { protocol: "tcp" }, values: [[1785283200, "1"]] }],
+            },
+          }),
+        );
+      }
+      return Promise.resolve(json({}));
+    });
+    vi.stubGlobal("fetch", fetchMock);
+  }
+
+  it("says so, and names the distance, instead of drawing leg A alone in silence", async () => {
+    stubShiftedEmpty(7 * 24 * HOUR_MS);
+    renderPage();
+    setSelect("Compare with earlier", "7d");
+
+    expect(
+      await screen.findByText("No data 7d ago — Prometheus's retention does not reach that far back."),
+    ).toBeInTheDocument();
+  });
+
+  it("keeps leg A drawn — it is real data, and the note is about B", async () => {
+    stubShiftedEmpty(7 * 24 * HOUR_MS);
+    renderPage();
+    setSelect("Compare with earlier", "7d");
+
+    await screen.findByText(/retention does not reach/);
+    expect(seriesNames(compareChart()).some((n) => n.startsWith("A: "))).toBe(true);
+  });
+
+  it("says nothing when the shifted leg DOES come back with data", async () => {
+    stubFetch();
+    renderPage();
+    setSelect("Compare with earlier", "24h");
+
+    await waitFor(() => expect(seriesNames(compareChart()).length).toBe(2));
+    expect(screen.queryByText(/retention does not reach/)).not.toBeInTheDocument();
+  });
+
+  it("says nothing in metric-B mode — an empty second METRIC is a different fact", async () => {
+    // Every window comes back empty here, shifted or not.
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((url: string) =>
+        Promise.resolve(
+          String(url).includes("/api/v1/promql/query_range")
+            ? json({ status: "success", data: { resultType: "matrix", result: [] } })
+            : json({}),
+        ),
+      ),
+    );
+    renderPage();
+    setSelect("Compare with metric", CHART_B.id);
+
+    await waitFor(() => expect(screen.getAllByText(/no series returned/i).length).toBeGreaterThan(0));
+    expect(screen.queryByText(/retention does not reach/)).not.toBeInTheDocument();
+  });
+});
+
 describe("ExplorePage compare panel — nothing selected", () => {
   it("fires no compare request and draws no compare chart until a leg B is chosen", async () => {
     const { bodies } = stubFetch();

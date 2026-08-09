@@ -872,7 +872,7 @@ export interface paths {
          *
          *     NO SECRET EVER LEAVES THROUGH THIS ROUTE. A webhook exports its name, url, events and enabled flag plus a `hasSecret` boolean; the sealed signing key appears in no field, and there is no query parameter, header or role that changes that.
          *
-         *     Observation fields are stripped per collection: a schedule loses lastFiredAt/nextFireAt (scheduler bookkeeping), an alert rule loses syncStatus/syncMessage/lastSyncedAt (the reconciler's view of a cluster the destination has never talked to) and a webhook loses lastStatus/lastAttempt/failures (delivery outcomes). Maintenance windows that have already ENDED are omitted -- a closed window is history.
+         *     Observation fields are stripped per collection: a schedule loses lastFiredAt/nextFireAt and lastError/lastErrorAt (scheduler bookkeeping and a failure this console saw), an alert rule loses syncStatus/syncMessage/lastSyncedAt (the reconciler's view of a cluster the destination has never talked to) and a webhook loses lastStatus/lastAttempt/failures (delivery outcomes). Maintenance windows that have already ENDED are omitted -- a closed window is history.
          *
          *     Gated on `settings:write`, held by admin alone. One permission for both routes and no read/write split, the `webhooks:manage` posture: an export is every probe address, every webhook URL and every alert expression this console holds, in one file, so there is no audience that should read it without being trusted to write it.
          */
@@ -1964,6 +1964,7 @@ export interface components {
             /** @description Becomes a Prometheus label value, hence the restricted charset store enforces. */
             name: string;
             kind: components["schemas"]["TargetKind"];
+            /** @description Stored TRIMMED, and validated against the kind it was filed under. See TargetRequest.address for the rule. */
             address: string;
             /** @description Always an object ({} when unset), never null. */
             labels: {
@@ -1978,6 +1979,7 @@ export interface components {
         TargetRequest: {
             name: string;
             kind: components["schemas"]["TargetKind"];
+            /** @description Validated against `kind`, and rejected with 422 when it does not match. kind=host takes a hostname, an IP literal (bracketed for IPv6) or either with a numeric ":port" in 1-65535 -- the shapes the agent's allowlist resolves. kind=url takes an http:// or https:// URL with a host; a port, a path and a query are all allowed, since the agent's HTTP checker reads all three. A URL is NOT a valid host address and a bare hostname is NOT a valid url address: the kind is what tells the agent which parser to use. Leading and trailing whitespace is trimmed before the check, and the trimmed value is what gets stored; an address that is empty after trimming is refused. */
             address: string;
             labels?: {
                 [key: string]: string;
@@ -2023,6 +2025,7 @@ export interface components {
             destinationKind: components["schemas"]["DestinationKind"];
             /** Format: uuid */
             destinationTargetId?: string;
+            /** @description Required when destinationKind is adhoc, and validated against what an agent can actually dial: a DNS name, an IP literal (bracketed for IPv6), either of those with a `:port` suffix in 1-65535, or an http(s) URL with a host. Anything else is 422 -- the agent resolves and dials this string verbatim, so a value it cannot parse would be stored, pushed to every assigned agent and refused there once per interval, forever. Whether the resolved address is PERMITTED is a separate question, answered per probe by the agent's own allowlist. */
             destinationAddress?: string;
             checkType: components["schemas"]["CheckType"];
             plane: string;
@@ -2076,6 +2079,13 @@ export interface components {
              * @description Scheduler bookkeeping; null for kind "continuous", which the loop never fires.
              */
             nextFireAt: string | null;
+            /** @description Why the LAST fire produced no run; "" when it produced one. A schedule always advances its cadence, fired or not (leaving a broken one due would turn it into a hot loop), so without this a schedule whose definition points at a deleted target is indistinguishable from a healthy one. Always PRESENT -- "" is how a healthy schedule says so, and an absent key would be indistinguishable from a server that has no such concept. Cleared by the next fire that goes through, and NOT by an edit: an edit is not a fire. */
+            lastError: string;
+            /**
+             * Format: date-time
+             * @description When lastError was recorded. Non-null exactly when lastError is non-empty -- the store derives one from the other in a single UPDATE, so the pair can never disagree.
+             */
+            lastErrorAt: string | null;
             /** Format: date-time */
             createdAt: string;
             /** Format: date-time */
@@ -2202,7 +2212,7 @@ export interface components {
             /** Format: password */
             password: string;
         };
-        /** @description Schedule as a bundle carries it: Schedule MINUS lastFiredAt and nextFireAt. Those two are scheduler bookkeeping -- an observation of a running console, not the cadence an operator declared. nextFireAt is re-seeded on import exactly as POST /api/v1/schedules seeds it. */
+        /** @description Schedule as a bundle carries it: Schedule MINUS lastFiredAt, nextFireAt and the lastError pair. Those are scheduler bookkeeping -- an observation of a running console, not the cadence an operator declared, and a failure this console saw is not a fact about the console the bundle is restored into. nextFireAt is re-seeded on import exactly as POST /api/v1/schedules seeds it. */
         ExportedSchedule: {
             /**
              * Format: uuid
@@ -2522,8 +2532,10 @@ export interface operations {
             query?: {
                 /** @description Repeatable. An unknown event type is 400. */
                 type?: components["schemas"]["LiveEventType"][];
-                /** @description Exact match on the event's scope. */
+                /** @description Exact match on the event's scope. Mutually exclusive with `scopeNode`. */
                 scope?: string;
+                /** @description A node or target NAME, matched on either side of the scope: the bare scope itself, or a pair scope `<source>→<destination>` (U+2192) naming it as source or destination. This is what an object card asks for -- an equality filter on `scope` cannot see the pair rows a node takes part in. The name is matched literally (LIKE metacharacters are escaped server-side). Mutually exclusive with `scope`; supplying both is 422. */
+                scopeNode?: string;
                 /** @description RFC3339. Must precede `to`. */
                 from?: string;
                 to?: string;
@@ -2550,6 +2562,7 @@ export interface operations {
             400: components["responses"]["BadRequest"];
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
+            422: components["responses"]["UnprocessableEntity"];
             502: components["responses"]["BadGateway"];
             503: components["responses"]["Unavailable"];
         };

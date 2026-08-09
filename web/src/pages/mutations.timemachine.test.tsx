@@ -4,7 +4,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ThemeProvider } from "@/components/theme-provider";
 import { resetWsClient } from "@/hooks/use-ws-topic";
 import { FakeSocket } from "@/lib/fake-websocket";
-import { TimeMachineProvider } from "@/lib/timemachine";
+import {
+  TIME_MACHINE_DISABLED_REASON,
+  TIME_MACHINE_REASON_ID,
+  TimeMachineProvider,
+} from "@/lib/timemachine";
 import { AlertingPage } from "./alerting";
 import { DiagnosticsPage } from "./diagnostics";
 import { MTRPage } from "./mtr";
@@ -372,5 +376,101 @@ describe("Alerting rules", () => {
     engaged("/alerting");
     renderPage(<AlertingPage />);
     expect(await screen.findByRole("button", { name: "Details for PairLossHigh" })).toBeEnabled();
+  });
+});
+
+/* ══════════════════════════════════════════════════════════════════════════
+   The write guard reaches every mutating surface (QA round 2's finding #18,
+   extended in round 3).
+
+   "Disabled" alone was the M5 rule and it is not enough: a control that gives
+   no reason for being disabled is indistinguishable from a broken one, and the
+   single top-bar banner only helps a sighted reader who has it in view. So the
+   reason travels WITH the control — `title` for the pointer, `aria-describedby`
+   for the screen reader, pointing at the ONE node TimeMachineProvider mounts
+   while engaged.
+
+   One representative control per page, asserted in BOTH directions: while Live
+   the guard must add NOTHING, because an enabled control carrying a "why are
+   you disabled" tooltip is worse than the silence it replaced.
+   ══════════════════════════════════════════════════════════════════════════ */
+
+function expectGuarded(control: HTMLElement) {
+  expect(control).toBeDisabled();
+  expect(control).toHaveAttribute("title", TIME_MACHINE_DISABLED_REASON);
+  expect(control).toHaveAttribute("aria-describedby", TIME_MACHINE_REASON_ID);
+}
+
+function expectUnguarded(control: HTMLElement) {
+  expect(control).toBeEnabled();
+  expect(control).not.toHaveAttribute("title");
+  expect(control).not.toHaveAttribute("aria-describedby");
+}
+
+describe("the write guard carries its reason", () => {
+  it("mounts the reason node ONCE, and only while engaged", async () => {
+    engaged("/targets");
+    renderPage(<TargetsPage />);
+    await screen.findByRole("button", { name: "New target" });
+    const reasons = document.querySelectorAll(`#${TIME_MACHINE_REASON_ID}`);
+    expect(reasons).toHaveLength(1);
+    expect(reasons[0].textContent).toBe(TIME_MACHINE_DISABLED_REASON);
+  });
+
+  it("mounts no reason node at all while Live — an unreferenced sentence would be a lie", async () => {
+    live("/targets");
+    renderPage(<TargetsPage />);
+    await screen.findByRole("button", { name: "New target" });
+    expect(document.querySelectorAll(`#${TIME_MACHINE_REASON_ID}`)).toHaveLength(0);
+  });
+
+  it("targets: New target", async () => {
+    engaged("/targets");
+    renderPage(<TargetsPage />);
+    expectGuarded(await screen.findByRole("button", { name: "New target" }));
+  });
+
+  it("targets: New target, unguarded while Live", async () => {
+    live("/targets");
+    renderPage(<TargetsPage />);
+    expectUnguarded(await screen.findByRole("button", { name: "New target" }));
+  });
+
+  it("diagnostics: Start run", async () => {
+    engaged("/diagnostics");
+    renderPage(<DiagnosticsPage />);
+    expectGuarded(await screen.findByRole("button", { name: "Start run" }));
+  });
+
+  it("diagnostics: Start run, unguarded while Live", async () => {
+    live("/diagnostics");
+    renderPage(<DiagnosticsPage />);
+    expectUnguarded(await screen.findByRole("button", { name: "Start run" }));
+  });
+
+  it("mtr: Start MTR", async () => {
+    engaged("/mtr");
+    renderPage(<MTRPage />);
+    (await screen.findByRole("radio", { name: "Runner" })).click();
+    expectGuarded(await screen.findByRole("button", { name: "Start MTR" }));
+  });
+
+  it("mtr: Start MTR, unguarded while Live", async () => {
+    live("/mtr");
+    renderPage(<MTRPage />);
+    (await screen.findByRole("radio", { name: "Runner" })).click();
+    expectUnguarded(await screen.findByRole("button", { name: "Start MTR" }));
+  });
+
+  it("run detail: Cancel run", async () => {
+    engaged("/diagnostics/runs/run-1");
+    renderPage(<RunDetailPage />);
+    expectGuarded(await screen.findByRole("button", { name: "Cancel run" }));
+  });
+
+  it("run detail: Cancel run, unguarded while Live", async () => {
+    live("/diagnostics/runs/run-1");
+    renderPage(<RunDetailPage />);
+    expectUnguarded(await screen.findByRole("button", { name: "Cancel run" }));
   });
 });

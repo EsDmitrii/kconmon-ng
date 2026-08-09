@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { resetWsClient } from "@/hooks/use-ws-topic";
 import { FakeSocket } from "@/lib/fake-websocket";
 import type { LiveEvent } from "@/lib/types";
-import { RecentChanges } from "./recent-changes";
+import { matchesScope, RecentChanges } from "./recent-changes";
 
 const json = (body: unknown, init?: ResponseInit) =>
   new Response(JSON.stringify(body), { status: 200, headers: { "Content-Type": "application/json" }, ...init });
@@ -34,6 +34,13 @@ function event(overrides: Partial<LiveEvent> = {}): LiveEvent {
 }
 
 function renderRail(scope: string, opts: { databaseConfigured?: boolean; events?: LiveEvent[] } = {}) {
+  return renderRailWith({ scope }, opts);
+}
+
+function renderRailWith(
+  props: { scope: string; scopeNode?: undefined } | { scope?: undefined; scopeNode: string },
+  opts: { databaseConfigured?: boolean; events?: LiveEvent[] } = {},
+) {
   const { databaseConfigured = true, events = [] } = opts;
   const fetchMock = vi.fn((url: string) => {
     const href = String(url);
@@ -45,7 +52,7 @@ function renderRail(scope: string, opts: { databaseConfigured?: boolean; events?
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: Infinity } } });
   const utils = render(
     <QueryClientProvider client={qc}>
-      <RecentChanges scope={scope} />
+      <RecentChanges {...props} />
     </QueryClientProvider>,
   );
   return { ...utils, fetchMock, qc };
@@ -121,5 +128,58 @@ describe("RecentChanges", () => {
   it("renders history rows returned from the REST scrollback", async () => {
     renderRail("node-a", { events: [event({ id: "9-9000", summary: "history row" })] });
     expect(await screen.findByText("history row")).toBeInTheDocument();
+  });
+});
+
+/* ── the pair-aware half (QA scope 2 #21) ─────────────────────────────────── */
+
+describe("matchesScope", () => {
+  it("with a scopeNode admits the bare scope and both sides of a pair", () => {
+    expect(matchesScope("node-a", "", "node-a")).toBe(true);
+    expect(matchesScope("node-a→node-b", "", "node-a")).toBe(true);
+    expect(matchesScope("node-c→node-a", "", "node-a")).toBe(true);
+  });
+
+  it("with a scopeNode matches whole halves, never substrings", () => {
+    expect(matchesScope("node-ax→node-b", "", "node-a")).toBe(false);
+    expect(matchesScope("node-b→x-node-a", "", "node-a")).toBe(false);
+    expect(matchesScope("node-ab", "", "node-a")).toBe(false);
+    expect(matchesScope("node-c→node-d", "", "node-a")).toBe(false);
+  });
+
+  it("with a scope stays exact equality — a pair card is pinned to one edge", () => {
+    expect(matchesScope("node-a→node-b", "node-a→node-b", "")).toBe(true);
+    expect(matchesScope("node-a", "node-a→node-b", "")).toBe(false);
+    expect(matchesScope("node-a→node-b", "node-a", "")).toBe(false);
+  });
+});
+
+describe("RecentChanges pinned by scopeNode", () => {
+  it("sends ?scopeNode= and never the mutually exclusive ?scope=", async () => {
+    const { fetchMock } = renderRailWith({ scopeNode: "node-a" });
+    await waitFor(() =>
+      expect(fetchMock.mock.calls.some((c) => String(c[0]).startsWith("/api/v1/events"))).toBe(true),
+    );
+    const call = fetchMock.mock.calls.find((c) => String(c[0]).startsWith("/api/v1/events"));
+    const url = new URL(String(call?.[0]), "http://localhost");
+    expect(url.searchParams.get("scopeNode")).toBe("node-a");
+    expect(url.searchParams.get("scope")).toBeNull();
+  });
+
+  it("admits a live pair-scoped event naming the node — the half a reload used to reveal", async () => {
+    renderRailWith({ scopeNode: "node-a" });
+    await screen.findByText("No recent changes.");
+
+    act(() => FakeSocket.last().emitOpen());
+    act(() => {
+      FakeSocket.last().emitEnvelope({
+        topic: "live",
+        type: "event",
+        seq: 1,
+        data: event({ id: "4-4000", scope: "node-a→node-b", summary: "tcp check node-a→node-b failed" }),
+      });
+    });
+
+    expect(await screen.findByText("tcp check node-a→node-b failed")).toBeInTheDocument();
   });
 });

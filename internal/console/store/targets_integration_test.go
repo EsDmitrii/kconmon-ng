@@ -18,6 +18,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -227,6 +228,68 @@ func TestCreateDefinitionUnknownTargetIsNotFound(t *testing.T) {
 	}
 	if errors.Is(err, store.ErrInUse) {
 		t.Error("CreateDefinition with an unknown target reported ErrInUse; that is the DELETE direction")
+	}
+}
+
+// TestCreateDefinitionRejectsUndialableAdhocAddress is QA round 4's finding
+// #13 at the STORE boundary: "sdfsdfsdf !!" used to be accepted, written to
+// check_definitions, pushed to every assigned agent by the reconciler and
+// refused there once per interval forever.
+//
+// The probe goes through CreateDefinition and UpdateDefinition rather than
+// through Validate directly (targets_test.go covers the rule itself): the
+// point here is that NOTHING IS WRITTEN, which only a real INSERT can show —
+// and that an existing, well-formed row cannot be edited into a broken one.
+func TestCreateDefinitionRejectsUndialableAdhocAddress(t *testing.T) {
+	db, _ := newTargetsDB(t)
+	ctx := context.Background()
+
+	bad := store.DefinitionInput{
+		Name:               "edge-adhoc",
+		SourceSelection:    "all",
+		DestinationKind:    "adhoc",
+		DestinationAddress: "sdfsdfsdf !!",
+		CheckType:          "tcp",
+		Plane:              "pod",
+	}
+	if _, err := db.CreateDefinition(ctx, bad); err == nil {
+		t.Fatal("CreateDefinition with an undialable adhoc address = nil, want an error")
+	} else if !strings.Contains(err.Error(), "destination address") {
+		t.Errorf("CreateDefinition error %q does not name the destination address field", err)
+	}
+
+	// Nothing was written: the refusal happens before the INSERT.
+	page, err := db.ListDefinitions(ctx, store.DefinitionFilter{})
+	if err != nil {
+		t.Fatalf("ListDefinitions: %v", err)
+	}
+	if len(page.Definitions) != 0 {
+		t.Fatalf("ListDefinitions after the refused create = %d rows, want 0", len(page.Definitions))
+	}
+
+	// The shapes the agent CAN dial still go in, unchanged.
+	good := bad
+	good.DestinationAddress = "example.test:8443"
+	def, err := db.CreateDefinition(ctx, good)
+	if err != nil {
+		t.Fatalf("CreateDefinition with host:port: %v", err)
+	}
+	if def.DestinationAddress != "example.test:8443" {
+		t.Errorf("DestinationAddress = %q, want it stored verbatim", def.DestinationAddress)
+	}
+
+	// And an update cannot walk a good row into a bad one.
+	broken := good
+	broken.DestinationAddress = "example.test:http"
+	if _, err := db.UpdateDefinition(ctx, def.ID, broken); err == nil {
+		t.Fatal("UpdateDefinition to a non-numeric port = nil, want an error")
+	}
+	after, err := db.GetDefinition(ctx, def.ID)
+	if err != nil {
+		t.Fatalf("GetDefinition: %v", err)
+	}
+	if after.DestinationAddress != "example.test:8443" {
+		t.Errorf("DestinationAddress after the refused update = %q, want the original", after.DestinationAddress)
 	}
 }
 
@@ -488,7 +551,7 @@ func TestListDueSchedulesReturnsOnlyEnabledPastDue(t *testing.T) {
 	}
 
 	// MarkScheduleFired with a nil next retires the schedule from the poll.
-	if err := db.MarkScheduleFired(ctx, dueSoonest.ID, now, nil); err != nil {
+	if err := db.MarkScheduleFired(ctx, dueSoonest.ID, now, nil, ""); err != nil {
 		t.Fatalf("MarkScheduleFired: %v", err)
 	}
 	after, err := db.GetSchedule(ctx, dueSoonest.ID)
@@ -509,8 +572,166 @@ func TestListDueSchedulesReturnsOnlyEnabledPastDue(t *testing.T) {
 		t.Errorf("ListDueSchedules after the fire returned %d rows, want just %s", len(due), dueLater.ID)
 	}
 
-	if err := db.MarkScheduleFired(ctx, "0f1d1a2f-6f8e-4a3a-9a0e-7f3f9d0f1c22", now, nil); !errors.Is(err, store.ErrNotFound) {
+	if err := db.MarkScheduleFired(ctx, "0f1d1a2f-6f8e-4a3a-9a0e-7f3f9d0f1c22", now, nil, ""); !errors.Is(err, store.ErrNotFound) {
 		t.Errorf("MarkScheduleFired on an unknown id: err = %v, want ErrNotFound", err)
+	}
+}
+
+// TestScheduleLastErrorRoundTrips is migration 00008's boundary test (QA round
+// 5, finding #5): the two columns exist, they default to the healthy pair, the
+// UPDATE derives the stamp from the text, and a later good fire clears both.
+//
+// Every assertion here is against a REAL PostgreSQL, because the derivation
+// lives in SQL (a CASE in MarkScheduleFired) and a Go-side fake proves nothing
+// about it.
+func TestScheduleLastErrorRoundTrips(t *testing.T) {
+	db, _ := newTargetsDB(t)
+	ctx := context.Background()
+
+	def := mustCreateDefinition(t, ctx, db, "edge-tcp", "")
+	now := time.Now().UTC().Truncate(time.Microsecond) // pg stores microseconds
+	next := now.Add(time.Minute)
+
+	created, err := db.CreateSchedule(ctx, store.ScheduleInput{
+		DefinitionID: def.ID, Kind: "interval", IntervalNs: int64(time.Minute),
+		Enabled: true, NextFireAt: &next,
+	})
+	if err != nil {
+		t.Fatalf("CreateSchedule: %v", err)
+	}
+	// The column DEFAULT is the healthy pair, so every row that predates the
+	// migration reads as "nothing wrong" rather than as an unknown.
+	if created.LastError != "" || created.LastErrorAt != nil {
+		t.Fatalf("a new schedule = %q/%v, want the empty pair", created.LastError, created.LastErrorAt)
+	}
+
+	const boom = "get destination target 0f1d1a2f-6f8e-4a3a-9a0e-7f3f9d0f1c22: store: not found"
+	if err := db.MarkScheduleFired(ctx, created.ID, now, &next, boom); err != nil {
+		t.Fatalf("MarkScheduleFired(failure): %v", err)
+	}
+	failed, err := db.GetSchedule(ctx, created.ID)
+	if err != nil {
+		t.Fatalf("GetSchedule: %v", err)
+	}
+	if failed.LastError != boom {
+		t.Errorf("LastError = %q, want %q", failed.LastError, boom)
+	}
+	if failed.LastErrorAt == nil || !failed.LastErrorAt.UTC().Equal(now) {
+		t.Errorf("LastErrorAt = %v, want the fire's own stamp %v", failed.LastErrorAt, now)
+	}
+	// The failure did NOT cost the row its cadence: a broken schedule still
+	// advances, which is exactly why the error column had to exist.
+	if failed.LastFiredAt == nil || failed.NextFireAt == nil {
+		t.Errorf("a failed fire left LastFiredAt=%v NextFireAt=%v, want both stamped",
+			failed.LastFiredAt, failed.NextFireAt)
+	}
+
+	// An EDIT is not a fire: the failure survives a full-replace update, so an
+	// operator cannot turn a broken row green by pressing Save.
+	if _, err := db.UpdateSchedule(ctx, created.ID, store.ScheduleInput{
+		DefinitionID: def.ID, Kind: "interval", IntervalNs: int64(2 * time.Minute),
+		Enabled: true, NextFireAt: &next,
+	}); err != nil {
+		t.Fatalf("UpdateSchedule: %v", err)
+	}
+	edited, err := db.GetSchedule(ctx, created.ID)
+	if err != nil {
+		t.Fatalf("GetSchedule after update: %v", err)
+	}
+	if edited.LastError != boom {
+		t.Errorf("LastError after an edit = %q, want it untouched", edited.LastError)
+	}
+
+	// The next fire that goes through clears BOTH halves.
+	later := now.Add(time.Minute)
+	if err := db.MarkScheduleFired(ctx, created.ID, later, &next, ""); err != nil {
+		t.Fatalf("MarkScheduleFired(success): %v", err)
+	}
+	healthy, err := db.GetSchedule(ctx, created.ID)
+	if err != nil {
+		t.Fatalf("GetSchedule after recovery: %v", err)
+	}
+	if healthy.LastError != "" || healthy.LastErrorAt != nil {
+		t.Errorf("after a good fire = %q/%v, want the empty pair", healthy.LastError, healthy.LastErrorAt)
+	}
+}
+
+// A pathological error must not become a pathological row: the store caps what
+// one fire may write, on a rune boundary, and marks the cut.
+func TestScheduleLastErrorIsTruncated(t *testing.T) {
+	db, _ := newTargetsDB(t)
+	ctx := context.Background()
+
+	def := mustCreateDefinition(t, ctx, db, "edge-tcp", "")
+	now := time.Now().UTC()
+	created, err := db.CreateSchedule(ctx, store.ScheduleInput{
+		DefinitionID: def.ID, Kind: "interval", IntervalNs: int64(time.Minute), Enabled: true, NextFireAt: &now,
+	})
+	if err != nil {
+		t.Fatalf("CreateSchedule: %v", err)
+	}
+
+	// Multi-byte on purpose: a byte-sliced UTF-8 message would put a
+	// replacement character on the operator's screen.
+	huge := strings.Repeat("плохо ", 400)
+	if err := db.MarkScheduleFired(ctx, created.ID, now, &now, huge); err != nil {
+		t.Fatalf("MarkScheduleFired: %v", err)
+	}
+	got, err := db.GetSchedule(ctx, created.ID)
+	if err != nil {
+		t.Fatalf("GetSchedule: %v", err)
+	}
+	if len(got.LastError) > 500 {
+		t.Errorf("LastError is %d bytes, want at most 500", len(got.LastError))
+	}
+	if !strings.HasSuffix(got.LastError, "…") {
+		t.Errorf("LastError = %q, want the cut marked", got.LastError)
+	}
+	if !utf8.ValidString(got.LastError) {
+		t.Errorf("LastError is not valid UTF-8: %q", got.LastError)
+	}
+}
+
+// TestTargetAddressIsValidatedByKindAgainstPostgres is finding #11's boundary
+// test at the layer that actually WRITES: the shape rule lives in Go (Postgres
+// bounds nothing about an address), so a create that should be refused must be
+// shown never reaching the table.
+func TestTargetAddressIsValidatedByKindAgainstPostgres(t *testing.T) {
+	db, _ := newTargetsDB(t)
+	ctx := context.Background()
+
+	rejected := []struct{ name, kind, address string }{
+		{"whitespace-only host", "host", "   "},
+		{"garbage host", "host", "sdfsdfsdf !!"},
+		{"a URL filed as a host", "host", "https://example.test"},
+		{"whitespace-only url", "url", "  "},
+		{"garbage url", "url", "sdfsdfsdf !!"},
+		{"a bare hostname filed as a url", "url", "example.test"},
+	}
+	for _, tc := range rejected {
+		t.Run("refuses "+tc.name, func(t *testing.T) {
+			_, err := db.CreateTarget(ctx, store.TargetInput{Name: "t-" + strings.ReplaceAll(tc.kind, " ", ""), Kind: tc.kind, Address: tc.address})
+			if err == nil {
+				t.Fatalf("CreateTarget(kind=%s, address=%q) = nil, want an error", tc.kind, tc.address)
+			}
+		})
+	}
+
+	// …and the accepted one is stored TRIMMED, so what the agent dials is what
+	// was validated.
+	got, err := db.CreateTarget(ctx, store.TargetInput{Name: "edge-gw", Kind: "host", Address: "  10.0.0.1:8443  "})
+	if err != nil {
+		t.Fatalf("CreateTarget: %v", err)
+	}
+	if got.Address != "10.0.0.1:8443" {
+		t.Errorf("stored address = %q, want it trimmed", got.Address)
+	}
+	updated, err := db.UpdateTarget(ctx, got.ID, store.TargetInput{Name: "edge-gw", Kind: "url", Address: "  https://example.test/health  "})
+	if err != nil {
+		t.Fatalf("UpdateTarget: %v", err)
+	}
+	if updated.Address != "https://example.test/health" {
+		t.Errorf("updated address = %q, want it trimmed", updated.Address)
 	}
 }
 

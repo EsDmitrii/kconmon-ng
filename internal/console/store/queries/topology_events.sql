@@ -4,10 +4,30 @@ VALUES ($1, $2, $3, $4, $5, $6, $7)
 ON CONFLICT ON CONSTRAINT topology_events_natural_key DO NOTHING;
 
 -- name: ListTopologyEvents :many
+--
+-- scope is the EXACT filter. scope_node is the pair-aware one a node/target
+-- card needs: a check between two nodes is stored under the pair scope
+-- "<src>→<dst>" (U+2192 RIGHTWARDS ARROW -- events.pairScope,
+-- internal/console/events/live_event.go, is the only writer of this column's
+-- pair form, so this literal and that one must stay identical), which an
+-- equality filter on a single node name can never see. The two are mutually
+-- exclusive at the HTTP layer (422); ANDed here, because a query that silently
+-- ignored one of two supplied filters would be worse than a narrow answer.
+--
+-- The LIKE patterns are built from a param, so the name's own LIKE
+-- metacharacters MUST be neutralised: scope carries target names too, and
+-- store.validateName's charset (targets.sql / targets.go nameRE) permits '_'.
+-- Unescaped, scope_node 'a_c' would match 'abc→b'. The triple replace escapes
+-- the escape character first (backslash), then '%' and '_', and ESCAPE '\'
+-- names it -- standard_conforming_strings is on, so '\' here is one backslash.
 SELECT id, event_seq, event_time, type, severity, scope, summary, details
 FROM topology_events
 WHERE (sqlc.narg('types')::text[]  IS NULL OR type = ANY(sqlc.narg('types')::text[]))
   AND (sqlc.narg('scope')::text    IS NULL OR scope = sqlc.narg('scope')::text)
+  AND (sqlc.narg('scope_node')::text IS NULL
+       OR scope = sqlc.narg('scope_node')::text
+       OR scope LIKE replace(replace(replace(sqlc.narg('scope_node')::text, '\', '\\'), '%', '\%'), '_', '\_') || '→%' ESCAPE '\'
+       OR scope LIKE '%→' || replace(replace(replace(sqlc.narg('scope_node')::text, '\', '\\'), '%', '\%'), '_', '\_') ESCAPE '\')
   AND (sqlc.narg('from_time')::timestamptz IS NULL OR event_time >= sqlc.narg('from_time')::timestamptz)
   AND (sqlc.narg('to_time')::timestamptz   IS NULL OR event_time <  sqlc.narg('to_time')::timestamptz)
   AND (sqlc.narg('cur_time')::timestamptz  IS NULL OR

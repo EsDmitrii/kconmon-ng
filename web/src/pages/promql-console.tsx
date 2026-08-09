@@ -12,6 +12,7 @@ import { useTheme } from "@/components/theme-provider";
 import { promqlQuery, promqlQueryRange } from "@/lib/api";
 import { chartColors, seriesColor } from "@/lib/chart-theme";
 import { toTable } from "@/lib/prom-table";
+import { useTimeContext } from "@/lib/timemachine";
 import type { PromResult } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
@@ -105,7 +106,9 @@ function toConsoleChartOption(res: PromResult, dark: boolean): echarts.EChartsOp
     xAxis: {
       type: "time",
       axisLine: { lineStyle: { color: colors.grid } },
-      axisLabel: { color: colors.axis },
+      // Same anti-smear rule the curated charts take (QA round 2, #19): this
+      // console's plot lives in a narrower column than any of them.
+      axisLabel: { color: colors.axis, hideOverlap: true },
       splitLine: { show: false },
     },
     yAxis: {
@@ -264,6 +267,24 @@ function ResultPanel({ tab, children }: { tab: ResultTab; children: ReactNode })
 
 export function PromQLConsolePage() {
   const { theme } = useTheme();
+  /**
+   * The Time Machine anchors this page too (QA round 4, finding #3). It was
+   * the one data surface that ignored `?at=` entirely: with the console
+   * engaged at an incident, /console kept answering with NOW — an operator
+   * pasting a query from a card they were reading "at 02:14" got the present
+   * fleet's numbers under a banner that said 02:14.
+   *
+   * The anchoring is the SAME rule every other surface uses:
+   *  - an instant query sends `time=at` (the API already takes it — lib/api's
+   *    promqlQuery has carried the parameter since M5);
+   *  - a range query anchors its END at `at` and measures the picked window
+   *    backwards from there, exactly as Explore's useExploreQuery does, so
+   *    "6h" engaged means the six hours BEFORE t.
+   *
+   * TODO(docs): TIME_MACHINE.md's per-page table still lists Console as "not
+   * anchored". The control pass folds the docs; this comment is the marker.
+   */
+  const { at } = useTimeContext();
   const [query, setQuery] = useState<string>(readLastQuery);
   const [mode, setMode] = useState<Mode>("instant");
   const [rangeId, setRangeId] = useState("1h");
@@ -282,10 +303,10 @@ export function PromQLConsolePage() {
 
   const mutation = useMutation({
     mutationFn: (): Promise<PromResult> => {
-      if (mode === "instant") return promqlQuery(query);
+      if (mode === "instant") return promqlQuery(query, at ?? undefined);
       const range = RANGE_OPTIONS.find((r) => r.id === rangeId) ?? RANGE_OPTIONS[1];
       const step = STEP_OPTIONS.find((s) => s.id === stepId) ?? STEP_OPTIONS[0];
-      const end = new Date();
+      const end = at ?? new Date();
       const start = new Date(end.getTime() - range.seconds * 1000);
       return promqlQueryRange(query, start, end, step.seconds * 1e9);
     },
@@ -321,11 +342,23 @@ export function PromQLConsolePage() {
   // surfaces via data.status, distinct from mutation.error (an ApiError from
   // a problem+json response, or a network-level failure).
   const promError = data?.status === "error" ? data : undefined;
+  /* Whether an EMPTY-RESULT note is honest at all (QA round 4, finding #2).
+     A failed query has no result to be empty: the page was rendering the red
+     error card AND "No data — the query returned an empty result." at the
+     same time, which reads as two independent facts and told an operator the
+     query ran and matched nothing. The note therefore renders only when
+     nothing failed — either the envelope came back `success`, or no query has
+     been run yet (which is the "Run a query to see results." case). */
+  const failed = promError !== undefined || mutation.error !== null;
 
   return (
     <PageShell
       title="Console"
-      description="Run ad-hoc PromQL against the same Prometheus the rest of the console reads from."
+      description={
+        at
+          ? `Ad-hoc PromQL as of ${at.toLocaleString()} — instant queries are evaluated at that instant, and a range ends there.`
+          : "Run ad-hoc PromQL against the same Prometheus the rest of the console reads from."
+      }
       actions={
         <>
           <Segmented
@@ -423,7 +456,7 @@ export function PromQLConsolePage() {
                   </tbody>
                 </table>
               </Card>
-            ) : (
+            ) : failed ? null : (
               <ResultPlaceholder text={data ? "No data — the query returned an empty result." : "Run a query to see results."} />
             )}
           </ResultPanel>
@@ -435,7 +468,7 @@ export function PromQLConsolePage() {
               <Card className="p-5">
                 <EChart option={chartOption} className="h-80 w-full" />
               </Card>
-            ) : (
+            ) : failed ? null : (
               <ResultPlaceholder text={data ? "No series to chart." : "Run a range query to see a chart."} />
             )}
           </ResultPanel>

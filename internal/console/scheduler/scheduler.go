@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/EsDmitrii/kconmon-ng/internal/console/authz"
@@ -94,7 +95,7 @@ type Locker interface {
 // the unit tests drive the whole tick against a fake with no database at all.
 type Store interface {
 	ListDueSchedules(ctx context.Context, due time.Time, limit int) ([]store.Schedule, error)
-	MarkScheduleFired(ctx context.Context, id string, firedAt time.Time, nextFireAt *time.Time) error
+	MarkScheduleFired(ctx context.Context, id string, firedAt time.Time, nextFireAt *time.Time, lastError string) error
 	GetDefinition(ctx context.Context, id string) (store.Definition, error)
 	GetTarget(ctx context.Context, id string) (store.Target, error)
 }
@@ -293,16 +294,48 @@ func (s *Scheduler) fireDue(ctx context.Context) error {
 // overrun case -- would accumulate exactly the backlog the skip exists to
 // prevent (a 1-minute schedule over a 5-minute run owes four fires, and none
 // of them are wanted).
+// The same stamp also carries WHY this attempt produced no run, when it did
+// not (QA round 5, finding #5). Before it, the only difference between a
+// schedule firing perfectly and one whose definition pointed at a deleted
+// target was a log line on whichever replica held the lock: both advanced
+// last_fired_at, both kept a fresh next_fire_at, and the console showed both
+// as a healthy enabled row. The failure now rides in the SAME UPDATE as the
+// cadence advance, so the two can never disagree, and it is CLEARED by the
+// next attempt that goes through -- the column describes the last attempt, not
+// the last bad one, or one bad minute would leave a row red forever.
+//
+// A deliberate SKIP (a disabled definition, an overrun) counts as clearing:
+// nothing about this attempt failed, and leaving an old error standing beside
+// "skipped, its previous run is still in flight" would be the console
+// contradicting itself.
 func (s *Scheduler) fireOne(ctx context.Context, sched *store.Schedule, now time.Time, topo *topologyCache) error {
 	if sched.Kind == kindContinuous {
 		return nil
 	}
 
 	startErr := s.startFor(ctx, sched, topo)
-	if markErr := s.store.MarkScheduleFired(ctx, sched.ID, now, nextFireAt(sched, now)); markErr != nil {
+	lastError := ""
+	if startErr != nil {
+		lastError = scheduleErrorText(sched.ID, startErr)
+	}
+	if markErr := s.store.MarkScheduleFired(ctx, sched.ID, now, nextFireAt(sched, now), lastError); markErr != nil {
 		return errors.Join(startErr, fmt.Errorf("scheduler: mark schedule %s fired: %w", sched.ID, markErr))
 	}
 	return startErr
+}
+
+// scheduleErrorText renders a startFor error for check_schedules.last_error --
+// the string the console prints verbatim on the schedule row.
+//
+// The "scheduler: schedule <uuid>: " prefix every startFor error carries is
+// stripped, and only that one: the row this text is attached to IS that
+// schedule, so repeating its id would spend a third of a one-line UI field on
+// something the reader is already looking at. Everything after the prefix is
+// kept exactly as the error wrote it -- the store's own "target ... not found"
+// is the actionable half, and paraphrasing it here would create a second
+// vocabulary for the same failure.
+func scheduleErrorText(scheduleID string, err error) string {
+	return strings.TrimPrefix(err.Error(), "scheduler: schedule "+scheduleID+": ")
 }
 
 // startFor decides whether sched should actually produce a run right now, and

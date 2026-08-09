@@ -68,8 +68,44 @@ function labelForMetric(metric: Record<string, string>): string {
   return values.length > 0 ? values.join(",") : "series";
 }
 
-function formatSeconds(value: number): string {
-  return `${(value * 1000).toFixed(0)}ms`;
+/**
+ * formatSeconds prints a seconds value as milliseconds, with ADAPTIVE
+ * precision (QA round 2, finding #8).
+ *
+ * Integer milliseconds is right for a chart plotted in tens or hundreds of ms
+ * and wrong below ten, where the y-axis' own tick spacing is finer than the
+ * format: an axis stepping 0.0005s produced "1ms, 1ms, 2ms, 2ms, 2ms" — five
+ * ticks, three distinct labels, and no way to read a value off it. One decimal
+ * under 10ms separates them; above it a decimal is noise on a figure whose
+ * useful precision is the millisecond.
+ *
+ * The threshold is on the RENDERED value, not the input, so the same rule
+ * applies to a tooltip's single sample and to an axis tick.
+ *
+ * EXPORTED for components/investigation-signals.tsx (QA round 3, finding #14),
+ * which now names this formatter explicitly on its own y-axis rather than
+ * inheriting it from toSeriesOption below. See signalChartOption there for why
+ * the signals column states both axis treatments instead of trusting them.
+ */
+export function formatSeconds(value: number): string {
+  return formatMillis(value * 1000);
+}
+
+/**
+ * formatMillis is formatSeconds' rule with the unit conversion taken out —
+ * the SAME adaptive precision, for a series whose values are already
+ * milliseconds.
+ *
+ * It exists because components/mtr-hop-table.tsx's hop-RTT trend is the one
+ * chart in the console fed from stored snapshots rather than from Prometheus:
+ * its points are millisecond numbers, so it cannot call formatSeconds, and it
+ * had grown a private `ms.toFixed(1)` that disagreed with every Prometheus
+ * chart above 10ms (QA round 4, finding #11). One rule, two entry points, so
+ * "1ms, 1ms, 2ms" on one axis and "1.0ms, 1.5ms, 2.0ms" on another cannot
+ * happen again.
+ */
+export function formatMillis(ms: number): string {
+  return `${Math.abs(ms) < 10 ? ms.toFixed(1) : ms.toFixed(0)}ms`;
 }
 
 function formatRatio(value: number): string {
@@ -122,7 +158,12 @@ export function toSeriesOption(chart: CuratedChart, res: PromResult, dark: boole
     xAxis: {
       type: "time",
       axisLine: { lineStyle: { color: colors.grid } },
-      axisLabel: { color: colors.axis },
+      /* hideOverlap drops the ticks that would collide instead of drawing them
+         on top of each other (QA round 2, finding #19): under ~700px the time
+         axis smeared its own labels into an unreadable band. ECharts thins the
+         set out and keeps the ends, which is the readable trade — fewer
+         stamps, all legible, rather than every stamp and none. */
+      axisLabel: { color: colors.axis, hideOverlap: true },
       splitLine: { show: false },
     },
     yAxis: {

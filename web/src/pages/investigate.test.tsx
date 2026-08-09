@@ -2,16 +2,22 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ThemeProvider } from "@/components/theme-provider";
-import { TimeMachineProvider } from "@/lib/timemachine";
+import {
+  TIME_MACHINE_DISABLED_REASON,
+  TIME_MACHINE_REASON_ID,
+  TimeMachineProvider,
+} from "@/lib/timemachine";
 import { CAUSE_WEIGHTS } from "@/lib/investigation";
 import type { Alert, AuditEntry, Incident, PromResult } from "@/lib/types";
-import { InvestigatePage } from "./investigate";
+import { COPY_NOTE_TTL_MS, InvestigatePage } from "./investigate";
 import {
   PIN_KIND_BY_TIMELINE_KIND,
   alertEntries,
+  auditDetailLine,
   auditEntries,
   buildExportPayload,
   buildInvestigateURL,
+  commitWindow,
   incidentParams,
   investigationFailRatioQuery,
   investigationLossQuery,
@@ -21,12 +27,24 @@ import {
   pinnedRefFor,
   runTouchesScope,
   samplesFromMatrix,
+  scopeCaptionValue,
   scopeFilterValue,
   scopeFromAlertLabels,
   scopeFromIncidentScope,
+  scopeIncompleteReason,
+  scopeNodeOptions,
+  scopeZoneOptions,
+  scopesToQuery,
   type InvestigationScope,
 } from "@/lib/investigation-sources";
-import { cursorSeries, deltaFromVectors, withOverlays } from "@/components/investigation-signals";
+import {
+  CURSOR_SERIES_NAME,
+  cursorSeries,
+  deltaFromVectors,
+  signalChartOption,
+  withOverlays,
+} from "@/components/investigation-signals";
+import { formatSeconds } from "@/lib/curated-metrics";
 import { MAINTENANCE_SERIES_NAME, maintenanceOverlaySeries } from "@/lib/annotations";
 
 // Same reason as every other page test in this repo: echarts.init() reaches for
@@ -170,6 +188,16 @@ interface Options {
   /** The stored incident this console has. `null` = the id in the URL matches
    *  nothing, i.e. GET /api/v1/incidents/{id} answers 404. */
   incident?: Record<string, unknown> | null;
+  /** Route prefixes that answer problem+json instead of a body (QA round 3,
+   *  finding #1): each one becomes a FAILED source, which is a different thing
+   *  from an absent one and the page now says which. */
+  failing?: { prefix: string; status?: number; detail: string }[];
+  /** The topology body, so a test can hand the page a controller-less console
+   *  whose only evidence of a fleet is its AGENTS (QA round 3, finding #5). */
+  topology?: unknown;
+  /** The single sample every INSTANT promql query answers — the fail-ratio the
+   *  delta chip renders (QA round 3, finding #4). */
+  failRatio?: string;
 }
 
 function renderPage(opts: Options = {}) {
@@ -188,6 +216,9 @@ function renderPage(opts: Options = {}) {
     alerts = [],
     runDetail,
     incident = null,
+    failing = [],
+    topology = topologyBody(),
+    failRatio = "0.2",
   } = opts;
 
   window.history.replaceState({}, "", `/investigate${search}`);
@@ -205,11 +236,21 @@ function renderPage(opts: Options = {}) {
     const body = init?.body ? (JSON.parse(String(init.body)) as Record<string, unknown>) : undefined;
     calls.push({ method, url: href, body });
 
+    const broken = failing.find((f) => href.startsWith(f.prefix));
+    if (broken !== undefined) {
+      return Promise.resolve(
+        new Response(
+          JSON.stringify({ type: "about:blank", title: "unavailable", status: broken.status ?? 500, detail: broken.detail }),
+          { status: broken.status ?? 500, headers: { "Content-Type": "application/problem+json" } },
+        ),
+      );
+    }
+
     if (href.startsWith("/api/v1/auth/me")) return Promise.resolve(json(meBody(permissions)));
     if (href.startsWith("/api/v1/config")) {
       return Promise.resolve(json(configBody(databaseConfigured, prometheusConfigured)));
     }
-    if (href.startsWith("/api/v1/topology")) return Promise.resolve(json(topologyBody()));
+    if (href.startsWith("/api/v1/topology")) return Promise.resolve(json(topology));
     if (href.startsWith("/api/v1/targets")) return Promise.resolve(json({ targets: [targetRow()], nextCursor: "" }));
     if (href.startsWith("/api/v1/k8s-events")) return Promise.resolve(json({ events: k8sEvents, nextCursor: "" }));
     if (href.startsWith("/api/v1/events")) return Promise.resolve(json({ events, nextCursor: "" }));
@@ -274,7 +315,7 @@ function renderPage(opts: Options = {}) {
       const query = String(body?.query ?? "");
       return Promise.resolve(json(matrixBody(query.includes("packet_loss_ratio") ? LOSS_STEPS : RTT_STEPS)));
     }
-    if (href.startsWith("/api/v1/promql/query")) return Promise.resolve(json(vectorBody("0.2")));
+    if (href.startsWith("/api/v1/promql/query")) return Promise.resolve(json(vectorBody(failRatio)));
     return Promise.resolve(json({}));
   });
   vi.stubGlobal("fetch", fetchMock);
@@ -294,6 +335,20 @@ function renderPage(opts: Options = {}) {
   const postCalls = () => calls.filter((c) => c.method === "POST" && !c.url.startsWith("/api/v1/promql"));
   const patchCalls = () => calls.filter((c) => c.method === "PATCH");
   return { ...utils, calls, urlsFor, postCalls, patchCalls, qc };
+}
+
+/**
+ * pickRange drives one DateTimePicker by its aria-label: open the trigger, type
+ * the local day and wall clock into the picker's manual fields, apply. The same
+ * helper components/annotations.test.tsx and components/maintenance.test.tsx
+ * use — the console asks for an instant exactly one way now (QA round 3, #12),
+ * so the tests drive it one way too.
+ */
+function pickRange(triggerName: string, date: string, time: string) {
+  fireEvent.click(screen.getByRole("button", { name: triggerName }));
+  fireEvent.change(screen.getByLabelText("Date"), { target: { value: date } });
+  fireEvent.change(screen.getByLabelText("Time"), { target: { value: time } });
+  fireEvent.click(screen.getByRole("button", { name: "Apply" }));
 }
 
 function targetRow(over: Record<string, unknown> = {}) {
@@ -403,6 +458,142 @@ describe("parseInvestigationParams", () => {
   });
 });
 
+/* ── QA round 3: what the entry form is allowed to commit ───────────────── */
+
+describe("scopeIncompleteReason (finding #6)", () => {
+  it("refuses a pair that names one end, or the same node twice", () => {
+    expect(scopeIncompleteReason({ kind: "pair", a: "", b: "" })).toBe("Choose a source node.");
+    expect(scopeIncompleteReason({ kind: "pair", a: "node-a", b: "" })).toBe("Choose a destination node.");
+    expect(scopeIncompleteReason({ kind: "pair", a: "node-a", b: "node-a" })).toBe("A pair needs two different nodes.");
+    expect(scopeIncompleteReason({ kind: "pair", a: "node-a", b: "node-b" })).toBeNull();
+  });
+
+  it("refuses a zone pair missing either zone, and allows a zone with itself", () => {
+    expect(scopeIncompleteReason({ kind: "zone-pair", a: "", b: "zone-2" })).toBe("Choose a source zone.");
+    expect(scopeIncompleteReason({ kind: "zone-pair", a: "zone-1", b: "" })).toBe("Choose a destination zone.");
+    expect(scopeIncompleteReason({ kind: "zone-pair", a: "zone-1", b: "zone-1" })).toBeNull();
+  });
+
+  it("needs the one object a node or a target scope names", () => {
+    expect(scopeIncompleteReason({ kind: "node", a: "", b: "" })).toBe("Choose a node.");
+    expect(scopeIncompleteReason({ kind: "node", a: "node-a", b: "" })).toBeNull();
+    expect(scopeIncompleteReason({ kind: "target", a: "", b: "" })).toBe("Choose a target.");
+    expect(scopeIncompleteReason({ kind: "target", a: "api-gw", b: "" })).toBeNull();
+  });
+
+  it("is always complete for the cluster — it names no object", () => {
+    expect(scopeIncompleteReason({ kind: "cluster", a: "", b: "" })).toBeNull();
+  });
+});
+
+describe("commitWindow (findings #2 and #3)", () => {
+  const from = new Date(FROM);
+  const to = new Date(TO);
+
+  it("refuses an inverted or empty range before it can reach a query", () => {
+    expect(commitWindow(to, from, null)).toEqual({ ok: false, reason: "The range end must be after its start." });
+    expect(commitWindow(from, from, null)).toEqual({ ok: false, reason: "The range end must be after its start." });
+  });
+
+  it("is the identity while Live", () => {
+    expect(commitWindow(from, to, null)).toEqual({ ok: true, from, to, clamped: false });
+  });
+
+  it("clamps `to` down to the viewed instant and says it moved", () => {
+    const at = new Date("2026-08-08T00:30:00Z");
+    const out = commitWindow(from, to, at);
+    expect(out).toEqual({ ok: true, from, to: at, clamped: true });
+  });
+
+  it("does not claim a clamp when the window already ends at or before the instant", () => {
+    expect(commitWindow(from, to, to)).toEqual({ ok: true, from, to, clamped: false });
+    expect(commitWindow(from, to, new Date("2026-08-08T02:00:00Z"))).toEqual({ ok: true, from, to, clamped: false });
+  });
+
+  it("refuses a window that lies entirely after the viewed instant", () => {
+    const out = commitWindow(from, to, from);
+    expect(out.ok).toBe(false);
+    expect(out.ok === false && out.reason).toContain("after the viewed instant");
+  });
+});
+
+describe("scopeCaptionValue (finding #7)", () => {
+  it("says 'all scopes' for the wide scopes, which query UNFILTERED rather than global", () => {
+    expect(scopesToQuery({ kind: "zone-pair", a: "zone-1", b: "zone-2" })).toEqual([undefined]);
+    expect(scopeCaptionValue({ kind: "zone-pair", a: "zone-1", b: "zone-2" })).toBe("all scopes");
+    expect(scopeCaptionValue({ kind: "cluster", a: "", b: "" })).toBe("all scopes");
+  });
+
+  it("is the filter value itself for a narrow scope, which really is filtered", () => {
+    expect(scopeCaptionValue({ kind: "node", a: "node-a", b: "" })).toBe("node-a");
+    expect(scopeCaptionValue({ kind: "pair", a: "node-a", b: "node-b" })).toBe("node-a→node-b");
+  });
+});
+
+describe("scopeNodeOptions / scopeZoneOptions (finding #5)", () => {
+  it("fills both lists from the AGENTS alone when the controller reports no nodes", () => {
+    const topo = {
+      nodes: [],
+      agents: [
+        { nodeName: "node-b", zone: "zone-2" },
+        { nodeName: "node-a", zone: "zone-1" },
+      ],
+    };
+    expect(scopeNodeOptions(topo)).toEqual(["node-a", "node-b"]);
+    expect(scopeZoneOptions(topo)).toEqual(["zone-1", "zone-2"]);
+  });
+
+  it("unions the two lists and dedupes a node reported by both", () => {
+    const topo = {
+      nodes: [{ name: "node-a", zone: "zone-1" }],
+      agents: [
+        { nodeName: "node-a", zone: "zone-1" },
+        { nodeName: "node-c", zone: "zone-3" },
+      ],
+    };
+    expect(scopeNodeOptions(topo)).toEqual(["node-a", "node-c"]);
+    expect(scopeZoneOptions(topo)).toEqual(["zone-1", "zone-3"]);
+  });
+
+  it("drops empty names and survives an absent topology", () => {
+    expect(scopeNodeOptions(undefined)).toEqual([]);
+    expect(scopeZoneOptions({ nodes: [{ name: "node-a", zone: "" }] })).toEqual([]);
+  });
+});
+
+describe("auditDetailLine (finding #18)", () => {
+  it("omits an empty segment instead of leaving a dangling separator", () => {
+    const row: AuditEntry = {
+      id: 7,
+      at: FROM,
+      subjectKind: "user",
+      subjectId: "ada",
+      action: "POST /api/v1/auth/login",
+      resource: "",
+      outcome: "allowed",
+      remoteAddr: "",
+      detail: {},
+    };
+    expect(auditDetailLine(row)).toBe("user:ada · allowed");
+    expect(auditDetailLine(row)).not.toContain("· ·");
+  });
+
+  it("still joins every segment that is present", () => {
+    const row: AuditEntry = {
+      id: 8,
+      at: FROM,
+      subjectKind: "user",
+      subjectId: "ada",
+      action: "DELETE /api/v1/targets/{id}",
+      resource: "targets",
+      outcome: "denied",
+      remoteAddr: "",
+      detail: { name: "api-gw" },
+    };
+    expect(auditDetailLine(row)).toBe("user:ada · targets · denied · name=api-gw");
+  });
+});
+
 describe("scopeFilterValue", () => {
   it("is the annotations/events scope vocabulary: node name, pair arrow, target name, '' for the wide scopes", () => {
     expect(scopeFilterValue({ kind: "node", a: "node-a", b: "" })).toBe("node-a");
@@ -439,6 +630,36 @@ describe("the scope's signal queries", () => {
 
   it("selects nothing at all for the cluster scope — an empty selector is the whole fleet", () => {
     expect(investigationLossQuery({ kind: "cluster", a: "", b: "" })).not.toContain("{");
+  });
+
+  /* ── QA round 3, finding #4: the empty-sum trap ───────────────────────── */
+
+  it("guards every per-protocol sum with `or vector(0)` so an absent protocol contributes 0", () => {
+    const q = investigationFailRatioQuery({ kind: "pair", a: "node-a", b: "node-b" });
+    for (const protocol of ["tcp", "udp", "icmp"]) {
+      expect(q).toContain(
+        `(sum(rate(kconmon_ng_${protocol}_results_total{source_node="node-a",destination_node="node-b",result="fail"}[5m])) or vector(0))`,
+      );
+      expect(q).toContain(
+        `(sum(rate(kconmon_ng_${protocol}_results_total{source_node="node-a",destination_node="node-b"}[5m])) or vector(0))`,
+      );
+    }
+    // Six guards: three protocols on each side of the division.
+    expect(q.split("or vector(0)")).toHaveLength(7);
+  });
+
+  it("guards the target scope's single family the same way", () => {
+    const q = investigationFailRatioQuery({ kind: "target", a: "api-gw", b: "" });
+    expect(q).toBe(
+      '(sum(rate(kconmon_ng_external_results_total{target="api-gw",result="fail"}[5m])) or vector(0)) / ' +
+        '(sum(rate(kconmon_ng_external_results_total{target="api-gw"}[5m])) or vector(0))',
+    );
+  });
+
+  it("leaves investigationLossQuery unguarded — `or` already unions, and vector(0) would fake a healthy pair", () => {
+    const q = investigationLossQuery({ kind: "pair", a: "node-a", b: "node-b" });
+    expect(q).not.toContain("vector(0)");
+    expect(q.startsWith("max(")).toBe(true);
   });
 });
 
@@ -697,6 +918,48 @@ describe("the signal overlays", () => {
   });
 });
 
+/* ── QA round 3, findings #13 and #14: the signals column's own axes ─────── */
+
+describe("signalChartOption", () => {
+  const chart = (unit: "seconds" | "ratio") => ({ id: "t", title: "t", unit, query: "" });
+  const overlays = { cursorAt: null, windows: [] };
+  const axisLabel = (option: ReturnType<typeof signalChartOption>, axis: "xAxis" | "yAxis") =>
+    (option[axis] as { axisLabel?: Record<string, unknown> }).axisLabel ?? {};
+
+  it("#13 hides overlapping time ticks — a 20rem axis smears otherwise", () => {
+    const option = signalChartOption(chart("ratio"), matrixBody(LOSS_STEPS), false, overlays);
+    expect(axisLabel(option, "xAxis").hideOverlap).toBe(true);
+  });
+
+  it("#14 formats the RTT axis with the ADAPTIVE millisecond formatter", () => {
+    const option = signalChartOption(chart("seconds"), matrixBody(RTT_STEPS), false, overlays);
+    const formatter = axisLabel(option, "yAxis").formatter as (v: number) => string;
+    expect(typeof formatter).toBe("function");
+    /* The point of "adaptive": a sub-10ms axis steps finer than a whole
+       millisecond, so integer labels repeat. One decimal separates them, and
+       above 10ms the decimal would be noise. */
+    expect(formatter(0.0005)).toBe(formatSeconds(0.0005));
+    expect(formatter(0.0005)).toBe("0.5ms");
+    expect(formatter(0.0006)).toBe("0.6ms");
+    expect(formatter(0.0335)).toBe("34ms");
+  });
+
+  it("leaves a RATIO axis to the shared builder's own percent formatting", () => {
+    const option = signalChartOption(chart("ratio"), matrixBody(LOSS_STEPS), false, overlays);
+    expect(axisLabel(option, "yAxis").formatter).toBeUndefined();
+  });
+
+  it("still composes the overlays rather than replacing them", () => {
+    const option = signalChartOption(chart("ratio"), matrixBody(LOSS_STEPS), false, {
+      cursorAt: new Date("2026-08-08T00:20:00Z"),
+      windows: [maintenanceRow()],
+    });
+    const names = (option.series as { name?: string }[]).map((s) => s.name);
+    expect(names).toContain(MAINTENANCE_SERIES_NAME);
+    expect(names).toContain(CURSOR_SERIES_NAME);
+  });
+});
+
 /* ── the page ───────────────────────────────────────────────────────────── */
 
 describe("InvestigatePage — the URL is the entry contract", () => {
@@ -756,7 +1019,10 @@ describe("InvestigatePage — per-source permission gating", () => {
   it("a subject without audit:read gets the muted line and ZERO requests to /api/v1/audit", async () => {
     const { urlsFor } = renderPage({ permissions: ALL_READS.filter((p) => p !== "audit:read") });
 
-    expect(await screen.findByText(/config changes need audit:read/i)).toBeTruthy();
+    // "Audit rows", not "config changes" (QA round 5, finding #19): most of
+    // what the audit log records is a READ decision, and calling those rows
+    // config changes sent an operator hunting a change nobody made.
+    expect(await screen.findByText(/audit rows need audit:read/i)).toBeTruthy();
     // Give every other source time to fire so "zero" means zero, not "not yet".
     await waitFor(() => expect(urlsFor("/api/v1/events").length).toBeGreaterThan(0));
     expect(urlsFor("/api/v1/audit")).toEqual([]);
@@ -943,11 +1209,11 @@ describe("InvestigatePage — correlation", () => {
     expect(CAUSE_WEIGHTS["path-change"]).toBe(3);
   });
 
-  it("names the heuristic and links the document rather than implying a model", async () => {
+  it("names the heuristic and links the scoring source rather than implying a model", async () => {
     renderPage({ snapshots: [snapshotRow()] });
-    expect(await screen.findByText(/ranked by temporal proximity; weights are documented/i)).toBeTruthy();
-    const link = screen.getByRole("link", { name: /INVESTIGATION\.md/ });
-    expect(link.getAttribute("href")).toContain("docs/console/product/INVESTIGATION.md");
+    expect(await screen.findByText(/ranked by temporal proximity; the weights live in the open/i)).toBeTruthy();
+    const link = screen.getByRole("link", { name: /the scoring source/ });
+    expect(link.getAttribute("href")).toContain("web/src/lib/investigation.ts");
   });
 
   it("ranks nothing when no threshold was crossed, and says why", async () => {
@@ -1042,7 +1308,9 @@ describe("InvestigatePage — the actions rail", () => {
       maintenance: [maintenanceRow({ id: "m-doomed", reason: "wrong day" })],
     });
 
+    // Two clicks: the row confirms before it destroys (QA round 2, #14).
     fireEvent.click(await screen.findByRole("button", { name: "Delete maintenance window: wrong day" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Confirm delete maintenance window: wrong day" }));
     await waitFor(() =>
       expect(calls.some((c) => c.method === "DELETE" && c.url === "/api/v1/maintenance/m-doomed")).toBe(true),
     );
@@ -1154,7 +1422,7 @@ describe("InvestigatePage — saving an investigation as an incident", () => {
     const { postCalls } = renderPage({ permissions: WRITE });
 
     fireEvent.click(await screen.findByRole("button", { name: "Save as incident" }));
-    const dialog = await screen.findByRole("dialog", { name: "Save as incident" });
+    const dialog = await screen.findByRole("form", { name: "Save as incident" });
     fireEvent.change(within(dialog).getByLabelText("Incident title"), { target: { value: "Loss on the pair" } });
     fireEvent.change(within(dialog).getByLabelText("Incident notes"), { target: { value: "started at 00:20" } });
     fireEvent.click(within(dialog).getByRole("button", { name: "Create incident" }));
@@ -1188,7 +1456,7 @@ describe("InvestigatePage — saving an investigation as an incident", () => {
     const { postCalls } = renderPage({ permissions: WRITE });
 
     fireEvent.click(await screen.findByRole("button", { name: "Save as incident" }));
-    const dialog = await screen.findByRole("dialog", { name: "Save as incident" });
+    const dialog = await screen.findByRole("form", { name: "Save as incident" });
     fireEvent.click(within(dialog).getByRole("button", { name: "Create incident" }));
 
     expect(await within(dialog).findByRole("alert")).toHaveTextContent(/title is required/i);
@@ -1223,7 +1491,7 @@ describe("InvestigatePage — ?incident= hydrates the page", () => {
     // Leg 1: save the pair investigation the default search names.
     const first = renderPage({ permissions: WRITE });
     fireEvent.click(await screen.findByRole("button", { name: "Save as incident" }));
-    const dialog = await screen.findByRole("dialog", { name: "Save as incident" });
+    const dialog = await screen.findByRole("form", { name: "Save as incident" });
     fireEvent.change(within(dialog).getByLabelText("Incident title"), { target: { value: "Round trip" } });
     fireEvent.click(within(dialog).getByRole("button", { name: "Create incident" }));
     await screen.findByRole("region", { name: "Incident" });
@@ -1443,5 +1711,521 @@ describe("buildInvestigateURL", () => {
   it("agrees with scopeFilterValue about the pair separator, so an incident scope matches", () => {
     const url = buildInvestigateURL({ kind: "pair", a: "node-a", b: "node-b" }, NOW);
     expect(url).toContain(encodeURIComponent(scopeFilterValue({ kind: "pair", a: "node-a", b: "node-b" })));
+  });
+});
+
+/* ══════════════════════════════════════════════════════════════════════════
+   QA round 3 — the page-level pins. One describe per finding, named by it, so
+   a regression report says which decision came back.
+   ══════════════════════════════════════════════════════════════════════════ */
+
+const PAIR_SEARCH = `?kind=pair&scope=${encodeURIComponent("node-a→node-b")}&from=${FROM}&to=${TO}`;
+
+describe("#1 a failed source says so, and stops the page claiming nothing happened", () => {
+  it("renders ONE alert line per failed source, carrying the server's own detail", async () => {
+    renderPage({
+      failing: [
+        { prefix: "/api/v1/events", detail: "the events store is unavailable" },
+        { prefix: "/api/v1/k8s-events", detail: "the cluster event store is unavailable" },
+      ],
+    });
+    const events = await screen.findByText(/^Events: the events store is unavailable$/);
+    expect(events.getAttribute("role")).toBe("alert");
+    const k8s = await screen.findByText(/^Cluster events: the cluster event store is unavailable$/);
+    expect(k8s.getAttribute("role")).toBe("alert");
+  });
+
+  it("counts them in one partial banner rather than swallowing all but the first", async () => {
+    renderPage({
+      failing: [
+        { prefix: "/api/v1/events", detail: "events down" },
+        { prefix: "/api/v1/k8s-events", detail: "k8s down" },
+      ],
+    });
+    const partial = await screen.findByTestId("timeline-partial");
+    expect(partial.textContent).toBe("2 sources failed; the timeline below is partial.");
+  });
+
+  it("suppresses the nothing-happened empty state — an empty list is not evidence here", async () => {
+    renderPage({ failing: [{ prefix: "/api/v1/events", detail: "events down" }] });
+    await screen.findByTestId("timeline-partial");
+    expect(screen.queryByText(/Nothing happened in this window/i)).toBeNull();
+  });
+
+  it("still claims nothing happened when every enabled source settled cleanly", async () => {
+    renderPage();
+    expect(await screen.findByText(/Nothing happened in this window/i)).toBeTruthy();
+    expect(screen.queryByTestId("timeline-partial")).toBeNull();
+  });
+});
+
+describe("#4 the delta chip survives a fleet running one protocol", () => {
+  it("renders a real ratio rather than an em dash when the guarded query returns 1", async () => {
+    /* The end-to-end half of finding #4. The query-shape test above pins the
+       `or vector(0)` guards; this pins what they BUY: on an ICMP-only fleet the
+       two missing protocols now contribute 0 instead of erasing the whole
+       expression, so a scope failing every probe reads 100.0% instead of "—"
+       — which was indistinguishable from "nothing measured". */
+    renderPage({ search: PAIR_SEARCH, failRatio: "1" });
+    const chip = await screen.findByTestId("matrix-delta");
+    await waitFor(() => expect(chip.textContent).toContain("100.0%"));
+    expect(chip.textContent).not.toContain("—");
+  });
+
+  it("still says — when neither end could be measured at all", async () => {
+    renderPage({ search: PAIR_SEARCH, failRatio: "NaN" });
+    const chip = await screen.findByTestId("matrix-delta");
+    await waitFor(() => expect(chip.textContent).toContain("—"));
+  });
+});
+
+describe("#2 a refused signal query renders its problem, and the form refuses the range that caused it", () => {
+  it("puts the problem detail under the chart heading as an alert instead of dead space", async () => {
+    renderPage({
+      failing: [{ prefix: "/api/v1/promql/query_range", status: 400, detail: "end must be after start" }],
+    });
+    const loss = await screen.findByRole("region", { name: "Packet loss" });
+    const alert = await within(loss).findByRole("alert");
+    expect(alert.textContent).toBe("end must be after start");
+    expect(within(loss).queryByTestId("echart")).toBeNull();
+  });
+
+  it("refuses an inverted custom range at the form and issues no request for it", async () => {
+    const { urlsFor } = renderPage({ search: PAIR_SEARCH });
+    await screen.findByRole("button", { name: "Investigate" });
+    await waitFor(() => expect(urlsFor("/api/v1/promql/query_range").length).toBeGreaterThan(0));
+    const before = urlsFor("/api/v1/promql/query_range").length;
+    const committed = window.location.search;
+
+    fireEvent.click(screen.getByRole("radio", { name: "Custom" }));
+    // Start pushed past the end: from >= to.
+    pickRange("Range start", "2026-08-09", "12:00");
+    fireEvent.click(screen.getByRole("button", { name: "Investigate" }));
+
+    expect(await screen.findByText("The range end must be after its start.")).toBeTruthy();
+    // Nothing was committed, so nothing was asked: the URL and the request
+    // count are both exactly where they were.
+    expect(window.location.search).toBe(committed);
+    expect(urlsFor("/api/v1/promql/query_range").length).toBe(before);
+  });
+});
+
+describe("#3 the Time Machine clamps the investigated window", () => {
+  const ENGAGED = `${PAIR_SEARCH}&at=2026-08-08T00:30:00Z`;
+
+  /* The clock is frozen for this block only: a preset commit ("1h") is
+     measured from NOW, and against a real wall clock the window would land
+     months after the instant under test — a different branch of commitWindow
+     entirely. */
+  beforeEach(() => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    vi.setSystemTime(NOW);
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  /* A 45-minute span is not one of the presets, so the form opens on CUSTOM and
+     commits the two instants verbatim — no `now` in the arithmetic, and
+     therefore no dependence on how far the fake clock has drifted. */
+  const CUSTOM = `?kind=pair&scope=${encodeURIComponent("node-a→node-b")}&from=2026-08-08T00:00:00Z&to=2026-08-08T00:45:00Z`;
+
+  it("commits `to` as the viewed instant and says the window moved", async () => {
+    renderPage({ search: `${CUSTOM}&at=2026-08-08T00:30:00Z` });
+    await screen.findByRole("button", { name: "Investigate" });
+    fireEvent.click(screen.getByRole("button", { name: "Investigate" }));
+
+    expect(await screen.findByTestId("clamp-banner")).toHaveTextContent("Window clamped to the viewed instant.");
+    // The URL is the contract: `to` is now the instant, `from` is untouched.
+    const committed = parseInvestigationParams(window.location.search, NOW);
+    expect(committed.to.toISOString()).toBe("2026-08-08T00:30:00.000Z");
+    expect(committed.from.toISOString()).toBe("2026-08-08T00:00:00.000Z");
+  });
+
+  it("says nothing when the clamp changed nothing", async () => {
+    renderPage({ search: `${CUSTOM}&at=2026-08-08T01:00:00Z` });
+    await screen.findByRole("button", { name: "Investigate" });
+    fireEvent.click(screen.getByRole("button", { name: "Investigate" }));
+    await waitFor(() =>
+      expect(parseInvestigationParams(window.location.search, NOW).to.toISOString()).toBe("2026-08-08T00:45:00.000Z"),
+    );
+    expect(screen.queryByTestId("clamp-banner")).toBeNull();
+  });
+
+  it("refuses a window that lies entirely after the viewed instant", async () => {
+    renderPage({ search: `${CUSTOM}&at=2026-08-07T00:00:00Z` });
+    await screen.findByRole("button", { name: "Investigate" });
+    fireEvent.click(screen.getByRole("button", { name: "Investigate" }));
+    expect(await screen.findByText(/The window is after the viewed instant/)).toBeTruthy();
+    expect(screen.queryByTestId("clamp-banner")).toBeNull();
+  });
+
+  it("issues ZERO alert requests while engaged, and says why in the source list", async () => {
+    const { urlsFor } = renderPage({ search: ENGAGED });
+    expect(await screen.findByText(/Alert state is a live-only signal/i)).toBeTruthy();
+    expect(urlsFor("/api/v1/alerts")).toEqual([]);
+  });
+
+  it("does ask for alerts while Live", async () => {
+    const { urlsFor } = renderPage({ search: PAIR_SEARCH });
+    await waitFor(() => expect(urlsFor("/api/v1/alerts").length).toBeGreaterThan(0));
+  });
+});
+
+describe("#5 the scope selects read the agents too", () => {
+  /* The controller-less console: `nodes` is empty and the AGENTS are the only
+     thing that knows this fleet has machines in it. Before round 3 every select
+     here was empty and every scope but `cluster` was unreachable. */
+  const agentsOnly = {
+    nodes: [],
+    agents: [
+      { id: "ag-2", nodeName: "node-b", podIP: "10.0.0.2", zone: "zone-2" },
+      { id: "ag-1", nodeName: "node-a", podIP: "10.0.0.1", zone: "zone-1" },
+    ],
+    timestamp: FROM,
+  };
+
+  it("fills both node and zone lists from an agents-only topology", async () => {
+    renderPage({ search: "?kind=pair", topology: agentsOnly });
+
+    const source = (await screen.findByLabelText("Source node")) as HTMLSelectElement;
+    await waitFor(() => expect([...source.options].map((o) => o.value)).toEqual(["", "node-a", "node-b"]));
+
+    fireEvent.click(screen.getByRole("radio", { name: "Zone pair" }));
+    const zone = screen.getByLabelText("Source zone") as HTMLSelectElement;
+    expect([...zone.options].map((o) => o.value)).toEqual(["", "zone-1", "zone-2"]);
+  });
+
+  it("dedupes a node the controller AND an agent both report", async () => {
+    renderPage({
+      search: "?kind=node",
+      topology: {
+        nodes: [{ name: "node-a", zone: "zone-1", ready: true }],
+        agents: [{ id: "ag-1", nodeName: "node-a", podIP: "10.0.0.1", zone: "zone-1" }],
+        timestamp: FROM,
+      },
+    });
+    const node = (await screen.findByLabelText("Node")) as HTMLSelectElement;
+    await waitFor(() => expect([...node.options].map((o) => o.value)).toEqual(["", "node-a"]));
+  });
+});
+
+describe("#6 the Investigate button waits for a scope that names something", () => {
+  async function draft(kind: string) {
+    renderPage({ search: "?kind=cluster" });
+    await screen.findByRole("button", { name: "Investigate" });
+    fireEvent.click(screen.getByRole("radio", { name: kind }));
+  }
+
+  const button = () => screen.getByRole("button", { name: "Investigate" }) as HTMLButtonElement;
+
+  it("pair: needs both ends, and two DIFFERENT nodes", async () => {
+    await draft("Pair");
+    expect(button().disabled).toBe(true);
+    expect(screen.getByTestId("scope-incomplete").textContent).toBe("Choose a source node.");
+
+    fireEvent.change(screen.getByLabelText("Source node"), { target: { value: "node-a" } });
+    expect(screen.getByTestId("scope-incomplete").textContent).toBe("Choose a destination node.");
+
+    fireEvent.change(screen.getByLabelText("Destination node"), { target: { value: "node-a" } });
+    expect(screen.getByTestId("scope-incomplete").textContent).toBe("A pair needs two different nodes.");
+
+    fireEvent.change(screen.getByLabelText("Destination node"), { target: { value: "node-b" } });
+    expect(button().disabled).toBe(false);
+    expect(screen.queryByTestId("scope-incomplete")).toBeNull();
+  });
+
+  it("node: needs the one node", async () => {
+    await draft("Node");
+    expect(button().disabled).toBe(true);
+    fireEvent.change(screen.getByLabelText("Node"), { target: { value: "node-a" } });
+    expect(button().disabled).toBe(false);
+  });
+
+  it("zone pair: needs both zones", async () => {
+    await draft("Zone pair");
+    expect(button().disabled).toBe(true);
+    fireEvent.change(screen.getByLabelText("Source zone"), { target: { value: "zone-1" } });
+    expect(button().disabled).toBe(true);
+    fireEvent.change(screen.getByLabelText("Destination zone"), { target: { value: "zone-2" } });
+    expect(button().disabled).toBe(false);
+  });
+
+  it("target: needs the one target", async () => {
+    await draft("Target");
+    expect(button().disabled).toBe(true);
+    const select = (await screen.findByLabelText("Target")) as HTMLSelectElement;
+    await waitFor(() => expect([...select.options].map((o) => o.value)).toContain("api-gw"));
+    fireEvent.change(select, { target: { value: "api-gw" } });
+    expect(button().disabled).toBe(false);
+  });
+
+  it("cluster: always ready — it names no object", async () => {
+    renderPage({ search: "?kind=cluster" });
+    expect((await screen.findByRole("button", { name: "Investigate" })).hasAttribute("disabled")).toBe(false);
+    expect(screen.queryByTestId("scope-incomplete")).toBeNull();
+  });
+});
+
+describe("#7 a wide scope's caption says what was actually queried", () => {
+  it("says 'all scopes' for a zone pair, matching the unfiltered request", async () => {
+    const { urlsFor } = renderPage({
+      permissions: [...ALL_READS, "annotations:write"],
+      search: `?kind=zone-pair&scope=${encodeURIComponent("zone-1→zone-2")}&from=${FROM}&to=${TO}`,
+    });
+    expect(await screen.findByText(/annotations in this window · scope all scopes/)).toBeTruthy();
+    await waitFor(() => expect(urlsFor("/api/v1/annotations").length).toBeGreaterThan(0));
+    // The request really was unfiltered: no scope parameter at all.
+    expect(urlsFor("/api/v1/annotations").every((u) => !u.includes("scope="))).toBe(true);
+  });
+
+  it("names the scope itself when the request really was filtered by it", async () => {
+    renderPage({ search: PAIR_SEARCH });
+    expect(await screen.findByText(/annotations in this window · scope node-a→node-b/)).toBeTruthy();
+  });
+});
+
+describe("#8 a create outside the frozen window says so", () => {
+  it("notes an annotation stored outside the window, naming when the window ends", async () => {
+    renderPage({ permissions: [...ALL_READS, "annotations:write"], search: PAIR_SEARCH });
+    fireEvent.click(await screen.findByRole("button", { name: /annotate/i }));
+    pickRange("Start", "2026-08-09", "12:00");
+    fireEvent.change(screen.getByLabelText("Note"), { target: { value: "started the rollback" } });
+    fireEvent.click(screen.getByRole("button", { name: "Create annotation" }));
+
+    const note = await screen.findByText(/^Created — outside this window \(which ends .+\); press Investigate to reframe\.$/);
+    expect(note.getAttribute("role")).toBe("status");
+  });
+
+  it("stays silent for an ordinary in-window create — the row appearing IS the feedback", async () => {
+    /* A two-day window, so the LOCAL instant the picker composes lands inside
+       it whatever timezone this suite runs in. */
+    renderPage({
+      permissions: [...ALL_READS, "annotations:write"],
+      search: `?kind=pair&scope=${encodeURIComponent("node-a→node-b")}&from=2026-08-07T00:00:00Z&to=2026-08-09T00:00:00Z`,
+    });
+    fireEvent.click(await screen.findByRole("button", { name: /annotate/i }));
+    pickRange("Start", "2026-08-08", "12:00");
+    fireEvent.change(screen.getByLabelText("Note"), { target: { value: "in window" } });
+    fireEvent.click(screen.getByRole("button", { name: "Create annotation" }));
+
+    await waitFor(() => expect(screen.queryByRole("form", { name: "New annotation" })).toBeNull());
+    expect(screen.queryByText(/outside this window/)).toBeNull();
+  });
+});
+
+describe("#10 an in-app navigation is re-read, not ignored", () => {
+  /* The scope headline is rendered in more than one place (the page header and
+     the Signals column), so these assert on the SET rather than on a single
+     node. */
+  const headlines = () => screen.queryAllByText("node-a → node-b").length;
+
+  it("resets to the entry form when the URL becomes a bare /investigate", async () => {
+    renderPage({ search: PAIR_SEARCH });
+    await waitFor(() => expect(headlines()).toBeGreaterThan(0));
+
+    /* pushState is what a TanStack <Link> and the ⌘K palette both reach —
+       popstate is never dispatched for either, which is the whole finding. */
+    window.history.pushState({}, "", "/investigate");
+    await waitFor(() => expect(headlines()).toBe(0));
+    expect(screen.getAllByText("the whole cluster").length).toBeGreaterThan(0);
+    expect(screen.getByRole("radio", { name: "Cluster" }).getAttribute("aria-checked")).toBe("true");
+  });
+
+  it("follows Back the same way", async () => {
+    renderPage({ search: PAIR_SEARCH });
+    await waitFor(() => expect(headlines()).toBeGreaterThan(0));
+    window.history.replaceState({}, "", "/investigate?kind=node&scope=node-c");
+    window.dispatchEvent(new PopStateEvent("popstate"));
+    await waitFor(() => expect(screen.queryAllByText("node-c").length).toBeGreaterThan(0));
+    expect(headlines()).toBe(0);
+  });
+
+  it("re-enters incident mode when the new URL names one", async () => {
+    renderPage({ permissions: WRITE, search: PAIR_SEARCH, incident: incidentRow() });
+    await waitFor(() => expect(headlines()).toBeGreaterThan(0));
+    window.history.pushState({}, "", "/investigate?incident=inc-1");
+    expect(await screen.findByRole("heading", { name: "Loss between node-a and node-b" })).toBeTruthy();
+  });
+});
+
+describe("#15 the inline forms are disclosures, not dialogs", () => {
+  it("Save as incident carries role=form and no dialog role", async () => {
+    renderPage({ permissions: WRITE, search: PAIR_SEARCH });
+    fireEvent.click(await screen.findByRole("button", { name: "Save as incident" }));
+    expect(await screen.findByRole("form", { name: "Save as incident" })).toBeTruthy();
+    expect(screen.queryByRole("dialog", { name: "Save as incident" })).toBeNull();
+  });
+
+  /* The NEGATIVE pin, turning the QA observation into intent: Escape does not
+     dismiss this form and does not clear what has been typed into it. There is
+     no undo behind a discarded draft, and Cancel is one Tab away. */
+  it("does NOT discard a typed incident title on Escape", async () => {
+    renderPage({ permissions: WRITE, search: PAIR_SEARCH });
+    fireEvent.click(await screen.findByRole("button", { name: "Save as incident" }));
+    const form = await screen.findByRole("form", { name: "Save as incident" });
+    const title = within(form).getByLabelText("Incident title") as HTMLInputElement;
+    fireEvent.change(title, { target: { value: "half a thought" } });
+    fireEvent.keyDown(title, { key: "Escape" });
+    fireEvent.keyDown(document, { key: "Escape" });
+
+    expect(screen.getByRole("form", { name: "Save as incident" })).toBeTruthy();
+    expect((within(form).getByLabelText("Incident title") as HTMLInputElement).value).toBe("half a thought");
+  });
+});
+
+describe("#19 the pinned empty state names all three unpinnable classes", () => {
+  it("adds firing alerts to maintenance windows and threshold crossings", async () => {
+    renderPage({ permissions: WRITE, search: "?incident=inc-1", incident: incidentRow() });
+    const panel = await screen.findByRole("region", { name: "Pinned findings" });
+    expect(panel.textContent).toContain("Maintenance windows, threshold crossings and firing alerts cannot be pinned");
+    // …and the code that decides it agrees.
+    expect(PIN_KIND_BY_TIMELINE_KIND.alert).toBeNull();
+  });
+});
+
+describe("#21 an incident can be deleted", () => {
+  it("confirms, sends DELETE, and lands on the bare entry form", async () => {
+    const { calls } = renderPage({ permissions: WRITE, search: "?incident=inc-1", incident: incidentRow() });
+    const strip = await screen.findByRole("region", { name: "Incident" });
+
+    fireEvent.click(within(strip).getByRole("button", { name: "Delete incident: Loss between node-a and node-b" }));
+    expect(calls.filter((c) => c.method === "DELETE")).toEqual([]);
+
+    fireEvent.click(
+      within(strip).getByRole("button", { name: "Confirm delete incident: Loss between node-a and node-b" }),
+    );
+    await waitFor(() =>
+      expect(calls.filter((c) => c.method === "DELETE").map((c) => c.url)).toEqual(["/api/v1/incidents/inc-1"]),
+    );
+    await waitFor(() => expect(screen.queryByRole("region", { name: "Incident" })).toBeNull());
+    expect(window.location.pathname).toBe("/investigate");
+    expect(window.location.search).toBe("");
+    expect(screen.getAllByText("the whole cluster").length).toBeGreaterThan(0);
+  });
+
+  it("is hidden without incidents:write", async () => {
+    renderPage({ search: "?incident=inc-1", incident: incidentRow() });
+    const strip = await screen.findByRole("region", { name: "Incident" });
+    expect(within(strip).queryByRole("button", { name: /^Delete incident/ })).toBeNull();
+  });
+});
+
+describe("#22 the three small ones", () => {
+  it("focuses the title field when the title is what is missing", async () => {
+    renderPage({ permissions: WRITE, search: PAIR_SEARCH });
+    fireEvent.click(await screen.findByRole("button", { name: "Save as incident" }));
+    const form = await screen.findByRole("form", { name: "Save as incident" });
+    fireEvent.click(within(form).getByRole("button", { name: "Create incident" }));
+
+    expect(await within(form).findByText("A title is required.")).toBeTruthy();
+    expect(document.activeElement).toBe(within(form).getByLabelText("Incident title"));
+  });
+
+  it("clears 'Permalink copied.' after four seconds, and keeps a FAILURE up", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const writeText = vi.fn(() => Promise.resolve());
+      Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
+      renderPage({ permissions: WRITE, search: "?incident=inc-1", incident: incidentRow() });
+      const strip = await screen.findByRole("region", { name: "Incident" });
+      fireEvent.click(within(strip).getByRole("button", { name: "Copy permalink" }));
+      expect(await screen.findByText("Permalink copied.")).toBeTruthy();
+
+      await vi.advanceTimersByTimeAsync(COPY_NOTE_TTL_MS + 50);
+      await waitFor(() => expect(screen.queryByText("Permalink copied.")).toBeNull());
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("confirms an unpin that would discard a note, and unpins a note-less one in a click", async () => {
+    const withNote = incidentRow({
+      pinned: [
+        { kind: "event", id: "e-1", note: "this is the cause" },
+        { kind: "audit", id: "7" },
+      ],
+    });
+    const { patchCalls } = renderPage({ permissions: WRITE, search: "?incident=inc-1", incident: withNote });
+    await screen.findByRole("region", { name: "Pinned findings" });
+
+    // Note-less: one click is enough, nothing to lose.
+    fireEvent.click(screen.getByRole("button", { name: "Unpin audit 7" }));
+    await waitFor(() => expect(patchCalls().length).toBe(1));
+    expect(patchCalls()[0].body).toEqual({ pinned: [{ kind: "event", id: "e-1", note: "this is the cause" }] });
+
+    // With a note: the first click only arms.
+    fireEvent.click(screen.getByRole("button", { name: "Unpin event e-1" }));
+    expect(patchCalls().length).toBe(1);
+    fireEvent.click(screen.getByRole("button", { name: "Confirm unpin event e-1 and discard its note" }));
+    await waitFor(() => expect(patchCalls().length).toBe(2));
+    expect(patchCalls()[1].body).toEqual({ pinned: [] });
+  });
+});
+
+describe("the write guard reaches Investigate's rail (round 2's deferred follow-up)", () => {
+  it("gives a TM-disabled rail button the reason, not just the grey", async () => {
+    renderPage({
+      permissions: [...ALL_READS, "runs:create"],
+      search: `${PAIR_SEARCH}&at=2026-08-08T00:30:00Z`,
+    });
+    const run = (await screen.findByRole("button", { name: "Run MTR now" })) as HTMLButtonElement;
+    expect(run.disabled).toBe(true);
+    expect(run.getAttribute("title")).toBe(TIME_MACHINE_DISABLED_REASON);
+    expect(run.getAttribute("aria-describedby")).toBe(TIME_MACHINE_REASON_ID);
+  });
+
+  it("adds nothing at all while Live", async () => {
+    renderPage({ permissions: [...ALL_READS, "runs:create"], search: PAIR_SEARCH });
+    const run = (await screen.findByRole("button", { name: "Run MTR now" })) as HTMLButtonElement;
+    expect(run.disabled).toBe(false);
+    expect(run.hasAttribute("title")).toBe(false);
+    expect(run.hasAttribute("aria-describedby")).toBe(false);
+  });
+});
+
+/* ── QA round 5 ─────────────────────────────────────────────────────────── */
+
+/* #10. RFC 7807 details are PHRASES — "no incident with that id" carries no
+   full stop — so the server's words and the console's own sentence ran
+   together into one broken sentence. */
+describe("the stale-incident notice is two sentences (#10)", () => {
+  it("closes the server's phrase before its own sentence starts", async () => {
+    renderPage({ search: "?incident=gone", incident: null });
+    const heading = await screen.findByText(/no incident matches this link/i);
+    const body = heading.parentElement?.querySelector("p:nth-of-type(2)") ?? heading.nextElementSibling;
+    const text = body?.textContent ?? "";
+    expect(text).toContain(". The page is showing the default investigation");
+    // The exact shape of the old run-on: a lowercase word butting straight
+    // into the capital that starts the next sentence.
+    expect(text).not.toMatch(/[a-z] The page is showing/);
+  });
+});
+
+/* #19. The audit log records every authorization DECISION the API makes — a
+   read, a denial, a login — so labelling those rows "config change" told an
+   operator hunting a cause that somebody changed something when nobody did. */
+describe("the audit timeline badge names its SOURCE (#19)", () => {
+  it("labels audit rows 'audit', never 'config change'", async () => {
+    renderPage({
+      auditRows: [
+        {
+          id: 1,
+          at: "2026-08-08T00:30:00Z", // inside the default [FROM, TO) window
+          subjectKind: "user",
+          subjectId: "ada",
+          action: "GET /api/v1/targets",
+          resource: "targets",
+          outcome: "allowed",
+          detail: {},
+        },
+      ],
+    });
+    const timeline = await screen.findByRole("list", { name: "Timeline entries" });
+    await waitFor(() => expect(within(timeline).getByText("audit")).toBeInTheDocument());
+    expect(within(timeline).queryByText("config change")).toBeNull();
+    // The row's own title keeps the action verbatim — the label narrowed, the
+    // information did not.
+    expect(within(timeline).getByText("GET /api/v1/targets")).toBeInTheDocument();
   });
 });

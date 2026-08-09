@@ -1,8 +1,21 @@
 ---
-# Local testing values: all checkers enabled, monitoring enabled, local images
+# Local testing values: the FULL product on minikube — agents, controller and
+# the console with a database, alerting, webhooks and Prometheus wired up.
+# All checkers enabled, monitoring enabled, local images.
+#
+# Two Secrets are created by hack/local-test.sh BEFORE `helm upgrade -i` and
+# referenced BY NAME below; the chart never templates secret material:
+#   kconmon-local-postgres     — hack/postgres-local.yaml (key "dsn")
+#   kconmon-local-webhooks-key — `kubectl create secret` from openssl rand
 controller:
   replicaCount: 1
   leaderElection: true
+  # The controller's domain-event stream. On: it is what puts the console on
+  # live data instead of the M1 Prometheus poll with a "delayed data" badge,
+  # and the chart derives console.controller.grpcAddr from this same flag, so
+  # no address has to be repeated in the console block below.
+  events:
+    enabled: true
   image:
     repository: kconmon-ng-controller
     tag: local
@@ -86,3 +99,68 @@ pdb:
 
 serviceAccount:
   create: true
+
+console:
+  enabled: true
+  # ONE replica, and the chart enforces it: controller.events.enabled above
+  # gives the console a realtime ingester, and with console.valkey.mode left at
+  # the chart default (disabled) the fan-out bus is in-process. Rendering with
+  # replicas > 1 there fails the install with a message naming this exact pair
+  # (templates/console/configmap.yaml, ADR-002). Valkey is deliberately NOT
+  # bundled for a local stand: one replica needs no cross-replica bus, and a
+  # second Deployment is one more thing to debug on a 3×2-CPU cluster.
+  replicas: 1
+  image:
+    repository: kconmon-ng-console
+    tag: local
+    pullPolicy: Never
+  # anonymous + admin, exactly as e2e/testdata/console-values.yaml does it and
+  # for the same reason: anonymous auth stamps ONE fixed role on every request
+  # and no header can change it, so the role has to clear the highest
+  # permission anything on the stand needs. That bar is admin —
+  # webhooks:manage and settings:write are admin-only. auth.mode=local would
+  # additionally drag in a bootstrap-password Secret and a login flow for a
+  # cluster that lives for an afternoon.
+  auth:
+    mode: anonymous
+    anonymous:
+      role: admin
+  # External database against hack/postgres-local.yaml. Not cnpg — see that
+  # file's header for why a local stand does not install a second operator.
+  # Everything the console persists (alert rules, webhooks, targets, the audit
+  # log) lives here, so alerting below is dead without it.
+  database:
+    mode: external
+    existingSecret: kconmon-local-postgres
+    existingSecretKey: dsn
+  # The kube-prometheus-stack the script installs, addressed by its in-cluster
+  # DNS name. The release is named `monitoring` in the `monitoring` namespace,
+  # which is what makes the Service `monitoring-kube-prometheus-prometheus`
+  # (release name + chart's own suffix) — change one and this must change too.
+  # No trailing slash: the console's config validation rejects one.
+  prometheus:
+    url: http://monitoring-kube-prometheus-prometheus.monitoring.svc.cluster.local:9090
+  # Pod/Node event capture. Renders the console's own ServiceAccount +
+  # ClusterRole + ClusterRoleBinding and the POD_NAMESPACE downward-API env
+  # var. namespace left empty = the release namespace (default), which is where
+  # the agents, the controller and the console itself run — so the chaos
+  # testing further down produces events this actually sees.
+  kubernetesContext:
+    enabled: true
+  # PrometheusRule sync (M7) — the point of wiring a REAL kube-prometheus-stack
+  # into this stand rather than just the CRD. The Prometheus Operator is
+  # installed here, so a rule the console applies is a rule Prometheus actually
+  # loads and evaluates, which the e2e job (CRD only, no operator) cannot show.
+  # namespace/syncInterval/bundleName stay at chart defaults; the bundle object
+  # is therefore `kconmon-ng-console-rules` in `default`, which is the name
+  # hack/local-test.sh asserts on.
+  alerting:
+    enabled: true
+  # AES-256-GCM key sealing each webhook endpoint's HMAC secret at rest.
+  # Created by the script from `openssl rand -base64 32` and named here, never
+  # inlined — the chart has no value that would take the key itself. Without it
+  # POST /api/v1/webhooks answers 503 and the dispatcher is left nil.
+  webhooks:
+    encryptionKeySecret:
+      name: kconmon-local-webhooks-key
+      key: encryptionKey

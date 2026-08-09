@@ -69,6 +69,21 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// scope and scopeNode answer different questions about the same column --
+	// "this exact scope" against "this name on either side of a pair scope" --
+	// and the store ANDs whatever it is handed. Supplying both is a caller bug,
+	// not a narrower query, so it is refused rather than silently intersected.
+	// 422, not 400: each param is individually well-formed; it is the pair the
+	// server will not act on.
+	scope := q.Get("scope")
+	scopeNode := q.Get("scopeNode")
+	if scope != "" && scopeNode != "" {
+		writeProblem(w, http.StatusUnprocessableEntity, "conflicting scope filters",
+			"scope and scopeNode are mutually exclusive: scope matches the event's scope exactly, "+
+				"scopeNode matches a node/target name on either side of a pair scope")
+		return
+	}
+
 	from, ok := parseEventsTime(w, q.Get("from"), "from")
 	if !ok {
 		return
@@ -94,12 +109,13 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	}
 
 	filter := store.EventFilter{
-		Types:  types,
-		Scope:  q.Get("scope"),
-		From:   from,
-		To:     to,
-		Cursor: cursor,
-		Limit:  clampEventsLimit(parseEventsLimit(q.Get("limit"))),
+		Types:     types,
+		Scope:     scope,
+		ScopeNode: scopeNode,
+		From:      from,
+		To:        to,
+		Cursor:    cursor,
+		Limit:     clampEventsLimit(parseEventsLimit(q.Get("limit"))),
 	}
 
 	page, err := s.events.ListEvents(r.Context(), filter)

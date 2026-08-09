@@ -75,22 +75,27 @@ SELECT id, event_seq, event_time, type, severity, scope, summary, details
 FROM topology_events
 WHERE ($1::text[]  IS NULL OR type = ANY($1::text[]))
   AND ($2::text    IS NULL OR scope = $2::text)
-  AND ($3::timestamptz IS NULL OR event_time >= $3::timestamptz)
-  AND ($4::timestamptz   IS NULL OR event_time <  $4::timestamptz)
-  AND ($5::timestamptz  IS NULL OR
-       (event_time, id) < ($5::timestamptz, $6::bigint))
+  AND ($3::text IS NULL
+       OR scope = $3::text
+       OR scope LIKE replace(replace(replace($3::text, '\', '\\'), '%', '\%'), '_', '\_') || '→%' ESCAPE '\'
+       OR scope LIKE '%→' || replace(replace(replace($3::text, '\', '\\'), '%', '\%'), '_', '\_') ESCAPE '\')
+  AND ($4::timestamptz IS NULL OR event_time >= $4::timestamptz)
+  AND ($5::timestamptz   IS NULL OR event_time <  $5::timestamptz)
+  AND ($6::timestamptz  IS NULL OR
+       (event_time, id) < ($6::timestamptz, $7::bigint))
 ORDER BY event_time DESC, id DESC
-LIMIT $7
+LIMIT $8
 `
 
 type ListTopologyEventsParams struct {
-	Types    []string
-	Scope    pgtype.Text
-	FromTime pgtype.Timestamptz
-	ToTime   pgtype.Timestamptz
-	CurTime  pgtype.Timestamptz
-	CurID    pgtype.Int8
-	Lim      int32
+	Types     []string
+	Scope     pgtype.Text
+	ScopeNode pgtype.Text
+	FromTime  pgtype.Timestamptz
+	ToTime    pgtype.Timestamptz
+	CurTime   pgtype.Timestamptz
+	CurID     pgtype.Int8
+	Lim       int32
 }
 
 type ListTopologyEventsRow struct {
@@ -104,10 +109,26 @@ type ListTopologyEventsRow struct {
 	Details   json.RawMessage
 }
 
+// scope is the EXACT filter. scope_node is the pair-aware one a node/target
+// card needs: a check between two nodes is stored under the pair scope
+// "<src>→<dst>" (U+2192 RIGHTWARDS ARROW -- events.pairScope,
+// internal/console/events/live_event.go, is the only writer of this column's
+// pair form, so this literal and that one must stay identical), which an
+// equality filter on a single node name can never see. The two are mutually
+// exclusive at the HTTP layer (422); ANDed here, because a query that silently
+// ignored one of two supplied filters would be worse than a narrow answer.
+//
+// The LIKE patterns are built from a param, so the name's own LIKE
+// metacharacters MUST be neutralised: scope carries target names too, and
+// store.validateName's charset (targets.sql / targets.go nameRE) permits '_'.
+// Unescaped, scope_node 'a_c' would match 'abc→b'. The triple replace escapes
+// the escape character first (backslash), then '%' and '_', and ESCAPE '\'
+// names it -- standard_conforming_strings is on, so '\' here is one backslash.
 func (q *Queries) ListTopologyEvents(ctx context.Context, arg ListTopologyEventsParams) ([]ListTopologyEventsRow, error) {
 	rows, err := q.db.Query(ctx, listTopologyEvents,
 		arg.Types,
 		arg.Scope,
+		arg.ScopeNode,
 		arg.FromTime,
 		arg.ToTime,
 		arg.CurTime,

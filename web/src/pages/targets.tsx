@@ -4,10 +4,12 @@ import { PageShell } from "@/components/page-shell";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
+import { DateTimePicker } from "@/components/ui/datetime-picker";
 import { Segmented } from "@/components/ui/segmented";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useAuth } from "@/hooks/use-auth";
 import { useDatabaseAvailable } from "@/hooks/use-capabilities";
+import { useSubmitGuard } from "@/hooks/use-submit-guard";
 import {
   ApiError,
   checksProjection,
@@ -30,7 +32,7 @@ import {
 // levels up. See lib/timemachine.tsx for the hide-vs-disable rule these all
 // follow — `canWrite` decides whether a control EXISTS, this decides whether it
 // is usable right now.
-import { useWritesDisabled } from "@/lib/timemachine";
+import { useWriteGuard } from "@/lib/timemachine";
 import {
   CHECK_TYPES,
   type CheckDefinition,
@@ -46,7 +48,7 @@ import {
   type TargetKind,
   type TargetRequest,
 } from "@/lib/types";
-import { cn } from "@/lib/utils";
+import { ADHOC_ADDRESS_ERROR, CHECKBOX_CLASS, cn, isValidAdhocAddress } from "@/lib/utils";
 
 const TABS = [
   { value: "targets", label: "Targets" },
@@ -336,12 +338,18 @@ function fmtTime(timestamp?: string | null): string {
 
 function TargetForm({ initial, onDone }: { initial?: Target; onDone: () => void }) {
   const qc = useQueryClient();
-  const writesDisabled = useWritesDisabled();
+  /* guard carries the DISABLED flag AND the reason for it — lib/timemachine's
+     useWriteGuard (QA round 2, finding #18; extended here in round 3). Spread it
+     onto the control, and compose any local condition AFTER the spread. */
+  const guard = useWriteGuard();
   const [name, setName] = useState(initial?.name ?? "");
   const [kind, setKind] = useState<TargetKind>(initial?.kind ?? "host");
   const [address, setAddress] = useState(initial?.address ?? "");
   const [labels, setLabels] = useState(formatLabels(initial?.labels));
-  const [submitting, setSubmitting] = useState(false);
+  /* The in-flight guard, not just a disabled look (QA round 5, finding #17):
+     begin() is a REF write, so three clicks in one task produce one request.
+     hooks/use-submit-guard.ts says why a useState flag cannot do this. */
+  const { submitting, begin, end } = useSubmitGuard();
   const [errors, setErrors] = useState<FieldErrors<TargetField>>({});
 
   async function handleSubmit(e: FormEvent) {
@@ -357,7 +365,7 @@ function TargetForm({ initial, onDone }: { initial?: Target; onDone: () => void 
     // A full replace, so every field goes on the wire — an omitted one means
     // EMPTY server-side (PUT /api/v1/targets/{id}), never "leave as-is".
     const req: TargetRequest = { name, kind, address, labels: parsedLabels };
-    setSubmitting(true);
+    if (!begin()) return;
     try {
       if (initial) await updateTarget(initial.id, req);
       else await createTarget(req);
@@ -365,7 +373,7 @@ function TargetForm({ initial, onDone }: { initial?: Target; onDone: () => void 
       onDone();
     } catch (err) {
       setErrors(errorsFromProblem(err, TARGET_FIELD_PHRASES, "Failed to save the target"));
-      setSubmitting(false);
+      end();
     }
   }
 
@@ -406,7 +414,7 @@ function TargetForm({ initial, onDone }: { initial?: Target; onDone: () => void 
           {/* Only the WRITE is disabled. Cancel closes a form and touches
               nothing, so it stays live — a modal an operator cannot dismiss
               would be the mode holding the page hostage. */}
-          <Button type="submit" loading={submitting} disabled={writesDisabled}>
+          <Button type="submit" loading={submitting} {...guard}>
             {initial ? "Save target" : "Create target"}
           </Button>
           <Button type="button" variant="outline" onClick={onDone}>
@@ -420,7 +428,10 @@ function TargetForm({ initial, onDone }: { initial?: Target; onDone: () => void 
 
 function TargetRowActions({ target, onEdit }: { target: Target; onEdit: () => void }) {
   const qc = useQueryClient();
-  const writesDisabled = useWritesDisabled();
+  /* guard carries the DISABLED flag AND the reason for it — lib/timemachine's
+     useWriteGuard (QA round 2, finding #18; extended here in round 3). Spread it
+     onto the control, and compose any local condition AFTER the spread. */
+  const guard = useWriteGuard();
   const [confirming, setConfirming] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
@@ -444,7 +455,7 @@ function TargetRowActions({ target, onEdit }: { target: Target; onEdit: () => vo
   if (confirming) {
     return (
       <span className="flex items-center gap-2">
-        <Button size="sm" variant="outline" loading={busy} disabled={writesDisabled} onClick={handleDelete}>
+        <Button size="sm" variant="outline" loading={busy} {...guard} onClick={handleDelete}>
           Confirm delete {target.name}
         </Button>
         <Button size="sm" variant="ghost" onClick={() => setConfirming(false)}>
@@ -458,10 +469,10 @@ function TargetRowActions({ target, onEdit }: { target: Target; onEdit: () => vo
       {/* Edit opens a form whose only purpose is to submit a PUT, so it is
           disabled with the write it leads to rather than left to dead-end at a
           greyed Save. */}
-      <Button size="sm" variant="ghost" disabled={writesDisabled} onClick={onEdit}>
+      <Button size="sm" variant="ghost" {...guard} onClick={onEdit}>
         Edit {target.name}
       </Button>
-      <Button size="sm" variant="ghost" disabled={writesDisabled} onClick={() => setConfirming(true)}>
+      <Button size="sm" variant="ghost" {...guard} onClick={() => setConfirming(true)}>
         Delete {target.name}
       </Button>
       {error ? (
@@ -474,7 +485,10 @@ function TargetRowActions({ target, onEdit }: { target: Target; onEdit: () => vo
 }
 
 function TargetsTab({ canWrite }: { canWrite: boolean }) {
-  const writesDisabled = useWritesDisabled();
+  /* guard carries the DISABLED flag AND the reason for it — lib/timemachine's
+     useWriteGuard (QA round 2, finding #18; extended here in round 3). Spread it
+     onto the control, and compose any local condition AFTER the spread. */
+  const guard = useWriteGuard();
   const [editing, setEditing] = useState<{ mode: "none" } | { mode: "create" } | { mode: "edit"; target: Target }>({
     mode: "none",
   });
@@ -492,7 +506,7 @@ function TargetsTab({ canWrite }: { canWrite: boolean }) {
 
       {canWrite && editing.mode === "none" ? (
         <div>
-          <Button size="sm" disabled={writesDisabled} onClick={() => setEditing({ mode: "create" })}>
+          <Button size="sm" {...guard} onClick={() => setEditing({ mode: "create" })}>
             New target
           </Button>
         </div>
@@ -592,7 +606,11 @@ function DefinitionForm({
   onDone: () => void;
 }) {
   const qc = useQueryClient();
-  const writesDisabled = useWritesDisabled();
+  /* guard carries the DISABLED flag AND the reason for it — lib/timemachine's
+     useWriteGuard (QA round 2, finding #18; extended here in round 3). Spread it
+     onto the control, and compose any local condition AFTER the spread. */
+  const guard = useWriteGuard();
+  const writesDisabled = guard.disabled;
   const [name, setName] = useState(initial?.name ?? "");
   const [checkType, setCheckType] = useState<CheckType>(initial?.checkType ?? "tcp");
   const [sourceSelection, setSourceSelection] = useState<SourceSelection>(initial?.sourceSelection ?? "one-per-zone");
@@ -607,7 +625,10 @@ function DefinitionForm({
   const [paramsText, setParamsText] = useState(
     initial && Object.keys(initial.params).length > 0 ? JSON.stringify(initial.params, null, 2) : "",
   );
-  const [submitting, setSubmitting] = useState(false);
+  /* The in-flight guard, not just a disabled look (QA round 5, finding #17):
+     begin() is a REF write, so three clicks in one task produce one request.
+     hooks/use-submit-guard.ts says why a useState flag cannot do this. */
+  const { submitting, begin, end } = useSubmitGuard();
   const [errors, setErrors] = useState<FieldErrors<DefinitionField>>({});
   const [projection, setProjection] = useState<Projection>();
 
@@ -688,7 +709,28 @@ function DefinitionForm({
       setErrors({ params: params.message });
       return;
     }
-    setSubmitting(true);
+    /* The client mirror of store.validateAdhocAddress (QA round 4, finding
+       #13). This form is the one that PERSISTS an ad-hoc address, and until
+       the store learned to check it, "sdfsdfsdf !!" was accepted, written, and
+       then failed as a resolver refusal on every assigned agent, every
+       interval, forever — with nothing on this page ever saying so. The rule
+       is derived from what the agent's own checker accepts (lib/utils'
+       isValidAdhocAddress documents the derivation); the server remains the
+       arbiter, and this only puts the refusal at the field. */
+    if (
+      destinationKind === "adhoc" &&
+      destinationAddress.trim() !== "" &&
+      !isValidAdhocAddress(destinationAddress)
+    ) {
+      // An EMPTY address keeps its existing path: "adhoc requires a
+      // destination address" is the server's own message for a missing
+      // required field, and duplicating it here would give one condition two
+      // wordings. This branch is only about a value that IS there and cannot
+      // be dialled.
+      setErrors({ destinationAddress: ADHOC_ADDRESS_ERROR });
+      return;
+    }
+    if (!begin()) return;
     try {
       if (initial) await updateCheck(initial.id, draft);
       else await createCheck(draft);
@@ -696,7 +738,7 @@ function DefinitionForm({
       onDone();
     } catch (err) {
       setErrors(errorsFromProblem(err, DEFINITION_FIELD_PHRASES, "Failed to save the definition"));
-      setSubmitting(false);
+      end();
     }
   }
 
@@ -745,14 +787,29 @@ function DefinitionForm({
               placeholder="10.0.0.1"
             />
           ) : null}
-          <SelectField
-            label="Plane"
-            value="pod"
-            onChange={() => {}}
-            disabled
-            options={[{ value: "pod", label: "pod" }]}
-            error={errors.plane}
-          />
+          {/* Plane is STATIC TEXT, not a disabled one-option select (QA round
+              5, finding #16). A select is a promise of a choice, and a greyed
+              one with a single option promises a choice that is coming — it is
+              not. M4 fixed the plane to "pod": the agents run in the pod
+              network and there is no second plane to probe from, so the value
+              is a fact about this console, not a preference. A field that
+              cannot vary should read as a value, and the title says WHY rather
+              than leaving an operator to guess whether they lack a permission. */}
+          <div className="flex flex-col gap-1 text-[13px]">
+            <span className="text-muted-foreground">Plane</span>
+            <span
+              data-testid="definition-plane"
+              title="Definitions probe from the pod network. M4 ships no second plane, so this is fixed rather than chosen."
+              className="flex h-9 items-center text-[13px]"
+            >
+              pod
+            </span>
+            {errors.plane ? (
+              <span role="alert" className="text-xs leading-relaxed text-health-bad">
+                {errors.plane}
+              </span>
+            ) : null}
+          </div>
         </div>
 
         <TextField
@@ -769,7 +826,7 @@ function DefinitionForm({
             type="checkbox"
             checked={enabled}
             onChange={(e) => setEnabled(e.target.checked)}
-            className="size-4 rounded border-border-strong"
+            className={CHECKBOX_CLASS}
           />
           Enabled
         </label>
@@ -794,7 +851,7 @@ function DefinitionForm({
         ) : null}
 
         <div className="flex gap-2">
-          <Button type="submit" loading={submitting} disabled={blocked || writesDisabled}>
+          <Button type="submit" loading={submitting} {...guard} disabled={blocked || writesDisabled}>
             {initial ? "Save definition" : "Create definition"}
           </Button>
           <Button type="button" variant="outline" onClick={onDone}>
@@ -808,7 +865,10 @@ function DefinitionForm({
 
 function DefinitionRowActions({ definition, onEdit }: { definition: CheckDefinition; onEdit: () => void }) {
   const qc = useQueryClient();
-  const writesDisabled = useWritesDisabled();
+  /* guard carries the DISABLED flag AND the reason for it — lib/timemachine's
+     useWriteGuard (QA round 2, finding #18; extended here in round 3). Spread it
+     onto the control, and compose any local condition AFTER the spread. */
+  const guard = useWriteGuard();
   const [confirming, setConfirming] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
@@ -829,7 +889,7 @@ function DefinitionRowActions({ definition, onEdit }: { definition: CheckDefinit
   if (confirming) {
     return (
       <span className="flex items-center gap-2">
-        <Button size="sm" variant="outline" loading={busy} disabled={writesDisabled} onClick={handleDelete}>
+        <Button size="sm" variant="outline" loading={busy} {...guard} onClick={handleDelete}>
           Confirm delete {definition.name}
         </Button>
         <Button size="sm" variant="ghost" onClick={() => setConfirming(false)}>
@@ -840,10 +900,10 @@ function DefinitionRowActions({ definition, onEdit }: { definition: CheckDefinit
   }
   return (
     <span className="flex items-center gap-2">
-      <Button size="sm" variant="ghost" disabled={writesDisabled} onClick={onEdit}>
+      <Button size="sm" variant="ghost" {...guard} onClick={onEdit}>
         Edit {definition.name}
       </Button>
-      <Button size="sm" variant="ghost" disabled={writesDisabled} onClick={() => setConfirming(true)}>
+      <Button size="sm" variant="ghost" {...guard} onClick={() => setConfirming(true)}>
         Delete {definition.name}
       </Button>
       {error ? (
@@ -869,7 +929,10 @@ function destinationLabel(d: CheckDefinition, targets: Target[]): string {
 }
 
 function DefinitionsTab({ canRead, canWrite }: { canRead: boolean; canWrite: boolean }) {
-  const writesDisabled = useWritesDisabled();
+  /* guard carries the DISABLED flag AND the reason for it — lib/timemachine's
+     useWriteGuard (QA round 2, finding #18; extended here in round 3). Spread it
+     onto the control, and compose any local condition AFTER the spread. */
+  const guard = useWriteGuard();
   const [editing, setEditing] = useState<
     { mode: "none" } | { mode: "create" } | { mode: "edit"; definition: CheckDefinition }
   >({ mode: "none" });
@@ -901,7 +964,7 @@ function DefinitionsTab({ canRead, canWrite }: { canRead: boolean; canWrite: boo
 
       {canWrite && editing.mode === "none" ? (
         <div>
-          <Button size="sm" disabled={writesDisabled} onClick={() => setEditing({ mode: "create" })}>
+          <Button size="sm" {...guard} onClick={() => setEditing({ mode: "create" })}>
             New definition
           </Button>
         </div>
@@ -1014,9 +1077,15 @@ export function scheduleRequestFrom(s: Schedule, enabled: boolean): ScheduleRequ
  *  is advisory text, not a client-side gate. */
 const MIN_INTERVAL_SECONDS = 10;
 
-/** toIsoOrNull turns a datetime-local value ("2026-08-08T10:00", local time)
- *  into the RFC 3339 instant the API takes; null for anything unparseable, so
- *  the form reports it instead of posting "Invalid Date". */
+/** localDateTimeToIso turns a local wall-clock string ("2026-08-08T10:00") into
+ *  the RFC 3339 instant the API takes; null for anything unparseable, so the
+ *  form reports it instead of posting "Invalid Date".
+ *
+ *  The form no longer feeds it from an `<input type="datetime-local">` — the
+ *  DateTimePicker below hands over a Date directly (QA round 3, finding #12) —
+ *  but it stays exported and tested: it is the exact conversion a permalink or
+ *  an imported bundle would need, and its rule (unparseable → null, never
+ *  Invalid Date on the wire) is the one worth keeping pinned. */
 export function localDateTimeToIso(value: string): string | null {
   if (value === "") return null;
   const d = new Date(value);
@@ -1040,13 +1109,23 @@ export function localDateTimeToIso(value: string): string | null {
  */
 function ScheduleForm({ definitions, onDone }: { definitions: CheckDefinition[]; onDone: () => void }) {
   const qc = useQueryClient();
-  const writesDisabled = useWritesDisabled();
+  /* guard carries the DISABLED flag AND the reason for it — lib/timemachine's
+     useWriteGuard (QA round 2, finding #18; extended here in round 3). Spread it
+     onto the control, and compose any local condition AFTER the spread. */
+  const guard = useWriteGuard();
   const [definitionId, setDefinitionId] = useState(definitions[0]?.id ?? "");
   const [kind, setKind] = useState<ScheduleKind>("interval");
   const [intervalSeconds, setIntervalSeconds] = useState("60");
-  const [runAtLocal, setRunAtLocal] = useState("");
+  /* null, not a Date: "no moment chosen yet" is a real state of this field and
+     the server refuses a `once` schedule without one. A picker seeded with now
+     would offer an instant that is already in the past by the time it is
+     submitted. */
+  const [runAt, setRunAt] = useState<Date | null>(null);
   const [enabled, setEnabled] = useState(true);
-  const [submitting, setSubmitting] = useState(false);
+  /* The in-flight guard, not just a disabled look (QA round 5, finding #17):
+     begin() is a REF write, so three clicks in one task produce one request.
+     hooks/use-submit-guard.ts says why a useState flag cannot do this. */
+  const { submitting, begin, end } = useSubmitGuard();
   const [errors, setErrors] = useState<FieldErrors<ScheduleField>>({});
 
   async function handleSubmit(e: FormEvent) {
@@ -1063,22 +1142,21 @@ function ScheduleForm({ definitions, onDone }: { definitions: CheckDefinition[];
       req.intervalNs = Math.round(seconds * 1_000_000_000);
     }
     if (kind === "once") {
-      const iso = localDateTimeToIso(runAtLocal);
-      if (iso === null) {
+      if (runAt === null) {
         setErrors({ runAt: "kind once requires a run at time" });
         return;
       }
-      req.runAt = iso;
+      req.runAt = runAt.toISOString();
     }
 
-    setSubmitting(true);
+    if (!begin()) return;
     try {
       await createSchedule(req);
       await qc.invalidateQueries({ queryKey: ["schedules"] });
       onDone();
     } catch (err) {
       setErrors(errorsFromProblem(err, SCHEDULE_FIELD_PHRASES, "Failed to save the schedule"));
-      setSubmitting(false);
+      end();
     }
   }
 
@@ -1115,17 +1193,47 @@ function ScheduleForm({ definitions, onDone }: { definitions: CheckDefinition[];
           ) : null}
           {kind === "once" ? (
             <div className="flex flex-col gap-1 text-[13px]">
-              <label htmlFor="schedule-run-at" className="text-muted-foreground">
-                Run at
-              </label>
-              <input
-                id="schedule-run-at"
-                type="datetime-local"
-                value={runAtLocal}
-                aria-invalid={errors.runAt ? true : undefined}
-                onChange={(e) => setRunAtLocal(e.target.value)}
-                className={fieldClasses(!!errors.runAt)}
-              />
+              <span className="text-muted-foreground">Run at</span>
+              {/* The M5 DateTimePicker, not a raw <input type="datetime-local">
+                  (QA round 3, finding #12) — the LAST one in web/src, and the
+                  reason the whole console now asks for an instant exactly one
+                  way. The native spinner is miserable to aim at a date weeks
+                  out, which is precisely what a one-off schedule is for, and it
+                  clipped to unusability inside a narrow column.
+
+                  allowFuture, and this is the one field where that is not a
+                  preference: httpapi refuses a `once` schedule whose runAt is
+                  not in the FUTURE, so the past-clamp the picker defaults to
+                  would make every legal value unreachable. It is the same
+                  exception maintenance windows take, for the same reason —
+                  this is a declaration, not a record.
+
+                  disablePast is the OTHER half of that same rule, and it was
+                  missing (QA round 5, finding #12): allowFuture only lifts the
+                  ceiling, so the picker still offered ten years of past days,
+                  every one of which the server answers with "kind once
+                  requires a run at time in the future". A control must not
+                  offer what the thing behind it refuses. Maintenance windows
+                  do NOT set it — a window is often recorded after the fact —
+                  and the Time Machine picker sets neither flag. */}
+              <div className="flex items-center gap-1">
+                <DateTimePicker
+                  aria-label="Run at"
+                  aria-invalid={!!errors.runAt}
+                  value={runAt}
+                  label={runAt === null ? "Not set" : undefined}
+                  allowFuture
+                  disablePast
+                  onApply={setRunAt}
+                />
+                {/* A field the server requires is still one an operator must be
+                    able to un-set while they change their mind about the kind. */}
+                {runAt !== null ? (
+                  <Button type="button" size="sm" variant="ghost" aria-label="Clear run at" onClick={() => setRunAt(null)}>
+                    Clear
+                  </Button>
+                ) : null}
+              </div>
               {errors.runAt ? (
                 <span role="alert" className="text-xs leading-relaxed text-health-bad">
                   {errors.runAt}
@@ -1150,7 +1258,7 @@ function ScheduleForm({ definitions, onDone }: { definitions: CheckDefinition[];
             type="checkbox"
             checked={enabled}
             onChange={(e) => setEnabled(e.target.checked)}
-            className="size-4 rounded border-border-strong"
+            className={CHECKBOX_CLASS}
           />
           Enabled
         </label>
@@ -1162,7 +1270,7 @@ function ScheduleForm({ definitions, onDone }: { definitions: CheckDefinition[];
         ) : null}
 
         <div className="flex gap-2">
-          <Button type="submit" loading={submitting} disabled={writesDisabled}>
+          <Button type="submit" loading={submitting} {...guard}>
             Create schedule
           </Button>
           <Button type="button" variant="outline" onClick={onDone}>
@@ -1181,7 +1289,10 @@ function ScheduleForm({ definitions, onDone }: { definitions: CheckDefinition[];
  *  the honest answer and renders right here rather than being pre-empted. */
 function ScheduleRowActions({ schedule, label }: { schedule: Schedule; label: string }) {
   const qc = useQueryClient();
-  const writesDisabled = useWritesDisabled();
+  /* guard carries the DISABLED flag AND the reason for it — lib/timemachine's
+     useWriteGuard (QA round 2, finding #18; extended here in round 3). Spread it
+     onto the control, and compose any local condition AFTER the spread. */
+  const guard = useWriteGuard();
   const [confirming, setConfirming] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
@@ -1206,7 +1317,7 @@ function ScheduleRowActions({ schedule, label }: { schedule: Schedule; label: st
           size="sm"
           variant="outline"
           loading={busy}
-          disabled={writesDisabled}
+          {...guard}
           onClick={() => run(() => deleteSchedule(schedule.id), "Failed to delete the schedule")}
         >
           Confirm delete {label}
@@ -1223,7 +1334,7 @@ function ScheduleRowActions({ schedule, label }: { schedule: Schedule; label: st
         size="sm"
         variant="ghost"
         loading={busy}
-        disabled={writesDisabled}
+        {...guard}
         onClick={() =>
           run(
             () => updateSchedule(schedule.id, scheduleRequestFrom(schedule, !schedule.enabled)),
@@ -1233,7 +1344,7 @@ function ScheduleRowActions({ schedule, label }: { schedule: Schedule; label: st
       >
         {schedule.enabled ? "Disable" : "Enable"} {label}
       </Button>
-      <Button size="sm" variant="ghost" disabled={writesDisabled} onClick={() => setConfirming(true)}>
+      <Button size="sm" variant="ghost" {...guard} onClick={() => setConfirming(true)}>
         Delete {label}
       </Button>
       {error ? (
@@ -1257,7 +1368,10 @@ function ScheduleRowActions({ schedule, label }: { schedule: Schedule; label: st
  * the write affordances ABSENT rather than disabled (PAGES.md:126-129).
  */
 function SchedulesTab({ canRead, canWrite }: { canRead: boolean; canWrite: boolean }) {
-  const writesDisabled = useWritesDisabled();
+  /* guard carries the DISABLED flag AND the reason for it — lib/timemachine's
+     useWriteGuard (QA round 2, finding #18; extended here in round 3). Spread it
+     onto the control, and compose any local condition AFTER the spread. */
+  const guard = useWriteGuard();
   const [creating, setCreating] = useState(false);
   const query = useQuery({ queryKey: ["schedules"], queryFn: () => listSchedules(), enabled: canRead });
   // Named, not numbered: a schedule row that shows only a definition UUID
@@ -1291,7 +1405,7 @@ function SchedulesTab({ canRead, canWrite }: { canRead: boolean; canWrite: boole
 
       {canWrite && !creating ? (
         <div>
-          <Button size="sm" disabled={writesDisabled} onClick={() => setCreating(true)}>
+          <Button size="sm" {...guard} onClick={() => setCreating(true)}>
             New schedule
           </Button>
         </div>
@@ -1314,12 +1428,18 @@ function SchedulesTab({ canRead, canWrite }: { canRead: boolean; canWrite: boole
             <ul aria-label="Schedules" className="mt-4 divide-y divide-border">
               {schedules.map((s) => {
                 const label = names.get(s.definitionId) ?? s.definitionId;
+                /* A schedule ALWAYS advances its cadence, fired or not — so
+                   before finding #5 a schedule whose definition pointed at a
+                   deleted target looked exactly like a healthy one: enabled, a
+                   fresh "last", a "next" a minute out. The pill carries the
+                   state and the line carries the reason. */
+                const failing = s.enabled && s.lastError !== "";
                 return (
                   <li key={s.id} className="flex flex-wrap items-center gap-3 py-3 text-sm">
                     <span className="font-medium">{label}</span>
                     <Badge variant="neutral">{s.kind}</Badge>
                     <span className="text-xs text-muted-foreground">{cadence(s)}</span>
-                    <Badge variant={s.enabled ? "ok" : "neutral"} dot>
+                    <Badge variant={!s.enabled ? "neutral" : failing ? "warn" : "ok"} dot>
                       {s.enabled ? "enabled" : "disabled"}
                     </Badge>
                     {/* nextFireAt is null for a continuous schedule (the loop
@@ -1329,6 +1449,20 @@ function SchedulesTab({ canRead, canWrite }: { canRead: boolean; canWrite: boole
                     <span className="ml-auto text-xs text-muted-foreground">next {fmtTime(s.nextFireAt)}</span>
                     <span className="text-xs text-muted-foreground">last {fmtTime(s.lastFiredAt)}</span>
                     {canWrite ? <ScheduleRowActions schedule={s} label={label} /> : null}
+                    {failing ? (
+                      /* Full width (basis-full) under the row rather than
+                         inline: the server's own message is a sentence, and
+                         squeezing it between two pills would truncate the
+                         actionable half. Verbatim — this console does not
+                         paraphrase what the scheduler recorded. */
+                      <p
+                        data-testid="schedule-failure"
+                        className="basis-full text-xs leading-relaxed text-health-bad"
+                        title={s.lastErrorAt ? `Recorded ${fmtTime(s.lastErrorAt)}` : undefined}
+                      >
+                        failing: {s.lastError}
+                      </p>
+                    ) : null}
                   </li>
                 );
               })}

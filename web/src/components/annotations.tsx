@@ -1,11 +1,19 @@
-import { useCallback, useMemo, useState, type FormEvent } from "react";
+import { useCallback, useMemo, useRef, useState, type FormEvent } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
+import { DateTimePicker } from "@/components/ui/datetime-picker";
 import { useAuth } from "@/hooks/use-auth";
+import { useSubmitGuard } from "@/hooks/use-submit-guard";
 import { ApiError, createAnnotation, deleteAnnotation, listAnnotations } from "@/lib/api";
-import { ANNOTATION_TEXT_MAX, GLOBAL_SCOPE, mergeAnnotations } from "@/lib/annotations";
-import { useTimeContext, useWritesDisabled } from "@/lib/timemachine";
+import {
+  ANNOTATION_TEXT_MAX,
+  GLOBAL_SCOPE,
+  mergeAnnotations,
+  outsideWindowNote,
+  type FrozenWindow,
+} from "@/lib/annotations";
+import { useTimeContext, useWriteGuard } from "@/lib/timemachine";
 import type { Annotation } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
@@ -106,19 +114,40 @@ export function useAnnotations(scope: string, rangeSeconds: number): Annotations
   };
 }
 
-/** toLocalInputValue renders an instant for <input type="datetime-local">,
- *  which speaks LOCAL wall-clock time with no zone at all. Building it by hand
- *  rather than slicing toISOString(), which would silently show UTC and file
- *  every mark at the wrong hour outside UTC. */
-export function toLocalInputValue(d: Date): string {
-  const pad = (n: number) => String(n).padStart(2, "0");
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+/* toLocalInputValue lived here to feed `<input type="datetime-local">`. Both
+   annotate forms now use the M5 DateTimePicker (QA round 2, finding #13), so
+   the string round-trip — and the timezone trap it existed to avoid — is gone
+   with it: the picker speaks Dates. */
+
+/** floorToMinute drops the seconds the DateTimePicker cannot express, so the
+ *  form never posts an instant the operator could not reproduce by re-opening
+ *  it. Same rule maintenance.tsx's create form applies. */
+function floorToMinute(d: Date): Date {
+  const out = new Date(d);
+  out.setSeconds(0, 0);
+  return out;
 }
 
-/** fmtStamp is the marker list's time column: date + minute, local. */
+/** fmtStamp is the full local stamp — the row's `title`, and its fallback for
+ *  a timestamp that will not parse. */
 function fmtStamp(iso: string): string {
   const d = new Date(iso);
   return Number.isNaN(d.getTime()) ? iso : d.toLocaleString();
+}
+
+/**
+ * fmtStampCompact is the row's VISIBLE time column (QA round 2, finding #11).
+ *
+ * A full toLocaleString needs about 11rem; the column was 10rem and never
+ * shrank, so on the node card's 20rem rail it ate the note. Month-day-time is
+ * the shortest form that stays unambiguous over the 24 hours these lists span
+ * — the seconds and the year are what the note needed the room for — and the
+ * whole stamp stays one hover away on `title`.
+ */
+function fmtStampCompact(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  return d.toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
 }
 
 function Field({
@@ -139,9 +168,6 @@ function Field({
   );
 }
 
-const INPUT_CLASS =
-  "h-8 rounded-md bg-surface-2 px-2 text-sm text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring";
-
 /**
  * CreateAnnotationForm is the popover the "＋ annotate" button opens.
  *
@@ -151,78 +177,133 @@ const INPUT_CLASS =
  * here and appear somewhere they never visit. A note belongs to the thing you
  * were reading when you wrote it.
  *
+ * BOTH EDGES GO THROUGH THE DateTimePicker (QA round 2, finding #13). The raw
+ * `<input type="datetime-local">` this form used was the control the M5 picker
+ * was built to replace, and keeping it here meant the console asked for an
+ * instant two different ways depending on which form you opened — and the raw
+ * one clipped to unusability inside the node card's 20rem rail (finding #12).
+ *
+ * NEITHER edge allows a future instant. An annotation is a record of something
+ * that HAPPENED — "rolled the gateway", not "will roll the gateway" — and a
+ * mark drawn on a chart at a time no data exists for yet is a mark nobody can
+ * check. The API itself does not care (store.AnnotationInput.Validate enforces
+ * only a non-empty ≤1024-byte text and end-not-before-start, no future bound),
+ * so this is a product rule and it is stated here rather than assumed:
+ * maintenance windows, which ARE declared in advance, keep allowFuture.
+ *
  * The start defaults to NOW rather than to a clicked point on the chart:
  * ECharts click plumbing is not wired in this milestone (see the task report),
- * and a default an operator can see and correct in a plain datetime field beats
- * one derived from a pixel.
+ * and a default an operator can see and correct beats one derived from a pixel.
  */
-function CreateAnnotationForm({ scope, onDone, onCancel }: { scope: string; onDone: () => void; onCancel: () => void }) {
-  const [start, setStart] = useState(() => toLocalInputValue(new Date()));
-  const [end, setEnd] = useState("");
+function CreateAnnotationForm({
+  scope,
+  onDone,
+  onCancel,
+}: {
+  scope: string;
+  /** Called with the instants that were STORED, so the bar can say whether they
+   *  land in the window it is showing (QA round 3, finding #8). */
+  onDone: (created: { start: Date; end: Date | null }) => void;
+  onCancel: () => void;
+}) {
+  const [start, setStart] = useState(() => floorToMinute(new Date()));
+  /* null, not a Date: absence is the whole meaning of an INSTANT mark, and a
+     picker seeded with "now" would make every note a span by default. */
+  const [end, setEnd] = useState<Date | null>(null);
   const [text, setText] = useState("");
-  const [submitting, setSubmitting] = useState(false);
+  /* The in-flight guard, not just a disabled look (QA round 5, finding #17):
+     begin() is a REF write, so three clicks in one task produce one request.
+     hooks/use-submit-guard.ts says why a useState flag cannot do this. */
+  const { submitting, begin, end: endSubmit } = useSubmitGuard();
   const [error, setError] = useState<string>();
+  const formRef = useRef<HTMLFormElement>(null);
+
+  /* Focus goes to the field that is wrong (QA round 2, finding #20). Located
+     by aria-label inside this form: the note is a plain textarea and the two
+     edges are DateTimePicker triggers, which forward no ref — one lookup that
+     works for all three beats three different plumbings. */
+  function focusField(label: string) {
+    formRef.current?.querySelector<HTMLElement>(`[aria-label="${label}"]`)?.focus();
+  }
 
   async function handleSubmit(e: FormEvent) {
     e.preventDefault();
     const note = text.trim();
     if (note === "") {
       setError("A note is required.");
+      focusField("Note");
       return;
     }
-    const startAt = new Date(start);
-    if (Number.isNaN(startAt.getTime())) {
-      setError("Start is not a valid time.");
-      return;
-    }
-    const endAt = end === "" ? undefined : new Date(end);
-    if (endAt && Number.isNaN(endAt.getTime())) {
-      setError("End is not a valid time.");
+    /* The end-before-start test MIRRORS the store's own rule
+       (store.AnnotationInput.Validate: `EndAt.Before(StartAt)` — equal is
+       legal). It is not a substitute for it: the server still answers 422 and
+       that answer still lands verbatim below. It exists so the common mistake
+       costs a sentence in the reader's own timezone instead of a round trip
+       that comes back naming UTC instants and a field path (finding #17). */
+    if (end !== null && end.getTime() < start.getTime()) {
+      setError("End is before start.");
+      focusField("End");
       return;
     }
     setError(undefined);
-    setSubmitting(true);
+    if (!begin()) return;
     try {
       // endAt is OMITTED, never sent empty: its absence is what makes this an
       // instant mark rather than a zero-length span (lib/annotations.ts's
       // isInstant reads exactly this).
       await createAnnotation({
-        startAt: startAt.toISOString(),
-        ...(endAt ? { endAt: endAt.toISOString() } : {}),
+        startAt: start.toISOString(),
+        ...(end ? { endAt: end.toISOString() } : {}),
         scope,
         text: note,
       });
-      onDone();
+      onDone({ start, end });
     } catch (err) {
       setError(err instanceof ApiError ? (err.problem.detail || err.problem.title) : "Failed to create the annotation");
-      setSubmitting(false);
+      endSubmit();
     }
   }
 
   return (
     <Card asChild className="p-4">
-      <form role="dialog" aria-label="New annotation" onSubmit={handleSubmit} className="flex flex-col gap-3">
+      {/* role="form", not role="dialog" (QA round 3, finding #15). This is a
+          DISCLOSURE: the page behind it stays live and interactive, focus is
+          not trapped, and Escape does not dismiss it — none of which is what a
+          dialog role promises a screen-reader user. Escape-to-discard is
+          deliberately absent rather than missing: the form holds a typed draft
+          somebody is mid-way through, and a single stray keypress that threw it
+          away with no undo is exactly the mis-aimed-gesture problem the
+          confirm-delete idiom exists to prevent. Cancel is the way out, and it
+          is one Tab away. */}
+      <form ref={formRef} role="form" aria-label="New annotation" onSubmit={handleSubmit} className="flex flex-col gap-3">
         <p className="text-xs text-muted-foreground">
           Scope <span className="font-medium text-foreground">{scopeLabel(scope)}</span> — fixed to this view.
         </p>
-        <div className="grid gap-3 sm:grid-cols-2">
+        {/* flex-wrap, not `sm:grid-cols-2`: `sm:` is a VIEWPORT breakpoint, so
+            on a desktop the two columns were forced even inside the node
+            card's 20rem rail, where each got ~150px and the control clipped
+            (finding #12). Wrapping is driven by the actual width available.
+            Same shape maintenance.tsx's form already uses. */}
+        <div className="flex flex-wrap items-start gap-3">
           <Field label="Start">
-            <input
-              type="datetime-local"
-              aria-label="Start"
-              value={start}
-              onChange={(e) => setStart(e.target.value)}
-              className={INPUT_CLASS}
-            />
+            <DateTimePicker aria-label="Start" value={start} onApply={(d) => setStart(floorToMinute(d))} />
           </Field>
-          <Field label="End (optional)" hint="Leave empty for a mark at a single moment.">
-            <input
-              type="datetime-local"
-              aria-label="End"
-              value={end}
-              onChange={(e) => setEnd(e.target.value)}
-              className={INPUT_CLASS}
-            />
+          <Field label="End (optional)" hint="Leave unset for a mark at a single moment.">
+            <div className="flex items-center gap-1">
+              <DateTimePicker
+                aria-label="End"
+                value={end}
+                label={end === null ? "Not set" : undefined}
+                onApply={(d) => setEnd(floorToMinute(d))}
+              />
+              {/* The picker can set an instant but not unset one, and an
+                  optional field that cannot be emptied is not optional. */}
+              {end !== null ? (
+                <Button type="button" size="sm" variant="ghost" aria-label="Clear end" onClick={() => setEnd(null)}>
+                  Clear
+                </Button>
+              ) : null}
+            </div>
           </Field>
         </div>
         <Field label="Note" hint={`${text.length}/${ANNOTATION_TEXT_MAX}`}>
@@ -257,9 +338,16 @@ function CreateAnnotationForm({ scope, onDone, onCancel }: { scope: string; onDo
 }
 
 function AnnotationRow({ annotation, canWrite, onChanged }: { annotation: Annotation; canWrite: boolean; onChanged: () => void }) {
-  const writesDisabled = useWritesDisabled();
+  const guard = useWriteGuard();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
+  /* Second-click confirm, the exact idiom pages/alerting.tsx's rule rows use
+     (QA round 2, finding #14). A single click used to destroy a note with no
+     undo anywhere in this console — and the button sits at the end of a dense
+     row, right where a mis-aimed click lands. Not a modal: the row already
+     owns the space for a second control, and a dialog for one line of text is
+     more ceremony than the act deserves. */
+  const [confirming, setConfirming] = useState(false);
 
   async function handleDelete() {
     setBusy(true);
@@ -270,36 +358,72 @@ function AnnotationRow({ annotation, canWrite, onChanged }: { annotation: Annota
     } catch (err) {
       setError(err instanceof ApiError ? (err.problem.detail || err.problem.title) : "Failed to delete");
       setBusy(false);
+      setConfirming(false);
     }
   }
 
   return (
     <li data-testid="annotation-item" className="flex flex-wrap items-center gap-2 py-1.5 text-xs">
-      <span className="nums w-40 shrink-0 text-muted-foreground">{fmtStamp(annotation.startAt)}</span>
-      <span className="min-w-0 flex-1 truncate" title={annotation.text}>
+      {/* Narrow, truncating and allowed to shrink — the note is what this row
+          is for, and the stamp was taking a quarter of a 20rem rail for a year
+          and a seconds field nobody reads here (finding #11). */}
+      <span className="nums w-28 shrink-0 truncate text-muted-foreground" title={fmtStamp(annotation.startAt)}>
+        {fmtStampCompact(annotation.startAt)}
+      </span>
+      <span data-testid="annotation-text" className="min-w-0 flex-1 truncate" title={annotation.text}>
         {annotation.text}
       </span>
-      <span className="shrink-0 text-[11px] text-muted-foreground">{scopeLabel(annotation.scope)}</span>
+      {/* The scope column now truncates too (QA round 3, finding #11). Round 2
+          gave the stamp a w-28 cap, but the scope kept its natural width, and a
+          pair scope ("node-a→node-b") is wider than the stamp: inside the
+          Investigate page's 24rem right column the note — the one thing this
+          row exists to show — was squeezed to about 38px. A scope the reader
+          already chose is the cheapest thing on the row to shorten, and the
+          whole value stays one hover away. */}
+      <span
+        className="max-w-[7rem] shrink-0 truncate text-[11px] text-muted-foreground"
+        title={scopeLabel(annotation.scope)}
+      >
+        {scopeLabel(annotation.scope)}
+      </span>
       {error ? (
         <span role="alert" className="text-[11px] text-health-bad">
           {error}
         </span>
       ) : null}
       {/* Permission decides whether this EXISTS; time decides whether it is
-          usable — lib/timemachine.tsx's useWritesDisabled documents the split,
-          and this is the composition it prescribes. */}
+          usable — lib/timemachine.tsx's useWriteGuard documents the split, and
+          this is the composition it prescribes. */}
       {canWrite ? (
-        <Button
-          type="button"
-          size="sm"
-          variant="ghost"
-          loading={busy}
-          disabled={writesDisabled}
-          aria-label={`Delete annotation: ${annotation.text}`}
-          onClick={() => void handleDelete()}
-        >
-          Delete
-        </Button>
+        confirming ? (
+          <>
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              loading={busy}
+              {...guard}
+              aria-label={`Confirm delete annotation: ${annotation.text}`}
+              onClick={() => void handleDelete()}
+            >
+              Confirm delete
+            </Button>
+            <Button type="button" size="sm" variant="ghost" onClick={() => setConfirming(false)}>
+              Cancel
+            </Button>
+          </>
+        ) : (
+          <Button
+            type="button"
+            size="sm"
+            variant="ghost"
+            {...guard}
+            aria-label={`Delete annotation: ${annotation.text}`}
+            onClick={() => setConfirming(true)}
+          >
+            Delete
+          </Button>
+        )
       ) : null}
     </li>
   );
@@ -320,21 +444,44 @@ function AnnotationRow({ annotation, canWrite, onChanged }: { annotation: Annota
  */
 export function AnnotationBar({
   scope,
+  scopeCaption,
   annotations,
   error,
   onChanged,
+  frozenWindow,
   className,
 }: {
   scope: string;
+  /** What the count sentence CALLS the scope, when that differs from the value
+   *  notes are filed under (QA round 3, finding #7): the Investigate page's
+   *  wide scopes query every scope unfiltered while still filing new notes
+   *  globally, so "scope global" was naming the one value it was not filtering
+   *  by. Defaults to `scope`, which is the truth everywhere else. */
+  scopeCaption?: string;
   annotations: Annotation[];
   error?: Error | null;
   onChanged: () => void;
+  /** The FROZEN range this bar is listing, when it has one (Investigate).
+   *  Enables the out-of-window note after a create — see outsideWindowNote. */
+  frozenWindow?: FrozenWindow;
   className?: string;
 }) {
   const { can } = useAuth();
-  const writesDisabled = useWritesDisabled();
+  const guard = useWriteGuard();
   const canWrite = can("annotations:write");
   const [open, setOpen] = useState(false);
+  const [createdNote, setCreatedNote] = useState<string>();
+  const triggerRef = useRef<HTMLButtonElement>(null);
+
+  /* Where focus goes when the form closes (QA round 2, finding #20). The form
+     is unmounted by then, so without this the browser drops focus on <body>
+     and a keyboard user restarts their tab walk at the top of the page. It
+     returns to the control that opened the form — the standard disclosure
+     contract, and the same one the DateTimePicker's own Cancel/Escape keeps. */
+  const closeAndRefocus = () => {
+    setOpen(false);
+    triggerRef.current?.focus();
+  };
 
   return (
     <div data-testid="annotation-bar" className={cn("mt-3 flex flex-col gap-2", className)}>
@@ -342,17 +489,18 @@ export function AnnotationBar({
         <span className="text-xs text-muted-foreground">
           {error
             ? "Annotations are unavailable."
-            : `${annotations.length} annotation${annotations.length === 1 ? "" : "s"} in this window · scope ${scopeLabel(scope)}`}
+            : `${annotations.length} annotation${annotations.length === 1 ? "" : "s"} in this window · scope ${scopeCaption ?? scopeLabel(scope)}`}
         </span>
         {/* HIDE on permission, DISABLE on time. Never the other way round:
             hiding it while engaged would read as "you lost the permission". */}
         {canWrite ? (
           <Button
+            ref={triggerRef}
             type="button"
             size="sm"
             variant="outline"
             className="ml-auto"
-            disabled={writesDisabled}
+            {...guard}
             aria-expanded={open}
             onClick={() => setOpen((o) => !o)}
           >
@@ -364,12 +512,22 @@ export function AnnotationBar({
       {open ? (
         <CreateAnnotationForm
           scope={scope}
-          onDone={() => {
-            setOpen(false);
+          onDone={({ start, end }) => {
+            closeAndRefocus();
             onChanged();
+            /* Normal in-window creates stay SILENT — the row appearing in the
+               list below is the feedback, and a note on every success would be
+               noise (QA round 3, finding #8). */
+            setCreatedNote(outsideWindowNote(start, end, frozenWindow) ?? undefined);
           }}
-          onCancel={() => setOpen(false)}
+          onCancel={closeAndRefocus}
         />
+      ) : null}
+
+      {createdNote ? (
+        <p role="status" className="text-[11px] leading-relaxed text-muted-foreground">
+          {createdNote}
+        </p>
       ) : null}
 
       {annotations.length > 0 ? (

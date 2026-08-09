@@ -8,6 +8,7 @@ import {
   buildRegistry,
   GROUP_ORDER,
   isCommandDisabled,
+  PALETTE_OPEN_EVENT,
   searchCommands,
   type Command,
   type CommandContext,
@@ -78,6 +79,8 @@ export function CommandPalette() {
   const [activeIndex, setActiveIndex] = React.useState(0);
   const inputRef = React.useRef<HTMLInputElement>(null);
   const listRef = React.useRef<HTMLDivElement>(null);
+  /* The dialog itself, so the Tab trap can ask what is focusable inside it. */
+  const panelRef = React.useRef<HTMLDivElement>(null);
   /* Where focus was when the palette opened, so Escape can put it back. */
   const restoreRef = React.useRef<HTMLElement | null>(null);
 
@@ -145,6 +148,23 @@ export function CommandPalette() {
     restoreRef.current = null;
   }, []);
 
+  /* toggle is what BOTH entry points end in, so the hotkey and the explicit
+     PALETTE_OPEN_EVENT can never drift on what "opening" means (focus
+     restore, a cleared query, the highlight back at the top). */
+  const togglePalette = React.useCallback(
+    (from: Element | null) => {
+      if (open) {
+        close(true);
+        return;
+      }
+      restoreRef.current = from instanceof HTMLElement ? from : null;
+      setQuery("");
+      setActiveIndex(0);
+      setOpen(true);
+    },
+    [open, close],
+  );
+
   /* The global hotkey. The guard is the standard one: a hotkey must not steal
      a keystroke from a field the user is typing in — with the palette's OWN
      input as the deliberate exception, so ⌘K closes what ⌘K opened. */
@@ -155,18 +175,22 @@ export function CommandPalette() {
       const el = document.activeElement;
       if (isTextEntry(el) && el !== inputRef.current) return;
       e.preventDefault();
-      if (open) {
-        close(true);
-        return;
-      }
-      restoreRef.current = el instanceof HTMLElement ? el : null;
-      setQuery("");
-      setActiveIndex(0);
-      setOpen(true);
+      togglePalette(el);
     }
     document.addEventListener("keydown", onKeyDown);
     return () => document.removeEventListener("keydown", onKeyDown);
-  }, [open, close]);
+  }, [togglePalette]);
+
+  /* The explicit ask (QA round 4, finding #18). A surface that owns its own
+     keymap — the PromQL editor, whose CodeMirror keymap eats Mod-k before the
+     document ever sees it — dispatches lib/commands' PALETTE_OPEN_EVENT
+     instead of faking a keystroke. There is no text-entry guard on this path
+     on purpose: the sender IS the text entry, and it has already decided. */
+  React.useEffect(() => {
+    const onOpenRequest = () => togglePalette(document.activeElement);
+    window.addEventListener(PALETTE_OPEN_EVENT, onOpenRequest);
+    return () => window.removeEventListener(PALETTE_OPEN_EVENT, onOpenRequest);
+  }, [togglePalette]);
 
   React.useEffect(() => {
     if (open) inputRef.current?.focus();
@@ -181,6 +205,40 @@ export function CommandPalette() {
     });
   }, [open, active]);
 
+  /**
+   * trapTab keeps Tab inside the dialog (QA round 1, finding #8).
+   *
+   * aria-modal="true" tells assistive tech that everything behind this panel
+   * is inert; without a trap the very next Tab put focus on a page the same
+   * attribute has just declared unreachable, which is the one combination the
+   * ARIA practices call out as broken. The scrim already blocks the pointer,
+   * so this closes the keyboard's half of the same door.
+   *
+   * The cycle is ui/datetime-picker.tsx's onDialogKeyDown, verbatim in
+   * approach: query what is focusable NOW rather than caching a list, because
+   * typing rebuilds the result rows under it. In practice the palette's own
+   * options are tabIndex -1 (focus stays in the combobox input, which is what
+   * makes type-and-arrow work), so the cycle usually has ONE stop and Tab is
+   * a no-op that goes nowhere instead of leaving.
+   */
+  function trapTab(e: React.KeyboardEvent) {
+    const panel = panelRef.current;
+    if (!panel) return;
+    const nodes = Array.from(
+      panel.querySelectorAll<HTMLElement>("button:not([disabled]), input:not([disabled]), a[href]"),
+    ).filter((n) => n.tabIndex >= 0);
+    if (nodes.length === 0) return;
+    const first = nodes[0];
+    const last = nodes[nodes.length - 1];
+    if (e.shiftKey && document.activeElement === first) {
+      e.preventDefault();
+      last.focus();
+    } else if (!e.shiftKey && document.activeElement === last) {
+      e.preventDefault();
+      first.focus();
+    }
+  }
+
   function run(cmd: Command) {
     if (isCommandDisabled(cmd, ctx)) return;
     // No focus restore: the command owns focus from here (a route change, or
@@ -190,6 +248,10 @@ export function CommandPalette() {
   }
 
   function onPanelKeyDown(e: React.KeyboardEvent) {
+    if (e.key === "Tab") {
+      trapTab(e);
+      return;
+    }
     if (e.key === "Escape") {
       e.preventDefault();
       close(true);
@@ -217,6 +279,7 @@ export function CommandPalette() {
       onMouseDown={() => close(true)}
     >
       <div
+        ref={panelRef}
         role="dialog"
         aria-modal="true"
         aria-label="Command palette"

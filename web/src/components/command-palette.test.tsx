@@ -7,10 +7,11 @@ import {
   RouterProvider,
 } from "@tanstack/react-router";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CommandPalette } from "@/components/command-palette";
 import { ThemeProvider } from "@/components/theme-provider";
+import { openCommandPalette } from "@/lib/commands";
 import { TimeMachineProvider } from "@/lib/timemachine";
 import { NAV_ITEMS } from "@/nav";
 
@@ -146,6 +147,34 @@ describe("opening and closing", () => {
     await renderPalette();
     pressK();
     fireEvent.mouseDown(screen.getByTestId("command-palette-backdrop"));
+    expect(queryPalette()).not.toBeInTheDocument();
+  });
+
+  /* QA round 4, finding #18. CodeMirror binds Mod-k to deleteLine and stops
+     the event, so the PromQL editor asks for the palette by name instead of
+     faking a keystroke (lib/commands' openCommandPalette). */
+  it("opens on the explicit PALETTE_OPEN_EVENT, from a surface that swallowed ⌘K", async () => {
+    await renderPalette();
+    act(() => openCommandPalette());
+    expect(palette()).toBeInTheDocument();
+    await waitFor(() => expect(document.activeElement).toBe(input()));
+  });
+
+  it("the explicit ask fires even from a text entry — the sender IS the editor and has already decided", async () => {
+    await renderPalette();
+    screen.getByLabelText("a page field").focus();
+    // The hotkey path refuses this exact situation (see "the focus guard").
+    pressK();
+    expect(queryPalette()).not.toBeInTheDocument();
+    act(() => openCommandPalette());
+    expect(palette()).toBeInTheDocument();
+  });
+
+  it("the explicit ask toggles, so a second one closes what the first opened", async () => {
+    await renderPalette();
+    act(() => openCommandPalette());
+    expect(palette()).toBeInTheDocument();
+    act(() => openCommandPalette());
     expect(queryPalette()).not.toBeInTheDocument();
   });
 });
@@ -336,5 +365,44 @@ describe("Time Machine treatment (DISABLE=time)", () => {
     fireEvent.change(input(), { target: { value: "return to live" } });
     fireEvent.keyDown(input(), { key: "Enter" });
     expect(new URLSearchParams(window.location.search).get("at")).toBeNull();
+  });
+});
+
+/* ── QA round 1, finding #8: aria-modal without a focus trap ─────────────── */
+
+describe("the Tab trap", () => {
+  it("keeps Tab inside the dialog rather than in the page it declares inert", async () => {
+    await renderPalette();
+    pressK();
+    await waitFor(() => expect(document.activeElement).toBe(input()));
+
+    // jsdom does not move focus for a Tab keydown, so the assertion is the
+    // one thing that IS observable and is exactly what stops the browser:
+    // fireEvent returns false when the handler called preventDefault.
+    const notPrevented = fireEvent.keyDown(palette(), { key: "Tab" });
+    expect(notPrevented).toBe(false);
+    expect(palette().contains(document.activeElement)).toBe(true);
+    expect(document.activeElement).not.toBe(screen.getByLabelText("a page field"));
+  });
+
+  it("cycles: Tab from the last stop lands on the first, Shift+Tab the other way", async () => {
+    await renderPalette();
+    pressK();
+    await waitFor(() => expect(document.activeElement).toBe(input()));
+
+    // The options are tabIndex -1 by design (focus stays in the combobox so
+    // type-and-arrow works), so the input is both the first and the last stop
+    // — and the cycle is what keeps that from being an exit.
+    expect(fireEvent.keyDown(palette(), { key: "Tab" })).toBe(false);
+    expect(document.activeElement).toBe(input());
+
+    expect(fireEvent.keyDown(palette(), { key: "Tab", shiftKey: true })).toBe(false);
+    expect(document.activeElement).toBe(input());
+  });
+
+  it("keeps aria-modal — the trap is what makes the claim true", async () => {
+    await renderPalette();
+    pressK();
+    expect(palette()).toHaveAttribute("aria-modal", "true");
   });
 });

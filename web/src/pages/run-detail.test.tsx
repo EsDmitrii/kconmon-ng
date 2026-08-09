@@ -4,7 +4,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { resetWsClient } from "@/hooks/use-ws-topic";
 import { FakeSocket } from "@/lib/fake-websocket";
 import type { RunDetail } from "@/lib/types";
-import { runIdFromPath, RunDetailPage } from "./run-detail";
+import { TimeMachineProvider } from "@/lib/timemachine";
+import { decodeRunId, okPairs, runIdFromPath, RunDetailPage } from "./run-detail";
 
 const RUN_ID = "run-1";
 
@@ -117,6 +118,44 @@ describe("runIdFromPath", () => {
   it("extracts the id after the permalink prefix", () => {
     expect(runIdFromPath("/diagnostics/runs/abc-123")).toBe("abc-123");
     expect(runIdFromPath("/diagnostics")).toBe("");
+  });
+});
+
+/** QA round 4, finding #19: the header printed the URL's percent-encoded
+ *  bytes, so an id with a slash or a space could not be matched against the
+ *  one the reader pasted. */
+describe("decodeRunId", () => {
+  it("decodes the percent-encoding the pathname carries", () => {
+    expect(decodeRunId("run%2Fa%20b")).toBe("run/a b");
+  });
+
+  it("leaves an ordinary id alone", () => {
+    expect(decodeRunId("abc-123")).toBe("abc-123");
+  });
+
+  it("hands back the raw bytes rather than throwing on a lone percent", () => {
+    expect(decodeRunId("100%")).toBe("100%");
+  });
+});
+
+/** QA round 4, finding #14: "Pairs 2/2" was arrived/total and read as
+ *  passed/total. */
+describe("okPairs", () => {
+  it("counts only the pairs that actually succeeded", () => {
+    expect(
+      okPairs([
+        { source: "a", destination: "b", state: "failed", success: false },
+        { source: "a", destination: "c", state: "succeeded", success: true },
+      ]),
+    ).toBe(1);
+  });
+
+  it("counts a socket frame's succeeded state, which carries no `success` of its own", () => {
+    expect(okPairs([{ source: "a", destination: "b", state: "succeeded" }])).toBe(1);
+  });
+
+  it("counts an in-flight pair as not-yet-ok", () => {
+    expect(okPairs([{ source: "a", destination: "b", state: "dispatched" }])).toBe(0);
   });
 });
 
@@ -299,5 +338,103 @@ describe("RunDetailPage", () => {
     expect(await screen.findByText(/this run does not exist/i)).toBeInTheDocument();
     expect(screen.queryByRole("status", { name: /loading run/i })).not.toBeInTheDocument();
     expect(screen.queryByText(/loading run/i)).not.toBeInTheDocument();
+  });
+
+  it("prints a decoded id in the not-found copy, not the URL's percent-encoding (finding #19)", async () => {
+    renderNotFound("run%2Fa%20b");
+
+    expect(await screen.findByText(/No run matches “run\/a b”\./)).toBeInTheDocument();
+  });
+});
+
+/**
+ * QA round 4, finding #1. "Delayed data" on a run that finished twenty minutes
+ * ago describes a transport nobody is waiting on, and sent operators hunting
+ * for a staleness problem that did not exist. The badge keys on TERMINAL
+ * first, then on the socket.
+ */
+describe("RunDetailPage realtime badge", () => {
+  it("renders NO realtime badge at all for a terminal run — the data is final", async () => {
+    renderPage(["events"], runBody({ status: "succeeded" }));
+
+    await screen.findByText("succeeded");
+    expect(screen.queryByText("Live")).not.toBeInTheDocument();
+    expect(screen.queryByText("Delayed data")).not.toBeInTheDocument();
+  });
+
+  it("keeps the delayed badge on a run still in flight with the socket off", async () => {
+    // No "events" capability: useRun never opens a socket, so `live` is false
+    // and the page is genuinely on the 15s polling path.
+    renderPage([], runBody({ status: "running" }));
+
+    await screen.findByText("running");
+    expect(screen.getByText("Delayed data")).toBeInTheDocument();
+  });
+
+  it("says Live while a run is in flight and the socket is up", async () => {
+    renderPage(["events"], runBody({ status: "running" }));
+
+    await screen.findByText("running");
+    expect(await screen.findByText("Live")).toBeInTheDocument();
+  });
+});
+
+/** QA round 4, finding #14. */
+describe("RunDetailPage pair count", () => {
+  it("reads ok/total, so a run whose every pair failed does not announce 2/2", async () => {
+    renderPage(
+      ["events"],
+      runBody({
+        status: "failed",
+        pairTotal: 2,
+        pairFailed: 2,
+        results: [
+          { sourceNode: "node-a", destinationNode: "node-b", success: false, durationNs: 1, recordedAt: "t" },
+          { sourceNode: "node-b", destinationNode: "node-a", success: false, durationNs: 1, recordedAt: "t" },
+        ],
+      }),
+    );
+
+    expect(await screen.findByText("0/2 ok")).toBeInTheDocument();
+  });
+});
+
+/**
+ * QA round 4, finding #4. A permalink names ONE specific run, so it renders
+ * while the Time Machine is engaged rather than refusing — but it says which
+ * instant the rest of the console is on, so a run that happened after `t` is
+ * not silently read as part of that past.
+ */
+describe("RunDetailPage under the Time Machine", () => {
+  function renderEngaged(at: string) {
+    window.history.pushState({}, "", `/diagnostics/runs/${RUN_ID}?at=${at}`);
+    const fetchMock = vi.fn((url: string) => {
+      const href = String(url);
+      if (href.includes("/api/v1/version")) return Promise.resolve(json({ version: "1.6.0", commit: "x", capabilities: [] }));
+      if (href.includes("/api/v1/auth/me")) return Promise.resolve(json(meBody(["runs:create"])));
+      if (href.startsWith("/api/v1/runs/")) return Promise.resolve(json(runBody({ status: "succeeded" })));
+      return Promise.resolve(json({}));
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: Infinity } } });
+    qc.setQueryData(["version"], { version: "1.6.0", commit: "x", capabilities: [] });
+    return render(
+      <QueryClientProvider client={qc}>
+        <TimeMachineProvider>
+          <RunDetailPage />
+        </TimeMachineProvider>
+      </QueryClientProvider>,
+    );
+  }
+
+  it("still renders the run, and frames it against the viewed instant", async () => {
+    const at = "2026-07-28T09:00:00Z";
+    renderEngaged(at);
+
+    // The run itself is on screen: a permalink is not something to refuse.
+    expect(await screen.findByText("succeeded")).toBeInTheDocument();
+    expect(
+      screen.getByText(new RegExp(`this permalink is shown in full.*${new Date(at).toLocaleString()}`)),
+    ).toBeInTheDocument();
   });
 });

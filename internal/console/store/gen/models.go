@@ -116,6 +116,8 @@ type CheckSchedule struct {
 	NextFireAt   pgtype.Timestamptz
 	CreatedAt    time.Time
 	UpdatedAt    time.Time
+	LastError    string
+	LastErrorAt  pgtype.Timestamptz
 }
 
 type Incident struct {

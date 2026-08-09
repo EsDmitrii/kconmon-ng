@@ -646,8 +646,8 @@ func NewServer(d Deps) *Server { //nolint:gocritic // hugeParam: Deps is the pin
 		api.Get("/api/v1/auth/oidc/start", s.handleOIDCStart)
 		api.Get(config.OIDCCallbackPath, s.handleOIDCCallback)
 
-		// /ws is TOP LEVEL, not under /api/v1 (docs/console/architecture/API.md,
-		// ADR-003). One long-lived upgrade is recorded once by s.instrument as
+		// /ws is TOP LEVEL, not under /api/v1 — a protocol upgrade, not a REST
+		// resource. One long-lived upgrade is recorded once by s.instrument as
 		// path="/ws" when the socket closes — its "duration" is the connection
 		// LIFETIME, so it lands in the histogram's top (+Inf) bucket and inflates
 		// _sum by connection-seconds; don't read request latency from that series
@@ -655,6 +655,37 @@ func NewServer(d Deps) *Server { //nolint:gocritic // hugeParam: Deps is the pin
 		// count is the ws_clients gauge. chi.Router.Group adds no path prefix, so
 		// registering it here (for authenticate+authorize) keeps it top-level.
 		api.Get("/ws", s.handleWS)
+	})
+
+	// An unknown route UNDER /api is a 404, never the SPA (QA round 5,
+	// finding #20). GET /api/v1/nope used to fall through to r.NotFound below
+	// and answer 200 with index.html: a client asking for a route that does
+	// not exist was told everything is fine and handed HTML.
+	//
+	// It is mounted as a SUBROUTER WITH ONLY A NotFound HANDLER, which is the
+	// mechanism this needs rather than an incidental way to spell it:
+	//
+	//   - chi.Walk enumerates a mount's SubRoutes, and this subrouter has
+	//     none -- a NotFound handler is not a tree entry. So the OpenAPI drift
+	//     gate (TestEveryAPIRouteIsInTheOpenAPISpec) and the permission gate
+	//     (TestEveryAPIRouteHasAPermissionDecision) never see it, and neither
+	//     has to learn an exception. A `r.Handle("/api/*", ...)` would appear
+	//     in both walks and would have to be special-cased in both.
+	//   - chi matches a static branch before a catch-all and backtracks only
+	//     when the static branch dead-ends, so every real /api/v1/... route
+	//     above still wins; this only catches what nothing else matched.
+	//   - it is registered BEFORE r.NotFound: chi's NotFound propagates into
+	//     subrouters that have none of their own, so the SPA fallback would
+	//     otherwise overwrite this one.
+	//
+	// Deliberately OUTSIDE the authenticated group: "there is no such route"
+	// is true for every caller, and demanding credentials before saying so
+	// would answer a typo with a login prompt.
+	r.Route("/api", func(api chi.Router) {
+		api.NotFound(func(w http.ResponseWriter, _ *http.Request) {
+			writeProblem(w, http.StatusNotFound, "no such API route",
+				"this path is not part of the console API; see docs/console-api.yaml for the routes it serves")
+		})
 	})
 
 	// SPA + static assets: everything not matched above.

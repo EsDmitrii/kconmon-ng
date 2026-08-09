@@ -6,9 +6,8 @@ hop** is affected — while every other path stays green. It is the hands-on
 version of the question kconmon-ng exists to answer: not "is the mesh up?" but
 "what exactly degraded, and where?"
 
-Every command and every observed value below was executed on a live 3-node
-Minikube stand. Times and counters are from that run; yours will differ
-slightly but the shape is the same.
+Every command and every number below came off a live 3-node Minikube stand.
+Your digits will differ. The shape will not.
 
 ## Prerequisites
 
@@ -134,9 +133,10 @@ no firing or pending alerts. The Overview dashboard is all green.
 ## Break: blackhole UDP between two nodes
 
 We drop **only UDP** from `m02` to `m03` (pod-to-pod, port 9090), leaving every
-other protocol and every other pair untouched. This simulates the kind of
-protocol-specific breakage a firewall/conntrack misconfiguration or an
-overlay/offload bug produces — the case a binary reachability check misses.
+other protocol and every other pair untouched. That is what a firewall typo, a
+conntrack table filling up, or an overlay offload bug actually looks like in
+production: one protocol, one direction, one pair — and every health check in
+the cluster still green.
 
 Cross-node pod traffic transits the **FORWARD** chain on the destination node,
 so the rule goes on `m03`:
@@ -238,8 +238,9 @@ Two things worth noticing rather than skipping past:
   cleverness: class weight times a linear decay over the five minutes before
   onset. A path change outranks a config write outranks a maintenance window,
   and the threshold crossing itself scores zero — a symptom is not its own
-  cause. The rules are written down in
-  [`docs/console/product/INVESTIGATION.md`](../console/product/INVESTIGATION.md).
+  cause. The weights are plain exported constants in the scoring source
+  ([`web/src/lib/investigation.ts`](../../web/src/lib/investigation.ts)), and
+  the panel links straight to them.
 - **Sources you have not enabled say so.** With `kubernetesContext` off, the
   K8s-events row is one muted line naming the flag, not a silent absence you
   could read as "nothing happened in the cluster".
@@ -401,19 +402,18 @@ Tear the whole stand down when finished:
 
 ## What this proves
 
-A binary reachability tool answers "can node A reach node B?" — and here the
-answer is *yes*, because TCP and ICMP between m02 and m03 never stopped. It would
-show green while UDP-based workloads on that pair silently fail.
+"Can m02 reach m03?" was *yes* for the whole run — TCP and ICMP between those
+two nodes never stopped. Ask only that question and this outage stays invisible
+while every UDP workload on the pair quietly fails.
 
-kconmon-ng answers the operational question instead:
+The run answered the question you actually need:
 
-- **which protocol** — UDP, specifically, with TCP/ICMP proven healthy on the same pair;
+- **which protocol** — UDP, with TCP and ICMP proven healthy on the same pair;
 - **which node pair** — m02→m03, with the other five pairs proven unaffected;
-- **which hop** — captured automatically by the reactive MTR trace;
-- **and it pages** on sustained loss via a rule that ships with the chart.
+- **which hop** — captured by the MTR trace that fired on its own;
+- **and it paged** on sustained loss, from a rule that ships with the chart.
 
-That is the difference between "the mesh looks connected" and "here is the exact
-failing protocol, path, and hop."
+Four facts, no SSH, no guessing.
 
 ## Further experiments
 

@@ -2,7 +2,15 @@ import { cleanup, fireEvent, render, screen, within } from "@testing-library/rea
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ThemeProvider } from "@/components/theme-provider";
 import type { Enrichment, MTRHop, PathSnapshot } from "@/lib/types";
-import { fmtRttNs, hopTrendSeries, isPlaceholderHop, lossTier, TraceDetail, type TrendHistory } from "./mtr-hop-table";
+import {
+  fmtRttNs,
+  hopTrendSeries,
+  isPlaceholderHop,
+  lossTier,
+  TraceDetail,
+  trendExtent,
+  type TrendHistory,
+} from "./mtr-hop-table";
 
 // EChart is mocked for the same reason target-card.test.tsx mocks it:
 // echarts.init() wants a 2d canvas context jsdom does not implement, so a real
@@ -20,9 +28,12 @@ vi.mock("@/components/echart", () => ({
 /** The slice of the ECharts option this file asserts on. */
 interface TrendOption {
   series?: { data?: [number, number | null][] }[];
+  xAxis?: { min?: number; max?: number };
+  yAxis?: { axisLabel?: { formatter?: (v: number) => string } };
 }
 
 const lastSeries = () => captured.options[captured.options.length - 1]?.series?.[0]?.data;
+const lastOption = () => captured.options[captured.options.length - 1];
 
 function hop(over: Partial<MTRHop> = {}): MTRHop {
   return { number: 1, ip: "10.0.0.1", hostname: "gw.internal", rttNs: 2_500_000, lossRatio: 0, ...over };
@@ -154,6 +165,41 @@ describe("hopTrendSeries", () => {
   });
 });
 
+/**
+ * QA round 4, finding #11. A pair with ONE stored path drew a single symbol
+ * marooned at the left edge of whatever "nice" interval ECharts picked — days
+ * wide, for a chart describing one instant.
+ */
+describe("trendExtent", () => {
+  const t = (iso: string) => Date.parse(iso);
+
+  it("gives a lone sample an hour either side rather than a degenerate axis", () => {
+    const at = t("2026-08-01T12:00:00Z");
+    expect(trendExtent([[at, 3]])).toEqual({ min: at - 3_600_000, max: at + 3_600_000 });
+  });
+
+  it("pads a real extent by 5% at each end, so the end symbols clear the axis", () => {
+    const lo = t("2026-08-01T00:00:00Z");
+    const hi = t("2026-08-01T10:00:00Z");
+    const pad = (hi - lo) * 0.05;
+    expect(trendExtent([[lo, 1], [hi, 2]])).toEqual({ min: lo - pad, max: hi + pad });
+  });
+
+  it("measures only the points that were MEASURED — a gap has no position to pin to", () => {
+    const lo = t("2026-08-01T00:00:00Z");
+    const mid = t("2026-08-02T00:00:00Z");
+    const hi = t("2026-08-03T00:00:00Z");
+    // The route dropped the hop on the last snapshot; the axis must not
+    // stretch to cover a measurement that never happened.
+    expect(trendExtent([[lo, 1], [mid, 2], [hi, null]])?.max).toBeLessThan(hi);
+  });
+
+  it("answers undefined with nothing to measure, so the caller leaves the axis alone", () => {
+    expect(trendExtent([])).toBeUndefined();
+    expect(trendExtent([[1, null]])).toBeUndefined();
+  });
+});
+
 describe("TraceDetail — enrichment row", () => {
   it("expands a hop and renders every enrichment field the map carries", () => {
     renderDetail(snapshot({ enrichment: { "203.0.113.9": enrichment() } }));
@@ -264,6 +310,41 @@ describe("TraceDetail — per-hop trend", () => {
     fireEvent.click(screen.getByRole("button", { name: /trend for 10\.0\.0\.1/i }));
 
     expect(lastSeries()?.[1]).toEqual([Date.parse("2026-08-02T00:00:00Z"), null]);
+  });
+
+  /* QA round 4, finding #11: the axis now describes the data instead of the
+     other way round. */
+  it("pins the x-axis to the data's own padded extent", () => {
+    renderDetail(current, history());
+
+    fireEvent.click(screen.getByRole("button", { name: /trend for 10\.0\.0\.1/i }));
+
+    const lo = Date.parse("2026-08-01T00:00:00Z");
+    const hi = Date.parse("2026-08-03T00:00:00Z");
+    expect(lastOption()?.xAxis?.min).toBe(lo - (hi - lo) * 0.05);
+    expect(lastOption()?.xAxis?.max).toBe(hi + (hi - lo) * 0.05);
+  });
+
+  it("gives a single-sample trend a ±1h window rather than an axis of one instant", () => {
+    renderDetail(current, history({ snapshots: [current], traceTotal: 2 }));
+
+    fireEvent.click(screen.getByRole("button", { name: /trend for 10\.0\.0\.1/i }));
+
+    const at = Date.parse("2026-08-03T00:00:00Z");
+    expect(lastOption()?.xAxis?.max! - lastOption()?.xAxis?.min!).toBe(2 * 60 * 60 * 1000);
+    expect(lastOption()?.xAxis?.min).toBe(at - 60 * 60 * 1000);
+  });
+
+  it("labels the y-axis with the console's ONE millisecond rule, not a private toFixed(1)", () => {
+    renderDetail(current, history());
+
+    fireEvent.click(screen.getByRole("button", { name: /trend for 10\.0\.0\.1/i }));
+
+    const fmt = lastOption()?.yAxis?.axisLabel?.formatter;
+    // Round 2's finding #8, verbatim: one decimal under 10ms (where an axis'
+    // own tick spacing is finer than the format), none above it.
+    expect(fmt?.(2.5)).toBe("2.5ms");
+    expect(fmt?.(123.4)).toBe("123ms");
   });
 
   it("says the trend is partial when older paths of the pair have not been loaded", () => {

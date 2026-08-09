@@ -9,6 +9,14 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Tooltip } from "@/components/ui/tooltip";
 import { useMatrix } from "@/hooks/use-matrix";
 import { buildInvestigateURL } from "@/lib/investigation-sources";
+import {
+  cellSummary,
+  cellTier,
+  fmtRatio,
+  fmtRtt,
+  isMeasured,
+  type CellTier,
+} from "@/lib/matrix-cells";
 import { useTimeContext } from "@/lib/timemachine";
 import { PROTOCOLS, type MatrixCell, type Protocol } from "@/lib/types";
 import { cn } from "@/lib/utils";
@@ -18,18 +26,15 @@ import { cn } from "@/lib/utils";
 const pairKey = (source: string, destination: string) => `${source}\0${destination}`;
 
 /* One measure, one mark: the cell's colour AND its primary figure both encode
-   the failure ratio (healthy < 1%, degraded 1–10%, failing ≥ 10%); RTT p95 is
+   the pair's SEVERITY (healthy < 1%, degraded 1–10%, failing ≥ 10%) — the
+   failure ratio when there is one, packet loss when there is not; RTT p95 is
    the secondary, muted line. The fill is the -soft token so --foreground stays
    legible, and a saturated left rail repeats the state so the grid still reads
-   in greyscale. */
-type Tier = "ok" | "warn" | "bad" | "unknown";
-
-function tierOf(cell: MatrixCell | undefined): Tier {
-  if (!cell || cell.failRatio === null) return "unknown";
-  if (cell.failRatio < 0.01) return "ok";
-  if (cell.failRatio < 0.1) return "warn";
-  return "bad";
-}
+   in greyscale.
+   The reading itself lives in lib/matrix-cells.ts, shared with Overview, the
+   object cards and the topology edges — this page must not grow a second
+   opinion about what "measured" means (QA round 2, finding #1). */
+type Tier = CellTier;
 
 /* Healthy stays quiet (a neutral surface + green rail) so an all-green grid
    doesn't shout; only degraded/failing cells get a coloured fill. Colour is
@@ -64,13 +69,29 @@ const LEGEND: { tier: Tier; label: string }[] = [
   { tier: "unknown", label: "No data" },
 ];
 
-function fmtRtt(ns?: number): string {
-  if (ns === undefined) return "—";
-  return `${(ns / 1e6).toFixed(1)}ms`;
+/* PROTOCOL_PARAM is this page's own URL key, carried the way lib/timemachine's
+   `?at=` is carried: read off window.location, written through window.history.
+   TanStack Router owns navigation here but no route declares a search schema
+   (timemachine.tsx documents that decision), so this is the house idiom for a
+   page-level param rather than a second one.
+   REPLACE, not push: flipping the protocol segmented control is a change of
+   lens on the same page, and a Back button that walked backwards through four
+   protocol flips before leaving the page is not what the gesture means. */
+const PROTOCOL_PARAM = "protocol";
+
+/** readProtocolFromLocation resolves ?protocol= into one of the three the
+ *  console probes. Anything else — a typo, a stale link, a protocol this build
+ *  does not know — degrades to tcp rather than rendering an empty grid for a
+ *  protocol nothing will ever answer for. */
+export function readProtocolFromLocation(search: string): Protocol {
+  const raw = new URLSearchParams(search).get(PROTOCOL_PARAM);
+  return PROTOCOLS.includes(raw as Protocol) ? (raw as Protocol) : "tcp";
 }
 
-function fmtFail(ratio: number): string {
-  return `${(100 * ratio).toFixed(1)}%`;
+function writeProtocol(p: Protocol): void {
+  const url = new URL(window.location.href);
+  url.searchParams.set(PROTOCOL_PARAM, p);
+  window.history.replaceState({}, "", `${url.pathname}${url.search}${url.hash}`);
 }
 
 const HEADER_CELL =
@@ -88,12 +109,10 @@ function GridCell({
   src,
   dst,
   cell,
-  protocol,
 }: {
   src: string;
   dst: string;
   cell: MatrixCell | undefined;
-  protocol: Protocol;
 }) {
   if (src === dst) {
     return (
@@ -104,12 +123,14 @@ function GridCell({
       </td>
     );
   }
-  const tier = tierOf(cell);
+  /* MEASURED, not "has a failure ratio". The fail-ratio series is lazy — a
+     pair that has never failed emits no sample at all — so on a healthy fleet
+     `fail === null` is the normal state of a cell that is full of latency
+     data. Reading it as absence blanked the whole grid (QA round 2, #1). */
+  const tier = cellTier(cell);
+  const measured = isMeasured(cell);
   const fail = cell?.failRatio ?? null;
-  const label =
-    fail === null
-      ? `${src} → ${dst}: no data`
-      : `${src} → ${dst}: fail ${fmtFail(fail)}, RTT p95 ${fmtRtt(cell?.rttP95)}`;
+  const label = `${src} → ${dst}: ${cellSummary(cell)}`;
 
   const tooltip = (
     <div className="flex min-w-44 flex-col gap-1">
@@ -118,18 +139,29 @@ function GridCell({
         <span aria-hidden="true" className="text-muted-foreground">→</span>
         <span className="truncate">{dst}</span>
       </div>
-      {fail === null ? (
+      {!measured ? (
         <div className="text-muted-foreground">No probe data in Prometheus for this pair.</div>
       ) : (
         <dl className="nums grid grid-cols-[auto_1fr] gap-x-4 gap-y-0.5 text-muted-foreground">
           <dt>Failure ratio</dt>
-          <dd className="text-right text-popover-foreground">{fmtFail(fail)}</dd>
-          <dt>RTT p95</dt>
-          <dd className="text-right text-popover-foreground">{fmtRtt(cell?.rttP95)}</dd>
-          {protocol === "udp" && cell?.lossRatio !== undefined ? (
+          {/* "no samples" rather than a dash or a fabricated 0%: the series
+              exists and reported nothing, which is a different fact from a
+              measured zero and from an unprobed pair. */}
+          <dd className="text-right text-popover-foreground">{fail === null ? "no samples" : fmtRatio(fail)}</dd>
+          {cell?.rttP95 !== undefined ? (
+            <>
+              <dt>RTT p95</dt>
+              <dd className="text-right text-popover-foreground">{fmtRtt(cell.rttP95)}</dd>
+            </>
+          ) : null}
+          {/* Loss shows whenever the cell carries it. Gating this on
+              `protocol === "udp"` hid a vector the fold genuinely answers for
+              other protocols, and it is the one that can carry the tier when
+              the failure ratio cannot. */}
+          {cell?.lossRatio !== undefined ? (
             <>
               <dt>Packet loss</dt>
-              <dd className="text-right text-popover-foreground">{fmtFail(cell.lossRatio)}</dd>
+              <dd className="text-right text-popover-foreground">{fmtRatio(cell.lossRatio)}</dd>
             </>
           ) : null}
         </dl>
@@ -173,11 +205,22 @@ function GridCell({
             TIER_RAIL[tier],
           )}
         >
-          {fail === null ? (
+          {/* The em-dash is reserved for a cell nothing measured. A cell with
+              a p95 and no failure series shows its p95 as the hero figure —
+              throwing away the one number it has and drawing a dash over it
+              was the whole of finding #1. */}
+          {!measured ? (
             <span className="text-xs text-muted-foreground">—</span>
+          ) : fail === null ? (
+            <>
+              <span className="nums text-[13px] font-semibold leading-tight">{fmtRtt(cell?.rttP95)}</span>
+              <span className="nums text-[10.5px] leading-tight text-muted-foreground">
+                {cell?.lossRatio === undefined ? "no fail data" : `loss ${fmtRatio(cell.lossRatio)}`}
+              </span>
+            </>
           ) : (
             <>
-              <span className="nums text-[13px] font-semibold leading-tight">{fmtFail(fail)}</span>
+              <span className="nums text-[13px] font-semibold leading-tight">{fmtRatio(fail)}</span>
               <span className="nums text-[10.5px] leading-tight text-muted-foreground">
                 {fmtRtt(cell?.rttP95)}
               </span>
@@ -222,7 +265,14 @@ function MatrixSkeleton() {
 }
 
 export function MatrixPage() {
-  const [protocol, setProtocol] = useState<Protocol>("tcp");
+  /* Read ON MOUNT, so a shared /matrix?protocol=icmp link opens on ICMP
+     instead of silently on TCP (QA round 2, finding #15). Lazy initialiser:
+     window.location is read once, not on every render. */
+  const [protocol, setProtocolState] = useState<Protocol>(() => readProtocolFromLocation(window.location.search));
+  const setProtocol = (p: Protocol) => {
+    setProtocolState(p);
+    writeProtocol(p);
+  };
   const { at } = useTimeContext();
   const { data, isLoading, error, live } = useMatrix(protocol);
 
@@ -312,13 +362,7 @@ export function MatrixPage() {
                         <NodeLabel name={src} />
                       </th>
                       {data.nodes.map((dst) => (
-                        <GridCell
-                          key={dst}
-                          src={src}
-                          dst={dst}
-                          cell={byPair.get(pairKey(src, dst))}
-                          protocol={protocol}
-                        />
+                        <GridCell key={dst} src={src} dst={dst} cell={byPair.get(pairKey(src, dst))} />
                       ))}
                     </tr>
                   ))}
@@ -336,8 +380,11 @@ export function MatrixPage() {
                   {label}
                 </span>
               ))}
+              {/* Says what the colour actually reads now: the worst ratio the
+                  cell carries, which on a pair with no failure samples is its
+                  packet loss. */}
               <span className="ml-auto hidden sm:block">
-                colour = failure ratio · cell shows fail % and p95 RTT
+                colour = worst of fail % and packet loss · a cell with no fail samples shows its p95
               </span>
             </div>
           </div>
