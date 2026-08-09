@@ -398,6 +398,12 @@ body {
   align-items: center;
   gap: 0.5rem;
   min-width: 168px;
+  /* ZONE_W (300) minus the 20px inset the box sits at on each side — see
+     NODE_MAX_W in pages/topology.tsx, which pins the same number on the node's
+     inline style. Without a cap a long node name stretched the box straight
+     across its neighbours' lanes (QA round 2, finding #10); with it the name
+     truncates inside the lane and the full string stays on `title`. */
+  max-width: 260px;
   border-radius: calc(var(--radius) - 6px);
   border: 1px solid hsl(var(--border));
   border-left-width: 3px;

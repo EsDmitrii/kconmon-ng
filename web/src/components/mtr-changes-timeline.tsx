@@ -7,7 +7,7 @@ import { useTopology } from "@/hooks/use-topology";
 import { getConfig, promqlQueryRange } from "@/lib/api";
 import { type CuratedChart, toSeriesOption } from "@/lib/curated-metrics";
 import type { PathSnapshot } from "@/lib/types";
-import { escapeLabelValue } from "@/lib/utils";
+import { cn, escapeLabelValue } from "@/lib/utils";
 
 /* ── which loss family describes this pair ──────────────────────────────── */
 
@@ -181,26 +181,48 @@ export function PathChangesTimeline({
 
   if (window === null) return null;
   const span = window.end - window.start;
+  /* Is there a chart to frame at all (QA round 4, finding #8)? The 112px box
+     was unconditional, so Prometheus-off and empty-series both drew an empty
+     grey rectangle above the "no loss series" note — a chart frame containing
+     nothing, which reads as a chart that failed to load rather than as a
+     measurement that does not exist. With no series the markers get a short
+     rail of their own instead, which is all they ever needed. */
+  const hasChart = option !== undefined && !empty && !queryError;
 
   return (
     <section aria-label="Path changes over time" className="mt-3">
-      <div className="relative h-28 w-full">
-        {option && !empty && !queryError ? <EChart option={option} className="absolute inset-0 h-full w-full" /> : null}
+      <div className={cn("relative w-full", hasChart ? "h-28" : "h-6")}>
+        {hasChart ? <EChart option={option} className="absolute inset-0 h-full w-full" /> : null}
 
         {/* The markers are real DOM, not chart marklines: they must survive the
             two cases where there IS no chart (Prometheus off, empty series),
             and "when did this route change?" is the question this strip exists
-            to answer. */}
+            to answer.
+
+            pointer-events-auto on the marker itself, inside a
+            pointer-events-none track (QA round 4, finding #8): the track spans
+            the full width and would otherwise swallow every hover meant for
+            the chart underneath, while the 1px marker it exists to position
+            could not be hovered at all — so its title, the only place the
+            full path hash and the first-seen stamp are written, was
+            unreachable. The hit area is padded out to 9px around the hairline
+            (px-1) because a 1px pointer target is not one. */}
         <ul aria-label="Path changes" className="pointer-events-none absolute inset-x-0 top-0 h-full">
           {snapshots.map((s) => {
             const pct = Math.min(100, Math.max(0, ((msOf(s.firstSeen) - window.start) / span) * 100));
             return (
-              <li key={s.id} className="absolute top-0 h-full" style={{ left: `${pct}%` }}>
+              <li key={s.id} className="absolute top-0 h-full -translate-x-1/2" style={{ left: `${pct}%` }}>
                 <span
+                  tabIndex={0}
                   aria-label={`Path ${shortHash(s.pathHash)} first seen ${fmtTime(s.firstSeen)}`}
                   title={`${s.pathHash}\nfirst seen ${fmtTime(s.firstSeen)}`}
-                  className="block h-full w-px bg-health-warn/70"
-                />
+                  className={cn(
+                    "pointer-events-auto flex h-full cursor-help items-stretch px-1",
+                    "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+                  )}
+                >
+                  <span aria-hidden="true" className="block h-full w-px bg-health-warn/70" />
+                </span>
               </li>
             );
           })}

@@ -3,6 +3,7 @@ import { render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { OverviewPage, fmtAge, sortFiringAlerts, summarize } from "./overview";
 import type { Alert, Matrix, Topology } from "@/lib/types";
+import { fmtEventTime } from "@/lib/utils";
 
 const matrix: Matrix = {
   protocol: "tcp",
@@ -60,6 +61,46 @@ describe("summarize", () => {
     expect(s.totalNodes).toBe(2);
     expect(s.readyNodes).toBe(1);
   });
+
+  /* QA round 1, finding #3: a cell with a p95 RTT and no failure ratio was
+     counted as nothing at all, so a page full of latency numbers announced
+     "no probe data". A latency sample IS a measurement. */
+  describe("what counts as measured", () => {
+    const rttOnly: Matrix = {
+      ...matrix,
+      cells: [
+        { source: "a", destination: "b", failRatio: null, rttP95: 2_000_000 },
+        { source: "a", destination: "c", failRatio: null },
+      ],
+    };
+
+    it("counts a pair measured on RTT alone", () => {
+      expect(summarize(rttOnly).pairsTotal).toBe(1);
+    });
+
+    it("keeps the tiers on the failure ratio — an RTT-only pair is measured, not ranked", () => {
+      const s = summarize(rttOnly);
+      expect(s.pairsScored).toBe(0);
+      expect(s.pairsFailing).toBe(0);
+      expect(s.pairsDegraded).toBe(0);
+      expect(s.worstPairs).toHaveLength(0);
+    });
+
+    it("counts nothing when neither vector has anything for the pair", () => {
+      expect(summarize({ ...matrix, cells: [{ source: "a", destination: "b", failRatio: null }] }).pairsTotal).toBe(0);
+    });
+
+    it("breaks a failure-ratio tie with the slower pair first", () => {
+      const tied: Matrix = {
+        ...matrix,
+        cells: [
+          { source: "a", destination: "b", failRatio: 0.2, rttP95: 1_000_000 },
+          { source: "c", destination: "d", failRatio: 0.2, rttP95: 8_000_000 },
+        ],
+      };
+      expect(summarize(tied).worstPairs.map((c) => c.source)).toEqual(["c", "a"]);
+    });
+  });
 });
 
 afterEach(() => vi.unstubAllGlobals());
@@ -87,6 +128,40 @@ describe("OverviewPage", () => {
     renderPage();
     expect(await screen.findByText("1/2")).toBeInTheDocument();
     expect(screen.getByText("Nodes ready")).toBeInTheDocument();
+  });
+
+  /* QA round 1, finding #4: every pair number on this page comes from
+     useMatrix("tcp"), and an unlabelled "Failing pairs" claimed UDP and ICMP
+     too. Label, not aggregate — the qualifier rides the tiles and the section
+     header. */
+  it("qualifies the pair numbers as TCP on the pod plane", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((url: string) => Promise.resolve(String(url).includes("/topology") ? json(topo) : json(matrix))),
+    );
+    renderPage();
+    await screen.findByText("1/2");
+
+    // Both pair tiles and the worst-pairs header carry it.
+    expect(screen.getAllByText("TCP · pod plane").length).toBeGreaterThanOrEqual(3);
+  });
+
+  /* QA round 1, finding #3, at the page level: the slate that blamed an empty
+     Prometheus while the RTT column was full. */
+  it("does not claim there is no probe data when latency is flowing", async () => {
+    const rttOnly = {
+      ...matrix,
+      cells: [{ source: "a", destination: "b", failRatio: null, rttP95: 2_000_000 }],
+    };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((url: string) => Promise.resolve(String(url).includes("/topology") ? json(topo) : json(rttOnly))),
+    );
+    renderPage();
+
+    expect(await screen.findByText("No failure ratio for these pairs")).toBeInTheDocument();
+    expect(screen.queryByText("No probe data in Prometheus yet")).toBeNull();
+    expect(screen.getByText(/1 measured pair$/)).toBeInTheDocument();
   });
 });
 
@@ -261,8 +336,19 @@ describe("OverviewPage — Recent events (Decision 9)", () => {
     const rows = await within(panel).findAllByTestId("overview-event");
     expect(rows).toHaveLength(2);
     expect(within(rows[0]).getByText("node-b NotReady")).toBeInTheDocument();
-    expect(within(rows[0]).getByText("warn")).toBeInTheDocument();
+    // Live's capitalized vocabulary, not a second one for the same fact.
+    expect(within(rows[0]).getByText("Warn")).toBeInTheDocument();
     expect(within(panel).getByRole("link", { name: /open Live/i }).getAttribute("href")).toBe("/live");
+  });
+
+  /* QA round 1, finding #10: this card and /live showed the same event at two
+     different times. ONE formatter now, in lib/utils — pages/live.test.tsx
+     pins the same call for the same input on the other side. */
+  it("stamps a row with the shared event clock, not a private one", async () => {
+    renderOverview({ events: [eventRow()] });
+
+    const row = await screen.findByTestId("overview-event");
+    expect(within(row).getByText(fmtEventTime("2026-01-01T00:05:00Z"))).toBeInTheDocument();
   });
 
   it("asks for ten", async () => {
@@ -324,7 +410,11 @@ describe("OverviewPage — Firing alerts (Decision 6)", () => {
     });
 
     const rows = await screen.findAllByTestId("firing-alert");
-    expect(within(rows[0]).getByRole("link", { name: "PairLossHigh" }).getAttribute("href")).toBe("/alerting");
+    // ?rule= names the row rather than dropping the reader at the top of the
+    // list to find it themselves (QA round 1, finding #17).
+    expect(within(rows[0]).getByRole("link", { name: "PairLossHigh" }).getAttribute("href")).toBe(
+      "/alerting?rule=11111111-1111-4111-8111-111111111111",
+    );
     expect(within(rows[0]).queryByText("unmanaged")).toBeNull();
 
     // The console never implies it owns somebody else's rule: no /alerting link.

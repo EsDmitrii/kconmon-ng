@@ -22,7 +22,7 @@ import {
   type LiveEventSeverity,
   type LiveEventType,
 } from "@/lib/types";
-import { cn } from "@/lib/utils";
+import { cn, fmtEventTime } from "@/lib/utils";
 import { TOPIC_LIVE, type WsEnvelope } from "@/lib/ws";
 
 /**
@@ -288,10 +288,13 @@ function typeLabel(type: string): string {
   return isKnownType(type) ? TYPE_LABELS[type] : type;
 }
 
-function fmtTime(timestamp: string): string {
-  const d = new Date(timestamp);
-  return Number.isNaN(d.getTime()) ? timestamp : d.toISOString().slice(11, 23);
-}
+/* The feed's clock is lib/utils.fmtEventTime, shared with the Overview's
+   recent-events card. It used to be a private UTC ISO slice here, which put
+   the same event at two different times on two pages with nothing on either
+   saying which zone it was in (QA round 1, finding #10). Local wall clock wins
+   the tie-break: it is the one an operator correlates against. The millisecond
+   field went with the ISO slice — seconds are what the density argument
+   actually needed. */
 
 function SeverityBadge({ severity }: { severity: string }) {
   const known = isKnownSeverity(severity);
@@ -305,7 +308,7 @@ function SeverityBadge({ severity }: { severity: string }) {
 function EventRow({ event }: { event: LiveEvent }) {
   return (
     <>
-      <span className="nums w-24 shrink-0 text-xs text-muted-foreground">{fmtTime(event.timestamp)}</span>
+      <span className="nums w-24 shrink-0 text-xs text-muted-foreground">{fmtEventTime(event.timestamp)}</span>
       <span className="w-[5.25rem] shrink-0">
         <SeverityBadge severity={event.severity} />
       </span>
@@ -330,7 +333,7 @@ function EventRow({ event }: { event: LiveEvent }) {
 function AnnotationFeedRow({ annotation }: { annotation: Annotation }) {
   return (
     <>
-      <span className="nums w-24 shrink-0 text-xs text-muted-foreground">{fmtTime(annotation.startAt)}</span>
+      <span className="nums w-24 shrink-0 text-xs text-muted-foreground">{fmtEventTime(annotation.startAt)}</span>
       <span className="w-[5.25rem] shrink-0">
         <Badge variant="neutral" dot>
           Note
@@ -385,6 +388,12 @@ function BlankSlate({ title, body, action }: { title: string; body: string; acti
 }
 
 const EMPTY_FILTERS: LiveFilters = { type: "all", severity: "all", scope: "" };
+
+/** Why "Load older" is greyed out. The filters are named because they are the
+ *  half the operator can change: the scrollback is server-filtered by type and
+ *  scope, so an exhausted cursor is a statement about THIS query, not about
+ *  the retention window. */
+const NOTHING_OLDER = "Nothing older matches the current filters.";
 
 export function LivePage() {
   const { realtime, resolved } = useCapabilities();
@@ -679,6 +688,12 @@ export function LivePage() {
     recordAnchor();
   }, [filterKey, rows, recordAnchor]);
 
+  /* Exhausted: the walk has nowhere left to go under the CURRENT filters —
+     either the server answered an empty cursor or no page has landed yet. Both
+     read the same on the button, and both are the state the note below
+     explains. `loading` is a third thing and keeps its own label. */
+  const exhausted = history.nextCursor === "" && !history.loading;
+
   const clearFilters = useCallback(() => setFilters(EMPTY_FILTERS), []);
   // Only a filter can empty a non-empty ring, so `events.length > 0 &&
   // visible.length === 0` below is the "filtered to nothing" state by
@@ -701,7 +716,14 @@ export function LivePage() {
           : `Controller events pushed over the WebSocket, newest first. The browser holds the most recent ${LIVE_RING_CAP}; anything older is Prometheus' job.`
       }
       actions={
-        <>
+        /* ONE slot, both modes (QA round 1, finding #13). The toolbar used to
+           be a bare fragment whose width changed with the transport badge, and
+           in a wrapping header that moved the filters and Pause to a different
+           line the moment the Time Machine engaged — controls relocating under
+           the cursor as a side effect of a mode change. The container is now a
+           real element in a fixed position and the badge lives in a slot that
+           reserves its width, so what changes is the badge and nothing else. */
+        <div data-testid="live-toolbar" className="flex flex-wrap items-center gap-2">
           <Segmented
             aria-label="Severity"
             options={[
@@ -754,15 +776,23 @@ export function LivePage() {
           {/* Engaged the transport question does not arise — the badge would
               be answering "is the push live?" about a feed that is deliberately
               not live. The mode itself is the answer, and the top-bar banner
-              says it once for the whole console. */}
-          {engaged ? null : resolved ? (
-            <RealtimeBadge realtime={realtime && connected} />
-          ) : (
-            <Badge variant="neutral" dot>
-              Connecting…
-            </Badge>
-          )}
-        </>
+              says it once for the whole console.
+              Paused is the same shape of lie in the other direction: arrivals
+              are being held, so a green "Live" over a frozen list claims
+              exactly what the operator just switched off. The Paused chip in
+              the filter bar is the state (QA round 1, finding #12).
+              The slot keeps its width in every case, so nothing to its left
+              moves when the badge goes. */}
+          <span data-testid="live-transport-slot" className="inline-flex min-w-[7.5rem] justify-end">
+            {engaged || paused ? null : resolved ? (
+              <RealtimeBadge realtime={realtime && connected} />
+            ) : (
+              <Badge variant="neutral" dot>
+                Connecting…
+              </Badge>
+            )}
+          </span>
+        </div>
       }
     >
       {topicError ? (
@@ -808,13 +838,22 @@ export function LivePage() {
           </label>
 
           {historyAvailable ? (
+            /* A disabled control that will not say why is a dead end: the
+               cursor is exhausted for the CURRENT filters, which is a fact the
+               operator can act on (widen them) and could not previously see
+               (QA round 1, finding #16). The sentence is visually hidden and
+               therefore part of the accessible name, with a title for the
+               pointer — the loading state needs neither, its label already
+               says what it is doing. */
             <Button
               variant="outline"
               size="sm"
-              disabled={history.nextCursor === "" || history.loading}
+              disabled={exhausted || history.loading}
+              title={exhausted ? NOTHING_OLDER : undefined}
               onClick={() => loadHistory(history.nextCursor)}
             >
               {history.loading ? "Loading older…" : "Load older"}
+              {exhausted ? <span className="sr-only">{NOTHING_OLDER}</span> : null}
             </Button>
           ) : null}
 

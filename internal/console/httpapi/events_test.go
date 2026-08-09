@@ -112,6 +112,50 @@ func TestEventsFilterPlumbing(t *testing.T) {
 	}
 }
 
+// TestEventsScopeNodePlumbing is the node-card filter: ?scopeNode= reaches the
+// lister as EventFilter.ScopeNode and leaves the exact-match Scope alone, so
+// the store applies the pair-aware clause and nothing else.
+func TestEventsScopeNodePlumbing(t *testing.T) {
+	lister := &fakeEventLister{}
+	srv := newEventsServer(t, lister)
+
+	rec := do(t, srv, http.MethodGet, "/api/v1/events?scopeNode=node-a", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body)
+	}
+	if lister.gotFilter.ScopeNode != "node-a" {
+		t.Errorf("ScopeNode = %q, want node-a", lister.gotFilter.ScopeNode)
+	}
+	if lister.gotFilter.Scope != "" {
+		t.Errorf("Scope = %q, want empty -- scopeNode must not also set the exact filter", lister.gotFilter.Scope)
+	}
+}
+
+// TestEventsScopeAndScopeNodeAreMutuallyExclusive: the two filters answer
+// different questions ("this exact scope" vs "this name on either side of a
+// pair"), and silently AND-ing them would return a subset an operator never
+// asked for. 422 rather than 400: both params are individually well-formed --
+// it is the combination the server refuses (the same posture every other
+// semantic refusal in this API takes).
+func TestEventsScopeAndScopeNodeAreMutuallyExclusive(t *testing.T) {
+	lister := &fakeEventLister{}
+	srv := newEventsServer(t, lister)
+
+	rec := do(t, srv, http.MethodGet, "/api/v1/events?scope=node-a&scopeNode=node-a", "")
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status %d, want 422: %s", rec.Code, rec.Body)
+	}
+	if ct := rec.Header().Get("Content-Type"); ct != "application/problem+json" {
+		t.Errorf("Content-Type = %q, want application/problem+json", ct)
+	}
+	if !strings.Contains(rec.Body.String(), "scopeNode") {
+		t.Errorf("detail should name scopeNode: %s", rec.Body)
+	}
+	if lister.gotFilter.Scope != "" || lister.gotFilter.ScopeNode != "" {
+		t.Errorf("the lister was called despite the 422: %+v", lister.gotFilter)
+	}
+}
+
 func TestEventsValidation400s(t *testing.T) {
 	lister := &fakeEventLister{}
 	srv := newEventsServer(t, lister)

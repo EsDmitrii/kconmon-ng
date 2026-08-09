@@ -1,0 +1,110 @@
+---
+# Local PostgreSQL fixture for console.database.mode=external on minikube.
+#
+# Same shape and the same reasoning as e2e/testdata/postgres.yaml, which this
+# file is a deliberate sibling of: a plain Deployment + Service + Secret, NOT a
+# CNPG Cluster. mode=cnpg needs the CloudNativePG operator's CRDs to already
+# exist (ADR-001 names the chicken-and-egg as a known negative, and the chart
+# does not install the operator), so a local stand would have to install a
+# SECOND operator just to hand the console a database. That is weight without a
+# lesson: mode=external drives the identical Go path
+# (DatabaseConfig.ResolveDSN -> store.Open -> goose migrations -> sqlc
+# queries); only the controller rendering the Postgres Service differs, and the
+# CNPG rendering path is covered by `make helm-lint` / `helm template` instead.
+#
+# NON-PERSISTENT ON PURPOSE. The data directory is an emptyDir: this is a test
+# stand that `./hack/local-test.sh down` throws away with the whole cluster, and
+# a PVC would only add a storage class to debug and stale rows to explain after
+# a pod restart. Do not copy either the emptyDir or the credentials below into
+# anything real.
+#
+# Applied by hack/local-test.sh BEFORE the Helm install: the console Pod mounts
+# the Secret at boot and never becomes ready without it already existing.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: kconmon-local-postgres
+type: Opaque
+stringData:
+  # Key "dsn" is the chart's own console.database.existingSecretKey default;
+  # hack/values-local.yaml names it explicitly anyway, because the DSN and the
+  # key it lives under are one fact split across two files.
+  # sslmode=disable: a throwaway single-replica database inside a throwaway
+  # minikube cluster, never a pattern for a real deployment.
+  dsn: postgres://kconmon:kconmon@kconmon-local-postgres:5432/kconmon?sslmode=disable
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kconmon-local-postgres
+  labels:
+    app: kconmon-local-postgres
+spec:
+  replicas: 1
+  # Recreate, not RollingUpdate: two postgres pods must never hold the same
+  # data directory, and with an emptyDir there is nothing to hand over anyway.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: kconmon-local-postgres
+  template:
+    metadata:
+      labels:
+        app: kconmon-local-postgres
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:17-alpine
+          ports:
+            - name: postgres
+              containerPort: 5432
+          env:
+            - name: POSTGRES_USER
+              value: kconmon
+            - name: POSTGRES_PASSWORD
+              value: kconmon
+            - name: POSTGRES_DB
+              value: kconmon
+            # A subdirectory, not the mount root: initdb refuses a data
+            # directory that is not empty, and a fresh emptyDir mount can
+            # still carry a lost+found on some drivers.
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          volumeMounts:
+            - name: pgdata
+              mountPath: /var/lib/postgresql/data
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "kconmon", "-d", "kconmon"]
+            initialDelaySeconds: 3
+            periodSeconds: 3
+            timeoutSeconds: 3
+          livenessProbe:
+            exec:
+              command: ["pg_isready", "-U", "kconmon", "-d", "kconmon"]
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 3
+          resources:
+            limits:
+              cpu: 500m
+              memory: 256Mi
+            requests:
+              cpu: 50m
+              memory: 128Mi
+      volumes:
+        - name: pgdata
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kconmon-local-postgres
+spec:
+  selector:
+    app: kconmon-local-postgres
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: postgres

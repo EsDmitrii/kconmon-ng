@@ -8,9 +8,9 @@
  * Assembly being client-side is plan Decision 1; correlation being documented
  * heuristics rather than a model is Decision 2.
  *
- * The exported constants here are the AUTHORITY for the ranking rules.
- * docs/console/product/INVESTIGATION.md restates them for the operator and
- * cites these names; if the two ever disagree, the doc is the one that is wrong.
+ * The exported constants here are the AUTHORITY for the ranking rules — the
+ * Investigate page links straight to this file as "the scoring source", so
+ * the operator reads exactly what the code executes.
  */
 
 /** The closed set of timeline sources. Closed on purpose: CAUSE_WEIGHTS has to

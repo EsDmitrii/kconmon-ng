@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { resetWsClient } from "@/hooks/use-ws-topic";
 import { FakeSocket } from "@/lib/fake-websocket";
 import { parseInvestigationParams } from "@/lib/investigation-sources";
-import { MatrixPage } from "./matrix";
+import { MatrixPage, readProtocolFromLocation } from "./matrix";
 
 const matrixBody = {
   protocol: "tcp", plane: "pod", nodes: ["a", "b"],
@@ -205,5 +205,99 @@ describe("MatrixPage — Investigate affordance", () => {
     renderPage();
     await screen.findByLabelText("Investigate a → b");
     expect(screen.queryByLabelText("Investigate a → a")).toBeNull();
+  });
+});
+
+/* ── QA round 2, finding #1: the lazy fail counter ──────────────────────────
+   A pair that has never failed emits no fail-ratio sample, so `failRatio:
+   null` beside a real p95 is the NORMAL state of a healthy fleet's cell. The
+   grid used to throw all of it away and draw an em-dash. */
+
+const lazyBody = {
+  protocol: "udp", plane: "pod", nodes: ["a", "b"],
+  cells: [
+    // Never failed: latency and loss are there, the failure series is not.
+    { source: "a", destination: "b", failRatio: null, rttP95: 2_200_000, lossRatio: 0.05 },
+    // Genuinely unprobed: all three vectors silent.
+    { source: "b", destination: "a", failRatio: null },
+  ],
+  timestamp: "2026-01-01T00:00:00Z",
+};
+
+describe("MatrixPage — a cell measured without a failure ratio", () => {
+  it("renders its RTT instead of an em-dash", async () => {
+    stubFetch(lazyBody);
+    renderPage();
+    const cell = await screen.findByLabelText(/^a → b:/);
+    expect(cell).toHaveTextContent("2.2ms");
+    expect(cell).not.toHaveTextContent("—");
+  });
+
+  it("says in its aria-label what IS known, never 'no data' over the top of data", async () => {
+    stubFetch(lazyBody);
+    renderPage();
+    await screen.findByLabelText("a → b: no failure signal recorded, RTT p95 2.2ms, packet loss 5.0%");
+    // The genuinely silent pair keeps the honest "no data".
+    expect(screen.getByLabelText("b → a: no data")).toBeInTheDocument();
+  });
+
+  it("takes the tier from packet loss when the failure ratio cannot carry it", async () => {
+    stubFetch(lazyBody);
+    renderPage();
+    // loss 5% is the degraded band: a warn fill, not the unknown one the
+    // failRatio-only reading painted.
+    const cell = await screen.findByLabelText(/^a → b:/);
+    expect(cell.className).toContain("bg-health-warn-soft");
+    expect(cell.className).not.toContain("unknown");
+  });
+
+  it("keeps the figures in the tooltip, marking the failure series as unsampled", async () => {
+    stubFetch(lazyBody);
+    renderPage();
+    fireEvent.mouseEnter(await screen.findByLabelText(/^a → b:/));
+    const tooltip = await screen.findByRole("tooltip");
+    expect(tooltip).toHaveTextContent("no samples");
+    expect(tooltip).toHaveTextContent("2.2ms");
+    expect(tooltip).toHaveTextContent("Packet loss");
+    expect(tooltip).not.toHaveTextContent("No probe data");
+  });
+});
+
+/* ── QA round 2, finding #15: the protocol belongs in the URL ────────────── */
+
+describe("readProtocolFromLocation", () => {
+  it("reads a protocol the console probes", () => {
+    expect(readProtocolFromLocation("?protocol=icmp")).toBe("icmp");
+    expect(readProtocolFromLocation("?protocol=udp")).toBe("udp");
+  });
+
+  it("falls back to tcp for anything else, rather than an unanswerable grid", () => {
+    expect(readProtocolFromLocation("?protocol=sctp")).toBe("tcp");
+    expect(readProtocolFromLocation("")).toBe("tcp");
+    expect(readProtocolFromLocation("?protocol=")).toBe("tcp");
+  });
+});
+
+describe("MatrixPage — protocol in the URL", () => {
+  afterEach(() => window.history.replaceState({}, "", "/"));
+
+  it("opens on the protocol the link named", async () => {
+    window.history.replaceState({}, "", "/matrix?protocol=icmp");
+    stubFetch(matrixBody);
+    renderPage();
+    await screen.findByLabelText(/^a → b:/);
+    expect(screen.getByRole("radio", { name: "ICMP" })).toBeChecked();
+    expect(screen.getByRole("radio", { name: "TCP" })).not.toBeChecked();
+  });
+
+  it("REPLACES the protocol in the URL on a switch, leaving one history entry", async () => {
+    window.history.replaceState({}, "", "/matrix");
+    stubFetch(matrixBody);
+    renderPage();
+    await screen.findByLabelText(/^a → b:/);
+    const before = window.history.length;
+    fireEvent.click(screen.getByRole("radio", { name: "UDP" }));
+    expect(new URLSearchParams(window.location.search).get("protocol")).toBe("udp");
+    expect(window.history.length).toBe(before);
   });
 });

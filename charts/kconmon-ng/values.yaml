@@ -211,56 +211,183 @@ serviceMonitor:
 # metric are only produced by the leader's node informer.
 prometheusRule:
   enabled: false
+  # Why every rule below names its pair in the annotations: the series already
+  # carry the peer label set (source_node, destination_node, source_zone,
+  # destination_zone). An annotation that omits them turns N distinct broken
+  # links into N byte-identical Slack lines, and the operator cannot tell which
+  # link, which direction, or how bad. $labels costs nothing and answers all
+  # three.
+  #
+  # Why the *ChecksFailing rules divide instead of using rate(fail) > 0: a raw
+  # rate over a fail counter is positive for the WHOLE window after a single
+  # flaky probe, so the rule really says "something failed in the last 5
+  # minutes", which is not an incident. The ratio is failing probes over all
+  # probes for the same pair, so one failure inside a healthy stream stays
+  # under the threshold while a link that is actually down crosses it at once.
+  # Thresholds: 0.05 (5%) for in-cluster TCP and DNS, because a pod-to-pod path
+  # that drops one probe in twenty is broken; 0.1 (10%) for external targets,
+  # because those probes leave the cluster and cross networks nobody here
+  # operates, and a stricter bound would page on somebody else's packet loss.
+  #
+  # A pair that has never failed has no {result="fail"} series at all, so the
+  # division yields no sample for it and the rule stays silent. That is the
+  # intent: no zero has to be materialised for every pair in the mesh.
+  #
+  # `result` carries exactly two values, `success` and `fail`. The denominator
+  # deliberately selects the family with NO result selector, so a third value
+  # added later widens the denominator instead of silently skewing the ratio.
+  #
+  # Metric names must stay spelled with the literal `kconmon_ng` prefix:
+  # templates/prometheusrule.yaml rewrites each expr through
+  # `replace "kconmon_ng" $prefix`, which is what keeps config.metricsPrefix
+  # working. That rewrite touches `expr` ONLY, so a metric name mentioned in an
+  # annotation would not follow the prefix and is avoided below. Annotation
+  # bodies are passed through by toYaml and never Helm-templated, which is what
+  # lets `{{ $labels.x }}` and `{{ $value }}` reach Prometheus intact.
   rules:
+    # Pair-scoped gauge, 0.0-1.0, carrying the full peer label set. ICMP loss
+    # (kconmon_ng_icmp_packet_loss_ratio) uses the SAME labels, so this
+    # annotation shape ports to an ICMP copy of the rule unchanged.
     - alert: UDPLossHigh
       expr: kconmon_ng_udp_packet_loss_ratio > 0.5
       for: 5m
       labels:
         severity: warning
       annotations:
-        summary: High UDP packet loss detected
+        summary: >-
+          UDP loss {{ $labels.source_node }} -> {{ $labels.destination_node }}
+          at {{ $value | humanizePercentage }}
+        description: >-
+          UDP packet loss from {{ $labels.source_node }} (zone
+          {{ $labels.source_zone }}) to {{ $labels.destination_node }} (zone
+          {{ $labels.destination_zone }}) has held at
+          {{ $value | humanizePercentage }} for 5m, over the 50% threshold.
+          Drill this exact pair on the kconmon-ng console Investigate page, or
+          open the "kconmon-ng / Node Detail" Grafana dashboard with
+          node={{ $labels.source_node }} to see whether the same node is losing
+          packets to its other peers or only to this one.
     - alert: TCPChecksFailing
-      expr: rate(kconmon_ng_tcp_results_total{result="fail"}[5m]) > 0
+      expr: >-
+        sum by (source_node, destination_node, source_zone, destination_zone)
+        (rate(kconmon_ng_tcp_results_total{result="fail"}[5m]))
+        /
+        sum by (source_node, destination_node, source_zone, destination_zone)
+        (rate(kconmon_ng_tcp_results_total[5m]))
+        > 0.05
       for: 5m
       labels:
         severity: warning
       annotations:
-        summary: TCP connectivity checks failing
+        summary: >-
+          TCP checks failing {{ $labels.source_node }} ->
+          {{ $labels.destination_node }} at {{ $value | humanizePercentage }} of
+          probes
+        description: >-
+          {{ $value | humanizePercentage }} of TCP probes from
+          {{ $labels.source_node }} (zone {{ $labels.source_zone }}) to
+          {{ $labels.destination_node }} (zone {{ $labels.destination_zone }})
+          failed over the last 5m, above the 5% failure-ratio threshold. Open
+          the pair on the kconmon-ng console Investigate page, or the worst-pairs
+          table on the "kconmon-ng / Overview" Grafana dashboard to see whether
+          UDP and ICMP fail on the same link (a path problem) or TCP fails
+          alone (a listener or policy problem).
+    # DNS is NOT pair-scoped: this family carries host, resolver, source_node
+    # and source_zone, and no destination_* labels at all. Grouping by
+    # destination_node here would collapse everything into one empty group, so
+    # the annotation names the resolver and the queried host instead.
     - alert: DNSChecksFailing
-      expr: rate(kconmon_ng_dns_results_total{result="fail"}[5m]) > 0
+      expr: >-
+        sum by (source_node, source_zone, host, resolver)
+        (rate(kconmon_ng_dns_results_total{result="fail"}[5m]))
+        /
+        sum by (source_node, source_zone, host, resolver)
+        (rate(kconmon_ng_dns_results_total[5m]))
+        > 0.05
       for: 5m
       labels:
         severity: warning
       annotations:
-        summary: DNS resolution checks failing
+        summary: >-
+          DNS failing on {{ $labels.source_node }} for {{ $labels.host }} via
+          {{ $labels.resolver }} at {{ $value | humanizePercentage }}
+        description: >-
+          {{ $value | humanizePercentage }} of lookups of {{ $labels.host }}
+          through resolver {{ $labels.resolver }} from {{ $labels.source_node }}
+          (zone {{ $labels.source_zone }}) failed over the last 5m, above the 5%
+          threshold. This is resolver-side, not a peer link, so check
+          CoreDNS/kube-dns and the node's resolv.conf before the network. The
+          kconmon-ng console Investigate page scoped to
+          {{ $labels.source_node }} shows whether its peer probes degraded at
+          the same moment.
     # External checks (config.checkers.external.enabled). The vec stays empty
     # until an external probe reports, so this rule is inert on an install that
-    # never enabled the feature — no `absent()` false positive either way.
+    # never enabled the feature, and no absent() false positive either way.
+    # External destinations use their OWN label set (target, target_kind, and
+    # no destination_node), so this is the one *ChecksFailing rule that cannot
+    # print a peer.
     - alert: ExternalChecksFailing
-      expr: rate(kconmon_ng_external_results_total{result="fail"}[5m]) > 0
+      expr: >-
+        sum by (source_node, source_zone, target, target_kind)
+        (rate(kconmon_ng_external_results_total{result="fail"}[5m]))
+        /
+        sum by (source_node, source_zone, target, target_kind)
+        (rate(kconmon_ng_external_results_total[5m]))
+        > 0.1
       for: 5m
       labels:
         severity: warning
       annotations:
-        summary: External connectivity checks failing
+        summary: >-
+          External target {{ $labels.target }} failing from
+          {{ $labels.source_node }} at {{ $value | humanizePercentage }}
+        description: >-
+          {{ $value | humanizePercentage }} of probes to external target
+          {{ $labels.target }} (kind {{ $labels.target_kind }}) from
+          {{ $labels.source_node }} (zone {{ $labels.source_zone }}) failed over
+          the last 5m, above the 10% threshold. A probe the allowlist refused
+          never reaches this counter, so if the target looks untested rather
+          than failing, read the external_denied_total counter for its reason
+          (cidr, resolve or disabled) before suspecting the network.
     # Self-monitoring: registered agents stay below the schedulable-node count
-    # for 10m (agents failing to register or crash-looping).
+    # for 10m (agents failing to register or crash-looping). Written as a
+    # subtraction rather than `registered < expected` so that $value is the
+    # NUMBER OF MISSING agents; with `<` the alert value would be the registered
+    # count, which is the one number the operator can already see everywhere.
     - alert: KconmonAgentsMissing
-      expr: kconmon_ng_controller_registered_agents < kconmon_ng_controller_expected_agents
+      expr: kconmon_ng_controller_expected_agents - kconmon_ng_controller_registered_agents > 0
       for: 10m
       labels:
         severity: warning
       annotations:
-        summary: Fewer kconmon-ng agents registered than schedulable nodes
-    # Self-monitoring: no controller reports itself leader for 5m — the control
-    # plane is down and no other rule would evaluate.
+        summary: >-
+          {{ $value }} kconmon-ng agent(s) missing per controller
+          {{ $labels.instance }}
+        description: >-
+          The controller on {{ $labels.instance }} expects one agent per
+          schedulable node, and {{ $value }} of them have not registered for
+          10m. The usual causes are a DaemonSet that cannot schedule (taints or
+          resources), crash-looping agent pods, or agent-to-controller gRPC
+          being blocked. Every pair involving a missing node simply stops being
+          probed, so the other rules in this group go quiet rather than firing.
+          The kconmon-ng console topology view lists the nodes it does know.
+    # Self-monitoring: no controller reports itself leader for 5m, so the
+    # control plane is down and no other rule would evaluate. absent() returns
+    # a synthetic 1 with no series labels, so $value carries no information
+    # here and the description points at what to look at instead.
     - alert: KconmonControllerDown
       expr: absent(kconmon_ng_controller_leader == 1)
       for: 5m
       labels:
         severity: critical
       annotations:
-        summary: No active kconmon-ng controller leader
+        summary: No kconmon-ng controller has reported itself leader for 5m
+        description: >-
+          Every controller replica is reporting leader=0, or Prometheus is
+          scraping none of them. Peer lists stop being distributed, so agents
+          keep probing a frozen topology and every other rule in this group
+          quietly stops describing reality. Check the controller Deployment, its
+          lease in the release namespace, and the controller scrape target in
+          Prometheus.
 
 # NetworkPolicy locking down agent/controller traffic. When enabled it allows:
 # agent<->controller gRPC, agent<->agent UDP probes + HTTP metrics, DNS (53),

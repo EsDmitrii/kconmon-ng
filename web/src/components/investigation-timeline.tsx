@@ -18,12 +18,24 @@ import { cn } from "@/lib/utils";
  * sources they describe (M6 Global Constraints).
  */
 
-/** KIND_LABEL is the badge text per source. Deliberately operator vocabulary
- *  rather than the API's: "config change" is what an audit row IS to somebody
- *  reading a timeline, and "k8s" is what a cluster event is called out loud. */
+/**
+ * KIND_LABEL is the badge text per source. Deliberately operator vocabulary
+ * rather than the API's: "k8s" is what a cluster event is called out loud.
+ *
+ * `audit` says "audit", not "config change" (QA round 5, finding #19). The old
+ * label was a guess about what the row means, and the guess is wrong for most
+ * rows: the audit log records every authorization DECISION the API makes —
+ * `GET /api/v1/targets`, `allowed`; a denied read; a login — and lib/
+ * investigation-sources.ts's auditEntries filters none of them out. Labelling
+ * a read "config change" tells an operator hunting a cause that somebody
+ * changed something during the incident window when nobody did, which is the
+ * most expensive kind of wrong a timeline can be. "audit" names the SOURCE,
+ * which is what every other label here does, and the row's own title carries
+ * the action verbatim.
+ */
 export const KIND_LABEL: Record<TimelineKind, string> = {
   event: "event",
-  audit: "config change",
+  audit: "audit",
   annotation: "annotation",
   "path-change": "path change",
   run: "run",
@@ -51,6 +63,18 @@ const SEVERITY_BORDER: Record<TimelineEntry["severity"], string> = {
 export interface SourceNote {
   id: string;
   text: string;
+  /**
+   * True when this line describes a source that FAILED, as opposed to one that
+   * was never asked (QA round 3, finding #1).
+   *
+   * The distinction is the whole point of the list. A source the subject cannot
+   * read contributed nothing and was never requested — the timeline is complete
+   * for what this session can see. A source whose request came back 500
+   * contributed nothing EITHER, but the timeline is now missing rows that exist,
+   * and the page must not go on to claim nothing happened. Failed lines render
+   * as alerts and suppress the nothing-happened empty state below.
+   */
+  failed?: boolean;
 }
 
 function fmtClock(d: Date): string {
@@ -157,6 +181,7 @@ export function InvestigationTimeline({
   pinning?: PinControl;
 }) {
   const cursorMs = cursorAt?.getTime() ?? null;
+  const failed = notes.filter((n) => n.failed === true).length;
 
   return (
     <Card asChild className="overflow-hidden p-0">
@@ -165,11 +190,27 @@ export function InvestigationTimeline({
           <h3 className="text-sm font-semibold">Timeline</h3>
           <ul aria-label="Timeline sources" className="mt-2 flex flex-col gap-1">
             {notes.map((n) => (
-              <li key={n.id} className="text-[11px] leading-relaxed text-muted-foreground">
+              <li
+                key={n.id}
+                {...(n.failed ? { role: "alert" as const, "data-failed": "true" } : {})}
+                className={cn(
+                  "text-[11px] leading-relaxed",
+                  n.failed ? "text-health-bad" : "text-muted-foreground",
+                )}
+              >
                 {n.text}
               </li>
             ))}
           </ul>
+          {/* One line for the WHOLE picture, above the rows (finding #1). The
+              per-source lines say which and why; this one says what that costs
+              the reader, which is the thing they have to carry while reading
+              everything below it. */}
+          {failed > 0 ? (
+            <p data-testid="timeline-partial" className="mt-2 text-[11px] font-medium leading-relaxed text-health-bad">
+              {failed} source{failed === 1 ? "" : "s"} failed; the timeline below is partial.
+            </p>
+          ) : null}
         </div>
 
         {loading && entries.length === 0 ? (
@@ -181,7 +222,12 @@ export function InvestigationTimeline({
           </div>
         ) : null}
 
-        {!loading && entries.length === 0 ? (
+        {/* The nothing-happened claim requires EVERY enabled source to have
+            settled successfully (finding #1). With one of them failed, an empty
+            list is not evidence of a quiet fleet — it is evidence of a fetch
+            that did not come back, and the partial line above has already said
+            so rather than this sentence contradicting it. */}
+        {!loading && entries.length === 0 && failed === 0 ? (
           <p className="px-4 py-12 text-center text-xs leading-relaxed text-muted-foreground">
             Nothing happened in this window — no event, no configuration change and no threshold crossing from any
             source this session can read.

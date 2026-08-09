@@ -118,6 +118,24 @@ describe("nodeHealth", () => {
   it("reads unknown with no outbound data", () => {
     expect(nodeHealth(true, [], "node-a")).toEqual({ percent: null, tier: "unknown" });
   });
+
+  /* QA round 2, finding #1: a node whose pairs have simply never failed. */
+  it("does NOT read a measured-but-unscored node as No data", () => {
+    const measured = [{ source: "node-a", destination: "node-b", failRatio: null, rttP95: 2_200_000 }];
+    expect(nodeHealth(true, measured, "node-a")).toEqual({ percent: null, tier: "ok" });
+  });
+
+  it("takes the tier from packet loss when no failure ratio was reported", () => {
+    const lossy = [{ source: "node-a", destination: "node-b", failRatio: null, rttP95: 1e6, lossRatio: 0.2 }];
+    const h = nodeHealth(true, lossy, "node-a");
+    expect(h.tier).toBe("bad");
+    expect(h.percent).toBeCloseTo(80, 5);
+  });
+
+  it("still reads unknown when nothing measured the node at all", () => {
+    const silent = [{ source: "node-a", destination: "node-b", failRatio: null }];
+    expect(nodeHealth(true, silent, "node-a")).toEqual({ percent: null, tier: "unknown" });
+  });
 });
 
 describe("NodeCardPage", () => {
@@ -139,14 +157,19 @@ describe("NodeCardPage", () => {
     expect(screen.getByText("2.0%")).toBeInTheDocument();
   });
 
-  it("requests the recent-changes rail scoped to exactly the node name", async () => {
+  // QA scope 2 #21: `scope=node-a` is an EQUALITY filter, so the rail missed
+  // every row a check between two nodes writes ("node-a→node-b"). scopeNode is
+  // the pair-aware param, and the two are mutually exclusive server-side (422),
+  // so the exact-scope one must be gone from the URL, not merely accompanied.
+  it("requests the recent-changes rail with the pair-aware scopeNode filter", async () => {
     const { fetchMock } = renderPage("/nodes/node-a");
     await waitFor(() =>
       expect(fetchMock.mock.calls.some((c) => String(c[0]).startsWith("/api/v1/events"))).toBe(true),
     );
     const call = fetchMock.mock.calls.find((c) => String(c[0]).startsWith("/api/v1/events"));
     const url = new URL(String(call?.[0]), "http://localhost");
-    expect(url.searchParams.get("scope")).toBe("node-a");
+    expect(url.searchParams.get("scopeNode")).toBe("node-a");
+    expect(url.searchParams.get("scope")).toBeNull();
   });
 });
 
@@ -213,5 +236,108 @@ describe("NodeCardPage — open incidents rail", () => {
   it("says so when no open incident names this node", async () => {
     renderPage("/nodes/node-a", { permissions: ["incidents:read"], incidents: [nodeIncident({ scope: "node-b" })] });
     expect(await screen.findByText(/no open incident names this object/i)).toBeInTheDocument();
+  });
+});
+
+/* ── QA round 2, findings #3, #4 and #16: the Agent identity panel ───────── */
+
+/** Renders the card with a topology answer of the caller's choosing — a
+ *  problem+json response for the failure cases, a body for the rest. */
+function renderWithTopology(topology: { status: number; body: unknown }, pathname = "/nodes/node-a") {
+  window.history.pushState({}, "", pathname);
+  const fetchMock = vi.fn((url: string) => {
+    const href = String(url);
+    if (href.includes("/api/v1/version")) return Promise.resolve(json({ version: "1.6.0", commit: "x", capabilities: [] }));
+    if (href.includes("/api/v1/config")) return Promise.resolve(json(configBody()));
+    if (href.includes("/api/v1/auth/me")) {
+      return Promise.resolve(json({ subject: { kind: "user", id: "u1" }, permissions: [] }));
+    }
+    if (href.includes("/api/v1/topology")) {
+      return Promise.resolve(
+        new Response(JSON.stringify(topology.body), {
+          status: topology.status,
+          headers: { "Content-Type": topology.status === 200 ? "application/json" : "application/problem+json" },
+        }),
+      );
+    }
+    if (href.includes("/api/v1/matrix")) return Promise.resolve(json(matrixBody));
+    if (href.startsWith("/api/v1/incidents")) return Promise.resolve(json({ incidents: [], nextCursor: "" }));
+    if (href.startsWith("/api/v1/events")) return Promise.resolve(json({ events: [], nextCursor: "" }));
+    if (href.startsWith("/api/v1/runs")) return Promise.resolve(json({ runs: [], nextCursor: "" }));
+    return Promise.resolve(json({}));
+  });
+  vi.stubGlobal("fetch", fetchMock);
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  return render(
+    <QueryClientProvider client={qc}>
+      <NodeCardPage />
+    </QueryClientProvider>,
+  );
+}
+
+describe("NodeCardPage — identity when the topology query FAILED", () => {
+  it("says what the server said instead of drawing four em-dashes", async () => {
+    renderWithTopology({
+      status: 422,
+      body: {
+        type: "about:blank",
+        title: "instant outside retention",
+        status: 422,
+        detail: "at is older than console.database.retentionDays (30d)",
+      },
+    });
+    const line = await screen.findByTestId("identity-problem");
+    expect(line).toHaveTextContent("console.database.retentionDays");
+    expect(screen.queryByText("Zone")).not.toBeInTheDocument();
+    expect(screen.queryByText("Pod IP")).not.toBeInTheDocument();
+  });
+
+  it("keeps the em-dashes for a SUCCESSFUL topology that simply lacks the node", async () => {
+    renderWithTopology({ status: 200, body: { nodes: [], agents: [], timestamp: "t" } }, "/nodes/node-zzz");
+    await screen.findByText("Zone");
+    expect(screen.queryByTestId("identity-problem")).toBeNull();
+    expect(screen.getAllByText("—").length).toBeGreaterThanOrEqual(4);
+  });
+});
+
+describe("NodeCardPage — zone from a topology with agents but no nodes", () => {
+  it("reads the zone off the node's own AGENT entry", async () => {
+    renderWithTopology({
+      status: 200,
+      body: {
+        nodes: [],
+        agents: [{ id: "agent-1", nodeName: "node-a", podIP: "10.0.0.1", zone: "z9" }],
+        timestamp: "t",
+      },
+    });
+    await waitFor(() => expect(screen.getByText("z9")).toBeInTheDocument());
+    expect(screen.getByText("Zone z9")).toBeInTheDocument();
+  });
+
+  it("leaves readiness an em-dash, and says where that fact would have come from", async () => {
+    renderWithTopology({
+      status: 200,
+      body: {
+        nodes: [],
+        agents: [{ id: "agent-1", nodeName: "node-a", podIP: "10.0.0.1", zone: "z9" }],
+        timestamp: "t",
+      },
+    });
+    await waitFor(() => expect(screen.getByText("z9")).toBeInTheDocument());
+    const ready = screen.getByText("Ready").parentElement?.querySelector("dd");
+    expect(ready).toHaveTextContent("—");
+    expect(ready?.getAttribute("title")).toBe("node readiness comes from the Kubernetes node informer");
+  });
+});
+
+describe("NodeCardPage — the header percentage", () => {
+  it("drops the '— healthy' line entirely when there is no percentage to state", async () => {
+    renderWithTopology({
+      status: 200,
+      body: { nodes: [{ name: "node-zzz", zone: "z1", ready: true }], agents: [], timestamp: "t" },
+    }, "/nodes/node-zzz");
+    // node-zzz has no matrix cells at all: No data, and nothing else.
+    await screen.findByText("No data");
+    expect(screen.queryByText(/healthy/)).toBeNull();
   });
 });

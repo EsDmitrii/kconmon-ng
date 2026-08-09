@@ -266,16 +266,31 @@ function DefinitionRow({ definition, schedules }: { definition: CheckDefinition;
         </p>
       ) : (
         <ul className="flex flex-col gap-1">
-          {schedules.map((s) => (
-            <li key={s.id} className="flex flex-wrap items-center gap-3 text-xs text-muted-foreground">
-              <span className="nums">{cadence(s)}</span>
-              <Badge variant={s.enabled ? "ok" : "unknown"} dot>
-                {s.enabled ? "enabled" : "disabled"}
-              </Badge>
-              <span className="nums">next {fmtTime(s.nextFireAt)}</span>
-              <span className="nums">last {fmtTime(s.lastFiredAt)}</span>
-            </li>
-          ))}
+          {schedules.map((s) => {
+            // Same treatment as the Schedules tab's own rows (QA round 5,
+            // finding #5): the cadence advances whether the fire produced a
+            // run or not, so "enabled" alone is not evidence of health.
+            const failing = s.enabled && s.lastError !== "";
+            return (
+              <li key={s.id} className="flex flex-wrap items-center gap-3 text-xs text-muted-foreground">
+                <span className="nums">{cadence(s)}</span>
+                <Badge variant={!s.enabled ? "unknown" : failing ? "warn" : "ok"} dot>
+                  {s.enabled ? "enabled" : "disabled"}
+                </Badge>
+                <span className="nums">next {fmtTime(s.nextFireAt)}</span>
+                <span className="nums">last {fmtTime(s.lastFiredAt)}</span>
+                {failing ? (
+                  <p
+                    data-testid="schedule-failure"
+                    className="basis-full text-xs leading-relaxed text-health-bad"
+                    title={s.lastErrorAt ? `Recorded ${fmtTime(s.lastErrorAt)}` : undefined}
+                  >
+                    failing: {s.lastError}
+                  </p>
+                ) : null}
+              </li>
+            );
+          })}
         </ul>
       )}
     </li>
@@ -284,6 +299,15 @@ function DefinitionRow({ definition, schedules }: { definition: CheckDefinition;
 
 function ChecksTab({ targetId, canRead }: { targetId: string; canRead: boolean }) {
   const { definitions, schedules, isLoading, error } = useTargetChecks(targetId, canRead);
+  /* The Time Machine's honest line for this panel (QA round 5, finding #4).
+     The page header says "state as of <t>" and this card sits under it, so an
+     operator reasonably reads the definitions and cadences below as the ones
+     that existed AT t — and they are not. GET /api/v1/checks and
+     /api/v1/schedules have no `?at=` and no history table behind them: they
+     answer with the current configuration, always. Saying so is the only
+     option that is both true and cheap; the alternative is a history for
+     config tables, which is a milestone, not a fix. */
+  const { at } = useTimeContext();
 
   if (!canRead) {
     return (
@@ -299,6 +323,11 @@ function ChecksTab({ targetId, canRead }: { targetId: string; canRead: boolean }
     <Card asChild className="p-6">
       <section>
         <h3 className="text-sm font-semibold">Definitions probing this target</h3>
+        {at ? (
+          <p data-testid="checks-tm-notice" className="mt-1 text-xs leading-relaxed text-muted-foreground">
+            Target configuration is shown as of now — only the probe series time-travel.
+          </p>
+        ) : null}
         {error ? (
           <p role="alert" className="mt-3 text-sm text-health-bad">
             {queryErrorMessage(error, "Check definitions are unavailable")}
@@ -740,9 +769,14 @@ export function TargetCardPage() {
           <span className="nums max-w-[18rem] truncate text-sm text-muted-foreground" title={target.address}>
             {target.address}
           </span>
-          <span className="nums text-sm text-muted-foreground">
-            {health.percent === null ? "—" : `${health.percent.toFixed(1)}%`} healthy
-          </span>
+          {/* No percentage, no sentence. "— healthy" read as a claim with a
+              missing number in front of it; the badge beside it already says
+              the state in words, and it is the honest one. Round 2's finding
+              #16 fixed exactly this on the node card and it was never carried
+              across to this one (QA round 5, finding #7). */}
+          {health.percent === null ? null : (
+            <span className="nums text-sm text-muted-foreground">{health.percent.toFixed(1)}% healthy</span>
+          )}
           <Badge variant={TIER_VARIANT[health.tier]} dot>
             {TIER_LABEL[health.tier]}
           </Badge>
@@ -765,18 +799,19 @@ export function TargetCardPage() {
         </div>
         <div className="flex flex-col gap-2">
           <RelatedIncidents scope={investigationScope} />
-          <RecentChanges scope={target.name} />
-          {/* Honest about what this rail can and cannot show today: every event
-              a probe of this target produces is scoped per SOURCE node
+          {/* scopeNode, not scope (QA round 4, finding #22). Every event a
+              probe of this target produces is scoped per SOURCE node
               ("node-a→edge-gw", internal/console/events/live_event.go's
-              pairScope), and GET /api/v1/events matches `scope` by exact
-              equality. So this rail carries events scoped to the target itself
-              — which is where target-level events will land — and not the
-              per-source probe results. Saying so beats a rail that is silently
-              empty and looks broken. */}
+              pairScope), and `?scope=` is exact equality — so this rail was
+              matching only the target-scoped events and silently dropping
+              every pair row, which is nearly all of them. `?scopeNode=`
+              (store.EventFilter.ScopeNode) is the filter that was built for
+              exactly this: it admits the bare scope AND either side of a pair
+              scope, the same mechanism pages/node-card.tsx already uses. */}
+          <RecentChanges scopeNode={target.name} />
           <p className="px-1 text-[11px] leading-relaxed text-muted-foreground">
-            Probe results are recorded per source node (e.g. node-a→{target.name}) and appear on those pair cards; this
-            rail shows changes scoped to the target itself.
+            Probe results are recorded per source node (e.g. node-a→{target.name}); this rail matches the target on
+            either side of a pair, alongside changes scoped to the target itself.
           </p>
         </div>
       </div>

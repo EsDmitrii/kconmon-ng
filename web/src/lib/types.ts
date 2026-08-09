@@ -349,6 +349,10 @@ export interface EventPage {
 export interface EventQuery {
   types?: LiveEventType[];
   scope?: string;
+  // scopeNode matches a node/target NAME on either side of the scope: the bare
+  // scope, or a pair scope "<source>→<destination>" naming it. Mutually
+  // exclusive with `scope` — the server answers 422 when both are sent.
+  scopeNode?: string;
   from?: Date;
   to?: Date;
   limit?: number;

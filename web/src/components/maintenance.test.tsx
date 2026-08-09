@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MaintenanceBar, useMaintenance } from "@/components/maintenance";
 import { TimeMachineProvider } from "@/lib/timemachine";
@@ -112,7 +112,10 @@ function scopesAsked(listCalls: URLSearchParams[]): string[] {
 async function openForm(scope = "") {
   const view = renderHarness(scope);
   fireEvent.click(await screen.findByRole("button", { name: /maintenance/i }));
-  await screen.findByRole("dialog", { name: "New maintenance window" });
+  /* role="form", not role="dialog" (QA round 3, finding #15) — the twin of the
+     annotation form's own change, and for the same reason: this is a
+     disclosure, not a modal. */
+  await screen.findByRole("form", { name: "New maintenance window" });
   return view;
 }
 
@@ -265,12 +268,55 @@ describe("MaintenanceBar affordances", () => {
     await screen.findByText(/scope node-a→node-b/);
   });
 
+  /* QA round 3, finding #11: the stamp column is now COMPACT and capped, the
+     same treatment components/annotations.tsx got in round 2 — two full
+     toLocaleStrings were about 22rem of un-shrinkable text, and in the
+     Investigate page's 24rem column that left the reason with ~38px. */
+  const compact = (iso: string) =>
+    new Date(iso).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+
   it("shows a window as a SPAN — both edges, not just its start", async () => {
     stubFetch({ byScope: { "": [win()] } });
     renderHarness("");
     const row = await screen.findByTestId("maintenance-item");
-    expect(row.textContent).toContain(new Date("2026-08-01T11:30:00Z").toLocaleString());
-    expect(row.textContent).toContain(new Date("2026-08-01T11:45:00Z").toLocaleString());
+    expect(row.textContent).toContain(compact("2026-08-01T11:30:00Z"));
+    expect(row.textContent).toContain(compact("2026-08-01T11:45:00Z"));
+  });
+
+  /* QA round 5, finding #6. The column used to be w-28 AND truncate, which cut
+     the END of the range — the one edge an operator reads to answer "when does
+     this change finish?". It is now wide enough to hold the compact pair and
+     never truncates; the REASON is what gives way, and it already has a title
+     of its own. */
+  it("gives the range column room and never truncates it, keeping the FULL pair on title", async () => {
+    stubFetch({ byScope: { "": [win()] } });
+    renderHarness("");
+    const stamp = await screen.findByTestId("maintenance-stamp");
+    expect(stamp.className).toContain("lg:w-44");
+    expect(stamp.className).toContain("whitespace-nowrap");
+    expect(stamp.className).toContain("shrink-0");
+    expect(stamp.className).not.toContain("truncate");
+    expect(stamp.getAttribute("title")).toBe(
+      `${new Date("2026-08-01T11:30:00Z").toLocaleString()} → ${new Date("2026-08-01T11:45:00Z").toLocaleString()}`,
+    );
+  });
+
+  // Narrow (the Investigate rail, a phone), the range takes a row of its own
+  // above the reason rather than fighting it for one line.
+  it("stacks the range above the reason at narrow widths", async () => {
+    stubFetch({ byScope: { "": [win()] } });
+    renderHarness("");
+    const stamp = await screen.findByTestId("maintenance-stamp");
+    expect(stamp.className).toContain("basis-full");
+    expect(stamp.className).toContain("lg:basis-auto");
+  });
+
+  it("gives the reason the row's remaining width", async () => {
+    stubFetch({ byScope: { "": [win()] } });
+    renderHarness("");
+    const reason = await screen.findByTestId("maintenance-reason");
+    expect(reason.className).toContain("flex-1");
+    expect(reason.className).toContain("min-w-0");
   });
 });
 
@@ -337,7 +383,7 @@ describe("create flow", () => {
     fireEvent.change(screen.getByLabelText("Reason"), { target: { value: "x" } });
     fireEvent.click(screen.getByRole("button", { name: "Create maintenance window" }));
     await screen.findByText("endAt must be after startAt");
-    expect(screen.getByRole("dialog", { name: "New maintenance window" })).toBeTruthy();
+    expect(screen.getByRole("form", { name: "New maintenance window" })).toBeTruthy();
   });
 
   it("refetches the window and closes the form after a successful create", async () => {
@@ -365,14 +411,14 @@ describe("create flow", () => {
     fireEvent.change(await screen.findByLabelText("Reason"), { target: { value: "just declared" } });
     fireEvent.click(screen.getByRole("button", { name: "Create maintenance window" }));
     await screen.findByText("just declared");
-    expect(screen.queryByRole("dialog", { name: "New maintenance window" })).toBeNull();
+    expect(screen.queryByRole("form", { name: "New maintenance window" })).toBeNull();
   });
 
   it("cancel closes the form and posts nothing", async () => {
     const { createBodies } = stubFetch();
     await openForm("");
     fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
-    await waitFor(() => expect(screen.queryByRole("dialog", { name: "New maintenance window" })).toBeNull());
+    await waitFor(() => expect(screen.queryByRole("form", { name: "New maintenance window" })).toBeNull());
     expect(createBodies).toHaveLength(0);
   });
 });
@@ -401,7 +447,8 @@ describe("delete flow", () => {
     });
     vi.stubGlobal("fetch", fetchMock);
     renderHarness("");
-    fireEvent.click(await screen.findByRole("button", { name: /delete maintenance window/i }));
+    fireEvent.click(await screen.findByRole("button", { name: /^delete maintenance window/i }));
+    fireEvent.click(await screen.findByRole("button", { name: /^confirm delete maintenance window/i }));
     await waitFor(() => expect(deleted).toEqual(["doomed"]));
     await waitFor(() => expect(screen.queryByText("wrong day")).toBeNull());
   });
@@ -409,8 +456,69 @@ describe("delete flow", () => {
   it("surfaces a failed delete on the row and keeps it", async () => {
     stubFetch({ byScope: { "": [win({ id: "gone", reason: "already deleted" })] }, onDelete: () => problem(404, "not found") });
     renderHarness("");
-    fireEvent.click(await screen.findByRole("button", { name: /delete maintenance window/i }));
+    fireEvent.click(await screen.findByRole("button", { name: /^delete maintenance window/i }));
+    fireEvent.click(await screen.findByRole("button", { name: /^confirm delete maintenance window/i }));
     await screen.findByText("not found");
     expect(screen.getByText("already deleted")).toBeTruthy();
+  });
+
+  /* QA round 2, finding #14: a declared window is somebody's record that a
+     change was planned, and one mis-aimed click used to erase it. */
+  it("asks for a second click before deleting anything", async () => {
+    const { deleteIds } = stubFetch({ byScope: { "": [win({ id: "doomed", reason: "wrong day" })] } });
+    renderHarness("");
+    fireEvent.click(await screen.findByRole("button", { name: /^delete maintenance window/i }));
+    expect(deleteIds).toHaveLength(0);
+    expect(screen.getByRole("button", { name: /^confirm delete maintenance window/i })).toBeInTheDocument();
+  });
+
+  it("backs out cleanly, leaving the row and its normal Delete", async () => {
+    const { deleteIds } = stubFetch({ byScope: { "": [win({ id: "doomed", reason: "wrong day" })] } });
+    renderHarness("");
+    fireEvent.click(await screen.findByRole("button", { name: /^delete maintenance window/i }));
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(deleteIds).toHaveLength(0);
+    expect(screen.getByText("wrong day")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /^delete maintenance window/i })).toBeInTheDocument();
+  });
+});
+
+/* ── QA round 2, finding #18: a disabled control says why ────────────────── */
+
+describe("a time-disabled maintenance control carries its reason", () => {
+  it("titles and describes the create button while engaged", async () => {
+    window.history.pushState({}, "", "/explore?at=2026-08-01T09:00:00Z");
+    stubFetch();
+    renderHarness("");
+    const button = await screen.findByRole("button", { name: /maintenance/i });
+    expect(button).toBeDisabled();
+    expect(button).toHaveAttribute("title", "Time Machine is engaged — return to Live to act.");
+    expect(document.getElementById(button.getAttribute("aria-describedby") as string)).toHaveTextContent(
+      "Time Machine is engaged — return to Live to act.",
+    );
+  });
+});
+
+/* #17, the components family (the annotation form is this form's twin and
+   carries the same guard). The button LOOKED guarded — Button disables itself
+   while `loading` — but the flag it read was useState, which the handler about
+   to set it cannot see. */
+describe("one window per click storm (#17)", () => {
+  it("POSTs once for three rapid clicks", async () => {
+    const { createBodies } = stubFetch();
+    await openForm("node-a");
+    fireEvent.change(screen.getByLabelText("Reason"), { target: { value: "kernel patch" } });
+
+    const submit = screen.getByRole("button", { name: "Create maintenance window" });
+    /* One task, three clicks, no render between them — fireEvent.click flushes
+       React between calls, so a suite using it would pass against the bug. */
+    await act(async () => {
+      submit.click();
+      submit.click();
+      submit.click();
+    });
+
+    await waitFor(() => expect(createBodies.length).toBeGreaterThan(0));
+    expect(createBodies).toHaveLength(1);
   });
 });

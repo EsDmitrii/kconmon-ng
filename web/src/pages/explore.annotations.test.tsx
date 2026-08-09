@@ -154,12 +154,19 @@ describe("ExplorePage annotations", () => {
     const { createBodies } = stubFetch();
     renderPage();
     fireEvent.click(await screen.findByRole("button", { name: /annotate/i }));
-    fireEvent.change(await screen.findByLabelText("Start"), { target: { value: "2026-08-01T11:30" } });
+    // Both edges go through the M5 DateTimePicker now (QA round 2, #13), so
+    // the start is composed through its manual fields rather than typed into
+    // a datetime-local — and through the LOCAL Date constructor, which is what
+    // the picker itself uses.
+    fireEvent.click(await screen.findByRole("button", { name: "Start" }));
+    fireEvent.change(screen.getByLabelText("Date"), { target: { value: "2026-08-01" } });
+    fireEvent.change(screen.getByLabelText("Time"), { target: { value: "11:30" } });
+    fireEvent.click(screen.getByRole("button", { name: "Apply" }));
     fireEvent.change(screen.getByLabelText("Note"), { target: { value: "fleet-wide maintenance" } });
     fireEvent.click(screen.getByRole("button", { name: "Create annotation" }));
     await waitFor(() => expect(createBodies).toHaveLength(1));
     expect(createBodies[0]).toEqual({
-      startAt: new Date("2026-08-01T11:30").toISOString(),
+      startAt: new Date(2026, 7, 1, 11, 30).toISOString(),
       scope: "",
       text: "fleet-wide maintenance",
     });

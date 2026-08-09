@@ -1,12 +1,19 @@
-import { useCallback, useMemo, useState, type FormEvent } from "react";
+import { useCallback, useMemo, useRef, useState, type FormEvent } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { DateTimePicker } from "@/components/ui/datetime-picker";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { useAuth } from "@/hooks/use-auth";
+import { useSubmitGuard } from "@/hooks/use-submit-guard";
 import { ApiError, createMaintenance, deleteMaintenance, getMaintenance } from "@/lib/api";
-import { GLOBAL_SCOPE, MAINTENANCE_REASON_MAX, mergeMaintenanceWindows } from "@/lib/annotations";
-import { useTimeContext, useWritesDisabled } from "@/lib/timemachine";
+import {
+  GLOBAL_SCOPE,
+  MAINTENANCE_REASON_MAX,
+  mergeMaintenanceWindows,
+  outsideWindowNote,
+  type FrozenWindow,
+} from "@/lib/annotations";
+import { useTimeContext, useWriteGuard } from "@/lib/timemachine";
 import type { MaintenanceWindow } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
@@ -132,11 +139,28 @@ function floorToMinute(d: Date): Date {
   return out;
 }
 
-/** fmtStamp is the row's time column: date + minute, in the reader's own
- *  locale. */
+/** fmtStamp is the FULL local stamp — the row's `title`, and its fallback for
+ *  a timestamp that will not parse. */
 function fmtStamp(iso: string): string {
   const d = new Date(iso);
   return Number.isNaN(d.getTime()) ? iso : d.toLocaleString();
+}
+
+/**
+ * fmtStampCompact is the row's VISIBLE time column, the same treatment
+ * components/annotations.tsx got in QA round 2 and this row did not
+ * (QA round 3, finding #11).
+ *
+ * A window renders BOTH edges, so it was carrying two full toLocaleStrings —
+ * about 22rem of un-shrinkable text — in lists as narrow as the Investigate
+ * page's 24rem column, and the reason (what the row is actually for) was left
+ * with about 38px. Month-day-time is the shortest unambiguous form over the
+ * span these lists cover, and the whole pair stays one hover away on `title`.
+ */
+function fmtStampCompact(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  return d.toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
 }
 
 function Field({ label, children, hint }: { label: string; children: React.ReactNode; hint?: string }) {
@@ -167,11 +191,24 @@ function Field({ label, children, hint }: { label: string; children: React.React
  * under the fields. It exists so the common mistake costs a sentence instead of
  * a round trip.
  */
-function CreateMaintenanceForm({ scope, onDone, onCancel }: { scope: string; onDone: () => void; onCancel: () => void }) {
+function CreateMaintenanceForm({
+  scope,
+  onDone,
+  onCancel,
+}: {
+  scope: string;
+  /** The stored edges, so the bar can say whether they land in the window it is
+   *  showing (QA round 3, finding #8). */
+  onDone: (created: { start: Date; end: Date }) => void;
+  onCancel: () => void;
+}) {
   const [start, setStart] = useState(() => floorToMinute(new Date()));
   const [end, setEnd] = useState(() => new Date(floorToMinute(new Date()).getTime() + DEFAULT_WINDOW_SECONDS * 1000));
   const [reason, setReason] = useState("");
-  const [submitting, setSubmitting] = useState(false);
+  /* The in-flight guard, not just a disabled look (QA round 5, finding #17):
+     begin() is a REF write, so three clicks in one task produce one request.
+     hooks/use-submit-guard.ts says why a useState flag cannot do this. */
+  const { submitting, begin, end: endSubmit } = useSubmitGuard();
   const [error, setError] = useState<string>();
 
   async function handleSubmit(e: FormEvent) {
@@ -186,7 +223,7 @@ function CreateMaintenanceForm({ scope, onDone, onCancel }: { scope: string; onD
       return;
     }
     setError(undefined);
-    setSubmitting(true);
+    if (!begin()) return;
     try {
       await createMaintenance({
         scope,
@@ -194,16 +231,22 @@ function CreateMaintenanceForm({ scope, onDone, onCancel }: { scope: string; onD
         endAt: end.toISOString(),
         reason: why,
       });
-      onDone();
+      onDone({ start, end });
     } catch (err) {
       setError(err instanceof ApiError ? (err.problem.detail || err.problem.title) : "Failed to declare the window");
-      setSubmitting(false);
+      endSubmit();
     }
   }
 
   return (
     <Card asChild className="p-4">
-      <form role="dialog" aria-label="New maintenance window" onSubmit={handleSubmit} className="flex flex-col gap-3">
+      {/* role="form", not role="dialog" — the twin of the annotation form's own
+          change (QA round 3, finding #15), and for the same reason: this is a
+          disclosure with no focus trap and no Escape-to-dismiss, and claiming
+          the dialog role promises a screen-reader user three behaviours it does
+          not have. Escape-to-discard stays deliberately absent: the reason box
+          holds typed text, and losing it to a stray keypress has no undo. */}
+      <form role="form" aria-label="New maintenance window" onSubmit={handleSubmit} className="flex flex-col gap-3">
         <p className="text-xs text-muted-foreground">
           Scope <span className="font-medium text-foreground">{scopeLabel(scope)}</span> — fixed to this view.
         </p>
@@ -248,7 +291,17 @@ function CreateMaintenanceForm({ scope, onDone, onCancel }: { scope: string; onD
   );
 }
 
-function MaintenanceRow({
+/**
+ * MaintenanceRow is one declared window and its delete.
+ *
+ * EXPORTED for pages/settings.tsx (QA round 3, finding #9), which lists the
+ * windows this bar cannot reach — the bar is bounded to the chart's range, so
+ * a window declared for next Tuesday existed with no surface anywhere. Sharing
+ * the row rather than writing a second one keeps the confirm idiom, the
+ * compact stamp and the write guard in ONE place: three things that must not
+ * drift between two lists of the same rows.
+ */
+export function MaintenanceRow({
   window: w,
   canWrite,
   onChanged,
@@ -257,9 +310,14 @@ function MaintenanceRow({
   canWrite: boolean;
   onChanged: () => void;
 }) {
-  const writesDisabled = useWritesDisabled();
+  const guard = useWriteGuard();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
+  /* Second-click confirm, the same idiom the annotation rows and
+     pages/alerting.tsx's rule rows use (QA round 2, finding #14). A declared
+     window is somebody's record that a change was planned; deleting it on one
+     mis-aimed click rewrites that record with no undo. */
+  const [confirming, setConfirming] = useState(false);
 
   async function handleDelete() {
     setBusy(true);
@@ -270,39 +328,76 @@ function MaintenanceRow({
     } catch (err) {
       setError(err instanceof ApiError ? (err.problem.detail || err.problem.title) : "Failed to delete");
       setBusy(false);
+      setConfirming(false);
     }
   }
 
   return (
     <li data-testid="maintenance-item" className="flex flex-wrap items-center gap-2 py-1.5 text-xs">
       {/* Both edges, always. A window rendered by its start alone reads as an
-          instant, which is the one thing it never is. */}
-      <span className="nums shrink-0 text-muted-foreground">
-        {fmtStamp(w.startAt)} → {fmtStamp(w.endAt)}
+          instant, which is the one thing it never is.
+
+          QA round 5, finding #6: w-28 was too tight for the pair even in the
+          compact form, so the END was the part that got cut — and a window
+          whose end is "Aug 12, 14:…" tells an operator nothing about when the
+          change actually finishes, which is the single fact they came for.
+
+          The fix is a column that FITS (w-44) and never truncates: whitespace-
+          nowrap plus shrink-0, so flex takes the space out of the REASON
+          instead, which already truncates and already carries its own title.
+          Below 700px (max-lg here matches the app's own breakpoint use) the
+          range takes a full row of its own above the reason rather than
+          fighting it for one line — basis-full only at that width. */}
+      <span
+        data-testid="maintenance-stamp"
+        className="nums w-full shrink-0 basis-full whitespace-nowrap text-muted-foreground lg:w-44 lg:basis-auto"
+        title={`${fmtStamp(w.startAt)} → ${fmtStamp(w.endAt)}`}
+      >
+        {fmtStampCompact(w.startAt)} → {fmtStampCompact(w.endAt)}
       </span>
-      <span className="min-w-0 flex-1 truncate" title={w.reason}>
+      <span data-testid="maintenance-reason" className="min-w-0 flex-1 truncate" title={w.reason}>
         {w.reason}
       </span>
-      <span className="shrink-0 text-[11px] text-muted-foreground">{scopeLabel(w.scope)}</span>
+      <span className="max-w-[7rem] shrink-0 truncate text-[11px] text-muted-foreground" title={scopeLabel(w.scope)}>
+        {scopeLabel(w.scope)}
+      </span>
       {error ? (
         <span role="alert" className="text-[11px] text-health-bad">
           {error}
         </span>
       ) : null}
       {/* Permission decides whether this EXISTS; time decides whether it is
-          usable — lib/timemachine.tsx's useWritesDisabled documents the split. */}
+          usable — lib/timemachine.tsx's useWriteGuard documents the split. */}
       {canWrite ? (
-        <Button
-          type="button"
-          size="sm"
-          variant="ghost"
-          loading={busy}
-          disabled={writesDisabled}
-          aria-label={`Delete maintenance window: ${w.reason}`}
-          onClick={() => void handleDelete()}
-        >
-          Delete
-        </Button>
+        confirming ? (
+          <>
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              loading={busy}
+              {...guard}
+              aria-label={`Confirm delete maintenance window: ${w.reason}`}
+              onClick={() => void handleDelete()}
+            >
+              Confirm delete
+            </Button>
+            <Button type="button" size="sm" variant="ghost" onClick={() => setConfirming(false)}>
+              Cancel
+            </Button>
+          </>
+        ) : (
+          <Button
+            type="button"
+            size="sm"
+            variant="ghost"
+            {...guard}
+            aria-label={`Delete maintenance window: ${w.reason}`}
+            onClick={() => setConfirming(true)}
+          >
+            Delete
+          </Button>
+        )
       ) : null}
     </li>
   );
@@ -324,16 +419,24 @@ function MaintenanceRow({
  */
 export function MaintenanceBar({
   scope,
+  scopeCaption,
   windows,
   error,
   onChanged,
+  frozenWindow,
   createLabel = "＋ maintenance",
   className,
 }: {
   scope: string;
+  /** What the count sentence CALLS the scope, when the surface queried every
+   *  scope rather than this one (QA round 3, finding #7). Defaults to `scope`. */
+  scopeCaption?: string;
   windows: MaintenanceWindow[];
   error?: Error | null;
   onChanged: () => void;
+  /** The FROZEN range this bar is listing, when it has one (Investigate) —
+   *  see lib/annotations.ts's outsideWindowNote. */
+  frozenWindow?: FrozenWindow;
   /** The create button's text. Investigate's actions rail names it "Create
    *  maintenance" because that rail speaks in verbs; everywhere else the
    *  compact twin of "＋ annotate" is what sits under a chart. */
@@ -341,10 +444,20 @@ export function MaintenanceBar({
   className?: string;
 }) {
   const { can } = useAuth();
-  const writesDisabled = useWritesDisabled();
+  const guard = useWriteGuard();
   const canRead = can("maintenance:read");
   const canWrite = can("maintenance:write");
   const [open, setOpen] = useState(false);
+  const [createdNote, setCreatedNote] = useState<string>();
+  const triggerRef = useRef<HTMLButtonElement>(null);
+
+  /* Focus comes back to the control that opened the form, the same contract
+     AnnotationBar keeps (QA round 2, finding #20): the form is unmounted by
+     then, and without this a keyboard user is dropped on <body>. */
+  const closeAndRefocus = () => {
+    setOpen(false);
+    triggerRef.current?.focus();
+  };
 
   if (!canRead) return null;
 
@@ -354,16 +467,17 @@ export function MaintenanceBar({
         <span className="text-xs text-muted-foreground">
           {error
             ? "Maintenance windows are unavailable."
-            : `${windows.length} maintenance window${windows.length === 1 ? "" : "s"} in this window · scope ${scopeLabel(scope)}`}
+            : `${windows.length} maintenance window${windows.length === 1 ? "" : "s"} in this window · scope ${scopeCaption ?? scopeLabel(scope)}`}
         </span>
         {/* HIDE on permission, DISABLE on time — never the other way round. */}
         {canWrite ? (
           <Button
+            ref={triggerRef}
             type="button"
             size="sm"
             variant="outline"
             className="ml-auto"
-            disabled={writesDisabled}
+            {...guard}
             aria-expanded={open}
             onClick={() => setOpen((o) => !o)}
           >
@@ -375,12 +489,21 @@ export function MaintenanceBar({
       {open ? (
         <CreateMaintenanceForm
           scope={scope}
-          onDone={() => {
-            setOpen(false);
+          onDone={({ start, end }) => {
+            closeAndRefocus();
             onChanged();
+            /* Silent for the ordinary in-window create — the row appearing IS
+               the feedback (QA round 3, finding #8). */
+            setCreatedNote(outsideWindowNote(start, end, frozenWindow) ?? undefined);
           }}
-          onCancel={() => setOpen(false)}
+          onCancel={closeAndRefocus}
         />
+      ) : null}
+
+      {createdNote ? (
+        <p role="status" className="text-[11px] leading-relaxed text-muted-foreground">
+          {createdNote}
+        </p>
       ) : null}
 
       {windows.length > 0 ? (

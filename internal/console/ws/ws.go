@@ -62,9 +62,9 @@ const (
 )
 
 // MatrixTopic returns the topic carrying the connectivity matrix for protocol.
-// The ":pod" suffix is part of the topic NAME only (the shape
-// docs/console/architecture/WEBSOCKET.md specifies); matrix.Compute has no plane
-// parameter, because plane=pod is the only plane that exists.
+// The ":pod" suffix is part of the topic NAME only — a forward-compatibility
+// slot in the topic shape; matrix.Compute has no plane parameter, because
+// plane=pod is the only plane that exists.
 func MatrixTopic(protocol string) string { return "matrix:" + protocol + ":pod" }
 
 // runTopicPrefix identifies run:{id} topics — RunTopic is the canonical

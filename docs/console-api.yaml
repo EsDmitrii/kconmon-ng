@@ -214,7 +214,19 @@ paths:
           explode: true
         - name: scope
           in: query
-          description: Exact match on the event's scope.
+          description: Exact match on the event's scope. Mutually exclusive with `scopeNode`.
+          schema:
+            type: string
+        - name: scopeNode
+          in: query
+          description: >-
+            A node or target NAME, matched on either side of the scope: the
+            bare scope itself, or a pair scope `<source>→<destination>`
+            (U+2192) naming it as source or destination. This is what an object
+            card asks for -- an equality filter on `scope` cannot see the pair
+            rows a node takes part in. The name is matched literally (LIKE
+            metacharacters are escaped server-side). Mutually exclusive with
+            `scope`; supplying both is 422.
           schema:
             type: string
         - name: from
@@ -243,6 +255,8 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "403":
           $ref: "#/components/responses/Forbidden"
+        "422":
+          $ref: "#/components/responses/UnprocessableEntity"
         "502":
           $ref: "#/components/responses/BadGateway"
         "503":
@@ -2216,7 +2230,8 @@ paths:
 
 
         Observation fields are stripped per collection: a schedule loses
-        lastFiredAt/nextFireAt (scheduler bookkeeping), an alert rule loses
+        lastFiredAt/nextFireAt and lastError/lastErrorAt (scheduler
+        bookkeeping and a failure this console saw), an alert rule loses
         syncStatus/syncMessage/lastSyncedAt (the reconciler's view of a cluster
         the destination has never talked to) and a webhook loses
         lastStatus/lastAttempt/failures (delivery outcomes). Maintenance windows
@@ -4489,6 +4504,9 @@ components:
           $ref: "#/components/schemas/TargetKind"
         address:
           type: string
+          description: >-
+            Stored TRIMMED, and validated against the kind it was filed under.
+            See TargetRequest.address for the rule.
         labels:
           type: object
           description: Always an object ({} when unset), never null.
@@ -4513,6 +4531,18 @@ components:
           $ref: "#/components/schemas/TargetKind"
         address:
           type: string
+          description: >-
+            Validated against `kind`, and rejected with 422 when it does not
+            match. kind=host takes a hostname, an IP literal (bracketed for
+            IPv6) or either with a numeric ":port" in 1-65535 -- the shapes the
+            agent's allowlist resolves. kind=url takes an http:// or https://
+            URL with a host; a port, a path and a query are all allowed, since
+            the agent's HTTP checker reads all three. A URL is NOT a valid host
+            address and a bare hostname is NOT a valid url address: the kind is
+            what tells the agent which parser to use. Leading and trailing
+            whitespace is trimmed before the check, and the trimmed value is
+            what gets stored; an address that is empty after trimming is
+            refused.
         labels:
           type: object
           additionalProperties:
@@ -4612,6 +4642,15 @@ components:
           format: uuid
         destinationAddress:
           type: string
+          description: >-
+            Required when destinationKind is adhoc, and validated against what an
+            agent can actually dial: a DNS name, an IP literal (bracketed for
+            IPv6), either of those with a `:port` suffix in 1-65535, or an
+            http(s) URL with a host. Anything else is 422 -- the agent resolves
+            and dials this string verbatim, so a value it cannot parse would be
+            stored, pushed to every assigned agent and refused there once per
+            interval, forever. Whether the resolved address is PERMITTED is a
+            separate question, answered per probe by the agent's own allowlist.
         checkType:
           $ref: "#/components/schemas/CheckType"
         plane:
@@ -4668,7 +4707,9 @@ components:
 
     Schedule:
       type: object
-      required: [id, definitionId, kind, intervalNs, runAt, enabled, lastFiredAt, nextFireAt, createdAt, updatedAt]
+      required:
+        [id, definitionId, kind, intervalNs, runAt, enabled, lastFiredAt, nextFireAt,
+         lastError, lastErrorAt, createdAt, updatedAt]
       properties:
         id:
           type: string
@@ -4695,6 +4736,24 @@ components:
           type: [string, "null"]
           format: date-time
           description: Scheduler bookkeeping; null for kind "continuous", which the loop never fires.
+        lastError:
+          type: string
+          description: >-
+            Why the LAST fire produced no run; "" when it produced one. A
+            schedule always advances its cadence, fired or not (leaving a broken
+            one due would turn it into a hot loop), so without this a schedule
+            whose definition points at a deleted target is indistinguishable
+            from a healthy one. Always PRESENT -- "" is how a healthy schedule
+            says so, and an absent key would be indistinguishable from a server
+            that has no such concept. Cleared by the next fire that goes
+            through, and NOT by an edit: an edit is not a fire.
+        lastErrorAt:
+          type: [string, "null"]
+          format: date-time
+          description: >-
+            When lastError was recorded. Non-null exactly when lastError is
+            non-empty -- the store derives one from the other in a single
+            UPDATE, so the pair can never disagree.
         createdAt:
           type: string
           format: date-time
@@ -4974,10 +5033,12 @@ components:
     ExportedSchedule:
       type: object
       description: >-
-        Schedule as a bundle carries it: Schedule MINUS lastFiredAt and
-        nextFireAt. Those two are scheduler bookkeeping -- an observation of a
-        running console, not the cadence an operator declared. nextFireAt is
-        re-seeded on import exactly as POST /api/v1/schedules seeds it.
+        Schedule as a bundle carries it: Schedule MINUS lastFiredAt,
+        nextFireAt and the lastError pair. Those are scheduler bookkeeping --
+        an observation of a running console, not the cadence an operator
+        declared, and a failure this console saw is not a fact about the
+        console the bundle is restored into. nextFireAt is re-seeded on import
+        exactly as POST /api/v1/schedules seeds it.
       required: [id, definitionId, kind, intervalNs, enabled]
       properties:
         id:

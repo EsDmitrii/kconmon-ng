@@ -130,13 +130,27 @@ type EventRecord struct {
 }
 
 // EventFilter selects a page. All fields optional; Limit is clamped to [1,500].
+//
+// Scope and ScopeNode are two different questions about the same column and
+// httpapi refuses the pair with a 422 (they would only ever narrow each other).
+// Setting both here is therefore not a documented shape, but it is not
+// undefined either: the query ANDs them, which is the honest reading of "apply
+// every filter you were given".
 type EventFilter struct {
-	Types  []string  // OR-ed; empty = all
-	Scope  string    // exact match; empty = all
-	From   time.Time // inclusive; zero = unbounded
-	To     time.Time // exclusive; zero = unbounded
-	Cursor string    // opaque keyset cursor from a previous page
-	Limit  int
+	Types []string // OR-ed; empty = all
+	Scope string   // exact match; empty = all
+	// ScopeNode matches a NAME on either side of the scope: the bare scope
+	// itself, or a pair scope ("<src>→<dst>", events.pairScope) naming it as
+	// source or destination. This is what an object card asks -- a node's own
+	// events plus every check that ran to or from it -- and what Scope, being
+	// an equality filter, structurally cannot answer. Empty = no filter. The
+	// name is matched LITERALLY: its LIKE metacharacters are escaped in the
+	// query, so a target name carrying '_' cannot widen into a wildcard.
+	ScopeNode string
+	From      time.Time // inclusive; zero = unbounded
+	To        time.Time // exclusive; zero = unbounded
+	Cursor    string    // opaque keyset cursor from a previous page
+	Limit     int
 }
 
 // EventPage is one page of ListEvents results.
@@ -239,6 +253,14 @@ func (s *eventStore) ListEvents(ctx context.Context, f EventFilter) (EventPage, 
 		scope = pgtype.Text{String: f.Scope, Valid: true}
 	}
 
+	// Passed RAW: the escaping the LIKE branches need happens inside the query
+	// (see topology_events.sql), because the same param also feeds the equality
+	// branch, where an escaped name would match nothing.
+	var scopeNode pgtype.Text
+	if f.ScopeNode != "" {
+		scopeNode = pgtype.Text{String: f.ScopeNode, Valid: true}
+	}
+
 	var fromTime, toTime pgtype.Timestamptz
 	if !f.From.IsZero() {
 		fromTime = pgtype.Timestamptz{Time: f.From, Valid: true}
@@ -249,13 +271,14 @@ func (s *eventStore) ListEvents(ctx context.Context, f EventFilter) (EventPage, 
 
 	start := time.Now()
 	rows, err := s.q.ListTopologyEvents(ctx, gen.ListTopologyEventsParams{
-		Types:    types,
-		Scope:    scope,
-		FromTime: fromTime,
-		ToTime:   toTime,
-		CurTime:  curTime,
-		CurID:    curID,
-		Lim:      int32(limit), //nolint:gosec // limit is clamped to [1,500] above
+		Types:     types,
+		Scope:     scope,
+		ScopeNode: scopeNode,
+		FromTime:  fromTime,
+		ToTime:    toTime,
+		CurTime:   curTime,
+		CurID:     curID,
+		Lim:       int32(limit), //nolint:gosec // limit is clamped to [1,500] above
 	})
 	if err != nil {
 		s.observe(queryListTopologyEvents, start, resultError)

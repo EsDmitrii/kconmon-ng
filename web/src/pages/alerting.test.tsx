@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { TimeMachineProvider } from "@/lib/timemachine";
 import {
@@ -122,6 +122,11 @@ function renderPage(
     preview?: (body: unknown) => Response;
     importReport?: Record<string, unknown>;
     engaged?: boolean;
+    /** ?rule=<id>, the deep link the Overview's firing rows point at. */
+    rule?: string;
+    /** The rows GET /api/v1/targets answers, for the external-target-down
+     *  builder's target select (QA round 5, finding #15). */
+    targets?: { name: string }[];
   } = {},
 ) {
   const {
@@ -134,6 +139,8 @@ function renderPage(
     preview,
     importReport,
     engaged = false,
+    rule,
+    targets = [],
   } = opts;
   const rows = [...rules];
   const calls: Call[] = [];
@@ -188,13 +195,19 @@ function renderPage(
       }
       return Promise.resolve(rulesResponse ? rulesResponse() : json({ rules: rows }));
     }
+    if (href.startsWith("/api/v1/targets")) {
+      return Promise.resolve(json({ targets, nextCursor: "" }));
+    }
     return Promise.resolve(json({}));
   });
   vi.stubGlobal("fetch", fetchMock);
 
   // `?at=` is the only way the app itself engages the Time Machine, so the
   // tests engage it the same way rather than by faking the context.
-  window.history.pushState({}, "", engaged ? `/alerting?at=${AT}` : "/alerting");
+  const params = new URLSearchParams();
+  if (engaged) params.set("at", AT);
+  if (rule !== undefined) params.set("rule", rule);
+  window.history.pushState({}, "", `/alerting${params.size > 0 ? `?${params}` : ""}`);
 
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   const utils = render(
@@ -854,5 +867,210 @@ describe("AlertingPage under the Time Machine", () => {
     expect(
       (await screen.findByRole("button", { name: "Import kube-prometheus-rules" })) as HTMLButtonElement,
     ).toHaveProperty("disabled", true);
+  });
+});
+
+/* ── QA round 1, finding #17: the firing alert's link names its rule ─────── */
+
+describe("AlertingPage — ?rule= opens the row it names", () => {
+  const OTHER = "22222222-2222-2222-2222-222222222222";
+
+  it("expands that rule's details on arrival and leaves the others closed", async () => {
+    renderPage({
+      rules: [ruleRow(), ruleRow({ id: OTHER, name: "PairRttHigh" })],
+      rule: OTHER,
+    });
+
+    const rows = await screen.findAllByTestId("rule-row");
+    expect(within(rows[1]).getByRole("button", { name: "Details for PairRttHigh" })).toHaveAttribute(
+      "aria-expanded",
+      "true",
+    );
+    expect(within(rows[0]).getByRole("button", { name: "Details for PairLossHigh" })).toHaveAttribute(
+      "aria-expanded",
+      "false",
+    );
+  });
+
+  it("scrolls the named row into view, guarded for a DOM that has no scrollIntoView", async () => {
+    const scrollIntoView = vi.fn();
+    // jsdom defines no scrollIntoView at all; the page calls it optionally, so
+    // this both proves the call and proves the guard is what stands in for it.
+    Element.prototype.scrollIntoView = scrollIntoView;
+    try {
+      renderPage({ rules: [ruleRow()], rule: ruleRow().id as string });
+      await screen.findByTestId("rule-row");
+      expect(scrollIntoView).toHaveBeenCalled();
+    } finally {
+      delete (Element.prototype as Partial<Element>).scrollIntoView;
+    }
+  });
+
+  it("changes nothing without the param — every row starts collapsed", async () => {
+    renderPage({ rules: [ruleRow()] });
+
+    const row = await screen.findByTestId("rule-row");
+    expect(within(row).getByRole("button", { name: "Details for PairLossHigh" })).toHaveAttribute(
+      "aria-expanded",
+      "false",
+    );
+  });
+
+  it("ignores an id that matches nothing rather than opening something arbitrary", async () => {
+    renderPage({ rules: [ruleRow()], rule: "not-a-rule" });
+
+    const row = await screen.findByTestId("rule-row");
+    expect(within(row).getByRole("button", { name: "Details for PairLossHigh" })).toHaveAttribute(
+      "aria-expanded",
+      "false",
+    );
+  });
+});
+
+/* ── QA round 5 ─────────────────────────────────────────────────────────── */
+
+/* #14. The native checkbox rendered in the OS accent colour — a blue box beside
+   this console's own controls, and a bright white one in dark mode. */
+describe("the enabled checkbox wears the console's own theming (#14)", () => {
+  it("carries the shared class on the rule row", async () => {
+    renderPage({ rules: [ruleRow()] });
+    const box = await screen.findByRole("checkbox", { name: "Enabled PairLossHigh" });
+    expect(box.className).toContain("accent-primary");
+    expect(box.className).toContain("size-4");
+  });
+
+  it("and on the builder's own Enabled box", async () => {
+    renderPage();
+    fireEvent.click(await screen.findByRole("button", { name: "New rule" }));
+    const box = screen.getByRole("checkbox");
+    expect(box.className).toContain("accent-primary");
+  });
+});
+
+/* #15. "Add label" produced TWO identical empty boxes with nothing on screen
+   saying which is which; the aria-labels were always right, but the order is
+   the one thing a two-box row does not communicate. */
+describe("the builder's K/V rows name their boxes (#15)", () => {
+  it("places name/value placeholders on both label boxes", async () => {
+    renderPage();
+    fireEvent.click(await screen.findByRole("button", { name: "New rule" }));
+    fireEvent.click(screen.getByRole("button", { name: "Add label" }));
+    expect(screen.getByLabelText("Label name 1")).toHaveAttribute("placeholder", "name");
+    expect(screen.getByLabelText("Label value 1")).toHaveAttribute("placeholder", "value");
+  });
+
+  it("and on the annotation boxes, which are the same row shape", async () => {
+    renderPage();
+    fireEvent.click(await screen.findByRole("button", { name: "New rule" }));
+    fireEvent.click(screen.getByRole("button", { name: "Add annotation" }));
+    expect(screen.getByLabelText("Annotation name 1")).toHaveAttribute("placeholder", "name");
+    expect(screen.getByLabelText("Annotation value 1")).toHaveAttribute("placeholder", "value");
+  });
+});
+
+/* #15, second half. The value has to match a target's NAME exactly or the
+   rendered expression selects nothing, and a free box gave an operator no way
+   to know what the names are. */
+describe("external-target-down picks a real target (#15)", () => {
+  async function openBuilder(opts: Parameters<typeof renderPage>[0] = {}) {
+    renderPage(opts);
+    fireEvent.click(await screen.findByRole("button", { name: "New rule" }));
+    fireEvent.change(screen.getByLabelText("Kind"), { target: { value: "external-target-down" } });
+  }
+
+  it("offers a select over the console's targets when targets:read is held", async () => {
+    await openBuilder({
+      permissions: [...ALERT_EDITOR, "targets:read"],
+      targets: [{ name: "edge-gw" }, { name: "status-page" }],
+    });
+    // The select appears once the list ARRIVES: rendering it while the query is
+    // in flight would show an empty dropdown that silently omits the stored value.
+    await waitFor(() => expect(screen.getByLabelText("Target name").tagName).toBe("SELECT"));
+    const select = screen.getByLabelText("Target name") as HTMLSelectElement;
+    expect([...select.options].map((o) => o.textContent)).toEqual([
+      "every external target",
+      "edge-gw",
+      "status-page",
+    ]);
+    // "" is a real, meaningful value here and is NAMED rather than left blank.
+    expect(select.options[0].value).toBe("");
+  });
+
+  it("falls back to the free box, with a hint, when targets:read is not held", async () => {
+    await openBuilder({ permissions: ALERT_EDITOR, targets: [{ name: "edge-gw" }] });
+    const input = await screen.findByLabelText("Target name");
+    expect(input.tagName).toBe("INPUT");
+    expect(screen.getByText(/type the exact target name/i)).toBeInTheDocument();
+  });
+
+  it("asks for NO targets at all when the kind has no target field", async () => {
+    const { resourceCalls } = renderPage({ permissions: [...ALERT_EDITOR, "targets:read"] });
+    fireEvent.click(await screen.findByRole("button", { name: "New rule" }));
+    await waitFor(() => expect(screen.getByLabelText("Kind")).toBeInTheDocument());
+    expect(resourceCalls().some((c) => c.url.startsWith("/api/v1/targets"))).toBe(false);
+  });
+
+  it("keeps a stored value the list no longer contains, rather than widening the rule", async () => {
+    renderPage({
+      permissions: [...ALERT_EDITOR, "targets:read"],
+      targets: [{ name: "edge-gw" }],
+      rules: [ruleRow({ kind: "external-target-down", params: { targetName: "deleted-gw" } })],
+    });
+    fireEvent.click(await screen.findByRole("button", { name: "Edit PairLossHigh" }));
+    await waitFor(() => expect(screen.getByLabelText("Target name").tagName).toBe("SELECT"));
+    const select = screen.getByLabelText("Target name") as HTMLSelectElement;
+    expect(select.value).toBe("deleted-gw");
+    expect([...select.options].map((o) => o.textContent)).toContain("deleted-gw (no such target)");
+  });
+});
+
+/* #18. Following a link to a rule somebody had since deleted produced the
+   ordinary list with nothing opened and nothing said — indistinguishable from
+   a link that worked. */
+describe("?rule= naming nothing says so (#18)", () => {
+  it("shows the notice once the list has settled", async () => {
+    renderPage({ rules: [ruleRow()], rule: "99999999-9999-9999-9999-999999999999" });
+    const notice = await screen.findByTestId("unknown-rule-notice");
+    expect(notice).toHaveTextContent("No rule matches this link — it may have been deleted.");
+  });
+
+  it("says nothing when the param names a rule that IS there", async () => {
+    renderPage({ rules: [ruleRow()], rule: ruleRow().id as string });
+    expect(await screen.findByLabelText("Alert rules")).toBeInTheDocument();
+    expect(screen.queryByTestId("unknown-rule-notice")).toBeNull();
+  });
+
+  it("says nothing with no ?rule= at all", async () => {
+    renderPage({ rules: [ruleRow()] });
+    expect(await screen.findByLabelText("Alert rules")).toBeInTheDocument();
+    expect(screen.queryByTestId("unknown-rule-notice")).toBeNull();
+  });
+
+  it("stays silent while the list is still loading — a flash on cold load is worse", async () => {
+    renderPage({ rulesResponse: () => problem(502, "unavailable", "boom"), rule: "nope" });
+    await screen.findByText("boom");
+    // The list ERRORED, so it never settled: nothing is known about this id.
+    expect(screen.queryByTestId("unknown-rule-notice")).toBeNull();
+  });
+});
+
+/* #17, the alerting family. */
+describe("one rule per click storm (#17)", () => {
+  it("POSTs once for three rapid clicks", async () => {
+    const { resourceCalls } = renderPage();
+    fireEvent.click(await screen.findByRole("button", { name: "New rule" }));
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "LossHigh" } });
+    fireEvent.change(screen.getByLabelText("Protocol"), { target: { value: "udp" } });
+    fireEvent.change(screen.getByLabelText(/loss threshold/i), { target: { value: "5" } });
+
+    const submit = screen.getByRole("button", { name: "Create rule" });
+    await act(async () => {
+      submit.click();
+      submit.click();
+      submit.click();
+    });
+
+    await waitFor(() => expect(resourceCalls().filter((c) => c.method === "POST").length).toBeGreaterThan(0));
+    expect(resourceCalls().filter((c) => c.method === "POST" && c.url === "/api/v1/alert-rules")).toHaveLength(1);
   });
 });

@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"sort"
 	"strconv"
 	"time"
@@ -160,7 +161,15 @@ func vectorByPair(ctx context.Context, q Querier, query string) (map[pair]float6
 			continue
 		}
 		v, err := strconv.ParseFloat(vs, 64)
-		if err != nil { // NaN from 0/0 division serializes as "NaN"
+		if err != nil {
+			continue
+		}
+		// ParseFloat ACCEPTS "NaN" and "+Inf" (no error), and Prometheus emits
+		// both: 0/0 from a pair whose series went stale mid-window, quantiles
+		// over empty buckets. A NaN here poisons json.Marshal for the whole
+		// matrix (empty-200 REST answers, dropped WS snapshots), and +Inf
+		// overflows the ns conversion into a MaxInt64 "RTT". Not a sample.
+		if math.IsNaN(v) || math.IsInf(v, 0) {
 			continue
 		}
 		out[pair{s, d}] = v

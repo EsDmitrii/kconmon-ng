@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useId, useState, type FormEvent, type ReactNode } from "react";
+import { useCallback, useEffect, useId, useMemo, useState, type FormEvent, type ReactNode } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { ClipboardList } from "lucide-react";
 import { PageShell } from "@/components/page-shell";
@@ -8,9 +8,11 @@ import { Card } from "@/components/ui/card";
 import { Segmented } from "@/components/ui/segmented";
 import { useAuth } from "@/hooks/use-auth";
 import { useDatabaseAvailable } from "@/hooks/use-capabilities";
+import { useSubmitGuard } from "@/hooks/use-submit-guard";
 import { useTopology } from "@/hooks/use-topology";
 import { ApiError, createCheck, createRun, getRuns, goTo, listTargets } from "@/lib/api";
-import { useWritesDisabled } from "@/lib/timemachine";
+import { scopeNodeOptions } from "@/lib/investigation-sources";
+import { useTimeContext, useWriteGuard } from "@/lib/timemachine";
 import {
   CHECK_TYPES,
   type CheckDefinitionRequest,
@@ -19,7 +21,7 @@ import {
   type RunCreateRequest,
   type RunSummary,
 } from "@/lib/types";
-import { cn } from "@/lib/utils";
+import { ADHOC_ADDRESS_ERROR, CHECKBOX_CLASS, cn, isValidAdhocAddress, runsAtOrBefore } from "@/lib/utils";
 // The 422-detail -> form-field heuristic and its phrase table live with the
 // form that first needed them (pages/targets.tsx). They are imported rather
 // than re-implemented so the "Save as definition" action below places a
@@ -132,15 +134,26 @@ export function NodeSelector({
   selected: string[];
   onToggle: (name: string) => void;
 }) {
+  /* EXPLICIT htmlFor/id association, not a wrapping <label> (QA round 4,
+     finding #16). The nesting was doing the job in the DOM, but it made every
+     checkbox's name a property of where it sits rather than of what it is: the
+     `truncate` span it depended on is a presentational choice, and a control
+     whose accessible name can be lost by a styling edit has no name. Two
+     columns of these render at once (Sources and Destinations), so the id is
+     seeded per-selector — one useId, one name suffix per node — and the
+     fieldset's legend is what tells the two columns' "node-a" apart. */
+  const groupId = useId();
+  const nodeInputId = (n: string) => `${groupId}-node-${n}`;
   return (
     <fieldset className="rounded-md border border-border p-3">
       <legend className="px-1 text-xs font-medium text-muted-foreground">{label}</legend>
-      <label className="flex items-center gap-2 text-sm">
+      <label htmlFor={`${groupId}-all`} className="flex items-center gap-2 text-sm">
         <input
+          id={`${groupId}-all`}
           type="checkbox"
           checked={all}
           onChange={(e) => onAllChange(e.target.checked)}
-          className="size-4 rounded border-border-strong"
+          className={CHECKBOX_CLASS}
         />
         All nodes ({nodes.length})
       </label>
@@ -150,12 +163,13 @@ export function NodeSelector({
             <p className="text-xs text-muted-foreground">No nodes reported by the controller yet.</p>
           ) : (
             nodes.map((n) => (
-              <label key={n} className="flex items-center gap-2 text-sm">
+              <label key={n} htmlFor={nodeInputId(n)} className="flex items-center gap-2 text-sm">
                 <input
+                  id={nodeInputId(n)}
                   type="checkbox"
                   checked={selected.includes(n)}
                   onChange={() => onToggle(n)}
-                  className="size-4 rounded border-border-strong"
+                  className={CHECKBOX_CLASS}
                 />
                 <span className="truncate">{n}</span>
               </label>
@@ -240,9 +254,16 @@ function RunForm({
   const [destinationKind, setDestinationKind] = useState<DestinationKind>("node");
   const [destinationTargetId, setDestinationTargetId] = useState("");
   const [destinationAddress, setDestinationAddress] = useState("");
-  const [submitting, setSubmitting] = useState(false);
+  /* The in-flight guard, not just a disabled look (QA round 5, finding #17):
+     begin() is a REF write, so three clicks in one task produce one request.
+     hooks/use-submit-guard.ts says why a useState flag cannot do this. */
+  const { submitting, begin, end } = useSubmitGuard();
   const [submitError, setSubmitError] = useState<string>();
-  const writesDisabled = useWritesDisabled();
+  /* guard carries the DISABLED flag AND the reason for it — lib/timemachine's
+     useWriteGuard (QA round 2, finding #18; extended here in round 3). Spread it
+     onto the control, and compose any local condition AFTER the spread. */
+  const guard = useWriteGuard();
+  const writesDisabled = guard.disabled;
 
   /* The target picker's options. Fetched ONLY once "Target" is actually
      selected, and only with targets:read — GET /api/v1/targets is gated on
@@ -290,16 +311,30 @@ function RunForm({
     destinationAddress: destinationAddress.trim(),
   });
 
+  /* ONE clearing point for the whole form (QA round 4, finding #10). A 422
+     from a rejected submit stayed on screen while the operator edited the very
+     field it was complaining about, and survived a switch to a different
+     destination MODE entirely — so a banner about an ad-hoc address was still
+     being read under a node run. This form has no central state setter to hang
+     it off (each control owns its own useState), and an onChange on the <form>
+     would miss the two Segmented controls, which are buttons and fire no
+     change event at all. An effect over the form's whole value tuple catches
+     every one of them, including those. It fires once on mount too, where
+     clearing an already-clear error is a no-op. */
+  useEffect(() => {
+    setSubmitError(undefined);
+  }, [type, sourcesAll, destinationsAll, sources, destinations, destinationKind, destinationTargetId, destinationAddress]);
+
   async function handleSubmit(e: FormEvent) {
     e.preventDefault();
     setSubmitError(undefined);
-    setSubmitting(true);
+    if (!begin()) return;
     try {
       const res = await createRun(runRequest);
       goTo(`/diagnostics/runs/${res.id}`);
     } catch (err) {
       setSubmitError(err instanceof ApiError ? (err.problem.detail || err.problem.title) : "Failed to start run");
-      setSubmitting(false);
+      end();
     }
   }
 
@@ -308,11 +343,22 @@ function RunForm({
       <form onSubmit={handleSubmit} className="flex flex-col gap-5">
         <div>
           <span className="mb-2 block text-xs font-medium text-muted-foreground">Check type</span>
+          {/* flex-wrap (QA round 4, finding #17): six options is the widest
+              segmented control in the console, and under ~700px the track ran
+              off the card rather than wrapping — the last two check types were
+              simply unreachable. Round 3's finding #20 gave the track shrink-0
+              so it wraps AS A WHOLE inside a flex row; that is the right answer
+              for a track sitting beside other controls and the wrong one here,
+              where the track is alone in its own block and has nothing to wrap
+              against. So this one wraps INTERNALLY, and ui/segmented.tsx's
+              thumb tracks its option's row (offsetTop) rather than assuming
+              one. */}
           <Segmented
             aria-label="Check type"
             options={CHECK_TYPES.map((t) => ({ value: t, label: t.toUpperCase() }))}
             value={type}
             onChange={setType}
+            className="flex-wrap"
           />
         </div>
 
@@ -389,6 +435,10 @@ function RunForm({
               {(id) => (
                 <input
                   id={id}
+                  /* Belt and braces on the name (QA round 4, finding #16): the
+                     visible <label> is the association, and this survives a
+                     future refactor that moves the field out of FieldLabel. */
+                  aria-label="Destination address"
                   value={destinationAddress}
                   placeholder="10.0.0.1 or https://example.test/health"
                   onChange={(e) => setDestinationAddress(e.target.value)}
@@ -401,10 +451,18 @@ function RunForm({
 
         <div className="flex flex-wrap items-center gap-3">
           {destinationKind === "node" ? (
+            /* A RESET, and now it says so (QA round 4, finding #15). The glyph
+               alone read as "swap the two columns" or "run every pair", and
+               pressing it when both pickers were already at All did nothing
+               visible — which is fine for a reset and baffling for either of
+               the other two readings. The name is the fix; the no-op is not a
+               bug. */
             <Button
               type="button"
               variant="outline"
               size="sm"
+              title="Reset both pickers to every node"
+              aria-label="Reset both pickers to every node"
               onClick={() => {
                 setSourcesAll(true);
                 setDestinationsAll(true);
@@ -441,7 +499,7 @@ function RunForm({
         <Button
           type="submit"
           loading={submitting}
-          disabled={overLimit || noPairs || incompleteDestination || writesDisabled}
+          {...guard} disabled={overLimit || noPairs || incompleteDestination || writesDisabled}
           className="self-start"
         >
           Start run
@@ -496,7 +554,11 @@ function SaveAsDefinition({
   destinationAddress: string;
   incompleteDestination: boolean;
 }) {
-  const writesDisabled = useWritesDisabled();
+  /* guard carries the DISABLED flag AND the reason for it — lib/timemachine's
+     useWriteGuard (QA round 2, finding #18; extended here in round 3). Spread it
+     onto the control, and compose any local condition AFTER the spread. */
+  const guard = useWriteGuard();
+  const writesDisabled = guard.disabled;
   const [name, setName] = useState("");
   const [saving, setSaving] = useState(false);
   const [errors, setErrors] = useState<Partial<Record<SaveField, string>>>({});
@@ -521,6 +583,18 @@ function SaveAsDefinition({
     setSaved(undefined);
     if (name.trim() === "") {
       setErrors({ name: "a definition needs a name" });
+      return;
+    }
+    /* The client mirror of store.validateAdhocAddress (QA round 4, finding
+       #13). Saving a definition PERSISTS the address, and until the store
+       learned to check it "sdfsdfsdf !!" was stored happily and then failed as
+       a resolver error on every agent, every interval, forever. The server is
+       still the arbiter — this only means the refusal arrives at the field the
+       operator is looking at instead of two round trips later. */
+    if (destinationKind === "adhoc" && destinationAddress !== "" && !isValidAdhocAddress(destinationAddress)) {
+      // Empty is already the run form's own `incompleteDestination` gate; this
+      // branch is only about a value that IS there and cannot be dialled.
+      setErrors({ destination: ADHOC_ADDRESS_ERROR });
       return;
     }
     setSaving(true);
@@ -566,7 +640,7 @@ function SaveAsDefinition({
           type="button"
           variant="outline"
           loading={saving}
-          disabled={incompleteDestination || writesDisabled}
+          {...guard} disabled={incompleteDestination || writesDisabled}
           onClick={handleSave}
         >
           Save as definition
@@ -606,8 +680,27 @@ function fmtTime(timestamp?: string): string {
   return Number.isNaN(d.getTime()) ? timestamp : d.toLocaleString();
 }
 
-function HistoryList({ runs }: { runs: RunSummary[] }) {
+function HistoryList({ runs, engaged }: { runs: RunSummary[]; engaged: boolean }) {
   if (runs.length === 0) {
+    if (engaged) {
+      // Engaged with everything filtered out is a DIFFERENT fact from "nobody
+      // has ever run one", and offering the form above as the remedy would be
+      // wrong twice over — the form is disabled while engaged.
+      return (
+        <div className="flex flex-col items-center gap-3 px-6 py-14 text-center">
+          <span
+            aria-hidden="true"
+            className="flex size-12 items-center justify-center rounded-full bg-surface-2 text-muted-foreground"
+          >
+            <ClipboardList className="size-5" />
+          </span>
+          <p className="text-sm font-medium">No runs at or before the viewed instant</p>
+          <p className="max-w-sm text-xs leading-relaxed text-muted-foreground">
+            Every run on the loaded page started later than this. Return to Live, or load older pages.
+          </p>
+        </div>
+      );
+    }
     return (
       <div className="flex flex-col items-center gap-3 px-6 py-14 text-center">
         <span
@@ -646,9 +739,18 @@ export function DiagnosticsPage() {
   const { can } = useAuth();
   const topo = useTopology();
   const { available: dbConfigured, resolved: dbResolved } = useDatabaseAvailable();
+  const { at } = useTimeContext();
 
   const canCreate = can("runs:create");
-  const nodeNames = topo.data?.nodes.map((n) => n.name) ?? [];
+  /* The UNION of the controller's node list and the node names the AGENTS
+     report (QA round 4, finding #21; round 3's finding #5 solved the same
+     thing for Investigate and this is its helper, imported rather than
+     re-derived). `topology.nodes` is the CONTROLLER's view and is empty on
+     every console deployed without one — a console that still has agents
+     reporting in and every reason to run a diagnostic between them. Reading
+     `nodes` alone left both pickers empty there, with no explanation, on the
+     page whose entire purpose is starting a run. */
+  const nodeNames = useMemo(() => scopeNodeOptions(topo.data), [topo.data]);
 
   /* Run history (GET /api/v1/runs) is paginated behind the same opaque
      keyset cursor as event scrollback, and is loaded the same way --
@@ -681,10 +783,24 @@ export function DiagnosticsPage() {
     void loadRuns(undefined);
   }, [loadRuns]);
 
+  /* The Time Machine's cut across the history list (QA round 4, finding #4;
+     the same treatment round 3 gave the node and pair cards). GET /api/v1/runs
+     has no `to` parameter — its query is type/status/cursor/limit and nothing
+     else — so the newest page it answers is the newest page NOW, and under a
+     banner reading "you are viewing 02:14" this list was showing runs that had
+     not happened yet. Client-side over the fetched pages is therefore the
+     whole of what is available, and the copy below states the bound rather
+     than implying complete history. */
+  const visibleRuns = useMemo(() => runsAtOrBefore(runs, at), [runs, at]);
+
   return (
     <PageShell
       title="Diagnostics"
-      description="Run on-demand checks against the mesh, and browse run history."
+      description={
+        at
+          ? `Run on-demand checks against the mesh. History is cut to ${at.toLocaleString()} — runs started later are not listed.`
+          : "Run on-demand checks against the mesh, and browse run history."
+      }
     >
       {canCreate ? (
         <RunForm nodeNames={nodeNames} canReadTargets={can("targets:read")} canWriteChecks={can("checks:write")} />
@@ -707,6 +823,12 @@ export function DiagnosticsPage() {
               History is not persisted — set console.database.mode
             </p>
           ) : null}
+          {at ? (
+            <p className="mt-1 max-w-prose text-xs leading-relaxed text-muted-foreground">
+              GET /api/v1/runs has no time filter, so this cut to the viewed instant happens in the browser over the
+              pages loaded here — a run older than them is not reached by paging backwards from this list.
+            </p>
+          ) : null}
 
           {history.error ? (
             <p role="alert" className="mt-3 text-sm text-health-bad">
@@ -716,7 +838,7 @@ export function DiagnosticsPage() {
             </p>
           ) : null}
 
-          <HistoryList runs={runs} />
+          <HistoryList runs={visibleRuns} engaged={at !== null} />
 
           {runs.length > 0 ? (
             <div className="mt-4 flex justify-center">

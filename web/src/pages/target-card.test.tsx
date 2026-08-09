@@ -88,6 +88,8 @@ const schedule: Schedule = {
   runAt: null,
   enabled: true,
   lastFiredAt: null,
+  lastError: "",
+  lastErrorAt: null,
   nextFireAt: "2026-08-02T00:00:00Z",
   createdAt: "2026-08-01T00:00:00Z",
   updatedAt: "2026-08-01T00:00:00Z",
@@ -323,12 +325,18 @@ describe("TargetCardPage", () => {
     expect(called(fetchMock, "/api/v1/targets")).toBe(false);
   });
 
-  it("pins the recent-changes rail to the target's own name", async () => {
+  /* QA round 4, finding #22. `?scope=` is exact equality, so the rail was
+     matching only target-scoped events and silently dropping every pair row
+     ("node-a→edge-gw") — which is nearly all of them. `?scopeNode=` is the
+     pair-aware filter, the same one the node card already uses. */
+  it("pins the recent-changes rail with the PAIR-AWARE scopeNode filter", async () => {
     const { fetchMock } = renderPage();
     await waitFor(() => expect(called(fetchMock, "/api/v1/events")).toBe(true));
     const call = fetchMock.mock.calls.find((c) => String(c[0]).startsWith("/api/v1/events"));
     const url = new URL(String(call?.[0]), "http://localhost");
-    expect(url.searchParams.get("scope")).toBe("edge-gw");
+    expect(url.searchParams.get("scopeNode")).toBe("edge-gw");
+    // The two are mutually exclusive server-side: sending both is a 422.
+    expect(url.searchParams.get("scope")).toBeNull();
   });
 
   it("lists the definitions pointing at this target and each one's schedules", async () => {
@@ -458,5 +466,62 @@ describe("TargetCardPage — open incidents rail", () => {
     expect(within(rows[0]).getByRole("link", { name: "edge-gw unreachable" }).getAttribute("href")).toBe(
       "/investigate?incident=inc-1",
     );
+  });
+});
+
+/* ── QA round 5 ─────────────────────────────────────────────────────────── */
+
+/* #7. "— healthy" read as a claim with a missing number in front of it. Round
+   2's finding #16 fixed exactly this on the node card and it was never carried
+   across to this one. */
+describe("no percentage means no sentence (#7)", () => {
+  it("drops the suffix entirely when nothing has probed the target", async () => {
+    renderPage(`/targets/${TARGET_ID}`, { healthResult: [] });
+    expect(await screen.findByRole("heading", { name: "edge-gw" })).toBeInTheDocument();
+    expect(screen.queryByText(/healthy/i)).toBeNull();
+    // The chip alone speaks, and it says the honest thing.
+    expect(screen.getByText("No data")).toBeInTheDocument();
+  });
+
+  it("still prints the figure when there IS one", async () => {
+    renderPage(`/targets/${TARGET_ID}`, { healthResult: [{ metric: {}, value: [1, "1"] }] });
+    expect(await screen.findByText("100.0% healthy")).toBeInTheDocument();
+  });
+});
+
+/* #5, this card's half: the same treatment the Schedules tab's own rows get. */
+describe("a failing schedule says so on the target card (#5)", () => {
+  const def: CheckDefinition = {
+    id: "d-1",
+    name: "gw-tcp",
+    sourceSelection: "all",
+    destinationKind: "target",
+    destinationTargetId: TARGET_ID,
+    destinationAddress: "",
+    checkType: "tcp",
+    plane: "pod",
+    params: {},
+    enabled: true,
+    createdAt: "2026-08-01T00:00:00Z",
+    updatedAt: "2026-08-01T00:00:00Z",
+  };
+
+  it("renders the reason verbatim and warns the pill", async () => {
+    renderPage(`/targets/${TARGET_ID}`, {
+      definitions: [def],
+      schedules: {
+        "d-1": [{ ...schedule, lastError: "resolve one-per-zone sources: topology reports no agents", lastErrorAt: "2026-08-02T00:00:00Z" }],
+      },
+    });
+    const line = await screen.findByTestId("schedule-failure");
+    expect(line).toHaveTextContent("failing: resolve one-per-zone sources: topology reports no agents");
+    const row = line.closest("li") as HTMLElement;
+    expect(within(row).getByText("enabled").className).toContain("warn");
+  });
+
+  it("says nothing for a healthy one", async () => {
+    renderPage(`/targets/${TARGET_ID}`, { definitions: [def], schedules: { "d-1": [schedule] } });
+    expect(await screen.findByText("gw-tcp")).toBeInTheDocument();
+    expect(screen.queryByTestId("schedule-failure")).toBeNull();
   });
 });

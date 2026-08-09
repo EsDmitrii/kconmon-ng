@@ -273,7 +273,9 @@ describe("TargetCardPage maintenance", () => {
     await waitFor(() => expect(createBodies).toHaveLength(1));
     expect((createBodies[0] as { scope: string }).scope).toBe("edge-gw");
 
+    // Two clicks: the row confirms before it destroys (QA round 2, #14).
     fireEvent.click(await screen.findByRole("button", { name: "Delete maintenance window: wrong day" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Confirm delete maintenance window: wrong day" }));
     await waitFor(() => expect(deleted).toEqual(["doomed"]));
   });
 });

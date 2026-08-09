@@ -10,36 +10,67 @@ import { useMatrix } from "@/hooks/use-matrix";
 import { useTopology } from "@/hooks/use-topology";
 import { getEvents, getIncidents, listAlerts } from "@/lib/api";
 import { buildInvestigateURL, incidentPermalink, scopeFromAlertLabels } from "@/lib/investigation-sources";
+import { isMeasured } from "@/lib/matrix-cells";
+import { useTimeContext } from "@/lib/timemachine";
 import type { Alert, LiveEvent, LiveEventSeverity, Matrix, MatrixCell, Topology } from "@/lib/types";
-import { cn } from "@/lib/utils";
+import { cn, fmtEventTime } from "@/lib/utils";
 
 export interface OverviewSummary {
   totalNodes: number;
   readyNodes: number;
+  /** Pairs with ANY measurement — see isMeasured. */
   pairsTotal: number;
+  /** Pairs carrying a failure ratio, i.e. the ones the tiers below can rank.
+   *  Always ≤ pairsTotal, and the gap is what the third blank slate is for. */
+  pairsScored: number;
   pairsFailing: number;
   pairsDegraded: number;
-  worstPairs: MatrixCell[]; // top 5 by failRatio desc, failing/degraded only
+  worstPairs: MatrixCell[]; // top 5, failing/degraded only, worst first
+}
+
+/* isMeasured used to live here (QA round 1, finding #3). It is now
+   lib/matrix-cells.ts's, imported above and shared with the grid, the object
+   cards and the topology edges — round 2's finding #1 was the same misreading
+   surviving in four OTHER files, which is what a private copy buys. The one
+   change on the way out: packet loss counts as a measurement too. */
+
+/**
+ * compareWorst orders the problem table: failure ratio first, RTT as the
+ * tiebreak. Two pairs failing at the same ratio are not equally bad — the
+ * slower one is where an operator should look — and a comparator that left
+ * them in map order would reshuffle them between renders.
+ */
+function compareWorst(a: MatrixCell, b: MatrixCell): number {
+  const fa = a.failRatio ?? 0;
+  const fb = b.failRatio ?? 0;
+  if (fa !== fb) return fb - fa;
+  return (b.rttP95 ?? 0) - (a.rttP95 ?? 0);
 }
 
 // Health tiers mirror the matrix/topology thresholds: fail ≥ 10% is "failing",
-// 1%–10% is "degraded". Cells with a null failRatio have no probe data and are
-// excluded from every count so an unmeasured pair never reads as healthy.
+// 1%–10% is "degraded". A tier still needs a failure ratio — a cell with only
+// an RTT is measured but unranked, which is why pairsScored exists next to
+// pairsTotal rather than one number standing in for both.
 export function summarize(matrix: Matrix, topo?: Topology): OverviewSummary {
+  const measured = matrix.cells.filter(isMeasured);
   const scored = matrix.cells.filter((c) => c.failRatio !== null);
   const failing = scored.filter((c) => (c.failRatio ?? 0) >= 0.1);
   const degraded = scored.filter((c) => (c.failRatio ?? 0) >= 0.01 && (c.failRatio ?? 0) < 0.1);
   return {
     totalNodes: topo?.nodes.length ?? matrix.nodes.length,
     readyNodes: topo ? topo.nodes.filter((n) => n.ready).length : matrix.nodes.length,
-    pairsTotal: scored.length,
+    pairsTotal: measured.length,
+    pairsScored: scored.length,
     pairsFailing: failing.length,
     pairsDegraded: degraded.length,
-    worstPairs: [...failing, ...degraded]
-      .sort((a, b) => (b.failRatio ?? 0) - (a.failRatio ?? 0))
-      .slice(0, 5),
+    worstPairs: [...failing, ...degraded].sort(compareWorst).slice(0, 5),
   };
 }
+
+/** The qualifier every pair number on this page needs: the tiles and the worst
+ *  list read ONE protocol on ONE plane (useMatrix("tcp") below), and an
+ *  unlabelled "Failing pairs" claims the whole fleet's UDP and ICMP too. */
+const MATRIX_QUALIFIER = "TCP · pod plane";
 
 function fmtRtt(ns?: number): string {
   if (ns === undefined) return "—";
@@ -200,12 +231,26 @@ export function fmtAge(iso: string, now: Date): string {
 function OpenIncidents() {
   const { me, can } = useAuth();
   const { available, resolved } = useDatabaseAvailable();
+  const { at } = useTimeContext();
   const canRead = can("incidents:read");
   const enabled = me !== undefined && canRead && resolved && available;
 
+  /* Engaged, "open" is the wrong question to ask this endpoint. `status` is a
+     NOW fact (it is resolved_at's witness), so an incident that was ongoing at
+     t and has since been resolved would be filtered out of a view of t.
+     ListIncidents' from/to bound the window an incident's OWN RANGE must
+     overlap — from_at < to AND coalesce(to_at,'infinity') >= from — so the
+     one-second window [t, t+1s) selects exactly the incidents whose range
+     covers t, which is what "open as of t" means. The Time Machine's own
+     precision is the second, so that window is the finest honest one. */
   const query = useQuery({
-    queryKey: ["overview", "incidents"],
-    queryFn: () => getIncidents({ status: "open", limit: OPEN_INCIDENTS_LIMIT }),
+    queryKey: at ? ["overview", "incidents", "at", at.toISOString()] : ["overview", "incidents"],
+    queryFn: () =>
+      getIncidents(
+        at
+          ? { from: at, to: new Date(at.getTime() + 1000), limit: OPEN_INCIDENTS_LIMIT }
+          : { status: "open", limit: OPEN_INCIDENTS_LIMIT },
+      ),
     enabled,
   });
   const incidents = query.data?.incidents ?? [];
@@ -256,10 +301,16 @@ function isKnownSeverity(v: string): v is LiveEventSeverity {
   return v === "info" || v === "warn" || v === "error";
 }
 
-function fmtEventTime(timestamp: string): string {
-  const d = new Date(timestamp);
-  return Number.isNaN(d.getTime()) ? timestamp : d.toLocaleTimeString();
-}
+/* The Live feed's own wording, kept identical here on purpose (QA round 1,
+   finding #14): the same event was "warn" on this card and "Warn" on /live,
+   which reads as two vocabularies for one fact. Live's capitalized form wins
+   because it is the one an operator spends the most time in front of. An
+   unknown severity is still printed raw — Go's field is an open string. */
+const SEVERITY_LABELS: Record<LiveEventSeverity, string> = {
+  info: "Info",
+  warn: "Warn",
+  error: "Error",
+};
 
 /**
  * OverviewEventRow is a deliberately MINIMAL copy of pages/live.tsx's EventRow
@@ -276,7 +327,7 @@ function OverviewEventRow({ event }: { event: LiveEvent }) {
     <li data-testid="overview-event" className="flex items-center gap-3 py-2">
       <span className="nums w-16 shrink-0 text-xs text-muted-foreground">{fmtEventTime(event.timestamp)}</span>
       <Badge variant={isKnownSeverity(event.severity) ? SEVERITY_VARIANT[event.severity] : "unknown"} dot>
-        {event.severity}
+        {isKnownSeverity(event.severity) ? SEVERITY_LABELS[event.severity] : event.severity}
       </Badge>
       <span className="min-w-0 flex-1 truncate text-sm" title={event.summary}>
         {event.summary}
@@ -293,12 +344,17 @@ function OverviewEventRow({ event }: { event: LiveEvent }) {
 function RecentEvents() {
   const { me, can } = useAuth();
   const { available, resolved } = useDatabaseAvailable();
+  const { at } = useTimeContext();
   const canRead = can("events:read");
   const enabled = me !== undefined && canRead && resolved && available;
 
+  /* Engaged, `to=t` makes this the newest ten AT OR BEFORE t — the same bound
+     /live's scrollback takes, and for the same reason: "recent" under a banner
+     that says "you are viewing 12:00" cannot mean "since 12:00". Exclusive
+     server-side (store.EventFilter.To). */
   const query = useQuery({
-    queryKey: ["overview", "events"],
-    queryFn: () => getEvents({ limit: RECENT_EVENTS_LIMIT }),
+    queryKey: at ? ["overview", "events", "at", at.toISOString()] : ["overview", "events"],
+    queryFn: () => getEvents({ limit: RECENT_EVENTS_LIMIT, ...(at ? { to: at } : {}) }),
     enabled,
   });
   const events = query.data?.events ?? [];
@@ -400,8 +456,12 @@ function FiringAlertRow({ alert, now }: { alert: Alert; now: Date }) {
   return (
     <li data-testid="firing-alert" className="flex flex-wrap items-baseline gap-x-3 gap-y-1 py-2">
       {managed ? (
+        // ?rule= rather than a bare /alerting: the list can be long and the row
+        // an operator is chasing is one of many, so the link names it and the
+        // page opens it (pages/alerting.tsx reads the param). Same idiom as
+        // /investigate?incident=.
         <a
-          href="/alerting"
+          href={`/alerting?rule=${encodeURIComponent(alert.ruleId as string)}`}
           data-testid="firing-alert-name"
           className="min-w-0 flex-1 truncate text-sm text-primary hover:underline"
         >
@@ -454,8 +514,15 @@ function FiringAlertRow({ alert, now }: { alert: Alert; now: Date }) {
  */
 function FiringAlerts() {
   const { me, can } = useAuth();
+  const { at } = useTimeContext();
+  const engaged = at !== null;
   const canRead = can("alerts:read");
-  const enabled = me !== undefined && canRead;
+  /* Engaged this card asks for NOTHING. /api/v1/alerts is Prometheus's ACTIVE
+     alert set — a now-only signal by design, with no history behind it — so
+     the only two things this card could do at t are lie (render now's firing
+     set under a past instant) or say so. It says so, and the request is not
+     made at all rather than made and discarded. */
+  const enabled = me !== undefined && canRead && !engaged;
 
   const query = useQuery({ queryKey: ["overview", "alerts"], queryFn: listAlerts, enabled });
   const now = new Date();
@@ -484,7 +551,9 @@ function FiringAlerts() {
           ) : null}
         </div>
 
-        {me !== undefined && !canRead ? (
+        {engaged ? (
+          <PanelNote>Alert state is a live-only signal — Prometheus keeps no firing history here.</PanelNote>
+        ) : me !== undefined && !canRead ? (
           <PanelNote>Firing alerts need alerts:read — none was requested.</PanelNote>
         ) : query.isError ? (
           <PanelNote>
@@ -588,11 +657,32 @@ function WorstPairsTable({ pairs }: { pairs: MatrixCell[] }) {
   );
 }
 
+/**
+ * PageProblem is one failed dependency, said in its own sentence.
+ *
+ * The page used to surface `matrix.error ?? topo.error` — one slot for two
+ * independent queries — so with both down the topology detail was silently
+ * dropped, and the historical fold's 422 (the one that names
+ * console.database.retentionDays, i.e. the only actionable one) was exactly
+ * the message a reader lost while the NODES READY tile quietly showed an
+ * em-dash (QA round 1, finding #5). Two failures are two facts and get two
+ * lines, each carrying the server's own detail: ApiError's message IS
+ * problem.detail, so the retention sentence arrives verbatim.
+ */
+function PageProblem({ what, error }: { what: string; error: Error }) {
+  return (
+    <div data-testid="overview-problem">
+      <p className="text-sm font-medium">{what}</p>
+      <p className="mt-1 text-xs leading-relaxed text-muted-foreground">{error.message}</p>
+    </div>
+  );
+}
+
 export function OverviewPage() {
   const topo = useTopology();
   const matrix = useMatrix("tcp");
+  const { isLive } = useTimeContext();
 
-  const error = matrix.error ?? topo.error;
   const summary = matrix.data ? summarize(matrix.data, topo.data) : undefined;
   // summarize()'s topology-absent fallback (readyNodes = totalNodes) is meant
   // for "no data at all" — it must not be read as "all nodes ready" while the
@@ -611,17 +701,19 @@ export function OverviewPage() {
       description="Cluster health at a glance, recomputed from Prometheus every 15s."
     >
       <div className="flex flex-col gap-6">
-        {error ? (
-          <Card
-            role="alert"
-            className="border-l-4 border-l-health-bad bg-health-bad-soft/40 p-5"
-          >
-            <p className="text-sm font-medium">Overview data is unavailable</p>
-            <p className="mt-1 text-xs leading-relaxed text-muted-foreground">{error.message}</p>
-            <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
-              The page keeps retrying every 15s. If it persists, check that the console can reach
-              Prometheus.
-            </p>
+        {matrix.error || topo.error ? (
+          <Card role="alert" className="flex flex-col gap-3 border-l-4 border-l-health-bad bg-health-bad-soft/40 p-5">
+            {matrix.error ? <PageProblem what="The pair matrix is unavailable" error={matrix.error} /> : null}
+            {topo.error ? <PageProblem what="The node list is unavailable" error={topo.error} /> : null}
+            {/* Only true while Live: engaged, both queries have their poll off
+                on purpose (a past instant's answer cannot change), so promising
+                a retry that is never going to happen would be a second lie
+                stacked on the first. */}
+            {isLive ? (
+              <p className="text-xs leading-relaxed text-muted-foreground">
+                The page keeps retrying every 15s. If it persists, check that the console can reach Prometheus.
+              </p>
+            ) : null}
           </Card>
         ) : null}
 
@@ -635,24 +727,31 @@ export function OverviewPage() {
                 value={nodesReadyDisplay}
                 hint={topo.data ? undefined : "Topology unavailable"}
               />
+              {/* Both pair tiles carry the qualifier: they count ONE protocol
+                  on ONE plane, and the bare label claimed the whole fleet. */}
               <StatTile
                 label="Failing pairs"
                 value={summary.pairsFailing}
                 tone={summary.pairsFailing > 0 ? "bad" : undefined}
                 toneLabel="Fail ≥ 10%"
+                hint={MATRIX_QUALIFIER}
               />
               <StatTile
                 label="Degraded pairs"
                 value={summary.pairsDegraded}
                 tone={summary.pairsDegraded > 0 ? "warn" : undefined}
                 toneLabel="Fail 1–10%"
+                hint={MATRIX_QUALIFIER}
               />
             </div>
 
             <Card asChild className="p-6">
               <section>
                 <div className="flex flex-wrap items-baseline justify-between gap-2">
-                  <h2 className="text-sm font-semibold">Worst pairs</h2>
+                  <span className="flex flex-wrap items-baseline gap-2">
+                    <h2 className="text-sm font-semibold">Worst pairs</h2>
+                    <Badge variant="neutral">{MATRIX_QUALIFIER}</Badge>
+                  </span>
                   <p className="nums text-xs text-muted-foreground">
                     {summary.pairsTotal} measured pair{summary.pairsTotal === 1 ? "" : "s"}
                   </p>
@@ -663,10 +762,19 @@ export function OverviewPage() {
                       title="No probe data in Prometheus yet"
                       body="Pairs appear here once the agents have completed a probe round and Prometheus has scraped them — usually within a minute of the DaemonSet becoming ready."
                     />
+                  ) : summary.pairsScored === 0 ? (
+                    // Measured, but not RANKABLE: latency arrived and the
+                    // failure-ratio series did not, so "nothing is failing" is
+                    // a claim this page has no samples for. Naming the missing
+                    // half is the honest half of finding #3.
+                    <BlankSlate
+                      title="No failure ratio for these pairs"
+                      body={`${summary.pairsTotal} pair${summary.pairsTotal === 1 ? " is" : "s are"} reporting latency, but the failure-ratio series has no samples here — worst-first ranking needs it, so this list stays empty rather than reading as healthy.`}
+                    />
                   ) : (
                     <BlankSlate
                       title="No failing or degraded pairs"
-                      body="Every measured pair is under a 1% failure ratio. Anything that crosses that line shows up here, worst first."
+                      body="Every scored pair is under a 1% failure ratio. Anything that crosses that line shows up here, worst first."
                     />
                   )
                 ) : (

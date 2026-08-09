@@ -6,12 +6,15 @@ import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useAuth } from "@/hooks/use-auth";
+import { useSubmitGuard } from "@/hooks/use-submit-guard";
+import { MaintenanceRow } from "@/components/maintenance";
 import {
   ApiError,
   createWebhook,
   deleteWebhook,
   exportConfig,
   getConfig,
+  getMaintenance,
   importConfig,
   listWebhooks,
   testWebhook,
@@ -22,7 +25,7 @@ import {
 // every affordance then states its own dependency. See lib/timemachine.tsx for
 // the rule these all follow — a permission decides whether a control EXISTS,
 // this decides whether it is usable right now.
-import { useWritesDisabled } from "@/lib/timemachine";
+import { useWriteGuard } from "@/lib/timemachine";
 import type {
   ConfigBundle,
   ConfigImportCollectionResult,
@@ -31,7 +34,7 @@ import type {
   WebhookEvent,
   WebhookRequest,
 } from "@/lib/types";
-import { cn } from "@/lib/utils";
+import { CHECKBOX_CLASS, cn } from "@/lib/utils";
 
 /**
  * The Settings page (M7 Task 10, plan Decision 10).
@@ -54,11 +57,23 @@ import { cn } from "@/lib/utils";
  *   than none. The nav sentence keeps saying "RBAC" until MILESTONES' as-built
  *   pass rewrites it; this comment is the honest record in the meantime.
  *
- *   Maintenance windows. They already have surfaces — the MaintenanceBar on
- *   /investigate, /explore and the object cards (components/maintenance.tsx) —
- *   where a window is declared next to the chart it explains. A second create
- *   form here would be a second place to get the same thing wrong, so About
- *   LINKS to those surfaces instead.
+ *   Maintenance windows — CREATING them. They already have surfaces — the
+ *   MaintenanceBar on /investigate, /explore and the object cards
+ *   (components/maintenance.tsx) — where a window is declared next to the chart
+ *   it explains. A second create form here would be a second place to get the
+ *   same thing wrong, so About LINKS to those surfaces instead.
+ *
+ *   LISTING AND DELETING THEM DOES SHIP HERE (QA round 3, finding #9), and it
+ *   is the exception that proves the paragraph above rather than a reversal of
+ *   it. Every MaintenanceBar is bounded to the RANGE of the chart it sits under
+ *   — that is what makes the bands honest — so a window declared for next
+ *   Tuesday appeared on no surface in this console the moment it was saved: QA
+ *   created one and then could not find it, edit it or delete it anywhere. An
+ *   orphaned write is worse than a missing form. So the section below is a
+ *   deliberately minimal one: the UNBOUNDED list (GET /api/v1/maintenance with
+ *   no from/to), each row's scope, reason and span, and the same confirm-delete
+ *   every destructive control in this console wears. No create form — creation
+ *   stays next to the chart it explains, exactly as the paragraph above says.
  *
  *   Retention numbers. GET /api/v1/config does not serve them (httpapi's
  *   handleConfig: auth mode/role/loginPath, the anonymous banner flag, and
@@ -103,9 +118,9 @@ function SectionCard({ title, children }: { title: string; children: ReactNode }
   );
 }
 
-function ErrorLine({ children }: { children: ReactNode }) {
+function ErrorLine({ children, id }: { children: ReactNode; id?: string }) {
   return (
-    <p role="alert" className="mt-3 text-sm leading-relaxed text-health-bad">
+    <p id={id} role="alert" className="mt-3 text-sm leading-relaxed text-health-bad">
       {children}
     </p>
   );
@@ -183,6 +198,45 @@ export function webhookRequestFrom(draft: WebhookDraft): WebhookRequest {
   return req;
 }
 
+/* ── 422 → form field ───────────────────────────────────────────────────────
+   The same treatment pages/targets.tsx's three forms already have, applied to
+   this one in QA round 5 (finding #13). A refused endpoint used to render its
+   whole reason as one banner above the buttons — "webhook: url ... must start
+   with http:// or https://" printed a long way from the URL box, with nothing
+   marking which of the four fields was wrong. On a five-field form that is a
+   reading exercise.
+
+   Problem+json carries NO field pointer (docs/console-api.yaml's Problem has
+   exactly four members), so the field is recovered from the noun the server's
+   own message leads with: store/webhooks.go builds every message as
+   "webhook: <field> ...". This is a PRESENTATION heuristic — a detail matching
+   no phrase still renders verbatim as a form-level error, which is what the
+   banner already did. */
+
+export type WebhookField = "name" | "url" | "secret" | "events";
+
+/** Most specific first, and "event" (singular) rather than "events" so the
+ *  indexed form store writes for a bad member — "events[0]: ..." — lands here
+ *  too. `url` before `name` because a duplicate-name 422 says "webhook names
+ *  are unique" and carries no url, while a bad url message carries no name. */
+export const WEBHOOK_FIELD_PHRASES: readonly (readonly [WebhookField, string])[] = [
+  ["secret", "secret"],
+  ["events", "event"],
+  ["url", "url"],
+  ["name", "name"],
+];
+
+/** webhookFieldForDetail returns the field a 422 names, or null when the
+ *  message names none this form has. Exported for the same reason
+ *  targets.tsx's fieldForDetail is: the table is the thing worth pinning. */
+export function webhookFieldForDetail(detail: string): WebhookField | null {
+  const haystack = detail.toLowerCase();
+  for (const [field, phrase] of WEBHOOK_FIELD_PHRASES) {
+    if (haystack.includes(phrase)) return field;
+  }
+  return null;
+}
+
 /** lastStatusTone maps the endpoint row's own string onto a badge colour. The
  *  string itself is always rendered verbatim; this only decides which of the
  *  four tokens carries it, and an unrecognised value gets "unknown" rather than
@@ -196,7 +250,9 @@ function lastStatusTone(lastStatus: string): "neutral" | "ok" | "bad" | "unknown
 
 function WebhookForm({ initial, onDone }: { initial?: Webhook; onDone: () => void }) {
   const qc = useQueryClient();
-  const writesDisabled = useWritesDisabled();
+  /* guard carries the DISABLED flag AND the reason for it — lib/timemachine's
+     useWriteGuard (QA round 2, finding #18). Spread it onto the control. */
+  const guard = useWriteGuard();
   const secretId = useId();
   const [draft, setDraft] = useState<WebhookDraft>({
     name: initial?.name ?? "",
@@ -205,8 +261,29 @@ function WebhookForm({ initial, onDone }: { initial?: Webhook; onDone: () => voi
     enabled: initial?.enabled ?? true,
     secret: "",
   });
-  const [submitting, setSubmitting] = useState(false);
+  /* The in-flight guard, not just a disabled look (QA round 5, finding #17):
+     begin() is a REF write, so three clicks in one task produce one request.
+     hooks/use-submit-guard.ts says why a useState flag cannot do this. */
+  const { submitting, begin, end } = useSubmitGuard();
   const [error, setError] = useState<string>();
+  /* Which field the last refusal named, or null for a form-level one
+     (finding #13). Separate from `error`, which still carries the server's
+     words verbatim — the field only decides WHERE they render. */
+  const [errorField, setErrorField] = useState<WebhookField | null>(null);
+  const errorId = useId();
+
+  /** fail routes one refusal: the message always shows, and it shows AT the
+   *  field when the server named one. */
+  function fail(message: string, field: WebhookField | null) {
+    setError(message);
+    setErrorField(field);
+  }
+
+  /** invalid marks a field for aria-invalid and the red border. */
+  const invalid = (field: WebhookField) => errorField === field;
+  /** describedBy points a field's assistive description at the one message,
+   *  so a screen reader reading the URL box hears why it was refused. */
+  const describedBy = (field: WebhookField) => (errorField === field ? errorId : undefined);
 
   function toggleEvent(event: WebhookEvent) {
     setDraft((d) => ({
@@ -218,16 +295,17 @@ function WebhookForm({ initial, onDone }: { initial?: Webhook; onDone: () => voi
   async function handleSubmit(e: FormEvent) {
     e.preventDefault();
     setError(undefined);
+    setErrorField(null);
     // The one rule mirrored client-side. Everything else — the name charset,
     // the url scheme, an empty event list — is left to the server's 422, whose
     // wording is better than a second copy of the rule would be. This one is
     // mirrored because a blank box on CREATE is the single case where the
     // wire body would be ambiguous rather than merely invalid.
     if (!initial && draft.secret === "") {
-      setError("A secret is required: every delivery is signed, so an endpoint without one cannot exist.");
+      fail("A secret is required: every delivery is signed, so an endpoint without one cannot exist.", "secret");
       return;
     }
-    setSubmitting(true);
+    if (!begin()) return;
     try {
       const req = webhookRequestFrom(draft);
       if (initial) await updateWebhook(initial.id, req);
@@ -235,8 +313,10 @@ function WebhookForm({ initial, onDone }: { initial?: Webhook; onDone: () => voi
       await qc.invalidateQueries({ queryKey: ["webhooks"] });
       onDone();
     } catch (err) {
-      setError(queryErrorMessage(err, "Failed to save the endpoint"));
-      setSubmitting(false);
+      const message = queryErrorMessage(err, "Failed to save the endpoint");
+      // A non-ApiError has no server words to route, so it stays form-level.
+      fail(message, err instanceof ApiError ? webhookFieldForDetail(message) : null);
+      end();
     }
   }
 
@@ -250,8 +330,10 @@ function WebhookForm({ initial, onDone }: { initial?: Webhook; onDone: () => voi
             <input
               value={draft.name}
               placeholder="pagerduty"
+              aria-invalid={invalid("name") || undefined}
+              aria-describedby={describedBy("name")}
               onChange={(e) => setDraft((d) => ({ ...d, name: e.target.value }))}
-              className={fieldClasses(false)}
+              className={fieldClasses(invalid("name"))}
             />
           </label>
           <label className="flex flex-col gap-1 text-[13px]">
@@ -259,18 +341,32 @@ function WebhookForm({ initial, onDone }: { initial?: Webhook; onDone: () => voi
             <input
               value={draft.url}
               placeholder="https://hooks.example.test/incidents"
+              aria-invalid={invalid("url") || undefined}
+              aria-describedby={describedBy("url")}
               onChange={(e) => setDraft((d) => ({ ...d, url: e.target.value }))}
-              className={fieldClasses(false)}
+              className={fieldClasses(invalid("url"))}
             />
           </label>
         </div>
 
-        <fieldset className="flex flex-col gap-2 text-[13px]">
-          <legend className="text-muted-foreground">Events</legend>
+        {/* The event list has no single input to mark, so the GROUP carries it:
+            aria-invalid on the fieldset, which is what a "no events selected"
+            422 is actually about. */}
+        <fieldset
+          className="flex flex-col gap-2 text-[13px]"
+          aria-invalid={invalid("events") || undefined}
+          aria-describedby={describedBy("events")}
+        >
+          <legend className={cn("text-muted-foreground", invalid("events") && "text-health-bad")}>Events</legend>
           <div className="flex flex-wrap gap-4">
             {WEBHOOK_EVENTS.map((event) => (
               <label key={event} className="flex items-center gap-2">
-                <input type="checkbox" checked={draft.events.includes(event)} onChange={() => toggleEvent(event)} />
+                <input
+                  type="checkbox"
+                  checked={draft.events.includes(event)}
+                  onChange={() => toggleEvent(event)}
+                  className={CHECKBOX_CLASS}
+                />
                 <span>{event}</span>
               </label>
             ))}
@@ -282,6 +378,7 @@ function WebhookForm({ initial, onDone }: { initial?: Webhook; onDone: () => voi
             type="checkbox"
             checked={draft.enabled}
             onChange={(e) => setDraft((d) => ({ ...d, enabled: e.target.checked }))}
+            className={CHECKBOX_CLASS}
           />
           <span>Enabled</span>
         </label>
@@ -294,9 +391,10 @@ function WebhookForm({ initial, onDone }: { initial?: Webhook; onDone: () => voi
             id={secretId}
             type="password"
             value={draft.secret}
-            aria-describedby={`${secretId}-help`}
+            aria-invalid={invalid("secret") || undefined}
+            aria-describedby={invalid("secret") ? `${errorId} ${secretId}-help` : `${secretId}-help`}
             onChange={(e) => setDraft((d) => ({ ...d, secret: e.target.value }))}
-            className={fieldClasses(false)}
+            className={fieldClasses(invalid("secret"))}
           />
           {/* Write-only, in both directions: the API never returns a secret, so
               this box starts empty even when editing an endpoint that has one. */}
@@ -307,10 +405,14 @@ function WebhookForm({ initial, onDone }: { initial?: Webhook; onDone: () => voi
           </span>
         </div>
 
-        {error ? <ErrorLine>{error}</ErrorLine> : null}
+        {/* One message, one id. It keeps its place above the buttons whether or
+            not a field claimed it — the server's words are never moved out of
+            reading order — and aria-describedby points the marked field here
+            rather than duplicating the text beside it. */}
+        {error ? <ErrorLine id={errorId}>{error}</ErrorLine> : null}
 
         <div className="flex gap-2">
-          <Button type="submit" loading={submitting} disabled={writesDisabled}>
+          <Button type="submit" loading={submitting} {...guard}>
             {initial ? "Save endpoint" : "Create endpoint"}
           </Button>
           {/* Cancel closes a form and touches nothing, so it stays live even
@@ -327,7 +429,9 @@ function WebhookForm({ initial, onDone }: { initial?: Webhook; onDone: () => voi
 
 function WebhookRow({ hook, onEdit }: { hook: Webhook; onEdit: () => void }) {
   const qc = useQueryClient();
-  const writesDisabled = useWritesDisabled();
+  /* guard carries the DISABLED flag AND the reason for it — lib/timemachine's
+     useWriteGuard (QA round 2, finding #18). Spread it onto the control. */
+  const guard = useWriteGuard();
   const [confirming, setConfirming] = useState(false);
   const [busy, setBusy] = useState(false);
   const [queued, setQueued] = useState(false);
@@ -397,7 +501,7 @@ function WebhookRow({ hook, onEdit }: { hook: Webhook; onEdit: () => void }) {
       <span className="ml-auto flex flex-wrap items-center gap-2">
         {confirming ? (
           <>
-            <Button size="sm" variant="outline" loading={busy} disabled={writesDisabled} onClick={handleDelete}>
+            <Button size="sm" variant="outline" loading={busy} {...guard} onClick={handleDelete}>
               Confirm delete {hook.name}
             </Button>
             <Button size="sm" variant="ghost" onClick={() => setConfirming(false)}>
@@ -406,13 +510,13 @@ function WebhookRow({ hook, onEdit }: { hook: Webhook; onEdit: () => void }) {
           </>
         ) : (
           <>
-            <Button size="sm" variant="ghost" disabled={writesDisabled} onClick={handleTest}>
+            <Button size="sm" variant="ghost" {...guard} onClick={handleTest}>
               Send test to {hook.name}
             </Button>
-            <Button size="sm" variant="ghost" disabled={writesDisabled} onClick={onEdit}>
+            <Button size="sm" variant="ghost" {...guard} onClick={onEdit}>
               Edit {hook.name}
             </Button>
-            <Button size="sm" variant="ghost" disabled={writesDisabled} onClick={() => setConfirming(true)}>
+            <Button size="sm" variant="ghost" {...guard} onClick={() => setConfirming(true)}>
               Delete {hook.name}
             </Button>
           </>
@@ -433,7 +537,9 @@ function WebhookRow({ hook, onEdit }: { hook: Webhook; onEdit: () => void }) {
 }
 
 function WebhooksSection() {
-  const writesDisabled = useWritesDisabled();
+  /* guard carries the DISABLED flag AND the reason for it — lib/timemachine's
+     useWriteGuard (QA round 2, finding #18). Spread it onto the control. */
+  const guard = useWriteGuard();
   const [editing, setEditing] = useState<{ mode: "none" } | { mode: "create" } | { mode: "edit"; hook: Webhook }>({
     mode: "none",
   });
@@ -444,7 +550,7 @@ function WebhooksSection() {
     <div className="flex flex-col gap-4">
       {editing.mode === "none" ? (
         <div>
-          <Button size="sm" disabled={writesDisabled} onClick={() => setEditing({ mode: "create" })}>
+          <Button size="sm" {...guard} onClick={() => setEditing({ mode: "create" })}>
             New endpoint
           </Button>
         </div>
@@ -486,6 +592,83 @@ function WebhooksSection() {
         ) : null}
       </SectionCard>
     </div>
+  );
+}
+
+/* ── maintenance windows (QA round 3, finding #9) ───────────────────────── */
+
+/**
+ * MaintenanceWindowsSection is the ONLY unbounded view of the declared windows
+ * in this console, and the reason it exists is at the top of this file.
+ *
+ * THE REQUEST CARRIES NO RANGE. Every other maintenance request in the console
+ * passes from/to, because every other one is drawing bands on a chart. This one
+ * is answering "what has been declared, ever" — a window whose whole span is in
+ * the future is exactly the row an operator comes here for, and a range would
+ * hide it again. Nor is `scope` sent: the point is every scope at once.
+ *
+ * It is gated on maintenance:WRITE rather than :read, the same HIDE the
+ * webhooks section makes. A subject who can only read windows already sees them
+ * beside the charts they explain, in context; this list exists for the one act
+ * that has nowhere else to happen, so without the permission to perform it the
+ * section is not rendered and NOTHING is requested.
+ */
+function MaintenanceWindowsSection() {
+  const qc = useQueryClient();
+  const query = useQuery({ queryKey: ["settings", "maintenance"], queryFn: () => getMaintenance() });
+  const windows = query.data?.windows ?? [];
+
+  const onChanged = () => {
+    void qc.invalidateQueries({ queryKey: ["settings", "maintenance"] });
+    // The range-bounded lists elsewhere hold the same rows; a delete here must
+    // not leave a card in another tab drawing a band for a window that is gone.
+    void qc.invalidateQueries({ queryKey: ["maintenance"] });
+    void qc.invalidateQueries({ queryKey: ["investigate", "maintenance"] });
+  };
+
+  return (
+    <SectionCard title="Maintenance windows">
+      <p className="mt-1 max-w-prose text-xs leading-relaxed text-muted-foreground">
+        Every declared window, with no time range — including the ones entirely in the future, which the bars beside the
+        charts cannot show because those are bounded to what the chart plots. Declaring a window still happens next to
+        the chart it explains, on{" "}
+        <a href="/investigate" className="text-primary hover:underline">
+          Investigate
+        </a>{" "}
+        or{" "}
+        <a href="/explore" className="text-primary hover:underline">
+          Explore
+        </a>
+        ; this list is for finding and removing one.
+      </p>
+      {query.isError ? (
+        <ErrorLine>{queryErrorMessage(query.error, "Maintenance windows are unavailable")}</ErrorLine>
+      ) : null}
+      {/* isPending / isSuccess, the same guard the webhooks list uses: a paused
+          retry is pending-but-not-fetching, and presenting that as "none
+          declared" would be a settled answer nobody gave. */}
+      {query.isPending ? (
+        <div role="status" aria-live="polite" className="mt-4 flex flex-col gap-2">
+          <span className="sr-only">Loading…</span>
+          <Skeleton className="h-10 w-full" />
+        </div>
+      ) : null}
+      {query.isSuccess && windows.length === 0 ? (
+        <p className="px-1 py-10 text-center text-xs text-muted-foreground">
+          No maintenance windows have been declared.
+        </p>
+      ) : null}
+      {windows.length > 0 ? (
+        <ul aria-label="All maintenance windows" className="mt-4 divide-y divide-border">
+          {windows.map((w) => (
+            /* The SHARED row (components/maintenance.tsx): same confirm-delete,
+               same compact stamp, same write guard. canWrite is true by
+               construction — this whole section is behind maintenance:write. */
+            <MaintenanceRow key={w.id} window={w} canWrite onChanged={onChanged} />
+          ))}
+        </ul>
+      ) : null}
+    </SectionCard>
   );
 }
 
@@ -644,11 +827,20 @@ function ImportResultTable({ result }: { result: ConfigImportResult }) {
 }
 
 function ExportImportSection() {
-  const writesDisabled = useWritesDisabled();
+  /* guard carries the DISABLED flag AND the reason for it — lib/timemachine's
+     useWriteGuard (QA round 2, finding #18). Spread it onto the control; the
+     alias below is for the control that composes it with a local condition,
+     which must be applied AFTER the spread to win. */
+  const guard = useWriteGuard();
+  const writesDisabled = guard.disabled;
   const fileId = useId();
   const [exporting, setExporting] = useState(false);
   const [exportError, setExportError] = useState<string>();
   const [bundle, setBundle] = useState<ConfigBundle>();
+  /* The picked file's NAME, kept because the visually-hidden input no longer
+     shows it (finding #8). Set even for a bundle that failed to parse: the
+     operator needs to know WHICH file the error below is about. */
+  const [fileName, setFileName] = useState<string>();
   const [importing, setImporting] = useState(false);
   const [importError, setImportError] = useState<string>();
   const [result, setResult] = useState<ConfigImportResult>();
@@ -690,6 +882,7 @@ function ExportImportSection() {
     setResult(undefined);
     setImportError(undefined);
     setBundle(undefined);
+    setFileName(file?.name);
     if (!file) return;
     const parsed = parseBundle(await file.text());
     if (!parsed.ok) {
@@ -729,17 +922,54 @@ function ExportImportSection() {
       </div>
 
       <div className="mt-6 flex flex-col gap-2">
-        <label htmlFor={fileId} className="text-[13px] text-muted-foreground">
-          Configuration bundle
-        </label>
-        <input
-          id={fileId}
-          type="file"
-          accept="application/json,.json"
-          disabled={writesDisabled}
-          onChange={(e) => void handleFile(e.target.files?.[0])}
-          className="max-w-md text-[13px]"
-        />
+        <span className="text-[13px] text-muted-foreground">Configuration bundle</span>
+        {/* The native file input is VISUALLY HIDDEN, not replaced (QA round 5,
+            finding #8). `<input type="file">` renders as the browser's own
+            chrome — a grey "Choose File / no file selected" that matches
+            nothing else on this page and cannot be themed at all, so in dark
+            mode it was a light rectangle in the middle of a dark card.
+
+            sr-only rather than display:none or opacity-0: the element stays in
+            the accessibility tree AND in the tab order, so the keyboard path
+            is the real one (Tab to the input, Space to open the picker) and
+            the label is only the POINTER affordance. `peer` carries the
+            input's disabled and focus states onto the label, so there is one
+            source of truth for both — the guard still disables the input
+            itself, not just its skin. */}
+        <div className="flex flex-wrap items-center gap-2">
+          <input
+            id={fileId}
+            type="file"
+            accept="application/json,.json"
+            /* The accessible name stays the FIELD's name, not the button's
+               text: the label element below is the pointer affordance ("Choose
+               bundle…" is an instruction), while a screen reader user landing
+               on the input needs to hear what the field IS. */
+            aria-label="Configuration bundle"
+            {...guard}
+            onChange={(e) => void handleFile(e.target.files?.[0])}
+            className="peer sr-only"
+          />
+          <label
+            htmlFor={fileId}
+            data-testid="bundle-file-label"
+            className={cn(
+              "inline-flex h-8 cursor-pointer items-center justify-center rounded-md border border-border-strong",
+              "bg-transparent px-3 text-sm font-medium transition-colors duration-(--dur) ease-(--ease)",
+              "hover:bg-accent hover:text-accent-foreground",
+              "peer-focus-visible:ring-2 peer-focus-visible:ring-ring peer-focus-visible:ring-offset-2 peer-focus-visible:ring-offset-background",
+              "peer-disabled:pointer-events-none peer-disabled:opacity-50",
+            )}
+          >
+            Choose bundle…
+          </label>
+          {/* The name the native control used to show on the operator's
+              behalf. Without it, a hidden input means a picked file leaves no
+              trace at all until the dry-run table lands. */}
+          <span data-testid="bundle-file-name" className="min-w-0 truncate text-xs text-muted-foreground">
+            {fileName ?? "No file chosen"}
+          </span>
+        </div>
         <p className="max-w-prose text-xs leading-relaxed text-muted-foreground">
           Choosing a file runs a dry run immediately: it writes nothing and predicts, per collection, exactly what
           Apply would do.
@@ -753,7 +983,7 @@ function ExportImportSection() {
                already applied), and a result carrying errors is still worth
                applying for the items that succeeded. The operator decides;
                this button does not. */
-            disabled={writesDisabled || bundle === undefined}
+            {...guard} disabled={writesDisabled || bundle === undefined}
             onClick={() => bundle && void runImport(bundle, false)}
           >
             Apply import
@@ -777,6 +1007,17 @@ function Fact({ label, children }: { label: string; children: ReactNode }) {
   );
 }
 
+/**
+ * subjectLine joins the subject's kind and display name, skipping whatever is
+ * missing (QA round 5, finding #9). Exported so the rule is testable on its
+ * own: "anonymous" is a real subject kind with no display name at all, and it
+ * is the DEFAULT deployment, so the dangling-separator case was the one most
+ * operators saw first.
+ */
+export function subjectLine(kind: string, displayName: string): string {
+  return [kind, displayName].map((s) => s.trim()).filter((s) => s !== "").join(" · ");
+}
+
 function AboutSection() {
   const { me } = useAuth();
   const { data: config } = useQuery({ queryKey: ["config"], queryFn: getConfig, staleTime: Infinity });
@@ -788,7 +1029,13 @@ function AboutSection() {
       <dl className="mt-3 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
         <Fact label="Auth mode">{mode}</Fact>
         <Fact label="Your roles">{roles.length > 0 ? roles.join(", ") : "—"}</Fact>
-        <Fact label="Your subject">{me ? `${me.subject.kind} · ${me.subject.displayName}` : "—"}</Fact>
+        {/* Empty segments are DROPPED, not rendered as a gap — the same
+            treatment lib/investigation-sources.ts's auditDetailLine got in
+            round 3, applied here in round 5 (finding #9). An anonymous subject
+            has no displayName, and the fixed template printed the separator
+            anyway: "anonymous · " reads as a name that failed to load. A
+            separator is a joint between two things. */}
+        <Fact label="Your subject">{me ? subjectLine(me.subject.kind, me.subject.displayName) : "—"}</Fact>
         <Fact label="Controller">{config?.controller.configured ? "configured" : "not configured"}</Fact>
         <Fact label="Prometheus">{config?.prometheus.configured ? "configured" : "not configured"}</Fact>
         <Fact label="Database">{config?.database.configured ? "configured" : "not configured"}</Fact>
@@ -819,8 +1066,9 @@ function AboutSection() {
         <a href="/explore" className="text-primary hover:underline">
           Explore
         </a>
-        , next to the chart they cover — rather than a second time here. Roles and API tokens are not administered
-        from this console at all.
+        , next to the chart they cover — rather than a second time here. The section above lists every declared window
+        with no range, which is the only place a future one can be found and removed. Roles and API tokens are not
+        administered from this console at all.
       </p>
     </SectionCard>
   );
@@ -841,6 +1089,8 @@ export function SettingsPage() {
   const { me, can } = useAuth();
   const canWebhooks = can("webhooks:manage");
   const canBundle = can("settings:write");
+  /* maintenance:WRITE, not :read — see MaintenanceWindowsSection. */
+  const canMaintenance = can("maintenance:write");
 
   let body: ReactNode;
   if (me === undefined) {
@@ -853,16 +1103,18 @@ export function SettingsPage() {
   } else {
     body = (
       <>
-        {!canWebhooks && !canBundle ? (
+        {!canWebhooks && !canBundle && !canMaintenance ? (
           <Card role="status" className="p-6">
             <p className="text-sm font-medium">Your role can view none of the console's settings.</p>
             <p className="mt-1 max-w-prose text-xs leading-relaxed text-muted-foreground">
-              Webhook endpoints need webhooks:manage and configuration export/import needs settings:write. Both are
-              admin-only in the built-in roles. What is below is everything this role can read here.
+              Webhook endpoints need webhooks:manage, configuration export/import needs settings:write, and the
+              maintenance-window list needs maintenance:write. The first two are admin-only in the built-in roles. What
+              is below is everything this role can read here.
             </p>
           </Card>
         ) : null}
         {canWebhooks ? <WebhooksSection /> : null}
+        {canMaintenance ? <MaintenanceWindowsSection /> : null}
         {canBundle ? <ExportImportSection /> : null}
         <AboutSection />
       </>

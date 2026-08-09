@@ -39,8 +39,8 @@ var upgrader = websocket.Upgrader{
 	CheckOrigin:     checkOrigin,
 }
 
-// checkOrigin is the socket's CSRF defence and the direct analogue of the
-// "same-origin CORS default" in docs/console/architecture/SECURITY.md §12.
+// checkOrigin is the socket's CSRF defence — the WebSocket analogue of the
+// HTTP API's same-origin CORS default (no CORS headers = same-origin only).
 //
 // A browser cannot be talked out of sending Origin, so requiring Origin's host
 // to equal the request host stops any other site from opening an authenticated

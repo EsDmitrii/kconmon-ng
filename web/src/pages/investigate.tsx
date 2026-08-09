@@ -13,12 +13,14 @@ import { DateTimePicker } from "@/components/ui/datetime-picker";
 import { Segmented } from "@/components/ui/segmented";
 import { useAuth } from "@/hooks/use-auth";
 import { useDatabaseAvailable } from "@/hooks/use-capabilities";
+import { useSubmitGuard } from "@/hooks/use-submit-guard";
 import { useTopology } from "@/hooks/use-topology";
 import { mergeAnnotations } from "@/lib/annotations";
 import {
   ApiError,
   createIncident,
   createRun,
+  deleteIncident,
   getAuditEntries,
   getConfig,
   getEvents,
@@ -36,6 +38,8 @@ import {
   promqlQuery,
   promqlQueryRange,
 } from "@/lib/api";
+import { subscribeToLocation } from "@/lib/location";
+import { endSentence } from "@/lib/utils";
 import {
   CAUSE_WEIGHTS,
   DEFAULT_CAUSE_WINDOW_SECONDS,
@@ -45,9 +49,11 @@ import {
   thresholdCrossings,
 } from "@/lib/investigation";
 import {
+  CLAMPED_BANNER,
   DEFAULT_RANGE_SECONDS,
   INCIDENT_NOTES_MAX,
   INCIDENT_TITLE_MAX,
+  INVESTIGATE_PATH,
   PAIR_SEPARATOR,
   PIN_NOTE_MAX,
   RANGE_PRESETS,
@@ -55,6 +61,7 @@ import {
   annotationEntries,
   auditEntries,
   buildExportPayload,
+  commitWindow,
   eventEntries,
   inRange,
   incidentParams,
@@ -70,7 +77,11 @@ import {
   runEntries,
   runTouchesScope,
   samplesFromMatrix,
+  scopeCaptionValue,
   scopeFilterValue,
+  scopeIncompleteReason,
+  scopeNodeOptions,
+  scopeZoneOptions,
   scopesToQuery,
   validAt,
   type InvestigationParams,
@@ -78,7 +89,7 @@ import {
   type RangePreset,
   type ScopeKind,
 } from "@/lib/investigation-sources";
-import { useWritesDisabled } from "@/lib/timemachine";
+import { useTimeContext, useWriteGuard, useWritesDisabled } from "@/lib/timemachine";
 import type { Incident, IncidentStatus, K8sEvent, MaintenanceWindow, PathSnapshot, PinnedRef } from "@/lib/types";
 import { buildRunRequest, CONTROL_CLASS } from "@/pages/diagnostics";
 
@@ -149,7 +160,7 @@ const MTR_FANOUT = 4;
 const CAUSE_TOP_N = 5;
 
 const DOC_LINK =
-  "https://github.com/EsDmitrii/kconmon-ng/blob/main/docs/console/product/INVESTIGATION.md";
+  "https://github.com/EsDmitrii/kconmon-ng/blob/main/web/src/lib/investigation.ts";
 
 const SCOPE_OPTIONS: { value: ScopeKind; label: string }[] = [
   { value: "pair", label: "Pair" },
@@ -189,22 +200,29 @@ function queryErrorMessage(error: unknown, fallback: string): string {
  *
  *  `incident` is DROPPED here and not merely left alone: these four parameters
  *  are what an operator just chose by hand, and keeping the id would leave a
- *  URL claiming to be an incident while showing a different window. */
-function writeParams(p: InvestigationParams): void {
+ *  URL claiming to be an incident while showing a different window.
+ *
+ *  Returns the search string it wrote, so the caller can record it as its own
+ *  (QA round 3, finding #10): the page now listens for URL changes, and it must
+ *  be able to tell somebody else's navigation from the echo of its own. */
+function writeParams(p: InvestigationParams): string {
   const url = new URL(window.location.href);
   for (const key of ["kind", "scope", "from", "to", "incident"]) url.searchParams.delete(key);
   for (const [k, v] of new URLSearchParams(investigationParamsToSearch(p).slice(1))) url.searchParams.set(k, v);
   window.history.pushState({}, "", `${url.pathname}${url.search}${url.hash}`);
+  return url.search;
 }
 
 /** writeIncidentParam is the other direction: the id REPLACES the four scope
  *  parameters, because the row now answers all of them. Everything else in the
- *  query string (`?at=`) survives, same as writeParams. */
-function writeIncidentParam(id: string): void {
+ *  query string (`?at=`) survives, same as writeParams — and it returns the
+ *  search it wrote for the same reason. */
+function writeIncidentParam(id: string): string {
   const url = new URL(window.location.href);
   for (const key of ["kind", "scope", "from", "to"]) url.searchParams.delete(key);
   url.searchParams.set("incident", id);
   window.history.pushState({}, "", `${url.pathname}${url.search}${url.hash}`);
+  return url.search;
 }
 
 const INPUT_CLASS =
@@ -217,6 +235,10 @@ function fmtStamp(iso: string): string {
   const d = new Date(iso);
   return Number.isNaN(d.getTime()) ? iso : d.toLocaleString();
 }
+
+/** See IncidentStrip's `say`. Four seconds: long enough to read six words,
+ *  short enough that the line is gone before the next action. */
+export const COPY_NOTE_TTL_MS = 4000;
 
 /**
  * SaveIncidentForm is the popover behind "Save as incident".
@@ -243,29 +265,43 @@ function SaveIncidentForm({
 }) {
   const [title, setTitle] = useState("");
   const [notes, setNotes] = useState("");
-  const [busy, setBusy] = useState(false);
+  /* The in-flight guard, not just a disabled look (QA round 5, finding #17):
+     begin() is a REF write, so three clicks in one task produce one incident
+     rather than three. hooks/use-submit-guard.ts says why a useState flag
+     cannot do this. */
+  const { submitting: busy, begin, end } = useSubmitGuard();
   const [error, setError] = useState<string>();
+  /* Focus goes to the field that is wrong (QA round 3, finding #22, and the
+     contract components/annotations.tsx's focusField already keeps): a message
+     under a form the reader may have scrolled past is a message nobody sees. */
+  const titleRef = useRef<HTMLInputElement>(null);
 
   async function handleSubmit(e: FormEvent) {
     e.preventDefault();
     const t = title.trim();
     if (t === "") {
       setError("A title is required.");
+      titleRef.current?.focus();
       return;
     }
     setError(undefined);
-    setBusy(true);
+    if (!begin()) return;
     try {
       await onCreate(t, notes.trim());
     } catch (err) {
       setError(queryErrorMessage(err, "Failed to save the incident"));
-      setBusy(false);
+      end();
     }
   }
 
   return (
     <Card asChild className="mt-3 p-4">
-      <form role="dialog" aria-label="Save as incident" onSubmit={handleSubmit} className="flex flex-col gap-3">
+      {/* role="form", not role="dialog" (QA round 3, finding #15). The rail
+          stays live behind it, focus is not trapped and Escape dismisses
+          nothing — three promises the dialog role makes and this disclosure
+          does not keep. Escape-to-discard is deliberately absent here too: the
+          notes box holds typed text with no undo behind it. */}
+      <form role="form" aria-label="Save as incident" onSubmit={handleSubmit} className="flex flex-col gap-3">
         <p className="text-xs text-muted-foreground">
           Scope <span className="font-medium text-foreground">{scopeText === "" ? "global" : scopeText}</span> ·{" "}
           {from.toLocaleString()} → {to.toLocaleString()} — taken from this investigation, not editable here.
@@ -282,6 +318,7 @@ function SaveIncidentForm({
         <label className="flex flex-col gap-1 text-[13px]">
           <span className="text-muted-foreground">Title</span>
           <input
+            ref={titleRef}
             aria-label="Incident title"
             value={title}
             maxLength={INCIDENT_TITLE_MAX}
@@ -335,18 +372,28 @@ function IncidentStrip({
   canWrite,
   writesDisabled,
   onPatched,
+  onDeleted,
   targetsGated,
 }: {
   incident: Incident;
   canWrite: boolean;
   writesDisabled: boolean;
   onPatched: (updated: Incident) => void;
+  /** Where the page goes after the row stops existing (QA round 3, #21). */
+  onDeleted: () => void;
   targetsGated: boolean;
 }) {
+  const guard = useWriteGuard();
   const [notes, setNotes] = useState(incident.notes);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
   const [copyNote, setCopyNote] = useState<string>();
+  /* Second-click confirm, the idiom every destructive control in this console
+     uses (QA round 2, finding #14). An incident is somebody's written record of
+     an outage — the notes, the pinned findings, the permalink other people have
+     in a channel — and DELETE is the only irreversible act on this page. */
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
+  const copyTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
   const resolved = incident.status === "resolved";
 
   // The server is the authority after every write, so a fresh row resets the
@@ -370,20 +417,51 @@ function IncidentStrip({
     [incident.id, onPatched],
   );
 
+  /**
+   * COPY_NOTE_TTL_MS — how long "Permalink copied." stays on screen (QA round 3,
+   * finding #22).
+   *
+   * A confirmation of a completed one-shot act is only true for the moment
+   * after it: left up, it starts describing a click made ten minutes and three
+   * scope changes ago, and the next reader has to work out whether it means
+   * THIS URL. The two FAILURE messages are not timed out — they name a state of
+   * the browser that has not gone away, and they carry the fallback ("it is in
+   * the address bar") an operator may still be acting on. */
+  const say = useCallback((message: string, transient: boolean) => {
+    clearTimeout(copyTimer.current);
+    setCopyNote(message);
+    if (transient) copyTimer.current = setTimeout(() => setCopyNote(undefined), COPY_NOTE_TTL_MS);
+  }, []);
+
+  useEffect(() => () => clearTimeout(copyTimer.current), []);
+
   const copyPermalink = useCallback(async () => {
     const href = window.location.href;
     const clipboard = navigator.clipboard;
     if (!clipboard || typeof clipboard.writeText !== "function") {
-      setCopyNote("This browser gave the page no clipboard — the permalink is in the address bar.");
+      say("This browser gave the page no clipboard — the permalink is in the address bar.", false);
       return;
     }
     try {
       await clipboard.writeText(href);
-      setCopyNote("Permalink copied.");
+      say("Permalink copied.", true);
     } catch {
-      setCopyNote("The browser refused the copy — the permalink is in the address bar.");
+      say("The browser refused the copy — the permalink is in the address bar.", false);
     }
-  }, []);
+  }, [say]);
+
+  const handleDelete = useCallback(async () => {
+    setBusy(true);
+    setError(undefined);
+    try {
+      await deleteIncident(incident.id);
+      onDeleted();
+    } catch (err) {
+      setError(queryErrorMessage(err, "Failed to delete the incident"));
+      setBusy(false);
+      setConfirmingDelete(false);
+    }
+  }, [incident.id, onDeleted]);
 
   return (
     <Card asChild className="border-l-4 border-l-primary p-5">
@@ -409,11 +487,50 @@ function IncidentStrip({
                 size="sm"
                 variant="outline"
                 loading={busy}
+                {...guard}
                 disabled={writesDisabled}
                 onClick={() => void patch({ status: resolved ? "open" : "resolved" })}
               >
                 {resolved ? "Reopen" : "Resolve"}
               </Button>
+            ) : null}
+            {/* Delete, behind the same permission and the same confirm every
+                other destructive control in this console wears (finding #21).
+                Before this there was NO way to remove an incident from any
+                surface — a mistyped one stayed in the list forever, and the
+                only record of it was a permalink that kept resolving. */}
+            {canWrite ? (
+              confirmingDelete ? (
+                <>
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    loading={busy}
+                    {...guard}
+                    disabled={writesDisabled}
+                    aria-label={`Confirm delete incident: ${incident.title}`}
+                    onClick={() => void handleDelete()}
+                  >
+                    Confirm delete
+                  </Button>
+                  <Button type="button" size="sm" variant="ghost" onClick={() => setConfirmingDelete(false)}>
+                    Cancel
+                  </Button>
+                </>
+              ) : (
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="ghost"
+                  {...guard}
+                  disabled={writesDisabled}
+                  aria-label={`Delete incident: ${incident.title}`}
+                  onClick={() => setConfirmingDelete(true)}
+                >
+                  Delete
+                </Button>
+              )
             ) : null}
           </div>
         </div>
@@ -508,6 +625,11 @@ function PinnedFindings({
   onRemove: (index: number) => void;
   onSave: () => void;
 }) {
+  /* Which row is asking "are you sure?", by pinKey rather than by index — the
+     list is re-keyed by every save, and an index would move the confirm onto a
+     different finding under the operator's cursor. */
+  const [confirming, setConfirming] = useState<string | null>(null);
+
   return (
     <Card asChild className="p-5">
       <section aria-label="Pinned findings">
@@ -515,8 +637,17 @@ function PinnedFindings({
         {pinned.length === 0 ? (
           <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
             Nothing pinned yet. {canWrite ? "The pin on a timeline row adds it here." : "Pinning needs incidents:write."}{" "}
-            Maintenance windows and threshold crossings cannot be pinned at all — the stored vocabulary has no kind for
-            a declared window, and a threshold row is derived from a query rather than being a row anywhere.
+            {/* All THREE unpinnable classes, named (QA round 3, finding #19).
+                The sentence used to list two and stop, so an operator hunting
+                for the missing pin control on a firing-alert row was left to
+                conclude the console was broken. An alert lives in Prometheus,
+                not in any table this console owns, and its id is a fingerprint
+                of a label set that stops existing the moment it resolves —
+                PIN_KIND_BY_TIMELINE_KIND is the authority and says so. */}
+            Maintenance windows, threshold crossings and firing alerts cannot be pinned at all — the stored vocabulary
+            has no kind for a declared window, a threshold row is derived from a query rather than being a row anywhere,
+            and an alert lives in Prometheus rather than in this console, keyed by a label set that disappears when it
+            resolves.
           </p>
         ) : (
           <ul className="mt-3 flex flex-col gap-2">
@@ -536,16 +667,44 @@ function PinnedFindings({
                       onChange={(e) => onNote(i, e.target.value)}
                       className={`${INPUT_CLASS} min-w-0 flex-1`}
                     />
-                    <Button
-                      type="button"
-                      size="sm"
-                      variant="ghost"
-                      disabled={writesDisabled || busy}
-                      aria-label={`Unpin ${p.kind} ${p.id}`}
-                      onClick={() => onRemove(i)}
-                    >
-                      Unpin
-                    </Button>
+                    {/* Unpin DISCARDS the note (QA round 3, finding #22). The
+                        API replaces `pinned` wholesale — there is no per-ref
+                        delete and nothing keeps an orphaned note server-side —
+                        so removing a finding somebody wrote a reason against
+                        destroys the reason with it, with no undo. A note-less
+                        unpin stays one click: there is nothing to lose, and
+                        pinning is meant to be cheap to change your mind about. */}
+                    {(p.note ?? "") !== "" && confirming === pinKey(p) ? (
+                      <>
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="outline"
+                          disabled={writesDisabled || busy}
+                          aria-label={`Confirm unpin ${p.kind} ${p.id} and discard its note`}
+                          onClick={() => {
+                            setConfirming(null);
+                            onRemove(i);
+                          }}
+                        >
+                          Discard note &amp; unpin
+                        </Button>
+                        <Button type="button" size="sm" variant="ghost" onClick={() => setConfirming(null)}>
+                          Cancel
+                        </Button>
+                      </>
+                    ) : (
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="ghost"
+                        disabled={writesDisabled || busy}
+                        aria-label={`Unpin ${p.kind} ${p.id}`}
+                        onClick={() => ((p.note ?? "") === "" ? onRemove(i) : setConfirming(pinKey(p)))}
+                      >
+                        Unpin
+                      </Button>
+                    )}
                   </>
                 ) : (
                   <span className="min-w-0 flex-1 break-words text-muted-foreground">{p.note ?? ""}</span>
@@ -607,19 +766,31 @@ export function InvestigatePage() {
   const { me, can } = useAuth();
   const qc = useQueryClient();
   const writesDisabled = useWritesDisabled();
+  const guard = useWriteGuard();
+  /* The viewed instant itself, not just the boolean: it CLAMPS the committed
+     window (QA round 3, finding #3) and it decides whether the alert source is
+     asked anything at all. */
+  const { at } = useTimeContext();
   const { available: dbAvailable, resolved: dbResolved } = useDatabaseAvailable();
   const { data: config } = useQuery({ queryKey: ["config"], queryFn: getConfig, staleTime: Infinity });
   const promConfigured = config?.prometheus.configured ?? false;
 
-  /* The URL is read ONCE into state, at mount. Re-reading it on every render
-     would make the page fight its own pushState; the form below is the only
-     writer, and `?incident=` hydration (Task 8) will feed this same setter. */
+  /* The URL is read at mount AND re-read whenever it changes under the page
+     (QA round 3, finding #10 — see lib/location.ts for why popstate alone is
+     not enough). It is not re-read on every render: that would make the page
+     fight its own pushState. `?incident=` hydration (Task 8) feeds this same
+     setter. */
   const [params, setParams] = useState<InvestigationParams>(() =>
     parseInvestigationParams(window.location.search, new Date()),
   );
   const [cursorAt, setCursorAt] = useState<Date | null>(null);
   const [runError, setRunError] = useState<string>();
   const [runStarted, setRunStarted] = useState<string>();
+  /* Why the last commit was refused, and whether it moved an edge — both are
+     statements about the CURRENT params, so both are cleared by the next
+     successful commit (findings #2, #3 and #6). */
+  const [commitError, setCommitError] = useState<string>();
+  const [clamped, setClamped] = useState(false);
 
   /* Incident mode. The id is read from the URL once, exactly like the four
      scope parameters, and is thereafter owned by this state: saving sets it,
@@ -642,11 +813,13 @@ export function InvestigatePage() {
   const [customTo, setCustomTo] = useState<Date>(params.to);
 
   const topology = useTopology();
-  const nodeNames = useMemo(() => (topology.data?.nodes ?? []).map((n) => n.name).sort(), [topology.data]);
-  const zoneNames = useMemo(
-    () => [...new Set((topology.data?.nodes ?? []).map((n) => n.zone))].filter((z) => z !== "").sort(),
-    [topology.data],
-  );
+  /* Both lists come from the NODES AND THE AGENTS (QA round 3, finding #5).
+     `topology.nodes` is the controller's view and is empty on a console with
+     no controller wired — which is exactly the console that still has agents
+     reporting and metrics worth investigating, and where every select was
+     empty and every scope but `cluster` unreachable. */
+  const nodeNames = useMemo(() => scopeNodeOptions(topology.data), [topology.data]);
+  const zoneNames = useMemo(() => scopeZoneOptions(topology.data), [topology.data]);
 
   const canTargets = can("targets:read");
   const targetsQuery = useQuery({
@@ -656,6 +829,55 @@ export function InvestigatePage() {
   });
   const targets = useMemo(() => targetsQuery.data?.targets ?? [], [targetsQuery.data]);
   const targetNames = useMemo(() => targets.map((t) => t.name), [targets]);
+
+  /* ── the URL is re-read when it changes (QA round 3, finding #10) ──
+     The search string this page last APPLIED, whether it read it or wrote it.
+     Everything below compares against it, which is what makes the page's own
+     pushState a no-op here: without that, writeParams would fire the listener,
+     the listener would re-parse and setParams, and an incident save would be
+     re-read as a plain URL a beat after it wrote the id. */
+  const appliedSearchRef = useRef<string>(window.location.search);
+  /* The id currently in state and the id already hydrated, as refs, so the
+     subscription can compare against them without re-subscribing on every
+     change. hydratedRef is also what the `?incident=` effect below reads. */
+  const incidentIdRef = useRef<string | null>(incidentId);
+  incidentIdRef.current = incidentId;
+  const hydratedRef = useRef<string | null>(null);
+
+  useEffect(
+    () =>
+      subscribeToLocation(() => {
+        const search = window.location.search;
+        if (search === appliedSearchRef.current) return;
+        appliedSearchRef.current = search;
+        const qs = new URLSearchParams(search);
+        /* An incident id in the new URL takes over exactly as it does at
+           mount; its absence LEAVES incident mode, because the URL no longer
+           claims to be one. hydratedRef is cleared so re-entering the same
+           incident later hydrates again. */
+        const nextIncident = qs.get("incident");
+        if (nextIncident !== incidentIdRef.current) hydratedRef.current = null;
+        setIncidentId(nextIncident);
+        /* Bare /investigate (no parameters at all) resolves, through
+           parseInvestigationParams' own total degradation, to the cluster over
+           the last hour — which IS the entry form's default state. So "reset to
+           the entry form" needs no special case here: it is what the parser
+           already answers for an empty query string. */
+        const next = parseInvestigationParams(search, new Date());
+        setParams(next);
+        setDraftKind(next.kind);
+        setDraftA(next.a);
+        setDraftB(next.b);
+        setPreset(presetForSpan(next.from, next.to));
+        setCustomFrom(next.from);
+        setCustomTo(next.to);
+        setCursorAt(null);
+        setSaveOpen(false);
+        setCommitError(undefined);
+        setClamped(false);
+      }),
+    [],
+  );
 
   const scope: InvestigationScope = useMemo(
     () => ({ kind: params.kind, a: params.a, b: params.b }),
@@ -692,7 +914,6 @@ export function InvestigatePage() {
      which answers an empty series rather than a wrong number — an outage that
      looks like silence. */
   const targetsSettled = !canTargets || targetsQuery.isFetched;
-  const hydratedRef = useRef<string | null>(null);
   useEffect(() => {
     if (incident === undefined || !targetsSettled || hydratedRef.current === incident.id) return;
     hydratedRef.current = incident.id;
@@ -941,12 +1162,22 @@ export function InvestigatePage() {
 
      There is no window here to ask for: /api/v1/alerts serves CURRENT state
      and no alert history endpoint exists. alertEntries does the placing, and
-     the note states the consequence. */
+     the note states the consequence.
+
+     ENGAGED, THIS SOURCE ASKS FOR NOTHING (QA round 3, finding #3). Every other
+     source on this page anchors naturally through from/to, which the clamp
+     keeps at or before the viewed instant. This one cannot: the firing set is
+     Prometheus's NOW, with no history behind it, so at `t` the only two things
+     it could do are lie — place today's firing alerts on a window that closed
+     last Tuesday — or say so. It says so, in the same sentence pages/
+     overview.tsx's Firing alerts card uses, and the request is not made at all
+     rather than made and discarded. */
   const canAlerts = can("alerts:read");
+  const engaged = at !== null;
   const alertsQuery = useQuery({
     queryKey: ["investigate", "alerts"],
     queryFn: listAlerts,
-    enabled: ready && canAlerts && promConfigured,
+    enabled: ready && canAlerts && promConfigured && !engaged,
   });
   const firingAlerts = useMemo(() => alertsQuery.data?.alerts ?? [], [alertsQuery.data]);
 
@@ -985,6 +1216,39 @@ export function InvestigatePage() {
     [entries, onset],
   );
 
+  /* Every source that was ASKED and did not answer, named the way the source
+     list names it (QA round 3, finding #1). A source that was never requested
+     is absent from here by construction: react-query holds no error for a
+     disabled query, and "you may not read this" already has its own line. */
+  const failedSources = useMemo<{ id: string; label: string; error: unknown }[]>(
+    () =>
+      [
+        { id: "events", label: "Events", error: eventsQuery.error },
+        { id: "audit", label: "Config changes", error: auditQuery.error },
+        { id: "annotations", label: "Annotations", error: annotationsQuery.error },
+        { id: "snapshots", label: "Path changes", error: snapshotsQuery.error },
+        { id: "runs", label: "Diagnostic runs", error: runsQuery.error ?? runDetailsQuery.error },
+        { id: "k8s", label: "Cluster events", error: k8sQuery.error },
+        { id: "maintenance", label: "Maintenance windows", error: maintenanceQuery.error },
+        { id: "loss", label: "Packet loss series", error: lossQuery.error },
+        { id: "rtt", label: "RTT series", error: rttQuery.error },
+        { id: "alerts", label: "Firing alerts", error: alertsQuery.error },
+      ].filter((s) => s.error !== null && s.error !== undefined),
+    [
+      eventsQuery.error,
+      auditQuery.error,
+      annotationsQuery.error,
+      snapshotsQuery.error,
+      runsQuery.error,
+      runDetailsQuery.error,
+      k8sQuery.error,
+      maintenanceQuery.error,
+      lossQuery.error,
+      rttQuery.error,
+      alertsQuery.error,
+    ],
+  );
+
   /* ── the source list: one honest line per absent or bounded source ── */
   const notes = useMemo<SourceNote[]>(() => {
     const out: SourceNote[] = [];
@@ -1001,7 +1265,11 @@ export function InvestigatePage() {
       });
     }
     if (!canAudit) {
-      out.push({ id: "audit", text: "Config changes need audit:read — the audit log was not requested." });
+      /* "Audit rows", not "config changes" (QA round 5, finding #19): the
+         source is the audit log, and most of what it records is a READ
+         decision, not a change. The timeline badge above was corrected the
+         same way — this note names the same rows, so it has to agree. */
+      out.push({ id: "audit", text: "Audit rows need audit:read — the audit log was not requested." });
     } else {
       out.push({
         id: "audit-window",
@@ -1048,6 +1316,13 @@ export function InvestigatePage() {
     }
     if (!canAlerts) {
       out.push({ id: "alerts", text: "Firing alerts need alerts:read — no alert state was requested." });
+    } else if (engaged) {
+      /* The honest live-only caption, word for word the one pages/overview.tsx
+         gives (QA round 3, finding #3). */
+      out.push({
+        id: "alerts-live-only",
+        text: "Alert state is a live-only signal — Prometheus keeps no firing history here. Nothing was requested for this instant.",
+      });
     } else if (!promConfigured) {
       out.push({
         id: "alerts-config",
@@ -1057,6 +1332,22 @@ export function InvestigatePage() {
       out.push({
         id: "alerts-now",
         text: "Alerts are the set firing NOW: a row at activeAt for each one that started inside this window, and a row at the window's start for each one that was already firing. Resolutions are not recorded; only what is firing now is visible.",
+      });
+    }
+
+    /* ── one line PER FAILED SOURCE (QA round 3, finding #1) ──
+       These used to collapse into a single "One of the timeline's sources is
+       unavailable" card carrying whichever error `??` reached first, so a
+       console where events AND k8s were both 500ing reported one problem and
+       silently dropped the other — and the timeline underneath went on
+       claiming nothing happened. Each source now says its own name and the
+       server's own detail, and every one of them counts towards the partial
+       banner the timeline draws from `failed`. */
+    for (const source of failedSources) {
+      out.push({
+        id: `failed-${source.id}`,
+        text: `${source.label}: ${queryErrorMessage(source.error, "the request failed.")}`,
+        failed: true,
       });
     }
     return out;
@@ -1073,6 +1364,8 @@ export function InvestigatePage() {
     canAlerts,
     promConfigured,
     mtrMode,
+    engaged,
+    failedSources,
   ]);
 
   const loading =
@@ -1085,32 +1378,56 @@ export function InvestigatePage() {
     lossQuery.isLoading ||
     alertsQuery.isLoading;
 
-  const sourceError =
-    eventsQuery.error ??
-    auditQuery.error ??
-    annotationsQuery.error ??
-    snapshotsQuery.error ??
-    k8sQuery.error ??
-    maintenanceQuery.error ??
-    alertsQuery.error ??
-    null;
-
   /* ── the entry form ── */
+
+  /* The draft's own completeness, recomputed on every keystroke of the selects
+     so the button and the reason under it never disagree (finding #6). */
+  const draftScope: InvestigationScope = useMemo(
+    () => ({ kind: draftKind, a: draftA, b: draftB }),
+    [draftKind, draftA, draftB],
+  );
+  const incompleteReason = useMemo(() => scopeIncompleteReason(draftScope), [draftScope]);
+
   const apply = useCallback(() => {
+    if (incompleteReason !== null) return;
     const now = new Date();
     const chosen = RANGE_PRESETS.find((p) => p.value === preset);
-    const from = preset === "custom" ? customFrom : new Date(now.getTime() - (chosen?.seconds ?? DEFAULT_RANGE_SECONDS) * 1000);
-    const to = preset === "custom" ? customTo : now;
-    const next: InvestigationParams = { kind: draftKind, a: draftA, b: draftB, from, to };
-    writeParams(next);
+    const rawFrom =
+      preset === "custom" ? customFrom : new Date(now.getTime() - (chosen?.seconds ?? DEFAULT_RANGE_SECONDS) * 1000);
+    const rawTo = preset === "custom" ? customTo : now;
+
+    /* Time Machine contract for this page: engaging at `t` clamps a committed
+       window's `to` down to `t` (a window entirely after `t` is refused
+       outright), the header states "Window clamped to the viewed instant."
+       when that moved anything, and the firing-alerts source issues ZERO
+       requests and says so — every other source anchors through from/to and
+       needs no special case. */
+    const commit = commitWindow(rawFrom, rawTo, at);
+    if (!commit.ok) {
+      setCommitError(commit.reason);
+      return;
+    }
+
+    const next: InvestigationParams = { kind: draftKind, a: draftA, b: draftB, from: commit.from, to: commit.to };
+    appliedSearchRef.current = writeParams(next);
     setParams(next);
+    setCommitError(undefined);
+    setClamped(commit.clamped);
+    /* The clamp is a fact about the COMMITTED window, so the fields have to
+       show it too — otherwise re-pressing Investigate would re-clamp the same
+       edge and the form would keep disagreeing with the page. */
+    if (commit.clamped) {
+      setPreset("custom");
+      setCustomFrom(commit.from);
+      setCustomTo(commit.to);
+    }
     setCursorAt(null);
     /* Leaving incident mode: see writeParams' own comment. hydratedRef is left
        alone deliberately — re-entering the SAME incident later must hydrate
        again, and clearing the id is what makes the next mount do that. */
     setIncidentId(null);
     setSaveOpen(false);
-  }, [draftKind, draftA, draftB, preset, customFrom, customTo]);
+  }, [draftKind, draftA, draftB, preset, customFrom, customTo, at, incompleteReason]);
 
   /* Save-as-incident sends the CURRENT scope and range verbatim: the incident
      is the investigation on screen, given a name. The 201 body seeds the same
@@ -1129,7 +1446,7 @@ export function InvestigatePage() {
       hydratedRef.current = created.id;
       setIncidentId(created.id);
       setSaveOpen(false);
-      writeIncidentParam(created.id);
+      appliedSearchRef.current = writeIncidentParam(created.id);
     },
     [qc, scope, params.from, params.to],
   );
@@ -1139,6 +1456,32 @@ export function InvestigatePage() {
     setDraftA("");
     setDraftB("");
   }, []);
+
+  /**
+   * onIncidentDeleted lands the page back on the bare entry form (QA round 3,
+   * finding #21).
+   *
+   * Staying put was not an option: the row is gone, so the strip, the pinned
+   * findings and the permalink in the address bar would all be describing
+   * something that no longer exists, and a reload would render the 404 card.
+   * `?at=` is the one parameter kept — the Time Machine is a property of the
+   * whole console, not of this investigation, and dropping it here would
+   * silently return an operator to Live.
+   *
+   * The pushState is what resets the page: lib/location.ts's subscription
+   * above re-reads the URL, and an empty query string is exactly the entry
+   * form's default.
+   */
+  const onIncidentDeleted = useCallback(() => {
+    if (incidentId !== null) qc.removeQueries({ queryKey: ["incident", incidentId] });
+    hydratedRef.current = null;
+    const url = new URL(window.location.href);
+    const kept = new URLSearchParams();
+    const atParam = url.searchParams.get("at");
+    if (atParam !== null) kept.set("at", atParam);
+    const search = kept.toString();
+    window.history.pushState({}, "", `${INVESTIGATE_PATH}${search === "" ? "" : `?${search}`}`);
+  }, [incidentId, qc]);
 
   /* ── the actions rail ── */
   const canRun = can("runs:create");
@@ -1249,10 +1592,33 @@ export function InvestigatePage() {
               </div>
             ) : null}
 
-            <Button type="button" size="sm" onClick={apply}>
+            {/* Disabled until the scope NAMES something (finding #6). Not a
+                silent no-op click and not a 422 either: an incomplete scope
+                commits perfectly well and produces an empty timeline, which is
+                indistinguishable from a healthy fleet. */}
+            <Button type="button" size="sm" disabled={incompleteReason !== null} onClick={apply}>
               Investigate
             </Button>
           </div>
+
+          {incompleteReason !== null ? (
+            <p data-testid="scope-incomplete" className="mt-3 text-xs text-muted-foreground">
+              {incompleteReason}
+            </p>
+          ) : null}
+
+          {/* The refusal, and the clamp, each stated where the decision was
+              made (findings #2 and #3). */}
+          {commitError ? (
+            <p role="alert" className="mt-3 text-xs text-health-bad">
+              {commitError}
+            </p>
+          ) : null}
+          {clamped ? (
+            <p data-testid="clamp-banner" role="status" className="mt-3 text-xs text-muted-foreground">
+              {CLAMPED_BANNER}
+            </p>
+          ) : null}
 
           {draftKind === "target" && !canTargets ? (
             <p className="mt-3 text-xs text-muted-foreground">
@@ -1277,10 +1643,10 @@ export function InvestigatePage() {
                 composition it prescribes. */}
             {canRun ? (
               <>
-                <Button type="button" size="sm" variant="outline" disabled={writesDisabled} onClick={() => void startRun("mtr")}>
+                <Button type="button" size="sm" variant="outline" {...guard} onClick={() => void startRun("mtr")}>
                   Run MTR now
                 </Button>
-                <Button type="button" size="sm" variant="outline" disabled={writesDisabled} onClick={() => void startRun("tcp")}>
+                <Button type="button" size="sm" variant="outline" {...guard} onClick={() => void startRun("tcp")}>
                   Run TCP now
                 </Button>
               </>
@@ -1306,13 +1672,7 @@ export function InvestigatePage() {
                 opened for a window while the console is pinned to an instant:
                 the write would be filed against the present regardless. */}
             {canIncidentsWrite && incident === undefined ? (
-              <Button
-                type="button"
-                size="sm"
-                variant="outline"
-                disabled={writesDisabled}
-                onClick={() => setSaveOpen((v) => !v)}
-              >
+              <Button type="button" size="sm" variant="outline" {...guard} onClick={() => setSaveOpen((v) => !v)}>
                 Save as incident
               </Button>
             ) : null}
@@ -1343,9 +1703,18 @@ export function InvestigatePage() {
               declared here is one this page will read back. */}
           <MaintenanceBar
             scope={scopeFilterValue(scope)}
+            /* What the count sentence CALLS the scope (finding #7): the wide
+               scopes were queried unfiltered, so "scope global" named the one
+               value they were not filtering by. A window CREATED here is still
+               filed globally, and the form says so. */
+            scopeCaption={scopeCaptionValue(scope)}
             windows={windows}
             error={maintenanceQuery.error as Error | null}
             onChanged={refreshMaintenance}
+            /* The committed window is FROZEN here, so a window declared outside
+               it will not appear in the list below and the bar has to say so
+               (finding #8). */
+            frozenWindow={{ from: params.from, to: params.to }}
             createLabel="Create maintenance"
           />
 
@@ -1385,9 +1754,14 @@ export function InvestigatePage() {
         <Card role="alert" className="border-l-4 border-l-health-warn bg-health-warn-soft/40 p-4">
           <p className="text-sm font-medium">No incident matches this link</p>
           <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
-            {queryErrorMessage(incidentQuery.error, "The incident could not be read.")} The page is showing the default
-            investigation instead — an incident can be deleted, and a stale permalink is not an error state worth
-            blanking the page for.
+            {/* endSentence, not the bare detail (QA round 5, finding #10). The
+                server's problem details are phrases, not sentences — "no
+                incident with that id" carries no full stop — so the two ran
+                together into "...with that id The page is showing...", which
+                reads as one broken sentence rather than two correct ones. */}
+            {endSentence(queryErrorMessage(incidentQuery.error, "The incident could not be read"))} The page is showing
+            the default investigation instead — an incident can be deleted, and a stale permalink is not an error state
+            worth blanking the page for.
           </p>
         </Card>
       ) : null}
@@ -1398,6 +1772,7 @@ export function InvestigatePage() {
           canWrite={canIncidentsWrite}
           writesDisabled={writesDisabled}
           onPatched={onIncidentPatched}
+          onDeleted={onIncidentDeleted}
           targetsGated={!canTargets}
         />
       ) : null}
@@ -1430,14 +1805,14 @@ export function InvestigatePage() {
         </>
       ) : null}
 
-      {sourceError ? (
-        <Card role="alert" className="border-l-4 border-l-health-bad bg-health-bad-soft/40 p-4">
-          <p className="text-sm font-medium">One of the timeline&apos;s sources is unavailable</p>
-          <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
-            {queryErrorMessage(sourceError, "A source failed to load. The other sources are still merged below.")}
-          </p>
-        </Card>
-      ) : null}
+      {/* The single "One of the timeline's sources is unavailable" card is GONE
+          (QA round 3, finding #1). It carried whichever error `??` reached
+          first, so a second failing source was swallowed entirely and the list
+          below still claimed to be complete. Each failure is now its own line
+          in the timeline's source list, next to the lines explaining the
+          sources that were never asked — one place to read "what is this
+          timeline missing, and why" — and the count drives the partial banner
+          that suppresses the nothing-happened claim. */}
 
       <div className="grid grid-cols-1 gap-5 lg:grid-cols-[minmax(0,1fr)_24rem]">
         <InvestigationTimeline
@@ -1453,7 +1828,12 @@ export function InvestigatePage() {
           <SignalPanels
             scopeLabel={scopeHeadline(scope)}
             loss={lossQuery.data}
+            /* The REJECTION, not just the envelope (finding #2): a refused
+               range query left the pane blank, which reads as "still
+               loading" forever. */
+            lossError={lossQuery.error as Error | null}
             rtt={rttQuery.data}
+            rttError={rttQuery.error as Error | null}
             delta={deltaFromVectors(deltaQuery.data?.before, deltaQuery.data?.after)}
             cursorAt={cursorAt}
             windows={windows}
@@ -1506,10 +1886,10 @@ export function InvestigatePage() {
                 </>
               )}
               <p className="mt-3 text-[11px] leading-relaxed text-muted-foreground">
-                Ranked by temporal proximity; weights are documented — no model, four arithmetic steps, reproducible by
-                hand from{" "}
+                Ranked by temporal proximity; the weights live in the open — no model, four arithmetic steps,
+                reproducible by hand from{" "}
                 <a href={DOC_LINK} target="_blank" rel="noreferrer" className="text-primary hover:underline">
-                  INVESTIGATION.md
+                  the scoring source
                 </a>
                 .
               </p>
@@ -1521,9 +1901,13 @@ export function InvestigatePage() {
               <h3 className="text-sm font-semibold">Notes on this scope</h3>
               <AnnotationBar
                 scope={eventScope}
+                /* finding #7 — see the MaintenanceBar above. */
+                scopeCaption={scopeCaptionValue(scope)}
                 annotations={annotations}
                 error={annotationsQuery.error as Error | null}
                 onChanged={refreshAnnotations}
+                /* finding #8 — the window this list is frozen to. */
+                frozenWindow={{ from: params.from, to: params.to }}
               />
             </section>
           </Card>

@@ -2,13 +2,18 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { resetNavigateForTest, setNavigateForTest } from "@/lib/api";
+import { TimeMachineProvider } from "@/lib/timemachine";
 import { DiagnosticsPage, estimatePairCount, estimateRawPairCount } from "./diagnostics";
 
 const json = (body: unknown, init?: ResponseInit) =>
   new Response(JSON.stringify(body), { status: 200, headers: { "Content-Type": "application/json" }, ...init });
 
-function topologyBody(names: string[]) {
-  return { nodes: names.map((n) => ({ name: n, zone: "z1", ready: true })), agents: [], timestamp: "t" };
+function topologyBody(names: string[], agents: { nodeName: string; zone: string }[] = []) {
+  return {
+    nodes: names.map((n) => ({ name: n, zone: "z1", ready: true })),
+    agents: agents.map((a, i) => ({ agentId: `a${i}`, nodeName: a.nodeName, zone: a.zone, ready: true })),
+    timestamp: "t",
+  };
 }
 
 function meBody(permissions: string[]) {
@@ -60,11 +65,17 @@ function targetRow(over: Record<string, unknown> = {}) {
 function renderPage(opts: {
   permissions?: string[];
   nodes?: string[];
+  /** Agents the controller does NOT list as nodes — the controller-less
+   *  console of finding #21. */
+  agents?: { nodeName: string; zone: string }[];
   databaseConfigured?: boolean;
   runs?: unknown[];
   targets?: unknown[];
   onCreate?: (body: unknown) => Response;
   onSaveCheck?: (body: unknown) => Response;
+  /** RFC 3339 instant to engage the Time Machine at, through the URL (its one
+   *  carrier). */
+  at?: string;
   /** URL-aware GET /api/v1/runs stub (the stubEventsFetch convention from
    * pages/live.test.tsx), for tests that need cursor-dependent pages. Takes
    * precedence over the static `runs` list when supplied. */
@@ -73,13 +84,16 @@ function renderPage(opts: {
   const {
     permissions = ["runs:create"],
     nodes = ["a", "b"],
+    agents = [],
     databaseConfigured = true,
     runs = [],
     targets = [targetRow()],
     onCreate,
     onSaveCheck,
+    at,
     onRuns,
   } = opts;
+  window.history.pushState({}, "", at ? `/diagnostics?at=${at}` : "/diagnostics");
   const createCalls: unknown[] = [];
   const checkCalls: unknown[] = [];
   const urls: string[] = [];
@@ -89,7 +103,7 @@ function renderPage(opts: {
     urls.push(href);
     if (href.includes("/api/v1/auth/me")) return Promise.resolve(json(meBody(permissions)));
     if (href.includes("/api/v1/config")) return Promise.resolve(json(configBody(databaseConfigured)));
-    if (href.includes("/api/v1/topology")) return Promise.resolve(json(topologyBody(nodes)));
+    if (href.includes("/api/v1/topology")) return Promise.resolve(json(topologyBody(nodes, agents)));
     if (href.startsWith("/api/v1/targets")) return Promise.resolve(json({ targets, nextCursor: "" }));
     if (href === "/api/v1/checks" && method === "POST") {
       const body: unknown = JSON.parse(String(init?.body ?? "{}"));
@@ -121,7 +135,9 @@ function renderPage(opts: {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   const utils = render(
     <QueryClientProvider client={qc}>
-      <DiagnosticsPage />
+      <TimeMachineProvider>
+        <DiagnosticsPage />
+      </TimeMachineProvider>
     </QueryClientProvider>,
   );
   return { ...utils, fetchMock, createCalls, checkCalls, urls, qc, navigateSpy };
@@ -145,6 +161,7 @@ afterEach(() => {
   cleanup();
   vi.unstubAllGlobals();
   resetNavigateForTest();
+  window.history.pushState({}, "", "/");
 });
 
 describe("estimatePairCount", () => {
@@ -494,5 +511,201 @@ describe("DiagnosticsPage history", () => {
     renderPage({ nodes: ["a", "b"], runs: [] });
     await screen.findByText(/no runs yet/i);
     expect(screen.queryByRole("button", { name: "Load older" })).not.toBeInTheDocument();
+  });
+});
+
+/**
+ * QA round 4, finding #4. GET /api/v1/runs has no `to` parameter, so the list
+ * was showing runs that had not happened yet under a banner naming a past
+ * instant — the same hole round 3 closed on the node and pair cards, with the
+ * same client-side treatment and the same stated bound.
+ */
+describe("DiagnosticsPage history under the Time Machine", () => {
+  const AT = "2026-01-01T12:00:00Z";
+  const before = { ...runRow("run-before"), createdAt: "2026-01-01T09:00:00Z" };
+  const after = { ...runRow("run-after"), createdAt: "2026-01-01T15:00:00Z" };
+
+  it("drops a run that started AFTER the viewed instant", async () => {
+    renderPage({ nodes: ["a", "b"], runs: [after, before], at: AT });
+
+    expect(await screen.findByRole("link", { name: "run-before" })).toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "run-after" })).not.toBeInTheDocument();
+  });
+
+  it("states the limitation: the cut is client-side over the loaded pages", async () => {
+    renderPage({ nodes: ["a", "b"], runs: [before], at: AT });
+
+    expect(await screen.findByText(/GET \/api\/v1\/runs has no time filter/i)).toBeInTheDocument();
+    expect(screen.getByText(/not reached by paging backwards/i)).toBeInTheDocument();
+  });
+
+  it("says nothing about the cut while Live", async () => {
+    renderPage({ nodes: ["a", "b"], runs: [before, after] });
+
+    await screen.findByRole("link", { name: "run-before" });
+    expect(screen.getByRole("link", { name: "run-after" })).toBeInTheDocument();
+    expect(screen.queryByText(/no time filter/i)).not.toBeInTheDocument();
+  });
+
+  it("distinguishes 'everything is later than t' from 'nobody has ever run one'", async () => {
+    renderPage({ nodes: ["a", "b"], runs: [after], at: AT });
+
+    expect(await screen.findByText(/no runs at or before the viewed instant/i)).toBeInTheDocument();
+    expect(screen.queryByText(/no runs yet/i)).not.toBeInTheDocument();
+  });
+});
+
+/**
+ * QA round 4, finding #21. `topology.nodes` is the CONTROLLER's view and is
+ * empty on a console deployed without one — a console that still has agents
+ * reporting in and every reason to run a diagnostic between them.
+ */
+describe("DiagnosticsPage node pickers on a controller-less console", () => {
+  it("lists the agents' own node names when the controller reports none", async () => {
+    renderPage({
+      nodes: [],
+      agents: [
+        { nodeName: "node-a", zone: "z1" },
+        { nodeName: "node-b", zone: "z2" },
+      ],
+    });
+
+    const sources = await screen.findByRole("group", { name: /sources/i });
+    fireEvent.click(within(sources).getByLabelText(/all nodes/i));
+    expect(within(sources).getByLabelText("node-a")).toBeInTheDocument();
+    expect(within(sources).getByLabelText("node-b")).toBeInTheDocument();
+  });
+
+  it("counts a node present in BOTH lists once", async () => {
+    renderPage({ nodes: ["node-a"], agents: [{ nodeName: "node-a", zone: "z1" }] });
+
+    const sources = await screen.findByRole("group", { name: /sources/i });
+    expect(within(sources).getByLabelText("All nodes (1)")).toBeInTheDocument();
+  });
+});
+
+/** QA round 4, findings #15, #16 and #17. */
+describe("DiagnosticsPage form affordances", () => {
+  it("names All ↔ All as the reset it is", async () => {
+    renderPage({ nodes: ["a", "b"] });
+
+    const reset = await screen.findByRole("button", { name: "Reset both pickers to every node" });
+    expect(reset).toHaveAttribute("title", "Reset both pickers to every node");
+  });
+
+  it("All ↔ All puts both pickers back to every node", async () => {
+    renderPage({ nodes: ["a", "b"] });
+
+    const sources = await screen.findByRole("group", { name: /sources/i });
+    fireEvent.click(within(sources).getByLabelText(/all nodes/i));
+    expect(within(sources).getByLabelText(/all nodes/i)).not.toBeChecked();
+
+    fireEvent.click(screen.getByRole("button", { name: "Reset both pickers to every node" }));
+    expect(within(screen.getByRole("group", { name: /sources/i })).getByLabelText(/all nodes/i)).toBeChecked();
+  });
+
+  it("gives each node checkbox the node's own name, through a real label association", async () => {
+    renderPage({ nodes: ["node-a", "node-b"] });
+
+    const sources = await screen.findByRole("group", { name: /sources/i });
+    fireEvent.click(within(sources).getByLabelText(/all nodes/i));
+    const box = within(sources).getByRole("checkbox", { name: "node-a" });
+    // htmlFor/id, not proximity: the name survives a styling edit to the span.
+    expect(box.id).not.toBe("");
+    expect(sources.querySelector(`label[for="${box.id}"]`)).not.toBeNull();
+  });
+
+  it("names the ad-hoc address field", async () => {
+    renderPage({ permissions: OPERATOR, nodes: ["a", "b"] });
+
+    await pickDestination(/ad-hoc/i);
+    expect(screen.getByRole("textbox", { name: "Destination address" })).toBeInTheDocument();
+  });
+
+  it("lets the six-option check-type control wrap instead of overflowing a narrow card", async () => {
+    renderPage({ nodes: ["a", "b"] });
+
+    const group = await screen.findByRole("radiogroup", { name: "Check type" });
+    expect(group.className).toContain("flex-wrap");
+    // All six are still reachable — the overflow hid the last two.
+    expect(within(group).getAllByRole("radio")).toHaveLength(6);
+  });
+});
+
+/**
+ * QA round 4, finding #10. A 422 banner outlived the field it was complaining
+ * about, and survived a switch to a different destination MODE entirely.
+ */
+describe("DiagnosticsPage stale submit errors", () => {
+  const refuse = () => problem(422, "invalid run", "destination address is not routable");
+
+  it("clears the banner when the destination mode changes", async () => {
+    renderPage({ permissions: OPERATOR, nodes: ["a", "b"], onCreate: refuse });
+
+    await pickDestination(/ad-hoc/i);
+    fireEvent.change(screen.getByLabelText("Destination address"), { target: { value: "10.0.0.9" } });
+    fireEvent.click(screen.getByRole("button", { name: /start run/i }));
+    expect(await screen.findByText(/destination address is not routable/i)).toBeInTheDocument();
+
+    await pickDestination(/nodes/i);
+    await waitFor(() =>
+      expect(screen.queryByText(/destination address is not routable/i)).not.toBeInTheDocument(),
+    );
+  });
+
+  it("clears the banner when the check type changes", async () => {
+    renderPage({ permissions: OPERATOR, nodes: ["a", "b"], onCreate: refuse });
+
+    fireEvent.click(await screen.findByRole("button", { name: /start run/i }));
+    expect(await screen.findByText(/destination address is not routable/i)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("radio", { name: "UDP" }));
+    await waitFor(() =>
+      expect(screen.queryByText(/destination address is not routable/i)).not.toBeInTheDocument(),
+    );
+  });
+
+  it("clears the banner when a node selection changes", async () => {
+    renderPage({ permissions: OPERATOR, nodes: ["a", "b"], onCreate: refuse });
+
+    fireEvent.click(await screen.findByRole("button", { name: /start run/i }));
+    expect(await screen.findByText(/destination address is not routable/i)).toBeInTheDocument();
+
+    const sources = screen.getByRole("group", { name: /sources/i });
+    fireEvent.click(within(sources).getByLabelText(/all nodes/i));
+    await waitFor(() =>
+      expect(screen.queryByText(/destination address is not routable/i)).not.toBeInTheDocument(),
+    );
+  });
+});
+
+/**
+ * QA round 4, finding #13, client half. Saving a definition PERSISTS the
+ * address; until the store learned to check it, "sdfsdfsdf !!" was stored
+ * happily and then failed as a resolver error on every agent, forever.
+ */
+describe("DiagnosticsPage ad-hoc address validation", () => {
+  it("refuses to POST a definition carrying an address the agent could never dial", async () => {
+    const { checkCalls } = renderPage({ permissions: OPERATOR, nodes: ["a", "b"] });
+
+    await pickDestination(/ad-hoc/i);
+    fireEvent.change(screen.getByLabelText("Destination address"), { target: { value: "sdfsdfsdf !!" } });
+    fireEvent.change(screen.getByLabelText("Definition name"), { target: { value: "edge-http" } });
+    fireEvent.click(screen.getByRole("button", { name: /save as definition/i }));
+
+    expect(await screen.findByText(/must be a host, an IP, host:port, or an http\(s\) URL/i)).toBeInTheDocument();
+    expect(checkCalls).toHaveLength(0);
+  });
+
+  it("lets a well-formed address through untouched", async () => {
+    const { checkCalls } = renderPage({ permissions: OPERATOR, nodes: ["a", "b"] });
+
+    await pickDestination(/ad-hoc/i);
+    fireEvent.change(screen.getByLabelText("Destination address"), { target: { value: "example.test:8443" } });
+    fireEvent.change(screen.getByLabelText("Definition name"), { target: { value: "edge-tcp" } });
+    fireEvent.click(screen.getByRole("button", { name: /save as definition/i }));
+
+    await waitFor(() => expect(checkCalls).toHaveLength(1));
+    expect((checkCalls[0] as { destinationAddress: string }).destinationAddress).toBe("example.test:8443");
   });
 });

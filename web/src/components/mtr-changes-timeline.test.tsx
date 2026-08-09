@@ -200,6 +200,47 @@ describe("PathChangesTimeline", () => {
     expect(screen.queryByTestId("echart")).not.toBeInTheDocument();
   });
 
+  /* QA round 4, finding #8. The 112px box was unconditional, so an empty
+     series drew an empty grey rectangle above the note explaining that there
+     was nothing to draw — a chart frame containing nothing reads as a chart
+     that failed to load. */
+  it("drops the 112px chart frame entirely when the loss series is empty", async () => {
+    renderTimeline({ matrix: [] });
+
+    await screen.findByText(/no loss series/i);
+    const track = screen.getByRole("list", { name: /path changes/i }).parentElement;
+    expect(track?.className).not.toContain("h-28");
+    expect(track?.className).toContain("h-6");
+  });
+
+  it("drops it with Prometheus unconfigured too — same empty box, same reason", async () => {
+    renderTimeline({ prometheusConfigured: false });
+
+    await screen.findByText(/console\.prometheus\.address/);
+    expect(screen.getByRole("list", { name: /path changes/i }).parentElement?.className).not.toContain("h-28");
+  });
+
+  it("keeps the frame once there IS a series to draw in it", async () => {
+    renderTimeline();
+
+    await screen.findByTestId("echart");
+    expect(screen.getByRole("list", { name: /path changes/i }).parentElement?.className).toContain("h-28");
+  });
+
+  /* The other half of #8: the markers carry the only copy of the full path
+     hash and the first-seen stamp, in a title — on an element the track's own
+     pointer-events-none made unhoverable. */
+  it("makes each marker a real hit target, so its title is reachable", async () => {
+    renderTimeline();
+
+    const axis = await screen.findByRole("list", { name: /path changes/i });
+    const marker = within(axis).getByLabelText(/aaaaaaaaaaaa/);
+    expect(marker.className).toContain("pointer-events-auto");
+    expect(marker).toHaveAttribute("title", expect.stringContaining("first seen"));
+    // Keyboard-reachable too: a hover-only secret is not a fact.
+    expect(marker).toHaveAttribute("tabindex", "0");
+  });
+
   it("renders nothing at all without snapshots — there is no window to draw", () => {
     renderTimeline({ snapshots: [] });
 

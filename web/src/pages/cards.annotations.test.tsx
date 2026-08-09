@@ -208,7 +208,9 @@ describe("NodeCardPage annotations", () => {
   it("deletes a note from the card", async () => {
     const { deleted } = stubFetch({ byScope: { "node-a": [ann({ id: "doomed", scope: "node-a", text: "typo" })] } });
     renderAt("/nodes/node-a", <NodeCardPage />);
-    fireEvent.click(await screen.findByRole("button", { name: /delete annotation/i }));
+    // Two clicks: the row confirms before it destroys (QA round 2, #14).
+    fireEvent.click(await screen.findByRole("button", { name: /^delete annotation/i }));
+    fireEvent.click(await screen.findByRole("button", { name: /^confirm delete annotation/i }));
     await waitFor(() => expect(deleted).toEqual(["doomed"]));
   });
 });

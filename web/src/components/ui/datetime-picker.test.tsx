@@ -2,8 +2,12 @@ import { cleanup, fireEvent, render, screen, within } from "@testing-library/rea
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   DateTimePicker,
+  FUTURE_PRESETS,
+  PAST_PRESETS,
+  POPOVER_MIN_HEIGHT_PX,
   composeLocal,
   formatInstant,
+  pickerDropDirection,
   toDateInputValue,
   toTimeInputValue,
 } from "@/components/ui/datetime-picker";
@@ -269,6 +273,195 @@ describe("DateTimePicker presets", () => {
     expect(onApply.mock.calls[0][0].getTime()).toBe(NOW.getTime() - minutes * 60_000);
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   });
+
+  /* ── QA round 3, finding #17: a forward field gets forward presets ────── */
+
+  it("is the BACKWARD set by default — the Time Machine's own", () => {
+    expect(PAST_PRESETS.map((p) => p.label)).toEqual(["15m ago", "1h ago", "6h ago", "24h ago"]);
+    expect(PAST_PRESETS.every((p) => p.minutes < 0)).toBe(true);
+    renderPicker();
+    open();
+    const quick = within(screen.getByRole("group", { name: "Quick ranges" }));
+    expect(quick.getAllByRole("button").map((b) => b.textContent)).toEqual([
+      "15m ago",
+      "1h ago",
+      "6h ago",
+      "24h ago",
+    ]);
+  });
+
+  it("is the FORWARD set on an allowFuture picker — a window declared in advance never reaches back", () => {
+    expect(FUTURE_PRESETS.map((p) => p.label)).toEqual(["in 15m", "in 1h", "in 6h", "tomorrow"]);
+    expect(FUTURE_PRESETS.every((p) => p.minutes > 0)).toBe(true);
+    render(<DateTimePicker value={VALUE} onApply={vi.fn()} allowFuture aria-label="End" />);
+    fireEvent.click(screen.getByRole("button", { name: "End" }));
+    const quick = within(screen.getByRole("group", { name: "Quick ranges" }));
+    expect(quick.getAllByRole("button").map((b) => b.textContent)).toEqual(["in 15m", "in 1h", "in 6h", "tomorrow"]);
+  });
+
+  it.each([
+    ["in 15m", 15],
+    ["in 1h", 60],
+    ["in 6h", 360],
+    ["tomorrow", 1440],
+  ])("%s applies an instant AHEAD of now", (label, minutes) => {
+    const onApply = vi.fn();
+    render(<DateTimePicker value={VALUE} onApply={onApply} allowFuture aria-label="End" />);
+    fireEvent.click(screen.getByRole("button", { name: "End" }));
+    fireEvent.click(screen.getByRole("button", { name: label }));
+    expect(onApply.mock.calls[0][0].getTime()).toBe(NOW.getTime() + minutes * 60_000);
+  });
+});
+
+/* ── QA round 3, finding #16: which way the popover opens ────────────────── */
+
+describe("pickerDropDirection", () => {
+  it("opens downward whenever there is room below, however much room is above", () => {
+    expect(pickerDropDirection(POPOVER_MIN_HEIGHT_PX, 5000)).toBe("down");
+    expect(pickerDropDirection(POPOVER_MIN_HEIGHT_PX + 1, 5000)).toBe("down");
+  });
+
+  it("flips upward only when there is not room below AND the popover actually FITS above", () => {
+    expect(pickerDropDirection(10, 700)).toBe("up");
+    expect(pickerDropDirection(POPOVER_MIN_HEIGHT_PX - 1, POPOVER_MIN_HEIGHT_PX)).toBe("up");
+  });
+
+  it("stays downward when neither side fits — down is the tie-break, not a measurement", () => {
+    expect(pickerDropDirection(100, 100)).toBe("down");
+    expect(pickerDropDirection(100, 40)).toBe("down");
+  });
+
+  /* QA round 5, finding #3. The old rule took the LARGER side once below was
+     short, so 310px below and 390px above chose up — and 390 does not hold a
+     420px popover either. Up must be earned by FITTING, not by winning a
+     comparison; down at least scrolls. */
+  it("stays downward when above is merely larger but still too small (#3)", () => {
+    expect(pickerDropDirection(310, 390)).toBe("down");
+    expect(pickerDropDirection(0, POPOVER_MIN_HEIGHT_PX - 1)).toBe("down");
+  });
+
+  it("goes up at exactly the needed height above, never one pixel under", () => {
+    expect(pickerDropDirection(0, POPOVER_MIN_HEIGHT_PX)).toBe("up");
+    expect(pickerDropDirection(0, POPOVER_MIN_HEIGHT_PX - 1)).toBe("down");
+  });
+
+  it("answers down for a box it cannot measure", () => {
+    expect(pickerDropDirection(NaN, 900)).toBe("down");
+    expect(pickerDropDirection(10, Number.POSITIVE_INFINITY)).toBe("down");
+  });
+
+  it("renders the direction as the class the popover is anchored by", () => {
+    /* jsdom measures every box as zero, so the trigger's bottom is 0 and the
+       whole viewport counts as space below: the guarded fallback IS the
+       downward case, which is what this asserts. */
+    renderPicker();
+    open();
+    expect(dialog().getAttribute("data-drop")).toBe("down");
+    expect(dialog().className).toContain("top-full");
+    expect(dialog().className).not.toContain("bottom-full");
+  });
+
+  it("anchors to bottom-full when the trigger measures as being at the fold", () => {
+    renderPicker();
+    /* One stubbed measurement, the seam the pure helper exists for: a trigger
+       whose bottom is 8px above the viewport floor has no room below. */
+    vi.spyOn(trigger(), "getBoundingClientRect").mockReturnValue({
+      top: window.innerHeight - 40,
+      bottom: window.innerHeight - 8,
+      left: 0,
+      right: 100,
+      width: 100,
+      height: 32,
+      x: 0,
+      y: window.innerHeight - 40,
+      toJSON: () => ({}),
+    } as DOMRect);
+    open();
+    expect(dialog().getAttribute("data-drop")).toBe("up");
+    expect(dialog().className).toContain("bottom-full");
+    expect(dialog().className).not.toContain("top-full");
+  });
+
+  /* QA round 5, finding #3, second half: the direction was decided ONCE at
+     open time, so a window the user resized (or a phone rotated) under an open
+     popover kept an anchoring that no longer described the viewport. */
+  it("re-measures on window resize while it is open (#3)", () => {
+    renderPicker();
+    vi.spyOn(trigger(), "getBoundingClientRect").mockReturnValue({
+      top: window.innerHeight - 40,
+      bottom: window.innerHeight - 8,
+      left: 0,
+      right: 100,
+      width: 100,
+      height: 32,
+      x: 0,
+      y: window.innerHeight - 40,
+      toJSON: () => ({}),
+    } as DOMRect);
+    open();
+    expect(dialog().getAttribute("data-drop")).toBe("up");
+
+    // The viewport grows: the same trigger box now has room below it.
+    window.innerHeight = window.innerHeight + 2000;
+    fireEvent(window, new Event("resize"));
+    expect(dialog().getAttribute("data-drop")).toBe("down");
+  });
+});
+
+/* ── QA round 5, finding #12: a future-only field refuses the past ────────── */
+
+describe("DateTimePicker disablePast", () => {
+  function renderFuture() {
+    render(<DateTimePicker value={null} onApply={vi.fn()} allowFuture disablePast aria-label="Run at" />);
+    fireEvent.click(screen.getByRole("button", { name: /run at/i }));
+  }
+
+  it("disables every day BEFORE today in the grid, and leaves today live", () => {
+    renderFuture();
+    expect(day("7 August 2026")).toBeDisabled();
+    expect(day("1 August 2026")).toBeDisabled();
+    expect(day("8 August 2026")).toBeEnabled();
+    expect(day("9 August 2026")).toBeEnabled();
+  });
+
+  it("blocks the backward chevron at the current month and disables past months in the wheel", () => {
+    renderFuture();
+    expect(screen.getByRole("button", { name: "Previous month" })).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: /choose the month and year/i }));
+    const months = within(screen.getByRole("listbox", { name: "Month" }));
+    expect(months.getByRole("option", { name: "July" })).toBeDisabled();
+    expect(months.getByRole("option", { name: "August" })).toBeEnabled();
+    expect(months.getByRole("option", { name: "September" })).toBeEnabled();
+  });
+
+  it("shows only forward presets — a backward shortcut on a future-only field is a trap", () => {
+    renderFuture();
+    const quick = within(screen.getByRole("group", { name: "Quick ranges" }));
+    expect(quick.getAllByRole("button").map((b) => b.textContent)).toEqual(["in 15m", "in 1h", "in 6h", "tomorrow"]);
+  });
+
+  it("refuses to walk the arrow keys back past today", () => {
+    renderFuture();
+    // Focus opens on today (value is null, so the popover seeds on now); the
+    // grid keeps exactly one tab stop, and it must not walk into a dead day.
+    fireEvent.keyDown(day("8 August 2026"), { key: "ArrowLeft" });
+    expect(day("8 August 2026")).toHaveAttribute("tabindex", "0");
+    fireEvent.keyDown(day("8 August 2026"), { key: "ArrowRight" });
+    expect(day("9 August 2026")).toHaveAttribute("tabindex", "0");
+  });
+
+  it("floors the date field at today", () => {
+    renderFuture();
+    expect(screen.getByLabelText("Date")).toHaveAttribute("min", "2026-08-08");
+  });
+
+  it("leaves the Time Machine picker untouched — the past is the whole point there", () => {
+    renderPicker();
+    open();
+    expect(day("7 August 2026")).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Previous month" })).toBeEnabled();
+    expect(screen.getByLabelText("Date")).not.toHaveAttribute("min");
+  });
 });
 
 describe("DateTimePicker manual path", () => {
@@ -404,5 +597,112 @@ describe("DateTimePicker dismissal", () => {
     expect(trigger()).toBeDisabled();
     fireEvent.click(trigger());
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+});
+
+/* ── QA round 1: findings #6, #7, #11 ────────────────────────────────────── */
+
+describe("DateTimePicker — the time wheel opens upward (#6)", () => {
+  it("hangs the wheel above the field so it never covers Cancel and Apply", () => {
+    renderPicker();
+    open();
+    fireEvent.click(timeField());
+
+    const wheel = screen.getByRole("group", { name: "Pick a time" });
+    expect(wheel.className).toContain("bottom-full");
+    expect(wheel.className).not.toContain("top-full");
+  });
+
+  it("leaves the month & year panel opening downward — it only covers the grid", () => {
+    renderPicker();
+    open();
+    fireEvent.click(screen.getByRole("button", { name: /choose the month and year/i }));
+
+    expect(screen.getByRole("group", { name: "Pick a month and year" }).className).toContain("top-full");
+  });
+});
+
+describe("DateTimePicker — paging keeps the grid reachable (#7)", () => {
+  /** Every day cell currently in the tab order. Exactly one, always: that is
+   *  what makes the grid a single tab stop the arrows then drive. */
+  function tabbableDays(): HTMLElement[] {
+    return within(screen.getByRole("grid", { name: "Calendar" }))
+      .getAllByRole("button")
+      .filter((b) => b.tabIndex === 0);
+  }
+
+  it("keeps exactly one tabbable cell after paging past the focused day", () => {
+    renderPicker();
+    open();
+    expect(tabbableDays()).toHaveLength(1);
+
+    fireEvent.click(screen.getByRole("button", { name: /previous month/i }));
+    expect(tabbableDays()).toHaveLength(1);
+    fireEvent.click(screen.getByRole("button", { name: /previous month/i }));
+
+    const cells = tabbableDays();
+    expect(cells).toHaveLength(1);
+    // The 1st of the month now on screen, not a day two months away.
+    expect(cells[0]).toHaveAccessibleName("Choose 1 June 2026");
+  });
+
+  it("the arrows work from the cell paging left behind", () => {
+    renderPicker();
+    open();
+    fireEvent.click(screen.getByRole("button", { name: /previous month/i }));
+    fireEvent.click(screen.getByRole("button", { name: /previous month/i }));
+
+    tabbableDays()[0].focus();
+    fireEvent.keyDown(document.activeElement!, { key: "ArrowRight" });
+    expect(document.activeElement).toBe(day("2 June 2026"));
+  });
+
+  it("does not yank focus out of the chevron the pointer is clicking", () => {
+    renderPicker();
+    open();
+    const prev = screen.getByRole("button", { name: /previous month/i });
+    // A real click focuses the button it lands on; jsdom's does not, so the
+    // pointer's focus is staged explicitly.
+    prev.focus();
+    fireEvent.click(prev);
+    fireEvent.click(prev);
+
+    expect(document.activeElement).toBe(prev);
+  });
+
+  it("still carries focus across a month boundary when the GRID owns it", () => {
+    renderPicker();
+    open();
+    // Focus starts on the selected day (7 August); walking left off the start
+    // of the month is the case the arrows already owned.
+    for (let i = 0; i < 7; i++) fireEvent.keyDown(document.activeElement!, { key: "ArrowLeft" });
+    expect(document.activeElement).toBe(day("31 July 2026"));
+  });
+});
+
+describe("DateTimePicker — a future draft says so (#11)", () => {
+  it("warns that the instant will be clamped, and keeps Apply live", () => {
+    renderPicker();
+    open();
+    // Today at 23:00, with the frozen clock at 12:00.
+    fireEvent.change(dateField(), { target: { value: "2026-08-08" } });
+    fireEvent.change(timeField(), { target: { value: "23:00" } });
+
+    expect(screen.getByTestId("future-hint")).toHaveTextContent("In the future — will engage at now.");
+    expect(screen.getByRole("button", { name: "Apply" })).toBeEnabled();
+  });
+
+  it("says nothing for a past instant", () => {
+    renderPicker();
+    open();
+    expect(screen.queryByTestId("future-hint")).toBeNull();
+  });
+
+  it("says nothing when the caller allows the future — a maintenance window is declared ahead", () => {
+    render(<DateTimePicker value={VALUE} onApply={vi.fn()} aria-label="Window start" allowFuture />);
+    fireEvent.click(screen.getByRole("button", { name: /window start/i }));
+    fireEvent.change(screen.getAllByLabelText("Date")[0], { target: { value: "2026-09-01" } });
+
+    expect(screen.queryByTestId("future-hint")).toBeNull();
   });
 });

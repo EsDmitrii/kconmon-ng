@@ -1,46 +1,103 @@
 # kconmon-ng promo publication checklist
 
-Short plan for publishing the two drafts in this directory. Not a marketing campaign — just an order of operations for a solo maintainer sharing a real project.
+Order of operations for publishing the three pieces in this directory. Not a
+marketing campaign, just a solo maintainer sharing a real project.
+
+Current set:
+
+| File | Where | Language | What it is |
+|---|---|---|---|
+| `article-medium.md` | Medium | EN | Long-form: the pain, the measurement core, the console tour, Grafana/PromQL, quickstart |
+| `article-habr.md` | Habr | RU | Long-form, incident-story voice: same arc with more commands, internals and the chaos drill |
+| `post-linkedin.md` | LinkedIn | RU + EN | Short follow-up to the earlier announcement post, about the console |
+
+The two 1.2.0-era drafts (`article-devto-draft.md`, `article-habr-draft.md`) were
+deleted: they described a product with no web UI and a Goldpinger feature-comparison
+table, both of which stopped being true several releases ago.
 
 ## Before publishing anything
 
-- [ ] Take real screenshots to replace every `TODO-screenshot` / `![...]()` placeholder in both drafts:
-  - Overview dashboard: Connectivity Matrix + per-protocol success rate panels
-  - Node Detail dashboard: per-destination TCP/UDP/ICMP/DNS panels for one node
-  - Zone Heatmap dashboard: cross-zone latency/loss panels
-  - (Optional, Habr only) a real MTR-triggered incident view if one is available, or a synthetic one from `make local-up`
-- [ ] Read both drafts end to end once as if you were a stranger — cut anything that reads like marketing copy
-- [ ] Confirm current chart version / image tags in both drafts still match the latest release (`Chart.yaml`, `RELEASE_NOTES.md`)
-- [ ] Verify every PromQL snippet in the dev.to draft against a live `/metrics` endpoint (`make local-up` + `make local-urls`)
-- [ ] Add your own byline/bio and a one-line "why I built this" if you want a more personal opening than the current draft
+- [ ] Drop the real screenshots in. Every image reference already points at a
+      real repo path, so this is a check that the file is the current shot, not a
+      placeholder hunt:
+  - `docs/img/console-overview.png` (hero, both articles)
+  - `docs/img/console-matrix.png`
+  - `docs/img/console-investigate.png`
+  - `docs/img/console-timemachine.png`
+  - `docs/img/console-alerting.png`
+  - `docs/img/overview.png`, `docs/img/zone-heatmap.png`, `docs/img/node-detail.png`
+        (Grafana, currently being reworked; both articles caption them as
+        indicative; re-shoot and drop that caveat once the rework lands)
+- [ ] Convert image references when pasting: both articles use repo-relative
+      paths (`../img/...`). Medium and Habr both need uploaded images, so the
+      captions travel but the paths do not.
+- [ ] Confirm the chart version in every install snippet still matches
+      `charts/kconmon-ng/Chart.yaml` and `RELEASE_NOTES.md`. Both articles say
+      **1.10.0** in three places each (base install, console install, closing
+      links).
+- [ ] Confirm the krew manifest URL still points at a release that exists. Both
+      articles use the **v1.4.0** manifest, which is what the README uses.
+- [ ] Verify every PromQL snippet against a live `/metrics` endpoint:
+      `make local-up` then `make local-urls`. The histogram queries assume the
+      classic `_bucket` suffix, which is what `client_golang` exports today.
+- [ ] Read both articles end to end as a stranger. Cut anything that reads like
+      marketing copy.
+- [ ] Add a byline/bio line if you want a more personal opening than the current
+      one.
+
+## Facts that are load-bearing (re-verify if the repo moved on)
+
+Everything below is stated in the articles as a number. Each was checked against
+the repo at the time of writing:
+
+- 5 protocols, reactive MTR on failure, 5s default interval: `README.md`
+- 6 built-in alert rules, names and expressions: `docs/metrics.md`,
+  `charts/kconmon-ng/templates/prometheusrule.yaml`
+- 3 Grafana dashboards: `dashboards/`
+- 12 console pages: `web/src/nav.ts`
+- 25 permissions, 4 built-in roles: `internal/console/authz/authz.go`
+- 9 timeline sources, cause weights 3/2/1/0, 300s window:
+  `web/src/lib/investigation.ts`
+- 1521 frontend tests in 68 files: `cd web && npx vitest run`
+- 28 Go packages carrying tests, run under `-race`: `make test-race`
 
 ## Order of publication
 
-1. **dev.to first** (English, versus-format). Lower stakes, faster feedback loop, English-speaking Kubernetes/SRE audience is the primary target for GitHub stars and Helm chart adoption.
-2. **Habr second** (Russian, incident story). Wait for at least a day of dev.to feedback in case it surfaces a factual correction that should also go into the Habr draft.
-3. Cross-link: once both are live, add a short "also published in Russian/English" line at the top of each with a link to the other.
+1. **Medium first** (English). English-speaking Kubernetes/SRE audience is the
+   primary target for GitHub stars and chart adoption, and it is the piece the
+   LinkedIn post links to most naturally.
+2. **Habr second** (Russian). Wait a day in case Medium feedback surfaces a
+   factual correction worth carrying over.
+3. **LinkedIn third**, once at least one article is live, so the post can link to
+   both the repo and the long read. Fill in `[link to the previous post]` with
+   the original announcement URL before posting.
+4. Cross-link: add a short "also published in Russian/English" line at the top of
+   each article once both are live.
 
-## Where to also mention it (lightweight, no separate write-up needed)
+## Where to also mention it (lightweight, no separate write-up)
 
-- [ ] r/kubernetes — a short text post linking to the dev.to article once it's live, not a duplicate of the article
-- [ ] CNCF Slack `#kubernetes-novice` / relevant SIG channels, if appropriate and not against channel norms — link only, no copy-paste of the article
-- [ ] Artifact Hub listing — confirm `charts/kconmon-ng/README.md` renders correctly on the package page (already fixed in v1.2.0 per `RELEASE_NOTES.md`)
-- [ ] GitHub repo — pin or link the published articles from the README or a "Press/Articles" section if one gets added later (out of scope for this task)
-
-## After the 1.3.2 release
-
-- [ ] Verify the krew install on a clean machine: `kubectl krew install --manifest-url https://github.com/EsDmitrii/kconmon-ng/releases/download/v1.3.2/kconmon.yaml`, then `kubectl kconmon topology` against a live cluster — confirm the release archives and sha256s in `kconmon.yaml` resolve.
-- [ ] Apply for Artifact Hub "official" status once the 1.3.2 chart is indexed and the security report clears — file the request via the artifacthub/hub issue template (verified publisher + README-in-package are already satisfied).
+- [ ] r/kubernetes: short text post linking the Medium article, not a duplicate
+      of it
+- [ ] CNCF Slack, relevant SIG channels if it fits channel norms: link only
+- [ ] Artifact Hub: confirm `charts/kconmon-ng/README.md` still renders
+      correctly on the package page
+- [ ] GitHub repo: link the published articles from the README once they exist
 
 ## After publishing
 
-- [ ] Watch GitHub issues/discussions for the first 48h — comparison articles tend to draw "what about X" questions (MTU detection, root-cause hints, kubectl plugin are known gaps, already flagged as roadmap in both drafts)
-- [ ] If Goldpinger maintainers or community members comment, engage respectfully — the articles are written to be fair to Goldpinger, keep that tone in replies too
-- [ ] Note any factual corrections needed and apply them to both drafts (source of truth stays the repo, not the published articles)
+- [ ] Watch issues/discussions for the first 48h. The console will draw "does it
+      do X" questions; answer with what actually ships, not with the roadmap.
+- [ ] Goldpinger is mentioned as honest lineage in both articles and nowhere as a
+      competitor. If its maintainers or users show up, keep that tone in replies.
+- [ ] Apply any factual correction to the repo first. The repo is the source of
+      truth, the published articles are downstream copies.
 
-## Explicitly out of scope for this checklist
+## Explicitly out of scope
 
-- No paid promotion, no coordinated social media push, no invented usage statistics or adoption numbers in any follow-up posts
-- No claims about features not in the current release (MTU detection, root-cause hints, kubectl plugin stay "roadmap" until they ship)
-
-- After the dev.to article is published: add its public URL to the README "Why not just Goldpinger?" section (the long-form "when Goldpinger is the better fit" discussion is currently not linked from the README by design — drafts must not be linked from the storefront).
+- No paid promotion, no coordinated social push, no invented usage or adoption
+  numbers.
+- No benchmark claims. None have been run that are worth publishing, and both
+  articles say so out loud.
+- No feature-comparison table against any other product. This is what killed the
+  old dev.to draft.
+- No claims about anything not in the current release.

@@ -6,8 +6,18 @@ import { Badge } from "@/components/ui/badge";
 import { Card } from "@/components/ui/card";
 import { maintenanceOverlaySeries } from "@/lib/annotations";
 import { chartColors } from "@/lib/chart-theme";
-import { toSeriesOption, type CuratedChart } from "@/lib/curated-metrics";
+import { ApiError } from "@/lib/api";
+import { formatSeconds, toSeriesOption, type CuratedChart } from "@/lib/curated-metrics";
 import type { Annotation, MaintenanceWindow, PromResult } from "@/lib/types";
+
+/** problemDetail renders a rejected fetch as the sentence the SERVER wrote —
+ *  a problem+json `detail` says which parameter was refused and why, which is
+ *  the half an operator needs; the generic fallback is for a transport failure
+ *  that carries no body at all. */
+function problemDetail(error: Error): string {
+  if (error instanceof ApiError) return error.problem.detail ?? error.problem.title;
+  return error.message === "" ? "The query could not be run." : error.message;
+}
 
 /**
  * investigation-signals.tsx — the Investigate page's right-hand column: the
@@ -137,10 +147,54 @@ function fmtSignedPct(v: number | null): string {
   return `${pct >= 0 ? "+" : "−"}${Math.abs(pct).toFixed(1)} pp`;
 }
 
+/**
+ * signalChartOption is this column's OWN option builder (QA round 3, findings
+ * #13 and #14).
+ *
+ * It composes lib/curated-metrics.ts's toSeriesOption — the series, the colours
+ * and the tooltip are one builder for the whole console, and forking them here
+ * would let a curated chart and a signal chart draw the same numbers
+ * differently. What it then states EXPLICITLY is the two axis treatments this
+ * narrow column depends on, rather than inheriting them silently:
+ *
+ *   x — `hideOverlap`, so a 20rem-wide time axis thins its ticks out instead of
+ *       smearing every stamp into an unreadable band (#13).
+ *   y — the ADAPTIVE millisecond formatter (curated-metrics' formatSeconds), so
+ *       an RTT axis stepping fractions of a millisecond stops printing the same
+ *       label three times (#14).
+ *
+ * Stating them here is the point of the function. These panels are 24rem wide
+ * against the curated grid's full page, so they hit the collision cases first
+ * and hardest; a future width or density change to the shared builder must not
+ * be able to quietly un-fix this column, and a test pins the option THIS
+ * function returns.
+ */
+export function signalChartOption(
+  chart: CuratedChart,
+  result: PromResult,
+  dark: boolean,
+  overlays: { cursorAt: Date | null; windows: MaintenanceWindow[] },
+): EChartsOption {
+  const base = toSeriesOption(chart, result, dark);
+  const withAxes: EChartsOption = {
+    ...base,
+    xAxis: { ...(base.xAxis as object), axisLabel: { ...(base.xAxis as { axisLabel?: object }).axisLabel, hideOverlap: true } },
+    yAxis: {
+      ...(base.yAxis as object),
+      axisLabel: {
+        ...(base.yAxis as { axisLabel?: object }).axisLabel,
+        formatter: chart.unit === "seconds" ? (value: number) => formatSeconds(value) : undefined,
+      },
+    },
+  } as EChartsOption;
+  return withOverlays(withAxes, { ...overlays, dark });
+}
+
 function SignalChart({
   title,
   unit,
   result,
+  error,
   cursorAt,
   windows,
   annotations,
@@ -149,6 +203,12 @@ function SignalChart({
   title: string;
   unit: CuratedChart["unit"];
   result: PromResult | undefined;
+  /** The REJECTION, as opposed to Prometheus's own error envelope below (QA
+   *  round 3, finding #2). A 4xx from the guarded proxy — an inverted range,
+   *  a refused expression, a proxy that is down — throws out of the fetch, so
+   *  `result` stays undefined and this pane used to render nothing at all: a
+   *  heading over 160px of dead space, indistinguishable from still loading. */
+  error?: Error | null;
   cursorAt: Date | null;
   windows: MaintenanceWindow[];
   annotations: Annotation[];
@@ -157,28 +217,30 @@ function SignalChart({
   const { theme } = useTheme();
   const dark = theme === "dark";
   const chart = useMemo<CuratedChart>(() => ({ id: title, title, unit, query: "" }), [title, unit]);
-  const base = useMemo(() => (result ? toSeriesOption(chart, result, dark) : undefined), [chart, result, dark]);
   const option = useMemo(
-    () => (base ? withOverlays(base, { cursorAt, windows, dark }) : undefined),
-    [base, cursorAt, windows, dark],
+    () => (result ? signalChartOption(chart, result, dark, { cursorAt, windows }) : undefined),
+    [chart, result, dark, cursorAt, windows],
   );
 
   // promqlQueryRange RESOLVES Prometheus's own error envelope rather than
   // throwing, so a query-level failure shows up in the body, not as a rejection.
-  const queryError = result?.status === "error" ? (result.error ?? "query failed") : undefined;
+  const envelopeError = result?.status === "error" ? (result.error ?? "query failed") : undefined;
+  /* Both failure shapes render as ONE line under the heading. The rejection is
+     named first because it is the one that leaves no result to describe. */
+  const problem = error ? problemDetail(error) : envelopeError;
   const empty =
     result?.status === "success" && (result.data?.resultType !== "matrix" || (result.data?.result ?? []).length === 0);
 
   return (
     <section aria-label={title} className="mt-4 first:mt-0">
       <h4 className="text-xs font-medium text-muted-foreground">{title}</h4>
-      {queryError ? (
-        <p role="alert" className="mt-1 text-xs text-health-bad">
-          {queryError}
+      {problem ? (
+        <p role="alert" className="mt-1 text-xs leading-relaxed text-health-bad">
+          {problem}
         </p>
       ) : null}
-      {empty && !queryError ? <p className="mt-1 text-xs leading-relaxed text-muted-foreground">{emptyNote}</p> : null}
-      {option && !empty && !queryError ? (
+      {empty && !problem ? <p className="mt-1 text-xs leading-relaxed text-muted-foreground">{emptyNote}</p> : null}
+      {option && !empty && !problem ? (
         <EChart option={option} annotations={annotations} dark={dark} className="mt-1 h-40 w-full" />
       ) : null}
     </section>
@@ -197,7 +259,9 @@ function SignalChart({
 export function SignalPanels({
   scopeLabel,
   loss,
+  lossError,
   rtt,
+  rttError,
   delta,
   cursorAt,
   windows,
@@ -207,7 +271,11 @@ export function SignalPanels({
 }: {
   scopeLabel: string;
   loss: PromResult | undefined;
+  /** The loss range query's REJECTION (finding #2). */
+  lossError?: Error | null;
   rtt: PromResult | undefined;
+  /** The RTT range query's REJECTION (finding #2). */
+  rttError?: Error | null;
   delta: MatrixDelta;
   cursorAt: Date | null;
   windows: MaintenanceWindow[];
@@ -259,6 +327,7 @@ export function SignalPanels({
               title="Packet loss"
               unit="ratio"
               result={loss}
+              error={lossError}
               cursorAt={cursorAt}
               windows={windows}
               annotations={annotations}
@@ -268,6 +337,7 @@ export function SignalPanels({
               title="RTT p95"
               unit="seconds"
               result={rtt}
+              error={rttError}
               cursorAt={cursorAt}
               windows={windows}
               annotations={annotations}

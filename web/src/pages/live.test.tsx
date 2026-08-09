@@ -4,6 +4,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import { resetWsClient } from "@/hooks/use-ws-topic";
 import { FakeSocket } from "@/lib/fake-websocket";
 import type { LiveEvent } from "@/lib/types";
+import { fmtEventTime } from "@/lib/utils";
 import { TOPIC_LIVE } from "@/lib/ws";
 import { NAV_ITEMS } from "@/nav";
 import {
@@ -533,5 +534,100 @@ describe("LivePage scrollback (Task 5's GET /api/v1/events)", () => {
     expect(
       fetchMock.mock.calls.some(([url]) => typeof url === "string" && url.includes("type=topology_changed")),
     ).toBe(true);
+  });
+});
+
+/* ── QA round 1: findings #10, #12, #13, #16 ─────────────────────────────── */
+
+describe("LivePage — the feed's clock", () => {
+  // #10: /live rendered a UTC ISO slice and the Overview card a local
+  // wall clock, so the same event carried two different times across two
+  // pages with nothing on either saying which. ONE formatter now
+  // (lib/utils.fmtEventTime); pages/overview.test.tsx pins the same call on
+  // the other side.
+  it("stamps a row with the shared event clock, not a private ISO slice", async () => {
+    renderPage();
+    open();
+    await emit([ev(1, { timestamp: "2026-07-28T10:00:00Z" })]);
+
+    expect(screen.getByText(fmtEventTime("2026-07-28T10:00:00Z"))).toBeInTheDocument();
+    expect(screen.queryByText("10:00:00.000")).toBeNull();
+  });
+});
+
+describe("LivePage — paused is not live (#12)", () => {
+  it("drops the green Live badge while paused; the Paused chip is the state", async () => {
+    renderPage();
+    open();
+    await emit([ev(1)]);
+    expect(screen.getByText("Live", { selector: "span" })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Pause" }));
+
+    expect(screen.queryByText("Live", { selector: "span" })).toBeNull();
+    expect(screen.getByText(/^Paused ·/)).toBeInTheDocument();
+  });
+
+  it("lights it again on resume", async () => {
+    renderPage();
+    open();
+    await emit([ev(1)]);
+    fireEvent.click(screen.getByRole("button", { name: "Pause" }));
+    fireEvent.click(screen.getByRole("button", { name: "Resume" }));
+
+    expect(screen.getByText("Live", { selector: "span" })).toBeInTheDocument();
+  });
+});
+
+describe("LivePage — one toolbar slot (#13)", () => {
+  /** The toolbar's placement, expressed structurally: it is inside the block
+   *  that sits next to the page heading. Same answer in both states, or the
+   *  controls moved under the operator when the mode changed. */
+  function toolbarSitsBesideTheHeading(): boolean {
+    const toolbar = screen.getByTestId("live-toolbar");
+    const headingBlock = screen.getByRole("heading", { name: "Live" }).parentElement;
+    return headingBlock?.nextElementSibling?.contains(toolbar) ?? false;
+  }
+
+  it("keeps the toolbar in the same slot whether the transport badge is there or not", async () => {
+    renderPage();
+    open();
+    await emit([ev(1)]);
+    expect(toolbarSitsBesideTheHeading()).toBe(true);
+
+    // Pausing removes the badge (#12) — the toolbar must not move with it.
+    fireEvent.click(screen.getByRole("button", { name: "Pause" }));
+    expect(toolbarSitsBesideTheHeading()).toBe(true);
+    // The badge's slot is still there, holding the width.
+    expect(screen.getByTestId("live-transport-slot")).toBeInTheDocument();
+  });
+});
+
+describe("LivePage — Load older says why it is disabled (#16)", () => {
+  it("names the reason in the accessible name once there is nothing older", async () => {
+    const page1 = { events: [ev(5)], nextCursor: "" };
+    stubEventsFetch(() => json(page1));
+
+    renderPage(["events"], true);
+    open();
+    await screen.findByText("event 5");
+
+    const button = screen.getByRole("button", { name: /Load older/ });
+    expect(button).toBeDisabled();
+    // Both halves, in order. Matched loosely on the joiner: the name is the
+    // concatenation of the button's text nodes, and dom-accessibility-api
+    // trims each one where a real screen reader inserts a pause.
+    expect(button).toHaveAccessibleName(/^Load older\s*Nothing older matches the current filters\.$/);
+    expect(button).toHaveAttribute("title", "Nothing older matches the current filters.");
+  });
+
+  it("says nothing extra while it is loadable", async () => {
+    stubEventsFetch(() => json({ events: [ev(5)], nextCursor: "cursor-1" }));
+
+    renderPage(["events"], true);
+    open();
+    await screen.findByText("event 5");
+
+    expect(screen.getByRole("button", { name: "Load older" })).not.toBeDisabled();
   });
 });

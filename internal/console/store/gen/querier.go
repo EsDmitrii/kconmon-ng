@@ -325,6 +325,22 @@ type Querier interface {
 	// token_hash is NEVER selected here: this result set is exposed to admin UI
 	// and API responses, and the hash must never leave the database once written.
 	ListTokens(ctx context.Context) ([]ListTokensRow, error)
+	//
+	// scope is the EXACT filter. scope_node is the pair-aware one a node/target
+	// card needs: a check between two nodes is stored under the pair scope
+	// "<src>→<dst>" (U+2192 RIGHTWARDS ARROW -- events.pairScope,
+	// internal/console/events/live_event.go, is the only writer of this column's
+	// pair form, so this literal and that one must stay identical), which an
+	// equality filter on a single node name can never see. The two are mutually
+	// exclusive at the HTTP layer (422); ANDed here, because a query that silently
+	// ignored one of two supplied filters would be worse than a narrow answer.
+	//
+	// The LIKE patterns are built from a param, so the name's own LIKE
+	// metacharacters MUST be neutralised: scope carries target names too, and
+	// store.validateName's charset (targets.sql / targets.go nameRE) permits '_'.
+	// Unescaped, scope_node 'a_c' would match 'abc→b'. The triple replace escapes
+	// the escape character first (backslash), then '%' and '_', and ESCAPE '\'
+	// names it -- standard_conforming_strings is on, so '\' here is one backslash.
 	ListTopologyEvents(ctx context.Context, arg ListTopologyEventsParams) ([]ListTopologyEventsRow, error)
 	// The topology-at-t fold input: every event of the given type at or before
 	// 'at', OLDEST first, so replaying the rows in order reproduces the node/agent
@@ -358,6 +374,15 @@ type Querier interface {
 	// happened (which would make ListDueSchedules hand it out a second time).
 	// next_fire_at = NULL retires the schedule from the due index without
 	// disabling it -- the terminal state of a kind='once' schedule.
+	//
+	// last_error rides in the SAME statement, and its stamp is DERIVED from it
+	// rather than passed (QA round 5, finding #5): last_error_at is the fire's own
+	// timestamp when there is an error and NULL when there is not, so the pair can
+	// never disagree and a caller cannot write "a failure with no time" or "a time
+	// with no failure". Passing '' is how the scheduler CLEARS a previous failure
+	// on a tick that went through -- the column always describes the LAST attempt,
+	// never the last bad one, or a row would stay red forever after one bad
+	// minute.
 	MarkScheduleFired(ctx context.Context, arg MarkScheduleFiredParams) (int64, error)
 	// The retention floor for the topology-at-t fold (M5 Task 9): the console can
 	// only answer "what did the cluster look like at t" for a t at or after this
@@ -453,6 +478,13 @@ type Querier interface {
 	// different definition is a different schedule, and letting it move would
 	// silently reinterpret last_fired_at/next_fire_at against a cadence they were
 	// never computed for.
+	//
+	// last_error/last_error_at are not touched here either, and that is a separate
+	// decision from the one above: they are a FACT about the last fire, and an
+	// edit is not a fire. Clearing them on save would let an operator make a red
+	// row green by pressing Save on a schedule that is still broken; leaving them
+	// means the row keeps saying what went wrong, with the stamp that says when,
+	// until the next tick either repeats it or clears it (queries below).
 	UpdateSchedule(ctx context.Context, arg UpdateScheduleParams) (CheckSchedule, error)
 	// A full replace, not a patch: every mutable column is written on every call,
 	// so the caller's TargetInput is the whole truth about the row afterwards and

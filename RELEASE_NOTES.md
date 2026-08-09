@@ -154,8 +154,8 @@
 - **Correlation v1, documented rather than magic** — edge-triggered threshold
   crossings (loss > 1%, RTT > 2× the range **median**), an onset, a 300-second
   candidate window and a linear proximity decay against published class
-  weights. The panel links `docs/console/product/INVESTIGATION.md`, which
-  restates the exported constants verbatim. No ML, and nothing you cannot
+  weights. The panel links the scoring source itself, so the operator reads
+  exactly the constants the code executes. No ML, and nothing you cannot
   reproduce by hand.
 - **Incidents** — save an investigation (`/api/v1/incidents`), pin findings
   from six source kinds, write notes, resolve and reopen. The permalink
@@ -386,9 +386,9 @@
    chart does **not** install the CloudNativePG operator or its CRDs —
    install those first, or `helm install` fails with a clear error) or
    `external` (supply `console.database.existingSecret`), then set
-   `console.auth.mode` and its mode-specific block. See
-   `docs/console/architecture/CONFIG.md` and `SECURITY.md` for the full
-   validation matrix and secret-mount layout.
+   `console.auth.mode` and its mode-specific block. See the chart README and
+   the commented `values.yaml` for the full validation matrix and
+   secret-mount layout.
 
 ### Install
 

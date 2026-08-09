@@ -90,6 +90,16 @@ export function annotationOverlaySeries(annotations: Annotation[], dark: boolean
     // it out of the axis tooltip's value list, so hovering the chart still
     // reads the metrics rather than a phantom "Annotations: -".
     data: [],
+    // The LEGEND SWATCH (QA round 4, finding #7). A series with no explicit
+    // colour takes the next entry from ECharts' palette, so the legend key for
+    // "Annotations" was drawn in a blue that appears nowhere on the chart — a
+    // reader looking for the blue thing found a metric line instead. The
+    // markers themselves are drawn in `other`; the key says so now. itemStyle
+    // is what the legend's roundRect icon reads, lineStyle is what a line icon
+    // would, and both are set so the swatch is right whatever icon a caller's
+    // legend config asks for.
+    itemStyle: { color: colors.other },
+    lineStyle: { color: colors.other },
     ...(instants.length > 0
       ? {
           markLine: {
@@ -174,6 +184,12 @@ export function maintenanceOverlaySeries(windows: MaintenanceWindow[], dark: boo
     name: MAINTENANCE_SERIES_NAME,
     type: "line",
     data: [],
+    // Same finding as annotationOverlaySeries above (QA round 4, #7), and the
+    // one the report actually caught: the "Maintenance" legend key was BLUE
+    // while the bands it switches are the axis grey. The swatch names the band
+    // now.
+    itemStyle: { color: colors.axis },
+    lineStyle: { color: colors.axis },
     markArea: {
       label: { show: false },
       emphasis: { label: { show: true, formatter: "{b}", color: colors.axis, fontSize: 11, position: "top" } },
@@ -218,6 +234,44 @@ export function mergeAnnotations(...lists: Annotation[][]): Annotation[] {
     if (delta !== 0 && !Number.isNaN(delta)) return delta;
     return a.id.localeCompare(b.id);
   });
+}
+
+/** FrozenWindow is the range a surface is PINNED to — the Investigate page's
+ *  committed from/to. Absent everywhere else: a live chart re-fetches a moving
+ *  window, so anything created lands in it by the next poll. */
+export interface FrozenWindow {
+  from: Date;
+  to: Date;
+}
+
+/**
+ * outsideWindowNote is the one line a create form shows when what it just
+ * stored will not appear in the list it was created from (QA round 3, #8).
+ *
+ * The silent case is the whole finding. Everywhere else the created row simply
+ * APPEARS after the refresh, and its appearing IS the feedback — no toast
+ * needed, and adding one would put a banner on every ordinary success. But the
+ * Investigate page's window is FROZEN: an operator annotating "started the
+ * rollback" at 14:05, inside a window that ends 13:00, got a form that closed,
+ * a list that did not change, and nothing at all to distinguish that from a
+ * write that failed.
+ *
+ * A mark with no end is an INSTANT and has to fall inside the window; a span
+ * only has to OVERLAP it, which is the same rule the maintenance endpoint
+ * itself applies. Returns null when there is nothing to say — no frozen window,
+ * or the row lands where the reader is looking.
+ */
+export function outsideWindowNote(start: Date, end: Date | null, frozen: FrozenWindow | undefined): string | null {
+  if (frozen === undefined) return null;
+  const from = frozen.from.getTime();
+  const to = frozen.to.getTime();
+  if (!Number.isFinite(from) || !Number.isFinite(to)) return null;
+  const startMs = start.getTime();
+  const endMs = end === null ? startMs : end.getTime();
+  if (Number.isNaN(startMs) || Number.isNaN(endMs)) return null;
+  if (startMs <= to && endMs >= from) return null;
+  const ends = frozen.to.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
+  return `Created — outside this window (which ends ${ends}); press Investigate to reframe.`;
 }
 
 /** mergeMaintenanceWindows is mergeAnnotations for the windows: same two legs

@@ -3,6 +3,7 @@ package scheduler
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -58,6 +59,9 @@ type markCall struct {
 	id      string
 	firedAt time.Time
 	next    *time.Time
+	// lastErr is the text this fire recorded on the row, "" when it went
+	// through (QA round 5, finding #5).
+	lastErr string
 }
 
 func newFakeStore() *fakeStore {
@@ -88,14 +92,24 @@ func (f *fakeStore) ListDueSchedules(_ context.Context, due time.Time, limit int
 	return out, nil
 }
 
-func (f *fakeStore) MarkScheduleFired(_ context.Context, id string, firedAt time.Time, nextFireAt *time.Time) error {
+func (f *fakeStore) MarkScheduleFired(
+	_ context.Context, id string, firedAt time.Time, nextFireAt *time.Time, lastError string,
+) error {
 	s, ok := f.schedules[id]
 	if !ok {
 		return store.ErrNotFound
 	}
-	f.marks = append(f.marks, markCall{id: id, firedAt: firedAt, next: nextFireAt})
+	f.marks = append(f.marks, markCall{id: id, firedAt: firedAt, next: nextFireAt, lastErr: lastError})
 	s.LastFiredAt = &firedAt
 	s.NextFireAt = nextFireAt
+	// The real UPDATE derives the stamp from the text; the fake does too, so a
+	// test cannot observe a pair the database would never produce.
+	s.LastError = lastError
+	if lastError == "" {
+		s.LastErrorAt = nil
+	} else {
+		s.LastErrorAt = &firedAt
+	}
 	f.schedules[id] = s
 	return nil
 }
@@ -771,3 +785,140 @@ func TestNextFireAtArithmetic(t *testing.T) {
 }
 
 func ptr(t time.Time) *time.Time { return &t }
+
+// ---------------------------------------------------------------------------
+// The failing-schedule record (QA round 5, finding #5)
+// ---------------------------------------------------------------------------
+
+// TestFireRecordsWhyItProducedNoRun is the whole point of last_error. A
+// schedule whose definition is gone advances its cadence exactly like a
+// healthy one -- fireOne must, or the row stays due and becomes a hot loop --
+// so before this the two were INDISTINGUISHABLE in the console: enabled, a
+// fresh "last", a "next" a minute out.
+func TestFireRecordsWhyItProducedNoRun(t *testing.T) {
+	h := newHarness(t, true)
+	// No seedDefinition: the schedule points at a definition that is not there.
+	h.seedSchedule(kindInterval, int64(oneMinute))
+
+	h.s.Tick(context.Background())
+
+	if len(h.store.marks) != 1 {
+		t.Fatalf("MarkScheduleFired called %d times, want 1", len(h.store.marks))
+	}
+	got := h.store.marks[0].lastErr
+	if got == "" {
+		t.Fatal("lastError is empty for a fire that produced no run")
+	}
+	// The store's own vocabulary survives -- an operator reading the row gets
+	// the actionable half, not a paraphrase.
+	if !strings.Contains(got, "get definition") {
+		t.Errorf("lastError = %q, want it to name the failure that happened", got)
+	}
+	// …and the schedule's own id is NOT repeated: the row IS that schedule.
+	if strings.Contains(got, schedID) {
+		t.Errorf("lastError = %q, want the redundant schedule id stripped", got)
+	}
+	if h.store.schedules[schedID].LastErrorAt == nil {
+		t.Error("LastErrorAt is nil beside a non-empty LastError")
+	}
+}
+
+// A tick that goes through CLEARS the previous failure. The column describes
+// the LAST attempt, not the last bad one -- otherwise one bad minute leaves a
+// schedule red for the rest of its life.
+func TestASuccessfulFireClearsTheRecordedError(t *testing.T) {
+	h := newHarness(t, true)
+	h.seedSchedule(kindInterval, int64(oneMinute))
+
+	h.s.Tick(context.Background()) // fails: no definition
+	if h.store.schedules[schedID].LastError == "" {
+		t.Fatal("the first tick recorded no error, so there is nothing to clear")
+	}
+
+	// The definition appears and the schedule comes due again.
+	h.seedDefinition()
+	past := fixedNow.Add(-time.Second)
+	s := h.store.schedules[schedID]
+	s.NextFireAt = &past
+	h.store.schedules[schedID] = s
+
+	h.s.Tick(context.Background())
+
+	if len(h.store.marks) != 2 {
+		t.Fatalf("MarkScheduleFired called %d times, want 2", len(h.store.marks))
+	}
+	if h.store.marks[1].lastErr != "" {
+		t.Errorf("second mark lastError = %q, want cleared", h.store.marks[1].lastErr)
+	}
+	if got := h.store.schedules[schedID]; got.LastError != "" || got.LastErrorAt != nil {
+		t.Errorf("row after a good fire = %q/%v, want both cleared", got.LastError, got.LastErrorAt)
+	}
+}
+
+// A deliberate SKIP is not a failure. An enabled schedule on a DISABLED
+// definition is a paused check (startFor says so), and marking it red would
+// have the console contradict its own explanation.
+func TestASkipRecordsNoError(t *testing.T) {
+	h := newHarness(t, true)
+	h.seedDefinition()
+	def := h.store.definitions[defID]
+	def.Enabled = false
+	h.store.definitions[defID] = def
+	h.seedSchedule(kindInterval, int64(oneMinute))
+
+	h.s.Tick(context.Background())
+
+	if len(h.store.marks) != 1 {
+		t.Fatalf("MarkScheduleFired called %d times, want 1", len(h.store.marks))
+	}
+	if h.store.marks[0].lastErr != "" {
+		t.Errorf("lastError = %q for a skipped (not failed) fire, want empty", h.store.marks[0].lastErr)
+	}
+}
+
+// A run the runner refuses to START is a failure of this fire, same as a
+// missing definition: the schedule produced no run, and the row must say so.
+func TestAFailedStartIsRecordedOnTheRow(t *testing.T) {
+	h := newHarness(t, true)
+	h.seedDefinition()
+	h.seedSchedule(kindInterval, int64(oneMinute))
+	h.runner.startErr = errors.New("runner is shutting down")
+
+	h.s.Tick(context.Background())
+
+	if len(h.store.marks) != 1 {
+		t.Fatalf("MarkScheduleFired called %d times, want 1", len(h.store.marks))
+	}
+	if !strings.Contains(h.store.marks[0].lastErr, "runner is shutting down") {
+		t.Errorf("lastError = %q, want the runner's own message", h.store.marks[0].lastErr)
+	}
+}
+
+// scheduleErrorText strips ONE prefix and only when it is actually there --
+// an error from another layer must not be silently trimmed into nonsense.
+func TestScheduleErrorText(t *testing.T) {
+	cases := []struct{ name, in, want string }{
+		{
+			"strips the schedule's own prefix",
+			"scheduler: schedule " + schedID + ": get definition " + defID + ": store: not found",
+			"get definition " + defID + ": store: not found",
+		},
+		{
+			"leaves an error that does not carry it",
+			"store: mark schedule fired: connection refused",
+			"store: mark schedule fired: connection refused",
+		},
+		{
+			"leaves an error naming a DIFFERENT schedule",
+			"scheduler: schedule " + defID + ": boom",
+			"scheduler: schedule " + defID + ": boom",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := scheduleErrorText(schedID, errors.New(tc.in)); got != tc.want {
+				t.Errorf("scheduleErrorText = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}

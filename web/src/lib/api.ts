@@ -66,6 +66,24 @@ export class ApiError extends Error {
   }
 }
 
+/**
+ * retryUnlessClientError is the app-wide react-query retry predicate
+ * (main.tsx). A 4xx problem (except 429) is a settled answer — a 409 "sync is
+ * disabled" or a 422 will not become success by asking again, and the retry
+ * react-query schedules for it is exactly what the offline-pause trap freezes:
+ * QA found the foreign-rules section stuck on a skeleton forever over a 3ms
+ * 409 because the retry was PAUSED by an offline flicker. No retry, no pause
+ * window: the query settles to error on the first answer. Everything else
+ * (network failures, 5xx, 429) keeps one retry.
+ */
+export function retryUnlessClientError(failureCount: number, error: unknown): boolean {
+  if (error instanceof ApiError) {
+    const s = error.problem.status;
+    if (s !== undefined && s >= 400 && s < 500 && s !== 429) return false;
+  }
+  return failureCount < 1;
+}
+
 // LOGIN_PATH is the SPA route (web/src/pages/login.tsx), distinct from
 // Config.auth.loginPath (the backend endpoint/redirect target a submitted
 // login POSTs to or navigates to). redirectToLogin below always lands here.
@@ -200,7 +218,14 @@ async function handleVoid(resp: Response): Promise<void> {
  */
 export function getTopology(at?: Date): Promise<Topology> {
   const suffix = at ? `?at=${encodeURIComponent(formatAtParam(at))}` : "";
-  return apiFetch(`/api/v1/topology${suffix}`).then((r) => handle<Topology>(r));
+  // Go marshals a nil slice as JSON null, and a controller with agents but no
+  // node informer data answers {"nodes":null,...} — which took the whole
+  // landing page down (QA wave finding #1: types.ts promises arrays, so
+  // nothing downstream guards). The transport is the one place to keep that
+  // promise; every caller then trusts the type.
+  return apiFetch(`/api/v1/topology${suffix}`)
+    .then((r) => handle<Topology>(r))
+    .then((t) => ({ ...t, nodes: t.nodes ?? [], agents: t.agents ?? [] }));
 }
 
 export function getVersion(): Promise<Version> {
@@ -253,6 +278,7 @@ export function getEvents(q: EventQuery = {}): Promise<EventPage> {
   const qs = new URLSearchParams();
   for (const t of q.types ?? []) qs.append("type", t);
   if (q.scope) qs.set("scope", q.scope);
+  if (q.scopeNode) qs.set("scopeNode", q.scopeNode);
   if (q.from) qs.set("from", q.from.toISOString());
   if (q.to) qs.set("to", q.to.toISOString());
   if (q.limit !== undefined) qs.set("limit", String(q.limit));
@@ -263,7 +289,11 @@ export function getEvents(q: EventQuery = {}): Promise<EventPage> {
 
 export function getMatrix(protocol: Protocol, plane = "pod"): Promise<Matrix> {
   const qs = new URLSearchParams({ protocol, plane });
-  return apiFetch(`/api/v1/matrix?${qs}`).then((r) => handle<Matrix>(r));
+  // Same nil-slice normalization as getTopology — a fleet with no cells yet
+  // must arrive as [], not null (types.ts promises arrays).
+  return apiFetch(`/api/v1/matrix?${qs}`)
+    .then((r) => handle<Matrix>(r))
+    .then((m) => ({ ...m, nodes: m.nodes ?? [], cells: m.cells ?? [] }));
 }
 
 export function promqlQuery(query: string, time?: Date): Promise<PromResult> {
@@ -888,7 +918,22 @@ export function importConfig(bundle: ConfigBundle, dryRun: boolean): Promise<Con
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(req),
-  }).then((r) => handle<ConfigImportResult>(r));
+  })
+    .then((r) => handle<ConfigImportResult>(r))
+    .then((res) => {
+      // Go marshals nil slices as null: a collection with no errors arrives as
+      // {"errors":null,"warnings":null} and took the whole import renderer
+      // down (QA scope 6 #1 — the same trap getTopology normalizes). The
+      // transport is the one place the types' non-nullable promise is kept.
+      const out = { ...res } as Record<string, unknown>;
+      for (const [k, v] of Object.entries(out)) {
+        if (v !== null && typeof v === "object" && "created" in (v as object)) {
+          const c = v as { errors: unknown; warnings: unknown };
+          out[k] = { ...c, errors: c.errors ?? [], warnings: c.warnings ?? [] };
+        }
+      }
+      return out as unknown as ConfigImportResult;
+    });
 }
 
 /* ── M7 alert rules (pages/alerting.tsx) ─────────────────────────────────────

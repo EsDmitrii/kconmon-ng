@@ -148,3 +148,89 @@ describe("TopologyPage while live", () => {
     expect(screen.queryByText("This reconstruction is incomplete")).not.toBeInTheDocument();
   });
 });
+
+/* ── QA round 2, finding #2: a failed topology query is not a blank page ──── */
+
+function renderFailure(status: number, body: unknown) {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn((url: string) => {
+      const href = String(url);
+      if (href.startsWith("/api/v1/topology")) {
+        return Promise.resolve(
+          new Response(JSON.stringify(body), {
+            status,
+            headers: { "Content-Type": "application/problem+json" },
+          }),
+        );
+      }
+      if (href.includes("/api/v1/promql/query")) {
+        return Promise.resolve(json({ status: "success", data: { resultType: "vector", result: [] } }));
+      }
+      return Promise.resolve(json({}));
+    }),
+  );
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  return render(
+    <QueryClientProvider client={qc}>
+      <ThemeProvider>
+        <TimeMachineProvider>
+          <TopologyPage />
+        </TimeMachineProvider>
+      </ThemeProvider>
+    </QueryClientProvider>,
+  );
+}
+
+describe("TopologyPage when the topology query fails", () => {
+  it("renders the 422's own detail verbatim — the retention sentence is the actionable one", async () => {
+    renderFailure(422, {
+      type: "about:blank",
+      title: "instant outside retention",
+      status: 422,
+      detail: "at is older than console.database.retentionDays (30d)",
+    });
+    const problem = await screen.findByTestId("topology-problem");
+    expect(problem).toHaveTextContent("console.database.retentionDays");
+    expect(screen.getByRole("alert")).toHaveTextContent("Topology is unavailable");
+  });
+
+  it("falls back to the problem's title when it carries no detail", async () => {
+    renderFailure(500, { type: "about:blank", title: "topology fold failed", status: 500 });
+    expect(await screen.findByTestId("topology-problem")).toHaveTextContent("topology fold failed");
+  });
+
+  it("still describes itself as a view of t — a failed fold does not make the page Live", async () => {
+    renderFailure(422, { type: "about:blank", title: "nope", status: 422, detail: "too old" });
+    await screen.findByTestId("topology-problem");
+    expect(screen.getByText(/Zone\/node map as of/)).toBeInTheDocument();
+    expect(screen.queryByText(/^Live zone\/node map/)).not.toBeInTheDocument();
+  });
+});
+
+/* ── QA round 2, finding #5: agents without a node view ──────────────────── */
+
+describe("TopologyPage with agents but no nodes", () => {
+  it("says which half is missing rather than blaming the DaemonSet", async () => {
+    window.history.pushState({}, "", "/topology");
+    renderPage({
+      nodes: [],
+      agents: [
+        { id: "a1", nodeName: "n1", podIP: "10.0.0.1", zone: "z1" },
+        { id: "a2", nodeName: "n2", podIP: "10.0.0.2", zone: "z1" },
+      ],
+      timestamp: AT,
+    });
+    await screen.findByText("No Kubernetes node view");
+    expect(screen.getByText(/2 agents are registered/)).toBeInTheDocument();
+    expect(screen.getByText(/zone lanes cannot be drawn/)).toBeInTheDocument();
+    expect(screen.queryByText(/check that the DaemonSet is running/)).not.toBeInTheDocument();
+  });
+
+  it("keeps the old copy when the agents are missing too — that IS the DaemonSet's case", async () => {
+    window.history.pushState({}, "", "/topology");
+    renderPage({ nodes: [], agents: [], timestamp: AT });
+    await screen.findByText("No nodes reported by the controller yet");
+    expect(screen.getByText(/check that the DaemonSet is running/)).toBeInTheDocument();
+  });
+});

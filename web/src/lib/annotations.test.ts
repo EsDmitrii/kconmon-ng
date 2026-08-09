@@ -10,6 +10,7 @@ import {
   isInstant,
   maintenanceOverlaySeries,
   mergeAnnotations,
+  outsideWindowNote,
   mergeMaintenanceWindows,
   withAnnotations,
   withMaintenance,
@@ -104,6 +105,18 @@ describe("annotationOverlaySeries", () => {
     const light = annotationOverlaySeries([ann()], false) as LineSeriesOption;
     expect(dark.markLine?.lineStyle?.color).toBe(CHART_FALLBACK.dark.other);
     expect(light.markLine?.lineStyle?.color).toBe(CHART_FALLBACK.light.other);
+  });
+
+  /* QA round 4, finding #7. Without an explicit series colour the legend key
+     takes the next entry from ECharts' palette, so it was drawn in a blue
+     that appears nowhere on the chart. */
+  it("gives the legend swatch the marker's OWN colour, not the next palette entry", () => {
+    const dark = annotationOverlaySeries([ann()], true) as LineSeriesOption;
+    const light = annotationOverlaySeries([ann()], false) as LineSeriesOption;
+    expect((dark.itemStyle as { color?: string }).color).toBe(CHART_FALLBACK.dark.other);
+    expect((light.itemStyle as { color?: string }).color).toBe(CHART_FALLBACK.light.other);
+    // It is never a series ramp colour — that is the whole mismatch.
+    expect(CHART_FALLBACK.dark.series).not.toContain((dark.itemStyle as { color?: string }).color);
   });
 
   it("drops an annotation whose startAt does not parse", () => {
@@ -254,6 +267,17 @@ describe("maintenanceOverlaySeries", () => {
     expect((light.markArea?.itemStyle as { color?: string }).color).toBe(CHART_FALLBACK.light.axis);
   });
 
+  /* QA round 4, finding #7 — the one the report caught: the "Maintenance"
+     legend key was BLUE while the bands it switches are the axis grey. */
+  it("gives the legend swatch the BAND's colour, so the key and the band agree", () => {
+    const dark = maintenanceOverlaySeries([win()], true) as LineSeriesOption;
+    const light = maintenanceOverlaySeries([win()], false) as LineSeriesOption;
+    const swatch = (s: LineSeriesOption) => (s.itemStyle as { color?: string }).color;
+    expect(swatch(dark)).toBe((dark.markArea?.itemStyle as { color?: string }).color);
+    expect(swatch(light)).toBe((light.markArea?.itemStyle as { color?: string }).color);
+    expect(CHART_FALLBACK.dark.series).not.toContain(swatch(dark));
+  });
+
   it("SKIPS a window with an unparseable edge rather than drawing a band with a NaN bound", () => {
     expect(maintenanceOverlaySeries([win({ endAt: "later" })], true)).toBeNull();
     expect(maintenanceOverlaySeries([win({ startAt: "not-a-time" })], true)).toBeNull();
@@ -306,5 +330,46 @@ describe("mergeMaintenanceWindows", () => {
 
   it("is empty for no input", () => {
     expect(mergeMaintenanceWindows()).toEqual([]);
+  });
+});
+
+/* ── QA round 3, finding #8: the silent out-of-window create ─────────────── */
+
+describe("outsideWindowNote", () => {
+  const frozen = { from: new Date("2026-08-08T00:00:00Z"), to: new Date("2026-08-08T01:00:00Z") };
+  const at = (iso: string) => new Date(iso);
+
+  it("says nothing at all without a frozen window — a live list re-fetches and the row simply appears", () => {
+    expect(outsideWindowNote(at("2030-01-01T00:00:00Z"), null, undefined)).toBeNull();
+  });
+
+  it("says nothing for an instant inside the window, including both edges", () => {
+    expect(outsideWindowNote(at("2026-08-08T00:30:00Z"), null, frozen)).toBeNull();
+    expect(outsideWindowNote(frozen.from, null, frozen)).toBeNull();
+    expect(outsideWindowNote(frozen.to, null, frozen)).toBeNull();
+  });
+
+  it("names the window's end for an instant outside it, in both directions", () => {
+    const ends = frozen.to.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
+    expect(outsideWindowNote(at("2026-08-08T02:00:00Z"), null, frozen)).toBe(
+      `Created — outside this window (which ends ${ends}); press Investigate to reframe.`,
+    );
+    expect(outsideWindowNote(at("2026-08-07T23:00:00Z"), null, frozen)).toContain("outside this window");
+  });
+
+  it("only needs a SPAN to overlap — one that starts before and ends inside is visible", () => {
+    expect(outsideWindowNote(at("2026-08-07T23:00:00Z"), at("2026-08-08T00:10:00Z"), frozen)).toBeNull();
+    expect(outsideWindowNote(at("2026-08-08T00:50:00Z"), at("2026-08-08T03:00:00Z"), frozen)).toBeNull();
+    // A span that straddles the whole window covers it, so it is visible too.
+    expect(outsideWindowNote(at("2026-08-07T00:00:00Z"), at("2026-08-09T00:00:00Z"), frozen)).toBeNull();
+  });
+
+  it("notes a span entirely on either side", () => {
+    expect(outsideWindowNote(at("2026-08-09T00:00:00Z"), at("2026-08-09T01:00:00Z"), frozen)).toContain("outside");
+    expect(outsideWindowNote(at("2026-08-07T00:00:00Z"), at("2026-08-07T01:00:00Z"), frozen)).toContain("outside");
+  });
+
+  it("stays silent rather than guessing when an instant will not parse", () => {
+    expect(outsideWindowNote(new Date("nope"), null, frozen)).toBeNull();
   });
 });

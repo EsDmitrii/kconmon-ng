@@ -368,7 +368,12 @@ func (r *Reconciler) desired(ctx context.Context) (assignment map[string][]contr
 
 	assignments, series, err := AssignAgents(defs, agents)
 	if err != nil {
-		return nil, 0, fmt.Errorf("checks: reconcile: %w", err)
+		// Returned bare, exactly as continuousDefinitions' error is above:
+		// AssignAgents already says "checks: assign: ...", and re-wrapping an
+		// error this package has ALREADY qualified renders the package name
+		// twice ("checks: reconcile: checks: assign: ...") in the log line
+		// reconcileOnce writes.
+		return nil, 0, err
 	}
 
 	out := make(map[string][]controllerclient.ExternalCheckSpec, len(assignments))

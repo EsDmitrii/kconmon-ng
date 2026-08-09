@@ -25,6 +25,40 @@ import { NAV_ITEMS } from "@/nav";
  */
 export type Permission = string;
 
+/* ── opening the palette from somewhere that owns the keyboard ───────────── */
+
+/**
+ * PALETTE_OPEN_EVENT is the one-line bus that lets a surface with its OWN
+ * keymap open the palette (QA round 4, finding #18).
+ *
+ * The palette's hotkey is a document keydown listener, which is enough for
+ * every control in this console except one: CodeMirror handles Mod-k itself
+ * (deleteLine, from the default keymap) and calls preventDefault, so ⌘K inside
+ * the PromQL editor deleted a line and never reached the palette.
+ *
+ * Two ways out were on the table. Re-dispatching a synthetic
+ * KeyboardEvent("keydown", {key:"k", metaKey:true}) on document would have the
+ * editor pretending to be a keyboard — a lie the palette's own text-entry
+ * guard would then have to see through, since the active element at that
+ * moment IS the editor's contenteditable. This is the other one: an explicit,
+ * named event that says what it wants. The editor asks for the palette; the
+ * palette decides whether to open. Nothing about the hotkey path changes, and
+ * any future surface that swallows Mod-k gets the same one-line escape.
+ *
+ * A CustomEvent on `window` rather than a module-level callback registry: the
+ * editor and the palette are mounted by different trees (a page vs. AppShell)
+ * and must not import each other. This file is the shared, pure module they
+ * both already depend on.
+ */
+export const PALETTE_OPEN_EVENT = "kconmon:open-palette";
+
+/** openCommandPalette asks whatever palette is mounted to open. A no-op when
+ *  none is (the event simply has no listener) — deliberately, because a
+ *  keybinding must never throw at whoever pressed it. */
+export function openCommandPalette(): void {
+  window.dispatchEvent(new CustomEvent(PALETTE_OPEN_EVENT));
+}
+
 /**
  * CommandContext is everything a command may touch. Flat and boring by
  * design: a command must never reach for a hook, a store or the DOM itself,

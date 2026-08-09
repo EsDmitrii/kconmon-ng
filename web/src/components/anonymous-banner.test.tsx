@@ -16,8 +16,8 @@ import { AppShell } from "@/routes";
 
 test("shows the anonymous-mode warning", () => {
   render(<AnonymousBanner />);
-  expect(screen.getByRole("alert")).toHaveTextContent(/anonymous mode/i);
-  expect(screen.getByRole("alert")).toHaveTextContent(/do not use in production/i);
+  expect(screen.getByRole("status")).toHaveTextContent(/anonymous mode/i);
+  expect(screen.getByRole("status")).toHaveTextContent(/do not use in production/i);
 });
 
 // task-19-brief.md: "anonymous-banner.tsx keeps its exact M2 behaviour when
@@ -26,12 +26,12 @@ test("shows the anonymous-mode warning", () => {
 describe("AnonymousBanner mode prop", () => {
   it("hides for a non-anonymous mode", () => {
     render(<AnonymousBanner mode="local" />);
-    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
   });
 
   it("shows for mode=anonymous, same as the no-prop default", () => {
     render(<AnonymousBanner mode="anonymous" />);
-    expect(screen.getByRole("alert")).toHaveTextContent(/anonymous mode/i);
+    expect(screen.getByRole("status")).toHaveTextContent(/anonymous mode/i);
   });
 });
 
@@ -112,7 +112,7 @@ describe("TestAnonymousModeRendersExactlyLikeM2", () => {
     );
 
     // Banner: exact M2 copy, still shown.
-    expect(await screen.findByRole("alert")).toHaveTextContent(/anonymous mode/i);
+    expect(await screen.findByRole("status")).toHaveTextContent(/anonymous mode/i);
     // Sidebar: nav items present, unaffected by auth.
     expect(screen.getByRole("link", { name: /overview/i })).toBeInTheDocument();
     expect(screen.getByRole("link", { name: /live/i })).toBeInTheDocument();

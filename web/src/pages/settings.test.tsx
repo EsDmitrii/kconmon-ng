@@ -1,8 +1,15 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { TimeMachineProvider } from "@/lib/timemachine";
-import { SettingsPage, exportFilename, parseBundle, webhookRequestFrom } from "./settings";
+import {
+  SettingsPage,
+  exportFilename,
+  parseBundle,
+  subjectLine,
+  webhookFieldForDetail,
+  webhookRequestFrom,
+} from "./settings";
 
 /**
  * The Settings page is two admin-gated sections over one section everybody
@@ -108,6 +115,8 @@ function renderPage(
     onImport?: (body: unknown) => Response;
     exportResponse?: Response;
     engaged?: boolean;
+    /** The rows GET /api/v1/maintenance answers (QA round 3, finding #9). */
+    maintenance?: unknown[];
   } = {},
 ) {
   const {
@@ -119,8 +128,10 @@ function renderPage(
     onImport,
     exportResponse,
     engaged = false,
+    maintenance = [],
   } = opts;
   const rows = [...webhooks] as Record<string, unknown>[];
+  const windows = [...maintenance] as Record<string, unknown>[];
   const calls: Call[] = [];
 
   const fetchMock = vi.fn((url: string, init?: RequestInit) => {
@@ -141,6 +152,15 @@ function renderPage(
     if (href.endsWith("/test") && method === "POST") {
       onTest?.(rows);
       return Promise.resolve(new Response(null, { status: 202 }));
+    }
+    if (href.startsWith("/api/v1/maintenance/") && method === "DELETE") {
+      const id = decodeURIComponent(href.slice("/api/v1/maintenance/".length));
+      const at = windows.findIndex((w) => (w as { id: string }).id === id);
+      if (at >= 0) windows.splice(at, 1);
+      return Promise.resolve(new Response(null, { status: 204 }));
+    }
+    if (href.startsWith("/api/v1/maintenance")) {
+      return Promise.resolve(json({ windows, nextCursor: "" }));
     }
     if (href.startsWith("/api/v1/webhooks")) {
       const override = onWriteWebhook?.(method, body);
@@ -192,7 +212,7 @@ function renderPage(
 
   /** Every request the PAGE itself makes, i.e. excluding the /auth/me and
    *  /config chrome every route fetches regardless of what it renders. */
-  const resourceCalls = () => calls.filter((c) => /^\/api\/v1\/(webhooks|export|import)/.test(c.url));
+  const resourceCalls = () => calls.filter((c) => /^\/api\/v1\/(webhooks|export|import|maintenance)/.test(c.url));
   return { ...utils, fetchMock, calls, resourceCalls, qc };
 }
 
@@ -284,20 +304,27 @@ describe("section gating", () => {
     expect(screen.queryByText(/can view none of the console's settings/i)).not.toBeInTheDocument();
   });
 
-  it("operator sees neither gated section, one honest line, and About", async () => {
-    const { resourceCalls } = renderPage({ permissions: OPERATOR });
-    expect(await screen.findByText(/Your role can view none of the console's settings/i)).toBeInTheDocument();
+  /* An operator holds maintenance:write, so as of QA round 3 (finding #9) they
+     DO see one section here — the unbounded maintenance list, the only surface
+     in the console where a future window can be found. They still see neither
+     admin section, and the "none of the settings" line is therefore no longer
+     theirs. */
+  it("operator sees the maintenance list, neither admin section, and About", async () => {
+    renderPage({ permissions: OPERATOR });
+    expect(await screen.findByRole("heading", { name: "Maintenance windows" })).toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "Webhooks" })).not.toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "Configuration export / import" })).not.toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "About this console" })).toBeInTheDocument();
-    // HIDE means zero requests, not a hidden section that still fetched.
-    expect(resourceCalls()).toEqual([]);
+    expect(screen.queryByText(/can view none of the console's settings/i)).not.toBeInTheDocument();
   });
 
-  it("viewer gets exactly what operator gets", async () => {
-    renderPage({ permissions: VIEWER });
+  it("viewer sees no section at all — one honest line and About, and ZERO requests", async () => {
+    const { resourceCalls } = renderPage({ permissions: VIEWER });
     expect(await screen.findByText(/Your role can view none of the console's settings/i)).toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "Webhooks" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Maintenance windows" })).not.toBeInTheDocument();
+    // HIDE means zero requests, not a hidden section that still fetched.
+    expect(resourceCalls()).toEqual([]);
   });
 
   it("a role with only webhooks:manage sees webhooks and no export/import", async () => {
@@ -314,6 +341,64 @@ describe("section gating", () => {
     // Export/import is entirely button-driven: rendering the section must not
     // fetch a bundle nobody asked for.
     expect(resourceCalls()).toEqual([]);
+  });
+});
+
+/* ── maintenance windows (QA round 3, finding #9) ───────────────────────── */
+
+function windowRow(over: Record<string, unknown> = {}) {
+  return {
+    id: "m-1",
+    scope: "node-a",
+    startAt: "2030-01-01T10:00:00Z",
+    endAt: "2030-01-01T12:00:00Z",
+    reason: "switch firmware upgrade",
+    createdBy: "user:ada",
+    createdAt: "2026-08-08T00:00:00Z",
+    ...over,
+  };
+}
+
+describe("maintenance windows section", () => {
+  it("is gated on maintenance:WRITE and asks for nothing without it", async () => {
+    const { resourceCalls } = renderPage({ permissions: ["maintenance:read", "settings:write"] });
+    expect(await screen.findByRole("heading", { name: "Configuration export / import" })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Maintenance windows" })).not.toBeInTheDocument();
+    expect(resourceCalls().filter((c) => c.url.startsWith("/api/v1/maintenance"))).toEqual([]);
+  });
+
+  it("asks for EVERY window — no from, no to, no scope", async () => {
+    const { resourceCalls } = renderPage({ permissions: ["maintenance:write"], maintenance: [windowRow()] });
+    await screen.findByRole("heading", { name: "Maintenance windows" });
+    const asked = resourceCalls().filter((c) => c.url.startsWith("/api/v1/maintenance"));
+    expect(asked).toHaveLength(1);
+    /* The whole point of this section: a RANGE would hide the future windows
+       it exists to surface, and a scope would hide everybody else's. */
+    expect(asked[0].url).toBe("/api/v1/maintenance");
+  });
+
+  it("lists a window whose whole span is in the FUTURE — the one the bars cannot show", async () => {
+    renderPage({ permissions: ["maintenance:write"], maintenance: [windowRow()] });
+    const list = await screen.findByRole("list", { name: "All maintenance windows" });
+    expect(list).toHaveTextContent("switch firmware upgrade");
+    expect(list).toHaveTextContent("node-a");
+  });
+
+  it("says so plainly when nothing has ever been declared", async () => {
+    renderPage({ permissions: ["maintenance:write"] });
+    expect(await screen.findByText(/No maintenance windows have been declared/i)).toBeInTheDocument();
+  });
+
+  it("deletes behind the confirm idiom — one click arms, the second sends DELETE", async () => {
+    const { calls } = renderPage({ permissions: ["maintenance:write"], maintenance: [windowRow()] });
+    fireEvent.click(await screen.findByRole("button", { name: /^Delete maintenance window: switch firmware upgrade$/ }));
+    expect(calls.filter((c) => c.method === "DELETE")).toEqual([]);
+
+    fireEvent.click(screen.getByRole("button", { name: /^Confirm delete maintenance window: switch firmware upgrade$/ }));
+    await waitFor(() =>
+      expect(calls.filter((c) => c.method === "DELETE").map((c) => c.url)).toEqual(["/api/v1/maintenance/m-1"]),
+    );
+    await waitFor(() => expect(screen.queryByText("switch firmware upgrade")).toBeNull());
   });
 });
 
@@ -790,5 +875,212 @@ describe("About this console", () => {
     await screen.findByRole("heading", { name: "About this console" });
     expect(screen.queryByRole("heading", { name: /RBAC/i })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /token/i })).not.toBeInTheDocument();
+  });
+});
+
+/* ── QA round 5 ─────────────────────────────────────────────────────────── */
+
+/* #13. A refused endpoint used to render its whole reason as one banner above
+   the buttons, with nothing marking which of the four fields the server was
+   talking about. */
+describe("webhookFieldForDetail (#13)", () => {
+  it.each([
+    ["webhook: url \"x\" must start with http:// or https://", "url"],
+    ["webhook: url must not be empty", "url"],
+    ["webhook: name must not be empty", "name"],
+    ['webhook: name "pd" is already taken; webhook names are unique', "name"],
+    ["webhook: secret must not be empty: every delivery is signed", "secret"],
+    ["webhook: events must not be empty", "events"],
+    ['webhook: events[0]: "nope" must be one of incident.created, alert.fired', "events"],
+  ])("routes %s to the %s field", (detail, field) => {
+    expect(webhookFieldForDetail(detail)).toBe(field);
+  });
+
+  it("routes a message naming no field to nowhere, so it renders form-level", () => {
+    expect(webhookFieldForDetail("webhooks are unavailable")).toBeNull();
+  });
+});
+
+describe("webhook form — field-routed refusals (#13)", () => {
+  async function openCreate() {
+    fireEvent.click(await screen.findByRole("button", { name: "New endpoint" }));
+  }
+
+  it("marks the URL box when the server refuses the url, and no other box", async () => {
+    renderPage({
+      onWriteWebhook: (method) =>
+        method === "POST"
+          ? problem(422, "invalid webhook", 'webhook: url "ftp://x" must start with http:// or https://')
+          : undefined,
+    });
+    await openCreate();
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "pd" } });
+    fireEvent.change(screen.getByLabelText("URL"), { target: { value: "ftp://x" } });
+    fireEvent.change(screen.getByLabelText(/^Secret/), { target: { value: "s" } });
+    fireEvent.click(screen.getByRole("button", { name: "Create endpoint" }));
+
+    await waitFor(() => expect(screen.getByLabelText("URL")).toHaveAttribute("aria-invalid", "true"));
+    expect(screen.getByLabelText("Name")).not.toHaveAttribute("aria-invalid");
+    expect(screen.getByLabelText(/^Secret/)).not.toHaveAttribute("aria-invalid");
+    // The server's words still render, verbatim and in one place.
+    expect(screen.getByRole("alert")).toHaveTextContent("must start with http:// or https://");
+  });
+
+  it("marks the NAME box for a duplicate-name refusal", async () => {
+    renderPage({
+      onWriteWebhook: (method) =>
+        method === "POST"
+          ? problem(422, "invalid webhook", 'webhook: name "pd" is already taken; webhook names are unique')
+          : undefined,
+    });
+    await openCreate();
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "pd" } });
+    fireEvent.change(screen.getByLabelText("URL"), { target: { value: "https://x.test" } });
+    fireEvent.change(screen.getByLabelText(/^Secret/), { target: { value: "s" } });
+    fireEvent.click(screen.getByRole("button", { name: "Create endpoint" }));
+
+    await waitFor(() => expect(screen.getByLabelText("Name")).toHaveAttribute("aria-invalid", "true"));
+    expect(screen.getByLabelText("URL")).not.toHaveAttribute("aria-invalid");
+  });
+
+  it("marks the events GROUP, which has no single input to mark", async () => {
+    renderPage({
+      onWriteWebhook: (method) =>
+        method === "POST" ? problem(422, "invalid webhook", "webhook: events must not be empty") : undefined,
+    });
+    await openCreate();
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "pd" } });
+    fireEvent.change(screen.getByLabelText("URL"), { target: { value: "https://x.test" } });
+    fireEvent.change(screen.getByLabelText(/^Secret/), { target: { value: "s" } });
+    fireEvent.click(screen.getByRole("button", { name: "Create endpoint" }));
+
+    await waitFor(() =>
+      expect(screen.getByRole("group", { name: "Events" })).toHaveAttribute("aria-invalid", "true"),
+    );
+  });
+
+  it("marks the SECRET box for the one rule it checks client-side", async () => {
+    renderPage();
+    await openCreate();
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "pd" } });
+    fireEvent.click(screen.getByRole("button", { name: "Create endpoint" }));
+
+    await waitFor(() => expect(screen.getByLabelText(/^Secret/)).toHaveAttribute("aria-invalid", "true"));
+  });
+
+  it("leaves every box unmarked for a refusal that names no field", async () => {
+    renderPage({
+      onWriteWebhook: (method) =>
+        method === "POST" ? problem(502, "webhooks unavailable", "failed to reach the webhook store") : undefined,
+    });
+    await openCreate();
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "pd" } });
+    fireEvent.change(screen.getByLabelText("URL"), { target: { value: "https://x.test" } });
+    fireEvent.change(screen.getByLabelText(/^Secret/), { target: { value: "s" } });
+    fireEvent.click(screen.getByRole("button", { name: "Create endpoint" }));
+
+    await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent("failed to reach the webhook store"));
+    for (const label of ["Name", "URL"]) {
+      expect(screen.getByLabelText(label)).not.toHaveAttribute("aria-invalid");
+    }
+  });
+});
+
+/* #17. The button LOOKED guarded — Button disables itself while `loading` —
+   but the flag it read was useState, which the handler about to set it cannot
+   see. Three clicks in one task all ran, and all three POSTed. */
+describe("webhook form — one submit per click storm (#17)", () => {
+  it("POSTs once for three rapid clicks", async () => {
+    const { resourceCalls } = renderPage();
+    fireEvent.click(await screen.findByRole("button", { name: "New endpoint" }));
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "pd" } });
+    fireEvent.change(screen.getByLabelText("URL"), { target: { value: "https://x.test" } });
+    fireEvent.change(screen.getByLabelText(/^Secret/), { target: { value: "s3cret" } });
+
+    const submit = screen.getByRole("button", { name: "Create endpoint" });
+    /* THREE CLICKS IN ONE TASK, with no render between them — the shape an
+       impatient double-click actually has, and the one a useState flag cannot
+       survive: fireEvent.click flushes React between calls, so a suite using
+       it would pass against the very bug this pins. */
+    await act(async () => {
+      submit.click();
+      submit.click();
+      submit.click();
+    });
+
+    await waitFor(() => expect(resourceCalls().filter((c) => c.method === "POST").length).toBe(1));
+    expect(resourceCalls().filter((c) => c.method === "POST")).toHaveLength(1);
+  });
+});
+
+/* #8. `<input type="file">` renders as the browser's own chrome — a grey
+   "Choose File / no file selected" that cannot be themed at all, so in dark
+   mode it was a light rectangle in the middle of a dark card. */
+describe("configuration bundle picker (#8)", () => {
+  it("hides the native input visually while keeping it focusable and named", async () => {
+    renderPage();
+    const input = await screen.findByLabelText("Configuration bundle");
+    expect(input.className).toContain("sr-only");
+    // sr-only, NOT hidden: still in the accessibility tree and the tab order.
+    expect(input.className).not.toContain("hidden");
+    expect(input).not.toHaveAttribute("tabindex", "-1");
+  });
+
+  it("gives the pointer a styled label-button wired to the input", async () => {
+    renderPage();
+    const input = await screen.findByLabelText("Configuration bundle");
+    const label = screen.getByTestId("bundle-file-label");
+    expect(label).toHaveTextContent("Choose bundle…");
+    expect(label.getAttribute("for")).toBe(input.getAttribute("id"));
+    // The button styling lives on the LABEL, and both themes come from tokens.
+    expect(label.className).toContain("border-border-strong");
+    expect(label.className).toContain("hover:bg-accent");
+    expect(label.className).toContain("peer-disabled:opacity-50");
+  });
+
+  it("names the chosen file, which the hidden input can no longer do itself", async () => {
+    renderPage();
+    expect(await screen.findByTestId("bundle-file-name")).toHaveTextContent("No file chosen");
+    await loadBundle(BUNDLE);
+    await waitFor(() => expect(screen.getByTestId("bundle-file-name")).toHaveTextContent("bundle.json"));
+  });
+
+  it("names the file even when it will not parse — the error has to be ABOUT something", async () => {
+    renderPage();
+    await loadBundle("not json {");
+    await waitFor(() => expect(screen.getByTestId("bundle-file-name")).toHaveTextContent("bundle.json"));
+    expect(screen.getByRole("alert")).toHaveTextContent(/valid JSON/i);
+  });
+});
+
+/* #9. An anonymous subject has no display name, and the fixed template printed
+   the separator anyway: "anonymous · " reads as a name that failed to load. */
+describe("subjectLine (#9)", () => {
+  it("drops the separator when there is nothing on one side", () => {
+    expect(subjectLine("anonymous", "")).toBe("anonymous");
+    expect(subjectLine("anonymous", "   ")).toBe("anonymous");
+    expect(subjectLine("", "Ada")).toBe("Ada");
+  });
+
+  it("joins both when both are there", () => {
+    expect(subjectLine("user", "Ada")).toBe("user · Ada");
+  });
+
+  it("never leaves a dangling separator", () => {
+    for (const [kind, name] of [
+      ["anonymous", ""],
+      ["", ""],
+      ["token", ""],
+    ]) {
+      expect(subjectLine(kind, name).endsWith("·")).toBe(false);
+      expect(subjectLine(kind, name)).not.toContain("· ·");
+    }
+  });
+
+  it("renders the anonymous subject with no trailing separator on the page", async () => {
+    renderPage({ permissions: VIEWER });
+    const fact = await screen.findByText("Your subject");
+    const value = fact.parentElement?.querySelector("dd");
+    expect(value?.textContent).not.toMatch(/·\s*$/);
   });
 });

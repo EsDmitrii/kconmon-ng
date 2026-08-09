@@ -75,7 +75,9 @@ func (f *fakeChecksStore) DeleteSchedule(_ context.Context, id string) error {
 	return nil
 }
 
-func (f *fakeChecksStore) MarkScheduleFired(_ context.Context, id string, firedAt time.Time, nextFireAt *time.Time) error {
+func (f *fakeChecksStore) MarkScheduleFired(
+	_ context.Context, id string, firedAt time.Time, nextFireAt *time.Time, lastError string,
+) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	s, ok := f.scheds[id]
@@ -84,6 +86,14 @@ func (f *fakeChecksStore) MarkScheduleFired(_ context.Context, id string, firedA
 	}
 	s.LastFiredAt = &firedAt
 	s.NextFireAt = nextFireAt
+	// Mirrors the real UPDATE's derivation: the stamp comes FROM the text, so
+	// the fake cannot produce a pair the database would refuse to (#5).
+	s.LastError = lastError
+	if lastError == "" {
+		s.LastErrorAt = nil
+	} else {
+		s.LastErrorAt = &firedAt
+	}
 	f.scheds[id] = s
 	return nil
 }
@@ -505,5 +515,72 @@ func TestSchedulesListBadInputsAre400(t *testing.T) {
 	w = doRequest(t, s, http.MethodGet, "/api/v1/schedules?definitionId=not-a-uuid", nil, nil)
 	if w.Code != http.StatusBadRequest {
 		t.Errorf("garbage definitionId = %d, want 400 (M4 Task 4 fix pass)", w.Code)
+	}
+}
+
+/* ── QA round 5, finding #5: the failing schedule says so on the wire ─────── */
+
+// TestSchedulesExposeTheLastError pins both halves of the DTO: the pair is
+// PRESENT and empty on a healthy schedule (a client needs "" to mean healthy,
+// not a missing key it cannot distinguish from an older server), and it
+// carries the scheduler's own text once a fire has failed.
+func TestSchedulesExposeTheLastError(t *testing.T) {
+	st := newFakeChecksStore()
+	s := newOperatorChecksServer(t, st, nil)
+	defID := seedDefinition(t, s)
+
+	w := doRequest(t, s, http.MethodPost, "/api/v1/schedules",
+		strings.NewReader(intervalScheduleBody(defID, 5*time.Minute, true)), mutateWithCSRF)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("create = %d, want 201: %s", w.Code, w.Body)
+	}
+	var created scheduleResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &created); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if created.LastError != "" || created.LastErrorAt != nil {
+		t.Errorf("a fresh schedule reports %q/%v, want an empty pair", created.LastError, created.LastErrorAt)
+	}
+	// The KEY has to be there even when empty.
+	var raw map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &raw); err != nil {
+		t.Fatalf("decode raw: %v", err)
+	}
+	for _, key := range []string{"lastError", "lastErrorAt"} {
+		if _, ok := raw[key]; !ok {
+			t.Errorf("%q is absent from the response; a client cannot tell healthy from unsupported", key)
+		}
+	}
+
+	// A failed fire, recorded exactly the way the scheduler records one.
+	fired := time.Now().UTC()
+	if err := st.MarkScheduleFired(context.Background(), created.ID, fired, &fired,
+		"get definition "+defID+": store: not found"); err != nil {
+		t.Fatalf("MarkScheduleFired: %v", err)
+	}
+
+	w = doRequest(t, s, http.MethodGet, "/api/v1/schedules/"+created.ID, nil, nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("get = %d, want 200: %s", w.Code, w.Body)
+	}
+	var got scheduleResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !strings.Contains(got.LastError, "store: not found") {
+		t.Errorf("lastError = %q, want the scheduler's own text", got.LastError)
+	}
+	if got.LastErrorAt == nil {
+		t.Error("lastErrorAt is null beside a non-empty lastError")
+	}
+
+	// …and the listing carries it too: the Schedules tab reads that, not /{id}.
+	w = doRequest(t, s, http.MethodGet, "/api/v1/schedules", nil, nil)
+	var list schedulesListResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &list); err != nil {
+		t.Fatalf("decode list: %v", err)
+	}
+	if len(list.Schedules) != 1 || list.Schedules[0].LastError == "" {
+		t.Errorf("list = %+v, want the failure on the listed row", list.Schedules)
 	}
 }

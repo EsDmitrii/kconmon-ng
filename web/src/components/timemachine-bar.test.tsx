@@ -154,6 +154,17 @@ describe("TimeMachineBar while engaged", () => {
     expect(screen.getByRole("button", { name: /time machine/i })).toBeInTheDocument();
   });
 
+  /* QA round 1, finding #15: the banner and the chip named the same instant in
+     two clock formats, one with seconds and one without, two inches apart. */
+  it("states the instant ONCE, in one format, on both the banner and the chip", () => {
+    renderEngaged();
+    const adjust = screen.getByRole("button", { name: /change the viewing time/i });
+
+    expect(adjust).toHaveTextContent(engagedAt.toLocaleString());
+    expect(screen.getByRole("status")).toHaveTextContent(engagedAt.toLocaleString());
+    expect(adjust.getAttribute("aria-label")).toContain(engagedAt.toLocaleString());
+  });
+
   it("shows the engaged instant on the adjust trigger and inside the popover", () => {
     renderEngaged();
     const adjust = screen.getByRole("button", { name: /change the viewing time/i });

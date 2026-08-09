@@ -42,8 +42,12 @@ function configBody(databaseConfigured: boolean, prometheusConfigured = true) {
   };
 }
 
-function topologyBody(names: string[]) {
-  return { nodes: names.map((n) => ({ name: n, zone: "z1", ready: true })), agents: [], timestamp: "t" };
+function topologyBody(names: string[], agents: string[] = []) {
+  return {
+    nodes: names.map((n) => ({ name: n, zone: "z1", ready: true })),
+    agents: agents.map((n, i) => ({ agentId: `a${i}`, nodeName: n, zone: "z1", ready: true })),
+    timestamp: "t",
+  };
 }
 
 function targetRow(over: Record<string, unknown> = {}) {
@@ -103,6 +107,9 @@ function renderPage(
     prometheusConfigured?: boolean;
     destinations?: unknown[];
     nodes?: string[];
+    /** Agents the controller does NOT list as nodes — the controller-less
+     *  console of finding #21. */
+    agents?: string[];
     targets?: unknown[];
     onDestinations?: () => Response;
     /** Answers GET /api/v1/mtr/snapshots from the parsed query string, so a
@@ -118,6 +125,7 @@ function renderPage(
     prometheusConfigured = true,
     destinations = [destinationRow()],
     nodes = ["node-a", "node-b", "node-c"],
+    agents = [],
     targets = [targetRow()],
     onDestinations,
     onSnapshots,
@@ -136,7 +144,7 @@ function renderPage(
     if (href.includes("/api/v1/config")) {
       return Promise.resolve(json(configBody(databaseConfigured, prometheusConfigured)));
     }
-    if (href.startsWith("/api/v1/topology")) return Promise.resolve(json(topologyBody(nodes)));
+    if (href.startsWith("/api/v1/topology")) return Promise.resolve(json(topologyBody(nodes, agents)));
     if (href.startsWith("/api/v1/targets")) return Promise.resolve(json({ targets, nextCursor: "" }));
     if (href.startsWith("/api/v1/promql/")) {
       return Promise.resolve(
@@ -797,5 +805,120 @@ describe("MTRPage — runner tab", () => {
     fireEvent.click(await screen.findByRole("button", { name: /start mtr/i }));
 
     expect(await screen.findByRole("alert")).toHaveTextContent(/no pairs/i);
+  });
+
+  /* QA round 4, finding #9. Start MTR was enabled with zero known sources:
+     pressing it posted `sources: []`, which checks.Plan expands to no pairs
+     and refuses — a 422 the operator had to read to learn the form had
+     nothing to run. Diagnostics' noPairs gate, mirrored. */
+  it("disables Start MTR with no sources at all, and says why", async () => {
+    renderPage({ permissions: RUNNER, nodes: [] });
+
+    await openRunner();
+    // The reason appears once the topology has ANSWERED with an empty fleet —
+    // which is the state this gate is about, as opposed to a request still in
+    // flight.
+    expect(await screen.findByText(/no sources to trace from/i)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /start mtr/i })).toBeDisabled();
+  });
+
+  it("disables it when the operator has unticked every source by hand", async () => {
+    renderPage({ permissions: RUNNER, nodes: ["node-a", "node-b"] });
+
+    await openRunner();
+    await screen.findByText(/~2 pairs/);
+    const sourcesBox = within(screen.getByRole("group", { name: /sources/i }));
+    fireEvent.click(sourcesBox.getByRole("checkbox", { name: /all nodes/i }));
+    expect(screen.getByRole("button", { name: /start mtr/i })).toBeDisabled();
+
+    fireEvent.click(sourcesBox.getByRole("checkbox", { name: "node-a" }));
+    expect(screen.getByRole("button", { name: /start mtr/i })).toBeEnabled();
+  });
+
+  it("previews the pair count the way the Diagnostics form does", async () => {
+    renderPage({ permissions: RUNNER, nodes: ["node-a", "node-b"] });
+
+    await openRunner();
+    // Two nodes, node destinations: the self-excluded cross product.
+    expect(await screen.findByText(/~2 pairs/)).toBeInTheDocument();
+  });
+
+  it("does not flicker dead while the topology request is still in flight", async () => {
+    renderPage({ permissions: RUNNER, nodes: ["node-a", "node-b"] });
+
+    await openRunner();
+    // The very first paint, before GET /api/v1/topology has answered: "we do
+    // not know yet" is not "there is nothing to run".
+    expect(screen.getByRole("button", { name: /start mtr/i })).toBeEnabled();
+  });
+
+  /* QA round 4, finding #21: `topology.nodes` is empty on a console with no
+     controller wired, which left this form with nothing to trace FROM. */
+  it("lists the agents' own node names when the controller reports none", async () => {
+    renderPage({ permissions: RUNNER, nodes: [], agents: ["node-a", "node-b"] });
+
+    await openRunner();
+    await screen.findByText(/~2 pairs/);
+    const sourcesBox = within(screen.getByRole("group", { name: /sources/i }));
+    fireEvent.click(sourcesBox.getByRole("checkbox", { name: /all nodes/i }));
+    expect(sourcesBox.getByRole("checkbox", { name: "node-a" })).toBeInTheDocument();
+    expect(sourcesBox.getByRole("checkbox", { name: "node-b" })).toBeInTheDocument();
+  });
+
+  /* QA round 4, finding #10: a refusal outlived the form state it was about. */
+  it("clears a stale submit error when the destination mode changes", async () => {
+    renderPage({
+      permissions: [...RUNNER, "targets:read"],
+      onRun: () => problem(422, "Unprocessable Entity", "the selection expands to no pairs"),
+    });
+
+    await openRunner();
+    fireEvent.click(await screen.findByRole("button", { name: /start mtr/i }));
+    expect(await screen.findByRole("alert")).toHaveTextContent(/no pairs/i);
+
+    fireEvent.click(screen.getByRole("radio", { name: /ad-hoc/i }));
+    await waitFor(() => expect(screen.queryByRole("alert")).not.toBeInTheDocument());
+  });
+
+  it("drops the started-run link too — it names a run the form no longer describes", async () => {
+    renderPage({ permissions: RUNNER, onRun: () => json({ id: "run-42" }, { status: 202 }) });
+
+    await openRunner();
+    fireEvent.click(await screen.findByRole("button", { name: /start mtr/i }));
+    await screen.findByRole("link", { name: /watch it here/i });
+
+    fireEvent.click(screen.getByRole("radio", { name: /ad-hoc/i }));
+    await waitFor(() => expect(screen.queryByRole("link", { name: /watch it here/i })).not.toBeInTheDocument());
+  });
+});
+
+/** QA round 4, findings #12 and #20 — the copy the explorer prints. */
+describe("MTRPage — copy", () => {
+  it("agrees the count with its noun rather than printing '1 hops'", async () => {
+    renderPage({
+      destinations: [destinationRow({ snapshotCount: 1, traceCount: 1 })],
+      onSnapshots: () => json({ snapshots: [snapshotRow({ hopCount: 1, traceCount: 1 })], nextCursor: "" }),
+    });
+
+    await selectPair("node-a", "node-b");
+    expect(await screen.findByText("1 hop")).toBeInTheDocument();
+    // Both the destinations pane's group header and the snapshot row.
+    expect(screen.getAllByText(/\b1 path\b/).length).toBeGreaterThan(0);
+    expect(screen.queryByText(/1 hops/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/1 traces/)).not.toBeInTheDocument();
+  });
+
+  it("still pluralises a real plural", async () => {
+    renderPage();
+
+    await selectPair("node-a", "node-b");
+    expect(await screen.findByText("2 hops")).toBeInTheDocument();
+  });
+
+  it("does not tell a 700px reader to look 'on the left', where the pane is stacked above", async () => {
+    renderPage();
+
+    expect(await screen.findByText("Pick a source to see its path history.")).toBeInTheDocument();
+    expect(screen.queryByText(/on the left/i)).not.toBeInTheDocument();
   });
 });

@@ -1,16 +1,20 @@
 # kconmon-ng
 
-Kubernetes Node Connectivity Monitor — Next Generation. kconmon-ng continuously
-measures pod-to-pod and node-to-node network health across a cluster. An **agent
-DaemonSet** runs a probe on every node and a **controller Deployment** hands each
-agent its peer list over gRPC. Agents run TCP, UDP, ICMP, DNS and HTTP checkers
-against their peers and trigger a reactive MTR trace on failures, exposing all
-results as Prometheus metrics.
+Kubernetes Node Connectivity Monitor — Next Generation. kconmon-ng makes
+inter-node connectivity a measured fact instead of a guess. An **agent
+DaemonSet** probes from every node and a **controller Deployment** hands each
+agent its peer list over gRPC. Agents run TCP, UDP, ICMP, DNS and HTTP checkers,
+fire a reactive MTR trace when a probe fails, and export latency, jitter, loss
+and per-hop results as Prometheus metrics — per ordered node pair, per protocol.
+
+An optional [Console](#console-optional) web UI ships in the same chart, off by
+default. The project README has the full tour:
+<https://github.com/EsDmitrii/kconmon-ng#readme>.
 
 ## Prerequisites
 
-- Kubernetes 1.19+
-- Helm 3.8+ (OCI registry support)
+- Kubernetes 1.31+ (CI tests against 1.36)
+- Helm 4 (Helm ≥3.14 also works; the chart ships as an OCI artifact)
 - Optional: Prometheus Operator, if you want the `ServiceMonitor` and
   `PrometheusRule` resources (`serviceMonitor.enabled` / `prometheusRule.enabled`)
 - The agent Pods request the `NET_RAW` capability (for ICMP / raw sockets used by
@@ -26,6 +30,15 @@ The chart is published as an OCI artifact on GHCR.
 
 ```bash
 helm install kconmon-ng oci://ghcr.io/esdmitrii/charts/kconmon-ng --version 1.9.0
+```
+
+With the Prometheus Operator objects, which is what most installs want:
+
+```bash
+helm upgrade --install kconmon-ng oci://ghcr.io/esdmitrii/charts/kconmon-ng \
+  --version 1.9.0 \
+  --set serviceMonitor.enabled=true \
+  --set prometheusRule.enabled=true
 ```
 
 With custom values:
@@ -80,8 +93,9 @@ Read-only pages (topology, matrix, PromQL) work with no extra setup; setting
 `console.database.mode` (PostgreSQL, via CloudNativePG or an external DSN)
 and `console.auth.mode` (`anonymous | local | header | oidc`) adds durable
 event/run history, authentication, RBAC and an on-demand diagnostics runner.
-See [`docs/console/`](https://github.com/EsDmitrii/kconmon-ng/tree/main/docs/console)
-for the full architecture and configuration reference.
+Every knob is documented inline in this chart's `values.yaml`, and the HTTP
+API is specified in
+[`docs/console-api.yaml`](https://github.com/EsDmitrii/kconmon-ng/blob/main/docs/console-api.yaml).
 
 | Key | Default | Description |
 | --- | --- | --- |
@@ -105,13 +119,45 @@ Selected key metrics:
 - `kconmon_ng_controller_registered_agents` — agents currently registered with the controller
 - `kconmon_ng_controller_expected_agents` — schedulable nodes expected to run an agent
 
-When `prometheusRule.enabled` is `true`, the chart ships built-in alerting rules,
-including:
+With `prometheusRule.enabled=true` the chart renders six built-in rules. Every
+one of them annotates with the labels its own series carry, so a notification
+names the failing pair, direction and measured value instead of repeating one
+generic sentence per firing series:
 
-- `UDPLossHigh` — sustained high UDP packet loss
-- `TCPChecksFailing` — TCP connectivity checks failing
-- `KconmonAgentsMissing` — fewer agents registered than schedulable nodes
-- `KconmonControllerDown` — no active controller leader
+| Rule | Fires when | Annotation identifies |
+| --- | --- | --- |
+| `UDPLossHigh` | `kconmon_ng_udp_packet_loss_ratio > 0.5` for 5m | source → destination node, both zones, loss % |
+| `TCPChecksFailing` | TCP **failure ratio** > 5% for 5m | source → destination node, both zones, failed % |
+| `DNSChecksFailing` | DNS **failure ratio** > 5% for 5m | source node + zone, queried `host`, `resolver`, failed % |
+| `ExternalChecksFailing` | External **failure ratio** > 10% for 5m | source node + zone, `target`, `target_kind`, failed % |
+| `KconmonAgentsMissing` | `expected_agents - registered_agents > 0` for 10m | controller `instance` and how many agents are missing |
+| `KconmonControllerDown` | `absent(kconmon_ng_controller_leader == 1)` for 5m | nothing to identify; `absent()` has no series labels |
+
+The three `*ChecksFailing` rules compare a **failure ratio** —
+`rate(fail) / rate(all results)` for the same pair — rather than the older
+`rate(fail) > 0`. A raw rate stays positive for the whole window after one
+flaky probe, so it reported "a probe failed recently" instead of "this link is
+unhealthy". The ratio keeps a single failure inside a healthy stream below the
+threshold while a genuinely broken link crosses it immediately. Thresholds are
+5% in-cluster (TCP, DNS) and 10% for external targets, which cross networks the
+cluster operator does not run. Grouping stays per pair — that granularity is the
+point, and it is what lets the annotation name a specific link.
+
+A pair that has never failed has no `{result="fail"}` series, so the division
+produces no sample for it and the rule stays silent rather than materialising a
+zero for every pair in the mesh.
+
+The last two rules watch kconmon-ng itself, so a monitor that goes quiet pages
+you instead of looking healthy. Both need `controller.leaderElection=true`: the
+node informer and the leader metric only run on the leader.
+
+Alert expressions are the only field the chart rewrites: `config.metricsPrefix`
+is applied to `expr` via `replace "kconmon_ng" $prefix`, so metric names in
+`prometheusRule.rules` must stay written with the literal `kconmon_ng` prefix.
+Annotations are passed through untouched, which is what lets
+`{{ $labels.source_node }}` and `{{ $value | humanizePercentage }}` reach
+Prometheus intact — and also why annotations avoid naming metrics, since those
+would not follow a custom prefix.
 
 `prometheusRule.enabled` and `console.alerting.enabled` are two different things
 and neither implies the other. The former renders a static `PrometheusRule` from

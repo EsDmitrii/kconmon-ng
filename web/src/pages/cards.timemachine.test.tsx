@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { RecentChanges } from "@/components/recent-changes";
 import { ThemeProvider } from "@/components/theme-provider";
@@ -193,8 +193,138 @@ describe("TargetCardPage engaged at t", () => {
     await waitFor(() => expect(rec.instant.length).toBeGreaterThan(0));
     expect(rec.instant[0].time).toBeUndefined();
   });
+
+  /* QA round 5, finding #4. The header above says "state as of t", so an
+     operator reasonably reads the definitions and cadences below it as the
+     ones that existed AT t — and they are not. GET /api/v1/checks and
+     /api/v1/schedules take no `?at=` and have no history table behind them;
+     they answer with the current configuration, always. The honest line is
+     the only fix that is not a milestone. */
+  it("says the config panel is shown as of NOW, because it is (#4)", async () => {
+    window.history.pushState({}, "", `/targets/t-1?at=${AT}`);
+    stubFetch();
+    renderCard(<TargetCardPage />);
+    const notice = await screen.findByTestId("checks-tm-notice");
+    expect(notice).toHaveTextContent("Target configuration is shown as of now — only the probe series time-travel.");
+  });
+
+  it("disclaims nothing while live — there is nothing to disclaim (#4)", async () => {
+    window.history.pushState({}, "", "/targets/t-1");
+    stubFetch();
+    renderCard(<TargetCardPage />);
+    await screen.findByText("External probe target");
+    expect(screen.queryByTestId("checks-tm-notice")).toBeNull();
+  });
 });
 
 function escapeRe(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
+
+/* ── QA round 2, finding #6: the run scans leaked the present ───────────────
+   GET /api/v1/runs has no time filter (internal/console/httpapi/runs.go), so
+   both Diagnostics panels were rendering NOW's newest page under a banner
+   reading "you are viewing 12:00". */
+
+const AFTER = { id: "run-after", createdAt: "2026-08-01T12:30:00Z", startedAt: "2026-08-01T12:30:05Z" };
+const BEFORE = { id: "run-before", createdAt: "2026-08-01T11:00:00Z", startedAt: "2026-08-01T11:00:05Z" };
+
+function runSummary(r: { id: string; createdAt: string; startedAt: string }) {
+  return {
+    ...r,
+    status: "succeeded", type: "tcp", plane: "pod",
+    initiatorKind: "user", initiatorId: "u",
+    pairTotal: 1, pairOk: 1, pairFailed: 0,
+  };
+}
+
+function runDetail(r: { id: string; createdAt: string; startedAt: string }) {
+  return {
+    ...runSummary(r),
+    spec: {},
+    results: [
+      {
+        sourceNode: "node-a",
+        destinationNode: "node-b",
+        success: true,
+        durationNs: 1_000_000,
+        recordedAt: r.startedAt,
+      },
+    ],
+  };
+}
+
+/** Answers the run list with both runs and each detail with its own body. */
+function stubRuns(): { detailIds: string[] } {
+  const detailIds: string[] = [];
+  vi.stubGlobal(
+    "fetch",
+    vi.fn((url: string) => {
+      const href = String(url);
+      if (href.includes("/api/v1/auth/me")) return Promise.resolve(json(meBody));
+      if (href.includes("/api/v1/config")) return Promise.resolve(json(configBody));
+      if (href.startsWith("/api/v1/topology")) {
+        return Promise.resolve(json({ nodes: [{ name: "node-a", zone: "z1", ready: true }], agents: [], timestamp: AT }));
+      }
+      if (href.startsWith("/api/v1/events")) return Promise.resolve(json({ events: [], nextCursor: "" }));
+      if (href.includes("/api/v1/promql/query_range")) {
+        return Promise.resolve(json({ status: "success", data: { resultType: "matrix", result: [] } }));
+      }
+      if (href.includes("/api/v1/promql/query")) {
+        return Promise.resolve(json({ status: "success", data: { resultType: "vector", result: [] } }));
+      }
+      const detail = /^\/api\/v1\/runs\/(.+)$/.exec(href);
+      if (detail) {
+        detailIds.push(detail[1]);
+        return Promise.resolve(json(runDetail(detail[1] === AFTER.id ? AFTER : BEFORE)));
+      }
+      if (href.startsWith("/api/v1/runs")) {
+        return Promise.resolve(json({ runs: [runSummary(AFTER), runSummary(BEFORE)], nextCursor: "" }));
+      }
+      return Promise.resolve(json({}));
+    }),
+  );
+  return { detailIds };
+}
+
+describe("NodeCardPage Diagnostics engaged at t", () => {
+  it("never renders a run that started after the viewed instant", async () => {
+    window.history.pushState({}, "", `/nodes/node-a?at=${AT}`);
+    const { detailIds } = stubRuns();
+    renderCard(<NodeCardPage />);
+    fireEvent.click(await screen.findByRole("radio", { name: "Diagnostics" }));
+    await screen.findByText("run-before");
+    expect(screen.queryByText("run-after")).toBeNull();
+    // And it does not even cost a detail request.
+    expect(detailIds).not.toContain("run-after");
+  });
+
+  it("states the time bound alongside the page bound it already admitted", async () => {
+    window.history.pushState({}, "", `/nodes/node-a?at=${AT}`);
+    stubRuns();
+    renderCard(<NodeCardPage />);
+    fireEvent.click(await screen.findByRole("radio", { name: "Diagnostics" }));
+    expect(await screen.findByText(/only runs started at or before the viewed instant/)).toBeInTheDocument();
+  });
+
+  it("lists both while Live, and says nothing about an instant", async () => {
+    window.history.pushState({}, "", "/nodes/node-a");
+    stubRuns();
+    renderCard(<NodeCardPage />);
+    fireEvent.click(await screen.findByRole("radio", { name: "Diagnostics" }));
+    await screen.findByText("run-after");
+    expect(screen.getByText("run-before")).toBeInTheDocument();
+    expect(screen.queryByText(/viewed instant/)).toBeNull();
+  });
+});
+
+describe("PairCardPage Diagnostics engaged at t", () => {
+  it("calls the newest run AS OF t the last run, not the newest run now", async () => {
+    window.history.pushState({}, "", `/pairs/node-a/node-b?at=${AT}`);
+    stubRuns();
+    renderCard(<PairCardPage />);
+    fireEvent.click(await screen.findByRole("radio", { name: "Diagnostics" }));
+    await screen.findByRole("link", { name: "run-before" });
+    expect(screen.queryByRole("link", { name: "run-after" })).toBeNull();
+  });
+});

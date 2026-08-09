@@ -9,7 +9,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { useAuth } from "@/hooks/use-auth";
 import { isTerminalRunStatus, type RunPairRow, useRun } from "@/hooks/use-run";
 import { ApiError, cancelRun } from "@/lib/api";
-import { useWritesDisabled } from "@/lib/timemachine";
+import { useTimeContext, useWriteGuard } from "@/lib/timemachine";
 import { cn } from "@/lib/utils";
 
 const RUN_PATH_PREFIX = "/diagnostics/runs/";
@@ -25,6 +25,42 @@ const RUN_PATH_PREFIX = "/diagnostics/runs/";
  */
 export function runIdFromPath(pathname: string): string {
   return pathname.startsWith(RUN_PATH_PREFIX) ? pathname.slice(RUN_PATH_PREFIX.length) : "";
+}
+
+/**
+ * decodeRunId is what a run id looks like to a HUMAN (QA round 4, finding
+ * #19).
+ *
+ * window.location.pathname is percent-ENCODED, so a run whose id carries
+ * anything outside the unreserved set arrived here as "run%2Fa%20b" and was
+ * printed that way in the page header and in the not-found copy — an id the
+ * reader could not match against the one they pasted.
+ *
+ * DISPLAY ONLY. The encoded form is what runIdFromPath keeps and what
+ * lib/api's getRun re-encodes for the wire, so decoding here cannot corrupt a
+ * request; this is the last step before the string is shown.
+ *
+ * Guarded, because decodeURIComponent THROWS on a lone "%" (a URIError, which
+ * would blank the whole page over a cosmetic step). A string it cannot decode
+ * comes back verbatim — the bytes in the URL bar are more use to whoever has
+ * to explain them than an exception is.
+ */
+export function decodeRunId(raw: string): string {
+  try {
+    return decodeURIComponent(raw);
+  } catch {
+    return raw;
+  }
+}
+
+/** okPairs is the "Pairs 0/2 ok" numerator (QA round 4, finding #14). The
+ *  header read "Pairs 2/2", which an operator reads as "two of two passed"
+ *  while it actually meant "two of two rows have arrived" — on a run where
+ *  BOTH pairs failed. The run's own pairOk is not usable for it: the socket
+ *  can carry a pair's result before the REST snapshot's counter catches up, so
+ *  the count is derived from the merged rows this page is actually showing. */
+export function okPairs(pairs: RunPairRow[]): number {
+  return pairs.filter((p) => p.success === true || p.state === "succeeded").length;
 }
 
 const STATUS_VARIANT: Record<string, NonNullable<BadgeProps["variant"]>> = {
@@ -137,9 +173,16 @@ function PairTable({ pairs }: { pairs: RunPairRow[] }) {
 function CancelRunButton({ runId, onCancelled }: { runId: string; onCancelled: () => Promise<unknown> }) {
   // Note the asymmetry with the permission gate two paragraphs up, and that it
   // is deliberate: no runs:create means this button is ABSENT, the Time Machine
-  // means it is DISABLED (lib/timemachine.tsx's useWritesDisabled). Cancelling
-  // from a view of the past would stop a run happening in the present.
-  const writesDisabled = useWritesDisabled();
+  // means it is DISABLED (lib/timemachine.tsx's useWriteGuard). Cancelling
+  // from a view of the past would stop a run happening in the present — and
+  // the guard carries that REASON with the control (QA round 2, finding #18;
+  // extended to this page in round 3), so a keyboard user who tabs straight to
+  // a greyed "Cancel run" is told why instead of guessing.
+  //
+  // Cancel is this page's ONLY mutation. There is no rerun BUTTON to guard —
+  // the "back to Diagnostics" affordance is a plain <a> to the form, which
+  // starts nothing by itself.
+  const guard = useWriteGuard();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
 
@@ -157,7 +200,7 @@ function CancelRunButton({ runId, onCancelled }: { runId: string; onCancelled: (
 
   return (
     <>
-      <Button size="sm" variant="outline" loading={busy} disabled={writesDisabled} onClick={handleCancel}>
+      <Button size="sm" variant="outline" loading={busy} {...guard} onClick={handleCancel}>
         Cancel run
       </Button>
       {error ? (
@@ -171,7 +214,10 @@ function CancelRunButton({ runId, onCancelled }: { runId: string; onCancelled: (
 
 function NotFound({ runId }: { runId: string }) {
   return (
-    <PageShell title="Run not found" description={runId ? `No run matches “${runId}”.` : "No run id in the URL."}>
+    <PageShell
+      title="Run not found"
+      description={runId ? `No run matches “${decodeRunId(runId)}”.` : "No run id in the URL."}
+    >
       <Card role="status" className="flex flex-col items-center gap-3 px-8 py-16 text-center">
         <span
           aria-hidden="true"
@@ -196,6 +242,14 @@ export function RunDetailPage() {
   const runId = runIdFromPath(window.location.pathname);
   const { run, pairs, isLoading, notFound, error, live, refetch } = useRun(runId);
   const { can } = useAuth();
+  /* The Time Machine's framing for THIS page (QA round 4, finding #4). The
+     permalink itself stays reachable while engaged — a permalink names one
+     specific run, and refusing to render the run somebody linked to would be a
+     worse answer than rendering it. What was missing is the framing every
+     other engaged surface carries: the header now says which instant the
+     console is viewing and that this run is being shown regardless of it, so a
+     run that happened AFTER `t` is not silently read as part of that past. */
+  const { at } = useTimeContext();
 
   if (notFound) return <NotFound runId={runId} />;
 
@@ -217,7 +271,7 @@ export function RunDetailPage() {
 
   if (!run) {
     return (
-      <PageShell title="Diagnostics run" description={runId}>
+      <PageShell title="Diagnostics run" description={decodeRunId(runId)}>
         <Card role="alert" className="border-l-4 border-l-health-bad bg-health-bad-soft/40 p-5">
           <p className="text-sm font-medium">This run is unavailable</p>
           <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
@@ -228,15 +282,29 @@ export function RunDetailPage() {
     );
   }
 
+  const terminal = isTerminalRunStatus(run.status);
+
   return (
     <PageShell
       title="Diagnostics run"
-      description={run.id}
+      description={
+        at
+          ? `${decodeRunId(run.id)} — this permalink is shown in full; the console is otherwise viewing ${at.toLocaleString()}`
+          : decodeRunId(run.id)
+      }
       actions={
         <>
           <StatusBadge status={run.status} />
-          <RealtimeBadge realtime={live} />
-          {can("runs:create") && !isTerminalRunStatus(run.status) ? (
+          {/* Terminal FIRST, then the socket (QA round 4, finding #1). A
+              finished run's data is final: it is neither live nor delayed, and
+              "Delayed data" on a run that succeeded twenty minutes ago was a
+              badge describing a transport nobody is waiting on — it sent
+              operators looking for a stale-data problem that did not exist.
+              The badge only means something while there is still something to
+              arrive, so a non-terminal run with the socket down still says
+              "Delayed data". */}
+          {terminal ? null : <RealtimeBadge realtime={live} />}
+          {can("runs:create") && !terminal ? (
             <CancelRunButton runId={run.id} onCancelled={refetch} />
           ) : null}
         </>
@@ -254,8 +322,12 @@ export function RunDetailPage() {
           </div>
           <div>
             <dt className="text-xs text-muted-foreground">Pairs</dt>
+            {/* ok/total, worded like the history row on /diagnostics (QA round
+                4, finding #14): the bare "2/2" was arrived/total and read as
+                passed/total, so a run whose every pair FAILED announced itself
+                as complete success in the one number a reader scans first. */}
             <dd className="nums mt-0.5">
-              {pairs.length}/{run.pairTotal}
+              {okPairs(pairs)}/{run.pairTotal} ok
             </dd>
           </div>
           <div>

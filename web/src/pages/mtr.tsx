@@ -20,9 +20,10 @@ import {
   getMTRSnapshots,
   listTargets,
 } from "@/lib/api";
-import { useWritesDisabled } from "@/lib/timemachine";
+import { scopeNodeOptions } from "@/lib/investigation-sources";
+import { useWriteGuard } from "@/lib/timemachine";
 import type { DestinationKind, MTRDestination, PathSnapshot } from "@/lib/types";
-import { cn } from "@/lib/utils";
+import { CHECKBOX_CLASS, cn, plural } from "@/lib/utils";
 /* The Runner below builds the SAME POST /api/v1/runs body the Diagnostics run
    form does, from the same controls. Task 8's brief allows a mechanical export
    change over there rather than a second copy of any of this here — see the
@@ -33,6 +34,7 @@ import {
   FieldLabel,
   NodeSelector,
   buildRunRequest,
+  estimatePairCount,
   toggleName,
 } from "./diagnostics";
 
@@ -247,9 +249,7 @@ function DestinationsPane({
             <div key={group.destination}>
               <div className="flex flex-wrap items-baseline justify-between gap-2">
                 <h3 className="truncate text-sm font-medium">{group.destination}</h3>
-                <span className="nums text-xs text-muted-foreground">
-                  {group.snapshotCount} {group.snapshotCount === 1 ? "path" : "paths"}
-                </span>
+                <span className="nums text-xs text-muted-foreground">{plural(group.snapshotCount, "path")}</span>
               </div>
               <ul aria-label={group.destination} className="mt-1.5 flex flex-col gap-1">
                 {group.sources.map((row) => {
@@ -271,7 +271,7 @@ function DestinationsPane({
                       >
                         <span className="truncate">from {row.sourceNode}</span>
                         <span className="nums shrink-0 text-muted-foreground">
-                          {row.snapshotCount} · {row.traceCount} traces
+                          {row.snapshotCount} · {plural(row.traceCount, "trace")}
                         </span>
                       </button>
                     </li>
@@ -402,7 +402,11 @@ function HistoryPane({
         <PathChangesTimeline source={pair.source} destination={pair.destination} snapshots={snapshots} />
       ) : null}
 
-      {!pair ? <EmptyNote>Pick a source on the left to see the routes it has taken.</EmptyNote> : null}
+      {/* No "on the left" (QA round 4, finding #20): under ~700px the three
+          panes stack, and the destinations pane is ABOVE this one, not beside
+          it — the copy was pointing at empty space. The neutral wording is
+          true at every width. */}
+      {!pair ? <EmptyNote>Pick a source to see its path history.</EmptyNote> : null}
 
       {error ? (
         <p role="alert" className="mt-3 text-sm text-health-bad">
@@ -434,7 +438,7 @@ function HistoryPane({
                 aria-label={`Compare path ${shortHash(s.pathHash)}`}
                 checked={compare.includes(s.id)}
                 onChange={() => onToggleCompare(s.id)}
-                className="size-4 shrink-0 rounded border-border-strong"
+                className={CHECKBOX_CLASS}
               />
               <button
                 type="button"
@@ -451,11 +455,11 @@ function HistoryPane({
               >
                 <span className="flex flex-wrap items-center gap-2">
                   <span className="nums font-mono text-xs">{shortHash(s.pathHash)}</span>
-                  <Badge variant="neutral">{s.hopCount} hops</Badge>
+                  <Badge variant="neutral">{plural(s.hopCount, "hop")}</Badge>
                   {changed[i] ? <Badge variant="warn">path changed</Badge> : null}
                 </span>
                 <span className="nums text-xs text-muted-foreground">
-                  {fmtTime(s.firstSeen)} → {fmtTime(s.lastSeen)} · {s.traceCount} traces
+                  {fmtTime(s.firstSeen)} → {fmtTime(s.lastSeen)} · {plural(s.traceCount, "trace")}
                 </span>
               </button>
             </li>
@@ -589,7 +593,12 @@ function DiffPane({ snapshots, compare }: { snapshots: PathSnapshot[]; compare: 
  */
 function RunnerPane({ canReadTargets }: { canReadTargets: boolean }) {
   const topo = useTopology();
-  const nodeNames = useMemo(() => topo.data?.nodes?.map((n) => n.name) ?? [], [topo.data]);
+  /* The union of controller nodes and the node names the AGENTS report (QA
+     round 4, finding #21) — the same helper the Diagnostics form and the
+     Investigate scope selects use. `topology.nodes` alone is empty on a
+     console with no controller wired, which left this form with no source to
+     trace from at all. */
+  const nodeNames = useMemo(() => scopeNodeOptions(topo.data), [topo.data]);
 
   const [sourcesAll, setSourcesAll] = useState(true);
   const [sources, setSources] = useState<string[]>([]);
@@ -605,7 +614,11 @@ function RunnerPane({ canReadTargets }: { canReadTargets: boolean }) {
   // while engaged — path history is inherently historical, and its detail/diff
   // views need no anchoring at all. The Runner is the page's one MUTATION, and
   // it is the one thing time takes away.
-  const writesDisabled = useWritesDisabled();
+  /* guard carries the DISABLED flag AND the reason for it — lib/timemachine's
+     useWriteGuard (QA round 2, finding #18; extended here in round 3). Spread it
+     onto the control, and compose any local condition AFTER the spread. */
+  const guard = useWriteGuard();
+  const writesDisabled = guard.disabled;
 
   // Same cache entry, same gating as the Diagnostics form's picker: GET
   // /api/v1/targets needs targets:read, so asking without it is a guaranteed
@@ -632,6 +645,35 @@ function RunnerPane({ canReadTargets }: { canReadTargets: boolean }) {
   const incompleteDestination =
     (destinationKind === "target" && destinationTargetId === "") ||
     (destinationKind === "adhoc" && destinationAddress.trim() === "");
+
+  /* The pair preview and its gate, mirroring the Diagnostics form (QA round 4,
+     finding #9). Start MTR was ENABLED on a console with zero known sources:
+     pressing it posted `sources: []`, which checks.Plan expands to no pairs at
+     all and refuses with a 422 the operator then had to read to learn that the
+     form had nothing to run. An external run is one pair per source; a node
+     run is the self-excluded cross product, exactly as over there. */
+  const resolvedSources = sourcesAll ? nodeNames : sources;
+  const resolvedDestinations = destinationsAll ? nodeNames : destinations;
+  const external = destinationKind !== "node";
+  const pairCount = external
+    ? new Set(resolvedSources).size
+    : estimatePairCount(resolvedSources, resolvedDestinations);
+  // Only once the topology has actually ANSWERED. An in-flight GET
+  // /api/v1/topology has an empty node list for a fraction of a second, and
+  // disabling the button on it would make the control flicker dead on every
+  // cold load — "we do not know yet" is not "there is nothing to run".
+  const noPairs = !topo.isPending && pairCount === 0;
+
+  /* ONE clearing point for the whole form (QA round 4, finding #10) — the same
+     treatment, and the same reasoning, as the Diagnostics run form: the two
+     Segmented controls fire no change event, so a form-level onChange would
+     miss precisely the switch that most obviously invalidates the error. The
+     started-run link goes with it: it names a run the operator has since
+     stopped describing. */
+  useEffect(() => {
+    setSubmitError(undefined);
+    setStartedRunId(undefined);
+  }, [sourcesAll, destinationsAll, sources, destinations, destinationKind, destinationTargetId, destinationAddress]);
 
   async function handleSubmit(e: FormEvent) {
     e.preventDefault();
@@ -715,6 +757,9 @@ function RunnerPane({ canReadTargets }: { canReadTargets: boolean }) {
               {(id) => (
                 <input
                   id={id}
+                  /* Named explicitly as well as by its <label> (QA round 4,
+                     finding #16) — see the Diagnostics twin. */
+                  aria-label="Destination address"
                   value={destinationAddress}
                   placeholder="10.0.0.1 or example.test"
                   onChange={(e) => setDestinationAddress(e.target.value)}
@@ -725,6 +770,15 @@ function RunnerPane({ canReadTargets }: { canReadTargets: boolean }) {
           ) : null}
         </div>
 
+        {/* The count AND, at zero, the reason — the Diagnostics form's own
+            posture: a dead button owes an explanation, and "no sources" is one
+            the operator can act on (wire a controller, or wait for an agent to
+            register). */}
+        <span className={cn("nums text-sm", noPairs ? "text-health-bad" : "text-muted-foreground")}>
+          ~{plural(pairCount, "pair")}
+          {noPairs ? " — no sources to trace from, so there is nothing to run" : ""}
+        </span>
+
         {submitError ? (
           <p role="alert" className="text-sm text-health-bad">
             {submitError}
@@ -734,7 +788,7 @@ function RunnerPane({ canReadTargets }: { canReadTargets: boolean }) {
         <Button
           type="submit"
           loading={submitting}
-          disabled={incompleteDestination || writesDisabled}
+          {...guard} disabled={noPairs || incompleteDestination || writesDisabled}
           className="self-start"
         >
           Start MTR

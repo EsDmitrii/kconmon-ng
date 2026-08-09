@@ -25,6 +25,27 @@ export const RECENT_CHANGES_LIMIT = 50;
 // object card, not the primary feed.
 export const RECENT_CHANGES_CAP = 200;
 
+/** The separator events.pairScope writes between the two halves of a pair
+ * scope (internal/console/events/live_event.go) — U+2192 RIGHTWARDS ARROW, NOT
+ * a hyphen-arrow. Named rather than inlined so the one place this glyph is
+ * written client-side is the one place to check it against the Go writer. */
+const PAIR_SEPARATOR = "→";
+
+/** matchesScope is the client-side twin of the server's two events filters, so
+ * the live half of this rail admits exactly the rows the history half returned:
+ * `scope` is equality (`?scope=`), `scopeNode` is "this name on either side of
+ * a pair scope" (`?scopeNode=`, store.EventFilter.ScopeNode). Splitting on the
+ * FIRST separator and comparing whole halves keeps it an exact match — a
+ * substring test would let "node-a" claim "node-ax→b". */
+export function matchesScope(eventScope: string, exact: string, node: string): boolean {
+  if (node !== "") {
+    if (eventScope === node) return true;
+    const i = eventScope.indexOf(PAIR_SEPARATOR);
+    return i >= 0 && (eventScope.slice(0, i) === node || eventScope.slice(i + PAIR_SEPARATOR.length) === node);
+  }
+  return eventScope === exact;
+}
+
 const SEVERITY_VARIANT: Record<LiveEventSeverity, "neutral" | "warn" | "bad"> = {
   info: "neutral",
   warn: "warn",
@@ -50,33 +71,57 @@ function mergeCapped(prev: LiveEvent[], incoming: LiveEvent[]): LiveEvent[] {
 }
 
 /**
- * RecentChanges is the shared right rail every M3 object card (Node, Pair)
- * mounts, per PAGES.md §6.4. It is parameterised only by `scope` — the exact
- * string events.LiveEvent.Scope carries for this object
- * (internal/console/events/live_event.go): a bare node name for a node card,
- * or "<source>→<destination>" (U+2192 — pairScope's own separator, NOT a
- * hyphen-arrow) for a pair card. Getting that string wrong yields a silently
- * empty rail — there is no error state for "scope matched nothing" — so
- * callers must build it exactly the way the controller does.
+ * RecentChanges is the shared right rail every M3 object card (Node, Pair,
+ * Target) mounts, per PAGES.md §6.4. Exactly ONE of its two props says which
+ * events belong to this object, mirroring the two mutually-exclusive server
+ * filters (GET /api/v1/events answers 422 if both arrive):
  *
- * Two sources feed the same ring: GET /api/v1/events?scope=...&limit=50 for
- * history, and the `live` WebSocket topic (filtered to an EXACT scope match,
- * unlike the Live page's own case-insensitive substring filter — a card is
- * pinned to one precise object, not a search) for real-time updates while the
- * card stays open. Both merge through pushEvents' id-based dedupe, so an
- * event the history page already returned and one this tab later sees live
- * collapse into a single row rather than appearing twice.
+ *   - `scope` — equality on events.LiveEvent.Scope
+ *     (internal/console/events/live_event.go). What a PAIR card wants:
+ *     "<source>→<destination>" (U+2192 — pairScope's own separator, NOT a
+ *     hyphen-arrow) names one edge and nothing else.
+ *   - `scopeNode` — a node/target NAME matched on either side of the scope.
+ *     What an OBJECT card wants: a node takes part in pair-scoped rows
+ *     ("node-a→node-b" — every check run, every path change) that an equality
+ *     filter on its own name structurally cannot see. Before this existed the
+ *     node card's rail silently dropped all of them (QA scope 2 #21).
+ *
+ * Getting the string wrong yields a silently empty rail — there is no error
+ * state for "nothing matched" — so callers must build it exactly the way the
+ * controller does.
+ *
+ * Two sources feed the same ring: GET /api/v1/events?…&limit=50 for history,
+ * and the `live` WebSocket topic for real-time updates while the card stays
+ * open. The socket half is filtered through matchesScope with the SAME two
+ * props, so a live arrival and a history row are admitted by one rule — a
+ * narrower live filter would make an event appear only after a reload. (Still
+ * exact, unlike the Live page's case-insensitive substring search: a card is
+ * pinned to one precise object.) Both merge through pushEvents' id-based
+ * dedupe, so an event the history page already returned and one this tab later
+ * sees live collapse into a single row rather than appearing twice.
  */
-export function RecentChanges({ scope }: { scope: string }) {
+export type RecentChangesProps =
+  | { scope: string; scopeNode?: undefined }
+  | { scope?: undefined; scopeNode: string };
+
+export function RecentChanges({ scope = "", scopeNode = "" }: RecentChangesProps) {
   const { available: dbAvailable, resolved: dbResolved } = useDatabaseAvailable();
   const { at } = useTimeContext();
   const atKey = at ? at.toISOString() : "";
   const [events, setEvents] = useState<LiveEvent[]>([]);
 
+  // The identity of "which object is this rail pinned to" — the two props are
+  // exclusive, so one of them is it. The filter name rides in the query key
+  // alongside the value: ?scope=node-a and ?scopeNode=node-a are different
+  // questions with the same argument, and caching one answer under the other
+  // would hand a pair card a node card's rows.
+  const filterName = scopeNode !== "" ? "scopeNode" : "scope";
+  const filterValue = scopeNode !== "" ? scopeNode : scope;
+
   // Gated on dbResolved too, not just dbAvailable: a cold /api/v1/config must
   // not be read as "no database" (which would skip the fetch this exists to
   // make) the same way useDatabaseAvailable's own doc comment warns about.
-  const historyEnabled = dbResolved && dbAvailable && scope !== "";
+  const historyEnabled = dbResolved && dbAvailable && filterValue !== "";
   const historyQuery = useQuery({
     // `to` bounds the rail to the Time Machine's instant (Task 11): "Recent
     // changes" on a card showing state-as-of-t means the changes up to t, not
@@ -84,8 +129,11 @@ export function RecentChanges({ scope }: { scope: string }) {
     // (store.EventFilter.To), and `at` carries seconds precision, so an event
     // stamped exactly at t belongs to the next second's view — the same edge
     // the annotations store already documents.
-    queryKey: at ? ["events", scope, "to", at.toISOString()] : ["events", scope],
-    queryFn: () => getEvents({ scope, limit: RECENT_CHANGES_LIMIT, ...(at ? { to: at } : {}) }),
+    queryKey: at
+      ? ["events", filterName, filterValue, "to", at.toISOString()]
+      : ["events", filterName, filterValue],
+    queryFn: () =>
+      getEvents({ [filterName]: filterValue, limit: RECENT_CHANGES_LIMIT, ...(at ? { to: at } : {}) }),
     enabled: historyEnabled,
   });
 
@@ -95,7 +143,7 @@ export function RecentChanges({ scope }: { scope: string }) {
   // from after t are exactly what this rail must not be showing.
   useEffect(() => {
     setEvents([]);
-  }, [scope, atKey]);
+  }, [filterName, filterValue, atKey]);
 
   useEffect(() => {
     if (historyQuery.data) setEvents((prev) => mergeCapped(prev, historyQuery.data.events));
@@ -110,15 +158,15 @@ export function RecentChanges({ scope }: { scope: string }) {
   // into a rail whose whole claim is "up to t". The socket itself is page-wide
   // and stays open; this rail simply stops listening until Live returns.
   useEffect(() => {
-    if (scope === "" || at !== null) return;
+    if (filterValue === "" || at !== null) return;
     const ws = getWsClient();
     const off = ws.subscribe<LiveEvent>(TOPIC_LIVE, (env: WsEnvelope<LiveEvent>) => {
       if (env.type !== "event") return;
-      if (env.data.scope !== scope) return;
+      if (!matchesScope(env.data.scope, scope, scopeNode)) return;
       setEvents((prev) => mergeCapped(prev, [env.data]));
     });
     return () => off();
-  }, [scope, at]);
+  }, [scope, scopeNode, filterValue, at]);
 
   const historyError = historyQuery.isError
     ? historyQuery.error instanceof ApiError

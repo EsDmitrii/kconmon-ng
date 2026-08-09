@@ -60,8 +60,8 @@ type LiveEvent struct {
 }
 
 // Details payloads: one struct per event type, so the JSON keys are a compiled
-// contract rather than a map literal. These are what the payload table in
-// docs/console/architecture/WEBSOCKET.md documents.
+// contract rather than a map literal — these structs ARE the wire contract the
+// web client's ws types mirror.
 // topologyChangedDetails is also the durable shape: the ingester persists it
 // verbatim into topology_events.details, and the store's fold parses it back
 // (internal/console/store/events.go, topologyChangeDetails, mirrored by hand).

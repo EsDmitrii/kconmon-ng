@@ -61,8 +61,9 @@ function isSnapshotTopic(topic: string): boolean {
 
 /**
  * wsUrl derives ws(s)://<host>/ws from the page location. `/ws` is top level,
- * not under /api/v1 (docs/console/architecture/API.md, ADR-003). The argument
- * is only for tests — jsdom's window.location cannot be stubbed.
+ * not under /api/v1 — it is a protocol upgrade, not a REST resource, and the
+ * server registers it outside the API subrouter (see httpapi/server.go). The
+ * argument is only for tests — jsdom's window.location cannot be stubbed.
  */
 export function wsUrl(loc: { protocol: string; host: string } = window.location): string {
   const scheme = loc.protocol === "https:" ? "wss:" : "ws:";

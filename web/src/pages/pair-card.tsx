@@ -17,9 +17,10 @@ import { useMatrix } from "@/hooks/use-matrix";
 import { ApiError, createRun, getRun, getRuns, goTo, promqlQueryRange } from "@/lib/api";
 import { toSeriesOption, type CuratedChart } from "@/lib/curated-metrics";
 import type { InvestigationScope } from "@/lib/investigation-sources";
-import { useTimeContext, useWritesDisabled } from "@/lib/timemachine";
+import { cellSummary, cellTier, fmtRatio, isMeasured } from "@/lib/matrix-cells";
+import { useTimeContext, useWriteGuard } from "@/lib/timemachine";
 import type { MatrixCell, RunDetail, RunResult } from "@/lib/types";
-import { escapeLabelValue } from "@/lib/utils";
+import { escapeLabelValue, runsAtOrBefore } from "@/lib/utils";
 
 const PAIR_PATH_PREFIX = "/pairs/";
 
@@ -63,17 +64,6 @@ const TIER_VARIANT: Record<Tier, NonNullable<BadgeProps["variant"]>> = {
   unknown: "unknown",
 };
 
-function tierOf(cell: MatrixCell | undefined): Tier {
-  if (!cell || cell.failRatio === null) return "unknown";
-  if (cell.failRatio < 0.01) return "ok";
-  if (cell.failRatio < 0.1) return "warn";
-  return "bad";
-}
-
-function fmtFail(ratio: number): string {
-  return `${(100 * ratio).toFixed(1)}%`;
-}
-
 function fmtDuration(ns?: number): string {
   return ns === undefined ? "—" : `${(ns / 1e6).toFixed(0)}ms`;
 }
@@ -84,16 +74,23 @@ function fmtTime(ts?: string): string {
   return Number.isNaN(d.getTime()) ? ts : d.toLocaleString();
 }
 
-/** DirectionStat renders one directed leg's fail ratio as a labelled badge --
+/** DirectionStat renders one directed leg's severity as a labelled badge --
  * the pair card's header shows BOTH legs (src→dst and dst→src) side by side,
- * since a pair's two directions can and do disagree. */
+ * since a pair's two directions can and do disagree.
+ *
+ * "no data" is now reserved for a leg NOTHING measured (QA round 2, finding
+ * #1). A leg with a p95 and no failure samples showed "no data" in a grey chip
+ * beside a chart full of that leg's latency; it now reads "no fail data" and
+ * carries the rest on hover, and its tier comes from packet loss when there is
+ * some. */
 function DirectionStat({ label, cell }: { label: string; cell?: MatrixCell }) {
-  const tier = tierOf(cell);
+  const tier = cellTier(cell);
+  const measured = isMeasured(cell);
   return (
     <span className="flex items-center gap-1.5 text-xs">
       <span className="text-muted-foreground">{label}</span>
-      <Badge variant={TIER_VARIANT[tier]} dot>
-        {cell?.failRatio == null ? "no data" : fmtFail(cell.failRatio)}
+      <Badge variant={TIER_VARIANT[tier]} title={measured ? cellSummary(cell) : undefined} dot>
+        {!measured ? "no data" : cell?.failRatio == null ? "no fail data" : fmtRatio(cell.failRatio)}
       </Badge>
     </span>
   );
@@ -247,8 +244,15 @@ export function findLastRunForPair(
  * same limitation node-card.tsx's Diagnostics tab has, noted the same way.
  */
 function usePairLastRun(source: string, destination: string) {
+  const { at } = useTimeContext();
   const runsQuery = useQuery({ queryKey: ["runs", "recent-scan"], queryFn: () => getRuns({ limit: RUN_SCAN_LIMIT }) });
-  const ids = useMemo(() => runsQuery.data?.runs.map((r) => r.id) ?? [], [runsQuery.data]);
+  /* Cut to the viewed instant before fetching details, exactly as the node
+     card's own scan does: "the last run for this pair" under a banner reading
+     12:00 must mean the last one AS OF 12:00 (QA round 2, finding #6). */
+  const ids = useMemo(
+    () => runsAtOrBefore(runsQuery.data?.runs ?? [], at).map((r) => r.id),
+    [runsQuery.data, at],
+  );
   const detailsQuery = useQuery({
     queryKey: ["runs", "recent-scan", "details", ids.join(",")],
     queryFn: () => Promise.all(ids.map((id) => getRun(id))),
@@ -275,7 +279,8 @@ function PairDiagnosticsTab({
   canCreate: boolean;
 }) {
   const { last, isLoading, error } = usePairLastRun(source, destination);
-  const writesDisabled = useWritesDisabled();
+  const { at } = useTimeContext();
+  const guard = useWriteGuard();
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string>();
 
@@ -297,12 +302,13 @@ function PairDiagnosticsTab({
         <div className="flex flex-wrap items-center justify-between gap-3">
           <h3 className="text-sm font-semibold">Last run for this pair</h3>
           {/* Permission decides whether this button EXISTS; time decides
-              whether it is usable (lib/timemachine.tsx's useWritesDisabled
-              documents the split). Starting a probe from a view of the past
-              would run it now, against the present fleet — the one thing the
-              mode must not let happen by accident. */}
+              whether it is usable (lib/timemachine.tsx's useWriteGuard
+              documents the split, and now carries the REASON with it).
+              Starting a probe from a view of the past would run it now,
+              against the present fleet — the one thing the mode must not let
+              happen by accident. */}
           {canCreate ? (
-            <Button size="sm" loading={submitting} disabled={writesDisabled} onClick={() => void runCheck()}>
+            <Button size="sm" loading={submitting} {...guard} onClick={() => void runCheck()}>
               Run check
             </Button>
           ) : null}
@@ -325,7 +331,10 @@ function PairDiagnosticsTab({
         {!isLoading && !last && !error ? (
           <p className="mt-3 text-xs leading-relaxed text-muted-foreground">
             No matching run in the most recent {RUN_SCAN_LIMIT} runs — GET /api/v1/runs has no source/destination
-            filter yet, so an older run for this pair may exist but is not shown here.
+            filter yet, so an older run for this pair may exist but is not shown here
+            {/* And no time filter either, so the cut to `t` is client-side over
+                that same page — both bounds, stated together. */}
+            {at ? ", and only runs started at or before the viewed instant are considered" : ""}.
           </p>
         ) : null}
 

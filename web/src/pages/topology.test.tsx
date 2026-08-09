@@ -83,4 +83,85 @@ describe("nodeNavigationPath", () => {
   it("ignores a zone container click", () => {
     expect(nodeNavigationPath({ id: "zone:z1", type: "zone" })).toBeUndefined();
   });
+
+  /* QA round 2, finding #7: a click on a map of 12:00 must land on a card of
+     12:00. The stamp is the Time Machine's own (RFC 3339, UTC, seconds). */
+  it("carries the engaged instant to the node card", () => {
+    const at = new Date("2026-08-01T12:00:00Z");
+    expect(nodeNavigationPath({ id: "node-a", type: "topoNode" }, at)).toBe(
+      `/nodes/node-a?at=${encodeURIComponent("2026-08-01T12:00:00Z")}`,
+    );
+  });
+
+  it("adds nothing while Live", () => {
+    expect(nodeNavigationPath({ id: "node-a", type: "topoNode" }, null)).toBe("/nodes/node-a");
+  });
+});
+
+/* ── QA round 2, findings #1, #9 and #22 ─────────────────────────────────── */
+
+describe("buildFlow — a pair measured without a failure ratio", () => {
+  // Loss 5%, and the fail counter has never fired: exactly the state that used
+  // to make the pair invisible on this map.
+  const lossy: Matrix = {
+    protocol: "udp", plane: "pod", nodes: ["n1", "n2"],
+    cells: [{ source: "n1", destination: "n2", failRatio: null, rttP95: 2e6, lossRatio: 0.05 }],
+    timestamp: "t",
+  };
+
+  it("draws the problem edge from packet loss alone", () => {
+    const { edges, problemTotal } = buildFlow(topo, lossy);
+    expect(problemTotal).toBe(1);
+    expect(edges[0].id).toBe("n1->n2");
+    expect(edges[0].className).toBe("topo-edge--degraded");
+  });
+
+  it("names the vector the percentage came from", () => {
+    const { edges } = buildFlow(topo, lossy);
+    expect(edges[0].data).toMatchObject({ failLabel: "5% loss" });
+  });
+
+  it("colours the source node from the loss it cannot see in the fail series", () => {
+    const { nodes } = buildFlow(topo, lossy);
+    expect(nodes.find((n) => n.id === "n1")?.className).toContain("degraded");
+  });
+});
+
+describe("buildFlow — back edges", () => {
+  const mutual: Matrix = {
+    protocol: "tcp", plane: "pod", nodes: ["n1", "n2"],
+    cells: [
+      { source: "n1", destination: "n2", failRatio: 0.2 },
+      { source: "n2", destination: "n1", failRatio: 0.15 },
+    ],
+    timestamp: "t",
+  };
+
+  it("gives an opposite pair symmetric, direction-keyed routing", () => {
+    const { edges } = buildFlow(topo, mutual);
+    const forward = edges.find((e) => e.id === "n1->n2");
+    const back = edges.find((e) => e.id === "n2->n1");
+    expect(forward).toMatchObject({ pathOptions: { stepPosition: 0.35, offset: 16 } });
+    expect(back).toMatchObject({ pathOptions: { stepPosition: 0.65, offset: 44 } });
+  });
+
+  it("leaves a lone edge on the default routing — nothing to bow around", () => {
+    const { edges } = buildFlow(topo, matrix);
+    expect(edges[0]).not.toHaveProperty("pathOptions");
+  });
+});
+
+describe("buildFlow — node accessibility", () => {
+  it("labels every node with who, where and how", () => {
+    const { nodes } = buildFlow(topo, matrix);
+    // n1's worst outbound path is 20%, so it reads failing; n2 is not ready.
+    expect(nodes.find((n) => n.id === "n1")?.ariaLabel).toBe("n1, zone z1, failing");
+    expect(nodes.find((n) => n.id === "n2")?.ariaLabel).toBe("n2, zone z2, failing, not ready");
+  });
+
+  it("says healthy in words rather than in the class name's vocabulary", () => {
+    const quiet: Matrix = { protocol: "tcp", plane: "pod", nodes: ["n1"], cells: [], timestamp: "t" };
+    const oneReady: Topology = { nodes: [{ name: "n1", zone: "z1", ready: true }], agents: [], timestamp: "t" };
+    expect(buildFlow(oneReady, quiet).nodes.find((n) => n.id === "n1")?.ariaLabel).toBe("n1, zone z1, healthy");
+  });
 });
