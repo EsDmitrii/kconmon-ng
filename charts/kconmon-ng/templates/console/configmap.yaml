@@ -1,19 +1,20 @@
 {{- if .Values.console.enabled }}
-{{- /* Keyed on the resolved gRPC address: an explicit grpcAddr is still realtime-on. */}}
-{{- if and (include "kconmon-ng.console.controllerGRPCAddr" .) (eq .Values.console.valkey.mode "disabled") (gt (int .Values.console.replicas) 1) }}
-{{- fail "realtime events with console.valkey.mode=disabled require console.replicas=1 (the in-process bus has no cross-replica fan-out, ADR-002): set console.valkey.mode=bundled|external or console.replicas=1" }}
-{{- end }}
-{{- /* Keyed on the resolved auth mode: local/oidc sessions need Valkey past one replica. */}}
-{{- if and (has .Values.console.auth.mode (list "local" "oidc")) (eq .Values.console.valkey.mode "disabled") (gt (int .Values.console.replicas) 1) }}
-{{- fail "auth.mode=local|oidc with console.valkey.mode=disabled requires console.replicas=1 (sessions live in Valkey per DATA.md §5.3; the in-process KV has no cross-replica visibility, so a browser load-balanced to another replica would be logged out at random): set console.valkey.mode=bundled|external or console.replicas=1" }}
+{{- /* Auth-mode prerequisites first: they hold at any replica count, so they name the root cause. */}}
+{{- /* An empty trustedProxyCIDRs in header mode would be an authentication bypass. */}}
+{{- if and (eq .Values.console.auth.mode "header") (not .Values.console.auth.header.trustedProxyCIDRs) }}
+{{- fail "auth.mode=header requires a non-empty console.auth.header.trustedProxyCIDRs: without it any client could set X-Remote-User and authenticate as anyone" }}
 {{- end }}
 {{- /* Keyed on the resolved auth mode: local/oidc need PostgreSQL. */}}
 {{- if and (has .Values.console.auth.mode (list "local" "oidc")) (eq .Values.console.database.mode "disabled") }}
 {{- fail "auth.mode=local|oidc requires console.database.mode=cnpg|external (users, tokens and the audit log live in PostgreSQL, SECURITY.md §10.1)" }}
 {{- end }}
-{{- /* An empty trustedProxyCIDRs in header mode would be an authentication bypass. */}}
-{{- if and (eq .Values.console.auth.mode "header") (not .Values.console.auth.header.trustedProxyCIDRs) }}
-{{- fail "auth.mode=header requires a non-empty console.auth.header.trustedProxyCIDRs: without it any client could set X-Remote-User and authenticate as anyone" }}
+{{- /* Keyed on the resolved auth mode: local/oidc sessions need Valkey past one replica. */}}
+{{- if and (has .Values.console.auth.mode (list "local" "oidc")) (eq .Values.console.valkey.mode "disabled") (gt (int .Values.console.replicas) 1) }}
+{{- fail "auth.mode=local|oidc with console.valkey.mode=disabled requires console.replicas=1 (sessions live in Valkey per DATA.md §5.3; the in-process KV has no cross-replica visibility, so a browser load-balanced to another replica would be logged out at random): set console.valkey.mode=bundled|external or console.replicas=1" }}
+{{- end }}
+{{- /* Keyed on the resolved gRPC address: an explicit grpcAddr is still realtime-on. */}}
+{{- if and (include "kconmon-ng.console.controllerGRPCAddr" .) (eq .Values.console.valkey.mode "disabled") (gt (int .Values.console.replicas) 1) }}
+{{- fail "realtime events with console.valkey.mode=disabled require console.replicas=1 (the in-process bus has no cross-replica fan-out, ADR-002): set console.valkey.mode=bundled|external or console.replicas=1" }}
 {{- end }}
 {{- /* mode=volume must actually supply a volume, or geoip would be silently off. */}}
 {{- if and (eq (include "kconmon-ng.console.geoipMode" .) "volume") (not .Values.console.mtr.enrichment.geoip.volume) }}

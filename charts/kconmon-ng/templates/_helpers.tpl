@@ -82,8 +82,7 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- if not (dig "enabled" false (.Values.valkey | default dict)) -}}
 {{- fail "console.valkey.mode=dependency requires valkey.enabled=true (the Valkey subchart is not being installed)" -}}
 {{- end -}}
-{{- /* The subchart's ACL auth is off by default; when it IS on the console needs the same password or
-       every publish dies with NOAUTH. Refuse the combination that cannot work. */ -}}
+{{- /* The subchart's ACL auth is off by default; when it IS on the console needs the same password or every publish dies with NOAUTH. */ -}}
 {{- if and (dig "auth" "enabled" false (.Values.valkey | default dict)) (not (include "kconmon-ng.console.valkeySecretName" .)) -}}
 {{- fail "console.valkey.mode=dependency with valkey.auth.enabled=true needs the console to hold the same password: point valkey.auth.usersExistingSecret and console.valkey.existingSecret at ONE Secret, with console.valkey.existingSecretKey set to the ACL username (the subchart keys passwords by username, so the default user means key \"default\")" -}}
 {{- end -}}
@@ -120,9 +119,7 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- printf "%s-db" (include "kconmon-ng.console.fullname" . | trunc 57 | trimSuffix "-") | trunc 60 | trimSuffix "-" }}
 {{- end }}
 
-{{/* Resolve a renamed value: the new key wins, the deprecated one is honoured alone, both set fails.
-     newDefault names the chart's own default for the new key, which cannot be told apart from a user
-     setting that same value — matching it counts as unset so the deprecated key still wins. */}}
+{{/* Resolve a renamed value: the new key wins, the deprecated one is honoured alone, both set fails, and a new key still equal to .newDefault counts as unset. */}}
 {{- define "kconmon-ng.renamed" -}}
 {{- $old := .old -}}
 {{- $new := .new -}}
@@ -302,9 +299,7 @@ true
 {{- .Values.console.image.tag | default .Chart.AppVersion -}}
 {{- end }}
 
-{{/* True when the console image is new enough for a config key added in .since. The console parses its
-     config with unknown fields REJECTED, so emitting a key an older image does not know crashloops it.
-     A non-semver tag (latest, a sha) is assumed current -- that is the operator's own pin to reason about. */}}
+{{/* True when the console image is new enough for a config key added in .since; a non-semver tag (latest, a sha) counts as current. */}}
 {{- define "kconmon-ng.console.supports" -}}
 {{- $tag := include "kconmon-ng.console.imageTag" .ctx -}}
 {{- $v := regexFind "^[0-9]+\\.[0-9]+\\.[0-9]+" (trimPrefix "v" $tag) -}}
