@@ -29,11 +29,8 @@ func TestNewAnonymousYieldsFixedSubjectForEveryRequest(t *testing.T) {
 		t.Errorf("got %+v, want %+v", subject, want)
 	}
 
-	// Even a request carrying junk auth headers (a cookie, a bearer token, a
-	// spoofed trusted-proxy header) resolves to the exact same fixed
-	// Subject: NewAnonymous is a real Subject through the real authorize
-	// middleware, not a conditional bypass that a crafted request could
-	// influence.
+	// Even a request carrying junk auth headers (a cookie, a bearer token, a spoofed trusted-proxy
+	// header) resolves to the exact same fixed Subject.
 	junk := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/", nil)
 	junk.Header.Set("Authorization", "Bearer kcm_totally-not-a-real-token")
 	junk.Header.Set("X-Remote-User", "someone-else")

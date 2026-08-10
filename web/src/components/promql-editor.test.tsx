@@ -1,15 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 import { PALETTE_OPEN_EVENT } from "@/lib/commands";
-import { editorKeymap, promqlExtensions, tooltipConfig } from "./promql-editor";
+import { editorKeymap, promqlExtensions, topKeymap, tooltipConfig } from "./promql-editor";
 
 /**
- * QA round 4, findings #5 and #18.
- *
- * A real CodeMirror mount is not something jsdom renders honestly (no layout,
- * no measurement, and the completion popup is positioned from geometry that is
- * all zeroes), so the editor's CONFIGURATION is what gets pinned here — the
- * same seam pages/promql-console.tsx opened for its result tabs and
- * pages/topology.tsx for nodeNavigationPath.
+ * A real CodeMirror mount is not something jsdom renders honestly (no layout, no measurement, and
+ * the completion popup is positioned from geometry that is all zeroes).
  */
 
 describe("tooltipConfig (finding #5: the completion popup was clipped by the editor card)", () => {
@@ -42,6 +37,23 @@ describe("editorKeymap (finding #18: CodeMirror ate ⌘K)", () => {
     } finally {
       window.removeEventListener(PALETTE_OPEN_EVENT, seen);
     }
+  });
+});
+
+describe("topKeymap (finding #2: ⌘Enter inserted a newline instead of running)", () => {
+  it("carries Mod-Enter in the SAME highest-precedence keymap as the working Mod-k", () => {
+    const keys = topKeymap({ onRun: () => {} }).map((b) => b.key);
+    expect(keys).toContain("Mod-Enter");
+    // Mod-k is the binding that already worked; sharing the array is what
+    // guarantees the run binding got the same Prec.highest treatment.
+    expect(keys).toContain("Mod-k");
+  });
+
+  it("runs the query and RETURNS TRUE, so basicSetup's Enter handler never inserts a newline after it", () => {
+    const onRun = vi.fn();
+    const binding = topKeymap({ onRun }).find((b) => b.key === "Mod-Enter");
+    expect(binding?.run?.(undefined as never)).toBe(true);
+    expect(onRun).toHaveBeenCalledTimes(1);
   });
 });
 

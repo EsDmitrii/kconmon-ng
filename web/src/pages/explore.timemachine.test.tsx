@@ -5,10 +5,7 @@ import { ThemeProvider } from "@/components/theme-provider";
 import { TimeMachineProvider } from "@/lib/timemachine";
 import { ExplorePage } from "./explore";
 
-/**
- * /explore engaged: the range picker keeps working, anchored BACK from `t`
- * rather than from now.
- */
+/** /explore engaged: the range picker keeps working, anchored BACK from `t` rather than from now. */
 
 const AT = "2026-08-01T12:00:00Z";
 const AT_MS = Date.parse(AT);

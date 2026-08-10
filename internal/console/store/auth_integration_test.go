@@ -3,9 +3,6 @@
 package store_test
 
 // TestUser*, TestBindings*, TestToken*, TestAudit* require a real PostgreSQL.
-// Run: docker run --rm -d -p 5432:5432 -e POSTGRES_PASSWORD=test -e POSTGRES_DB=kconmon postgres:17-alpine
-// Then: KCONMON_TEST_DATABASE_DSN='postgres://postgres:test@127.0.0.1:5432/kconmon?sslmode=disable' \
-//       go test -tags=integration ./internal/console/store/... -v
 
 import (
 	"context"
@@ -19,12 +16,7 @@ import (
 	"github.com/EsDmitrii/kconmon-ng/internal/console/store"
 )
 
-// newAuthDB opens a *store.DB with migrations applied, dropping and
-// re-creating the schema first -- same convention as newEventStoreDB
-// (events_integration_test.go) and newPrunerDB (prune_integration_test.go);
-// this file shares one database with every other file in package
-// store_test, so each test must leave it clean. dsn is also returned for
-// tests (seedAuditEntryAtAge) that need to reach past *store.DB's public API.
+// newAuthDB opens a *store.DB with migrations applied, dropping and re-creating the schema first.
 func newAuthDB(t *testing.T) (*store.DB, string) {
 	t.Helper()
 	dsn := testDSN(t)
@@ -42,11 +34,7 @@ func newAuthDB(t *testing.T) (*store.DB, string) {
 	return db, dsn
 }
 
-// backdateAuditEntry directly UPDATEs audit_log.at for id: the query layer
-// intentionally has no way to write an arbitrary `at` (audit timestamps must
-// always be server time, DEFAULT now()), so ageing a row for a retention test
-// has to go around it, the same way seedTopologyEventsAtAges
-// (prune_integration_test.go) bulk-inserts around EventStore.InsertEvent.
+// backdateAuditEntry directly UPDATEs audit_log.at for id.
 func backdateAuditEntry(t *testing.T, dsn string, id int64, ageDays int) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), connectTimeout)
@@ -64,9 +52,7 @@ func backdateAuditEntry(t *testing.T, dsn string, id int64, ageDays int) {
 	}
 }
 
-// tokenHash returns a stand-in for the real SHA-256(256 random bits) hash
-// Decision 11 specifies: deterministic per input string, which is all these
-// tests need to tell tokens apart.
+// tokenHash returns a stand-in for the real SHA-256(256 random bits) hash.
 func tokenHash(s string) []byte {
 	h := sha256.Sum256([]byte(s))
 	return h[:]
@@ -172,12 +158,8 @@ func TestUserPasswordAndDisabledLifecycle(t *testing.T) {
 	}
 }
 
-// TestGetUserByIDFoundNotFoundAndDisabledRoundTrip covers the new
-// authn.WithOwnerDisabledCheck lookup path directly: a found row (with
-// PasswordHash always "", like ListUsers), ErrNotFound for both an unknown
-// UUID and a malformed one, and that a SetUserDisabled flip is visible on the
-// very next GetUserByID call -- the same re-query guarantee local.go's
-// GetUserByUsername already gives.
+// TestGetUserByIDFoundNotFoundAndDisabledRoundTrip covers the new authn.WithOwnerDisabledCheck
+// lookup path directly.
 func TestGetUserByIDFoundNotFoundAndDisabledRoundTrip(t *testing.T) {
 	db, _ := newAuthDB(t)
 	ctx := context.Background()
@@ -218,10 +200,8 @@ func TestGetUserByIDFoundNotFoundAndDisabledRoundTrip(t *testing.T) {
 	}
 }
 
-// TestListUsersNeverExposesPasswordHash mirrors TestListTokensNeverExposesHash
-// (below, for api_tokens.token_hash): ListUsers's result set must never carry
-// a usable password_hash, while GetUserByUsername -- the one path that exists
-// specifically to verify a password -- still returns the real one.
+// TestListUsersNeverExposesPasswordHash mirrors TestListTokensNeverExposesHash (below, for
+// api_tokens.token_hash).
 func TestListUsersNeverExposesPasswordHash(t *testing.T) {
 	db, _ := newAuthDB(t)
 	ctx := context.Background()
@@ -292,10 +272,7 @@ func TestRoleUpsertListDelete(t *testing.T) {
 	}
 }
 
-// TestListBindingsForSubjectResolvesUserAndGroupInOneCall is the brief's core
-// binding assertion: a user binding and a group binding the caller belongs to
-// both come back from a single ListBindingsForSubject call, and a binding for
-// an unrelated user or group does not.
+// TestListBindingsForSubjectResolvesUserAndGroupInOneCall is the core binding assertion.
 func TestListBindingsForSubjectResolvesUserAndGroupInOneCall(t *testing.T) {
 	db, _ := newAuthDB(t)
 	ctx := context.Background()
@@ -354,11 +331,7 @@ func TestListBindingsForSubjectResolvesUserAndGroupInOneCall(t *testing.T) {
 	}
 }
 
-// TestListBindingsReturnsEveryBindingUnscoped is Task 17's addition to
-// RoleStore: unlike ListBindingsForSubject (one subject's own resolution),
-// ListBindings must return every binding regardless of who it names --
-// the RBAC admin API's GET /api/v1/rbac/bindings and its delete-role
-// guard rail both depend on this.
+// TestListBindingsReturnsEveryBindingUnscoped is the addition to RoleStore.
 func TestListBindingsReturnsEveryBindingUnscoped(t *testing.T) {
 	db, _ := newAuthDB(t)
 	ctx := context.Background()
@@ -417,12 +390,8 @@ func TestGetTokenByHashUnknownHashReturnsNotFound(t *testing.T) {
 	}
 }
 
-// TestTokenLifecycleRevokedExpiredAndUnknownAreDistinguishable creates a
-// live token, a revoked token and an expired token, and asserts
-// GetTokenByHash lets the caller tell all three apart from each other and
-// from an unknown hash -- store.ErrNotFound only ever means "no such row";
-// RevokedAt/ExpiresAt being set or unset is how the caller (the authn layer)
-// distinguishes the rest.
+// TestTokenLifecycleRevokedExpiredAndUnknownAreDistinguishable creates a live token, a revoked
+// token and an expired token.
 func TestTokenLifecycleRevokedExpiredAndUnknownAreDistinguishable(t *testing.T) {
 	db, _ := newAuthDB(t)
 	ctx := context.Background()
@@ -538,16 +507,8 @@ func TestListTokensNeverExposesHash(t *testing.T) {
 	}
 }
 
-// TestGetTokenByIDRoundTrip is the primitive ListTokens' full scan used to
-// stand in for on the mint path: one row, by id, with every field intact and
-// -- structurally, since store.Token has no field for it -- no hash. It also
-// pins the three boundaries a single-row lookup has to get right:
-// a well-formed id naming no row is ErrNotFound, a malformed id is a DISTINCT
-// error (never folded into ErrNotFound), and a REVOKED token is still
-// returned, because this is a lookup and not an admission decision -- the
-// mint-path caller (httpapi.resolveInheritedOwner) attributes a new token to
-// the parent's owner, and a parent being revoked does not make that
-// attribution wrong.
+// TestGetTokenByIDRoundTrip is the primitive ListTokens' full scan used to stand in for on the mint
+// path; it also pins the three boundaries a single-row lookup has to get right.
 func TestGetTokenByIDRoundTrip(t *testing.T) {
 	db, _ := newAuthDB(t)
 	ctx := context.Background()
@@ -689,10 +650,7 @@ func mustInsertAudit(t *testing.T, ctx context.Context, db *store.DB, subjectKin
 }
 
 // TestPrunerDeletesOldAuditLogRows is the retention-side counterpart of
-// TestPruneOnceDeletesRowsPastRetention (prune_integration_test.go): seeds
-// audit_log rows both inside and outside a 90d retention window and asserts
-// PruneOnce removes exactly the old ones, crediting the "audit_log" key in
-// its returned map.
+// TestPruneOnceDeletesRowsPastRetention (prune_integration_test.go).
 func TestPrunerDeletesOldAuditLogRows(t *testing.T) {
 	db, dsn := newAuthDB(t)
 	ctx := context.Background()
@@ -720,10 +678,8 @@ func TestPrunerDeletesOldAuditLogRows(t *testing.T) {
 	}
 }
 
-// seedAuditEntryAtAge inserts one audit_log row via the store's own
-// InsertAuditEntry (which always stamps `at` as now()) and then backdates it
-// with a direct UPDATE, since the query layer intentionally has no way to
-// write an arbitrary `at` -- audit timestamps must always be server time.
+// seedAuditEntryAtAge inserts one audit_log row via the store's own InsertAuditEntry (which always
+// stamps `at` as now) and then backdates it with a direct UPDATE.
 func seedAuditEntryAtAge(t *testing.T, ctx context.Context, db *store.DB, dsn string, ageDays int) {
 	t.Helper()
 	e, err := db.InsertAuditEntry(ctx, "user", "seed", "GET /api/v1/topology", "topology", "allowed", "127.0.0.1", nil)

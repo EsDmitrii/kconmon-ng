@@ -39,21 +39,8 @@ import (
 	"k8s.io/client-go/rest"
 )
 
-// buildInClusterClientset builds a Kubernetes clientset from the in-cluster
-// service account. Returns an error when running outside a cluster (e.g. local
-// development), which the caller treats as "the feature is off", never as a
-// reason to fail.
-//
-// It is a VERBATIM copy of internal/controller's helper of the same name, and
-// the duplication is deliberate: internal/console must not import
-// internal/controller (they are separate binaries with separate config,
-// metrics and dependency budgets), and exporting ten lines from the controller
-// to create that edge would be a worse trade than repeating them.
-//
-// There is exactly ONE such copy in this binary. The M7 alerting reconciler
-// needs a DYNAMIC client from the same service account, and it gets it from
-// buildInClusterDynamic below, which shares this file's rest.InClusterConfig
-// call rather than adding a third copy of it.
+// buildInClusterClientset builds a Kubernetes clientset from the in-cluster service account;
+// returns an error when running outside a cluster (e.g. local development).
 func buildInClusterClientset() (*kubernetes.Clientset, error) {
 	restCfg, err := rest.InClusterConfig()
 	if err != nil {
@@ -66,17 +53,9 @@ func buildInClusterClientset() (*kubernetes.Clientset, error) {
 	return clientset, nil
 }
 
-// buildInClusterDynamic builds an unstructured (dynamic) Kubernetes client
-// from the same in-cluster service account, for the PrometheusRule reconciler
-// (internal/console/promrules, M7 Decision 3).
-//
-// Dynamic and not typed, and that is the whole point of Decision 2: a typed
-// PrometheusRule client means depending on the prometheus-operator module,
-// which drags its whole API surface into a binary that needs one CRD. The
-// dynamic client ships with client-go, which this binary already has.
-//
-// Same posture as buildInClusterClientset: an error means "not running in a
-// cluster", which the caller degrades on rather than dies on.
+// buildInClusterDynamic builds an unstructured (dynamic) Kubernetes client from the same in-cluster
+// service account; same posture as buildInClusterClientset: an error means "not running in a
+// cluster".
 func buildInClusterDynamic() (dynamic.Interface, error) {
 	restCfg, err := rest.InClusterConfig()
 	if err != nil {
@@ -89,22 +68,11 @@ func buildInClusterDynamic() (dynamic.Interface, error) {
 	return client, nil
 }
 
-// rbacPolicyRefreshInterval is how often cmd/console re-reads the roles
-// table and applies it to the live authz.Policy via Reload. Role BINDINGS
-// need no such ticker -- httpapi's resolveRoles re-reads role_bindings on
-// every request already, through roleResolver below. A custom role's
-// PERMISSION SET is different: authz.Policy caches it, so without this
-// ticker an admin editing a custom role's permissions through
-// POST /api/v1/rbac/roles would need a console restart to take effect
-// (task-18-brief.md: "pick the ticker, it is ten lines").
+// rbacPolicyRefreshInterval is how often cmd/console re-reads the roles table and applies it to the
+// live authz.Policy via Reload; a custom role's PERMISSION SET is different: authz.Policy caches.
 const rbacPolicyRefreshInterval = 60 * time.Second
 
-// eventSink adapts a store.EventStore to events.EventSink. Neither package may
-// import the other (store must not import events; events must not import
-// store, per ADR-001's "store is the only pgx importer" plus the events
-// package's own no-store-dependency rule), so the LiveEvent -> EventRecord
-// translation lives here — the same import-cycle shape httpapi.RealtimeStatus
-// already resolves for the realtime health bit. Zero new package edges.
+// eventSink adapts a store.EventStore to events.EventSink; neither package may import.
 type eventSink struct {
 	store store.EventStore
 }
@@ -123,16 +91,9 @@ func (s eventSink) InsertEvent(ctx context.Context, ev events.LiveEvent) (bool, 
 	})
 }
 
-// roleResolver adapts store.RoleStore's subject-scoped binding lookup
-// (ListBindingsForSubject) to httpapi.RoleResolver's narrower RolesFor(ctx,
-// authz.Subject) seam -- the same "small local adapter, not a store method
-// httpapi depends on directly" shape eventSink above already uses for
-// events.EventSink. Re-queried on EVERY request (resolveRoles,
-// httpapi/middleware_auth.go), never cached: that is what lets a role
-// BINDING created or removed through the RBAC API take effect on the very
-// next request, with no restart and no ticker -- unlike a changed
-// PERMISSION SET on a custom role, which authz.Policy does cache (see
-// refreshCustomRoles below).
+// roleResolver adapts store.RoleStore's subject-scoped binding lookup (ListBindingsForSubject) to
+// httpapi.RoleResolver's narrower RolesFor(ctx, authz.Subject) seam; re-queried on EVERY request
+// (resolveRoles, httpapi/middleware_auth.go).
 type roleResolver struct {
 	db *store.DB
 }
@@ -149,11 +110,8 @@ func (r roleResolver) RolesFor(ctx context.Context, s authz.Subject) ([]string, 
 	return roles, nil
 }
 
-// pushInterval is how often each snapshot pusher recomputes and broadcasts when
-// nothing nudges it. It matches the frontend's MATRIX_POLL_MS/TOPOLOGY_POLL_MS
-// (both 15s), so a browser on the WebSocket path never sees staler data than one
-// on the M1 polling path. Not operator-tunable in M2: the nudge relay already
-// covers the latency case that matters (topology changes).
+// pushInterval is how often each snapshot pusher recomputes and broadcasts when nothing nudges it;
+// it matches the frontend's MATRIX_POLL_MS/TOPOLOGY_POLL_MS (both 15s).
 const pushInterval = 15 * time.Second
 
 func main() {
@@ -207,14 +165,18 @@ func main() {
 		slog.Warn("prometheus.url not set — matrix and PromQL APIs disabled (503)")
 	}
 
-	// Two contexts on purpose. rootCtx is cancelled by SIGINT/SIGTERM and governs
-	// the HTTP server only. bgCtx governs the realtime pipeline and is cancelled
-	// by hand AFTER the HTTP server has finished shutting down — see the shutdown
-	// block at the bottom of main.
+	// Two contexts on purpose. rootCtx is cancelled by SIGINT/SIGTERM and governs the HTTP server
+	// only.
 	rootCtx, stopSignals := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	bgCtx, stopBackground := context.WithCancel(context.Background())
 
-	bus, closeBus := newBus(bgCtx, cfg)
+	// An unreadable valkey.passwordFile is fatal for the same reason dsnFile is: a broken Secret mount,
+	// not an operator asking to run without a password.
+	bus, closeBus, busErr := newBus(bgCtx, cfg)
+	if busErr != nil {
+		slog.Error("failed to resolve the Valkey password", "error", busErr)
+		os.Exit(1)
+	}
 
 	// dsn resolution errors are fatal (unlike the Valkey fallback above): a
 	// dsnFile that cannot be read means the Secret mount is wrong, not that the
@@ -225,10 +187,8 @@ func main() {
 		os.Exit(1)
 	}
 
-	// db stays nil for the entire process when database.dsn/dsnFile are unset:
-	// that is the documented degraded path (M1/M2 surface unaffected), not an
-	// error. When it IS configured, a failure to open it is fatal — Task 2's
-	// decision, no silent fallback to "no database" the way Valkey has one.
+	// db stays nil for the entire process when database.dsn/dsnFile are unset: that is the documented
+	// degraded path.
 	var db *store.DB
 	if dsn == "" {
 		slog.Info("database not configured — event history, run history and the audit log are disabled; the M1/M2 surface is unaffected")
@@ -243,17 +203,7 @@ func main() {
 		db.SetMetrics(m)
 	}
 
-	// --- Auth (M3 Phase B/C) ------------------------------------------------
-	//
-	// cache.KV backs SessionStore and OIDCAuthenticator's login-flow state
-	// (oidcstate:{state}). Built from the SAME bus newBus already dialled --
-	// never a second Valkey connection -- so it inherits newBus's own
-	// Valkey-unreachable fallback: cache.NewInProcessKV() whenever bus is not
-	// a *cache.ValkeyBus. That fallback is single-replica-only for sessions,
-	// same ADR-002 shape as realtime fan-out; the Helm session guard
-	// (templates/console/configmap.yaml) refuses auth.mode=local|oidc with
-	// console.valkey.mode=disabled and console.replicas>1 for exactly this
-	// reason.
+	// Built from the SAME bus newBus already dialled -- never a second Valkey connection.
 	var kv cache.KV
 	if vb, ok := bus.(*cache.ValkeyBus); ok {
 		kv = cache.NewValkeyKVFromBus(vb)
@@ -262,12 +212,9 @@ func main() {
 	}
 	sessions := authn.NewSessionStore(kv, cfg.Auth.Session.TTL)
 
-	// authenticator is built per cfg.Auth.Mode. The default case below is
-	// unreachable through config.Load (Config.Validate already restricts
-	// Mode to anonymous|local|header|oidc) but is required by the switch's
-	// own well-formedness -- and it fails CLOSED (exit 1): reaching it means
-	// validation was bypassed, and a composition root must not answer that
-	// by serving unauthenticated reads.
+	// authenticator is built per cfg.Auth.Mode; the default case below is unreachable through
+	// config.Load (Config.Validate already restricts Mode to anonymous|local|header|oidc) but is
+	// required by the switch's own well-formedness.
 	var authenticator authn.Authenticator
 	var oidcDep httpapi.OIDCFlow
 	switch cfg.Auth.Mode {
@@ -293,83 +240,42 @@ func main() {
 		}
 		authenticator, oidcDep = oidcAuth, oidcAuth
 	default:
-		// Unreachable through config.Load (the validator rejects unknown
-		// modes), so reaching it means validation was bypassed — and a
-		// composition root must fail closed, not fall back to serving
-		// unauthenticated reads (the same direction OIDC discovery failure
-		// takes above).
+		// Unreachable through config.Load (the validator rejects unknown modes), so reaching it means
+		// validation was bypassed.
 		slog.Error("unknown auth.mode — config validation was bypassed, refusing to start", //nolint:gosec // G706: mode is operator config, structured slog field
 			"mode", cfg.Auth.Mode)
 		os.Exit(1)
 	}
 	if db != nil {
-		// PATs work in every mode (SECURITY.md §10.1): wrapping is ONE
-		// composition applied regardless of auth.mode, not a branch per
-		// mode above. WithOwnerDisabledCheck(db) is what closes the
-		// disabling-a-user-does-not-invalidate-their-PATs gap (store/auth.go's
-		// TokenStore doc comment): it costs one extra GetUserByID lookup per
-		// token-authenticated request, gated behind db != nil the same way
-		// every other database-backed dependency here is, since there is no
-		// UserStore to check against when database.mode=disabled.
+		// PATs work in every mode (SECURITY.md §10.1): wrapping is ONE composition applied regardless of
+		// auth.mode.
 		authenticator = authn.NewTokenFallback(db, authenticator, authn.WithOwnerDisabledCheck(db))
 	}
 
-	// Deps that only make sense with a database: role bindings, local users,
-	// the audit log, and the RBAC/token admin APIs all live in PostgreSQL.
-	// *store.DB satisfies httpapi.Auditor, httpapi.RoleAdmin, httpapi.TokenAdmin
-	// and authn.UserStore structurally (no adapter needed for those four --
-	// only RolesFor, above, needs one); assigning it only inside this
-	// db != nil branch is what avoids hanging a nil *store.DB off a
-	// non-nil interface value (the same typed-nil-interface trap eventsDep
-	// avoids further down).
+	// Deps that only make sense with a database: role bindings.
 	var rolesDep httpapi.RoleResolver
 	var usersDep authn.UserStore
 	var auditDep httpapi.Auditor
 	var rbacDep httpapi.RoleAdmin
 	var tokensDep httpapi.TokenAdmin
-	// targetsDep has NO non-database fallback, unlike runnerDep below:
-	// targets are persisted configuration (Decision 13), so with
-	// database.mode=disabled all five /api/v1/targets routes answer 503
-	// rather than accepting writes that would vanish on the next restart.
+	// targetsDep has NO non-database fallback, unlike runnerDep below: targets are persisted
+	// configuration.
 	var targetsDep httpapi.TargetService
-	// definitionsDep/schedulesDep share targetsDep's exact posture: persisted
-	// configuration, no in-memory fallback (Decision 13) -- nil means every
-	// /api/v1/checks and /api/v1/schedules route answers 503. Caught missing
-	// by the M4 final-gate browser smoke: the handlers, tests and OpenAPI
-	// entries all existed while this wiring did not, so a real console
-	// answered 503 with the database fully configured.
+	// definitionsDep/schedulesDep share targetsDep's exact posture: persisted configuration, no
+	// in-memory fallback.
 	var definitionsDep httpapi.DefinitionService
 	var schedulesDep httpapi.ScheduleService
-	// mtrDep/annotationsDep (M5 Task 4) share the exact same posture, and are
-	// wired in the SAME task as their handlers precisely because of the M4
-	// lesson recorded just above: nil means every /api/v1/mtr and
-	// /api/v1/annotations route answers 503. Path history and operator notes
-	// are worth exactly as much as they are durable, so neither gets an
-	// in-memory fallback either.
+	// mtrDep/annotationsDep share the exact same posture, and are wired in the SAME task as their
+	// handlers precisely.
 	var mtrDep httpapi.MTRService
 	var annotationsDep httpapi.AnnotationService
-	// incidentsDep/maintenanceDep/webhooksDep/k8sEventsDep (M6 Task 4) share
-	// the identical posture, and are wired in the SAME task as their handlers
-	// for the same M4 lesson recorded above: nil means every /api/v1/incidents,
-	// /api/v1/maintenance, /api/v1/webhooks and /api/v1/k8s-events route
-	// answers 503. A saved investigation, a declared change window and a
-	// configured outbound endpoint are worth exactly as much as they are
-	// durable, so none of them gets an in-memory fallback either.
-	//
-	// Note what k8sEventsDep does NOT depend on: console.kubernetesContext. The
-	// READ route needs a database and nothing else -- with the capture off the
-	// table is simply empty and the endpoint answers an empty page, which is
-	// the honest report. Gating the route on the reader would turn "nothing was
-	// captured" into "endpoint unavailable" and send an operator hunting an API
-	// bug that is not there.
+	// incidentsDep/maintenanceDep/webhooksDep/k8sEventsDep share the identical posture.
 	var incidentsDep httpapi.IncidentService
 	var maintenanceDep httpapi.MaintenanceService
 	var webhooksDep httpapi.WebhookService
 	var k8sEventsDep httpapi.K8sEventService
-	// alertRulesDep (M7 Task 6) shares the identical posture: nil means
-	// /api/v1/export and /api/v1/import answer 503 — configUnavailable is
-	// all-or-nothing, because a bundle missing a collection is a restore
-	// point with a hole in it.
+	// alertRulesDep shares the identical posture: nil means /api/v1/export and /api/v1/import answer
+	// 503.
 	var alertRulesDep httpapi.AlertRuleService
 	policy := authz.NewPolicy(nil)
 	if db != nil {
@@ -393,12 +299,8 @@ func main() {
 			bootstrapLocalAdmin(bgCtx, db, cfg.Auth.Local)
 		}
 
-		// Custom roles are loaded once here, at boot, then kept fresh by the
-		// rbac-policy-refresh ticker spawned below (task-18-brief.md item 4).
-		// A read failure here is NOT fatal: built-in roles are compiled in
-		// (Decision 7) and the refresh ticker retries within 60s — the same
-		// warn-and-keep policy the ticker itself uses. Exiting would take an
-		// anonymous-mode console down over a table it barely uses.
+		// Custom roles are loaded once here, at boot, then kept fresh by the rbac-policy-refresh ticker
+		// spawned below.
 		custom, err := loadCustomRoles(bgCtx, db)
 		if err != nil {
 			slog.Warn("failed to load custom RBAC roles at boot — starting with built-in roles only, the refresh ticker will retry", "error", err)
@@ -428,10 +330,8 @@ func main() {
 	var ingesterOpts []events.Option
 	if db != nil {
 		eventStore = store.NewEventStore(db, m)
-		// WithEventSink(nil) must never be passed: a non-nil events.EventSink
-		// interface holding a nil eventSink would panic on first InsertEvent
-		// call. Building opts conditionally, rather than always passing
-		// WithEventSink(eventSink{...}), is what keeps that impossible.
+		// WithEventSink(nil) must never be passed: a non-nil events.EventSink interface holding a nil
+		// eventSink would panic on first InsertEvent call.
 		ingesterOpts = append(ingesterOpts, events.WithEventSink(eventSink{store: eventStore}))
 	}
 	ingester := events.NewIngester(ctrl, grpcAddr, bus, m, ingesterOpts...)
@@ -448,16 +348,7 @@ func main() {
 		nudgers = append(nudgers, topologyPusher)
 	}
 
-	// eventsDep starts as Deps{}'s ordinary zero value — a genuine nil
-	// EventLister interface — and is assigned only inside the db != nil
-	// branch. Assigning a nil *store.DB (or any nil concrete pointer) directly
-	// to an interface field instead would produce a typed-nil interface that
-	// compares != nil, so httpapi's "s.events == nil" 503 gate would then call
-	// ListEvents on a nil receiver instead of answering 503.
-	// topologyHistoryDep is the SAME eventStore, taken through its fold seam:
-	// GET /api/v1/topology?at= reconstructs from exactly the rows the Live page
-	// pages through. Assigned under the same db != nil guard, and for the same
-	// typed-nil reason, as eventsDep above.
+	// eventsDep starts as Deps{}'s ordinary zero value — a genuine nil EventLister interface.
 	var eventsDep httpapi.EventLister
 	var topologyHistoryDep httpapi.TopologyHistory
 	if db != nil {
@@ -465,17 +356,7 @@ func main() {
 		topologyHistoryDep = eventStore
 	}
 
-	// runner executes on-demand diagnostics runs (Task 22/23): constructed
-	// only when ctrl != nil, since there is no meaningful run path without a
-	// controller to dispatch each pair's check to (httpapi answers 503 on
-	// all three /api/v1/runs* routes when runnerDep stays the nil interface
-	// value below — same convention as eventsDep just above). Its Store is
-	// *store.DB when a database is configured, or checks.NewMemoryStore()
-	// otherwise (Decision 15: runs still work with the database disabled,
-	// just not durably — only the most recent 50 stay retrievable — and that
-	// is already honestly labelled via GET /api/v1/config's existing
-	// "database":{"configured"} signal, the same one handleEvents/handleAudit
-	// gate on, with no runs-specific field needed).
+	// runner executes on-demand diagnostics runs: constructed only when ctrl != nil.
 	var runner *checks.Runner
 	if ctrl != nil {
 		var runStore checks.Store
@@ -491,18 +372,7 @@ func main() {
 		runnerDep = runner
 	}
 
-	// enricherDep swaps the cache-only hop enrichment read for a resolving one
-	// (M5 Task 5). It needs BOTH the master gate and a database: the TTL cache
-	// is mtr_hop_enrichment, so a resolver without one would re-resolve every
-	// hop of every trace on every read -- an unbounded rDNS load on the
-	// cluster's resolver produced by a page refresh. That is a warn-and-skip,
-	// not a fatal: mtr.enrichment.enabled with database.mode=disabled is an
-	// operator asking for something the deployment cannot give, and taking the
-	// whole console down over an optional decoration would be the wrong trade.
-	//
-	// enrich.New itself never fails on the environment -- an unreadable or
-	// missing mmdb file disables that ONE source with a WARN (Decision 5) --
-	// so an error here is a composition bug, and those fail closed.
+	// enricherDep swaps the cache-only hop enrichment read for a resolving one.
 	var enricherDep httpapi.EnrichmentReader
 	var enricher *enrich.Resolver
 	switch {
@@ -527,29 +397,8 @@ func main() {
 			"ttl", cfg.MTR.Enrichment.TTL)
 	}
 
-	// The webhook dispatcher (M6 Task 5) needs BOTH a database -- endpoints,
-	// their encrypted secrets and their delivery outcomes are all rows -- and
-	// an encryption key, which is what the cipher is built from. It supplies
-	// THREE httpapi seams at once (seal a secret, ping an endpoint, notify on
-	// an incident), and they are wired together on purpose: there is no state
-	// where endpoints can be created but nothing ever fires.
-	//
-	// The three ways this ends, and why each is what it is:
-	//
-	//	no key       -- the documented keyless state (Decision 4). Silent: an
-	//	                unconfigured optional feature is not news, and httpapi
-	//	                already answers 503 naming the key on the two routes
-	//	                that need it.
-	//	key, no db   -- warn and skip, the enrichment precedent: an operator
-	//	                asked for something this deployment cannot give, and
-	//	                taking the whole console down over it would be worse.
-	//	broken key   -- FATAL, the database.dsnFile precedent. A key that is
-	//	                configured but unreadable or malformed is a wrong Secret
-	//	                mount, not a deliberate omission, and starting anyway
-	//	                would silently degrade to "webhooks never fire".
-	// keyErr rather than err, for the reason enrichErr above states: reading
-	// the function-scoped err this far down turns every earlier `x, err :=`
-	// into a govet shadow report.
+	// A key that is configured but unreadable or malformed is a wrong Secret mount, not a deliberate
+	// omission.
 	webhookKey, keyErr := cfg.Webhooks.ResolveEncryptionKey()
 	if keyErr != nil {
 		slog.Error("failed to resolve the webhook encryption key", "error", keyErr)
@@ -579,30 +428,8 @@ func main() {
 		slog.Info("webhook delivery enabled")
 	}
 
-	// The PrometheusRule reconciler is opt-in (console.alerting.enabled,
-	// default false) and needs a database, for a stronger reason than the
-	// event reader's: alert_rules is the SOURCE, not the sink. With no
-	// database there are no rules to render, and a reconciler that ran anyway
-	// would server-side-apply an EMPTY bundle over whatever the previous
-	// deployment left in the namespace -- a config change that silently
-	// deletes an operator's alerts. Skipping is the only safe degradation.
-	//
-	// Every other failure is warn-and-continue, the same posture kubectx has
-	// and for the same reason: `alerting.enabled: true` on a console running
-	// outside a cluster must degrade to "no sync", never to a console that
-	// refuses to start. A cluster that is reachable but has no PrometheusRule
-	// CRD is NOT handled here at all -- that is a running reconciler writing
-	// crd-missing onto every rule, which is the informative failure Decision 3
-	// asks for.
-	//
-	// It is BUILT here, ahead of NewServer, and SPAWNED further down next to
-	// every other background component -- the webhook dispatcher's shape,
-	// for the same reason: httpapi needs the seam at construction time (M7
-	// Task 4 wires POST /api/v1/alert-rules/{id}/sync and GET
-	// /api/v1/alert-rules/foreign to it, and kicks it after every write),
-	// while `spawn` does not exist until the WaitGroup below does. There is
-	// deliberately no state in which the API holds a reconciler that is not
-	// running: one branch produces both, or neither.
+	// The PrometheusRule reconciler is opt-in (console.alerting.enabled, default false) and needs a
+	// database.
 	var ruleReconciler *promrules.Reconciler
 	switch {
 	case !cfg.Alerting.Enabled:
@@ -624,12 +451,7 @@ func main() {
 			slog.Warn("prometheus rule sync is off", "error", clientErr)
 			break
 		}
-		// The renderer carries cfg.MetricsPrefix, not the package default: a
-		// deployment that renamed its metric families must get rules over the
-		// families it actually publishes, or every rendered alert is one that
-		// can never fire (M7 Task 3). httpapi builds its own renderer from the
-		// very same cfg.MetricsPrefix, so the expression a POST stores and the
-		// expression this loop applies are rendered by identical renderers.
+		// The renderer carries cfg.MetricsPrefix, not the package default.
 		reconciler, recErr := promrules.New(promrules.Deps{
 			Client:     ruleClient,
 			Store:      db,
@@ -646,30 +468,8 @@ func main() {
 			"namespace", namespace, "bundle", cfg.Alerting.BundleName,
 			"syncInterval", cfg.Alerting.SyncInterval, "metricsPrefix", cfg.MetricsPrefix)
 	}
-	// The alert-transition watcher (M7 Task 5, Decision 7) turns Prometheus'
-	// alert STATE into alert.fired/alert.resolved deliveries. It needs three
-	// things at once, and every one of them is a hard prerequisite rather than
-	// a degradable nicety:
-	//
-	//	a dispatcher   -- it exists only to fire deliveries. With no cipher
-	//	                  and no database there is nothing to deliver to, and a
-	//	                  watcher that polled anyway would be a loop whose
-	//	                  entire output is discarded.
-	//	alerting on    -- the alerts it acts on are the ones this console
-	//	                  MANAGES, matched by the rule-id label the reconciler
-	//	                  stamps. With the reconciler off, nothing in Prometheus
-	//	                  carries that label and every poll is empty.
-	//	prometheus     -- it is the source. Nothing else can answer "what is
-	//	                  firing".
-	//
-	// Each miss is warn-and-continue, never fatal: exactly the reconciler's
-	// posture above, for the reconciler's reason. A console that cannot watch
-	// alert state still serves every page and every route.
-	//
-	// It is built here and SPAWNED further down, unlike the reconciler for a
-	// simpler reason: httpapi holds no seam onto it at all. Nothing in the API
-	// can start, stop or query the watcher -- it is a closed loop from
-	// Prometheus to the dispatcher.
+	// It needs three things at once, and every one of them is a hard prerequisite rather than a
+	// degradable nicety: a dispatcher.
 	var alertWatcher *webhooks.AlertWatcher
 	switch {
 	case dispatcher == nil:
@@ -691,10 +491,7 @@ func main() {
 		aw, watcherErr := webhooks.NewAlertWatcher(webhooks.AlertWatcherDeps{
 			Alerts:   prom,
 			Notifier: dispatcher,
-			// db, not nil: the rule source is what fills the payload's expr and
-			// the rule's own name, neither of which /api/v1/alerts carries. It
-			// is non-nil here by construction -- a dispatcher exists only when
-			// a database does.
+			// It is non-nil here by construction -- a dispatcher exists only when a database does.
 			Rules:    db,
 			Interval: cfg.Webhooks.AlertPollInterval,
 		})
@@ -707,11 +504,7 @@ func main() {
 			"alertPollInterval", cfg.Webhooks.AlertPollInterval)
 	}
 
-	// Assigned through an interface-typed var behind an explicit nil check, so
-	// an absent reconciler stays a GENUINE nil interface rather than the
-	// typed-nil trap httpapi.Deps.Events' doc comment describes -- httpapi's
-	// own gate is `s.ruleSync == nil`, and a typed nil would sail past it into
-	// a nil-receiver call instead of answering 409.
+	// Assigned through an interface-typed var behind an explicit nil check.
 	var ruleSyncDep httpapi.RuleSyncer
 	if ruleReconciler != nil {
 		ruleSyncDep = ruleReconciler
@@ -731,12 +524,9 @@ func main() {
 		Incidents: incidentsDep, Maintenance: maintenanceDep,
 		Webhooks: webhooksDep, K8sEvents: k8sEventsDep,
 		AlertRules: alertRulesDep, RuleSync: ruleSyncDep,
-		// All three are the same *webhooks.Dispatcher, or all three are nil.
-		// nil is NOT "webhooks off": listing, reading, updating, disabling and
-		// deleting an endpoint keep working, and only creating one, testing
-		// one, and firing on an incident need the cipher (M6 Decision 4).
-		// Assigned through the interface-typed vars above so a nil dispatcher
-		// stays a genuine nil interface rather than the typed-nil trap.
+		// All three are the same *webhooks.Dispatcher, or all three are nil; assigned through the
+		// interface-typed vars above so a nil dispatcher stays a genuine nil interface rather than the
+		// typed-nil trap.
 		WebhookSealer:         webhookSealerDep,
 		WebhookTestDispatcher: webhookTesterDep,
 		IncidentNotifier:      incidentNotifierDep,
@@ -776,41 +566,22 @@ func main() {
 		spawn("rbac-policy-refresh", func(ctx context.Context) { refreshCustomRoles(ctx, db, policy) })
 	}
 	if dispatcher != nil {
-		// Dispatcher.Run only waits for cancellation and then drains, so
-		// spawning it here is what puts its 5s drain budget inside wg.Wait --
-		// which is in turn ahead of db.Close(), so a delivery finishing during
-		// shutdown can still write its outcome row.
+		// Dispatcher.Run only waits for cancellation and then drains.
 		spawn("webhook-dispatcher", dispatcher.Run)
 	}
 	if alertWatcher != nil {
-		// Spawned AHEAD of nothing in particular but stopped by the same bgCtx,
-		// which matters in one specific way: cancellation ends the poll loop
-		// immediately, so the last thing the watcher can do is enqueue a
-		// delivery into a dispatcher that is still inside its own drain budget.
-		// Every replica runs it -- there is no leader election here, and
-		// AlertWatcher's doc says why, and says what a receiver deduplicates on
-		// as a result.
+		// Spawned AHEAD of nothing in particular but stopped by the same bgCtx, which matters in one
+		// specific way.
 		spawn("alert-webhook-watcher", alertWatcher.Run)
 	}
 	if ruleReconciler != nil {
-		// Every replica runs it (M7 Decision 5): the apply is idempotent SSA of
-		// identical bytes, so there is no advisory lock here and deliberately
-		// so -- see the promrules package doc for the contrast with the
-		// scheduler's lock.
+		// Every replica runs it: the apply is idempotent SSA of identical bytes, so there is no advisory
+		// lock here and deliberately so.
 		spawn("prometheus-rule-sync", ruleReconciler.Run)
 	}
 
-	// The schedule loop is opt-in (console.scheduler.enabled, default false)
-	// and needs BOTH a database -- check_schedules and the cross-replica
-	// advisory lock live there -- and a runner, since a fired schedule becomes
-	// an ordinary diagnostics run. A misconfiguration here warns and leaves
-	// the loop off rather than refusing to boot: everything else the console
-	// serves still works, and taking the whole deployment down over a feature
-	// flag would be the worse failure. It is spawned through the same `spawn`
-	// helper as the pruner, so bgCtx cancellation stops it and wg.Wait covers
-	// its exit in the shutdown sequence below -- and because the advisory lock
-	// is taken and released PER TICK, a replica stopped mid-tick costs the
-	// fleet one tick, never a wedged lock.
+	// The schedule loop is opt-in (console.scheduler.enabled, default false) and needs BOTH a
+	// database.
 	switch {
 	case !cfg.Scheduler.Enabled:
 	case db == nil:
@@ -824,30 +595,7 @@ func main() {
 			Lock: db, Store: db, Runner: runner, Topology: ctrl,
 			Metrics: m, Interval: cfg.Scheduler.TickInterval,
 		}).Run)
-		// The continuous external-check reconciler rides the SAME gate, the
-		// same cadence and the same advisory lock key as the schedule loop,
-		// and that is deliberate on all three counts.
-		//
-		// Same gate: it consumes kind='continuous' check_schedules rows, the
-		// half of that table the scheduler deliberately skips (see
-		// scheduler.fireOne), so "schedules are being acted on" is one switch,
-		// not two an operator can set inconsistently. Same requirements too --
-		// no database means no continuous definitions to read and no
-		// cross-replica lock to take, so there is nothing for it to do, which
-		// is why it is wired inside this arm rather than beside it.
-		//
-		// Same cadence: both are seconds-scale polls whose whole design
-		// assumes a short tick (the lock is taken and released per tick), and
-		// a second interval knob would be one more number to keep consistent
-		// with the first for no behavioural gain.
-		//
-		// Same key: scheduler.LockKey is passed in rather than read from this
-		// package, because internal/console/scheduler imports
-		// internal/console/checks and the reconciler lives in the latter -- see
-		// checks.ReconcilerDeps.LockKey. Sharing it is what keeps N replicas
-		// from issuing N identical PUTs per interval; the cost is that the two
-		// ticks serialize against each other, which checks.Reconciler's own doc
-		// comment explains is acceptable at this cadence.
+		// The continuous external-check reconciler rides the SAME gate.
 		spawn("external-check-reconciler", checks.NewReconciler(checks.ReconcilerDeps{
 			Lock: db, Store: db, Topology: ctrl, Controller: ctrl,
 			Metrics: m, Interval: cfg.Scheduler.TickInterval, LockKey: scheduler.LockKey,
@@ -855,18 +603,8 @@ func main() {
 		slog.Info("schedule loop enabled", "tickInterval", cfg.Scheduler.TickInterval)
 	}
 
-	// The Kubernetes event reader is opt-in (console.kubernetesContext.enabled,
-	// default false) and needs a database -- k8s_events is where it puts what it
-	// captures, and watching the apiserver to throw the result away would be an
-	// RBAC grant spent on nothing.
-	//
-	// EVERY failure here is a warn-and-continue, and the in-cluster config one
-	// most of all: `kubernetesContext.enabled: true` on a console running
-	// outside a cluster (local development, a laptop against a port-forwarded
-	// database) must degrade to "no k8s context", never to a console that
-	// refuses to start. That is the controller's own posture at
-	// controller.go:247, copied rather than imported -- internal/console must
-	// not depend on internal/controller, and the helper is ten lines.
+	// The Kubernetes event reader is opt-in (console.kubernetesContext.enabled, default false) and
+	// needs a database.
 	switch {
 	case !cfg.KubernetesContext.Enabled:
 	case db == nil:
@@ -880,10 +618,8 @@ func main() {
 				"cluster, or its ServiceAccount token is not mounted)", "error", kubeErr)
 			break
 		}
-		// ctrl is a TYPED nil when controller.url is unset, and a typed nil in
-		// an interface is not a nil interface -- assigning it directly would
-		// hand the reader something that panics instead of something it knows
-		// to treat as "no topology" (and fail closed on node events).
+		// ctrl is a TYPED nil when controller.url is unset, and a typed nil in an interface is not a nil
+		// interface.
 		var topo kubectx.TopologySource
 		if ctrl != nil {
 			topo = ctrl
@@ -902,42 +638,7 @@ func main() {
 
 	runErr := srv.Run(rootCtx)
 
-	// Shutdown, in this order and no other:
-	//  1. srv.Run has already returned, so the listener is closed and
-	//     http.Server.Shutdown has drained the in-flight plain HTTP requests. No
-	//     new WebSocket upgrade can arrive from here on.
-	//  2. stopBackground stops the ingester, the pushers, the nudge relay and the
-	//     Hub. Hijacked WebSocket connections are not tracked by
-	//     http.Server.Shutdown, so this — not step 1 — is what releases them.
-	//  3. wg.Wait guarantees nobody is inside Bus.Publish any more. It covers
-	//     ONLY the components spawned above (hub.Run, ingester, pushers, relay)
-	//     — the per-client read/write pumps (ws/conn.go) are tracked by nothing
-	//     and are abandoned at process exit, so the ~2×writeWait (≈20s) linger a
-	//     writePump may need against a wedged peer is best-effort (peer may see
-	//     an RST instead of a 1001 close frame), not a budget honored here.
-	//     wg.Wait itself returns promptly: every waited component exits on ctx
-	//     cancellation.
-	//  4. closeBus releases the Valkey client last. Closing it earlier would make
-	//     in-flight publishes fail against a closed client and log errors during
-	//     an otherwise clean shutdown.
-	//  5. db.Close, when a database is configured, comes AFTER closeBus for the
-	//     same reason closeBus comes after wg.Wait: both the retention pruner
-	//     (spawned above, waited on by wg like every other background
-	//     component) and the ingester's event sink run queries against the
-	//     pool, so closing it any earlier would fail in-flight inserts/deletes
-	//     during an otherwise clean shutdown.
-	//
-	// runner.Wait sits between stopBackground and wg.Wait, on its own budget:
-	// a run's execution context is deliberately NOT derived from bgCtx
-	// (checks.Runner.Start's doc comment), so stopBackground does not, by
-	// itself, wait for or cancel any run in flight — this is what gives one
-	// a bounded (10s) chance to finish, and its terminal store write and WS
-	// frames to land, before the process exits, instead of a rolling update
-	// silently truncating a diagnostic without a trace. It is independent of
-	// wg (which tracks the hub/ingester/pushers/pruner, none of which a run
-	// depends on), so its position relative to wg.Wait does not matter
-	// causally — placed first since it is what stopBackground's own log line
-	// below is announcing.
+	// It covers ONLY the components spawned above (hub.Run, ingester, pushers, relay).
 	slog.Info("http server stopped, draining realtime pipeline")
 	stopBackground()
 	if runner != nil {
@@ -973,12 +674,8 @@ func main() {
 	}
 }
 
-// readSecretFile reads a file-mounted secret (an OIDC client secret, a
-// bootstrap admin password) and trims surrounding whitespace, mirroring
-// DatabaseConfig.ResolveDSN's own "file-mounted, trimmed" convention for
-// database.dsnFile. Every auth secret is a file path, never an inline
-// config value: KCONMON_NG_CONSOLE_CONFIG stays the only env var, and no
-// chart value ever carries secret material.
+// readSecretFile reads a file-mounted secret (an OIDC client secret, a bootstrap admin password)
+// and trims surrounding whitespace; every auth secret is a file path, never an inline config value.
 func readSecretFile(path string) (string, error) {
 	data, err := os.ReadFile(path) //nolint:gosec // path comes from operator config (a mounted Secret), not user input -- same trust boundary as config.Load's own os.ReadFile
 	if err != nil {
@@ -987,26 +684,13 @@ func readSecretFile(path string) (string, error) {
 	return strings.TrimSpace(string(data)), nil
 }
 
-// bootstrapLocalAdminRole is the built-in role granted to the operator-named
-// bootstrapAdmin user. Without a binding, a freshly created user has zero
-// roles and falls back to auth.defaultRole (empty by default = 403 on
-// everything, middleware_auth.go's resolveRoles) -- bootstrapping a user
-// nobody can use would defeat the entire point of "so the console isn't
-// locked out on first boot".
+// bootstrapLocalAdminRole is the built-in role granted to the operator-named bootstrapAdmin user;
+// without a binding, a freshly created user has zero roles and falls back to auth.defaultRole
+// (empty by default = 403 on everything, middleware_auth.go's resolveRoles).
 const bootstrapLocalAdminRole = "admin"
 
-// bootstrapLocalAdmin implements task-18-brief.md's local-mode bootstrap:
-// when auth.local.bootstrapAdmin is set AND the users table is empty, it
-// creates that user (from bootstrapAdminPasswordFile) and binds it to the
-// built-in admin role, then logs a WARN telling the operator to change the
-// password. If the table is already non-empty, it does nothing and logs at
-// DEBUG -- re-running bootstrap on every restart would let a stale
-// bootstrapAdminPasswordFile Secret silently reset a password the operator
-// (or the bootstrap admin) has since rotated.
-//
-// Callers must only invoke this when db != nil (checked by the caller, not
-// here, for the same "conditional deps only inside if db != nil" discipline
-// every other optional dependency in main follows).
+// bootstrapLocalAdmin implements; if the table is already non-empty, it does nothing and logs at
+// DEBUG.
 func bootstrapLocalAdmin(ctx context.Context, db *store.DB, cfg config.LocalConfig) {
 	if cfg.BootstrapAdmin == "" {
 		return
@@ -1018,12 +702,7 @@ func bootstrapLocalAdmin(ctx context.Context, db *store.DB, cfg config.LocalConf
 		os.Exit(1)
 	}
 	if count > 0 {
-		// The table is populated, so no user is created — but reconcile the
-		// bootstrap admin's role binding if the user exists without one: a
-		// crash between CreateUser and CreateBinding on a previous boot
-		// would otherwise strand a permission-less admin FOREVER (this
-		// count>0 path would skip, and fixing it needs the very RBAC API
-		// the stranded admin cannot reach).
+		// The table is populated, so no user is created.
 		reconcileBootstrapAdminBinding(ctx, db, cfg.BootstrapAdmin)
 		slog.Debug("users table already populated — skipping local-mode admin bootstrap", //nolint:gosec // G706: bootstrapAdmin is an operator-configured username, structured slog field
 			"bootstrapAdmin", cfg.BootstrapAdmin)
@@ -1062,10 +741,9 @@ func bootstrapLocalAdmin(ctx context.Context, db *store.DB, cfg config.LocalConf
 		"username", cfg.BootstrapAdmin)
 }
 
-// reconcileBootstrapAdminBinding re-creates the bootstrap admin's admin-role
-// binding when the user row exists but the binding does not (a crash between
-// CreateUser and CreateBinding on a previous boot). Best-effort: every
-// failure is logged and boot continues — this is a repair path, not a gate.
+// reconcileBootstrapAdminBinding re-creates the bootstrap admin's admin-role binding when the user
+// row exists but the binding does not (a crash between CreateUser and CreateBinding on a previous
+// boot).
 func reconcileBootstrapAdminBinding(ctx context.Context, db *store.DB, username string) {
 	user, err := db.GetUserByUsername(ctx, username)
 	if err != nil {
@@ -1092,13 +770,8 @@ func reconcileBootstrapAdminBinding(ctx context.Context, db *store.DB, username 
 		"username", username)
 }
 
-// loadCustomRoles reads every custom (database-defined) role and reshapes it
-// into the map[string][]authz.Permission authz.NewPolicy/(*authz.Policy).Reload
-// take -- store.Role.Permissions is a plain []string (the roles table's own
-// storage shape), so each entry is cast to authz.Permission individually,
-// not validated against authz.AllPermissions: an unknown permission string
-// simply never matches anything Policy.Can checks for, same as it always
-// has for a role loaded once at boot.
+// loadCustomRoles reads every custom (database-defined) role and reshapes it into the
+// map[string][]authz.Permission authz.NewPolicy/(*authz.Policy).Reload take.
 func loadCustomRoles(ctx context.Context, db *store.DB) (map[string][]authz.Permission, error) {
 	roles, err := db.ListRoles(ctx)
 	if err != nil {
@@ -1115,18 +788,8 @@ func loadCustomRoles(ctx context.Context, db *store.DB) (map[string][]authz.Perm
 	return custom, nil
 }
 
-// refreshCustomRoles runs loadCustomRoles every rbacPolicyRefreshInterval and
-// applies the result to policy via Reload, so an admin's change to a custom
-// role's PERMISSION SET (through POST /api/v1/rbac/roles) takes effect for
-// new requests within one interval instead of requiring a console restart --
-// task-18-brief.md's "pick the ticker, it is ten lines" over only
-// documenting the restart requirement. A role BINDING needs no such ticker
-// (roleResolver re-reads role_bindings on every request already); this is
-// only for the cached permission SET behind each role name.
-//
-// A read failure logs and leaves policy exactly as it was: a transient store
-// hiccup must never blank out every custom role's permissions for the rest
-// of the process.
+// refreshCustomRoles runs loadCustomRoles every rbacPolicyRefreshInterval and applies the result to
+// policy via Reload.
 func refreshCustomRoles(ctx context.Context, db *store.DB, policy *authz.Policy) {
 	ticker := time.NewTicker(rbacPolicyRefreshInterval)
 	defer ticker.Stop()
@@ -1145,40 +808,27 @@ func refreshCustomRoles(ctx context.Context, db *store.DB, policy *authz.Policy)
 	}
 }
 
-// newBus selects the pub/sub backend the realtime pipeline runs on and returns a
-// close func for it.
-//
-// A non-empty valkey.address means real cross-replica fan-out (cache.ValkeyBus):
-// every replica's ingester publishes there, and every replica's Hub sees every
-// event. An empty address — or a Valkey that cannot be dialled at startup —
-// falls back to cache.NewInProcessBus(). That fallback is deliberate, not a
-// papered-over error: a single-replica console on an in-process bus is a
-// documented working state (ADR-002), so a Valkey outage must degrade realtime
-// fan-out, not stop the console from booting and serving the M1 REST API.
-//
-// The fallback lasts until the process restarts: NewValkeyBus only fails on the
-// initial dial. Disconnects after that are rueidis's problem — the client
-// retries and resubscribes internally, with the bus's own receive loop as a
-// backstop for the cases rueidis gives up on. The warning below is therefore
-// the operator's signal to restart the console once Valkey is back.
-//
-// The returned closeBus must be called exactly once, after every publisher has
-// stopped: cancelling ctx stops the ValkeyBus receive loop but does NOT release
-// the rueidis client — only Close does.
-func newBus(ctx context.Context, cfg *config.Config) (bus cache.Bus, closeBus func()) {
+// newBus selects the pub/sub backend the realtime pipeline runs on and returns a close func for it;
+// an empty address — or a Valkey that cannot be dialled at startup.
+func newBus(ctx context.Context, cfg *config.Config) (bus cache.Bus, closeBus func(), err error) {
 	if cfg.Valkey.Address == "" {
 		slog.Info("valkey.address not set — using the in-process bus (realtime fan-out is single-replica only)")
-		return cache.NewInProcessBus(), func() {}
+		return cache.NewInProcessBus(), func() {}, nil
 	}
 
-	vb, err := cache.NewValkeyBus(ctx, cfg.Valkey.Address, cfg.Valkey.DialTimeout)
+	// A file error is NOT the dial fallback below: an unreadable Secret is a broken mount.
+	password, err := cfg.Valkey.ResolvePassword()
+	if err != nil {
+		return nil, nil, err
+	}
+	vb, err := cache.NewValkeyBus(ctx, cfg.Valkey.Address, cfg.Valkey.DialTimeout, password)
 	if err != nil {
 		slog.Warn("valkey unreachable at startup — falling back to the in-process bus; "+ //nolint:gosec // G706: address comes from the local config file, structured slog field
 			"realtime fan-out is single-replica only until the console is restarted",
 			"address", cfg.Valkey.Address, "error", err)
-		return cache.NewInProcessBus(), func() {}
+		return cache.NewInProcessBus(), func() {}, nil
 	}
 
 	slog.Info("valkey pub/sub enabled", "address", cfg.Valkey.Address) //nolint:gosec // G706: address comes from the local config file, structured slog field
-	return vb, vb.Close
+	return vb, vb.Close, nil
 }

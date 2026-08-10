@@ -15,21 +15,14 @@ import (
 	"github.com/EsDmitrii/kconmon-ng/internal/console/store"
 )
 
-// EnrichmentReader is the READ half of store.EnrichmentStore, narrowed the
-// same way EventLister narrows store.EventStore: the HTTP layer looks hop
-// addresses up in the TTL cache and must not be able to write it. The
-// write-back path belongs to the enrichment resolver (M5 Task 5), which owns
-// the resolve-then-PutEnrichment cycle; a handler that could write the cache
-// could poison it from a request.
+// EnrichmentReader is the READ half of store.EnrichmentStore, narrowed the same way EventLister
+// narrows store.EventStore.
 type EnrichmentReader interface {
 	GetEnrichment(ctx context.Context, ips []string) (map[string]store.Enrichment, error)
 }
 
-// MTRService is the subset of *store.DB httpapi needs for /api/v1/mtr/*: the
-// path-snapshot read seam plus the enrichment cache read. Composed from
-// store's own interfaces in TargetService's shape, so a test can substitute a
-// fake with no database at all and this package's contract with store cannot
-// widen every time *store.DB grows a method for some other caller.
+// MTRService is the subset of *store.DB httpapi needs for /api/v1/mtr/*; composed from store's own
+// interfaces in TargetService's shape.
 type MTRService interface {
 	store.PathSnapshotReader
 	EnrichmentReader
@@ -37,19 +30,12 @@ type MTRService interface {
 
 var _ MTRService = (*store.DB)(nil)
 
-// mtrUnavailableDetail is served whenever s.mtr is nil, in
-// targetsUnavailableDetail's shape. Path history has no in-memory fallback
-// for a stronger reason than targets do: a snapshot's whole value is that it
-// outlives the run that produced it, so an in-process copy that vanishes on
-// pod restart would be a path history that cannot answer the one question it
-// exists for ("when did this route change?").
+// mtrUnavailableDetail is served whenever s.mtr is nil, in targetsUnavailableDetail's shape; path
+// history has no in-memory fallback for a stronger reason than targets do.
 const mtrUnavailableDetail = "MTR path history lives in the database and has no in-memory fallback: " +
 	"set console.database.mode in the console config (Helm: console.database.mode) to enable /api/v1/mtr"
 
-// Page-limit bounds shared by M5's two new listings. events.go, targets.go
-// and runs.go each keep their own hand-synced copy of store's private
-// clampLimit; M5 adds ONE more copy for both of its listings rather than a
-// fourth and a fifth of the identical [1,500] window.
+// Page-limit bounds shared by the two new listings.
 const (
 	pageMinLimit     = 1
 	pageMaxLimit     = 500
@@ -107,18 +93,14 @@ type mtrDestinationResponse struct {
 	LastSeen      time.Time `json:"lastSeen"`
 }
 
-// mtrDestinationsResponse envelopes the (unpaged) pair list. An envelope
-// rather than a bare array, matching every other list body in this API
-// (targets/checks/schedules/tokens): a top-level array can never grow a
-// sibling field, and this listing will want one the moment it pages.
+// mtrDestinationsResponse envelopes the (unpaged) pair list; an envelope rather than a bare array,
+// matching every other list body in this API (targets/checks/schedules/tokens).
 type mtrDestinationsResponse struct {
 	Destinations []mtrDestinationResponse `json:"destinations"`
 }
 
-// mtrSnapshotResponse is one persisted route on the wire. Hops is passed
-// through as raw JSON, never re-marshalled through []store.PathHop, for
-// targetResponse.Labels' reason: the store hands the JSONB back verbatim and
-// a round trip would only be an opportunity to change it.
+// mtrSnapshotResponse is one persisted route on the wire; hops is passed through as raw JSON, never
+// re-marshalled through []store.PathHop.
 type mtrSnapshotResponse struct {
 	ID          string          `json:"id"`
 	SourceNode  string          `json:"sourceNode"`
@@ -167,23 +149,15 @@ type mtrEnrichmentResponse struct {
 	ResolvedAt time.Time       `json:"resolvedAt"`
 }
 
-// mtrSnapshotDetailResponse is GET /api/v1/mtr/snapshots/{id}?enrich=true's
-// body: the snapshot, plus the enrichment map keyed by hop IP. WITHOUT
-// ?enrich=true the handler serves the bare mtrSnapshotResponse instead, so
-// the field is absent rather than null or empty -- "did not ask" and "asked
-// and nothing is known" stay distinguishable, which is what the plan's
-// "disabled => the field is absent, never an error" rule needs once Task 5
-// adds the on/off config.
+// mtrSnapshotDetailResponse is GET /api/v1/mtr/snapshots/{id}?enrich=true's body: the snapshot;
+// WITHOUT ?enrich=true the handler serves the bare mtrSnapshotResponse.
 type mtrSnapshotDetailResponse struct {
 	mtrSnapshotResponse
 	Enrichment map[string]mtrEnrichmentResponse `json:"enrichment"`
 }
 
-// snapshotIDFrom resolves the {id} path parameter, answering 404 and
-// reporting false for anything that is not a canonical UUID -- targetIDFrom's
-// reasoning, verbatim: an unparseable id and an unknown one are
-// indistinguishable to a caller, and without the guard a malformed id reaches
-// pgx and its encode failure surfaces as a 502 that reads as an outage.
+// snapshotIDFrom resolves the {id} path parameter, answering 404 and reporting false for anything
+// that is not a canonical UUID.
 func snapshotIDFrom(w http.ResponseWriter, r *http.Request) (string, bool) {
 	id := chi.URLParam(r, "id")
 	if _, err := uuid.Parse(id); err != nil {
@@ -219,15 +193,7 @@ func (s *Server) handleMTRDestinations(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, mtrDestinationsResponse{Destinations: out})
 }
 
-// handleMTRSnapshots serves one pair's route history, newest-first, behind an
-// opaque keyset cursor.
-//
-// BOTH source and destination are required, and a request missing either is
-// 422 rather than an unfiltered listing: the store would happily page the
-// whole table, but there is no UI for that and no bound on it -- the answer
-// would grow with the fleet's entire trace history. 422, not 400: the query
-// string parses perfectly, its VALUES are what the endpoint refuses (the same
-// line decodeTargetRequest draws).
+// handleMTRSnapshots serves one pair's route history; BOTH source and destination are required.
 func (s *Server) handleMTRSnapshots(w http.ResponseWriter, r *http.Request) {
 	if s.mtrUnavailable(w) {
 		return
@@ -272,18 +238,7 @@ func (s *Server) handleMTRSnapshots(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, mtrSnapshotsResponse{Snapshots: out, NextCursor: page.NextCursor})
 }
 
-// handleMTRSnapshotGet serves one stored route. An unknown id and a malformed
-// one are both 404 (snapshotIDFrom).
-//
-// ?enrich=true adds the enrichment map, read through EnrichmentReader.
-// WHICH reader is Task 5's Deps.Enricher decision and this handler is
-// deliberately unaware of it: without one it is the cache-only read Task 4
-// shipped (mtr_hop_enrichment, never resolving), and with one it is
-// enrich.Resolver, which reads that same cache and resolves what it misses
-// with a bounded budget before writing back. The handler did not change when
-// enrichment gained sources, which is what the seam was for. The nil case
-// needs no gate: without a database there is no snapshot to enrich either,
-// and mtrUnavailable already answered.
+// handleMTRSnapshotGet serves one stored route.
 func (s *Server) handleMTRSnapshotGet(w http.ResponseWriter, r *http.Request) {
 	if s.mtrUnavailable(w) {
 		return
@@ -312,11 +267,8 @@ func (s *Server) handleMTRSnapshotGet(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, mtrSnapshotDetailResponse{mtrSnapshotResponse: body, Enrichment: s.enrichHops(r.Context(), &snap)})
 }
 
-// enrichmentReader is the seam swap Task 4 promised, in one place: an
-// *enrich.Resolver when cmd/console built one (mtr.enrichment.enabled with a
-// database), and the store's own cache-only read otherwise. Both are
-// EnrichmentReader, so the handler below is byte-identical either way and the
-// resolver still cannot write the cache through this interface.
+// Both are EnrichmentReader, so the handler below is byte-identical either way and the resolver
+// still cannot write the cache through this interface.
 func (s *Server) enrichmentReader() EnrichmentReader {
 	if s.enricher != nil {
 		return s.enricher
@@ -325,11 +277,6 @@ func (s *Server) enrichmentReader() EnrichmentReader {
 }
 
 // enrichHops looks the snapshot's hop addresses up through enrichmentReader.
-// Every failure mode -- undecodable hops, a cache read that errors, a resolver
-// that could not reach a single source -- degrades to an EMPTY map, never to
-// an error response: M5 Decision 5's rule is that a missing or broken
-// enrichment source is never an error on the trace itself, and the trace is
-// what the caller asked for.
 func (s *Server) enrichHops(ctx context.Context, snap *store.PathSnapshot) map[string]mtrEnrichmentResponse {
 	out := map[string]mtrEnrichmentResponse{}
 

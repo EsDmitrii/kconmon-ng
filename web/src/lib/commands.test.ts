@@ -1,12 +1,16 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   buildRegistry,
+  commandTitle,
+  GROUP_KEYS,
   isCommandDisabled,
   scoreCommand,
   searchCommands,
   type Command,
   type CommandContext,
 } from "@/lib/commands";
+import { chromeDict, NAV_KEYS } from "@/lib/i18n/dict/chrome";
+import { paletteDict } from "@/lib/i18n/dict/palette";
 import { NAV_ITEMS } from "@/nav";
 
 function ctx(over: Partial<CommandContext> = {}): CommandContext {
@@ -244,6 +248,163 @@ describe("buildRegistry action destinations", () => {
       const c = ctx({ navigate });
       buildRegistry(c).find((x) => x.id === id)!.perform(c);
       expect(navigate, id).toHaveBeenCalledWith(path);
+    }
+  });
+});
+
+/* the bilingual palette The English fixtures above are unchanged and stay the ranking contract. */
+
+/** A two-language entry, the shape every registry row now has. */
+function bi(over: Partial<Command> & { id: string; title: string; titleRu: string }): Command {
+  return { group: "Actions", perform: () => {}, ...over };
+}
+
+describe("commandTitle", () => {
+  it("shows the English title in en and the Russian one in ru", () => {
+    const c = bi({ id: "a", title: "Matrix", titleRu: "Матрица" });
+    expect(commandTitle(c, "en")).toBe("Matrix");
+    expect(commandTitle(c, "ru")).toBe("Матрица");
+  });
+
+  it("falls back to English for an entry with no Russian title — never to the id", () => {
+    const c = cmd({ id: "a", title: "MTR" });
+    expect(commandTitle(c, "ru")).toBe("MTR");
+    expect(commandTitle(c, "en")).toBe("MTR");
+  });
+});
+
+describe("scoreCommand indexes BOTH languages", () => {
+  const matrix = bi({ id: "a", title: "Matrix", titleRu: "Матрица" });
+
+  it("finds a Russian-titled entry by its English name", () => {
+    expect(scoreCommand("matrix", matrix)).toBeGreaterThan(0);
+  });
+
+  it("finds it by its Russian name too — the operator types either", () => {
+    expect(scoreCommand("матрица", matrix)).toBeGreaterThan(0);
+  });
+
+  it("scores a title-start hit the same in both languages: neither is the second-class one", () => {
+    expect(scoreCommand("матрица", matrix)).toBe(scoreCommand("matrix", matrix));
+  });
+
+  it("still refuses a word that is in neither", () => {
+    expect(scoreCommand("топология", matrix)).toBe(0);
+    expect(scoreCommand("topology", matrix)).toBe(0);
+  });
+
+  it("matches a Russian KEYWORD blob when neither title carries the word", () => {
+    const c = bi({
+      id: "a",
+      title: "Declare a maintenance window…",
+      titleRu: "Объявить окно работ…",
+      keywords: ["downtime planned", "простой регламент"],
+    });
+    expect(scoreCommand("простой", c)).toBeGreaterThan(0);
+    expect(scoreCommand("downtime", c)).toBeGreaterThan(0);
+    // A title hit still outranks a keyword hit, in Russian as in English.
+    expect(scoreCommand("окно", c)).toBeGreaterThan(scoreCommand("регламент", c));
+  });
+
+  /* The reason WORD_CHAR had to learn Cyrillic. */
+  it("treats Cyrillic as inside a word, so a mid-word fragment ranks BELOW a real prefix", () => {
+    const prefix = bi({ id: "a", title: "x", titleRu: "матрица связности" });
+    const midWord = bi({ id: "b", title: "y", titleRu: "телематрица" });
+    expect(scoreCommand("матри", prefix)).toBeGreaterThan(scoreCommand("матри", midWord));
+  });
+
+  it("ranks a Russian word-boundary hit above a mid-word one", () => {
+    const boundary = bi({ id: "a", title: "x", titleRu: "Перейти в матрицу" });
+    const substring = bi({ id: "b", title: "y", titleRu: "телематрицу" });
+    expect(scoreCommand("матриц", boundary)).toBeGreaterThan(scoreCommand("матриц", substring));
+  });
+
+  it("sums a MIXED query: an operator halfway through switching languages still lands", () => {
+    const c = bi({ id: "a", title: "Create an alert rule…", titleRu: "Создать правило оповещения…" });
+    expect(scoreCommand("alert правило", c)).toBeGreaterThan(0);
+    expect(scoreCommand("alert nothinghere", c)).toBe(0);
+  });
+});
+
+describe("searchCommands tie-break follows the DISPLAYED title", () => {
+  const alpha = bi({ id: "z", title: "Alpha thing", titleRu: "Ярлык вещь" });
+  const bravo = bi({ id: "y", title: "Bravo thing", titleRu: "Автор вещь" });
+
+  it("orders by the English title in en", () => {
+    expect(searchCommands("thing", [bravo, alpha], "en").map((c) => c.id)).toEqual(["z", "y"]);
+  });
+
+  it("orders by the RUSSIAN title in ru — the alphabet the reader is actually reading", () => {
+    expect(searchCommands("вещь", [alpha, bravo], "ru").map((c) => c.id)).toEqual(["y", "z"]);
+  });
+
+  it("defaults to en, so every existing two-argument call is unchanged", () => {
+    expect(searchCommands("thing", [bravo, alpha]).map((c) => c.id)).toEqual(["z", "y"]);
+  });
+});
+
+describe("the registry speaks both languages", () => {
+  it("takes each nav entry's Russian label from the SIDEBAR's own table, never a second copy", () => {
+    const registry = buildRegistry(ctx());
+    for (const item of NAV_ITEMS) {
+      const entry = registry.find((c) => c.id === `nav:${item.path}`)!;
+      expect(entry.titleRu, item.path).toBe(chromeDict.ru[NAV_KEYS[item.path]]);
+    }
+  });
+
+  it("carries nav.ts's English description AND its Russian twin as keywords", () => {
+    const registry = buildRegistry(ctx());
+    const matrix = registry.find((c) => c.id === "nav:/matrix")!;
+    expect(matrix.keywords).toContain(NAV_ITEMS.find((i) => i.path === "/matrix")!.description);
+    expect(matrix.keywords).toContain(paletteDict.ru["navDesc.matrix"]);
+  });
+
+  it("finds Matrix by «матрица» and by «тепловая» — the label and the tooltip, in Russian", () => {
+    const registry = buildRegistry(ctx());
+    expect(searchCommands("матрица", registry, "ru").map((c) => c.id)).toContain("nav:/matrix");
+    expect(searchCommands("тепловая", registry, "ru").map((c) => c.id)).toContain("nav:/matrix");
+  });
+
+  it("finds the same entry by its English name while the console is in Russian", () => {
+    const registry = buildRegistry(ctx());
+    expect(searchCommands("heatmap", registry, "ru").map((c) => c.id)).toEqual(["nav:/matrix"]);
+    expect(searchCommands("matrix", registry, "ru").map((c) => c.id)).toContain("nav:/matrix");
+  });
+
+  it("gives every action and view entry a Russian title", () => {
+    for (const c of buildRegistry(ctx())) {
+      expect(c.titleRu, c.id).toBeDefined();
+      expect(c.titleRu, c.id).not.toBe("");
+    }
+  });
+
+  it("names the theme it switches TO in Russian too", () => {
+    const dark = buildRegistry(ctx({ theme: "dark" })).find((c) => c.id === "view:theme")!;
+    expect(commandTitle(dark, "ru")).toBe("Переключить на светлую тему");
+    const light = buildRegistry(ctx({ theme: "light" })).find((c) => c.id === "view:theme")!;
+    expect(commandTitle(light, "ru")).toBe("Переключить на тёмную тему");
+  });
+
+  it("says «Вернуться в реальное время» — the Time Machine bar's own words, not a second wording", () => {
+    const engaged = buildRegistry(ctx({ isLive: false })).find((c) => c.id === "view:timemachine-live")!;
+    expect(commandTitle(engaged, "ru")).toBe(chromeDict.ru["timemachine.returnToLive"]);
+  });
+
+  it("finds the Time Machine entry by «машина времени», and Return to Live by «live»", () => {
+    const live = buildRegistry(ctx({ isLive: true }));
+    expect(searchCommands("машина времени", live, "ru").map((c) => c.id)).toContain("view:timemachine-pick");
+    const engaged = buildRegistry(ctx({ isLive: false }));
+    expect(searchCommands("live", engaged, "en").map((c) => c.id)).toContain("view:timemachine-live");
+    expect(searchCommands("реальное", engaged, "ru").map((c) => c.id)).toContain("view:timemachine-live");
+  });
+});
+
+describe("GROUP_KEYS", () => {
+  it("names every group exactly once, so no section can render untranslated", () => {
+    expect(Object.keys(GROUP_KEYS).sort()).toEqual(["Actions", "Navigation", "View"]);
+    for (const key of Object.values(GROUP_KEYS)) {
+      expect(paletteDict.ru[key]).toBeTruthy();
+      expect(paletteDict.en[key]).toBeTruthy();
     }
   });
 });

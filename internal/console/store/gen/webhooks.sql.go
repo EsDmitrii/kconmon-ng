@@ -95,10 +95,8 @@ FROM webhooks
 ORDER BY created_at DESC, id DESC
 `
 
-// Unpaged by design, the same call ListMTRDestinations makes: the row count is
-// configured endpoints, bounded by how many an operator typed, not by time. A
-// keyset cursor over a table that will hold single digits of rows would be
-// machinery with nothing to do.
+// Unpaged by design, the same call ListMTRDestinations makes: the row count is configured
+// endpoints.
 func (q *Queries) ListWebhooks(ctx context.Context) ([]Webhook, error) {
 	rows, err := q.db.Query(ctx, listWebhooks)
 	if err != nil {
@@ -146,10 +144,7 @@ type UpdateWebhookParams struct {
 	Enabled   bool
 }
 
-// A full replace of the CONFIGURED half of the row, and only that half:
-// last_status/last_attempt/failures are delivery OUTCOMES, written by
-// UpdateWebhookDelivery, and an operator editing the URL must not reset the
-// endpoint's failure history along with it.
+// A full replace of the CONFIGURED half of the row, and only that half.
 func (q *Queries) UpdateWebhook(ctx context.Context, arg UpdateWebhookParams) (Webhook, error) {
 	row := q.db.QueryRow(ctx, updateWebhook,
 		arg.ID,
@@ -188,10 +183,7 @@ type UpdateWebhookDeliveryParams struct {
 	Failures    int32
 }
 
-// The dispatcher's write-back after a terminal delivery outcome (M6 Decision
-// 5). failures is set, not incremented, because the dispatcher -- not this
-// layer -- knows whether the attempt ended a streak (0) or extended one, and a
-// SET is idempotent under the retry that a += is not.
+// The dispatcher's write-back after a terminal delivery outcome.
 func (q *Queries) UpdateWebhookDelivery(ctx context.Context, arg UpdateWebhookDeliveryParams) (int64, error) {
 	result, err := q.db.Exec(ctx, updateWebhookDelivery,
 		arg.ID,

@@ -2,14 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { METRICS_PREFIX, foldMatrix, getMatrixAt, matrixQueries, vectorByPair } from "./matrix-promql";
 import type { PromResult } from "./types";
 
-/**
- * These pin matrix-promql against the Go implementation it ports
- * (internal/console/matrix/matrix.go). The query assertions are deliberately
- * string-exact rather than "contains the metric name": the point of Decision 7
- * is that the historical cell is the SAME computation as the live one, and a
- * quietly different rate window or grouping would break that claim while still
- * returning a plausible-looking grid.
- */
+/** These pin matrix-promql against the Go implementation it ports (internal/console/matrix/matrix.go). */
 
 const AT = new Date("2026-08-01T12:00:00Z");
 

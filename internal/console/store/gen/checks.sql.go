@@ -29,12 +29,8 @@ type CreateRunParams struct {
 	PairTotal     int32
 }
 
-// status is always the literal 'pending' -- a caller never gets to create a
-// run in any other status; the lifecycle only ever advances it forward via
-// MarkRunStarted and FinishRun below. id is caller-supplied (not DB-default,
-// unlike users/api_tokens): the runner mints the UUID before this INSERT so
-// it can also be the ephemeral WS "run:{id}" topic name (Task 20) without a
-// round trip first.
+// status is always the literal 'pending' -- a caller never gets to create a run in any other
+// status.
 func (q *Queries) CreateRun(ctx context.Context, arg CreateRunParams) (CheckRun, error) {
 	row := q.db.QueryRow(ctx, createRun,
 		arg.ID,
@@ -74,14 +70,10 @@ type DeleteRunsBeforeParams struct {
 	Limit     int32
 }
 
-// cr alias on the subquery's own FROM: sqlc v1.31.1's own query analyzer
-// (not real PostgreSQL -- verified this exact self-join resolves
-// unambiguously against a live postgres:17-alpine) reports an ambiguous
-// column reference for the unaliased form, same quirk documented on
-// DeleteTopologyEventsBefore (topology_events.sql) and
-// DeleteAuditEntriesBefore (auth.sql). ON DELETE CASCADE on check_results.run_id
-// means deleting the run row here is enough to also drop its results -- no
-// separate check_results sweep exists or is needed.
+// cr alias on the subquery's own FROM: sqlc v1.31.1's own query analyzer (not real PostgreSQL --
+// verified this exact self-join resolves unambiguously against a live postgres:17-alpine) reports
+// an ambiguous column reference for the unaliased form, same quirk documented on
+// DeleteTopologyEventsBefore (topology_events.sql) and DeleteAuditEntriesBefore (auth.sql).
 func (q *Queries) DeleteRunsBefore(ctx context.Context, arg DeleteRunsBeforeParams) (int64, error) {
 	result, err := q.db.Exec(ctx, deleteRunsBefore, arg.CreatedAt, arg.Limit)
 	if err != nil {
@@ -103,12 +95,7 @@ type FinishRunParams struct {
 	PairFailed int32
 }
 
-// status + finished_at + both pair counters in one UPDATE, so a reader never
-// observes a run whose status says "succeeded" while pair_ok/pair_failed
-// still read their zero-value default. AND status = 'running' guards the
-// running->terminal transition the same way MarkRunStarted's AND status =
-// 'pending' does: a run that never started, or already finished, is left
-// untouched (0 rows) rather than silently overwritten by a retry.
+// status + finished_at + both pair counters in one UPDATE.
 func (q *Queries) FinishRun(ctx context.Context, arg FinishRunParams) (int64, error) {
 	result, err := q.db.Exec(ctx, finishRun,
 		arg.ID,
@@ -150,12 +137,13 @@ func (q *Queries) GetRun(ctx context.Context, id pgtype.UUID) (CheckRun, error) 
 }
 
 const getRunResults = `-- name: GetRunResults :many
-SELECT id, run_id, source_node, destination_node, success, duration_ns, error, result, recorded_at
+SELECT id, run_id, source_node, destination_node, success, duration_ns, error, result, recorded_at, sample_seq
 FROM check_results
 WHERE run_id = $1
 ORDER BY id
 `
 
+// ORDER BY id, not (pair, sample_seq): id is insertion order.
 func (q *Queries) GetRunResults(ctx context.Context, runID pgtype.UUID) ([]CheckResult, error) {
 	rows, err := q.db.Query(ctx, getRunResults, runID)
 	if err != nil {
@@ -175,6 +163,7 @@ func (q *Queries) GetRunResults(ctx context.Context, runID pgtype.UUID) ([]Check
 			&i.Error,
 			&i.Result,
 			&i.RecordedAt,
+			&i.SampleSeq,
 		); err != nil {
 			return nil, err
 		}
@@ -205,11 +194,7 @@ type ListRunsParams struct {
 	Lim       int32
 }
 
-// Same keyset cursor shape as ListTopologyEvents/ListAuditEntries: (created_at,
-// id) DESC, seeked via the row-tuple comparison below against
-// check_runs_created_idx. id is UUID rather than bigint here -- it does not
-// need to be a meaningful sort order, only a stable deterministic tie-breaker
-// for rows sharing one created_at.
+// Same keyset cursor shape as ListTopologyEvents/ListAuditEntries: (created_at, id) DESC.
 func (q *Queries) ListRuns(ctx context.Context, arg ListRunsParams) ([]CheckRun, error) {
 	rows, err := q.db.Query(ctx, listRuns,
 		arg.CheckType,
@@ -254,10 +239,8 @@ const markRunStarted = `-- name: MarkRunStarted :execrows
 UPDATE check_runs SET status = 'running', started_at = now() WHERE id = $1 AND status = 'pending'
 `
 
-// AND status = 'pending' guards the pending->running transition: a run
-// that's already running, or already terminal, is left untouched (0 rows),
-// so a caller can tell "no such run" apart from "wrong state" -- see
-// checks.go's disambiguating GetRun lookup on rows == 0.
+// AND status = 'pending' guards the pending->running transition: a run that's already running, or
+// already terminal.
 func (q *Queries) MarkRunStarted(ctx context.Context, id pgtype.UUID) (int64, error) {
 	result, err := q.db.Exec(ctx, markRunStarted, id)
 	if err != nil {
@@ -282,34 +265,7 @@ type ReapStuckRunsParams struct {
 	Limit     int32
 }
 
-// Force-finish runs left 'running' long past any deadline the runner could
-// have given them (M4 follow-up #6): a Console killed mid-run never writes its
-// FinishRun, and nothing else would ever move that row out of 'running'.
-// 'cancelled' is the honest outcome -- the run did not fail its checks, it was
-// abandoned.
-//
-// status = 'running' is half the predicate on purpose: age alone must never be
-// enough. A pending run that never started, and one that already reached a
-// terminal status, are both left untouched no matter how old they are (the
-// retention Pruner is what removes those, not this).
-//
-// NO NEW INDEX, and the honest reason is that no existing one helps and no new
-// one is worth a migration here. check_runs_created_idx (created_at DESC, id
-// DESC) cannot serve this: created_at < cutoff matches almost the whole table
-// (every run older than the cutoff, i.e. nearly all of them), so it is not a
-// selective bound and the planner correctly prefers a sequential scan --
-// measured at ~667 buffers / ~2ms over 50k rows on postgres:17-alpine, with
-// the ORDER BY's sort on the 100-row LIMIT costing nothing. The selective
-// predicate is status = 'running', which would want a PARTIAL index, and that
-// needs a migration this task does not add. The trade is fine because
-// check_runs is bounded by the retention sweep (DeleteRunsBefore) and this
-// query runs on a slow scheduler tick, not per request -- revisit it if run
-// volume ever makes check_runs large enough for a seq scan to matter.
-//
-// ORDER BY created_at (oldest first) matches DeleteRunsBefore's own shape so a
-// limit that cannot cover the whole backlog still makes forward progress
-// instead of re-examining the same rows. cr alias on the subquery's own FROM
-// for the same sqlc v1.31.1 analyzer quirk documented on DeleteRunsBefore above.
+// Force-finish runs left 'running' long past any deadline the runner could have given them.
 func (q *Queries) ReapStuckRuns(ctx context.Context, arg ReapStuckRunsParams) (int64, error) {
 	result, err := q.db.Exec(ctx, reapStuckRuns, arg.CreatedAt, arg.Limit)
 	if err != nil {
@@ -319,15 +275,15 @@ func (q *Queries) ReapStuckRuns(ctx context.Context, arg ReapStuckRunsParams) (i
 }
 
 const upsertRunResult = `-- name: UpsertRunResult :one
-INSERT INTO check_results (run_id, source_node, destination_node, success, duration_ns, error, result)
-VALUES ($1, $2, $3, $4, $5, $6, $7)
+INSERT INTO check_results (run_id, source_node, destination_node, success, duration_ns, error, result, sample_seq)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 ON CONFLICT ON CONSTRAINT check_results_pair_unique DO UPDATE
 SET success = EXCLUDED.success,
     duration_ns = EXCLUDED.duration_ns,
     error = EXCLUDED.error,
     result = EXCLUDED.result,
     recorded_at = now()
-RETURNING id, run_id, source_node, destination_node, success, duration_ns, error, result, recorded_at
+RETURNING id, run_id, source_node, destination_node, success, duration_ns, error, result, recorded_at, sample_seq
 `
 
 type UpsertRunResultParams struct {
@@ -338,10 +294,11 @@ type UpsertRunResultParams struct {
 	DurationNs      int64
 	Error           string
 	Result          json.RawMessage
+	SampleSeq       int32
 }
 
 // A retried pair overwrites rather than erroring: ON CONFLICT ON CONSTRAINT
-// check_results_pair_unique DO UPDATE, not DO NOTHING.
+// check_results_pair_unique DO UPDATE.
 func (q *Queries) UpsertRunResult(ctx context.Context, arg UpsertRunResultParams) (CheckResult, error) {
 	row := q.db.QueryRow(ctx, upsertRunResult,
 		arg.RunID,
@@ -351,6 +308,7 @@ func (q *Queries) UpsertRunResult(ctx context.Context, arg UpsertRunResultParams
 		arg.DurationNs,
 		arg.Error,
 		arg.Result,
+		arg.SampleSeq,
 	)
 	var i CheckResult
 	err := row.Scan(
@@ -363,6 +321,7 @@ func (q *Queries) UpsertRunResult(ctx context.Context, arg UpsertRunResultParams
 		&i.Error,
 		&i.Result,
 		&i.RecordedAt,
+		&i.SampleSeq,
 	)
 	return i, err
 }

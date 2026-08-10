@@ -2,11 +2,8 @@
 
 package scheduler_test
 
-// These tests require a real PostgreSQL: the whole point is the ADVISORY LOCK,
-// which has no in-process equivalent to fake.
-// Run: docker run --rm -d -p 5432:5432 -e POSTGRES_PASSWORD=test -e POSTGRES_DB=kconmon postgres:17-alpine
-// Then: KCONMON_TEST_DATABASE_DSN='postgres://postgres:test@127.0.0.1:5432/kconmon?sslmode=disable' \
-//       go test -tags=integration -race ./internal/console/scheduler/... -v
+// These tests require a real PostgreSQL: the whole point is the ADVISORY LOCK, which has no
+// in-process equivalent to fake.
 
 import (
 	"context"
@@ -31,15 +28,7 @@ import (
 
 const connectTimeout = 10 * time.Second
 
-// testDSN returns the DSN from KCONMON_TEST_DATABASE_DSN, skipping when it is
-// unset -- same convention as package store's own integration tests -- and
-// then swaps the database name for a scheduler-owned one it creates on the
-// same server. `go test ./internal/console/...` runs PACKAGES in parallel,
-// and package store's integration tests dropSchema the shared database
-// exactly as this file does: two packages resetting one database race each
-// other into spurious failures (caught by the M4 final gate). Isolation by
-// database, not by -p 1, so the whole-tree integration invocation stays
-// parallel and honest.
+// testDSN returns the DSN from KCONMON_TEST_DATABASE_DSN, skipping when it is unset.
 func testDSN(t *testing.T) string {
 	t.Helper()
 	dsn := os.Getenv("KCONMON_TEST_DATABASE_DSN")
@@ -73,14 +62,8 @@ func testDSN(t *testing.T) string {
 	return u.String()
 }
 
-// dropSchema wipes every table the migrations create so this file is
-// re-runnable and shares the database cleanly with the other suites.
-//
-// This is the one deliberate pgx use outside internal/console/store: the
-// "store is the sole pgx importer" boundary (ADR-001) protects PRODUCTION
-// data paths, and store's public API rightly has no drop-every-table
-// operation for a test harness to call. Integration-tagged test code
-// resetting its own schema is outside that boundary's blast radius.
+// dropSchema wipes every table the migrations create so this file is re-runnable and shares the
+// database cleanly with the other suites.
 func dropSchema(t *testing.T, dsn string) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), connectTimeout)
@@ -117,11 +100,8 @@ func openDB(t *testing.T, dsn string) *store.DB {
 	return db
 }
 
-// countingRunner counts Start calls across BOTH scheduler instances (one
-// shared instance, deliberately: the assertion is fleet-wide, "exactly one
-// fire", not per-replica). Get and ReapStuckRuns come from the embedded real
-// *checks.Runner, so the reaper test exercises Task 12's actual sweep against
-// the actual table.
+// countingRunner counts Start calls across BOTH scheduler instances (one shared instance,
+// deliberately: the assertion is fleet-wide, "exactly one fire", not per-replica).
 type countingRunner struct {
 	*checks.Runner
 	mu      sync.Mutex
@@ -186,15 +166,9 @@ func seedDueInterval(t *testing.T, db *store.DB, interval time.Duration) string 
 	return sched.ID
 }
 
-// TestTwoInstancesFireADueScheduleExactlyOnce is the reason this test needs a
-// real database: the advisory lock is what makes N replicas behave like one
-// scheduler, and nothing in-process can stand in for it.
-//
-// Two Scheduler instances, two independent *store.DB pools (two sets of
-// PostgreSQL sessions -- one pool would still prove the lock works, but two
-// is what a real deployment looks like), one shared runner, several
-// overlapping ticks. A schedule with a long interval is due exactly once, so
-// any leak in the mutual exclusion shows up as a second Start.
+// TestTwoInstancesFireADueScheduleExactlyOnce is the reason this test needs a real database; two
+// Scheduler instances, two independent *store.DB pools (two sets of PostgreSQL sessions -- one pool
+// would still prove the lock works, but two is what a real deployment looks like).
 func TestTwoInstancesFireADueScheduleExactlyOnce(t *testing.T) {
 	dsn := testDSN(t)
 	dropSchema(t, dsn)
@@ -258,10 +232,8 @@ func TestReaperFinishesAStuckRunUnderTheLock(t *testing.T) {
 		t.Fatalf("MarkRunStarted: %v", err)
 	}
 
-	// Back-date it well past checks' own maxRunLifetime ceiling (the longest
-	// deadline Start can hand a run, plus its reap slack -- under two hours);
-	// four hours is comfortably beyond it without this test needing to know
-	// the exact number.
+	// Back-date it well past checks' own maxRunLifetime ceiling (the longest deadline Start can hand a
+	// run, plus its reap slack -- under two hours).
 	pool, err := pgxpool.New(ctx, dsn)
 	if err != nil {
 		t.Fatalf("connect: %v", err)
@@ -288,10 +260,6 @@ func TestReaperFinishesAStuckRunUnderTheLock(t *testing.T) {
 	}
 }
 
-// TestAFailingScheduleRecordsItAgainstPostgres is finding #5 end to end, on a
-// real database: the schedule advances its cadence exactly as a healthy one
-// does (which is why it used to be invisible), AND the row now says why no run
-// came out of it, with the stamp derived by the UPDATE's own CASE.
 func TestAFailingScheduleRecordsItAgainstPostgres(t *testing.T) {
 	dsn := testDSN(t)
 	dropSchema(t, dsn)
@@ -303,11 +271,7 @@ func TestAFailingScheduleRecordsItAgainstPostgres(t *testing.T) {
 
 	schedID := seedDueInterval(t, db, time.Hour)
 
-	// Delete the definition out from under the schedule -- the exact shape the
-	// finding describes. ON DELETE CASCADE would take the schedule with it, so
-	// the failure is staged by pointing the schedule's definition lookup at a
-	// row that is gone: disable the FK for one statement's worth of surgery is
-	// not available, so instead the DESTINATION target is what disappears.
+	// Delete the definition out from under the schedule -- the exact shape the finding describes.
 	sched, err := db.GetSchedule(ctx, schedID)
 	if err != nil {
 		t.Fatalf("GetSchedule: %v", err)
@@ -325,10 +289,8 @@ func TestAFailingScheduleRecordsItAgainstPostgres(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("UpdateDefinition: %v", err)
 	}
-	// Drop the target row directly: DeleteTarget is refused by ON DELETE
-	// RESTRICT while the definition points at it, and a definition pointing at
-	// a target that no longer exists is exactly the state a restore or a
-	// hand-edited database produces.
+	// Drop the target row directly: DeleteTarget is refused by ON DELETE RESTRICT while the definition
+	// points at it.
 	pool, err := pgxpool.New(ctx, dsn)
 	if err != nil {
 		t.Fatalf("connect: %v", err)
@@ -342,10 +304,8 @@ func TestAFailingScheduleRecordsItAgainstPostgres(t *testing.T) {
 		t.Fatalf("delete target: %v", err)
 	}
 
-	// countingRunner, not a bare checks.Runner: the RECOVERY half below reaches
-	// Start for real, and a Runner built with no controller client has no
-	// topology to resolve nodes against. The failure half never gets that far
-	// -- specFor refuses before Start is called, which is the point.
+	// The failure half never gets that far -- specFor refuses before Start is called, which is the
+	// point.
 	runner := &countingRunner{Runner: checks.NewRunner(nil, nil, nil, db, metrics.New("kconmon_ng_it_lasterr", prometheus.NewRegistry()))}
 	newScheduler(t, db, runner).Tick(ctx)
 

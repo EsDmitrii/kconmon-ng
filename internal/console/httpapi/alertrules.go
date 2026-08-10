@@ -20,18 +20,8 @@ import (
 	"github.com/EsDmitrii/kconmon-ng/internal/console/store"
 )
 
-// RuleSyncer is the reconciler seam: ask for a reconcile now, and list the
-// PrometheusRules in the console's namespace that the console does NOT own
-// (M7 Decision 4). Satisfied by *promrules.Reconciler.
-//
-// ONE interface rather than a separate kicker and lister, because the two are
-// never separately available: both come off the same reconciler, and
-// cmd/console builds it or does not. Two Deps fields could go out of sync and
-// would give this package two nil checks to tell the same story with.
-//
-// Kick returns nothing and cannot fail on purpose -- it is a non-blocking,
-// coalescing nudge (promrules.Reconciler.Kick), and a handler must never wait
-// on a Kubernetes round trip to answer a database write.
+// RuleSyncer is the reconciler seam: ask for a reconcile now; ONE interface rather than a separate
+// kicker and lister.
 type RuleSyncer interface {
 	Kick()
 	ListForeign(ctx context.Context) ([]promrules.ForeignRule, error)
@@ -45,22 +35,7 @@ var _ RuleSyncer = (*promrules.Reconciler)(nil)
 const alertRulesUnavailableDetail = "alert rules are persisted configuration with no in-memory fallback: " +
 	"set console.database.mode in the console config (Helm: console.database.mode) to enable /api/v1/alert-rules"
 
-// alertingDisabledDetail is served whenever s.ruleSync is nil, and it is a 409
-// rather than a 503 -- the ONE place in this API where those two come apart,
-// so the distinction is worth stating.
-//
-// 503 in this package always means "the dependency this route reads from is
-// not configured": the database is off, the controller is unset, Prometheus is
-// unset. That is not what is happening here. The database is fine, every rule
-// is right where it was, and the list, the builder and the whole CRUD surface
-// keep working. What is off is the SYNC LOOP -- an opt-in feature
-// (console.alerting.enabled, default false) whose absence means the console is
-// deliberately not talking to Kubernetes at all.
-//
-// 409 Conflict says exactly that: the request is well-formed and the resource
-// exists, but it conflicts with the state this console is configured to be in.
-// Answering 503 would send an operator looking at their database for a
-// PrometheusRule reconciler that was never asked to start.
+// alertingDisabledDetail is served whenever s.ruleSync is nil, and it is a 409 rather than a 503.
 const alertingDisabledDetail = "prometheus rule sync is not running on this console: the alert rules " +
 	"themselves are unaffected and stay readable and editable, but nothing is applying them to the " +
 	"cluster -- set console.alerting.enabled=true (Helm: console.alerting.enabled) on a console running " +
@@ -75,12 +50,8 @@ const promUnconfiguredDetail = "prometheus is not configured on this console, so
 // every one of its errors with.
 const alertRuleValidationPrefix = "store: alert rule: "
 
-// alertQueryTimeout bounds the ONE Prometheus round trip the preview and the
-// firing list each make. Deliberately short and independent of the promql
-// client's own guard: both routes are interactive -- somebody is watching a
-// form or an Overview card -- and a slow Prometheus must degrade to a partial
-// answer quickly rather than hold a request open for the client's full query
-// timeout.
+// alertQueryTimeout bounds the ONE Prometheus round trip the preview and the firing list each make;
+// deliberately short and independent of the promql client's own guard.
 const alertQueryTimeout = 5 * time.Second
 
 // alertsUpstreamMaxLen bounds an upstream error string before it is placed in
@@ -98,10 +69,8 @@ func (s *Server) alertRulesUnavailable(w http.ResponseWriter) bool {
 	return false
 }
 
-// alertingDisabled answers 409 and reports true when no RuleSyncer is wired.
-// Ordered AFTER alertRulesUnavailable at every call site: a console with no
-// database has no rules to sync in the first place, so naming the feature flag
-// there would be the less actionable of two true statements.
+// alertingDisabled answers 409 and reports true when no RuleSyncer is wired; ordered AFTER
+// alertRulesUnavailable at every call site.
 func (s *Server) alertingDisabled(w http.ResponseWriter) bool {
 	if s.ruleSync == nil {
 		writeProblem(w, http.StatusConflict, "prometheus rule sync is disabled", alertingDisabledDetail)
@@ -110,30 +79,13 @@ func (s *Server) alertingDisabled(w http.ResponseWriter) bool {
 	return false
 }
 
-// renderer builds the expression renderer from the SAME metric prefix this
-// console publishes under. It is constructed per call rather than held on the
-// Server: alerting.Renderer is an immutable value over one string the config
-// already carries, so a field would be a second copy of a value with no state
-// (and cmd/console would have to remember to wire it).
-//
-// Consequence worth naming: a deployment that renamed its metric families
-// renders rules over the families it actually publishes, never the package
-// default -- the same reason cmd/console hands cfg.MetricsPrefix to the
-// reconciler's renderer (M7 Task 3).
+// renderer builds the expression renderer from the SAME metric prefix this console publishes under;
+// it is constructed per call rather than held on the Server.
 func (s *Server) renderer() alerting.Renderer {
 	return alerting.NewRenderer(s.cfg.MetricsPrefix)
 }
 
-// alertRuleResponse is one rule on the wire: the builder fields an operator
-// typed, the expression the SERVER rendered from them, and the reconciler's
-// view of whether the cluster agrees.
-//
-// renderedExpr is returned even though it is derived, because it is the one
-// field an operator cannot compute themselves and the one the drift view
-// diffs against. syncStatus/syncMessage/lastSyncedAt are READ-ONLY here --
-// there is no request field for any of them, by construction: they are the
-// reconciler's outcomes (store.AlertRuleInput carries the builder half and
-// only that half).
+// alertRuleResponse is one rule on the wire: the builder fields an operator typed.
 type alertRuleResponse struct {
 	ID           string          `json:"id"`
 	Name         string          `json:"name"`
@@ -173,26 +125,13 @@ func orEmptyJSONObject(raw json.RawMessage) json.RawMessage {
 	return raw
 }
 
-// alertRulesListResponse is GET /api/v1/alert-rules's body. UNPAGED, and
-// therefore carrying no nextCursor: store.ListAlertRules is unpaged for
-// ListWebhooks' reason -- the row count is rules an operator configured, not a
-// function of how long the system has been running.
+// alertRulesListResponse is GET /api/v1/alert-rules's body.
 type alertRulesListResponse struct {
 	Rules []alertRuleResponse `json:"rules"`
 }
 
-// alertRuleRequest is POST /api/v1/alert-rules's, PUT /{id}'s and
-// /preview's body: the BUILDER fields, and only those. Both writes are FULL
-// REPLACES -- there is deliberately no PATCH here. The incidents PATCH is the
-// one exception in this API and stays unique to incidents, for the reason
-// handleIncidentsUpdate states: an incident evolves under collaboration, so a
-// full replace would let the last writer discard a colleague's notes. An alert
-// rule has no such property. It is a definition one person edits in a form,
-// and a full replace is what makes "what you see is what is stored" true.
-//
-// Enabled is a pointer for webhookRequest's reason: an omitted enabled means
-// TRUE (a rule you just declared is one you want evaluated), not Go's false
-// zero value.
+// alertRuleRequest is POST /api/v1/alert-rules's, PUT /{id}'s and /preview's body: the BUILDER
+// fields, and only those.
 type alertRuleRequest struct {
 	Name        string          `json:"name"`
 	Kind        string          `json:"kind"`
@@ -209,15 +148,8 @@ type syncKickResponse struct {
 	Status string `json:"status"`
 }
 
-// foreignRuleResponse is ONE PrometheusRule in the namespace that this console
-// does not own, PROJECTED down to four facts.
-//
-// The raw object is deliberately NOT served, even though promrules.ForeignRule
-// carries it. It is somebody else's object: its annotations can hold anything
-// their tooling put there, its expressions name their infrastructure, and
-// nothing this console does with it needs more than "what is it called, how
-// big is it, and who claims it". An import (M7 Decision 4) reads the groups
-// server-side; the browser never needs them.
+// foreignRuleResponse is ONE PrometheusRule in the namespace that this console does not own; an
+// import reads the groups server-side.
 type foreignRuleResponse struct {
 	Name   string `json:"name"`
 	Groups int    `json:"groups"`
@@ -232,46 +164,28 @@ type foreignRulesResponse struct {
 	Foreign []foreignRuleResponse `json:"foreign"`
 }
 
-// alertRuleImportRequest is POST /api/v1/alert-rules/import's body: the NAME
-// of a foreign PrometheusRule object, and nothing else.
-//
-// One field, because there is exactly one decision to make. There is no
-// "which groups", no "rename to" and no dryRun: adoption reads an object the
-// operator just saw on GET /foreign and reports, item by item, what it did --
-// which is the dry run and the apply in one round trip, for an operation whose
-// entire output is at most a few dozen rows.
+// alertRuleImportRequest is POST /api/v1/alert-rules/import's body: the NAME of a foreign
+// PrometheusRule object.
 type alertRuleImportRequest struct {
 	Name string `json:"name"`
 }
 
-// alertRuleImportSkip is one rule entry that did NOT become a row, and why.
-// Name is the entry's own alert (or record) name as the foreign object spells
-// it -- including the spellings this store would refuse, because the operator
-// has to find that line in their object.
+// alertRuleImportSkip is one rule entry that did NOT become a row; name is the entry's own alert
+// (or record) name as the foreign object spells.
 type alertRuleImportSkip struct {
 	Name   string `json:"name"`
 	Reason string `json:"reason"`
 }
 
-// alertRuleImportNote is one rule that WAS imported and about which the
-// console had to make a choice. The distinction from a skip is the whole
-// reason there are two lists: a skip means "this is not in your console", a
-// note means "this is in your console, and it is not byte-identical to what
-// the object said". Collapsing them would make an operator re-check rules that
-// imported perfectly.
+// alertRuleImportNote is one rule that WAS imported and about which the console had to make a
+// choice; collapsing them would make an operator re-check rules that imported perfectly.
 type alertRuleImportNote struct {
 	Name string `json:"name"`
 	Note string `json:"note"`
 }
 
-// alertRuleImportResponse is the import's report, and the report IS the
-// result: 0 created with a dozen skips is a 200, because "every rule in that
-// object is a recording rule" is the useful answer and no status code can
-// carry it.
-//
-// All three slices are non-nil on the wire for orEmptyJSONObject's reason: the
-// UI renders all three, and a null would be a runtime error in the one place
-// somebody looks after pressing Import.
+// alertRuleImportResponse is the import's report, and the report IS the result; all three slices
+// are non-nil on the wire for orEmptyJSONObject's reason.
 type alertRuleImportResponse struct {
 	Created []string              `json:"created"`
 	Skipped []alertRuleImportSkip `json:"skipped"`
@@ -294,13 +208,8 @@ func (r *alertRuleImportResponse) note(name, note string) {
 	r.Notes = append(r.Notes, alertRuleImportNote{Name: name, Note: note})
 }
 
-// alertRulePreviewResponse is POST /api/v1/alert-rules/preview's body.
-//
-// It has TWO halves that fail independently, and that is the whole design (M7
-// Decision 2: there is no Prometheus parser dependency, so "is this expression
-// valid" is answered by running it). The render either produced an expression
-// or it did not; the instant query either produced a series count or it did
-// not. Only the first failure is a status code -- see the handler.
+// alertRulePreviewResponse is POST /api/v1/alert-rules/preview's body; only the first failure is a
+// status code -- see the handler.
 type alertRulePreviewResponse struct {
 	Expr   string `json:"expr"`
 	Series int    `json:"series"`
@@ -308,16 +217,15 @@ type alertRulePreviewResponse struct {
 	// It is never set for a render failure, which is a 422 with no body of this
 	// shape at all.
 	Error string `json:"error,omitempty"`
+	// Rejected narrows Error to the one cause a CLIENT can act on: Prometheus
+	// parsed the expression and refused it. "Could not be reached" and "not
+	// configured" are the console's problems, not the expression's, and leave
+	// this false -- so a UI can block a save on a PROVEN-bad expression without
+	// also blocking one it merely failed to check.
+	Rejected bool `json:"rejected,omitempty"`
 }
 
-// firingAlert is one entry of GET /api/v1/alerts, mapped from Prometheus's own
-// /api/v1/alerts shape (M7 Decision 6).
-//
-// name and severity are LIFTED off the label set rather than left in it,
-// because every consumer needs them and digging them out of a map at three
-// call sites is how a UI ends up with three spellings. Labels keeps them too:
-// it is the upstream set, verbatim, and quietly deleting keys from it would
-// make this a different alert than the one Prometheus is firing.
+// firingAlert is one entry of GET /api/v1/alerts; labels keeps them too: it is the upstream set.
 type firingAlert struct {
 	Name        string            `json:"name"`
 	State       string            `json:"state"`
@@ -325,33 +233,14 @@ type firingAlert struct {
 	Labels      map[string]string `json:"labels"`
 	Annotations map[string]string `json:"annotations"`
 	ActiveAt    *time.Time        `json:"activeAt,omitempty"`
-	// Value is Prometheus's sample value as a STRING, verbatim ("7e+00"). Not
-	// parsed to a float: the upstream field is a string precisely because it
-	// carries NaN and ±Inf, and re-encoding those through JSON would produce
-	// either a lie or a marshal error.
+	// Value is Prometheus's sample value as a STRING, verbatim ("7e+00"); not parsed to a float: the
+	// upstream field is a string precisely because it carries NaN and ±Inf.
 	Value string `json:"value"`
-	// RuleID is the alert_rules row this alert came from, lifted off the
-	// kconmon_ng_rule_id label the renderer stamps on every managed rule. Empty
-	// for an alert this console does not manage -- which is a fact worth
-	// serving, not a reason to hide the alert.
+	// RuleID is the alert_rules row this alert came from.
 	RuleID string `json:"ruleId,omitempty"`
 }
 
 // alertsResponse is GET /api/v1/alerts's body.
-//
-// promConfigured is IN THE BODY, not implied by a status code, and that is the
-// point of this route's degraded shape: with no Prometheus wired the answer is
-// 200 with an empty list and promConfigured:false, not 503. The consumer is the
-// Overview card, and "nothing is firing" and "nobody is watching" are two
-// different sentences it must be able to render without treating one of them as
-// an error state.
-//
-// This DIVERGES from GET /api/v1/matrix, which answers 503 for the same missing
-// dependency, and the difference is deliberate: the matrix IS the Prometheus
-// data, so without it there is no answer at all, while the firing set is a
-// LIST that is legitimately empty and whose emptiness has two causes this field
-// tells apart. A Prometheus that is configured and FAILS is neither: that is a
-// real upstream failure and stays a 502.
 type alertsResponse struct {
 	Alerts         []firingAlert `json:"alerts"`
 	PromConfigured bool          `json:"promConfigured"`
@@ -369,11 +258,8 @@ func alertRuleIDFrom(w http.ResponseWriter, r *http.Request) (string, bool) {
 	return id, true
 }
 
-// writeAlertRuleStoreError maps an AlertRuleService error to a response.
-// ErrAlreadyExists is 422 rather than 409, writeTargetStoreError's reason: a
-// duplicate name is a rejected FIELD VALUE in an otherwise well-formed body,
-// and the caller's fix is to change the name and resend. (409 on this resource
-// means something else entirely -- see alertingDisabledDetail.)
+// writeAlertRuleStoreError maps an AlertRuleService error to a response; ErrAlreadyExists is 422
+// rather than 409, writeTargetStoreError's reason.
 func writeAlertRuleStoreError(w http.ResponseWriter, name, id string, err error) {
 	switch {
 	case errors.Is(err, store.ErrNotFound):
@@ -406,19 +292,9 @@ func decodeAlertRuleRequest(w http.ResponseWriter, r *http.Request) (alertRuleRe
 	return req, true
 }
 
-// alertRuleInputFrom turns a decoded request into the store's write payload,
-// RENDERING the expression first.
-//
-// The order is the contract: render, then store. A row whose rendered_expr came
-// from a different version of its own params is exactly what
-// store.AlertRuleInput's doc comment refuses to allow, and the only way to keep
-// that true is for the one HTTP write path to render on the way in. It also
-// means an unrenderable rule is rejected AT WRITE TIME with a 422 naming the
-// param, rather than becoming a stored row that first reports a problem a
-// minute later as a per-rule sync error nobody is looking at.
-//
-// The render input is built from the SAME decoded body the store write uses,
-// so the two can never disagree about what was asked for.
+// alertRuleInputFrom turns a decoded request into the store's write payload; a row whose
+// rendered_expr came from a different version of its own params is exactly what
+// store.AlertRuleInput's doc comment refuses to allow.
 func (s *Server) alertRuleInputFrom(w http.ResponseWriter, req *alertRuleRequest) (store.AlertRuleInput, bool) {
 	in := store.AlertRuleInput{
 		Name: req.Name, Kind: req.Kind, Params: req.Params,
@@ -426,13 +302,8 @@ func (s *Server) alertRuleInputFrom(w http.ResponseWriter, req *alertRuleRequest
 		Labels: req.Labels, Annotations: req.Annotations,
 		Enabled: enabledOrDefault(req.Enabled),
 	}
-	// Store validation FIRST, so a bad severity or a bad name is reported as
-	// itself rather than as whatever the renderer happens to say about a body
-	// it was never going to accept. The kind check lives on both sides on
-	// purpose: store's set is the column's CHECK constraint and the renderer's
-	// is the set of templates that exist, and they differ (cert-expiry is in
-	// the column and has no template) -- so a rule can pass one and fail the
-	// other, which is precisely the case the next call catches.
+	// Store validation FIRST, so a bad severity or a bad name is reported as itself rather than as
+	// whatever the renderer happens to say about a body it was never going to accept.
 	if err := in.Validate(); err != nil {
 		writeProblem(w, http.StatusUnprocessableEntity, "invalid alert rule", publicValidationDetail(err))
 		return store.AlertRuleInput{}, false
@@ -446,10 +317,8 @@ func (s *Server) alertRuleInputFrom(w http.ResponseWriter, req *alertRuleRequest
 	return in, true
 }
 
-// renderAlertRule renders one request body into PromQL, answering 422 and
-// reporting false on failure. The renderer's errors already name the param
-// that caused them ("params.thresholdPercent is required"), which is why they
-// are surfaced verbatim: the caller typed that param a second ago.
+// renderAlertRule renders one request body into PromQL, answering 422 and reporting false on
+// failure.
 func (s *Server) renderAlertRule(w http.ResponseWriter, req *alertRuleRequest) (string, bool) {
 	params, err := decodeJSONObjectMap(req.Params)
 	if err != nil {
@@ -519,12 +388,9 @@ func decodeJSONStringMap(field string, raw json.RawMessage) (map[string]string, 
 	return out, nil
 }
 
-// kickSync nudges the reconciler after a successful write, so an operator does
-// not wait out the jittered 60s loop to see their rule applied. A complete
-// no-op when alerting is off -- the CRUD routes deliberately do NOT gate on the
-// reconciler being present (that is what makes rules editable on a console with
-// no cluster access at all), so this must tolerate a nil seam rather than
-// assume one.
+// kickSync nudges the reconciler after a successful write; a complete no-op when alerting is off --
+// the CRUD routes deliberately do NOT gate on the reconciler being present (that is what makes
+// rules editable on a console with no cluster access at all).
 func (s *Server) kickSync() {
 	if s.ruleSync != nil {
 		s.ruleSync.Kick()
@@ -591,19 +457,8 @@ func (s *Server) handleAlertRulesGet(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, alertRuleResponseFrom(&rule))
 }
 
-// handleAlertRulesUpdate replaces one rule's builder fields IN FULL and
-// re-renders the expression from them.
-//
-// PUT, not PATCH, and that is a deliberate non-exception: see
-// alertRuleRequest's doc comment for why the incidents PATCH stays the only
-// one in this API. Omitting a field here CLEARS it -- omitting "labels" is how
-// you remove every label, not how you keep them -- which is the whole meaning
-// of a full replace and the reason the form always sends the complete rule.
-//
-// The store resets the row to sync_status=unsynced on every update (its own
-// query comment says why: an edited rule is by definition not the rule that was
-// applied), so the response's syncStatus flips back the moment anything
-// changes, before the kick below has had time to do anything.
+// handleAlertRulesUpdate replaces one rule's builder fields IN FULL and re-renders the expression
+// from them; PUT, not PATCH, and that is a deliberate non-exception.
 func (s *Server) handleAlertRulesUpdate(w http.ResponseWriter, r *http.Request) {
 	if s.alertRulesUnavailable(w) {
 		return
@@ -629,15 +484,7 @@ func (s *Server) handleAlertRulesUpdate(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, alertRuleResponseFrom(&rule))
 }
 
-// handleAlertRulesDelete removes one rule. Deleting one that is not there is
-// 404, not success.
-//
-// The row is what goes away here; the CLUSTER catches up on the next reconcile,
-// which re-renders the bundle from the enabled rules that remain and applies it
-// (promrules renders ONE object holding all rules, so a deletion is a smaller
-// bundle, never a delete call). The kick makes that "in a moment" rather than
-// "within the jittered interval", and on a console with alerting off it is a
-// no-op -- the rule is gone from the database either way.
+// handleAlertRulesDelete removes one rule; the row is what goes away here.
 func (s *Server) handleAlertRulesDelete(w http.ResponseWriter, r *http.Request) {
 	if s.alertRulesUnavailable(w) {
 		return
@@ -654,20 +501,8 @@ func (s *Server) handleAlertRulesDelete(w http.ResponseWriter, r *http.Request) 
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// handleAlertRulesSync asks the reconciler for a pass now.
-//
-// 202, not 200: Kick is a non-blocking coalescing nudge, so the only honest
-// thing this can report is that the work was requested. The OUTCOME lands on
-// the rules themselves and is read back from GET /api/v1/alert-rules --
-// syncStatus/syncMessage/lastSyncedAt.
-//
-// The route is per-rule ({id}) but the reconcile is WHOLE-BUNDLE, because the
-// bundle is one object (M7 Task 2: RenderBundle produces a single
-// PrometheusRule holding every enabled rule). The id is not a filter; it is
-// the rule the operator was looking at when they pressed the button, and it is
-// what the audit row records. Existence is still checked, on
-// handleWebhooksTest's precedent: answering 202 for an id that names nothing
-// would promise an outcome that never arrives.
+// handleAlertRulesSync asks the reconciler for a pass now. 202, not 200: Kick is a non-blocking
+// coalescing nudge.
 func (s *Server) handleAlertRulesSync(w http.ResponseWriter, r *http.Request) {
 	if s.alertRulesUnavailable(w) {
 		return
@@ -687,15 +522,9 @@ func (s *Server) handleAlertRulesSync(w http.ResponseWriter, r *http.Request) {
 	writeJSONStatus(w, http.StatusAccepted, syncKickResponse{Status: "kicked"})
 }
 
-// handleAlertRulesForeign lists the PrometheusRules in the console's namespace
-// that it does not own (M7 Decision 4). READ-ONLY in the strongest sense: this
-// console never mutates a foreign object under any circumstance, and adoption
-// is an explicit import that copies the groups into builder rows and creates a
-// NEW object.
-//
-// It needs no database -- the answer comes from the cluster -- but it does need
-// the reconciler, so a console with alerting off answers 409 naming the flag,
-// exactly like the sync route.
+// handleAlertRulesForeign lists the PrometheusRules in the console's namespace that it does not
+// own; READ-ONLY in the strongest sense: this console never mutates a foreign object under any
+// circumstance.
 func (s *Server) handleAlertRulesForeign(w http.ResponseWriter, r *http.Request) {
 	if s.alertingDisabled(w) {
 		return
@@ -720,43 +549,16 @@ func (s *Server) handleAlertRulesForeign(w http.ResponseWriter, r *http.Request)
 	writeJSON(w, foreignRulesResponse{Foreign: out})
 }
 
-// foreignRuleNotFoundDetail is the ONE 404 this route serves, and it covers
-// two different situations on purpose: an object nobody has, and an object
-// this console OWNS. ListForeign is the only lookup the import performs and it
-// excludes anything carrying the managed-by label, so a bundle of ours is
-// simply not in the set being searched. Telling the two apart would mean a
-// second, unfiltered read of the namespace for no benefit -- and re-adopting
-// our own bundle would produce a duplicate of every rule already in the
-// database.
+// foreignRuleNotFoundDetail is the ONE 404 this route serves; ListForeign is the only lookup the
+// import performs and it excludes anything carrying the managed-by label.
 const foreignRuleNotFoundDetail = "no foreign PrometheusRule with that name in the console's namespace; " +
 	"list them with GET /api/v1/alert-rules/foreign (an object this console already owns is not foreign)"
 
-// recordingRuleSkipReason names the one shape of rule entry the builder has no
-// model for at all. It is not a rendering failure or a validation failure: a
-// recording rule produces a time series, an alert rule produces an alert, and
-// alert_rules has no column that could mean the first.
+// recordingRuleSkipReason names the one shape of rule entry the builder has no model for at all.
 const recordingRuleSkipReason = "recording rule -- the console builder has no recording model, only alerting rules"
 
-// handleAlertRulesImport ADOPTS a foreign PrometheusRule (M7 Decision 4): it
-// COPIES the object's alerting rules into console-managed builder rows.
-//
-// The foreign object is never mutated and never deleted, by this handler or by
-// anything it calls. There is no code path from this route to a write against
-// somebody else's object -- it reads the copy ListForeign already handed back
-// and writes only to the alert_rules table. After a successful adoption the
-// console's OWN bundle grows by the adopted rules and is applied on the next
-// reconcile, at which point the same alerts are defined twice in the cluster:
-// once by the object its owner still controls, once by ours. Deleting theirs
-// is THEIR decision, and the console will not make it for them.
-//
-// Per-item and NON-TRANSACTIONAL, the import-bundle precedent (handleImport):
-// each entry is created on its own, and one entry the store refuses does not
-// roll back the ones before it. The response says exactly which is which.
-//
-// Both dependency gates apply, in the CRUD order: no store is 503 (there is
-// nowhere to adopt TO), and no reconciler is 409 naming the feature flag
-// (there is nothing to adopt FROM -- this route reads the cluster through the
-// same seam GET /foreign does).
+// handleAlertRulesImport ADOPTS a foreign PrometheusRule; the foreign object is never mutated and
+// never deleted.
 func (s *Server) handleAlertRulesImport(w http.ResponseWriter, r *http.Request) {
 	if s.alertRulesUnavailable(w) {
 		return
@@ -802,11 +604,8 @@ func (s *Server) handleAlertRulesImport(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// The name set is read ONCE, up front, and maintained in memory as rows are
-	// created. Asking the store per entry would be N queries to answer a
-	// question one query answers, and would still not be atomic: the uniqueness
-	// that actually holds is the lower(name) index, and CreateAlertRule's
-	// ErrAlreadyExists is the backstop this map only makes legible.
+	// Asking the store per entry would be N queries to answer a question one query answers, and would
+	// still not be atomic.
 	existing, err := s.alertRules.ListAlertRules(r.Context(), false)
 	if err != nil {
 		slog.Error("list alert rules failed", "error", err)
@@ -825,15 +624,8 @@ func (s *Server) handleAlertRulesImport(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, report)
 }
 
-// adoptForeignRule walks spec.groups[].rules[] and adopts what it can.
-//
-// A malformed group or entry is SKIPPED, never fatal -- countGroups' posture in
-// promrules, for the same reason: this is a read of somebody else's object, and
-// refusing the whole import because one entry is the wrong shape would hide the
-// rules that were perfectly adoptable. Group names are not carried: the console
-// renders ONE group of its own (alerting.GroupName), so a foreign group name
-// has nowhere to live and inventing a column for it would be a schema change
-// serving no reader.
+// adoptForeignRule walks spec.groups[].rules[] and adopts what it can; a malformed group or entry
+// is SKIPPED, never fatal -- countGroups' posture in promrules.
 func (s *Server) adoptForeignRule(
 	ctx context.Context, obj *unstructured.Unstructured, taken map[string]bool,
 ) alertRuleImportResponse {
@@ -863,10 +655,9 @@ func (s *Server) adoptForeignRule(
 	return report
 }
 
-// adoptRuleEntry turns ONE spec.groups[].rules[] entry into a row, or records
-// why it did not.
+// adoptRuleEntry turns ONE spec.groups[].rules[] entry into a row, or records why it did not.
 //
-//nolint:gocognit,gocyclo // one linear gate chain: every branch is one adoption rule stated once, and splitting it would scatter the skip vocabulary across helpers
+//nolint:gocognit,gocyclo // one linear gate chain: every branch is one adoption rule stated once
 func (s *Server) adoptRuleEntry(
 	ctx context.Context, renderer alerting.Renderer,
 	entry map[string]any, taken map[string]bool, report *alertRuleImportResponse,
@@ -875,11 +666,8 @@ func (s *Server) adoptRuleEntry(
 		report.skip(record, recordingRuleSkipReason)
 		return
 	}
-	// The alert name is used AS IS or not at all. SanitizeAlertName exists and
-	// is deliberately NOT called here: it is for names an operator typed into
-	// the builder and can see being transformed, and applying it silently
-	// during an adoption would store somebody's rule under a name they never
-	// wrote and cannot search for.
+	// The alert name is used AS IS or not at all; SanitizeAlertName exists and is deliberately NOT
+	// called here.
 	name, _ := entry["alert"].(string)
 	name = strings.TrimSpace(name)
 	if name == "" {
@@ -907,11 +695,7 @@ func (s *Server) adoptRuleEntry(
 		return
 	}
 	severity := liftSeverity(name, labels, report)
-	// Both reserved names come out. severity is LIFTED into its own column, so
-	// leaving it in the map would make one fact editable in two places and let
-	// them disagree; the rule id is the renderer's, and a stale uuid from
-	// somebody else's copy of our rule would make the firing list attribute
-	// alerts to a row that never produced them.
+	// Both reserved names come out. severity is LIFTED into its own column.
 	delete(labels, alerting.SeverityLabel)
 	if _, present := labels[alerting.RuleIDLabel]; present {
 		report.note(name, "the object carried the reserved "+alerting.RuleIDLabel+
@@ -975,14 +759,8 @@ func (s *Server) adoptRuleEntry(
 const alertRuleNameTakenReason = "name already taken: alert rule names are unique case-insensitively, " +
 	"and adoption will not rename a rule to make room for it"
 
-// liftSeverity reads labels.severity, falling back to warning and SAYING SO.
-//
-// A note rather than a skip, and a note in BOTH fallback cases (absent label,
-// and a value outside the closed set): the rule imports either way, and what
-// the operator needs to know is not "this failed" but "this one field is the
-// console's guess, not your object's". warning is the fallback because it is
-// the middle of the three -- guessing info would quietly demote a page, and
-// guessing critical would invent one.
+// liftSeverity reads labels.severity, falling back to warning and SAYING SO; a note rather than a
+// skip, and a note in BOTH fallback cases (absent label, and a value outside the closed set).
 func liftSeverity(name string, labels map[string]string, report *alertRuleImportResponse) string {
 	raw, present := labels[alerting.SeverityLabel]
 	switch raw {
@@ -998,15 +776,8 @@ func liftSeverity(name string, labels map[string]string, report *alertRuleImport
 	return store.AlertSeverityWarning
 }
 
-// foreignForNS reads a rule entry's `for`, in nanoseconds. Absent is 0 -- which
-// is what Prometheus itself means by an absent `for`.
-//
-// An unreadable one is an ERROR (and therefore a skip at the call site) rather
-// than a fallback to 0, and that is the single most consequential choice in
-// this importer: 0 means "fire the instant the expression holds", so a
-// misparsed 5m would turn a deliberately patient rule into a pager at 3am,
-// silently, in an import nobody re-reads. A skipped rule is visible in the
-// report; a wrongly-imported one is not.
+// foreignForNS reads a rule entry's `for`, in nanoseconds; an unreadable one is an ERROR (and
+// therefore a skip at the call site) rather than a fallback to 0.
 func foreignForNS(entry map[string]any) (int64, error) {
 	raw, present := entry["for"]
 	if !present || raw == nil {
@@ -1026,11 +797,8 @@ func foreignForNS(entry map[string]any) (int64, error) {
 	return ns, nil
 }
 
-// foreignStringMap reads labels/annotations off a rule entry. A non-string
-// value NAMES ITS KEY -- decodeJSONStringMap's rule, applied to a map that came
-// off the apiserver rather than out of a request body. The CRD declares both as
-// map[string]string, so a value that is not one means the object is malformed
-// and the honest outcome is to skip that rule rather than coerce.
+// foreignStringMap reads labels/annotations off a rule entry; a non-string value NAMES ITS KEY --
+// decodeJSONStringMap's rule.
 func foreignStringMap(entry map[string]any, field string) (map[string]string, error) {
 	raw, present := entry[field]
 	if !present || raw == nil {
@@ -1051,10 +819,8 @@ func foreignStringMap(entry map[string]any, field string) (map[string]string, er
 	return out, nil
 }
 
-// mustMarshalStringMap encodes a map[string]string for a JSONB column. It
-// cannot fail -- every key and value is a string, which json always encodes --
-// and the signature says so rather than making four call sites handle an error
-// that has no branch.
+// mustMarshalStringMap encodes a map[string]string for a JSONB column; it cannot fail -- every key
+// and value is a string, which json always encodes.
 func mustMarshalStringMap(m map[string]string) json.RawMessage {
 	raw, err := json.Marshal(m)
 	if err != nil {
@@ -1063,29 +829,8 @@ func mustMarshalStringMap(m map[string]string) json.RawMessage {
 	return raw
 }
 
-// handleAlertRulesPreview renders a DRAFT rule and reports what its expression
-// currently matches.
-//
-// This is M7 Decision 2 in one handler: there is no Prometheus parser
-// dependency in this build, so "is this expression valid" is answered by
-// RUNNING it. An instant query that errors is an invalid expression; one that
-// returns N series is the preview.
-//
-// The two halves fail independently and are reported differently:
-//
-//   - RENDER fails -> 422. There is no expression, so there is nothing partial
-//     to be honest about, and the error names the param the caller just typed.
-//   - QUERY fails, or Prometheus is not configured at all -> 200, with the
-//     rendered expression and an `error` string. The render SUCCEEDED, which is
-//     the half the builder form is actually asking about; refusing the whole
-//     request because the evaluation half could not run would hide a correct
-//     expression behind an unrelated outage.
-//
-// It persists nothing and is gated on alerts:READ, checks/projection's shape
-// one permission-class down: previewing is asking what a draft matches right
-// now, which is a read of Prometheus. It is still a POST (the body is a rule)
-// and is therefore still audited -- with an empty {} detail, since the
-// allow-list names no keys for it (audit.go).
+// handleAlertRulesPreview renders a DRAFT rule and reports what its expression currently matches;
+// the render SUCCEEDED, which is the half the builder form is actually asking about.
 func (s *Server) handleAlertRulesPreview(w http.ResponseWriter, r *http.Request) {
 	req, ok := decodeAlertRuleRequest(w, r)
 	if !ok {
@@ -1104,7 +849,8 @@ func (s *Server) handleAlertRulesPreview(w http.ResponseWriter, r *http.Request)
 	defer cancel()
 	raw, err := s.prom.Query(ctx, expr, time.Time{})
 	if err != nil {
-		writeJSON(w, alertRulePreviewResponse{Expr: expr, Error: promQueryErrorText(err)})
+		text, rejected := promQueryErrorText(err)
+		writeJSON(w, alertRulePreviewResponse{Expr: expr, Error: text, Rejected: rejected})
 		return
 	}
 	series, err := countPromSeries(raw)
@@ -1115,34 +861,40 @@ func (s *Server) handleAlertRulesPreview(w http.ResponseWriter, r *http.Request)
 	writeJSON(w, alertRulePreviewResponse{Expr: expr, Series: series})
 }
 
-// promQueryErrorText turns a promql client error into the one-line `error` a
-// preview body carries.
-//
-// Prometheus's own message is forwarded for an UpstreamError, and only for
-// that: it is a PromQL parse or evaluation error about the expression the
-// caller sent a second ago, which is the single most useful thing the preview
-// can say. Every other failure -- a dial error, a timeout, a size cap -- is
-// reported in this package's own words: those errors carry the configured
-// Prometheus URL, which is infrastructure this response has no reason to name.
-func promQueryErrorText(err error) string {
+// promQueryErrorText turns a promql client error into the one-line `error` a preview body carries;
+// prometheus's own message is forwarded for an UpstreamError. The second return reports whether
+// PROMETHEUS ITSELF refused the expression -- the only case where the expression is proven bad
+// rather than merely unchecked.
+func promQueryErrorText(err error) (text string, rejected bool) {
 	var ue *promql.UpstreamError
 	if errors.As(err, &ue) {
+		// 4xx is Prometheus judging the EXPRESSION (a parse error, bad_data);
+		// 5xx is Prometheus having a bad day, which says nothing about the
+		// expression and must not be reported as a rejection.
+		judged := ue.Status >= http.StatusBadRequest && ue.Status < http.StatusInternalServerError
 		var envelope struct {
 			Error string `json:"error"`
 		}
 		if json.Unmarshal(ue.Body, &envelope) == nil && envelope.Error != "" {
-			return truncateUpstream("prometheus rejected the expression: " + envelope.Error)
+			if !judged {
+				return truncateUpstream("prometheus could not evaluate the expression: " + envelope.Error), false
+			}
+			return truncateUpstream("prometheus rejected the expression: " + envelope.Error), true
 		}
-		return "prometheus rejected the expression"
+		if !judged {
+			return "prometheus could not be reached to evaluate the expression", false
+		}
+		return "prometheus rejected the expression", true
 	}
 	switch {
 	case errors.Is(err, promql.ErrResponseTooLarge):
-		return "the expression matched more data than the console will read back; narrow it"
+		// The expression PARSED; it just matches too much. Nothing to block on.
+		return "the expression matched more data than the console will read back; narrow it", false
 	case errors.Is(err, promql.ErrBadRequest):
-		return "the console could not build a valid instant query from this expression"
+		return "the console could not build a valid instant query from this expression", false
 	default:
 		slog.Warn("alert rule preview query failed", "error", err)
-		return "prometheus could not be reached to evaluate the expression"
+		return "prometheus could not be reached to evaluate the expression", false
 	}
 }
 
@@ -1153,10 +905,8 @@ func truncateUpstream(s string) string {
 	return s[:alertsUpstreamMaxLen] + "..."
 }
 
-// countPromSeries counts the vector entries in an instant-query envelope. A
-// non-success envelope or an unexpected shape is an error rather than a zero:
-// "0 series" is a meaningful preview answer ("this would never fire") and must
-// never be produced by a parse failure.
+// countPromSeries counts the vector entries in an instant-query envelope; a non-success envelope or
+// an unexpected shape is an error rather than a zero.
 func countPromSeries(raw json.RawMessage) (int, error) {
 	var envelope struct {
 		Status string `json:"status"`
@@ -1178,22 +928,9 @@ func countPromSeries(raw json.RawMessage) (int, error) {
 	return len(envelope.Data.Result), nil
 }
 
-// handleAlerts serves the alerts Prometheus is currently firing or pending
-// (M7 Decision 6), mapped onto this console's own vocabulary.
-//
-// The console does NOT evaluate anything: Prometheus evaluates, the console
-// manages. This is a read of /api/v1/alerts, projected and optionally filtered.
-//
-// Three outcomes, and the difference between the first two is the reason this
-// route does not simply mirror GET /api/v1/matrix's 503:
-//
-//   - Prometheus UNCONFIGURED -> 200, empty list, promConfigured:false. The
-//     Overview card must be able to render "nothing is firing" and "nobody is
-//     watching" without one of them being an error.
-//   - Prometheus configured and FAILING -> 502. That is a real upstream
-//     failure, and pretending it is an empty firing list would be the most
-//     dangerous lie in this API.
-//   - otherwise -> 200 with the mapped set.
+// handleAlerts serves the alerts Prometheus is currently firing or pending; the Overview card must
+// be able to render "nothing is firing" and "nobody is watching" without one of them being an
+// error.
 func (s *Server) handleAlerts(w http.ResponseWriter, r *http.Request) {
 	managedOnly := false
 	if raw := r.URL.Query().Get("managedOnly"); raw != "" {

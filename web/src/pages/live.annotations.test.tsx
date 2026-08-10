@@ -7,14 +7,7 @@ import { TimeMachineProvider } from "@/lib/timemachine";
 import type { Annotation, LiveEvent } from "@/lib/types";
 import { LivePage, mergeFeedRows, LIVE_ANNOTATION_RANGE_SECONDS } from "./live";
 
-/**
- * Global annotations inline in the scrollback. Two halves: the pure merge
- * (ordering, keys, filter independence) and the rendered row.
- *
- * The virtualizer measures its scroll element, which jsdom reports as 0 tall —
- * the same offsetHeight/offsetWidth stubs live.timemachine.test.tsx installs are
- * what make rows render here at all.
- */
+/** Global annotations inline in the scrollback. */
 
 const offsetHeightDescriptor = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "offsetHeight");
 const offsetWidthDescriptor = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "offsetWidth");

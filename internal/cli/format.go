@@ -235,14 +235,8 @@ func formatMTR(w io.Writer, res *model.CheckResult) error {
 	return nil
 }
 
-// detailLines extracts the key numbers from a CheckResult for the human check
-// summary. Every probe type speaks the same grammar — sent, recv, loss, rtt,
-// then type-specific extras — so outputs stay comparable across types. TCP,
-// DNS and HTTP run a single attempt per check, so their sent/recv are the
-// honest 1/1 (or 1/0 with loss=100% on failure) derived from the result;
-// UDP reports its real packet counts and ICMP its single echo. Decoding is
-// defensive: unknown or malformed details yield no extra lines rather than
-// panicking.
+// detailLines extracts the key numbers from a CheckResult for the human check summary; decoding is
+// defensive: unknown or malformed details yield no extra lines rather than panicking.
 func detailLines(res *model.CheckResult) []string {
 	if res == nil || res.Details == nil {
 		return nil
@@ -310,10 +304,7 @@ func detailLines(res *model.CheckResult) []string {
 			return []string{fmt.Sprintf("target=%s hops=%d", orDash(d.Target), len(d.Hops))}
 		}
 	case model.CheckExternal:
-		// The CLI renders ON-DEMAND diagnostics, and "external" is the wrapper
-		// type of a continuous assignment sweep that no on-demand task can
-		// produce (agent.executeOne refuses it). Named here only to keep the
-		// switch exhaustive over model.CheckType.
+		// Named here only to keep the switch exhaustive over model.CheckType.
 		return nil
 	default:
 		return nil

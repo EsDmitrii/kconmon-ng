@@ -104,12 +104,8 @@ func TestK8sEventInputValidateRejects(t *testing.T) {
 	}
 }
 
-// TestK8sEventKindIsAClosedSetButTypeIsNot pins the asymmetry the package
-// documents and would otherwise be easy to "tidy up" into symmetry: kind is
-// M6 Decision 3's own capture contract (nodes and pods, nothing else), so an
-// unknown kind is a filter bug worth rejecting; type is core/v1's, which says
-// new event types may be added, so pinning it to {Normal, Warning} would
-// eventually drop real events for the crime of being new.
+// TestK8sEventKindIsAClosedSetButTypeIsNot pins the asymmetry the package documents and would
+// otherwise be easy to "tidy up" into symmetry.
 func TestK8sEventKindIsAClosedSetButTypeIsNot(t *testing.T) {
 	in := validK8sEventInput()
 	in.Kind = "ReplicaSet"
@@ -157,10 +153,7 @@ func TestListK8sEventsRejectsAMalformedCursorWithoutTouchingPgx(t *testing.T) {
 	}
 }
 
-// TestK8sEventCursorRoundTrips pins that ListK8sEvents pages on the BIGINT
-// cursor family (EncodeCursor/DecodeCursor -- the topology_events one), not on
-// the UUID family every M4/M5 listing uses: k8s_events' primary key is a
-// BIGSERIAL, and a UUID cursor here would reject every cursor it minted.
+// TestK8sEventCursorRoundTrips pins that ListK8sEvents pages on the BIGINT cursor family.
 func TestK8sEventCursorRoundTrips(t *testing.T) {
 	at := time.Now().UTC().Truncate(time.Microsecond)
 	cursor := EncodeCursor(at, 4242)
@@ -177,12 +170,8 @@ func TestK8sEventCursorRoundTrips(t *testing.T) {
 	}
 }
 
-// sweepFunc is the shape prune.go drives every retention target through. The
-// three M6 helpers are assigned to it below, so a signature drift is a compile
-// error at the assignment rather than a sweep silently going missing from
-// PruneOnce's list. There is deliberately no webhooks entry: that table has no
-// sweep (see prune.go's table-label comment and
-// TestWebhooksAreNotARetentionTable).
+// sweepFunc is the shape prune.go drives every retention target through; the three helpers are
+// assigned to it below.
 type sweepFunc = func(context.Context, time.Time, int32) (int64, error)
 
 var (

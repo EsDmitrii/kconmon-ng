@@ -1,6 +1,7 @@
 import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ThemeProvider } from "@/components/theme-provider";
+import { LOCALE_STORAGE_KEY, LocaleProvider } from "@/lib/i18n";
 import type { Enrichment, MTRHop, PathSnapshot } from "@/lib/types";
 import {
   fmtRttNs,
@@ -12,11 +13,8 @@ import {
   type TrendHistory,
 } from "./mtr-hop-table";
 
-// EChart is mocked for the same reason target-card.test.tsx mocks it:
-// echarts.init() wants a 2d canvas context jsdom does not implement, so a real
-// mount throws. The mock also CAPTURES the option, which is how the trend's
-// two load-bearing claims — milliseconds, and a gap rather than a zero — are
-// asserted on the data that would actually reach the chart.
+// EChart is mocked for the same reason target-card.test.tsx mocks it; the mock also CAPTURES the
+// option, which is how the trend's two load-bearing claims.
 const captured = vi.hoisted(() => ({ options: [] as TrendOption[] }));
 vi.mock("@/components/echart", () => ({
   EChart: ({ option }: { option: TrendOption }) => {
@@ -95,6 +93,21 @@ describe("fmtRttNs", () => {
     expect(fmtRttNs(400_000)).toBe("0.4ms");
     expect(fmtRttNs(undefined)).toBe("—");
   });
+
+  /* QA scope 4, finding #14: a same-node first hop answers in tens of
+     microseconds, and one decimal of a millisecond printed it as "0.0ms" —
+     a measurement erased rather than reported. */
+  it("switches to microseconds below 0.1ms rather than rounding a real hop to zero", () => {
+    expect(fmtRttNs(22_000)).toBe("22µs");
+    expect(fmtRttNs(1_500)).toBe("2µs");
+    // The boundary stays in milliseconds: 0.1ms has a decimal that holds it.
+    expect(fmtRttNs(100_000)).toBe("0.1ms");
+    expect(fmtRttNs(99_999)).toBe("100µs");
+  });
+
+  it("keeps a genuine ZERO in milliseconds — 0µs would read as a measurement", () => {
+    expect(fmtRttNs(0)).toBe("0.0ms");
+  });
 });
 
 describe("isPlaceholderHop", () => {
@@ -166,9 +179,8 @@ describe("hopTrendSeries", () => {
 });
 
 /**
- * QA round 4, finding #11. A pair with ONE stored path drew a single symbol
- * marooned at the left edge of whatever "nice" interval ECharts picked — days
- * wide, for a chart describing one instant.
+ * A pair with ONE stored path drew a single symbol marooned at the left edge of whatever "nice"
+ * interval ECharts picked.
  */
 describe("trendExtent", () => {
   const t = (iso: string) => Date.parse(iso);
@@ -250,6 +262,42 @@ describe("TraceDetail — enrichment row", () => {
   });
 });
 
+/* QA scope 4, finding #6: a long rDNS name pushed RTT and Loss off the right
+   edge of the card, and the card clipped them without a word. */
+describe("TraceDetail — horizontal overflow", () => {
+  const LONG = "edge-router-09.transit.lon.eu-west.example-networks.internal";
+
+  it("bounds and truncates the hostname cell, keeping the full name reachable", () => {
+    renderDetail(snapshot({ hops: [hop({ hostname: LONG })] }));
+
+    const cell = screen.getByTitle(LONG);
+    expect(cell).toHaveClass("truncate");
+    // A max-width is what makes `truncate` do anything at all here — `truncate`
+    // on the <td> itself was a no-op and the cell simply grew.
+    expect(cell.className).toMatch(/max-w-\[/);
+    // The columns it used to push out are still rendered.
+    expect(screen.getByText("Loss")).toBeInTheDocument();
+    expect(screen.getByText("RTT")).toBeInTheDocument();
+  });
+
+  it("says nothing about scrolling while nothing is off-screen", () => {
+    renderDetail(snapshot());
+    // jsdom lays nothing out, so scrollWidth === clientWidth === 0: the
+    // affordance must be driven by real overflow, not drawn unconditionally.
+    expect(screen.queryByRole("note")).not.toBeInTheDocument();
+  });
+
+  it("offers the hint once the table really does run past its card", () => {
+    const { container } = renderDetail(snapshot());
+    const scroller = container.querySelector(".overflow-x-auto") as HTMLElement;
+    Object.defineProperty(scroller, "scrollWidth", { value: 800, configurable: true });
+    Object.defineProperty(scroller, "clientWidth", { value: 400, configurable: true });
+
+    fireEvent.scroll(scroller);
+    expect(screen.getByRole("note")).toHaveTextContent(/scroll sideways/i);
+  });
+});
+
 describe("TraceDetail — loss column", () => {
   it("colours loss with the matrix's health tokens and leaves a clean hop quiet", () => {
     renderDetail(
@@ -312,8 +360,6 @@ describe("TraceDetail — per-hop trend", () => {
     expect(lastSeries()?.[1]).toEqual([Date.parse("2026-08-02T00:00:00Z"), null]);
   });
 
-  /* QA round 4, finding #11: the axis now describes the data instead of the
-     other way round. */
   it("pins the x-axis to the data's own padded extent", () => {
     renderDetail(current, history());
 
@@ -341,8 +387,6 @@ describe("TraceDetail — per-hop trend", () => {
     fireEvent.click(screen.getByRole("button", { name: /trend for 10\.0\.0\.1/i }));
 
     const fmt = lastOption()?.yAxis?.axisLabel?.formatter;
-    // Round 2's finding #8, verbatim: one decimal under 10ms (where an axis'
-    // own tick spacing is finer than the format), none above it.
     expect(fmt?.(2.5)).toBe("2.5ms");
     expect(fmt?.(123.4)).toBe("123ms");
   });
@@ -390,5 +434,75 @@ describe("TraceDetail — per-hop trend", () => {
     fireEvent.click(toggle);
 
     expect(screen.queryByTestId("echart")).not.toBeInTheDocument();
+  });
+});
+
+/* the pane in Russian Everything above renders with no <LocaleProvider>, which lib/i18n defines as English. */
+
+describe("TraceDetail — Russian", () => {
+  const older = snapshot({
+    id: "older",
+    firstSeen: "2026-08-01T00:00:00Z",
+    traceCount: 3,
+    hops: [hop({ ip: "10.0.0.1", rttNs: 2_000_000 })],
+  });
+  const current = snapshot({
+    id: "11111111-1111-1111-1111-111111111111",
+    firstSeen: "2026-08-03T00:00:00Z",
+    traceCount: 2,
+    hops: [hop({ ip: "10.0.0.1", rttNs: 4_000_000 })],
+  });
+
+  function renderRu(history: TrendHistory) {
+    localStorage.setItem(LOCALE_STORAGE_KEY, "ru");
+    render(
+      <LocaleProvider>
+        <ThemeProvider>
+          <TraceDetail snapshot={current} history={history} />
+        </ThemeProvider>
+      </LocaleProvider>,
+    );
+  }
+
+  afterEach(() => {
+    // vitest.setup.ts backs localStorage with ONE Map per test FILE.
+    localStorage.removeItem(LOCALE_STORAGE_KEY);
+  });
+
+  it("names the table, its columns and the snapshot's own three figures", () => {
+    renderRu({ snapshots: [current, older], hasOlder: false, traceTotal: 5 });
+
+    expect(screen.getByRole("table", { name: "Хопы" })).toBeInTheDocument();
+    for (const column of ["Адрес", "Имя хоста", "Потери"]) {
+      expect(screen.getByRole("columnheader", { name: column })).toBeInTheDocument();
+    }
+    expect(screen.getByText("Впервые виден")).toBeInTheDocument();
+    expect(screen.getByText("Трассировок")).toBeInTheDocument();
+  });
+
+  it("picks the FEW form for two paths", () => {
+    renderRu({ snapshots: [current, older], hasOlder: true, traceTotal: 5 });
+    fireEvent.click(screen.getByRole("button", { name: "Тренд RTT для 10.0.0.1" }));
+    expect(screen.getByText(/^Тренд покрывает загруженные здесь 2 пути\./)).toBeInTheDocument();
+  });
+
+  it("picks the ONE form for a single path, and for a trace count ending in 1", () => {
+    renderRu({ snapshots: [current], hasOlder: false, traceTotal: 21 });
+    fireEvent.click(screen.getByRole("button", { name: "Тренд RTT для 10.0.0.1" }));
+    // «1 путь», not «1 пути»; «21 трассировка», not «21 трассировок».
+    expect(screen.getByText(/1 путь \(2 из 21 трассировка у этой пары\)/)).toBeInTheDocument();
+  });
+
+  it("picks the MANY form for a trace count in the teens and above four", () => {
+    renderRu({ snapshots: [current, older], hasOlder: false, traceTotal: 40 });
+    fireEvent.click(screen.getByRole("button", { name: "Тренд RTT для 10.0.0.1" }));
+    expect(screen.getByText(/\(5 из 40 трассировок у этой пары\)/)).toBeInTheDocument();
+  });
+
+  it("translates the enrichment note, keeping the config key an operator would grep for", () => {
+    renderRu({ snapshots: [current], hasOlder: false, traceTotal: 2 });
+    fireEvent.click(screen.getByRole("button", { name: "Обогащение для хопа 1, 10.0.0.1" }));
+    const note = screen.getByText(/обогащения не записано/);
+    expect(note).toHaveTextContent("console.mtr.enrichment.enabled");
   });
 });

@@ -19,10 +19,8 @@ import (
 	"github.com/EsDmitrii/kconmon-ng/internal/console/store"
 )
 
-// fakeTopologyHistory returns one canned snapshot (or one canned error) and
-// records the instant it was asked about, so the tests can pin BOTH the
-// response shape and that the handler passed the parsed timestamp through
-// unmodified.
+// fakeTopologyHistory returns one canned snapshot (or one canned error) and records the instant it
+// was asked about.
 type fakeTopologyHistory struct {
 	snap   store.TopologySnapshot
 	err    error
@@ -61,13 +59,7 @@ func newTopologyServer(t *testing.T, ctrlURL string, history httpapi.TopologyHis
 	})
 }
 
-// seededHistory is the snapshot every happy-path test folds to: two nodes, two
-// agents, a retention floor well before the instants asked about.
-//
-// It carries zones because the M7 controller attributes them, which is what
-// lets a reconstructed map draw the same zone lanes as the live one. The two
-// unfoldable events are the pre-M7 rows still inside the same retention
-// window -- a real upgraded console's history is exactly this mixture.
+// seededHistory is the snapshot every happy-path test folds to: two nodes.
 func seededHistory() *fakeTopologyHistory {
 	return &fakeTopologyHistory{snap: store.TopologySnapshot{
 		Nodes: []store.TopologyNode{
@@ -85,10 +77,8 @@ func seededHistory() *fakeTopologyHistory {
 	}}
 }
 
-// TestTopologyLivePassthroughIsUnchangedByTheAtParam is the regression that
-// guards the pre-M5 contract: with no ?at=, the body must be BYTE-identical to
-// what the controller proxy produced before this endpoint learned about time,
-// and the history dependency must not be consulted at all.
+// TestTopologyLivePassthroughIsUnchangedByTheAtParam is the regression that guards the pre-M5
+// contract: with no ?at=.
 func TestTopologyLivePassthroughIsUnchangedByTheAtParam(t *testing.T) {
 	ctrl := fakeController(t)
 	defer ctrl.Close()
@@ -159,10 +149,7 @@ func TestTopologyAtFoldsAndMarksTheResponseHistorical(t *testing.T) {
 	if len(got.Nodes) != 2 || got.Nodes[0].Name != "node-a" || !got.Nodes[0].Ready {
 		t.Errorf("nodes = %+v, want the folded pair", got.Nodes)
 	}
-	// Zone is attributed, so it must reach the response under the SAME key the
-	// live passthrough uses -- one frontend type reads both bodies, and a
-	// reconstruction that dropped the zone would collapse every node into one
-	// nameless lane on the map.
+	// Zone is attributed, so it must reach the response under the SAME key the live passthrough uses.
 	if got.Nodes[0].Zone != "zone-a" || got.Nodes[1].Zone != "zone-b" {
 		t.Errorf("node zones = %q/%q, want zone-a/zone-b from the folded events",
 			got.Nodes[0].Zone, got.Nodes[1].Zone)
@@ -199,10 +186,7 @@ func TestTopologyAtFoldsAndMarksTheResponseHistorical(t *testing.T) {
 	}
 }
 
-// TestTopologyAtEmptyFoldStillServes200 covers the fold that legitimately
-// reconstructs nothing: an instant inside retention where no subject had been
-// registered yet is an EMPTY topology, not an error, and nodes/agents must be
-// JSON arrays rather than null.
+// TestTopologyAtEmptyFoldStillServes200 covers the fold that legitimately reconstructs nothing.
 func TestTopologyAtEmptyFoldStillServes200(t *testing.T) {
 	history := &fakeTopologyHistory{snap: store.TopologySnapshot{
 		Nodes:            []store.TopologyNode{},
@@ -224,12 +208,7 @@ func TestTopologyAtEmptyFoldStillServes200(t *testing.T) {
 	}
 }
 
-// timelineHistory answers each instant with the membership that held at it --
-// the attributed-history behaviour the M7 controller finally makes possible.
-// The fold itself is proven over real records in the store package
-// (TestFoldTopologyPrefixesGiveTheMembershipAtEachInstant); what belongs HERE
-// is that the handler asks about the instant it was given and serves back
-// whatever that instant folded to, unmixed between requests.
+// timelineHistory answers each instant with the membership that held.
 type timelineHistory struct {
 	byInstant map[time.Time]store.TopologySnapshot
 	askedA    []time.Time
@@ -244,10 +223,8 @@ func (h *timelineHistory) TopologyAt(_ context.Context, at time.Time) (store.Top
 	return snap, nil
 }
 
-// TestTopologyAtWalksAJoinAndALeaveAcrossThreeInstants is the carry's payoff at
-// the API surface: node-b joins, then leaves, and ?at= before / between /
-// after must show three different node sets instead of the empty one every
-// instant returned while the controller published unattributed events.
+// TestTopologyAtWalksAJoinAndALeaveAcrossThreeInstants is the carry's payoff at the API surface:
+// node-b joins.
 func TestTopologyAtWalksAJoinAndALeaveAcrossThreeInstants(t *testing.T) {
 	floor := time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)
 	t1 := time.Date(2026, 8, 5, 10, 0, 0, 0, time.UTC) // node-b joins
@@ -325,11 +302,8 @@ func TestTopologyAtWalksAJoinAndALeaveAcrossThreeInstants(t *testing.T) {
 	}
 }
 
-// TestTopologyAtPreM7HistoryStillFoldsToTheHonestEmpty keeps the OTHER half of
-// the contract pinned. Attribution does not rewrite rows already on disk: an
-// instant whose window holds only pre-M7 events folds to an empty node set
-// with every row counted unfoldable, and that must stay a 200 carrying the
-// counter -- it is what the UI's honest-empty note quotes.
+// TestTopologyAtPreM7HistoryStillFoldsToTheHonestEmpty keeps the OTHER half of the contract pinned;
+// attribution does not rewrite rows already on disk.
 func TestTopologyAtPreM7HistoryStillFoldsToTheHonestEmpty(t *testing.T) {
 	history := &fakeTopologyHistory{snap: store.TopologySnapshot{
 		Nodes:            []store.TopologyNode{},
@@ -410,12 +384,21 @@ func TestTopologyAtBeforeRetentionIs422(t *testing.T) {
 	if !strings.Contains(p.Detail, "console.database.retentionDays") {
 		t.Errorf("detail = %q, want it to name console.database.retentionDays", p.Detail)
 	}
+	// The knob is named ONCE: the Helm value and the console-config key are the
+	// same string, so repeating it read as two different settings.
+	if n := strings.Count(p.Detail, "console.database.retentionDays"); n != 1 {
+		t.Errorf("detail names console.database.retentionDays %d times, want 1: %q", n, p.Detail)
+	}
+	if strings.Contains(p.Detail, "--") {
+		t.Errorf("detail = %q, want sentences rather than an ASCII double dash", p.Detail)
+	}
+	if !strings.Contains(p.Detail, "there. Pick a later time") {
+		t.Errorf("detail = %q, want the advice to start its own capitalised sentence", p.Detail)
+	}
 }
 
-// TestTopologyAtWithNoRetainedEventsIs422 is the same refusal for a database
-// that is configured but has ingested nothing: an empty table cannot answer a
-// question about the past either, and pretending it means "empty cluster"
-// would be the lie this whole endpoint exists to avoid.
+// TestTopologyAtWithNoRetainedEventsIs422 is the same refusal for a database that is configured but
+// has ingested nothing.
 func TestTopologyAtWithNoRetainedEventsIs422(t *testing.T) {
 	history := &fakeTopologyHistory{snap: store.TopologySnapshot{
 		Nodes:  []store.TopologyNode{},

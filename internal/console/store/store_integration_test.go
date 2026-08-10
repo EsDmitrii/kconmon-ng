@@ -3,9 +3,6 @@
 package store_test
 
 // TestOpenAppliesMigrations requires a real PostgreSQL.
-// Run: docker run --rm -d -p 5432:5432 -e POSTGRES_PASSWORD=test -e POSTGRES_DB=kconmon postgres:17-alpine
-// Then: KCONMON_TEST_DATABASE_DSN='postgres://postgres:test@127.0.0.1:5432/kconmon?sslmode=disable' \
-//       go test -tags=integration ./internal/console/store/... -v
 
 import (
 	"context"
@@ -31,10 +28,8 @@ func testDSN(t *testing.T) string {
 	return dsn
 }
 
-// dropSchema wipes every table this package's migrations create (plus
-// goose_db_version) so the file is re-runnable: every test in this file
-// shares one database (there is no per-test schema), so each must leave it
-// as it found it.
+// dropSchema wipes every table this package's migrations create (plus goose_db_version) so the file
+// is re-runnable.
 func dropSchema(t *testing.T, dsn string) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), connectTimeout)

@@ -96,10 +96,8 @@ func TestInProcessKVDeleteIsIdempotent(t *testing.T) {
 	}
 }
 
-// TestInProcessKVSweeperReclaimsMemory guards against a long-running console
-// leaking one map entry per expired login: entries that are set and never
-// read again must still be reclaimed by the background sweeper, not just
-// evicted lazily on Get.
+// TestInProcessKVSweeperReclaimsMemory guards against a long-running console leaking one map entry
+// per expired login.
 func TestInProcessKVSweeperReclaimsMemory(t *testing.T) {
 	t.Parallel()
 	kv := cache.NewInProcessKV()
@@ -148,10 +146,7 @@ func TestInProcessKVIncrWithTTLCountsOneToNWithinTheWindow(t *testing.T) {
 	}
 }
 
-// TestInProcessKVIncrWithTTLDoesNotExtendTheWindow is the whole point of the
-// primitive: a FIXED window starts at its first hit and later hits inside it
-// must not push the expiry out, or a client hammering the endpoint would
-// keep its own counter alive forever and never get a fresh allowance.
+// TestInProcessKVIncrWithTTLDoesNotExtendTheWindow is the whole point of the primitive.
 func TestInProcessKVIncrWithTTLDoesNotExtendTheWindow(t *testing.T) {
 	t.Parallel()
 	kv := cache.NewInProcessKV()
@@ -179,10 +174,8 @@ func TestInProcessKVIncrWithTTLDoesNotExtendTheWindow(t *testing.T) {
 	}
 }
 
-// TestInProcessKVIncrWithTTLConcurrentFirstHitsNeverLeaveAKeyTTLLess pins the
-// race the doc comment calls out: many goroutines racing on a key that does
-// not exist yet must produce exactly N as the final count AND a key that
-// still expires -- a lost TTL would lock a subject out permanently.
+// TestInProcessKVIncrWithTTLConcurrentFirstHitsNeverLeaveAKeyTTLLess pins the race the doc comment
+// calls out.
 func TestInProcessKVIncrWithTTLConcurrentFirstHitsNeverLeaveAKeyTTLLess(t *testing.T) {
 	t.Parallel()
 	kv := cache.NewInProcessKV()
@@ -229,10 +222,7 @@ func TestInProcessKVIncrWithTTLConcurrentFirstHitsNeverLeaveAKeyTTLLess(t *testi
 	}
 }
 
-// TestInProcessKVIncrWithTTLOnANonNumericValueErrors mirrors Valkey's own
-// INCR contract: a key holding something that is not an integer is an error,
-// not a silent reset -- otherwise a key collision between a counter and a
-// session blob would quietly wipe the rate limit.
+// TestInProcessKVIncrWithTTLOnANonNumericValueErrors mirrors Valkey's own INCR contract.
 func TestInProcessKVIncrWithTTLOnANonNumericValueErrors(t *testing.T) {
 	t.Parallel()
 	kv := cache.NewInProcessKV()

@@ -18,14 +18,8 @@ import (
 	"github.com/EsDmitrii/kconmon-ng/internal/console/store"
 )
 
-// fakeMTRStore is one double for MTRService: the three path-snapshot reads
-// plus the enrichment cache read, mutex-guarded like fakeChecksStore for the
-// same -race reason (the audit drain and the handler run on different
-// goroutines).
-//
-// It records the LAST filter ListPathSnapshots was called with, which is how
-// the limit-clamp and required-filter tests assert what the handler actually
-// asked the store for rather than merely what came back.
+// fakeMTRStore is one double for MTRService; it records the LAST filter ListPathSnapshots was
+// called.
 type fakeMTRStore struct {
 	mu sync.Mutex
 
@@ -137,11 +131,8 @@ func (f *fakeMTRStore) addSnapshot(source, dest string, hops []store.PathHop, se
 	return id
 }
 
-// newM5TestServer wires a Server whose subject holds the given BUILT-IN role,
-// using the real compiled-in role sets -- newChecksTestServer's pattern, so
-// these tests prove mtr:read/annotations:read/annotations:write land where M5
-// Task 3 actually put them (Decision 11: viewer READS both), not where a
-// synthetic test role would.
+// newM5TestServer wires a Server whose subject holds the given BUILT-IN role, using the real
+// compiled-in role sets.
 func newM5TestServer(t *testing.T, role string, extra Deps) *Server { //nolint:gocritic // hugeParam: test helper
 	t.Helper()
 	authr := fakeAuthenticator{subject: authz.Subject{Kind: authz.SubjectUser, ID: "u1"}}
@@ -191,8 +182,6 @@ func TestMTRRoutesWithoutStoreReturn503(t *testing.T) {
 	}
 }
 
-// TestMTRRoutesAreReadableByViewer is M5 Decision 11 in test form: path
-// history is TELEMETRY, so the role auth.mode=anonymous defaults to reads it.
 // A regression that moved mtr:read up to operator would fail here.
 func TestMTRRoutesAreReadableByViewer(t *testing.T) {
 	st := newFakeMTRStore()
@@ -271,9 +260,8 @@ func TestMTRDestinationsStoreFailureReturns502(t *testing.T) {
 	}
 }
 
-// Both filters are REQUIRED: an unfiltered snapshot listing has no UI and no
-// bound (plan Task 4). The 422 detail must name both parameters, or the
-// caller cannot tell which one it forgot.
+// Both filters are REQUIRED: an unfiltered snapshot listing has no UI and no bound; the 422 detail
+// must name both parameters, or the caller cannot tell which one it forgot.
 func TestMTRSnapshotsRequireSourceAndDestination(t *testing.T) {
 	st := newFakeMTRStore()
 	s := newM5TestServer(t, "viewer", Deps{MTR: st})
@@ -430,10 +418,8 @@ func TestMTRSnapshotGetWithoutEnrichOmitsTheField(t *testing.T) {
 	}
 }
 
-// ?enrich=true with NO Deps.Enricher is cache-only: the map holds exactly the
-// hop addresses already in mtr_hop_enrichment, keyed by IP, and a miss is
-// simply an absent key -- never an error. This is the shape a console with
-// mtr.enrichment.enabled=false serves, which is the default.
+// ?enrich=true with NO Deps.Enricher is cache-only: the map holds exactly the hop addresses already
+// in mtr_hop_enrichment.
 func TestMTRSnapshotGetEnrichIsCacheOnly(t *testing.T) {
 	st := newFakeMTRStore()
 	id := st.addSnapshot("node-a", "node-b", sampleHops(), time.Now().UTC())
@@ -481,9 +467,7 @@ func TestMTRSnapshotGetEnrichAllMissesIsAnEmptyMap(t *testing.T) {
 	}
 }
 
-// An enrichment cache failure must NEVER fail the trace itself (M5 Decision
-// 5's degradation rule): the snapshot still answers 200, with the field
-// present and empty.
+// An enrichment cache failure must NEVER fail the trace itself: the snapshot still answers 200.
 func TestMTRSnapshotGetEnrichFailureStillServesTheTrace(t *testing.T) {
 	st := newFakeMTRStore()
 	id := st.addSnapshot("node-a", "node-b", sampleHops(), time.Now().UTC())
@@ -504,14 +488,8 @@ func TestMTRSnapshotGetEnrichFailureStillServesTheTrace(t *testing.T) {
 
 // --- M5 Task 5: the resolver seam ------------------------------------------
 
-// This assertion is the whole point of Task 5's seam decision: an
-// *enrich.Resolver IS an EnrichmentReader, so swapping the cache-only read for
-// a resolving one is ONE Deps field and mtr.go's handler is untouched. If it
-// stops compiling, the seam has drifted and the wiring in cmd/console is the
-// thing that would otherwise break at runtime, in production. It lives in the
-// TEST file on purpose: httpapi must not import enrich, or the dependency
-// would point the wrong way -- the HTTP layer defines the seam, the resolver
-// satisfies it.
+// If it stops compiling, the seam has drifted and the wiring in cmd/console is the thing that would
+// otherwise break at runtime.
 var _ EnrichmentReader = (*enrich.Resolver)(nil)
 
 // fakeEnricher stands in for *enrich.Resolver: same read-only method, and it
@@ -540,10 +518,7 @@ func (f *fakeEnricher) GetEnrichment(_ context.Context, ips []string) (map[strin
 	return out, nil
 }
 
-// TestMTRSnapshotGetEnrichPrefersTheResolver: with Deps.Enricher wired, the
-// hop addresses go to the RESOLVER and the store's cache read is not called
-// directly at all -- the resolver owns the whole resolve-then-write-back
-// cycle, and a handler that also read the cache would be racing it.
+// TestMTRSnapshotGetEnrichPrefersTheResolver: with Deps.Enricher wired.
 func TestMTRSnapshotGetEnrichPrefersTheResolver(t *testing.T) {
 	st := newFakeMTRStore()
 	id := st.addSnapshot("node-a", "node-b", sampleHops(), time.Now().UTC())
@@ -587,10 +562,8 @@ func TestMTRSnapshotGetEnrichPrefersTheResolver(t *testing.T) {
 	}
 }
 
-// TestMTRSnapshotGetEnrichResolverFailureStillServesTheTrace: the handler's
-// degradation contract is unchanged by the swap. A resolver that errors is
-// exactly as harmless as a cache that errors -- 200, empty map, no internals
-// in the body.
+// TestMTRSnapshotGetEnrichResolverFailureStillServesTheTrace: the handler's degradation contract is
+// unchanged by the swap.
 func TestMTRSnapshotGetEnrichResolverFailureStillServesTheTrace(t *testing.T) {
 	st := newFakeMTRStore()
 	id := st.addSnapshot("node-a", "node-b", sampleHops(), time.Now().UTC())
@@ -628,11 +601,7 @@ func TestMTRSnapshotGetWithoutEnrichNeverResolves(t *testing.T) {
 	}
 }
 
-// TestMTRSnapshotGetEnrichFallsBackToTheCacheWhenNoResolverIsWired pins the
-// nil-Enricher case: with mtr.enrichment.enabled false (or no database), the
-// route keeps Task 4's cache-only behaviour rather than answering 503 or
-// dropping the field. Enrichment is decoration, and its absence must never
-// change a status code.
+// Enrichment is decoration, and its absence must never change a status code.
 func TestMTRSnapshotGetEnrichFallsBackToTheCacheWhenNoResolverIsWired(t *testing.T) {
 	st := newFakeMTRStore()
 	id := st.addSnapshot("node-a", "node-b", sampleHops(), time.Now().UTC())

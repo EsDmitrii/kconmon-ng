@@ -3,6 +3,7 @@ import {
   CHECKBOX_CLASS,
   endSentence,
   escapeLabelValue,
+  fmtEventStamp,
   fmtEventTime,
   isValidAdhocAddress,
   plural,
@@ -20,14 +21,42 @@ describe("fmtEventTime", () => {
   it("hands back the wire's own bytes for an unparseable stamp", () => {
     expect(fmtEventTime("not a time")).toBe("not a time");
   });
+
+  it("is 24-hour whatever locale tag it is handed", () => {
+    const noon = new Date();
+    noon.setHours(15, 12, 0, 0);
+    expect(fmtEventTime(noon.toISOString(), "en-US")).toBe("15:12:00");
+    expect(fmtEventTime(noon.toISOString(), "ru-RU")).toBe("15:12:00");
+  });
 });
 
-/**
- * runsAtOrBefore — the Time Machine's cut across a run list (QA round 2,
- * finding #6). GET /api/v1/runs has no time filter, so a card rendering its
- * newest page under a banner reading "you are viewing 12:00" was listing runs
- * that had not happened yet.
- */
+/* QA scope 2, finding #10 — a change feed whose rows are time-only reads
+   yesterday's 15:12 as this afternoon's. */
+describe("fmtEventStamp", () => {
+  const NOW = new Date("2026-08-09T12:00:00");
+
+  it("is time-only for a row from the same day", () => {
+    expect(fmtEventStamp("2026-08-09T15:12:00", undefined, NOW)).toBe("15:12:00");
+  });
+
+  it("carries the day for a row from any other one", () => {
+    const stamp = fmtEventStamp("2026-08-08T15:12:00", undefined, NOW);
+    expect(stamp).toContain("15:12:00");
+    expect(stamp).not.toBe("15:12:00");
+    expect(stamp).toBe(`${new Date("2026-08-08T15:12:00").toLocaleDateString(undefined, { month: "short", day: "numeric" })} 15:12:00`);
+  });
+
+  it("compares the DAY, not a 24-hour distance", () => {
+    // 23:59 the previous night is under an hour ago and still another day.
+    expect(fmtEventStamp("2026-08-08T23:59:00", undefined, new Date("2026-08-09T00:30:00"))).not.toBe("23:59:00");
+  });
+
+  it("hands back the wire's own bytes for an unparseable stamp", () => {
+    expect(fmtEventStamp("not a time", undefined, NOW)).toBe("not a time");
+  });
+});
+
+/** runsAtOrBefore — the Time Machine's cut across a run list. */
 describe("runInstant", () => {
   it("prefers the moment the run STARTED", () => {
     expect(runInstant({ createdAt: "2026-08-01T10:00:00Z", startedAt: "2026-08-01T11:00:00Z" })).toBe(
@@ -84,9 +113,8 @@ describe("plural", () => {
 });
 
 /**
- * QA round 4, finding #13. The client half of store.validateAdhocAddress: the
- * four shapes the AGENT can actually dial, and nothing stricter — a policy
- * refusal from the allowlist belongs to the agent, not to this form.
+ * The client half of store.validateAdhocAddress: the four shapes the AGENT can actually dial, and
+ * nothing stricter.
  */
 describe("isValidAdhocAddress", () => {
   it.each([
@@ -126,11 +154,6 @@ describe("isValidAdhocAddress", () => {
   });
 });
 
-/**
- * endSentence — QA round 5, finding #10. RFC 7807 details are PHRASES, so a UI
- * that concatenates one with a sentence of its own produced a run-on: "no
- * incident with that id The page is showing the default investigation".
- */
 describe("endSentence", () => {
   it("closes a phrase so the next sentence can start", () => {
     expect(endSentence("no incident with that id")).toBe("no incident with that id.");
@@ -156,9 +179,6 @@ describe("endSentence", () => {
   });
 });
 
-/* CHECKBOX_CLASS — QA round 5, finding #14. The native control keeps its
-   behaviour and gains this console's theming; accent-color is the whole
-   mechanism, so its absence is the regression worth pinning. */
 describe("CHECKBOX_CLASS", () => {
   it("tints the native check with the theme token rather than the OS accent", () => {
     expect(CHECKBOX_CLASS).toContain("accent-primary");

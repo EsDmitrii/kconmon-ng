@@ -13,19 +13,11 @@ import (
 	"github.com/EsDmitrii/kconmon-ng/internal/console/authz"
 )
 
-// openapiSpecPath is docs/console-api.yaml relative to this package's
-// directory -- the same "walk up to the repo root" form every other
-// file-relative path in this repo's tests uses. `go test` always runs with
-// the package directory as its working directory, so this is stable
-// regardless of where the command was invoked from.
+// openapiSpecPath is docs/console-api.yaml relative to this package's directory.
 const openapiSpecPath = "../../../docs/console-api.yaml"
 
-// openapiMethods is the closed set of OpenAPI path-item keys that denote an
-// operation. Every OTHER key a path item may legally carry -- summary,
-// description, servers, parameters, $ref, and any x- extension -- is not a
-// method and must be skipped, or the spec side of the join would invent
-// routes like "PARAMETERS /api/v1/targets/{id}" and fail against a router
-// that is perfectly in sync.
+// openapiMethods is the closed set of OpenAPI path-item keys that denote an operation; every OTHER
+// key a path item may legally carry -- summary.
 var openapiMethods = map[string]string{
 	"get":     http.MethodGet,
 	"put":     http.MethodPut,
@@ -38,36 +30,11 @@ var openapiMethods = map[string]string{
 }
 
 // TestEveryAPIRouteIsInTheOpenAPISpec walks the LIVE chi router the same way
-// TestEveryAPIRouteHasAPermissionDecision does and fails if any registered
-// /api/v1/* pattern is absent from docs/console-api.yaml, or if the spec
-// names a path the router does not serve. Two hand-maintained artefacts with
-// a machine-checked join beat one with none (Plan Decision 4). chi patterns
-// use {id}; OpenAPI uses {id} too, so no translation is needed.
-//
-// Scope, both directions:
-//
-//   - router -> spec covers /api/v1/* ONLY. /healthz, /readyz, /metrics and
-//     /ws are deliberately outside the spec (the first three are probe/scrape
-//     endpoints, /ws is a protocol documented in WEBSOCKET.md, not a REST
-//     path), so requiring them here would only force noise into the document.
-//   - spec -> router covers EVERY path the document declares, /api/v1/* or
-//     not. That is what makes a typo'd or removed path fail: the check is
-//     against the full set of registered routes, so documenting /ws or
-//     /healthz would still pass, while /api/v1/bogus (or a /api/v1/targets
-//     that lost its DELETE in server.go) fails immediately.
-//
-// Methods are part of the key on both sides, so a path that is present but
-// missing one of its verbs is drift and fails like a missing path does.
-//
-// The YAML is parsed with gopkg.in/yaml.v3 into map[string]any rather than
-// with an OpenAPI library: the join needs path keys and method keys, nothing
-// else, and a schema-validating dependency would buy nothing this test asks
-// for while adding one more thing to keep current.
+// TestEveryAPIRouteHasAPermissionDecision does and fails if any registered /api/v1/* pattern is
+// absent from docs/console-api.yaml; scope, both directions: - router -> spec covers /api/v1/*.
 func TestEveryAPIRouteIsInTheOpenAPISpec(t *testing.T) {
-	// Same server construction as TestEveryAPIRouteHasAPermissionDecision --
-	// the whole point is to walk the router production actually builds. No
-	// request is issued here, so the authenticator/policy pair only has to
-	// exist for NewServer to wire the authenticated Group at all.
+	// No request is issued here, so the authenticator/policy pair only has to exist for NewServer to
+	// wire the authenticated Group at all.
 	authr := fakeAuthenticator{subject: authz.Subject{Kind: authz.SubjectUser, ID: "u1"}, mode: "local"}
 	s := newAuthzServer(t, authr, authz.NewPolicy(nil), Deps{})
 

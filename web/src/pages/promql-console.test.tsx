@@ -3,6 +3,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/re
 import { useState } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ThemeProvider } from "@/components/theme-provider";
+import { LOCALE_STORAGE_KEY, LocaleProvider, type Locale } from "@/lib/i18n";
 import { TimeMachineProvider } from "@/lib/timemachine";
 import { PromQLConsolePage, ResultTabs } from "./promql-console";
 
@@ -17,16 +18,8 @@ vi.mock("@/components/echart", () => ({
 }));
 
 /**
- * M7 Task 12b (plan Decision 12). The Console's result switcher is the one
- * place in this codebase that declared role="tablist" without honouring the
- * pattern: three separate tab stops, no arrow keys, and three panels with no
- * role. Every other switcher on this very page is a Segmented radiogroup with
- * a roving tabindex, so the bar these cases hold the strip to is the repo's
- * own (components/ui/segmented.tsx), not an abstract checklist.
- *
- * ResultTabs is driven directly rather than through PromQLConsolePage: the
- * page mounts CodeMirror and ECharts, neither of which renders comfortably in
- * jsdom — the same reason pages/topology.tsx exports nodeNavigationPath.
+ * The Console's result switcher is the one place in this codebase that declared role="tablist"
+ * without honouring the pattern.
  */
 
 type Tab = "table" | "chart" | "json";
@@ -55,12 +48,24 @@ interface PromCall {
 
 /** The whole page, with the two heavy children stubbed out. `at` engages the
  *  Time Machine through the URL, which is the only carrier it has. */
-function renderConsole(opts: { answer?: unknown; at?: string; httpStatus?: number } = {}) {
+function renderConsole(
+  opts: {
+    answer?: unknown;
+    at?: string;
+    httpStatus?: number;
+    /** Mounts a <LocaleProvider> above the page. Absent — every case but the ru
+     *  smoke pin at the bottom of this file — there is no provider at all,
+     *  which lib/i18n defines as English. */
+    locale?: Locale;
+  } = {},
+) {
   const {
     answer = { status: "success", data: { resultType: "vector", result: [] } },
     at,
     httpStatus = 200,
+    locale,
   } = opts;
+  if (locale !== undefined) localStorage.setItem(LOCALE_STORAGE_KEY, locale);
   window.history.pushState({}, "", at ? `/console?at=${at}` : "/console");
   const calls: PromCall[] = [];
   const fetchMock = vi.fn((url: string, init?: RequestInit) => {
@@ -81,11 +86,12 @@ function renderConsole(opts: { answer?: unknown; at?: string; httpStatus?: numbe
   });
   vi.stubGlobal("fetch", fetchMock);
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const page = <PromQLConsolePage />;
   const utils = render(
     <QueryClientProvider client={qc}>
       <ThemeProvider>
         <TimeMachineProvider>
-          <PromQLConsolePage />
+          {locale === undefined ? page : <LocaleProvider>{page}</LocaleProvider>}
         </TimeMachineProvider>
       </ThemeProvider>
     </QueryClientProvider>,
@@ -100,6 +106,9 @@ afterEach(() => {
   cleanup();
   vi.unstubAllGlobals();
   window.history.pushState({}, "", "/");
+  /* vitest.setup.ts backs localStorage with one Map per test FILE — a locale
+     left behind would flip every later case in this one. */
+  localStorage.removeItem(LOCALE_STORAGE_KEY);
 });
 
 describe("Console result tabs", () => {
@@ -163,12 +172,7 @@ describe("Console result tabs", () => {
   });
 });
 
-/**
- * QA round 4, finding #2. Prometheus's own error envelope resolves rather than
- * throws (lib/api's `handle`), so the page held a `data` object AND an error —
- * and rendered the red card together with "No data — the query returned an
- * empty result.", which reads as "it ran and matched nothing".
- */
+/** Prometheus's own error envelope resolves rather than throws (lib/api's `handle`). */
 describe("Console empty notes vs. a failed query", () => {
   const errorEnvelope = { status: "error", errorType: "bad_data", error: "parse error: unexpected end of input" };
 
@@ -206,6 +210,40 @@ describe("Console empty notes vs. a failed query", () => {
 
     run();
     expect(await screen.findByText(/no data — the query returned an empty result/i)).toBeInTheDocument();
+  });
+});
+
+/* QA scope 4, finding #16: Instant and Range answer different SHAPES of
+   question, so the result on screen stops describing what the controls say the
+   moment the mode changes — and nothing said so. */
+describe("Console mode switch", () => {
+  const oneSample = {
+    status: "success",
+    data: { resultType: "vector", result: [{ metric: { __name__: "up", node: "node-a" }, value: [1_754_000_000, "1"] }] },
+  };
+
+  it("drops the instant result when the mode flips to Range, rather than leaving it unmarked", async () => {
+    renderConsole({ answer: oneSample });
+
+    run();
+    expect(await screen.findByText("node-a")).toBeInTheDocument();
+
+    pickRange();
+    await waitFor(() => expect(screen.queryByText("node-a")).not.toBeInTheDocument());
+    // Back to the idle state, which is the honest one: nothing has been asked
+    // in this mode yet.
+    expect(screen.getByText(/run a query to see results/i)).toBeInTheDocument();
+  });
+
+  it("drops a range result on the way back to Instant too", async () => {
+    renderConsole({ answer: oneSample });
+
+    pickRange();
+    run();
+    expect(await screen.findByText("node-a")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("radio", { name: "Instant" }));
+    await waitFor(() => expect(screen.queryByText("node-a")).not.toBeInTheDocument());
   });
 });
 
@@ -251,5 +289,25 @@ describe("Console under the Time Machine", () => {
     run();
     await waitFor(() => expect(calls).toHaveLength(1));
     expect(calls[0].body.time).toBeUndefined();
+  });
+});
+
+/* the Russian is wired ONE smoke pin. */
+describe("PromQLConsolePage — Russian", () => {
+  it("names its controls and keeps the idle/empty distinction in Russian", async () => {
+    renderConsole({ locale: "ru" });
+
+    expect(await screen.findByRole("heading", { name: "Консоль" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Выполнить" })).toBeInTheDocument();
+    // JSON is a format name and does NOT move; the other two tabs do.
+    expect(screen.getByRole("tab", { name: "Таблица" })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "JSON" })).toBeInTheDocument();
+
+    // Nothing run yet: the idle sentence, not the empty-result one.
+    expect(screen.getByText("Выполните запрос, чтобы увидеть результат.")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Выполнить" }));
+    // Ran, and matched nothing: a different sentence, with the different fact.
+    expect(await screen.findByText("Данных нет: запрос вернул пустой результат.")).toBeInTheDocument();
   });
 });

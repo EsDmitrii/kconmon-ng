@@ -3,9 +3,6 @@
 package store_test
 
 // TestAnnotation* require a real PostgreSQL.
-// Run: docker run --rm -d -p 5432:5432 -e POSTGRES_PASSWORD=test -e POSTGRES_DB=kconmon postgres:17-alpine
-// Then: KCONMON_TEST_DATABASE_DSN='postgres://postgres:test@127.0.0.1:5432/kconmon?sslmode=disable' \
-//       go test -tags=integration ./internal/console/store/... -v
 
 import (
 	"context"
@@ -20,10 +17,8 @@ import (
 	"github.com/EsDmitrii/kconmon-ng/internal/console/store"
 )
 
-// newAnnotationsDB opens a *store.DB with migrations applied, dropping and
-// re-creating the schema first -- same convention as newTargetsDB; this file
-// shares one database with every other file in package store_test, so each
-// test must leave it clean.
+// newAnnotationsDB opens a *store.DB with migrations applied, dropping and re-creating the schema
+// first.
 func newAnnotationsDB(t *testing.T) *store.DB {
 	t.Helper()
 	dsn := testDSN(t)
@@ -43,9 +38,7 @@ func newAnnotationsDB(t *testing.T) *store.DB {
 
 func scopePtr(s string) *string { return &s }
 
-// TestAnnotationLifecycle is the happy path M5 supports: create -> get ->
-// delete, with the delete asserted through an independent read. There is no
-// update by design (Decision 10), so this is the whole of the CRUD.
+// There is no update by design, so this is the whole of the CRUD.
 func TestAnnotationLifecycle(t *testing.T) {
 	db := newAnnotationsDB(t)
 	ctx := context.Background()
@@ -98,9 +91,6 @@ func TestAnnotationLifecycle(t *testing.T) {
 	}
 }
 
-// TestAnnotationInstantMarkRoundTrips pins Decision 10's NULL end_at: an
-// instant mark reads back with a nil EndAt, not with EndAt == StartAt, so a
-// consumer can tell "a moment" from "a zero-length span" without guessing.
 func TestAnnotationInstantMarkRoundTrips(t *testing.T) {
 	db := newAnnotationsDB(t)
 	ctx := context.Background()
@@ -150,10 +140,7 @@ func TestAnnotationInvalidInputNeverReachesTheDatabase(t *testing.T) {
 	}
 }
 
-// TestListAnnotationsWindowIsOverlapNotContainment is the range filter's real
-// claim, and the one a naive "start_at BETWEEN from AND to" gets wrong: a span
-// that began BEFORE the window and is still running inside it is exactly the
-// annotation a chart needs to draw, and it must come back.
+// TestListAnnotationsWindowIsOverlapNotContainment is the range filter's real claim.
 func TestListAnnotationsWindowIsOverlapNotContainment(t *testing.T) {
 	db := newAnnotationsDB(t)
 	ctx := context.Background()
@@ -252,11 +239,8 @@ func TestListAnnotationsUnboundedWindow(t *testing.T) {
 	}
 }
 
-// TestListAnnotationsScopeFilterCanSelectTheGlobalOnes is why
-// AnnotationFilter.Scope is a pointer: "" is the GLOBAL scope, a real value,
-// so "no filter" and "the global ones" are two different requests and both
-// have to be expressible. Every other filter in this package uses "" for "no
-// filter", which here would make the global marks unaddressable.
+// TestListAnnotationsScopeFilterCanSelectTheGlobalOnes is why AnnotationFilter.Scope is a pointer;
+// every other filter in this package uses "" for "no filter".
 func TestListAnnotationsScopeFilterCanSelectTheGlobalOnes(t *testing.T) {
 	db := newAnnotationsDB(t)
 	ctx := context.Background()

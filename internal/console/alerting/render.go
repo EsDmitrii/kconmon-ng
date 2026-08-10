@@ -1,73 +1,5 @@
-// Package alerting turns console-managed alert-rule rows into deterministic
-// PromQL expressions and into ONE PrometheusRule bundle object.
-//
-// # Constants in code ARE the documentation
-//
-// Following the M6 investigation.ts precedent: every number, window, metric
-// family and label name this package renders is a named constant declared
-// below, and the golden tests in render_test.go / bundle_test.go pin the exact
-// output bytes. ALERTING.md restates these; it never becomes the source of
-// truth. If a constant here and a sentence there disagree, the constant wins
-// and the doc is stale.
-//
-// The constants that are NOT obvious, stated once:
-//
-//   - MetricPrefix is "kconmon_ng" — the DEFAULT of config.metricsPrefix, and
-//     only the default. Rendering hangs off a Renderer VALUE carrying the
-//     prefix (NewRenderer), because config.metricsPrefix is operator-settable
-//     and a rule rendered against the wrong family name is a rule that can
-//     never fire — the exact failure the Grafana dashboards in dashboards/
-//     still have (docs/metrics.md "Default alerting rules"). There is no
-//     package-level Render: a free function would have to pick a prefix for
-//     the caller, and picking the default silently is the bug.
-//   - RateWindow is "5m" for every rate()/histogram_quantile template. It is
-//     not a builder param: a per-rule window is a second knob that changes what
-//     the threshold MEANS, and the plan's builder model has one threshold.
-//   - TTFBQuantile is 0.95 for http-ttfb. zone-latency takes a quantile param
-//     because a latency SLO is quantile-shaped; TTFB alerting is not.
-//   - Loss thresholds are PERCENT in the builder and the loss metrics are
-//     RATIOS (0.0-1.0), so the gauge is multiplied by 100 here. Latency
-//     thresholds are MILLISECONDS and the histograms are in SECONDS, so the
-//     quantile is multiplied by 1000 here. Both conversions happen at render
-//     time so the stored params stay in operator units.
-//
-// # Metric families (every name verified against the exporter, not from memory)
-//
-//	kconmon_ng_udp_packet_loss_ratio         internal/metrics/prometheus.go:115  gauge, peer labels
-//	kconmon_ng_icmp_packet_loss_ratio        internal/metrics/prometheus.go:130  gauge, peer labels
-//	kconmon_ng_tcp_results_total             internal/metrics/prometheus.go:101  counter, peer + result
-//	kconmon_ng_udp_rtt_seconds               internal/metrics/prometheus.go:106  histogram, peer labels
-//	kconmon_ng_icmp_rtt_seconds              internal/metrics/prometheus.go:124  histogram, peer labels
-//	kconmon_ng_tcp_total_duration_seconds    internal/metrics/prometheus.go:96   histogram, peer labels
-//	kconmon_ng_dns_results_total             internal/metrics/prometheus.go:143  counter, host/resolver/source_node/source_zone + result
-//	kconmon_ng_http_ttfb_seconds             internal/metrics/prometheus.go:163  histogram, url/source_node/source_zone
-//	kconmon_ng_external_results_total        internal/metrics/prometheus.go:196  counter, external labels + result
-//	kconmon_ng_controller_registered_agents  internal/metrics/prometheus.go:222  gauge, unlabelled
-//	kconmon_ng_controller_expected_agents    internal/metrics/prometheus.go:226  gauge, unlabelled
-//
-// Peer label set (internal/metrics/prometheus.go:75): source_node,
-// destination_node, source_zone, destination_zone. External label set
-// (internal/metrics/prometheus.go:82): source_node, source_zone, target,
-// target_kind — deliberately NOT the peer set (docs/metrics.md:7-14).
-//
-// # Two template kinds deviate from the brief, on evidence
-//
-//   - cert-expiry is DROPPED. There is no certificate-expiry metric family in
-//     this codebase: no exporter declares one (internal/metrics/prometheus.go
-//     is the whole agent/controller surface, internal/console/metrics is the
-//     console surface) and docs/metrics.md lists none. Rendering a rule over an
-//     invented series would ship an alert that can never fire. Pinned by
-//     TestEveryKnownKindHasAGolden.
-//   - agent-missing renders the CONTROLLER-side count comparison
-//     (registered < expected), not a per-node absence expression. There is no
-//     per-node agent up/heartbeat family: the agent's own liveness is only
-//     visible through the peer probe families, which are keyed by
-//     source_node/destination_node and therefore go silent for a node that
-//     never registered — absent() over them cannot enumerate the nodes that
-//     SHOULD exist. The controller derives expected_agents from its node
-//     informer, so it is the only series in the system that knows the
-//     denominator. This is the same expression the shipped KconmonAgentsMissing
-//     default rule uses (docs/metrics.md "Default alerting rules").
+// Package alerting turns console-managed alert-rule rows into deterministic PromQL expressions and
+// into ONE PrometheusRule bundle object; ALERTING.md restates these.
 package alerting
 
 import (
@@ -111,27 +43,15 @@ const (
 	suffixExpectedAgts   = "_controller_expected_agents"
 )
 
-// Renderer renders alert rules against ONE metric prefix.
-//
-// It is a value, not a package-level function set, for exactly one reason:
-// config.metricsPrefix is operator-settable and every expression this package
-// emits names a metric family. A renderer built from the wrong prefix produces
-// syntactically perfect PromQL over series that do not exist — an alert that
-// can never fire and never errors. Making the prefix a constructor argument
-// forces every caller to say which deployment it is rendering for.
-//
-// The type is immutable and carries no state beyond the prefix, so one value
-// is shared by the reconciler loop and every HTTP request without locking.
+// Renderer renders alert rules against ONE metric prefix; a renderer built from the wrong prefix
+// produces syntactically perfect PromQL over series that do not exist.
 type Renderer struct {
 	// prefix is the resolved metric prefix, never empty (NewRenderer folds ""
 	// into MetricPrefix).
 	prefix string
 }
 
-// NewRenderer builds a Renderer for prefix. An empty or whitespace-only prefix
-// means MetricPrefix — the config package already defaults metricsPrefix and
-// refuses an empty one, so this is a repair for a hand-built caller, not a
-// supported configuration.
+// NewRenderer builds a Renderer for prefix; an empty or whitespace-only prefix means MetricPrefix.
 func NewRenderer(prefix string) Renderer {
 	p := strings.TrimSpace(prefix)
 	if p == "" {
@@ -147,8 +67,6 @@ func (r Renderer) Prefix() string { return r.prefix }
 // metric joins the renderer's prefix to a family suffix.
 func (r Renderer) metric(suffix string) string { return r.prefix + suffix }
 
-// Bundle-object constants. See Decision 4 (ownership) and the single-bundle
-// strategy in Task 2 of the M7 plan.
 const (
 	BundleAPIVersion = "monitoring.coreos.com/v1"
 	BundleKind       = "PrometheusRule"
@@ -187,10 +105,7 @@ var (
 	validQuantiles  = []float64{0.5, 0.95, 0.99}
 	validSeverities = []string{"info", "warning", "critical"}
 
-	// peerGroupBy / dnsGroupBy / externalGroupBy are the by() clauses of the
-	// aggregating templates. They are the metric's own label set minus the
-	// aggregated-away ones, written out so the alert carries the labels an
-	// operator needs to act.
+	// peerGroupBy / dnsGroupBy / externalGroupBy are the by clauses of the aggregating templates.
 	peerGroupBy     = []string{"source_node", "destination_node", "source_zone", "destination_zone"}
 	zoneGroupBy     = []string{"le", "source_zone", "destination_zone"}
 	dnsGroupBy      = []string{"host", "resolver", "source_node", "source_zone"}
@@ -198,9 +113,7 @@ var (
 	externalGroupBy = []string{"target", "target_kind", "source_node", "source_zone"}
 )
 
-// Rule is the render engine's input. It is deliberately NOT the store's row
-// type: this package imports no pgx and no store package, and Task 1's
-// alert_rules row satisfies this shape field-for-field.
+// Rule is the render engine's input.
 type Rule struct {
 	ID          string
 	Name        string
@@ -291,11 +204,9 @@ func ValidKind(kind string) bool {
 // Render
 // ---------------------------------------------------------------------------
 
-// Render turns one rule into a PromQL expression. It is pure and total: the
-// same input renders the same bytes forever, and every rejection names the
-// param that caused it.
+// Render turns one rule into a PromQL expression.
 //
-//nolint:gocritic // hugeParam: the value receiver is the signature pinned by the M7 Task 2 brief.
+//nolint:gocritic // hugeParam: the value receiver is the signature pinned
 func (r Renderer) Render(rule Rule) (expr string, err error) {
 	schema, ok := kindSchemas[rule.Kind]
 	if !ok {
@@ -431,11 +342,8 @@ func (r Renderer) renderExternalTargetDown(params map[string]any) (expr string, 
 	if ok {
 		matchers = append(matchers, matcher{"target", target})
 	}
-	// A refused probe increments external_denied_total and NOT
-	// external_results_total (docs/metrics.md:88-93), so "down" is a non-zero
-	// failure rate rather than a missing success series: an all-failing target
-	// has no result="success" series at all, and == 0 over a series that does
-	// not exist never fires.
+	// A refused probe increments external_denied_total and NOT external_results_total
+	// (docs/metrics.md:88-93).
 	failing := append(slices.Clone(matchers), matcher{"result", "fail"})
 	return "sum by (" + strings.Join(externalGroupBy, ", ") + ") (rate(" +
 		r.metric(suffixExternalResult) + selector(failing) + "[" + RateWindow + "])) > 0", nil
@@ -446,9 +354,7 @@ func renderRaw(params map[string]any) (expr string, err error) {
 	if strings.TrimSpace(raw) == "" {
 		return "", fmt.Errorf("%s: param %q must not be empty", KindRaw, "expr")
 	}
-	// Verbatim, including the operator's whitespace: there is no Prometheus
-	// parser in this module (Decision 2), so the console must not pretend to
-	// normalise an expression it cannot read.
+	// Verbatim, including the operator's whitespace: there is no Prometheus parser in this module.
 	return raw, nil
 }
 
@@ -671,19 +577,8 @@ func scopeMatchers(params map[string]any) (matchers []matcher, err error) {
 // FormatPromDuration
 // ---------------------------------------------------------------------------
 
-// FormatPromDuration renders a nanosecond duration as a Prometheus duration
-// string, with no external dependency.
-//
-// The rule is "largest unit that divides evenly, otherwise the next one down":
-// 300s renders "5m" and 90s renders "90s" rather than "1m30s". A single-unit
-// string is what an operator typed into the builder in the first place, and a
-// compound string would make two equal durations render differently depending
-// on which unit the UI happened to use.
-//
-// Units stop at days: weeks would turn a 7-day window into "1w", which reads
-// as a different setting than the one that was entered. Sub-millisecond
-// precision is an error rather than a rounding: a `for` of 1.5ms is a bug in
-// the caller, not an intent to alert instantly.
+// FormatPromDuration renders a nanosecond duration as a Prometheus duration string; the rule is
+// "largest unit that divides evenly, otherwise the next one down".
 func FormatPromDuration(ns int64) (duration string, err error) {
 	const (
 		millisecond = int64(1_000_000)
@@ -715,18 +610,9 @@ func FormatPromDuration(ns int64) (duration string, err error) {
 // ParsePromDuration
 // ---------------------------------------------------------------------------
 
-// promDurationUnit is one entry of the Prometheus duration grammar, in the
-// DESCENDING order the grammar itself requires. The order is load-bearing
-// twice: it is the legality check for a composite string (a unit may only be
-// followed by a smaller one), and it is the reason "ms" can sit next to "m"
-// without ambiguity -- the scanner reads a whole letter run, so "500ms" yields
-// the unit "ms" and never "m" followed by a stray "s".
-//
-// y and w are 365d and 7d, Prometheus's own definitions. They are DELIBERATELY
-// absent from FormatPromDuration's output side (see its doc comment: a 7-day
-// window rendered as "1w" reads as a different setting than the one entered),
-// which is why the two functions are inverses in one direction only -- pinned
-// by TestParsePromDurationIsNotOnto.
+// promDurationUnit is one entry of the Prometheus duration grammar; the order is load-bearing
+// twice: it is the legality check for a composite string (a unit may only be followed by a smaller
+// one).
 var promDurationUnits = []struct {
 	name string
 	size int64
@@ -740,29 +626,8 @@ var promDurationUnits = []struct {
 	{"ms", int64(time.Millisecond)},
 }
 
-// ParsePromDuration reads a Prometheus duration string and returns
-// nanoseconds. It is FormatPromDuration's inverse, and it exists for exactly
-// one caller: adopting a FOREIGN PrometheusRule (M7 Decision 4), whose `for:`
-// was written by a human in whatever spelling they liked.
-//
-// It is therefore WIDER than the formatter on purpose:
-//
-//   - COMPOSITE strings are accepted ("1h30m", "1y2w3d4h5m6s7ms"). The
-//     formatter never emits one, but a hand-written rule routinely is one, and
-//     refusing it would drop somebody's rule on the floor over a spelling.
-//   - y and w are accepted, as 365d and 7d. The formatter stops at days.
-//
-// It is STRICT everywhere else, because a misread duration is silent: a `for`
-// of 5m that parses as 0 turns a rule that waits five minutes into one that
-// fires instantly, and nobody reviews an import for that. So the grammar is
-// the whole grammar and nothing beside it -- decimal digits only (no sign, no
-// decimal point: "1.5h" is an error rather than 90m, matching Prometheus,
-// which has no fractional durations), units strictly descending and each used
-// at most once, no whitespace anywhere, the entire string consumed, and an
-// int64-nanosecond overflow reported rather than wrapped.
-//
-// The ONE special case is Prometheus's own: the bare string "0" is zero. Every
-// other unit-less number is an error.
+// ParsePromDuration reads a Prometheus duration string and returns nanoseconds; the formatter never
+// emits one, but a hand-written rule routinely.
 func ParsePromDuration(s string) (ns int64, err error) {
 	if s == "" {
 		return 0, errors.New("duration must not be empty")
@@ -815,11 +680,7 @@ func ParsePromDuration(s string) (ns int64, err error) {
 	return total, nil
 }
 
-// scanPromDurationComponent reads ONE number+unit pair starting at from,
-// returning the digits, the unit and the offset just past them. Both halves
-// are required: a number with no unit and a unit with no number are each an
-// error naming what is missing, because "5" meaning five of something
-// unstated is exactly the guess this parser refuses to make.
+// scanPromDurationComponent reads ONE number+unit pair starting at from, returning the digits.
 func scanPromDurationComponent(s string, from int) (digits, unit string, rest int, err error) {
 	i := from
 	for i < len(s) && s[i] >= '0' && s[i] <= '9' {
@@ -845,21 +706,8 @@ func scanPromDurationComponent(s string, from int) (digits, unit string, rest in
 // SanitizeAlertName
 // ---------------------------------------------------------------------------
 
-// SanitizeAlertName turns an operator-typed rule name into a Prometheus alert
-// name.
-//
-// The rules, pinned by TestSanitizeAlertName:
-//
-//   - Only [a-zA-Z0-9_] survives. Everything else — spaces, punctuation,
-//     non-ASCII letters — is DROPPED, and dropping it upper-cases the next
-//     surviving character. "zone a -> zone b loss" becomes "ZoneAZoneBLoss".
-//   - Underscores survive as themselves and do NOT upper-case the next
-//     character, so "already_snake_case" stays readable as
-//     "Already_snake_case".
-//   - The first surviving character is upper-cased.
-//   - The result must start with a LETTER. "5xx rate" is an error rather than
-//     a silently prefixed name: a rule an operator cannot find by its own name
-//     is worse than a rejected one.
+// SanitizeAlertName turns an operator-typed rule name into a Prometheus alert name; the rules,
+// pinned by TestSanitizeAlertName: - Only [a-zA-Z0-9_] survives.
 func SanitizeAlertName(name string) (alert string, err error) {
 	var b strings.Builder
 	b.Grow(len(name))
@@ -893,18 +741,8 @@ func SanitizeAlertName(name string) (alert string, err error) {
 // RenderBundle
 // ---------------------------------------------------------------------------
 
-// RenderBundle renders every ENABLED rule into ONE PrometheusRule object.
-//
-// One object, not one per rule: it is a single server-side-apply target, so
-// drift is one comparison and a partial apply is impossible. Disabled rules are
-// dropped entirely rather than rendered and commented out — Prometheus has no
-// notion of a disabled rule, and a rule present in the CRD is a rule that
-// evaluates.
-//
-// Determinism is load-bearing (the sync layer diffs rendered bytes against the
-// live object): rules are ordered by lower(Name), ties broken by ID, and every
-// map that reaches the object is serialized by a key-sorting marshaller. Map
-// iteration never reaches the output.
+// RenderBundle renders every ENABLED rule into ONE PrometheusRule object; disabled rules are
+// dropped entirely rather than rendered and commented.
 func (r Renderer) RenderBundle(rules []Rule, namespace, bundleName string) (*unstructured.Unstructured, error) {
 	if strings.TrimSpace(namespace) == "" {
 		return nil, errors.New("RenderBundle: namespace must not be empty")

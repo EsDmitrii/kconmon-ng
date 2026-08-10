@@ -8,12 +8,7 @@ import {
 } from "./matrix-cells";
 import type { MatrixCell } from "./types";
 
-/**
- * The shared cell reading (QA round 2, finding #1). The state under test is
- * the COMMON one, not the exotic one: a fleet where nothing has failed emits
- * no fail-ratio series at all, so `failRatio: null` next to a real p95 is what
- * most cells look like most of the time.
- */
+/** The shared cell reading. */
 
 function cell(over: Partial<MatrixCell> = {}): MatrixCell {
   return { source: "a", destination: "b", failRatio: null, ...over };

@@ -82,14 +82,8 @@ func TestComputeRejectsProtocol(t *testing.T) {
 	}
 }
 
-// Prometheus serializes 0/0 (a pair whose series went stale mid-window) and
-// empty-bucket histogram_quantile as the STRING "NaN" — and
-// strconv.ParseFloat accepts "NaN" without error, so it used to flow into the
-// cell and kill json.Marshal for the WHOLE matrix: the REST handler answered
-// 200 with an empty body ("Unexpected end of JSON input" in the UI) and the
-// WS pusher dropped every snapshot. Caught live: pausing one fleet node took
-// the entire matrix API down five minutes later. NaN/±Inf is "no sample",
-// never a value.
+// Prometheus serializes 0/0 (a pair whose series went stale mid-window) and empty-bucket
+// histogram_quantile as the STRING "NaN"; NaN/±Inf is "no sample".
 func TestComputeTreatsNaNAndInfAsNoData(t *testing.T) {
 	q := &fakeQuerier{byContains: map[string]string{
 		"results_total":              vec(sample("a", "b", "NaN"), sample("b", "a", "0.25")),

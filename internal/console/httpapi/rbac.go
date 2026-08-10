@@ -14,15 +14,8 @@ import (
 	"github.com/EsDmitrii/kconmon-ng/internal/console/store"
 )
 
-// RoleAdmin is the subset of store.RoleStore the RBAC admin API
-// (GET/POST/DELETE /api/v1/rbac/roles[/{name}], /api/v1/rbac/bindings[/{id}])
-// needs. store.RoleStore.ListBindingsForSubject is deliberately excluded --
-// that one drives per-request role RESOLUTION (resolveRoles,
-// middleware_auth.go, through the separate RoleResolver seam), not the
-// admin listing/CRUD surface this file serves. ListBindings was added to
-// store.RoleStore by this same task (store/auth.go) specifically to back
-// GET /api/v1/rbac/bindings and the delete-role guard rail below -- neither
-// can be answered by a subject-scoped query.
+// RoleAdmin is the subset of store.RoleStore the RBAC admin API (GET/POST/DELETE
+// /api/v1/rbac/roles[/{name}], /api/v1/rbac/bindings[/{id}]) needs.
 type RoleAdmin interface {
 	ListRoles(ctx context.Context) ([]store.Role, error)
 	UpsertRole(ctx context.Context, name string, permissions []string) (store.Role, error)
@@ -44,11 +37,8 @@ func (s *Server) rbacUnavailable(w http.ResponseWriter) bool {
 	return false
 }
 
-// handleRBACPermissions serves the static authz.AllPermissions list so the
-// UI can build a role editor without hardcoding permission strings.
-// Deliberately independent of s.roleAdmin/database.mode: this is compiled-in
-// data, not a store read, so it stays available even with the database
-// disabled.
+// handleRBACPermissions serves the static authz.AllPermissions list so the UI can build a role
+// editor without hardcoding permission strings.
 func (s *Server) handleRBACPermissions(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, map[string]any{"permissions": authz.AllPermissions})
 }
@@ -96,12 +86,8 @@ func validPermission(p string) bool {
 	return false
 }
 
-// handleRBACRolesCreate upserts a custom role. Guard rails, task-17-brief.md
-// verbatim: a custom role may not be named like a built-in (422 --
-// authz.IsBuiltinRole; the authz layer silently drops a role whose name
-// collides with a built-in, authz.NewPolicy's own doc comment, so accepting
-// the write would store a row that never takes effect); a permission
-// string outside authz.AllPermissions is 422.
+// handleRBACRolesCreate upserts a custom role; guard rails, verbatim: a custom role may not be
+// named like a built-in.
 func (s *Server) handleRBACRolesCreate(w http.ResponseWriter, r *http.Request) {
 	if s.rbacUnavailable(w) {
 		return
@@ -131,17 +117,8 @@ func (s *Server) handleRBACRolesCreate(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, roleResponseFrom(&role))
 }
 
-// handleRBACRolesDelete removes a custom role. Guard rail: a role may not
-// be deleted while any binding still references it (409) -- deleting it out
-// from under a live binding would silently strip whoever it names of every
-// permission the role granted, the next time role resolution
-// (ListBindingsForSubject) runs, with no error anywhere to explain why. The
-// reference check and the delete below are NOT one atomic operation --
-// role_bindings.role_name is deliberately not a foreign key into roles
-// (migration 00002's own comment: "a binding may reference a built-in
-// role, which has no row") -- so a binding created in the narrow window
-// between the two calls can still race this guard. That is an accepted,
-// documented gap, not a promise of strict consistency.
+// handleRBACRolesDelete removes a custom role; guard rail: a role may not be deleted while any
+// binding still references it (409).
 func (s *Server) handleRBACRolesDelete(w http.ResponseWriter, r *http.Request) {
 	if s.rbacUnavailable(w) {
 		return
@@ -202,12 +179,8 @@ func (s *Server) handleRBACBindingsList(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, map[string]any{"bindings": out})
 }
 
-// validSubjectKinds is the set of subject kinds a binding can be CREATED
-// with. The schema (migration 00002) also declares "token", but
-// ListBindingsForSubject resolves only user and group kinds — a token-kind
-// binding would be stored and silently grant nothing (fails closed). Until
-// token subject resolution exists (post-M3), accepting the write would be a
-// no-op foot-gun, so the API rejects it with 422 rather than storing it.
+// validSubjectKinds is the set of subject kinds a binding can be CREATED with; the schema
+// (migration 00002) also declares "token".
 var validSubjectKinds = map[string]bool{"user": true, "group": true}
 
 type bindingRequest struct {
@@ -235,9 +208,7 @@ func (s *Server) roleKnown(ctx context.Context, name string) (bool, error) {
 	return false, nil
 }
 
-// handleRBACBindingsCreate binds a subject to a role. Guard rail,
-// task-17-brief.md verbatim: creating a binding to an unknown role name
-// (built-in ∪ custom) is 422.
+// handleRBACBindingsCreate binds a subject to a role.
 func (s *Server) handleRBACBindingsCreate(w http.ResponseWriter, r *http.Request) {
 	if s.rbacUnavailable(w) {
 		return

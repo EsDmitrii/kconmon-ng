@@ -119,9 +119,6 @@ func TestK8sEventsWithNoCapturedRowsIsAnEmptyPageNot503(t *testing.T) {
 	}
 }
 
-// M6 Decision 8: k8s events ride events:read, so every role that reads the
-// live event stream reads these -- including viewer, which is what
-// auth.mode=anonymous defaults to.
 func TestK8sEventsRideEventsRead(t *testing.T) {
 	for _, role := range []string{"viewer", "alert-editor", "operator", "admin"} {
 		st := newFakeK8sEventStore()

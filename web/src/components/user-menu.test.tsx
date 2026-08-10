@@ -2,6 +2,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { UserMenu } from "./user-menu";
+import { TOKENS_ANCHOR } from "@/pages/settings";
 import type { Me } from "@/lib/types";
 
 const me: Me = {
@@ -44,6 +45,17 @@ describe("UserMenu", () => {
     renderMenu(true);
     fireEvent.click(screen.getByRole("button", { name: /ada lovelace/i }));
     expect(screen.getByRole("menuitem", { name: /token management/i })).toBeInTheDocument();
+  });
+
+  /* The link pointed at /settings while that page had no tokens section on it
+     at all (QA round 6, finding #14); it now names the section's own anchor. */
+  it("lands on the Settings tokens section, not the top of the page", () => {
+    renderMenu(true);
+    fireEvent.click(screen.getByRole("button", { name: /ada lovelace/i }));
+    expect(screen.getByRole("menuitem", { name: /token management/i })).toHaveAttribute(
+      "href",
+      `/settings#${TOKENS_ANCHOR}`,
+    );
   });
 
   it("sign out calls logout, echoes CSRF, and invalidates the me query", async () => {

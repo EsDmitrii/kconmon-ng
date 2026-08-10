@@ -20,12 +20,8 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-// consoleBaseURL returns KCONMON_CONSOLE_URL, or skips the test when unset.
-// Unlike getBaseURL (the controller helper above), there is deliberately no
-// localhost default: the console and controller are separate Services on
-// separate ports, and guessing a port here would silently point console
-// assertions at whatever happens to be listening instead of skipping
-// cleanly on a workflow run that never wired the console up.
+// consoleBaseURL returns KCONMON_CONSOLE_URL, or skips the test when unset; unlike getBaseURL (the
+// controller helper above), there is deliberately no localhost default.
 func consoleBaseURL(t *testing.T) string {
 	t.Helper()
 	url := os.Getenv("KCONMON_CONSOLE_URL")
@@ -35,13 +31,8 @@ func consoleBaseURL(t *testing.T) string {
 	return strings.TrimSuffix(url, "/")
 }
 
-// agentBaseURL returns KCONMON_AGENT_URL -- ONE agent Pod's own HTTP port,
-// port-forwarded by the workflow -- or skips. Same no-default rule as
-// consoleBaseURL, and for a sharper reason: the agent's /metrics is the only
-// place a continuous external check can be observed at all (the console never
-// sees external results, they are Prometheus series on the agent that ran
-// them), so a wrong guess here would turn "the feature is broken" into "the
-// series is missing", which reads identically.
+// agentBaseURL returns KCONMON_AGENT_URL -- ONE agent Pod's own HTTP port; same no-default rule as
+// consoleBaseURL, and for a sharper reason.
 func agentBaseURL(t *testing.T) string {
 	t.Helper()
 	url := os.Getenv("KCONMON_AGENT_URL")
@@ -51,14 +42,8 @@ func agentBaseURL(t *testing.T) string {
 	return strings.TrimSuffix(url, "/")
 }
 
-// externalTargetAddr is the destination the continuous-external-check test
-// probes. It defaults to the controller's own ClusterIP Service in the
-// release namespace the workflow installs into, and that choice is the whole
-// point: the harness allowlist (e2e/testdata/values.yaml) covers the kind pod
-// and Service networks ONLY, so this test proves the external-check pipeline
-// end to end WITHOUT the cluster ever egressing to the internet and without a
-// public-address carve-out that would weaken the very allowlist
-// TestConsoleExternalCheckDenied exists to verify.
+// externalTargetAddr is the destination the continuous-external-check test probes; it defaults to
+// the controller's own ClusterIP Service in the release namespace the workflow installs.
 func externalTargetAddr() string {
 	if addr := os.Getenv("KCONMON_EXTERNAL_TARGET_ADDR"); addr != "" {
 		return addr
@@ -66,12 +51,8 @@ func externalTargetAddr() string {
 	return "kconmon-ng-controller.default.svc.cluster.local:8080"
 }
 
-// deniedTargetAddr is the destination the security test points at: an
-// RFC 5737 TEST-NET-3 literal. It is outside the harness allowedCidrs, it is
-// an IP literal so no DNS lookup can make the outcome depend on a resolver,
-// and it is reserved for documentation so it is not routable anywhere even if
-// the allowlist were removed. A denial here is therefore a statement about
-// the allowlist, never about the network.
+// deniedTargetAddr is the destination the security test points at; a denial here is therefore a
+// statement about the allowlist, never about the network.
 func deniedTargetAddr() string {
 	if addr := os.Getenv("KCONMON_DENIED_TARGET_ADDR"); addr != "" {
 		return addr
@@ -79,32 +60,15 @@ func deniedTargetAddr() string {
 	return "203.0.113.10:80"
 }
 
-// e2eClient is the single HTTP client this file uses. A per-request timeout
-// matters more here than anywhere else in the repo: every assertion below
-// runs inside a poll loop with its own budget, and a request that hangs
-// forever would burn the whole budget on one iteration and report a timeout
-// against the wrong thing.
+// e2eClient is the single HTTP client this file uses; a per-request timeout matters more here than
+// anywhere else in the repo.
 var e2eClient = &http.Client{Timeout: 30 * time.Second}
 
-// requestTimeout bounds one request's context. It matches e2eClient.Timeout on
-// purpose -- the context is what actually cancels an in-flight body read when
-// `go test -timeout` fires, which the client timeout alone does not guarantee
-// for a response already being streamed.
+// requestTimeout bounds one request's context.
 const requestTimeout = 30 * time.Second
 
-// request issues one HTTP request and returns its status, headers and the
-// FULL body, with the response already closed.
-//
-// Every HTTP call in this file goes through it, which is what keeps the file
-// free of the two mistakes a hand-rolled call inside a polling loop makes
-// most often: a response body that is never closed (one leaked connection per
-// iteration, over a 60s budget) and a request carrying no context, which
-// cannot be cancelled at all.
-//
-// A transport error is RETURNED, never fatal: most callers here are poll
-// bodies, for which "the console has not come back yet" is an ordinary
-// intermediate state, not a failure. Callers that cannot recover use
-// mustRequest.
+// request issues one HTTP request and returns its status, headers and the FULL body; every HTTP
+// call in this file goes through.
 func request(t *testing.T, method, url string, body any) (int, http.Header, []byte, error) {
 	t.Helper()
 
@@ -156,10 +120,7 @@ func mustRequest(t *testing.T, method, url string, body any) (int, http.Header, 
 	return status, header, data
 }
 
-// decodeJSON decodes a response body, naming what failed and echoing the body
-// -- a decode error on a Problem Details response is otherwise reported as
-// "cannot unmarshal string into field", which says nothing about the 422 the
-// server actually sent.
+// decodeJSON decodes a response body, naming what failed and echoing the body.
 func decodeJSON(t *testing.T, what string, data []byte, out any) {
 	t.Helper()
 	if err := json.Unmarshal(data, out); err != nil {
@@ -167,11 +128,7 @@ func decodeJSON(t *testing.T, what string, data []byte, out any) {
 	}
 }
 
-// uniqueName mints a name unique per test run, so every test below is
-// re-runnable against a cluster that still holds rows from an earlier run and
-// order-independent with respect to the others. The charset is the one
-// store.validateName enforces (alphanumerics, '-', '_', '.'), and the whole
-// string stays inside its 63-byte limit for any prefix used here.
+// uniqueName mints a name unique per test run.
 func uniqueName(prefix string) string {
 	return fmt.Sprintf("%s-%d", prefix, time.Now().UnixNano())
 }
@@ -214,10 +171,7 @@ func createTarget(t *testing.T, base string, body map[string]any) string {
 	return created.ID
 }
 
-// createDefinition POSTs one check definition and registers its deletion. Its
-// cleanup runs BEFORE any target's, because t.Cleanup is LIFO and every
-// caller here creates the target first: a target with a definition still
-// pointing at it is a 409, by design.
+// createDefinition POSTs one check definition and registers its deletion.
 func createDefinition(t *testing.T, base string, body map[string]any) string {
 	t.Helper()
 	status, header, data := mustRequest(t, http.MethodPost, base+"/api/v1/checks", body)
@@ -240,10 +194,7 @@ func createDefinition(t *testing.T, base string, body map[string]any) string {
 	return created.ID
 }
 
-// createSchedule POSTs one schedule and returns the stored row -- not an echo
-// of the request: an interval below the store's 10s floor is clamped up, and
-// a caller that asserts on what it sent would be asserting on a value the
-// server rejected.
+// createSchedule POSTs one schedule and returns the stored row -- not an echo of the request.
 func createSchedule(t *testing.T, base string, body map[string]any) scheduleRow {
 	t.Helper()
 	status, header, data := mustRequest(t, http.MethodPost, base+"/api/v1/schedules", body)
@@ -274,13 +225,9 @@ type scheduleRow struct {
 	NextFireAt   *time.Time `json:"nextFireAt"`
 }
 
-// metricSamples returns every sample LINE of family `name` in a Prometheus
-// text exposition body whose label set carries all of `labels`.
-//
-// Substring matching on `key="value"` is deliberate rather than a full
-// exposition parse: the label values these tests match on are run-unique
-// names (uniqueName), so a false positive would need another series to carry
-// the exact same nanosecond-stamped string.
+// metricSamples returns every sample LINE of family `name` in a Prometheus text exposition body
+// whose label set carries all of `labels`; substring matching on `key="value"` is deliberate rather
+// than a full exposition parse.
 func metricSamples(text, name string, labels map[string]string) []string {
 	var out []string
 	for _, line := range strings.Split(text, "\n") {
@@ -358,14 +305,7 @@ func TestConsoleMetrics(t *testing.T) {
 		t.Errorf("expected /metrics to contain kconmon_ng_console_ series")
 	}
 
-	// Proof the store was actually exercised, not merely compiled in: this
-	// series is only emitted once the console issues a query against
-	// PostgreSQL, which console-values.yaml's database.mode=external makes
-	// happen (e.g. GET /api/v1/config's own database.configured check, or
-	// the events/runs polling elsewhere in this file). It rides the same
-	// ingester/store pipeline as TestConsoleEvents, so it is polled rather
-	// than asserted on a single GET: this is observability-of-arrival for
-	// that pipeline, not a race assertion on unrelated behavior.
+	// Proof the store was actually exercised, not merely compiled in.
 	pollUntil(t, 60*time.Second, 2*time.Second,
 		"kconmon_ng_console_store_queries_total to appear in /metrics (store not exercised)", func() bool {
 			pollStatus, _, body, err := request(t, http.MethodGet, base+"/metrics", nil)
@@ -392,11 +332,7 @@ func TestConsoleVersion(t *testing.T) {
 		Capabilities []string `json:"capabilities"`
 	}
 	decodeJSON(t, "version response", data, &body)
-	// capabilities is asserted to be a present array only -- NOT that it
-	// contains "events". Whether the realtime pipeline is healthy at the
-	// moment this request lands depends on leader/reconnect timing; asserting
-	// its presence would make this test flake on exactly the kind of blip
-	// that is not a real bug.
+	// capabilities is asserted to be a present array only -- NOT that it contains "events".
 	if body.Capabilities == nil {
 		t.Errorf("expected capabilities to be a JSON array (possibly empty), got null")
 	}
@@ -420,12 +356,7 @@ func TestConsoleConfig(t *testing.T) {
 	}
 }
 
-// TestConsoleEvents is the single most valuable assertion in this file:
-// agents registering with the controller produce topology_changed domain
-// events, which -- with controller.events.enabled=true and
-// database.mode=external wired -- the console's ingester consumes and
-// persists. A non-empty history here is end-to-end proof that
-// ingester -> store -> API works in a real cluster, not just in a unit test.
+// TestConsoleEvents is the single most valuable assertion in this file.
 func TestConsoleEvents(t *testing.T) {
 	base := consoleBaseURL(t)
 
@@ -452,11 +383,7 @@ func TestConsoleEvents(t *testing.T) {
 		})
 }
 
-// TestConsoleRuns exercises POST /api/v1/runs end to end against the real
-// agents in the cluster: an empty sources/destinations pair fans out to
-// every node in the current topology (checks.Plan's documented fallback), so
-// on a 3-node kind cluster this dispatches several TCP pairs through the
-// real controller/agent path, not a stub.
+// TestConsoleRuns exercises POST /api/v1/runs end to end against the real agents in the cluster.
 func TestConsoleRuns(t *testing.T) {
 	base := consoleBaseURL(t)
 
@@ -541,13 +468,8 @@ func TestConsoleRuns(t *testing.T) {
 	}
 }
 
-// TestConsoleTargetsCRUD walks the whole /api/v1/targets lifecycle against the
-// real console and the real PostgreSQL fixture, ending on the one status code
-// that cannot be reached from a single table: the 409 a DELETE gets while a
-// check definition still references the row (ON DELETE RESTRICT in migration
-// 00004, surfaced as store.ErrInUse). That path crosses targets ->
-// check_definitions -> the handler's error mapping, which is exactly the kind
-// of wiring a unit test with a fake store cannot prove.
+// TestConsoleTargetsCRUD walks the whole /api/v1/targets lifecycle against the real console and the
+// real PostgreSQL fixture.
 func TestConsoleTargetsCRUD(t *testing.T) {
 	base := consoleBaseURL(t)
 
@@ -696,19 +618,7 @@ func TestConsoleTargetsCRUD(t *testing.T) {
 	}
 }
 
-// TestConsoleSchedule proves the console's schedule loop actually runs in a
-// real cluster: an interval schedule is seeded due immediately
-// (httpapi.seedNextFireAt), the advisory-locked tick picks it up and fires it
-// through the SAME diagnostics runner POST /api/v1/runs uses, and the run row
-// it produces carries initiatorKind "scheduler" with the SCHEDULE's id --
-// which is the only evidence that distinguishes a scheduled run from the
-// on-demand one TestConsoleRuns creates.
-//
-// The second half is the half that catches the real regression: disabling a
-// schedule must actually stop it. check_schedules_due_idx is a partial index
-// on `enabled`, so a disabled row simply stops being handed out -- but that
-// is a claim about an index predicate, and an e2e is where it gets tested
-// against the loop that reads it.
+// TestConsoleSchedule proves the console's schedule loop actually runs in a real cluster.
 func TestConsoleSchedule(t *testing.T) {
 	base := consoleBaseURL(t)
 
@@ -772,10 +682,7 @@ func TestConsoleSchedule(t *testing.T) {
 			return scheduledRunCount(t, base, sched.ID) > 0
 		})
 
-	// Disable it, then let anything already in flight land before taking the
-	// baseline: a fire could have been dispatched in the same instant the PUT
-	// was served, and counting that as "a run after disabling" would be a
-	// race, not a regression.
+	// Disable it, then let anything already in flight land before taking the baseline.
 	putStatus, _, putData := mustRequest(t, http.MethodPut, base+"/api/v1/schedules/"+sched.ID, map[string]any{
 		"definitionId": defID,
 		"kind":         "interval",
@@ -804,10 +711,7 @@ func TestConsoleSchedule(t *testing.T) {
 	}
 }
 
-// scheduledRunCount counts the runs on the newest page that were initiated by
-// scheduleID. initiatorKind is asserted alongside the id deliberately: the id
-// alone would also match a hypothetical user id, and "scheduler" is the exact
-// string internal/console/scheduler writes.
+// scheduledRunCount counts the runs on the newest page that were initiated by scheduleID.
 func scheduledRunCount(t *testing.T, base, scheduleID string) int {
 	t.Helper()
 	status, _, data, err := request(t, http.MethodGet, base+"/api/v1/runs?limit=500", nil)
@@ -841,20 +745,8 @@ func scheduledRunCount(t *testing.T, base, scheduleID string) int {
 	return count
 }
 
-// TestConsoleExternalCheckAssignment is the continuous external-check path end
-// to end, across four processes: the console stores a target + an enabled
-// definition + a kind="continuous" schedule, the reconciler resolves that
-// against the live topology and PUTs a per-agent assignment to the
-// controller, the controller streams it to every agent over
-// WatchExternalChecks, and the agent probes it on its own checker loop and
-// exports kconmon_ng_external_results_total. None of that is observable from
-// the console at all -- the result never travels back -- which is why the
-// assertion is made against one agent Pod's own /metrics.
-//
-// The destination is an IN-CLUSTER Service (externalTargetAddr), so this test
-// needs no internet egress and no public-address carve-out in the harness
-// allowlist. "External" here means "not a peer agent", which a ClusterIP
-// Service is.
+// TestConsoleExternalCheckAssignment is the continuous external-check path end to end; none of that
+// is observable from the console at all -- the result never travels back.
 func TestConsoleExternalCheckAssignment(t *testing.T) {
 	base := consoleBaseURL(t)
 	agentBase := agentBaseURL(t)
@@ -895,10 +787,8 @@ func TestConsoleExternalCheckAssignment(t *testing.T) {
 			sched.NextFireAt)
 	}
 
-	// Budget: one reconcile tick (5s in the e2e values) + the controller
-	// push + one agent external tick (5s) is the happy path, so 180s is a
-	// wide margin that still fails in reasonable time when the pipeline is
-	// genuinely broken.
+	// Budget: one reconcile tick (5s in the e2e values) + the controller push + one agent external
+	// tick (5s) is the happy path.
 	wanted := map[string]string{"target": targetName, "target_kind": "host", "result": "success"}
 	pollUntil(t, 180*time.Second, 5*time.Second,
 		fmt.Sprintf("a successful kconmon_ng_external_results_total sample for target %q on %s",
@@ -909,10 +799,8 @@ func TestConsoleExternalCheckAssignment(t *testing.T) {
 			}
 			if denied := metricSamples(text, "kconmon_ng_external_denied_total",
 				map[string]string{"target": targetName}); len(denied) > 0 {
-				// Loud, and immediately: an in-cluster destination landing in
-				// denied_total means the harness allowlist does not cover the
-				// kind Service network, and no amount of further polling will
-				// change that.
+				// Loud, and immediately: an in-cluster destination landing in denied_total means the harness
+				// allowlist does not cover the kind Service network.
 				t.Errorf("in-cluster target %q was REFUSED by the agent allowlist: %v", targetName, denied)
 				return true
 			}
@@ -920,22 +808,8 @@ func TestConsoleExternalCheckAssignment(t *testing.T) {
 		})
 }
 
-// TestConsoleExternalCheckDenied is THE security e2e for external checks.
-//
-// The agent's allowlist is enforced in-process, after DNS resolution, and it
-// is the only thing standing between an operator-writable target row and the
-// agents probing an arbitrary address from inside the cluster. Every unit
-// test of it runs against an in-memory allowlist; this one runs against the
-// allowlist an operator actually configures, reached through the whole
-// console -> reconciler -> controller -> agent chain, and asserts BOTH halves
-// of a refusal:
-//
-//   - kconmon_ng_external_denied_total{reason="cidr"} increments, so the
-//     refusal is observable and alertable rather than silent;
-//   - kconmon_ng_external_results_total carries NO sample for the target, so
-//     a denied probe is neither a success nor a failure. Counting it as a
-//     failure would report an allowlist misconfiguration as an outage at a
-//     destination the agent never touched.
+// TestConsoleExternalCheckDenied is THE security e2e for external checks; the agent's allowlist is
+// enforced in-process, after DNS resolution.
 func TestConsoleExternalCheckDenied(t *testing.T) {
 	base := consoleBaseURL(t)
 	agentBase := agentBaseURL(t)
@@ -990,34 +864,19 @@ func TestConsoleExternalCheckDenied(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// M5: MTR path history, operator annotations, historical topology.
-// ---------------------------------------------------------------------------
+// MTR path history, operator annotations, historical topology.
 
-// mtrPairTimeout is the per-pair budget the mtr runs below ask for, set
-// EXPLICITLY rather than left to the server: an omitted timeoutNs clamps to
-// checks.minPerPairTimeout (1s), while one trace is up to
-// config.checkers.mtr.maxHops probes at a 1s per-hop read deadline
-// (internal/agent/agent.go hardcodes that one) plus a reverse-DNS lookup per
-// answered hop. A 1s budget would cancel the trace mid-flight, the checker
-// would return an error carrying no hops at all, and that outcome is
-// indistinguishable from the kind limitation this test skips on -- so the
-// suite would report an environment story about a timeout it set itself.
+// mtrPairTimeout is the per-pair budget the mtr runs below ask for, set EXPLICITLY rather than left
+// to the server.
 const mtrPairTimeout = 45 * time.Second
 
-// mtrProjectionBudget bounds the wait for a finished trace to show up in path
-// history. The projection runs in the SAME process that just completed the run
-// (checks.Runner.projectMTRSnapshot, on the result-ingest path), so this is
-// one database write behind a run that has already reached a terminal status;
-// the budget is generous only so a loaded kind node cannot turn a slow write
-// into a false "kind cannot traceroute" skip.
+// mtrProjectionBudget bounds the wait for a finished trace to show up in path history; the
+// projection runs in the SAME process that just completed the run
+// (checks.Runner.projectMTRSnapshot, on the result-ingest path).
 const mtrProjectionBudget = 60 * time.Second
 
-// pathHop is the subset of a stored hop these tests assert on. The IP is the
-// only field that takes part in the dedupe hash, and it is also what decides
-// the skip branch below: internal/checker/mtr.go writes "*" for a TTL that
-// never answered, and internal/console/checks/mtrproject.go drops those hops
-// before hashing -- a trace whose every hop is silent projects to nothing.
+// pathHop is the subset of a stored hop these tests assert on; the IP is the only field that takes
+// part in the dedupe hash.
 type pathHop struct {
 	Number int    `json:"number"`
 	IP     string `json:"ip"`
@@ -1036,10 +895,7 @@ type pathSnapshot struct {
 	TraceCount  int64     `json:"traceCount"`
 }
 
-// mtrRunResult is one pair's row out of GET /api/v1/runs/{id}. Result is the
-// check payload stored verbatim, and it is decoded here with exactly the two
-// fields internal/console/checks/mtrproject.go reads -- so what this test
-// calls "an all-silent trace" is the same predicate the projector applies.
+// mtrRunResult is one pair's row out of GET /api/v1/runs/{id}.
 type mtrRunResult struct {
 	SourceNode      string `json:"sourceNode"`
 	DestinationNode string `json:"destinationNode"`
@@ -1060,15 +916,7 @@ type mtrRunDetail struct {
 	Results []mtrRunResult `json:"results"`
 }
 
-// topologyNodePair returns two distinct node names that currently carry a
-// registered agent, or skips when the cluster cannot express a pair at all.
-//
-// The names come from the AGENTS list, not the nodes list: a node with no
-// agent is a node the controller cannot dispatch a trace to, and asking it to
-// would produce a failed pair with no payload -- the one outcome that reads
-// exactly like the kind limitation this test is careful to name honestly.
-// Sorted so re-runs keep tracing the SAME pair, which is what lets path
-// history accumulate on one row instead of scattering across pairs.
+// topologyNodePair returns two distinct node names that currently carry a registered agent.
 func topologyNodePair(t *testing.T, base string) (source, destination string) {
 	t.Helper()
 	status, _, data := mustRequest(t, http.MethodGet, base+"/api/v1/topology", nil)
@@ -1102,10 +950,9 @@ func topologyNodePair(t *testing.T, base string) (source, destination string) {
 	return names[0], names[1]
 }
 
-// listPathSnapshots reads one pair's whole route history (limit=500 is the
-// store's own ceiling and a pair has orders of magnitude fewer DISTINCT routes
-// than that). It reports failure instead of failing: every caller is either a
-// poll body or a branch that has its own verdict to reach.
+// listPathSnapshots reads one pair's whole route history (limit=500 is the store's own ceiling and
+// a pair has orders of magnitude fewer DISTINCT routes than that); it reports failure instead of
+// failing: every caller is either a poll body or a branch that has its own verdict to reach.
 func listPathSnapshots(t *testing.T, base, source, destination string) ([]pathSnapshot, bool) {
 	t.Helper()
 	query := url.Values{}
@@ -1133,10 +980,8 @@ func listPathSnapshots(t *testing.T, base, source, destination string) ([]pathSn
 	return page.Snapshots, true
 }
 
-// traceTotal sums a pair's traces across its distinct routes. It is the one
-// counter that cannot be inherited from an earlier e2e run against the same
-// cluster: the node pair is not run-unique, so "a snapshot exists" would pass
-// without this test tracing anything, while "the total grew" cannot.
+// traceTotal sums a pair's traces across its distinct routes; it is the one counter that cannot be
+// inherited from an earlier e2e run against the same cluster.
 func traceTotal(snaps []pathSnapshot) int64 {
 	var total int64
 	for i := range snaps {
@@ -1154,11 +999,7 @@ func pathHashes(snaps []pathSnapshot) map[string]pathSnapshot {
 	return out
 }
 
-// awaitTraceTotal polls a pair's history until its total traceCount exceeds
-// above, and REPORTS the outcome rather than failing on timeout: "no trace was
-// projected" is a state TestConsoleMTRHistory has to inspect the run to
-// interpret, so pollUntil -- which ends the test right there -- is the wrong
-// tool for this one wait.
+// awaitTraceTotal polls a pair's history until its total traceCount exceeds above.
 func awaitTraceTotal(t *testing.T, base, source, destination string, above int64) ([]pathSnapshot, bool) {
 	t.Helper()
 	deadline := time.Now().Add(mtrProjectionBudget)
@@ -1195,12 +1036,9 @@ func getRunDetail(t *testing.T, base, runID string) (mtrRunDetail, bool) {
 	return detail, true
 }
 
-// runMTR dispatches ONE mtr pair through the real controller and agents and
-// waits for the run to reach a terminal status, returning its id.
-//
-// Success is deliberately NOT asserted. Whether the trace carried usable hops
-// is precisely what the caller then has to decide on, and a pair that failed
-// is evidence to report, never a reason to stop before reporting it.
+// runMTR dispatches ONE mtr pair through the real controller and agents and waits for the run to
+// reach a terminal status; whether the trace carried usable hops is precisely what the caller then
+// has to decide.
 func runMTR(t *testing.T, base, source, destination string) string {
 	t.Helper()
 	status, _, data := mustRequest(t, http.MethodPost, base+"/api/v1/runs", map[string]any{
@@ -1228,10 +1066,7 @@ func runMTR(t *testing.T, base, source, destination string) string {
 		t.Fatalf("expected an mtr run over one source and one destination to plan 1 pair, got %d", created.PairTotal)
 	}
 
-	// 120s is a hair under three times the per-pair budget this run asked for,
-	// which is wide enough for dispatch and ingest on a loaded kind node and
-	// tight enough that two of these runs cannot eat the workflow's own job
-	// timeout when the pipeline is genuinely stuck.
+	// 120s is a hair under three times the per-pair budget this run asked for.
 	pollUntil(t, 120*time.Second, 3*time.Second,
 		fmt.Sprintf("mtr run %s to reach a terminal status", created.ID), func() bool {
 			detail, ok := getRunDetail(t, base, created.ID)
@@ -1295,20 +1130,8 @@ func mtrRunEvidence(detail *mtrRunDetail) string {
 	return strings.Join(parts, "; ")
 }
 
-// endUnprojected ends the test after a dispatched trace produced no path
-// history, deciding between a skip and a failure on the RUN's own results.
-//
-// The distinction is the whole point of this helper. traceroute from inside a
-// kind container can legitimately come back with every TTL unanswered, and the
-// projector rejects an all-silent trace on purpose (hashing "*" would make a
-// stable route look new every time an intermediate router rate-limited ICMP) --
-// so that outcome is an environment limitation, not a defect, and it is
-// skipped with the hop list quoted as evidence. Anything else -- a pair that
-// never produced a payload, a checker error, a trace with usable hops that
-// still did not project -- is a genuine break in the console's ingest path and
-// fails, with the same evidence attached.
-//
-// It never returns: both branches end the test on the calling goroutine.
+// endUnprojected ends the test after a dispatched trace produced no path history; anything else --
+// a pair that never produced a payload, a checker error.
 func endUnprojected(t *testing.T, base, runID, source, destination string) {
 	t.Helper()
 	detail, ok := getRunDetail(t, base, runID)
@@ -1327,11 +1150,8 @@ func endUnprojected(t *testing.T, base, runID, source, destination string) {
 		source, destination, mtrProjectionBudget, mtrRunEvidence(&detail))
 }
 
-// assertSnapshotInvariants checks what every stored route must satisfy
-// regardless of which hops answered: it belongs to the pair that was traced,
-// it carries a content hash, hopCount agrees with the hop list it is derived
-// from, no silent hop survived normalization, and -- the dedupe invariant, the
-// one that holds whether or not the route changed -- no two rows share a hash.
+// assertSnapshotInvariants checks what every stored route must satisfy regardless of which hops
+// answered.
 func assertSnapshotInvariants(t *testing.T, snaps []pathSnapshot, source, destination string) {
 	t.Helper()
 	if len(snaps) == 0 {
@@ -1407,19 +1227,7 @@ func findMTRDestination(t *testing.T, base, source, destination string) (mtrDest
 	return mtrDestination{}, false
 }
 
-// TestConsoleMTRHistory is MTR path history end to end: a real trace between
-// two real agents, projected onto mtr_path_snapshots by the console's own
-// result-ingest path, then traced AGAIN so the dedupe that makes this table
-// useful is observable rather than merely unit-tested.
-//
-// Two things make the assertions here honest against a cluster that has
-// already run this suite. The pair is not run-unique -- there are only so many
-// nodes -- so every claim is made about GROWTH from a baseline taken first,
-// never about a row simply existing. And the second run's effect is bounded
-// exactly: one pair, one trace, so the pair's total traceCount must move by
-// exactly one while its DISTINCT-route count either holds (the route repeated,
-// which is the dedupe) or grows by at most one (an intermediate router went
-// silent, so normalizeHops produced a genuinely different hop list).
+// TestConsoleMTRHistory is MTR path history end to end: a real trace between two real agents.
 func TestConsoleMTRHistory(t *testing.T) {
 	base := consoleBaseURL(t)
 	source, destination := topologyNodePair(t, base)
@@ -1441,10 +1249,7 @@ func TestConsoleMTRHistory(t *testing.T) {
 	firstTraces := traceTotal(afterFirst)
 	firstHashes := pathHashes(afterFirst)
 
-	// THE SAME PAIR AGAIN. Nothing else in this suite traces MTR -- the
-	// scheduler's definitions are tcp, and the agents' own reactive traces
-	// never reach this table (the projector runs on the console's run-ingest
-	// path only) -- so this adds exactly one trace.
+	// Nothing else in this suite traces MTR -- the scheduler's definitions are tcp.
 	secondRun := runMTR(t, base, source, destination)
 	afterSecond, projectedAgain := awaitTraceTotal(t, base, source, destination, firstTraces)
 	if !projectedAgain {
@@ -1496,13 +1301,7 @@ func TestConsoleMTRHistory(t *testing.T) {
 			t.Errorf("expected exactly one route's traceCount to grow on a repeat trace, %d did", grew)
 		}
 	} else {
-		// The two traces genuinely took different routes, which inside kind
-		// means a router answered one probe and stayed silent on the next:
-		// normalizeHops DROPS a silent hop, so the hop-IP list -- and with it
-		// the hash -- is a different route by construction. That is the
-		// projector working as designed, so it is reported, not failed; the
-		// dedupe invariant that holds either way (one row per hash) is
-		// asserted in assertSnapshotInvariants above.
+		// The two traces genuinely took different routes.
 		t.Logf("route changed between the two traces for %s -> %s (%d -> %d distinct routes): "+
 			"an intermediate hop answered one probe and not the other",
 			source, destination, len(firstHashes), len(secondHashes))
@@ -1577,21 +1376,8 @@ func containsAnnotation(page []annotation, id string) bool {
 	return false
 }
 
-// TestConsoleAnnotations walks one operator note's whole life against the real
-// console and PostgreSQL, and spends most of its assertions on the ONE part of
-// this API that cannot be guessed from its shape: ?scope= has three states,
-// and the middle one -- present but empty -- means "the global marks only",
-// because "" is a real scope value here rather than a missing filter. A server
-// that treated an empty parameter as absent would still pass every other
-// assertion in this file while quietly returning every scope to a chart that
-// asked for global marks.
-//
-// The viewer half of the RBAC contract (annotations:read in both roles,
-// annotations:write only from operator up) is NOT exercised here: the e2e
-// console runs auth.mode=anonymous, whose authenticator returns the single
-// configured subject for every request and ignores credentials entirely
-// (internal/console/authn/authn.go), so this harness has no way to present a
-// second role at all. internal/console/authz covers it in unit tests.
+// TestConsoleAnnotations walks one operator note's whole life against the real console and
+// PostgreSQL.
 func TestConsoleAnnotations(t *testing.T) {
 	base := consoleBaseURL(t)
 
@@ -1708,24 +1494,8 @@ func TestConsoleAnnotations(t *testing.T) {
 	}
 }
 
-// historicalTopologyBound returns an instant that is in the past, at or after
-// the retention floor, and at or after at least one topology_changed event --
-// plus how many such events the page carried.
-//
-// Picking "two minutes ago" outright would be a coin flip on a fresh cluster:
-// ?at= answers 422 for any instant older than the OLDEST retained event, and a
-// console whose history started ninety seconds ago has no honest answer for
-// two minutes ago. That 422 is correct behavior, so a test asserting 200 there
-// would really be asserting on how long the workflow had been running.
-//
-// The floor is derived from a topology_changed row rather than from any event,
-// for two separate reasons: such a row is retained by definition, so an
-// instant at or after it can never be pre-retention; and the fold counts only
-// this type, so the same instant guarantees eventsFolded >= 1 -- a floor taken
-// from some other event type could satisfy the 422 check and still fold
-// nothing. It is rounded UP to the next whole second because ?at= is carried
-// as RFC 3339 with second precision, and rounding a sub-second timestamp DOWN
-// would land just before the floor it was derived from.
+// historicalTopologyBound returns an instant that is in the past; picking "two minutes ago"
+// outright would be a coin flip on a fresh cluster.
 func historicalTopologyBound(t *testing.T, base string) (at time.Time, retained int) {
 	t.Helper()
 	var page struct {
@@ -1770,16 +1540,8 @@ func historicalTopologyBound(t *testing.T, base string) (at time.Time, retained 
 	return at, len(page.Events)
 }
 
-// TestConsoleTopologyAt covers GET /api/v1/topology?at= against real persisted
-// history: the fold's answer, and the three refusals around it.
-//
-// It asserts the FIELDS, never node presence, and that is the honest choice
-// rather than a weak one. A topology_changed event records {reason, nodeName,
-// agentId}, and the controller shipped with this release publishes the reason
-// WITHOUT the other two -- so history written by it folds to an EMPTY nodes
-// array with every event counted in unfoldableEvents. Asserting a node would
-// therefore fail against a correct server; the counters are what carry the
-// information, which is exactly why they are in the response body.
+// TestConsoleTopologyAt covers GET /api/v1/topology?at= against real persisted history; it asserts
+// the FIELDS, never node presence.
 func TestConsoleTopologyAt(t *testing.T) {
 	base := consoleBaseURL(t)
 	at, retained := historicalTopologyBound(t, base)
@@ -1816,10 +1578,7 @@ func TestConsoleTopologyAt(t *testing.T) {
 		t.Errorf("expected timestamp (%s) at or before asOf (%s): a fold cannot see past what it was asked about",
 			folded.Timestamp, folded.AsOf)
 	}
-	// at is at or after a retained topology_changed event (see
-	// historicalTopologyBound), so that row is inside the fold's range and at
-	// least one event was consumed -- which is what makes unfoldableEvents
-	// below a statement about the events' CONTENT rather than their absence.
+	// at is at or after a retained topology_changed event (see historicalTopologyBound).
 	if folded.EventsFolded < 1 {
 		t.Errorf("expected at least one event to be folded for an instant at or after a retained topology_changed event, got %d",
 			folded.EventsFolded)
@@ -1842,10 +1601,7 @@ func TestConsoleTopologyAt(t *testing.T) {
 		at.Format(time.RFC3339), len(folded.Nodes), len(folded.Agents),
 		folded.EventsFolded, folded.UnfoldableEvents)
 
-	// The live route is the same body WITHOUT the marker, which is how a
-	// client tells a reconstruction from a passthrough without inspecting the
-	// URL it asked for. Decoded into a map on purpose: a typed struct cannot
-	// tell an absent field from a false one.
+	// Decoded into a map on purpose: a typed struct cannot tell an absent field from a false one.
 	liveStatus, _, liveData := mustRequest(t, http.MethodGet, base+"/api/v1/topology", nil)
 	if liveStatus != http.StatusOK {
 		t.Fatalf("expected GET /api/v1/topology 200, got %d: %s", liveStatus, liveData)
@@ -1892,9 +1648,6 @@ func TestConsoleTopologyAt(t *testing.T) {
 }
 
 // incident is the subset of the Incident schema these tests assert on.
-// ResolvedAt is a POINTER and is deliberately not tagged omitempty here: the
-// whole resolve/reopen assertion below is "is this field null or not", and a
-// value type could not tell an absent resolvedAt from the zero time.
 type incident struct {
 	ID         string          `json:"id"`
 	Title      string          `json:"title"`
@@ -1940,10 +1693,8 @@ func containsIncident(page []incident, id string) bool {
 	return false
 }
 
-// patchIncident PATCHes one incident and returns the row the SERVER answers
-// with -- never an echo of the request: a patch that names one field still
-// returns the whole row, and every assertion below is about what the other
-// fields did while that one changed.
+// patchIncident PATCHes one incident and returns the row the SERVER answers with -- never an echo
+// of the request.
 func patchIncident(t *testing.T, base, id, what string, body map[string]any) incident {
 	t.Helper()
 	status, _, data := mustRequest(t, http.MethodPatch, base+"/api/v1/incidents/"+id, body)
@@ -1971,24 +1722,9 @@ func decodePinned(t *testing.T, raw json.RawMessage) []pinnedRef {
 	return refs
 }
 
-// TestConsoleIncidentLifecycle walks one saved investigation from open to
-// resolved to reopened against the real console and PostgreSQL, and spends its
-// assertions on the two things the route's shape does not give away.
-//
-// First, resolvedAt is STATUS' WITNESS rather than a field of its own: the
-// store's invariant is that it is non-nil exactly when status is "resolved"
-// (store/incidents.go validateIncidentStatus), so a resolve must fill it, a
-// reopen must clear it, and a patch that touches neither must leave both
-// alone. A server that let the two drift would still answer 200 to every
-// request here.
-//
-// Second, pinned refs are validated for SHAPE, not for EXISTENCE. Verified in
-// store.ValidatePinned before this test was written: it checks the kind
-// against a closed vocabulary (event, audit, annotation, snapshot, run, k8s),
-// a non-empty bounded id and a bounded note, and never looks the id up. So the
-// ids below are deliberately synthetic -- pinning a real event id would make
-// this test depend on the events pipeline having produced one, which is a
-// different test's job (TestConsoleEvents), and would prove nothing extra.
+// TestConsoleIncidentLifecycle walks one saved investigation from open to resolved to reopened
+// against the real console and PostgreSQL; first, resolvedAt is STATUS' WITNESS rather than a field
+// of its own.
 func TestConsoleIncidentLifecycle(t *testing.T) {
 	base := consoleBaseURL(t)
 
@@ -2108,10 +1844,7 @@ func TestConsoleIncidentLifecycle(t *testing.T) {
 		t.Errorf("expected the reopen patch to leave the notes alone, got %q", reopened.Notes)
 	}
 
-	// Pinned is a WHOLESALE replacement, not a merge: two entries in, two
-	// entries out, and the one-entry patch below replaces both rather than
-	// removing one. Both kinds are in ValidatePinned's vocabulary and both ids
-	// are synthetic -- see the doc comment.
+	// Pinned is a WHOLESALE replacement, not a merge: two entries in, two entries out.
 	twoPins := []map[string]any{
 		{"kind": "event", "id": "424242", "note": "the event this investigation started from"},
 		{"kind": "run", "id": "00000000-0000-0000-0000-000000000001"},
@@ -2187,18 +1920,8 @@ func containsWindow(page []maintenanceWindow, id string) bool {
 	return false
 }
 
-// TestConsoleMaintenanceWindows covers the declare/see/refuse/withdraw loop of
-// a maintenance window, and puts most of its weight on the ONE thing that
-// separates ?from/?to here from every other listing in this file: they bound a
-// window the row must OVERLAP, not one that must CONTAIN it. A half-hour
-// window that started five minutes ago overlaps a two-minute probe around
-// "now" while containing neither of its bounds, so a server that had
-// implemented containment would answer an empty page to exactly the question
-// an operator asks most ("is anything in maintenance right now?").
-//
-// The scope is global (""), which is a real value here rather than a missing
-// filter -- the same three-state rule TestConsoleAnnotations exercises for
-// ?scope=, restated on the write side.
+// TestConsoleMaintenanceWindows covers the declare/see/refuse/withdraw loop of a maintenance
+// window.
 func TestConsoleMaintenanceWindows(t *testing.T) {
 	base := consoleBaseURL(t)
 
@@ -2297,12 +2020,8 @@ func TestConsoleMaintenanceWindows(t *testing.T) {
 	}
 }
 
-// unroutableWebhookURL is where every endpoint this file declares points: an
-// RFC 5737 TEST-NET-3 literal on the discard port. Same reasoning as
-// deniedTargetAddr -- an IP literal so no resolver can influence the outcome,
-// and reserved for documentation so it is unroutable from a CI runner
-// regardless. There is no in-cluster receiver to point at, and inventing one
-// would test a fixture; this tests the dispatcher.
+// unroutableWebhookURL is where every endpoint this file declares points; there is no in-cluster
+// receiver to point at, and inventing one would test a fixture.
 const unroutableWebhookURL = "http://203.0.113.9:9/hook"
 
 // e2eWebhookSecret is the plaintext HMAC signing secret the endpoints below
@@ -2310,11 +2029,7 @@ const unroutableWebhookURL = "http://203.0.113.9:9/hook"
 // back" scan, which is why it is a distinctive literal rather than a uuid.
 const e2eWebhookSecret = "e2e-webhook-signing-secret-do-not-echo"
 
-// webhookOutcomeBudget bounds the wait for a /test ping's outcome to land on
-// the endpoint row. The ceiling is one attempt: the dispatcher's per-attempt
-// timeout is 10s (webhooks/dispatcher.go attemptTimeout) plus a 5s store
-// write, and /test runs a SINGLE-attempt ladder. 90s is that with room for a
-// loaded runner, not a guess.
+// webhookOutcomeBudget bounds the wait for a /test ping's outcome to land on the endpoint row.
 const webhookOutcomeBudget = 90 * time.Second
 
 // webhookRow is one endpoint on the wire. There is no secret field because the
@@ -2331,16 +2046,8 @@ type webhookRow struct {
 	Failures    int32      `json:"failures"`
 }
 
-// createWebhook POSTs one endpoint, asserts the created-and-point-at-it
-// contract and registers its deletion. It returns the RAW body beside the
-// decoded row: the secret assertions are a string scan over exactly the bytes
-// a client receives, which no typed struct could make -- webhookRow has no
-// field for a secret, which is the point and also why it could never notice
-// one.
-//
-// A 503 here is the HARNESS, not the server: creating an endpoint is one of
-// the two routes that need the cipher, so an unconfigured encryption key takes
-// this whole test down with a message naming the value to set.
+// createWebhook POSTs one endpoint, asserts the created-and-point-at-it contract and registers its
+// deletion; it returns the RAW body beside the decoded row.
 func createWebhook(t *testing.T, base string, body map[string]any) (webhookRow, []byte) {
 	t.Helper()
 	status, header, data := mustRequest(t, http.MethodPost, base+"/api/v1/webhooks", body)
@@ -2366,10 +2073,7 @@ func createWebhook(t *testing.T, base string, body map[string]any) (webhookRow, 
 	return created, data
 }
 
-// assertNoSecretServed is the whole write-only-secret contract in one place:
-// the body must not carry the plaintext that was sent, and must not carry a
-// "secret" key at all -- a null or empty one would still be a field the UI
-// could bind an input to.
+// assertNoSecretServed is the whole write-only-secret contract in one place.
 func assertNoSecretServed(t *testing.T, what string, body []byte) {
 	t.Helper()
 	if strings.Contains(string(body), e2eWebhookSecret) {
@@ -2380,10 +2084,7 @@ func assertNoSecretServed(t *testing.T, what string, body []byte) {
 	}
 }
 
-// webhookDeliveryCount reads one result-label sample off the console's own
-// delivery counter, answering 0 for a label a Prometheus CounterVec has not
-// created a child for yet: an absent series and a zero one mean the same thing
-// here, and only the DELTA is ever asserted on.
+// webhookDeliveryCount reads one result-label sample off the console's own delivery counter.
 func webhookDeliveryCount(t *testing.T, base, result string) float64 {
 	t.Helper()
 	status, _, data, err := request(t, http.MethodGet, base+"/metrics", nil)
@@ -2403,42 +2104,12 @@ func webhookDeliveryCount(t *testing.T, base, result string) float64 {
 	return sampleValue(t, samples[0])
 }
 
-// TestConsoleWebhookDelivery proves the outbound dispatcher fires, signs,
-// attempts and records HONESTLY -- with no receiver anywhere in the cluster.
-// That constraint is the whole design of this test, and the split below is
-// forced by what internal/console/webhooks/dispatcher.go actually does:
-//
-//   - deliver() records EXACTLY ONE outcome per delivery, at the END of the
-//     ladder, never per attempt. A failing first attempt writes nothing.
-//   - Notify (the incident lifecycle path) runs retryLadder = {0, 30s, 5m}
-//     with +/-20% jitter, so its row lands four to six and a half MINUTES
-//     after the incident. Waiting that out in e2e is not an option.
-//   - DispatchTest (POST /{id}/test) runs singleAttempt = {0}: one POST, then
-//     record. Against an unroutable address that is one attemptTimeout (10s)
-//     and the row is there.
-//
-// So the OUTCOME assertions ride /test, which is the only path whose terminal
-// state is observable inside a test budget. The LIFECYCLE assertion cannot be
-// the same row, and it is not faked either: creating an incident is asserted
-// to (a) return its 201 well inside one attempt timeout, which is the
-// non-blocking contract -- a dispatcher that delivered inline would stall the
-// 201 for 10s against this dead endpoint -- and (b) advance
-// webhook_deliveries_total{result="filtered"}, which Notify increments
-// SYNCHRONOUSLY for an endpoint that does not subscribe to the event. That
-// counter moving is direct proof the incident create reached the dispatcher
-// and ran its event filter, with no HTTP and no ladder in the way.
-//
-// The endpoint that DOES subscribe to incident.created is declared anyway, so
-// a real ladder is enqueued against a real unreachable address. Its terminal
-// row is deliberately not waited for; the observed lastStatus is logged.
+// TestConsoleWebhookDelivery proves the outbound dispatcher fires; that constraint is the whole
+// design of this test.
 func TestConsoleWebhookDelivery(t *testing.T) {
 	base := consoleBaseURL(t)
 
-	// probeHook subscribes to incident.resolved ONLY. Two things follow, both
-	// wanted: /test still pings it (the ping ignores the event filter by
-	// design, so an operator can test an endpoint they just narrowed), and the
-	// incident CREATE below cannot enqueue a five-and-a-half-minute ladder
-	// against it that would overwrite the row mid-assertion.
+	// probeHook subscribes to incident.resolved ONLY.
 	probeHook, probeBody := createWebhook(t, base, map[string]any{
 		"name":   uniqueName("e2e-hook-probe"),
 		"url":    unroutableWebhookURL,
@@ -2529,10 +2200,7 @@ func TestConsoleWebhookDelivery(t *testing.T) {
 	decodeJSON(t, "create-incident response", incData, &fired)
 	t.Cleanup(func() { deleteResource(t, base+"/api/v1/incidents/"+fired.ID) })
 
-	// The non-blocking contract, measured against the dispatcher's own
-	// per-attempt timeout: an endpoint that never answers must cost the
-	// caller nothing. Half of attemptTimeout is a generous ceiling for one
-	// unpaged SELECT plus an insert.
+	// The non-blocking contract, measured against the dispatcher's own per-attempt timeout.
 	if elapsed >= 5*time.Second {
 		t.Errorf("expected POST /api/v1/incidents to return without waiting on a dead endpoint, took %s "+
 			"(the dispatcher's per-attempt timeout is 10s -- this looks like an inline delivery)", elapsed)
@@ -2544,10 +2212,8 @@ func TestConsoleWebhookDelivery(t *testing.T) {
 			return webhookDeliveryCount(t, base, "filtered") >= filteredBefore+1
 		})
 
-	// The ladder against liveHook is running RIGHT NOW and will not record for
-	// another four to six minutes (see the doc comment). Reported, never
-	// asserted: waiting it out would add five and a half minutes to every e2e
-	// run to learn what /test already proved above.
+	// Reported, never asserted: waiting it out would add five and a half minutes to every e2e run to
+	// learn what /test already proved above.
 	live, liveRowBody := getWebhookRow(t, base, liveHook.ID)
 	t.Logf("incident.created subscriber %s mid-ladder: lastStatus=%q failures=%d "+
 		"(the {0s,30s,5m} ladder records ONE terminal outcome, so this is expected to be empty here)",
@@ -2612,33 +2278,11 @@ type k8sEventRow struct {
 	Message   string    `json:"message"`
 }
 
-// k8sCaptureBudget is how long the reader gets to put a first row in the
-// database. Generous because it covers a cold start (the console Pod's watch
-// opening, its initial list, and the batched insert behind it), not because
-// the events themselves are in doubt.
+// k8sCaptureBudget is how long the reader gets to put a first row in the database.
 const k8sCaptureBudget = 120 * time.Second
 
-// TestConsoleK8sEventsCapture is the live test of the whole M6 Kubernetes
-// context path: console.kubernetesContext.enabled renders a console-only
-// ServiceAccount, ClusterRole and ClusterRoleBinding (charts' rbac.yaml), the
-// console watches the apiserver with that identity, and the rows land in
-// PostgreSQL where GET /api/v1/k8s-events serves them. A grant that is too
-// narrow shows up here -- and ONLY here -- as an endpoint that answers 200
-// with an empty page forever, which is why this is a hard assertion rather
-// than a skip.
-//
-// It is a hard assertion for a second reason too: a helm install churns Pods.
-// The release namespace holds the controller Deployment, the agent DaemonSet
-// (which the workflow deliberately RESTARTS mid-run), the console itself, the
-// bundled Valkey and the Postgres fixture, so Scheduled/Pulled/Created/Started
-// events for that namespace are not a maybe. The apiserver keeps events for an
-// hour by default and the reader lists on start, so even the ones emitted
-// before the console came up are in scope.
-//
-// The risk worth naming: this was written against the code and the chart, not
-// against a live kind cluster (no kind locally -- the M4/M5 precedent). If it
-// ever fails on an empty page, the two candidates are the RBAC grant and the
-// namespace the reader was pointed at, in that order.
+// A grant that is too narrow shows up here -- and ONLY here -- as an endpoint that answers 200 with
+// an empty page forever.
 func TestConsoleK8sEventsCapture(t *testing.T) {
 	base := consoleBaseURL(t)
 
@@ -2695,10 +2339,8 @@ func TestConsoleK8sEventsCapture(t *testing.T) {
 	}
 	t.Logf("captured %d Kubernetes events in the newest page, by kind: %v", len(page.Events), kinds)
 
-	// ?kind=Pod is asserted separately: it exercises the filter AND states the
-	// stronger claim, that POD events -- the ones scoped to the release
-	// namespace, and therefore the ones the RBAC and the namespace wiring both
-	// have to be right for -- were captured, not just cluster-scoped Node ones.
+	// ?kind=Pod is asserted separately: it exercises the filter AND states the stronger claim, that
+	// POD events.
 	podStatus, _, podData := mustRequest(t, http.MethodGet, base+"/api/v1/k8s-events?kind=Pod&limit=50", nil)
 	if podStatus != http.StatusOK {
 		t.Fatalf("expected GET /api/v1/k8s-events?kind=Pod 200, got %d: %s", podStatus, podData)
@@ -2719,14 +2361,10 @@ func TestConsoleK8sEventsCapture(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// M7: alert rules, PrometheusRule sync, export/import, the WebSocket gate
-// ---------------------------------------------------------------------------
+// alert rules, PrometheusRule sync, export/import, the WebSocket gate.
 
-// alertRuleRow is one alert rule on the wire. The three JSONB columns are
-// RawMessage rather than typed maps for the reason the API serves them as
-// objects: the tests below assert on their SHAPE (never null, `{}` when
-// cleared), which a decoded map would silently normalise away.
+// alertRuleRow is one alert rule on the wire; the three JSONB columns are RawMessage rather than
+// typed maps for the reason the API serves them as objects.
 type alertRuleRow struct {
 	ID           string          `json:"id"`
 	Name         string          `json:"name"`
@@ -2743,11 +2381,7 @@ type alertRuleRow struct {
 	LastSyncedAt *time.Time      `json:"lastSyncedAt"`
 }
 
-// foreignRuleRow is one PrometheusRule in the namespace that the console does
-// NOT own, as GET /api/v1/alert-rules/foreign projects it. There is
-// deliberately no raw object on the wire (httpapi.foreignRuleResponse's doc
-// comment), so these four fields are everything a client -- or this test --
-// can learn about somebody else's rule.
+// foreignRuleRow is one PrometheusRule in the namespace that the console does NOT own.
 type foreignRuleRow struct {
 	Name      string `json:"name"`
 	Groups    int    `json:"groups"`
@@ -2755,29 +2389,16 @@ type foreignRuleRow struct {
 	ManagedBy string `json:"managedBy"`
 }
 
-// e2eRawExpr is the expression every rule these tests declare renders to.
-// kind "raw" is verbatim (alerting.renderRaw: "there is no Prometheus parser
-// in this module, so the console must not pretend to normalise an expression
-// it cannot read"), which is what lets renderedExpr be asserted for EQUALITY
-// below rather than merely for non-emptiness.
-//
-// `vector(1) > 0` is chosen because it is well-formed PromQL that depends on
-// no scrape target, no series and no Prometheus at all -- and nothing in this
-// cluster ever evaluates it: the Prometheus Operator is not installed (M7
-// Decision 14), only its CRD is.
+// e2eRawExpr is the expression every rule these tests declare renders to; `vector(1) > 0` is chosen
+// because it is well-formed PromQL that depends on no scrape target.
 const e2eRawExpr = "vector(1) > 0"
 
-// consoleBundleName is the ONE PrometheusRule object the console owns. It is
-// the chart default (console.alerting.bundleName), left unset in
-// e2e/testdata/console-values.yaml on purpose, and it is asserted by NAME
-// below -- as the object that must NOT appear in the foreign list, because it
-// is ours.
+// consoleBundleName is the ONE PrometheusRule object the console owns; it is the chart default
+// (console.alerting.bundleName).
 const consoleBundleName = "kconmon-ng-console-rules"
 
-// foreignFixtureName, foreignFixtureAlert and foreignFixtureRecord name the
-// harness fixture .github/workflows/e2e.yaml applies from
-// e2e/testdata/foreign-prometheusrule.yaml. Changing either file means
-// changing these.
+// foreignFixtureName, foreignFixtureAlert and foreignFixtureRecord name the harness fixture
+// .github/workflows/e2e.yaml applies from e2e/testdata/foreign-prometheusrule.yaml.
 const (
 	foreignFixtureName      = "e2e-foreign-rules"
 	foreignFixtureManagedBy = "e2e-fixture"
@@ -2785,19 +2406,12 @@ const (
 	foreignFixtureRecord    = "e2e_foreign_recording"
 )
 
-// alertSyncBudget bounds the wait for a reconcile to land its outcome on a
-// rule. The KICK is what this budget is written against -- every CRUD write
-// and every POST /{id}/sync nudges the reconciler immediately
-// (httpapi.kickSync), so the normal path here is seconds. The jittered 60s
-// loop (console.alerting.syncInterval) is the backstop for a kick that
-// coalesced away, and 90s clears one full jittered interval plus an apply.
+// alertSyncBudget bounds the wait for a reconcile to land its outcome on a rule.
 const alertSyncBudget = 90 * time.Second
 
-// alertRuleBody builds a create/replace body. Both writes are FULL REPLACES
-// -- there is no PATCH on this resource by design (httpapi.alertRuleRequest:
-// "an alert rule is a definition one person edits in a form") -- so this
-// helper takes every field rather than merging, which is what makes the
-// omitted-field-clears-it assertion below meaningful.
+// alertRuleBody builds a create/replace body; both writes are FULL REPLACES -- there is no PATCH on
+// this resource by design (httpapi.alertRuleRequest: "an alert rule is a definition one person
+// edits in a form").
 func alertRuleBody(name, severity string, forNs int64, enabled bool) map[string]any {
 	return map[string]any{
 		"name":     name,
@@ -2809,14 +2423,8 @@ func alertRuleBody(name, severity string, forNs int64, enabled bool) map[string]
 	}
 }
 
-// createAlertRule POSTs one rule, asserts the created-and-point-at-it
-// contract and registers its deletion.
-//
-// A 503 here is the HARNESS, not the server -- createWebhook's posture: alert
-// rules are persisted configuration with no in-memory fallback, so an
-// unconfigured database takes the whole alerting surface down with a message
-// naming the value to set rather than with fifteen confusing assertion
-// failures.
+// createAlertRule POSTs one rule, asserts the created-and-point-at-it contract and registers its
+// deletion; a 503 here is the HARNESS, not the server -- createWebhook's posture.
 func createAlertRule(t *testing.T, base string, body map[string]any) alertRuleRow {
 	t.Helper()
 	status, header, data := mustRequest(t, http.MethodPost, base+"/api/v1/alert-rules", body)
@@ -2889,10 +2497,8 @@ func listAlertRules(t *testing.T, base string) []alertRuleRow {
 	return page.Rules
 }
 
-// findAlertRuleByName looks one rule up the way an operator does. The match is
-// CASE-INSENSITIVE because the store's uniqueness is (migration 00007's
-// lower(name) index) -- a lookup that missed "EdgeLoss" when asked for
-// "edgeloss" would report "not created" for a row that is very much there.
+// findAlertRuleByName looks one rule up the way an operator does; the match is CASE-INSENSITIVE
+// because the store's uniqueness is (migration 00007's lower(name) index).
 func findAlertRuleByName(t *testing.T, base, name string) (alertRuleRow, bool) {
 	t.Helper()
 	rules := listAlertRules(t, base)
@@ -2904,11 +2510,8 @@ func findAlertRuleByName(t *testing.T, base, name string) (alertRuleRow, bool) {
 	return alertRuleRow{}, false
 }
 
-// dropAlertRuleByName deletes a rule if it is there, and says nothing if it is
-// not. It exists for RE-RUNNABILITY and nothing else: adoption refuses a name
-// already taken, so a run that died between an import and its cleanup would
-// otherwise turn every later run's "created" assertion into a "skipped: name
-// already taken" -- a harness scar reported as a product failure.
+// dropAlertRuleByName deletes a rule if it is there, and says nothing if it is not; it exists for
+// RE-RUNNABILITY and nothing else: adoption refuses a name already taken.
 func dropAlertRuleByName(t *testing.T, base, name string) {
 	t.Helper()
 	if row, found := findAlertRuleByName(t, base, name); found {
@@ -2917,10 +2520,7 @@ func dropAlertRuleByName(t *testing.T, base, name string) {
 	}
 }
 
-// listForeignRules reads the PrometheusRules in the console's namespace that
-// it does not own, returning the STATUS beside the list: this route answers
-// 409 (not 503) on a console with alerting off, and that distinction is itself
-// an assertion in TestConsoleDegradedMode.
+// listForeignRules reads the PrometheusRules in the console's namespace that it does not own.
 func listForeignRules(t *testing.T, base string) (int, []foreignRuleRow, []byte) {
 	t.Helper()
 	status, _, data := mustRequest(t, http.MethodGet, base+"/api/v1/alert-rules/foreign", nil)
@@ -2934,10 +2534,8 @@ func listForeignRules(t *testing.T, base string) (int, []foreignRuleRow, []byte)
 	return status, page.Foreign, data
 }
 
-// mustListForeignRules is listForeignRules for a caller that cannot continue
-// without the cluster read. A 409 is called out as the harness problem it is:
-// the flag is set in e2e/testdata/console-values.yaml, and the console drops
-// the reconciler when it cannot build one.
+// mustListForeignRules is listForeignRules for a caller that cannot continue without the cluster
+// read.
 func mustListForeignRules(t *testing.T, base string) []foreignRuleRow {
 	t.Helper()
 	status, foreign, data := listForeignRules(t, base)
@@ -2964,27 +2562,8 @@ func findForeignRule(foreign []foreignRuleRow, name string) (foreignRuleRow, boo
 	return foreignRuleRow{}, false
 }
 
-// TestConsoleAlertRulesCRUD walks one rule through the whole surface against
-// the real console and PostgreSQL, and spends its assertions on the three
-// things the route shape does not give away.
-//
-// First, renderedExpr is the SERVER's, computed at write time and never the
-// caller's. httpapi.alertRuleInputFrom renders BEFORE it stores, precisely so
-// a row can never hold an expression rendered from a different version of its
-// own params; kind "raw" makes that observable, because its render is verbatim
-// and the expected value is therefore knowable here.
-//
-// Second, syncStatus is RESET BY THE WRITE. store's update query flips the row
-// back to "unsynced" on every change ("an edited rule is by definition not the
-// rule that was applied"), and the assertion has to be made on the PUT's own
-// RESPONSE rather than on a later GET -- the create/update kick means a
-// reconcile may well have moved it to synced by the time a second request
-// lands, which is correct behaviour and would make a GET-based assertion a
-// race.
-//
-// Third, a duplicate name is 422 and not 409. On this ONE resource those two
-// codes mean different things (httpapi.alertingDisabledDetail), so the
-// case-flipped create below is checking the code as much as the constraint.
+// TestConsoleAlertRulesCRUD walks one rule through the whole surface against the real console and
+// PostgreSQL; first, renderedExpr is the SERVER's, computed at write time and never the caller's.
 func TestConsoleAlertRulesCRUD(t *testing.T) {
 	base := consoleBaseURL(t)
 
@@ -3098,17 +2677,8 @@ func TestConsoleAlertRulesCRUD(t *testing.T) {
 	}
 }
 
-// awaitAlertRuleSynced drives one rule to syncStatus=synced, RE-KICKING the
-// reconciler on every iteration that finds it anywhere else.
-//
-// The re-kick is not impatience, it is the model. promrules.Reconcile compares
-// the live object against the desired one BEFORE applying it, so the first
-// pass after any rule change legitimately reports `drift` (the live bundle is
-// the previous one) even though that same pass then applies the correction --
-// the package doc says so in as many words: "drift is past tense here, the
-// correction already happened". `synced` is therefore the state of the SECOND
-// pass, and the honest way to wait for a converged bundle is to ask for
-// another pass rather than to accept drift as success.
+// awaitAlertRuleSynced drives one rule to syncStatus=synced; `synced` is therefore the state of the
+// SECOND pass.
 func awaitAlertRuleSynced(t *testing.T, base, id, what string) alertRuleRow {
 	t.Helper()
 	var row alertRuleRow
@@ -3122,11 +2692,8 @@ func awaitAlertRuleSynced(t *testing.T, base, id, what string) alertRuleRow {
 			return true
 		}
 		if row.SyncStatus == "error" {
-			// Reported every iteration on purpose: the cause classes
-			// (crd-missing, forbidden, other) are the first token of the
-			// message, and a job that times out here should say WHICH of the
-			// two fixable causes it hit in its own log rather than only in a
-			// final one-line failure.
+			// Reported every iteration on purpose: the cause classes (crd-missing, forbidden, other) are the
+			// first token of the message.
 			t.Logf("alert rule %s is in sync error: %s", id, row.SyncMessage)
 		}
 		mustRequest(t, http.MethodPost, base+"/api/v1/alert-rules/"+id+"/sync", nil)
@@ -3135,49 +2702,13 @@ func awaitAlertRuleSynced(t *testing.T, base, id, what string) alertRuleRow {
 	return row
 }
 
-// TestConsoleAlertRuleSyncAgainstRealCRD is the live test of the whole M7
-// alerting path: console.alerting.enabled renders a console-only Role and
-// RoleBinding for prometheusrules (charts' rbac.yaml -- M7 Decision 3, a Role
-// and NOT a ClusterRole), the console server-side-applies ONE PrometheusRule
-// object into its own namespace with that identity, and the outcome comes back
-// on each rule's syncStatus. The workflow applies the CRD before the install
-// (e2e/testdata/prometheusrule-crd.yaml); the Prometheus Operator itself is
-// deliberately absent, because SSA needs the resource to be served, not the
-// controller behind it.
-//
-// WHY THE ASSERTIONS ARE API READS AND NOT `kubectl get prometheusrule`.
-// Nothing in this package shells out -- every kubectl call in the harness
-// lives in the workflow, and the K8s-events e2e (M6) set the precedent of
-// asserting a cluster fact through the console route that reads it. Keeping
-// that line has a concrete payoff here: the suite stays runnable against any
-// console reachable at KCONMON_CONSOLE_URL, including a port-forward from a
-// laptop with no cluster credentials at all, instead of silently degrading to
-// "kubectl not found" on the one assertion that matters most. What is given up
-// is a direct read of the object's own bytes; what replaces it is two API
-// facts that cannot both be true unless the object is there and is ours:
-//
-//   - syncStatus reaching `synced` (or `drift`, its one-pass-behind sibling)
-//     happens ONLY after promrules.Client.Apply returned without error. A
-//     missing CRD, a missing Role or a wrong namespace each produce
-//     syncStatus=error with a named cause instead.
-//   - the bundle is ABSENT from GET /api/v1/alert-rules/foreign, which is a
-//     LIVE list of the namespace's PrometheusRules filtered on exactly one
-//     thing -- the app.kubernetes.io/managed-by label. An object that existed
-//     without our label would be in that list under its own name; an object
-//     with our label is excluded, which is the fact being asserted. The
-//     fixture object IS in the same list on the same read, so an empty answer
-//     cannot be mistaken for a passing one.
+// The workflow applies the CRD before the install (e2e/testdata/prometheusrule-crd.yaml); keeping
+// that line has a concrete payoff here.
 func TestConsoleAlertRuleSyncAgainstRealCRD(t *testing.T) {
 	base := consoleBaseURL(t)
 
-	// TWO rules, and the second one is not padding. A disabled rule is dropped
-	// from the bundle entirely (alerting.RenderBundle) and the reconciler only
-	// ever walks ENABLED rows, so nothing is written onto a rule after it is
-	// switched off -- its own status can therefore say nothing about whether
-	// the cluster caught up. The keeper is what makes that observable: its
-	// lastSyncedAt advancing is proof that an apply happened AFTER the
-	// disable, and the bundle that apply carried was rendered without the
-	// disabled rule by construction.
+	// TWO rules, and the second one is not padding; a disabled rule is dropped from the bundle
+	// entirely (alerting.RenderBundle) and the reconciler only ever walks ENABLED rows.
 	keeperName := uniqueName("e2e-alertsync-keeper")
 	keeper := createAlertRule(t, base, alertRuleBody(keeperName, "info", 0, true))
 	subjectName := uniqueName("e2e-alertsync")
@@ -3281,11 +2812,7 @@ func TestConsoleAlertRuleSyncAgainstRealCRD(t *testing.T) {
 	t.Logf("keeper %s re-applied at %v with status %q (message %q) after %s was disabled",
 		keeperName, afterDisable.LastSyncedAt, afterDisable.SyncStatus, afterDisable.SyncMessage, subjectName)
 
-	// The disabled rule is now OUTSIDE the reconciler's world: it walks
-	// enabled rows only, so nothing will ever write a status onto this one
-	// again. unsynced is the honest state for a rule that is not applied
-	// anywhere, and a console that reported it as synced would be claiming the
-	// cluster is evaluating a rule its owner switched off.
+	// The disabled rule is now OUTSIDE the reconciler's world: it walks enabled rows only.
 	stillOff := getAlertRule(t, base, subject.ID)
 	if stillOff.SyncStatus != "unsynced" {
 		t.Errorf("expected a DISABLED rule to stay unsynced (the reconciler walks enabled rules only, "+
@@ -3294,25 +2821,7 @@ func TestConsoleAlertRuleSyncAgainstRealCRD(t *testing.T) {
 	}
 }
 
-// TestConsoleAlertRuleForeignImport is M7 Decision 4 end to end: a
-// PrometheusRule this console does not own is LISTED read-only, adoption is an
-// explicit import that COPIES its rules into builder rows, and the foreign
-// object is never touched.
-//
-// The last clause is the one worth a test rather than a comment. After an
-// adoption the same alerts are defined twice in the cluster -- once by the
-// object its owner still controls, once by the console's own bundle -- and
-// deleting theirs is THEIR decision. A console that "helpfully" cleaned up
-// after itself would be silently editing somebody else's alerting, so the
-// fixture is re-read after the import and its projection compared field by
-// field.
-//
-// The fixture is harness state, not test state: .github/workflows/e2e.yaml
-// applies it from e2e/testdata/foreign-prometheusrule.yaml and nothing here
-// creates or deletes it. What this test does clean up is the console ROW the
-// import mints, which is what keeps the suite re-runnable -- and it drops a
-// leftover of the same name up front, so a run that died mid-import does not
-// poison every run after it.
+// The last clause is the one worth a test rather than a comment.
 func TestConsoleAlertRuleForeignImport(t *testing.T) {
 	base := consoleBaseURL(t)
 
@@ -3419,10 +2928,7 @@ func TestConsoleAlertRuleForeignImport(t *testing.T) {
 		t.Errorf("expected an adopted rule to arrive enabled, got false")
 	}
 
-	// The foreign object is UNCHANGED and still foreign. Re-read on the same
-	// route the import read it through, so a mutation of any kind -- an added
-	// label, a rewritten group, a deletion -- shows up as a changed projection
-	// or a missing entry.
+	// The foreign object is UNCHANGED and still foreign.
 	after := mustListForeignRules(t, base)
 	stillThere, present := findForeignRule(after, foreignFixtureName)
 	if !present {
@@ -3483,24 +2989,9 @@ func TestConsoleAlertRuleForeignImport(t *testing.T) {
 	}
 }
 
-// TestConsoleAlertsWithoutPrometheus pins the honest-empty branch of GET
-// /api/v1/alerts against the harness as it really is.
-//
-// e2e/testdata/console-values.yaml sets no console.prometheus.url, and the
-// chart default is the empty string, so this console genuinely has no
-// Prometheus. That is not a gap in the harness -- it is the case the route's
-// shape exists for. The firing list answers 200 with an empty array and
-// promConfigured:false rather than 503, because the Overview card that
-// consumes it has to be able to render "nothing is firing" and "nobody is
-// watching" without treating one of them as an error. GET /api/v1/matrix
-// answers 503 for the same missing dependency, and the difference is the
-// point: the matrix IS the Prometheus data, while the firing set is a list
-// that is legitimately empty.
-//
-// If a future harness DOES point the console at a Prometheus, this test says
-// so instead of failing: the assertions below fork on promConfigured, and the
-// configured branch checks the only invariant that survives -- the list is an
-// array, never null.
+// TestConsoleAlertsWithoutPrometheus pins the honest-empty branch of GET /api/v1/alerts against the
+// harness as it really is; the firing list answers 200 with an empty array and promConfigured:false
+// rather than 503.
 func TestConsoleAlertsWithoutPrometheus(t *testing.T) {
 	base := consoleBaseURL(t)
 
@@ -3548,15 +3039,7 @@ type firingAlertRow struct {
 	RuleID   string `json:"ruleId"`
 }
 
-// exportBundleMap is a bundle as this file handles it: the raw JSON object,
-// decoded into a map rather than into six mirrored Go structs.
-//
-// Deliberate. The round trip below has to POST BACK BYTE-FOR-BYTE what the
-// export served (that is the whole idempotence claim), and re-encoding through
-// hand-written structs would quietly drop any field this file forgot to
-// mirror -- turning "the console round-trips its own configuration" into "the
-// console round-trips the subset e2e knows about". A map carries every key,
-// including the ones a future milestone adds.
+// exportBundleMap is a bundle as this file handles it: the raw JSON object.
 type exportBundleMap map[string]any
 
 // bundleCollection returns one collection of a bundle as a []any, failing the
@@ -3668,38 +3151,12 @@ func postImport(t *testing.T, base string, dryRun bool, bundle exportBundleMap) 
 	return report
 }
 
-// TestConsoleExportImportRoundTrip proves M7 Decision 9's central claim: the
-// bundle a console exports is a bundle it can import, the dry run predicts
-// exactly what the apply does, and a re-import of an unmodified bundle changes
-// nothing.
-//
-// That last property is what makes this more than a serialisation test. Every
-// collection is merged by NATURAL KEY, not by id -- no store call anywhere
-// accepts a caller-chosen primary key -- so a bundle round-tripped into its own
-// source console must resolve every item to the row it came from and update or
-// skip it. A single spurious create here would mean a restore duplicates the
-// configuration it was meant to restore.
-//
-// The secret scan is the second claim and it is made on RAW BYTES, not on a
-// decoded struct: a bundle carries webhooks as name/url/events/enabled plus a
-// hasSecret BOOLEAN, and the sealed bytes never leave the store through this
-// package. A typed assertion could not notice a secret field, because the type
-// has none -- which is the point and also why it could never catch a
-// regression that added one.
+// TestConsoleExportImportRoundTrip proves the central claim; every collection is merged by NATURAL
+// KEY.
 func TestConsoleExportImportRoundTrip(t *testing.T) {
 	base := consoleBaseURL(t)
 
-	// The two rows the IMPORT mints have no create call to hang a cleanup off,
-	// so their names are minted here and their cleanups registered FIRST --
-	// which, t.Cleanup being LIFO, is what makes them run LAST.
-	//
-	// That ordering is load-bearing rather than tidy. The renamed target below
-	// becomes the destination the seeded definition points at (the importer
-	// remaps the bundle's target id onto the row it actually created), and a
-	// target with a definition still pointing at it is a 409 by design. A
-	// cleanup registered at the point of mutation would run BEFORE the
-	// definition's and fail on that 409 -- in cleanup, where the failure would
-	// name the wrong thing entirely.
+	// The two rows the IMPORT mints have no create call to hang a cleanup off.
 	renamedTarget := uniqueName("e2e-import-target")
 	t.Cleanup(func() { dropTargetByName(t, base, renamedTarget) })
 	newRuleName := uniqueName("e2e-import-rule")
@@ -3858,11 +3315,8 @@ func TestConsoleExportImportRoundTrip(t *testing.T) {
 		"renderedExpr": e2eRawExpr,
 	})
 
-	// A webhook the destination does not have. It is the ONE asymmetry in the
-	// whole import and it is the store's rule, not the importer's: every
-	// delivery is signed, a bundle never carries a secret, and the only
-	// alternatives to skipping would be fabricating a signing key or weakening
-	// that rule.
+	// A webhook the destination does not have; it is the ONE asymmetry in the whole import and it is
+	// the store's rule, not the importer's.
 	freshHookName := uniqueName("e2e-import-hook")
 	bundle["webhooks"] = append(bundleCollection(t, bundle, "webhooks"), map[string]any{
 		"id":        "00000000-0000-0000-0000-000000000000",
@@ -3939,10 +3393,8 @@ func TestConsoleExportImportRoundTrip(t *testing.T) {
 	}
 }
 
-// assertWebhookSkipWarning checks the one WARNING this API has: an endpoint the
-// import handled correctly and completely, whose outcome still needs a human.
-// A warning is not an error -- nothing failed, and the operator's next step is
-// to create the endpoint with a secret and re-import.
+// assertWebhookSkipWarning checks the one WARNING this API has: an endpoint the import handled
+// correctly and completely.
 func assertWebhookSkipWarning(t *testing.T, res *importCollection, name, what string) {
 	t.Helper()
 	for _, w := range res.Warnings {
@@ -4008,10 +3460,8 @@ func findWebhookByName(t *testing.T, base, name string) (string, bool) {
 	return "", false
 }
 
-// wsEnvelope is every server->client frame, mirrored here rather than imported
-// from internal/console/ws: these tests assert on the WIRE, and sharing the
-// server's own type would make a rename invisible to exactly the test whose
-// job is to notice it.
+// wsEnvelope is every server->client frame, mirrored here rather than imported from
+// internal/console/ws.
 type wsEnvelope struct {
 	Topic string          `json:"topic"`
 	Type  string          `json:"type"`
@@ -4067,38 +3517,8 @@ func wsAwait(t *testing.T, conn *websocket.Conn, budget time.Duration, match fun
 	}
 }
 
-// TestConsoleWSSubscribeGate covers the /ws surface M7 touched: the upgrade
-// row became `anyOf{events:read, runs:read}` (M3 follow-up #10, Decision 13)
-// and each SUBSCRIBE gained a second, per-connection decision
-// (httpapi.wsTopicAuthorizer).
-//
-// WHAT THIS TEST DOES NOT DO, AND WHY. The interesting half of that change --
-// a runs:read-ONLY subject that is admitted to the socket and then refused the
-// `live` topic by name -- is NOT REACHABLE in this harness, and no amount of
-// test code can make it so. e2e/testdata/console-values.yaml runs
-// auth.mode=anonymous, and internal/console/authn.NewAnonymous returns the SAME
-// fixed Subject for every request "regardless of what the request carries": a
-// Bearer token, a session cookie and a spoofed header are all ignored by
-// construction (its own test asserts exactly that). So the M3 RBAC surface can
-// happily mint a custom role {runs:read}, a binding and a PAT -- and the socket
-// would still see the one configured role. There is no in-harness path from a
-// created token to an authenticated connection.
-//
-// The both-permissions-absent 403 is unreachable for a second, independent
-// reason: EVERY builtin role (viewer, operator, alert-editor, admin) holds
-// events:read, so no value of console.auth.anonymous.role produces a subject
-// the /ws row refuses. Covering it would need a whole third console rollout on
-// auth.mode=token plus a bootstrap credential -- a harness of its own, for one
-// status code that internal/console/httpapi's unit tests already pin against
-// the live router.
-//
-// What IS asserted here is the part that only a real socket can prove, and it
-// is not nothing: the route still admits an ordinary role after the anyOf
-// rewrite, a refused subscribe is answered with an error FRAME rather than a
-// closed connection, the refusal names the topic it refused, and the socket
-// keeps working afterwards -- which is the property that makes a multiplexed
-// socket usable at all, and the one a rewrite of the subscribe path is most
-// likely to break.
+// WHAT THIS TEST DOES NOT DO; the interesting half of that change -- a runs:read-ONLY subject that
+// is admitted to the socket and then refused the `live` topic by name.
 func TestConsoleWSSubscribeGate(t *testing.T) {
 	base := consoleBaseURL(t)
 
@@ -4137,10 +3557,8 @@ func TestConsoleWSSubscribeGate(t *testing.T) {
 		t.Errorf("expected the refusal to say the topic is unknown and list the subscribable ones, got %q", detail)
 	}
 
-	// A run topic for a run that is not streaming here. EXISTENCE is checked
-	// before permission, deliberately (ws.Hub.handleClientMessage says why):
-	// answering "forbidden" for a run that simply is not open on this replica
-	// would send a browser to fix its RBAC instead of falling back to polling.
+	// A run topic for a run that is not streaming here; EXISTENCE is checked before permission,
+	// deliberately (ws.Hub.handleClientMessage says why).
 	const absentRunTopic = "run:00000000-0000-0000-0000-000000000000"
 	wsSubscribe(t, conn, absentRunTopic)
 	runFrames, gotRun := wsAwait(t, conn, 15*time.Second, func(env *wsEnvelope) bool {
@@ -4155,10 +3573,7 @@ func TestConsoleWSSubscribeGate(t *testing.T) {
 			"(existence is checked first, on purpose), got %q", detail)
 	}
 
-	// The socket survives both refusals. This is the assertion the two above
-	// exist to set up: a refused subscribe must not cost the connection its
-	// other topics, which is the whole premise of multiplexing N topics onto
-	// one socket per browser tab.
+	// The socket survives both refusals; this is the assertion the two above exist to set up.
 	wsSubscribe(t, conn, "topology")
 	topoFrames, gotTopo := wsAwait(t, conn, 60*time.Second, func(env *wsEnvelope) bool {
 		return env.Topic == "topology" && env.Type != "error"
@@ -4176,34 +3591,10 @@ func TestConsoleWSSubscribeGate(t *testing.T) {
 }
 
 // TestConsoleDegradedMode runs against a SEPARATE console rollout with
-// console.database.mode=disabled (.github/workflows/e2e.yaml's "Reinstall
-// console with database disabled" + "Run degraded-mode E2E tests" steps
-// redeploy and re-forward before invoking just this test by name) -- it
-// reuses KCONMON_CONSOLE_URL, now pointed at that rollout's fresh
-// port-forward. This is the Phase A guarantee (M3 plan Decision) verified in
-// a real cluster: with no database wired, the M1/M2 surface (healthz,
-// topology) stays fully up and only the database-backed endpoints degrade
-// to 503 -- never a 500, never a hang.
-//
-// M4 widened what "database-backed" covers: targets, check definitions and
-// schedules are CONFIGURATION and get NO in-memory fallback (Plan Decision
-// 13), unlike runs, which fall back to checks.NewMemoryStore(). So all three
-// CRUD surfaces must answer 503 here -- and the M3 surface's behavior must be
-// unchanged by their arrival, which is why the original assertions below are
-// kept verbatim rather than folded into the new loop.
-//
-// M5 widened it once more, and its addition is the sharpest one in this test:
-// GET /api/v1/topology?at= must be 503 while GET /api/v1/topology stays 200.
-// One route, two answers, decided purely by whether a parameter is present --
-// history needs a database and the live passthrough does not, so a rollout
-// with no database must degrade the parameter without taking the route down.
-//
-// M6 adds incidents, maintenance windows, webhook endpoints and captured
-// Kubernetes events. The last one is the interesting case: this rollout keeps
-// console-values.yaml's console.kubernetesContext.enabled, so the console
-// starts with the capture CONFIGURED and no database to write to -- it warns
-// and skips the reader rather than failing to start, and the endpoint answers
-// 503 rather than an empty 200.
+// console.database.mode=disabled (.github/workflows/e2e.yaml's "Reinstall console with database
+// disabled" + "Run degraded-mode E2E tests" steps redeploy and re-forward before invoking just this
+// test by name) -- it reuses KCONMON_CONSOLE_URL, now pointed at that rollout's fresh port-forward;
+// so all three CRUD surfaces must answer 503 here.
 func TestConsoleDegradedMode(t *testing.T) {
 	base := consoleBaseURL(t)
 
@@ -4222,10 +3613,8 @@ func TestConsoleDegradedMode(t *testing.T) {
 		t.Errorf("expected /api/v1/events 503 with console.database.mode=disabled, got %d", eventsStatus)
 	}
 
-	// The three M4 CRUD surfaces, read and write side. A write is asserted
-	// too because the 503 guard sits before the body is even decoded: a
-	// regression that moved it after decoding would still answer 503 to a GET
-	// while answering 400 to a malformed POST, which is a different contract.
+	// The three CRUD surfaces, read and write side; a write is asserted too because the 503 guard sits
+	// before the body is even decoded.
 	for _, tc := range []struct {
 		method string
 		path   string
@@ -4244,15 +3633,9 @@ func TestConsoleDegradedMode(t *testing.T) {
 		{http.MethodPost, "/api/v1/schedules", map[string]any{
 			"definitionId": "00000000-0000-0000-0000-000000000000", "kind": "continuous",
 		}},
-		// M5. Path history and operator notes have no in-memory fallback
-		// either, for a reason the M4 surfaces share: a trace history or an
-		// incident note that vanishes on pod restart is worse than one that
-		// was never accepted.
 		{http.MethodGet, "/api/v1/mtr/destinations", nil},
-		// Both filters present and valid, so a 422 here would mean the
-		// unavailability guard had slipped BEHIND the parameter validation --
-		// and a request with them missing would then get 422 while a complete
-		// one got 503, which is two different contracts on one route.
+		// Both filters present and valid, so a 422 here would mean the unavailability guard had slipped
+		// BEHIND the parameter validation.
 		{http.MethodGet, "/api/v1/mtr/snapshots?source=a&destination=b", nil},
 		{http.MethodGet, "/api/v1/annotations", nil},
 		{http.MethodPost, "/api/v1/annotations", map[string]any{
@@ -4264,22 +3647,8 @@ func TestConsoleDegradedMode(t *testing.T) {
 		// 200 on the same path in the same rollout.
 		{http.MethodGet, "/api/v1/topology?at=" +
 			url.QueryEscape(time.Now().UTC().Add(-2*time.Minute).Format(time.RFC3339)), nil},
-		// M6. Four more surfaces with no in-memory fallback, and the reasons
-		// differ enough to be worth naming:
-		//
-		//   - incidents and maintenance windows are operator RECORDS, the
-		//     annotations rule verbatim: one that vanishes on a pod restart is
-		//     worse than one that was never accepted.
-		//   - webhook endpoints are persisted CONFIGURATION (the targets /
-		//     checks / schedules rule), and their signing secrets live in the
-		//     same rows.
-		//   - k8s-events is the sharpest of the four, because this rollout
-		//     ALSO has console.kubernetesContext.enabled: the capture is
-		//     configured and the endpoint is still 503, since captured events
-		//     live in PostgreSQL and there is nowhere for the reader to have
-		//     written them. Turning the capture on must not make this route
-		//     answer an empty 200, which would report "nothing happened in
-		//     your cluster" for "this console has no database".
+		// . Four more surfaces with no in-memory fallback, and the reasons differ enough to be worth
+		// naming.
 		{http.MethodGet, "/api/v1/incidents", nil},
 		{http.MethodPost, "/api/v1/incidents", map[string]any{
 			"title":  uniqueName("e2e-degraded"),
@@ -4288,18 +3657,8 @@ func TestConsoleDegradedMode(t *testing.T) {
 		{http.MethodGet, "/api/v1/maintenance", nil},
 		{http.MethodGet, "/api/v1/webhooks", nil},
 		{http.MethodGet, "/api/v1/k8s-events", nil},
-		// M7. Alert rules are persisted CONFIGURATION with no in-memory
-		// fallback -- the targets/checks/schedules rule verbatim -- and the
-		// three routes below are the three shapes of that gate:
-		//
-		//   - the CRUD surface, read and write side.
-		//   - the SYNC kick, which is 503 and not 409 even though this
-		//     rollout also has no reconciler: the two gates are ordered
-		//     store-first on purpose, because a console with no database has
-		//     no rules to sync in the first place, so naming the feature flag
-		//     here would be the less actionable of two true statements.
-		//   - the IMPORT, for the same ordering: there is nowhere to adopt TO
-		//     before there is nothing to adopt FROM.
+		// . Alert rules are persisted CONFIGURATION with no in-memory fallback -- the
+		// targets/checks/schedules rule verbatim.
 		{http.MethodGet, "/api/v1/alert-rules", nil},
 		{http.MethodPost, "/api/v1/alert-rules", map[string]any{
 			"name": uniqueName("e2e-degraded"), "kind": "raw",
@@ -4307,10 +3666,7 @@ func TestConsoleDegradedMode(t *testing.T) {
 		}},
 		{http.MethodPost, "/api/v1/alert-rules/00000000-0000-0000-0000-000000000000/sync", nil},
 		{http.MethodPost, "/api/v1/alert-rules/import", map[string]any{"name": "anything"}},
-		// Export/import reads EVERY persisted config table and is
-		// all-or-nothing about it: a bundle with targets but no alert rules
-		// because that one seam happened to be nil would be a restore point
-		// with a hole in it, which is worse than no restore point.
+		// Export/import reads EVERY persisted config table and is all-or-nothing about it.
 		{http.MethodGet, "/api/v1/export", nil},
 		{http.MethodPost, "/api/v1/import", map[string]any{
 			"dryRun": true,
@@ -4324,16 +3680,10 @@ func TestConsoleDegradedMode(t *testing.T) {
 		}
 	}
 
-	// --- The three M7 routes that must NOT be 503, and each for its own
-	// reason. This rollout keeps console.alerting.enabled=true from
-	// console-values.yaml, so it is the only place these can be observed. ---
+	// The three routes that must NOT be 503, and each for its own reason.
 
-	// 1. The firing list needs Prometheus, not a database, and this console
-	// has neither. It answers an honest empty 200: the Overview card must be
-	// able to render "nothing is firing" and "nobody is watching" without
-	// treating either as an error, and promConfigured is how it tells them
-	// apart. A 503 here would make a console with no database report a
-	// Prometheus outage.
+	// It answers an honest empty 200: the Overview card must be able to render "nothing is firing" and
+	// "nobody is watching" without treating either as an error.
 	alertsStatus, _, alertsData := mustRequest(t, http.MethodGet, base+"/api/v1/alerts", nil)
 	if alertsStatus != http.StatusOK {
 		t.Errorf("expected /api/v1/alerts 200 in degraded mode (it needs no database at all), got %d: %s",
@@ -4353,15 +3703,8 @@ func TestConsoleDegradedMode(t *testing.T) {
 		}
 	}
 
-	// 2. The foreign list is the ONE place in this API where 409 and 503 come
-	// apart, and this rollout is where that is provable. The route reads the
-	// CLUSTER, not the database, so the database being off is not its problem
-	// -- what is missing is the reconciler, which the console drops when there
-	// is no store to keep rules in. 409 says "the request is fine and the
-	// resource exists, but it conflicts with the state this console is
-	// configured to be in", and it names the flag to set. 503 would send an
-	// operator to look at their database for a reconciler nobody asked to
-	// start.
+	// 2. The foreign list is the ONE place in this API where 409 and 503 come apart, and this rollout
+	// is where that is provable.
 	foreignStatus, _, foreignData := mustRequest(t, http.MethodGet, base+"/api/v1/alert-rules/foreign", nil)
 	if foreignStatus != http.StatusConflict {
 		t.Errorf("expected /api/v1/alert-rules/foreign 409 (not 503) on a console with no PrometheusRule "+
@@ -4371,12 +3714,8 @@ func TestConsoleDegradedMode(t *testing.T) {
 			"set to fix it -- got %s", foreignData)
 	}
 
-	// 3. Preview is gated on NEITHER: it renders an expression from a request
-	// body and asks Prometheus what that expression currently matches. With no
-	// Prometheus the render half still succeeds, so the honest answer is a 200
-	// carrying the expression plus an error string for the half that could not
-	// run -- refusing the whole request would hide a correct expression behind
-	// an unrelated outage.
+	// 3. Preview is gated on NEITHER: it renders an expression from a request body and asks Prometheus
+	// what that expression currently matches.
 	previewStatus, _, previewData := mustRequest(t, http.MethodPost, base+"/api/v1/alert-rules/preview",
 		alertRuleBody(uniqueName("e2e-degraded-preview"), "info", 0, true))
 	if previewStatus != http.StatusOK {

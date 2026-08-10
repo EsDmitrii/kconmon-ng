@@ -50,14 +50,8 @@ func NewMatrixPusher(prom matrix.Querier, hub *ws.Hub, metricsPrefix string, int
 // Nudge asks for an out-of-band recompute. Non-blocking and coalescing.
 func (p *MatrixPusher) Nudge() { signalNudge(p.nudgeCh) }
 
-// Run pushes once immediately (so a freshly connected browser is not waiting a
-// whole interval for its first snapshot), then on every tick or nudge, until
-// ctx is cancelled. A failing Prometheus is recorded and retried on the next
-// tick; it never terminates the loop.
-//
-// Run must be called exactly once per pusher: a second concurrent Run would
-// share nudgeCh and broadcast the same topics concurrently, violating ws.Hub's
-// one-goroutine-per-topic serialization assumption (see Hub.Broadcast).
+// Run pushes once immediately (so a freshly connected browser is not waiting a whole interval for
+// its first snapshot); a failing Prometheus is recorded and retried on the next tick.
 func (p *MatrixPusher) Run(ctx context.Context) {
 	p.pushAll(ctx)
 
@@ -83,9 +77,7 @@ func (p *MatrixPusher) pushAll(ctx context.Context) {
 }
 
 // pushOne reuses matrix.Compute verbatim — the exact call the REST handler in
-// internal/console/httpapi/data.go already makes, so the WebSocket snapshot and
-// GET /api/v1/matrix can never drift apart. Compute has no plane parameter: the
-// ":pod" in the topic name is the WEBSOCKET.md topic shape, not an argument.
+// internal/console/httpapi/data.go already makes.
 func (p *MatrixPusher) pushOne(ctx context.Context, protocol string) {
 	topic := ws.MatrixTopic(protocol)
 

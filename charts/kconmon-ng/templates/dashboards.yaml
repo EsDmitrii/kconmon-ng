@@ -1,0 +1,33 @@
+{{- if .Values.dashboards.enabled }}
+{{- $top := . }}
+{{- range $path, $_ := .Files.Glob "dashboards/*.json" }}
+{{- $name := base $path | trimSuffix ".json" }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ printf "%s-dashboard-%s" (include "kconmon-ng.fullname" $top) $name | trunc 63 | trimSuffix "-" }}
+  {{- with $.Values.dashboards.namespace }}
+  namespace: {{ . }}
+  {{- end }}
+  labels:
+    {{- include "kconmon-ng.labels" $top | nindent 4 }}
+    app.kubernetes.io/component: dashboard
+    # The label the Grafana sidecar watches for.
+    {{ $.Values.dashboards.label }}: {{ $.Values.dashboards.labelValue | quote }}
+    {{- with $.Values.dashboards.extraLabels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  annotations:
+    {{- with $.Values.dashboards.folder }}
+    # Folder the Grafana sidecar files this dashboard under.
+    grafana_folder: {{ . | quote }}
+    {{- end }}
+    {{- with $.Values.dashboards.annotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+data:
+  {{ base $path }}: |
+{{ $top.Files.Get $path | replace "kconmon_ng_" (printf "%s_" $top.Values.config.metricsPrefix) | indent 4 }}
+{{- end }}
+{{- end }}

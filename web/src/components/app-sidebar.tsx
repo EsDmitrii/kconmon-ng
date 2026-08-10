@@ -18,6 +18,9 @@ import { NAV_ITEMS, type NavItem } from "@/nav";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { UserMenu } from "@/components/user-menu";
 import { useAuth } from "@/hooks/use-auth";
+import { useT } from "@/lib/i18n";
+import { chromeDict, NAV_KEYS, type ChromeKey } from "@/lib/i18n/dict/chrome";
+import { NAV_DESC_KEYS, paletteDict } from "@/lib/i18n/dict/palette";
 import { cn } from "@/lib/utils";
 
 /* The sidebar derives its grouping and icons from NAV_ITEMS by path, without
@@ -38,17 +41,19 @@ const ICONS: Record<string, LucideIcon> = {
   "/settings": Settings,
 };
 
-const GROUPS: { label: string; paths: string[] }[] = [
-  { label: "Monitor", paths: ["/", "/live", "/matrix", "/topology"] },
-  { label: "Investigate", paths: ["/investigate", "/mtr", "/diagnostics", "/explore", "/console"] },
-  { label: "Manage", paths: ["/targets", "/alerting", "/settings"] },
+/* The header is a translation KEY rather than a literal: the group names are
+   the one piece of sidebar text with no NavItem behind it to fall back to. */
+const GROUPS: { key: ChromeKey; paths: string[] }[] = [
+  { key: "nav.group.monitor", paths: ["/", "/live", "/matrix", "/topology"] },
+  { key: "nav.group.investigate", paths: ["/investigate", "/mtr", "/diagnostics", "/explore", "/console"] },
+  { key: "nav.group.manage", paths: ["/targets", "/alerting", "/settings"] },
 ];
 
-function groupItems(): { label: string; items: NavItem[] }[] {
+function groupItems(): { key: ChromeKey; items: NavItem[] }[] {
   const byPath = new Map(NAV_ITEMS.map((i) => [i.path, i]));
   const seen = new Set<string>();
   const groups = GROUPS.map((g) => ({
-    label: g.label,
+    key: g.key,
     items: g.paths.flatMap((p) => {
       const item = byPath.get(p);
       if (!item) return [];
@@ -61,13 +66,24 @@ function groupItems(): { label: string; items: NavItem[] }[] {
   return groups;
 }
 
-function NavLink({ item }: { item: NavItem }) {
+function NavLink({ item, onNavigate }: { item: NavItem; onNavigate?: () => void }) {
+  const t = useT(chromeDict);
+  /* The tooltip is the palette's search corpus, so it lives in the PALETTE's
+     table and the two can never say different things about one link (the pair
+     was the named gap the palette's own translation closed). */
+  const tDesc = useT(paletteDict);
   const Icon = ICONS[item.path];
+  /* Same fallback rule as ICONS and GROUPS above: a path this build's chrome
+     dictionary has never heard of renders nav.ts's English label — and its
+     English description — rather than nothing at all. */
+  const key = NAV_KEYS[item.path];
+  const descKey = NAV_DESC_KEYS[item.path];
   return (
     <Link
       to={item.path}
       activeOptions={{ exact: item.path === "/" }}
-      title={item.description}
+      onClick={onNavigate}
+      title={descKey ? tDesc(descKey) : item.description}
       className={cn(
         "group flex h-9 items-center gap-2.5 rounded-md px-2.5 text-[13.5px] text-muted-foreground",
         "transition-colors duration-(--dur-fast) ease-(--ease)",
@@ -82,13 +98,20 @@ function NavLink({ item }: { item: NavItem }) {
           className="size-4 shrink-0 opacity-70 transition-opacity duration-(--dur-fast) group-hover:opacity-100 group-[.active]:opacity-100 group-[.active]:text-primary"
         />
       ) : null}
-      <span className="truncate">{item.label}</span>
+      <span className="truncate">{key ? t(key) : item.label}</span>
     </Link>
   );
 }
 
-export function AppSidebar() {
+/**
+ * AppSidebar is the column itself. `onNavigate` fires on every link click and is
+ * how the narrow-viewport drawer closes after a navigation — a drawer that
+ * stayed open over the page it just loaded would hide the thing it was used to
+ * reach.
+ */
+export function AppSidebar({ onNavigate }: { onNavigate?: () => void } = {}) {
   const { me, can, isAnonymous } = useAuth();
+  const t = useT(chromeDict);
   return (
     <aside className="flex h-full w-64 flex-col bg-surface">
       <div className="flex items-center justify-between px-4 pb-2 pt-4">
@@ -104,15 +127,15 @@ export function AppSidebar() {
       {/* Named, like every other role in this kit (the palette's listbox is
           "Commands", the picker's grid is "Calendar"): "navigation" alone is
           what a landmark list would otherwise announce. */}
-      <nav aria-label="Main" className="flex-1 overflow-y-auto px-3 pb-4 pt-2">
+      <nav aria-label={t("shell.nav.aria")} className="flex-1 overflow-y-auto px-3 pb-4 pt-2">
         {groupItems().map((group) => (
-          <div key={group.label} className="mb-5">
+          <div key={group.key} className="mb-5">
             <div className="mb-1.5 px-2.5 text-[10.5px] font-semibold uppercase tracking-[0.1em] text-muted-foreground/70">
-              {group.label}
+              {t(group.key)}
             </div>
             <div className="flex flex-col gap-0.5">
               {group.items.map((item) => (
-                <NavLink key={item.path} item={item} />
+                <NavLink key={item.path} item={item} onNavigate={onNavigate} />
               ))}
             </div>
           </div>
@@ -126,7 +149,7 @@ export function AppSidebar() {
         {me && !isAnonymous ? (
           <UserMenu me={me} can={can} />
         ) : (
-          <span className="text-[11px] text-muted-foreground/70">Network connectivity console</span>
+          <span className="text-[11px] text-muted-foreground/70">{t("sidebar.footer")}</span>
         )}
       </div>
     </aside>

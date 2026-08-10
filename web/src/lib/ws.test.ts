@@ -205,11 +205,7 @@ describe("WsClient", () => {
   });
 });
 
-// Delivery is exactly-once but NOT ordered: the hub hands frames to a client
-// outside its lock, so a Broadcast racing a subscribe's replay can arrive
-// inverted (internal/console/ws/hub.go, `func (h *Hub) subscribe` doc — which
-// names this file as the place the consumer rule lives). Per-topic seq is the
-// authoritative ORDER, and the rule differs by topic class.
+// Delivery is exactly-once but NOT ordered: the hub hands frames to a client outside its lock.
 describe("WsClient seq discipline", () => {
   it("keeps only the highest seq on snapshot topics (topology, matrix:*)", () => {
     const client = newClient();
@@ -246,10 +242,7 @@ describe("WsClient seq discipline", () => {
     const socket = FakeSocket.last();
     socket.emitOpen();
 
-    // A racing broadcast delivers 6 before the replayed 1..5; dropping those
-    // five would lose event rows permanently (the live feed is a SET, not a
-    // succession of whole states). Ordering/dedupe by LiveEvent.id is the
-    // store's job — the client's job is to deliver every frame.
+    // A racing broadcast delivers 6 before the replayed 1..5.
     for (const seq of [6, 1, 2, 3, 4, 5]) {
       socket.emitEnvelope({ topic: "live", type: "event", seq, data: {} });
     }

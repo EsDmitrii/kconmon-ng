@@ -16,6 +16,7 @@ import (
 	"github.com/EsDmitrii/kconmon-ng/internal/metrics"
 	"github.com/EsDmitrii/kconmon-ng/internal/model"
 	"github.com/prometheus/client_golang/prometheus"
+	dto "github.com/prometheus/client_model/go"
 )
 
 type mockDeregisterer struct {
@@ -66,11 +67,8 @@ func TestGracefulDeregisterDoesNotBlockOnError(t *testing.T) {
 	}
 }
 
-// TestAgentCapabilitiesGatedOnExternalEnabled pins the advertisement that makes
-// an opted-out agent invisible to the controller's external dispatch path. The
-// controller refuses to send external_target to an agent that did not advertise
-// external-checks, so this flag is the outermost of the three gates (this one,
-// checkers.external.enabled in the executor, and the allowlist itself).
+// TestAgentCapabilitiesGatedOnExternalEnabled pins the advertisement that makes an opted-out agent
+// invisible to the controller's external dispatch path.
 func TestAgentCapabilitiesGatedOnExternalEnabled(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -223,10 +221,8 @@ func TestApplyExternalAssignmentDropsInvalidSpecsAndKeepsTheRest(t *testing.T) {
 
 // --- kconmon_ng_external_* metric family ------------------------------------
 
-// exposition renders a registry into a flat, searchable blob of family names
-// and LABEL VALUES. Hand-rolled rather than expfmt on purpose: the guard that
-// matters here is "no destination address appears anywhere in a label", and
-// searching the label values directly is what proves it.
+// exposition renders a registry into a flat, searchable blob of family names and LABEL VALUES;
+// hand-rolled rather than expfmt on purpose.
 func exposition(t *testing.T, reg *prometheus.Registry) string {
 	t.Helper()
 	families, err := reg.Gather()
@@ -280,10 +276,8 @@ func newTestRegistry(t *testing.T) (*prometheus.Registry, ResultHandler) {
 	return reg, NewResultHandler(m, checker.Target{NodeName: "node-a", Zone: "zone-a"})
 }
 
-// externalTCPResult drives a REAL ExternalChecker against a loopback listener
-// and returns the CheckResult a scheduler would hand the result handler. Using
-// the real checker rather than a hand-built CheckResult is what makes the
-// address guard meaningful: the address genuinely passed through the probe path.
+// externalTCPResult drives a REAL ExternalChecker against a loopback listener and returns the
+// CheckResult a scheduler would hand the result handler.
 func externalTCPResult(t *testing.T, allowed []string) (res model.CheckResult, host, port string) {
 	t.Helper()
 	var lc net.ListenConfig
@@ -496,5 +490,147 @@ func TestResultHandlerFeatureDisabledExposesNoExternalSeries(t *testing.T) {
 		if strings.Contains(line, "_external_") {
 			t.Errorf("external series exposed with the feature unused: %s", line)
 		}
+	}
+}
+
+// --- ICMP packet loss gauge -------------------------------------------------
+
+// The one pair every ICMP pin below drives. Fixed rather than threaded through
+// the helpers: what the pins are about is the VALUE on the series, not which
+// pair carries it.
+const (
+	icmpSrcNode = "node-a"
+	icmpDstNode = "node-b"
+)
+
+// icmpLoss reads the kconmon_ng_icmp_packet_loss_ratio sample for that pair. The
+// bool separates "no series at all" from "a series reading 0.0": those are
+// different states and only one of them is the bug pinned below.
+func icmpLoss(t *testing.T, reg *prometheus.Registry) (float64, bool) {
+	t.Helper()
+	for _, mtr := range icmpPairSamples(t, reg, "kconmon_ng_icmp_packet_loss_ratio") {
+		return mtr.GetGauge().GetValue(), true
+	}
+	return 0, false
+}
+
+// icmpFails reads kconmon_ng_icmp_results_total{result="fail"} for that pair.
+func icmpFails(t *testing.T, reg *prometheus.Registry) (float64, bool) {
+	t.Helper()
+	for _, mtr := range icmpPairSamples(t, reg, "kconmon_ng_icmp_results_total") {
+		for _, lp := range mtr.GetLabel() {
+			if lp.GetName() == "result" && lp.GetValue() == "fail" {
+				return mtr.GetCounter().GetValue(), true
+			}
+		}
+	}
+	return 0, false
+}
+
+// icmpPairSamples collects every sample of one family carrying the pin's pair.
+func icmpPairSamples(t *testing.T, reg *prometheus.Registry, family string) []*dto.Metric {
+	t.Helper()
+	families, err := reg.Gather()
+	if err != nil {
+		t.Fatalf("gathering registry: %v", err)
+	}
+	var out []*dto.Metric
+	for _, f := range families {
+		if f.GetName() != family {
+			continue
+		}
+		for _, mtr := range f.GetMetric() {
+			var gotSrc, gotDst string
+			for _, lp := range mtr.GetLabel() {
+				switch lp.GetName() {
+				case "source_node":
+					gotSrc = lp.GetValue()
+				case "destination_node":
+					gotDst = lp.GetValue()
+				}
+			}
+			if gotSrc == icmpSrcNode && gotDst == icmpDstNode {
+				out = append(out, mtr)
+			}
+		}
+	}
+	return out
+}
+
+// THE pin for a total ICMP outage.
+func TestResultHandlerICMPFailureWithoutDetailsReportsTotalLoss(t *testing.T) {
+	reg, handle := newTestRegistry(t)
+
+	// A healthy probe first: this is the 0.0 the bug used to freeze on the pair.
+	handle(model.CheckResult{
+		Type: model.CheckICMP, Source: "node-a", Destination: "node-b",
+		SourceZone: "zone-a", DestZone: "zone-b", Success: true,
+		Details: &model.ICMPDetails{RTT: 2 * time.Millisecond, LossRatio: 0},
+	})
+	if got, ok := icmpLoss(t, reg); !ok || got != 0 {
+		t.Fatalf("healthy probe must record loss 0.0, got %v (present=%v)", got, ok)
+	}
+
+	// The peer goes away. This is what the checker hands back on every error
+	// path that is not the read deadline.
+	handle(model.CheckResult{
+		Type: model.CheckICMP, Source: "node-a", Destination: "node-b",
+		SourceZone: "zone-a", DestZone: "zone-b", Success: false,
+		Error: "ICMP write: sendto: network is unreachable",
+	})
+
+	got, ok := icmpLoss(t, reg)
+	if !ok {
+		t.Fatal("the pair lost its icmp_packet_loss_ratio series entirely")
+	}
+	if got != 1 {
+		t.Errorf("a peer that answered nothing must read loss ratio 1.0, got %v", got)
+	}
+
+	// The counter half of the report was already correct; keep it that way.
+	if c, ok := icmpFails(t, reg); !ok || c != 1 {
+		t.Errorf("icmp_results_total{result=fail} = %v (present=%v), want 1", c, ok)
+	}
+}
+
+// A probe that never got a reply has no round-trip time, so the failed attempt must not land in the
+// RTT histogram.
+func TestResultHandlerICMPTimeoutRecordsLossNotLatency(t *testing.T) {
+	reg, handle := newTestRegistry(t)
+	handle(model.CheckResult{
+		Type: model.CheckICMP, Source: "node-a", Destination: "node-b",
+		SourceZone: "zone-a", DestZone: "zone-b", Success: false,
+		Error:   "ICMP read: i/o timeout",
+		Details: &model.ICMPDetails{RTT: 2 * time.Second, LossRatio: 1.0},
+	})
+
+	if got, ok := icmpLoss(t, reg); !ok || got != 1 {
+		t.Errorf("a timed-out probe must read loss ratio 1.0, got %v (present=%v)", got, ok)
+	}
+	if strings.Contains(exposition(t, reg), "kconmon_ng_icmp_rtt_seconds") {
+		t.Error("a timed-out probe published its timeout as an RTT observation")
+	}
+}
+
+// The same guard driven through the REAL ICMPChecker against RFC 5737 TEST-NET-1, which cannot
+// answer.
+func TestResultHandlerICMPUnreachableTargetReportsTotalLoss(t *testing.T) {
+	reg, handle := newTestRegistry(t)
+
+	c := checker.NewICMPChecker(300 * time.Millisecond)
+	res := c.Check(context.Background(), checker.Target{PodIP: "192.0.2.1"})
+	if res.Success {
+		t.Fatal("192.0.2.1 (TEST-NET-1) answered an echo request; the pin is meaningless here")
+	}
+	res.Source, res.Destination = "node-a", "node-b"
+	res.SourceZone, res.DestZone = "zone-a", "zone-b"
+	handle(res)
+
+	got, ok := icmpLoss(t, reg)
+	if !ok {
+		t.Fatalf("no loss series for an unreachable peer (checker error: %s)", res.Error)
+	}
+	if got != 1 {
+		t.Errorf("unreachable peer read loss %v, want 1.0 (checker error: %s)", got, res.Error)
 	}
 }

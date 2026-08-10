@@ -14,10 +14,9 @@ import (
 	"github.com/EsDmitrii/kconmon-ng/internal/console/store"
 )
 
-// The ScheduleService half of fakeChecksStore (the DefinitionService half,
-// and the struct itself, live in definitions_test.go -- one fake, so the
-// FOREIGN KEY and the ON DELETE CASCADE between the two tables can be
-// modelled at all).
+// The ScheduleService half of fakeChecksStore (the DefinitionService half, and the struct itself,
+// live in definitions_test.go -- one fake, so the FOREIGN KEY and the ON DELETE CASCADE between the
+// two tables can be modelled at all).
 
 func (f *fakeChecksStore) CreateSchedule(_ context.Context, in store.ScheduleInput) (store.Schedule, error) {
 	f.mu.Lock()
@@ -52,10 +51,8 @@ func (f *fakeChecksStore) UpdateSchedule(_ context.Context, id string, in store.
 	}
 	updated := store.Schedule{
 		ID: id,
-		// definition_id is deliberately NOT updatable (store's UpdateSchedule
-		// query does not touch the column) -- modelled here so a handler that
-		// tried to move a schedule would be caught by the fake, not silently
-		// pass.
+		// definition_id is deliberately NOT updatable (store's UpdateSchedule query does not touch the
+		// column).
 		DefinitionID: existing.DefinitionID,
 		Kind:         in.Kind, IntervalNs: in.IntervalNs, RunAt: in.RunAt, Enabled: in.Enabled,
 		LastFiredAt: existing.LastFiredAt, NextFireAt: in.NextFireAt,
@@ -213,9 +210,7 @@ func TestSchedulesCreateReturns201AndSeedsNextFire(t *testing.T) {
 	}
 }
 
-// Decision 9's honest refusal: cron is a cadence this milestone consciously
-// did not ship, and saying so beats a generic invalid-enum message that sends
-// an operator hunting a typo that is not there.
+// 's honest refusal: cron is a cadence this milestone consciously did not ship.
 func TestSchedulesCronReturns422WithTheMilestoneMessage(t *testing.T) {
 	st := newFakeChecksStore()
 	s := newOperatorChecksServer(t, st, nil)
@@ -520,10 +515,7 @@ func TestSchedulesListBadInputsAre400(t *testing.T) {
 
 /* ── QA round 5, finding #5: the failing schedule says so on the wire ─────── */
 
-// TestSchedulesExposeTheLastError pins both halves of the DTO: the pair is
-// PRESENT and empty on a healthy schedule (a client needs "" to mean healthy,
-// not a missing key it cannot distinguish from an older server), and it
-// carries the scheduler's own text once a fire has failed.
+// TestSchedulesExposeTheLastError pins both halves of the DTO.
 func TestSchedulesExposeTheLastError(t *testing.T) {
 	st := newFakeChecksStore()
 	s := newOperatorChecksServer(t, st, nil)

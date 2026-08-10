@@ -14,11 +14,7 @@ import (
 	"github.com/EsDmitrii/kconmon-ng/internal/console/store"
 )
 
-// AlertRuleService is the subset of *store.DB the export/import routes need
-// for alert_rules: the read seam and the write seam together, in
-// TargetService's shape. Declared here because export/import is the first
-// consumer of the M7 Task 1 store; the /api/v1/alert-rules CRUD routes reuse
-// this same interface rather than declaring a second one.
+// AlertRuleService is the subset of *store.DB the export/import routes need for alert_rules.
 type AlertRuleService interface {
 	store.AlertRuleReader
 	store.AlertRuleStore
@@ -27,39 +23,23 @@ type AlertRuleService interface {
 var _ AlertRuleService = (*store.DB)(nil)
 
 // exportBundleVersion is the ONLY bundle version this build reads or writes.
-// It is an integer, not a semver string, and it is checked for EQUALITY on
-// import: a bundle from a future console may describe collections this build
-// has never heard of, and silently importing the subset it recognises would
-// be a partial restore presented as a complete one.
 const exportBundleVersion = 1
 
-// exportUnavailableDetail is served whenever any config seam is unwired. The
-// bundle is the WHOLE declarative configuration, so a partial one -- targets
-// but no alert rules, because that seam happened to be nil -- would be a
-// restore point with a hole in it. Naming the value that turns persistence on
-// is the same remedy targetsUnavailableDetail names.
+// exportUnavailableDetail is served whenever any config seam is unwired; the bundle is the WHOLE
+// declarative configuration.
 const exportUnavailableDetail = "configuration export/import reads every persisted config table and has no " +
 	"in-memory fallback: set console.database.mode in the console config (Helm: console.database.mode) to " +
 	"enable /api/v1/export and /api/v1/import"
 
-// exportPageLimit is the page size the paged list seams are walked with, and
-// exportMaxPages bounds the walk. 500 is store's own clampLimit ceiling, so
-// this asks for the largest page the store will give. The cap exists so a
-// pathological table cannot turn one request into an unbounded read; it is
-// 10 000 rows per collection, which is two orders of magnitude above what a
-// hand-typed config table holds, and being told the export was refused beats
-// being handed a silently truncated one.
+// exportPageLimit is the page size the paged list seams are walked with; the cap exists so a
+// pathological table cannot turn one request into an unbounded read.
 const (
 	exportPageLimit = 500
 	exportMaxPages  = 20
 )
 
-// webhookImportNoSecretReason is the warning an endpoint that does not exist
-// here yet carries. It is a WARNING and a SKIP, never an error and never a
-// create: store.WebhookInput.Validate refuses an empty secret ("every
-// delivery is signed", M6 Decision 5) and a bundle never carries one, so the
-// only alternatives to skipping would be fabricating a signing key or
-// weakening the store's rule. Both are worse than saying so.
+// webhookImportNoSecretReason is the warning an endpoint that does not exist here yet carries; it
+// is a WARNING and a SKIP, never an error and never a create.
 const webhookImportNoSecretReason = "imported without secret: a bundle never carries webhook secrets and an " +
 	"endpoint cannot be created without one -- create it with POST /api/v1/webhooks (secret required), " +
 	"then re-import to apply the bundle's url, events and enabled flag"
@@ -68,17 +48,8 @@ const webhookImportNoSecretReason = "imported without secret: a bundle never car
 // Bundle shape
 // ---------------------------------------------------------------------------
 
-// exportSchedule is a check schedule as a bundle carries it: scheduleResponse
-// (schedules.go) MINUS lastFiredAt, nextFireAt and the lastError pair. Those
-// are scheduler BOOKKEEPING -- when this schedule last fired, when the due
-// index should hand it out next, and why the last fire produced no run --
-// which is an observation of a running console, not the cadence an operator
-// declared. Importing them would assert a fire history (and a failure) the
-// destination never had; nextFireAt is re-seeded on import exactly as POST
-// /api/v1/schedules seeds it (seedNextFireAt).
-//
-// Field names are scheduleResponse's, verbatim, so a bundle and an API read
-// spell the same thing the same way.
+// exportSchedule is a check schedule as a bundle carries it; importing them would assert a fire
+// history (and a failure) the destination never had.
 type exportSchedule struct {
 	ID           string     `json:"id"`
 	DefinitionID string     `json:"definitionId"`
@@ -88,38 +59,22 @@ type exportSchedule struct {
 	Enabled      bool       `json:"enabled"`
 }
 
-// exportWebhook is an endpoint as a bundle carries it: name, url, events,
-// enabled and the hasSecret BOOLEAN. There is no secret field and there never
-// will be -- the sealed bytes never leave the store through this package
-// (webhookResponse's doc comment states the type-level half of the same
-// guarantee) -- and the delivery-outcome columns (lastStatus, lastAttempt,
-// failures) are absent for exportSchedule's reason: they are what happened,
-// not what was configured.
+// exportWebhook is an endpoint as a bundle carries it: name; there is no secret field and there
+// never will be.
 type exportWebhook struct {
 	ID      string   `json:"id"`
 	Name    string   `json:"name"`
 	URL     string   `json:"url"`
 	Events  []string `json:"events"`
 	Enabled bool     `json:"enabled"`
-	// HasSecret is INFORMATIONAL on import: it tells a human reading the
-	// bundle that the source endpoint could sign its deliveries. It is always
-	// true for a stored row (the store refuses an empty secret), and it is
-	// never a licence to create one -- see webhookImportNoSecretReason.
+	// HasSecret is INFORMATIONAL on import: it tells a human reading the bundle that the source
+	// endpoint could sign its deliveries; it is always true for a stored row (the store refuses an
+	// empty secret).
 	HasSecret bool `json:"hasSecret"`
 }
 
-// exportAlertRule is an alert rule as a bundle carries it: the BUILDER half of
-// store.AlertRule and only that half. syncStatus, syncMessage and lastSyncedAt
-// are the reconciler's view of what the CLUSTER agrees to -- an observation of
-// a Prometheus that the destination console has never talked to -- so
-// importing them would let a bundle claim a sync that never happened.
-//
-// renderedExpr DOES travel. It is derived from the builder fields, but it is
-// derived by the renderer at write time (store.AlertRuleInput carries it for
-// exactly that reason: "one write path means a row can never hold an
-// expression rendered from a different version of its own params"), so
-// carrying it keeps a round trip lossless and gives the drift view something
-// to show before the destination's first reconcile.
+// exportAlertRule is an alert rule as a bundle carries it: the BUILDER half of store.AlertRule and
+// only that half.
 type exportAlertRule struct {
 	ID           string          `json:"id"`
 	Name         string          `json:"name"`
@@ -133,18 +88,7 @@ type exportAlertRule struct {
 	RenderedExpr string          `json:"renderedExpr"`
 }
 
-// exportBundle is GET /api/v1/export's body and POST /api/v1/import's
-// `bundle`. One type for both directions on purpose: a shape that can be
-// exported but not imported is a restore point nobody can restore.
-//
-// Collections are in DEPENDENCY ORDER -- targets before the definitions that
-// point at them, definitions before the schedules that point at them -- and
-// the importer walks them in exactly this order for the same reason.
-//
-// What is deliberately ABSENT: everything observational. No runs, no results,
-// no events, no incidents, no annotations, no MTR snapshots, no k8s events, no
-// audit rows. A bundle is what an operator DECLARED, so that it can be
-// declared again somewhere else.
+// exportBundle is GET /api/v1/export's body and POST /api/v1/import's `bundle`.
 type exportBundle struct {
 	Version            int                   `json:"version"`
 	ExportedAt         time.Time             `json:"exportedAt"`
@@ -160,33 +104,21 @@ type exportBundle struct {
 // Import request/response shape
 // ---------------------------------------------------------------------------
 
-// importRequest is POST /api/v1/import's body. dryRun is a BODY FLAG rather
-// than a ?dryRun= query parameter, deliberately: the flag and the bundle it
-// applies to are one indivisible statement, a query parameter silently
-// dropped by a proxy or a typo'd client would turn a preview into an apply,
-// and the body is already the thing a client had to construct anyway.
+// importRequest is POST /api/v1/import's body.
 type importRequest struct {
 	DryRun bool          `json:"dryRun"`
 	Bundle *exportBundle `json:"bundle"`
 }
 
-// importItemNote names ONE item and what happened to it. Name is the item's
-// natural key as a human reads it (a target/definition/rule/endpoint name, a
-// "definition/kind" pair for a schedule, a "scope@start" pair for a window),
-// never a UUID alone -- an id in an error message is a lookup, not an answer.
+// importItemNote names ONE item and what happened to it; name is the item's natural key as a human
+// reads it (a target/definition/rule/endpoint name, a "definition/kind" pair for a schedule, a
+// "scope@start" pair for a window).
 type importItemNote struct {
 	Name   string `json:"name"`
 	Reason string `json:"reason"`
 }
 
-// importCollectionResult is one collection's outcome. The three counters are
-// disjoint and every bundle item lands in exactly one of them or in Errors.
-//
-// Errors vs Warnings: an ERROR is an item that did not import and that the
-// operator can act on by fixing the bundle (an invalid value, a dangling
-// reference, an ambiguous natural key). A WARNING is an item the import
-// handled correctly and completely, whose OUTCOME still needs a human -- today
-// that is exactly one case, the secret-less webhook.
+// importCollectionResult is one collection's outcome.
 type importCollectionResult struct {
 	Created  int              `json:"created"`
 	Updated  int              `json:"updated"`
@@ -203,11 +135,7 @@ func (r *importCollectionResult) warn(name, reason string) {
 	r.Warnings = append(r.Warnings, importItemNote{Name: name, Reason: reason})
 }
 
-// counts renders this collection's three counters plus its error/warning
-// tallies for the audit row. NO ITEM NAMES: an audit log is read by more
-// people and retained longer than the configuration it describes, and the
-// names are all readable from the bundle itself by whoever holds the
-// permission to import it.
+// counts renders this collection's three counters plus its error/warning tallies for the audit row.
 func (r *importCollectionResult) counts() map[string]int {
 	return map[string]int{
 		"created": r.Created, "updated": r.Updated, "skipped": r.Skipped,
@@ -215,10 +143,7 @@ func (r *importCollectionResult) counts() map[string]int {
 	}
 }
 
-// importResponse is POST /api/v1/import's body, keyed by collection with the
-// bundle's own key names so a caller can zip the two together. Identical in
-// shape for a dry run and an apply -- that is the entire point of the dry run:
-// what it predicts is what the apply does.
+// importResponse is POST /api/v1/import's body.
 type importResponse struct {
 	DryRun             bool                   `json:"dryRun"`
 	Targets            importCollectionResult `json:"targets"`
@@ -333,12 +258,7 @@ func (s *Server) buildExportBundle(ctx context.Context) (exportBundle, error) {
 		bundle.Webhooks = append(bundle.Webhooks, exportWebhookFrom(&hooks[i]))
 	}
 
-	// Only windows that have NOT ENDED. A closed maintenance window is
-	// history -- it explains a chart the destination console never drew --
-	// and carrying every window ever declared would make the bundle grow
-	// with time, which is precisely what "configuration, not observation"
-	// rules out. From = now with no To is ListMaintenanceWindows' overlap
-	// test for "still open or still ahead".
+	// Only windows that have NOT ENDED.
 	windows, err := s.listMaintenanceWindows(ctx, store.MaintenanceFilter{From: time.Now().UTC()})
 	if err != nil {
 		return exportBundle{}, err
@@ -383,13 +303,8 @@ func exportAlertRuleFrom(r *store.AlertRule) exportAlertRule {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// Paged reads
-//
-// The four keyset-paged seams are walked to exhaustion here rather than served
-// one page at a time: a bundle with a nextCursor in it is not a bundle. Each
-// walk is bounded by exportMaxPages (see the constant's doc comment).
-// ---------------------------------------------------------------------------
+// Paged reads The four keyset-paged seams are walked to exhaustion here rather than served one page
+// at a time.
 
 func (s *Server) listAllTargets(ctx context.Context) ([]store.Target, error) {
 	var out []store.Target
@@ -463,17 +378,8 @@ func (s *Server) listMaintenanceWindows(ctx context.Context, f store.Maintenance
 // Import
 // ---------------------------------------------------------------------------
 
-// handleImport merges a bundle into this console's configuration.
-//
-// NOT ONE TRANSACTION, and that is the deliberate choice: every item is its
-// own statement, an item that fails is reported and stepped past, and the
-// response is a precise per-item ledger of what landed. For CONFIG
-// RECONCILIATION that beats all-or-nothing -- an operator restoring 40
-// definitions after a cluster rebuild wants the 39 that are valid, plus the
-// name of the one that is not, rather than nothing at all and a single error.
-// The cost is honest and stated here: a failed import leaves the console in a
-// partially-merged state, which is why dry-run exists and why the response
-// names every item.
+// handleImport merges a bundle into this console's configuration; for CONFIG RECONCILIATION that
+// beats all-or-nothing.
 func (s *Server) handleImport(w http.ResponseWriter, r *http.Request) {
 	if s.configUnavailable(w) {
 		return
@@ -510,35 +416,16 @@ func (s *Server) handleImport(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, res)
 }
 
-// importer carries the one thing that makes this task more than six merge
-// loops: the ID REMAP.
-//
-// Nothing in a bundle keeps its exported UUID. store.CreateTarget mints its
-// own ("the id is minted here rather than by a column DEFAULT so the whole
-// package keeps one id story") and so do CreateDefinition, CreateSchedule,
-// CreateAlertRule, CreateWebhook and CreateMaintenanceWindow -- there is no
-// public store call anywhere that accepts a caller-chosen primary key. A
-// bundle's own cross-references (a definition's destinationTargetId, a
-// schedule's definitionId) are therefore ids that will not exist in the
-// destination, and importing them verbatim would produce rows pointing at
-// nothing.
-//
-// So each collection records, as it goes, the mapping from the BUNDLE's id to
-// the id the destination actually has -- freshly minted for a create, the
-// pre-existing row's for an update. Downstream collections resolve their
-// references through those maps first. A reference the maps do not know is
-// then checked against the destination's own rows by id (the bundle simply did
-// not include a target this definition legitimately points at); only if it is
-// in neither place is the item an error, and that error names BOTH sides.
+// importer carries the one thing that makes this task more than six merge loops: the ID REMAP; a
+// bundle's own cross-references (a definition's destinationTargetId, a schedule's definitionId) are
+// therefore ids that will not exist in the destination.
 type importer struct {
 	server *Server
 	ctx    context.Context
 	dryRun bool
 
-	// targetIDs and defIDs are bundle id -> destination id. On a dry run the
-	// value for a would-be create is the bundle's own id: nothing is written,
-	// so the only later use is a natural-key lookup that must find nothing,
-	// and an id that exists in no table is exactly right for that.
+	// targetIDs and defIDs are bundle id -> destination id; on a dry run the value for a would-be
+	// create is the bundle's own id: nothing is written.
 	targetIDs map[string]string
 	defIDs    map[string]string
 
@@ -555,11 +442,8 @@ func (i *importer) run(bundle *exportBundle) (importResponse, error) {
 
 	res := importResponse{DryRun: i.dryRun}
 
-	// Dependency order, and the reason for it: a definition may point at a
-	// target and a schedule at a definition, so each must be resolvable by the
-	// time the thing referencing it is walked. alertRules, webhooks and
-	// maintenanceWindows reference nothing and could go anywhere; they go last
-	// so the ordered half of the walk reads as one story.
+	// Dependency order, and the reason for it: a definition may point at a target and a schedule at a
+	// definition.
 	if err := i.importTargets(bundle.Targets, &res.Targets); err != nil {
 		return importResponse{}, err
 	}
@@ -739,10 +623,7 @@ func (i *importer) importDefinitions(items []definitionResponse, res *importColl
 
 // --- check schedules -------------------------------------------------------
 
-// scheduleLabel is a schedule's natural key as a human reads it. check_schedules
-// has no name column and no unique constraint, so the importer's key is
-// (definition, kind) -- the one pair that identifies "the cadence this check
-// runs on" in the way an operator thinks about it.
+// scheduleLabel is a schedule's natural key as a human reads it.
 func scheduleLabel(defName, kind string) string {
 	if defName == "" {
 		defName = "(unknown definition)"
@@ -755,10 +636,8 @@ func (i *importer) importSchedules(items []exportSchedule, res *importCollection
 	if err != nil {
 		return err
 	}
-	// byKey groups the destination's schedules by (definition id, kind) --
-	// the natural key. A slice, not a single value: the column has no unique
-	// constraint, so two of a kind is a state the database allows and the
-	// importer must refuse to guess about.
+	// byKey groups the destination's schedules by (definition id, kind) -- the natural key; a slice,
+	// not a single value: the column has no unique constraint.
 	byKey := map[string][]store.Schedule{}
 	for idx := range existing {
 		key := existing[idx].DefinitionID + "\x00" + existing[idx].Kind
@@ -834,11 +713,8 @@ func (i *importer) importAlertRules(items []exportAlertRule, res *importCollecti
 	if err != nil {
 		return fmt.Errorf("list alert rules: %w", err)
 	}
-	// lower(name), because that is exactly what migration 00007's
-	// alert_rules_name_lower_idx makes unique: a bundle rule named
-	// "EdgePairLoss" and a stored "edgepairloss" are the same rule, and
-	// attempting a create would be an ErrAlreadyExists the operator cannot act
-	// on.
+	// lower(name), because that is exactly what migration 00007's alert_rules_name_lower_idx makes
+	// unique.
 	byName := make(map[string]store.AlertRule, len(existing))
 	for idx := range existing {
 		byName[strings.ToLower(existing[idx].Name)] = existing[idx]
@@ -909,10 +785,7 @@ func (i *importer) importWebhooks(items []exportWebhook, res *importCollectionRe
 			res.warn(item.Name, webhookImportNoSecretReason)
 			continue
 		}
-		// The STORED ciphertext is carried through untouched. That is what
-		// makes an import able to fix a URL or an event filter without
-		// destroying the signing key -- the same three-state contract PUT
-		// /api/v1/webhooks/{id} implements for an absent "secret".
+		// The STORED ciphertext is carried through untouched.
 		in := store.WebhookInput{
 			Name: item.Name, URL: item.URL, Events: item.Events,
 			SecretEnc: cur.SecretEnc, Enabled: item.Enabled,
@@ -989,11 +862,7 @@ func (i *importer) importMaintenanceWindows(items []maintenanceResponse, res *im
 		}
 		key := maintenanceKey(item.Scope, item.StartAt, item.EndAt)
 		if seen[key] {
-			// SKIPPED, never updated: store.MaintenanceStore has no update by
-			// design (M6 Task 4 -- "a window is two timestamps and a reason,
-			// so delete-and-recreate is both the correction path and the whole
-			// of it"), so an identical window is already what the bundle asks
-			// for and a changed reason is a delete the operator must make.
+			// SKIPPED, never updated: store.MaintenanceStore has no update by design.
 			res.Skipped++
 			continue
 		}

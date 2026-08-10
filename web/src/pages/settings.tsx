@@ -1,35 +1,42 @@
-import { useEffect, useId, useRef, useState, type FormEvent, type ReactNode } from "react";
+import { Fragment, useEffect, useId, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { PageShell } from "@/components/page-shell";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
+import { DateTimePicker } from "@/components/ui/datetime-picker";
+import { Segmented, type SegmentedOption } from "@/components/ui/segmented";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useAuth } from "@/hooks/use-auth";
 import { useSubmitGuard } from "@/hooks/use-submit-guard";
 import { MaintenanceRow } from "@/components/maintenance";
 import {
   ApiError,
+  createToken,
   createWebhook,
+  deleteToken,
   deleteWebhook,
   exportConfig,
   getConfig,
+  getVersion,
   getMaintenance,
   importConfig,
+  listTokens,
   listWebhooks,
   testWebhook,
   updateWebhook,
 } from "@/lib/api";
-// Read in each mutating component rather than threaded down as a prop, the same
-// way pages/targets.tsx does it: it is a context read, it costs nothing, and
-// every affordance then states its own dependency. See lib/timemachine.tsx for
-// the rule these all follow — a permission decides whether a control EXISTS,
-// this decides whether it is usable right now.
+// Read in each mutating component rather than threaded down as a prop, the same way
+// pages/targets.tsx does it.
+import { stampFull, translate, useLocale, useT, type Locale, type Translate } from "@/lib/i18n";
+import { pluralKey, settingsDict, type SettingsKey } from "@/lib/i18n/dict/settings";
 import { useWriteGuard } from "@/lib/timemachine";
 import type {
   ConfigBundle,
   ConfigImportCollectionResult,
   ConfigImportResult,
+  Token,
+  TokenCreateResponse,
   Webhook,
   WebhookEvent,
   WebhookRequest,
@@ -37,55 +44,8 @@ import type {
 import { CHECKBOX_CLASS, cn } from "@/lib/utils";
 
 /**
- * The Settings page (M7 Task 10, plan Decision 10).
- *
- * WHAT IS HERE, and why the nav description promises more than this file
- * delivers. NAV_ITEMS calls /settings "Auth, RBAC, retention, maintenance,
- * webhooks, export/import", and that sentence predates the decision this page
- * implements. What ships is:
- *
- *   1. Webhooks — full CRUD plus test delivery, behind webhooks:manage.
- *   2. Configuration export / import — behind settings:write.
- *   3. About this console — read-only, everyone who can see the page.
- *
- * And what deliberately does NOT ship here, each for its own reason:
- *
- *   RBAC and token administration. There is no UI for either, in this file or
- *   anywhere else, and adding one is not a page-layout decision: rbac:manage
- *   and tokens:manage are the credential-issuing permissions, a token is shown
- *   exactly once at creation, and a half-built version of that surface is worse
- *   than none. The nav sentence keeps saying "RBAC" until MILESTONES' as-built
- *   pass rewrites it; this comment is the honest record in the meantime.
- *
- *   Maintenance windows — CREATING them. They already have surfaces — the
- *   MaintenanceBar on /investigate, /explore and the object cards
- *   (components/maintenance.tsx) — where a window is declared next to the chart
- *   it explains. A second create form here would be a second place to get the
- *   same thing wrong, so About LINKS to those surfaces instead.
- *
- *   LISTING AND DELETING THEM DOES SHIP HERE (QA round 3, finding #9), and it
- *   is the exception that proves the paragraph above rather than a reversal of
- *   it. Every MaintenanceBar is bounded to the RANGE of the chart it sits under
- *   — that is what makes the bands honest — so a window declared for next
- *   Tuesday appeared on no surface in this console the moment it was saved: QA
- *   created one and then could not find it, edit it or delete it anywhere. An
- *   orphaned write is worse than a missing form. So the section below is a
- *   deliberately minimal one: the UNBOUNDED list (GET /api/v1/maintenance with
- *   no from/to), each row's scope, reason and span, and the same confirm-delete
- *   every destructive control in this console wears. No create form — creation
- *   stays next to the chart it explains, exactly as the paragraph above says.
- *
- *   Retention numbers. GET /api/v1/config does not serve them (httpapi's
- *   handleConfig: auth mode/role/loginPath, the anonymous banner flag, and
- *   three `configured` booleans — that is the whole body). Inventing a route to
- *   fetch them is a backend change this task does not own, so About says
- *   plainly that the browser is not told, and names where the numbers live.
- *
- * DEGRADED MODE. Neither gated section pre-checks `database.configured` the way
- * pages/targets.tsx does. The 503 both sets of routes answer with names
- * console.database.mode in its own detail, in better words than a second copy
- * here would, and rendering the server's sentence verbatim keeps one authority
- * on what is missing instead of two that can drift.
+ * WHAT IS HERE, and why the nav description promises more than this file delivers; a second create
+ * form here would be a second place to get the same thing wrong.
  */
 
 /* ── shared bits ────────────────────────────────────────────────────────── */
@@ -94,10 +54,12 @@ function queryErrorMessage(error: unknown, fallback: string): string {
   return error instanceof ApiError ? (error.problem.detail ?? error.problem.title) : fallback;
 }
 
-function fmtTime(timestamp?: string | null): string {
+/** The locale is required: a bare toLocaleString() reorders the date and swaps in AM/PM from
+ *  whatever the browser was installed in — "8/10/2026 3:47 AM" on a Russian page. */
+function fmtTime(timestamp: string | null | undefined, locale: Locale): string {
   if (!timestamp) return "—";
   const d = new Date(timestamp);
-  return Number.isNaN(d.getTime()) ? timestamp : d.toLocaleString();
+  return Number.isNaN(d.getTime()) ? timestamp : stampFull(d, locale);
 }
 
 function fieldClasses(invalid: boolean): string {
@@ -107,10 +69,11 @@ function fieldClasses(invalid: boolean): string {
   );
 }
 
-function SectionCard({ title, children }: { title: string; children: ReactNode }) {
+function SectionCard({ id, title, children }: { id?: string; title: string; children: ReactNode }) {
   return (
     <Card asChild className="p-6">
-      <section>
+      {/* `id` is the anchor the sidebar's user menu links a deep link at. */}
+      <section id={id}>
         <h2 className="text-sm font-semibold">{title}</h2>
         {children}
       </section>
@@ -126,18 +89,37 @@ function ErrorLine({ children, id }: { children: ReactNode; id?: string }) {
   );
 }
 
+/** enT is the English translator this file's PURE helpers default to, so
+ *  parseBundle keeps the signature (and the output) its unit tests read. */
+const enT: Translate<SettingsKey> = (key, vars) => translate(settingsDict, "en", key, vars);
+
+/**
+ * withNodes renders a translated sentence that contains LINKS; two paragraphs on this page say "…on
+ * Investigate or Explore…" with each name an anchor.
+ */
+function withNodes(template: string, nodes: Record<string, ReactNode>): ReactNode[] {
+  return template.split(/(\{\w+\})/).map((chunk, i) => {
+    const name = /^\{(\w+)\}$/.exec(chunk)?.[1];
+    const node = name === undefined ? undefined : nodes[name];
+    return node === undefined ? chunk : <Fragment key={i}>{node}</Fragment>;
+  });
+}
+
+/** The two surface names that appear as links in those sentences. Their words
+ *  come from this dictionary and match what the sidebar calls the same pages. */
+function SurfaceLink({ href, children }: { href: string; children: ReactNode }) {
+  return (
+    <a href={href} className="text-primary hover:underline">
+      {children}
+    </a>
+  );
+}
+
 /* ── webhooks ───────────────────────────────────────────────────────────── */
 
 /**
- * WEBHOOK_EVENTS is the closed subscribable set as of THIS build, in the order
- * the checkbox group renders it: the incident family first, then the alert
- * family, each grouped so the list reads the way the two payload shapes divide.
- * It is typed as WebhookEvent[] rather than inferred, deliberately — the array
- * has to fail typechecking the day the enum narrows, and an inferred one never
- * would.
- *
- * There is no runtime enum to derive this from: openapi-typescript emits
- * WebhookEvent as a TYPE union, which vanishes at build time.
+ * WEBHOOK_EVENTS is the closed subscribable set as of THIS build; it is typed as WebhookEvent[]
+ * rather than inferred.
  */
 const WEBHOOK_EVENTS: WebhookEvent[] = [
   "incident.created",
@@ -148,16 +130,9 @@ const WEBHOOK_EVENTS: WebhookEvent[] = [
 ];
 
 /**
- * TEST_REFETCH_DELAY_MS is how long the page waits after a 202 before re-reading
- * the endpoint list.
- *
- * It is a nicety, not a mechanism. The delivery ladder is asynchronous and the
- * console makes no promise about when the outcome row is written, so this
- * refetch is a convenience for the common case where the receiver answers
- * immediately — the copy next to it says the outcome lands on the row either
- * way, and a slower receiver's result arrives on the next natural read rather
- * than being lost. Kept well under vitest's waitFor budget so the tests
- * exercise the real timer instead of a fake clock.
+ * TEST_REFETCH_DELAY_MS is how long the page waits after a 202 before re-reading the endpoint list;
+ * the delivery ladder is asynchronous and the console makes no promise about when the outcome row
+ * is written.
  */
 export const TEST_REFETCH_DELAY_MS = 400;
 
@@ -172,21 +147,7 @@ export interface WebhookDraft {
   secret: string;
 }
 
-/**
- * webhookRequestFrom turns the draft into the body that goes on the wire, and
- * the ONLY interesting thing it does is with a blank secret box: it omits the
- * KEY, rather than sending "" or null.
- *
- * That is the API's rule, not a preference (docs/console-api.yaml's PUT
- * description): absent means KEEP the stored ciphertext, "" is 422 on both
- * create and update because neither "keep" nor "clear" would be more than a
- * guess about what an operator meant by an empty box. So an operator editing a
- * URL never has to re-type a signing key they may not have, and a create with a
- * blank box is refused CLIENT-side (see WebhookForm) rather than sent to
- * collect a 422 that says the same thing one round trip later.
- *
- * The secret is not trimmed. Leading and trailing bytes are part of a key.
- */
+/** webhookRequestFrom turns the draft into the body that goes on the wire. */
 export function webhookRequestFrom(draft: WebhookDraft): WebhookRequest {
   const req: WebhookRequest = {
     name: draft.name,
@@ -198,20 +159,7 @@ export function webhookRequestFrom(draft: WebhookDraft): WebhookRequest {
   return req;
 }
 
-/* ── 422 → form field ───────────────────────────────────────────────────────
-   The same treatment pages/targets.tsx's three forms already have, applied to
-   this one in QA round 5 (finding #13). A refused endpoint used to render its
-   whole reason as one banner above the buttons — "webhook: url ... must start
-   with http:// or https://" printed a long way from the URL box, with nothing
-   marking which of the four fields was wrong. On a five-field form that is a
-   reading exercise.
-
-   Problem+json carries NO field pointer (docs/console-api.yaml's Problem has
-   exactly four members), so the field is recovered from the noun the server's
-   own message leads with: store/webhooks.go builds every message as
-   "webhook: <field> ...". This is a PRESENTATION heuristic — a detail matching
-   no phrase still renders verbatim as a form-level error, which is what the
-   banner already did. */
+/* 422 → form field The same treatment pages/targets.tsx's three forms already have. */
 
 export type WebhookField = "name" | "url" | "secret" | "events";
 
@@ -248,10 +196,48 @@ function lastStatusTone(lastStatus: string): "neutral" | "ok" | "bad" | "unknown
   return "unknown";
 }
 
+/** FieldErrors is targets.tsx's shape: a message per field, plus "form" for
+ *  anything that names no field this form has. */
+type FieldErrors<F extends string> = Partial<Record<F | "form", string>>;
+
+/** WEBHOOK_NAME_RE is store.webhookNameRE, mirrored: lowercase alphanumerics and hyphens. */
+const WEBHOOK_NAME_RE = /^[a-z0-9-]+$/;
+
+/**
+ * webhookDraftErrors returns EVERY basic problem in a draft at once.
+ *
+ * The server refuses one thing at a time — it returns on the first failure —
+ * so a draft with an empty name, a bare-hostname URL and no events took three
+ * submits to learn three facts. These are only the checks a browser can be
+ * certain about; anything subtler is still the server's call, and its words
+ * are what render for it.
+ */
+export function webhookDraftErrors(
+  draft: WebhookDraft,
+  editing: boolean,
+  t: Translate<SettingsKey>,
+): FieldErrors<WebhookField> {
+  const errors: FieldErrors<WebhookField> = {};
+  const name = draft.name.trim();
+  if (name === "") errors.name = t("webhooks.form.nameRequired");
+  else if (!WEBHOOK_NAME_RE.test(name)) errors.name = t("webhooks.form.nameCharset");
+
+  const url = draft.url.trim();
+  if (url === "") errors.url = t("webhooks.form.urlRequired");
+  else if (!url.startsWith("http://") && !url.startsWith("https://")) errors.url = t("webhooks.form.urlScheme");
+
+  if (draft.events.length === 0) errors.events = t("webhooks.form.eventsRequired");
+
+  // Only on CREATE: editing with an empty box keeps the stored secret.
+  if (!editing && draft.secret === "") errors.secret = t("webhooks.form.secretRequired");
+
+  return errors;
+}
+
 function WebhookForm({ initial, onDone }: { initial?: Webhook; onDone: () => void }) {
+  const t = useT(settingsDict);
   const qc = useQueryClient();
-  /* guard carries the DISABLED flag AND the reason for it — lib/timemachine's
-     useWriteGuard (QA round 2, finding #18). Spread it onto the control. */
+  /* guard carries the DISABLED flag AND the reason for it — lib/timemachine's useWriteGuard. */
   const guard = useWriteGuard();
   const secretId = useId();
   const [draft, setDraft] = useState<WebhookDraft>({
@@ -265,46 +251,72 @@ function WebhookForm({ initial, onDone }: { initial?: Webhook; onDone: () => voi
      begin() is a REF write, so three clicks in one task produce one request.
      hooks/use-submit-guard.ts says why a useState flag cannot do this. */
   const { submitting, begin, end } = useSubmitGuard();
-  const [error, setError] = useState<string>();
-  /* Which field the last refusal named, or null for a form-level one
-     (finding #13). Separate from `error`, which still carries the server's
-     words verbatim — the field only decides WHERE they render. */
-  const [errorField, setErrorField] = useState<WebhookField | null>(null);
+  /* The draft as it was handed over, for the discard prompt below — the same
+     shape the rule builder uses, and for the same reason: these two are the
+     forms with enough in them to be worth a question. */
+  const pristine = useRef(
+    JSON.stringify({
+      name: initial?.name ?? "",
+      url: initial?.url ?? "",
+      events: initial?.events ?? [],
+      enabled: initial?.enabled ?? true,
+      secret: "",
+    }),
+  );
+  const dirty = JSON.stringify(draft) !== pristine.current;
+  const [discarding, setDiscarding] = useState(false);
+  /* A MAP, not one message: the client checks say everything wrong with the
+     draft at once, and each message renders at the field it is about rather
+     than 256px below it in a single slot. A server refusal still lands here
+     verbatim, routed by the phrase it names. */
+  const [errors, setErrors] = useState<FieldErrors<WebhookField>>({});
   const errorId = useId();
 
-  /** fail routes one refusal: the message always shows, and it shows AT the
-   *  field when the server named one. */
-  function fail(message: string, field: WebhookField | null) {
-    setError(message);
-    setErrorField(field);
+  /** invalid marks a field for aria-invalid and the red border. */
+  const invalid = (field: WebhookField) => errors[field] !== undefined;
+  /** fieldErrorId is the id of the message rendered beside a field. */
+  const fieldErrorId = (field: WebhookField) => `${errorId}-${field}`;
+  /** describedBy points a field's assistive description at its OWN message. */
+  const describedBy = (field: WebhookField) => (invalid(field) ? fieldErrorId(field) : undefined);
+
+  /** FieldError renders one field's message right under it. */
+  function FieldError({ field }: { field: WebhookField }) {
+    const message = errors[field];
+    if (message === undefined) return null;
+    return (
+      <span id={fieldErrorId(field)} role="alert" className="text-xs leading-relaxed text-health-bad">
+        {message}
+      </span>
+    );
   }
 
-  /** invalid marks a field for aria-invalid and the red border. */
-  const invalid = (field: WebhookField) => errorField === field;
-  /** describedBy points a field's assistive description at the one message,
-   *  so a screen reader reading the URL box hears why it was refused. */
-  const describedBy = (field: WebhookField) => (errorField === field ? errorId : undefined);
+  /* Editing answers an error: a field the reader has just changed must stop
+     carrying a verdict about what it used to hold. */
+  function edit(field: WebhookField, next: Partial<WebhookDraft>) {
+    setErrors((prev) => {
+      if (prev[field] === undefined && prev.form === undefined) return prev;
+      const rest = { ...prev };
+      delete rest[field];
+      delete rest.form;
+      return rest;
+    });
+    setDraft((d) => ({ ...d, ...next }));
+  }
 
   function toggleEvent(event: WebhookEvent) {
-    setDraft((d) => ({
-      ...d,
-      events: d.events.includes(event) ? d.events.filter((e) => e !== event) : [...d.events, event],
-    }));
+    const next = draft.events.includes(event)
+      ? draft.events.filter((e) => e !== event)
+      : [...draft.events, event];
+    edit("events", { events: next });
   }
 
   async function handleSubmit(e: FormEvent) {
     e.preventDefault();
-    setError(undefined);
-    setErrorField(null);
-    // The one rule mirrored client-side. Everything else — the name charset,
-    // the url scheme, an empty event list — is left to the server's 422, whose
-    // wording is better than a second copy of the rule would be. This one is
-    // mirrored because a blank box on CREATE is the single case where the
-    // wire body would be ambiguous rather than merely invalid.
-    if (!initial && draft.secret === "") {
-      fail("A secret is required: every delivery is signed, so an endpoint without one cannot exist.", "secret");
-      return;
-    }
+    const basics = webhookDraftErrors(draft, initial !== undefined, t);
+    setErrors(basics);
+    // Every basic problem is now on screen at once; there is nothing to learn
+    // from a round trip that would only report the first of them again.
+    if (Object.keys(basics).length > 0) return;
     if (!begin()) return;
     try {
       const req = webhookRequestFrom(draft);
@@ -313,9 +325,11 @@ function WebhookForm({ initial, onDone }: { initial?: Webhook; onDone: () => voi
       await qc.invalidateQueries({ queryKey: ["webhooks"] });
       onDone();
     } catch (err) {
-      const message = queryErrorMessage(err, "Failed to save the endpoint");
-      // A non-ApiError has no server words to route, so it stays form-level.
-      fail(message, err instanceof ApiError ? webhookFieldForDetail(message) : null);
+      const message = queryErrorMessage(err, t("webhooks.form.failed"));
+      // The server's words, verbatim, at the field its phrase names; a
+      // non-ApiError has none to route, so it stays form-level.
+      const field = err instanceof ApiError ? webhookFieldForDetail(message) : null;
+      setErrors(field ? { [field]: message } : { form: message });
       end();
     }
   }
@@ -323,30 +337,44 @@ function WebhookForm({ initial, onDone }: { initial?: Webhook; onDone: () => voi
   return (
     <Card asChild className="p-6">
       <form onSubmit={handleSubmit} className="flex flex-col gap-4">
-        <h3 className="text-sm font-semibold">{initial ? `Edit ${initial.name}` : "New endpoint"}</h3>
+        <h3 className="text-sm font-semibold">
+          {initial ? t("webhooks.form.edit", { name: initial.name }) : t("webhooks.form.create")}
+        </h3>
         <div className="grid gap-4 sm:grid-cols-2">
-          <label className="flex flex-col gap-1 text-[13px]">
-            <span className="text-muted-foreground">Name</span>
-            <input
-              value={draft.name}
-              placeholder="pagerduty"
-              aria-invalid={invalid("name") || undefined}
-              aria-describedby={describedBy("name")}
-              onChange={(e) => setDraft((d) => ({ ...d, name: e.target.value }))}
-              className={fieldClasses(invalid("name"))}
-            />
-          </label>
-          <label className="flex flex-col gap-1 text-[13px]">
-            <span className="text-muted-foreground">URL</span>
-            <input
-              value={draft.url}
-              placeholder="https://hooks.example.test/incidents"
-              aria-invalid={invalid("url") || undefined}
-              aria-describedby={describedBy("url")}
-              onChange={(e) => setDraft((d) => ({ ...d, url: e.target.value }))}
-              className={fieldClasses(invalid("url"))}
-            />
-          </label>
+          {/* The message is a SIBLING of the label, not a child of it: text
+              inside a wrapping <label> becomes part of the control's accessible
+              name, and "Name webhook: name "pd" is already taken" is not what
+              the box is called. */}
+          <div className="flex flex-col gap-1 text-[13px]">
+            <label className="flex flex-col gap-1">
+              <span className="text-muted-foreground">{t("webhooks.form.name")}</span>
+              {/* The two placeholders are sample VALUES — a receiver's name and
+                  a receiver's URL — and stay as they are. */}
+              <input
+                value={draft.name}
+                placeholder="pagerduty"
+                aria-invalid={invalid("name") || undefined}
+                aria-describedby={describedBy("name")}
+                onChange={(e) => edit("name", { name: e.target.value })}
+                className={fieldClasses(invalid("name"))}
+              />
+            </label>
+            <FieldError field="name" />
+          </div>
+          <div className="flex flex-col gap-1 text-[13px]">
+            <label className="flex flex-col gap-1">
+              <span className="text-muted-foreground">{t("webhooks.form.url")}</span>
+              <input
+                value={draft.url}
+                placeholder="https://hooks.example.test/incidents"
+                aria-invalid={invalid("url") || undefined}
+                aria-describedby={describedBy("url")}
+                onChange={(e) => edit("url", { url: e.target.value })}
+                className={fieldClasses(invalid("url"))}
+              />
+            </label>
+            <FieldError field="url" />
+          </div>
         </div>
 
         {/* The event list has no single input to mark, so the GROUP carries it:
@@ -357,7 +385,11 @@ function WebhookForm({ initial, onDone }: { initial?: Webhook; onDone: () => voi
           aria-invalid={invalid("events") || undefined}
           aria-describedby={describedBy("events")}
         >
-          <legend className={cn("text-muted-foreground", invalid("events") && "text-health-bad")}>Events</legend>
+          <legend className={cn("text-muted-foreground", invalid("events") && "text-health-bad")}>
+            {t("webhooks.form.events")}
+          </legend>
+          {/* The event IDs are the wire values the checkbox writes and the
+              payload carries — they render as themselves. */}
           <div className="flex flex-wrap gap-4">
             {WEBHOOK_EVENTS.map((event) => (
               <label key={event} className="flex items-center gap-2">
@@ -371,6 +403,7 @@ function WebhookForm({ initial, onDone }: { initial?: Webhook; onDone: () => voi
               </label>
             ))}
           </div>
+          <FieldError field="events" />
         </fieldset>
 
         <label className="flex items-center gap-2 text-[13px]">
@@ -380,47 +413,61 @@ function WebhookForm({ initial, onDone }: { initial?: Webhook; onDone: () => voi
             onChange={(e) => setDraft((d) => ({ ...d, enabled: e.target.checked }))}
             className={CHECKBOX_CLASS}
           />
-          <span>Enabled</span>
+          <span>{t("webhooks.form.enabled")}</span>
         </label>
 
         <div className="flex max-w-md flex-col gap-1 text-[13px]">
           <label htmlFor={secretId} className="text-muted-foreground">
-            Secret
+            {t("webhooks.form.secret")}
           </label>
           <input
             id={secretId}
             type="password"
             value={draft.secret}
             aria-invalid={invalid("secret") || undefined}
-            aria-describedby={invalid("secret") ? `${errorId} ${secretId}-help` : `${secretId}-help`}
-            onChange={(e) => setDraft((d) => ({ ...d, secret: e.target.value }))}
+            aria-describedby={invalid("secret") ? `${fieldErrorId("secret")} ${secretId}-help` : `${secretId}-help`}
+            onChange={(e) => edit("secret", { secret: e.target.value })}
             className={fieldClasses(invalid("secret"))}
           />
+          <FieldError field="secret" />
           {/* Write-only, in both directions: the API never returns a secret, so
               this box starts empty even when editing an endpoint that has one. */}
           <span id={`${secretId}-help`} className="text-xs leading-relaxed text-muted-foreground">
-            {initial
-              ? "Leave blank to keep the current secret. Typing here replaces it."
-              : "Required — every delivery is signed with it. It is never shown again."}
+            {initial ? t("webhooks.form.secretKeep") : t("webhooks.form.secretNew")}
           </span>
         </div>
 
-        {/* One message, one id. It keeps its place above the buttons whether or
-            not a field claimed it — the server's words are never moved out of
-            reading order — and aria-describedby points the marked field here
-            rather than duplicating the text beside it. */}
-        {error ? <ErrorLine id={errorId}>{error}</ErrorLine> : null}
+        {/* The form-level slot, for a refusal that names no field this form
+            has. Everything that DOES name one renders at that field instead of
+            here, which is the whole point: the message and the box it is about
+            are now in the same place. */}
+        {errors.form ? <ErrorLine id={errorId}>{errors.form}</ErrorLine> : null}
 
         <div className="flex gap-2">
           <Button type="submit" loading={submitting} {...guard}>
-            {initial ? "Save endpoint" : "Create endpoint"}
+            {initial ? t("webhooks.form.save") : t("webhooks.form.createButton")}
           </Button>
           {/* Cancel closes a form and touches nothing, so it stays live even
               while engaged — a form an operator cannot dismiss would be the
-              mode holding the page hostage. */}
-          <Button type="button" variant="outline" onClick={onDone}>
-            Cancel
-          </Button>
+              mode holding the page hostage. It asks first only when there is
+              unsaved work to lose. */}
+          {discarding ? (
+            <>
+              <Button type="button" variant="outline" onClick={onDone}>
+                {t("webhooks.form.discard")}
+              </Button>
+              <Button type="button" variant="ghost" onClick={() => setDiscarding(false)}>
+                {t("webhooks.form.keepEditing")}
+              </Button>
+              <span role="status" className="self-center text-xs text-muted-foreground">
+                {t("webhooks.form.discardConfirm")}
+              </span>
+            </>
+          ) : (
+            <Button type="button" variant="outline" onClick={() => (dirty ? setDiscarding(true) : onDone())}>
+              {t("cancel")}
+            </Button>
+          )}
         </div>
       </form>
     </Card>
@@ -428,9 +475,10 @@ function WebhookForm({ initial, onDone }: { initial?: Webhook; onDone: () => voi
 }
 
 function WebhookRow({ hook, onEdit }: { hook: Webhook; onEdit: () => void }) {
+  const t = useT(settingsDict);
+  const { locale } = useLocale();
   const qc = useQueryClient();
-  /* guard carries the DISABLED flag AND the reason for it — lib/timemachine's
-     useWriteGuard (QA round 2, finding #18). Spread it onto the control. */
+  /* guard carries the DISABLED flag AND the reason for it — lib/timemachine's useWriteGuard. */
   const guard = useWriteGuard();
   const [confirming, setConfirming] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -447,7 +495,7 @@ function WebhookRow({ hook, onEdit }: { hook: Webhook; onEdit: () => void }) {
       await deleteWebhook(hook.id);
       await qc.invalidateQueries({ queryKey: ["webhooks"] });
     } catch (err) {
-      setError(queryErrorMessage(err, "Failed to delete the endpoint"));
+      setError(queryErrorMessage(err, t("webhooks.row.deleteFailed")));
       setBusy(false);
       setConfirming(false);
     }
@@ -462,7 +510,7 @@ function WebhookRow({ hook, onEdit }: { hook: Webhook; onEdit: () => void }) {
     } catch (err) {
       // A 503 here names console.webhooks.encryptionKey — the key the ping has
       // to be signed with. Worth every word the server wrote.
-      setError(queryErrorMessage(err, "Failed to enqueue the test delivery"));
+      setError(queryErrorMessage(err, t("webhooks.row.testFailed")));
       setBusy(false);
       return;
     }
@@ -484,47 +532,59 @@ function WebhookRow({ hook, onEdit }: { hook: Webhook; onEdit: () => void }) {
           {event}
         </Badge>
       ))}
-      <Badge variant={hook.enabled ? "ok" : "unknown"}>{hook.enabled ? "enabled" : "disabled"}</Badge>
+      {/* Both pills describe a BOOLEAN this page read, so both translate. */}
+      <Badge variant={hook.enabled ? "ok" : "unknown"}>
+        {hook.enabled ? t("webhooks.row.enabled") : t("webhooks.row.disabled")}
+      </Badge>
       {/* hasSecret is always true for a stored row, so this reads as the
           contract statement the API intends — "this endpoint signs its
           deliveries" — rather than as a question with two answers. An imported
           endpoint is the one case that can be false (plan Decision 9). */}
-      <Badge variant={hook.hasSecret ? "neutral" : "bad"}>{hook.hasSecret ? "signed" : "no secret"}</Badge>
+      <Badge variant={hook.hasSecret ? "neutral" : "bad"}>
+        {hook.hasSecret ? t("webhooks.row.signed") : t("webhooks.row.noSecret")}
+      </Badge>
+      {/* lastStatus is the DELIVERY LADDER's own string ("ok", "failed: 502").
+          This row picks its colour and prints it; it does not rewrite it. */}
       <span data-testid="last-status" className="text-xs">
         <Badge variant={lastStatusTone(hook.lastStatus)}>{hook.lastStatus === "" ? "—" : hook.lastStatus}</Badge>
       </span>
-      <span className="text-xs text-muted-foreground">{fmtTime(hook.lastAttempt)}</span>
+      <span className="text-xs text-muted-foreground">{fmtTime(hook.lastAttempt, locale)}</span>
       {hook.failures > 0 ? (
-        <span className="text-xs text-health-bad">{hook.failures} consecutive failures</span>
+        <span className="text-xs text-health-bad">
+          {t("webhooks.row.failures", {
+            count: hook.failures,
+            word: t(pluralKey(hook.failures, "count.failures.one", "count.failures.few", "count.failures.many")),
+          })}
+        </span>
       ) : null}
 
       <span className="ml-auto flex flex-wrap items-center gap-2">
         {confirming ? (
           <>
             <Button size="sm" variant="outline" loading={busy} {...guard} onClick={handleDelete}>
-              Confirm delete {hook.name}
+              {t("webhooks.row.confirmDelete", { name: hook.name })}
             </Button>
             <Button size="sm" variant="ghost" onClick={() => setConfirming(false)}>
-              Cancel
+              {t("cancel")}
             </Button>
           </>
         ) : (
           <>
             <Button size="sm" variant="ghost" {...guard} onClick={handleTest}>
-              Send test to {hook.name}
+              {t("webhooks.row.test", { name: hook.name })}
             </Button>
             <Button size="sm" variant="ghost" {...guard} onClick={onEdit}>
-              Edit {hook.name}
+              {t("webhooks.row.edit", { name: hook.name })}
             </Button>
             <Button size="sm" variant="ghost" {...guard} onClick={() => setConfirming(true)}>
-              Delete {hook.name}
+              {t("webhooks.row.delete", { name: hook.name })}
             </Button>
           </>
         )}
       </span>
       {queued ? (
         <span role="status" className="w-full text-xs text-muted-foreground">
-          Test queued; the outcome lands on this row.
+          {t("webhooks.row.queued")}
         </span>
       ) : null}
       {error ? (
@@ -537,8 +597,8 @@ function WebhookRow({ hook, onEdit }: { hook: Webhook; onEdit: () => void }) {
 }
 
 function WebhooksSection() {
-  /* guard carries the DISABLED flag AND the reason for it — lib/timemachine's
-     useWriteGuard (QA round 2, finding #18). Spread it onto the control. */
+  const t = useT(settingsDict);
+  /* guard carries the DISABLED flag AND the reason for it — lib/timemachine's useWriteGuard. */
   const guard = useWriteGuard();
   const [editing, setEditing] = useState<{ mode: "none" } | { mode: "create" } | { mode: "edit"; hook: Webhook }>({
     mode: "none",
@@ -551,7 +611,7 @@ function WebhooksSection() {
       {editing.mode === "none" ? (
         <div>
           <Button size="sm" {...guard} onClick={() => setEditing({ mode: "create" })}>
-            New endpoint
+            {t("webhooks.new")}
           </Button>
         </div>
       ) : (
@@ -562,29 +622,24 @@ function WebhooksSection() {
         />
       )}
 
-      <SectionCard title="Webhooks">
-        <p className="mt-1 max-w-prose text-xs leading-relaxed text-muted-foreground">
-          Outbound endpoints the console signs and POSTs incident events to. Delivery is asynchronous with a retry
-          ladder, so the last outcome below is what actually happened, not what was attempted.
-        </p>
-        {query.isError ? <ErrorLine>{queryErrorMessage(query.error, "Webhooks are unavailable")}</ErrorLine> : null}
+      <SectionCard title={t("webhooks.heading")}>
+        <p className="mt-1 max-w-prose text-xs leading-relaxed text-muted-foreground">{t("webhooks.blurb")}</p>
+        {query.isError ? <ErrorLine>{queryErrorMessage(query.error, t("webhooks.unavailable"))}</ErrorLine> : null}
         {/* isPending / isSuccess, not !isLoading && !isError: a paused retry
             (react-query pauses while the browser thinks it is offline) is
             pending-but-not-fetching, and the old guard would present "no
             endpoints" as a settled answer. M7 final-gate finding. */}
         {query.isPending ? (
           <div role="status" aria-live="polite" className="mt-4 flex flex-col gap-2">
-            <span className="sr-only">Loading…</span>
+            <span className="sr-only">{t("loading")}</span>
             <Skeleton className="h-10 w-full" />
           </div>
         ) : null}
         {query.isSuccess && hooks.length === 0 ? (
-          <p className="px-1 py-10 text-center text-xs text-muted-foreground">
-            No endpoints yet. Nothing is being notified.
-          </p>
+          <p className="px-1 py-10 text-center text-xs text-muted-foreground">{t("webhooks.empty")}</p>
         ) : null}
         {hooks.length > 0 ? (
-          <ul aria-label="Webhook endpoints" className="mt-4 divide-y divide-border">
+          <ul aria-label={t("webhooks.listAria")} className="mt-4 divide-y divide-border">
             {hooks.map((hook) => (
               <WebhookRow key={hook.id} hook={hook} onEdit={() => setEditing({ mode: "edit", hook })} />
             ))}
@@ -595,25 +650,370 @@ function WebhooksSection() {
   );
 }
 
-/* ── maintenance windows (QA round 3, finding #9) ───────────────────────── */
+/* ── API tokens (QA round 6, finding #14) ───────────────────────────────── */
+
+/** TOKENS_ANCHOR is what components/user-menu.tsx's "Token management" points
+ *  at; the link used to land on /settings, which had no tokens section at all. */
+export const TOKENS_ANCHOR = "tokens";
+
+export type TokenField = "name" | "expiresAt";
+
+/** tokenFieldForDetail routes a 422/400 onto the field it names, the same table
+ *  idiom webhookFieldForDetail uses. */
+export function tokenFieldForDetail(detail: string): TokenField | null {
+  const haystack = detail.toLowerCase();
+  if (haystack.includes("expire")) return "expiresAt";
+  if (haystack.includes("name")) return "name";
+  return null;
+}
+
+/** tokenState is the row's own status; `revokedAt` and a past `expiresAt` are
+ *  two different reasons a token no longer works and the row says which. */
+export function tokenState(token: Token, now: Date): "active" | "revoked" | "expired" {
+  if (token.revokedAt) return "revoked";
+  if (token.expiresAt && new Date(token.expiresAt).getTime() <= now.getTime()) return "expired";
+  return "active";
+}
 
 /**
- * MaintenanceWindowsSection is the ONLY unbounded view of the declared windows
- * in this console, and the reason it exists is at the top of this file.
- *
- * THE REQUEST CARRIES NO RANGE. Every other maintenance request in the console
- * passes from/to, because every other one is drawing bands on a chart. This one
- * is answering "what has been declared, ever" — a window whose whole span is in
- * the future is exactly the row an operator comes here for, and a range would
- * hide it again. Nor is `scope` sent: the point is every scope at once.
- *
- * It is gated on maintenance:WRITE rather than :read, the same HIDE the
- * webhooks section makes. A subject who can only read windows already sees them
- * beside the charts they explain, in context; this list exists for the one act
- * that has nowhere else to happen, so without the permission to perform it the
- * section is not rendered and NOTHING is requested.
+ * MintedToken is the ONE render of a raw token in this console. It is not stored, not re-fetchable
+ * and not in the list — so it stays until the operator dismisses it.
  */
+function MintedToken({ minted, onDismiss }: { minted: TokenCreateResponse; onDismiss: () => void }) {
+  const t = useT(settingsDict);
+  const [note, setNote] = useState<string>();
+
+  async function copy() {
+    const clipboard = navigator.clipboard;
+    if (!clipboard || typeof clipboard.writeText !== "function") {
+      setNote(t("tokens.secret.noClipboard"));
+      return;
+    }
+    try {
+      await clipboard.writeText(minted.token);
+      setNote(t("tokens.secret.copied"));
+    } catch {
+      setNote(t("tokens.secret.refused"));
+    }
+  }
+
+  return (
+    <Card asChild className="border-l-4 border-l-health-warn bg-health-warn-soft/40 p-6">
+      <section aria-label={t("tokens.secret.aria")}>
+        <h3 className="text-sm font-semibold">{t("tokens.secret.title", { name: minted.name })}</h3>
+        {/* The server's bytes, selectable and wrapped — never truncated, or the
+            one copy an operator gets would be a partial token. */}
+        <p data-testid="minted-token" className="mt-3 break-all rounded-md bg-surface-2 p-3 font-mono text-[13px]">
+          {minted.token}
+        </p>
+        <div className="mt-3 flex flex-wrap items-center gap-2">
+          <Button size="sm" variant="outline" onClick={() => void copy()}>
+            {t("tokens.secret.copy")}
+          </Button>
+          <Button size="sm" variant="ghost" onClick={onDismiss}>
+            {t("tokens.secret.dismiss")}
+          </Button>
+          {note ? (
+            <span role="status" className="text-xs text-muted-foreground">
+              {note}
+            </span>
+          ) : null}
+        </div>
+      </section>
+    </Card>
+  );
+}
+
+function TokenForm({ onMinted, onDone }: { onMinted: (minted: TokenCreateResponse) => void; onDone: () => void }) {
+  const t = useT(settingsDict);
+  const qc = useQueryClient();
+  /* guard carries the DISABLED flag AND the reason for it — lib/timemachine's useWriteGuard. */
+  const guard = useWriteGuard();
+  const nameId = useId();
+  const expiresId = useId();
+  const errorId = useId();
+  const [name, setName] = useState("");
+  /* null, not "": "no expiry chosen" is a real state — a token with no expiry
+     is valid until revoked, which the help line says. */
+  const [expires, setExpires] = useState<Date | null>(null);
+  const { submitting, begin, end } = useSubmitGuard();
+  const [error, setError] = useState<string>();
+  const [errorField, setErrorField] = useState<TokenField | null>(null);
+
+  function fail(message: string, field: TokenField | null) {
+    setError(message);
+    setErrorField(field);
+  }
+
+  /* Both fields carry a help line, so a marked one points at the message AND
+     keeps its own description rather than replacing it. */
+  const invalid = (field: TokenField) => errorField === field;
+
+  async function handleSubmit(e: FormEvent) {
+    e.preventDefault();
+    setError(undefined);
+    setErrorField(null);
+    if (name.trim() === "") {
+      fail(t("tokens.form.nameRequired"), "name");
+      return;
+    }
+    if (expires !== null && Number.isNaN(expires.getTime())) {
+      fail(t("tokens.form.badExpiry"), "expiresAt");
+      return;
+    }
+    /* A token that has already expired can never authenticate, so minting one
+       hands back a secret for nothing. The picker's disablePast blocks past
+       DAYS; on today it still yields a time already gone, and the server's 422
+       stays the net behind this. */
+    if (expires !== null && expires.getTime() <= Date.now()) {
+      fail(t("tokens.form.pastExpiry"), "expiresAt");
+      return;
+    }
+    if (!begin()) return;
+    try {
+      const minted = await createToken({
+        name: name.trim(),
+        ...(expires !== null ? { expiresAt: expires.toISOString() } : {}),
+      });
+      await qc.invalidateQueries({ queryKey: ["tokens"] });
+      onMinted(minted);
+    } catch (err) {
+      const message = queryErrorMessage(err, t("tokens.form.failed"));
+      fail(message, err instanceof ApiError ? tokenFieldForDetail(message) : null);
+      end();
+    }
+  }
+
+  return (
+    <Card asChild className="p-6">
+      <form onSubmit={handleSubmit} className="flex flex-col gap-4">
+        <h3 className="text-sm font-semibold">{t("tokens.form.create")}</h3>
+        <div className="grid gap-4 sm:grid-cols-2">
+          <div className="flex flex-col gap-1 text-[13px]">
+            <label htmlFor={nameId} className="text-muted-foreground">
+              {t("tokens.form.name")}
+            </label>
+            {/* A sample VALUE, not a word — it stays as it is. */}
+            <input
+              id={nameId}
+              value={name}
+              placeholder="ci-pipeline"
+              aria-invalid={invalid("name") || undefined}
+              aria-describedby={invalid("name") ? `${errorId} ${nameId}-help` : `${nameId}-help`}
+              onChange={(e) => setName(e.target.value)}
+              className={fieldClasses(invalid("name"))}
+            />
+            <span id={`${nameId}-help`} className="text-xs leading-relaxed text-muted-foreground">
+              {t("tokens.form.nameHelp")}
+            </span>
+          </div>
+          <div className="flex flex-col gap-1 text-[13px]">
+            <span className="text-muted-foreground">{t("tokens.form.expires")}</span>
+            {/* The M5 DateTimePicker, the one way this console asks for an
+                instant — and here for the reason the schedule's Run-at field
+                takes it: allowFuture lifts the ceiling, disablePast is the
+                other half of the same rule. An expiry in the past is refused
+                by the server, so a control must not offer one. */}
+            <div className="flex items-center gap-1">
+              <DateTimePicker
+                aria-label={t("tokens.form.expires")}
+                aria-invalid={invalid("expiresAt")}
+                aria-describedby={invalid("expiresAt") ? `${errorId} ${expiresId}-help` : `${expiresId}-help`}
+                value={expires}
+                label={expires === null ? t("tokens.form.expiresNotSet") : undefined}
+                allowFuture
+                disablePast
+                onApply={setExpires}
+              />
+              {expires !== null ? (
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="ghost"
+                  aria-label={t("tokens.form.expiresClearAria")}
+                  onClick={() => setExpires(null)}
+                >
+                  {t("tokens.form.expiresClear")}
+                </Button>
+              ) : null}
+            </div>
+            <span id={`${expiresId}-help`} className="text-xs leading-relaxed text-muted-foreground">
+              {t("tokens.form.expiresHelp")}
+            </span>
+          </div>
+        </div>
+
+        {error ? <ErrorLine id={errorId}>{error}</ErrorLine> : null}
+
+        <div className="flex gap-2">
+          <Button type="submit" loading={submitting} {...guard}>
+            {t("tokens.form.createButton")}
+          </Button>
+          {/* Cancel touches nothing, so it stays live while engaged — the same
+              rule the webhook form's Cancel follows. */}
+          <Button type="button" variant="outline" onClick={onDone}>
+            {t("cancel")}
+          </Button>
+        </div>
+      </form>
+    </Card>
+  );
+}
+
+function TokenRow({ token }: { token: Token }) {
+  const t = useT(settingsDict);
+  const { locale } = useLocale();
+  const qc = useQueryClient();
+  /* guard carries the DISABLED flag AND the reason for it — lib/timemachine's useWriteGuard. */
+  const guard = useWriteGuard();
+  const [confirming, setConfirming] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string>();
+  const state = tokenState(token, new Date());
+
+  /* Spent = revoked, or past its expiry. DELETE means REVOKE on a live token
+     and PURGE on a spent one — the server reads the row's state and acts on it
+     — so the row asks for the act it is actually about to perform. Without
+     this, a revoked row was permanent and the list only ever grew. */
+  const spent = state !== "active";
+
+  async function handleDelete() {
+    setBusy(true);
+    setError(undefined);
+    try {
+      await deleteToken(token.id);
+      await qc.invalidateQueries({ queryKey: ["tokens"] });
+    } catch (err) {
+      setError(queryErrorMessage(err, t(spent ? "tokens.row.purgeFailed" : "tokens.row.deleteFailed")));
+    }
+    /* Cleared on BOTH paths, because a SUCCESS does not necessarily unmount this
+       row: DELETE on an active token revokes it, and the revoked row comes
+       straight back from the refetch — offering the purge, but with `busy` still
+       true, which is `loading` on the confirm button, which is disabled. The
+       purge then needed a reload to become clickable. */
+    setBusy(false);
+    setConfirming(false);
+  }
+
+  return (
+    <li data-testid="token-row" className="flex flex-wrap items-center gap-x-3 gap-y-1 py-3 text-sm">
+      <span className="font-medium">{token.name}</span>
+      {state === "active" ? null : (
+        <Badge variant={state === "revoked" ? "bad" : "unknown"}>
+          {t(state === "revoked" ? "tokens.revoked" : "tokens.expired")}
+        </Badge>
+      )}
+      {/* The owner is a SUBJECT ID the server assigned; it prints as it came. */}
+      <span className="text-xs text-muted-foreground">
+        {t("tokens.col.owner")} {token.owner}
+      </span>
+      <span className="text-xs text-muted-foreground">
+        {t("tokens.col.created")} {fmtTime(token.createdAt, locale)}
+      </span>
+      {/* An absent lastUsedAt means never used, which is a fact worth stating —
+          fmtTime's em-dash would have read as "the API did not say". */}
+      <span data-testid="token-last-used" className="text-xs text-muted-foreground">
+        {token.lastUsedAt ? `${t("tokens.col.lastUsed")} ${fmtTime(token.lastUsedAt, locale)}` : t("tokens.lastUsed.never")}
+      </span>
+      {token.expiresAt ? (
+        <span className="text-xs text-muted-foreground">
+          {t("tokens.col.expires")} {fmtTime(token.expiresAt, locale)}
+        </span>
+      ) : null}
+
+      <span className="ml-auto flex flex-wrap items-center gap-2">
+        {confirming ? (
+          <>
+            <Button size="sm" variant="outline" loading={busy} {...guard} onClick={handleDelete}>
+              {t(spent ? "tokens.row.confirmPurge" : "tokens.row.confirmDelete", { name: token.name })}
+            </Button>
+            <Button size="sm" variant="ghost" onClick={() => setConfirming(false)}>
+              {t("cancel")}
+            </Button>
+          </>
+        ) : (
+          <Button
+            size="sm"
+            variant="ghost"
+            {...guard}
+            title={spent ? t("tokens.row.purgeHint") : undefined}
+            onClick={() => setConfirming(true)}
+          >
+            {t(spent ? "tokens.row.purge" : "tokens.row.delete", { name: token.name })}
+          </Button>
+        )}
+      </span>
+      {error ? (
+        <span role="alert" className="w-full text-xs leading-relaxed text-health-bad">
+          {error}
+        </span>
+      ) : null}
+    </li>
+  );
+}
+
+function TokensSection() {
+  const t = useT(settingsDict);
+  /* guard carries the DISABLED flag AND the reason for it — lib/timemachine's useWriteGuard. */
+  const guard = useWriteGuard();
+  const [creating, setCreating] = useState(false);
+  /* The one-time secret lives HERE rather than in the form, so dismissing the
+     form does not take the only copy of it with it. */
+  const [minted, setMinted] = useState<TokenCreateResponse>();
+  const query = useQuery({ queryKey: ["tokens"], queryFn: listTokens });
+  const tokens = query.data?.tokens ?? [];
+
+  return (
+    <div className="flex flex-col gap-4">
+      {creating ? (
+        <TokenForm
+          onMinted={(m) => {
+            setMinted(m);
+            setCreating(false);
+          }}
+          onDone={() => setCreating(false)}
+        />
+      ) : (
+        <div>
+          <Button size="sm" {...guard} onClick={() => setCreating(true)}>
+            {t("tokens.new")}
+          </Button>
+        </div>
+      )}
+
+      {minted ? <MintedToken minted={minted} onDismiss={() => setMinted(undefined)} /> : null}
+
+      <SectionCard id={TOKENS_ANCHOR} title={t("tokens.heading")}>
+        <p className="mt-1 max-w-prose text-xs leading-relaxed text-muted-foreground">{t("tokens.blurb")}</p>
+        {query.isError ? <ErrorLine>{queryErrorMessage(query.error, t("tokens.unavailable"))}</ErrorLine> : null}
+        {/* isPending / isSuccess, the webhooks list's own guard: a paused retry
+            is pending-but-not-fetching and must not read as "no tokens". */}
+        {query.isPending ? (
+          <div role="status" aria-live="polite" className="mt-4 flex flex-col gap-2">
+            <span className="sr-only">{t("loading")}</span>
+            <Skeleton className="h-10 w-full" />
+          </div>
+        ) : null}
+        {query.isSuccess && tokens.length === 0 ? (
+          <p className="px-1 py-10 text-center text-xs text-muted-foreground">{t("tokens.empty")}</p>
+        ) : null}
+        {tokens.length > 0 ? (
+          <ul aria-label={t("tokens.listAria")} className="mt-4 divide-y divide-border">
+            {tokens.map((token) => (
+              <TokenRow key={token.id} token={token} />
+            ))}
+          </ul>
+        ) : null}
+      </SectionCard>
+    </div>
+  );
+}
+
+/* ── maintenance windows (QA round 3, finding #9) ───────────────────────── */
+
+/** MaintenanceWindowsSection is the ONLY unbounded view of the declared windows in this console. */
 function MaintenanceWindowsSection() {
+  const t = useT(settingsDict);
   const qc = useQueryClient();
   const query = useQuery({ queryKey: ["settings", "maintenance"], queryFn: () => getMaintenance() });
   const windows = query.data?.windows ?? [];
@@ -627,39 +1027,30 @@ function MaintenanceWindowsSection() {
   };
 
   return (
-    <SectionCard title="Maintenance windows">
+    <SectionCard title={t("maintenance.heading")}>
       <p className="mt-1 max-w-prose text-xs leading-relaxed text-muted-foreground">
-        Every declared window, with no time range — including the ones entirely in the future, which the bars beside the
-        charts cannot show because those are bounded to what the chart plots. Declaring a window still happens next to
-        the chart it explains, on{" "}
-        <a href="/investigate" className="text-primary hover:underline">
-          Investigate
-        </a>{" "}
-        or{" "}
-        <a href="/explore" className="text-primary hover:underline">
-          Explore
-        </a>
-        ; this list is for finding and removing one.
+        {withNodes(t("maintenance.blurb"), {
+          investigate: <SurfaceLink href="/investigate">{t("link.investigate")}</SurfaceLink>,
+          explore: <SurfaceLink href="/explore">{t("link.explore")}</SurfaceLink>,
+        })}
       </p>
       {query.isError ? (
-        <ErrorLine>{queryErrorMessage(query.error, "Maintenance windows are unavailable")}</ErrorLine>
+        <ErrorLine>{queryErrorMessage(query.error, t("maintenance.unavailable"))}</ErrorLine>
       ) : null}
       {/* isPending / isSuccess, the same guard the webhooks list uses: a paused
           retry is pending-but-not-fetching, and presenting that as "none
           declared" would be a settled answer nobody gave. */}
       {query.isPending ? (
         <div role="status" aria-live="polite" className="mt-4 flex flex-col gap-2">
-          <span className="sr-only">Loading…</span>
+          <span className="sr-only">{t("loading")}</span>
           <Skeleton className="h-10 w-full" />
         </div>
       ) : null}
       {query.isSuccess && windows.length === 0 ? (
-        <p className="px-1 py-10 text-center text-xs text-muted-foreground">
-          No maintenance windows have been declared.
-        </p>
+        <p className="px-1 py-10 text-center text-xs text-muted-foreground">{t("maintenance.empty")}</p>
       ) : null}
       {windows.length > 0 ? (
-        <ul aria-label="All maintenance windows" className="mt-4 divide-y divide-border">
+        <ul aria-label={t("maintenance.listAria")} className="mt-4 divide-y divide-border">
           {windows.map((w) => (
             /* The SHARED row (components/maintenance.tsx): same confirm-delete,
                same compact stamp, same write guard. canWrite is true by
@@ -674,76 +1065,56 @@ function MaintenanceWindowsSection() {
 
 /* ── export / import ────────────────────────────────────────────────────── */
 
-/** The ONE bundle version this build reads or writes, matching httpapi's
- *  exportBundleVersion. Checked for EQUALITY, never ">=": a bundle from a
- *  future console may describe collections this build has never heard of, and
- *  importing the recognised subset would be a partial restore presented as a
- *  complete one. */
+/**
+ * Checked for EQUALITY, never ">=": a bundle from a future console may describe collections this
+ * build has never heard.
+ */
 export const BUNDLE_VERSION = 1;
 
 export type BundleParse = { ok: true; bundle: ConfigBundle } | { ok: false; message: string };
 
 /**
- * parseBundle is the WHOLE of the client's validation, and its shortness is the
- * point: it checks that the file is a JSON object and that it declares the
- * version this build reads. Nothing else.
- *
- * The server is the authority on everything past that — which collections
- * exist, whether a schedule's definition is in the bundle, whether a name
- * collides — and it reports all of it per item through the dry run. A second,
- * weaker copy of those rules here would reject bundles the console would have
- * accepted, and its verdicts would drift from the real ones the first time the
- * importer changed.
- *
- * The two checks that ARE here earn their place by being about the FILE rather
- * than its contents: an operator who picked the wrong file, or a bundle from a
- * console this one cannot speak to, should hear so without a round trip.
+ * parseBundle is the WHOLE of the client's validation, and its shortness is the point; a second,
+ * weaker copy of those rules here would reject bundles the console would have accepted.
  */
-export function parseBundle(text: string): BundleParse {
+export function parseBundle(text: string, t: Translate<SettingsKey> = enT): BundleParse {
   let parsed: unknown;
   try {
     parsed = JSON.parse(text);
   } catch {
-    return { ok: false, message: "That file is not valid JSON. A configuration bundle is the JSON this page exports." };
+    return { ok: false, message: t("bundle.notJson") };
   }
   if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
-    return { ok: false, message: "That file is valid JSON but not a bundle: a bundle is a JSON object." };
+    return { ok: false, message: t("bundle.notObject") };
   }
   const version = (parsed as { version?: unknown }).version;
   if (version !== BUNDLE_VERSION) {
     return {
       ok: false,
-      message:
-        `This console reads bundle version ${BUNDLE_VERSION}; that file declares ` +
-        `${JSON.stringify(version ?? null)}. Importing the part this build recognises would be a partial ` +
-        `restore presented as a complete one, so it is refused.`,
+      /* Both numbers go in as they are — the version the build reads and the
+         one the file declares, JSON-quoted so `null` reads as null. */
+      message: t("bundle.versionMismatch", {
+        expected: BUNDLE_VERSION,
+        found: JSON.stringify(version ?? null),
+      }),
     };
   }
   return { ok: true, bundle: parsed as ConfigBundle };
 }
 
-/** exportFilename names the DAY, not the instant: a bundle is a restore point
- *  an operator files away, and two exports on the same day overwriting each
- *  other in the downloads folder is the behaviour they expect from a
- *  date-stamped config dump. */
+/** exportFilename names the DAY, not the instant: a bundle is a restore point an operator files away. */
 export function exportFilename(now: Date): string {
   return `kconmon-ng-config-${now.toISOString().slice(0, 10)}.json`;
 }
 
-/**
- * IMPORT_COLLECTIONS is the result table's row order, and it is the BUNDLE's
- * own dependency order (targets before the definitions that point at them,
- * definitions before their schedules) rather than alphabetical: the importer
- * walks them in this order, so a reader scanning down the table is reading the
- * sequence of events, and an error high up explains the skips below it.
- */
-const IMPORT_COLLECTIONS: readonly (readonly [keyof Omit<ConfigImportResult, "dryRun">, string])[] = [
-  ["targets", "Targets"],
-  ["checkDefinitions", "Check definitions"],
-  ["checkSchedules", "Check schedules"],
-  ["alertRules", "Alert rules"],
-  ["webhooks", "Webhooks"],
-  ["maintenanceWindows", "Maintenance windows"],
+/** IMPORT_COLLECTIONS is the result table's row order. */
+const IMPORT_COLLECTIONS: readonly (readonly [keyof Omit<ConfigImportResult, "dryRun">, SettingsKey])[] = [
+  ["targets", "collection.targets"],
+  ["checkDefinitions", "collection.checkDefinitions"],
+  ["checkSchedules", "collection.checkSchedules"],
+  ["alertRules", "collection.alertRules"],
+  ["webhooks", "collection.webhooks"],
+  ["maintenanceWindows", "collection.maintenanceWindows"],
 ];
 
 function ImportNotes({ label, notes, tone }: { label: string; notes: ConfigImportCollectionResult["errors"]; tone: string }) {
@@ -766,41 +1137,37 @@ function ImportNotes({ label, notes, tone }: { label: string; notes: ConfigImpor
   );
 }
 
-/* role="status", like the webhook row's "Test queued" line: the dry run fires
-   the moment a file is chosen and this table is its whole answer, arriving
-   asynchronously well below the file input. Without a live region the one
-   sentence that matters — dry run, or applied — is silent. */
+/* role="status", like the webhook row's "Test queued" line. */
 function ImportResultTable({ result }: { result: ConfigImportResult }) {
+  const t = useT(settingsDict);
   return (
     <div role="status" className="mt-4">
-      <p className="text-sm font-medium">
-        {result.dryRun ? "Dry run — nothing was written." : "Applied — these writes happened."}
-      </p>
+      <p className="text-sm font-medium">{result.dryRun ? t("bundle.dryRun") : t("bundle.applied")}</p>
       <div className="mt-2 overflow-x-auto">
         <table className="w-full text-left text-xs">
           <thead className="text-muted-foreground">
             <tr>
               <th scope="col" className="py-1 pr-4 font-medium">
-                Collection
+                {t("bundle.col.collection")}
               </th>
               <th scope="col" className="py-1 pr-4 font-medium">
-                Created
+                {t("bundle.col.created")}
               </th>
               <th scope="col" className="py-1 pr-4 font-medium">
-                Updated
+                {t("bundle.col.updated")}
               </th>
               <th scope="col" className="py-1 pr-4 font-medium">
-                Skipped
+                {t("bundle.col.skipped")}
               </th>
             </tr>
           </thead>
           <tbody className="divide-y divide-border">
-            {IMPORT_COLLECTIONS.map(([key, label]) => {
+            {IMPORT_COLLECTIONS.map(([key, labelKey]) => {
               const c = result[key];
               return (
                 <tr key={key} data-testid={`import-row-${key}`}>
                   <th scope="row" className="py-1.5 pr-4 font-normal">
-                    {label}
+                    {t(labelKey)}
                   </th>
                   <td className="py-1.5 pr-4 tabular-nums">{c.created}</td>
                   <td className="py-1.5 pr-4 tabular-nums">{c.updated}</td>
@@ -811,14 +1178,14 @@ function ImportResultTable({ result }: { result: ConfigImportResult }) {
           </tbody>
         </table>
       </div>
-      {IMPORT_COLLECTIONS.map(([key, label]) => {
+      {IMPORT_COLLECTIONS.map(([key, labelKey]) => {
         const c = result[key];
         if (c.errors.length === 0 && c.warnings.length === 0) return null;
         return (
           <div key={key} className="mt-4">
-            <p className="text-xs font-semibold">{label}</p>
-            <ImportNotes label="Errors" notes={c.errors} tone="text-health-bad" />
-            <ImportNotes label="Warnings" notes={c.warnings} tone="text-health-warn" />
+            <p className="text-xs font-semibold">{t(labelKey)}</p>
+            <ImportNotes label={t("bundle.errors")} notes={c.errors} tone="text-health-bad" />
+            <ImportNotes label={t("bundle.warnings")} notes={c.warnings} tone="text-health-warn" />
           </div>
         );
       })}
@@ -827,19 +1194,15 @@ function ImportResultTable({ result }: { result: ConfigImportResult }) {
 }
 
 function ExportImportSection() {
-  /* guard carries the DISABLED flag AND the reason for it — lib/timemachine's
-     useWriteGuard (QA round 2, finding #18). Spread it onto the control; the
-     alias below is for the control that composes it with a local condition,
-     which must be applied AFTER the spread to win. */
+  const t = useT(settingsDict);
+  /* Spread it onto the control; the alias below is for the control that composes it with a local condition. */
   const guard = useWriteGuard();
   const writesDisabled = guard.disabled;
   const fileId = useId();
   const [exporting, setExporting] = useState(false);
   const [exportError, setExportError] = useState<string>();
   const [bundle, setBundle] = useState<ConfigBundle>();
-  /* The picked file's NAME, kept because the visually-hidden input no longer
-     shows it (finding #8). Set even for a bundle that failed to parse: the
-     operator needs to know WHICH file the error below is about. */
+  /* The picked file's NAME, kept because the visually-hidden input no longer shows it. */
   const [fileName, setFileName] = useState<string>();
   const [importing, setImporting] = useState(false);
   const [importError, setImportError] = useState<string>();
@@ -862,7 +1225,7 @@ function ExportImportSection() {
       anchor.remove();
       URL.revokeObjectURL(href);
     } catch (err) {
-      setExportError(queryErrorMessage(err, "Failed to export the configuration"));
+      setExportError(queryErrorMessage(err, t("bundle.exportFailed")));
     }
     setExporting(false);
   }
@@ -873,7 +1236,7 @@ function ExportImportSection() {
     try {
       setResult(await importConfig(b, dryRun));
     } catch (err) {
-      setImportError(queryErrorMessage(err, "The import was refused"));
+      setImportError(queryErrorMessage(err, t("bundle.importRefused")));
     }
     setImporting(false);
   }
@@ -884,27 +1247,20 @@ function ExportImportSection() {
     setBundle(undefined);
     setFileName(file?.name);
     if (!file) return;
-    const parsed = parseBundle(await file.text());
+    const parsed = parseBundle(await file.text(), t);
     if (!parsed.ok) {
       setImportError(parsed.message);
       return;
     }
     setBundle(parsed.bundle);
-    // ALWAYS the dry run first, without being asked. A bundle is the whole
-    // declarative configuration, so the first thing an operator should see is
-    // what it WOULD do — and since the dry-run and apply responses are
-    // identical in shape, the preview is the apply's own prediction rather than
-    // a separate estimate.
+    // ALWAYS the dry run first, without being asked; a bundle is the whole declarative
+    // configuration.
     await runImport(parsed.bundle, true);
   }
 
   return (
-    <SectionCard title="Configuration export / import">
-      <p className="mt-1 max-w-prose text-xs leading-relaxed text-muted-foreground">
-        Targets, check definitions, schedules, alert rules, webhook endpoints and maintenance windows — what was
-        declared, never what was observed. A bundle never carries a webhook secret; imported endpoints arrive without
-        one and stay unusable until a secret is set here.
-      </p>
+    <SectionCard title={t("bundle.heading")}>
+      <p className="mt-1 max-w-prose text-xs leading-relaxed text-muted-foreground">{t("bundle.blurb")}</p>
 
       <div className="mt-4 flex flex-col gap-2">
         {/* Export is a READ, so the Time Machine does not touch it. Engaging the
@@ -915,14 +1271,14 @@ function ExportImportSection() {
             and config tables are not time-folded.) */}
         <div>
           <Button size="sm" loading={exporting} onClick={handleExport}>
-            Export configuration
+            {t("bundle.export")}
           </Button>
         </div>
         {exportError ? <ErrorLine>{exportError}</ErrorLine> : null}
       </div>
 
       <div className="mt-6 flex flex-col gap-2">
-        <span className="text-[13px] text-muted-foreground">Configuration bundle</span>
+        <span className="text-[13px] text-muted-foreground">{t("bundle.field")}</span>
         {/* The native file input is VISUALLY HIDDEN, not replaced (QA round 5,
             finding #8). `<input type="file">` renders as the browser's own
             chrome — a grey "Choose File / no file selected" that matches
@@ -941,11 +1297,8 @@ function ExportImportSection() {
             id={fileId}
             type="file"
             accept="application/json,.json"
-            /* The accessible name stays the FIELD's name, not the button's
-               text: the label element below is the pointer affordance ("Choose
-               bundle…" is an instruction), while a screen reader user landing
-               on the input needs to hear what the field IS. */
-            aria-label="Configuration bundle"
+            /* The accessible name stays the FIELD's name, not the button's text. */
+            aria-label={t("bundle.field")}
             {...guard}
             onChange={(e) => void handleFile(e.target.files?.[0])}
             className="peer sr-only"
@@ -961,36 +1314,55 @@ function ExportImportSection() {
               "peer-disabled:pointer-events-none peer-disabled:opacity-50",
             )}
           >
-            Choose bundle…
+            {t("bundle.choose")}
           </label>
           {/* The name the native control used to show on the operator's
               behalf. Without it, a hidden input means a picked file leaves no
-              trace at all until the dry-run table lands. */}
+              trace at all until the dry-run table lands. The FILE NAME itself
+              is the operator's own bytes and is printed as it is. */}
           <span data-testid="bundle-file-name" className="min-w-0 truncate text-xs text-muted-foreground">
-            {fileName ?? "No file chosen"}
+            {fileName ?? t("bundle.noFile")}
           </span>
         </div>
-        <p className="max-w-prose text-xs leading-relaxed text-muted-foreground">
-          Choosing a file runs a dry run immediately: it writes nothing and predicts, per collection, exactly what
-          Apply would do.
-        </p>
+        <p className="max-w-prose text-xs leading-relaxed text-muted-foreground">{t("bundle.dryRunNote")}</p>
         <div>
           <Button
             size="sm"
             loading={importing}
-            /* Enabled the moment a bundle is loaded, and NOT gated on what the
-               dry run predicted: an all-zero result is a valid no-op (a bundle
-               already applied), and a result carrying errors is still worth
-               applying for the items that succeeded. The operator decides;
-               this button does not. */
+            /* Enabled the moment a bundle is loaded, and NOT gated on what the dry run predicted. */
             {...guard} disabled={writesDisabled || bundle === undefined}
             onClick={() => bundle && void runImport(bundle, false)}
           >
-            Apply import
+            {t("bundle.apply")}
           </Button>
         </div>
         {importError ? <ErrorLine>{importError}</ErrorLine> : null}
         {result ? <ImportResultTable result={result} /> : null}
+      </div>
+    </SectionCard>
+  );
+}
+
+/* ── language ───────────────────────────────────────────────────────────── */
+
+/** LANGUAGE_OPTIONS names each language IN THAT LANGUAGE. */
+const LANGUAGE_OPTIONS: readonly SegmentedOption<Locale>[] = [
+  { value: "en", label: "English" },
+  { value: "ru", label: "Русский" },
+];
+
+/**
+ * LanguageSection is the console's language switch (lib/i18n); ungated and unconditional: it is the
+ * one control on this page that belongs to the PERSON rather than to their role.
+ */
+function LanguageSection() {
+  const { locale, setLocale } = useLocale();
+  const t = useT(settingsDict);
+  return (
+    <SectionCard title={t("language.title")}>
+      <p className="mt-1 max-w-prose text-xs leading-relaxed text-muted-foreground">{t("language.description")}</p>
+      <div className="mt-4">
+        <Segmented options={LANGUAGE_OPTIONS} value={locale} onChange={setLocale} aria-label={t("language.aria")} />
       </div>
     </SectionCard>
   );
@@ -1007,38 +1379,60 @@ function Fact({ label, children }: { label: string; children: ReactNode }) {
   );
 }
 
-/**
- * subjectLine joins the subject's kind and display name, skipping whatever is
- * missing (QA round 5, finding #9). Exported so the rule is testable on its
- * own: "anonymous" is a real subject kind with no display name at all, and it
- * is the DEFAULT deployment, so the dangling-separator case was the one most
- * operators saw first.
- */
+/** subjectLine joins the subject's kind and display name, skipping whatever is missing. */
 export function subjectLine(kind: string, displayName: string): string {
   return [kind, displayName].map((s) => s.trim()).filter((s) => s !== "").join(" · ");
 }
 
 function AboutSection() {
+  const t = useT(settingsDict);
   const { me } = useAuth();
   const { data: config } = useQuery({ queryKey: ["config"], queryFn: getConfig, staleTime: Infinity });
+  /* Same ["version"] entry useCapabilities polls, so this costs no extra round
+     trip. The section that answers "what am I looking at" could not say WHICH
+     BUILD it was — the first question of any bug report. */
+  const { data: version } = useQuery({ queryKey: ["version"], queryFn: getVersion });
   const mode = config?.auth.mode ?? "—";
   const roles = me?.subject.roles ?? [];
 
   return (
-    <SectionCard title="About this console">
+    <SectionCard title={t("about.heading")}>
+      {/* The LABELS are ours; every value beside them — the auth mode, the role
+          names, the subject — is what the server said it is. */}
       <dl className="mt-3 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-        <Fact label="Auth mode">{mode}</Fact>
-        <Fact label="Your roles">{roles.length > 0 ? roles.join(", ") : "—"}</Fact>
+        <Fact label={t("about.authMode")}>{mode}</Fact>
+        <Fact label={t("about.roles")}>{roles.length > 0 ? roles.join(", ") : "—"}</Fact>
         {/* Empty segments are DROPPED, not rendered as a gap — the same
             treatment lib/investigation-sources.ts's auditDetailLine got in
             round 3, applied here in round 5 (finding #9). An anonymous subject
             has no displayName, and the fixed template printed the separator
             anyway: "anonymous · " reads as a name that failed to load. A
             separator is a joint between two things. */}
-        <Fact label="Your subject">{me ? subjectLine(me.subject.kind, me.subject.displayName) : "—"}</Fact>
-        <Fact label="Controller">{config?.controller.configured ? "configured" : "not configured"}</Fact>
-        <Fact label="Prometheus">{config?.prometheus.configured ? "configured" : "not configured"}</Fact>
-        <Fact label="Database">{config?.database.configured ? "configured" : "not configured"}</Fact>
+        <Fact label={t("about.subject")}>{me ? subjectLine(me.subject.kind, me.subject.displayName) : "—"}</Fact>
+        {/* The server's own strings, verbatim — including "dev" and "unknown",
+            which are the honest answer for a locally built binary and must not
+            be dressed up as anything else. */}
+        <Fact label={t("about.version")}>
+          <span className="font-mono text-[12px]" data-testid="about-version">
+            {version?.version ?? "—"}
+          </span>
+        </Fact>
+        <Fact label={t("about.commit")}>
+          <span className="font-mono text-[12px] break-all" data-testid="about-commit">
+            {version?.commit ?? "—"}
+          </span>
+        </Fact>
+        <Fact label={t("about.controller")}>
+          {config?.controller.configured ? t("about.configured") : t("about.notConfigured")}
+        </Fact>
+        <Fact label={t("about.prometheus")}>
+          {config?.prometheus.configured ? t("about.configured") : t("about.notConfigured")}
+        </Fact>
+        {/* «База данных» is feminine, so it takes the feminine participle;
+            the two above are masculine and keep the plain key. */}
+        <Fact label={t("about.database")}>
+          {config?.database.configured ? t("about.configured.f") : t("about.notConfigured.f")}
+        </Fact>
       </dl>
 
       {/* The role SOURCE differs by mode, and only in anonymous mode is it a
@@ -1047,28 +1441,17 @@ function AboutSection() {
           already says. */}
       {mode === "anonymous" ? (
         <p className="mt-4 max-w-prose text-xs leading-relaxed text-muted-foreground">
-          Anonymous mode: every unauthenticated request is the {config?.auth.role} role
-          (console.auth.anonymous.role). There is no sign-in.
+          {/* The ROLE is a config value and goes in as it is. */}
+          {t("about.anonymous", { role: config?.auth.role ?? "" })}
         </p>
       ) : null}
 
-      <p className="mt-4 max-w-prose text-xs leading-relaxed text-muted-foreground">
-        Retention: GET /api/v1/config does not serve the retention windows to the browser, so this page will not
-        print numbers it was never told. They are console.retention.* in the console config (Helm:
-        console.retention), and the pruner logs what it swept.
-      </p>
+      <p className="mt-4 max-w-prose text-xs leading-relaxed text-muted-foreground">{t("about.retention")}</p>
       <p className="mt-3 max-w-prose text-xs leading-relaxed text-muted-foreground">
-        Maintenance windows are declared where they explain something — on{" "}
-        <a href="/investigate" className="text-primary hover:underline">
-          Investigate
-        </a>{" "}
-        and{" "}
-        <a href="/explore" className="text-primary hover:underline">
-          Explore
-        </a>
-        , next to the chart they cover — rather than a second time here. The section above lists every declared window
-        with no range, which is the only place a future one can be found and removed. Roles and API tokens are not
-        administered from this console at all.
+        {withNodes(t("about.maintenance"), {
+          investigate: <SurfaceLink href="/investigate">{t("link.investigate")}</SurfaceLink>,
+          explore: <SurfaceLink href="/explore">{t("link.explore")}</SurfaceLink>,
+        })}
       </p>
     </SectionCard>
   );
@@ -1076,17 +1459,11 @@ function AboutSection() {
 
 /* ── page ───────────────────────────────────────────────────────────────── */
 
-/**
- * SettingsPage renders for ANY authenticated subject; the two gated sections
- * hide per permission, and About is what is left.
- *
- * The gate waits for `me` before deciding. `can()` fails closed while GET
- * /api/v1/auth/me is in flight, so rendering on the un-resolved value would
- * flash "your role can view none of this" on every cold load — the same
- * resolved-vs-false split pages/targets.tsx makes.
- */
+/** SettingsPage renders for ANY authenticated subject; `can` fails closed while GET /api/v1/auth/me is in flight. */
 export function SettingsPage() {
+  const t = useT(settingsDict);
   const { me, can } = useAuth();
+  const canTokens = can("tokens:manage");
   const canWebhooks = can("webhooks:manage");
   const canBundle = can("settings:write");
   /* maintenance:WRITE, not :read — see MaintenanceWindowsSection. */
@@ -1096,23 +1473,23 @@ export function SettingsPage() {
   if (me === undefined) {
     body = (
       <Card role="status" aria-live="polite" className="p-6">
-        <span className="sr-only">Loading…</span>
+        <span className="sr-only">{t("loading")}</span>
         <Skeleton className="h-10 w-full" />
       </Card>
     );
   } else {
     body = (
       <>
-        {!canWebhooks && !canBundle && !canMaintenance ? (
+        {/* First, and for everyone — see LanguageSection. */}
+        <LanguageSection />
+        {!canTokens && !canWebhooks && !canBundle && !canMaintenance ? (
           <Card role="status" className="p-6">
-            <p className="text-sm font-medium">Your role can view none of the console's settings.</p>
-            <p className="mt-1 max-w-prose text-xs leading-relaxed text-muted-foreground">
-              Webhook endpoints need webhooks:manage, configuration export/import needs settings:write, and the
-              maintenance-window list needs maintenance:write. The first two are admin-only in the built-in roles. What
-              is below is everything this role can read here.
-            </p>
+            <p className="text-sm font-medium">{t("nothing.title")}</p>
+            <p className="mt-1 max-w-prose text-xs leading-relaxed text-muted-foreground">{t("nothing.body")}</p>
           </Card>
         ) : null}
+        {/* First of the gated sections: the user menu links straight at it. */}
+        {canTokens ? <TokensSection /> : null}
         {canWebhooks ? <WebhooksSection /> : null}
         {canMaintenance ? <MaintenanceWindowsSection /> : null}
         {canBundle ? <ExportImportSection /> : null}
@@ -1122,10 +1499,8 @@ export function SettingsPage() {
   }
 
   return (
-    <PageShell
-      title="Settings"
-      description="Webhook endpoints, configuration export/import, and what this console is running as."
-    >
+    /* The title is the same word the sidebar's nav.settings uses. */
+    <PageShell title={t("title")} description={t("description")}>
       {body}
     </PageShell>
   );

@@ -32,21 +32,32 @@ func testMetrics(t *testing.T) *metrics.Metrics {
 }
 
 // fakeDiagnosticsServer speaks the real POST /api/v1/diagnostics contract
-// (internal/controller/diagnostics.go): JSON {source,destination,type,plane}
-// in, a model.CheckResult verbatim on 200, plain-text http.Error on failure.
-// Per-pair behaviour (fail the check, or answer with a given HTTP status
-// instead of 200) is configurable by key so one server can drive every
-// runner_test.go scenario. Same shape as
-// internal/console/events/ingester_test.go's fakeControllerAPI.
+// (internal/controller/diagnostics.go); per-pair behaviour (fail the check, or answer with a given
+// HTTP status instead of 200) is configurable by key so one server can drive every runner_test.go
+// scenario.
 type fakeDiagnosticsServer struct {
 	mu        sync.Mutex
 	failPairs map[string]bool
 	status    map[string]int
 	delay     time.Duration
+	nodes     []controllerclient.Node
+	agents    []controllerclient.Agent
 
 	calls     atomic.Int32
 	inFlight  atomic.Int32
 	highWater atomic.Int32
+}
+
+// withAgents registers one agent per node name, with no Kubernetes Node
+// entries at all -- the k8s-less topology the QA stand and any agent-only
+// deployment actually reports.
+func (f *fakeDiagnosticsServer) withAgents(nodeNames ...string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.agents = nil
+	for _, n := range nodeNames {
+		f.agents = append(f.agents, controllerclient.Agent{ID: n + "-agent", NodeName: n, Zone: "zone-a"})
+	}
 }
 
 func newFakeDiagnosticsServer() *fakeDiagnosticsServer {
@@ -69,6 +80,14 @@ func (f *fakeDiagnosticsServer) statusFor(src, dst string, code int) {
 
 func (f *fakeDiagnosticsServer) handler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v1/topology" {
+			f.mu.Lock()
+			snap := controllerclient.Topology{Nodes: f.nodes, Agents: f.agents, Timestamp: time.Now()}
+			f.mu.Unlock()
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(snap)
+			return
+		}
 		if r.URL.Path != "/api/v1/diagnostics" {
 			http.NotFound(w, r)
 			return
@@ -125,13 +144,7 @@ func startFakeDiagnosticsServer(t *testing.T) (*fakeDiagnosticsServer, *controll
 	return fake, controllerclient.New(srv.URL, 10*time.Second)
 }
 
-// recordingBus is a fake cache.Bus that records every Publish call in order
-// under a mutex. A real bus (cache.InProcessBus) has no way to guarantee a
-// test's Subscribe call happens before the run's own goroutine starts
-// publishing -- the run ID, and therefore the topic name, is not known until
-// Start returns, by which point the goroutine may already be running. A
-// recording fake sidesteps that race entirely and gives exact, deterministic
-// order.
+// recordingBus is a fake cache.Bus that records every Publish call in order under a mutex.
 type recordingBus struct {
 	mu   sync.Mutex
 	msgs []recordedMsg
@@ -212,18 +225,8 @@ func testInitiator() authz.Subject {
 	return authz.Subject{Kind: authz.SubjectUser, ID: "u1"}
 }
 
-// TestStartDispatchedBeforeTerminalPerPairAndFinishedBeforeClosed replaces
-// the previous total-count-only "frames in order" test (task-22-brief.md
-// minor e): counting 4 dispatched and 4 terminal frames somewhere in the
-// stream cannot catch one pair's dispatched frame landing AFTER a different
-// pair's terminal frame, so this asserts ordering PER PAIR instead. It also
-// covers I-2: since the finished frame now goes out via
-// hub.CloseTopicWithFinal instead of a bus publish, this dials a real
-// WebSocket client against a real hub (not the recordingBus fake the other
-// tests in this file use, which never touches ws.Hub.Broadcast at all) and
-// asserts the finished frame's Seq is strictly lower than the topic's
-// terminal TypeClosed control frame's Seq, exactly as a real browser tab
-// would observe it.
+// TestStartDispatchedBeforeTerminalPerPairAndFinishedBeforeClosed replaces the previous
+// total-count-only "frames in order" test.
 func TestStartDispatchedBeforeTerminalPerPairAndFinishedBeforeClosed(t *testing.T) {
 	fake, ctrl := startFakeDiagnosticsServer(t)
 	_ = fake
@@ -263,11 +266,8 @@ func TestStartDispatchedBeforeTerminalPerPairAndFinishedBeforeClosed(t *testing.
 		t.Fatalf("subscribe: %v", err)
 	}
 
-	// The run already finished (waitForTerminal above), so this is not a
-	// race against the run's own goroutine: the replay ring (runRingSize,
-	// 64 -- ws/hub.go) hands back every frame from the start regardless of
-	// when this client subscribed relative to when they were broadcast (see
-	// ws.Hub.subscribe's doc comment).
+	// The run already finished (waitForTerminal above), so this is not a race against the run's own
+	// goroutine.
 	dispatchedAt := map[string]int{} // pairKey -> index of that pair's dispatched frame
 	terminalAt := map[string]int{}   // pairKey -> index of that pair's terminal frame
 	var envelopes []ws.Envelope
@@ -386,6 +386,90 @@ func TestStartOneFailingPairYieldsPartial(t *testing.T) {
 	}
 }
 
+// The full-mesh fallback must plan against the MEASUREMENT FLEET -- the nodes that have a
+// registered agent.
+func TestStartFullMeshFallbackPlansAgainstAgentsNotKubernetesNodes(t *testing.T) {
+	fake, ctrl := startFakeDiagnosticsServer(t)
+	// Ten agents, zero Kubernetes nodes: the QA stand's exact topology.
+	fake.withAgents("n1", "n2", "n3")
+	bus := newRecordingBus()
+	hub := ws.NewHub(bus, testMetrics(t))
+	mem := checks.NewMemoryStore()
+	runner := checks.NewRunner(ctrl, hub, bus, mem, testMetrics(t))
+
+	// Both sides empty -- the console's "all <-> all".
+	spec := checks.Spec{Type: "tcp", Plane: "pod", Timeout: 2 * time.Second}
+	id, err := runner.Start(context.Background(), spec, testInitiator())
+	if err != nil {
+		t.Fatalf("Start(all<->all with agents but no k8s nodes): %v, want a planned run", err)
+	}
+
+	run := waitForTerminal(t, mem, id)
+	// 3 nodes, ordered pairs, self-pairs dropped: 3*3-3 = 6.
+	if run.PairTotal != 6 {
+		t.Fatalf("run.PairTotal = %d, want 6 (3 agents, full mesh, self-pairs dropped)", run.PairTotal)
+	}
+	if run.Status != "succeeded" {
+		t.Errorf("run.Status = %q, want succeeded", run.Status)
+	}
+}
+
+// The one-sided fallbacks are the same bug wearing different clothes; both orientations are pinned
+// so a fix that only repairs the symmetric all<->all shape cannot pass.
+func TestStartOneSidedFallbackPlansAgainstAgents(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		spec      checks.Spec
+		wantPairs int32
+	}{
+		{
+			name:      "explicit sources, all destinations",
+			spec:      checks.Spec{Sources: []string{"n1"}, Type: "tcp", Plane: "pod", Timeout: 2 * time.Second},
+			wantPairs: 2, // n1->n2, n1->n3 (self-pair dropped)
+		},
+		{
+			name:      "all sources, explicit destinations",
+			spec:      checks.Spec{Destinations: []string{"n3"}, Type: "tcp", Plane: "pod", Timeout: 2 * time.Second},
+			wantPairs: 2, // n1->n3, n2->n3 (self-pair dropped)
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fake, ctrl := startFakeDiagnosticsServer(t)
+			fake.withAgents("n1", "n2", "n3")
+			bus := newRecordingBus()
+			hub := ws.NewHub(bus, testMetrics(t))
+			mem := checks.NewMemoryStore()
+			runner := checks.NewRunner(ctrl, hub, bus, mem, testMetrics(t))
+
+			id, err := runner.Start(context.Background(), tc.spec, testInitiator())
+			if err != nil {
+				t.Fatalf("Start: %v, want a planned run", err)
+			}
+			run := waitForTerminal(t, mem, id)
+			if run.PairTotal != tc.wantPairs {
+				t.Errorf("run.PairTotal = %d, want %d", run.PairTotal, tc.wantPairs)
+			}
+		})
+	}
+}
+
+// With no agents registered at all there is genuinely nothing to probe, and ErrNoNodes must still
+// be what an operator gets.
+func TestStartFullMeshFallbackStillFailsWithNoAgents(t *testing.T) {
+	fake, ctrl := startFakeDiagnosticsServer(t)
+	fake.mu.Lock()
+	fake.nodes = []controllerclient.Node{{Name: "k8s-only", Zone: "zone-a", Ready: true}}
+	fake.mu.Unlock()
+	bus := newRecordingBus()
+	hub := ws.NewHub(bus, testMetrics(t))
+	runner := checks.NewRunner(ctrl, hub, bus, checks.NewMemoryStore(), testMetrics(t))
+
+	_, err := runner.Start(context.Background(), checks.Spec{Type: "tcp", Plane: "pod"}, testInitiator())
+	if !errors.Is(err, checks.ErrNoNodes) {
+		t.Fatalf("Start with zero agents = %v, want ErrNoNodes", err)
+	}
+}
+
 func TestStartAllFailingPairsYieldsFailed(t *testing.T) {
 	fake, ctrl := startFakeDiagnosticsServer(t)
 	fake.failPair("n1", "n2")
@@ -439,9 +523,7 @@ func TestStartControllerTimeoutMapsToTimeoutState(t *testing.T) {
 	}
 }
 
-// Cancelling the CALLER's context after Start returns must not stop a run
-// already in flight -- the run context is background-derived, not the
-// request context (task-22-brief.md).
+// Cancelling the CALLER's context after Start returns must not stop a run already in flight.
 func TestStartCallerContextCancelDoesNotStopRun(t *testing.T) {
 	fake, ctrl := startFakeDiagnosticsServer(t)
 	fake.delay = 100 * time.Millisecond
@@ -467,10 +549,7 @@ func TestStartCallerContextCancelDoesNotStopRun(t *testing.T) {
 	}
 }
 
-// With the memory store, Runner.Get works and the 51st run evicts the 1st
-// (Decision 15's bounded ring). Runs are created directly against the
-// MemoryStore, not via Start/dispatch, since this is exercising the ring
-// bound, not the fan-out.
+// With the memory store, Runner.Get works and the 51st run evicts the 1st.
 func TestGetWithMemoryStoreRingEviction(t *testing.T) {
 	mem := checks.NewMemoryStore()
 	runner := checks.NewRunner(nil, nil, nil, mem, testMetrics(t))
@@ -497,12 +576,8 @@ func TestGetWithMemoryStoreRingEviction(t *testing.T) {
 	}
 }
 
-// hub.OpenTopic returning false (registry full, or the hub already shut
-// down) must still let the run execute to completion -- refusing a topic
-// must never refuse a run (ws.Hub.OpenTopic's doc comment). Shutting the hub
-// down first is the cheapest reliable way to force OpenTopic to answer
-// false: h.closed makes it a pure precondition check with no need to fill
-// the 256-topic ephemeral registry.
+// hub.OpenTopic returning false (registry full, or the hub already shut down) must still let the
+// run execute to completion.
 func TestStartRunsToCompletionWhenOpenTopicReturnsFalse(t *testing.T) {
 	fake, ctrl := startFakeDiagnosticsServer(t)
 	_ = fake
@@ -530,9 +605,7 @@ func TestStartRunsToCompletionWhenOpenTopicReturnsFalse(t *testing.T) {
 	}
 }
 
-// TestGetResultsReturnsPerPairRows is the httpapi seam GET /api/v1/runs/{id}
-// needs (task-23-brief.md: "run + its results") -- GetResults must return
-// every pair's persisted outcome once the run has finished.
+// TestGetResultsReturnsPerPairRows is the httpapi seam GET /api/v1/runs/{id} needs.
 func TestGetResultsReturnsPerPairRows(t *testing.T) {
 	fake, ctrl := startFakeDiagnosticsServer(t)
 	_ = fake
@@ -597,10 +670,7 @@ func TestWaitReturnsPromptlyWhenNoRunsInFlight(t *testing.T) {
 	}
 }
 
-// TestWaitBlocksUntilRunFinishes is the shutdown-drain contract
-// (task-23-brief.md carry-forward): Wait must not return while a run Start
-// launched is still executing, and must return once it finishes -- well
-// before ctx's own deadline.
+// TestWaitBlocksUntilRunFinishes is the shutdown-drain contract.
 func TestWaitBlocksUntilRunFinishes(t *testing.T) {
 	fake, ctrl := startFakeDiagnosticsServer(t)
 	fake.delay = 200 * time.Millisecond
@@ -633,11 +703,7 @@ func TestWaitBlocksUntilRunFinishes(t *testing.T) {
 	}
 }
 
-// TestWaitReturnsAtBudgetWithRunStillInFlight is Wait's other half: a run
-// that outlives ctx's budget must not block Wait forever -- it returns (and
-// logs) once ctx fires, leaving the run to finish on its own on runCtx's own
-// deadline (Start's doc comment: nothing external can cancel a run once
-// launched).
+// TestWaitReturnsAtBudgetWithRunStillInFlight is Wait's other half.
 func TestWaitReturnsAtBudgetWithRunStillInFlight(t *testing.T) {
 	fake, ctrl := startFakeDiagnosticsServer(t)
 	fake.delay = 500 * time.Millisecond

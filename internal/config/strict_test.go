@@ -77,10 +77,8 @@ checkers:
 	}
 }
 
-// TestHelmRenderedConfigIsValid renders the chart, extracts the ConfigMap's
-// config.yaml, and feeds it through the loader under strict decoding. This
-// guards against the chart emitting a key that strict decode would reject,
-// which would break deployment. Skips gracefully when helm is not installed.
+// TestHelmRenderedConfigIsValid renders the chart, extracts the ConfigMap's config.yaml; this
+// guards against the chart emitting a key that strict decode would reject.
 func TestHelmRenderedConfigIsValid(t *testing.T) {
 	helm, err := exec.LookPath("helm")
 	if err != nil {

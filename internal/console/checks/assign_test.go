@@ -77,9 +77,8 @@ func TestAssignAgentsAllSelectsEveryAgent(t *testing.T) {
 	}
 }
 
-// per-zone resolves to the SAME agent set as all -- it groups the agents by
-// zone for metric purposes downstream, it does not shrink the set (Plan
-// Decision 11, mirrored by httpapi's projectedAgents).
+// per-zone resolves to the SAME agent set as all -- it groups the agents by zone for metric
+// purposes downstream.
 func TestAssignAgentsPerZoneYieldsEveryAgent(t *testing.T) {
 	all, allSeries, err := checks.AssignAgents(
 		[]checks.Definition{tcpDef("def-1", "edge-tcp", checks.SelectAll)}, fiveNodesTwoZones())
@@ -97,10 +96,7 @@ func TestAssignAgentsPerZoneYieldsEveryAgent(t *testing.T) {
 	}
 }
 
-// one-per-zone picks the FIRST agent by sorted node name in each zone, and
-// zoneless agents (Zone == "") form ONE bucket of their own -- the same
-// convention httpapi's projectedAgents counts with, so the planner and the
-// projection guard can never disagree about the number of series.
+// one-per-zone picks the FIRST agent by sorted node name in each zone.
 func TestAssignAgentsOnePerZonePicksSortedFirst(t *testing.T) {
 	agents := []checks.AgentRef{
 		{NodeName: "node-e", Zone: "zone-b"},
@@ -213,10 +209,8 @@ func TestAssignAgentsDisabledDefinitionContributesNothing(t *testing.T) {
 	}
 }
 
-// Projection: series == assigned agents x protocolsPerDefinition (1), summed
-// across enabled definitions -- the same arithmetic httpapi's projection
-// endpoint reports, computed here from the resolved assignment instead of an
-// estimate.
+// Projection: series == assigned agents x protocolsPerDefinition (1), summed across enabled
+// definitions.
 func TestAssignAgentsProjectedSeries(t *testing.T) {
 	tests := []struct {
 		name       string

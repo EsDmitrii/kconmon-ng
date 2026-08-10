@@ -10,15 +10,7 @@ import { NodeCardPage } from "./node-card";
 import { PairCardPage } from "./pair-card";
 import { TargetCardPage } from "./target-card";
 
-/**
- * The three object cards' annotation surfaces, and the one question they exist
- * to answer: WHICH SCOPE does each of them ask for.
- *
- * Every card asks for two scopes — its own object's, plus the global one — and
- * neither leg may ever go out with the scope parameter absent, which would be
- * "every annotation in the fleet" and would scatter one node's private notes
- * across every other card.
- */
+/** The three object cards' annotation surfaces, and the one question they exist to answer. */
 vi.mock("@/components/echart", () => ({
   EChart: ({ className, annotations }: { className?: string; annotations?: Annotation[] }) => (
     <div data-testid="echart" className={className} data-annotations={(annotations ?? []).map((a) => a.id).join(",")} />

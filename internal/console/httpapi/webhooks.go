@@ -26,29 +26,14 @@ type WebhookService interface {
 
 var _ WebhookService = (*store.DB)(nil)
 
-// SecretSealer turns a plaintext endpoint secret into the ciphertext
-// store.WebhookInput.SecretEnc carries. It is the reason THIS package never
-// encrypts anything: the AES-GCM key is config (`console.webhooks.encryptionKey`,
-// M6 Decision 4) and lives with the code that also has to DECRYPT at delivery
-// time -- the dispatcher (M6 Task 5). Splitting the cipher across two packages
-// would give one key two implementations to disagree about.
-//
-// Narrow on purpose: Seal is the only direction the HTTP layer is allowed. A
-// handler that could unseal could serve a secret back, and the whole point of
-// the write-only field is that nothing can.
+// SecretSealer turns a plaintext endpoint secret into the ciphertext store.WebhookInput.SecretEnc
+// carries; it is the reason THIS package never encrypts anything.
 type SecretSealer interface {
 	Seal(plain []byte) ([]byte, error)
 }
 
-// TestDispatcher enqueues one signed ping to an already-stored endpoint,
-// addressed by ID ALONE. It never takes a secret, plaintext or sealed: the
-// dispatcher reads the row it is going to deliver to, so the ciphertext never
-// travels through this package, and the /test route cannot be turned into an
-// oracle that confirms a secret a caller supplied.
-//
-// Enqueue, not deliver: the error is about accepting the work, not about what
-// the endpoint answered. A 202 here means "queued"; the outcome lands on the
-// endpoint row (lastStatus/lastAttempt/failures), which is what GET returns.
+// TestDispatcher enqueues one signed ping to an already-stored endpoint, addressed by ID ALONE; it
+// never takes a secret, plaintext or sealed.
 type TestDispatcher interface {
 	DispatchTest(ctx context.Context, id string) error
 }
@@ -59,12 +44,7 @@ type TestDispatcher interface {
 const webhooksUnavailableDetail = "webhook endpoints are persisted configuration with no in-memory fallback: " +
 	"set console.database.mode in the console config (Helm: console.database.mode) to enable /api/v1/webhooks"
 
-// webhookKeyUnavailableDetail is served for the two operations that need the
-// cipher -- creating an endpoint (its secret must be sealed) and testing one
-// (its secret must be unsealed to sign the ping). M6 Decision 4 makes the key
-// OPTIONAL at boot: a console that never configures a webhook must not fail to
-// start over a key it will never use, so the honest place to report the
-// missing key is the first request that actually needs it, naming it.
+// webhookKeyUnavailableDetail is served for the two operations that need the cipher.
 const webhookKeyUnavailableDetail = "webhook secrets are encrypted at rest and this console has no encryption " +
 	"key configured: set console.webhooks.encryptionKey (32 bytes, base64, from a Secret) to create or " +
 	"test webhook endpoints"
@@ -83,17 +63,8 @@ func (s *Server) webhooksUnavailable(w http.ResponseWriter) bool {
 	return false
 }
 
-// webhookResponse is one endpoint on the wire. There is NO secret field, and
-// that is the type-level half of the guarantee: HasSecret is the only thing a
-// reader ever learns about it, and it is always true for a stored row (the
-// store refuses an empty one), so it is a contract statement rather than a
-// query -- "this endpoint signs its deliveries".
-//
-// The URL is returned, unlike the secret: it is what the operator typed and
-// what the UI has to show to be usable at all. It stays out of the AUDIT log
-// for the reason a target's address does (audit.go) -- a log read by more
-// people, retained longer, must not carry a value that names internal
-// infrastructure.
+// webhookResponse is one endpoint on the wire; there is NO secret field, and that is the type-level
+// half of the guarantee.
 type webhookResponse struct {
 	ID        string   `json:"id"`
 	Name      string   `json:"name"`
@@ -101,9 +72,7 @@ type webhookResponse struct {
 	Events    []string `json:"events"`
 	Enabled   bool     `json:"enabled"`
 	HasSecret bool     `json:"hasSecret"`
-	// The last delivery outcome, kept on the endpoint row rather than in a
-	// delivery-log table (M6 Decision 5). LastAttempt is omitted when nothing
-	// has ever been delivered.
+	// The last delivery outcome, kept on the endpoint row rather than in a delivery-log table.
 	LastStatus  string     `json:"lastStatus"`
 	LastAttempt *time.Time `json:"lastAttempt,omitempty"`
 	Failures    int32      `json:"failures"`
@@ -128,31 +97,13 @@ func webhookResponseFrom(h *store.Webhook) webhookResponse {
 	}
 }
 
-// webhooksListResponse is GET /api/v1/webhooks's body. UNPAGED, and therefore
-// carrying no nextCursor: store.ListWebhooks is unpaged for
-// ListMTRDestinations' reason -- the row count is endpoints an operator typed,
-// not a function of time.
+// webhooksListResponse is GET /api/v1/webhooks's body.
 type webhooksListResponse struct {
 	Webhooks []webhookResponse `json:"webhooks"`
 }
 
-// webhookRequest is POST /api/v1/webhooks's and PUT /api/v1/webhooks/{id}'s
-// body. Both are FULL replaces, matching store.WebhookInput's contract -- with
-// exactly ONE field that is not: Secret.
-//
-// Secret is WRITE-ONLY and three-state, which is why it is a pointer:
-//   - absent (nil): on create, 422 (every delivery is signed, so there is no
-//     such thing as an endpoint without a secret); on update, KEEP the stored
-//     one. This is what makes editing a URL or an event filter possible
-//     without the operator having to re-type a secret they may not have.
-//   - present and empty (""): 422 on BOTH. "" is what a form submits for a
-//     field the operator left blank, and reading that as "keep" would be a
-//     guess; reading it as "clear" would leave an endpoint that cannot sign.
-//     Refusing it is the only answer that is not a guess.
-//   - present and non-empty: sealed and stored, replacing whatever was there.
-//
-// Enabled is a pointer for a smaller reason: an omitted enabled means TRUE
-// (an endpoint you just declared is one you want), not Go's false zero value.
+// webhookRequest is POST /api/v1/webhooks's and PUT /api/v1/webhooks/{id}'s body; secret is
+// WRITE-ONLY and three-state, which is why it is a pointer: - absent (nil).
 type webhookRequest struct {
 	Name    string   `json:"name"`
 	URL     string   `json:"url"`
@@ -172,10 +123,8 @@ func webhookIDFrom(w http.ResponseWriter, r *http.Request) (string, bool) {
 	return id, true
 }
 
-// writeWebhookStoreError maps a WebhookService error to a response.
-// ErrAlreadyExists is 422 rather than 409, for writeTargetStoreError's reason:
-// a duplicate name is a rejected FIELD VALUE in an otherwise well-formed body,
-// and the caller's fix is to change the name and resend.
+// writeWebhookStoreError maps a WebhookService error to a response; ErrAlreadyExists is 422 rather
+// than 409, for writeTargetStoreError's reason.
 func writeWebhookStoreError(w http.ResponseWriter, name, id string, err error) {
 	switch {
 	case errors.Is(err, store.ErrNotFound):
@@ -191,11 +140,8 @@ func writeWebhookStoreError(w http.ResponseWriter, name, id string, err error) {
 	}
 }
 
-// decodeWebhookRequest reads a create/update body. A body that is not JSON at
-// all is a 400; a well-formed body whose VALUES break a rule is a 422 --
-// decodeTargetRequest's distinction. The secret's own three-state rule is
-// applied by the callers, which are the only ones that know whether there is
-// an existing ciphertext to keep.
+// decodeWebhookRequest reads a create/update body; the secret's own three-state rule is applied by
+// the callers.
 func decodeWebhookRequest(w http.ResponseWriter, r *http.Request) (webhookRequest, bool) {
 	var req webhookRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -216,11 +162,7 @@ func decodeWebhookRequest(w http.ResponseWriter, r *http.Request) (webhookReques
 	return req, true
 }
 
-// sealWebhookSecret encrypts plain through the configured SecretSealer. A nil
-// sealer is 503 naming the key, NOT 500: the deployment is missing a
-// configuration value, which is an operator action, and Decision 4 made the
-// key optional precisely so this is the first place it can possibly be
-// noticed.
+// sealWebhookSecret encrypts plain through the configured SecretSealer.
 func (s *Server) sealWebhookSecret(w http.ResponseWriter, plain string) ([]byte, bool) {
 	if s.webhookSealer == nil {
 		writeProblem(w, http.StatusServiceUnavailable, "webhook encryption key not configured",
@@ -267,10 +209,8 @@ func (s *Server) handleWebhooksList(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, webhooksListResponse{Webhooks: out})
 }
 
-// handleWebhooksCreate declares one endpoint: 201 with a Location header.
-// The secret is REQUIRED here -- every delivery is signed, so an endpoint
-// without one could never deliver -- and is sealed before it reaches store,
-// which is typed to accept ciphertext only.
+// handleWebhooksCreate declares one endpoint: 201 with a Location header; the secret is REQUIRED
+// here -- every delivery is signed.
 func (s *Server) handleWebhooksCreate(w http.ResponseWriter, r *http.Request) {
 	if s.webhooksUnavailable(w) {
 		return
@@ -325,16 +265,8 @@ func (s *Server) handleWebhooksGet(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, webhookResponseFrom(&hook))
 }
 
-// handleWebhooksUpdate replaces one endpoint in full -- EXCEPT the secret,
-// whose absence means "keep the stored one" (see webhookRequest).
-//
-// Note what that implies and what it does not: keeping a secret needs no
-// encryption key, so an update that does not carry one succeeds on a console
-// with no console.webhooks.encryptionKey configured. Only an update that
-// actually REPLACES the secret needs the cipher, and only that one answers 503
-// naming the key. The alternative -- gating the whole route on a key it may
-// not need -- would make an operator unable to disable a misfiring endpoint
-// during exactly the incident that made them want to.
+// handleWebhooksUpdate replaces one endpoint in full -- EXCEPT the secret; only an update that
+// actually REPLACES the secret needs the cipher.
 func (s *Server) handleWebhooksUpdate(w http.ResponseWriter, r *http.Request) {
 	if s.webhooksUnavailable(w) {
 		return
@@ -399,18 +331,9 @@ func (s *Server) handleWebhooksDelete(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// handleWebhooksTest enqueues one signed ping so an operator can find out
-// whether an endpoint works BEFORE an incident depends on it.
-//
-// 202, not 200: delivery is asynchronous with a retry ladder (M6 Decision 5),
-// so the only honest thing this can report is that the work was accepted. The
-// OUTCOME arrives on the endpoint row and is read back from GET
-// /api/v1/webhooks/{id} -- lastStatus/lastAttempt/failures.
-//
-// A nil dispatcher answers 503 with the SAME detail a missing key gets, and on
-// purpose: the dispatcher is exactly the component the key configures (M6 Task
-// 5 wires them together), so naming a second knob here would send the operator
-// looking for something that does not exist.
+// handleWebhooksTest enqueues one signed ping so an operator can find out whether an endpoint works
+// BEFORE an incident depends on it; a nil dispatcher answers 503 with the SAME detail a missing key
+// gets.
 func (s *Server) handleWebhooksTest(w http.ResponseWriter, r *http.Request) {
 	if s.webhooksUnavailable(w) {
 		return
@@ -423,10 +346,7 @@ func (s *Server) handleWebhooksTest(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, http.StatusServiceUnavailable, "webhook delivery not configured", webhookKeyUnavailableDetail)
 		return
 	}
-	// Existence is checked HERE rather than left to the dispatcher: enqueuing
-	// a ping to an id that names nothing would answer 202 for work that can
-	// never happen, and the operator would wait for an outcome row that never
-	// appears.
+	// Existence is checked HERE rather than left to the dispatcher.
 	if _, err := s.webhooks.GetWebhook(r.Context(), id); err != nil {
 		writeWebhookStoreError(w, "", id, err)
 		return

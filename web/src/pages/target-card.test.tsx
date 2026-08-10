@@ -16,12 +16,8 @@ import {
   targetIdFromPath,
 } from "./target-card";
 
-// EChart is mocked, not rendered: echarts.init() reaches for a 2d canvas
-// context jsdom does not implement (no `canvas` package in devDependencies),
-// and a real mount throws. Mocking it keeps the assertion this file actually
-// cares about — a chart is rendered for a non-empty series and NOT rendered
-// for an empty one — while leaving the option-building itself covered by
-// lib/curated-metrics.test.ts.
+// EChart is mocked, not rendered: echarts.init reaches for a 2d canvas context jsdom does not
+// implement (no `canvas` package in devDependencies).
 vi.mock("@/components/echart", () => ({
   EChart: ({ className }: { className?: string }) => <div data-testid="echart" className={className} />,
 }));
@@ -362,6 +358,18 @@ describe("TargetCardPage", () => {
     expect(screen.queryByTestId("echart")).not.toBeInTheDocument();
   });
 
+  /* QA scope 2, finding #15 — the candidate list named three reasons and left
+     out the one the stand was actually hitting. The chart is built from probe
+     DURATIONS, so a target being probed hard and failing every time looks
+     exactly like a target nobody probes. */
+  it("lists the failing-probe candidate, not just the not-probed ones", async () => {
+    renderPage(`/targets/${TARGET_ID}`, { rangeResult: [] });
+    fireEvent.click(await screen.findByRole("radio", { name: "History" }));
+    const note = await screen.findByText(/No external probe series for this target/i);
+    expect(note).toHaveTextContent(/every probe failed/);
+    expect(note).toHaveTextContent(/built from probe durations/);
+  });
+
   it("renders the chart when the PromQL proxy returns a series", async () => {
     renderPage(`/targets/${TARGET_ID}`, {
       rangeResult: [{ metric: { source_node: "node-a" }, values: [[1, "0.004"]] }],
@@ -471,9 +479,7 @@ describe("TargetCardPage — open incidents rail", () => {
 
 /* ── QA round 5 ─────────────────────────────────────────────────────────── */
 
-/* #7. "— healthy" read as a claim with a missing number in front of it. Round
-   2's finding #16 fixed exactly this on the node card and it was never carried
-   across to this one. */
+/* #7. "— healthy" read as a claim with a missing number in front of it. */
 describe("no percentage means no sentence (#7)", () => {
   it("drops the suffix entirely when nothing has probed the target", async () => {
     renderPage(`/targets/${TARGET_ID}`, { healthResult: [] });

@@ -122,13 +122,8 @@ func TestWebhookInputValidateRejects(t *testing.T) {
 	}
 }
 
-// TestWebhookEventsAreTheClosedSet pins the VALUES, not just the count. M6
-// shipped the incident lifecycle three (Decision 5) and M7 widened the set
-// with the two alert transitions -- in CODE, not in a migration, exactly as
-// the M6 comment on the constant block planned. The literal strings here are
-// deliberately NOT the constants -- a test that compares a constant to itself
-// pins nothing -- so a typo in one of the exported names fails here rather
-// than silently shipping a wire value no receiver filters on.
+// TestWebhookEventsAreTheClosedSet pins the VALUES, not just the count; the literal strings here
+// are deliberately NOT the constants.
 func TestWebhookEventsAreTheClosedSet(t *testing.T) {
 	want := map[string]bool{
 		"incident.created":  true,
@@ -158,10 +153,8 @@ func TestWebhookEventsAreTheClosedSet(t *testing.T) {
 	}
 }
 
-// The Validate error is what an operator reads when the API rejects their
-// events array, so it has to list the WHOLE vocabulary. A message that still
-// named only the M6 three would send someone hunting for a bug that is not
-// there.
+// The Validate error is what an operator reads when the API rejects their events array; a message
+// that still named only the three would send someone hunting for a bug that is not there.
 func TestWebhookEventRejectionNamesEveryAcceptedValue(t *testing.T) {
 	in := validWebhookInput()
 	in.Events = []string{"alert.acknowledged"}
@@ -179,12 +172,8 @@ func TestWebhookEventRejectionNamesEveryAcceptedValue(t *testing.T) {
 	}
 }
 
-// TestWebhookSecretIsOpaqueToValidation is the layering claim migration 00006
-// and WebhookInput.SecretEnc both make: the store persists bytes and does not
-// know, or check, what they encrypt. Arbitrary binary -- NUL bytes, invalid
-// UTF-8, a lone 0xff -- must round through Validate untouched, because
-// AES-GCM ciphertext is exactly that and a store that "helpfully" rejected it
-// would make the dispatcher's own crypto unstorable.
+// TestWebhookSecretIsOpaqueToValidation is the layering claim migration 00006 and
+// WebhookInput.SecretEnc both make; arbitrary binary -- NUL bytes.
 func TestWebhookSecretIsOpaqueToValidation(t *testing.T) {
 	for _, secret := range [][]byte{
 		{0x00},
@@ -225,10 +214,8 @@ func TestWebhookMalformedIDIsNotFoundWithoutTouchingPgx(t *testing.T) {
 	}
 }
 
-// TestUpdateWebhookValidatesBeforeTheIDPreCheck asserts a bad payload is
-// reported as a validation error rather than as a miss: an operator who typed
-// a file:// URL must be told that, not told the endpoint does not exist. NIL
-// pool.
+// TestUpdateWebhookValidatesBeforeTheIDPreCheck asserts a bad payload is reported as a validation
+// error rather than as a miss.
 func TestUpdateWebhookValidatesBeforeTheIDPreCheck(t *testing.T) {
 	db := &DB{}
 	in := validWebhookInput()

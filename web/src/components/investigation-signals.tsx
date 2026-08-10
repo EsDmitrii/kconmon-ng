@@ -8,56 +8,33 @@ import { maintenanceOverlaySeries } from "@/lib/annotations";
 import { chartColors } from "@/lib/chart-theme";
 import { ApiError } from "@/lib/api";
 import { formatSeconds, toSeriesOption, type CuratedChart } from "@/lib/curated-metrics";
+import { stampClock, translate, useLocale, useT, type Translate } from "@/lib/i18n";
+import { PROMQL_MAX_RANGE_MS } from "@/lib/investigation-sources";
+import { signalsDict, type SignalsKey } from "@/lib/i18n/dict/signals";
 import type { Annotation, MaintenanceWindow, PromResult } from "@/lib/types";
+
+/** enT is the ENGLISH translator problemDetail defaults to — the wave's
+ *  pattern for a pure helper, so a one-argument call reads what it always did. */
+const enT: Translate<SignalsKey> = (key, vars) => translate(signalsDict, "en", key, vars);
 
 /** problemDetail renders a rejected fetch as the sentence the SERVER wrote —
  *  a problem+json `detail` says which parameter was refused and why, which is
  *  the half an operator needs; the generic fallback is for a transport failure
  *  that carries no body at all. */
-function problemDetail(error: Error): string {
+function problemDetail(error: Error, t: Translate<SignalsKey> = enT): string {
   if (error instanceof ApiError) return error.problem.detail ?? error.problem.title;
-  return error.message === "" ? "The query could not be run." : error.message;
+  return error.message === "" ? t("error.noBody") : error.message;
 }
 
-/**
- * investigation-signals.tsx — the Investigate page's right-hand column: the
- * scope's loss and RTT charts, the timeline cursor drawn across both of them,
- * and the matrix delta chip.
- *
- * It is PRESENTATIONAL. Every fetch the panels render lives in
- * pages/investigate.tsx, because the same loss/RTT range responses are also
- * what lib/investigation.ts's thresholdCrossings derives the timeline's
- * threshold rows from — fetching them twice (once for the chart, once for the
- * timeline) would let the picture and the rows disagree about the very series
- * they are both describing.
- *
- * The cursor builder below is exported and unit-tested directly, for the reason
- * lib/annotations.ts already documents: EChart is mocked in every page test
- * (echarts.init needs a 2d canvas context jsdom does not implement), so marker
- * geometry can only be asserted where it is BUILT.
- *
- * The maintenance bands are NOT built here any more. M6 Task 9 lifted them into
- * lib/annotations.ts (maintenanceOverlaySeries), beside the annotation overlay
- * they are modelled on, because the pair/target cards and Explore draw the same
- * bands — this file just composes them below.
- */
+/** investigation-signals.tsx — the Investigate page's right-hand column: the scope's loss and RTT charts. */
 
 /** The cursor series' name. Named rather than anonymous so it can be switched
  *  off from the legend like any other series. */
 export const CURSOR_SERIES_NAME = "Timeline cursor";
 
 /**
- * cursorSeries is the timeline↔chart sync, in one markLine.
- *
- * Hovering a timeline row hands this the row's instant and the same vertical
- * line appears on every signal chart, which is the whole point of the pane:
- * "the route changed HERE" and "loss started THERE" have to be readable as one
- * picture. Null (nothing hovered) returns null rather than an empty series, so
- * the caller's memoised option keeps its identity and ECharts is not asked to
- * re-render for a marker that is not there.
- *
- * Markers must hang off a series — ECharts has no free-floating markLine — so
- * this is an empty line series whose only job is to host one.
+ * cursorSeries is the timeline↔chart sync, in one markLine; null (nothing hovered) returns null
+ * rather than an empty series.
  */
 export function cursorSeries(at: Date | null, dark: boolean): LineSeriesOption | null {
   if (at === null) return null;
@@ -79,13 +56,7 @@ export function cursorSeries(at: Date | null, dark: boolean): LineSeriesOption |
   };
 }
 
-/** withOverlays appends the cursor and the maintenance bands to an option a
- *  caller already built, WITHOUT mutating it (pages memoise their options, and
- *  a mutation would be invisible to that memo) and returning the same object
- *  when there is nothing to add. The bands come from the SHARED builder every
- *  other surface draws (lib/annotations.ts's maintenanceOverlaySeries), so the
- *  Investigate charts and a pair card cannot disagree about what a declared
- *  window looks like. */
+/** withOverlays appends the cursor and the maintenance bands to an option a caller already built. */
 export function withOverlays(
   option: EChartsOption,
   opts: { cursorAt: Date | null; windows: MaintenanceWindow[]; dark: boolean },
@@ -121,16 +92,7 @@ function firstSample(res: PromResult | undefined): number | null {
   return Number.isFinite(v) ? v : null;
 }
 
-/**
- * deltaFromVectors is the matrix delta chip: the scope's fail ratio evaluated
- * at the START of the window and again at its END, and the signed difference.
- *
- * Two INSTANT evaluations rather than an average over the window, because the
- * question the chip answers is "is this worse than it was when the window
- * opened?" — and the value at `from` is, by the rate window's own construction,
- * the state of the PRECEDING window. A null on either side keeps the delta null:
- * "we could not measure one end" is not "nothing changed".
- */
+/** deltaFromVectors is the matrix delta chip; two INSTANT evaluations rather than an average over the window. */
 export function deltaFromVectors(before: PromResult | undefined, after: PromResult | undefined): MatrixDelta {
   const b = firstSample(before);
   const a = firstSample(after);
@@ -148,26 +110,8 @@ function fmtSignedPct(v: number | null): string {
 }
 
 /**
- * signalChartOption is this column's OWN option builder (QA round 3, findings
- * #13 and #14).
- *
- * It composes lib/curated-metrics.ts's toSeriesOption — the series, the colours
- * and the tooltip are one builder for the whole console, and forking them here
- * would let a curated chart and a signal chart draw the same numbers
- * differently. What it then states EXPLICITLY is the two axis treatments this
- * narrow column depends on, rather than inheriting them silently:
- *
- *   x — `hideOverlap`, so a 20rem-wide time axis thins its ticks out instead of
- *       smearing every stamp into an unreadable band (#13).
- *   y — the ADAPTIVE millisecond formatter (curated-metrics' formatSeconds), so
- *       an RTT axis stepping fractions of a millisecond stops printing the same
- *       label three times (#14).
- *
- * Stating them here is the point of the function. These panels are 24rem wide
- * against the curated grid's full page, so they hit the collision cases first
- * and hardest; a future width or density change to the shared builder must not
- * be able to quietly un-fix this column, and a test pins the option THIS
- * function returns.
+ * signalChartOption is this column's OWN option builder; it composes lib/curated-metrics.ts's
+ * toSeriesOption — the series.
  */
 export function signalChartOption(
   chart: CuratedChart,
@@ -191,6 +135,7 @@ export function signalChartOption(
 }
 
 function SignalChart({
+  id,
   title,
   unit,
   result,
@@ -199,24 +144,30 @@ function SignalChart({
   windows,
   annotations,
   emptyNote,
+  refusal,
 }: {
+  /** The chart's IDENTITY, separate from its title since the title moved into
+   *  the dictionary: it used to be derived from the English words, and an id
+   *  that changes with the interface language is not an id. */
+  id: string;
   title: string;
   unit: CuratedChart["unit"];
   result: PromResult | undefined;
-  /** The REJECTION, as opposed to Prometheus's own error envelope below (QA
-   *  round 3, finding #2). A 4xx from the guarded proxy — an inverted range,
-   *  a refused expression, a proxy that is down — throws out of the fetch, so
-   *  `result` stays undefined and this pane used to render nothing at all: a
-   *  heading over 160px of dead space, indistinguishable from still loading. */
+  /** The REJECTION, as opposed to Prometheus's own error envelope below. */
   error?: Error | null;
   cursorAt: Date | null;
   windows: MaintenanceWindow[];
   annotations: Annotation[];
   emptyNote: string;
+  /** OUR OWN refusal, decided before anything was fetched, so it outranks both
+   *  failure shapes below: there is no rejection and no envelope to describe
+   *  when the request was never sent. */
+  refusal?: string;
 }) {
+  const t = useT(signalsDict);
   const { theme } = useTheme();
   const dark = theme === "dark";
-  const chart = useMemo<CuratedChart>(() => ({ id: title, title, unit, query: "" }), [title, unit]);
+  const chart = useMemo<CuratedChart>(() => ({ id, title, unit, query: "" }), [id, title, unit]);
   const option = useMemo(
     () => (result ? signalChartOption(chart, result, dark, { cursorAt, windows }) : undefined),
     [chart, result, dark, cursorAt, windows],
@@ -224,10 +175,10 @@ function SignalChart({
 
   // promqlQueryRange RESOLVES Prometheus's own error envelope rather than
   // throwing, so a query-level failure shows up in the body, not as a rejection.
-  const envelopeError = result?.status === "error" ? (result.error ?? "query failed") : undefined;
+  const envelopeError = result?.status === "error" ? (result.error ?? t("error.queryFailed")) : undefined;
   /* Both failure shapes render as ONE line under the heading. The rejection is
      named first because it is the one that leaves no result to describe. */
-  const problem = error ? problemDetail(error) : envelopeError;
+  const problem = refusal ?? (error ? problemDetail(error, t) : envelopeError);
   const empty =
     result?.status === "success" && (result.data?.resultType !== "matrix" || (result.data?.result ?? []).length === 0);
 
@@ -248,13 +199,8 @@ function SignalChart({
 }
 
 /**
- * SignalPanels is the right-hand column: the delta chip, the two charts and the
- * cursor readout.
- *
- * The cursor readout is DOM, not a chart tooltip, and deliberately: the canvas
- * marker cannot be read by a screen reader, cannot be focused, and is invisible
- * to every test in this repo. A one-line readout says which instant the panes
- * are currently agreeing on, in text.
+ * SignalPanels is the right-hand column: the delta chip, the two charts and the cursor readout; the
+ * cursor readout is DOM, not a chart tooltip, and deliberately.
  */
 export function SignalPanels({
   scopeLabel,
@@ -263,11 +209,13 @@ export function SignalPanels({
   rtt,
   rttError,
   delta,
+  deltaError,
   cursorAt,
   windows,
   annotations,
   promConfigured,
   gated,
+  rangeTooWide,
 }: {
   scopeLabel: string;
   loss: PromResult | undefined;
@@ -277,6 +225,10 @@ export function SignalPanels({
   /** The RTT range query's REJECTION (finding #2). */
   rttError?: Error | null;
   delta: MatrixDelta;
+  /** The fail-ratio pair's REJECTION (QA scope 3, finding #1). Without it the
+   *  chip printed "0.0% → 0.0% · +0.0 pp" over two requests that never came
+   *  back — a figure, in the place a figure lives, describing nothing. */
+  deltaError?: Error | null;
   cursorAt: Date | null;
   windows: MaintenanceWindow[];
   annotations: Annotation[];
@@ -285,63 +237,87 @@ export function SignalPanels({
    *  muted line and NOTHING is fetched (the timeline's source list carries the
    *  same statement; this one keeps the empty column from looking broken). */
   gated: boolean;
+  /** True when the window is wider than one query_range may be, in which case
+   *  the two range queries were NOT fetched and the charts say the bound
+   *  themselves — the delta chip is unaffected, its two evaluations are INSTANT
+   *  queries and carry no range at all. */
+  rangeTooWide: boolean;
 }) {
+  const t = useT(signalsDict);
+  const { locale } = useLocale();
+  const tooWide = rangeTooWide ? t("chart.tooWide", { hours: PROMQL_MAX_RANGE_MS / 3_600_000 }) : undefined;
   return (
     <Card asChild className="p-5">
-      <section aria-label="Signals">
+      <section aria-label={t("title")}>
         <div className="flex flex-wrap items-center gap-2">
-          <h3 className="text-sm font-semibold">Signals</h3>
+          <h3 className="text-sm font-semibold">{t("title")}</h3>
           <span className="text-xs text-muted-foreground">{scopeLabel}</span>
         </div>
 
         <div data-testid="matrix-delta" className="mt-3 flex flex-wrap items-center gap-2 text-xs">
-          <span className="text-muted-foreground">Fail ratio</span>
-          <span className="nums">{fmtPct(delta.before)}</span>
-          <span aria-hidden="true" className="text-muted-foreground">
-            →
-          </span>
-          <span className="nums">{fmtPct(delta.after)}</span>
-          <Badge variant={delta.delta === null ? "unknown" : delta.delta > 0 ? "bad" : delta.delta < 0 ? "ok" : "neutral"}>
-            {fmtSignedPct(delta.delta)}
-          </Badge>
-          <span className="text-[11px] text-muted-foreground">window start vs window end</span>
+          <span className="text-muted-foreground">{t("delta.failRatio")}</span>
+          {deltaError ? (
+            /* No numbers at all when the two evaluations were refused. A "—"
+               would be honest about the VALUE and silent about the reason, and
+               the reason is the half an operator can act on. */
+            <span role="alert" className="leading-relaxed text-health-bad">
+              {problemDetail(deltaError, t)}
+            </span>
+          ) : (
+            <>
+              <span className="nums">{fmtPct(delta.before)}</span>
+              <span aria-hidden="true" className="text-muted-foreground">
+                →
+              </span>
+              <span className="nums">{fmtPct(delta.after)}</span>
+              <Badge
+                variant={delta.delta === null ? "unknown" : delta.delta > 0 ? "bad" : delta.delta < 0 ? "ok" : "neutral"}
+              >
+                {fmtSignedPct(delta.delta)}
+              </Badge>
+              <span className="text-[11px] text-muted-foreground">{t("delta.caption")}</span>
+            </>
+          )}
         </div>
 
         <p data-testid="signal-cursor" className="mt-2 text-[11px] text-muted-foreground">
-          Cursor {cursorAt === null ? "— no row hovered" : cursorAt.toLocaleTimeString()}
+          {/* The SAME stamp helper the timeline row's own clock uses, so the
+              instant a reader is hovering reads identically in both places
+              (QA scope 3, finding #18). */}
+          {t("cursor", {
+            at: cursorAt === null ? t("cursor.none") : stampClock(cursorAt, locale),
+          })}
         </p>
 
         {gated ? (
-          <p className="mt-3 text-xs leading-relaxed text-muted-foreground">
-            The loss and RTT panes read Prometheus through the guarded proxy, which needs promql:query. Nothing was
-            requested.
-          </p>
+          <p className="mt-3 text-xs leading-relaxed text-muted-foreground">{t("gated")}</p>
         ) : !promConfigured ? (
-          <p className="mt-3 text-xs leading-relaxed text-muted-foreground">
-            Prometheus is not configured for this console — set console.prometheus.address to draw the scope's signals.
-            The timeline above does not depend on it.
-          </p>
+          <p className="mt-3 text-xs leading-relaxed text-muted-foreground">{t("promUnset")}</p>
         ) : (
           <>
             <SignalChart
-              title="Packet loss"
+              id="packet-loss"
+              title={t("chart.loss")}
               unit="ratio"
               result={loss}
               error={lossError}
               cursorAt={cursorAt}
               windows={windows}
               annotations={annotations}
-              emptyNote="No loss series for this scope in the window — nothing is probing it, or the samples have not been scraped yet."
+              emptyNote={t("chart.loss.empty")}
+              refusal={tooWide}
             />
             <SignalChart
-              title="RTT p95"
+              id="rtt-p95"
+              title={t("chart.rtt")}
               unit="seconds"
               result={rtt}
               error={rttError}
               cursorAt={cursorAt}
               windows={windows}
               annotations={annotations}
-              emptyNote="No RTT series for this scope in the window."
+              emptyNote={t("chart.rtt.empty")}
+              refusal={tooWide}
             />
           </>
         )}

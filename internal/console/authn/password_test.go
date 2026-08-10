@@ -61,30 +61,13 @@ func TestVerifyPasswordWrongPasswordFails(t *testing.T) {
 	}
 }
 
-// TestVerifyPasswordMalformedHashNeverSucceeds proves every unparseable phc
-// -- truncated, garbage, or empty -- returns a non-nil error and (critically)
-// never (true, nil). A verifier that silently treated "I couldn't parse
-// this" as "it matched" would be a full authentication bypass.
-// validSaltB64 and validHashB64 are a well-formed 16-byte salt and 32-byte
-// hash (base64 RawStdEncoding), reused across the pathological-parameter
-// cases below so that the ONLY thing under test in each case is the
-// parameter (t=0, p=0, version) or field (empty hash) being exercised --
-// not an incidental salt/hash-length rejection.
+// TestVerifyPasswordMalformedHashNeverSucceeds proves every unparseable phc -- truncated.
 var (
 	validSaltB64 = base64.RawStdEncoding.EncodeToString(make([]byte, 16))
 	validHashB64 = base64.RawStdEncoding.EncodeToString(make([]byte, 32))
 )
 
-// TestVerifyPasswordMalformedHashNeverSucceeds proves every unparseable phc
-// -- truncated, garbage, empty, or carrying a pathological/out-of-range
-// parameter -- returns a non-nil error and (critically) never (true, nil)
-// and never panics. A verifier that silently treated "I couldn't parse
-// this" as "it matched" would be a full authentication bypass; a verifier
-// that panicked on attacker-supplied input (e.g. a stored/forged hash with
-// t=0, p=0, or a truncated hash field) would be a denial-of-service vector.
-// t=0, p=0, and the empty-hash-field case are verified (against
-// golang.org/x/crypto v0.54.0) to panic inside argon2.IDKey if parsePHC ever
-// let them through unchecked.
+// TestVerifyPasswordMalformedHashNeverSucceeds proves every unparseable phc -- truncated.
 func TestVerifyPasswordMalformedHashNeverSucceeds(t *testing.T) {
 	t.Parallel()
 
@@ -126,11 +109,8 @@ func TestVerifyPasswordMalformedHashNeverSucceeds(t *testing.T) {
 	}
 }
 
-// TestVerifyPasswordHonorsParametersEncodedInHash proves the argon2id
-// parameters (m, t, p) and salt used at verification time come from the PHC
-// string itself, not from HashPassword's current hardcoded defaults -- so a
-// hash minted with different (e.g. lighter, faster-to-test) parameters than
-// today's defaults still verifies correctly.
+// TestVerifyPasswordHonorsParametersEncodedInHash proves the argon2id parameters (m, t, p) and salt
+// used at verification time come from the PHC string itself.
 func TestVerifyPasswordHonorsParametersEncodedInHash(t *testing.T) {
 	t.Parallel()
 
@@ -165,11 +145,4 @@ func TestVerifyPasswordHonorsParametersEncodedInHash(t *testing.T) {
 	}
 }
 
-// The actual timing-budget assertion lives in password_timing_test.go: one
-// test that always runs, including under -race (M-5 -- it previously split
-// into a real assertion and a silently-disabled one across two build-tagged
-// files). Only the numeric budget itself is still build-tag split, in
-// password_timing_budget_norace_test.go / password_timing_budget_race_test.go,
-// because the race detector's instrumentation genuinely does inflate
-// argon2id's wall-clock cost by roughly 7-10x on this hardware (measured
-// ~500ms vs ~50-70ms for the exact same m=65536,t=3,p=2 call).
+// Only the numeric budget itself is still build-tag split.

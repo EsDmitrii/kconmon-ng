@@ -16,10 +16,8 @@ import (
 	"github.com/EsDmitrii/kconmon-ng/internal/console/store"
 )
 
-// fakeAnnotationStore is one double for AnnotationService (read seam + write
-// seam), mutex-guarded like fakeChecksStore. Validation goes through the real
-// store.AnnotationInput.Validate so the 422 tests exercise the SAME rules the
-// database layer enforces, not a second copy of them.
+// fakeAnnotationStore is one double for AnnotationService (read seam + write seam), mutex-guarded
+// like fakeChecksStore.
 type fakeAnnotationStore struct {
 	mu sync.Mutex
 
@@ -148,9 +146,6 @@ func TestAnnotationsWithoutStoreReturn503(t *testing.T) {
 	}
 }
 
-// M5 Decision 11 in test form: viewer READS annotations (chart markers are
-// telemetry) and CANNOT write them (a note pinned to the fleet's history is
-// an operator statement).
 func TestAnnotationsViewerReadsButCannotWrite(t *testing.T) {
 	for _, role := range []string{"viewer", "alert-editor"} {
 		st := newFakeAnnotationStore()

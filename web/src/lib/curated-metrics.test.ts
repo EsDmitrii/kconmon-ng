@@ -1,6 +1,6 @@
 import type * as echarts from "echarts";
 import { describe, expect, it } from "vitest";
-import { CURATED_CHARTS, toSeriesOption } from "./curated-metrics";
+import { CURATED_CHARTS, RANGE_TOKEN, resolveRangeToken, toSeriesOption } from "./curated-metrics";
 import type { PromResult } from "./types";
 
 // Full metric-name inventory from docs/metrics.md (also verified against
@@ -58,6 +58,74 @@ describe("CURATED_CHARTS", () => {
     );
     expect(failRate.query).not.toContain("vector(0)");
   });
+
+  /* ---------------------------------------------------------------- */
+  /* The topk-in-a-range-query shape                                   */
+  /* ---------------------------------------------------------------- */
+
+  /* A bare `topk(N, …)` at the head of a RANGE query is re-evaluated at every
+     step, so the chart draws the union of everything that ever led — on a
+     10-node mesh that is up to 90 pairs, each a stub. The corrected shape
+     picks the N once, pinned at the window's end, and uses it only as a
+     membership filter. These tests pin that shape so it cannot regress into a
+     leading topk again. */
+  const rankedCharts = () => CURATED_CHARTS.filter((c) => c.query.includes("topk("));
+
+  it("never leads a range query with a bare topk", () => {
+    for (const chart of CURATED_CHARTS) {
+      expect(chart.query.trimStart(), `${chart.id}: bare leading topk`).not.toMatch(/^topk\s*\(/);
+    }
+  });
+
+  it("uses topk only as an `and on` membership filter, pinned with @ end()", () => {
+    expect(rankedCharts().length).toBeGreaterThan(0);
+    for (const chart of rankedCharts()) {
+      // Exactly one topk, on the right of `and on` — the drawn samples come
+      // from the left-hand series, never from the ranker.
+      expect(chart.query.match(/topk\(/g), `${chart.id}: more than one topk`).toHaveLength(1);
+      expect(chart.query, `${chart.id}: topk not joined with and on`).toContain(
+        "and on (source_node, destination_node) topk(",
+      );
+      expect(chart.query, `${chart.id}: ranker not pinned to the window end`).toContain(
+        `[${RANGE_TOKEN}] @ end()`,
+      );
+    }
+  });
+
+  it("bounds every worst-5 chart at the 5 its title promises", () => {
+    const worst5 = CURATED_CHARTS.filter((c) => /worst 5/i.test(c.title));
+    expect(worst5.map((c) => c.id)).toEqual(["tcp-p95", "udp-loss", "icmp-p95"]);
+    for (const chart of worst5) {
+      expect(chart.query, `${chart.id}: not a topk(5) chart`).toContain("topk(5,");
+    }
+  });
+
+  it("leaves no unresolved token in anything the page can post", () => {
+    for (const chart of CURATED_CHARTS) {
+      expect(resolveRangeToken(chart.query, 3600), `${chart.id}: token survived resolution`).not.toContain("$");
+    }
+  });
+});
+
+describe("resolveRangeToken", () => {
+  it("substitutes the drawn window as a PromQL duration", () => {
+    expect(resolveRangeToken(`rate(x[${RANGE_TOKEN}] @ end())`, 6 * 60 * 60)).toBe("rate(x[21600s] @ end())");
+  });
+
+  it("replaces every occurrence, not just the first", () => {
+    expect(resolveRangeToken(`a[${RANGE_TOKEN}] + b[${RANGE_TOKEN}]`, 900)).toBe("a[900s] + b[900s]");
+  });
+
+  it("leaves a query without the token untouched", () => {
+    const plain = "rate(kconmon_ng_tcp_results_total[5m])";
+    expect(resolveRangeToken(plain, 900)).toBe(plain);
+  });
+
+  it("never emits a fractional or zero duration Prometheus would reject", () => {
+    expect(resolveRangeToken(`x[${RANGE_TOKEN}]`, 90.7)).toBe("x[91s]");
+    expect(resolveRangeToken(`x[${RANGE_TOKEN}]`, 0)).toBe("x[1s]");
+    expect(resolveRangeToken(`x[${RANGE_TOKEN}]`, -5)).toBe("x[1s]");
+  });
 });
 
 describe("toSeriesOption", () => {
@@ -101,10 +169,7 @@ describe("toSeriesOption", () => {
     expect(formatter(0.215, 0)).toBe("215ms");
   });
 
-  /* QA round 2, finding #8: a sub-10ms chart's ticks all rounded to the same
-     integer, so the axis read "1ms, 1ms, 2ms, 2ms" — five ticks, three
-     labels. One decimal below 10ms separates them; above it the decimal is
-     noise. */
+  /* One decimal below 10ms separates them; above it the decimal is noise. */
   it("switches to one decimal below 10ms so adjacent ticks stop colliding", () => {
     const option = toSeriesOption(tcpP95, matrixResult, false);
     const yAxis = option.yAxis as echarts.YAXisComponentOption;
@@ -116,8 +181,6 @@ describe("toSeriesOption", () => {
     expect(formatter(0.0099, 0)).toBe("9.9ms");
   });
 
-  /* QA round 2, finding #19: below ~700px the time axis drew every tick on
-     top of the last one. */
   it("lets ECharts thin out colliding time-axis labels", () => {
     const option = toSeriesOption(tcpP95, matrixResult, false);
     const xAxis = option.xAxis as echarts.XAXisComponentOption;

@@ -53,14 +53,21 @@ type fakeStore struct {
 	listErr     error
 	// marks records every MarkScheduleFired call in order.
 	marks []markCall
+	// skips records every MarkScheduleSkipped call in order -- the write a paused occurrence
+	// makes INSTEAD of a mark, never as well as one.
+	skips []skipCall
+}
+
+type skipCall struct {
+	id   string
+	next *time.Time
 }
 
 type markCall struct {
 	id      string
 	firedAt time.Time
 	next    *time.Time
-	// lastErr is the text this fire recorded on the row, "" when it went
-	// through (QA round 5, finding #5).
+	// lastErr is the text this fire recorded on the row, "" when it went through.
 	lastErr string
 }
 
@@ -110,6 +117,19 @@ func (f *fakeStore) MarkScheduleFired(
 	} else {
 		s.LastErrorAt = &firedAt
 	}
+	f.schedules[id] = s
+	return nil
+}
+
+// MarkScheduleSkipped advances the cadence and touches NOTHING else, exactly as the real UPDATE
+// does -- so a test cannot observe a last_fired_at the database would never have written.
+func (f *fakeStore) MarkScheduleSkipped(_ context.Context, id string, nextFireAt *time.Time) error {
+	s, ok := f.schedules[id]
+	if !ok {
+		return store.ErrNotFound
+	}
+	f.skips = append(f.skips, skipCall{id: id, next: nextFireAt})
+	s.NextFireAt = nextFireAt
 	f.schedules[id] = s
 	return nil
 }
@@ -253,10 +273,8 @@ func (h *harness) counter(vec *prometheus.CounterVec, labels ...string) float64 
 // Locking
 // ---------------------------------------------------------------------------
 
-// TestTickWithoutTheLockIsASilentSkip is the contract every replica but one
-// lives in: no work, no error, no log-worthy outcome -- just the not-leader
-// counter, which is what makes "the loop is alive but not leading" visible
-// without a line per replica per tick.
+// TestTickWithoutTheLockIsASilentSkip is the contract every replica but one lives in: no work, no
+// error, no log-worthy outcome.
 func TestTickWithoutTheLockIsASilentSkip(t *testing.T) {
 	h := newHarness(t, false)
 	h.seedDefinition()
@@ -278,10 +296,9 @@ func TestTickWithoutTheLockIsASilentSkip(t *testing.T) {
 	}
 }
 
-// TestTickUsesItsOwnLockKey pins the key AND its distinctness from the two
-// other advisory locks this module takes. A collision would make a migration
-// run or a retention sweep look exactly like "another replica is scheduling",
-// and nothing would fire for as long as it ran.
+// TestTickUsesItsOwnLockKey pins the key AND its distinctness from the two other advisory locks
+// this module takes; a collision would make a migration run or a retention sweep look exactly like
+// "another replica is scheduling".
 func TestTickUsesItsOwnLockKey(t *testing.T) {
 	h := newHarness(t, true)
 	h.s.Tick(context.Background())
@@ -522,8 +539,47 @@ func TestDisabledDefinitionSkipsButKeepsTheCadence(t *testing.T) {
 	if got := h.counter(h.m.SchedulerSkipped, skipDisabled); got != 1 {
 		t.Errorf("SchedulerSkipped{disabled} = %v, want 1", got)
 	}
-	if len(h.store.marks) != 1 || h.store.marks[0].next == nil {
-		t.Fatalf("marks = %+v, want one advancing the cadence", h.store.marks)
+	// The cadence advances via the SKIP write, not the fire write: nothing ran, so nothing may
+	// be stamped as having run (finding 25).
+	if len(h.store.marks) != 0 {
+		t.Errorf("MarkScheduleFired called %+v for a paused schedule, want never", h.store.marks)
+	}
+	if len(h.store.skips) != 1 || h.store.skips[0].next == nil {
+		t.Fatalf("skips = %+v, want one advancing the cadence", h.store.skips)
+	}
+	if got := h.store.schedules[schedID]; got.LastFiredAt != nil {
+		t.Errorf("lastFiredAt = %v after a paused occurrence, want it left unset: nothing fired", got.LastFiredAt)
+	}
+}
+
+// TestDisabledDefinitionKeepsAnEarlierFailureVisible: pausing a check does not
+// un-fail its history. The last_error a real failure wrote stays on the row.
+func TestDisabledDefinitionKeepsAnEarlierFailureVisible(t *testing.T) {
+	h := newHarness(t, true)
+	h.seedDefinition()
+	h.seedSchedule(kindInterval, int64(oneMinute))
+
+	// Tick one: the run fails, so the row records why.
+	h.runner.startErr = errors.New("controller unavailable")
+	h.s.Tick(context.Background())
+	failed := h.store.schedules[schedID]
+	if failed.LastError == "" {
+		t.Fatalf("lastError is empty after a failed start; the setup for this test never happened")
+	}
+
+	// Tick two: the definition is switched off, and the occurrence is skipped.
+	def := h.store.definitions[defID]
+	def.Enabled = false
+	h.store.definitions[defID] = def
+	sched := h.store.schedules[schedID]
+	due := fixedNow.Add(-time.Second)
+	sched.NextFireAt = &due
+	h.store.schedules[schedID] = sched
+
+	h.s.Tick(context.Background())
+
+	if got := h.store.schedules[schedID]; got.LastError != failed.LastError {
+		t.Errorf("lastError = %q after pausing, want the earlier failure %q kept: it is a fact", got.LastError, failed.LastError)
 	}
 }
 
@@ -611,10 +667,8 @@ func TestTargetDestinationResolvesThroughTheTargetsTable(t *testing.T) {
 	}
 }
 
-// TestOnePerZoneNarrowsSourcesDeterministically pins the one selection that
-// actually shrinks the source set, and pins the tiebreak (first node by
-// sorted name per zone) that makes two ticks over an unchanged topology
-// produce byte-identical specs.
+// TestOnePerZoneNarrowsSourcesDeterministically pins the one selection that actually shrinks the
+// source set.
 func TestOnePerZoneNarrowsSourcesDeterministically(t *testing.T) {
 	h := newHarness(t, true)
 	h.seedDefinition()
@@ -646,11 +700,8 @@ func TestOnePerZoneNarrowsSourcesDeterministically(t *testing.T) {
 	}
 }
 
-// TestOnePerZoneRefusesWhenTopologyIsUnreadable is the deliberate
-// fail-CLOSED: unlike httpapi's projection guard, which fails open so a
-// controller outage cannot become a config-write outage, failing open here
-// would DISPATCH probe traffic from every node when the operator asked for
-// one per zone.
+// TestOnePerZoneRefusesWhenTopologyIsUnreadable is the deliberate fail-CLOSED: unlike httpapi's
+// projection guard.
 func TestOnePerZoneRefusesWhenTopologyIsUnreadable(t *testing.T) {
 	h := newHarness(t, true)
 	h.seedDefinition()
@@ -707,8 +758,7 @@ func TestTopologyIsReadAtMostOncePerTick(t *testing.T) {
 // Reaper
 // ---------------------------------------------------------------------------
 
-// TestReaperRunsUnderTheLockAndCounts pins Task 12's sweep to this loop: it
-// runs on the leader, every tick, and what it moved is counted.
+// TestReaperRunsUnderTheLockAndCounts pins the sweep to this loop: it runs on the leader.
 func TestReaperRunsUnderTheLockAndCounts(t *testing.T) {
 	h := newHarness(t, true)
 	h.runner.reaped = 3
@@ -786,15 +836,10 @@ func TestNextFireAtArithmetic(t *testing.T) {
 
 func ptr(t time.Time) *time.Time { return &t }
 
-// ---------------------------------------------------------------------------
-// The failing-schedule record (QA round 5, finding #5)
-// ---------------------------------------------------------------------------
+// The failing-schedule record.
 
-// TestFireRecordsWhyItProducedNoRun is the whole point of last_error. A
-// schedule whose definition is gone advances its cadence exactly like a
-// healthy one -- fireOne must, or the row stays due and becomes a hot loop --
-// so before this the two were INDISTINGUISHABLE in the console: enabled, a
-// fresh "last", a "next" a minute out.
+// A schedule whose definition is gone advances its cadence exactly like a healthy one -- fireOne
+// must.
 func TestFireRecordsWhyItProducedNoRun(t *testing.T) {
 	h := newHarness(t, true)
 	// No seedDefinition: the schedule points at a definition that is not there.
@@ -868,11 +913,13 @@ func TestASkipRecordsNoError(t *testing.T) {
 
 	h.s.Tick(context.Background())
 
-	if len(h.store.marks) != 1 {
-		t.Fatalf("MarkScheduleFired called %d times, want 1", len(h.store.marks))
+	// The skip advances the cadence and writes nothing else: no error text, and
+	// (finding 25) no last_fired_at either, since no run happened.
+	if len(h.store.skips) != 1 {
+		t.Fatalf("MarkScheduleSkipped called %d times, want 1", len(h.store.skips))
 	}
-	if h.store.marks[0].lastErr != "" {
-		t.Errorf("lastError = %q for a skipped (not failed) fire, want empty", h.store.marks[0].lastErr)
+	if got := h.store.schedules[schedID]; got.LastError != "" {
+		t.Errorf("lastError = %q for a skipped (not failed) occurrence, want empty", got.LastError)
 	}
 }
 

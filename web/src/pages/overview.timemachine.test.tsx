@@ -1,17 +1,10 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { TimeMachineProvider } from "@/lib/timemachine";
 import { OverviewPage } from "./overview";
 
-/**
- * Overview with the Time Machine engaged (QA round 1, findings #2 and #5).
- *
- * The live cases stay in pages/overview.test.tsx, untouched. What is asserted
- * here is the honesty boundary the QA pass found broken: every panel on this
- * page either resolves through `at` or SAYS it cannot, and a topology fold the
- * server refused is never rendered as an em-dash and nothing else.
- */
+/** Overview with the Time Machine engaged. */
 
 const AT = "2026-08-01T12:00:00Z";
 
@@ -38,8 +31,10 @@ function vector(pairs: { src: string; dst: string; value: string }[]) {
   };
 }
 
+/* The server's own 422 sentence, verbatim (internal/console/httpapi/data.go). */
 const TOPOLOGY_RETENTION_DETAIL =
-  "no events are retained for that instant, so the topology cannot be reconstructed there -- pick a later time";
+  "no events are retained for that instant, so the topology cannot be reconstructed there. Pick a later time, " +
+  "or raise console.database.retentionDays to keep more history in future";
 
 function meBody(permissions: string[]) {
   return { subject: { kind: "user", id: "u1", displayName: "Ada", groups: [], roles: ["viewer"] }, permissions };
@@ -135,11 +130,7 @@ describe("OverviewPage engaged — a 422 from the topology fold", () => {
     expect(await screen.findByText(TOPOLOGY_RETENTION_DETAIL)).toBeInTheDocument();
   });
 
-  /* The swallow itself: the page used to surface `matrix.error ?? topo.error`,
-     one slot for two independent dependencies. With BOTH down the topology
-     detail — the only actionable one, since it names retentionDays — was the
-     one that lost the coin toss, and the tile's em-dash was all that was left
-     of it. */
+  /* With BOTH down the topology detail — the only actionable one, since it names retentionDays. */
   it("states BOTH failures when the matrix is down too, rather than one of them", async () => {
     const { urls } = renderOverview({
       topologyResponse: () => problem(422, "topology not retained", TOPOLOGY_RETENTION_DETAIL),
@@ -185,12 +176,10 @@ describe("OverviewPage engaged — Recent events", () => {
 });
 
 describe("OverviewPage engaged — Open incidents", () => {
-  /* The store CAN express "ongoing at t": ListIncidents' from/to bound the
-     window an incident's OWN RANGE must overlap (from_at < to AND
-     coalesce(to_at,'infinity') >= from), so the one-second window [t, t+1s)
-     selects exactly the incidents whose range covers t. `status` is dropped
-     with it — status is a NOW fact (resolved_at), and filtering on it would
-     hide an incident that was ongoing at t and has since been resolved. */
+  /*
+   * The store CAN express "ongoing at t": ListIncidents' from/to bound the window an incident's OWN
+   * RANGE must overlap (from_at < to AND coalesce(to_at,'infinity') >= from).
+   */
   it("asks for the incidents whose range covers t, not the ones open now", async () => {
     const { urls } = renderOverview();
     await waitFor(() => expect(urls.some((u) => u.startsWith("/api/v1/incidents"))).toBe(true));
@@ -208,6 +197,135 @@ describe("OverviewPage engaged — Open incidents", () => {
     const call = new URLSearchParams((urls.find((u) => u.startsWith("/api/v1/incidents")) ?? "").split("?")[1] ?? "");
     expect(call.get("status")).toBe("open");
     expect(call.get("from")).toBeNull();
+  });
+});
+
+/* ── round 6: the page must stop speaking in the present tense ──────────── */
+
+describe("OverviewPage engaged — the page's own subtitle (#6)", () => {
+  it("does not promise a 15s refresh while every poll on the page is off", async () => {
+    renderOverview();
+    expect(
+      await screen.findByText("Cluster health at the instant you are viewing. Nothing here refreshes."),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/recomputed from Prometheus every 15s/)).toBeNull();
+  });
+
+  it("says the live sentence again once the console returns to Live", async () => {
+    renderOverview({ engaged: false });
+    expect(
+      await screen.findByText("Cluster health at a glance, recomputed from Prometheus every 15s."),
+    ).toBeInTheDocument();
+  });
+});
+
+describe("OverviewPage engaged — the nodes tile discloses the fold's bounds (#2)", () => {
+  const folded = (over: Record<string, unknown>) =>
+    json({
+      nodes: [
+        { name: "a", zone: "z", ready: true },
+        { name: "b", zone: "z", ready: true },
+      ],
+      agents: [],
+      timestamp: AT,
+      historical: true,
+      asOf: AT,
+      eventsFolded: 12,
+      ...over,
+    });
+
+  it("says the window was truncated instead of presenting 2/2 as the whole fleet", async () => {
+    renderOverview({ topologyResponse: () => folded({ truncated: true, unfoldableEvents: 0 }) });
+
+    expect(await screen.findByText("2/2")).toBeInTheDocument();
+    expect(screen.getByTestId("tile-note")).toHaveTextContent(
+      "The event window was truncated, so this reconstruction is partial.",
+    );
+  });
+
+  it("counts the events that could not be folded", async () => {
+    renderOverview({ topologyResponse: () => folded({ truncated: false, unfoldableEvents: 4 }) });
+
+    expect(await screen.findByText("2/2")).toBeInTheDocument();
+    expect(screen.getByTestId("tile-note")).toHaveTextContent(
+      "4 events carried no node detail and could not be folded in.",
+    );
+  });
+
+  it("stays quiet when the fold lost nothing", async () => {
+    renderOverview({ topologyResponse: () => folded({ truncated: false, unfoldableEvents: 0 }) });
+
+    expect(await screen.findByText("2/2")).toBeInTheDocument();
+    expect(screen.queryByTestId("tile-note")).toBeNull();
+  });
+});
+
+describe("OverviewPage engaged — an incident's age is measured from t (#3)", () => {
+  it("ages the row against the viewed instant, not the wall clock", async () => {
+    renderOverview({
+      incidents: [
+        {
+          id: "inc-1",
+          title: "Loss between node-a and node-b",
+          scope: "",
+          fromAt: "2026-08-01T11:30:00Z", // half an hour before AT
+          status: "open",
+          notes: "",
+          pinned: [],
+          createdBy: "user:ada",
+          createdAt: "2026-08-01T11:30:00Z",
+        },
+      ],
+    });
+
+    const row = await screen.findByTestId("open-incident");
+    expect(within(row).getByText("30m")).toBeInTheDocument();
+  });
+});
+
+describe("OverviewPage engaged — the empty states drop the live framing (#4)", () => {
+  /* An instant-vector with no samples: measured pairs = 0. */
+  const noSamples = () => json({ status: "success", data: { resultType: "vector", result: [] } });
+
+  it("does not tell a past instant to wait for the DaemonSet", async () => {
+    renderOverview({ promqlResponse: noSamples });
+
+    expect(await screen.findByText("No probe data at this instant")).toBeInTheDocument();
+    expect(screen.queryByText(/within a minute of the DaemonSet becoming ready/)).toBeNull();
+  });
+
+  it("does not claim nothing has ever happened when it asked for events up to t", async () => {
+    renderOverview({ events: [] });
+
+    expect(
+      await screen.findByText(
+        "No events at or before the instant you are viewing. Return to Live, or pick another instant.",
+      ),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/Nothing has happened yet/)).toBeNull();
+  });
+
+  it("keeps the live wording while live", async () => {
+    renderOverview({ engaged: false, promqlResponse: noSamples });
+
+    expect(await screen.findByText("No probe data in Prometheus yet")).toBeInTheDocument();
+    expect(await screen.findByText(/Nothing has happened yet/)).toBeInTheDocument();
+  });
+});
+
+/* ── #5: zero over zero, under the Time Machine as well ─────────────────── */
+
+describe("OverviewPage engaged — the pair tiles at zero measured pairs", () => {
+  it("renders an em-dash with the no-data note rather than a confident 0", async () => {
+    renderOverview({ promqlResponse: () => json({ status: "success", data: { resultType: "vector", result: [] } }) });
+
+    await screen.findByText("No probe data at this instant");
+    const values = screen.getAllByTestId("stat-value");
+    expect(values[1]).toHaveTextContent("—");
+    expect(values[2]).toHaveTextContent("—");
+    expect(screen.getAllByTestId("tile-note")[0]).toHaveTextContent(
+      "No pair was measured here, so there is nothing to count.",
+    );
   });
 });
 

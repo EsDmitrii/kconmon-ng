@@ -1,0 +1,29 @@
+---
+# Automated GeoLite2 refresh: the maxmind/geoipupdate sidecar keeps /geoip
+# fresh and the console reloads a changed database without a restart.
+console:
+  enabled: true
+  replicas: 1
+  prometheus:
+    url: http://prometheus-operated.monitoring:9090
+  database:
+    mode: external
+    existingSecret: console-dsn
+  mtr:
+    enrichment:
+      enabled: true
+      rdns:
+        enabled: true
+      geoip:
+        mode: auto
+        updateIntervalHours: 12
+        reloadInterval: 30m
+        secret:
+          create: true
+          annotations:
+            vault.security.banzaicloud.io/vault-addr: "https://vault.example.com:8200"
+          accountId: ${vault:secret/data/example/maxmind#accountId}
+          licenseKey: ${vault:secret/data/example/maxmind#licenseKey}
+
+dashboards:
+  enabled: true

@@ -25,10 +25,7 @@ function renderBar() {
 const atParam = () => new URLSearchParams(window.location.search).get("at");
 const asAtParam = (d: Date) => d.toISOString().replace(/\.\d{3}Z$/, "Z");
 
-/* The bar's control is now a calendar (ui/datetime-picker.tsx), so which days
-   it offers depends on the clock. Both stateful describes below freeze it; the
-   AppShell mount test keeps the real one, since react-query and the router are
-   in play there and it asserts nothing about time. */
+/* The bar's control is now a calendar (ui/datetime-picker.tsx), so which days it offers depends on the clock. */
 const NOW = new Date(2026, 7, 8, 12, 0, 0); // Sat 8 August 2026, 12:00 local
 
 const openPicker = (name: RegExp) => fireEvent.click(screen.getByRole("button", { name }));
@@ -154,8 +151,6 @@ describe("TimeMachineBar while engaged", () => {
     expect(screen.getByRole("button", { name: /time machine/i })).toBeInTheDocument();
   });
 
-  /* QA round 1, finding #15: the banner and the chip named the same instant in
-     two clock formats, one with seconds and one without, two inches apart. */
   it("states the instant ONCE, in one format, on both the banner and the chip", () => {
     renderEngaged();
     const adjust = screen.getByRole("button", { name: /change the viewing time/i });
@@ -199,12 +194,7 @@ describe("TimeMachineBar while engaged", () => {
   });
 });
 
-/**
- * The bar is only useful if it is actually in the chrome: this pins the mount
- * point (AppShell's flex column, sibling to AnonymousBanner, above <main>) the
- * same way anonymous-banner.test.tsx pins the shell, with a memory-history
- * router so it cannot bleed location state into the rest of the suite.
- */
+/** The bar is only useful if it is actually in the chrome. */
 describe("AppShell mounts the Time Machine bar", () => {
   it("renders the bar above the page frame on every route", async () => {
     vi.stubGlobal(

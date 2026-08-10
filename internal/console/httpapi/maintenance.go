@@ -14,12 +14,7 @@ import (
 	"github.com/EsDmitrii/kconmon-ng/internal/console/store"
 )
 
-// MaintenanceService is the subset of *store.DB httpapi needs for
-// /api/v1/maintenance: the read seam and the write seam together, in
-// AnnotationService's shape. There is no update half because there is no
-// update -- a window is two timestamps and a reason, so delete-and-recreate is
-// both the correction path and the whole of it (M6 Task 1's own note on
-// DeleteMaintenanceWindow).
+// MaintenanceService is the subset of *store.DB httpapi needs for /api/v1/maintenance.
 type MaintenanceService interface {
 	store.MaintenanceReader
 	store.MaintenanceStore
@@ -28,9 +23,7 @@ type MaintenanceService interface {
 var _ MaintenanceService = (*store.DB)(nil)
 
 // maintenanceUnavailableDetail is served whenever s.maintenance is nil, in
-// annotationsUnavailableDetail's shape: a declared window whose whole job is
-// to explain a chart weeks later cannot live in a map that vanishes on pod
-// restart, so there is no in-memory fallback.
+// annotationsUnavailableDetail's shape.
 const maintenanceUnavailableDetail = "maintenance windows are persisted operator declarations with no " +
 	"in-memory fallback: set console.database.mode in the console config (Helm: console.database.mode) " +
 	"to enable /api/v1/maintenance"
@@ -56,9 +49,7 @@ func (s *Server) maintenanceUnavailable(w http.ResponseWriter) bool {
 // window (the table's own CHECK says end_at > start_at).
 type maintenanceResponse struct {
 	ID string `json:"id"`
-	// Scope is "" for a global window; any other value names a node, a pair or
-	// a target and is matched exactly -- the annotations scope vocabulary
-	// (M6 Decision 6). A filter key, never a Prometheus label value.
+	// Scope is "" for a global window; a filter key, never a Prometheus label value.
 	Scope     string    `json:"scope"`
 	StartAt   time.Time `json:"startAt"`
 	EndAt     time.Time `json:"endAt"`
@@ -112,18 +103,8 @@ func isMaintenanceValidationError(err error) bool {
 	return strings.HasPrefix(err.Error(), maintenanceValidationPrefix)
 }
 
-// handleMaintenanceList serves one page of windows, newest-STARTING first,
-// behind an opaque keyset cursor.
-//
-// from/to bound the window a maintenance window must OVERLAP, not contain: one
-// that opened before the range and is still running inside it is exactly the
-// one that explains what the operator is looking at. ?scope= carries the same
-// THREE states as annotations (absent = every scope, present-but-empty = the
-// GLOBAL ones, anything else exact), which is what lets a scoped chart ask for
-// "global windows plus mine" in two cheap queries instead of filtering the
-// whole table client-side. An inverted range is an empty page, not a 400 --
-// handleAnnotationsList's reasoning, and for the same caller (a chart's
-// visible extent).
+// handleMaintenanceList serves one page of windows, newest-STARTING first, behind an opaque keyset
+// cursor.
 func (s *Server) handleMaintenanceList(w http.ResponseWriter, r *http.Request) {
 	if s.maintenanceUnavailable(w) {
 		return
@@ -175,12 +156,10 @@ func (s *Server) handleMaintenanceList(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, maintenanceListResponse{Windows: out, NextCursor: page.NextCursor})
 }
 
-// handleMaintenanceCreate declares one window: 201 with a Location header
-// naming the new row, matching POST /api/v1/annotations.
-//
-// Validation is delegated to store.MaintenanceInput.Validate so the
-// end-after-start rule and the 512-byte reason bound cannot drift from the
-// ones the database layer (and the table's own CHECK) actually enforce.
+// handleMaintenanceCreate declares one window: 201 with a Location header naming the new row;
+// validation is delegated to store.MaintenanceInput.Validate so the end-after-start rule and the
+// 512-byte reason bound cannot drift from the ones the database layer (and the table's own CHECK)
+// actually enforce.
 func (s *Server) handleMaintenanceCreate(w http.ResponseWriter, r *http.Request) {
 	if s.maintenanceUnavailable(w) {
 		return

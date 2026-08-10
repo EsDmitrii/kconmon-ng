@@ -155,12 +155,9 @@ func TestTaskManagerReportUnknownTaskNoBlock(t *testing.T) {
 	tm.Report(&pb.TaskResult{TaskId: "ghost", Success: true})
 }
 
-// TestTaskManagerDispatchRacesCleanup drives Dispatch concurrently with the
-// subscription teardown. Before the fix, cleanup closed the subscriber channel
-// and a Dispatch that read the channel before the close but sent after it would
-// panic on a send to a closed channel. Now the channel is never closed, so a
-// racing Dispatch either succeeds, sees the agent already gone
-// (ErrAgentNotSubscribed), or times out on its own deadline. Run under -race.
+// TestTaskManagerDispatchRacesCleanup drives Dispatch concurrently with the subscription teardown;
+// before the fix, cleanup closed the subscriber channel and a Dispatch that read the channel before
+// the close but sent after it would panic on a send to a closed channel.
 func TestTaskManagerDispatchRacesCleanup(t *testing.T) {
 	tm := NewTaskManager()
 

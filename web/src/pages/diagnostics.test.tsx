@@ -2,8 +2,9 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { resetNavigateForTest, setNavigateForTest } from "@/lib/api";
+import { LOCALE_STORAGE_KEY, LocaleProvider, type Locale } from "@/lib/i18n";
 import { TimeMachineProvider } from "@/lib/timemachine";
-import { DiagnosticsPage, estimatePairCount, estimateRawPairCount } from "./diagnostics";
+import { DiagnosticsPage, estimatePairCount, estimateRawPairCount, RUN_DURATIONS } from "./diagnostics";
 
 const json = (body: unknown, init?: ResponseInit) =>
   new Response(JSON.stringify(body), { status: 200, headers: { "Content-Type": "application/json" }, ...init });
@@ -65,8 +66,7 @@ function targetRow(over: Record<string, unknown> = {}) {
 function renderPage(opts: {
   permissions?: string[];
   nodes?: string[];
-  /** Agents the controller does NOT list as nodes — the controller-less
-   *  console of finding #21. */
+  /** Agents the controller does NOT list as nodes. */
   agents?: { nodeName: string; zone: string }[];
   databaseConfigured?: boolean;
   runs?: unknown[];
@@ -80,6 +80,10 @@ function renderPage(opts: {
    * pages/live.test.tsx), for tests that need cursor-dependent pages. Takes
    * precedence over the static `runs` list when supplied. */
   onRuns?: (qs: URLSearchParams) => Response;
+  /** Mounts a <LocaleProvider> above the page. Absent — every case but the ru
+   *  smoke pin at the bottom of this file — there is no provider at all, which
+   *  lib/i18n defines as English. */
+  locale?: Locale;
 }) {
   const {
     permissions = ["runs:create"],
@@ -92,7 +96,9 @@ function renderPage(opts: {
     onSaveCheck,
     at,
     onRuns,
+    locale,
   } = opts;
+  if (locale !== undefined) localStorage.setItem(LOCALE_STORAGE_KEY, locale);
   window.history.pushState({}, "", at ? `/diagnostics?at=${at}` : "/diagnostics");
   const createCalls: unknown[] = [];
   const checkCalls: unknown[] = [];
@@ -126,17 +132,15 @@ function renderPage(opts: {
     return Promise.resolve(json({}));
   });
   vi.stubGlobal("fetch", fetchMock);
-  // Every renderPage caller can reach a submit that calls goTo -- stub the
-  // navigate seam unconditionally (jsdom has no real navigation), and hand
-  // the spy back so the one test that cares about the destination can
-  // assert on it directly.
+  // Every renderPage caller can reach a submit that calls goTo.
   const navigateSpy = vi.fn();
   setNavigateForTest(navigateSpy);
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const page = <DiagnosticsPage />;
   const utils = render(
     <QueryClientProvider client={qc}>
       <TimeMachineProvider>
-        <DiagnosticsPage />
+        {locale === undefined ? page : <LocaleProvider>{page}</LocaleProvider>}
       </TimeMachineProvider>
     </QueryClientProvider>,
   );
@@ -162,6 +166,9 @@ afterEach(() => {
   vi.unstubAllGlobals();
   resetNavigateForTest();
   window.history.pushState({}, "", "/");
+  /* vitest.setup.ts backs localStorage with one Map per test FILE — a locale
+     left behind would flip every later case in this one. */
+  localStorage.removeItem(LOCALE_STORAGE_KEY);
 });
 
 describe("estimatePairCount", () => {
@@ -182,13 +189,7 @@ describe("estimateRawPairCount", () => {
     expect(estimateRawPairCount(["a"], ["a"])).toBe(1);
   });
 
-  // The scenario from the review: 20 sources and 21 destinations sharing 20
-  // names. Raw product is 420 (over the 400 limit); the self-excluded
-  // display estimate collapses to exactly 400 (one self-pair per shared
-  // name), AT the limit. The server (checks.go's Plan) rejects on the raw
-  // product BEFORE self-pair exclusion, so the two must disagree here on
-  // purpose -- that disagreement is exactly what estimateRawPairCount exists
-  // to catch.
+  // The server (checks.go's Plan) rejects on the raw product BEFORE self-pair exclusion.
   it("disagrees with estimatePairCount on an asymmetric overlapping selection (20x21 sharing 20 names)", () => {
     const shared = Array.from({ length: 20 }, (_, i) => `n${i}`);
     const sources = shared;
@@ -210,10 +211,8 @@ describe("DiagnosticsPage form", () => {
     expect(createCalls[0]).toEqual({ type: "udp", plane: "pod", sources: [], destinations: [] });
   });
 
-  // The regression that matters most in form v2: a NODE run's body must stay
-  // the pre-M4 four keys, in the pre-M4 order, with no destinationKind:"node"
-  // added -- the server treats "" and "node" identically, so serialising one
-  // would be a new field on the wire for the overwhelmingly common path.
+  // The regression that matters most in form v2: a NODE run's body must stay the pre-M4 four keys,
+  // in the pre-M4 order.
   it("a node run's body is byte-identical to the pre-M4 shape -- no destination* keys at all", async () => {
     const { createCalls } = renderPage({ permissions: OPERATOR, nodes: ["a", "b"] });
 
@@ -242,13 +241,7 @@ describe("DiagnosticsPage form", () => {
     expect(screen.getByRole("button", { name: /start run/i })).toBeEnabled();
   });
 
-  // Mirrors the server's own gate exactly (checks.go's Plan): the raw S×D
-  // product, not the self-excluded count. 20 of 21 nodes as sources, all 21
-  // as destinations -- raw 20*21=420 > 400, but self-pair exclusion (every
-  // source also appears in destinations) brings the displayed estimate down
-  // to exactly 400, AT the limit. Without the raw-product gate this
-  // selection would read as fine and submit, only to 422 against the
-  // server's own ErrTooManyPairs.
+  // Without the raw-product gate this selection would read as fine and submit.
   it("disables submit on an asymmetric overlapping selection whose raw product exceeds 400 even though the displayed estimate does not", async () => {
     const nodes = Array.from({ length: 21 }, (_, i) => `n${i}`); // n0..n20
     renderPage({ nodes });
@@ -279,6 +272,24 @@ describe("DiagnosticsPage form", () => {
     await waitFor(() => expect(screen.getByText(/runs:create/)).toBeInTheDocument());
     expect(screen.queryByRole("button", { name: /start run/i })).not.toBeInTheDocument();
     expect(screen.queryByRole("radio", { name: "TCP" })).not.toBeInTheDocument();
+  });
+
+  /*
+   * The owner's live report, pinned from the SENDING side; the form was never wrong to send it and
+   * is not changed here.
+   */
+  it("sends several explicit sources with an empty destinations array when Destinations is left on All", async () => {
+    const { createCalls } = renderPage({ nodes: ["a", "b", "c"] });
+
+    const sourcesGroup = await screen.findByRole("group", { name: /sources/i });
+    fireEvent.click(within(sourcesGroup).getByLabelText(/all nodes/i));
+    fireEvent.click(within(sourcesGroup).getByLabelText("a"));
+    fireEvent.click(within(sourcesGroup).getByLabelText("b"));
+    // Destinations deliberately left at "All nodes".
+    fireEvent.click(screen.getByRole("button", { name: /start run/i }));
+
+    await waitFor(() => expect(createCalls).toHaveLength(1));
+    expect(createCalls[0]).toEqual({ type: "tcp", plane: "pod", sources: ["a", "b"], destinations: [] });
   });
 
   it("the all <-> all shortcut and the individual node checkboxes are independently scoped per column", async () => {
@@ -317,7 +328,7 @@ describe("DiagnosticsPage destination kinds", () => {
     const { createCalls } = renderPage({ permissions: OPERATOR, nodes: ["a", "b"] });
 
     await pickDestination(/ad-hoc/i);
-    fireEvent.change(screen.getByLabelText("Destination address"), { target: { value: "10.0.0.9" } });
+    fireEvent.change(screen.getByLabelText(/^Destination (host|address)/), { target: { value: "10.0.0.9" } });
     fireEvent.click(screen.getByRole("button", { name: /start run/i }));
 
     await waitFor(() => expect(createCalls).toHaveLength(1));
@@ -337,8 +348,52 @@ describe("DiagnosticsPage destination kinds", () => {
     await pickDestination(/ad-hoc/i);
     expect(screen.getByRole("button", { name: /start run/i })).toBeDisabled();
 
-    fireEvent.change(screen.getByLabelText("Destination address"), { target: { value: "10.0.0.9" } });
+    fireEvent.change(screen.getByLabelText(/^Destination (host|address)/), { target: { value: "10.0.0.9" } });
     expect(screen.getByRole("button", { name: /start run/i })).toBeEnabled();
+  });
+
+  /* QA scope 4, findings #8 and #9. The estimate is sources x destinations;
+     with the destination side unresolved there is no second factor, so "~10
+     pairs" was a number for a run the server would refuse — and "~0 pairs" on
+     its own is a dead button with no explanation. */
+  it("estimates ZERO pairs, and says why, while no target is picked", async () => {
+    renderPage({ permissions: OPERATOR, nodes: ["a", "b"] });
+
+    await pickDestination(/target/i);
+    await waitFor(() => expect(screen.getByText(/~0 pairs/)).toBeInTheDocument());
+    expect(screen.getByText(/no target picked yet/i)).toBeInTheDocument();
+    expect(screen.queryByText(/~2 pairs/)).not.toBeInTheDocument();
+  });
+
+  it("estimates ZERO pairs, and says why, while the ad-hoc address is empty", async () => {
+    renderPage({ permissions: OPERATOR, nodes: ["a", "b"] });
+
+    await pickDestination(/ad-hoc/i);
+    await waitFor(() => expect(screen.getByText(/~0 pairs/)).toBeInTheDocument());
+    expect(screen.getByText(/no address typed yet/i)).toBeInTheDocument();
+
+    // ...and the count comes back the moment the destination resolves.
+    fireEvent.change(screen.getByLabelText(/^Destination (host|address)/), { target: { value: "10.0.0.9" } });
+    await waitFor(() => expect(screen.getByText(/~2 pairs/)).toBeInTheDocument());
+    expect(screen.queryByText(/no address typed yet/i)).not.toBeInTheDocument();
+  });
+
+  it("explains a zero estimate that comes from having no sources, the way /mtr's Runner does", async () => {
+    renderPage({ permissions: OPERATOR, nodes: [] });
+
+    await waitFor(() => expect(screen.getByText(/~0 pairs/)).toBeInTheDocument());
+    expect(screen.getByText(/no sources to check from/i)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /start run/i })).toBeDisabled();
+  });
+
+  /* QA scope 4, finding #17 — one option is not a choice. */
+  it("states the plane as a chip rather than a disabled one-option select", async () => {
+    renderPage({ permissions: OPERATOR, nodes: ["a", "b"] });
+
+    await screen.findByRole("radio", { name: "TCP" });
+    expect(screen.getByText("Plane")).toBeInTheDocument();
+    expect(screen.getByText("pod")).toBeInTheDocument();
+    expect(screen.queryByRole("combobox", { name: /plane/i })).not.toBeInTheDocument();
   });
 
   it("swaps the node destination checkboxes for the external field and back", async () => {
@@ -348,11 +403,11 @@ describe("DiagnosticsPage destination kinds", () => {
 
     await pickDestination(/ad-hoc/i);
     expect(screen.queryByRole("group", { name: /destinations/i })).not.toBeInTheDocument();
-    expect(screen.getByLabelText("Destination address")).toBeInTheDocument();
+    expect(screen.getByLabelText(/^Destination (host|address)/)).toBeInTheDocument();
 
     await pickDestination(/nodes/i);
     expect(screen.getByRole("group", { name: /destinations/i })).toBeInTheDocument();
-    expect(screen.queryByLabelText("Destination address")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText(/^Destination (host|address)/)).not.toBeInTheDocument();
   });
 
   it("offers no Target option without targets:read, and never asks for the target list", async () => {
@@ -389,7 +444,7 @@ describe("DiagnosticsPage save as definition", () => {
 
     await pickDestination(/ad-hoc/i);
     fireEvent.click(screen.getByRole("radio", { name: "HTTP" }));
-    fireEvent.change(screen.getByLabelText("Destination address"), { target: { value: "https://example.test" } });
+    fireEvent.change(screen.getByLabelText(/^Destination (host|address)/), { target: { value: "https://example.test" } });
     fireEvent.change(screen.getByLabelText("Definition name"), { target: { value: "edge-http" } });
     fireEvent.click(screen.getByRole("button", { name: /save as definition/i }));
 
@@ -515,10 +570,8 @@ describe("DiagnosticsPage history", () => {
 });
 
 /**
- * QA round 4, finding #4. GET /api/v1/runs has no `to` parameter, so the list
- * was showing runs that had not happened yet under a banner naming a past
- * instant — the same hole round 3 closed on the node and pair cards, with the
- * same client-side treatment and the same stated bound.
+ * GET /api/v1/runs has no `to` parameter, so the list was showing runs that had not happened yet
+ * under a banner naming a past instant.
  */
 describe("DiagnosticsPage history under the Time Machine", () => {
   const AT = "2026-01-01T12:00:00Z";
@@ -555,11 +608,7 @@ describe("DiagnosticsPage history under the Time Machine", () => {
   });
 });
 
-/**
- * QA round 4, finding #21. `topology.nodes` is the CONTROLLER's view and is
- * empty on a console deployed without one — a console that still has agents
- * reporting in and every reason to run a diagnostic between them.
- */
+/** `topology.nodes` is the CONTROLLER's view and is empty on a console deployed without one. */
 describe("DiagnosticsPage node pickers on a controller-less console", () => {
   it("lists the agents' own node names when the controller reports none", async () => {
     renderPage({
@@ -619,7 +668,7 @@ describe("DiagnosticsPage form affordances", () => {
     renderPage({ permissions: OPERATOR, nodes: ["a", "b"] });
 
     await pickDestination(/ad-hoc/i);
-    expect(screen.getByRole("textbox", { name: "Destination address" })).toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: /^Destination host \(port optional\)$/ })).toBeInTheDocument();
   });
 
   it("lets the six-option check-type control wrap instead of overflowing a narrow card", async () => {
@@ -643,7 +692,7 @@ describe("DiagnosticsPage stale submit errors", () => {
     renderPage({ permissions: OPERATOR, nodes: ["a", "b"], onCreate: refuse });
 
     await pickDestination(/ad-hoc/i);
-    fireEvent.change(screen.getByLabelText("Destination address"), { target: { value: "10.0.0.9" } });
+    fireEvent.change(screen.getByLabelText(/^Destination (host|address)/), { target: { value: "10.0.0.9" } });
     fireEvent.click(screen.getByRole("button", { name: /start run/i }));
     expect(await screen.findByText(/destination address is not routable/i)).toBeInTheDocument();
 
@@ -679,21 +728,146 @@ describe("DiagnosticsPage stale submit errors", () => {
   });
 });
 
-/**
- * QA round 4, finding #13, client half. Saving a definition PERSISTS the
- * address; until the store learned to check it, "sdfsdfsdf !!" was stored
- * happily and then failed as a resolver error on every agent, forever.
- */
+/* QA scope 4, finding #11. The filters ride the SERVER's own ?type=&status=
+   (runs.go's handleRunsList) — a client-side pass over the loaded pages would
+   quietly mean "of the runs already fetched". */
+describe("DiagnosticsPage run history filters", () => {
+  const runsQueries = (urls: string[]) =>
+    urls.filter((u) => /^\/api\/v1\/runs(\?|$)/.test(u)).map((u) => new URLSearchParams(u.split("?")[1] ?? ""));
+
+  it("asks for neither filter until one is picked", async () => {
+    const { urls } = renderPage({ runs: [runRow("r-1")] });
+
+    await screen.findByText("r-1");
+    const q = runsQueries(urls);
+    expect(q).toHaveLength(1);
+    expect(q[0].has("type")).toBe(false);
+    expect(q[0].has("status")).toBe(false);
+  });
+
+  it("sends ?type= and ?status= and re-asks from page ONE, replacing the list", async () => {
+    const { urls } = renderPage({
+      onRuns: (qs) =>
+        json({
+          runs: qs.get("type") === "mtr" ? [runRow("r-mtr", { type: "mtr" })] : [runRow("r-tcp")],
+          nextCursor: "",
+        }),
+    });
+
+    await screen.findByText("r-tcp");
+    fireEvent.change(screen.getByLabelText(/filter runs by check type/i), { target: { value: "mtr" } });
+    expect(await screen.findByText("r-mtr")).toBeInTheDocument();
+    // Replaced, not appended: a filtered page one is a new list.
+    expect(screen.queryByText("r-tcp")).not.toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText(/filter runs by status/i), { target: { value: "failed" } });
+    await waitFor(() => {
+      const last = runsQueries(urls).at(-1);
+      expect(last?.get("type")).toBe("mtr");
+      expect(last?.get("status")).toBe("failed");
+      // Page one, never the cursor the previous filter left behind.
+      expect(last?.has("cursor")).toBe(false);
+    });
+  });
+
+  it("says a filter matched nothing rather than claiming the history is empty", async () => {
+    renderPage({ onRuns: (qs) => json({ runs: qs.get("status") ? [] : [runRow("r-1")], nextCursor: "" }) });
+
+    await screen.findByText("r-1");
+    fireEvent.change(screen.getByLabelText(/filter runs by status/i), { target: { value: "cancelled" } });
+
+    expect(await screen.findByText(/no runs match these filters/i)).toBeInTheDocument();
+    expect(screen.queryByText(/no runs yet/i)).not.toBeInTheDocument();
+  });
+});
+
+/* QA scope 4, finding #10. One field with one label, one placeholder and no
+   hint served all six check types, and a value typed for one survived a switch
+   to another in silence. The vocabulary and the verdict now both follow the
+   type, and the rules are the agent's own (internal/agent/tasks.go). */
+describe("DiagnosticsPage — the external destination follows the check type", () => {
+  it("labels and hints tcp, udp and icmp differently, because the agent treats them differently", async () => {
+    renderPage({ permissions: OPERATOR, nodes: ["a", "b"] });
+
+    await pickDestination(/ad-hoc/i);
+    // tcp: the port is optional and defaults to 80.
+    expect(screen.getByLabelText(/^Destination host \(port optional\)/)).toBeInTheDocument();
+    expect(screen.getByText(/Without a port the agent dials 80/i)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("radio", { name: "UDP" }));
+    expect(screen.getByLabelText(/^Destination host:port/)).toBeInTheDocument();
+    expect(screen.getByText(/udp has no default/i)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("radio", { name: "ICMP" }));
+    expect(screen.getByLabelText(/^Destination host$/)).toBeInTheDocument();
+    expect(screen.getByText(/There are no ports here/i)).toBeInTheDocument();
+  });
+
+  it("carries a per-type placeholder rather than one example that fits four types badly", async () => {
+    renderPage({ permissions: OPERATOR, nodes: ["a", "b"] });
+
+    await pickDestination(/ad-hoc/i);
+    expect(screen.getByLabelText(/^Destination host/)).toHaveAttribute("placeholder", "example.test or 10.0.0.1:8443");
+
+    fireEvent.click(screen.getByRole("radio", { name: "ICMP" }));
+    expect(screen.getByLabelText(/^Destination host/)).toHaveAttribute("placeholder", "example.test or 10.0.0.1");
+  });
+
+  it("KEEPS the typed value across a type switch and shows the mismatch at once", async () => {
+    renderPage({ permissions: OPERATOR, nodes: ["a", "b"] });
+
+    await pickDestination(/ad-hoc/i);
+    fireEvent.change(screen.getByLabelText(/^Destination host/), { target: { value: "10.0.0.1" } });
+    expect(screen.getByRole("button", { name: /start run/i })).toBeEnabled();
+
+    // udp has no default port, so the very same address is now unrunnable —
+    // and the value is still there to be corrected, not silently dropped.
+    fireEvent.click(screen.getByRole("radio", { name: "UDP" }));
+    expect(screen.getByLabelText(/^Destination host/)).toHaveValue("10.0.0.1");
+    expect(screen.getByRole("alert")).toHaveTextContent(/udp has no default port/i);
+    expect(screen.getByRole("button", { name: /start run/i })).toBeDisabled();
+
+    fireEvent.change(screen.getByLabelText(/^Destination host/), { target: { value: "10.0.0.1:53" } });
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /start run/i })).toBeEnabled();
+  });
+
+  it("says outright that dns and http have no external destination at all", async () => {
+    renderPage({ permissions: OPERATOR, nodes: ["a", "b"] });
+
+    await pickDestination(/ad-hoc/i);
+    fireEvent.click(screen.getByRole("radio", { name: "DNS" }));
+    expect(screen.getByRole("alert")).toHaveTextContent(/tcp, udp, icmp and mtr only/i);
+    expect(screen.getByRole("button", { name: /start run/i })).toBeDisabled();
+
+    fireEvent.click(screen.getByRole("radio", { name: "HTTP" }));
+    expect(screen.getByRole("alert")).toHaveTextContent(/tcp, udp, icmp and mtr only/i);
+  });
+
+  it("refuses a URL for a type that dials the string itself", async () => {
+    renderPage({ permissions: OPERATOR, nodes: ["a", "b"] });
+
+    await pickDestination(/ad-hoc/i);
+    fireEvent.change(screen.getByLabelText(/^Destination host/), { target: { value: "https://example.test/health" } });
+    expect(screen.getByRole("alert")).toHaveTextContent(/a scheme and a path are never read/i);
+    expect(screen.getByRole("button", { name: /start run/i })).toBeDisabled();
+  });
+});
+
+/** Saving a definition PERSISTS the address; until the store learned to check it. */
 describe("DiagnosticsPage ad-hoc address validation", () => {
   it("refuses to POST a definition carrying an address the agent could never dial", async () => {
     const { checkCalls } = renderPage({ permissions: OPERATOR, nodes: ["a", "b"] });
 
     await pickDestination(/ad-hoc/i);
-    fireEvent.change(screen.getByLabelText("Destination address"), { target: { value: "sdfsdfsdf !!" } });
+    fireEvent.change(screen.getByLabelText(/^Destination (host|address)/), { target: { value: "sdfsdfsdf !!" } });
     fireEvent.change(screen.getByLabelText("Definition name"), { target: { value: "edge-http" } });
     fireEvent.click(screen.getByRole("button", { name: /save as definition/i }));
 
-    expect(await screen.findByText(/must be a host, an IP, host:port, or an http\(s\) URL/i)).toBeInTheDocument();
+    /* TWO now, not one: since QA scope 4's finding #10 the RUN form judges the
+       address live as well, in the same sentence, so this one value is refused
+       once above the button and once on the definition. */
+    expect(await screen.findAllByText(/must be a host, an IP, host:port, or an http\(s\) URL/i)).toHaveLength(2);
     expect(checkCalls).toHaveLength(0);
   });
 
@@ -701,11 +875,115 @@ describe("DiagnosticsPage ad-hoc address validation", () => {
     const { checkCalls } = renderPage({ permissions: OPERATOR, nodes: ["a", "b"] });
 
     await pickDestination(/ad-hoc/i);
-    fireEvent.change(screen.getByLabelText("Destination address"), { target: { value: "example.test:8443" } });
+    fireEvent.change(screen.getByLabelText(/^Destination (host|address)/), { target: { value: "example.test:8443" } });
     fireEvent.change(screen.getByLabelText("Definition name"), { target: { value: "edge-tcp" } });
     fireEvent.click(screen.getByRole("button", { name: /save as definition/i }));
 
     await waitFor(() => expect(checkCalls).toHaveLength(1));
     expect((checkCalls[0] as { destinationAddress: string }).destinationAddress).toBe("example.test:8443");
+  });
+});
+
+/* ── duration selector (Task 2) ─────────────────────────────────────────── */
+
+describe("DiagnosticsPage duration selector", () => {
+  // Instant is the default and must stay wire-invisible: the node run's body
+  // is a deliberate regression surface, and a `durationNs: 0` on it would be a
+  // new key on the overwhelmingly common path.
+  it("defaults to Instant and sends no durationNs at all", async () => {
+    const { createCalls } = renderPage({ nodes: ["a", "b"] });
+
+    expect(await screen.findByRole("radio", { name: "Instant" })).toBeChecked();
+    fireEvent.click(screen.getByRole("button", { name: /start run/i }));
+
+    await waitFor(() => expect(createCalls).toHaveLength(1));
+    expect(Object.keys(createCalls[0] as object)).toEqual(["type", "plane", "sources", "destinations"]);
+  });
+
+  it("sends durationNs for a picked duration", async () => {
+    const { createCalls } = renderPage({ nodes: ["a", "b"] });
+
+    await screen.findByRole("radio", { name: "Instant" });
+    fireEvent.click(screen.getByRole("radio", { name: "15m" }));
+    fireEvent.click(screen.getByRole("button", { name: /start run/i }));
+
+    await waitFor(() => expect(createCalls).toHaveLength(1));
+    expect(createCalls[0]).toEqual({
+      type: "tcp",
+      plane: "pod",
+      sources: [],
+      destinations: [],
+      durationNs: 900_000_000_000,
+    });
+  });
+
+  // The caption is the operator's only warning that picking "24h" starts a day
+  // of fleet traffic, so it must state the derived cadence and sample count --
+  // and it must agree with what the server will actually do.
+  it("explains the derived cadence and sample count for the chosen duration", async () => {
+    renderPage({ nodes: ["a", "b"] });
+
+    await screen.findByRole("radio", { name: "Instant" });
+    expect(screen.getByText(/one probe per pair, right now/i)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("radio", { name: "1m" }));
+    // 60s / 500 floors to the 5s minimum -> 12 samples.
+    await waitFor(() =>
+      expect(screen.getByText(/probed every 5s for 1m — about 12 samples per pair/i)).toBeInTheDocument(),
+    );
+
+    fireEvent.click(screen.getByRole("radio", { name: "24h" }));
+    // 86400s / 500 = 172.8s -> "3m", capped at 500 samples.
+    await waitFor(() =>
+      expect(screen.getByText(/probed every 3m for 24h — about 500 samples per pair/i)).toBeInTheDocument(),
+    );
+  });
+
+  // Every offered option must sit inside the server's own accepted window, so
+  // the UI can never lead an operator into the 422 it defines.
+  it("offers only durations the server accepts", () => {
+    const MIN_NS = 10_000_000_000;
+    const MAX_NS = 86_400_000_000_000;
+    for (const d of RUN_DURATIONS) {
+      if (d.ns === 0) continue;
+      expect(d.ns).toBeGreaterThanOrEqual(MIN_NS);
+      expect(d.ns).toBeLessThanOrEqual(MAX_NS);
+    }
+    expect(RUN_DURATIONS[0].ns).toBe(0);
+  });
+});
+
+/* the Russian is wired ONE smoke pin. */
+describe("DiagnosticsPage — Russian", () => {
+  it("renders the duration selector and its honesty caption in Russian", async () => {
+    renderPage({ locale: "ru", permissions: OPERATOR });
+
+    expect(await screen.findByRole("heading", { name: "Диагностика" })).toBeInTheDocument();
+
+    // The duration control: its own name, its Instant option, and the caption
+    // that says what Instant actually does.
+    const duration = screen.getByRole("radiogroup", { name: "Длительность" });
+    expect(within(duration).getByRole("radio", { name: "Мгновенно" })).toBeInTheDocument();
+    expect(screen.getByText("По одному зонду на пару, прямо сейчас.")).toBeInTheDocument();
+
+    // Pick an interval: the caption must now spell out the fan-out, cadence and
+    // sample count — the same warning the English gives, at the same strength.
+    fireEvent.click(within(duration).getByRole("radio", { name: "1m" }));
+    const caption = await screen.findByText(/Каждая пара зондируется раз в/);
+    /* The cadence is a rendered SPAN and follows the interface language: «5 с», not "5s". The
+       {label} beside it stays "1m" — that is the selector's own range token, not prose. */
+    expect(caption.textContent).toMatch(/раз в 5 с /);
+    expect(caption.textContent).not.toMatch(/раз в 5s/);
+    expect(caption.textContent).toMatch(/на протяжении 1m/);
+    expect(caption.textContent).toMatch(/проб на пару/);
+    expect(caption.textContent).toMatch(/остаётся отменяемым/);
+
+    // 24h widens the cadence to 172.8s, and the widened span localises too: «3 мин».
+    fireEvent.click(within(duration).getByRole("radio", { name: "24h" }));
+    await waitFor(() => expect(screen.getByText(/раз в 3 мин /)).toBeInTheDocument());
+
+    // Two nodes → two pairs → «~2 пары», the few form a two-form language
+    // would render as «~2 пар».
+    expect(screen.getByText("~2 пары")).toBeInTheDocument();
   });
 });

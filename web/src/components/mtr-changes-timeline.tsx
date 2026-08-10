@@ -6,62 +6,24 @@ import { useTheme } from "@/components/theme-provider";
 import { useTopology } from "@/hooks/use-topology";
 import { getConfig, promqlQueryRange } from "@/lib/api";
 import { type CuratedChart, toSeriesOption } from "@/lib/curated-metrics";
+import { useLocale, useT } from "@/lib/i18n";
+import { mtrDetailDict } from "@/lib/i18n/dict/mtr-detail";
 import type { PathSnapshot } from "@/lib/types";
 import { cn, escapeLabelValue } from "@/lib/utils";
 
 /* ── which loss family describes this pair ──────────────────────────────── */
 
-/** LossFamily names the two metric families a pair's loss can live in. They
- *  are not variants of one metric: the peer family is labelled by
- *  {source_node, destination_node} and the external one by {source_node,
- *  target}, so picking the wrong one yields an empty series, not a wrong
- *  number. */
+/** LossFamily names the two metric families a pair's loss can live in. */
 export type LossFamily = "peer" | "external";
 
-/**
- * lossFamilyFor decides which family to query for a (source, destination)
- * pair, and the rule is deliberately the simplest honest one: a destination
- * that appears in the controller's node list is a MESH PEER and its loss lives
- * in the peer gauges; anything else is an external target NAME (that is the
- * only other thing a snapshot's `destination` can hold — store rows carry a
- * node name or a target name, never an address) and its loss lives in
- * kconmon_ng_external_packet_loss_ratio{target=...}.
- *
- * The known-node list is the live topology, which means the rule is only as
- * good as what the controller reports right now: a node that has since left
- * the fleet reads as external and its series comes back empty. The caller
- * therefore waits for topology to RESOLVE before asking anything — guessing
- * from an empty node list would send every pair to the external family and
- * quietly draw nothing. An empty list here still answers "external" rather
- * than throwing, because a component that has snapshots but no topology yet
- * must render, and "external" is the answer that at least names something the
- * store can hold.
- */
+/** lossFamilyFor decides which family to query for a (source, destination) pair. */
 export function lossFamilyFor(destination: string, nodeNames: string[]): LossFamily {
   return nodeNames.includes(destination) ? "peer" : "external";
 }
 
 /**
- * pairLossQuery builds the pair's packet-loss series. Metric names and label
- * sets are the agent's own, verified against internal/metrics/prometheus.go:
- *
- *  - peer: `_icmp_packet_loss_ratio` and `_udp_packet_loss_ratio` over
- *    {source_node, destination_node, source_zone, destination_zone}. BOTH are
- *    asked for, tagged with a synthetic `protocol` label the way
- *    pair-card.tsx's own series query does, because which of them exists for a
- *    given pair depends on which check types the fleet runs — an ICMP-only
- *    query would read as "no loss" on a UDP-only mesh. There is no MTR loss
- *    metric to prefer: the MTR family is `_mtr_hops` and `_mtr_hop_rtt`, and
- *    per-hop loss deliberately never became a metric (hop_ip cardinality,
- *    M4).
- *  - external: `_external_packet_loss_ratio` over {source_node, source_zone,
- *    target, target_kind} — no destination_node exists there, because an
- *    external destination is not a peer.
- *
- * `max by (protocol)` rather than `sum`: a loss RATIO is not additive, and two
- * zones' series summed would happily exceed 1.0. The worst observation for the
- * pair is the honest one-number summary of "was this route losing packets
- * when the path changed?".
+ * pairLossQuery builds the pair's packet-loss series; BOTH are asked for, tagged with a synthetic
+ * `protocol` label the way pair-card.tsx's own series query does.
  */
 export function pairLossQuery(source: string, destination: string, family: LossFamily): string {
   const src = `source_node="${escapeLabelValue(source)}"`;
@@ -85,10 +47,7 @@ export function pairLossQuery(source: string, destination: string, family: LossF
 const TARGET_POINTS = 120;
 const MIN_STEP_SECONDS = 15;
 
-/** stepSecondsFor keeps the proxy's point budget the same one target-card.tsx
- *  and pair-card.tsx use: about TARGET_POINTS samples, rounded up to a whole
- *  scrape interval, never finer than MIN_STEP_SECONDS. A pair whose history
- *  spans weeks therefore costs the same query as one that spans an hour. */
+/** stepSecondsFor keeps the proxy's point budget the same one target-card.tsx and pair-card.tsx use. */
 export function stepSecondsFor(rangeSeconds: number): number {
   return Math.max(1, Math.ceil(rangeSeconds / TARGET_POINTS / MIN_STEP_SECONDS)) * MIN_STEP_SECONDS;
 }
@@ -99,24 +58,8 @@ function msOf(ts: string): number {
 }
 
 /**
- * PathChangesTimeline is MTR_EXPLORER.md's "'path changes' timeline overlaid
- * with the pair's loss series from Prometheus": one marker per snapshot at its
- * first_seen, on the same time axis as the loss chart underneath, so "the
- * route changed" and "the pair started losing packets" can be read as one
- * picture instead of two.
- *
- * The window is [oldest loaded snapshot's first_seen, now]. It is derived from
- * the snapshots the history pane has ALREADY loaded, so pressing "Load older"
- * widens it and nothing else refetches — and it is memoised on that one
- * timestamp so a re-render does not mint a new `now`, a new query key and a
- * new request every time React feels like it.
- *
- * Two honest degradations, the same pair target-card.tsx's History tab makes:
- * Prometheus unconfigured on this replica (GET /api/v1/config's
- * `prometheus.configured`, the signal the proxy's own 503 gate reads) keeps
- * the markers, says so once and issues ZERO requests; an empty series says so
- * rather than drawing a flat line at zero, which would read as "no loss" when
- * it means "nothing measured".
+ * PathChangesTimeline is MTR_EXPLORER.md's "'path changes' timeline overlaid with the pair's loss
+ * series from Prometheus".
  */
 export function PathChangesTimeline({
   source,
@@ -127,6 +70,8 @@ export function PathChangesTimeline({
   destination: string;
   snapshots: PathSnapshot[];
 }) {
+  const t = useT(mtrDetailDict);
+  const { locale } = useLocale();
   const { theme } = useTheme();
   const topo = useTopology();
   const configQuery = useQuery({ queryKey: ["config"], queryFn: getConfig, staleTime: Infinity });
@@ -175,22 +120,20 @@ export function PathChangesTimeline({
   const option = useMemo(() => (data ? toSeriesOption(chart, data, theme === "dark") : undefined), [chart, data, theme]);
   // promqlQueryRange RESOLVES Prometheus's own error envelope rather than
   // throwing (lib/api.ts's `handle`), so a query-level failure shows up here.
-  const queryError = data?.status === "error" ? (data.error ?? "query failed") : undefined;
+  const queryError = data?.status === "error" ? (data.error ?? t("changes.queryFailed")) : undefined;
   const empty =
     data?.status === "success" && (data.data?.resultType !== "matrix" || (data.data?.result ?? []).length === 0);
 
   if (window === null) return null;
   const span = window.end - window.start;
-  /* Is there a chart to frame at all (QA round 4, finding #8)? The 112px box
-     was unconditional, so Prometheus-off and empty-series both drew an empty
-     grey rectangle above the "no loss series" note — a chart frame containing
-     nothing, which reads as a chart that failed to load rather than as a
-     measurement that does not exist. With no series the markers get a short
-     rail of their own instead, which is all they ever needed. */
+  /*
+   * Is there a chart to frame at all?; the 112px box was unconditional, so Prometheus-off and
+   * empty-series both drew an empty grey rectangle above the "no loss series" note.
+   */
   const hasChart = option !== undefined && !empty && !queryError;
 
   return (
-    <section aria-label="Path changes over time" className="mt-3">
+    <section aria-label={t("changes.aria")} className="mt-3">
       <div className={cn("relative w-full", hasChart ? "h-28" : "h-6")}>
         {hasChart ? <EChart option={option} className="absolute inset-0 h-full w-full" /> : null}
 
@@ -207,15 +150,15 @@ export function PathChangesTimeline({
             full path hash and the first-seen stamp are written, was
             unreachable. The hit area is padded out to 9px around the hairline
             (px-1) because a 1px pointer target is not one. */}
-        <ul aria-label="Path changes" className="pointer-events-none absolute inset-x-0 top-0 h-full">
+        <ul aria-label={t("changes.list.aria")} className="pointer-events-none absolute inset-x-0 top-0 h-full">
           {snapshots.map((s) => {
             const pct = Math.min(100, Math.max(0, ((msOf(s.firstSeen) - window.start) / span) * 100));
             return (
               <li key={s.id} className="absolute top-0 h-full -translate-x-1/2" style={{ left: `${pct}%` }}>
                 <span
                   tabIndex={0}
-                  aria-label={`Path ${shortHash(s.pathHash)} first seen ${fmtTime(s.firstSeen)}`}
-                  title={`${s.pathHash}\nfirst seen ${fmtTime(s.firstSeen)}`}
+                  aria-label={t("changes.marker.aria", { hash: shortHash(s.pathHash), at: fmtTime(s.firstSeen, locale) })}
+                  title={t("changes.marker.title", { hash: s.pathHash, at: fmtTime(s.firstSeen, locale) })}
                   className={cn(
                     "pointer-events-auto flex h-full cursor-help items-stretch px-1",
                     "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
@@ -231,7 +174,7 @@ export function PathChangesTimeline({
 
       {promResolved && !promConfigured ? (
         <p role="status" className="mt-1 text-xs leading-relaxed text-muted-foreground">
-          Path changes only — set console.prometheus.address to overlay this pair's packet loss.
+          {t("changes.promUnset")}
         </p>
       ) : null}
       {queryError ? (
@@ -240,15 +183,10 @@ export function PathChangesTimeline({
         </p>
       ) : null}
       {empty && !queryError ? (
-        <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
-          No loss series for this pair over the window — nothing is probing it, or the {family} metric family carries no
-          samples for it yet.
-        </p>
+        <p className="mt-1 text-xs leading-relaxed text-muted-foreground">{t("changes.empty", { family })}</p>
       ) : null}
       {promConfigured && isLoading && !data ? (
-        <p role="status" className="mt-1 text-xs text-muted-foreground">
-          Loading the pair's loss series…
-        </p>
+        <p role="status" className="mt-1 text-xs text-muted-foreground">{t("changes.loading")}</p>
       ) : null}
     </section>
   );

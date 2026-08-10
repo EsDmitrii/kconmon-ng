@@ -15,10 +15,7 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 )
 
-// TestCapabilitiesFor pins the capability advertisement that gates the whole
-// Console realtime path: "events" appears only when the operator turned the
-// events flag on, and the slice is never nil (a nil slice marshals as JSON
-// null, which the Console cannot iterate).
+// TestCapabilitiesFor pins the capability advertisement that gates the whole Console realtime path.
 func TestCapabilitiesFor(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -45,15 +42,8 @@ func TestCapabilitiesFor(t *testing.T) {
 	}
 }
 
-// TestControllerPublishesAttributedTopologyEvents is the end-to-end pin for the
-// M7 attribution carry: what a registry mutation causes to appear on the event
-// stream, not just what TopologyChange.Events() renders.
-//
-// Since M3 this wiring published pb.TopologyChanged{Reason: reason} and threw
-// the subject away, so the Console's topology fold reconstructed an empty
-// cluster from any amount of history. This asserts every emission site now
-// names its agent, node and zone -- and that a multi-agent eviction produces
-// one event PER agent rather than a single ambiguous one.
+// Since this wiring published pb.TopologyChanged{Reason: reason} and threw the subject away; this
+// asserts every emission site now names its agent.
 func TestControllerPublishesAttributedTopologyEvents(t *testing.T) {
 	cfg := &config.Config{MetricsPrefix: "test"}
 	cfg.Controller.AgentTTL = time.Nanosecond
@@ -139,11 +129,7 @@ func freePort(t *testing.T) int {
 	return port
 }
 
-// TestControllerRunShutsDownWithActiveEventSubscriber is the regression test for
-// the M2 smoke-test hang. grpc.Server.GracefulStop waits for active handlers to
-// return but does not cancel their stream contexts, so a single connected
-// WatchEvents subscriber kept Run blocked forever and only SIGKILL ended the
-// process. Run must return on ctx cancel within the bounded shutdown window.
+// Run must return on ctx cancel within the bounded shutdown window.
 func TestControllerRunShutsDownWithActiveEventSubscriber(t *testing.T) {
 	grpcPort := freePort(t)
 

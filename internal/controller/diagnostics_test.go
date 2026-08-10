@@ -528,10 +528,6 @@ func newDiagTestHandlerExternal(t *testing.T, disp TaskDispatcher, events EventP
 	return NewDiagnosticsHandler(reg, disp, m, false, nil, events)
 }
 
-// TestDiagnosticsM3RequestShapeUnchanged is the regression gate for M4: a body
-// carrying none of the new fields must dispatch the exact same TaskRequest and
-// return the exact same bytes and headers as before external destinations
-// existed.
 func TestDiagnosticsM3RequestShapeUnchanged(t *testing.T) {
 	details := []byte(`{"type":"icmp","success":true,"source":"node-a","destination":"node-b"}`)
 	disp := &fakeDispatcher{result: &pb.TaskResult{Success: true, DetailsJson: details}}

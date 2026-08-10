@@ -1,29 +1,18 @@
 import * as React from "react";
 import { CalendarDays, ChevronLeft, ChevronRight } from "lucide-react";
 import { Button, type ButtonProps } from "@/components/ui/button";
+import { stampInstant, useLocale, useT, type Locale, type Translate } from "@/lib/i18n";
+import {
+  MONTH_KEYS,
+  MONTH_OF_KEYS,
+  PRESET_KEYS,
+  sharedDict,
+  WEEKDAY_KEYS,
+  type SharedKey,
+} from "@/lib/i18n/dict/shared";
 import { cn } from "@/lib/utils";
 
-/**
- * DateTimePicker — a hand-rolled calendar popover for choosing a past instant.
- *
- * It exists because `<input type="datetime-local">` is a spinner: correct, and
- * miserable to aim at a day three weeks back. The repo carries no date library
- * and gains none for this; the grid below is 40 lines of arithmetic on the
- * local-time Date getters and nothing more.
- *
- * The component is CONTROLLED and dumb: it holds a draft while open, emits one
- * Date through onApply, and knows nothing about the Time Machine, `?at=` or the
- * future-clamp. The caller owns all of that (lib/timemachine.tsx's engage()).
- *
- * Two ways in, on purpose:
- *   - point: presets, then the month grid (mouse, and arrow keys in the grid).
- *   - type: the date and time fields at the bottom are plain, editable inputs —
- *     a keyboard user can compose the whole instant without ever entering the
- *     grid. That is the manual path the raw input used to be, kept intact.
- *
- * Every surface is a token (popover/surface-2/accent/primary/ring), so light
- * and dark come from index.css and never from a literal colour here.
- */
+/** Every surface is a token (popover/surface-2/accent/primary/ring). */
 
 const pad = (n: number) => String(n).padStart(2, "0");
 
@@ -63,45 +52,25 @@ export function composeLocal(date: string, time: string): Date | null {
   return Number.isNaN(out.getTime()) ? null : out;
 }
 
-/** formatInstant is the trigger's label: "Aug 8, 2026, 01:23" in the viewer's
- *  own locale. Short by design — the trigger sits in a one-line bar. */
-export function formatInstant(d: Date): string {
-  return d.toLocaleString(undefined, {
-    month: "short",
-    day: "numeric",
-    year: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-  });
+/**
+ * formatInstant is the trigger's label: "Aug 8, 2026, 1:23 AM". Short by design
+ * — the trigger sits in a one-line bar.
+ *
+ * It delegates to lib/i18n's stampInstant, which is where the shape now lives so
+ * that a range shown on a trigger, in a row's detail line and in the incident
+ * form reads one way (QA scope 3, finding #18). Two things moved with it: the
+ * locale is the INTERFACE's rather than a bare `undefined` (finding #7), and the
+ * hour is "numeric" — `hour: "2-digit"` printed "08:00 PM" on this control and
+ * nowhere else in the console (finding #17).
+ */
+export function formatInstant(d: Date, locale: Locale = "en"): string {
+  return stampInstant(d, locale);
 }
 
-const MONTHS = [
-  "January",
-  "February",
-  "March",
-  "April",
-  "May",
-  "June",
-  "July",
-  "August",
-  "September",
-  "October",
-  "November",
-  "December",
-];
-
-/* Monday-first, matching ISO 8601 and the week an operator reading a duty
-   roster already has in their head. Header cells carry the full name in
-   `abbr` so a screen reader announces "Monday", not "Mo". */
-const WEEKDAYS = [
-  { short: "Mo", long: "Monday" },
-  { short: "Tu", long: "Tuesday" },
-  { short: "We", long: "Wednesday" },
-  { short: "Th", long: "Thursday" },
-  { short: "Fr", long: "Friday" },
-  { short: "Sa", long: "Saturday" },
-  { short: "Su", long: "Sunday" },
-];
+/*
+ * The month names, the weekday abbreviations and the preset labels all live in
+ * lib/i18n/dict/shared.ts now (MONTH_KEYS, MONTH_OF_KEYS, WEEKDAY_KEYS, PRESET_KEYS).
+ */
 
 export interface PickerPreset {
   label: string;
@@ -119,21 +88,7 @@ export const PAST_PRESETS: readonly PickerPreset[] = [
   { label: "24h ago", minutes: -1440 },
 ];
 
-/**
- * FUTURE_PRESETS is the allowFuture set (QA round 3, finding #17).
- *
- * The backward presets were shown on every picker, including the maintenance
- * form's two — where the grid disables nothing ahead of today because a change
- * window is DECLARED IN ADVANCE. So the one control offering a shortcut offered
- * four shortcuts that all pointed the wrong way: an operator planning tomorrow's
- * switch upgrade could click "24h ago" and land a day BEFORE the window they
- * came to write. A preset row is a statement about where this field usually
- * goes, and on a forward-looking field it has to point forward.
- *
- * "tomorrow" is +24h rather than "the next midnight" on purpose: every other
- * entry here is an offset from now, and a preset that silently changed KIND
- * would be the one an operator gets wrong.
- */
+/** The backward presets were shown on every picker, including the maintenance form's two. */
 export const FUTURE_PRESETS: readonly PickerPreset[] = [
   { label: "in 15m", minutes: 15 },
   { label: "in 1h", minutes: 60 },
@@ -142,37 +97,13 @@ export const FUTURE_PRESETS: readonly PickerPreset[] = [
 ];
 
 /**
- * POPOVER_MIN_HEIGHT_PX is the popover's own drawn height, near enough: the
- * preset row, the month header, six calendar rows of 36px, the field row and
- * the button row. It is a CONSTANT rather than a measurement because the
- * direction has to be decided BEFORE the popover exists — measuring it would
- * mean rendering it downward first and flipping it under the cursor.
+ * POPOVER_MIN_HEIGHT_PX is the popover's own drawn height, near enough: the preset row; it is a
+ * CONSTANT rather than a measurement because the direction has to be decided BEFORE the popover
+ * exists.
  */
 export const POPOVER_MIN_HEIGHT_PX = 420;
 
-/**
- * pickerDropDirection decides which way the popover opens (QA round 3,
- * finding #16).
- *
- * The popover was unconditionally `top-full`, so a trigger low in the viewport
- * — a maintenance row at the bottom of a long Investigate page, an annotation
- * bar under a chart — put the whole calendar below the fold: Apply and Cancel
- * were unreachable without scrolling the page behind an open popover.
- *
- * Downward is still the DEFAULT and the tie-break, because down is where a
- * dropdown belongs and flipping it is a surprise worth spending only when the
- * alternative is unusable. Non-finite inputs (no layout to measure — jsdom, a
- * detached node) answer "down": the fallback must be the ordinary case, never
- * the exception.
- *
- * QA round 5, finding #3 narrowed the flip. The old rule took the LARGER side
- * once below fell short, so a trigger with 310px below and 390px above opened
- * UP into 390px — and the popover needs 420, so the presets and the month
- * header went off the TOP of the viewport, where nothing can scroll to them
- * (the page cannot scroll past y=0). Downward overflow is recoverable; upward
- * overflow is not. So up is now EARNED by fitting, not won by comparison:
- * spaceBelow short AND spaceAbove genuinely large enough.
- */
+/** pickerDropDirection decides which way the popover opens; downward is still the DEFAULT and the tie-break. */
 export function pickerDropDirection(spaceBelow: number, spaceAbove: number): "down" | "up" {
   if (!Number.isFinite(spaceBelow) || !Number.isFinite(spaceAbove)) return "down";
   if (spaceBelow >= POPOVER_MIN_HEIGHT_PX) return "down";
@@ -191,16 +122,21 @@ function sameDay(a: Date, b: Date): boolean {
   return a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
 }
 
-function dayLabel(d: Date): string {
-  return `${d.getDate()} ${MONTHS[d.getMonth()]} ${d.getFullYear()}`;
+/**
+ * dayLabel is the day cell's spoken name; assembled through the dictionary rather than a template
+ * literal so the month arrives in whatever form the sentence needs.
+ */
+function dayLabel(t: Translate<SharedKey>, d: Date): string {
+  return t("picker.dayLabel", {
+    day: d.getDate(),
+    month: t(MONTH_OF_KEYS[d.getMonth()]),
+    year: d.getFullYear(),
+  });
 }
 
 /**
- * monthGrid returns the 42 days (6 rows × 7 columns) the month is drawn on,
- * including the leading/trailing days of the neighbouring months. Always 42, so
- * the popover never changes height between February and a 31-day month that
- * starts on a Sunday — a calendar that resizes under the cursor is the exact
- * jank this component was asked to remove.
+ * monthGrid returns the 42 days (6 rows × 7 columns) the month is drawn on; always 42, so the
+ * popover never changes height between February and a 31-day month that starts on a Sunday.
  */
 function monthGrid(view: Date): Date[] {
   const first = new Date(view.getFullYear(), view.getMonth(), 1);
@@ -257,21 +193,9 @@ export interface DateTimePickerProps {
   /** Called with the composed instant on Apply or on a preset click. Never
    *  called by Cancel, Escape or a click outside. */
   onApply: (d: Date) => void;
-  /** Opt IN to days after today. Default false, because the control was built
-   *  for the Time Machine, where a future instant is a state nothing has
-   *  measured yet and offering it is a promise the console cannot keep.
-   *  M6's maintenance form is the exception the flag exists for: a change
-   *  window is normally DECLARED IN ADVANCE, so clamping it to the past would
-   *  make the common case unexpressible. */
+  /** Opt IN to days after today; default false, because the control was built for the Time Machine. */
   allowFuture?: boolean;
-  /** Opt OUT of days before today — the mirror image of allowFuture, for a
-   *  field that is FUTURE-ONLY (QA round 5, finding #12). The schedules form's
-   *  "Run at" is the case: a one-shot run scheduled for last Tuesday is an
-   *  instruction nothing can carry out, and the picker offered a whole
-   *  calendar of them. Separate from allowFuture rather than folded into a
-   *  three-way mode, because the two clamps are independent: the Time Machine
-   *  wants the past only, maintenance wants both, Run-at wants the future
-   *  only. The Time Machine picker passes neither flag and is UNCHANGED. */
+  /** Opt OUT of days before today — the mirror image of allowFuture, for a field that is FUTURE-ONLY. */
   disablePast?: boolean;
   disabled?: boolean;
   /** Trigger text. Defaults to the formatted value (or "Pick a time"); pass it
@@ -302,6 +226,8 @@ export function DateTimePicker({
   variant = "outline",
   className,
 }: DateTimePickerProps) {
+  const t = useT(sharedDict);
+  const { locale } = useLocale();
   const [open, setOpen] = React.useState(false);
   const rootRef = React.useRef<HTMLDivElement>(null);
   const popRef = React.useRef<HTMLDivElement>(null);
@@ -310,11 +236,7 @@ export function DateTimePicker({
   /* The calendar table, so changeView can ask whether the grid currently owns
      DOM focus before it moves any. */
   const gridRef = React.useRef<HTMLTableElement>(null);
-  /* Set by the gestures that OWN the focus (opening, the arrow keys) and read
-     by the effect below. A ref, not state: focus is an imperative fact about
-     the DOM, and re-rendering to record "please focus" would be a render for
-     nobody. Clicking a day deliberately does NOT set it — the browser already
-     put focus on the button that was clicked. */
+  /* Set by the gestures that OWN the focus (opening, the arrow keys) and read by the effect below. */
   const pendingFocusRef = React.useRef(false);
 
   /* The instant the popover opens on: the current value, or now when there
@@ -329,11 +251,7 @@ export function DateTimePicker({
   const [timeStr, setTimeStr] = React.useState(() => toTimeInputValue(seed()));
   const [view, setView] = React.useState(() => startOfDay(seed()));
   const [focusedDay, setFocusedDay] = React.useState(() => startOfDay(seed()));
-  /* The time wheel: two scrollable columns that open on the time field itself.
-     The native indicator (and the browser dropdown behind it) is hidden — one
-     popover should not sprout a second, foreign-looking one — so this panel is
-     the pointer path for the wall clock, and typing in the field remains the
-     keyboard path. */
+  /* The time wheel: two scrollable columns that open on the time field itself. */
   const [timeOpen, setTimeOpen] = React.useState(false);
   const timeWrapRef = React.useRef<HTMLDivElement>(null);
   const timeInputRef = React.useRef<HTMLInputElement>(null);
@@ -344,9 +262,7 @@ export function DateTimePicker({
   /* pickMinute hands focus back to the field; without this flag that very
      focus would re-open the wheel the pick just closed. */
   const suppressWheelRef = React.useRef(false);
-  /* Which way the popover opens, decided ONCE at open time from the trigger's
-     box (QA round 3, finding #16). State, not a ref: the class it produces is
-     rendered, so the render that mounts the popover has to see it. */
+  /* Which way the popover opens, decided ONCE at open time from the trigger's box. */
   const [drop, setDrop] = React.useState<"down" | "up">("down");
 
   const today = startOfDay(new Date());
@@ -356,11 +272,10 @@ export function DateTimePicker({
     triggerRef.current?.focus();
   }, []);
 
-  /* The measurement half of finding #16, kept next to the decision it feeds.
-     Guarded on every step: jsdom implements getBoundingClientRect as all-zeros
-     and may not define visualViewport at all, and a picker that throws while
-     deciding which way to open would be a worse bug than opening the wrong
-     way. Every failure lands on "down", the ordinary case. */
+  /*
+   * The measurement half of , kept next to the decision it feeds; guarded on every step: jsdom
+   * implements getBoundingClientRect as all-zeros and may not define visualViewport.
+   */
   const measureDropDirection = React.useCallback((): "down" | "up" => {
     const trigger = triggerRef.current;
     if (!trigger || typeof trigger.getBoundingClientRect !== "function") return "down";
@@ -370,12 +285,10 @@ export function DateTimePicker({
     return pickerDropDirection(viewportHeight - rect.bottom, rect.top);
   }, []);
 
-  /* The direction is decided at open time AND kept honest afterwards (QA round
-     5, finding #3): a window resized — or a phone rotated — under an open
-     popover changes which side has room, and an anchoring measured against the
-     old viewport is exactly the off-screen popover this listener exists to
-     avoid. One cheap listener, only while open, no rAF: resize already
-     coalesces and the handler is two reads and a compare. */
+  /*
+   * One cheap listener, only while open, no rAF: resize already coalesces and the handler is two
+   * reads and a compare.
+   */
   React.useEffect(() => {
     if (!open) return;
     function remeasure() {
@@ -419,11 +332,10 @@ export function DateTimePicker({
     };
   }, [open]);
 
-  /* Opening moves focus into the grid, at the selected day (leaving it on the
-     trigger behind the popover would make Tab walk the page instead of the
-     calendar), and the arrow keys then carry it — including across a month
-     boundary, where the old cell is unmounted and focus would otherwise fall
-     back to <body>. */
+  /*
+   * Opening moves focus into the grid, at the selected day (leaving it on the trigger behind the
+   * popover would make Tab walk the page instead of the calendar).
+   */
   React.useEffect(() => {
     if (!open || !pendingFocusRef.current) return;
     pendingFocusRef.current = false;
@@ -495,30 +407,15 @@ export function DateTimePicker({
   const thisMonthStart = new Date(today.getFullYear(), today.getMonth(), 1);
 
   /**
-   * changeView is the ONE way the visible month moves — the chevrons, the
-   * month wheel and the year wheel all go through it — because paging has a
-   * second half that is easy to forget and was (QA round 1, finding #7).
-   *
-   * The grid keeps exactly one cell in the tab order: the one matching
-   * focusedDay. Page two months away and focusedDay is no longer drawn at all,
-   * so the grid has NO tab stop and a keyboard user who reaches it lands
-   * nowhere — the arrows have nothing to move from. So a view change that
-   * leaves focusedDay behind carries it to the 1st of the new month.
-   *
-   * DOM focus is a separate question and moves only if the grid already had
-   * it. Clicking a chevron puts focus on the chevron, and a control that
-   * yanked focus into the grid on every click would make repeated paging
-   * impossible with the mouse and surprising with the keyboard.
+   * changeView is the ONE way the visible month moves — the chevrons; DOM focus is a separate
+   * question and moves only if the grid already had.
    */
   function changeView(next: Date) {
     setView(next);
     if (focusedDay.getFullYear() === next.getFullYear() && focusedDay.getMonth() === next.getMonth()) return;
     const first = new Date(next.getFullYear(), next.getMonth(), 1);
-    // The 1st of the CURRENT month is never in the future, but the clamp is
-    // stated rather than assumed: a caller with allowFuture off must never end
-    // up focused on a day the grid has disabled. disablePast is the mirror —
-    // the 1st of THIS month is in the past for all but one day a month, and
-    // landing the only tab stop on a dead cell is the same bug reflected.
+    // The 1st of the CURRENT month is never in the future, but the clamp is stated rather than
+    // assumed.
     const landing = !allowFuture && first > today ? today : disablePast && first < today ? today : first;
     const grid = gridRef.current;
     if (grid && document.activeElement instanceof Node && grid.contains(document.activeElement)) {
@@ -633,12 +530,7 @@ export function DateTimePicker({
      today's date is not. */
   const futureDraft = !allowFuture && composed !== null && composed.getTime() > Date.now();
 
-  /* The preset row follows the field's DIRECTION, not the component's default
-     (finding #17): a picker that accepts future instants is one an operator
-     opens to reach forward. disablePast then drops anything that still points
-     backward (finding #12) — belt and braces, so a caller that sets the flag
-     without allowFuture cannot end up with four one-click trips into the dead
-     half of its own calendar. */
+  /* The preset row follows the field's DIRECTION, not the component's default. */
   const presets = (allowFuture ? FUTURE_PRESETS : PAST_PRESETS).filter((p) => !disablePast || p.minutes >= 0);
 
   const days = monthGrid(view);
@@ -646,7 +538,7 @@ export function DateTimePicker({
     !allowFuture && view.getFullYear() === today.getFullYear() && view.getMonth() === today.getMonth();
   const atFirstMonth =
     disablePast && view.getFullYear() === today.getFullYear() && view.getMonth() === today.getMonth();
-  const triggerText = label ?? (value ? formatInstant(value) : "Pick a time");
+  const triggerText = label ?? (value ? formatInstant(value, locale) : t("picker.triggerDefault"));
 
   return (
     <div ref={rootRef} className="relative">
@@ -671,7 +563,7 @@ export function DateTimePicker({
         <div
           ref={popRef}
           role="dialog"
-          aria-label="Choose a date and time"
+          aria-label={t("picker.dialog")}
           onKeyDown={onDialogKeyDown}
           data-drop={drop}
           className={cn(
@@ -681,23 +573,30 @@ export function DateTimePicker({
             drop === "up" ? "bottom-full mb-1.5" : "top-full mt-1.5",
           )}
         >
-          <div role="group" aria-label="Quick ranges" className="flex flex-wrap gap-1">
-            {presets.map((p) => (
-              <button
-                key={p.label}
-                type="button"
-                onClick={() => applyPreset(p.minutes)}
-                className="rounded-full bg-surface-2 px-2.5 py-1 text-[11px] font-medium text-muted-foreground transition-colors duration-(--dur-fast) ease-(--ease) hover:bg-accent hover:text-accent-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-              >
-                {p.label}
-              </button>
-            ))}
+          <div role="group" aria-label={t("picker.quickRanges")} className="flex flex-wrap gap-1">
+            {presets.map((p) => {
+              /*
+               * Keyed by the OFFSET, not by the label: PAST_PRESETS and FUTURE_PRESETS stay pure
+               * exported data with their English labels intact (tests read them as data).
+               */
+              const key = PRESET_KEYS[p.minutes];
+              return (
+                <button
+                  key={p.label}
+                  type="button"
+                  onClick={() => applyPreset(p.minutes)}
+                  className="rounded-full bg-surface-2 px-2.5 py-1 text-[11px] font-medium text-muted-foreground transition-colors duration-(--dur-fast) ease-(--ease) hover:bg-accent hover:text-accent-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                >
+                  {key ? t(key) : p.label}
+                </button>
+              );
+            })}
           </div>
 
           <div className="mt-3 flex items-center justify-between">
             <button
               type="button"
-              aria-label="Previous month"
+              aria-label={t("picker.prevMonth")}
               disabled={atFirstMonth}
               onClick={() => changeView(new Date(view.getFullYear(), view.getMonth() - 1, 1))}
               className="grid size-7 place-items-center rounded-md text-muted-foreground transition-colors duration-(--dur-fast) ease-(--ease) hover:bg-accent hover:text-accent-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-30"
@@ -709,7 +608,7 @@ export function DateTimePicker({
                 type="button"
                 aria-haspopup="listbox"
                 aria-expanded={monthYearOpen}
-                aria-label="Choose the month and year"
+                aria-label={t("picker.monthYearTrigger")}
                 onClick={() => setMonthYearOpen((v) => !v)}
                 onKeyDown={(e) => {
                   if (e.key === "Escape" && monthYearOpen) {
@@ -720,21 +619,21 @@ export function DateTimePicker({
                 className="rounded-md px-2 py-0.5 text-[13px] font-medium text-foreground transition-colors duration-(--dur-fast) ease-(--ease) hover:bg-accent hover:text-accent-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
               >
                 <span aria-live="polite">
-                  {MONTHS[view.getMonth()]} {view.getFullYear()}
+                  {t(MONTH_KEYS[view.getMonth()])} {view.getFullYear()}
                 </span>
               </button>
               {monthYearOpen ? (
                 <div
                   role="group"
-                  aria-label="Pick a month and year"
+                  aria-label={t("picker.monthYearPanel")}
                   className="absolute left-1/2 top-full z-50 mt-1 flex -translate-x-1/2 gap-1 rounded-lg border border-border bg-popover p-1 shadow-card"
                 >
                   <WheelColumn
-                    label="Month"
+                    label={t("picker.monthColumn")}
                     width="w-26"
-                    options={MONTHS.map((name, m) => ({
+                    options={MONTH_KEYS.map((key, m) => ({
                       value: m,
-                      text: name,
+                      text: t(key),
                       selected: m === view.getMonth(),
                       disabled:
                         (!allowFuture && new Date(view.getFullYear(), m, 1) > thisMonthStart) ||
@@ -743,7 +642,7 @@ export function DateTimePicker({
                     onPick={pickViewMonth}
                   />
                   <WheelColumn
-                    label="Year"
+                    label={t("picker.yearColumn")}
                     width="w-16"
                     options={yearRange.map((y) => ({
                       value: y,
@@ -757,7 +656,7 @@ export function DateTimePicker({
             </div>
             <button
               type="button"
-              aria-label="Next month"
+              aria-label={t("picker.nextMonth")}
               disabled={atLastMonth}
               onClick={() => changeView(new Date(view.getFullYear(), view.getMonth() + 1, 1))}
               className="grid size-7 place-items-center rounded-md text-muted-foreground transition-colors duration-(--dur-fast) ease-(--ease) hover:bg-accent hover:text-accent-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-30"
@@ -766,17 +665,17 @@ export function DateTimePicker({
             </button>
           </div>
 
-          <table ref={gridRef} role="grid" aria-label="Calendar" className="mt-1.5 w-full border-collapse">
+          <table ref={gridRef} role="grid" aria-label={t("picker.calendar")} className="mt-1.5 w-full border-collapse">
             <thead>
               <tr>
-                {WEEKDAYS.map((w) => (
+                {WEEKDAY_KEYS.map((w) => (
                   <th
                     key={w.short}
                     scope="col"
-                    abbr={w.long}
+                    abbr={t(w.long)}
                     className="pb-1 text-[10px] font-medium uppercase tracking-wide text-muted-foreground"
                   >
-                    {w.short}
+                    {t(w.short)}
                   </th>
                 ))}
               </tr>
@@ -798,7 +697,7 @@ export function DateTimePicker({
                           ref={isFocused ? focusedDayRef : undefined}
                           tabIndex={isFocused ? 0 : -1}
                           disabled={isFuture || isPast}
-                          aria-label={`Choose ${dayLabel(d)}`}
+                          aria-label={t("picker.chooseDay", { date: dayLabel(t, d) })}
                           aria-current={isToday ? "date" : undefined}
                           onClick={() => pickDay(d)}
                           onKeyDown={(e) => onGridKeyDown(e, d)}
@@ -834,7 +733,7 @@ export function DateTimePicker({
                 are the typing path, and they stay plain text boxes. */}
             <input
               type="date"
-              aria-label="Date"
+              aria-label={t("picker.dateField")}
               value={dateStr}
               max={allowFuture ? undefined : toDateInputValue(today)}
               min={disablePast ? toDateInputValue(today) : undefined}
@@ -845,7 +744,7 @@ export function DateTimePicker({
               <input
                 ref={timeInputRef}
                 type="time"
-                aria-label="Time"
+                aria-label={t("picker.timeField")}
                 value={timeStr}
                 onChange={(e) => setTimeStr(e.target.value)}
                 onFocus={() => {
@@ -867,27 +766,22 @@ export function DateTimePicker({
               {timeOpen ? (
                 <div
                   role="group"
-                  aria-label="Pick a time"
-                  /* UPWARD (QA round 1, finding #6). The time field is the
-                     second-to-last row of the popover, so a downward panel
-                     landed squarely on Cancel and Apply — the two controls
-                     that end the interaction, unreachable by pointer until
-                     the wheel was dismissed. Opening up overlays the grid,
-                     which is this popover's own surface and costs nothing:
-                     the day is already chosen by the time the clock is being
-                     aimed at. The month & year panel above stays downward for
-                     the same reason — it covers only the grid. */
+                  aria-label={t("picker.timePanel")}
+                  /* The month & year panel above stays downward for the same reason — it covers only the grid. */
                   className="absolute bottom-full right-0 z-50 mb-1 flex gap-1 rounded-lg border border-border bg-popover p-1 shadow-card"
                 >
                   {(
                     [
-                      { label: "Hour", count: 24, selected: timeParts?.[0], pick: pickHour },
-                      { label: "Minute", count: 60, selected: timeParts?.[1], pick: pickMinute },
+                      { labelKey: "picker.hourColumn", count: 24, selected: timeParts?.[0], pick: pickHour },
+                      { labelKey: "picker.minuteColumn", count: 60, selected: timeParts?.[1], pick: pickMinute },
                     ] as const
                   ).map((col) => (
                     <WheelColumn
-                      key={col.label}
-                      label={col.label}
+                      /* The KEY is the dictionary key, not the label: a React
+                         key that changed with the interface language would
+                         remount both wheels on a language switch. */
+                      key={col.labelKey}
+                      label={t(col.labelKey)}
                       width="w-12"
                       options={Array.from({ length: col.count }, (_, n) => ({
                         value: n,
@@ -904,7 +798,7 @@ export function DateTimePicker({
               type="button"
               variant="ghost"
               size="sm"
-              aria-label="Set the date and time to now"
+              aria-label={t("picker.nowAria")}
               onClick={() => {
                 // The whole instant, not just the wall clock: "Now" is an
                 // escape hatch back to the present, and a draft parked three
@@ -917,7 +811,7 @@ export function DateTimePicker({
               }}
               className="ml-auto h-8 px-2 text-muted-foreground"
             >
-              Now
+              {t("picker.now")}
             </Button>
           </div>
 
@@ -929,16 +823,16 @@ export function DateTimePicker({
               the click would trade a surprise for a dead end. */}
           {futureDraft ? (
             <p data-testid="future-hint" className="mt-2 text-[11px] leading-relaxed text-muted-foreground">
-              In the future — will engage at now.
+              {t("picker.futureHint")}
             </p>
           ) : null}
 
           <div className="mt-2.5 flex items-center justify-end gap-2">
             <Button type="button" variant="ghost" size="sm" className="h-8" onClick={closeAndRefocus}>
-              Cancel
+              {t("picker.cancel")}
             </Button>
             <Button type="button" size="sm" className="h-8" disabled={composed === null} onClick={apply}>
-              Apply
+              {t("picker.apply")}
             </Button>
           </div>
         </div>

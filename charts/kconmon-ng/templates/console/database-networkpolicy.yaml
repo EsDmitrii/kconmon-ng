@@ -14,8 +14,7 @@ spec:
   policyTypes:
     - Ingress
   ingress:
-    # Console -> PostgreSQL. The egress half of this path lives in
-    # templates/console/networkpolicy.yaml — both layers are required.
+    # Console to PostgreSQL; the egress half lives in the console policy.
     - from:
         - podSelector:
             matchLabels:
@@ -24,10 +23,7 @@ spec:
       ports:
         - protocol: TCP
           port: 5432
-    # The CNPG cluster's OWN pods: streaming replication (5432) and the
-    # operator's instance manager / status probes (8000) run between the
-    # instances. An ingress policy that forgets this breaks HA — replicas
-    # cannot join and the operator cannot see instance health.
+    # Instance-to-instance replication and instance-manager probes; HA breaks without it.
     - from:
         - podSelector:
             matchLabels:
@@ -37,10 +33,7 @@ spec:
           port: 5432
         - protocol: TCP
           port: 8000
-    # Prometheus scraping of the CNPG instance-manager metrics endpoint
-    # (9187, used by CNPG's PodMonitor). Same knob as the root policy's
-    # scrape rule: networkPolicy.prometheusNamespace narrows it, empty allows
-    # any namespace.
+    # Prometheus scraping of the CNPG instance-manager metrics endpoint.
     - from:
         {{- if .Values.networkPolicy.prometheusNamespace }}
         - namespaceSelector:
@@ -52,8 +45,5 @@ spec:
       ports:
         - protocol: TCP
           port: 9187
-    # NOTE: depending on the installation, the CNPG OPERATOR's own namespace
-    # may also need ingress here (webhooks/status calls into the instance
-    # manager on 8000). This chart cannot know that namespace; add a rule of
-    # your own if the operator logs connection timeouts to these pods.
+    # Some installs also need ingress from the CNPG operator's own namespace.
 {{- end }}

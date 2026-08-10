@@ -73,57 +73,41 @@ sqlc:
 
 ## OpenAPI
 
-# Regenerates web/src/lib/api-types.ts from the hand-authored
-# docs/console-api.yaml. Unlike proto:/sqlc: above there is no `go run` to pin
-# the tool with -- the generator is openapi-typescript, so this needs NODE and
-# an installed web/ tree (`cd web && npm ci`). The version is pinned by
-# web/package-lock.json instead, which is the same guarantee by another means.
-# CI runs this and fails on a diff, so a spec edit without a regenerate cannot
-# land; api-types.ts is committed, exactly like api/proto/*.pb.go and
-# internal/console/store/gen/.
+# CI runs this and fails on a diff, so a spec edit without a regenerate cannot land; api-types.ts is committed.
 
 openapi:
 	cd web && npm run gen:api
 
 ## Helm
 
-helm-lint:
+# Optional subcharts are pinned in Chart.lock and gitignored, so a fresh clone must fetch them first.
+# The chart needs its own copy of dashboards/ to package them; this keeps the two honest.
+dashboards-check:
+	@diff -r dashboards charts/kconmon-ng/dashboards && echo "dashboards in sync"
+
+helm-deps:
+	helm dependency build charts/kconmon-ng
+
+# JSON keeps the LAST of a repeated key, so a duplicate silently kills the earlier definition.
+schema-lint:
+	@python3 hack/schema-lint.py charts/kconmon-ng/values.schema.json
+
+helm-lint: helm-deps dashboards-check schema-lint
 	helm lint charts/kconmon-ng
-	helm lint charts/kconmon-ng -f charts/kconmon-ng/ci/default-values.yaml
-	helm lint charts/kconmon-ng -f charts/kconmon-ng/ci/full-values.yaml
-	helm lint charts/kconmon-ng -f charts/kconmon-ng/ci/minimal-values.yaml
-	helm lint charts/kconmon-ng -f charts/kconmon-ng/ci/console-values.yaml
-	helm lint charts/kconmon-ng -f charts/kconmon-ng/ci/console-db-values.yaml
-	helm lint charts/kconmon-ng -f charts/kconmon-ng/ci/console-auth-values.yaml
-	helm lint charts/kconmon-ng -f charts/kconmon-ng/ci/console-auth-local-values.yaml
-	helm lint charts/kconmon-ng -f charts/kconmon-ng/ci/console-auth-header-values.yaml
-	helm lint charts/kconmon-ng -f charts/kconmon-ng/ci/console-targets-values.yaml
-	helm lint charts/kconmon-ng -f charts/kconmon-ng/ci/console-mtr-values.yaml
-	helm lint charts/kconmon-ng -f charts/kconmon-ng/ci/console-investigation-values.yaml
-	helm lint charts/kconmon-ng -f charts/kconmon-ng/ci/console-alerting-values.yaml
+	@for f in charts/kconmon-ng/ci/*.yaml; do \
+		echo "--- lint $$f"; \
+		helm lint charts/kconmon-ng -f "$$f" || exit 1; \
+	done
 
-# EVERY ci profile is templated as well as linted, and the two are not
-# interchangeable: `helm lint` validates values against values.schema.json and
-# renders, but it reports template failures as lint warnings on a chart it
-# still calls linted, while `helm template` fails the build. The default and
-# minimal profiles are here for the same reason the console ones are — a
-# schema-clean profile that no longer renders must not pass a chart task.
-helm-template:
+# EVERY ci profile is templated as well as linted; the two are not interchangeable.
+helm-template: helm-deps
 	helm template kconmon-ng charts/kconmon-ng
-	helm template kconmon-ng charts/kconmon-ng -f charts/kconmon-ng/ci/default-values.yaml
-	helm template kconmon-ng charts/kconmon-ng -f charts/kconmon-ng/ci/full-values.yaml
-	helm template kconmon-ng charts/kconmon-ng -f charts/kconmon-ng/ci/minimal-values.yaml
-	helm template kconmon-ng charts/kconmon-ng -f charts/kconmon-ng/ci/console-values.yaml
-	helm template kconmon-ng charts/kconmon-ng -f charts/kconmon-ng/ci/console-db-values.yaml
-	helm template kconmon-ng charts/kconmon-ng -f charts/kconmon-ng/ci/console-auth-values.yaml
-	helm template kconmon-ng charts/kconmon-ng -f charts/kconmon-ng/ci/console-auth-local-values.yaml
-	helm template kconmon-ng charts/kconmon-ng -f charts/kconmon-ng/ci/console-auth-header-values.yaml
-	helm template kconmon-ng charts/kconmon-ng -f charts/kconmon-ng/ci/console-targets-values.yaml
-	helm template kconmon-ng charts/kconmon-ng -f charts/kconmon-ng/ci/console-mtr-values.yaml
-	helm template kconmon-ng charts/kconmon-ng -f charts/kconmon-ng/ci/console-investigation-values.yaml
-	helm template kconmon-ng charts/kconmon-ng -f charts/kconmon-ng/ci/console-alerting-values.yaml
+	@for f in charts/kconmon-ng/ci/*.yaml; do \
+		echo "--- template $$f"; \
+		helm template kconmon-ng charts/kconmon-ng -f "$$f" >/dev/null || exit 1; \
+	done
 
-helm-package:
+helm-package: helm-deps
 	helm package charts/kconmon-ng -d dist/
 
 ## Docker

@@ -1,34 +1,7 @@
 import { promqlQuery } from "./api";
 import type { Matrix, MatrixCell, PromResult, Protocol } from "./types";
 
-/**
- * matrix-promql rebuilds the N×N matrix from PromQL evaluated AT AN INSTANT —
- * the Time Machine's half of the matrix (plan Decision 7: "the matrix's cell
- * values are already Prometheus series; the historical matrix is the same
- * PromQL evaluated with the proxy's EXISTING `time` parameter. GET
- * /api/v1/matrix stays live-only").
- *
- * Why this is a faithful port and not a second, competing implementation:
- * every query string below is character-for-character `internal/console/
- * matrix/matrix.go`'s own failRatioQuery / p95Query / lossQuery, and the fold
- * is its Compute (union the pairs seen across all three vectors, sort nodes and
- * cells, seconds→ns for the RTT). The live endpoint runs exactly these three
- * queries through the same Prometheus, with `ts` zero (= now); this runs them
- * with `ts = t`. Nothing else differs, which is why a historical cell and the
- * live cell for the same pair are the same number computed the same way.
- *
- * THE ONE ASSUMPTION, stated plainly: the metric PREFIX. Server-side it is
- * `console.metricsPrefix` (config default "kconmon_ng") and GET /api/v1/config
- * does not publish it. This module hardcodes the default, exactly as
- * lib/curated-metrics.ts and pages/pair-card.tsx's pairSeriesQuery already do
- * for the same metric families — the frontend has assumed this prefix since M1.
- * A console running a CUSTOM prefix therefore gets an EMPTY historical matrix
- * (every series selector misses), which renders as the page's "no probe data"
- * state. That is a wrong-looking answer but never a WRONG answer: no cell can
- * be attributed a value that is not that pair's. Publishing the prefix on
- * /api/v1/config would retire the assumption for all three call sites at once;
- * that is a one-field change, deliberately not smuggled into this task.
- */
+/** GET /api/v1/matrix stays live-only. */
 
 /** METRICS_PREFIX mirrors internal/config/defaults.go's MetricsPrefix. */
 export const METRICS_PREFIX = "kconmon_ng";
@@ -85,13 +58,9 @@ type PairKey = string;
 const key = (src: string, dst: string): PairKey => `${src}\0${dst}`;
 
 /**
- * vectorByPair folds ONE instant-vector response into pair→value, mirroring
- * matrix.go's vectorByPair. Samples missing either label, or carrying a value
- * Prometheus rendered as a string this cannot parse (`NaN`, `+Inf` — a
- * histogram_quantile over an empty bucket set produces exactly those), are
- * SKIPPED rather than defaulted to zero: "no data" and "zero failures" are
- * opposite answers and the matrix's `failRatio: null` exists to keep them
- * apart.
+ * vectorByPair folds ONE instant-vector response into pair→value; samples missing either label, or
+ * carrying a value Prometheus rendered as a string this cannot parse (`NaN`, `+Inf` — a
+ * histogram_quantile over an empty bucket set produces exactly those).
  */
 export function vectorByPair(res: PromResult): Map<PairKey, number> {
   const out = new Map<PairKey, number>();
@@ -108,16 +77,7 @@ export function vectorByPair(res: PromResult): Map<PairKey, number> {
   return out;
 }
 
-/**
- * foldMatrix is matrix.go's Compute minus the fetching: union the pairs, sort,
- * seconds→nanoseconds for the RTT (the wire's duration unit, Global
- * Constraints), and leave a cell's `rttP95`/`lossRatio` ABSENT when that vector
- * had nothing for the pair.
- *
- * `timestamp` is the instant the matrix was EVALUATED at, not the instant it
- * was computed — the live endpoint stamps time.Now() because for it the two are
- * the same thing; here they are not, and the honest stamp is `t`.
- */
+/** foldMatrix is matrix.go's Compute minus the fetching: union the pairs. */
 export function foldMatrix(
   protocol: Protocol,
   fail: Map<PairKey, number>,
@@ -154,21 +114,14 @@ export function foldMatrix(
   };
 }
 
-/**
- * promqlError surfaces Prometheus's OWN error envelope as a thrown Error.
- * promqlQuery resolves rather than throws for it (lib/api.ts's `handle`), which
- * is right for a chart that renders the message inline — but the matrix has one
- * error slot per grid, and silently folding an errored vector into an empty map
- * would paint "no data" over a query that actually failed.
- */
+/** promqlError surfaces Prometheus's OWN error envelope as a thrown Error. */
 function promqlError(res: PromResult): string | undefined {
   return res.status === "error" ? (res.error ?? "PromQL query failed") : undefined;
 }
 
 /**
- * getMatrixAt is getMatrix's Time Machine counterpart: the same matrix, at `t`.
- * The two or three queries go out in parallel — they are independent instant
- * evaluations and serialising them would triple the wait for no gain.
+ * getMatrixAt is getMatrix's Time Machine counterpart: the same matrix; the two or three queries go
+ * out in parallel.
  */
 export async function getMatrixAt(protocol: Protocol, at: Date): Promise<Matrix> {
   const q = matrixQueries(protocol);

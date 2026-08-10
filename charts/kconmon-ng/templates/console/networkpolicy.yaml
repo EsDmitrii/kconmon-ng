@@ -30,15 +30,7 @@ spec:
         - protocol: TCP
           port: {{ .Values.config.httpPort }}
     {{- if include "kconmon-ng.console.controllerGRPCAddr" . }}
-    # Console to controller gRPC (EventStream.WatchEvents). Gated on the
-    # RESOLVED dial target, not on controller.events.enabled: an explicit
-    # console.controller.grpcAddr makes the console dial even with events off,
-    # and egress missing there is a silent packet drop with no diagnostic.
-    # The controller-side ingress half of this path lives in the shared root
-    # templates/networkpolicy.yaml (correctly keyed on events.enabled — that is
-    # the controller's own flag). Both layers are required for the in-cluster
-    # case; a grpcAddr pointing outside this namespace is the operator's own
-    # policy to write.
+    # Console to controller gRPC, gated on the resolved dial target.
     - to:
         - podSelector:
             matchLabels:
@@ -58,16 +50,18 @@ spec:
       ports:
         - protocol: TCP
           port: {{ .Values.console.valkey.port | int64 }}
+    {{- else if eq .Values.console.valkey.mode "dependency" }}
+    # Console to the Valkey subchart, selected by its own chart labels.
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: valkey
+              app.kubernetes.io/instance: {{ .Release.Name }}
+      ports:
+        - protocol: TCP
+          port: {{ include "kconmon-ng.console.valkeyDependencyPort" . | int64 }}
     {{- else if eq .Values.console.valkey.mode "external" }}
-    # Console to an external Valkey. Namespace is deployment-specific; the
-    # default allows the dialled port cluster-wide, tighten via
-    # console.networkPolicy.valkeyEgress. The port comes from the port INSIDE
-    # console.valkey.address, not console.valkey.port — see
-    # kconmon-ng.console.valkeyEgressPort: console.valkey.port describes the
-    # bundled listener, and opening it here would render a rule for a port
-    # nothing dials. NOTE: for a Valkey outside the cluster this NetworkPolicy
-    # is only one of two gates — the destination host's own firewall
-    # (iptables/nftables/security group) must allow it too.
+    # Console to an external Valkey, on the port inside console.valkey.address.
     {{- if .Values.console.networkPolicy.valkeyEgress }}
     {{- toYaml .Values.console.networkPolicy.valkeyEgress | nindent 4 }}
     {{- else }}
@@ -79,10 +73,7 @@ spec:
     {{- end }}
     {{- end }}
     {{- if eq .Values.console.database.mode "cnpg" }}
-    # Console to the CNPG-managed PostgreSQL (event history, ADR-001). Precise
-    # pod-selector rule: CNPG labels every instance Pod with cnpg.io/cluster.
-    # The database-side ingress half lives in
-    # templates/console/database-networkpolicy.yaml — both layers are required.
+    # Console to the CNPG-managed PostgreSQL.
     - to:
         - podSelector:
             matchLabels:
@@ -91,11 +82,7 @@ spec:
         - protocol: TCP
           port: 5432
     {{- else if eq .Values.console.database.mode "external" }}
-    # Console to an external PostgreSQL. Namespace/port are deployment-specific;
-    # default allows TCP 5432 cluster-wide, tighten via
-    # console.networkPolicy.databaseEgress. NOTE: for a database outside the
-    # cluster this NetworkPolicy is only one of two gates — the destination
-    # host's own firewall (iptables/nftables/security group) must allow it too.
+    # Console to an external PostgreSQL; tighten via console.networkPolicy.databaseEgress.
     {{- if .Values.console.networkPolicy.databaseEgress }}
     {{- toYaml .Values.console.networkPolicy.databaseEgress | nindent 4 }}
     {{- else }}
@@ -107,19 +94,7 @@ spec:
     {{- end }}
     {{- end }}
     {{- if eq .Values.console.auth.mode "oidc" }}
-    # Console to the OIDC IdP (authorization-code + PKCE, SECURITY.md
-    # §10.1: discovery, token exchange, and the lazy refresh in
-    # OIDCAuthenticator.maybeRefresh). An IdP is almost always OUTSIDE the
-    # cluster, so the default uses ipBlock 0.0.0.0/0 (a namespaceSelector
-    # would match only in-cluster pods and silently drop every packet to an
-    # external IdP -- discovery fails, the pod exits 1, CrashLoopBackOff);
-    # tighten via console.networkPolicy.oidcEgress. A PUBLIC IdP also needs
-    # egress to DNS to resolve its hostname (already allowed below). Same
-    # two-layer warning as the valkey/database egress rules above: this
-    # NetworkPolicy is only the CLUSTER-side gate. A cluster that ALSO
-    # enforces a default-deny egress policy at the node/CNI layer (not just
-    # via Kubernetes NetworkPolicy objects) must be checked and opened there
-    # too, or the IdP stays unreachable even with this rule present.
+    # Console to the OIDC IdP; ipBlock because an IdP is usually outside the cluster.
     {{- if .Values.console.networkPolicy.oidcEgress }}
     {{- toYaml .Values.console.networkPolicy.oidcEgress | nindent 4 }}
     {{- else }}
@@ -131,8 +106,7 @@ spec:
           port: 443
     {{- end }}
     {{- end }}
-    # Console to Prometheus (query API). Namespace/port are deployment-specific;
-    # default allows TCP 9090 cluster-wide, tighten via console.networkPolicy.prometheusEgress.
+    # Console to Prometheus; tighten via console.networkPolicy.prometheusEgress.
     {{- if .Values.console.networkPolicy.prometheusEgress }}
     {{- toYaml .Values.console.networkPolicy.prometheusEgress | nindent 4 }}
     {{- else }}
@@ -142,22 +116,8 @@ spec:
         - protocol: TCP
           port: 9090
     {{- end }}
-    # Console to the Kubernetes apiserver (M6 event reader and, since M7, the
-    # alerting reconciler's PrometheusRule apply — see
-    # kconmon-ng.console.k8sIdentity; either flag opens this, neither leaves it
-    # closed, and the reconciler's forbidden/dial errors are otherwise
-    # indistinguishable in a rule's sync_message). ipBlock and not a
-    # namespaceSelector for the same reason as the OIDC rule above and one more:
-    # kubernetes.default.svc is a ClusterIP with no Pod behind it, so a
-    # namespaceSelector matches nothing and every packet is dropped — the
-    # reader would retry on its backoff forever with no diagnostic beyond a
-    # dial timeout. Both 443 (the in-cluster Service) and 6443 (the usual
-    # control-plane listener the Service's endpoints point at) because the
-    # kube-proxy DNAT rewrites the port and the policy is evaluated against the
-    # POST-DNAT destination on most CNIs. Tighten via
-    # console.networkPolicy.kubeAPIEgress once you know your control plane's
-    # addresses.
     {{- if include "kconmon-ng.console.k8sIdentity" . }}
+    # Console to the apiserver on 443 and 6443; tighten via console.networkPolicy.kubeAPIEgress.
     {{- if .Values.console.networkPolicy.kubeAPIEgress }}
     {{- toYaml .Values.console.networkPolicy.kubeAPIEgress | nindent 4 }}
     {{- else }}
@@ -169,6 +129,19 @@ spec:
           port: 443
         - protocol: TCP
           port: 6443
+    {{- end }}
+    {{- end }}
+    {{- if eq (include "kconmon-ng.console.geoipMode" .) "auto" }}
+    # geoipupdate sidecar downloading from MaxMind; tighten via console.networkPolicy.geoipEgress.
+    {{- with .Values.console.networkPolicy.geoipEgress }}
+    {{- toYaml . | nindent 4 }}
+    {{- else }}
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+      ports:
+        - protocol: TCP
+          port: 443
     {{- end }}
     {{- end }}
     # DNS

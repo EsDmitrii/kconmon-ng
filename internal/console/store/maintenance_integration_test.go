@@ -3,9 +3,6 @@
 package store_test
 
 // TestMaintenance* require a real PostgreSQL.
-// Run: docker run --rm -d -p 5432:5432 -e POSTGRES_PASSWORD=test -e POSTGRES_DB=kconmon postgres:17-alpine
-// Then: KCONMON_TEST_DATABASE_DSN='postgres://postgres:test@127.0.0.1:5432/kconmon?sslmode=disable' \
-//       go test -tags=integration ./internal/console/store/... -v
 
 import (
 	"context"
@@ -49,9 +46,7 @@ func maintenanceInput(scope string, start time.Time, d time.Duration) store.Main
 	}
 }
 
-// TestMaintenanceLifecycle is the whole of M6's maintenance CRUD: create ->
-// list -> delete, with the delete asserted through an independent read. There
-// is no update by design.
+// TestMaintenanceLifecycle is the whole of the maintenance CRUD: create -> list -> delete.
 func TestMaintenanceLifecycle(t *testing.T) {
 	db, _ := newMaintenanceDB(t)
 	ctx := context.Background()
@@ -102,11 +97,7 @@ func TestMaintenanceLifecycle(t *testing.T) {
 	}
 }
 
-// TestMaintenanceCheckConstraintRejectsAnInvertedWindow is the DB half of the
-// end-after-start rule. Validate catches it first for anything going through
-// the store, so the CHECK is exercised here with raw SQL -- it is the backstop
-// for anything that ever writes this table without going through this package,
-// and a backstop nobody ever fires is a backstop nobody knows is missing.
+// TestMaintenanceCheckConstraintRejectsAnInvertedWindow is the DB half of the end-after-start rule.
 func TestMaintenanceCheckConstraintRejectsAnInvertedWindow(t *testing.T) {
 	db, dsn := newMaintenanceDB(t)
 	ctx := context.Background()
@@ -150,10 +141,7 @@ func TestMaintenanceCheckConstraintRejectsAnInvertedWindow(t *testing.T) {
 	}
 }
 
-// TestListMaintenanceWindowsWindowIsOverlapNotContainment is the markArea
-// query's real claim: a window that opened before the range and is still
-// running inside it is exactly the one that explains what the operator is
-// looking at, so containment would be the wrong test.
+// TestListMaintenanceWindowsWindowIsOverlapNotContainment is the markArea query's real claim.
 func TestListMaintenanceWindowsWindowIsOverlapNotContainment(t *testing.T) {
 	db, _ := newMaintenanceDB(t)
 	ctx := context.Background()

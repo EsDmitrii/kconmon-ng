@@ -2,17 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ApiError, createAnnotation, deleteAnnotation, listAnnotations } from "./api";
 import type { Annotation } from "./types";
 
-/**
- * The annotations half of lib/api.ts, in its own file rather than appended to
- * api.test.ts — same convention explore.timemachine.test.tsx and
- * use-matrix.timemachine.test.tsx already follow for a milestone's additions,
- * and it keeps M5 out of a 500-line file whose assertions predate it.
- *
- * The parameter this file exists for is `scope`. GET /api/v1/annotations reads
- * three states out of it (absent / present-but-empty / a value), so "did the
- * caller pass a scope at all" is a wire-visible question and every one of the
- * three states is pinned below.
- */
+/** The annotations half of lib/api.ts, in its own file rather than appended to api.test.ts. */
 
 const json = (body: unknown, init?: ResponseInit) =>
   new Response(JSON.stringify(body), { status: 200, headers: { "Content-Type": "application/json" }, ...init });

@@ -24,20 +24,15 @@ type VersionInfo struct {
 // version) that do not take a user-supplied --timeout.
 const shortCallTimeout = 30 * time.Second
 
-// diagnosticsDeadlineSlack is added on top of the caller's requested
-// diagnostics/mtr timeout to give the controller room to respond after its
-// own (server-capped) timeout elapses, before the client gives up. It is a
-// package variable (not a const) so tests can shrink it and stay fast.
+// diagnosticsDeadlineSlack is added on top of the caller's requested diagnostics/mtr timeout to
+// give the controller room to respond after its own (server-capped) timeout elapses.
 var diagnosticsDeadlineSlack = 10 * time.Second
 
 // serverTimeoutCap mirrors the controller's own cap on the ?timeout= value
 // (see internal/cli/check.go flag help / controller docs).
 const serverTimeoutCap = 120 * time.Second
 
-// maxDiagnosticsClientTimeout is the hard ceiling for the client-side
-// diagnostics deadline: the controller caps its own timeout at
-// serverTimeoutCap, so nothing the client waits for should exceed that plus
-// slack.
+// maxDiagnosticsClientTimeout is the hard ceiling for the client-side diagnostics deadline.
 func maxDiagnosticsClientTimeout() time.Duration {
 	return serverTimeoutCap + diagnosticsDeadlineSlack
 }
@@ -118,10 +113,9 @@ type DiagnosticsRequest struct {
 	Plane       string `json:"plane,omitempty"`
 }
 
-// Diagnostics runs a one-shot check. timeout, when > 0, is passed to the
-// controller as ?timeout=<seconds> (the controller caps it at 120s). The
-// client itself enforces a hard deadline of timeout+10s (capped at 130s) so a
-// wedged controller or dropped port-forward cannot hang the CLI forever.
+// Diagnostics runs a one-shot check. timeout; the client itself enforces a hard deadline of
+// timeout+10s (capped at 130s) so a wedged controller or dropped port-forward cannot hang the CLI
+// forever.
 func (c *Client) Diagnostics(ctx context.Context, req DiagnosticsRequest, timeout time.Duration) (*model.CheckResult, []byte, error) {
 	body, err := json.Marshal(req)
 	if err != nil {

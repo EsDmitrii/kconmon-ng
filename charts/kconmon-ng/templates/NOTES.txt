@@ -1,0 +1,64 @@
+kconmon-ng {{ .Chart.AppVersion }} installed as "{{ .Release.Name }}" in namespace "{{ .Release.Namespace }}".
+
+An agent now runs on every node and probes its peers. Watch them register:
+
+  kubectl -n {{ .Release.Namespace }} rollout status ds/{{ include "kconmon-ng.fullname" . }}-agent
+  kubectl -n {{ .Release.Namespace }} logs deploy/{{ include "kconmon-ng.fullname" . }}-controller | grep registered
+
+{{- $todo := list }}
+{{- if not .Values.serviceMonitor.enabled }}
+{{- $todo = append $todo "serviceMonitor.enabled=true — nothing is scraping the metrics yet (needs the Prometheus Operator CRDs)." }}
+{{- end }}
+{{- if not .Values.prometheusRule.enabled }}
+{{- $todo = append $todo "prometheusRule.enabled=true — the seven built-in alerts are not deployed, so a broken link pages nobody." }}
+{{- end }}
+{{- if not .Values.dashboards.enabled }}
+{{- $todo = append $todo "dashboards.enabled=true — the Grafana dashboards ship with this chart but are not installed." }}
+{{- end }}
+{{- if and .Values.console.enabled (not .Values.console.prometheus.url) }}
+{{- $todo = append $todo "console.prometheus.url — EMPTY, so every Console data page (matrix, Explore, PromQL) answers 503. Point it at your Prometheus, e.g. http://prometheus-operated.monitoring:9090." }}
+{{- end }}
+{{- if and .Values.console.enabled (eq .Values.console.auth.mode "anonymous") }}
+{{- $todo = append $todo "console.auth.mode — anonymous: every visitor gets the viewer role and the UI shows a permanent warning. Use local, header or oidc for a real deployment." }}
+{{- end }}
+{{- if and .Values.console.enabled (eq .Values.console.database.mode "disabled") }}
+{{- $todo = append $todo "console.database.mode — disabled: no event history, no incidents, no saved checks, no local/oidc auth. Set cnpg or external to keep data." }}
+{{- end }}
+{{- if and .Values.console.enabled (gt (int .Values.console.replicas) 1) (eq .Values.console.valkey.mode "disabled") }}
+{{- $todo = append $todo "console.valkey.mode — disabled with replicas > 1: browsers on other replicas will not see live events. Use bundled, dependency or external." }}
+{{- end }}
+{{- if and .Values.console.enabled .Values.console.mtr.enrichment.enabled (eq .Values.console.mtr.enrichment.geoip.mode "disabled") (not .Values.console.mtr.enrichment.rdns.enabled) }}
+{{- $todo = append $todo "console.mtr.enrichment — on with every source off; hop rows will stay bare." }}
+{{- end }}
+{{- if and .Values.console.enabled (not (include "kconmon-ng.console.webhooksKeySecretName" .)) }}
+{{- $todo = append $todo "console.webhooks — no encryption key, so creating or testing a webhook endpoint answers 503 (every other webhook route works)." }}
+{{- end }}
+{{- if and .Values.console.enabled (eq .Values.console.auth.mode "anonymous") (not .Values.console.ingress.enabled) .Values.networkPolicy.enabled }}
+{{- $todo = append $todo "console exposure — anonymous auth and the NetworkPolicy allows console ingress from ANY namespace; restrict it or move off anonymous." }}
+{{- end }}
+{{- if not .Values.controller.leaderElection }}
+{{- $todo = append $todo "controller.leaderElection=false — zone labels and the KconmonAgentsMissing / KconmonControllerDown alerts are inactive." }}
+{{- end }}
+{{- if $todo }}
+
+STILL TO DECIDE ({{ len $todo }}):
+{{- range $i, $t := $todo }}
+  {{ add1 $i }}. {{ $t }}
+{{- end }}
+{{- else }}
+
+Nothing left to decide — scraping, alerts, dashboards and the Console are all configured.
+{{- end }}
+{{- if .Values.console.enabled }}
+
+Reach the Console:
+{{- if .Values.console.ingress.enabled }}
+{{- range .Values.console.ingress.hosts }}
+  http{{ if $.Values.console.ingress.tls }}s{{ end }}://{{ .host }}
+{{- end }}
+{{- else }}
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "kconmon-ng.console.fullname" . }} 8080:{{ .Values.console.service.port }}
+{{- end }}
+{{- end }}
+
+Docs: https://github.com/EsDmitrii/kconmon-ng#readme

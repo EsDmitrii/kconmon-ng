@@ -36,10 +36,7 @@ type CreateDefinitionParams struct {
 	Enabled             bool
 }
 
-// destination_target_id is NULL for every destination_kind other than
-// 'target'; a non-NULL value naming no targets row fails with a
-// foreign_key_violation, which the Go layer reports as ErrNotFound (the
-// reference is missing) rather than ErrInUse (which is the DELETE direction).
+// destination_target_id is NULL for every destination_kind other than 'target'.
 func (q *Queries) CreateDefinition(ctx context.Context, arg CreateDefinitionParams) (CheckDefinition, error) {
 	row := q.db.QueryRow(ctx, createDefinition,
 		arg.ID,
@@ -130,10 +127,9 @@ type CreateTargetParams struct {
 	Labels  json.RawMessage
 }
 
-// id is caller-supplied, same as CreateRun (checks.sql): targets.id has no
-// column DEFAULT, so the Go layer mints the UUID. That also means a caller
-// retrying a create with the same id gets ErrAlreadyExists rather than a
-// second row.
+// id is caller-supplied, same as CreateRun (checks.sql): targets.id has no column DEFAULT; that
+// also means a caller retrying a create with the same id gets ErrAlreadyExists rather than a second
+// row.
 func (q *Queries) CreateTarget(ctx context.Context, arg CreateTargetParams) (Target, error) {
 	row := q.db.QueryRow(ctx, createTarget,
 		arg.ID,
@@ -185,9 +181,7 @@ const deleteTarget = `-- name: DeleteTarget :execrows
 DELETE FROM targets WHERE id = $1
 `
 
-// No cascade of any kind: check_definitions.destination_target_id is
-// ON DELETE RESTRICT, so this statement fails with a foreign_key_violation
-// (mapped to ErrInUse) while any definition still probes the target.
+// No cascade of any kind: check_definitions.destination_target_id is ON DELETE RESTRICT.
 func (q *Queries) DeleteTarget(ctx context.Context, id pgtype.UUID) (int64, error) {
 	result, err := q.db.Exec(ctx, deleteTarget, id)
 	if err != nil {
@@ -291,9 +285,7 @@ type ListDefinitionsParams struct {
 	Lim      int32
 }
 
-// The target_id filter is what check_definitions_target_idx exists for: the
-// "which definitions would this target's deletion break?" question an admin
-// API asks before it ever attempts the DELETE.
+// The target_id filter is what check_definitions_target_idx exists for.
 func (q *Queries) ListDefinitions(ctx context.Context, arg ListDefinitionsParams) ([]CheckDefinition, error) {
 	rows, err := q.db.Query(ctx, listDefinitions,
 		arg.TargetID,
@@ -347,13 +339,7 @@ type ListDueSchedulesParams struct {
 	Lim int32
 }
 
-// The WHERE clause is written to match check_schedules_due_idx exactly --
-// "enabled" bare (the index's own predicate) and a plain range test on
-// next_fire_at (its key), nothing else. next_fire_at IS NOT NULL is left
-// implicit: a NULL never satisfies <=, and spelling it out would add a clause
-// the partial index cannot be matched against. ORDER BY next_fire_at is the
-// index's own order, so the scheduler's due poll is an index range scan with
-// no sort, however large the table grows.
+// The WHERE clause is written to match check_schedules_due_idx exactly.
 func (q *Queries) ListDueSchedules(ctx context.Context, arg ListDueSchedulesParams) ([]CheckSchedule, error) {
 	rows, err := q.db.Query(ctx, listDueSchedules, arg.Due, arg.Lim)
 	if err != nil {
@@ -460,11 +446,7 @@ type ListTargetsParams struct {
 	Lim     int32
 }
 
-// Same keyset cursor shape as ListRuns: (created_at, id) DESC seeked via a
-// row-tuple comparison. targets carries no (created_at DESC, id DESC) index
-// -- it is a curated configuration table an operator maintains by hand, sized
-// in the tens, so the ordering is a sort over a handful of rows, not a scan
-// the planner needs help with.
+// Same keyset cursor shape as ListRuns: (created_at, id) DESC seeked via a row-tuple comparison.
 func (q *Queries) ListTargets(ctx context.Context, arg ListTargetsParams) ([]Target, error) {
 	rows, err := q.db.Query(ctx, listTargets,
 		arg.Kind,
@@ -503,11 +485,7 @@ UPDATE check_schedules
 SET last_fired_at = $2,
     next_fire_at  = $3,
     last_error    = $4::text,
-    -- $2::timestamptz, not a bare $2: inside a CASE whose other branch is a
-    -- bare NULL, PostgreSQL has nothing to deduce the parameter's type from
-    -- and reports "inconsistent types deduced for parameter $2" (42P08) at
-    -- PREPARE time, because the same placeholder is already pinned to
-    -- timestamptz by the assignment above. The cast states it once.
+    -- $2::timestamptz, not a bare $2: inside a CASE whose other branch is a bare NULL.
     last_error_at = CASE WHEN $4::text = '' THEN NULL ELSE $2::timestamptz END,
     updated_at    = now()
 WHERE id = $1
@@ -520,21 +498,7 @@ type MarkScheduleFiredParams struct {
 	LastError   string
 }
 
-// The scheduler's post-dispatch bookkeeping: stamp what just fired and when
-// the next fire is due, in one UPDATE, so a reader never sees a schedule whose
-// last_fired_at moved while next_fire_at still points at the fire that already
-// happened (which would make ListDueSchedules hand it out a second time).
-// next_fire_at = NULL retires the schedule from the due index without
-// disabling it -- the terminal state of a kind='once' schedule.
-//
-// last_error rides in the SAME statement, and its stamp is DERIVED from it
-// rather than passed (QA round 5, finding #5): last_error_at is the fire's own
-// timestamp when there is an error and NULL when there is not, so the pair can
-// never disagree and a caller cannot write "a failure with no time" or "a time
-// with no failure". Passing ” is how the scheduler CLEARS a previous failure
-// on a tick that went through -- the column always describes the LAST attempt,
-// never the last bad one, or a row would stay red forever after one bad
-// minute.
+// The scheduler's post-dispatch bookkeeping: stamp what just fired and when the next fire is due.
 func (q *Queries) MarkScheduleFired(ctx context.Context, arg MarkScheduleFiredParams) (int64, error) {
 	result, err := q.db.Exec(ctx, markScheduleFired,
 		arg.ID,
@@ -542,6 +506,28 @@ func (q *Queries) MarkScheduleFired(ctx context.Context, arg MarkScheduleFiredPa
 		arg.NextFireAt,
 		arg.LastError,
 	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const markScheduleSkipped = `-- name: MarkScheduleSkipped :execrows
+UPDATE check_schedules
+SET next_fire_at = $2,
+    updated_at   = now()
+WHERE id = $1
+`
+
+type MarkScheduleSkippedParams struct {
+	ID         pgtype.UUID
+	NextFireAt pgtype.Timestamptz
+}
+
+// The cadence advances but last_fired_at does NOT: nothing fired, and a stamp here would read as
+// a run that happened. last_error is left alone -- a past failure is still a fact.
+func (q *Queries) MarkScheduleSkipped(ctx context.Context, arg MarkScheduleSkippedParams) (int64, error) {
+	result, err := q.db.Exec(ctx, markScheduleSkipped, arg.ID, arg.NextFireAt)
 	if err != nil {
 		return 0, err
 	}
@@ -620,17 +606,8 @@ type UpdateScheduleParams struct {
 	NextFireAt pgtype.Timestamptz
 }
 
-// definition_id is deliberately NOT updatable: re-pointing a schedule at a
-// different definition is a different schedule, and letting it move would
-// silently reinterpret last_fired_at/next_fire_at against a cadence they were
-// never computed for.
-//
-// last_error/last_error_at are not touched here either, and that is a separate
-// decision from the one above: they are a FACT about the last fire, and an
-// edit is not a fire. Clearing them on save would let an operator make a red
-// row green by pressing Save on a schedule that is still broken; leaving them
-// means the row keeps saying what went wrong, with the stamp that says when,
-// until the next tick either repeats it or clears it (queries below).
+// definition_id is deliberately NOT updatable: re-pointing a schedule at a different definition is
+// a different schedule.
 func (q *Queries) UpdateSchedule(ctx context.Context, arg UpdateScheduleParams) (CheckSchedule, error) {
 	row := q.db.QueryRow(ctx, updateSchedule,
 		arg.ID,
@@ -673,11 +650,7 @@ type UpdateTargetParams struct {
 	Labels  json.RawMessage
 }
 
-// A full replace, not a patch: every mutable column is written on every call,
-// so the caller's TargetInput is the whole truth about the row afterwards and
-// there is no "field absent means keep" ambiguity to get wrong. :one (not
-// :execrows) so the refreshed updated_at comes back without a second round
-// trip; an id matching nothing yields pgx.ErrNoRows -> ErrNotFound.
+// A full replace, not a patch: every mutable column is written on every call.
 func (q *Queries) UpdateTarget(ctx context.Context, arg UpdateTargetParams) (Target, error) {
 	row := q.db.QueryRow(ctx, updateTarget,
 		arg.ID,

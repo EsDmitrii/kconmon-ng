@@ -11,7 +11,13 @@ import { useDatabaseAvailable } from "@/hooks/use-capabilities";
 import { useSubmitGuard } from "@/hooks/use-submit-guard";
 import { useTopology } from "@/hooks/use-topology";
 import { ApiError, createCheck, createRun, getRuns, goTo, listTargets } from "@/lib/api";
+import { localeTag, stampFull, useLocale, useT, type Locale } from "@/lib/i18n";
+import { countForm, diagnosticsDict, type DiagnosticsKey } from "@/lib/i18n/dict/diagnostics";
+/* The ad-hoc address refusal is lib/utils.ts's, shared with the definition
+   form on /targets — one rule, one sentence, one table. */
+import { validationDict } from "@/lib/i18n/dict/validation";
 import { scopeNodeOptions } from "@/lib/investigation-sources";
+import { formatDurationNs, plannedSamplesPerPair, sampleIntervalNs } from "@/lib/run-samples";
 import { useTimeContext, useWriteGuard } from "@/lib/timemachine";
 import {
   CHECK_TYPES,
@@ -21,31 +27,18 @@ import {
   type RunCreateRequest,
   type RunSummary,
 } from "@/lib/types";
-import { ADHOC_ADDRESS_ERROR, CHECKBOX_CLASS, cn, isValidAdhocAddress, runsAtOrBefore } from "@/lib/utils";
-// The 422-detail -> form-field heuristic and its phrase table live with the
-// form that first needed them (pages/targets.tsx). They are imported rather
-// than re-implemented so the "Save as definition" action below places a
-// rejected field exactly where the Definitions tab would place the same
-// message -- one table, one behaviour, no second copy to drift.
+import { CHECKBOX_CLASS, cn, isValidAdhocAddress, runsAtOrBefore } from "@/lib/utils";
+// The 422-detail -> form-field heuristic and its phrase table live with the form that first needed
+// them (pages/targets.tsx).
 import { DEFINITION_FIELD_PHRASES, fieldForDetail } from "./targets";
 
-// MAX_PAIRS mirrors checks.maxPairs (internal/console/checks/checks.go) --
-// a client-side echo of the server's ErrTooManyPairs 422 so the operator
-// sees the guard before submitting, not after. The server remains the only
-// real enforcement point; a Plan run through a stale/empty topology can
-// still disagree with this estimate (e.g. duplicate names), and that
-// disagreement is the server's 422 to raise, not a bug in this preview.
+// MAX_PAIRS mirrors checks.maxPairs (internal/console/checks/checks.go); the server remains the
+// only real enforcement point.
 export const MAX_PAIRS = 400;
 
 /**
- * estimatePairCount previews checks.Plan's own pair count: the deduplicated
- * cross product of sources x destinations, minus self-pairs. It is a
- * client-side approximation only -- Plan additionally dedupes exact
- * duplicate (source, destination) pairs after expansion, which this does
- * not need to reproduce since Set already dedupes each side going in.
- *
- * This is a DISPLAY estimate only -- it is not what gates the submit
- * button. See estimateRawPairCount for that.
+ * estimatePairCount previews checks.Plan's own pair count; it is a client-side approximation only
+ * -- Plan additionally dedupes exact duplicate (source, destination) pairs after expansion.
  */
 export function estimatePairCount(sources: string[], destinations: string[]): number {
   const srcSet = new Set(sources);
@@ -87,20 +80,25 @@ const STATUS_VARIANT: Record<string, NonNullable<BadgeProps["variant"]>> = {
 };
 
 /* ── destination kind ────────────────────────────────────────────────────────
-   DESTINATION_KIND_LABELS is the run form's destination selector, and it is
-   the SAME vocabulary check definitions use (store.DefinitionInput's
-   destinationKind), on purpose: an operator who has written a definition
-   already knows this shape.
+   The run form's destination selector names the SAME vocabulary check
+   definitions use (store.DefinitionInput's destinationKind), on purpose: an
+   operator who has written a definition already knows this shape.
+
+   The map holds dict KEYS rather than words (it used to be
+   DESTINATION_KIND_LABELS, an exported English table): the wire values are the
+   thing this page owns, the words belong to lib/i18n/dict/diagnostics.ts.
+   pages/mtr.tsx's Runner carries the same three options and its own map into
+   its own dictionary, per the README's one-file-per-surface rule.
 
    "node" is the default and the pre-M4 contract -- and a node run sends NO
    destination* field at all, not an explicit "node", so the body an M3
    console produced and the body this form produces for a node run are the
    same bytes (resolveRunDestination in internal/console/httpapi/runs.go
    treats "" and "node" identically). */
-export const DESTINATION_KIND_LABELS: Record<DestinationKind, string> = {
-  node: "Nodes",
-  target: "Target",
-  adhoc: "Ad-hoc",
+const DESTINATION_KIND_KEYS: Record<DestinationKind, DiagnosticsKey> = {
+  node: "destination.kind.node",
+  target: "destination.kind.target",
+  adhoc: "destination.kind.adhoc",
 };
 
 function StatusBadge({ status }: { status: string }) {
@@ -111,14 +109,14 @@ function StatusBadge({ status }: { status: string }) {
   );
 }
 
-/* NodeSelector, toggleName, FieldLabel, CONTROL_CLASS and
-   DESTINATION_KIND_LABELS below are EXPORTED, not because this page needs them
-   to be, but because M5 Task 8's MTR Runner builds the same body against the
-   same endpoint from pages/mtr.tsx. Exporting the pieces rather than copying
-   them is the same call this file already made when it imported targets.tsx's
-   422-detail table: one run form's vocabulary, one set of controls, and a
-   change to the destination kinds cannot land on one page and not the other.
-   Nothing here changed shape — the exports are purely additive. */
+/* NodeSelector, toggleName, FieldLabel and CONTROL_CLASS below are EXPORTED,
+   not because this page needs them to be, but because M5 Task 8's MTR Runner
+   builds the same body against the same endpoint from pages/mtr.tsx.
+   Exporting the pieces rather than copying them is the same call this file
+   already made when it imported targets.tsx's 422-detail table: one run form's
+   set of controls, and a change to them cannot land on one page and not the
+   other. NodeSelector's own two strings therefore come from THIS surface's
+   dictionary on both pages. */
 export function NodeSelector({
   label,
   nodes,
@@ -142,6 +140,7 @@ export function NodeSelector({
      columns of these render at once (Sources and Destinations), so the id is
      seeded per-selector — one useId, one name suffix per node — and the
      fieldset's legend is what tells the two columns' "node-a" apart. */
+  const t = useT(diagnosticsDict);
   const groupId = useId();
   const nodeInputId = (n: string) => `${groupId}-node-${n}`;
   return (
@@ -155,12 +154,12 @@ export function NodeSelector({
           onChange={(e) => onAllChange(e.target.checked)}
           className={CHECKBOX_CLASS}
         />
-        All nodes ({nodes.length})
+        {t("nodes.all", { count: nodes.length })}
       </label>
       {!all ? (
         <div className="mt-2 flex max-h-40 flex-col gap-1 overflow-y-auto">
           {nodes.length === 0 ? (
-            <p className="text-xs text-muted-foreground">No nodes reported by the controller yet.</p>
+            <p className="text-xs text-muted-foreground">{t("nodes.empty")}</p>
           ) : (
             nodes.map((n) => (
               <label key={n} htmlFor={nodeInputId(n)} className="flex items-center gap-2 text-sm">
@@ -199,6 +198,107 @@ export function toggleName(list: string[], name: string): string[] {
  * with a 400 ("one run probes either the mesh or one external destination,
  * never a mix") rather than picking one.
  */
+/**
+ * RUN_DURATIONS is the duration selector's vocabulary. "Instant" is FIRST and
+ * is the default: the overwhelming majority of runs are still one probe per
+ * pair, and a form that quietly defaulted to an hour of fleet traffic would be
+ * a trap.
+ *
+ * Every non-zero value sits inside the server's own [10s, 24h] window
+ * (checks.MinRunDuration/MaxRunDuration), so no option on offer here can
+ * produce the 422 — the server stays the enforcement point, but the UI does
+ * not lead an operator into a refusal.
+ *
+ * `label` is the DURATION token and renders as it stands in both languages.
+ * The one exception is "Instant", which is a word: the two forms that offer
+ * this table (the run form below and pages/mtr.tsx's Runner) each swap it for
+ * their own dictionary's, so editing the literal here changes nothing on
+ * screen. It stays as the option's description, and as the interval captions'
+ * "{label}" placeholder, which only ever sees a non-zero row.
+ */
+export const RUN_DURATIONS: { value: string; label: string; ns: number }[] = [
+  { value: "instant", label: "Instant", ns: 0 },
+  { value: "1m", label: "1m", ns: 60e9 },
+  { value: "5m", label: "5m", ns: 300e9 },
+  { value: "15m", label: "15m", ns: 900e9 },
+  { value: "1h", label: "1h", ns: 3600e9 },
+  { value: "6h", label: "6h", ns: 21600e9 },
+  { value: "24h", label: "24h", ns: 86400e9 },
+];
+
+export function durationNsFor(value: string): number {
+  return RUN_DURATIONS.find((d) => d.value === value)?.ns ?? 0;
+}
+
+/* ── the external destination, per check type ────────────────────────────────
+   One field served all six check types with one label, one placeholder and no
+   hint (QA scope 4, finding #10) — so it named the wrong thing for most of
+   them, and a value typed for one type survived a switch to another without a
+   word. These four shapes are the AGENT's own behaviour, read off
+   internal/agent/tasks.go:
+
+     tcp   externalCapableChecks + externalPort defaults the port to 80
+     udp   externalCapableChecks, no default port: 0 is what gets dialled
+     icmp  externalCapableChecks, ICMP has no ports and one is ignored
+     mtr   same as icmp
+     dns   NOT in externalCapableChecks — "external destinations support only
+     http  tcp, udp, icmp and mtr checks", refused before any checker runs
+
+   The console does not enforce; it says what the agent will do, and refuses to
+   send a body whose refusal is already certain. */
+export type AdhocShape = "hostPort" | "hostPortRequired" | "hostOnly" | "unsupported";
+
+export const ADHOC_SHAPE: Record<CheckType, AdhocShape> = {
+  tcp: "hostPort",
+  udp: "hostPortRequired",
+  icmp: "hostOnly",
+  mtr: "hostOnly",
+  dns: "unsupported",
+  http: "unsupported",
+};
+
+/* Addresses are syntax and do not translate, so the examples live here rather
+   than in the dictionary. */
+export const ADHOC_PLACEHOLDER: Record<AdhocShape, string> = {
+  hostPort: "example.test or 10.0.0.1:8443",
+  hostPortRequired: "10.0.0.1:53",
+  hostOnly: "example.test or 10.0.0.1",
+  unsupported: "",
+};
+
+/**
+ * AdhocIssue is what is wrong with (check type, address) as a pair, evaluated on every render — so
+ * a type switch RE-JUDGES the value the operator already typed instead of leaving it standing.
+ * `null` is "nothing the console can know is wrong"; the server is still the arbiter.
+ */
+export type AdhocIssue = "unsupported" | "shape" | "url" | "port";
+
+export function adhocAddressIssue(checkType: CheckType, raw: string): AdhocIssue | null {
+  // The whole check type is refused for an external destination, whatever the
+  // address says — so this one outranks every address-shaped complaint.
+  if (ADHOC_SHAPE[checkType] === "unsupported") return "unsupported";
+  const value = raw.trim();
+  // Empty is the form's own incompleteDestination gate, not a mismatch.
+  if (value === "") return null;
+  if (!isValidAdhocAddress(value)) return "shape";
+  // The agent hands this string to the allowlist and dials the host it
+  // resolves; a URL is only ever dialled by the http checker, which cannot
+  // take an external destination at all.
+  if (/^https?:\/\//i.test(value)) return "url";
+  // udp has no default port (externalPort returns 0 for everything but tcp),
+  // so an address without one names a port nothing listens on.
+  if (ADHOC_SHAPE[checkType] === "hostPortRequired" && !hasExplicitPort(value)) return "port";
+  return null;
+}
+
+/** hasExplicitPort mirrors isValidAdhocAddress's own port split: the LAST colon, with a bracketed
+ *  IPv6 host kept whole. */
+function hasExplicitPort(value: string): boolean {
+  const colon = value.lastIndexOf(":");
+  if (colon <= 0) return false;
+  return value.startsWith("[") ? value.includes("]:") && value.indexOf("]:") + 1 === colon : value.indexOf(":") === colon;
+}
+
 export function buildRunRequest(input: {
   type: CheckType;
   sources: string[];
@@ -206,6 +306,7 @@ export function buildRunRequest(input: {
   destinationKind: DestinationKind;
   destinationTargetId: string;
   destinationAddress: string;
+  durationNs?: number;
 }): RunCreateRequest {
   const req: RunCreateRequest = {
     type: input.type,
@@ -213,6 +314,13 @@ export function buildRunRequest(input: {
     sources: input.sources,
     destinations: input.destinationKind === "node" ? input.destinations : [],
   };
+  /* Omitted entirely for an instant run, not sent as 0: the node case's body
+     is a deliberate regression surface (see this function's own doc above),
+     and an instant run must keep serialising exactly the four keys it always
+     had. */
+  if (input.durationNs && input.durationNs > 0) {
+    req.durationNs = input.durationNs;
+  }
   if (input.destinationKind === "target") {
     req.destinationKind = "target";
     req.destinationTargetId = input.destinationTargetId;
@@ -246,6 +354,9 @@ function RunForm({
   canReadTargets: boolean;
   canWriteChecks: boolean;
 }) {
+  const t = useT(diagnosticsDict);
+  const tv = useT(validationDict);
+  const { locale } = useLocale();
   const [type, setType] = useState<CheckType>("tcp");
   const [sourcesAll, setSourcesAll] = useState(true);
   const [destinationsAll, setDestinationsAll] = useState(true);
@@ -254,6 +365,7 @@ function RunForm({
   const [destinationKind, setDestinationKind] = useState<DestinationKind>("node");
   const [destinationTargetId, setDestinationTargetId] = useState("");
   const [destinationAddress, setDestinationAddress] = useState("");
+  const [duration, setDuration] = useState("instant");
   /* The in-flight guard, not just a disabled look (QA round 5, finding #17):
      begin() is a REF write, so three clicks in one task produce one request.
      hooks/use-submit-guard.ts says why a useState flag cannot do this. */
@@ -281,10 +393,26 @@ function RunForm({
   const external = destinationKind !== "node";
   const resolvedSources = sourcesAll ? nodeNames : sources;
   const resolvedDestinations = destinationsAll ? nodeNames : destinations;
+  // A target run with nothing picked, or an ad-hoc one with an empty address,
+  // is a guaranteed 400 (resolveRunDestination) -- blocked here rather than
+  // sent to collect one.
+  const incompleteDestination =
+    (destinationKind === "target" && destinationTargetId === "") ||
+    (destinationKind === "adhoc" && destinationAddress.trim() === "");
+  /* A run's fan-out is sources x destinations, and with the destination side
+     unresolved there is no second factor. The preview used to print one pair
+     per source anyway -- "~10 pairs" for a form with no target picked and no
+     address typed (QA scope 4, finding #9), a number for a run the server
+     would refuse outright. Zero is the true estimate, and pairsReason below
+     says which side is missing. */
   // An external run has exactly ONE destination (the target row, or the typed
   // address), so its fan-out is one pair per source — the node cross product
   // does not apply, and neither does its self-pair exclusion.
-  const pairCount = external ? new Set(resolvedSources).size : estimatePairCount(resolvedSources, resolvedDestinations);
+  const pairCount = incompleteDestination
+    ? 0
+    : external
+      ? new Set(resolvedSources).size
+      : estimatePairCount(resolvedSources, resolvedDestinations);
   const rawPairCount = external
     ? resolvedSources.length
     : estimateRawPairCount(resolvedSources, resolvedDestinations);
@@ -295,13 +423,30 @@ function RunForm({
   // estimateRawPairCount's own doc for the 20x21/400 example.
   const overLimit = rawPairCount > MAX_PAIRS;
   const noPairs = pairCount === 0;
-  // A target run with nothing picked, or an ad-hoc one with an empty address,
-  // is a guaranteed 400 (resolveRunDestination) -- blocked here rather than
-  // sent to collect one.
-  const incompleteDestination =
-    (destinationKind === "target" && destinationTargetId === "") ||
-    (destinationKind === "adhoc" && destinationAddress.trim() === "");
+  /* The reason a zero estimate is zero. A dead button owes an explanation and
+     "~0 pairs" alone is not one (QA scope 4, finding #8) -- /mtr's Runner has
+     said this since it shipped, and this is the same sentence. Sources first:
+     with nothing to probe FROM, which destination is missing does not matter
+     yet. */
+  const pairsReason: DiagnosticsKey | null = !noPairs
+    ? null
+    : resolvedSources.length === 0
+      ? "pairs.noSources"
+      : destinationKind === "target" && destinationTargetId === ""
+        ? "pairs.noTarget"
+        : destinationKind === "adhoc" && destinationAddress.trim() === ""
+          ? "pairs.noAddress"
+          : "pairs.noDestinations";
 
+  /* The external destination's per-type vocabulary and its live verdict. Both
+     are derived, never stored: a check-type switch must re-judge whatever is
+     already typed rather than leave a stale caption or a stale error. */
+  const adhocShape = ADHOC_SHAPE[type];
+  const adhocLabelKey = `adhoc.label.${adhocShape}` as DiagnosticsKey;
+  const adhocHintKey = `adhoc.hint.${adhocShape}` as DiagnosticsKey;
+  const adhocIssue = external ? adhocAddressIssue(type, destinationKind === "adhoc" ? destinationAddress : "") : null;
+
+  const durationNs = durationNsFor(duration);
   const runRequest = buildRunRequest({
     type,
     sources: sourcesAll ? [] : sources,
@@ -309,6 +454,7 @@ function RunForm({
     destinationKind,
     destinationTargetId,
     destinationAddress: destinationAddress.trim(),
+    durationNs,
   });
 
   /* ONE clearing point for the whole form (QA round 4, finding #10). A 422
@@ -323,7 +469,7 @@ function RunForm({
      clearing an already-clear error is a no-op. */
   useEffect(() => {
     setSubmitError(undefined);
-  }, [type, sourcesAll, destinationsAll, sources, destinations, destinationKind, destinationTargetId, destinationAddress]);
+  }, [type, sourcesAll, destinationsAll, sources, destinations, destinationKind, destinationTargetId, destinationAddress, duration]);
 
   async function handleSubmit(e: FormEvent) {
     e.preventDefault();
@@ -333,7 +479,9 @@ function RunForm({
       const res = await createRun(runRequest);
       goTo(`/diagnostics/runs/${res.id}`);
     } catch (err) {
-      setSubmitError(err instanceof ApiError ? (err.problem.detail || err.problem.title) : "Failed to start run");
+      // problem+json is the SERVER's refusal, verbatim; only the network-level
+      // fallback is the console's own sentence.
+      setSubmitError(err instanceof ApiError ? (err.problem.detail || err.problem.title) : t("form.submitFailed"));
       end();
     }
   }
@@ -342,7 +490,7 @@ function RunForm({
     <Card asChild className="p-6">
       <form onSubmit={handleSubmit} className="flex flex-col gap-5">
         <div>
-          <span className="mb-2 block text-xs font-medium text-muted-foreground">Check type</span>
+          <span className="mb-2 block text-xs font-medium text-muted-foreground">{t("form.checkType")}</span>
           {/* flex-wrap (QA round 4, finding #17): six options is the widest
               segmented control in the console, and under ~700px the track ran
               off the card rather than wrapping — the last two check types were
@@ -354,39 +502,70 @@ function RunForm({
               thumb tracks its option's row (offsetTop) rather than assuming
               one. */}
           <Segmented
-            aria-label="Check type"
-            options={CHECK_TYPES.map((t) => ({ value: t, label: t.toUpperCase() }))}
+            aria-label={t("form.checkType.aria")}
+            /* The check types are protocol names — TCP, UDP, ICMP, DNS, HTTP,
+               MTR — and stay Latin in both languages. */
+            options={CHECK_TYPES.map((ct) => ({ value: ct, label: ct.toUpperCase() }))}
             value={type}
             onChange={setType}
             className="flex-wrap"
           />
         </div>
 
-        <label className="flex w-32 flex-col gap-1 text-[13px]">
-          <span className="text-muted-foreground">Plane</span>
-          {/* The only plane that exists (task-24-brief.md) -- a real,
-              disabled form control rather than a decorative badge, so it
-              still reads as "part of this form" to a screen reader. */}
-          <select
-            disabled
-            value="pod"
-            className="h-9 rounded-md border border-border-strong bg-transparent px-3 text-[13px] text-muted-foreground disabled:opacity-70"
-          >
-            <option value="pod">pod</option>
-          </select>
-        </label>
+        <div>
+          <span className="mb-2 block text-xs font-medium text-muted-foreground">{t("form.duration")}</span>
+          {/* Instant stays the default and the first option. Anything else
+              re-probes every pair on a server-derived cadence for that long,
+              and the run stays cancellable the whole time — which is why the
+              caption below spells out what was chosen rather than leaving the
+              operator to discover the fan-out after pressing Run. */}
+          <Segmented
+            aria-label={t("form.duration.aria")}
+            /* Only "Instant" is a word; 1m … 24h are durations and stay. */
+            options={RUN_DURATIONS.map((d) => ({
+              value: d.value,
+              label: d.value === "instant" ? t("duration.instant") : d.label,
+            }))}
+            value={duration}
+            onChange={setDuration}
+            className="flex-wrap"
+          />
+          <p className="mt-2 text-xs text-muted-foreground">
+            {durationNs === 0
+              ? t("duration.caption.instant")
+              : t("duration.caption.interval", {
+                  interval: formatDurationNs(sampleIntervalNs(durationNs), locale),
+                  label: RUN_DURATIONS.find((d) => d.value === duration)?.label ?? "",
+                  samples: plannedSamplesPerPair(durationNs),
+                })}
+          </p>
+        </div>
+
+        <div className="flex w-32 flex-col gap-1 text-[13px]">
+          <span className="text-muted-foreground">{t("form.plane")}</span>
+          {/* pod is the only plane that exists (task-24-brief.md), and one
+              option is not a choice: a disabled <select> still LOOKS like a
+              control, so it reads as something the operator failed to use.
+              A chip states the fact instead — the treatment pages/matrix.tsx
+              already gives the same value (QA scope 4, finding #17). The
+              run body's `plane` comes from a constant either way, never from
+              this element. */}
+          <span className="flex h-9 items-center">
+            <Badge variant="neutral">pod</Badge>
+          </span>
+        </div>
 
         <div>
-          <span className="mb-2 block text-xs font-medium text-muted-foreground">Destination</span>
+          <span className="mb-2 block text-xs font-medium text-muted-foreground">{t("form.destination")}</span>
           {/* "Target" is offered only with targets:read: without it the picker
               would have nothing to list and its own GET would be a guaranteed
               403. Ad-hoc needs no permission of its own — the address is typed
               here, not read from the targets store. */}
           <Segmented
-            aria-label="Destination"
+            aria-label={t("form.destination.aria")}
             options={(["node", "target", "adhoc"] as DestinationKind[])
               .filter((k) => k !== "target" || canReadTargets)
-              .map((k) => ({ value: k, label: DESTINATION_KIND_LABELS[k] }))}
+              .map((k) => ({ value: k, label: t(DESTINATION_KIND_KEYS[k]) }))}
             value={destinationKind}
             onChange={setDestinationKind}
           />
@@ -394,7 +573,7 @@ function RunForm({
 
         <div className="grid gap-4 sm:grid-cols-2">
           <NodeSelector
-            label="Sources"
+            label={t("form.sources")}
             nodes={nodeNames}
             all={sourcesAll}
             onAllChange={setSourcesAll}
@@ -403,7 +582,7 @@ function RunForm({
           />
           {destinationKind === "node" ? (
             <NodeSelector
-              label="Destinations"
+              label={t("form.destinations")}
               nodes={nodeNames}
               all={destinationsAll}
               onAllChange={setDestinationsAll}
@@ -412,7 +591,7 @@ function RunForm({
             />
           ) : null}
           {destinationKind === "target" ? (
-            <FieldLabel label="Destination target">
+            <FieldLabel label={t("form.destinationTarget")}>
               {(id) => (
                 <select
                   id={id}
@@ -420,7 +599,7 @@ function RunForm({
                   onChange={(e) => setDestinationTargetId(e.target.value)}
                   className={CONTROL_CLASS}
                 >
-                  <option value="">— pick a target —</option>
+                  <option value="">{t("form.destinationTarget.placeholder")}</option>
                   {targets.map((t) => (
                     <option key={t.id} value={t.id}>
                       {t.name}
@@ -431,23 +610,41 @@ function RunForm({
             </FieldLabel>
           ) : null}
           {destinationKind === "adhoc" ? (
-            <FieldLabel label="Destination address">
+            /* The label, the placeholder and the hint all follow the CHECK
+               TYPE (QA scope 4, finding #10): tcp defaults a missing port to
+               80, udp has no default at all, icmp and mtr ignore one, and dns
+               and http cannot take an external destination in the first
+               place. One field with one caption named the wrong thing for
+               four of the six. */
+            <FieldLabel label={t(adhocLabelKey)}>
               {(id) => (
-                <input
-                  id={id}
-                  /* Belt and braces on the name (QA round 4, finding #16): the
-                     visible <label> is the association, and this survives a
-                     future refactor that moves the field out of FieldLabel. */
-                  aria-label="Destination address"
-                  value={destinationAddress}
-                  placeholder="10.0.0.1 or https://example.test/health"
-                  onChange={(e) => setDestinationAddress(e.target.value)}
-                  className={CONTROL_CLASS}
-                />
+                <>
+                  <input
+                    id={id}
+                    /* Belt and braces on the name (QA round 4, finding #16): the
+                       visible <label> is the association, and this survives a
+                       future refactor that moves the field out of FieldLabel. */
+                    aria-label={t(adhocLabelKey)}
+                    value={destinationAddress}
+                    placeholder={ADHOC_PLACEHOLDER[adhocShape]}
+                    onChange={(e) => setDestinationAddress(e.target.value)}
+                    className={CONTROL_CLASS}
+                  />
+                  <p className="mt-1 text-xs leading-relaxed text-muted-foreground">{t(adhocHintKey)}</p>
+                </>
               )}
             </FieldLabel>
           ) : null}
         </div>
+
+        {/* Recomputed every render, so switching the check type re-judges the
+            address already in the box and the mismatch appears at once rather
+            than surviving the switch in silence. */}
+        {adhocIssue ? (
+          <p role="alert" className="text-sm text-health-bad">
+            {adhocIssue === "shape" ? tv("adhoc.address") : t(`adhoc.mismatch.${adhocIssue}` as DiagnosticsKey)}
+          </p>
+        ) : null}
 
         <div className="flex flex-wrap items-center gap-3">
           {destinationKind === "node" ? (
@@ -461,27 +658,30 @@ function RunForm({
               type="button"
               variant="outline"
               size="sm"
-              title="Reset both pickers to every node"
-              aria-label="Reset both pickers to every node"
+              title={t("form.resetPickers")}
+              aria-label={t("form.resetPickers")}
               onClick={() => {
                 setSourcesAll(true);
                 setDestinationsAll(true);
               }}
             >
-              All ↔ All
+              {t("form.resetPickers.label")}
             </Button>
           ) : null}
           {/* "~" flags this as an estimate: the server is the only real
               arbiter, and on an overlapping selection this self-excluded
               number can even read as under the limit while the raw S×D
               product the server actually gates on is over it. */}
-          <span className={cn("nums text-sm", overLimit ? "text-health-bad" : "text-muted-foreground")}>
-            ~{pairCount} pair{pairCount === 1 ? "" : "s"}
+          <span className={cn("nums text-sm", overLimit || noPairs ? "text-health-bad" : "text-muted-foreground")}>
+            {t(`pairs.${countForm(locale, pairCount)}` as DiagnosticsKey, { count: pairCount })}
             {overLimit
-              ? ` — above the ${MAX_PAIRS}-pair limit (server enforces the raw ${resolvedSources.length}×${
-                  external ? 1 : resolvedDestinations.length
-                } limit of ${MAX_PAIRS}), narrow the selection`
+              ? t("pairs.overLimit", {
+                  max: MAX_PAIRS,
+                  sources: resolvedSources.length,
+                  destinations: external ? 1 : resolvedDestinations.length,
+                })
               : ""}
+            {pairsReason ? t(pairsReason) : ""}
           </span>
         </div>
 
@@ -499,10 +699,12 @@ function RunForm({
         <Button
           type="submit"
           loading={submitting}
-          {...guard} disabled={overLimit || noPairs || incompleteDestination || writesDisabled}
+          /* adhocIssue joins the list for the same reason incompleteDestination is on it: the
+             refusal is already certain, so sending the body only collects it later. */
+          {...guard} disabled={overLimit || noPairs || incompleteDestination || adhocIssue !== null || writesDisabled}
           className="self-start"
         >
-          Start run
+          {t("form.submit")}
         </Button>
 
         {canWriteChecks ? (
@@ -554,6 +756,8 @@ function SaveAsDefinition({
   destinationAddress: string;
   incompleteDestination: boolean;
 }) {
+  const t = useT(diagnosticsDict);
+  const tv = useT(validationDict);
   /* guard carries the DISABLED flag AND the reason for it — lib/timemachine's
      useWriteGuard (QA round 2, finding #18; extended here in round 3). Spread it
      onto the control, and compose any local condition AFTER the spread. */
@@ -582,7 +786,7 @@ function SaveAsDefinition({
     setErrors({});
     setSaved(undefined);
     if (name.trim() === "") {
-      setErrors({ name: "a definition needs a name" });
+      setErrors({ name: t("definition.nameRequired") });
       return;
     }
     /* The client mirror of store.validateAdhocAddress (QA round 4, finding
@@ -594,7 +798,7 @@ function SaveAsDefinition({
     if (destinationKind === "adhoc" && destinationAddress !== "" && !isValidAdhocAddress(destinationAddress)) {
       // Empty is already the run form's own `incompleteDestination` gate; this
       // branch is only about a value that IS there and cannot be dialled.
-      setErrors({ destination: ADHOC_ADDRESS_ERROR });
+      setErrors({ destination: tv("adhoc.address") });
       return;
     }
     setSaving(true);
@@ -604,7 +808,7 @@ function SaveAsDefinition({
       setName("");
     } catch (err) {
       if (!(err instanceof ApiError)) {
-        setErrors({ form: "Failed to save the definition" });
+        setErrors({ form: t("definition.saveFailed") });
       } else {
         const detail = err.problem.detail ?? err.problem.title;
         // The same phrase table the Definitions tab uses, collapsed onto the
@@ -624,7 +828,7 @@ function SaveAsDefinition({
   return (
     <div className="flex flex-col gap-2 border-t border-border pt-4">
       <div className="flex flex-wrap items-end gap-3">
-        <FieldLabel label="Definition name">
+        <FieldLabel label={t("definition.name")}>
           {(id) => (
             <input
               id={id}
@@ -643,13 +847,10 @@ function SaveAsDefinition({
           {...guard} disabled={incompleteDestination || writesDisabled}
           onClick={handleSave}
         >
-          Save as definition
+          {t("definition.save")}
         </Button>
       </div>
-      <p className="max-w-prose text-xs leading-relaxed text-muted-foreground">
-        Saved enabled and probing from all agents — a definition has no per-node source list. Edit it on Targets &
-        Schedules.
-      </p>
+      <p className="max-w-prose text-xs leading-relaxed text-muted-foreground">{t("definition.hint")}</p>
       {errors.name ? (
         <p role="alert" className="text-sm text-health-bad">
           {errors.name}
@@ -667,21 +868,53 @@ function SaveAsDefinition({
       ) : null}
       {saved ? (
         <p role="status" className="text-sm text-muted-foreground">
-          Saved definition “{saved}”
+          {t("definition.saved", { name: saved })}
         </p>
       ) : null}
     </div>
   );
 }
 
-function fmtTime(timestamp?: string): string {
+/** The locale is required: a bare toLocaleString() reorders the date and swaps in AM/PM from
+ *  whatever the browser was installed in, which is not what a Russian page promised. */
+function fmtTime(timestamp: string | undefined, locale: Locale): string {
   if (!timestamp) return "—";
   const d = new Date(timestamp);
-  return Number.isNaN(d.getTime()) ? timestamp : d.toLocaleString();
+  return Number.isNaN(d.getTime()) ? timestamp : stampFull(d, locale);
 }
 
-function HistoryList({ runs, engaged }: { runs: RunSummary[]; engaged: boolean }) {
+/* RUN_STATUSES is the store's own terminal-plus-live set, in the order a run
+   moves through it; it is the same vocabulary STATUS_VARIANT above keys on and
+   the same the server accepts in ?status=. */
+const RUN_STATUSES = ["pending", "running", "succeeded", "partial", "failed", "cancelled"] as const;
+
+/** FILTER_CLASS is CONTROL_CLASS at list-header size — a filter is a smaller thing than a form field. */
+const FILTER_CLASS =
+  "h-8 rounded-md border border-border-strong bg-transparent px-2 text-xs " +
+  "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring";
+
+function HistoryList({ runs, engaged, filtered }: { runs: RunSummary[]; engaged: boolean; filtered: boolean }) {
+  const t = useT(diagnosticsDict);
+  const { locale } = useLocale();
   if (runs.length === 0) {
+    /* A filter that matched nothing is a different fact from "nobody has ever
+       run one", and the run form above is not the remedy for it. Checked
+       BEFORE the engaged branch: a filter is something the reader just did,
+       and it is the likelier cause of the two. */
+    if (filtered) {
+      return (
+        <div className="flex flex-col items-center gap-3 px-6 py-14 text-center">
+          <span
+            aria-hidden="true"
+            className="flex size-12 items-center justify-center rounded-full bg-surface-2 text-muted-foreground"
+          >
+            <ClipboardList className="size-5" />
+          </span>
+          <p className="text-sm font-medium">{t("history.emptyFiltered.title")}</p>
+          <p className="max-w-sm text-xs leading-relaxed text-muted-foreground">{t("history.emptyFiltered.body")}</p>
+        </div>
+      );
+    }
     if (engaged) {
       // Engaged with everything filtered out is a DIFFERENT fact from "nobody
       // has ever run one", and offering the form above as the remedy would be
@@ -694,10 +927,8 @@ function HistoryList({ runs, engaged }: { runs: RunSummary[]; engaged: boolean }
           >
             <ClipboardList className="size-5" />
           </span>
-          <p className="text-sm font-medium">No runs at or before the viewed instant</p>
-          <p className="max-w-sm text-xs leading-relaxed text-muted-foreground">
-            Every run on the loaded page started later than this. Return to Live, or load older pages.
-          </p>
+          <p className="text-sm font-medium">{t("history.emptyAt.title")}</p>
+          <p className="max-w-sm text-xs leading-relaxed text-muted-foreground">{t("history.emptyAt.body")}</p>
         </div>
       );
     }
@@ -709,10 +940,8 @@ function HistoryList({ runs, engaged }: { runs: RunSummary[]; engaged: boolean }
         >
           <ClipboardList className="size-5" />
         </span>
-        <p className="text-sm font-medium">No runs yet</p>
-        <p className="max-w-sm text-xs leading-relaxed text-muted-foreground">
-          Runs started from the form above (or by another operator) show up here.
-        </p>
+        <p className="text-sm font-medium">{t("history.empty.title")}</p>
+        <p className="max-w-sm text-xs leading-relaxed text-muted-foreground">{t("history.empty.body")}</p>
       </div>
     );
   }
@@ -726,9 +955,9 @@ function HistoryList({ runs, engaged }: { runs: RunSummary[]; engaged: boolean }
           <StatusBadge status={r.status} />
           <span className="text-xs uppercase tracking-wide text-muted-foreground">{r.type}</span>
           <span className="nums ml-auto text-xs text-muted-foreground">
-            {r.pairOk}/{r.pairTotal} ok
+            {t("history.run.okOfTotal", { ok: r.pairOk, total: r.pairTotal })}
           </span>
-          <span className="text-xs text-muted-foreground">{fmtTime(r.createdAt)}</span>
+          <span className="text-xs text-muted-foreground">{fmtTime(r.createdAt, locale)}</span>
         </li>
       ))}
     </ul>
@@ -736,6 +965,8 @@ function HistoryList({ runs, engaged }: { runs: RunSummary[]; engaged: boolean }
 }
 
 export function DiagnosticsPage() {
+  const t = useT(diagnosticsDict);
+  const { locale } = useLocale();
   const { can } = useAuth();
   const topo = useTopology();
   const { available: dbConfigured, resolved: dbResolved } = useDatabaseAvailable();
@@ -760,6 +991,9 @@ export function DiagnosticsPage() {
      initial value, also ""), which is the right default for a "Load
      older" button that has not yet heard back from its first page. */
   const [runs, setRuns] = useState<RunSummary[]>([]);
+  /* "" is the no-filter value on both, and both are sent to the SERVER. */
+  const [typeFilter, setTypeFilter] = useState("");
+  const [statusFilter, setStatusFilter] = useState("");
   const [history, setHistory] = useState<{ nextCursor: string; loading: boolean; error: unknown }>({
     nextCursor: "",
     loading: false,
@@ -769,7 +1003,10 @@ export function DiagnosticsPage() {
   const loadRuns = useCallback(async (cursor?: string) => {
     setHistory((h) => ({ ...h, loading: true, error: null }));
     try {
-      const page = await getRuns({ cursor });
+      // "" is "no filter" and must not reach the query string: the server reads
+      // an empty ?type= as no filter too, but sending it is a lie about what
+      // was asked for.
+      const page = await getRuns({ cursor, type: typeFilter || undefined, status: statusFilter || undefined });
       // A cursor-less call is page one -- replace, rather than append, so a
       // remount or a future refresh does not just keep growing the list.
       setRuns((prev) => (cursor ? [...prev, ...page.runs] : page.runs));
@@ -777,7 +1014,7 @@ export function DiagnosticsPage() {
     } catch (err) {
       setHistory({ nextCursor: "", loading: false, error: err });
     }
-  }, []);
+  }, [typeFilter, statusFilter]);
 
   useEffect(() => {
     void loadRuns(undefined);
@@ -795,50 +1032,81 @@ export function DiagnosticsPage() {
 
   return (
     <PageShell
-      title="Diagnostics"
-      description={
-        at
-          ? `Run on-demand checks against the mesh. History is cut to ${at.toLocaleString()} — runs started later are not listed.`
-          : "Run on-demand checks against the mesh, and browse run history."
-      }
+      title={t("title")}
+      /* {at} lands INSIDE a translated sentence, so it takes that sentence's
+         language — lib/i18n's localeTag. Computed here, never formatted by the
+         dictionary (QA scope 2, finding #8). */
+      description={at ? t("description.at", { at: at.toLocaleString(localeTag(locale)) }) : t("description")}
     >
       {canCreate ? (
         <RunForm nodeNames={nodeNames} canReadTargets={can("targets:read")} canWriteChecks={can("checks:write")} />
       ) : (
         <Card role="status" className="p-6">
-          <p className="text-sm font-medium">Starting a run requires the runs:create permission</p>
-          <p className="mt-1 max-w-prose text-xs leading-relaxed text-muted-foreground">
-            You can still see run history below. Ask an operator to start a new run.
-          </p>
+          <p className="text-sm font-medium">{t("gate.title")}</p>
+          <p className="mt-1 max-w-prose text-xs leading-relaxed text-muted-foreground">{t("gate.body")}</p>
         </Card>
       )}
 
       <Card asChild className="p-6">
         <section>
-          <div className="flex flex-wrap items-baseline justify-between gap-2">
-            <h2 className="text-sm font-semibold">Run history</h2>
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <h2 className="text-sm font-semibold">{t("history.title")}</h2>
+            {/* Wired to the SERVER's own ?type=&status= (runs.go's
+                handleRunsList), not to a client-side pass over the loaded
+                pages: filtering in the browser would silently mean "of the
+                hundred runs already fetched", which is the trap the Time
+                Machine note beside it exists to admit to. A filter change
+                re-fetches page one — loadRuns's identity depends on both,
+                and the cursor-less call replaces rather than appends.
+                Selects, not Segmented: seven options a side. */}
+            <div className="flex flex-wrap items-center gap-2">
+              <select
+                aria-label={t("history.filter.type.aria")}
+                value={typeFilter}
+                onChange={(e) => setTypeFilter(e.target.value)}
+                className={FILTER_CLASS}
+              >
+                <option value="">{t("history.filter.type.all")}</option>
+                {CHECK_TYPES.map((ct) => (
+                  <option key={ct} value={ct}>
+                    {ct}
+                  </option>
+                ))}
+              </select>
+              <select
+                aria-label={t("history.filter.status.aria")}
+                value={statusFilter}
+                onChange={(e) => setStatusFilter(e.target.value)}
+                className={FILTER_CLASS}
+              >
+                <option value="">{t("history.filter.status.all")}</option>
+                {RUN_STATUSES.map((s) => (
+                  <option key={s} value={s}>
+                    {s}
+                  </option>
+                ))}
+              </select>
+            </div>
           </div>
           {dbResolved && !dbConfigured ? (
             <p role="status" className="mt-1 text-xs leading-relaxed text-muted-foreground">
-              History is not persisted — set console.database.mode
+              {t("history.notPersisted")}
             </p>
           ) : null}
           {at ? (
-            <p className="mt-1 max-w-prose text-xs leading-relaxed text-muted-foreground">
-              GET /api/v1/runs has no time filter, so this cut to the viewed instant happens in the browser over the
-              pages loaded here — a run older than them is not reached by paging backwards from this list.
-            </p>
+            <p className="mt-1 max-w-prose text-xs leading-relaxed text-muted-foreground">{t("history.atNote")}</p>
           ) : null}
 
           {history.error ? (
             <p role="alert" className="mt-3 text-sm text-health-bad">
+              {/* problem+json is the server's own sentence — verbatim. */}
               {history.error instanceof ApiError
                 ? (history.error.problem.detail ?? history.error.problem.title)
-                : "Run history is unavailable"}
+                : t("history.unavailable")}
             </p>
           ) : null}
 
-          <HistoryList runs={visibleRuns} engaged={at !== null} />
+          <HistoryList runs={visibleRuns} engaged={at !== null} filtered={typeFilter !== "" || statusFilter !== ""} />
 
           {runs.length > 0 ? (
             <div className="mt-4 flex justify-center">
@@ -848,7 +1116,7 @@ export function DiagnosticsPage() {
                 disabled={history.nextCursor === "" || history.loading}
                 onClick={() => loadRuns(history.nextCursor)}
               >
-                {history.loading ? "Loading older…" : "Load older"}
+                {history.loading ? t("history.loadingOlder") : t("history.loadOlder")}
               </Button>
             </div>
           ) : null}

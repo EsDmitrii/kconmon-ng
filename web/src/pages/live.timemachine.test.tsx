@@ -8,10 +8,7 @@ import type { LiveEvent } from "@/lib/types";
 import { TOPIC_LIVE } from "@/lib/ws";
 import { LivePage } from "./live";
 
-/**
- * /live engaged: a scrollback ENDING at t, with the live tail off. The live
- * cases stay in pages/live.test.tsx, untouched.
- */
+/** /live engaged: a scrollback ENDING at t, with the live tail off. */
 
 // Same jsdom layout stub live.test.tsx installs, and for the same reason: the
 // virtualizer renders nothing into a zero-height viewport.

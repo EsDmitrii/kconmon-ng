@@ -18,11 +18,8 @@ import (
 	"github.com/google/uuid"
 )
 
-// RunService is the subset of *checks.Runner that httpapi needs: start a new
-// run, read one run, read one run's results, and page through runs. A local
-// interface, same shape as EventLister/Auditor/RoleAdmin -- so a test can
-// substitute a fake without wiring a real controller, hub, bus, and store the
-// way constructing a real *checks.Runner would require.
+// RunService is the subset of *checks.Runner that httpapi needs: start a new run; a local
+// interface, same shape as EventLister/Auditor/RoleAdmin.
 type RunService interface {
 	Start(ctx context.Context, spec checks.Spec, initiator authz.Subject) (string, error) //nolint:gocritic // Subject is a value type by design
 	Get(ctx context.Context, runID string) (checks.Run, error)
@@ -37,27 +34,17 @@ type RunService interface {
 var _ RunService = (*checks.Runner)(nil)
 
 // Limit bounds for GET /api/v1/runs, mirroring GET /api/v1/events's
-// eventsMinLimit/eventsMaxLimit/eventsDefaultLimit convention (events.go) --
-// store.RunFilter.Limit clamps identically on its own (checks.go's
-// clampLimit, shared with EventFilter), but httpapi pre-clamps too, the same
-// hand-kept-in-sync-copy reasoning events.go's own comment gives.
+// eventsMinLimit/eventsMaxLimit/eventsDefaultLimit convention (events.go).
 const (
 	runsMinLimit     = 1
 	runsMaxLimit     = 500
 	runsDefaultLimit = 100
 )
 
-// runsUnavailableDetail is served whenever s.runner is nil: no controller
-// was configured (cmd/console only ever constructs a Runner when one is), so
-// there is no meaningful run path at all -- the same "nil dependency -> 503"
-// convention every other optional Deps field in this package uses.
+// runsUnavailableDetail is served whenever s.runner is nil.
 const runsUnavailableDetail = "set controller.url in the console config (Helm: console.controller.url) to enable on-demand diagnostics runs"
 
-// runCreateRequest is POST /api/v1/runs's body (task-23-brief.md verbatim).
-// TimeoutNs is nanoseconds in the JSON, the repo-wide duration convention
-// (API.md:12) -- the one place the unit changes is inside
-// controllerclient.Diagnose, which converts to the controller's
-// ?timeout=<seconds>, exactly as promql's step already does (API.md:116-118).
+// runCreateRequest is POST /api/v1/runs's body.
 type runCreateRequest struct {
 	Sources      []string `json:"sources"`
 	Destinations []string `json:"destinations"`
@@ -65,25 +52,19 @@ type runCreateRequest struct {
 	Plane        string   `json:"plane"`
 	TimeoutNs    int64    `json:"timeoutNs"`
 
-	// DestinationKind is "node" (the default, and the ONLY value that existed
-	// before M4), "target" or "adhoc" -- the diagnostics form's destination
-	// selector (M4 Task 14; the same kind vocabulary DefinitionInput uses).
-	// "node" keeps Destinations as node names, byte-identical to the M3
-	// contract. "target" resolves a saved targets row Console-side --
-	// DestinationTargetID carries its UUID -- and "adhoc" probes the
-	// operator-typed DestinationAddress. Both external kinds travel to the
-	// controller as destinationKind=external, and both leave Destinations
-	// empty: mixing node and external destinations in one run is refused
-	// rather than half-honored.
+	// DestinationKind is "node", "target" or "adhoc" -- the diagnostics form's destination selector;
+	// both external kinds travel to the controller as destinationKind=external.
 	DestinationKind     string `json:"destinationKind,omitempty"`
 	DestinationTargetID string `json:"destinationTargetId,omitempty"`
 	DestinationAddress  string `json:"destinationAddress,omitempty"`
+
+	// DurationNs turns the run into an INTERVAL run; absent or 0 is an instant run -- one probe per
+	// pair, the only thing that existed.
+	DurationNs int64 `json:"durationNs,omitempty"`
 }
 
-// runCreateResponse is POST /api/v1/runs's 202 body (task-23-brief.md
-// verbatim). WSTopic is the server-chosen topic name -- ws.RunTopic's own
-// canonical format -- so the browser subscribes to a name it was told, never
-// one it constructs itself by string concatenation.
+// runCreateResponse is POST /api/v1/runs's 202 body; WSTopic is the server-chosen topic name --
+// ws.RunTopic's own canonical format.
 type runCreateResponse struct {
 	ID        string `json:"id"`
 	Status    string `json:"status"`
@@ -91,43 +72,27 @@ type runCreateResponse struct {
 	WSTopic   string `json:"wsTopic"`
 }
 
-// writeJSONStatus is writeJSON (server.go) with an explicit status code, for
-// the one response in this package that is not a plain 200: POST
-// /api/v1/runs's 202 Accepted. Headers (Content-Type, and the caller's own
-// Location) must be set before this is called -- WriteHeader freezes them.
+// writeJSONStatus is writeJSON (server.go) with an explicit status code; headers (Content-Type, and
+// the caller's own Location) must be set before this is called.
 func writeJSONStatus(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(v)
 }
 
-// runsRateLimitDetail is the 429 body's detail for POST /api/v1/runs. It
-// names the config key an operator would change, since a legitimate power
-// user hitting this needs to know it is tunable, not just that they were
-// refused.
+// runsRateLimitDetail is the 429 body's detail for POST /api/v1/runs; it names the config key an
+// operator would change.
 const runsRateLimitDetail = "too many diagnostics runs started; retry shortly " +
 	"(limit: console.rateLimit.runsPerMinute per subject per minute)"
 
-// handleRunsCreate plans and starts a new diagnostics run. s.runner nil
-// (no controller.url configured -- there is no meaningful run path without
-// one) answers 503. A malformed body answers 400. A well-formed spec Plan
-// refuses on policy -- too many pairs, or every pair a self-pair/duplicate --
-// answers 422, never 400: the request is valid JSON shaped exactly as
-// documented, it is refused because of what it WOULD do, the same
-// distinction promql's own guards draw (API.md:125-126). An unrecognized
-// check type is a 400: that is a malformed field value, not a policy call.
+// handleRunsCreate plans and starts a new diagnostics run.
 func (s *Server) handleRunsCreate(w http.ResponseWriter, r *http.Request) {
 	if s.runner == nil {
 		writeProblem(w, http.StatusServiceUnavailable, "runs not available", runsUnavailableDetail)
 		return
 	}
 
-	// Rate limit BEFORE anything expensive: a run fans out to up to 400 agent
-	// pairs, so this is the endpoint where an authenticated caller can turn a
-	// cheap request into controller-wide load (TARGETS.md §7.3). The subject
-	// is already on the context (authenticate ran in the middleware chain), so
-	// no body decoding is needed to key it -- and refusing before the decode
-	// means a flood of malformed bodies is just as cheap to refuse.
+	// Rate limit BEFORE anything expensive: a run fans out to up to 400 agent pairs.
 	subject, _ := SubjectFrom(r.Context())
 	if !s.rateLimitAllow(r.Context(), rateLimitRuns, s.cfg.RateLimit.RunsPerMinute, runsRateLimitKey(subject)) {
 		writeRateLimited(w, runsRateLimitDetail)
@@ -147,6 +112,7 @@ func (s *Server) handleRunsCreate(w http.ResponseWriter, r *http.Request) {
 		Type:         req.Type,
 		Plane:        req.Plane,
 		Timeout:      time.Duration(req.TimeoutNs),
+		Duration:     time.Duration(req.DurationNs),
 	}
 	if !s.resolveRunDestination(w, r, &req, &spec) {
 		return
@@ -158,10 +124,7 @@ func (s *Server) handleRunsCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Start already persisted the run (status "pending") before returning --
-	// Get reads that same row back rather than this handler hardcoding
-	// "pending" and recomputing pairTotal itself, so the response always
-	// reports the run's actual, just-created state.
+	// Start already persisted the run (status "pending") before returning.
 	run, err := s.runner.Get(r.Context(), id)
 	if err != nil {
 		slog.Error("httpapi: read back run after start failed", "run", id, "error", err) //nolint:gosec // G706: structured slog fields, not string-built log injection
@@ -175,27 +138,12 @@ func (s *Server) handleRunsCreate(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// resolveRunDestination turns runCreateRequest's destination fields into
-// spec's, writing the refusal and returning false when the request cannot
-// proceed. Split from handleRunsCreate so the M3 node path stays visibly
-// untouched: kind "node" (or absent) returns immediately without touching
-// spec, so a pre-M4 body takes exactly the code path it always took.
-//
-// The kind vocabulary and field names mirror store.DefinitionInput
-// (destinationKind/destinationTargetId/destinationAddress), so an operator
-// who has written a check definition already knows this shape. Status-code
-// split follows handleRunsCreate's own doc comment: a malformed field value
-// (unknown kind, non-UUID target id) is 400; a well-formed reference the
-// system refuses -- an unknown target row -- is 422; targets unavailable
-// (database.mode=disabled) is 503 with the same actionable detail the
-// targets routes serve.
+// resolveRunDestination turns runCreateRequest's destination fields into spec's.
 func (s *Server) resolveRunDestination(w http.ResponseWriter, r *http.Request, req *runCreateRequest, spec *checks.Spec) bool {
 	switch req.DestinationKind {
 	case "", "node":
-		// The M3 contract, byte-identical: Destinations are node names. The
-		// external-only fields are refused rather than ignored -- a body that
-		// names both a kind and fields the kind cannot use is a caller bug
-		// worth surfacing, not guessing over.
+		// The contract, byte-identical: Destinations are node names; the external-only fields are refused
+		// rather than ignored.
 		if req.DestinationTargetID != "" || req.DestinationAddress != "" {
 			writeProblem(w, http.StatusBadRequest, "invalid destination",
 				"destinationTargetId and destinationAddress require destinationKind target or adhoc")
@@ -254,6 +202,12 @@ func (s *Server) resolveRunDestination(w http.ResponseWriter, r *http.Request, r
 			"destinationAddress is required when destinationKind is adhoc")
 		return false
 	}
+	// The same rule a SAVED definition's destination_address is held to: a well-formed field carrying
+	// a value the agent could never dial is 422, the class ErrTooManyPairs already sits in.
+	if err := store.ValidateAdhocAddress(req.DestinationAddress); err != nil {
+		writeProblem(w, http.StatusUnprocessableEntity, "invalid destination address", err.Error())
+		return false
+	}
 	spec.Destinations = nil
 	// Name deliberately repeats the address: for an ad-hoc probe the address
 	// IS the operator's name for it, matching the controller's own destName
@@ -266,13 +220,9 @@ func (s *Server) resolveRunDestination(w http.ResponseWriter, r *http.Request, r
 	return true
 }
 
-// writeRunStartError maps a checks.Runner.Start error to a response.
-// ErrTooManyPairs/ErrNoPairs/ErrNoNodes are all a well-formed spec refused
-// for what it would produce, not for how it is shaped -- 422, per this
-// handler's own doc comment. ErrUnknownType is a malformed field value --
-// 400. Everything else is either a wrapped controllerclient error from
-// resolving the topology for node expansion (mirrors handleTopology's own
-// mapping) or an unexpected store failure.
+// writeRunStartError maps a checks.Runner.Start error to a response;
+// ErrTooManyPairs/ErrNoPairs/ErrNoNodes are all a well-formed spec refused for what it would
+// produce.
 func (s *Server) writeRunStartError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, checks.ErrTooManyPairs):
@@ -281,12 +231,13 @@ func (s *Server) writeRunStartError(w http.ResponseWriter, err error) {
 		writeProblem(w, http.StatusUnprocessableEntity, "no pairs to check", err.Error())
 	case errors.Is(err, checks.ErrNoNodes):
 		writeProblem(w, http.StatusUnprocessableEntity, "no nodes available", err.Error())
+	case errors.Is(err, checks.ErrDurationOutOfRange):
+		// A well-formed field carrying a value policy refuses -- the same class as ErrTooManyPairs, and
+		// 422 for the same reason.
+		writeProblem(w, http.StatusUnprocessableEntity, "run duration out of range", err.Error())
 	case errors.Is(err, checks.ErrUnknownType):
 		writeProblem(w, http.StatusBadRequest, "invalid type", err.Error())
 	case errors.Is(err, checks.ErrInvalidDestination):
-		// Task 12 carry-forward: a typed destination the planner refuses is a
-		// malformed field value, same class as ErrUnknownType -- 400, not the
-		// 502 the default arm would produce.
 		writeProblem(w, http.StatusBadRequest, "invalid destination", err.Error())
 	case errors.Is(err, controllerclient.ErrUnavailable):
 		writeProblem(w, http.StatusBadGateway, "controller unavailable", "no controller leader answered after retries")
@@ -296,19 +247,7 @@ func (s *Server) writeRunStartError(w http.ResponseWriter, err error) {
 	}
 }
 
-// runIDFrom resolves the {id} path parameter for POST
-// /api/v1/runs/{id}/cancel, answering 404 for anything that is not a
-// canonical UUID -- the same guard, and the same reasoning, as
-// definitionIDFrom/scheduleIDFrom: an id that cannot name a row in a
-// UUID-keyed table has "not found" as its truthful answer, and without the
-// pre-check the catch-all below would report 502 for something that simply
-// cannot exist.
-//
-// GET /api/v1/runs/{id} needs no such helper because store.DB.GetRun already
-// maps an unparseable id to ErrNotFound at the seam (store/checks.go). Cancel
-// cannot rely on that: checks.Runner.Cancel answers nil, without consulting
-// the store at all, for any id that happens to be in its in-flight map -- so
-// the shape check belongs here, before the runner is asked anything.
+// runIDFrom resolves the {id} path parameter for POST /api/v1/runs/{id}/cancel.
 func runIDFrom(w http.ResponseWriter, r *http.Request) (string, bool) {
 	id := chi.URLParam(r, "id")
 	if _, err := uuid.Parse(id); err != nil {
@@ -318,27 +257,8 @@ func runIDFrom(w http.ResponseWriter, r *http.Request) (string, bool) {
 	return id, true
 }
 
-// handleRunsCancel stops a run in flight (Plan Decision 15).
-//
-// It answers 204 No Content on success, with no body, and that ALSO covers the
-// two outcomes checks.Runner.Cancel deliberately treats as non-errors:
-// cancelling a run that already reached a terminal status a moment earlier,
-// and cancelling one this replica did not start. Both are 204, not 409 and not
-// 202. An operator who clicks cancel on a run that just finished has not done
-// anything wrong, and an endpoint that answered differently depending on which
-// replica the request happened to land on would be reporting routing, not run
-// state. 204 over 200 for the same reason DELETE uses it here: there is
-// nothing to say beyond "done", and the run's actual state is one GET
-// /api/v1/runs/{id} away -- which is where a client should read it, since
-// cancellation is asynchronous (the run's own goroutine writes the terminal
-// "cancelled" status after its in-flight pairs settle).
-//
-// An id naming no run at all is 404. s.runner nil is 503, same convention as
-// the other three runs routes.
-//
-// Gated on runs:create, not a permission of its own: starting fleet-wide probe
-// traffic and stopping it are the same operational class, and a role that can
-// start a 400-pair run must not need a second grant to stop it.
+// handleRunsCancel stops a run in flight; both are 204, not 409 and not 202. An operator who clicks
+// cancel on a run that just finished has not done anything wrong.
 func (s *Server) handleRunsCancel(w http.ResponseWriter, r *http.Request) {
 	if s.runner == nil {
 		writeProblem(w, http.StatusServiceUnavailable, "runs not available", runsUnavailableDetail)
@@ -378,6 +298,9 @@ type runSummary struct {
 	PairFailed    int32      `json:"pairFailed"`
 }
 
+// toRunSummary projects a run onto the wire. PairOK/PairFailed count PAIRS, never samples: on an
+// interval run a pair is OK when its LATEST sample succeeded (checks.pairOutcomes), the same rule
+// the detail page applies -- so "7/9 ok" in the list and on the detail page is the same 7/9.
 func toRunSummary(run *checks.Run) runSummary {
 	return runSummary{
 		ID: run.ID, CreatedAt: run.CreatedAt, StartedAt: run.StartedAt, FinishedAt: run.FinishedAt,
@@ -470,10 +393,12 @@ type runResultResponse struct {
 	Error           string          `json:"error,omitempty"`
 	Result          json.RawMessage `json:"result,omitempty"`
 	RecordedAt      time.Time       `json:"recordedAt"`
+	// SampleSeq is which probe of this pair the row records; not `omitempty`: the zero value is a
+	// meaningful sample number.
+	SampleSeq int32 `json:"sampleSeq"`
 }
 
-// runDetailResponse is GET /api/v1/runs/{id}'s body: the run plus its
-// per-pair results (task-23-brief.md: "run + its results").
+// runDetailResponse is GET /api/v1/runs/{id}'s body: the run plus its per-pair results.
 type runDetailResponse struct {
 	runSummary
 	Spec    json.RawMessage     `json:"spec"`
@@ -513,7 +438,7 @@ func (s *Server) handleRunsGet(w http.ResponseWriter, r *http.Request) {
 		out = append(out, runResultResponse{
 			SourceNode: res.SourceNode, DestinationNode: res.DestinationNode,
 			Success: res.Success, DurationNs: res.DurationNs, Error: res.Error,
-			Result: res.Result, RecordedAt: res.RecordedAt,
+			Result: res.Result, RecordedAt: res.RecordedAt, SampleSeq: res.SampleSeq,
 		})
 	}
 	writeJSON(w, runDetailResponse{runSummary: toRunSummary(&run), Spec: run.Spec, Results: out})

@@ -451,12 +451,8 @@ func TestEventStreamRegisteredWhenEventsEnabled(t *testing.T) {
 	}
 }
 
-// TestGRPCServerShutdownUnblocksWatchEvents pins the graceful-shutdown
-// contract that grpc.Server.GracefulStop cannot provide on its own: it waits
-// for active handlers to return but never cancels their stream contexts, so a
-// WatchEvents loop with no events flowing and no leader change would block
-// forever. Shutdown must end the stream promptly with codes.Unavailable, which
-// the Console ingester already treats as a retryable stream end.
+// TestGRPCServerShutdownUnblocksWatchEvents pins the graceful-shutdown contract that
+// grpc.Server.GracefulStop cannot provide on its own.
 func TestGRPCServerShutdownUnblocksWatchEvents(t *testing.T) {
 	reg := NewRegistry(30 * time.Second)
 	m := metrics.NewPrometheusMetrics("test", prometheus.NewRegistry())
@@ -535,10 +531,8 @@ func TestGRPCServerShutdownUnblocksWatchTasks(t *testing.T) {
 	}
 }
 
-// TestGRPCServerShutdownUnblocksWatchPeers covers the third handler with the
-// same shape. Every connected agent holds a WatchPeers stream alongside its
-// WatchTasks one, so leaving this loop out would send every graceful shutdown
-// straight into the forceful 5s fallback whenever any agent is connected.
+// TestGRPCServerShutdownUnblocksWatchPeers covers the third handler with the same shape; every
+// connected agent holds a WatchPeers stream alongside its WatchTasks.
 func TestGRPCServerShutdownUnblocksWatchPeers(t *testing.T) {
 	srv, _ := newTestGRPCServer()
 
@@ -601,10 +595,7 @@ func TestGRPCServerShutdownIdempotent(t *testing.T) {
 	}
 }
 
-// TestGRPCServerShutdownConcurrentWithPublishers pins the ordering hazard in
-// the shutdown path: the registry OnChange callback fans out via
-// BroadcastPeerUpdate and PublishEvent from other goroutines, and those must
-// neither panic nor block once Shutdown has run.
+// TestGRPCServerShutdownConcurrentWithPublishers pins the ordering hazard in the shutdown path.
 func TestGRPCServerShutdownConcurrentWithPublishers(t *testing.T) {
 	reg := NewRegistry(30 * time.Second)
 	m := metrics.NewPrometheusMetrics("test", prometheus.NewRegistry())

@@ -1,10 +1,12 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { resetWsClient } from "@/hooks/use-ws-topic";
+import { LOCALE_STORAGE_KEY, LocaleProvider } from "@/lib/i18n";
+import { liveDict } from "@/lib/i18n/dict/live";
 import { FakeSocket } from "@/lib/fake-websocket";
 import type { LiveEvent } from "@/lib/types";
-import { fmtEventTime } from "@/lib/utils";
+import { fmtEventStamp } from "@/lib/utils";
 import { TOPIC_LIVE } from "@/lib/ws";
 import { NAV_ITEMS } from "@/nav";
 import {
@@ -16,12 +18,8 @@ import {
   pushEvents,
 } from "./live";
 
-// @tanstack/react-virtual sizes its viewport from scrollElement.offsetHeight,
-// which jsdom always reports as 0 — a zero-height viewport renders no rows at
-// all. Give the layout a real height for this file only (jsdom defines these as
-// configurable accessors) and restore it afterwards. This is the layout
-// boundary, stubbed exactly like fetch and WebSocket are, and it is scoped to
-// this file rather than vitest.setup.ts because no other test needs it.
+// Give the layout a real height for this file only (jsdom defines these as configurable accessors)
+// and restore it afterwards.
 const offsetHeightDescriptor = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "offsetHeight");
 const offsetWidthDescriptor = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "offsetWidth");
 
@@ -56,13 +54,7 @@ function ev(seq: number, over: Partial<LiveEvent> = {}): LiveEvent {
   };
 }
 
-/**
- * `capabilities: null` leaves the version cache unseeded, i.e. the cold load.
- * `databaseConfigured` seeds GET /api/v1/config's `database.configured`
- * straight into the cache the same way — defaulting to `false` so every M2
- * test written before scrollback existed keeps making zero history requests
- * and seeing no scrollback control, unchanged.
- */
+/** `capabilities: null` leaves the version cache unseeded, i.e. the cold load. */
 function renderPage(capabilities: string[] | null = ["events"], databaseConfigured = false) {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   if (capabilities !== null) {
@@ -96,11 +88,7 @@ function stubEventsFetch(onEvents: (qs: URLSearchParams) => Response) {
   return fn;
 }
 
-/**
- * The page merges arrivals once per animation frame rather than once per event,
- * so a test has to let a frame pass before asserting — the same wait a real
- * browser imposes.
- */
+/** The page merges arrivals once per animation frame rather than once per event. */
 async function emit(events: LiveEvent[]) {
   emitHidden(events);
   await nextFrame();
@@ -238,10 +226,8 @@ describe("countMissedEvents", () => {
     expect(countMissedEvents(lost)).toBe(898);
   });
 
-  // Display order is timestamp-primary, and agents' observations are genuinely
-  // time-shuffled against the controller's numbering. Counting along the
-  // displayed array would read that shuffle as loss and pin a permanent false
-  // alarm over a completely healthy stream.
+  // Display order is timestamp-primary, and agents' observations are genuinely time-shuffled
+  // against the controller's numbering.
   it("reports nothing for a gapless run that is shuffled in display order", () => {
     const shuffled = [
       ev(2, { timestamp: "2026-07-28T10:00:09Z" }),
@@ -362,11 +348,8 @@ describe("LivePage", () => {
     expect(screen.getByText(/1 event may have been missed/)).toBeInTheDocument();
   });
 
-  // The loss a gap scan structurally cannot see: a tab that spends long enough
-  // hidden gets no frames, its queue outgrows the slab bound, and the oldest
-  // arrivals are dropped before they ever reach the ring. That truncates the
-  // bottom of the seq range rather than punching a hole in it, so the tab has
-  // to remember what it threw away or it comes back silently incomplete.
+  // The loss a gap scan structurally cannot see: a tab that spends long enough hidden gets no
+  // frames.
   it("says so when a hidden tab's backlog outgrew the queue and was trimmed", async () => {
     renderPage();
     open();
@@ -540,18 +523,32 @@ describe("LivePage scrollback (Task 5's GET /api/v1/events)", () => {
 /* ── QA round 1: findings #10, #12, #13, #16 ─────────────────────────────── */
 
 describe("LivePage — the feed's clock", () => {
-  // #10: /live rendered a UTC ISO slice and the Overview card a local
-  // wall clock, so the same event carried two different times across two
-  // pages with nothing on either saying which. ONE formatter now
-  // (lib/utils.fmtEventTime); pages/overview.test.tsx pins the same call on
-  // the other side.
+  // #10: /live rendered a UTC ISO slice and the Overview card a local wall clock.
   it("stamps a row with the shared event clock, not a private ISO slice", async () => {
     renderPage();
     open();
     await emit([ev(1, { timestamp: "2026-07-28T10:00:00Z" })]);
 
-    expect(screen.getByText(fmtEventTime("2026-07-28T10:00:00Z"))).toBeInTheDocument();
+    // fmtEventStamp, not fmtEventTime: a 2000-event ring reaches past midnight,
+    // so a row that is not from today carries its day (finding 21).
+    expect(screen.getByText(fmtEventStamp("2026-07-28T10:00:00Z"))).toBeInTheDocument();
     expect(screen.queryByText("10:00:00.000")).toBeNull();
+  });
+
+  it("carries the DAY for a row that is not from today, and drops it for one that is", async () => {
+    renderPage();
+    open();
+    const today = new Date();
+    today.setHours(9, 30, 0, 0);
+    await emit([
+      ev(1, { timestamp: "2026-07-28T10:00:00Z" }),
+      ev(2, { timestamp: today.toISOString() }),
+    ]);
+
+    // Today's row is a bare clock; the old one is not.
+    expect(screen.getByText(fmtEventStamp(today.toISOString()))).toBeInTheDocument();
+    expect(fmtEventStamp(today.toISOString())).toMatch(/^\d\d:\d\d:\d\d$/);
+    expect(fmtEventStamp("2026-07-28T10:00:00Z")).not.toMatch(/^\d\d:\d\d:\d\d$/);
   });
 });
 
@@ -565,7 +562,11 @@ describe("LivePage — paused is not live (#12)", () => {
     fireEvent.click(screen.getByRole("button", { name: "Pause" }));
 
     expect(screen.queryByText("Live", { selector: "span" })).toBeNull();
-    expect(screen.getByText(/^Paused ·/)).toBeInTheDocument();
+    // Two chips now, and deliberately: the filter bar's "Paused · N buffered"
+    // is the state, and the transport slot's "Paused · socket live" keeps the
+    // socket answerable while the feed is held (finding 20).
+    expect(screen.getAllByText(/^Paused ·/).length).toBeGreaterThanOrEqual(1);
+    expect(within(screen.getByTestId("live-transport-slot")).getByText(/^Paused ·/)).toBeInTheDocument();
   });
 
   it("lights it again on resume", async () => {
@@ -629,5 +630,165 @@ describe("LivePage — Load older says why it is disabled (#16)", () => {
     await screen.findByText("event 5");
 
     expect(screen.getByRole("button", { name: "Load older" })).not.toBeDisabled();
+  });
+});
+
+/* ru The one case in this file that mounts LocaleProvider. */
+
+describe("LivePage — ru", () => {
+  afterEach(() => {
+    /* vitest.setup.ts backs localStorage with ONE Map per test FILE, so a
+       locale left here would leak into every later test in it. */
+    localStorage.removeItem(LOCALE_STORAGE_KEY);
+  });
+
+  it("renders the feed chrome and the unfed-replica card in Russian", () => {
+    localStorage.setItem(LOCALE_STORAGE_KEY, "ru");
+    // No "events" capability: resolved, and honestly not receiving the stream.
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    qc.setQueryData(["version"], { version: "1.6.0", commit: "abc123", capabilities: [] });
+    qc.setQueryData(["config"], {
+      auth: { mode: "anonymous", role: "admin" },
+      anonymousBanner: true,
+      controller: { configured: true },
+      prometheus: { configured: true },
+      database: { configured: false },
+    });
+    render(
+      <QueryClientProvider client={qc}>
+        <LocaleProvider>
+          <LivePage />
+        </LocaleProvider>
+      </QueryClientProvider>,
+    );
+
+    expect(screen.getByRole("heading", { name: "Онлайн", level: 1 })).toBeInTheDocument();
+    expect(screen.getByText("Ждём события")).toBeInTheDocument();
+    expect(screen.getByText(/лента не сломана, её просто не кормят/)).toBeInTheDocument();
+  });
+});
+
+/* ── the scope filter's placeholder has to FIT its box (QA round 6, #8) ──── */
+
+describe("scope filter placeholder", () => {
+  /* The input is w-64 with pl-8/pr-2, i.e. 216px of text room at text-sm.
+     Measured against the console's own stack (14px ui-sans-serif) on the live
+     stand: the old wordings were 221px (en) and 314px (ru) and clipped the
+     example they existed to show; the current pair is 167px and 182px. The
+     character budget below is that headroom expressed in a way jsdom, which
+     lays nothing out, can still hold: ~7.9px per glyph in this stack. */
+  const ROOM_PX = 216;
+  const PX_PER_CHAR = 7.9;
+  const BUDGET = Math.floor(ROOM_PX / PX_PER_CHAR);
+
+  it.each(["en", "ru"] as const)("fits the box and keeps the example scope (%s)", (locale) => {
+    const placeholder = liveDict[locale]["filters.scope.placeholder"];
+    expect(placeholder.length).toBeLessThanOrEqual(BUDGET);
+    expect(placeholder).toContain("node-a→node-b");
+  });
+
+  it("is what the box actually renders", () => {
+    renderPage();
+    expect(screen.getByPlaceholderText("Scope — node-a→node-b")).toBeInTheDocument();
+  });
+});
+
+/* ── QA scope 5 ─────────────────────────────────────────────────────────── */
+
+/* #19. The gap warning's only explanation lived in a title attribute, which is
+   invisible to touch and to anyone who does not hover a warning triangle. */
+describe("the gap warning explains itself in the open (#19)", () => {
+  it("offers a control that reveals the reason, and hides it again", async () => {
+    renderPage();
+    open();
+    await emit([ev(1), ev(2)]);
+    await emit([ev(4)]);
+
+    expect(screen.queryByTestId("missed-note")).toBeNull();
+    const why = screen.getByRole("button", { name: "Why events may have been missed" });
+    expect(why).toHaveAttribute("aria-expanded", "false");
+
+    fireEvent.click(why);
+    expect(screen.getByTestId("missed-note")).toHaveTextContent(/holes in the controller's event numbering/i);
+    expect(why).toHaveAttribute("aria-expanded", "true");
+
+    fireEvent.click(why);
+    expect(screen.queryByTestId("missed-note")).toBeNull();
+  });
+
+  it("names the note it opens, so the revealed text is reachable from the control", async () => {
+    renderPage();
+    open();
+    await emit([ev(1)]);
+    await emit([ev(3)]);
+
+    const why = screen.getByRole("button", { name: "Why events may have been missed" });
+    fireEvent.click(why);
+    const controls = why.getAttribute("aria-controls");
+    expect(controls).toBeTruthy();
+    expect(document.getElementById(controls!)).toHaveAttribute("data-testid", "missed-note");
+  });
+
+  it("offers nothing at all when no events were missed", async () => {
+    renderPage();
+    open();
+    await emit([ev(1), ev(2)]);
+    expect(screen.queryByRole("button", { name: "Why events may have been missed" })).toBeNull();
+  });
+});
+
+/* #20. Pausing emptied the transport slot, so the one fact an operator needs
+   BEFORE pressing Resume — is the socket still there — went with it. */
+describe("a paused feed still reports its socket (#20)", () => {
+  it("says the socket is live while paused", async () => {
+    renderPage();
+    open();
+    await emit([ev(1)]);
+    fireEvent.click(screen.getByRole("button", { name: "Pause" }));
+
+    const slot = screen.getByTestId("live-transport-slot");
+    expect(within(slot).getByText("Paused · socket live")).toBeInTheDocument();
+  });
+
+  it("says the socket is DOWN when it dropped during the pause", async () => {
+    renderPage();
+    open();
+    await emit([ev(1)]);
+    fireEvent.click(screen.getByRole("button", { name: "Pause" }));
+
+    act(() => {
+      FakeSocket.last().emitClose();
+    });
+
+    const slot = screen.getByTestId("live-transport-slot");
+    expect(within(slot).getByText("Paused · socket down")).toBeInTheDocument();
+  });
+});
+
+/* #22. At the ring's cap "Load older" stayed enabled and did nothing: anything
+   it fetched would be dropped on the way into a full buffer. */
+describe("Load older is disabled at the cap (#22)", () => {
+  it("disables itself, with the cap as the reason, once the ring is full", async () => {
+    stubEventsFetch(() => json({ events: [ev(1)], nextCursor: "cursor-1" }));
+    renderPage(["events"], true);
+    open();
+    await screen.findByRole("button", { name: /Load older/ });
+
+    emitHidden(Array.from({ length: LIVE_RING_CAP }, (_, i) => ev(i + 1)));
+    await nextFrame();
+
+    const button = screen.getByRole("button", { name: /Load older/ });
+    expect(button).toBeDisabled();
+    expect(button).toHaveAttribute("title", expect.stringContaining(String(LIVE_RING_CAP)));
+    // Readable, not merely hoverable.
+    expect(button).toHaveAccessibleName(expect.stringContaining("buffer is full"));
+  });
+
+  it("stays live while the ring has room", async () => {
+    stubEventsFetch(() => json({ events: [ev(1)], nextCursor: "cursor-1" }));
+    renderPage(["events"], true);
+    open();
+    await screen.findByText("event 1");
+    expect(screen.getByRole("button", { name: /Load older/ })).toBeEnabled();
   });
 });

@@ -15,11 +15,8 @@ import (
 	"github.com/EsDmitrii/kconmon-ng/internal/console/ws"
 )
 
-// gatedCtrl answers instantly for destinations in fast, and blocks until its
-// own ctx is cancelled for every other destination -- the shape that pins a
-// run's fan-out open at exactly maxConcurrency in-flight pairs so a Cancel can
-// be issued at a known point, with a known number of pairs already completed
-// and a known number never dispatched.
+// gatedCtrl answers instantly for destinations in fast, and blocks until its own ctx is cancelled
+// for every other destination.
 type gatedCtrl struct {
 	fast     map[string]bool
 	calls    atomic.Int32
@@ -68,16 +65,8 @@ func newCancelRunner(t *testing.T, ctrl *gatedCtrl) (*checks.Runner, *checks.Mem
 	return checks.NewRunner(ctrl, hub, bus, mem, testMetrics(t)), mem
 }
 
-// TestCancelMidRunKeepsCompletedResultsAndStopsDispatching is Decision 15's
-// core contract (TDD item 3): pairs already dispatched record their outcome
-// through the terminalOpTimeout path, undispatched pairs never dispatch at
-// all, and the run itself finishes "cancelled".
-//
-// The arithmetic is deterministic, not a race: 20 pairs, maxConcurrency 8. The
-// first batch of 8 covers dst-00..dst-07; dst-00..dst-03 answer instantly and
-// free four slots, which dst-08..dst-11 take and then block. That pins exactly
-// 8 blocked pairs, 4 completed, and 8 (dst-12..dst-19) never dispatched -- so
-// a Cancel issued once 8 pairs are blocked must leave calls at exactly 12.
+// The arithmetic is deterministic, not a race: 20 pairs; that pins exactly 8 blocked pairs, 4
+// completed, and 8 (dst-12..dst-19) never dispatched.
 func TestCancelMidRunKeepsCompletedResultsAndStopsDispatching(t *testing.T) {
 	ctrl := newGatedCtrl("dst-00", "dst-01", "dst-02", "dst-03")
 	runner, mem := newCancelRunner(t, ctrl)
@@ -159,9 +148,7 @@ func TestCancelPublishesFinishedFrameWithCancelledStatus(t *testing.T) {
 	}
 }
 
-// Cancelling a run that already reached a terminal status is a NO-OP, not an
-// error: an operator clicking cancel on a run that finished a moment earlier
-// has not done anything wrong (Decision 15).
+// Cancelling a run that already reached a terminal status is a NO-OP.
 func TestCancelTerminalRunIsANoOp(t *testing.T) {
 	fake, ctrl := startFakeDiagnosticsServer(t)
 	_ = fake
@@ -223,9 +210,7 @@ func TestCancelTwiceIsIdempotent(t *testing.T) {
 	}
 }
 
-// MemoryStore must accept running -> cancelled exactly as *store.DB's
-// FinishRun guard does, so the database-disabled path cannot diverge from the
-// database-enabled one on the one status M4 introduced.
+// MemoryStore must accept running -> cancelled exactly as *store.DB's FinishRun guard does.
 func TestMemoryStoreFinishRunAcceptsCancelled(t *testing.T) {
 	m := checks.NewMemoryStore()
 	ctx := context.Background()

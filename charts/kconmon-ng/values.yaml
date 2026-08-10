@@ -1,133 +1,48 @@
 ---
-# Default values for kconmon-ng.
-# This is a YAML-formatted file.
+# kconmon-ng default values. Sections in order:
+#   1 Naming  2 Shared config  3 Agent  4 Controller  5 Console
+#   6 Observability  7 Kubernetes  8 Optional dependencies
+# Reasoning, migration notes and examples live in README.md.
 
-# Controller Deployment. One controller hands every agent its peer list over
-# gRPC and (as leader) watches Kubernetes nodes to resolve zones and count
-# expected agents. Tune replicas/HA and scheduling here.
-controller:
-  # Number of controller Pods. Only the leader is active; extra replicas stay
-  # ready but passive (HA standby). Requires leaderElection=true to be useful.
-  replicaCount: 1
-  # HA leader election among controller replicas. IMPORTANT: the node informer
-  # only runs on the leader, so zone enrichment (source_zone/dest_zone labels)
-  # and the kconmon_ng_controller_expected_agents metric require this to be
-  # true. Setting it false disables those features even with one replica.
-  leaderElection: true
-  # Controller domain event stream (EventStream.WatchEvents gRPC) consumed by
-  # the Console's events ingester, plus the "events" capability flag on
-  # GET /api/v1/version. Leader-only: passive replicas reject subscriptions.
-  # OFF by default — with events.enabled=false the Console detects the missing
-  # capability and stays on M1 Prometheus polling with a "delayed data" badge.
-  events:
-    enabled: false
-  image:
-    repository: ghcr.io/esdmitrii/kconmon-ng-controller
-    # Image tag. Empty string means the chart appVersion is used.
-    tag: ""
-    pullPolicy: IfNotPresent
-  # Controller resource requests/limits. Defaults are small; the controller is
-  # not on the data path (agents do the probing).
-  resources:
-    limits:
-      cpu: 200m
-      memory: 128Mi
-    requests:
-      cpu: 50m
-      memory: 64Mi
-  # Standard scheduling controls for the controller Deployment.
-  nodeSelector: {}
-  tolerations: []
-  affinity: {}
+# == 1. Naming ==
 
-# Agent DaemonSet. One agent runs on every node and executes the enabled
-# checkers against its peers, exposing results as Prometheus metrics.
-agent:
-  # zone is an optional explicit override for the agent's failure-domain zone.
-  # Leave empty (default): the controller resolves each agent's zone from its
-  # node label (config.failureDomainLabel) at registration and the agent adopts
-  # it. A non-empty value here always wins over the controller-resolved zone.
-  # Note: zone enrichment requires controller.leaderElection=true (the
-  # NodeWatcher only runs on the leader).
-  zone: ""
-  # Extra annotations for agent Pods (e.g. custom Prometheus scrape hints).
-  podAnnotations: {}
-  image:
-    repository: ghcr.io/esdmitrii/kconmon-ng-agent
-    # Image tag. Empty string means the chart appVersion is used.
-    tag: ""
-    pullPolicy: IfNotPresent
-  # Agent resource requests/limits. Applied to every node's agent Pod.
-  resources:
-    limits:
-      cpu: 200m
-      memory: 128Mi
-    requests:
-      cpu: 50m
-      memory: 64Mi
-  # Default tolerates everything so an agent runs on all nodes, including
-  # tainted/control-plane nodes. Narrow this to skip specific nodes.
-  tolerations:
-    - operator: Exists
-  # Agent needs the NET_RAW capability to open raw sockets for the ICMP checker
-  # and reactive MTR traces. Removing it breaks ICMP/MTR (TCP/UDP/DNS/HTTP
-  # checkers do not require it).
-  securityContext:
-    capabilities:
-      add:
-        - NET_RAW
-  # Pod-level security context. The ICMP checker opens an unprivileged ICMP
-  # "ping" socket (SOCK_DGRAM+IPPROTO_ICMP), which the kernel gates on
-  # net.ipv4.ping_group_range — NOT on NET_RAW. Some container runtimes leave
-  # this at the closed kernel default ("1 0"), so the checker fails with
-  # "socket: permission denied". Opening the range (a safe, namespaced sysctl)
-  # lets any GID create ping sockets. Set podSecurityContext to {} to opt out.
-  podSecurityContext:
-    sysctls:
-      - name: net.ipv4.ping_group_range
-        value: "0 2147483647"
+# Overrides the chart name used in resource names and labels.
+nameOverride: ""
+# Overrides the full resource-name prefix outright.
+fullnameOverride: ""
 
-# Runtime configuration rendered into a ConfigMap and consumed by both the
-# controller and the agents. Changes are hot-reloaded without a restart.
+# == 2. Shared config == runtime config for controller and agents, hot-reloaded from a ConfigMap.
+
 config:
-  # Prefix for all exported Prometheus metrics (e.g. kconmon_ng_tcp_results_total).
-  # Changing it renames every metric; update dashboards/alerts accordingly.
+  # Prefix for every exported metric; changing it renames all of them.
   metricsPrefix: kconmon_ng
-  # Port serving /metrics and health endpoints. Must differ from grpcPort;
-  # both must be 1-65535 or startup fails.
+  # Serves /metrics and health; must differ from grpcPort.
   httpPort: 8080
-  # Port for the controller's gRPC peer-list/topology API. Must differ from httpPort.
+  # Controller peer-list/topology API; must differ from httpPort.
   grpcPort: 9090
-  # Log verbosity: one of debug, info, warn, error. Invalid values fail startup.
+  # debug | info | warn | error.
   logLevel: info
-  # Log output format: json or text. Invalid values fail startup.
+  # json | text.
   logFormat: json
-  # Node label the controller reads to determine each agent's zone. Used to
-  # populate source_zone/dest_zone metric labels (see agent.zone override).
+  # Node label the controller reads for each agent's zone.
   failureDomainLabel: topology.kubernetes.io/zone
-  # How long the controller keeps a registered agent without a heartbeat before
-  # evicting it from the peer list. Too low risks flapping on slow nodes.
+  # Grace period before an agent without a heartbeat leaves the peer list.
   controllerAgentTtl: 30s
-  # Per-protocol connectivity checkers run by each agent against its peers.
-  # For any ENABLED checker, invalid timing fails startup (v1.2.0 strict
-  # validation): interval and timeout must both be > 0. A shorter interval
-  # means more frequent probes -> higher CPU/network load and metric cardinality.
+  # Per-protocol checkers; for an enabled one, interval and timeout must be > 0.
   checkers:
-    # TCP dial check to a peer's port. Verifies L4 reachability.
+    # TCP dial to a peer's port (L4 reachability).
     tcp:
       enabled: true
-      # How often to probe. Lower = more load.
       interval: 5s
-      # Per-probe deadline. Must be > 0 when enabled; >= interval only warns.
       timeout: 1s
     # UDP probe measuring packet loss to a peer.
     udp:
       enabled: true
       interval: 5s
       timeout: 250ms
-      # Packets sent per probe to compute loss ratio. Must be >= 1 (validated).
+      # Packets per probe, used to compute the loss ratio; must be >= 1.
       packets: 5
-    # ICMP (ping) reachability/loss check. Requires the agent NET_RAW capability.
+    # ICMP ping reachability/loss; needs the agent NET_RAW capability.
     icmp:
       enabled: true
       interval: 5s
@@ -136,445 +51,170 @@ config:
     dns:
       enabled: true
       interval: 5s
-      # DNS lookups can be slow; timeout is larger by default.
       timeout: 5s
-      # Names to resolve each interval. Must be non-empty when the checker is
-      # enabled (validated); each entry must be a non-empty name.
+      # Names to resolve; must be non-empty when the checker is enabled.
       hosts:
         - kubernetes.default.svc.cluster.local
-      # Optional explicit resolvers as "host" or "host:port". Empty = use the
-      # Pod's default resolver. Malformed entries fail startup.
+      # Explicit resolvers as "host" or "host:port"; empty uses the Pod's own.
       resolvers: []
-    # HTTP endpoint check. Disabled by default. When enabled, targets must be
-    # non-empty and each URL must be a valid http/https URL with a host.
+    # HTTP endpoint check; targets are required when enabled.
     http:
       enabled: false
       interval: 30s
       timeout: 5s
-      # List of HTTP targets (url, optional method/expectStatus/bodyPattern).
+      # [{url, method, expectStatus, bodyPattern}]
       targets: []
-    # Reactive traceroute (MTR) triggered on probe failures to locate the bad hop.
+    # Reactive traceroute fired on probe failures.
     mtr:
-      # Minimum gap between MTR runs for the same node pair, to avoid trace floods.
+      # Minimum gap between MTR runs for the same pair.
       cooldown: 60s
-      # Max traceroute hops. Must be between 1 and 64 (validated).
+      # Maximum traceroute hops; 1-64.
       maxHops: 30
-    # External checks: every probe whose destination is NOT a peer agent — the
-    # Console's external targets (continuous) and one-shot external diagnostics.
-    # OFF by default, and the block is rendered into the shared ConfigMap ONLY
-    # when enabled, so an install that leaves it alone produces a config file
-    # byte-identical to chart 1.5.0's.
-    #
-    # TWO LAYERS, and this is the one people get wrong: a Kubernetes
-    # NetworkPolicy cannot gate agent -> internet egress in any useful way here.
-    # allowedCidrs/deniedCidrs are enforced by the AGENT, in-process, after DNS
-    # resolution. If your cluster enforces default-deny egress at the node/CNI
-    # layer — Calico global policy, cilium ClusterwideNetworkPolicy, a
-    # node-level iptables/nftables ruleset, a cloud security group — that layer
-    # must be opened separately for the agent DaemonSet or every external probe
-    # fails on the wire while this config says it is allowed. Same shape as the
-    # console.networkPolicy note further down: allowed here and still refused on
-    # the wire almost always means the node/CNI layer was missed.
+    # Probes to destinations that are not peer agents.
     external:
-      # Master switch. false => the block is not parsed, not validated, and no
-      # external probe can run; the metric families stay empty.
+      # Off means the block is not parsed and no external probe can run.
       enabled: false
-      # Destinations the agent MAY probe, as CIDRs (IPv4 and IPv6 both fine),
-      # matched against the RESOLVED address. REQUIRED and non-empty when
-      # enabled=true — an empty list is a startup error, never read as
-      # "allow everything". Malformed entries fail startup with the index.
+      # CIDR allowlist matched against the resolved address; required when enabled.
       allowedCidrs: []
-      # Carve-outs subtracted from allowedCidrs; denied wins. The usual entries
-      # are link-local metadata (169.254.169.254/32) and loopback.
+      # Carve-outs subtracted from allowedCidrs; denied wins.
       deniedCidrs: []
-      # Cap on operator-defined external targets this agent accepts. Defaulted
-      # to 100 by the agent when enabled and left at 0. NOTE: the value is
-      # validated at startup but not yet enforced against the assignment the
-      # controller pushes — see CONFIG.md.
+      # Cap on operator-defined external targets per agent.
       maxTargets: 100
-      # Bounds resolution-and-authorisation of ONE external destination. It does
-      # NOT replace the per-checker timeout: the probe itself stays governed by
-      # checkers.<type>.timeout.
+      # Bounds resolve-and-authorise only, not the probe itself.
       timeout: 10s
 
-# Prometheus Operator ServiceMonitor for scraping the /metrics endpoint.
-# Requires the Prometheus Operator CRDs to be installed.
-serviceMonitor:
-  enabled: false
-  # Scrape interval used by the generated ServiceMonitor.
-  interval: 15s
+# == 3. Agent == DaemonSet running the enabled checkers against peers on every node.
 
-# Prometheus Operator PrometheusRule with built-in alerts. Requires the
-# Prometheus Operator CRDs. Edit or replace `rules` to customize alerting.
-# The two self-monitoring alerts (KconmonAgentsMissing, KconmonControllerDown)
-# require controller.leaderElection=true, since expected_agents and the leader
-# metric are only produced by the leader's node informer.
-prometheusRule:
-  enabled: false
-  # Why every rule below names its pair in the annotations: the series already
-  # carry the peer label set (source_node, destination_node, source_zone,
-  # destination_zone). An annotation that omits them turns N distinct broken
-  # links into N byte-identical Slack lines, and the operator cannot tell which
-  # link, which direction, or how bad. $labels costs nothing and answers all
-  # three.
-  #
-  # Why the *ChecksFailing rules divide instead of using rate(fail) > 0: a raw
-  # rate over a fail counter is positive for the WHOLE window after a single
-  # flaky probe, so the rule really says "something failed in the last 5
-  # minutes", which is not an incident. The ratio is failing probes over all
-  # probes for the same pair, so one failure inside a healthy stream stays
-  # under the threshold while a link that is actually down crosses it at once.
-  # Thresholds: 0.05 (5%) for in-cluster TCP and DNS, because a pod-to-pod path
-  # that drops one probe in twenty is broken; 0.1 (10%) for external targets,
-  # because those probes leave the cluster and cross networks nobody here
-  # operates, and a stricter bound would page on somebody else's packet loss.
-  #
-  # A pair that has never failed has no {result="fail"} series at all, so the
-  # division yields no sample for it and the rule stays silent. That is the
-  # intent: no zero has to be materialised for every pair in the mesh.
-  #
-  # `result` carries exactly two values, `success` and `fail`. The denominator
-  # deliberately selects the family with NO result selector, so a third value
-  # added later widens the denominator instead of silently skewing the ratio.
-  #
-  # Metric names must stay spelled with the literal `kconmon_ng` prefix:
-  # templates/prometheusrule.yaml rewrites each expr through
-  # `replace "kconmon_ng" $prefix`, which is what keeps config.metricsPrefix
-  # working. That rewrite touches `expr` ONLY, so a metric name mentioned in an
-  # annotation would not follow the prefix and is avoided below. Annotation
-  # bodies are passed through by toYaml and never Helm-templated, which is what
-  # lets `{{ $labels.x }}` and `{{ $value }}` reach Prometheus intact.
-  rules:
-    # Pair-scoped gauge, 0.0-1.0, carrying the full peer label set. ICMP loss
-    # (kconmon_ng_icmp_packet_loss_ratio) uses the SAME labels, so this
-    # annotation shape ports to an ICMP copy of the rule unchanged.
-    - alert: UDPLossHigh
-      expr: kconmon_ng_udp_packet_loss_ratio > 0.5
-      for: 5m
-      labels:
-        severity: warning
-      annotations:
-        summary: >-
-          UDP loss {{ $labels.source_node }} -> {{ $labels.destination_node }}
-          at {{ $value | humanizePercentage }}
-        description: >-
-          UDP packet loss from {{ $labels.source_node }} (zone
-          {{ $labels.source_zone }}) to {{ $labels.destination_node }} (zone
-          {{ $labels.destination_zone }}) has held at
-          {{ $value | humanizePercentage }} for 5m, over the 50% threshold.
-          Drill this exact pair on the kconmon-ng console Investigate page, or
-          open the "kconmon-ng / Node Detail" Grafana dashboard with
-          node={{ $labels.source_node }} to see whether the same node is losing
-          packets to its other peers or only to this one.
-    - alert: TCPChecksFailing
-      expr: >-
-        sum by (source_node, destination_node, source_zone, destination_zone)
-        (rate(kconmon_ng_tcp_results_total{result="fail"}[5m]))
-        /
-        sum by (source_node, destination_node, source_zone, destination_zone)
-        (rate(kconmon_ng_tcp_results_total[5m]))
-        > 0.05
-      for: 5m
-      labels:
-        severity: warning
-      annotations:
-        summary: >-
-          TCP checks failing {{ $labels.source_node }} ->
-          {{ $labels.destination_node }} at {{ $value | humanizePercentage }} of
-          probes
-        description: >-
-          {{ $value | humanizePercentage }} of TCP probes from
-          {{ $labels.source_node }} (zone {{ $labels.source_zone }}) to
-          {{ $labels.destination_node }} (zone {{ $labels.destination_zone }})
-          failed over the last 5m, above the 5% failure-ratio threshold. Open
-          the pair on the kconmon-ng console Investigate page, or the worst-pairs
-          table on the "kconmon-ng / Overview" Grafana dashboard to see whether
-          UDP and ICMP fail on the same link (a path problem) or TCP fails
-          alone (a listener or policy problem).
-    # DNS is NOT pair-scoped: this family carries host, resolver, source_node
-    # and source_zone, and no destination_* labels at all. Grouping by
-    # destination_node here would collapse everything into one empty group, so
-    # the annotation names the resolver and the queried host instead.
-    - alert: DNSChecksFailing
-      expr: >-
-        sum by (source_node, source_zone, host, resolver)
-        (rate(kconmon_ng_dns_results_total{result="fail"}[5m]))
-        /
-        sum by (source_node, source_zone, host, resolver)
-        (rate(kconmon_ng_dns_results_total[5m]))
-        > 0.05
-      for: 5m
-      labels:
-        severity: warning
-      annotations:
-        summary: >-
-          DNS failing on {{ $labels.source_node }} for {{ $labels.host }} via
-          {{ $labels.resolver }} at {{ $value | humanizePercentage }}
-        description: >-
-          {{ $value | humanizePercentage }} of lookups of {{ $labels.host }}
-          through resolver {{ $labels.resolver }} from {{ $labels.source_node }}
-          (zone {{ $labels.source_zone }}) failed over the last 5m, above the 5%
-          threshold. This is resolver-side, not a peer link, so check
-          CoreDNS/kube-dns and the node's resolv.conf before the network. The
-          kconmon-ng console Investigate page scoped to
-          {{ $labels.source_node }} shows whether its peer probes degraded at
-          the same moment.
-    # External checks (config.checkers.external.enabled). The vec stays empty
-    # until an external probe reports, so this rule is inert on an install that
-    # never enabled the feature, and no absent() false positive either way.
-    # External destinations use their OWN label set (target, target_kind, and
-    # no destination_node), so this is the one *ChecksFailing rule that cannot
-    # print a peer.
-    - alert: ExternalChecksFailing
-      expr: >-
-        sum by (source_node, source_zone, target, target_kind)
-        (rate(kconmon_ng_external_results_total{result="fail"}[5m]))
-        /
-        sum by (source_node, source_zone, target, target_kind)
-        (rate(kconmon_ng_external_results_total[5m]))
-        > 0.1
-      for: 5m
-      labels:
-        severity: warning
-      annotations:
-        summary: >-
-          External target {{ $labels.target }} failing from
-          {{ $labels.source_node }} at {{ $value | humanizePercentage }}
-        description: >-
-          {{ $value | humanizePercentage }} of probes to external target
-          {{ $labels.target }} (kind {{ $labels.target_kind }}) from
-          {{ $labels.source_node }} (zone {{ $labels.source_zone }}) failed over
-          the last 5m, above the 10% threshold. A probe the allowlist refused
-          never reaches this counter, so if the target looks untested rather
-          than failing, read the external_denied_total counter for its reason
-          (cidr, resolve or disabled) before suspecting the network.
-    # Self-monitoring: registered agents stay below the schedulable-node count
-    # for 10m (agents failing to register or crash-looping). Written as a
-    # subtraction rather than `registered < expected` so that $value is the
-    # NUMBER OF MISSING agents; with `<` the alert value would be the registered
-    # count, which is the one number the operator can already see everywhere.
-    - alert: KconmonAgentsMissing
-      expr: kconmon_ng_controller_expected_agents - kconmon_ng_controller_registered_agents > 0
-      for: 10m
-      labels:
-        severity: warning
-      annotations:
-        summary: >-
-          {{ $value }} kconmon-ng agent(s) missing per controller
-          {{ $labels.instance }}
-        description: >-
-          The controller on {{ $labels.instance }} expects one agent per
-          schedulable node, and {{ $value }} of them have not registered for
-          10m. The usual causes are a DaemonSet that cannot schedule (taints or
-          resources), crash-looping agent pods, or agent-to-controller gRPC
-          being blocked. Every pair involving a missing node simply stops being
-          probed, so the other rules in this group go quiet rather than firing.
-          The kconmon-ng console topology view lists the nodes it does know.
-    # Self-monitoring: no controller reports itself leader for 5m, so the
-    # control plane is down and no other rule would evaluate. absent() returns
-    # a synthetic 1 with no series labels, so $value carries no information
-    # here and the description points at what to look at instead.
-    - alert: KconmonControllerDown
-      expr: absent(kconmon_ng_controller_leader == 1)
-      for: 5m
-      labels:
-        severity: critical
-      annotations:
-        summary: No kconmon-ng controller has reported itself leader for 5m
-        description: >-
-          Every controller replica is reporting leader=0, or Prometheus is
-          scraping none of them. Peer lists stop being distributed, so agents
-          keep probing a frozen topology and every other rule in this group
-          quietly stops describing reality. Check the controller Deployment, its
-          lease in the release namespace, and the controller scrape target in
-          Prometheus.
+agent:
+  # Explicit zone override; empty lets the controller resolve it from the node.
+  zone: ""
+  podAnnotations: {}
+  image:
+    repository: ghcr.io/esdmitrii/kconmon-ng-agent
+    # Empty means the chart appVersion.
+    tag: ""
+    pullPolicy: IfNotPresent
+  resources:
+    limits:
+      cpu: 200m
+      memory: 128Mi
+    requests:
+      cpu: 50m
+      memory: 64Mi
+  # Default runs an agent on every node, including tainted ones.
+  tolerations:
+    - operator: Exists
+  # NET_RAW is required by the ICMP checker and reactive MTR traces; everything else is dropped.
+  # This is the one workload the restricted PSS profile cannot admit as-is (documented in README).
+  securityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    capabilities:
+      drop:
+        - ALL
+      add:
+        - NET_RAW
+  # Opens ping_group_range so ICMP ping sockets work; set {} to opt out.
+  podSecurityContext:
+    sysctls:
+      - name: net.ipv4.ping_group_range
+        value: "0 2147483647"
+  nodeSelector: {}
+  affinity: {}
 
-# NetworkPolicy locking down agent/controller traffic. When enabled it allows:
-# agent<->controller gRPC, agent<->agent UDP probes + HTTP metrics, DNS (53),
-# and the Kubernetes API (443). Enable only if the cluster enforces policies.
-networkPolicy:
-  enabled: false
-  # Namespace Prometheus scrapes from. Empty = allow scrape ingress from any
-  # namespace; set it to restrict scraping to your monitoring namespace.
-  prometheusNamespace: ""
+# == 4. Controller == Deployment serving peer lists over gRPC and watching nodes as leader.
 
-# PodDisruptionBudget for the controller Deployment, so voluntary disruptions
-# (drains/upgrades) keep a controller available.
-pdb:
-  # With replicaCount=1 a minAvailable of 1 blocks voluntary eviction of the
-  # sole controller; raise replicaCount for smoother maintenance.
-  enabled: true
-  minAvailable: 1
+controller:
+  # Controller replicas; only the leader is active, extras are HA standby.
+  replicaCount: 1
+  # Leader election; false also disables zone enrichment and expected_agents.
+  leaderElection: true
+  events:
+    # Domain event stream for the Console's realtime ingester (leader-only).
+    enabled: false
+  image:
+    repository: ghcr.io/esdmitrii/kconmon-ng-controller
+    # Empty means the chart appVersion.
+    tag: ""
+    pullPolicy: IfNotPresent
+  # restricted-PSS compliant; the controller only talks to the apiserver and gRPC.
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 65532
+    seccompProfile:
+      type: RuntimeDefault
+  securityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    capabilities:
+      drop:
+        - ALL
+  # The controller is not on the data path, so defaults are small.
+  resources:
+    limits:
+      cpu: 200m
+      memory: 128Mi
+    requests:
+      cpu: 50m
+      memory: 64Mi
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
 
-# ServiceAccount used by the controller (needs RBAC to watch nodes/leases).
-serviceAccount:
-  # Create the ServiceAccount and its RBAC. Set false to use an existing one.
-  create: true
-  # Name of the ServiceAccount. Empty = generated from the release name.
-  name: ""
+# == 5. Console == optional web UI and API; every block below is inert while enabled is false.
 
-# Console (kconmon-ng Console). A separate Deployment serving the web UI and its
-# API. OFF by default: with console.enabled=false the chart renders exactly as
-# before. The default auth.mode=anonymous (a fixed role + a permanent warning
-# banner in the UI) keeps that byte-identical default even with everything
-# below present. Alerting integration lands in a later milestone.
 console:
+  # -- 5.1 core --
   enabled: false
-  # Number of console replicas. The M0 console is stateless.
+  # Console replicas; the console is stateless.
   replicas: 2
   image:
     repository: ghcr.io/esdmitrii/kconmon-ng-console
-    # Image tag. Empty string means the chart appVersion is used.
+    # Empty means the chart appVersion.
     tag: ""
     pullPolicy: IfNotPresent
-  # Authentication (SECURITY.md §10.1).
-  auth:
-    # anonymous | local | header | oidc.
-    # anonymous is the default and a fully supported deployment: RBAC still
-    # applies, with every request carrying the fixed role below.
-    mode: anonymous
-    anonymous:
-      # Fixed role assigned to every anonymous request.
-      role: viewer
-    # Role granted to an authenticated subject that no role binding matches.
-    # Empty means such a subject can do nothing (403) until an admin binds it.
-    defaultRole: ""
-    # mode=local: users and sessions in PostgreSQL (argon2id passwords).
-    # Requires console.database.mode=cnpg|external (see the render guard
-    # below).
-    local:
-      # Username created on FIRST start only, when the users table is empty.
-      bootstrapAdmin: ""
-      # Name of an existing Secret holding the bootstrap password.
-      # Referenced by name only; this chart never creates or reads it.
-      existingSecret: ""
-      existingSecretKey: password
-    # mode=header: identity trusted from a header set by an in-cluster
-    # reverse proxy. See trustedProxyCIDRs below — it is mandatory in this
-    # mode, with no default that would trust every peer.
-    header:
-      userHeader: X-Remote-User
-      groupsHeader: X-Remote-Groups
-      groupsDelimiter: ","
-      # REQUIRED and non-empty for mode=header. The console trusts the identity
-      # headers ONLY from a peer inside these CIDRs. An empty list would make an
-      # unauthenticated request header an authentication bypass, so rendering
-      # fails rather than shipping that.
-      trustedProxyCIDRs: []
-    # mode=oidc: authorization-code + PKCE against an external IdP. Requires
-    # console.database.mode=cnpg|external (sessions live in PostgreSQL) and,
-    # for console.replicas>1, console.valkey.mode=bundled|external (sessions
-    # live in Valkey, not the single-replica in-process KV) — see the render
-    # guards below.
-    oidc:
-      issuer: ""
-      clientID: ""
-      # Name of an existing Secret holding the OIDC client secret.
-      existingSecret: ""
-      existingSecretKey: clientSecret
-      redirectURL: ""
-      scopes: [openid, profile, email, groups]
-      usernameClaim: preferred_username
-      groupsClaim: groups
-    # Session cookie used by every non-anonymous mode.
-    session:
-      ttl: 12h
-      cookieName: __Host-kconmon_session
-      # Set false ONLY for local http:// development. A __Host- cookie name
-      # with secure=false is rejected at startup.
-      secure: true
-  # Controller API access (topology). Empty url means "derive from this
-  # release's controller Service"; set explicitly to point elsewhere.
+  # Controller API access.
   controller:
+    # Empty derives from this release's controller Service.
     url: ""
-    # Per-request timeout for console -> controller calls.
     timeout: 10s
-    # gRPC address of the controller's EventStream (host:port). Empty means
-    # "derive from this release's controller Service when
-    # controller.events.enabled=true, otherwise leave realtime off".
-    # Setting this explicitly points the console at a controller in ANOTHER
-    # namespace or cluster. The chart still renders only a same-namespace
-    # egress rule to THIS release's controller, so a target outside this
-    # namespace needs your own NetworkPolicy on both the egress and ingress
-    # sides (plus any host firewall) — there is no grpcEgress override list
-    # in M2.
+    # EventStream host:port; empty derives it when controller.events.enabled.
+    grpcAddress: ""
+    # DEPRECATED, renamed to grpcAddress; still honoured when set alone.
     grpcAddr: ""
-  # Prometheus query API (matrix, Explore, PromQL console). REQUIRED for the
-  # M1 data pages; with url empty those APIs answer 503 and the UI says so.
+  # Prometheus query API; required by the data pages, which 503 without it.
   prometheus:
     url: ""
     queryTimeout: 30s
-    # Maximum query_range window the guarded proxy accepts.
+    # Largest query_range window the guarded proxy accepts.
     maxRange: 24h
-    # Response size cap in bytes (8 MiB).
+    # Response size cap in bytes.
     maxResponseBytes: 8388608
-  # Valkey pub/sub for cross-replica WebSocket fan-out (ADR-002: ephemeral
-  # only — a flush must lose zero durable data).
-  #   bundled  = this chart renders a minimal single-replica Valkey
-  #              Deployment + Service (see the ephemeral note below)
-  #   external = point at an existing Valkey/Redis via address
-  #   disabled = no Valkey; the console falls back to an in-process bus,
-  #              which is correct ONLY for console.replicas=1 (documented
-  #              degradation: browsers on other replicas see no events)
-  # The bundled Valkey is deliberately ephemeral: no PersistentVolumeClaim, no
-  # volumeClaimTemplates, no writable data dir at all. Per ADR-002 a Valkey
-  # flush must lose zero durable data, so losing the whole instance on a Pod
-  # restart is a liveness event, never a data-loss event; the console's own
-  # in-memory replay ring covers the reconnect window.
-  valkey:
-    mode: disabled
-    # host:port of an existing Valkey. REQUIRED when mode=external, ignored
-    # otherwise (rendering fails fast if mode=external and this is empty).
-    address: ""
-    # Initial dial timeout for the console's Valkey client.
-    dialTimeout: 5s
-    # Port the bundled Valkey listens on and the address the console dials.
-    port: 6379
-    # Bundled-only image. Ignored for mode=external|disabled.
-    image:
-      repository: valkey/valkey
-      tag: 9-alpine
-      pullPolicy: IfNotPresent
-    # Bundled-only resources. Pub/sub fan-out plus short-TTL caches only.
-    resources:
-      limits:
-        cpu: 200m
-        memory: 128Mi
-      requests:
-        cpu: 50m
-        memory: 64Mi
-  # PostgreSQL for durable Console state (ADR-001). M3 uses it for the event
-  # history behind GET /api/v1/events, the auth/RBAC/audit tables and run
-  # history. It is OPTIONAL: with mode=disabled the console runs exactly the
-  # M1/M2 surface — no history, no local/oidc auth, in-memory run history only.
-  #   cnpg     = this chart renders a CloudNativePG Cluster CR; the console
-  #              reads the DSN from the operator-generated <cluster>-app Secret
-  #   external = point at an existing PostgreSQL; you supply a Secret holding
-  #              the full DSN (existingSecret + existingSecretKey)
-  #   disabled = no database (default)
-  # CRD ORDERING TRAP (ADR-001 "Negative"): mode=cnpg requires the CNPG
-  # operator's CRDs to already exist in the cluster. This chart does NOT install
-  # the operator (installOperator is intentionally absent) — `helm install` will
-  # fail with "no matches for kind Cluster" if you skip that step.
-  # NOTE on rotation: the DSN Secret is read once at boot (mounted as a file);
-  # rotating it is an operator-initiated restart, the Deployment does not roll
-  # automatically on Secret changes (only on ConfigMap changes).
+
+  # -- 5.2 database -- PostgreSQL for durable Console state (ADR-001).
   database:
+    # cnpg (renders a CNPG Cluster, operator CRDs must exist) | external | disabled.
     mode: disabled
-    # mode=external only. The Secret must contain a full postgres:// DSN.
-    # The chart NEVER templates a credential value — it references this Secret
-    # by name and mounts the key as a file.
-    existingSecret: ""
-    existingSecretKey: dsn
     maxConns: 10
     connectTimeout: 10s
-    # Run embedded goose migrations at startup (ADR-001: embedded,
-    # advisory-locked, run on start). Set false only if you migrate out of band.
+    # Run the embedded goose migrations at startup.
     migrateOnStart: true
-    # Rows older than this are pruned by a daily background sweep (DATA.md §5.2).
-    # 0 keeps everything forever.
+    # Daily prune of rows older than this; 0 keeps everything.
     retentionDays: 90
-    # mode=cnpg only.
+    # mode=external: Secret holding a full postgres:// DSN, read once at boot.
+    existingSecret: ""
+    # Key inside that Secret; the chart-managed path writes this same key.
+    existingSecretKey: console-database-dsn
+    # Chart-managed alternative to existingSecret; values may be ${vault:...} placeholders.
+    secret:
+      create: false
+      # Empty derives the name from the release name.
+      name: ""
+      annotations: {}
+      labels: {}
+      # Full postgres:// DSN; required when create is true.
+      dsn: ""
+    # mode=cnpg only: the Cluster CR this chart renders (the OPERATOR is section 8).
     cnpg:
       instances: 2
       imageName: ""            # empty = CNPG operator default
@@ -582,343 +222,299 @@ console:
         size: 10Gi
         storageClass: ""
       resources: {}
-      # Optional ScheduledBackup; requires a configured barmanObjectStore.
+      # ScheduledBackup; needs a configured S3-compatible barmanObjectStore.
       backup:
         enabled: false
         schedule: "0 0 2 * * *"
         destinationPath: ""
         endpointURL: ""
-        # Name of an existing Secret with the object-store credentials.
-        # Referenced by name only; never created or read by this chart.
-        # S3-compatible object stores only (barman s3Credentials); for
-        # Azure/GCS/IAM-role credentials render your own Cluster CR.
+        # Existing Secret with the object-store credentials.
+        existingSecret: ""
+        # DEPRECATED, renamed to existingSecret; still honoured when set alone.
         credentialsSecret: ""
-  # Fixed-window request limits on the two endpoints where an unbounded caller
-  # is an availability problem. Both are counts per MINUTE and both follow the
-  # same convention as database.retentionDays: 0 disables THAT limit, a
-  # negative value is a startup error (a typo must not read as "off").
-  #
-  # The window is counted in the console's KV, so the limit is cluster-wide
-  # with valkey.mode=bundled|external and PER REPLICA with valkey.mode=disabled
-  # (the in-process KV has no cross-replica visibility, ADR-002): N replicas
-  # then admit up to N times the configured rate. Weaker than configured,
-  # never stronger.
-  #
-  # Both limits FAIL OPEN when the KV is unreadable — a Valkey outage must not
-  # become a login outage. Every fail-open admission is counted by
-  # kconmon_ng_console_rate_limit_failopen_total.
-  rateLimit:
-    # POST /api/v1/runs per SUBJECT per minute. One run fans out to up to 400
-    # agent pairs, so an unbounded caller is a controller-load amplifier.
-    runsPerMinute: 10
-    # POST /api/v1/auth/login per USERNAME and, counted independently, per
-    # SOURCE IP per minute. This is an availability control as much as an
-    # anti-brute-force one: argon2id is deliberately 64 MiB per verification.
-    loginPerMinute: 5
-  # Console schedule loop: the advisory-locked tick that fires due check_schedules
-  # rows through the diagnostics runner, drives the stuck-run reaper, and (same
-  # lock, same tick gate) reconciles continuous external checks onto agents.
-  #
-  # OFF by default, deliberately. Schedules can be created and stored without
-  # anything acting on them, so upgrading to this chart must not by itself start
-  # dispatching fleet traffic from rows an operator entered while nothing was
-  # consuming them. Turning it on is a deliberate act.
-  #
-  # Enabling it also needs console.database.mode=cnpg|external (check_schedules
-  # and the cross-replica advisory lock both live in PostgreSQL) and a reachable
-  # controller (a fired schedule becomes an ordinary diagnostics run). With
-  # either missing the console logs and skips the loop rather than failing to
-  # start. The block is rendered into the ConfigMap only when enabled.
-  scheduler:
-    enabled: false
-    # Poll cadence. Short by design: the advisory lock is taken and released per
-    # tick, so a replica dying mid-tick delays one tick instead of wedging the
-    # fleet until its PostgreSQL session is reaped. Must be > 0 when enabled.
-    tickInterval: 5s
-  # MTR path history extras (M5). Path history itself needs no configuration —
-  # the checks runner projects every MTR result into mtr_path_snapshots whenever
-  # console.database.mode is cnpg|external. This block is only about ENRICHING
-  # the hop addresses in a stored trace with reverse DNS and MaxMind data.
-  #
-  # The whole block is rendered into the ConfigMap only when enabled, exactly
-  # like console.scheduler and config.checkers.external: the console config is
-  # parsed with KnownFields(true) and a pre-M5 console image has no `mtr:` key
-  # at all, so an unconditional block would crashloop the old Pod as the
-  # Deployment rolls. Off by default also keeps this chart's default render
-  # key-identical to 1.6.0's.
-  mtr:
-    enrichment:
-      # Master gate. OFF for a stronger reason than the scheduler's: enrichment
-      # is the only part of the console that talks to something other than the
-      # controller, Prometheus, Valkey and PostgreSQL. rdns sends every hop
-      # address the fleet ever traced to whatever resolver /etc/resolv.conf
-      # names — an egress footprint, not a default.
-      enabled: false
-      # rdns and geoip gate INDEPENDENTLY. An air-gapped cluster with mmdb files
-      # and no reachable resolver runs geoip-only; a cluster with internal DNS
-      # and no MaxMind licence runs rdns-only. Turning the master gate on with
-      # every source off is a STARTUP ERROR, not a no-op: the resolver would
-      # cache empty rows and the ttl would then protect them for a day.
-      rdns:
-        enabled: false
-        # Bounds ONE lookup, not the batch. Milliseconds rather than a duration
-        # string so `500` cannot accidentally mean 500ns. Must be > 0 when
-        # rdns.enabled.
-        timeoutMs: 500
-      # MaxMind GeoLite2 databases. The console NEVER downloads them: the files
-      # come from a volume you supply below. An empty path is that source off;
-      # an unreadable file is NOT a boot failure — the console warns, disables
-      # that one source, and keeps serving trace history.
-      geoip:
-        # Both paths must sit under /geoip — that mount path is fixed by the
-        # chart (see volume below), and a path outside it names a file no
-        # container ever sees.
-        # asnPath: /geoip/GeoLite2-ASN.mmdb
-        asnPath: ""
-        # cityPath: /geoip/GeoLite2-City.mmdb
-        cityPath: ""
-        # OPAQUE Kubernetes VolumeSource, spliced verbatim into the console
-        # Pod's volumes[] and mounted read-only at /geoip. Deliberately not a
-        # typed {configMap|secret|hostPath|pvc} switch: mmdb files are ~10 MB
-        # (too big for a ConfigMap in many clusters), operators keep them in
-        # wildly different places, and re-declaring the VolumeSource union in
-        # values.schema.json would go stale the first time Kubernetes adds a
-        # source. Whatever you write here is what Kubernetes validates.
-        #
-        #   volume:
-        #     persistentVolumeClaim:
-        #       claimName: geolite2
-        #
-        # Rendering FAILS if a geoip path is set and this is empty: the config
-        # would name a file nothing mounts, and the console would start, warn
-        # once and silently run without geoip — the failure mode this guard
-        # exists to make loud.
-        volume: {}
-      # Cache row lifetime in mtr_hop_enrichment. A row older than this is
-      # re-resolved on the next read that wants it: there is no background
-      # refresher in M5, so an address nobody looks at costs nothing. 24h
-      # because the answers are slow-moving — a PTR record and an ASN change on
-      # the order of months. Must be > 0 when enabled.
-      #
-      # The cache lives in PostgreSQL, so this whole block is INERT with
-      # console.database.mode=disabled: the console logs a warning at boot and
-      # runs without the resolver rather than re-resolving on every read.
-      ttl: 24h
-  # Kubernetes event capture (M6). The ONLY part of the console that talks to
-  # the apiserver: it list+watches core/v1 Events and writes the ones that
-  # concern this fleet into k8s_events, so the Investigate timeline can put
-  # "the kubelet restarted this pod" next to "loss to this node spiked".
-  #
-  # The whole block is rendered into the ConfigMap only when enabled, exactly
-  # like console.scheduler and console.mtr: the console config is parsed with
-  # KnownFields(true) and a pre-M6 console image has no `kubernetesContext:` key
-  # at all, so an unconditional block would crashloop the old Pod as the
-  # Deployment rolls. Off by default also keeps this chart's default render
-  # key-identical to 1.7.0's.
-  kubernetesContext:
-    # Master gate. OFF for the same reason mtr.enrichment is: turning it on
-    # gives the console pod a NEW egress (the apiserver) and a NEW RBAC grant
-    # (events/nodes/pods get,list,watch). Enabling it renders, under this one
-    # flag: the config block, a console-only ServiceAccount + ClusterRole +
-    # ClusterRoleBinding (templates/rbac.yaml — the agent/controller grant is
-    # NEVER widened), serviceAccountName on the console Deployment, the
-    # POD_NAMESPACE downward-API env var, and the apiserver egress rule.
-    #
-    # It also needs console.database.mode=cnpg|external: captured events live
-    # in PostgreSQL. With the database off the console logs a warning and skips
-    # the reader rather than failing to start (the enrichment precedent).
-    enabled: false
-    # The ONE namespace whose POD events are captured. Empty — the default —
-    # means "the namespace this release runs in", which the console reads from
-    # the POD_NAMESPACE env var the Deployment sets via the downward API.
-    #
-    # Deliberately one namespace and not a list: the release namespace is where
-    # the agents and the controller run, and widening this is how a capture
-    # turns into a cluster-wide event firehose. NODE events are cluster-scoped
-    # and filtered differently — kept only for nodes present in the controller's
-    # topology, dropped entirely when no topology is available (fail closed).
-    namespace: ""
-    # Periodic relist even while the watch is healthy — the backstop against a
-    # watch that is silently wedged (connected, delivering nothing), which no
-    # error path can detect. Ten minutes because the apiserver keeps events for
-    # an hour by default, so a relist at this cadence cannot miss one, and every
-    # relisted row the database already holds costs one conflicting INSERT, not
-    # a duplicate row. Must be > 0 when enabled.
-    resyncInterval: 10m
-  # Outbound webhooks (M6). Everything about a webhook endpoint — its URL, its
-  # event filter, its enabled flag, its HMAC signing secret — is a database row
-  # an admin typed through the API. Only ONE thing is a deployment secret and
-  # therefore config: the AES-256-GCM key that encrypts each endpoint's signing
-  # secret at rest.
-  #
-  # Leaving this empty is a supported state, not a broken one: every read,
-  # update, disable and delete route keeps working, and only the two operations
-  # that need the cipher — creating an endpoint and testing one — answer 503
-  # naming this value. A key that IS named but unreadable or malformed is a
-  # broken Secret mount, and the console refuses to start on it exactly as it
-  # refuses to start on an unreadable database.dsnFile.
+        # Chart-managed alternative; CNPG fixes the two key names it reads.
+        secret:
+          create: false
+          # Empty derives the name from the release name.
+          name: ""
+          annotations: {}
+          labels: {}
+          # Written as ACCESS_KEY_ID; required when create is true.
+          accessKeyId: ""
+          # Written as ACCESS_SECRET_KEY; required when create is true.
+          secretAccessKey: ""
+
+  # -- 5.3 auth -- SECURITY.md 10.1.
+  auth:
+    # anonymous | local | header | oidc.
+    mode: anonymous
+    # Role for an authenticated subject no binding matches; empty means none.
+    defaultRole: ""
+    anonymous:
+      # Fixed role for every anonymous request.
+      role: viewer
+    # mode=local; requires console.database.mode=cnpg|external.
+    local:
+      # Created on first start only, while the users table is empty.
+      bootstrapAdmin: ""
+      # Existing Secret holding the bootstrap password.
+      existingSecret: ""
+      # Key inside that Secret; the chart-managed path writes this same key.
+      existingSecretKey: console-local-admin-password
+      # Chart-managed alternative to existingSecret; values may be ${vault:...} placeholders.
+      secret:
+        create: false
+        # Empty derives the name from the release name.
+        name: ""
+        annotations: {}
+        labels: {}
+        # Bootstrap admin password; required when create is true.
+        password: ""
+    # mode=header: identity from a trusted in-cluster reverse proxy.
+    header:
+      userHeader: X-Remote-User
+      groupsHeader: X-Remote-Groups
+      groupsDelimiter: ","
+      # Required and non-empty for mode=header, else headers are an auth bypass.
+      trustedProxyCIDRs: []
+    # mode=oidc; requires a database, and Valkey for replicas > 1.
+    oidc:
+      issuer: ""
+      clientID: ""
+      redirectURL: ""
+      scopes: [openid, profile, email, groups]
+      usernameClaim: preferred_username
+      groupsClaim: groups
+      # Existing Secret holding the OIDC client secret.
+      existingSecret: ""
+      # Key inside that Secret; the chart-managed path writes this same key.
+      existingSecretKey: console-oidc-client-secret
+      # Chart-managed alternative to existingSecret; values may be ${vault:...} placeholders.
+      secret:
+        create: false
+        # Empty derives the name from the release name.
+        name: ""
+        annotations: {}
+        labels: {}
+        # OIDC client secret; required when create is true.
+        clientSecret: ""
+    # Session cookie for every non-anonymous mode.
+    session:
+      ttl: 12h
+      cookieName: __Host-kconmon_session
+      # A __Host- cookie with secure=false is rejected at startup.
+      secure: true
+
+  # -- 5.4 valkey -- pub/sub for cross-replica WebSocket fan-out (ADR-002).
+  valkey:
+    # bundled (ephemeral, no PVC) | dependency (section 8 subchart) | external | disabled (in-process, replicas=1).
+    mode: disabled
+    # host:port; required for mode=external.
+    address: ""
+    dialTimeout: 5s
+    # Password for a Valkey that requires AUTH (the norm for managed and for the subchart).
+    # Empty means no AUTH, which is what the unauthenticated bundled Valkey wants.
+    existingSecret: ""
+    # Key inside that Secret; the chart-managed path writes this same key.
+    existingSecretKey: console-valkey-password
+    # Chart-managed alternative to existingSecret; values may be ${vault:...} placeholders.
+    secret:
+      create: false
+      # Empty derives the name from the release name.
+      name: ""
+      annotations: {}
+      labels: {}
+      # Valkey password; required when create is true.
+      password: ""
+    # Port the bundled Valkey listens on.
+    port: 6379
+    # Bundled-only.
+    image:
+      repository: valkey/valkey
+      tag: 9-alpine
+      pullPolicy: IfNotPresent
+    # Bundled-only.
+    resources:
+      limits:
+        cpu: 200m
+        memory: 128Mi
+      requests:
+        cpu: 50m
+        memory: 64Mi
+    # Bundled-only; restricted-PSS compliant.
+    podSecurityContext:
+      runAsNonRoot: true
+      runAsUser: 1000
+      seccompProfile:
+        type: RuntimeDefault
+    securityContext:
+      allowPrivilegeEscalation: false
+      readOnlyRootFilesystem: false
+      capabilities:
+        drop:
+          - ALL
+
+  # -- 5.5 webhooks -- endpoints themselves are database rows, not values.
   webhooks:
-    # Reference to an existing Secret holding the key, base64 (standard
-    # encoding) of 32 random bytes: `openssl rand -base64 32`. Same posture as
-    # console.database.existingSecret — the chart references this Secret BY NAME
-    # and mounts the key as a file (webhooks.encryptionKeyFile in the rendered
-    # config); it NEVER templates a credential value, and there is deliberately
-    # no inline-key value to make that impossible.
-    #
-    # The file lands in the same projected volume as the DSN, so rotating the
-    # Secret is an operator-initiated restart: it is read once at boot and the
-    # Deployment rolls on ConfigMap changes only.
+    # Existing Secret with the AES-256-GCM key (base64 of 32 bytes) that
+    # encrypts endpoint signing secrets; empty leaves create and test at 503.
+    existingSecret: ""
+    # Key inside that Secret; the chart-managed path writes this same key.
+    existingSecretKey: console-webhooks-encryption-key
+    # Chart-managed alternative to existingSecret; values may be ${vault:...} placeholders.
+    secret:
+      create: false
+      # Empty derives the name from the release name.
+      name: ""
+      annotations: {}
+      labels: {}
+      # base64 of 32 random bytes (openssl rand -base64 32); required when create is true.
+      encryptionKey: ""
+    # Alert-transition poll cadence, and the resolution granularity of every
+    # alert.resolved delivery; emitted only with webhooks and alerting both on.
+    alertPollInterval: 30s
+    # DEPRECATED, renamed to webhooks.existingSecret/existingSecretKey.
     encryptionKeySecret:
       name: ""
-      key: encryptionKey
-    # How often the alert-transition watcher (M7) reads Prometheus' current
-    # alert set to detect fired/resolved edges and POST alert.fired /
-    # alert.resolved. It lives under webhooks and not under alerting on
-    # purpose: alerting.syncInterval pushes rules INTO Prometheus, this reads
-    # alert STATE back out, and it exists for exactly one purpose — firing
-    # deliveries. With no encryption key (no webhooks) or with alerting off it
-    # does nothing at all, which is why it is rendered into the config only
-    # when BOTH are on.
-    #
-    # It is also, directly, the RESOLUTION GRANULARITY of every alert.resolved
-    # delivery: a resolution is detected by an alert's absence from a poll, so
-    # "resolved at" means "resolved somewhere in the interval ending here".
-    # Shortening it sharpens that number and costs one more GET per interval
-    # per replica; lengthening it blunts it. Must be > 0 when it is emitted.
-    #
-    # NOTE there is no leader election on this watcher: N console replicas
-    # deliver N copies of every edge. That is deliberate (a lock trades
-    # duplicates for MISSED edges when the holder dies mid-interval) —
-    # receivers should dedupe on the fingerprint in the payload. See
-    # ALERTING.md.
-    alertPollInterval: 30s
-  # Prometheus alert rules (M7). The console MANAGES rules; Prometheus
-  # EVALUATES them. Every rule an operator creates on /alerting is a row in
-  # alert_rules, and this reconciler renders all the enabled ones into ONE
-  # PrometheusRule object and server-side-applies it on an interval and on
-  # every write. Nothing here evaluates anything, and turning it off does not
-  # delete the object it last applied.
-  #
-  # The whole block is rendered into the ConfigMap only when enabled, exactly
-  # like console.kubernetesContext and console.mtr: the console config is
-  # parsed with KnownFields(true) and a pre-M7 console image has no `alerting:`
-  # key at all, so an unconditional block would crashloop the old Pod as the
-  # Deployment rolls. Off by default also keeps this chart's default render
-  # key-identical to 1.8.0's.
+      key: null
+
+  # -- 5.6 alerting -- Console-managed Prometheus alert rules, reconciled into one PrometheusRule.
   alerting:
-    # Master gate. OFF because turning it on gives the console pod a Kubernetes
-    # identity and the power to WRITE a monitoring.coreos.com object. Enabling
-    # it renders, under this one flag: the config block, the console-only
-    # ServiceAccount (shared with kubernetesContext), a namespaced Role +
-    # RoleBinding for prometheusrules (templates/rbac.yaml — a Role, not a
-    # ClusterRole, so it cannot reach past this namespace), serviceAccountName
-    # on the console Deployment, the POD_NAMESPACE downward-API env var and the
-    # apiserver egress rule.
-    #
-    # It needs the Prometheus Operator's PrometheusRule CRD to exist in the
-    # cluster; without it every apply fails with a crd-missing cause the
-    # console reports per rule rather than at boot. It also needs
-    # console.database.mode=cnpg|external — the rules live in PostgreSQL, and
-    # with the database off the console SKIPS the reconciler rather than
-    # applying an empty bundle over rules that are already evaluating.
+    # Off by default: enabling it lets the console write a cluster object.
     enabled: false
-    # The namespace the single PrometheusRule object is applied into. Empty —
-    # the default — means "the namespace this release runs in", read from the
-    # POD_NAMESPACE env var the Deployment sets via the downward API.
-    #
-    # Deliberately one namespace and deliberately this one: the grant is a Role
-    # in the release namespace, so pointing this elsewhere does not widen
-    # anything, it just makes every apply fail with a forbidden that lands in
-    # each rule's sync_message. Whether your Prometheus PICKS UP a rule object
-    # in this namespace is a ruleNamespaceSelector question on the Prometheus
-    # CR, not a chart one.
+    # Namespace the object is applied into; empty means this release's.
     namespace: ""
-    # Reconcile cadence. Sixty seconds because a reconcile is a single
-    # server-side apply of a few kilobytes and the loop exists to CONVERGE, not
-    # to react — reacting is what every create/update/delete through the API
-    # already does, so this interval only ever covers drift somebody introduced
-    # out of band. Jittered ±20% in the loop so N replicas do not apply in
-    # lockstep. Must be > 0 when enabled.
+    # Reconcile cadence, jittered 20%; must be > 0 when enabled.
     syncInterval: 60s
-    # Name of the ONE PrometheusRule object the console owns. One object and
-    # not one per rule: a single apply target means drift is one comparison and
-    # a partial apply is impossible.
-    #
-    # Configurable only so two consoles can share a namespace without fighting
-    # over the same object. CHANGING IT ON A LIVE INSTALL ORPHANS THE PREVIOUS
-    # OBJECT — the reconciler owns what it is pointed at and deletes nothing —
-    # which is why the default is spelled out here rather than derived from the
-    # release name. Must be a DNS-1123 subdomain when enabled.
+    # Name of the one owned PrometheusRule; changing it orphans the previous.
     bundleName: kconmon-ng-console-rules
-  # Pod-level securityContext for the console Deployment. Rendered ONLY when
-  # database.mode != disabled, so the default (database off) manifest stays
-  # byte-identical to chart 1.4.0. The default fsGroup matches the distroless
-  # nonroot gid (65532): the kubelet writes the DSN Secret file root-owned, and
-  # fsGroup + the volume's group-readable defaultMode (0440) is what lets the
-  # nonroot console process read it — without this the console crashes at boot
-  # with "read database.dsnFile: permission denied". Override if you run a
-  # custom console image with a different gid.
+
+  # -- 5.7 optional console features --
+  # Advisory-locked tick firing due schedules and reconciling external checks.
+  scheduler:
+    # Off by default so an upgrade never starts dispatching fleet traffic.
+    enabled: false
+    # Poll cadence; must be > 0 when enabled.
+    tickInterval: 5s
+  # Reverse DNS and MaxMind enrichment of stored MTR hop addresses.
+  mtr:
+    enrichment:
+      # Off by default: rdns is an egress footprint.
+      enabled: false
+      # rdns and geoip gate independently; all sources off is a startup error.
+      rdns:
+        enabled: false
+        # Bounds one lookup, in milliseconds.
+        timeoutMs: 500
+      # MaxMind GeoLite2 databases, served from the fixed /geoip mount.
+      geoip:
+        # auto (geoipupdate sidecar keeps them fresh) | volume (you supply them) | disabled.
+        # Empty derives it: a volume or a path you set means volume, otherwise disabled.
+        mode: ""
+        # Editions the sidecar downloads; also what the default paths are derived from.
+        editions:
+          - GeoLite2-ASN
+          - GeoLite2-City
+        # geoipupdate's own unit: hours between downloads.
+        updateIntervalHours: 24
+        # How often the console re-reads changed files; 0 never reloads (restart required).
+        reloadInterval: 1h
+        image:
+          repository: ghcr.io/maxmind/geoipupdate
+          tag: v7.1.1
+          pullPolicy: IfNotPresent
+        resources:
+          limits:
+            cpu: 100m
+            memory: 64Mi
+          requests:
+            cpu: 10m
+            memory: 32Mi
+        # Sidecar container securityContext; it writes into the shared /geoip emptyDir.
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: false
+          capabilities:
+            drop:
+              - ALL
+        # mode=auto: MaxMind credentials (a free GeoLite2 account issues them).
+        existingSecret: ""
+        # Keys inside that Secret; the chart-managed path writes these same keys.
+        accountIdKey: console-maxmind-account-id
+        licenseKeyKey: console-maxmind-license-key
+        # Chart-managed alternative to existingSecret; values may be ${vault:...} placeholders.
+        secret:
+          create: false
+          # Empty derives the name from the release name.
+          name: ""
+          annotations: {}
+          labels: {}
+          # MaxMind account ID; required when create is true.
+          accountId: ""
+          # MaxMind license key; required when create is true.
+          licenseKey: ""
+        # mode=volume (airgapped): opaque VolumeSource mounted read-only at /geoip.
+        volume: {}
+        # Override only if your files are not named after their edition IDs.
+        asnPath: ""
+        cityPath: ""
+      # Cache row lifetime in PostgreSQL; must be > 0 when enabled.
+      ttl: 24h
+  # Kubernetes event capture into the Investigate timeline.
+  kubernetesContext:
+    # Off by default: enabling it adds apiserver egress and an RBAC grant.
+    enabled: false
+    # The one namespace whose pod events are captured; empty means this release's.
+    namespace: ""
+    # Periodic relist backstop against a silently wedged watch.
+    resyncInterval: 10m
+  # Fixed-window request limits; 0 disables one, a negative value fails startup.
+  rateLimit:
+    # POST /api/v1/runs per subject per minute.
+    runsPerMinute: 10
+    # POST /api/v1/auth/login per username and per source IP per minute.
+    loginPerMinute: 5
+
+  # -- 5.8 console workload plumbing --
+  # fsGroup lets the nonroot console read the root-owned Secret files.
   podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 65532
     fsGroup: 65532
-  # NetworkPolicy rules specific to the console (only rendered when
-  # console.enabled and the top-level networkPolicy.enabled are both true).
-  # NOTE: a Kubernetes NetworkPolicy is only ONE of the two layers that gate
-  # this traffic in a real deployment. If the destination (an external Valkey,
-  # a Prometheus outside the cluster) sits behind a host firewall — iptables,
-  # nftables, a puppet-managed ruleset, a cloud security group — that layer
-  # must be opened separately. Egress allowed here and still refused on the
-  # wire almost always means the host-firewall layer was missed.
+    seccompProfile:
+      type: RuntimeDefault
+  # restricted-PSS compliant.
+  securityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    capabilities:
+      drop:
+        - ALL
+  # Console NetworkPolicy rules; a host firewall on the destination is a
+  # separate layer this chart cannot open.
   networkPolicy:
-    # Custom egress rule list for console -> Prometheus; when empty a
-    # default rule allowing TCP 9090 to any namespace is rendered.
+    # Empty renders a default allowing TCP 9090 to any namespace.
     prometheusEgress: []
-    # Custom egress rule list for console -> external Valkey; when empty and
-    # console.valkey.mode=external, a default rule allowing the port from
-    # console.valkey.address (NOT console.valkey.port, which describes the
-    # bundled listener) to any namespace is rendered. Ignored for mode=bundled
-    # (a precise pod-selector rule is rendered instead).
+    # Empty renders a default for mode=external; ignored for mode=bundled.
     valkeyEgress: []
-    # Custom egress rule list for console -> an EXTERNAL PostgreSQL; when empty
-    # and mode=external, a default rule allowing TCP 5432 to any namespace is
-    # rendered. Ignored for mode=cnpg (a precise pod-selector rule is rendered
-    # instead). Same two-layer warning as above applies: for a database outside
-    # the cluster, the destination host's own firewall must allow it too.
+    # Empty renders a default allowing TCP 5432; ignored for mode=cnpg.
     databaseEgress: []
-    # Custom egress rule list for console -> the OIDC IdP (auth.mode=oidc
-    # only); when empty a permissive default rule allowing TCP 443 to any
-    # namespace is rendered, since an IdP is almost always outside the
-    # cluster and its address is not known to this chart. A PUBLIC IdP also
-    # needs egress to DNS (already allowed, see the DNS rule below) to
-    # resolve its hostname. Same two-layer warning as prometheusEgress/
-    # valkeyEgress/databaseEgress: this NetworkPolicy is only the CLUSTER
-    # side of the gate — a cluster that also enforces a default-deny egress
-    # policy at the node/CNI layer (not just via Kubernetes NetworkPolicy)
-    # must be checked and opened there too, or the IdP stays unreachable
-    # even with this rule present.
+    # Empty renders a default allowing TCP 443 to any namespace.
     oidcEgress: []
-    # Custom egress rule list for console -> the Kubernetes apiserver
-    # (console.kubernetesContext.enabled only); when empty a default rule
-    # allowing TCP 443 and 6443 to 0.0.0.0/0 is rendered. ipBlock and not a
-    # namespaceSelector on purpose: kubernetes.default.svc is a ClusterIP with
-    # no pod behind it, and the real endpoints are the control-plane node
-    # addresses — a namespaceSelector matches only in-cluster Pods and would
-    # silently drop every packet to the apiserver, leaving the event reader
-    # retrying with a backoff and nothing else to say why. Tighten this to your
-    # control plane's actual addresses. Same two-layer warning as the other
-    # egress rules: for a control plane outside the cluster network this
-    # NetworkPolicy is only the cluster-side gate.
+    # Empty renders a default allowing TCP 443/6443 to 0.0.0.0/0.
     kubeAPIEgress: []
+    # Empty renders a default allowing TCP 443 to 0.0.0.0/0 for the geoipupdate sidecar.
+    geoipEgress: []
   service:
     type: ClusterIP
-    # Port the console listens on and the Service exposes.
     port: 8080
   ingress:
     enabled: false
     className: ""
     annotations: {}
-    # hosts: [{host: console.example.com, paths: [{path: /, pathType: Prefix}]}]
+    # [{host: console.example.com, paths: [{path: /, pathType: Prefix}]}]
     hosts: []
-    # tls: [{secretName: console-tls, hosts: [console.example.com]}]
+    # [{secretName: console-tls, hosts: [console.example.com]}]
     tls: []
   resources:
     limits:
@@ -930,8 +526,124 @@ console:
   nodeSelector: {}
   tolerations: []
   affinity: {}
-  # PodDisruptionBudget for the console Deployment. Only rendered when
-  # console.enabled and replicas > 1.
+  # Rendered only when console.enabled and replicas > 1.
   pdb:
     enabled: true
     minAvailable: 1
+
+# == 6. Observability == objects for a Prometheus Operator you already run; this chart installs none.
+
+# Ships dashboards/*.json as ConfigMaps for the Grafana sidecar to pick up.
+dashboards:
+  enabled: false
+  # Empty renders into the release namespace; set it where your Grafana sidecar watches.
+  namespace: ""
+  # Label the Grafana sidecar selects on, and its value.
+  label: grafana_dashboard
+  labelValue: "1"
+  # Grafana folder the sidecar files them under; empty leaves it at the sidecar default.
+  folder: kconmon-ng
+  extraLabels: {}
+  annotations: {}
+
+# ServiceMonitor for /metrics; needs the operator CRDs.
+serviceMonitor:
+  enabled: false
+  interval: 15s
+
+# PrometheusRule with the built-in alerts; rule text lives in templates/_rules.tpl, tuning here.
+prometheusRule:
+  enabled: false
+  # UDP loss ratio above threshold on a pair.
+  udpLossHigh:
+    enabled: true
+    # Loss ratio, 0.0-1.0.
+    threshold: 0.5
+    for: 5m
+    severity: warning
+  # TCP failure ratio (rate(fail)/rate(all)) above threshold on a pair.
+  tcpChecksFailing:
+    enabled: true
+    # Failure ratio, 0.0-1.0.
+    threshold: 0.05
+    for: 5m
+    severity: warning
+  # A pair probed within the last hour that now reports nothing.
+  pairWentSilent:
+    enabled: true
+    for: 10m
+    severity: warning
+  # DNS failure ratio above threshold per host/resolver.
+  dnsChecksFailing:
+    enabled: true
+    # Failure ratio, 0.0-1.0.
+    threshold: 0.05
+    for: 5m
+    severity: warning
+  # External-target failure ratio above threshold; looser, it leaves the cluster.
+  externalChecksFailing:
+    enabled: true
+    # Failure ratio, 0.0-1.0.
+    threshold: 0.1
+    for: 5m
+    severity: warning
+  # Registered agents below the schedulable-node count; needs leaderElection.
+  kconmonAgentsMissing:
+    enabled: true
+    for: 10m
+    severity: warning
+  # No controller reports itself leader; needs leaderElection.
+  kconmonControllerDown:
+    enabled: true
+    for: 5m
+    severity: critical
+  # Extra rules appended verbatim; write metric names with your own prefix.
+  additionalRules: []
+  # DEPRECATED (pre-1.12 shape): a non-empty list replaces every built-in above.
+  rules: []
+
+# == 7. Kubernetes == identity, network and disruption plumbing.
+
+# ServiceAccount for the agent and controller.
+serviceAccount:
+  # False binds the pods to an existing ServiceAccount instead of creating one.
+  create: true
+  # Empty generates the name from the release name; required when create is false.
+  name: ""
+
+# ClusterRole/Role and their bindings; they bind to the resolved ServiceAccount
+# name whether or not this chart created it. False means you manage RBAC.
+rbac:
+  create: true
+
+# NetworkPolicy for agent/controller traffic; enable only if the cluster enforces policies.
+networkPolicy:
+  enabled: false
+  # Namespace Prometheus scrapes from; empty allows any namespace.
+  prometheusNamespace: ""
+  # Empty renders a default allowing TCP 443/6443 to 0.0.0.0/0 for the apiserver.
+  kubeAPIEgress: []
+  # Empty renders TCP 80/443 + ICMP to 0.0.0.0/0 when the external checker is on.
+  externalEgress: []
+  # Empty renders TCP 80/443 to 0.0.0.0/0 when the HTTP checker is on.
+  httpEgress: []
+  # Egress to DNS resolvers outside the cluster (config.checkers.dns.resolvers).
+  resolverEgress: []
+
+# PodDisruptionBudget for the controller Deployment.
+pdb:
+  # With replicaCount 1 this blocks voluntary eviction of the sole controller.
+  enabled: true
+  minAvailable: 1
+
+# == 8. Optional dependencies == subcharts for the product's OWN stack, both off by default.
+# Helm keys subchart values by the dependency ALIAS, so these are top-level
+# blocks and everything under them passes through verbatim. See README.
+
+# CloudNativePG OPERATOR; false assumes it is already installed (the Cluster CR is 5.2).
+cnpg-operator:
+  enabled: false
+
+# Valkey subchart, consumed by console.valkey.mode=dependency; read the image caveat in README.
+valkey:
+  enabled: false

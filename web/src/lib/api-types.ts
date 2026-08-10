@@ -1029,7 +1029,7 @@ export interface paths {
         put?: never;
         /**
          * Mint a token.
-         * @description The response is the only place the raw wire-form token (kcm_...) is ever returned; it is never stored or logged. Served with Cache-Control: no-store.
+         * @description The response is the only place the raw wire-form token (kcm_...) is ever returned; it is never stored or logged. Served with Cache-Control: no-store. An expiresAt that is not in the future is refused with 422 before any secret is generated: such a token could never authenticate, so minting one would only leak a secret.
          */
         post: operations["createToken"];
         delete?: never;
@@ -1051,7 +1051,10 @@ export interface paths {
         get?: never;
         put?: never;
         post?: never;
-        /** Revoke one token; 404 for an unknown or already-revoked id. */
+        /**
+         * Revoke an active token, or purge an already-spent one.
+         * @description The action follows the token's current state. On an ACTIVE token this revokes, which is what it has always meant: the row survives, carrying its revokedAt. On a token that is already revoked, or past its expiresAt, it hard-deletes the row instead -- an already-spent credential can authenticate nothing, so keeping it would only grow the list forever. Either way the answer is 204; 404 means no token with that id exists at all.
+         */
         delete: operations["revokeToken"];
         options?: never;
         head?: never;
@@ -1684,6 +1687,8 @@ export interface components {
             series: number;
             /** @description Set exactly when the evaluation half did not run or did not answer. Prometheus's own message is forwarded for a rejected expression (it is about the expression the caller just sent); every other failure is reported in the console's words, because those errors carry the configured Prometheus URL. */
             error?: string;
+            /** @description True only when Prometheus itself refused the expression (a 4xx -- a parse error, bad_data). An unreachable or erroring Prometheus, an unconfigured one, and a response that was simply too large all leave this false: in those cases the expression was never judged, so a client must stay permissive rather than treat "not checked" as "bad". */
+            rejected?: boolean;
         };
         /** @description A reconcile was requested. The outcome lands on the rules, not here. */
         SyncKick: {
@@ -1883,7 +1888,7 @@ export interface components {
             nextCursor: string;
         };
         RunCreateRequest: {
-            /** @description Empty or absent means every node in the current topology. */
+            /** @description Empty or absent means every node in the current topology, which is every node carrying a registered agent - the measurement fleet, not the Kubernetes Node inventory. The two differ on any cluster whose controller has no node informer, where the Node list is empty while agents are registered and probing. */
             sources?: string[];
             destinations?: string[];
             type: components["schemas"]["CheckType"];
@@ -1905,6 +1910,13 @@ export interface components {
             destinationTargetId?: string;
             /** @description Required when destinationKind is adhoc. */
             destinationAddress?: string;
+            /**
+             * Format: int64
+             * @description Optional. Absent or 0 runs the check ONCE per pair (an instant run, the default and the only behaviour before this field existed). Any other value turns it into an interval run: every pair is re-probed on a cadence for this long, each probe kept as its own result sample, and the run stays `running` - cancellable, streaming progress on its `run:{id}` topic - until the duration elapses.
+             *     Bounded to 10s..24h; outside that the request is refused with 422 naming both bounds, never silently clamped.
+             *     The cadence is derived, not requested: duration / 500, floored at 5s. That caps ONE PAIR at 500 samples however long the run is, so a 24h run samples roughly every 173s across the whole day rather than filling its quota in the first hour. A run's total sample count is therefore at most pairs x 500.
+             */
+            durationNs?: number;
         };
         RunCreateResponse: {
             id: string;
@@ -1930,6 +1942,7 @@ export interface components {
             pairOk: number;
             pairFailed: number;
         };
+        /** @description One PROBE of one pair. An instant run contributes exactly one of these per pair (sampleSeq 0); an interval run contributes one per pair per round, and (sourceNode, destinationNode, sampleSeq) is what identifies a sample. Rows come back in completion order, which is the timeline. */
         RunResult: {
             sourceNode: string;
             destinationNode: string;
@@ -1943,6 +1956,8 @@ export interface components {
             };
             /** Format: date-time */
             recordedAt: string;
+            /** @description 0-based probe number within this pair. Always 0 for an instant run; 0..n-1 for an interval run, capped at 499 (500 samples per pair). */
+            sampleSeq: number;
         };
         /** @description One run's summary plus its spec snapshot and per-pair results. */
         RunDetail: components["schemas"]["RunSummary"] & {
@@ -2184,7 +2199,10 @@ export interface components {
         };
         TokenCreateRequest: {
             name: string;
-            /** Format: date-time */
+            /**
+             * Format: date-time
+             * @description Must be in the future when present; omit it for a token that never expires.
+             */
             expiresAt?: string;
         };
         TokenCreateResponse: {
@@ -4490,6 +4508,7 @@ export interface operations {
             400: components["responses"]["BadRequest"];
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
+            422: components["responses"]["UnprocessableEntity"];
             500: components["responses"]["InternalError"];
             502: components["responses"]["BadGateway"];
             503: components["responses"]["Unavailable"];

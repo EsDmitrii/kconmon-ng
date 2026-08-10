@@ -1,0 +1,38 @@
+---
+# The combination whose absence hid the missing geoipupdate egress: NetworkPolicy
+# and geoip auto ON together, plus every checker that needs its own egress rule.
+networkPolicy:
+  enabled: true
+  prometheusNamespace: monitoring
+
+config:
+  checkers:
+    icmp:
+      enabled: true
+    http:
+      enabled: true
+      targets:
+        - url: https://kubernetes.default.svc.cluster.local/healthz
+    external:
+      enabled: true
+      allowedCidrs:
+        - 10.0.0.0/8
+
+console:
+  enabled: true
+  replicas: 1
+  prometheus:
+    url: http://prometheus-operated.monitoring:9090
+  database:
+    mode: external
+    existingSecret: console-dsn
+  valkey:
+    mode: external
+    address: valkey.data.svc.cluster.local:6379
+    existingSecret: valkey-auth
+  mtr:
+    enrichment:
+      enabled: true
+      geoip:
+        mode: auto
+        existingSecret: maxmind-creds

@@ -37,11 +37,7 @@ func (c *MTRChecker) Name() model.CheckType {
 	return model.CheckMTR
 }
 
-// TryAcquire checks whether MTR can run for the given source-destination pair
-// and, if so, atomically records the current time to enforce the cooldown.
-// Returns true if the trace should proceed, false if still within cooldown.
-// Expired entries are purged on each call to prevent unbounded map growth in
-// large clusters where node pairs come and go over time.
+// TryAcquire checks whether MTR can run for the given source-destination pair and.
 func (c *MTRChecker) TryAcquire(source, destination string) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -62,20 +58,28 @@ func (c *MTRChecker) TryAcquire(source, destination string) bool {
 }
 
 func (c *MTRChecker) Check(ctx context.Context, target Target) model.CheckResult {
+	// Every other checker fills Duration; MTR did not, so a SUCCESSFUL trace
+	// reached the console as durationNs 0 while a failed one carried the
+	// console's own wall clock (the runner's error branch measures it there).
+	// The whole trace is what a traceroute takes -- per-hop RTTs are their own
+	// field and are not summed into this.
+	start := time.Now()
 	result := model.CheckResult{
 		Type:      model.CheckMTR,
-		Timestamp: time.Now(),
+		Timestamp: start,
 	}
 
 	ip := net.ParseIP(target.PodIP)
 	if ip == nil {
 		result.Error = fmt.Sprintf("invalid IP: %s", target.PodIP)
+		result.Duration = time.Since(start)
 		return result
 	}
 
 	hops, err := c.traceroute(ctx, ip)
 	if err != nil {
 		result.Error = fmt.Sprintf("MTR traceroute: %v", err)
+		result.Duration = time.Since(start)
 		return result
 	}
 
@@ -86,6 +90,7 @@ func (c *MTRChecker) Check(ctx context.Context, target Target) model.CheckResult
 
 	result.Success = true
 	result.Details = details
+	result.Duration = time.Since(start)
 
 	slog.Info("MTR trace completed",
 		"target", target.PodIP,
@@ -206,11 +211,7 @@ func (c *MTRChecker) traceroute(ctx context.Context, dst net.IP) ([]model.MTRHop
 	return hops, nil
 }
 
-// hopIPFromAddr extracts the bare IP from a net.Addr returned by an ICMP
-// socket's ReadFrom. Depending on platform and address family this can be a
-// *net.IPAddr or a *net.UDPAddr (which stringifies as "ip:port"); either way
-// callers need the bare IP for display, metric labels, and reverse-DNS
-// lookups.
+// hopIPFromAddr extracts the bare IP from a net.Addr returned by an ICMP socket's ReadFrom.
 func hopIPFromAddr(addr net.Addr) string {
 	switch a := addr.(type) {
 	case *net.IPAddr:

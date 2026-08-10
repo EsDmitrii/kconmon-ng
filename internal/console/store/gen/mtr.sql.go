@@ -23,9 +23,7 @@ type DeleteEnrichmentBeforeParams struct {
 	Limit      int32
 }
 
-// The cache's retention sweep. Every row here is re-derivable from the
-// resolvers that wrote it, so this deletes cheerfully: the cost of being
-// wrong is one lookup, not lost data. e alias for the same analyzer quirk.
+// The cache's retention sweep.
 func (q *Queries) DeleteEnrichmentBefore(ctx context.Context, arg DeleteEnrichmentBeforeParams) (int64, error) {
 	result, err := q.db.Exec(ctx, deleteEnrichmentBefore, arg.ResolvedAt, arg.Limit)
 	if err != nil {
@@ -44,10 +42,8 @@ type DeletePathSnapshotsBeforeParams struct {
 	Limit    int32
 }
 
-// Retention by last_seen, not first_seen: a route the pair still takes is
-// still current however long ago it was first observed. s alias on the
-// subquery's own FROM for the sqlc v1.31.1 analyzer quirk documented on
-// DeleteRunsBefore (checks.sql).
+// Retention by last_seen, not first_seen: a route the pair still takes is still current however
+// long ago it was first observed.
 func (q *Queries) DeletePathSnapshotsBefore(ctx context.Context, arg DeletePathSnapshotsBeforeParams) (int64, error) {
 	result, err := q.db.Exec(ctx, deletePathSnapshotsBefore, arg.LastSeen, arg.Limit)
 	if err != nil {
@@ -62,11 +58,8 @@ FROM mtr_hop_enrichment
 WHERE ip = ANY($1::text[])
 `
 
-// The read half of the TTL cache. Callers ask for a whole trace's hop IPs at
-// once (a snapshot detail is up to 64 of them), so this is one round trip
-// with an array rather than one per hop. Rows the cache does not have are
-// simply absent from the result -- a miss is not an error, it is the signal
-// to resolve.
+// The read half of the TTL cache; callers ask for a whole trace's hop IPs at once (a snapshot
+// detail is up to 64 of them).
 func (q *Queries) GetEnrichment(ctx context.Context, ips []string) ([]MtrHopEnrichment, error) {
 	rows, err := q.db.Query(ctx, getEnrichment, ips)
 	if err != nil {
@@ -140,10 +133,7 @@ type ListMTRDestinationsRow struct {
 	LastSeen      time.Time
 }
 
-// The MTR Explorer's left pane: every (source, destination) pair path history
-// knows about, with how many distinct routes it has taken and when it was
-// last traced. Unbounded by design -- the row count is pairs, not traces, so
-// it is bounded by the cluster's own size rather than by time.
+// The MTR Explorer's left pane: every (source, destination) pair path history knows about.
 func (q *Queries) ListMTRDestinations(ctx context.Context) ([]ListMTRDestinationsRow, error) {
 	rows, err := q.db.Query(ctx, listMTRDestinations)
 	if err != nil {
@@ -191,13 +181,7 @@ type ListPathSnapshotsParams struct {
 	Lim         int32
 }
 
-// The pair's route history, newest first. The WHERE/ORDER BY pair is written
-// to match mtr_snapshots_pair_seen_idx exactly: equality on the two leading
-// columns, then the (last_seen, id) keyset the cursor carries, then the
-// index's own DESC ordering -- so a pair with a long history pages without a
-// sort. Keeping the source/destination filters optional costs nothing here:
-// with both bound to real values the planner's custom plan folds the
-// IS NULL arms away and the index scan is what is left.
+// The pair's route history.
 func (q *Queries) ListPathSnapshots(ctx context.Context, arg ListPathSnapshotsParams) ([]MtrPathSnapshot, error) {
 	rows, err := q.db.Query(ctx, listPathSnapshots,
 		arg.SourceNode,
@@ -248,17 +232,8 @@ SET rdns = EXCLUDED.rdns,
     resolved_at = EXCLUDED.resolved_at
 `
 
-// The write-back half, one statement for the whole batch. The batch travels
-// as ONE jsonb array expanded by jsonb_to_recordset rather than as six
-// parallel arrays: sqlc v1.31.1's own analyzer has no six-argument unnest in
-// its catalog ("function unnest(unknown, unknown, ...) does not exist"), and
-// six positional arrays is in any case a shape where one mis-ordered slice on
-// the Go side silently writes every row's provider into its rdns. One array
-// of objects cannot be mis-zipped.
-//
-// ON CONFLICT DO UPDATE, not DO NOTHING: a re-resolve past the TTL is exactly
-// when the row must be replaced, and resolved_at moving is what makes the TTL
-// work at all.
+// The write-back half, one statement for the whole batch; the batch travels as ONE jsonb array
+// expanded by jsonb_to_recordset rather than as six parallel arrays.
 func (q *Queries) PutEnrichment(ctx context.Context, rows []byte) error {
 	_, err := q.db.Exec(ctx, putEnrichment, rows)
 	return err
@@ -307,22 +282,8 @@ type UpsertPathSnapshotRow struct {
 	Inserted    bool
 }
 
-// The dedupe write (M5 Decision 2). A trace over a path the pair has already
-// taken bumps last_seen and trace_count on the existing row; a trace over a
-// new path inserts one. Which of the two happened is the observable the
-// caller needs -- "the route changed" is the whole point of this table -- and
-// (xmax = 0) is how PostgreSQL answers it: the RETURNING clause of an
-// INSERT ... ON CONFLICT DO UPDATE sees the tuple's xmax, which is zero for a
-// freshly inserted row and the updating transaction's id for a conflicting
-// one. Reported back rather than derived from a count, because :one gives no
-// rows-affected and a follow-up SELECT would race another replica's trace.
-//
-// last_seen takes GREATEST rather than EXCLUDED outright: results arrive from
-// several agents through several replicas and a late-delivered older trace
-// must not walk the pair's "last seen" backwards. first_seen is never
-// touched on conflict, so the row keeps the moment the path was discovered.
-// hops is likewise never overwritten -- the stored payload is the FIRST
-// trace at this path, by design (migration 00005).
+// A trace over a path the pair has already taken bumps last_seen and trace_count on the existing
+// row.
 func (q *Queries) UpsertPathSnapshot(ctx context.Context, arg UpsertPathSnapshotParams) (UpsertPathSnapshotRow, error) {
 	row := q.db.QueryRow(ctx, upsertPathSnapshot,
 		arg.ID,

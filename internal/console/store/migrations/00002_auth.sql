@@ -9,11 +9,7 @@ CREATE TABLE users (
     updated_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
--- Custom roles ONLY. The four built-ins (viewer/operator/alert-editor/admin)
--- are compiled-in constants in internal/console/authz (Decision 7), so RBAC
--- works with database.mode=disabled. A row whose name collides with a built-in
--- is rejected by the application, not by this constraint -- the DB cannot know
--- the built-in list, and encoding it here would freeze it in a migration.
+-- A row whose name collides with a built-in is rejected by the application, not by this constraint.
 CREATE TABLE roles (
     name        TEXT        PRIMARY KEY,
     permissions TEXT[]      NOT NULL,

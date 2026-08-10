@@ -2,10 +2,12 @@ import * as React from "react";
 import { useNavigate } from "@tanstack/react-router";
 import { Search } from "lucide-react";
 import { useTheme } from "@/components/theme-provider";
-import { TIME_MACHINE_TRIGGER_LABEL } from "@/components/timemachine-bar";
+import { TIME_MACHINE_TRIGGER_SELECTOR } from "@/components/timemachine-bar";
 import { useAuth } from "@/hooks/use-auth";
 import {
   buildRegistry,
+  commandTitle,
+  GROUP_KEYS,
   GROUP_ORDER,
   isCommandDisabled,
   PALETTE_OPEN_EVENT,
@@ -13,46 +15,13 @@ import {
   type Command,
   type CommandContext,
 } from "@/lib/commands";
+import { useLocale, useT } from "@/lib/i18n";
+import { paletteDict } from "@/lib/i18n/dict/palette";
 import { useTimeMachine, useWritesDisabled } from "@/lib/timemachine";
 import { cn } from "@/lib/utils";
 
-/**
- * CommandPalette — ⌘K / Ctrl-K overlay over the registry in lib/commands.ts
- * (plan Decision 8: hand-rolled, no cmdk, no kbar, no fuzzy library, zero new
- * dependencies).
- *
- * This component owns keys, focus and paint only. What can be invoked, who may
- * see it and how a query ranks it all live in lib/commands.ts, which is pure
- * and unit-tested without a DOM — so a scoring change is never debugged
- * through a jsdom render.
- *
- * A11Y — this is the reference implementation the M7 a11y sweep (Task 12) will
- * hold the other overlays to:
- *   - the combobox/listbox pattern: a text input with role="combobox",
- *     aria-expanded, aria-controls pointing at the list, and
- *     aria-activedescendant naming the highlighted option. The options are
- *     NOT tab stops (tabIndex -1, the wheel-column idiom from
- *     ui/datetime-picker.tsx) — focus stays in the input, which is what makes
- *     type-and-arrow work at all;
- *   - groups are real role="group" nodes with an accessible name, not bare
- *     styled headers, so the section a row belongs to is announced;
- *   - a disabled entry keeps aria-disabled rather than the `disabled`
- *     attribute: it must remain a legal aria-activedescendant target, and a
- *     user arrowing onto it should hear WHY it will not fire;
- *   - Escape closes and returns focus to whatever had it. Performing a command
- *     deliberately does NOT restore focus — the command owns where focus goes
- *     next (a route change, or the Time Machine picker it just opened).
- *
- * TIME MACHINE COPY — a deviation worth naming. lib/timemachine.tsx's
- * useWritesDisabled says a time-disabled control carries NO per-button
- * tooltip, because the top bar's amber banner is the whole explanation. That
- * reasoning does not survive here: the palette is an overlay with a scrim over
- * that banner. So a disabled row carries a short visible "Live only" tag —
- * visible text rather than a title attribute, so it is part of the option's
- * accessible name instead of a hover-only secret.
- */
+/** This component owns keys, focus and paint only. */
 
-const PLACEHOLDER = "Type a command or search…";
 const LIST_ID = "command-palette-list";
 const optionId = (i: number) => `command-palette-option-${i}`;
 
@@ -65,11 +34,11 @@ function isTextEntry(el: Element | null): boolean {
 
 export function CommandPalette() {
   const { can } = useAuth();
+  const t = useT(paletteDict);
+  const { locale } = useLocale();
   const writesDisabled = useWritesDisabled();
-  // useTimeMachine, not useTimeContext: the palette is a CONTROL (it can
-  // return the console to Live), and a control mounted outside the provider is
-  // a wiring bug that should say so — the same line ui/timemachine-bar.tsx
-  // takes. AppShell mounts this inside TimeMachineProvider.
+  // useTimeMachine, not useTimeContext: the palette is a CONTROL (it can return the console to
+  // Live).
   const { isLive, returnToLive } = useTimeMachine();
   const { theme, toggle } = useTheme();
   const navigate = useNavigate();
@@ -85,16 +54,11 @@ export function CommandPalette() {
   const restoreRef = React.useRef<HTMLElement | null>(null);
 
   /**
-   * openTimeMachinePicker clicks the Time Machine bar's own trigger.
-   *
-   * The alternative — engaging at some instant the palette chose — would be
-   * the console inventing the answer to the only question that matters, so
-   * the ON direction hands the choice back to the picker that already exists.
-   * The selector is built from the constant timemachine-bar.tsx exports and
-   * renders, so the two cannot drift; nothing in lib/timemachine.tsx changed.
+   * openTimeMachinePicker clicks the Time Machine bar's own trigger; the alternative — engaging at
+   * some instant the palette chose.
    */
   const openTimeMachinePicker = React.useCallback(() => {
-    const el = document.querySelector<HTMLElement>(`[aria-label="${TIME_MACHINE_TRIGGER_LABEL}"]`);
+    const el = document.querySelector<HTMLElement>(TIME_MACHINE_TRIGGER_SELECTOR);
     el?.focus();
     el?.click();
   }, []);
@@ -103,14 +67,8 @@ export function CommandPalette() {
     () => ({
       can,
       writesDisabled,
-      // TanStack owns navigation, and `navigate` drops `?at=` exactly the way
-      // a <Link> does — the limitation lib/timemachine.tsx already documents
-      // ("the shareable-link guarantee holds for the URL you are ON, not
-      // across in-app navigations"). The Time Machine CONTEXT survives the
-      // move, so the destination still renders at `t`; only the URL forgets,
-      // until the next engage/returnToLive rewrites it. Teaching the router
-      // about search params is the fix, and it is out of scope here — as it
-      // was in M5.
+      // TanStack owns navigation, and `navigate` drops `?at=` exactly the way a <Link> does; the
+      // Time Machine CONTEXT survives the move, so the destination still renders at `t`.
       navigate: (path: string) => void navigate({ to: path }),
       theme,
       toggleTheme: toggle,
@@ -121,7 +79,10 @@ export function CommandPalette() {
     [can, writesDisabled, navigate, theme, toggle, isLive, returnToLive, openTimeMachinePicker],
   );
 
-  const results = React.useMemo(() => searchCommands(query, buildRegistry(ctx)), [query, ctx]);
+  const results = React.useMemo(
+    () => searchCommands(query, buildRegistry(ctx), locale),
+    [query, ctx, locale],
+  );
 
   /* One pass builds both the rendered sections and the FLAT order the arrow
      keys walk, so the highlight can never point at a different row than the
@@ -181,11 +142,10 @@ export function CommandPalette() {
     return () => document.removeEventListener("keydown", onKeyDown);
   }, [togglePalette]);
 
-  /* The explicit ask (QA round 4, finding #18). A surface that owns its own
-     keymap — the PromQL editor, whose CodeMirror keymap eats Mod-k before the
-     document ever sees it — dispatches lib/commands' PALETTE_OPEN_EVENT
-     instead of faking a keystroke. There is no text-entry guard on this path
-     on purpose: the sender IS the text entry, and it has already decided. */
+  /*
+   * A surface that owns its own keymap — the PromQL editor, whose CodeMirror keymap eats Mod-k
+   * before the document ever sees it.
+   */
   React.useEffect(() => {
     const onOpenRequest = () => togglePalette(document.activeElement);
     window.addEventListener(PALETTE_OPEN_EVENT, onOpenRequest);
@@ -206,20 +166,8 @@ export function CommandPalette() {
   }, [open, active]);
 
   /**
-   * trapTab keeps Tab inside the dialog (QA round 1, finding #8).
-   *
-   * aria-modal="true" tells assistive tech that everything behind this panel
-   * is inert; without a trap the very next Tab put focus on a page the same
-   * attribute has just declared unreachable, which is the one combination the
-   * ARIA practices call out as broken. The scrim already blocks the pointer,
-   * so this closes the keyboard's half of the same door.
-   *
-   * The cycle is ui/datetime-picker.tsx's onDialogKeyDown, verbatim in
-   * approach: query what is focusable NOW rather than caching a list, because
-   * typing rebuilds the result rows under it. In practice the palette's own
-   * options are tabIndex -1 (focus stays in the combobox input, which is what
-   * makes type-and-arrow work), so the cycle usually has ONE stop and Tab is
-   * a no-op that goes nowhere instead of leaving.
+   * trapTab keeps Tab inside the dialog; the cycle is ui/datetime-picker.tsx's onDialogKeyDown,
+   * verbatim in approach.
    */
   function trapTab(e: React.KeyboardEvent) {
     const panel = panelRef.current;
@@ -282,7 +230,7 @@ export function CommandPalette() {
         ref={panelRef}
         role="dialog"
         aria-modal="true"
-        aria-label="Command palette"
+        aria-label={t("dialog")}
         onMouseDown={(e) => e.stopPropagation()}
         onKeyDown={onPanelKeyDown}
         className="pop-enter flex w-full max-w-xl flex-col overflow-hidden rounded-lg border border-border bg-popover text-popover-foreground shadow-pop"
@@ -293,13 +241,13 @@ export function CommandPalette() {
             ref={inputRef}
             type="text"
             role="combobox"
-            aria-label="Type a command or search"
+            aria-label={t("input")}
             aria-expanded="true"
             aria-controls={LIST_ID}
             aria-activedescendant={active >= 0 ? optionId(active) : undefined}
             autoComplete="off"
             spellCheck={false}
-            placeholder={PLACEHOLDER}
+            placeholder={t("placeholder")}
             value={query}
             onChange={(e) => {
               setQuery(e.target.value);
@@ -309,14 +257,22 @@ export function CommandPalette() {
           />
         </div>
 
-        <div ref={listRef} id={LIST_ID} role="listbox" aria-label="Commands" className="max-h-80 overflow-y-auto p-1.5">
+        <div ref={listRef} id={LIST_ID} role="listbox" aria-label={t("list")} className="max-h-80 overflow-y-auto p-1.5">
           {sections.map((section) => (
-            <div key={section.group} role="group" aria-label={section.group} className="mb-1 last:mb-0">
+            /* One translated string for both the accessible name and the
+               visible header — the header is aria-hidden precisely because the
+               group already carries the name, and the two must not diverge. */
+            <div
+              key={section.group}
+              role="group"
+              aria-label={t(GROUP_KEYS[section.group])}
+              className="mb-1 last:mb-0"
+            >
               <div
                 aria-hidden="true"
                 className="px-2 pb-1 pt-1.5 text-[10.5px] font-semibold uppercase tracking-[0.1em] text-muted-foreground/70"
               >
-                {section.group}
+                {t(GROUP_KEYS[section.group])}
               </div>
               {section.items.map(({ cmd, index }) => {
                 const disabled = isCommandDisabled(cmd, ctx);
@@ -338,9 +294,9 @@ export function CommandPalette() {
                       disabled && "opacity-50",
                     )}
                   >
-                    <span className="truncate">{cmd.title}</span>
+                    <span className="truncate">{commandTitle(cmd, locale)}</span>
                     {disabled ? (
-                      <span className="shrink-0 text-[11px] text-muted-foreground">Live only</span>
+                      <span className="shrink-0 text-[11px] text-muted-foreground">{t("liveOnly")}</span>
                     ) : null}
                   </button>
                 );
@@ -348,7 +304,7 @@ export function CommandPalette() {
             </div>
           ))}
           {flat.length === 0 ? (
-            <p className="px-2 py-6 text-center text-[13px] text-muted-foreground">Nothing matches</p>
+            <p className="px-2 py-6 text-center text-[13px] text-muted-foreground">{t("empty")}</p>
           ) : null}
         </div>
       </div>

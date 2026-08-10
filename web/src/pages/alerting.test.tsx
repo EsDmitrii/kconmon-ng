@@ -14,19 +14,8 @@ import {
 } from "./alerting";
 
 /**
- * The Alerting page is one read floor (alerts:read) over one write permission
- * (alerts:manage) over TWO independent dependencies that fail in different
- * ways — the database and the reconciler — so most of what is asserted here is
- * a BOUNDARY:
- *
- *   which permission makes a control exist (HIDE=permission),
- *   which of the two failures a section is in (503 store vs 409 sync),
- *   which body a write puts on the wire (PUT is a full replace),
- *   and which facts the page is allowed to state (a 202 is not a success, a
- *   preview error is not "0 series", an import report is not a toast).
- *
- * The last one is where this page could most easily lie, so the preview panel,
- * the sync ack and the import report each get their own case.
+ * The Alerting page is one read floor (alerts:read) over one write permission (alerts:manage) over
+ * TWO independent dependencies that fail in different ways.
  */
 
 const AT = "2026-08-01T12:00:00Z";
@@ -41,12 +30,7 @@ const problem = (status: number, title: string, detail: string) =>
     headers: { "Content-Type": "application/problem+json" },
   });
 
-/** The two permissions this page gates on. viewer holds the READ (the firing
- *  set and the rules that produce it are context on charts viewer already
- *  sees); alert-editor, operator and admin all hold BOTH — alert-editor is the
- *  deliberate exception to the "writes stop at operator" groove, because
- *  editing alert rules is that role's entire charter
- *  (internal/console/authz/roles.go). */
+/** The two permissions this page gates on. */
 const VIEWER = ["topology:read", "matrix:read", "alerts:read"];
 const ALERT_EDITOR = ["topology:read", "alerts:read", "alerts:manage"];
 const NO_ALERTS = ["topology:read", "matrix:read", "events:read"];
@@ -124,8 +108,7 @@ function renderPage(
     engaged?: boolean;
     /** ?rule=<id>, the deep link the Overview's firing rows point at. */
     rule?: string;
-    /** The rows GET /api/v1/targets answers, for the external-target-down
-     *  builder's target select (QA round 5, finding #15). */
+    /** The rows GET /api/v1/targets answers, for the external-target-down builder's target select. */
     targets?: { name: string }[];
   } = {},
 ) {
@@ -442,8 +425,10 @@ describe("AlertingPage degraded states", () => {
     expect(within(list).getByText("PairLossHigh")).toBeTruthy();
     expect(screen.getByRole("button", { name: "New rule" })).toBeTruthy();
 
-    // Only the half that needs the cluster says so.
-    expect(await screen.findByText(ALERTING_DISABLED_DETAIL)).toBeTruthy();
+    // Both halves that need the cluster say so: the managed section discloses
+    // it up front (finding 8) and the foreign list reports why it is empty.
+    expect(await screen.findByTestId("sync-disabled-notice")).toHaveTextContent(ALERTING_DISABLED_DETAIL);
+    expect(screen.getAllByText(ALERTING_DISABLED_DETAIL).length).toBeGreaterThan(0);
     expect(screen.queryByLabelText("Foreign PrometheusRule objects")).toBeNull();
   });
 
@@ -458,6 +443,65 @@ describe("AlertingPage degraded states", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Sync PairLossHigh now" }));
     const banner = await screen.findByTestId("rules-sync-banner");
     expect(banner.textContent).toContain(ALERTING_DISABLED_DETAIL);
+  });
+
+  /* QA scope 4, finding #6: sync-being-off is ONE state, and the console gave it
+     three verdicts at once — the managed section's amber role=status notice, the
+     foreign section's red role=alert line and the click banner's red line, all
+     printing the SAME server paragraph. Amber wins: nothing is broken and no
+     rule is at risk, sync is simply not a thing this console does. */
+  it("gives the sync-disabled state ONE tone wherever it is reported", async () => {
+    renderPage({
+      rules: [ruleRow()],
+      foreignResponse: () => problem(409, "prometheus rule sync is disabled", ALERTING_DISABLED_DETAIL),
+    });
+
+    const managed = await screen.findByTestId("sync-disabled-notice");
+    const foreign = await screen.findByTestId("foreign-sync-disabled-notice");
+    expect(foreign).toHaveTextContent(ALERTING_DISABLED_DETAIL);
+    expect(foreign.className).toBe(managed.className);
+    expect(foreign.getAttribute("role")).toBe(managed.getAttribute("role"));
+    expect(managed.getAttribute("role")).toBe("status");
+    expect(managed.className).toContain("text-health-warn");
+    expect(managed.className).not.toContain("text-health-bad");
+  });
+
+  it("keeps the RED line for a failure that really is one", async () => {
+    renderPage({ foreignResponse: () => problem(503, "alert rules not available", NO_DATABASE_DETAIL) });
+    const line = await screen.findByText(NO_DATABASE_DETAIL);
+    expect(line.getAttribute("role")).toBe("alert");
+    expect(line.className).toContain("text-health-bad");
+  });
+
+  it("uses the same tone for the 409 the Sync button itself comes back with", async () => {
+    renderPage({
+      rules: [ruleRow()],
+      onWrite: (method, url) =>
+        method === "POST" && url.endsWith("/sync")
+          ? problem(409, "prometheus rule sync is disabled", ALERTING_DISABLED_DETAIL)
+          : undefined,
+    });
+    fireEvent.click(await screen.findByRole("button", { name: "Sync PairLossHigh now" }));
+    const banner = await screen.findByTestId("rules-sync-banner");
+    expect(banner.getAttribute("role")).toBe("status");
+    expect(banner.className).toContain("text-health-warn");
+  });
+
+  /* The disabled Sync button sat at disabled:opacity-50. Measured in Chrome
+     against the live console, light theme, #1e212f label on #ffffff:
+       opacity .50 → 3.18:1  (under WCAG AA's 4.5:1 for 14px text)
+       opacity .65 → 5.03:1
+     Dark was already 4.89:1 at .50 and goes to 7.44:1 at .65, so one value
+     serves both themes. */
+  it("keeps a disabled button readable rather than half-erased", async () => {
+    renderPage({
+      rules: [ruleRow()],
+      foreignResponse: () => problem(409, "prometheus rule sync is disabled", ALERTING_DISABLED_DETAIL),
+    });
+    const btn = await screen.findByRole("button", { name: "Sync PairLossHigh now" });
+    await waitFor(() => expect(btn).toBeDisabled());
+    expect(btn.className).toContain("disabled:opacity-65");
+    expect(btn.className).not.toContain("disabled:opacity-50");
   });
 });
 
@@ -492,9 +536,6 @@ describe("AlertingPage rule list", () => {
     expect(within(list).getByText("kconmon_ng_udp_packet_loss_ratio * 100 > 5")).toBeTruthy();
   });
 
-  /* M7 Task 12b: aria-expanded alone said "something opened" and named
-     nothing. components/mtr-hop-table.tsx's expander is the repo's bar for
-     this exact shape and it carries aria-controls. */
   it("the details toggle names the block it opens", async () => {
     renderPage({ permissions: VIEWER, rules: [ruleRow()] });
     const list = await screen.findByLabelText("Alert rules");
@@ -828,9 +869,7 @@ describe("AlertingPage foreign rules", () => {
     }
   });
 
-  /* M7 Task 12b: the report arrives when the POST answers, far below the
-     button that was pressed. Polite, not assertive — the import succeeded;
-     its refusal is the role="alert" line beside it. */
+  /* Polite, not assertive — the import succeeded; its refusal is the role="alert" line beside it. */
   it("announces the report politely instead of landing silently", async () => {
     renderPage({ foreign: [foreignRow()], importReport: EMPTY_REPORT });
     fireEvent.click(await screen.findByRole("button", { name: "Import kube-prometheus-rules" }));
@@ -1072,5 +1111,180 @@ describe("one rule per click storm (#17)", () => {
 
     await waitFor(() => expect(resourceCalls().filter((c) => c.method === "POST").length).toBeGreaterThan(0));
     expect(resourceCalls().filter((c) => c.method === "POST" && c.url === "/api/v1/alert-rules")).toHaveLength(1);
+  });
+});
+
+/* ── QA scope 5 ─────────────────────────────────────────────────────────── */
+
+/* #7. The preview PROVED Prometheus refuses the expression, and Create saved it
+   anyway. On a sync-enabled console that expression goes into the rule bundle,
+   and a bundle Prometheus cannot load stops applying every OTHER rule in it. */
+describe("a proven-bad expression cannot be saved (#7)", () => {
+  const rejected = () =>
+    json({ expr: "up >", series: 0, error: "prometheus rejected the expression: parse error", rejected: true });
+
+  async function draftRaw(expr: string) {
+    setKind("raw");
+    fireEvent.change(screen.getByLabelText("PromQL expression"), { target: { value: expr } });
+  }
+
+  it("blocks Create, and says why, once the preview comes back rejected", async () => {
+    const { resourceCalls } = renderPage({ preview: rejected });
+    await openBuilder();
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Bad" } });
+    await draftRaw("up >");
+
+    expect(await screen.findByTestId("rejected-expr-block")).toBeInTheDocument();
+    const create = screen.getByRole("button", { name: "Create rule" });
+    await waitFor(() => expect(create).toBeDisabled());
+
+    fireEvent.click(create);
+    await new Promise((r) => setTimeout(r, 50));
+    // The preview POSTs to /alert-rules/preview; a SAVE would POST to the
+    // collection itself, and that is the call that must not have happened.
+    expect(resourceCalls().filter((c) => c.method === "POST" && c.url === "/api/v1/alert-rules")).toEqual([]);
+  });
+
+  it("lifts the block the moment the expression is edited", async () => {
+    let reject = true;
+    renderPage({
+      preview: () => (reject ? rejected() : json({ expr: "up > 0", series: 2 })),
+    });
+    await openBuilder();
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Bad" } });
+    await draftRaw("up >");
+    await screen.findByTestId("rejected-expr-block");
+
+    reject = false;
+    await draftRaw("up > 0");
+    await waitFor(() => expect(screen.queryByTestId("rejected-expr-block")).toBeNull());
+    expect(screen.getByRole("button", { name: "Create rule" })).toBeEnabled();
+  });
+
+  it("stays permissive when the preview merely could NOT be evaluated", async () => {
+    renderPage({
+      preview: () =>
+        json({
+          expr: "up > 0",
+          series: 0,
+          error: "prometheus could not be reached to evaluate the expression",
+        }),
+    });
+    await openBuilder();
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Unchecked" } });
+    await draftRaw("up > 0");
+
+    const panel = await screen.findByLabelText("Expression preview");
+    await waitFor(() => expect(panel.textContent).toContain("could not be reached"));
+    // Not known to be bad is not bad: there is no PromQL parser here to say
+    // otherwise, so the save stays available.
+    expect(screen.queryByTestId("rejected-expr-block")).toBeNull();
+    expect(screen.getByRole("button", { name: "Create rule" })).toBeEnabled();
+  });
+
+  it("never blocks a draft that was never previewed at all", async () => {
+    renderPage();
+    await openBuilder();
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Fresh" } });
+    expect(screen.getByRole("button", { name: "Create rule" })).toBeEnabled();
+    expect(screen.queryByTestId("rejected-expr-block")).toBeNull();
+  });
+});
+
+/* #8. With sync off the managed section said nothing up front and every Sync
+   button was live, answering a 409 only once clicked. */
+describe("a console with rule sync off says so up front (#8)", () => {
+  const off = () => problem(409, "prometheus rule sync is disabled", ALERTING_DISABLED_DETAIL);
+
+  it("discloses the reason at the top of the managed section", async () => {
+    renderPage({ rules: [ruleRow()], foreignResponse: off });
+    const notice = await screen.findByTestId("sync-disabled-notice");
+    // The server's own paragraph, not a paraphrase of it.
+    expect(notice).toHaveTextContent(ALERTING_DISABLED_DETAIL);
+  });
+
+  it("disables every Sync button, carrying the reason", async () => {
+    renderPage({ rules: [ruleRow()], foreignResponse: off });
+    const sync = await screen.findByRole("button", { name: "Sync PairLossHigh now" });
+    await waitFor(() => expect(sync).toBeDisabled());
+    expect(sync).toHaveAttribute("title", ALERTING_DISABLED_DETAIL);
+  });
+
+  it("says nothing, and keeps Sync live, on a console where sync IS running", async () => {
+    renderPage({ rules: [ruleRow()] });
+    const sync = await screen.findByRole("button", { name: "Sync PairLossHigh now" });
+    expect(sync).toBeEnabled();
+    expect(screen.queryByTestId("sync-disabled-notice")).toBeNull();
+  });
+});
+
+/* #18. ?rule= opened a row on arrival, but expanding a row could not produce
+   the link — so a rule found by scrolling could not be handed to anyone. */
+describe("expanding a row writes ?rule= (#18)", () => {
+  const FIRST_ID = "11111111-1111-1111-1111-111111111111";
+  const SECOND_ID = "22222222-2222-2222-2222-222222222222";
+  const ruleParam = () => new URLSearchParams(window.location.search).get("rule");
+
+  it("writes the rule id when the details open, and clears it when they close", async () => {
+    renderPage({ rules: [ruleRow()] });
+    const details = await screen.findByRole("button", { name: "Details for PairLossHigh" });
+
+    fireEvent.click(details);
+    await waitFor(() => expect(ruleParam()).toBe(FIRST_ID));
+
+    fireEvent.click(details);
+    await waitFor(() => expect(ruleParam()).toBeNull());
+  });
+
+  it("leaves the param alone when a DIFFERENT row is collapsed", async () => {
+    renderPage({ rules: [ruleRow(), ruleRow({ id: SECOND_ID, name: "Other" })] });
+    const first = await screen.findByRole("button", { name: "Details for PairLossHigh" });
+    const second = screen.getByRole("button", { name: "Details for Other" });
+
+    fireEvent.click(first);
+    await waitFor(() => expect(ruleParam()).toBe(FIRST_ID));
+
+    // Opening the second takes the link; closing the second clears it, and
+    // must not have been able to clear the FIRST row's link on its way.
+    fireEvent.click(second);
+    await waitFor(() => expect(ruleParam()).toBe(SECOND_ID));
+    fireEvent.click(first);
+    // The first row collapsing while the param names the SECOND leaves it be.
+    await waitFor(() => expect(ruleParam()).toBe(SECOND_ID));
+  });
+});
+
+/* #23. Cancel on the longest form in the console threw away every field the
+   operator had filled in, without a word. */
+describe("the rule builder asks before discarding unsaved work (#23)", () => {
+  it("closes immediately when nothing was typed", async () => {
+    renderPage();
+    await openBuilder();
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(screen.queryByLabelText("Name")).toBeNull());
+  });
+
+  it("asks once when the draft is dirty, and keeps the form on Keep editing", async () => {
+    renderPage();
+    await openBuilder();
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "HalfTyped" } });
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+
+    expect(await screen.findByText("Discard the changes?")).toBeInTheDocument();
+    expect(screen.getByLabelText("Name")).toHaveValue("HalfTyped");
+
+    fireEvent.click(screen.getByRole("button", { name: "Keep editing" }));
+    expect(screen.getByLabelText("Name")).toHaveValue("HalfTyped");
+    expect(screen.queryByText("Discard the changes?")).toBeNull();
+  });
+
+  it("closes on the second, explicit answer", async () => {
+    renderPage();
+    await openBuilder();
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "HalfTyped" } });
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Discard changes" }));
+
+    await waitFor(() => expect(screen.queryByLabelText("Name")).toBeNull());
   });
 });

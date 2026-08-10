@@ -17,14 +17,7 @@ import (
 
 const localCookieName = "kconmon_session"
 
-// fakeUserStore is a minimal in-memory authn.UserStore double, keyed by
-// username -- there is no in-memory UserStore in the store package itself
-// (store.DB is Postgres-backed, integration-test only). GetUserByID is keyed
-// by scanning users for a matching ID; local_test.go's own tests only ever
-// exercise GetUserByUsername (local.go's Authenticate never calls
-// GetUserByID -- that method exists on the interface solely for
-// token_test.go's owner-disabled-check fixtures, which use their own,
-// separate fake), so this linear scan's cost is irrelevant here.
+// fakeUserStore is a minimal in-memory authn.UserStore double, keyed by username.
 type fakeUserStore struct {
 	users map[string]store.User
 	err   error // when set, returned verbatim for every call regardless of username
@@ -70,16 +63,9 @@ func requestWithCookie(value string) *http.Request {
 	return r
 }
 
-// TestLocalAuthenticateValidSessionResolvesSubjectIdentity proves what a
-// valid session actually resolves to here: Subject.Kind/ID/DisplayName/
-// Groups, built from the re-queried User plus the session's own Groups.
-// Subject.Roles is asserted implicitly (via reflect.DeepEqual against a
-// zero-value/nil Roles field) but that is NOT this test proving anything
-// about role resolution -- local.go's Authenticate never touches Roles at
-// all (see its return statement), and role resolution from Subject.ID/
-// Groups happens downstream, in the authorize middleware (Task 16), not
-// here. This test was previously misnamed "...ResolvesSubjectWithRoles",
-// which read as if it exercised that resolution.
+// TestLocalAuthenticateValidSessionResolvesSubjectIdentity proves what a valid session actually
+// resolves to here; Subject.Roles is asserted implicitly (via reflect.DeepEqual against a
+// zero-value/nil Roles field) but that is NOT this test proving anything about role resolution.
 func TestLocalAuthenticateValidSessionResolvesSubjectIdentity(t *testing.T) {
 	t.Parallel()
 
@@ -152,11 +138,8 @@ func TestLocalAuthenticateDisabledUserIsErrDisabled(t *testing.T) {
 	}
 }
 
-// TestLocalAuthenticateDeletedUserBehindLiveSessionIsNoCredentials is not an
-// explicitly required test-list case, but exercises the same UserStore
-// re-query path as the disabled-user case: an account deleted out from under
-// an otherwise-live session degrades the same way an unknown session id
-// does (re-prompt login), not ErrInvalid.
+// TestLocalAuthenticateDeletedUserBehindLiveSessionIsNoCredentials is not an explicitly required
+// test-list case.
 func TestLocalAuthenticateDeletedUserBehindLiveSessionIsNoCredentials(t *testing.T) {
 	t.Parallel()
 

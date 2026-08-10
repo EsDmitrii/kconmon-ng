@@ -19,10 +19,7 @@ type EventLister interface {
 	ListEvents(ctx context.Context, f store.EventFilter) (store.EventPage, error)
 }
 
-// Limit bounds for GET /api/v1/events, mirroring store.EventFilter.Limit's own
-// contract. store keeps its equivalents private, so this is a deliberate,
-// hand-kept-in-sync copy: 0 (unset) means eventsDefaultLimit; anything else
-// clamps into [eventsMinLimit, eventsMaxLimit] rather than being rejected.
+// Limit bounds for GET /api/v1/events, mirroring store.EventFilter.Limit's own contract.
 const (
 	eventsMinLimit     = 1
 	eventsMaxLimit     = 500
@@ -48,10 +45,8 @@ type eventsResponse struct {
 	NextCursor string             `json:"nextCursor"`
 }
 
-// handleEvents serves one page of persisted controller events, newest first,
-// behind an opaque keyset cursor. A nil s.events (console.database.mode unset)
-// answers 503, the same convention handleTopology/handleMatrix use for an
-// unwired upstream.
+// handleEvents serves one page of persisted controller events, newest first, behind an opaque
+// keyset cursor.
 func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	if s.events == nil {
 		writeProblem(w, http.StatusServiceUnavailable, "event history not available",
@@ -69,12 +64,7 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// scope and scopeNode answer different questions about the same column --
-	// "this exact scope" against "this name on either side of a pair scope" --
-	// and the store ANDs whatever it is handed. Supplying both is a caller bug,
-	// not a narrower query, so it is refused rather than silently intersected.
-	// 422, not 400: each param is individually well-formed; it is the pair the
-	// server will not act on.
+	// scope and scopeNode answer different questions about the same column.
 	scope := q.Get("scope")
 	scopeNode := q.Get("scopeNode")
 	if scope != "" && scopeNode != "" {
@@ -134,10 +124,7 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, eventsResponse{Events: out, NextCursor: page.NextCursor})
 }
 
-// parseEventsTime parses an RFC3339 query param. An empty value is the
-// well-defined "unbounded" case: it returns the zero time with ok=true. A
-// non-empty value that fails to parse writes a 400 problem and returns
-// ok=false, so the caller can bail out without duplicating the response.
+// parseEventsTime parses an RFC3339 query param.
 func parseEventsTime(w http.ResponseWriter, raw, field string) (t time.Time, ok bool) {
 	if raw == "" {
 		return time.Time{}, true
@@ -179,10 +166,8 @@ func clampEventsLimit(n int) int {
 	}
 }
 
-// toLiveEvent projects a persisted EventRecord onto the exact shape
-// events.ToLiveEvent produces for the "live" WebSocket topic (same field
-// names, RFC3339 timestamp, raw JSON details), so the frontend reuses one type
-// for the socket and this scrollback endpoint.
+// toLiveEvent projects a persisted EventRecord onto the exact shape events.ToLiveEvent produces for
+// the "live" WebSocket topic (same field names, RFC3339 timestamp, raw JSON details).
 func toLiveEvent(rec *store.EventRecord) events.LiveEvent {
 	return events.LiveEvent{
 		ID:        fmt.Sprintf("%d-%d", rec.EventSeq, rec.EventTime.UnixNano()),

@@ -86,9 +86,8 @@ func TestAlertRuleInputValidateAcceptsWellFormed(t *testing.T) {
 		})
 	}
 
-	// Every template kind must validate with the baseline's params: params are
-	// validated closed by the RENDERER (M7 Task 2), not here, so this layer
-	// must not reject a kind it does not yet know how to render.
+	// Every template kind must validate with the baseline's params: params are validated closed by the
+	// RENDERER.
 	for kind := range alertRuleKinds {
 		if kind == AlertRuleKindRaw {
 			continue // raw carries its own expr requirement, asserted above
@@ -174,10 +173,7 @@ func TestAlertRuleInputValidateRejects(t *testing.T) {
 	}
 }
 
-// TestAlertRuleKindsAreTheClosedM7Set pins the VALUES, not just the count, and
-// pins them against the LITERAL strings the migration's CHECK spells -- a test
-// that compares a constant to itself pins nothing. A kind that drifts out of
-// step with the CHECK is a row the store accepts and Postgres rejects.
+// TestAlertRuleKindsAreTheClosedM7Set pins the VALUES, not just the count.
 func TestAlertRuleKindsAreTheClosedM7Set(t *testing.T) {
 	want := map[string]bool{
 		"pair-loss":            true,
@@ -231,9 +227,7 @@ func TestAlertSeveritiesAreTheClosedSet(t *testing.T) {
 	}
 }
 
-// TestAlertSyncStatusesAreTheClosedSet is the same pin for sync_status, whose
-// four values the reconciler (M7 Decision 5) writes and the migration's CHECK
-// backstops.
+// TestAlertSyncStatusesAreTheClosedSet is the same pin for sync_status.
 func TestAlertSyncStatusesAreTheClosedSet(t *testing.T) {
 	want := map[string]bool{"unsynced": true, "synced": true, "drift": true, "error": true}
 	if len(alertSyncStatuses) != len(want) {
@@ -291,10 +285,8 @@ func TestAlertRuleMalformedIDIsNotFoundWithoutTouchingPgx(t *testing.T) {
 	}
 }
 
-// TestUpdateAlertRuleValidatesBeforeTheIDPreCheck asserts a bad payload is
-// reported as a validation error rather than as a miss: an operator who typed
-// an unknown severity must be told that, not told the rule does not exist.
-// NIL pool.
+// TestUpdateAlertRuleValidatesBeforeTheIDPreCheck asserts a bad payload is reported as a validation
+// error rather than as a miss.
 func TestUpdateAlertRuleValidatesBeforeTheIDPreCheck(t *testing.T) {
 	db := &DB{}
 	in := validAlertRuleInput()
@@ -340,11 +332,8 @@ func TestUpdateAlertRuleSyncStatusValidatesBeforeTouchingPgx(t *testing.T) {
 	}
 }
 
-// TestValidateJSONObjectRejectsNonObjects is the rule params, labels and
-// annotations all lean on, asserted directly: jsonb would happily store an
-// array or a scalar, and every reader of these three columns -- the renderer,
-// the builder UI -- assumes a map. The check belongs at the only layer that
-// can name which field carried it.
+// TestValidateJSONObjectRejectsNonObjects is the rule params, labels and annotations all lean on,
+// asserted directly.
 func TestValidateJSONObjectRejectsNonObjects(t *testing.T) {
 	for _, ok := range []string{"", "null", "  null  ", "{}", `{"a":1}`, "\n\t{\"a\":[1,2]}\n"} {
 		if err := validateJSONObject("params", json.RawMessage(ok)); err != nil {

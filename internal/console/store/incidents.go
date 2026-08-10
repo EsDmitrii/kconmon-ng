@@ -14,31 +14,21 @@ import (
 	"github.com/EsDmitrii/kconmon-ng/internal/console/store/gen"
 )
 
-// The incident bounds (M6 Decision 7 and Task 1). Every one is counted in
-// BYTES, not runes, for annotationTextMaxLen's reason: the columns store
-// bytes, and a caller who squeezed 16384 multi-byte runes past a rune-counting
-// check would still be a caller whose notes are 48 kilobytes.
-//
-// incidentScopeMaxLen also bounds created_by, exactly as annotationScopeMaxLen
-// does: it is a subject reference ("user:<name>", "token:<name>") with no
-// reason to outgrow a scope.
+// Every one is counted in BYTES, not runes, for annotationTextMaxLen's reason: the columns store
+// bytes.
 const (
 	incidentTitleMaxLen = 255
 	incidentNotesMaxLen = 16384
 	incidentScopeMaxLen = 255
 
-	// pinnedMaxEntries bounds the pinned array. 64 is far past what an
-	// operator pins by hand while reading one timeline, and comfortably under
-	// the point where a JSONB payload stops being a payload -- maxPathHops'
-	// reasoning applied to a different column.
+	// pinnedMaxEntries bounds the pinned array.
 	pinnedMaxEntries = 64
 	pinnedIDMaxLen   = 128
 	pinnedNoteMaxLen = 512
 )
 
-// Incident statuses. The set is closed here rather than by a CHECK constraint
-// so widening it in a later milestone is code, not a migration -- the same
-// reasoning M4 Decision 9 applies to check_schedules.kind.
+// The set is closed here rather than by a CHECK constraint so widening it in a later milestone is
+// code, not a migration.
 const (
 	IncidentStatusOpen     = "open"
 	IncidentStatusResolved = "resolved"
@@ -49,11 +39,8 @@ var incidentStatuses = map[string]bool{
 	IncidentStatusResolved: true,
 }
 
-// pinnedKinds is the closed vocabulary of PinnedRef.Kind: the timeline source
-// classes an operator can pin a finding from. An unknown kind is REJECTED
-// rather than stored, because a pin whose kind nothing can resolve is a
-// dangling reference that renders as nothing and can never be repaired -- the
-// caller learns at write time instead of the reader guessing at read time.
+// pinnedKinds is the closed vocabulary of PinnedRef.Kind; an unknown kind is REJECTED rather than
+// stored.
 var pinnedKinds = map[string]bool{
 	"event":      true, // a topology_events row
 	"audit":      true, // an audit_log row
@@ -63,22 +50,15 @@ var pinnedKinds = map[string]bool{
 	"k8s":        true, // a k8s_events row
 }
 
-// PinnedRef is one finding pinned to an incident: a typed reference into
-// whichever table the timeline row came from. It is the element type of
-// incidents.pinned, and the shape ValidatePinned enforces.
-//
-// ID is a STRING for every kind, including the bigint-keyed ones (event, k8s):
-// pinned is one heterogeneous list, and one id spelling across it is worth
-// more than a per-kind type that every reader would have to switch on.
+// PinnedRef is one finding pinned to an incident; ID is a STRING for every kind, including the
+// bigint-keyed ones (event, k8s).
 type PinnedRef struct {
 	Kind string `json:"kind"`
 	ID   string `json:"id"`
 	Note string `json:"note,omitempty"`
 }
 
-// Incident is one saved investigation (M6 Decision 7): annotations-class, not
-// a ticket. Its permalink is /investigate?incident={ID} -- the page hydrates
-// scope and range from these fields, which is why they live on the row.
+// Incident is one saved investigation: annotations-class.
 type Incident struct {
 	ID    string
 	Title string
@@ -93,10 +73,8 @@ type Incident struct {
 	ToAt   *time.Time
 	Status string
 	Notes  string
-	// Pinned is the stored JSONB ARRAY of PinnedRef, verbatim. Handed back raw
-	// for PathSnapshot.Hops' reason: the API layer re-serializes it, and a
-	// round trip through []PinnedRef and back would only be an opportunity to
-	// change it. DecodePinned parses it when a caller wants the typed list.
+	// Pinned is the stored JSONB ARRAY of PinnedRef; handed back raw for PathSnapshot.Hops' reason:
+	// the API layer re-serializes.
 	Pinned    json.RawMessage
 	CreatedBy string
 	CreatedAt time.Time
@@ -130,11 +108,8 @@ type IncidentFilter struct {
 	// the same reason: "" is a real value here (the global scope), so nil
 	// means "every scope" and a pointer to "" means "the global ones only".
 	Scope *string
-	// From and To bound the window an incident's OWN RANGE must OVERLAP, not
-	// the window it was created in: an incident that began before From and is
-	// still open at From is exactly the one an operator looking at that window
-	// needs. An open-ended incident (nil ToAt) extends to infinity. Zero on
-	// either side is unbounded.
+	// From and To bound the window an incident's OWN RANGE must OVERLAP, not the window it was created
+	// in.
 	From   time.Time // inclusive
 	To     time.Time // exclusive
 	Cursor string    // opaque keyset cursor from a previous page
@@ -148,19 +123,11 @@ type IncidentPage struct {
 	NextCursor string // "" when the page is the last one
 }
 
-// IncidentStore is the write seam. The update surface is THREE NARROW UPDATES
-// rather than one full replace: an incident evolves while several people look
-// at it, so a full-replace write would let a collaborator's stale copy of
-// notes silently overwrite an edit made a second earlier, and the three
-// mutable fields change for three unrelated reasons. httpapi assembles PATCH
-// semantics from these.
+// The update surface is THREE NARROW UPDATES rather than one full replace: an incident evolves
+// while several people look at it.
 type IncidentStore interface {
 	CreateIncident(ctx context.Context, in IncidentInput) (Incident, error)
 	// UpdateIncidentStatus moves an incident between open and resolved.
-	// resolvedAt travels with status because it is status' witness: resolving
-	// requires a non-nil resolvedAt, reopening requires a nil one, and both
-	// are checked before the UPDATE so a reopened incident can never keep a
-	// resolution time.
 	UpdateIncidentStatus(ctx context.Context, id, status string, resolvedAt *time.Time) (Incident, error)
 	UpdateIncidentNotes(ctx context.Context, id, notes string) (Incident, error)
 	UpdateIncidentPinned(ctx context.Context, id string, pinned json.RawMessage) (Incident, error)
@@ -219,11 +186,9 @@ func (in *IncidentInput) effectiveStatus() string {
 	return in.Status
 }
 
-// validateIncidentStatus applies the status/resolved_at invariant that both
-// CreateIncident and UpdateIncidentStatus enforce: the status vocabulary is
-// closed, and resolved_at is present exactly when the status is "resolved".
-// Checked in Go rather than by a CHECK constraint so the status vocabulary can
-// widen without a migration.
+// validateIncidentStatus applies the status/resolved_at invariant that both CreateIncident and
+// UpdateIncidentStatus enforce; checked in Go rather than by a CHECK constraint so the status
+// vocabulary can widen without a migration.
 func validateIncidentStatus(status string, resolvedAt *time.Time) error {
 	if !incidentStatuses[status] {
 		return fmt.Errorf("store: incident: status %q must be one of open, resolved", status)
@@ -239,16 +204,7 @@ func validateIncidentStatus(status string, resolvedAt *time.Time) error {
 	return nil
 }
 
-// ValidatePinned reports whether raw is a well-formed pinned array: a JSON
-// ARRAY (not an object) of at most pinnedMaxEntries refs, each with a kind
-// from the closed vocabulary, a non-empty id of at most 128 bytes and a note
-// of at most 512.
-//
-// The DECODED value is checked, not merely the bytes' JSON validity: an
-// unknown kind or an over-long note would round-trip through jsonb happily and
-// only fail in the UI, as a pin that renders as nothing. Exported because
-// httpapi validates a PATCH body before it ever builds a store call, and two
-// spellings of this rule is one too many.
+// ValidatePinned reports whether raw is a well-formed pinned array.
 func ValidatePinned(raw json.RawMessage) error {
 	trimmed := bytes.TrimSpace(raw)
 	if len(trimmed) == 0 || bytes.Equal(trimmed, jsonNull) {
@@ -281,10 +237,8 @@ func ValidatePinned(raw json.RawMessage) error {
 	return nil
 }
 
-// DecodePinned parses an Incident.Pinned payload back into typed refs. The
-// store itself never needs it -- it hands the JSONB straight through -- but
-// every consumer that wants the list rather than its bytes would otherwise
-// re-declare PinnedRef. Same reasoning as DecodeHops.
+// DecodePinned parses an Incident.Pinned payload back into typed refs; the store itself never needs
+// it -- it hands the JSONB straight through.
 func DecodePinned(raw json.RawMessage) ([]PinnedRef, error) {
 	trimmed := bytes.TrimSpace(raw)
 	if len(trimmed) == 0 || bytes.Equal(trimmed, jsonNull) {
@@ -297,11 +251,8 @@ func DecodePinned(raw json.RawMessage) ([]PinnedRef, error) {
 	return refs, nil
 }
 
-// orEmptyPinnedArray is orEmptyJSON for an ARRAY-shaped column. It cannot be
-// orEmptyJSON itself: that one substitutes {}, the labels/params default,
-// which for pinned would store an object where every reader expects a list.
-// The substitute here is [], the column's own DEFAULT, spelled explicitly so
-// an UPDATE (which has no DEFAULT to fall back on) behaves like an INSERT.
+// orEmptyPinnedArray is orEmptyJSON for an ARRAY-shaped column; it cannot be orEmptyJSON itself:
+// that one substitutes {}, the labels/params default.
 func orEmptyPinnedArray(raw json.RawMessage) json.RawMessage {
 	if len(bytes.TrimSpace(raw)) == 0 || bytes.Equal(bytes.TrimSpace(raw), jsonNull) {
 		return json.RawMessage(`[]`)
@@ -466,10 +417,8 @@ func (db *DB) UpdateIncidentNotes(ctx context.Context, id, notes string) (Incide
 	return incidentFromRow(&row), nil
 }
 
-// UpdateIncidentPinned replaces the pinned-findings array wholesale. A pin and
-// an unpin are both "the list is now this", which is what the UI actually
-// knows; an add/remove pair would need a server-side merge that two operators
-// pinning at once would race.
+// UpdateIncidentPinned replaces the pinned-findings array wholesale; a pin and an unpin are both
+// "the list is now this", which is what the UI actually knows.
 func (db *DB) UpdateIncidentPinned(ctx context.Context, id string, pinned json.RawMessage) (Incident, error) {
 	if err := ValidatePinned(pinned); err != nil {
 		return Incident{}, err
@@ -510,11 +459,8 @@ func (db *DB) DeleteIncident(ctx context.Context, id string) error {
 	return nil
 }
 
-// DeleteIncidentsBefore deletes up to limit incidents RESOLVED before before,
-// oldest resolution first, and reports how many were removed. An open incident
-// has a NULL resolved_at and can therefore never be selected -- see the query
-// and prune.go. Used by Pruner's sweep; exposed for the same testability
-// reason as DeleteRunsBefore.
+// DeleteIncidentsBefore deletes up to limit incidents RESOLVED before before; an open incident has
+// a NULL resolved_at and can therefore never be selected.
 func (db *DB) DeleteIncidentsBefore(ctx context.Context, before time.Time, limit int32) (int64, error) {
 	n, err := gen.New(db.pool).DeleteIncidentsBefore(ctx, gen.DeleteIncidentsBeforeParams{
 		ResolvedAt: pgtype.Timestamptz{Time: before, Valid: true},

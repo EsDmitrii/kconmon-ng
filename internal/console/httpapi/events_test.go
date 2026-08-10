@@ -31,9 +31,6 @@ func (f *fakeEventLister) ListEvents(_ context.Context, filter store.EventFilter
 }
 
 // newEventsServer wires a server with only what GET /api/v1/events needs.
-// lister is passed as the httpapi.EventLister interface param itself (not a
-// concrete *fakeEventLister variable that might be nil) so that passing nil
-// here is a genuine nil interface, never a typed-nil trap.
 func newEventsServer(t *testing.T, lister httpapi.EventLister) *httpapi.Server {
 	t.Helper()
 	cfg, err := config.Load("/nonexistent")
@@ -131,12 +128,6 @@ func TestEventsScopeNodePlumbing(t *testing.T) {
 	}
 }
 
-// TestEventsScopeAndScopeNodeAreMutuallyExclusive: the two filters answer
-// different questions ("this exact scope" vs "this name on either side of a
-// pair"), and silently AND-ing them would return a subset an operator never
-// asked for. 422 rather than 400: both params are individually well-formed --
-// it is the combination the server refuses (the same posture every other
-// semantic refusal in this API takes).
 func TestEventsScopeAndScopeNodeAreMutuallyExclusive(t *testing.T) {
 	lister := &fakeEventLister{}
 	srv := newEventsServer(t, lister)

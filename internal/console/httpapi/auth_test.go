@@ -29,10 +29,7 @@ import (
 	"github.com/EsDmitrii/kconmon-ng/internal/console/ws"
 )
 
-// fakeAuthenticator is an authn.Authenticator test double: always returns
-// the fixed (subject, err) pair regardless of what the request carries, so
-// tests can drive authorize's decision independently of any real
-// authenticator implementation.
+// fakeAuthenticator is an authn.Authenticator test double.
 type fakeAuthenticator struct {
 	subject authz.Subject
 	err     error
@@ -72,10 +69,8 @@ func (f fakeUserStore) GetUserByUsername(_ context.Context, username string) (st
 	return u, nil
 }
 
-// GetUserByID is unused by every auth_test.go case (they all authenticate
-// via GetUserByUsername, local mode's own re-query path) -- it exists only
-// so fakeUserStore keeps satisfying authn.UserStore now that
-// WithOwnerDisabledCheck (authn/token.go) added it to the interface.
+// GetUserByID is unused by every auth_test.go case (they all authenticate via GetUserByUsername,
+// local mode's own re-query path).
 func (f fakeUserStore) GetUserByID(_ context.Context, id string) (store.User, error) {
 	for _, u := range f.users {
 		if u.ID == id {
@@ -85,10 +80,8 @@ func (f fakeUserStore) GetUserByID(_ context.Context, id string) (store.User, er
 	return store.User{}, store.ErrNotFound
 }
 
-// fakeOIDCFlow is an OIDCFlow test double (I-4): a tiny fake standing in
-// for *authn.OIDCAuthenticator, letting handleOIDCStart/handleOIDCCallback
-// be tested against fixed AuthorizeURL/Callback outcomes without provider
-// discovery, a KV, or a SessionStore.
+// fakeOIDCFlow is an OIDCFlow test double (I-4): a tiny fake standing in for
+// *authn.OIDCAuthenticator.
 type fakeOIDCFlow struct {
 	authorizeURL string
 	authorizeErr error
@@ -105,10 +98,7 @@ func (f fakeOIDCFlow) Callback(context.Context, string, string) (string, string,
 	return f.sessionID, f.returnTo, f.callbackErr
 }
 
-// captureLogs swaps in a buffer-backed default slog logger for the
-// duration of a test, restoring the previous default on cleanup -- the
-// same pattern authn/session_test.go's captureLogs uses, reimplemented
-// here since it is package-private there.
+// captureLogs swaps in a buffer-backed default slog logger for the duration of a test.
 func captureLogs(t *testing.T) *syncBuffer {
 	t.Helper()
 	buf := &syncBuffer{}
@@ -137,10 +127,7 @@ func (b *syncBuffer) String() string {
 	return b.buf.String()
 }
 
-// authTestConfig builds a minimal, hand-constructed config.Config for the
-// auth tests below -- not routed through config.Load/Validate, since these
-// tests need full control over Session.CookieName without __Host-'s
-// Secure=true entanglement.
+// authTestConfig builds a minimal, hand-constructed config.Config for the auth tests below.
 func authTestConfig(mode string) *config.Config {
 	return &config.Config{
 		HTTPPort: 8080, LogLevel: "info", LogFormat: "json", MetricsPrefix: "kconmon_ng",
@@ -183,11 +170,7 @@ func doRequest(t *testing.T, s *Server, method, target string, body io.Reader, m
 	return w
 }
 
-// TestAnonymousDefaultServesEveryM1M2Route is the Phase B degraded-state
-// guarantee: the default auth.mode=anonymous + auth.anonymous.role=viewer
-// deployment serves every M1/M2 route exactly as before -- none of them
-// may answer 401 or 403 now that authenticate/authorize sit in front of
-// all of them.
+// TestAnonymousDefaultServesEveryM1M2Route is the Phase B degraded-state guarantee.
 func TestAnonymousDefaultServesEveryM1M2Route(t *testing.T) {
 	s := newTestServer(t) // anonymous/viewer default, no Authenticator/Policy override
 	cases := []struct {
@@ -213,33 +196,11 @@ func TestAnonymousDefaultServesEveryM1M2Route(t *testing.T) {
 	}
 }
 
-// TestEveryAPIRouteHasAPermissionDecision walks the live chi router and
-// checks two things per registered route: (1) it has an entry in
-// routeTable, and (2) the auth chain actually GATES it. (2) is the I-1
-// review carry-forward -- the previous version of this test only asserted
-// (1), map membership, and discarded chi.Walk's own middlewares argument
-// entirely. That made it a bookkeeping check, not a behavioral one: a
-// route registered OUTSIDE the api.Use(s.authenticate, s.authorize) Group
-// in server.go would still get a routeTable row (nothing stops that) and
-// would still pass the old test, while every real request against it sailed
-// through with no 401/403 ever possible. This version proves the chain
-// actually runs, by issuing a real request per route with a subject that
-// is authenticated but holds no roles: a non-public row must answer 401 or
-// 403 (nothing else can explain that response for a no-role subject other
-// than authorize having run), and a public row must answer neither.
-//
-// No /api/v1 prefix filter any more, either -- every registered route not
-// in the fixed public-infra set below goes through the same table lookup
-// AND the same live-request check, so a future route added outside
-// /api/v1 (like /ws already is) cannot silently skip both.
+// TestEveryAPIRouteHasAPermissionDecision walks the live chi router and checks two things per
+// registered route; (2) is the I-1 review carry-forward -- the previous version of this test only
+// asserted (1).
 func TestEveryAPIRouteHasAPermissionDecision(t *testing.T) {
-	// Authenticated (Kind != "") but role-less: passes authenticate, so a
-	// public route's authorize check lets it straight through to its
-	// handler, and a non-public route's permission check denies it -- but
-	// ONLY if authorize is actually the thing deciding. authz.NewPolicy(nil)
-	// is the built-in-roles-only policy with no custom role granting
-	// anything to a subject with zero Roles, so Can() is false for every
-	// permission in routeTable.
+	// Authenticated (Kind != "") but role-less: passes authenticate.
 	authr := fakeAuthenticator{subject: authz.Subject{Kind: authz.SubjectUser, ID: "u1"}, mode: "local"}
 	s := newAuthzServer(t, authr, authz.NewPolicy(nil), Deps{})
 
@@ -258,13 +219,7 @@ func TestEveryAPIRouteHasAPermissionDecision(t *testing.T) {
 		if isMutatingMethod(method) {
 			body = strings.NewReader(`{}`)
 		}
-		// This subject is Kind == authz.SubjectUser, which requires the
-		// CSRF double-submit pair on a mutating request regardless of
-		// public/non-public (I-2: CSRF and the permission decision are
-		// orthogonal -- a public route like POST /api/v1/auth/login is
-		// still CSRF-gated once a SubjectUser is attached). Supply the
-		// pair so THIS test isolates the permission decision, which is
-		// what it exists to check; CSRF has its own tests.
+		// This subject is Kind == authz.SubjectUser.
 		w := doRequest(t, s, method, route, body, func(r *http.Request) {
 			if isMutatingMethod(method) {
 				r.AddCookie(&http.Cookie{Name: csrfCookieName, Value: "tok-1"})
@@ -288,15 +243,7 @@ func TestEveryAPIRouteHasAPermissionDecision(t *testing.T) {
 	}
 }
 
-// TestRoutePermissionTable exercises every non-public row of routeTable: a
-// subject holding the permission gets through (never 401/403); a subject
-// without it gets 403 problem+json naming the permission.
-//
-// The granted half iterates rule.accepted() rather than reading
-// rule.permission, so an anyOf row (GET /ws, the only one -- see routeRule's
-// doc comment) is proven to admit EACH of its permissions on its own, not
-// merely to admit somebody. The denied half asserts the 403 names all of
-// them, since a caller holding none needs to know which one to ask for.
+// TestRoutePermissionTable exercises every non-public row of routeTable.
 func TestRoutePermissionTable(t *testing.T) {
 	for key, rule := range routeTable {
 		if rule.public {
@@ -314,19 +261,12 @@ func TestRoutePermissionTable(t *testing.T) {
 
 		for _, perm := range accepted {
 			t.Run(key+"/granted/"+string(perm), func(t *testing.T) {
-				// Roles come from a RoleResolver, not from the Authenticator's
-				// returned Subject directly -- resolveRoles (middleware_auth.go)
-				// always re-derives Roles for a non-anonymous subject, exactly
-				// as every real authenticator (local/header/oidc/token) leaves
-				// Roles unset on the Subject it returns.
+				// Roles come from a RoleResolver, not from the Authenticator's returned Subject directly.
 				policy := authz.NewPolicy(map[string][]authz.Permission{"tester": {perm}})
 				authr := fakeAuthenticator{subject: authz.Subject{Kind: authz.SubjectUser, ID: "u1"}}
 				s := newAuthzServer(t, authr, policy, Deps{Roles: fakeRoleResolver{roles: []string{"tester"}}})
-				// Kind == authz.SubjectUser requires the CSRF double-submit
-				// pair for a mutating method now (I-2), regardless of whether
-				// a session cookie happens to be on the request -- add it for
-				// POST routes so this sub-test still isolates the permission
-				// decision, not the CSRF one (which has its own tests below).
+				// Kind == authz.SubjectUser requires the CSRF double-submit pair for a mutating method now
+				// (I-2).
 				w := doRequest(t, s, method, path, strings.NewReader(`{"query":"up"}`), func(r *http.Request) {
 					if isMutatingMethod(method) {
 						r.AddCookie(&http.Cookie{Name: csrfCookieName, Value: "tok-1"})
@@ -359,11 +299,7 @@ func TestRoutePermissionTable(t *testing.T) {
 	}
 }
 
-// TestAuthorizeFailsClosedWhenRouteRuleMissing pins authorize's own
-// fail-closed behavior directly: a route reachable at runtime but absent
-// from routeTable (structurally prevented for every real route by
-// TestEveryAPIRouteHasAPermissionDecision) is denied, never let through,
-// even for a subject holding every permission there is.
+// TestAuthorizeFailsClosedWhenRouteRuleMissing pins authorize's own fail-closed behavior directly.
 func TestAuthorizeFailsClosedWhenRouteRuleMissing(t *testing.T) {
 	s := newAuthzServer(t, fakeAuthenticator{subject: authz.Subject{Kind: authz.SubjectUser, Roles: []string{"admin"}}}, authz.NewPolicy(nil), Deps{})
 
@@ -397,9 +333,7 @@ func TestUnauthenticatedNonAnonymousModeReturns401(t *testing.T) {
 	}
 }
 
-// TestRoleResolverErrorDegradesToDefaultRoleNot500 is the brief's explicit
-// case: RolesFor failing (a database blip) must not lock an otherwise
-// working read surface behind a 500 -- it degrades to auth.defaultRole.
+// TestRoleResolverErrorDegradesToDefaultRoleNot500 is the explicit case.
 func TestRoleResolverErrorDegradesToDefaultRoleNot500(t *testing.T) {
 	cfg := authTestConfig("local")
 	cfg.Auth.DefaultRole = "viewer"
@@ -495,10 +429,8 @@ func TestCSRFBearerAuthedMutationExempt(t *testing.T) {
 
 // --- /healthz /readyz /metrics never authenticated ---------------------
 
-// panicAuthenticator proves /healthz, /readyz and /metrics never even
-// reach the authenticate middleware, in every mode: if they ever did,
-// Authenticate would panic and fail the test loudly instead of silently
-// returning the "right" answer for the wrong reason.
+// panicAuthenticator proves /healthz, /readyz and /metrics never even reach the authenticate
+// middleware.
 type panicAuthenticator struct{ mode string }
 
 func (panicAuthenticator) Authenticate(*http.Request) (authz.Subject, error) {
@@ -522,10 +454,8 @@ func TestHealthzReadyzMetricsNeverAuthenticatedInAnyMode(t *testing.T) {
 
 // --- /ws through the full auth middleware chain (Unwrap regression) ----
 
-// TestWSUpgradesThroughAuthMiddlewareForPermittedSubject proves the
-// authenticate+authorize middleware pair does not break the /ws Hijacker
-// path for a genuinely non-default, non-anonymous permitted subject (not
-// just the anonymous/viewer default server_test.go already covers).
+// TestWSUpgradesThroughAuthMiddlewareForPermittedSubject proves the authenticate+authorize
+// middleware pair does not break the /ws Hijacker path for a genuinely non-default.
 func TestWSUpgradesThroughAuthMiddlewareForPermittedSubject(t *testing.T) {
 	hub := ws.NewHub(cache.NewInProcessBus(), metrics.New("kconmon_ng", prometheus.NewRegistry()))
 	policy := authz.NewPolicy(map[string][]authz.Permission{"tester": {authz.PermEventsRead}})
@@ -550,26 +480,9 @@ func TestWSUpgradesThroughAuthMiddlewareForPermittedSubject(t *testing.T) {
 	}
 }
 
-// M7 rewrites the M4 pin that used to live here
-// (TestWSRequiresEventsReadEvenForRunWatching), consciously and exactly as
-// that test's own doc comment instructed a later milestone to. The property it
-// pinned -- "the socket has ONE permission and it covers every topic" -- was
-// never the goal; it was the honest description of a hub that could not tell
-// its connections apart. Now that ws.Hub takes a per-connection
-// ws.TopicAuthorizer, the three tests below pin the property that was actually
-// wanted all along, and each of them would have failed against the M4 code:
-//
-//   - runs:read alone OPENS the socket and may watch a run (was: 403).
-//   - that same connection is refused live/topology/matrix (the leak M4 was
-//     protecting against by keeping the bar at events:read).
-//   - holding NEITHER permission is still 403 at the upgrade.
-//
-// TestWSEventsReadAloneCoversRunTopics, below, is unchanged and still true.
+// The property it pinned -- "the socket has ONE permission and it covers every topic" -- was never
+// the goal.
 
-// TestWSAdmitsRunsReadForRunWatching is the M3 follow-up #10 fix seen from the
-// affected role: a custom role granted runs:read so it can start a diagnostics
-// run can now WATCH the run it started, over the socket, instead of polling
-// GET /api/v1/runs/{id}.
 func TestWSAdmitsRunsReadForRunWatching(t *testing.T) {
 	hub := ws.NewHub(cache.NewInProcessBus(), metrics.New("kconmon_ng", prometheus.NewRegistry()))
 	policy := authz.NewPolicy(map[string][]authz.Permission{
@@ -623,17 +536,8 @@ func TestWSAdmitsRunsReadForRunWatching(t *testing.T) {
 	}
 }
 
-// TestWSRunsReadOnlyIsRefusedTheFleetWideTopics is the other half, and the
-// reason the upgrade may be widened at all: the runs:read-only connection that
-// TestWSAdmitsRunsReadForRunWatching just proved can open the socket must NOT
-// be able to read the fleet-wide topics over it. Widening the route without
-// this second, per-topic decision would hand every run watcher the "live"
-// event stream that events:read gates on GET /api/v1/events -- precisely the
-// leak M4 refused, and the reason both halves have to land together.
-//
-// The refusal is an error frame on a socket that stays open, not a close: the
-// connection is legitimately serving run topics, and one denied subscribe must
-// not cost it the ones it is entitled to.
+// TestWSRunsReadOnlyIsRefusedTheFleetWideTopics is the other half, and the reason the upgrade may
+// be widened at all.
 func TestWSRunsReadOnlyIsRefusedTheFleetWideTopics(t *testing.T) {
 	hub := ws.NewHub(cache.NewInProcessBus(), metrics.New("kconmon_ng", prometheus.NewRegistry()))
 	policy := authz.NewPolicy(map[string][]authz.Permission{
@@ -700,10 +604,8 @@ func TestWSRunsReadOnlyIsRefusedTheFleetWideTopics(t *testing.T) {
 	}
 }
 
-// TestWSRefusesTheUpgradeWithoutEitherPermission pins that widening the row to
-// anyOf did not make it public: a role holding neither events:read nor
-// runs:read is still stopped at the upgrade, with a 403 naming both
-// acceptable permissions so the caller knows which to ask an admin for.
+// TestWSRefusesTheUpgradeWithoutEitherPermission pins that widening the row to anyOf did not make
+// it public.
 func TestWSRefusesTheUpgradeWithoutEitherPermission(t *testing.T) {
 	hub := ws.NewHub(cache.NewInProcessBus(), metrics.New("kconmon_ng", prometheus.NewRegistry()))
 	policy := authz.NewPolicy(map[string][]authz.Permission{
@@ -726,11 +628,8 @@ func TestWSRefusesTheUpgradeWithoutEitherPermission(t *testing.T) {
 	}
 }
 
-// TestWSEventsReadAloneCoversRunTopics is the other face of the same
-// coupling: events:read alone -- with no runs:read at all -- is enough to
-// subscribe to a run:{id} topic and receive its frames, because the hub
-// applies no per-topic permission check. Stated as a test so the
-// per-connection granularity is a pinned property rather than folklore.
+// TestWSEventsReadAloneCoversRunTopics is the other face of the same coupling: events:read alone;
+// stated as a test so the per-connection granularity is a pinned property rather than folklore.
 func TestWSEventsReadAloneCoversRunTopics(t *testing.T) {
 	hub := ws.NewHub(cache.NewInProcessBus(), metrics.New("kconmon_ng", prometheus.NewRegistry()))
 	policy := authz.NewPolicy(map[string][]authz.Permission{
@@ -850,13 +749,8 @@ func TestAuthLoginLocalModeSetsSessionAndCSRFCookies(t *testing.T) {
 	s := NewServer(Deps{
 		Config: cfg, Metrics: m, PromRegistry: reg, UI: ui,
 		Users: users, Sessions: sessions,
-		// A login request carries no session cookie -- the real local
-		// authenticator would resolve this to ErrNoCredentials, which
-		// authenticate degrades to the zero Subject (Kind == ""), csrfOK's
-		// exempt case. Wiring that explicitly here (rather than relying on
-		// NewServer's nil-Authenticator fallback, which is a FIXED
-		// anonymous Subject unrelated to this test's mode="local" config)
-		// is what makes the CSRF exemption apply for the right reason.
+		// A login request carries no session cookie -- the real local authenticator would resolve this to
+		// ErrNoCredentials.
 		Authenticator: fakeAuthenticator{err: authn.ErrNoCredentials, mode: "local"},
 	})
 
@@ -947,11 +841,7 @@ func TestAuthLogoutDeletesSessionAndClearsCookies(t *testing.T) {
 	ui := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte("spa")) })
 	s := NewServer(Deps{Config: cfg, Metrics: m, PromRegistry: reg, UI: ui, Sessions: sessions})
 
-	// logout is a mutating request and, once a session cookie is present,
-	// is subject to the same CSRF double-submit check as any other
-	// cookie-authenticated mutation (task-16-brief.md draws the exemption
-	// line at Bearer-authed requests and requests with no session cookie
-	// at all -- logout has one, so it is not exempt).
+	// logout is a mutating request and, once a session cookie is present.
 	w := doRequest(t, s, http.MethodPost, "/api/v1/auth/logout", http.NoBody, func(r *http.Request) {
 		r.AddCookie(&http.Cookie{Name: cfg.Auth.Session.CookieName, Value: id})
 		r.AddCookie(&http.Cookie{Name: csrfCookieName, Value: "tok-1"})
@@ -1040,15 +930,7 @@ func TestNewServerDefaultsNilAuthenticatorAndPolicyToAnonymousViewer(t *testing.
 
 // --- I-2: CSRF exemption keyed on subject kind ---------------------------
 
-// TestCSRFHeaderModeSubjectRequiresPair pins I-2's actual fix: a
-// header-mode SubjectUser never carries kconmon's own session cookie (a
-// trusted proxy injects identity per request instead), so the OLD
-// cookie-presence-keyed csrfOK exempted every header-mode mutation from
-// CSRF entirely -- exactly the gap a cross-site request riding the proxy's
-// OWN ambient cookie could exploit. Now the exemption is keyed on
-// subject.Kind, so a header-mode mutation with no pair is denied, and one
-// with the pair maybeMintCSRFCookie lazily minted on a prior safe GET
-// passes.
+// TestCSRFHeaderModeSubjectRequiresPair pins I-2's actual fix.
 func TestCSRFHeaderModeSubjectRequiresPair(t *testing.T) {
 	policy := authz.NewPolicy(map[string][]authz.Permission{"tester": {authz.PermPromQLQuery}})
 	authr := fakeAuthenticator{subject: authz.Subject{Kind: authz.SubjectUser, ID: "proxy-user"}, mode: "header"}
@@ -1065,10 +947,7 @@ func TestCSRFHeaderModeSubjectRequiresPair(t *testing.T) {
 	})
 
 	t.Run("mint then echo", func(t *testing.T) {
-		// GET /api/v1/auth/me is public (no permission needed) and, being a
-		// safe GET from an authenticated SubjectUser with no csrf cookie
-		// yet, is exactly where maybeMintCSRFCookie hands the browser its
-		// cookie -- header mode has no login handler to do it instead.
+		// GET /api/v1/auth/me is public (no permission needed) and.
 		get := doRequest(t, s, http.MethodGet, "/api/v1/auth/me", nil, nil)
 		var minted string
 		for _, c := range get.Result().Cookies() {
@@ -1092,14 +971,7 @@ func TestCSRFHeaderModeSubjectRequiresPair(t *testing.T) {
 
 // --- I-3: login timing oracle --------------------------------------------
 
-// TestAuthLoginFailurePathsReturnIdenticalResponses pins I-3: unknown
-// username, a disabled account, and a wrong password must be
-// indistinguishable to the caller. Response timing itself cannot be
-// asserted reliably in a unit test, so this checks what CAN be pinned
-// deterministically -- identical status and body across all three -- which
-// is only true now that the not-found and disabled paths pay the same
-// argon2 cost as the real verification path (dummyPasswordHash, auth.go)
-// before answering.
+// TestAuthLoginFailurePathsReturnIdenticalResponses pins I-3: unknown username, a disabled account.
 func TestAuthLoginFailurePathsReturnIdenticalResponses(t *testing.T) {
 	knownHash, err := authn.HashPassword("correct-horse")
 	if err != nil {
@@ -1161,16 +1033,7 @@ func TestAuthLoginFailurePathsReturnIdenticalResponses(t *testing.T) {
 
 // --- I-4: OIDC callback success path --------------------------------------
 
-// TestOIDCCallbackSuccessSetsSessionAndCSRFCookiesAndRedirects is I-4's
-// missing coverage: a successful callback (via the fakeOIDCFlow test
-// double, exercising the narrowed OIDCFlow seam) sets the session cookie
-// under the CONFIGURED cookie name (deliberately non-default here, proving
-// setSessionCookie honors it rather than authn.OIDCSessionCookieName's
-// hardcoded constant), sets the csrf cookie, and 302s to the returnTo the
-// flow reported -- trusted as-is, since AuthorizeURL already validated it
-// before it was ever stashed; this test asserts that trust boundary by
-// having the fake return a fixed, arbitrary path and checking it comes
-// back verbatim.
+// TestOIDCCallbackSuccessSetsSessionAndCSRFCookiesAndRedirects is I-4's missing coverage.
 func TestOIDCCallbackSuccessSetsSessionAndCSRFCookiesAndRedirects(t *testing.T) {
 	cfg := authTestConfig("oidc")
 	cfg.Auth.Session.CookieName = "my_nondefault_session_cookie"
@@ -1208,12 +1071,7 @@ func TestOIDCCallbackSuccessSetsSessionAndCSRFCookiesAndRedirects(t *testing.T) 
 
 // --- M-5: csrf-mint failure is no longer swallowed ------------------------
 
-// spyKV wraps a cache.KV, recording the key of the most recent Set -- used
-// below to recover the session id handleAuthLogin's sessions.Create mints
-// internally (it is not otherwise observable from outside the handler), so
-// the test can confirm handleAuthLogin's Delete call on a csrf-mint
-// failure actually removed it from the store, not just that the response
-// looked right.
+// spyKV wraps a cache.KV, recording the key of the most recent Set.
 type spyKV struct {
 	cache.KV
 	mu         sync.Mutex
@@ -1233,9 +1091,8 @@ func (s *spyKV) lastKey() string {
 	return s.lastSetKey
 }
 
-// withFailingCSRFRand stubs csrfRandRead to fail for the duration of the
-// test, restoring it on cleanup -- the M-5-mandated seam (auth.go) for
-// exercising setCSRFCookie's error path without touching real entropy.
+// withFailingCSRFRand stubs csrfRandRead to fail for the duration of the test, restoring it on
+// cleanup.
 func withFailingCSRFRand(t *testing.T) {
 	t.Helper()
 	orig := csrfRandRead
@@ -1243,13 +1100,8 @@ func withFailingCSRFRand(t *testing.T) {
 	t.Cleanup(func() { csrfRandRead = orig })
 }
 
-// TestCSRFMintFailureOnLoginAbortsSessionAndReturns500 pins M-5: a
-// setCSRFCookie failure during login must not leave a session the browser
-// can never again pair a csrf token with (every subsequent mutation,
-// logout included, would 403 forever under the old swallow-and-warn
-// behavior). The session created just before the failure must be deleted
-// server-side, the session cookie cleared client-side, and the response a
-// 500 problem -- never the 204 the pre-fix code would have returned.
+// The session created just before the failure must be deleted server-side, the session cookie
+// cleared client-side.
 func TestCSRFMintFailureOnLoginAbortsSessionAndReturns500(t *testing.T) {
 	hash, err := authn.HashPassword("s3cret!")
 	if err != nil {
@@ -1299,11 +1151,9 @@ func TestCSRFMintFailureOnLoginAbortsSessionAndReturns500(t *testing.T) {
 }
 
 // TestCSRFMintFailureOnOIDCCallbackAbortsSessionAndReturns500 is
-// TestCSRFMintFailureOnLoginAbortsSessionAndReturns500's oidc-callback
-// counterpart. The session id here is a REAL one, pre-created directly
-// against the same SessionStore the server is wired with (standing in for
-// what s.oidc.Callback would have just created), so sessions.Get after the
-// request reliably proves whether handleOIDCCallback's Delete call ran.
+// TestCSRFMintFailureOnLoginAbortsSessionAndReturns500's oidc-callback counterpart; the session id
+// here is a REAL one, pre-created directly against the same SessionStore the server is wired with
+// (standing in for what s.oidc.Callback would have just created).
 func TestCSRFMintFailureOnOIDCCallbackAbortsSessionAndReturns500(t *testing.T) {
 	sessions := authn.NewSessionStore(cache.NewInProcessKV(), time.Hour)
 	sessionID, err := sessions.Create(context.Background(), authn.Session{Username: "alice"})
@@ -1345,11 +1195,6 @@ func TestCSRFMintFailureOnOIDCCallbackAbortsSessionAndReturns500(t *testing.T) {
 
 // --- Task 18: oidc mode + non-default cookie name no longer needs a boot warning ---
 
-// TestOIDCNonDefaultCookieNameNoLongerWarnsAtBoot documents the fix for the
-// old M-9 gap: NewOIDC now honors auth.session.cookieName (oidc.go's
-// cookieName parameter, threaded through by cmd/console), so auth.mode=oidc
-// with a non-default cookie name is simply a supported configuration, not a
-// boot-time hazard any more -- NewServer must NOT warn about it.
 func TestOIDCNonDefaultCookieNameNoLongerWarnsAtBoot(t *testing.T) {
 	logs := captureLogs(t)
 
@@ -1369,11 +1214,6 @@ func TestOIDCNonDefaultCookieNameNoLongerWarnsAtBoot(t *testing.T) {
 
 // --- M-10: handleOIDCStart error mapping ----------------------------------
 
-// TestOIDCStartMapsBadReturnToTo400AndOtherFailuresTo500 pins M-10: only a
-// caller-supplied unsafe returnTo is a 400, decided before the flow is ever
-// called (isSafeReturnTo, auth.go) -- anything the flow itself fails with
-// (state mint / KV write) is an infrastructure problem, answered 500 with a
-// generic detail that never echoes the underlying error, and logged.
 func TestOIDCStartMapsBadReturnToTo400AndOtherFailuresTo500(t *testing.T) {
 	cfg := authTestConfig("oidc")
 	reg := prometheus.NewRegistry()
@@ -1410,12 +1250,6 @@ func TestOIDCStartMapsBadReturnToTo400AndOtherFailuresTo500(t *testing.T) {
 
 // --- M-11: anonymous mode does not increment AuthRequests -----------------
 
-// TestAnonymousModeDoesNotIncrementAuthRequests pins M-11:
-// anonymousAuthenticator.Authenticate never fails by construction, so every
-// request under auth.mode=anonymous would otherwise increment
-// AuthRequests(anonymous, ok) 1:1 with total traffic -- no diagnostic
-// signal beyond what the instrument middleware's own HTTPRequests counter
-// already provides.
 func TestAnonymousModeDoesNotIncrementAuthRequests(t *testing.T) {
 	cfg := authTestConfig("anonymous")
 	reg := prometheus.NewRegistry()

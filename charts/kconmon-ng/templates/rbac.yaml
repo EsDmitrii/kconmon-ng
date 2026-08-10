@@ -1,4 +1,4 @@
-{{- if .Values.serviceAccount.create }}
+{{- if .Values.rbac.create }}
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -25,32 +25,9 @@ subjects:
     name: {{ include "kconmon-ng.serviceAccountName" . }}
     namespace: {{ .Release.Namespace }}
 {{- end }}
-{{- if and .Values.console.enabled .Values.console.kubernetesContext.enabled .Values.serviceAccount.create }}
+{{- if and .Values.console.enabled .Values.console.kubernetesContext.enabled .Values.rbac.create }}
 ---
-{{/*
-M6: a SECOND ClusterRole, for the console only. The grant above is bound to the
-ServiceAccount the agent DaemonSet and the controller Deployment both run as
-(see their serviceAccountName), so adding event read to it would put that grant
-on every agent Pod on every node — and would still not reach the console, which
-until this release set no serviceAccountName at all and ran as the namespace
-`default` SA. A second role bound to a console-only SA is the only shape that
-gives the reader what it needs without widening what the fleet already has.
-
-The verbs are exactly what internal/console/kubectx calls and nothing more:
-CoreV1().Events(ns).List and .Watch, twice (one stream for the release
-namespace's Pod events, one cluster-scoped stream field-selected to Node
-events). It reads NO nodes and NO pods: the node set it filters against comes
-from the controller's topology over the controller's own HTTP API, not from the
-apiserver, which is why the plan's "events/nodes/pods" grant is narrower here
-than it was written. `get` is absent for the same reason — the reader never
-fetches a single event by name.
-
-Cluster-scoped rather than a namespaced Role because Node events are the point:
-the kubelet writes them into whatever namespace it likes (usually "default"),
-so the cluster-scoped stream cannot be expressed as a Role in the release
-namespace. The leak-consciousness lives in the READER's filter, not in the
-grant — see DATA.md and Decision 3.
-*/}}
+{{/* Console-only ClusterRole: event list/watch, cluster-scoped because Node events land in any namespace. */}}
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -79,35 +56,9 @@ subjects:
     name: {{ include "kconmon-ng.console.serviceAccountName" . }}
     namespace: {{ .Release.Namespace }}
 {{- end }}
-{{- if and .Values.console.enabled .Values.console.alerting.enabled .Values.serviceAccount.create }}
+{{- if and .Values.console.enabled .Values.console.alerting.enabled .Values.rbac.create }}
 ---
-{{/*
-M7: the alerting reconciler's grant. A namespaced Role, not a third
-ClusterRole, and that is the whole point of SECURITY.md §10.3: the console
-writes exactly ONE PrometheusRule object, into ONE namespace -- its own -- and a
-Role cannot be made to reach further even by mistake. Pointing
-console.alerting.namespace somewhere else does not widen anything; it makes
-every apply fail with a forbidden the reconciler writes into each rule's
-sync_message, which is a far better failure than a console that can quietly
-create rules in a namespace nobody expected it to touch.
-
-Bound to the SAME console-only ServiceAccount the M6 ClusterRole above uses
-(kconmon-ng.console.serviceAccountName), under its OWN flag: an install with
-alerting on and kubernetesContext off gets this Role and no event grant, and
-the reverse install gets the event grant and no rule-writing power. The shared
-subject is why kconmon-ng.console.k8sIdentity exists.
-
-The verbs are what a server-side apply actually needs and nothing more.
-create/update/patch: SSA is a PATCH with the apply content type, but the
-apiserver charges the create verb when the object does not exist yet and
-update on some paths, so all three are required for one Apply call -- this is
-not three code paths. get/list/watch: the drift comparison reads the live
-object back (promrules.Compare), and list is what ListForeign walks to find
-rules written by other tools. DELETE IS ABSENT ON PURPOSE: the reconciler
-converges by applying an empty bundle when no rule is enabled, it never removes
-the object, and a grant to delete PrometheusRules is a grant to delete somebody
-else's alerting.
-*/}}
+{{/* Alerting reconciler grant: a namespaced Role, no delete verb. */}}
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:

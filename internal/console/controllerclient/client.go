@@ -19,23 +19,15 @@ import (
 // (no leader reachable) after all retries.
 var ErrUnavailable = errors.New("controller unavailable")
 
-// Diagnose's sentinel errors, one per plain-text http.Error status the
-// controller's POST /api/v1/diagnostics returns (internal/controller/diagnostics.go).
-// 503 (non-leader) does not get one of its own -- it reuses ErrUnavailable via
-// the same retry ladder getJSON uses.
+// Diagnose's sentinel errors, one per plain-text http.Error status the controller's POST
+// /api/v1/diagnostics returns (internal/controller/diagnostics.go).
 var (
 	ErrNoAgent      = errors.New("no agent on node")   // controller 404
 	ErrDispatch     = errors.New("dispatch failed")    // controller 502
 	ErrCheckTimeout = errors.New("dispatch timed out") // controller 504
 	ErrBadRequest   = errors.New("invalid request")    // controller 400
-	// ErrExternalUnsupported is the controller's 501: the SOURCE agent does
-	// not advertise the "external-checks" capability, so it would silently
-	// ignore the task's external_target rather than probe it
-	// (internal/controller/diagnostics.go's capability gate). It is a distinct
-	// sentinel, not a flavour of ErrDispatch, because it is the one dispatch
-	// failure an operator fixes by rolling agents forward rather than by
-	// looking at the network -- and because a run whose pairs all fail this
-	// way is reporting an agent-version problem, not a connectivity one.
+	// ErrExternalUnsupported is the controller's 501: the SOURCE agent does not advertise the
+	// "external-checks" capability.
 	ErrExternalUnsupported = errors.New("agent does not support external destinations") // controller 501
 )
 
@@ -44,20 +36,12 @@ const (
 	initialBackoff = 200 * time.Millisecond
 	maxBodyBytes   = 4 << 20 // topology snapshots are small; 4 MiB is generous
 
-	// diagnosticsTimeoutCap mirrors internal/controller/diagnostics.go's
-	// maxDiagnosticsTimeout. The controller silently clamps ?timeout=
-	// server-side; clamping it here too keeps this client's own wait bounded
-	// by the same number instead of trusting an uncapped caller-supplied
-	// value to agree with a cap it never sees.
+	// diagnosticsTimeoutCap mirrors internal/controller/diagnostics.go's maxDiagnosticsTimeout; the
+	// controller silently clamps ?timeout= server-side.
 	diagnosticsTimeoutCap = 120 * time.Second
 
-	// diagnoseCtxSlack is added on top of the per-request timeout sent to the
-	// controller (?timeout=) when bounding tryDiagnose's own context: the
-	// controller enforces that timeout server-side and answers 504 once it
-	// fires, so this client's wait must outlast it by enough to still
-	// receive that 504 response (network RTT, response encode/decode)
-	// instead of cancelling its own request out from under a server that was
-	// about to answer correctly.
+	// diagnoseCtxSlack is added on top of the per-request timeout sent to the controller (?timeout=)
+	// when bounding tryDiagnose's own context.
 	diagnoseCtxSlack = 10 * time.Second
 )
 
@@ -109,21 +93,13 @@ type Client struct {
 	diagHC *http.Client
 }
 
-// New returns a client for baseURL (no trailing slash) with a per-request
-// timeout for Topology/Version (the polling/probe calls hc serves).
-//
-// Diagnose deliberately does NOT share hc: hc.Timeout is sized for a quick
-// topology/version poll (config.go's controller.timeout default is 10s) and
-// would silently cap every diagnostics dispatch at that same ceiling no
-// matter what timeout the caller passes Diagnose or the ?timeout= the
-// controller itself is told to honour (up to diagnosticsTimeoutCap, 120s) --
-// an http.Client.Timeout applies to the whole round trip regardless of the
-// context deadline passed alongside it, so the shorter of the two always
-// wins. diagHC carries no Timeout of its own; tryDiagnose bounds each
-// request purely through its own context (timeout + diagnoseCtxSlack),
-// scoped to that one call, so it can never be a tighter, invisible ceiling
-// under a caller-supplied timeout the way a shared client-wide Timeout would
-// be.
+// New returns a client for baseURL (no trailing slash) with a per-request timeout for
+// Topology/Version (the polling/probe calls hc serves); diagnose deliberately does NOT share hc:
+// hc.Timeout is sized for a quick topology/version poll (config.go's controller.timeout default is
+// 10s) and would silently cap every diagnostics dispatch at that same ceiling no matter what
+// timeout the caller passes Diagnose or the ?timeout= the controller itself is told to honour (up
+// to diagnosticsTimeoutCap, 120s) -- an http.Client.Timeout applies to the whole round trip
+// regardless of the context deadline passed alongside it, so the shorter of the two always wins.
 func New(baseURL string, timeout time.Duration) *Client {
 	return &Client{base: baseURL, hc: &http.Client{Timeout: timeout}, diagHC: &http.Client{}}
 }
@@ -153,50 +129,18 @@ type DiagnoseRequest struct {
 	Destination string `json:"destination"`
 	Type        string `json:"type"`
 	Plane       string `json:"plane"`
-	// DestinationKind is "" (which the controller reads as "node", the only
-	// value that existed before M4) or "external". DestinationAddress carries
-	// the address an external destination is probed at; Destination stays the
-	// metric-safe NAME either way -- the address never becomes an identifier
-	// downstream (internal/controller/diagnostics.go's destName comment).
-	//
-	// Both are `omitempty` on purpose, and that is a compatibility guarantee,
-	// not a formatting preference: a node dispatch must serialize to exactly
-	// the four-field body M3 sent, byte for byte, so a controller that
-	// predates these fields sees no change whatsoever from a Console that has
-	// them. checks' own dispatch tests assert those bytes.
+	// DestinationAddress carries the address an external destination is probed at.
 	DestinationKind    string `json:"destinationKind,omitempty"`
 	DestinationAddress string `json:"destinationAddress,omitempty"`
 }
 
-// DestinationKindExternal is DiagnoseRequest.DestinationKind's non-node value,
-// mirroring internal/controller/diagnostics.go's own destinationKindExternal.
-// A deliberate copy, not an import: this package must not depend on
-// internal/controller.
+// DestinationKindExternal is DiagnoseRequest.DestinationKind's non-node value; a deliberate copy,
+// not an import: this package must not depend on internal/controller.
 const DestinationKindExternal = "external"
 
-// Diagnose posts to the controller's on-demand diagnostics endpoint and
-// returns the agent's model.CheckResult verbatim, exactly as the controller's
-// handler wrote it. timeout is sent as ?timeout=<seconds> and is clamped to
-// [1s, diagnosticsTimeoutCap] (120s) both here and by the controller
-// (maxDiagnosticsTimeout) -- a sub-second timeout is rounded UP to 1s rather
-// than truncated to 0 by the ?timeout=<seconds> encoding (a literal
-// "timeout=0" would mean "no timeout" to a server that does not itself
-// distinguish "caller sent zero" from "caller sent nothing"). So this
-// client's own wait and the server's cap cannot disagree on the SIZE of the
-// bound -- and, since Client.New, they no longer can on ENFORCEMENT either:
-// tryDiagnose bounds this call by its own context (timeout +
-// diagnoseCtxSlack), not by the shared, unrelated hc.Timeout New() also
-// configures for Topology/Version, so a short controller.timeout config
-// value can no longer silently cap a longer diagnose timeout out from under
-// the caller (see New's doc comment).
-//
-// 503 (non-leader) reuses getJSON's retry ladder: up to maxAttempts,
-// doubling backoff, ErrUnavailable once exhausted. 502 and 504 do NOT
-// retry -- a dispatch that reached an agent and then failed or timed out
-// must not be silently re-run against a cluster the operator is diagnosing.
-// 400, 404 and 501 are single-shot request-shape/topology/capability errors
-// that a retry cannot fix either -- retrying a 501 in particular cannot make
-// an old agent grow the external-checks capability.
+// Diagnose posts to the controller's on-demand diagnostics endpoint and returns the agent's
+// model.CheckResult verbatim; so this client's own wait and the server's cap cannot disagree on the
+// SIZE of the bound.
 func (c *Client) Diagnose(ctx context.Context, req DiagnoseRequest, timeout time.Duration) (json.RawMessage, error) { //nolint:gocritic // hugeParam: DiagnoseRequest is a value-type request payload, mirroring the controller's own diagnosticsRequest, and is named in checks' controllerAPI interface -- every fake would have to change with it
 	switch {
 	case timeout <= 0, timeout > diagnosticsTimeoutCap:
@@ -245,16 +189,9 @@ func (c *Client) Diagnose(ctx context.Context, req DiagnoseRequest, timeout time
 	}
 }
 
-// tryDiagnose issues one POST /api/v1/diagnostics attempt and returns the
-// response body (capped to maxBodyBytes, exactly like tryOnce) alongside the
-// status code, regardless of whether that status is 200 -- Diagnose needs
-// the plain-text http.Error body to build its wrapped sentinel errors.
-//
-// The request is bounded by a context derived here (timeout + diagnoseCtxSlack),
-// not by a client-wide http.Client.Timeout -- see New's and Diagnose's doc
-// comments for why diagHC deliberately carries none of its own -- and issued
-// on diagHC, never the shared hc Topology/Version use, so this bound is the
-// only one in effect.
+// tryDiagnose issues one POST /api/v1/diagnostics attempt and returns the response body (capped to
+// maxBodyBytes, exactly like tryOnce) alongside the status code; the request is bounded by a
+// context derived here (timeout + diagnoseCtxSlack).
 func (c *Client) tryDiagnose(ctx context.Context, body []byte, timeout time.Duration) (data []byte, status int, err error) {
 	ctx, cancel := context.WithTimeout(ctx, timeout+diagnoseCtxSlack)
 	defer cancel()
@@ -279,10 +216,7 @@ func (c *Client) tryDiagnose(ctx context.Context, body []byte, timeout time.Dura
 	return data, resp.StatusCode, nil
 }
 
-// ExternalTarget is one continuous probe's destination, mirroring the
-// controller's externalTargetJSON (internal/controller/external.go) and, through
-// it, pb.ExternalTarget. Port 0 means "the check type's default" -- the proto's
-// own convention, not a missing value.
+// ExternalTarget is one continuous probe's destination.
 type ExternalTarget struct {
 	Name    string `json:"name"`
 	Kind    string `json:"kind"`
@@ -290,16 +224,8 @@ type ExternalTarget struct {
 	Port    uint32 `json:"port"`
 }
 
-// ExternalCheckSpec is one continuous external check assigned to one agent,
-// mirroring the controller's externalCheckSpecJSON field for field. DefinitionID
-// is correlation only and NEVER becomes a metric label (pb.ExternalCheckSpec's
-// own comment); Params is the definition's opaque params object, forwarded to
-// the agent for its own check-type validation and left `omitempty` so a
-// paramless spec serializes without a null.
-//
-// CheckType is restricted to tcp|icmp|dns|http by the CONTROLLER (400 on
-// anything else, and the 400 rejects the WHOLE PUT), which is why the caller
-// filters before it gets here rather than discovering it on the wire.
+// ExternalCheckSpec is one continuous external check assigned to one agent; DefinitionID is
+// correlation only and NEVER becomes a metric label (pb.ExternalCheckSpec's own comment).
 type ExternalCheckSpec struct {
 	DefinitionID string          `json:"definitionId"`
 	Target       ExternalTarget  `json:"target"`
@@ -309,40 +235,20 @@ type ExternalCheckSpec struct {
 	Params       json.RawMessage `json:"params,omitempty"`
 }
 
-// externalChecksRequest is the PUT body: the WHOLE desired state, never a
-// delta. An agent absent from the map, or present with an empty list, has no
-// checks -- both spellings converge on the controller pushing that agent an
-// empty assignment.
+// externalChecksRequest is the PUT body: the WHOLE desired state.
 type externalChecksRequest struct {
 	Agents map[string][]ExternalCheckSpec `json:"agents"`
 }
 
-// ExternalChecksResult is the controller's 200 body. Changed is 0 for a
-// retried identical PUT (the endpoint is idempotent by construction), and
-// Unknown lists the agent IDs the controller's registry does not know -- a
-// warning, not a failure, because the Console's topology view can legitimately
-// lag the registry.
+// ExternalChecksResult is the controller's 200 body.
 type ExternalChecksResult struct {
 	Agents  int      `json:"agents"`
 	Changed int      `json:"changed"`
 	Unknown []string `json:"unknown"`
 }
 
-// PutExternalChecks replaces the controller's ENTIRE continuous external-check
-// assignment state with agents.
-//
-// It rides the same retry ladder Topology/Version/Diagnose use for 503: a
-// non-leader controller replica cannot fan out, so it answers 503, and
-// retrying is safe here for the same reason it is safe for Diagnose's
-// dispatch-free 503 -- the PUT is absolute and idempotent, so landing on the
-// leader on the second attempt produces exactly the state the first attempt
-// wanted. Exhausted retries return ErrUnavailable.
-//
-// A 400 is ErrBadRequest and is NOT retried: it means a spec in this body is
-// malformed (in practice an ineligible checkType), which no number of attempts
-// can fix, and -- because the controller rejects the whole body, not the
-// offending spec -- it means NOTHING was applied. The caller must therefore
-// treat it exactly like any other failed PUT: not as a partial success.
+// PutExternalChecks replaces the controller's ENTIRE continuous external-check assignment state
+// with agents; it rides the same retry ladder Topology/Version/Diagnose use for 503.
 func (c *Client) PutExternalChecks(ctx context.Context, agents map[string][]ExternalCheckSpec) (*ExternalChecksResult, error) {
 	if agents == nil {
 		// An explicit empty object, never a JSON null: the controller reads
@@ -384,15 +290,8 @@ func (c *Client) PutExternalChecks(ctx context.Context, agents map[string][]Exte
 	}
 }
 
-// tryPutExternalChecks issues one PUT attempt and returns the body (capped to
-// maxBodyBytes, exactly like tryOnce/tryDiagnose) alongside the status, so
-// PutExternalChecks can build its wrapped sentinel errors from the plain-text
-// http.Error body.
-//
-// It runs on the shared hc, not diagHC: this is a small control-plane write on
-// the same latency budget as a topology poll, so controller.timeout is the
-// right ceiling for it -- unlike a diagnostics dispatch, nothing here waits on
-// an agent's probe.
+// tryPutExternalChecks issues one PUT attempt and returns the body (capped to maxBodyBytes, exactly
+// like tryOnce/tryDiagnose) alongside the status.
 func (c *Client) tryPutExternalChecks(ctx context.Context, body []byte) (data []byte, status int, err error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPut, c.base+"/api/v1/external-checks", bytes.NewReader(body))
 	if err != nil {

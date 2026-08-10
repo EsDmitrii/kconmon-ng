@@ -70,6 +70,19 @@ describe("value helpers", () => {
     expect(label).toMatch(/7/); // the day of month
     expect(label).toMatch(/34/); // the minute
   });
+
+  it("takes the INTERFACE locale rather than a bare undefined (QA scope 3, finding #7)", () => {
+    // The custom-range triggers on /investigate sit inside a Russian page; a
+    // month abbreviation is a WORD, and words follow the interface.
+    expect(formatInstant(VALUE, "ru")).not.toBe(formatInstant(VALUE, "en"));
+    expect(formatInstant(VALUE, "ru")).not.toMatch(/AM|PM/);
+  });
+
+  it("prints the hour in the locale's natural form, never a padded 08:00 PM (finding #17)", () => {
+    // Local 20:05, i.e. 8pm wherever the clock is 12-hour.
+    const evening = new Date(2026, 7, 8, 20, 5);
+    expect(formatInstant(evening, "en")).not.toMatch(/\b0\d:\d\d\s?(AM|PM)/i);
+  });
 });
 
 describe("DateTimePicker trigger", () => {
@@ -331,10 +344,7 @@ describe("pickerDropDirection", () => {
     expect(pickerDropDirection(100, 40)).toBe("down");
   });
 
-  /* QA round 5, finding #3. The old rule took the LARGER side once below was
-     short, so 310px below and 390px above chose up — and 390 does not hold a
-     420px popover either. Up must be earned by FITTING, not by winning a
-     comparison; down at least scrolls. */
+  /* Up must be earned by FITTING, not by winning a comparison; down at least scrolls. */
   it("stays downward when above is merely larger but still too small (#3)", () => {
     expect(pickerDropDirection(310, 390)).toBe("down");
     expect(pickerDropDirection(0, POPOVER_MIN_HEIGHT_PX - 1)).toBe("down");
@@ -382,9 +392,6 @@ describe("pickerDropDirection", () => {
     expect(dialog().className).not.toContain("top-full");
   });
 
-  /* QA round 5, finding #3, second half: the direction was decided ONCE at
-     open time, so a window the user resized (or a phone rotated) under an open
-     popover kept an anchoring that no longer described the viewport. */
   it("re-measures on window resize while it is open (#3)", () => {
     renderPicker();
     vi.spyOn(trigger(), "getBoundingClientRect").mockReturnValue({

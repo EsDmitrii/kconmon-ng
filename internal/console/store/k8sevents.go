@@ -11,14 +11,8 @@ import (
 	"github.com/EsDmitrii/kconmon-ng/internal/console/store/gen"
 )
 
-// Bounds for a captured Kubernetes event. They exist so a malformed or hostile
-// payload cannot turn one row into a megabyte, NOT to re-implement the
-// apiserver's own validation -- every one of them is set well past what a real
-// event carries, so the capture never silently drops something the cluster
-// genuinely emitted.
-//
-// The name/namespace bounds are the DNS-subdomain maximum a Kubernetes object
-// name can actually reach (253); the rest are generous round numbers.
+// Bounds for a captured Kubernetes event; they exist so a malformed or hostile payload cannot turn
+// one row into a megabyte.
 const (
 	k8sUIDMaxLen        = 255
 	k8sResourceVerLen   = 255
@@ -28,26 +22,15 @@ const (
 	k8sMessageMaxLen    = 8192
 )
 
-// k8sEventKinds is the closed set of involvedObject kinds this table accepts,
-// and it is closed because M6 Decision 3 makes it so: the reader captures node
-// events for nodes in the fleet topology and pod events from the release
-// namespace, and nothing else. A third kind arriving here is a bug in the
-// filter, not a new data source, so it is rejected loudly rather than stored.
-//
-// K8sEventInput.Type is deliberately NOT closed the same way. core/v1's own
-// documentation says new event types may be added in the future, so pinning it
-// to {Normal, Warning} would eventually drop real events for being new; the
-// length bound is the whole of its validation.
+// k8sEventKinds is the closed set of involvedObject kinds this table accepts, and it is closed; a
+// third kind arriving here is a bug in the filter, not a new data source.
 var k8sEventKinds = map[string]bool{"Node": true, "Pod": true}
 
 // K8sEvent is one captured Kubernetes event row. It is a CAPTURE, never an
 // authority -- the cluster's own event log is (migration 00006).
 type K8sEvent struct {
 	ID int64
-	// UID and ResourceVersion are the dedupe key TOGETHER. A Kubernetes Event
-	// is mutable: a recurring reason keeps its uid and comes back with a
-	// bumped Count and a new ResourceVersion, so each revision is its own row
-	// and the timeline can show the recurrence.
+	// UID and ResourceVersion are the dedupe key TOGETHER.
 	UID             string
 	ResourceVersion string
 	EventTime       time.Time
@@ -97,14 +80,9 @@ type K8sEventPage struct {
 	NextCursor string // "" when the page is the last one
 }
 
-// K8sEventStore is the write seam: internal/console/kubectx (M6 Task 2) is its
-// only caller.
+// K8sEventStore is the write seam: internal/console/kubectx is its only caller.
 type K8sEventStore interface {
-	// InsertK8sEvent records one captured event. inserted is false, with a nil
-	// error, exactly when the (uid, resourceVersion) revision was already
-	// stored -- the normal outcome of the reader's relist-on-watch-expiry
-	// loop, which callers must not log as an error. Same contract as
-	// EventStore.InsertEvent.
+	// InsertK8sEvent records one captured event.
 	InsertK8sEvent(ctx context.Context, in K8sEventInput) (inserted bool, err error)
 }
 

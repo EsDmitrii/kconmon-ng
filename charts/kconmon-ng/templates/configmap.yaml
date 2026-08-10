@@ -1,3 +1,15 @@
+{{- if eq (int .Values.config.httpPort) (int .Values.config.grpcPort) }}
+{{- fail (printf "config.httpPort and config.grpcPort must differ (both are %v): one Pod cannot bind the same port twice" .Values.config.httpPort) }}
+{{- end }}
+{{- if and .Values.config.checkers.dns.enabled (not .Values.config.checkers.dns.hosts) }}
+{{- fail "config.checkers.dns.enabled is true but config.checkers.dns.hosts is empty: the checker would resolve nothing" }}
+{{- end }}
+{{- if and .Values.config.checkers.http.enabled (not .Values.config.checkers.http.targets) }}
+{{- fail "config.checkers.http.enabled is true but config.checkers.http.targets is empty: the checker would probe nothing" }}
+{{- end }}
+{{- if and .Values.config.checkers.external.enabled (not .Values.config.checkers.external.allowedCidrs) }}
+{{- fail "config.checkers.external.enabled is true but config.checkers.external.allowedCidrs is empty: an empty allowlist is a startup error, never read as allow-everything" }}
+{{- end }}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -16,12 +28,7 @@ data:
     controller:
       leaderElection: {{ .Values.controller.leaderElection }}
       agentTtl: {{ .Values.config.controllerAgentTtl | quote }}
-      {{- /*
-      Emitted only when ON: EventsConfig.Enabled's Go zero value makes an
-      omitted key identical to an explicit false, and this shared config is
-      parsed with KnownFields(true) — so a pre-M2 controller image (which has
-      no Events field) would crashloop on an unconditional key as Pods roll.
-      */}}
+      {{- /* Emitted only when ON: a pre-M2 controller image would crashloop on an unknown key. */}}
       {{- if .Values.controller.events.enabled }}
       events:
         enabled: true
@@ -63,13 +70,7 @@ data:
       mtr:
         cooldown: {{ .Values.config.checkers.mtr.cooldown | quote }}
         maxHops: {{ .Values.config.checkers.mtr.maxHops }}
-      {{- /*
-      Emitted only when ON, for the same KnownFields(true) reason as
-      controller.events above: a pre-M4 agent image has no External field, so
-      an unconditional `external:` key would crashloop it as the DaemonSet
-      rolls node by node. Off by default also means an untouched install
-      renders a config.yaml byte-identical to chart 1.5.0's.
-      */}}
+      {{- /* Emitted only when ON: a pre-M4 agent image would crashloop on an unknown key. */}}
       {{- if .Values.config.checkers.external.enabled }}
       external:
         enabled: true

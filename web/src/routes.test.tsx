@@ -13,16 +13,7 @@ import { ThemeProvider } from "@/components/theme-provider";
 import { NAV_ITEMS } from "@/nav";
 import { AppShell } from "@/routes";
 
-/**
- * M7 Task 12b (plan Decision 12), the shared-shell half of the sweep.
- *
- * The shell puts twelve nav links, a theme toggle and a user menu ahead of the
- * page on EVERY route, and a keyboard user paid that toll on every navigation
- * — the one structural keyboard gap the sweep found in the chrome. These cases
- * pin the escape hatch and the landmark naming; they deliberately do NOT
- * re-assert what TestAnonymousModeRendersExactlyLikeM2
- * (components/anonymous-banner.test.tsx) already owns about this same shell.
- */
+/** The shell puts twelve nav links, a theme toggle and a user menu ahead of the page on EVERY route. */
 
 const json = (body: unknown) =>
   new Response(JSON.stringify(body), { status: 200, headers: { "Content-Type": "application/json" } });
@@ -51,10 +42,7 @@ function renderShell() {
     }),
   );
 
-  // AppSidebar's NavLinks are TanStack <Link>s and need a real RouterProvider;
-  // this mirrors routes.tsx's own root route on a memory history so no
-  // location state escapes into another file — anonymous-banner.test.tsx's
-  // shell case established this build.
+  // AppSidebar's NavLinks are TanStack <Link>s and need a real RouterProvider.
   const testRoot = createRootRoute({
     component: () => (
       <AppShell>

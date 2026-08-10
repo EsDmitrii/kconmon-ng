@@ -11,6 +11,8 @@ import { Segmented } from "@/components/ui/segmented";
 import { useTheme } from "@/components/theme-provider";
 import { promqlQuery, promqlQueryRange } from "@/lib/api";
 import { chartColors, seriesColor } from "@/lib/chart-theme";
+import { localeTag, useLocale, useT } from "@/lib/i18n";
+import { promqlConsoleDict, type PromQLConsoleKey } from "@/lib/i18n/dict/promql-console";
 import { toTable } from "@/lib/prom-table";
 import { useTimeContext } from "@/lib/timemachine";
 import type { PromResult } from "@/lib/types";
@@ -64,22 +66,8 @@ function labelForEntry(metric: Record<string, string>): string {
   return parts.length > 0 ? `{${parts.join(", ")}}` : "value";
 }
 
-// --- Chart-tab design decision (Task 14) ---------------------------------
-// The brief says the Chart tab should "reuse EChart + toSeriesOption-style
-// mapping", but toSeriesOption (lib/curated-metrics.ts) is shaped for the 5
-// fixed CuratedChart queries: it takes a `unit: "seconds" | "ratio"` and
-// formats axis labels/tooltips accordingly (ms, %). An arbitrary user-typed
-// PromQL query has no such known unit — force-fitting it through
-// toSeriesOption would mean guessing a unit (wrong most of the time) or
-// always lying with a seconds/ratio label on unrelated values.
-//
-// Instead this is a small local series-option builder: it maps a matrix
-// PromResult onto an ECharts line-series option with a neutral, unformatted
-// numeric y-axis (raw values, no ms/% conversion), and a generic
-// label-set-based series name instead of the peer/host/protocol-specific
-// naming toSeriesOption uses. It reuses the EChart wrapper component and the
-// design-system chart palette, but not toSeriesOption itself or its unit
-// formatters.
+// Chart-tab design decision says the Chart tab should "reuse EChart + toSeriesOption-style
+// mapping".
 function toConsoleChartOption(res: PromResult, dark: boolean): echarts.EChartsOption {
   const entries: MatrixEntry[] =
     res.status === "success" && res.data?.resultType === "matrix" ? (res.data.result as MatrixEntry[]) : [];
@@ -138,10 +126,13 @@ function readLastQuery(): string {
   }
 }
 
-const TABS: { id: ResultTab; label: string }[] = [
-  { id: "table", label: "Table" },
-  { id: "chart", label: "Chart" },
-  { id: "json", label: "JSON" },
+/* The strip's three tabs, each carrying the KEY of its label rather than the
+   label: the order is the tab order (and therefore the arrow-key order), which
+   is a property of this list, while the words belong to the dictionary. */
+const TABS: { id: ResultTab; key: PromQLConsoleKey }[] = [
+  { id: "table", key: "tab.table" },
+  { id: "chart", key: "tab.chart" },
+  { id: "json", key: "tab.json" },
 ];
 
 /* One console, one result switcher, so the ids can be constants rather than
@@ -151,28 +142,8 @@ const tabDomId = (id: ResultTab) => `promql-result-tab-${id}`;
 const panelDomId = (id: ResultTab) => `promql-result-panel-${id}`;
 
 /**
- * ResultTabs is the result switcher, and it declares role="tablist" — so it
- * owes the whole tab contract, not the half of it that is easy.
- *
- * What it was: three independent tab stops carrying role="tab" and
- * aria-selected, with no keyboard relationship between them and three panels
- * that carried no role at all. A screen-reader user was told "tab, selected"
- * and then had nothing to move to.
- *
- * What it is: ONE tab stop for the strip (roving tabindex — the idiom
- * ui/segmented.tsx already uses for its radiogroup, which is what every OTHER
- * switcher on this page is), arrows/Home/End moving selection and focus
- * together, and each tab pointing at the panel it reveals via aria-controls.
- *
- * A disabled tab is STEPPED OVER rather than landed on: Chart is disabled in
- * instant mode, a disabled button is not focusable, and an arrow key that
- * moved selection onto it would strand the keyboard on an element that cannot
- * take focus.
- *
- * Exported for its own test: this page mounts PromQLEditor (CodeMirror) and
- * EChart, neither of which is a comfortable jsdom render, so the strip is
- * pinned directly — the same seam pages/topology.tsx opened with
- * nodeNavigationPath and pages/diagnostics.tsx with NodeSelector.
+ * ResultTabs is the result switcher, and it declares role="tablist"; a disabled tab is STEPPED OVER
+ * rather than landed on: Chart is disabled in instant mode.
  */
 export function ResultTabs({
   active,
@@ -183,6 +154,7 @@ export function ResultTabs({
   onChange: (id: ResultTab) => void;
   isDisabled: (id: ResultTab) => boolean;
 }) {
+  const t = useT(promqlConsoleDict);
   const refs = useRef<(HTMLButtonElement | null)[]>([]);
 
   const move = (from: number, delta: number) => {
@@ -212,7 +184,7 @@ export function ResultTabs({
   };
 
   return (
-    <div role="tablist" aria-label="Result view" className="flex w-fit gap-1 rounded-md bg-surface-2 p-1">
+    <div role="tablist" aria-label={t("tabs.aria")} className="flex w-fit gap-1 rounded-md bg-surface-2 p-1">
       {TABS.map((tab, i) => {
         const disabled = isDisabled(tab.id);
         const selected = tab.id === active;
@@ -237,9 +209,9 @@ export function ResultTabs({
               selected ? "bg-card font-medium text-foreground shadow-card" : "text-muted-foreground hover:text-foreground",
               disabled && "cursor-not-allowed opacity-40 hover:text-muted-foreground",
             )}
-            title={disabled ? "Chart is only available for range queries" : undefined}
+            title={disabled ? t("tab.chart.disabled") : undefined}
           >
-            {tab.label}
+            {t(tab.key)}
           </button>
         );
       })}
@@ -247,10 +219,7 @@ export function ResultTabs({
   );
 }
 
-/* The panel half of the same contract: a labelled tabpanel that is itself a
-   tab stop, because none of the three (a table, a chart canvas, a <pre>) holds
-   anything focusable of its own — without this, Tab off the strip leaves the
-   result behind entirely. */
+/* The panel half of the same contract: a labelled tabpanel that is itself a tab stop. */
 function ResultPanel({ tab, children }: { tab: ResultTab; children: ReactNode }) {
   return (
     <div
@@ -266,24 +235,10 @@ function ResultPanel({ tab, children }: { tab: ResultTab; children: ReactNode })
 }
 
 export function PromQLConsolePage() {
+  const t = useT(promqlConsoleDict);
+  const { locale } = useLocale();
   const { theme } = useTheme();
-  /**
-   * The Time Machine anchors this page too (QA round 4, finding #3). It was
-   * the one data surface that ignored `?at=` entirely: with the console
-   * engaged at an incident, /console kept answering with NOW — an operator
-   * pasting a query from a card they were reading "at 02:14" got the present
-   * fleet's numbers under a banner that said 02:14.
-   *
-   * The anchoring is the SAME rule every other surface uses:
-   *  - an instant query sends `time=at` (the API already takes it — lib/api's
-   *    promqlQuery has carried the parameter since M5);
-   *  - a range query anchors its END at `at` and measures the picked window
-   *    backwards from there, exactly as Explore's useExploreQuery does, so
-   *    "6h" engaged means the six hours BEFORE t.
-   *
-   * TODO(docs): TIME_MACHINE.md's per-page table still lists Console as "not
-   * anchored". The control pass folds the docs; this comment is the marker.
-   */
+  /** The Time Machine anchors this page too. */
   const { at } = useTimeContext();
   const [query, setQuery] = useState<string>(readLastQuery);
   const [mode, setMode] = useState<Mode>("instant");
@@ -312,6 +267,18 @@ export function PromQLConsolePage() {
     },
   });
 
+  /* A mode switch invalidates whatever is on screen (QA scope 4, finding #16).
+     Instant answers a vector at ONE timestamp; Range answers a matrix over a
+     window — so the table left behind after a switch describes a query the
+     controls no longer describe, with nothing saying so. Dropping it is the
+     same call runQuery already makes before every re-run: a result nobody can
+     tell is stale is worse than no result. The `mode` dep is the whole point,
+     hence the exhaustive-deps waiver; reset() is stable across renders. */
+  const reset = mutation.reset;
+  useEffect(() => {
+    reset();
+  }, [mode, reset]);
+
   const handleChange = (v: string) => {
     setQuery(v);
     try {
@@ -337,44 +304,35 @@ export function PromQLConsolePage() {
     () => (data && mode === "range" ? toConsoleChartOption(data, theme === "dark") : undefined),
     [data, mode, theme],
   );
-  // promqlQuery/promqlQueryRange resolve (rather than throw) for Prometheus's
-  // own error envelope (see lib/api.ts's `handle`), so a query-level failure
-  // surfaces via data.status, distinct from mutation.error (an ApiError from
-  // a problem+json response, or a network-level failure).
+  // promqlQuery/promqlQueryRange resolve (rather than throw) for Prometheus's own error envelope
+  // (see lib/api.ts's `handle`).
   const promError = data?.status === "error" ? data : undefined;
-  /* Whether an EMPTY-RESULT note is honest at all (QA round 4, finding #2).
-     A failed query has no result to be empty: the page was rendering the red
-     error card AND "No data — the query returned an empty result." at the
-     same time, which reads as two independent facts and told an operator the
-     query ran and matched nothing. The note therefore renders only when
-     nothing failed — either the envelope came back `success`, or no query has
-     been run yet (which is the "Run a query to see results." case). */
+  /* Whether an EMPTY-RESULT note is honest at all; the note therefore renders only when nothing failed. */
   const failed = promError !== undefined || mutation.error !== null;
 
   return (
     <PageShell
-      title="Console"
-      description={
-        at
-          ? `Ad-hoc PromQL as of ${at.toLocaleString()} — instant queries are evaluated at that instant, and a range ends there.`
-          : "Run ad-hoc PromQL against the same Prometheus the rest of the console reads from."
-      }
+      title={t("title")}
+      /* {at} lands INSIDE a translated sentence, so it takes that sentence's
+         language — lib/i18n's localeTag. Computed here, never formatted by the
+         dictionary (QA scope 2, finding #8). */
+      description={at ? t("description.at", { at: at.toLocaleString(localeTag(locale)) }) : t("description")}
       actions={
         <>
           <Segmented
-            aria-label="Query mode"
+            aria-label={t("mode.aria")}
             options={[
-              { value: "instant", label: "Instant" },
-              { value: "range", label: "Range" },
+              { value: "instant", label: t("mode.instant") },
+              { value: "range", label: t("mode.range") },
             ]}
             value={mode}
             onChange={setMode}
           />
           {mode === "range" ? (
             <>
-              <LabeledControl label="Range">
+              <LabeledControl label={t("range.label")}>
                 <Segmented
-                  aria-label="Range"
+                  aria-label={t("range.aria")}
                   options={RANGE_OPTIONS.map((r) => ({ value: r.id, label: r.label }))}
                   value={rangeId}
                   onChange={(id) => {
@@ -385,9 +343,9 @@ export function PromQLConsolePage() {
                   }}
                 />
               </LabeledControl>
-              <LabeledControl label="Step">
+              <LabeledControl label={t("step.label")}>
                 <Segmented
-                  aria-label="Step"
+                  aria-label={t("step.aria")}
                   options={STEP_OPTIONS.map((s) => ({ value: s.id, label: s.label }))}
                   value={stepId}
                   onChange={(id) => {
@@ -399,7 +357,7 @@ export function PromQLConsolePage() {
             </>
           ) : null}
           <Button onClick={runQuery} loading={mutation.isPending}>
-            Run
+            {t("run")}
           </Button>
         </>
       }
@@ -416,8 +374,10 @@ export function PromQLConsolePage() {
         ) : null}
         {promError ? (
           <Card role="alert" className="border-l-4 border-l-health-bad bg-health-bad-soft/40 p-4 text-sm">
+            {/* errorType and error are PROMETHEUS's own words and render
+                verbatim; only the stand-in for a missing message is ours. */}
             {promError.errorType ? `${promError.errorType}: ` : ""}
-            {promError.error ?? "query failed"}
+            {promError.error ?? t("queryFailed")}
           </Card>
         ) : null}
 
@@ -457,7 +417,7 @@ export function PromQLConsolePage() {
                 </table>
               </Card>
             ) : failed ? null : (
-              <ResultPlaceholder text={data ? "No data — the query returned an empty result." : "Run a query to see results."} />
+              <ResultPlaceholder text={data ? t("table.empty") : t("table.idle")} />
             )}
           </ResultPanel>
         ) : null}
@@ -469,7 +429,7 @@ export function PromQLConsolePage() {
                 <EChart option={chartOption} className="h-80 w-full" />
               </Card>
             ) : failed ? null : (
-              <ResultPlaceholder text={data ? "No series to chart." : "Run a range query to see a chart."} />
+              <ResultPlaceholder text={data ? t("chart.empty") : t("chart.idle")} />
             )}
           </ResultPanel>
         ) : null}
@@ -478,7 +438,7 @@ export function PromQLConsolePage() {
           <ResultPanel tab="json">
             <Card className="overflow-hidden p-0">
               <pre className="max-h-[32rem] overflow-auto bg-surface-2/50 p-4 font-mono text-xs leading-relaxed">
-                {data ? JSON.stringify(data, null, 2) : "Run a query to see the raw response."}
+                {data ? JSON.stringify(data, null, 2) : t("json.idle")}
               </pre>
             </Card>
           </ResultPanel>

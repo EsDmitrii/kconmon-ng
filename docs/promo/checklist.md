@@ -17,24 +17,27 @@ table, both of which stopped being true several releases ago.
 
 ## Before publishing anything
 
-- [ ] Drop the real screenshots in. Every image reference already points at a
-      real repo path, so this is a check that the file is the current shot, not a
-      placeholder hunt:
-  - `docs/img/console-overview.png` (hero, both articles)
-  - `docs/img/console-matrix.png`
-  - `docs/img/console-investigate.png`
-  - `docs/img/console-timemachine.png`
-  - `docs/img/console-alerting.png`
+- [x] Screenshots are the current shots, re-taken on the 10-node qa fleet, and
+      every alt/caption in both articles describes what is actually in frame:
+  - `docs/img/console-overview.png` (hero, both articles): 9 nodes counted from
+    agents, 9 of 90 failing pairs, critical UdpPairLoss, one open incident
+  - `docs/img/console-matrix.png`: UDP, the column into qa-node-07 at 16.7–17%
+  - `docs/img/console-investigate.png`: qa-node-07 timeline, rollout annotation,
+    five UdpPairLoss rows, Likely causes ranking nothing and saying why
+  - `docs/img/console-timemachine.png`: the 10:49:03 instant, banner up, column
+    at 19.5–20.5%
+  - `docs/img/console-alerting.png`: the minikube shot, six managed rules SYNCED
   - `docs/img/overview.png`, `docs/img/zone-heatmap.png`, `docs/img/node-detail.png`
-        (Grafana, currently being reworked; both articles caption them as
-        indicative; re-shoot and drop that caveat once the rework lands)
+        (Grafana: reworked and re-shot, so the "indicative" caveat is gone from
+        both articles)
 - [ ] Convert image references when pasting: both articles use repo-relative
       paths (`../img/...`). Medium and Habr both need uploaded images, so the
       captions travel but the paths do not.
 - [ ] Confirm the chart version in every install snippet still matches
-      `charts/kconmon-ng/Chart.yaml` and `RELEASE_NOTES.md`. Both articles say
-      **1.10.0** in three places each (base install, console install, closing
-      links).
+      `charts/kconmon-ng/Chart.yaml` and `RELEASE_NOTES.md`. Both articles are
+      now aligned at **2.0.0** in all three places (base install, console
+      install, closing links), matching `Chart.yaml` (`appVersion: 2.0.0`), and
+      the README install snippets carry the same version.
 - [ ] Confirm the krew manifest URL still points at a release that exists. Both
       articles use the **v1.4.0** manifest, which is what the README uses.
 - [ ] Verify every PromQL snippet against a live `/metrics` endpoint:
@@ -51,15 +54,17 @@ Everything below is stated in the articles as a number. Each was checked against
 the repo at the time of writing:
 
 - 5 protocols, reactive MTR on failure, 5s default interval: `README.md`
-- 6 built-in alert rules, names and expressions: `docs/metrics.md`,
+- 7 built-in alert rules, names and expressions: `docs/metrics.md`,
   `charts/kconmon-ng/templates/prometheusrule.yaml`
 - 3 Grafana dashboards: `dashboards/`
 - 12 console pages: `web/src/nav.ts`
 - 25 permissions, 4 built-in roles: `internal/console/authz/authz.go`
 - 9 timeline sources, cause weights 3/2/1/0, 300s window:
   `web/src/lib/investigation.ts`
-- 1521 frontend tests in 68 files: `cd web && npx vitest run`
-- 28 Go packages carrying tests, run under `-race`: `make test-race`
+- 2099 frontend tests in 81 files: `cd web && npx vitest run`
+- 29 Go packages carrying tests, run under `-race`: `make test-race`
+- Chart **2.0.0**, `appVersion: 2.0.0`: `charts/kconmon-ng/Chart.yaml`. The
+  release workflow publishes the images at that tag.
 
 ## Order of publication
 

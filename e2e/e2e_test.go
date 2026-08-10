@@ -24,10 +24,8 @@ func TestControllerPodsRunning(t *testing.T) {
 	t.Skip("pod status checked via kubectl wait in workflow")
 }
 
-// Every request below goes through console_test.go's mustRequest helper (same
-// package): it carries a context, closes the response body and checks the
-// close error, which is what keeps `golangci-lint run --build-tags e2e` --
-// the only run that compiles these files at all -- clean for the package.
+// Every request below goes through console_test.go's mustRequest helper (same package): it carries
+// a context.
 
 func TestHealthz(t *testing.T) {
 	baseURL := getBaseURL()
@@ -76,11 +74,9 @@ func TestTopology(t *testing.T) {
 	}
 }
 
-// pollUntil polls fn every interval until it returns true or budget elapses,
-// then fails the test naming what it was waiting for. Shared by this file
-// and console_test.go for asserting on eventually-consistent state (event
-// history catching up, a run reaching a terminal status) instead of each
-// caller hand-rolling its own retry loop.
+// pollUntil polls fn every interval until it returns true or budget elapses; shared by this file
+// and console_test.go for asserting on eventually-consistent state (event history catching up, a
+// run reaching a terminal status) instead of each caller hand-rolling its own retry loop.
 func pollUntil(t *testing.T, budget, interval time.Duration, what string, fn func() bool) {
 	t.Helper()
 	deadline := time.Now().Add(budget)

@@ -1,5 +1,6 @@
 import type { LineSeriesOption } from "echarts";
 import { describe, expect, it } from "vitest";
+import { stampShort } from "@/lib/i18n";
 import {
   ANNOTATION_SERIES_NAME,
   ANNOTATION_TEXT_MAX,
@@ -18,12 +19,7 @@ import {
 import { CHART_FALLBACK } from "./chart-theme";
 import type { Annotation, MaintenanceWindow } from "./types";
 
-/**
- * The option-builder is a pure function on purpose: EChart is mocked in every
- * page test (echarts.init reaches for a 2d canvas context jsdom does not
- * implement), so this file is the ONLY place the markLine/markArea shape is
- * actually asserted. Nothing here renders.
- */
+/** The option-builder is a pure function on purpose. */
 
 function ann(over: Partial<Annotation> = {}): Annotation {
   return {
@@ -107,9 +103,7 @@ describe("annotationOverlaySeries", () => {
     expect(light.markLine?.lineStyle?.color).toBe(CHART_FALLBACK.light.other);
   });
 
-  /* QA round 4, finding #7. Without an explicit series colour the legend key
-     takes the next entry from ECharts' palette, so it was drawn in a blue
-     that appears nowhere on the chart. */
+  /* Without an explicit series colour the legend key takes the next entry from ECharts' palette. */
   it("gives the legend swatch the marker's OWN colour, not the next palette entry", () => {
     const dark = annotationOverlaySeries([ann()], true) as LineSeriesOption;
     const light = annotationOverlaySeries([ann()], false) as LineSeriesOption;
@@ -243,11 +237,10 @@ describe("maintenanceOverlaySeries", () => {
     expect(series.markArea?.emphasis?.label?.formatter).toBe("{b}");
   });
 
-  /* THE differentiating property. Both overlays are muted bands drawn from the
-     same axis colour, so the thing that tells them apart on a busy chart is the
-     DASHED OUTLINE and the fainter fill a declared window carries — an
-     annotation's band has neither. Asserted on both sides so a future edit that
-     makes them identical fails here rather than in an operator's eyes. */
+  /*
+   * THE differentiating property; asserted on both sides so a future edit that makes them identical
+   * fails here rather than in an operator's eyes.
+   */
   it("is visually DISTINCT from an annotation band: dashed outline, fainter fill", () => {
     const maintenance = maintenanceOverlaySeries([win()], true) as LineSeriesOption;
     const annotation = annotationOverlaySeries([ann({ endAt: "2026-08-01T11:45:00Z" })], true) as LineSeriesOption;
@@ -267,8 +260,6 @@ describe("maintenanceOverlaySeries", () => {
     expect((light.markArea?.itemStyle as { color?: string }).color).toBe(CHART_FALLBACK.light.axis);
   });
 
-  /* QA round 4, finding #7 — the one the report caught: the "Maintenance"
-     legend key was BLUE while the bands it switches are the axis grey. */
   it("gives the legend swatch the BAND's colour, so the key and the band agree", () => {
     const dark = maintenanceOverlaySeries([win()], true) as LineSeriesOption;
     const light = maintenanceOverlaySeries([win()], false) as LineSeriesOption;
@@ -350,7 +341,10 @@ describe("outsideWindowNote", () => {
   });
 
   it("names the window's end for an instant outside it, in both directions", () => {
-    const ends = frozen.to.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
+    /* stampShort, the shared helper — the day comes with the clock now, and the
+       hour is the locale's natural form rather than a zero-padded "01:00 PM"
+       (QA scope 3, findings #7 and #17). */
+    const ends = stampShort(frozen.to, "en");
     expect(outsideWindowNote(at("2026-08-08T02:00:00Z"), null, frozen)).toBe(
       `Created — outside this window (which ends ${ends}); press Investigate to reframe.`,
     );

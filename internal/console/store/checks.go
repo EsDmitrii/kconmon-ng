@@ -12,12 +12,8 @@ import (
 	"github.com/EsDmitrii/kconmon-ng/internal/console/store/gen"
 )
 
-// ErrWrongState is returned by MarkRunStarted and FinishRun when id names a
-// run that exists but is not in the state the transition requires:
-// MarkRunStarted needs status "pending" (pending->running), FinishRun needs
-// status "running" (running->terminal). It is distinguished from ErrNotFound
-// by a follow-up GetRun lookup on the UPDATE's zero-rows case -- see both
-// methods below.
+// ErrWrongState is returned by MarkRunStarted and FinishRun when id names a run that exists but is
+// not in the state the transition requires.
 var ErrWrongState = errors.New("store: wrong state")
 
 // Run is one persisted check_runs row: a fan-out execution's spec snapshot,
@@ -67,6 +63,8 @@ type RunResultInput struct {
 	// controller returned it -- see migration 00003's comment on
 	// check_results.result.
 	Result json.RawMessage
+	// SampleSeq is which PROBE of this pair the row records, 0-based (migration 00009).
+	SampleSeq int32
 }
 
 // RunResult is one persisted check_results row.
@@ -80,50 +78,26 @@ type RunResult struct {
 	Error           string
 	Result          json.RawMessage
 	RecordedAt      time.Time
+	SampleSeq       int32
 }
 
 // RunStore is the seam the check runner needs: create a run, mark it
 // started, upsert per-pair results as they complete, and finish it. httpapi
 // never needs any of these -- it only reads, via RunReader below.
 type RunStore interface {
-	// CreateRun persists a new run in status "pending", snapshotting spec as
-	// JSONB. id is caller-supplied (see checks.sql's CreateRun comment for
-	// why) and must be a canonical UUID string; a colliding id returns
-	// ErrAlreadyExists. pairTotal is the run's total number of (source,
-	// destination) pairs -- it has no DB default and must be set here.
+	// CreateRun persists a new run in status "pending", snapshotting spec as JSONB.
 	CreateRun(ctx context.Context, id, checkType, plane string, spec json.RawMessage, initiatorKind, initiatorID string, pairTotal int32) (Run, error)
-	// MarkRunStarted transitions id from status "pending" to "running" and
-	// stamps started_at = now(). Returns ErrNotFound when id does not name a
-	// run, and ErrWrongState when id names a run that is not "pending" --
-	// including a run FinishRun already moved to a terminal status, which
-	// this refuses to reopen.
+	// MarkRunStarted transitions id from status "pending" to "running" and stamps started_at = now.
 	MarkRunStarted(ctx context.Context, id string) error
-	// FinishRun transitions id from status "running" to a terminal status,
-	// setting finished_at = now() and both pair counters in one UPDATE -- see
-	// checks.sql's FinishRun comment for why that matters. Returns
-	// ErrNotFound when id does not name a run, and ErrWrongState when id
-	// names a run that is not "running" -- including one FinishRun already
-	// finished. A caller retrying FinishRun after a lost response should
-	// treat ErrWrongState as "already finished" (check GetRun for the
-	// persisted outcome), not as a failure: the row keeps whichever call's
-	// values landed first.
+	// FinishRun transitions id from status "running" to a terminal status.
 	FinishRun(ctx context.Context, id, status string, pairOK, pairFailed int32) error
 	// UpsertRunResult inserts one (run, source, destination) result, or --
 	// on a retried pair -- overwrites the existing row's success, duration,
 	// error, result, and recorded_at rather than erroring.
 	UpsertRunResult(ctx context.Context, in RunResultInput) (RunResult, error)
-	// ReapStuckRuns force-finishes up to limit runs left in status "running"
-	// with created_at strictly before before, recording each as "cancelled"
-	// with finished_at = now(), and reports how many it moved. A run that
-	// never started ("pending") and one that already reached a terminal
-	// status are both left untouched however old they are -- age alone is
-	// never enough.
-	//
-	// The cutoff is the CALLER's to compute: this seam has no idea what
-	// deadline a run was given (checks.Runner.ReapStuckRuns derives it from
-	// the largest fan-out it will accept). Idempotent by construction --
-	// a second sweep over the same window finds nothing, since the first one
-	// left no "running" rows behind it.
+	// ReapStuckRuns force-finishes up to limit runs left in status "running" with created_at strictly
+	// before before; a run that never started ("pending") and one that already reached a terminal
+	// status are both left untouched however old they.
 	ReapStuckRuns(ctx context.Context, before time.Time, limit int32) (int64, error)
 }
 
@@ -138,10 +112,8 @@ type RunReader interface {
 	// EventStore.ListEvents (checks.sql's ListRuns comment has the details on
 	// why the cursor's id half is a UUID here rather than a bigint).
 	ListRuns(ctx context.Context, f RunFilter) (RunPage, error)
-	// GetRunResults returns every result row for id, ordered by insertion
-	// (id ascending). An id naming no run returns an empty, non-nil slice
-	// rather than an error -- same "no rows is not itself a failure"
-	// contract ListEvents/ListAuditEntries give an empty page.
+	// GetRunResults returns every result row for id, ordered by insertion (id ascending); an id naming
+	// no run returns an empty, non-nil slice rather than an error.
 	GetRunResults(ctx context.Context, id string) ([]RunResult, error)
 }
 
@@ -180,6 +152,7 @@ func runResultFromRow(r *gen.CheckResult) RunResult {
 		Error:           r.Error,
 		Result:          r.Result,
 		RecordedAt:      r.RecordedAt,
+		SampleSeq:       r.SampleSeq,
 	}
 }
 
@@ -254,15 +227,8 @@ func (db *DB) FinishRun(ctx context.Context, id, status string, pairOK, pairFail
 	return nil
 }
 
-// GetRun validates id as a UUID BEFORE touching pgx, and reports a malformed
-// one as ErrNotFound rather than as a parse failure (M4 follow-up #5). The
-// distinction matters at the edge: httpapi maps ErrNotFound to 404 and
-// everything else to 502 "run history unavailable", so without this a typo in
-// a run URL would report the database as broken. An id that is not a UUID
-// cannot name a row in a UUID-keyed table, which makes "not found" the
-// truthful answer, not a convenient one -- and answering it here rather than
-// in httpapi means every caller of this seam gets it, not just the one
-// handler that remembered to pre-check.
+// GetRun validates id as a UUID BEFORE touching pgx, and reports a malformed one as ErrNotFound
+// rather than as a parse failure.
 func (db *DB) GetRun(ctx context.Context, id string) (Run, error) {
 	rid, err := parseUUID(id)
 	if err != nil {
@@ -328,12 +294,8 @@ func (db *DB) ListRuns(ctx context.Context, f RunFilter) (RunPage, error) { //no
 	return RunPage{Runs: runs, NextCursor: nextCursor}, nil
 }
 
-// GetRunResults applies GetRun's UUID pre-check for the same reason and with
-// the same ErrNotFound answer. Note the asymmetry with a well-formed id that
-// simply names no run: that still returns an empty, non-nil slice (this
-// method's documented "no rows is not itself a failure" contract). A
-// malformed id is a different thing entirely -- not "a run with no results"
-// but "not an id at all".
+// GetRunResults applies GetRun's UUID pre-check for the same reason and with the same ErrNotFound
+// answer.
 func (db *DB) GetRunResults(ctx context.Context, id string) ([]RunResult, error) {
 	rid, err := parseUUID(id)
 	if err != nil {
@@ -363,6 +325,7 @@ func (db *DB) UpsertRunResult(ctx context.Context, in RunResultInput) (RunResult
 		DurationNs:      in.DurationNs,
 		Error:           in.Error,
 		Result:          in.Result,
+		SampleSeq:       in.SampleSeq,
 	})
 	if err != nil {
 		return RunResult{}, fmt.Errorf("store: upsert run result: %w", err)
@@ -384,11 +347,8 @@ func (db *DB) ReapStuckRuns(ctx context.Context, before time.Time, limit int32) 
 	return n, nil
 }
 
-// DeleteRunsBefore deletes up to limit runs older than before, oldest first,
-// and reports how many were removed. ON DELETE CASCADE on
-// check_results.run_id removes each deleted run's results along with it.
-// Used by Pruner's sweep (prune.go); exposed here too so it is independently
-// testable, same as AuditStore.DeleteAuditEntriesBefore.
+// DeleteRunsBefore deletes up to limit runs older than before, oldest first, and reports how many
+// were removed.
 func (db *DB) DeleteRunsBefore(ctx context.Context, before time.Time, limit int32) (int64, error) {
 	n, err := gen.New(db.pool).DeleteRunsBefore(ctx, gen.DeleteRunsBeforeParams{
 		CreatedAt: before,

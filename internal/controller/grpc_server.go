@@ -42,10 +42,6 @@ type GRPCServer struct {
 	leaderCheckInterval time.Duration
 
 	// stopCh is closed by Shutdown to end every open server-streaming handler.
-	// grpc.Server.GracefulStop waits for handlers to return but never cancels
-	// their stream contexts, so a handler that only selects on its own channel
-	// and stream.Context() blocks shutdown forever. stopCh is the missing
-	// out-of-band signal. stopOnce keeps the close idempotent.
 	stopCh   chan struct{}
 	stopOnce sync.Once
 }
@@ -76,15 +72,9 @@ func NewGRPCServer(
 	}
 }
 
-// Shutdown ends every open server-streaming handler so a subsequent
-// grpc.Server.GracefulStop can complete. It is idempotent and safe to call
-// concurrently with PublishEvent and BroadcastPeerUpdate: it only closes a
-// signalling channel and touches no subscriber map, so publishers racing it
-// keep taking their existing non-blocking paths and cannot panic.
-//
-// Handlers answer codes.Unavailable, the same code a non-leader replica
-// returns, so the agent's WatchTasks reconnect loop and the Console ingester
-// both treat it as an ordinary retryable stream end.
+// Shutdown ends every open server-streaming handler so a subsequent grpc.Server.GracefulStop can
+// complete; it is idempotent and safe to call concurrently with PublishEvent and
+// BroadcastPeerUpdate.
 func (s *GRPCServer) Shutdown() {
 	s.stopOnce.Do(func() { close(s.stopCh) })
 }
@@ -102,10 +92,8 @@ func (s *GRPCServer) ExternalCheckManager() *ExternalCheckManager {
 	return s.externalMgr
 }
 
-// RegisterService registers the controller's gRPC services. EventStream is only
-// registered when controller.events.enabled is on: leaving it unregistered makes
-// gRPC answer a subscribing Console with codes.Unimplemented, which is the
-// honest answer and needs no per-RPC gate.
+// RegisterService registers the controller's gRPC services; EventStream is only registered when
+// controller.events.enabled.
 func (s *GRPCServer) RegisterService(srv *grpc.Server) {
 	pb.RegisterAgentRegistryServer(srv, s)
 	if s.eventsEnabled {
@@ -225,10 +213,8 @@ func (s *GRPCServer) WatchTasks(req *pb.WatchTasksRequest, stream pb.AgentRegist
 
 	for {
 		select {
-		// The TaskManager never closes the subscription channel (see Subscribe),
-		// so this branch does not fire on teardown; the loop exits via the
-		// stream context or the server-wide stopCh below. The ok check is kept
-		// as belt-and-braces.
+		// The TaskManager never closes the subscription channel (see Subscribe), so this branch does not
+		// fire on teardown.
 		case task, ok := <-tasks:
 			if !ok {
 				return nil
@@ -244,19 +230,8 @@ func (s *GRPCServer) WatchTasks(req *pb.WatchTasksRequest, stream pb.AgentRegist
 	}
 }
 
-// WatchExternalChecks server-streams an agent's CONTINUOUS external-check
-// assignment. It mirrors the WatchTasks lifecycle — subscribe, count the
-// connection, clean up on stream close — with one addition borrowed from
-// WatchPeers: the agent's CURRENT assignment (an empty one when it has none)
-// is sent immediately on subscribe, exactly as WatchPeers opens with a
-// FULL_SYNC. That is what lets a restarting agent converge without waiting for
-// the next operator change, and what stops a stale assignment surviving a
-// controller restart: the empty send tells the agent to drop everything.
-//
-// Subscribing BEFORE reading the current assignment is deliberate: no change
-// can slip through the gap. A change landing in between is delivered twice
-// instead, which is harmless because every assignment is absolute state, never
-// a delta.
+// WatchExternalChecks server-streams an agent's CONTINUOUS external-check assignment; a change
+// landing in between is delivered twice.
 func (s *GRPCServer) WatchExternalChecks(
 	req *pb.WatchExternalChecksRequest,
 	stream pb.AgentRegistry_WatchExternalChecksServer,
@@ -279,10 +254,8 @@ func (s *GRPCServer) WatchExternalChecks(
 
 	for {
 		select {
-		// The ExternalCheckManager never closes the subscription channel (see
-		// Subscribe), so this branch does not fire on teardown; the loop exits
-		// via the stream context or the server-wide stopCh below. The ok check
-		// is kept as belt-and-braces.
+		// The ExternalCheckManager never closes the subscription channel (see Subscribe), so this branch
+		// does not fire on teardown.
 		case assignment, ok := <-updates:
 			if !ok {
 				return nil
@@ -306,16 +279,8 @@ func (s *GRPCServer) ReportTaskResult(_ context.Context, res *pb.TaskResult) (*e
 	return &emptypb.Empty{}, nil
 }
 
-// WatchEvents server-streams controller domain events to the Console.
-// Leader-only when leader election is enabled: a non-leader replica fails the
-// call immediately with codes.Unavailable so the caller's reconnect loop
-// retries (and may land on the leader on a subsequent dial), mirroring
-// DiagnosticsHandler's HTTP 503-on-non-leader behavior.
-//
-// Leadership is also re-checked on a ticker while the stream is open, so a
-// replica demoted mid-stream stops fanning out events instead of serving a
-// stale view forever. A ticker rather than a check before each Send: staleness
-// must stay bounded even when no events are flowing.
+// WatchEvents server-streams controller domain events to the Console; leader-only when leader
+// election is enabled.
 func (s *GRPCServer) WatchEvents(_ *pb.WatchEventsRequest, stream pb.EventStream_WatchEventsServer) error {
 	if s.lostLeadership() {
 		return status.Error(codes.Unavailable, "not the leader")
@@ -368,13 +333,8 @@ func (s *GRPCServer) lostLeadership() bool {
 	return s.leaderElection && (s.isLeader == nil || !s.isLeader())
 }
 
-// PublishEvent assigns a sequence number and timestamp, then fans ev out to
-// every subscribed WatchEvents stream. Callers construct ev with only the
-// oneof Payload field set.
-//
-// With controller.events.enabled off this is a no-op taken before anything is
-// stamped or counted: a disabled controller must not burn sequence numbers or
-// move the published-events counter.
+// PublishEvent assigns a sequence number and timestamp; callers construct ev with only the oneof
+// Payload field set.
 func (s *GRPCServer) PublishEvent(ev *pb.Event) {
 	if !s.eventsEnabled {
 		return

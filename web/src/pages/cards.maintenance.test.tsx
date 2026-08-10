@@ -9,18 +9,7 @@ import type { MaintenanceWindow } from "@/lib/types";
 import { PairCardPage } from "./pair-card";
 import { TargetCardPage } from "./target-card";
 
-/**
- * The object cards' MAINTENANCE surface — the sibling of
- * cards.annotations.test.tsx, and the same one question: WHICH SCOPE does each
- * card ask for. Each asks for two (its own object's, plus the global one) and
- * neither leg may go out with the scope parameter absent, which would drag
- * every other object's declared windows onto this card.
- *
- * The EChart mock re-publishes BOTH overlays it was handed, so a page test can
- * see that the bands reached the chart while staying out of the business of how
- * they are drawn — that geometry is asserted in lib/annotations.test.ts, where
- * it is built.
- */
+/** The object cards' MAINTENANCE surface — the sibling of cards.annotations.test.tsx, and the same one question. */
 vi.mock("@/components/echart", () => ({
   EChart: ({ className, maintenance }: { className?: string; maintenance?: MaintenanceWindow[] }) => (
     <div data-testid="echart" className={className} data-maintenance={(maintenance ?? []).map((w) => w.id).join(",")} />
@@ -188,6 +177,24 @@ describe("PairCardPage maintenance", () => {
     renderAt("/pairs/node-a/node-b", <PairCardPage />);
     await waitFor(() => expect(maintenanceQueries.length).toBeGreaterThan(0));
     expect(spanSecondsOf(maintenanceQueries[0])).toBe(3600);
+  });
+
+  /* QA scope 2, finding #20 — the bar counted "windows in this window" from a
+     `now` it resolved for itself, milliseconds after the chart resolved its
+     own, so a window declared in that gap was counted here and absent there.
+     Both now read ONE anchor (components/maintenance.tsx's useWindowAnchor). */
+  it("counts over EXACTLY the range the chart drew, not a range of its own", async () => {
+    const { fetchMock, maintenanceQueries } = stubFetch();
+    renderAt("/pairs/node-a/node-b", <PairCardPage />);
+    await waitFor(() => expect(maintenanceQueries.length).toBeGreaterThan(0));
+    // query_range is a POST, so the window is in the body rather than the URL.
+    const rangeCall = fetchMock.mock.calls.find((c) => String(c[0]).includes("/api/v1/promql/query_range"));
+    const chart = JSON.parse(String((rangeCall?.[1] as RequestInit | undefined)?.body ?? "{}")) as {
+      start: string;
+      end: string;
+    };
+    expect(maintenanceQueries[0].get("from")).toBe(chart.start);
+    expect(maintenanceQueries[0].get("to")).toBe(chart.end);
   });
 
   it("hands the bands to the chart as an overlay of their own", async () => {

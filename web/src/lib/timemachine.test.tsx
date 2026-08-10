@@ -2,11 +2,7 @@ import { render, screen, cleanup, act } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { formatAtParam, TimeMachineProvider, useTimeMachine } from "@/lib/timemachine";
 
-/**
- * Probe renders the whole context surface as text plus two buttons, so every
- * test below asserts on what a consumer would actually see rather than on
- * provider internals.
- */
+/** Probe renders the whole context surface as text plus two buttons. */
 function Probe({ engageAt }: { engageAt?: Date }) {
   const { at, isLive, engage, returnToLive } = useTimeMachine();
   return (
@@ -236,6 +232,52 @@ describe("popstate", () => {
     window.history.pushState({}, "", "/?at=2026-08-07T10:00:00Z");
     window.dispatchEvent(new PopStateEvent("popstate"));
     expect(window.location.search).toContain("at=");
+  });
+});
+
+/* The URL is the shareable statement of what is on screen, so a param we
+   ignored or clamped cannot be left standing. */
+describe("?at= normalization rewrites the URL", () => {
+  it("drops an unparseable ?at= rather than leaving Live under a time-shaped URL", () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    window.history.pushState({}, "", "/matrix?zone=eu-1&at=not-a-date");
+    renderProbe();
+
+    expect(live()).toBe("true");
+    const params = new URLSearchParams(window.location.search);
+    expect(params.has("at")).toBe(false);
+    expect(params.get("zone")).toBe("eu-1");
+    expect(window.location.pathname).toBe("/matrix");
+  });
+
+  it("drops an empty ?at=", () => {
+    window.history.pushState({}, "", "/?at=");
+    renderProbe();
+    expect(new URLSearchParams(window.location.search).has("at")).toBe(false);
+  });
+
+  it("writes the CLAMPED instant back, so a reload lands on the same moment", () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    window.history.pushState({}, "", "/?at=2999-01-01T00:00:00Z");
+    renderProbe();
+
+    const param = new URLSearchParams(window.location.search).get("at");
+    expect(param).not.toBe("2999-01-01T00:00:00Z");
+    expect(param).toBe(formatAtParam(new Date(at()!)));
+  });
+
+  it("rewrites in place — no history entry for a correction the operator did not make", () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    window.history.pushState({}, "", "/?at=2999-01-01T00:00:00Z");
+    const before = window.history.length;
+    renderProbe();
+    expect(window.history.length).toBe(before);
+  });
+
+  it("leaves a good ?at= byte-for-byte alone", () => {
+    window.history.pushState({}, "", "/matrix?at=2026-08-07T10:00:00Z");
+    renderProbe();
+    expect(window.location.search).toBe("?at=2026-08-07T10:00:00Z");
   });
 });
 

@@ -5,15 +5,8 @@ import { TimeMachineProvider } from "@/lib/timemachine";
 import { TOPOLOGY_POLL_MS, useTopology } from "./use-topology";
 
 /**
- * Both halves of useTopology live here: the live path (unchanged since M1 —
- * these cases exist so a Time Machine change that broke it would be caught by
- * THIS file rather than by a page test three layers up) and the engaged path.
- *
- * The Time Machine is driven the way the app drives it: through the URL. The
- * provider reads `?at=` on mount (readAtFromLocation), so pushing a location
- * before render is the whole setup — no mocked context, no test-only setter,
- * and therefore no way for these tests to agree with an implementation that a
- * real shared link would disagree with.
+ * The provider reads `?at=` on mount (readAtFromLocation), so pushing a location before render is
+ * the whole setup.
  */
 
 const AT = "2026-08-01T12:00:00Z";
@@ -76,10 +69,8 @@ describe("useTopology while live", () => {
     expect(urls).toEqual(["/api/v1/topology"]);
   });
 
-  // Fake timers go in BEFORE render on purpose: react-query arms the
-  // refetchInterval while the query mounts, and a timer armed against the real
-  // clock is invisible to a fake one installed afterwards — the poll would then
-  // look switched off in a test whose whole point is that it is not.
+  // Fake timers go in BEFORE render on purpose: react-query arms the refetchInterval while the
+  // query mounts.
   it("keeps polling every TOPOLOGY_POLL_MS", async () => {
     vi.useFakeTimers();
     const { fetchMock } = stub(liveBody);

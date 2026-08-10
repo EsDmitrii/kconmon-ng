@@ -83,6 +83,24 @@ func TestMTRCheckerExpiredEntriesPurged(t *testing.T) {
 	}
 }
 
+// MTR was the ONE checker that never filled CheckResult.Duration, so every
+// successful trace persisted durationNs 0 while a FAILED one showed 2-3ms --
+// the console's own wall clock, filled in by the runner's error branch. A run
+// where the failures are the only rows with a duration is backwards.
+func TestMTRCheckerFillsDurationOnEveryPath(t *testing.T) {
+	c := NewMTRChecker(30, 1*time.Second, 0)
+
+	// The invalid-IP path returns before any packet is sent and is the one
+	// failure this test can produce without a network.
+	got := c.Check(t.Context(), Target{PodIP: "not-an-ip", NodeName: "node-b"})
+	if got.Success {
+		t.Fatalf("Check(invalid IP) succeeded, want a failure: %+v", got)
+	}
+	if got.Duration <= 0 {
+		t.Errorf("Duration = %s, want the time actually spent (> 0)", got.Duration)
+	}
+}
+
 func TestHopIPFromAddrStripsPort(t *testing.T) {
 	cases := []struct {
 		name string

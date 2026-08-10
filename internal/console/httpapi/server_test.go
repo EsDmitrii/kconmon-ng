@@ -132,11 +132,6 @@ func (fakeConfigEventLister) ListEvents(context.Context, store.EventFilter) (sto
 	return store.EventPage{}, nil
 }
 
-// TestConfigEndpointAdvertisesDatabaseConfigured pins the M3 contract: the
-// "database":{"configured":...} bit in /api/v1/config must track whether
-// cmd/console wired an EventLister (i.e. db != nil in main.go), the same
-// signal handleEvents' own 503 gate reads, so this endpoint never grows a
-// second, independently-driftable notion of "is the database up".
 func TestConfigEndpointAdvertisesDatabaseConfigured(t *testing.T) {
 	cfg := &config.Config{HTTPPort: 8080, LogLevel: "info", LogFormat: "json", MetricsPrefix: "kconmon_ng", Auth: config.AuthConfig{Mode: "anonymous", Anonymous: config.AnonymousConfig{Role: "viewer"}}}
 	reg := prometheus.NewRegistry()
@@ -157,9 +152,7 @@ func TestConfigEndpointAdvertisesDatabaseConfigured(t *testing.T) {
 	}
 }
 
-// TestConfigEndpointLoginPathPerMode pins Task 18's authLoginPath: the
-// frontend feature-detects the login flow from GET /api/v1/config instead of
-// hardcoding auth.mode's four cases itself.
+// TestConfigEndpointLoginPathPerMode pins the authLoginPath.
 func TestConfigEndpointLoginPathPerMode(t *testing.T) {
 	cases := []struct {
 		mode string
@@ -289,13 +282,7 @@ func TestWSWithoutHubReturns503Problem(t *testing.T) {
 	}
 }
 
-// /ws is top level. If it were registered under /api/v1 this path would
-// upgrade; instead it is an unknown API route.
-//
-// The expected answer here changed with QA round 5's finding #20: it used to
-// be the SPA's 200, which is what that finding was about. The CLAIM this test
-// makes is unchanged and is the one that matters -- /api/v1/ws does not
-// upgrade, so /ws is not registered under the API prefix.
+// If it were registered under /api/v1 this path would upgrade; instead it is an unknown API route.
 func TestWSIsNotUnderAPIV1(t *testing.T) {
 	hub := ws.NewHub(cache.NewInProcessBus(), metrics.New("kconmon_ng", prometheus.NewRegistry()))
 	w := do(t, newRealtimeTestServer(t, hub, nil), "/api/v1/ws")
@@ -372,14 +359,7 @@ func TestWSRouteUpgradesThroughTheMiddlewareChain(t *testing.T) {
 
 /* ── QA round 5, finding #20: an unknown /api/* route is a 404, not the SPA ── */
 
-// TestUnknownAPIRouteIs404ProblemJSON pins the catch-all. Before it,
-// GET /api/v1/nope fell through to r.NotFound and got the SPA's index.html
-// with a 200: a client (or a curl, or a test) asking for a route that does not
-// exist was told everything is fine and handed HTML, which is the single most
-// confusing answer an API can give.
-//
-// The whole /api prefix is covered, not just /api/v1: an operator who types
-// /api/targets has the same right to be told there is no such route.
+// Before it, GET /api/v1/nope fell through to r.NotFound and got the SPA's index.html with a 200.
 func TestUnknownAPIRouteIs404ProblemJSON(t *testing.T) {
 	s := newTestServer(t)
 	for _, target := range []string{

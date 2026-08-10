@@ -217,9 +217,7 @@ func TestReconcilerIdenticalTopologyPutsOnce(t *testing.T) {
 	}
 }
 
-// TestReconcilerNewZoneTriggersPut and its sibling below are Task 5's
-// determinism observed end to end: under one-per-zone a node in a NEW zone
-// changes the assignment and a node in a REPRESENTED zone does not.
+// TestReconcilerNewZoneTriggersPut and its sibling below are the determinism observed end to end.
 func TestReconcilerNewZoneTriggersPut(t *testing.T) {
 	h := newReconcileHarness(t)
 	h.addContinuous("def-1", "tcp", "one-per-zone")
@@ -288,10 +286,8 @@ func TestReconcilerDisabledDefinitionDropsItsSpecs(t *testing.T) {
 	}
 }
 
-// TestReconcilerPersistentFailureRetriesNextTick: a controller that keeps
-// failing is counted and logged, the loop stays alive, and -- the part that
-// matters -- the last-pushed state is NOT marked clean, so the next tick
-// re-PUTs the very same desired state instead of deciding nothing changed.
+// TestReconcilerPersistentFailureRetriesNextTick: a controller that keeps failing is counted and
+// logged, the loop stays alive.
 func TestReconcilerPersistentFailureRetriesNextTick(t *testing.T) {
 	h := newReconcileHarness(t)
 	h.addContinuous("def-1", "tcp", "all")
@@ -417,9 +413,7 @@ func TestReconcilerGaugeTracksProjectedSeries(t *testing.T) {
 	}
 }
 
-// TestReconcilerPutBodyShape pins the wire contract Task 16's handler decodes:
-// the assignment is keyed by the controller's AGENT ID (not the node name),
-// and each spec carries the target, cadence and params the proto requires.
+// TestReconcilerPutBodyShape pins the wire contract the handler decodes.
 func TestReconcilerPutBodyShape(t *testing.T) {
 	h := newReconcileHarness(t)
 	h.st.schedules = append(h.st.schedules, store.Schedule{
@@ -525,11 +519,8 @@ func TestReconcilerRunStopsOnContextCancel(t *testing.T) {
 	}
 }
 
-// captureReconcileLogs swaps in a capturing default logger for the duration of
-// one test. The buffer is mutex-guarded because other tests in this package
-// run goroutines that log (Runner's fan-out), so a plain bytes.Buffer would
-// race the String() read here -- assert on substring presence, never on the
-// buffer being otherwise empty.
+// captureReconcileLogs swaps in a capturing default logger for the duration of one test; the buffer
+// is mutex-guarded because other tests in this package run goroutines that log (Runner's fan-out).
 func captureReconcileLogs(t *testing.T) *reconcileLogBuffer {
 	t.Helper()
 	buf := &reconcileLogBuffer{}

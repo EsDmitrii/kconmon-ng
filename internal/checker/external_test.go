@@ -393,9 +393,7 @@ func TestExternalCheckerAuthorisesOnEveryProbe(t *testing.T) {
 	lis.waitAccepts(t, 3)
 }
 
-// TLS verification is ON by default (Decision 10): httptest's self-signed
-// certificate must be refused. The same target with insecureSkipVerify:true
-// must then succeed, proving the opt-out is per target and not global.
+// TLS verification is ON by default: httptest's self-signed certificate must be refused.
 func TestExternalCheckerHTTPSVerifiesTLSByDefault(t *testing.T) {
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -771,10 +769,7 @@ func TestParseExternalSpecDefaults(t *testing.T) {
 	}
 }
 
-// A denial reason must reach the metrics layer as a TYPED value from a closed
-// set, never as a substring of the human-readable error: the refusal messages
-// are deliberately vague (they must not echo an attacker-chosen name), so
-// resolve and cidr are indistinguishable by text.
+// A denial reason must reach the metrics layer as a TYPED value from a closed set.
 func TestExternalCheckerDenialCarriesTypedReason(t *testing.T) {
 	cases := []struct {
 		name    string

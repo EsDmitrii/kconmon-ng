@@ -8,8 +8,7 @@ metadata:
     app.kubernetes.io/component: console-valkey
 spec:
   replicas: 1
-  # Recreate, not RollingUpdate: a single ephemeral in-memory instance, so two
-  # Pods overlapping would briefly split pub/sub between them.
+  # Recreate: two overlapping Pods would split pub/sub between them.
   strategy:
     type: Recreate
   selector:
@@ -22,13 +21,20 @@ spec:
         {{- include "kconmon-ng.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: console-valkey
     spec:
+      automountServiceAccountToken: false
+      {{- with .Values.console.valkey.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       containers:
         - name: valkey
           image: "{{ .Values.console.valkey.image.repository }}:{{ .Values.console.valkey.image.tag }}"
+          {{- with .Values.console.valkey.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           imagePullPolicy: {{ .Values.console.valkey.image.pullPolicy }}
-          # Persistence fully off (ADR-002: a flush must lose zero durable
-          # data). No RDB snapshots, no AOF, therefore no writable data dir and
-          # deliberately no PersistentVolumeClaim anywhere in this chart.
+          # Persistence fully off (ADR-002), so there is no writable data dir and no PVC.
           args:
             - --save
             - ""

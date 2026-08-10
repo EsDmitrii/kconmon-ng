@@ -18,12 +18,8 @@ import (
 // unanchored fmt.Sscanf could not do this job.
 var paramsFieldRE = regexp.MustCompile(`^m=(\d+),t=(\d+),p=(\d+)$`)
 
-// Argon2id parameters: RFC 9106's SECOND recommended option (64 MiB, t=3,
-// p=2), not the first-choice 2 GiB/t=1 profile. A console pod's default
-// resource limit is 256Mi (charts values.yaml console.resources) -- the 2
-// GiB profile would OOM the container the moment a handful of logins land
-// concurrently, so the memory-conservative option is the correct one here,
-// not a weaker fallback.
+// Argon2id parameters: RFC 9106's SECOND recommended option (64 MiB, t=3, p=2); a console pod's
+// default resource limit is 256Mi (charts values.yaml console.resources).
 const (
 	argonMemoryKiB   = 64 * 1024 // 64 MiB
 	argonIterations  = 3
@@ -32,18 +28,11 @@ const (
 	argonKeyBytes    = 32
 )
 
-// errMalformedHash is wrapped into every parse failure VerifyPassword can
-// hit, so a caller can tell "this looked like a hash but wasn't" apart from
-// an argon2 computation failure (which this package never actually produces,
-// since argon2.IDKey cannot itself fail).
+// errMalformedHash is wrapped into every parse failure VerifyPassword can hit.
 var errMalformedHash = errors.New("authn: malformed argon2id PHC string")
 
-// HashPassword returns an argon2id PHC string:
-// $argon2id$v=19$m=65536,t=3,p=2$<salt>$<hash>
-// <salt> and <hash> are base64 (standard alphabet, no padding) -- the same
-// convention the PHC string format and every common Go argon2id library use.
-// A fresh, cryptographically random salt is drawn on every call, so hashing
-// the same password twice never produces the same PHC string.
+// HashPassword returns an argon2id PHC string; a fresh, cryptographically random salt is drawn on
+// every call.
 func HashPassword(plain string) (string, error) {
 	salt := make([]byte, argonSaltBytes)
 	if _, err := rand.Read(salt); err != nil {
@@ -60,13 +49,8 @@ func HashPassword(plain string) (string, error) {
 	), nil
 }
 
-// VerifyPassword reports whether plain hashes to phc. The argon2id
-// parameters (m, t, p) and salt are read out of phc itself, not hardcoded --
-// so a hash produced with different parameters than HashPassword's current
-// defaults still verifies correctly; only the current password can ever get
-// a *new* hash minted with today's parameters (via HashPassword). A
-// malformed, truncated, empty, or otherwise unparseable phc always returns
-// (false, non-nil error) -- never (true, nil), and never a panic.
+// VerifyPassword reports whether plain hashes to phc; the argon2id parameters (m, t, p) and salt
+// are read out of phc itself.
 func VerifyPassword(phc, plain string) (ok bool, err error) {
 	params, err := parsePHC(phc)
 	if err != nil {
@@ -79,51 +63,24 @@ func VerifyPassword(phc, plain string) (ok bool, err error) {
 	return subtle.ConstantTimeCompare(params.hash, got) == 1, nil
 }
 
-// phcParams is parsePHC's result: the argon2id parameters and salt/hash
-// bytes read out of a PHC string. Grouped into a struct (rather than five
-// separate named returns) purely to keep parsePHC's signature small; nothing
-// about phcParams is meant to be reused outside this file.
+// phcParams is parsePHC's result: the argon2id parameters and salt/hash bytes read out of a PHC
+// string; grouped into a struct (rather than five separate named returns) purely to keep parsePHC's
+// signature small.
 type phcParams struct {
 	memory, iterations uint32
 	parallelism        uint8
 	salt, hash         []byte
 }
 
-// minSaltBytes and minHashBytes are the smallest salt/hash lengths parsePHC
-// accepts. Both are well below anything HashPassword ever produces
-// (argonSaltBytes=16, argonKeyBytes=32); they exist purely to keep a
-// pathologically short field (in particular a zero-length hash) from ever
-// reaching argon2.IDKey, which panics on a hash length short enough to
-// underflow inside its internal blake2b expansion rather than returning an
-// error -- see parsePHC's doc comment for the specific inputs verified to
-// panic.
+// minSaltBytes and minHashBytes are the smallest salt/hash lengths parsePHC accepts; both are well
+// below anything HashPassword ever produces (argonSaltBytes=16, argonKeyBytes=32).
 const (
 	minSaltBytes = 8
 	minHashBytes = 16
 )
 
-// parsePHC splits a PHC string of the exact shape HashPassword produces:
-// "$argon2id$v=<int>$m=<int>,t=<int>,p=<int>$<salt>$<hash>". Every failure
-// mode (wrong field count, wrong algorithm tag, unparseable parameter block,
-// invalid base64 in either the salt or hash field) returns errMalformedHash;
-// there is no partial-success return.
-//
-// argon2.IDKey (golang.org/x/crypto/argon2, verified against v0.54.0) does
-// not return an error for a bad parameter -- it panics. Three shapes of PHC
-// string that pass a naive parse still reach argon2.IDKey with a
-// panic-inducing parameter if this function does not reject them first:
-// t=0 ("argon2: number of rounds too small"), p=0 ("argon2: parallelism
-// degree too low"), and a PHC string with an empty hash field (e.g.
-// "$argon2id$v=19$m=65536,t=3,p=2$c29tZXNhbHQ$"), which decodes to a
-// zero-length hash and then nil-pointer-derefs inside blake2b's internal key
-// expansion. VerifyPassword's own doc comment promises "never a panic" for
-// any malformed phc, so all three are rejected here, before argon2.IDKey is
-// ever called, alongside a version field that does not match argon2.Version
-// (accepted-then-discarded previously, which silently tolerated a hash
-// produced by a different argon2 revision) and a parameter field with
-// trailing garbage after p=<int> (fmt.Sscanf on "m=%d,t=%d,p=%d" never
-// required the format to consume the whole input, so "m=8,t=1,p=1,JUNK"
-// parsed undetected before paramsFieldRE's anchored match replaced it).
+// parsePHC splits a PHC string of the exact shape HashPassword produces; VerifyPassword's own doc
+// comment promises "never a panic" for any malformed phc.
 func parsePHC(phc string) (phcParams, error) {
 	parts := strings.Split(phc, "$")
 	// strings.Split("$a$b$c$d$e", "$") == ["", "a", "b", "c", "d", "e"]: the
@@ -140,13 +97,8 @@ func parsePHC(phc string) (phcParams, error) {
 		return phcParams{}, fmt.Errorf("%w: unsupported argon2 version %d (want %d)", errMalformedHash, version, argon2.Version)
 	}
 
-	// fmt.Sscanf("m=%d,t=%d,p=%d") reports 3 successful conversions and a nil
-	// error even for "m=8,t=1,p=1,JUNK": Sscanf never required the format to
-	// consume the entire input, and its %n verb (which would let us check
-	// bytes-consumed) is rejected by the Scan family in this Go version --
-	// "bad verb '%n' for integer" -- so it cannot be used to detect the
-	// leftover ",JUNK" either. paramsFieldRE anchors both ends (^...$)
-	// instead, which is the only way to reject trailing garbage outright.
+	// fmt.Sscanf("m=%d,t=%d,p=%d") reports 3 successful conversions and a nil error even for
+	// "m=8,t=1,p=1,JUNK".
 	groups := paramsFieldRE.FindStringSubmatch(parts[3])
 	if groups == nil {
 		return phcParams{}, fmt.Errorf("%w: parameter field %q", errMalformedHash, parts[3])

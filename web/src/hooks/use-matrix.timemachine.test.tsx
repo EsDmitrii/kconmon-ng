@@ -6,11 +6,7 @@ import { TimeMachineProvider } from "@/lib/timemachine";
 import { MATRIX_POLL_MS, useMatrix } from "./use-matrix";
 import { resetWsClient } from "./use-ws-topic";
 
-/**
- * useMatrix's THIRD path (plan Decision 7): engaged, the grid is rebuilt from
- * PromQL at `t` and both live transports go quiet. The live-mode cases stay in
- * hooks/use-matrix.test.tsx, untouched.
- */
+/** useMatrix's THIRD path: engaged, the grid is rebuilt from PromQL at `t` and both live transports go quiet. */
 
 const AT = "2026-08-01T12:00:00Z";
 

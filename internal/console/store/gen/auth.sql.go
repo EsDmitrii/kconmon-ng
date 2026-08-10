@@ -180,9 +180,8 @@ type GetTokenByHashRow struct {
 	CreatedAt  time.Time
 }
 
-// token_hash is deliberately not in the SELECT list, even here: the caller
-// already knows the hash it looked up by, and there is never a reason to hand
-// a hash value back across this boundary.
+// token_hash is deliberately not in the SELECT list, even here: the caller already knows the hash
+// it looked up by.
 func (q *Queries) GetTokenByHash(ctx context.Context, tokenHash []byte) (GetTokenByHashRow, error) {
 	row := q.db.QueryRow(ctx, getTokenByHash, tokenHash)
 	var i GetTokenByHashRow
@@ -214,18 +213,8 @@ type GetTokenByIDRow struct {
 	CreatedAt  time.Time
 }
 
-// The single-row counterpart to ListTokens, for the callers that already know
-// WHICH token they want: the mint path (httpapi.resolveInheritedOwner) needs
-// one parent row and used to pay for the whole admin-scale list to find it.
-// token_hash is NEVER selected here either -- for the same reason it is absent
-// from GetTokenByHash's SELECT list: the hash must not leave the database, and
-// this row type must stay structurally identical to the other three so
-// store/auth.go's single tokenRow conversion keeps working.
-//
-// No revoked_at/expires_at filtering: revoked and expired tokens are returned
-// as-is, exactly like GetTokenByHash, so the caller decides what those states
-// mean for it. Attributing a new token to a revoked parent's owner is still
-// correct attribution.
+// The single-row counterpart to ListTokens, for the callers that already know WHICH token they
+// want.
 func (q *Queries) GetTokenByID(ctx context.Context, id pgtype.UUID) (GetTokenByIDRow, error) {
 	row := q.db.QueryRow(ctx, getTokenByID, id)
 	var i GetTokenByIDRow
@@ -256,10 +245,8 @@ type GetUserByIDRow struct {
 	UpdatedAt   time.Time
 }
 
-// password_hash is NEVER selected here: this lookup exists solely to back
-// authn's owner-disabled check (GetUserByID, store/auth.go), which only ever
-// needs Disabled -- same guarantee ListUsers' own comment gives, producing a
-// distinct row type (no password_hash column in its SELECT list at all).
+// password_hash is NEVER selected here: this lookup exists solely to back authn's owner-disabled
+// check (GetUserByID, store/auth.go).
 func (q *Queries) GetUserByID(ctx context.Context, id pgtype.UUID) (GetUserByIDRow, error) {
 	row := q.db.QueryRow(ctx, getUserByID, id)
 	var i GetUserByIDRow
@@ -394,10 +381,7 @@ FROM role_bindings
 ORDER BY role_name, subject_kind, subject_id
 `
 
-// Every binding, unscoped -- unlike ListBindingsForSubject (one subject's own
-// resolution), this backs the RBAC admin API's GET /api/v1/rbac/bindings
-// (Task 17) and its delete-role "still referenced" guard rail, neither of
-// which can be answered by a subject-scoped query.
+// Every binding, unscoped -- unlike ListBindingsForSubject (one subject's own resolution).
 func (q *Queries) ListBindings(ctx context.Context) ([]RoleBinding, error) {
 	rows, err := q.db.Query(ctx, listBindings)
 	if err != nil {
@@ -437,9 +421,8 @@ type ListBindingsForSubjectParams struct {
 	Groups []string
 }
 
-// One round trip per request: resolves both the user's own bindings and every
-// group binding for the caller's group membership in a single query, rather
-// than one query per group.
+// One round trip per request: resolves both the user's own bindings and every group binding for the
+// caller's group membership in a single query.
 func (q *Queries) ListBindingsForSubject(ctx context.Context, arg ListBindingsForSubjectParams) ([]RoleBinding, error) {
 	rows, err := q.db.Query(ctx, listBindingsForSubject, arg.UserID, arg.Groups)
 	if err != nil {
@@ -553,9 +536,7 @@ type ListUsersRow struct {
 	UpdatedAt   time.Time
 }
 
-// password_hash is NEVER selected here: this result set is exposed to admin
-// UI and API responses, and the hash must never leave the database once
-// written (same guarantee ListTokens gives token_hash).
+// password_hash is NEVER selected here: this result set is exposed to admin UI and API responses.
 func (q *Queries) ListUsers(ctx context.Context) ([]ListUsersRow, error) {
 	rows, err := q.db.Query(ctx, listUsers)
 	if err != nil {
@@ -581,6 +562,22 @@ func (q *Queries) ListUsers(ctx context.Context) ([]ListUsersRow, error) {
 		return nil, err
 	}
 	return items, nil
+}
+
+const purgeToken = `-- name: PurgeToken :execrows
+DELETE FROM api_tokens
+WHERE id = $1
+  AND (revoked_at IS NOT NULL OR (expires_at IS NOT NULL AND expires_at <= now()))
+`
+
+// Hard delete, guarded to rows that can no longer authenticate anything: callers reach this only
+// for a token they have already read as revoked or expired.
+func (q *Queries) PurgeToken(ctx context.Context, id pgtype.UUID) (int64, error) {
+	result, err := q.db.Exec(ctx, purgeToken, id)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
 const revokeToken = `-- name: RevokeToken :execrows
@@ -616,10 +613,8 @@ const touchTokenLastUsed = `-- name: TouchTokenLastUsed :execrows
 UPDATE api_tokens SET last_used_at = now() WHERE id = $1
 `
 
-// Callers (the authn layer, Task 14) must debounce this to at most once per
-// minute per token themselves -- see auth.go's TokenStore doc comment. This
-// query is intentionally a plain, cheap single-row UPDATE with no such logic
-// baked in, so the debounce policy stays entirely in the caller's hands.
+// Callers must debounce this to at most once per minute per token themselves -- see auth.go's
+// TokenStore doc comment.
 func (q *Queries) TouchTokenLastUsed(ctx context.Context, id pgtype.UUID) (int64, error) {
 	result, err := q.db.Exec(ctx, touchTokenLastUsed, id)
 	if err != nil {

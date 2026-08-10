@@ -3,14 +3,13 @@ import { useQuery } from "@tanstack/react-query";
 import { useDatabaseAvailable } from "@/hooks/use-capabilities";
 import { getWsClient } from "@/hooks/use-ws-topic";
 import { ApiError, getEvents } from "@/lib/api";
+import { localeTag, useLocale, useT } from "@/lib/i18n";
+import { recentChangesDict } from "@/lib/i18n/dict/recent-changes";
 import { useTimeContext } from "@/lib/timemachine";
 import type { LiveEvent, LiveEventSeverity } from "@/lib/types";
+import { fmtEventStamp } from "@/lib/utils";
 import { TOPIC_LIVE, type WsEnvelope } from "@/lib/ws";
-// Reuses the Live page's own merge/dedupe store rather than re-implementing
-// it: pushEvents is exported from pages/live.tsx precisely so a second
-// consumer of the same LiveEvent stream (this rail) shares its ordering
-// (timestamp, seq) and its id-based dedupe across a reconnect replay,
-// instead of drifting from it.
+// Reuses the Live page's own merge/dedupe store rather than re-implementing it.
 import { pushEvents } from "@/pages/live";
 import { Badge } from "./ui/badge";
 import { Card } from "./ui/card";
@@ -19,10 +18,7 @@ import { Skeleton } from "./ui/skeleton";
 /** GET /api/v1/events page size for the rail — task-25-brief.md's own number. */
 export const RECENT_CHANGES_LIMIT = 50;
 
-// A cap on the merged (history + live) ring. Generous enough that a card left
-// open through a busy incident does not grow without bound, but far below the
-// Live page's 2000-row budget (PAGES.md §7.8) — this is a narrow rail on an
-// object card, not the primary feed.
+// A cap on the merged (history + live) ring.
 export const RECENT_CHANGES_CAP = 200;
 
 /** The separator events.pairScope writes between the two halves of a pair
@@ -56,10 +52,11 @@ function isKnownSeverity(v: string): v is LiveEventSeverity {
   return v === "info" || v === "warn" || v === "error";
 }
 
-function fmtTime(timestamp: string): string {
-  const d = new Date(timestamp);
-  return Number.isNaN(d.getTime()) ? timestamp : d.toLocaleTimeString();
-}
+/* fmtTime used to be a bare toLocaleTimeString here: 3:12 PM in this rail
+   against the Live feed's 15:12 for the same event, and an operator flipping
+   between the two had to translate one into the other (QA scope 2, finding #9).
+   The shared idiom is lib/utils' fmtEventStamp — hour12:false, plus the day for
+   a row that is not from today (#10). */
 
 /** mergeCapped is pushEvents plus RECENT_CHANGES_CAP, preserving pushEvents'
  * "return prev unchanged when nothing new arrived" identity so an unrelated
@@ -70,36 +67,7 @@ function mergeCapped(prev: LiveEvent[], incoming: LiveEvent[]): LiveEvent[] {
   return merged.length > RECENT_CHANGES_CAP ? merged.slice(0, RECENT_CHANGES_CAP) : merged;
 }
 
-/**
- * RecentChanges is the shared right rail every M3 object card (Node, Pair,
- * Target) mounts, per PAGES.md §6.4. Exactly ONE of its two props says which
- * events belong to this object, mirroring the two mutually-exclusive server
- * filters (GET /api/v1/events answers 422 if both arrive):
- *
- *   - `scope` — equality on events.LiveEvent.Scope
- *     (internal/console/events/live_event.go). What a PAIR card wants:
- *     "<source>→<destination>" (U+2192 — pairScope's own separator, NOT a
- *     hyphen-arrow) names one edge and nothing else.
- *   - `scopeNode` — a node/target NAME matched on either side of the scope.
- *     What an OBJECT card wants: a node takes part in pair-scoped rows
- *     ("node-a→node-b" — every check run, every path change) that an equality
- *     filter on its own name structurally cannot see. Before this existed the
- *     node card's rail silently dropped all of them (QA scope 2 #21).
- *
- * Getting the string wrong yields a silently empty rail — there is no error
- * state for "nothing matched" — so callers must build it exactly the way the
- * controller does.
- *
- * Two sources feed the same ring: GET /api/v1/events?…&limit=50 for history,
- * and the `live` WebSocket topic for real-time updates while the card stays
- * open. The socket half is filtered through matchesScope with the SAME two
- * props, so a live arrival and a history row are admitted by one rule — a
- * narrower live filter would make an event appear only after a reload. (Still
- * exact, unlike the Live page's case-insensitive substring search: a card is
- * pinned to one precise object.) Both merge through pushEvents' id-based
- * dedupe, so an event the history page already returned and one this tab later
- * sees live collapse into a single row rather than appearing twice.
- */
+/** RecentChanges is the shared right rail; getting the string wrong yields a silently empty rail. */
 export type RecentChangesProps =
   | { scope: string; scopeNode?: undefined }
   | { scope?: undefined; scopeNode: string };
@@ -107,14 +75,13 @@ export type RecentChangesProps =
 export function RecentChanges({ scope = "", scopeNode = "" }: RecentChangesProps) {
   const { available: dbAvailable, resolved: dbResolved } = useDatabaseAvailable();
   const { at } = useTimeContext();
+  const t = useT(recentChangesDict);
+  const { locale } = useLocale();
   const atKey = at ? at.toISOString() : "";
   const [events, setEvents] = useState<LiveEvent[]>([]);
 
-  // The identity of "which object is this rail pinned to" — the two props are
-  // exclusive, so one of them is it. The filter name rides in the query key
-  // alongside the value: ?scope=node-a and ?scopeNode=node-a are different
-  // questions with the same argument, and caching one answer under the other
-  // would hand a pair card a node card's rows.
+  // The identity of "which object is this rail pinned to" — the two props are exclusive, so one of
+  // them is it.
   const filterName = scopeNode !== "" ? "scopeNode" : "scope";
   const filterValue = scopeNode !== "" ? scopeNode : scope;
 
@@ -123,12 +90,7 @@ export function RecentChanges({ scope = "", scopeNode = "" }: RecentChangesProps
   // make) the same way useDatabaseAvailable's own doc comment warns about.
   const historyEnabled = dbResolved && dbAvailable && filterValue !== "";
   const historyQuery = useQuery({
-    // `to` bounds the rail to the Time Machine's instant (Task 11): "Recent
-    // changes" on a card showing state-as-of-t means the changes up to t, not
-    // everything that has happened since. The bound is EXCLUSIVE server-side
-    // (store.EventFilter.To), and `at` carries seconds precision, so an event
-    // stamped exactly at t belongs to the next second's view — the same edge
-    // the annotations store already documents.
+    // `to` bounds the rail to the Time Machine's instant.
     queryKey: at
       ? ["events", filterName, filterValue, "to", at.toISOString()]
       : ["events", filterName, filterValue],
@@ -137,10 +99,8 @@ export function RecentChanges({ scope = "", scopeNode = "" }: RecentChangesProps
     enabled: historyEnabled,
   });
 
-  // A scope change (a different node/pair card mounted in place of this one)
-  // must not carry over the previous object's history for even one render.
-  // Moving through time is the same kind of change for the same reason: rows
-  // from after t are exactly what this rail must not be showing.
+  // A scope change (a different node/pair card mounted in place of this one) must not carry over
+  // the previous object's history for even one render.
   useEffect(() => {
     setEvents([]);
   }, [filterName, filterValue, atKey]);
@@ -149,14 +109,7 @@ export function RecentChanges({ scope = "", scopeNode = "" }: RecentChangesProps
     if (historyQuery.data) setEvents((prev) => mergeCapped(prev, historyQuery.data.events));
   }, [historyQuery.data]);
 
-  // Subscribed unconditionally, same as the Live page: another console
-  // replica's events still arrive over the Valkey bus even while this
-  // replica's own ingester is down, and holding the socket open costs
-  // nothing extra (it is already page-wide, ADR-003).
-  // ... EXCEPT while the Time Machine is engaged. A live arrival is by
-  // definition after t, so subscribing at all would let the present trickle
-  // into a rail whose whole claim is "up to t". The socket itself is page-wide
-  // and stays open; this rail simply stops listening until Live returns.
+  // Subscribed unconditionally, same as the Live page.
   useEffect(() => {
     if (filterValue === "" || at !== null) return;
     const ws = getWsClient();
@@ -171,33 +124,35 @@ export function RecentChanges({ scope = "", scopeNode = "" }: RecentChangesProps
   const historyError = historyQuery.isError
     ? historyQuery.error instanceof ApiError
       ? (historyQuery.error.problem.detail ?? historyQuery.error.problem.title)
-      : "Event history is unavailable"
+      : t("error.fallback")
     : null;
 
-  // "Loading" spans two waits, not one: whether this replica even has a
-  // database (dbResolved) comes back before the events page itself does, and
-  // showing "No recent changes" in between would flash an empty state that a
-  // moment later flips to a loading skeleton once the history fetch actually
-  // starts — see recent-changes.test.tsx's different-scope live-event case,
-  // which caught exactly that flicker.
+  // "Loading" spans two waits, not one: whether this replica even has a database (dbResolved) comes
+  // back before the events page itself does.
   const waitingOnHistory = !dbResolved || (historyEnabled && historyQuery.isLoading);
   const loadingFirstPage = waitingOnHistory && events.length === 0;
 
   return (
     <Card asChild className="flex max-h-[calc(100vh-13rem)] flex-col gap-0 overflow-hidden p-0">
-      <aside aria-label="Recent changes" className="flex flex-col">
+      <aside aria-label={t("aria")} className="flex flex-col">
         <div className="border-b border-border px-4 py-3">
-          <h2 className="text-sm font-semibold">Recent changes</h2>
+          <h2 className="text-sm font-semibold">{t("title")}</h2>
           {/* The rail says what it is bounded BY, right where the rows are —
-              the top-bar banner explains the mode, this states the cut. */}
-          {at ? <p className="mt-0.5 text-[11px] text-muted-foreground">up to {at.toLocaleString()}</p> : null}
+              the top-bar banner explains the mode, this states the cut. The
+              stamp lands INSIDE that translated sentence, so it takes the
+              sentence's own language (lib/i18n's localeTag). */}
+          {at ? (
+            <p className="mt-0.5 text-[11px] text-muted-foreground">
+              {t("upTo", { at: at.toLocaleString(localeTag(locale)) })}
+            </p>
+          ) : null}
         </div>
 
         {/* Degraded, not broken: no database means no scrollback, but the
             live half of this rail keeps working off the socket regardless. */}
         {dbResolved && !dbAvailable ? (
           <p role="status" className="border-b border-border px-4 py-2 text-xs leading-relaxed text-muted-foreground">
-            History requires a database — showing live events only.
+            {t("db.note")}
           </p>
         ) : null}
 
@@ -209,7 +164,7 @@ export function RecentChanges({ scope = "", scopeNode = "" }: RecentChangesProps
 
         {loadingFirstPage ? (
           <div role="status" aria-live="polite" className="flex flex-col gap-2 p-4">
-            <span className="sr-only">Loading recent changes…</span>
+            <span className="sr-only">{t("loading")}</span>
             {Array.from({ length: 5 }, (_, i) => (
               <Skeleton key={i} className="h-9 w-full" />
             ))}
@@ -217,7 +172,7 @@ export function RecentChanges({ scope = "", scopeNode = "" }: RecentChangesProps
         ) : null}
 
         {!loadingFirstPage && events.length === 0 ? (
-          <p className="px-4 py-10 text-center text-xs text-muted-foreground">No recent changes.</p>
+          <p className="px-4 py-10 text-center text-xs text-muted-foreground">{t("empty")}</p>
         ) : null}
 
         {events.length > 0 ? (
@@ -225,7 +180,9 @@ export function RecentChanges({ scope = "", scopeNode = "" }: RecentChangesProps
             {events.map((e) => (
               <li key={e.id} className="flex flex-col gap-1 px-4 py-2.5">
                 <div className="flex items-center justify-between gap-2">
-                  <span className="nums text-[11px] text-muted-foreground">{fmtTime(e.timestamp)}</span>
+                  <span className="nums text-[11px] text-muted-foreground" title={e.timestamp}>
+                    {fmtEventStamp(e.timestamp, localeTag(locale))}
+                  </span>
                   <Badge variant={isKnownSeverity(e.severity) ? SEVERITY_VARIANT[e.severity] : "unknown"} dot>
                     {e.severity}
                   </Badge>

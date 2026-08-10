@@ -18,6 +18,19 @@ Object.defineProperty(globalThis, "localStorage", {
   },
 });
 
+// jsdom implements no ResizeObserver, and React Flow constructs one the moment
+// its pane mounts. The topology map reaches that point in tests now that it
+// draws from agents as well as from Kubernetes nodes, so the no-op double is
+// what keeps a rendered map from throwing on mount.
+Object.defineProperty(globalThis, "ResizeObserver", {
+  configurable: true,
+  value: class {
+    observe() {}
+    unobserve() {}
+    disconnect() {}
+  },
+});
+
 Object.defineProperty(globalThis, "matchMedia", {
   configurable: true,
   value: (query: string) => ({

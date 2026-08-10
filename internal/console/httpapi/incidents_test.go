@@ -16,10 +16,8 @@ import (
 	"github.com/EsDmitrii/kconmon-ng/internal/console/store"
 )
 
-// fakeIncidentStore is one double for IncidentService (read seam + write seam),
-// mutex-guarded like fakeAnnotationStore. Validation goes through the REAL
-// store.IncidentInput.Validate and store.ValidatePinned so the 422 tests
-// exercise the same rules the database layer enforces, not a second copy.
+// fakeIncidentStore is one double for IncidentService (read seam + write seam), mutex-guarded like
+// fakeAnnotationStore.
 type fakeIncidentStore struct {
 	mu sync.Mutex
 
@@ -223,9 +221,6 @@ func TestIncidentsWithoutStoreReturn503(t *testing.T) {
 	}
 }
 
-// M6 Decision 8 in test form, against the REAL built-in roles: incidents are
-// telemetry-class context a viewer reads, and writing one is an operator
-// statement about the fleet's history.
 func TestIncidentsViewerReadsButCannotWrite(t *testing.T) {
 	for _, role := range []string{"viewer", "alert-editor"} {
 		st := newFakeIncidentStore()
@@ -743,8 +738,7 @@ func (f *fakeIncidentNotifier) notified() []notifiedIncident {
 	return append([]notifiedIncident(nil), f.events...)
 }
 
-// The three lifecycle events, in the order an incident actually goes through
-// them, against the ONE seam the dispatcher plugs into (M6 Decision 5).
+// The three lifecycle events, in the order an incident actually goes through them.
 func TestIncidentLifecycleNotifiesCreatedResolvedAndReopened(t *testing.T) {
 	st := newFakeIncidentStore()
 	notifier := &fakeIncidentNotifier{}

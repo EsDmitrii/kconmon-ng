@@ -19,11 +19,8 @@ export function runTopic(runId: string): string {
 }
 
 /**
- * isTerminalRunStatus answers "is there anything left to poll for". The set
- * it reads (RUN_TERMINAL_STATUSES) includes "cancelled": a cancelled run is
- * FINISHED, not paused, so treating it as anything else would leave this hook
- * polling a run whose status can never change again — one GET every
- * RUN_POLL_MS, forever, for every open cancelled permalink.
+ * isTerminalRunStatus answers "is there anything left to poll for"; the set it reads
+ * (RUN_TERMINAL_STATUSES) includes "cancelled": a cancelled run is FINISHED.
  */
 export function isTerminalRunStatus(status: string | undefined): boolean {
   return status !== undefined && (RUN_TERMINAL_STATUSES as string[]).includes(status);
@@ -61,16 +58,8 @@ function fromFrame(f: RunProgressFrame): RunPairRow {
 }
 
 /**
- * mergeRunPairs combines the REST snapshot's recorded results with whatever
- * per-pair progress frames this tab has seen over the socket into one row
- * per (source, destination) -- never two. REST wins on overlap: a result
- * the server has actually persisted is authoritative over a frame this tab
- * merely observed in transit, and it is what a page must fall back to
- * entirely when the socket contributed nothing at all -- a direct load of
- * the permalink (nothing but the REST payload, ever) or a run whose socket
- * frames were never received (the polling-only path). Frames fill in ONLY
- * the pairs REST has not caught up to yet, typically ones still
- * "dispatched".
+ * mergeRunPairs combines the REST snapshot's recorded results with whatever per-pair progress
+ * frames this tab has seen over the socket into one row per (source, destination).
  */
 export function mergeRunPairs(results: RunResult[], frames: Map<string, RunProgressFrame>): RunPairRow[] {
   const rows = new Map<string, RunPairRow>();
@@ -90,38 +79,13 @@ export interface UseRunResult {
   notFound: boolean;
   error: Error | null;
   live: boolean;
-  /** One immediate re-read of GET /api/v1/runs/{id}, outside the poll's own
-   *  cadence. Exists for POST /api/v1/runs/{id}/cancel: the 204 means only
-   *  "accepted", so the page asks the server for the run's real status
-   *  instead of writing "cancelled" into the cache itself — and once that
-   *  status IS terminal the poll stops on its own (refetchInterval below). */
+  /** Exists for POST /api/v1/runs/{id}/cancel: the 204 means only "accepted". */
   refetch: () => Promise<unknown>;
 }
 
 /**
- * useRun is the run permalink's (task-24-brief.md) data source: GET
- * /api/v1/runs/{id} (task-23-brief.md) polled every RUN_POLL_MS until the
- * run reaches a terminal status, PLUS the run's own run:{id} WebSocket
- * topic (task-22-brief.md) for live per-pair progress -- identical in
- * spirit to useMatrix's push-with-polling-fallback (use-matrix.ts).
- *
- * Unlike useMatrix's snapshot topics, run:{id} is NOT whole-state: every
- * progress frame describes exactly one pair. This subscribes directly
- * through getWsClient() -- live.tsx's own pattern, for the same reason:
- * useWsTopic keeps only the latest envelope, which would collapse every
- * pair's frame but the most recent one into a single state update and drop
- * the rest. It is also the one seam that needs the raw WsEnvelope.type to
- * tell a progress/finished frame ("event") from the topic's own terminal
- * control frame ("closed", ws.TypeClosed) apart, which useWsTopic does not
- * expose to callers at all.
- *
- * REST polling is the correctness backstop, not a nicety: a replica this
- * tab is not streaming the run from answers the run:{id} subscribe with
- * the M2 "unknown topic" error frame (registry-full or an old run), and
- * polling alone must still drive the page to completion in that case --
- * `socketEnabled` below goes false and RUN_POLL_MS keeps firing until the
- * REST status itself is terminal. The same fallback covers `realtime`
- * being off entirely (no "events" capability on this replica).
+ * useRun is the run permalink's data source; this subscribes directly through getWsClient --
+ * live.tsx's own pattern, for the same reason.
  */
 export function useRun(runId: string): UseRunResult {
   const { realtime } = useCapabilities();
@@ -142,20 +106,14 @@ export function useRun(runId: string): UseRunResult {
     queryFn: () => getRun(runId),
     enabled,
     retry: false,
-    // Stops on its own once the run is terminal (nothing left to poll for)
-    // and on any error (a 404 does not become fetchable by retrying on a
-    // timer -- see notFound below; this is what keeps that state from
-    // being an infinite spinner).
+    // Stops on its own once the run is terminal (nothing left to poll for) and on any error (a 404
+    // does not become fetchable by retrying on a timer -- see notFound below; this is what keeps
+    // that state from being an infinite spinner).
     refetchInterval: (q) => (isTerminalRunStatus(q.state.data?.status) || q.state.error ? false : RUN_POLL_MS),
   });
 
   const terminal = isTerminalRunStatus(query.data?.status);
-  // Gated on query.data !== undefined too, not just !terminal: opening the
-  // socket while the FIRST REST response is still in flight would, for an
-  // already-finished run loaded directly (the permalink guarantee), open a
-  // socket for a fraction of a second before terminal ever has a chance to
-  // become true. Waiting for that first response costs nothing -- it is
-  // already the very thing every render is waiting on anyway.
+  // Gated on query.data !== undefined too, not just !terminal.
   const socketEnabled = enabled && realtime && query.data !== undefined && !terminal && !socketDone;
 
   useEffect(() => {

@@ -1,37 +1,23 @@
 {{- if .Values.console.enabled }}
-{{- /* Keyed on the RESOLVED gRPC address, not the raw events flag, for the
-same reason as the console egress rule: an explicit grpcAddr with
-events.enabled=false is still realtime-on-with-no-bus, exactly what this
-guard exists to reject. */}}
+{{- /* Keyed on the resolved gRPC address: an explicit grpcAddr is still realtime-on. */}}
 {{- if and (include "kconmon-ng.console.controllerGRPCAddr" .) (eq .Values.console.valkey.mode "disabled") (gt (int .Values.console.replicas) 1) }}
 {{- fail "realtime events with console.valkey.mode=disabled require console.replicas=1 (the in-process bus has no cross-replica fan-out, ADR-002): set console.valkey.mode=bundled|external or console.replicas=1" }}
 {{- end }}
-{{- /* Keyed on the RESOLVED auth mode: sessions for local/oidc live in
-Valkey (DATA.md §5.3), not the in-process KV, once more than one replica is
-running -- same shape as the realtime guard above, one mode set instead of
-one flag. */}}
+{{- /* Keyed on the resolved auth mode: local/oidc sessions need Valkey past one replica. */}}
 {{- if and (has .Values.console.auth.mode (list "local" "oidc")) (eq .Values.console.valkey.mode "disabled") (gt (int .Values.console.replicas) 1) }}
 {{- fail "auth.mode=local|oidc with console.valkey.mode=disabled requires console.replicas=1 (sessions live in Valkey per DATA.md §5.3; the in-process KV has no cross-replica visibility, so a browser load-balanced to another replica would be logged out at random): set console.valkey.mode=bundled|external or console.replicas=1" }}
 {{- end }}
-{{- /* Keyed on the RESOLVED auth mode: local/oidc store users, tokens and
-the audit log in PostgreSQL (SECURITY.md §10.1), so a database is not
-optional the way it is for anonymous/header. */}}
+{{- /* Keyed on the resolved auth mode: local/oidc need PostgreSQL. */}}
 {{- if and (has .Values.console.auth.mode (list "local" "oidc")) (eq .Values.console.database.mode "disabled") }}
 {{- fail "auth.mode=local|oidc requires console.database.mode=cnpg|external (users, tokens and the audit log live in PostgreSQL, SECURITY.md §10.1)" }}
 {{- end }}
-{{- /* Keyed on the RESOLVED trustedProxyCIDRs list: an empty list in header
-mode would make an unauthenticated request header an authentication bypass
-(SECURITY.md §10.1's "explicit opt-in"), so rendering fails rather than
-shipping that. */}}
+{{- /* An empty trustedProxyCIDRs in header mode would be an authentication bypass. */}}
 {{- if and (eq .Values.console.auth.mode "header") (not .Values.console.auth.header.trustedProxyCIDRs) }}
 {{- fail "auth.mode=header requires a non-empty console.auth.header.trustedProxyCIDRs: without it any client could set X-Remote-User and authenticate as anyone" }}
 {{- end }}
-{{- /* Keyed on the RESOLVED geoip configuration (M5): a geoip path names a file
-inside the /geoip mount, and the chart has no other way to put a file there.
-Without the volume source the console would boot, warn once and run with geoip
-silently off -- exactly the quiet degradation the other guards above refuse. */}}
-{{- if and .Values.console.mtr.enrichment.enabled (or .Values.console.mtr.enrichment.geoip.asnPath .Values.console.mtr.enrichment.geoip.cityPath) (not .Values.console.mtr.enrichment.geoip.volume) }}
-{{- fail "console.mtr.enrichment.geoip.asnPath/cityPath are set but console.mtr.enrichment.geoip.volume is empty: the chart mounts that volume read-only at /geoip and nothing else puts the mmdb files there, so the console would start with geoip disabled and only a warning to say so" }}
+{{- /* mode=volume must actually supply a volume, or geoip would be silently off. */}}
+{{- if and (eq (include "kconmon-ng.console.geoipMode" .) "volume") (not .Values.console.mtr.enrichment.geoip.volume) }}
+{{- fail "console.mtr.enrichment.geoip.mode=volume requires console.mtr.enrichment.geoip.volume: the chart mounts that VolumeSource read-only at /geoip and nothing else puts the mmdb files there. Use mode=auto to have the chart run maxmind/geoipupdate for you" }}
 {{- end }}
 apiVersion: v1
 kind: ConfigMap
@@ -55,10 +41,7 @@ data:
       local:
         bootstrapAdmin: {{ .Values.console.auth.local.bootstrapAdmin | quote }}
         {{- if .Values.console.auth.local.bootstrapAdmin }}
-        {{- /* Forces the existingSecret guard (kconmon-ng.console.localAdminSecretName)
-        to run even though its result is only used for the volume mount below,
-        not here -- rendering must fail at THIS point, not silently produce a
-        bootstrapAdminPasswordFile no Secret backs. */}}
+        {{- /* Forces the existingSecret guard to run here, so rendering fails at this point. */}}
         {{- $_ := include "kconmon-ng.console.localAdminSecretName" . }}
         bootstrapAdminPasswordFile: "/etc/kconmon-ng-console-secrets/local-admin-password"
         {{- end }}
@@ -104,6 +87,9 @@ data:
     valkey:
       address: {{ include "kconmon-ng.console.valkeyAddress" . | quote }}
       dialTimeout: {{ .Values.console.valkey.dialTimeout | quote }}
+      {{- with (include "kconmon-ng.console.valkeySecretName" .) }}
+      passwordFile: "/etc/kconmon-ng-console-secrets/valkey-password"
+      {{- end }}
     {{- if ne .Values.console.database.mode "disabled" }}
     database:
       dsnFile: "/etc/kconmon-ng-console-secrets/database-dsn"
@@ -115,27 +101,13 @@ data:
     rateLimit:
       runsPerMinute: {{ .Values.console.rateLimit.runsPerMinute | int }}
       loginPerMinute: {{ .Values.console.rateLimit.loginPerMinute | int }}
-    {{- /* Emitted only when ON. SchedulerConfig.Enabled's Go zero value makes
-    an omitted block identical to an explicit false, and a tickInterval in a
-    rendered config nothing reads is noise an operator has to reason about.
-    The one gate covers all three consumers: the schedule loop, the stuck-run
-    reaper, and the continuous external-check reconciler, which share this flag
-    and the same PostgreSQL advisory lock. */}}
+    {{- /* Emitted only when ON; the one gate covers all three consumers. */}}
     {{- if .Values.console.scheduler.enabled }}
     scheduler:
       enabled: true
       tickInterval: {{ .Values.console.scheduler.tickInterval | quote }}
     {{- end }}
-    {{- /* Emitted only when ON, for the reason config.checkers.external is:
-    console config.Load parses with KnownFields(true) (config.go:515) and a
-    pre-M5 console image has no MTRConfig field at all, so an unconditional
-    block would crashloop the OLD Pod while the Deployment rolls. THIS build
-    would accept it -- mtr.* is a known field here -- which is precisely why the
-    gate has to be justified by the rolling image rather than by this one.
-    Off by default also keeps the default render key-identical to chart
-    1.6.0's. The sub-gates are the binary's own: rdns and geoip switch
-    independently, an empty geoip path is that source off, and enabled with
-    every source off is a startup error, not a silent no-op. */}}
+    {{- /* Emitted only when ON: a pre-M5 console image would crashloop on an unknown key. */}}
     {{- if .Values.console.mtr.enrichment.enabled }}
     mtr:
       enrichment:
@@ -144,74 +116,35 @@ data:
           enabled: {{ .Values.console.mtr.enrichment.rdns.enabled }}
           timeoutMs: {{ .Values.console.mtr.enrichment.rdns.timeoutMs | int }}
         geoip:
-          asnPath: {{ .Values.console.mtr.enrichment.geoip.asnPath | quote }}
-          cityPath: {{ .Values.console.mtr.enrichment.geoip.cityPath | quote }}
+          asnPath: {{ include "kconmon-ng.console.geoipPath" (dict "ctx" . "edition" "GeoLite2-ASN" "override" .Values.console.mtr.enrichment.geoip.asnPath) | quote }}
+          cityPath: {{ include "kconmon-ng.console.geoipPath" (dict "ctx" . "edition" "GeoLite2-City" "override" .Values.console.mtr.enrichment.geoip.cityPath) | quote }}
+          {{- /* Emitted only for an image that knows the key: the console rejects unknown fields. */}}
+          {{- if and (include "kconmon-ng.console.geoipEnabled" .) (include "kconmon-ng.console.supports" (dict "ctx" . "since" "2.0.0")) }}
+          reloadInterval: {{ .Values.console.mtr.enrichment.geoip.reloadInterval | quote }}
+          {{- end }}
         ttl: {{ .Values.console.mtr.enrichment.ttl | quote }}
     {{- end }}
-    {{- /* M6 Kubernetes event capture. Emitted only when ON, for the reason
-    mtr above is: config.Load parses with KnownFields(true) and a pre-M6 console
-    image has no kubernetesContext field, so an unconditional block would
-    crashloop the OLD Pod while the Deployment rolls. Off by default also keeps
-    the default render key-identical to chart 1.7.0's.
-
-    NOT guarded against database.mode=disabled, unlike auth.mode=local|oidc
-    above: the console's own posture there is a warning and a skipped reader
-    (cmd/console), because captured events live in PostgreSQL and having
-    nowhere to put them is a degraded feature, not an unsafe one. The chart
-    does not get to be stricter than the binary about a knob the binary
-    already reports on. Same reasoning for the empty namespace: the console
-    resolves it from POD_NAMESPACE, which the Deployment sets under this same
-    gate. */}}
+    {{- /* Emitted only when ON; a missing database is the binary's own warn-and-skip. */}}
     {{- if .Values.console.kubernetesContext.enabled }}
     kubernetesContext:
       enabled: true
       namespace: {{ .Values.console.kubernetesContext.namespace | quote }}
       resyncInterval: {{ .Values.console.kubernetesContext.resyncInterval | quote }}
     {{- end }}
-    {{- /* M6 webhook secret encryption. encryptionKeyFile, never encryptionKey:
-    the file comes out of the projected Secret volume the DSN already uses, and
-    the inline form would put 32 bytes of key material in a ConfigMap. The
-    console refuses a config that sets both, so only ever one is emitted.
-    Absent when no Secret is named -- that is the keyless state, where create
-    and test answer 503 and every other webhook route keeps working. */}}
+    {{- /* encryptionKeyFile, never an inline key: a ConfigMap must not hold key material. */}}
     {{- with (include "kconmon-ng.console.webhooksKeySecretName" .) }}
     webhooks:
       encryptionKeyFile: "/etc/kconmon-ng-console-secrets/webhooks-encryption-key"
-      {{- /* M7: the alert-transition watcher's poll cadence, and directly the
-      resolution granularity of every alert.resolved delivery (WebhooksConfig.
-      AlertPollInterval). Nested under the SAME key-secret gate the line above
-      lives behind, because the watcher exists only to fire deliveries and a
-      keyless console has no delivery path to fire down -- config.validate
-      requires it only when a key is named AND alerting is on, which is exactly
-      this pair of conditions.
-
-      Gated additionally on alerting.enabled for the emission reason
-      kubernetesContext and mtr are gated: config.Load parses with
-      KnownFields(true), and a pre-M7 console image has no alertPollInterval
-      field under webhooks, so an unconditional line would crashloop the OLD
-      Pod while the Deployment rolls. Nobody turns alerting on while rolling
-      backwards onto an image that does not have it. Off by default also keeps
-      a default render key-identical to chart 1.8.0's. */}}
+      {{- /* Emitted only with a webhook key AND alerting on, the pair config.validate requires. */}}
       {{- if $.Values.console.alerting.enabled }}
       alertPollInterval: {{ $.Values.console.webhooks.alertPollInterval | quote }}
       {{- end }}
     {{- end }}
-    {{- /* M7 PrometheusRule reconciler. Emitted only when ON, for the same
-    KnownFields(true) rolling-image reason as kubernetesContext above, and the
-    same key-identical-default-render reason.
-
-    NOT guarded against database.mode=disabled, deliberately, and the console's
-    posture there is stronger than a warning: cmd/console SKIPS the reconciler
-    entirely without a database rather than degrading, because the rules live in
-    alert_rules and applying an EMPTY bundle over whatever is already in the
-    cluster would silently stop yesterday's alerts from evaluating. The chart
-    does not get to be stricter than the binary about a knob the binary already
-    reports on -- and here the binary's answer is the safe one.
-
-    An empty namespace is resolved from POD_NAMESPACE, which the Deployment sets
-    under this same gate (kconmon-ng.console.k8sIdentity), exactly as it does
-    for kubernetesContext. */}}
+    {{- /* Emitted only when ON; without a database the binary skips the reconciler. */}}
     {{- if .Values.console.alerting.enabled }}
+    {{- if and .Values.console.alerting.namespace (ne .Values.console.alerting.namespace .Release.Namespace) }}
+    {{- fail (printf "console.alerting.namespace=%q but the chart renders the prometheusrules Role into %q — the reconciler would get a permanent 403. Leave it empty to use the release namespace, or install the chart into %q" .Values.console.alerting.namespace .Release.Namespace .Values.console.alerting.namespace) }}
+    {{- end }}
     alerting:
       enabled: true
       namespace: {{ .Values.console.alerting.namespace | quote }}

@@ -18,10 +18,8 @@ service AgentRegistry {
   // ReportTaskResult delivers the outcome of a WatchTasks task back to the
   // controller.
   rpc ReportTaskResult(TaskResult) returns (google.protobuf.Empty);
-  // WatchExternalChecks server-streams this agent's CONTINUOUS external-check
-  // assignment, mirroring the WatchPeers push pattern. Each message is the
-  // agent's COMPLETE assignment, never a delta: a dropped message can then
-  // never leave an agent probing a target the operator deleted.
+  // WatchExternalChecks server-streams this agent's CONTINUOUS external-check assignment; each
+  // message is the agent's COMPLETE assignment.
   rpc WatchExternalChecks(WatchExternalChecksRequest) returns (stream ExternalCheckAssignment);
 }
 
@@ -30,10 +28,9 @@ service ProbeService {
   rpc UDPProbe(UDPProbeRequest) returns (UDPProbeResponse);
 }
 
-// EventStream lets the Console watch controller-observed domain events in
-// realtime. Leader-only: a non-leader replica fails the call immediately
-// (codes.Unavailable) so the Console's reconnect loop retries and may land on
-// the leader on a subsequent dial.
+// EventStream lets the Console watch controller-observed domain events in realtime; Leader-only: a
+// non-leader replica fails the call immediately (codes.Unavailable) so the Console's reconnect loop
+// retries and may land on the leader on a subsequent dial.
 service EventStream {
   rpc WatchEvents(WatchEventsRequest) returns (stream Event);
 }
@@ -45,12 +42,8 @@ message AgentMeta {
   string pod_ip = 4;
   string zone = 5;
   map<string, string> labels = 6;
-  // capabilities are opt-in feature flags this agent build supports, e.g.
-  // "external-checks". A pre-M4 agent sends an empty list and the controller
-  // refuses to dispatch anything that needs one, rather than sending a field
-  // the old agent silently ignores (which would make it probe an empty
-  // AgentMeta). Same posture as the Console/controller /api/v1/version
-  // capability array: feature detection, never version sniffing.
+  // capabilities are opt-in feature flags this agent build supports, e.g. "external-checks"; a
+  // pre-M4 agent sends an empty list and the controller refuses to dispatch anything that needs.
   repeated string capabilities = 7;
 }
 
@@ -99,13 +92,7 @@ message WatchExternalChecksRequest {
   string agent_id = 1;
 }
 
-// ExternalCheckSpec is one continuous probe an agent must run. mtr and udp
-// are deliberately absent from check_type: UDP's probe is a peer-to-peer
-// protocol against another agent's probe server, which no external host
-// runs, and a continuous MTR against an internet destination is a traffic
-// and cardinality decision (mtr_hop_rtt_seconds is labelled by hop_ip,
-// unbounded for internet paths) that belongs with the M5 MTR Explorer.
-// One-shot MTR to a target still works through diagnostics v2.
+// ExternalCheckSpec is one continuous probe an agent must run.
 message ExternalCheckSpec {
   string definition_id = 1; // correlation only -- NEVER a metric label
   ExternalTarget target = 2;
@@ -123,10 +110,7 @@ message ExternalCheckAssignment {
   google.protobuf.Timestamp timestamp = 2;
 }
 
-// ExternalTarget is a probe destination that is NOT a registered agent:
-// an operator-defined target, or an ad-hoc address typed into the
-// diagnostics form. name is the ONLY field that becomes a metric label
-// value (see docs/metrics.md); address never does.
+// ExternalTarget is a probe destination that is NOT a registered agent: an operator-defined target.
 message ExternalTarget {
   string name = 1;
   string kind = 2; // host | url
@@ -139,13 +123,8 @@ message TaskRequest {
   string check_type = 2; // tcp|udp|icmp|dns|http|mtr
   AgentMeta target = 3;
   string plane = 4; // pod|host
-  // external_target is set INSTEAD OF target (field 3) when the destination
-  // is not a registered agent. Exactly one of the two is ever populated; the
-  // agent treats both-set as a malformed request and reports an error result
-  // rather than guessing. The exclusion is deliberately NOT a oneof: moving
-  // the existing field 3 into a new oneof would change the generated Go API
-  // and churn every existing call site for no wire benefit, so it is
-  // enforced in code and tested instead.
+  // external_target is set INSTEAD OF target (field 3) when the destination is not a registered
+  // agent.
   ExternalTarget external_target = 5;
 }
 
@@ -182,10 +161,7 @@ message UDPProbeResponse {
 }
 
 message WatchEventsRequest {
-  // Reserved for a future resume-by-seq capability across controller
-  // restarts. The controller keeps no cross-restart event history in M2, so
-  // this is currently unused; the field exists so the wire shape does not
-  // need to change when that lands.
+  // Reserved for a future resume-by-seq capability across controller restarts.
   uint64 last_seq = 1;
 }
 
@@ -201,19 +177,8 @@ message Event {
   }
 }
 
-// TopologyChanged is a lightweight "refetch" signal for a LIVE Console: it
-// names the subject of one change, never the resulting cluster. The Console
-// already has an authoritative HTTP topology endpoint (GET /api/v1/topology)
-// and re-queries it rather than duplicating node/zone enrichment here.
-//
-// The subject fields are also the ONLY thing a persisted event history can be
-// folded back into a topology from (internal/console/store/events.go
-// foldTopology), so the controller fills every one it knows at the emission
-// site: one event per affected agent, not one per registry mutation.
-//
-// zone carries the agent's failure domain AT THE TIME OF THE CHANGE. For
-// zone_updated it is the NEW zone, which is that reason's entire subject —
-// without it, a zone change is indistinguishable from a no-op in history.
+// TopologyChanged is a lightweight "refetch" signal for a LIVE Console: it names the subject of one
+// change.
 message TopologyChanged {
   string reason = 1;    // agent_registered|zone_updated|agent_deregistered|agent_evicted
   string node_name = 2;
@@ -221,10 +186,8 @@ message TopologyChanged {
   string zone = 4;
 }
 
-// CheckObserved reports the outcome of a completed ON-DEMAND diagnostic check
-// (POST /api/v1/diagnostics). It is NOT the continuous background probes —
-// those go straight from agent to Prometheus and never touch the controller.
-// It is a compact rollup, never the raw CheckResult payload.
+// CheckObserved reports the outcome of a completed ON-DEMAND diagnostic check (POST
+// /api/v1/diagnostics); it is NOT the continuous background probes.
 message CheckObserved {
   string task_id = 1;
   string check_type = 2; // tcp|udp|icmp|dns|http (mtr uses MTRTriggered/MTRCompleted instead)

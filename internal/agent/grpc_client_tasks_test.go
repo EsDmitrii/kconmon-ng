@@ -48,10 +48,8 @@ func startTaskTestServer(t *testing.T) (*controller.GRPCServer, *GRPCClient) {
 	return srv, client
 }
 
-// TestWatchExternalChecksReceivesAssignments exercises the agent client against
-// a real controller: subscribe, receive the immediate current assignment (empty
-// on a fresh controller — the send that tells a restarting agent to stop
-// probing), then receive a pushed one.
+// TestWatchExternalChecksReceivesAssignments exercises the agent client against a real controller:
+// subscribe.
 func TestWatchExternalChecksReceivesAssignments(t *testing.T) {
 	srv, client := startTaskTestServer(t)
 
@@ -107,10 +105,8 @@ func TestWatchExternalChecksReceivesAssignments(t *testing.T) {
 	}
 }
 
-// TestWatchTasksReceivesDispatchedTaskAndReportsResult exercises the full agent
-// client path against a real controller: subscribe via WatchTasks, receive a
-// dispatched task, run it through a TaskExecutor, and report the result back so
-// the controller's Dispatch call returns.
+// TestWatchTasksReceivesDispatchedTaskAndReportsResult exercises the full agent client path against
+// a real controller.
 func TestWatchTasksReceivesDispatchedTaskAndReportsResult(t *testing.T) {
 	srv, client := startTaskTestServer(t)
 

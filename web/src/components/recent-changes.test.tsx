@@ -131,6 +131,45 @@ describe("RecentChanges", () => {
   });
 });
 
+/* ── QA scope 2, findings #9 and #10: the row's clock ────────────────────── */
+
+describe("RecentChanges row stamps", () => {
+  /* The rail read 3:12 PM for the event the Live feed called 15:12. Both now go
+     through lib/utils' shared idiom, so the two cannot disagree. */
+  it("uses the console's 24-hour clock, never a 12-hour one", async () => {
+    const afternoon = new Date();
+    afternoon.setHours(15, 12, 0, 0);
+    renderRail("node-a", {
+      events: [event({ id: "1-1", timestamp: afternoon.toISOString(), summary: "this afternoon" })],
+    });
+    await screen.findByText("this afternoon");
+    expect(screen.getByText("15:12:00")).toBeInTheDocument();
+    expect(screen.queryByText(/PM|AM/)).toBeNull();
+  });
+
+  it("adds the DAY to a row that is not from today", async () => {
+    const yesterday = new Date();
+    yesterday.setDate(yesterday.getDate() - 1);
+    yesterday.setHours(15, 12, 0, 0);
+    renderRail("node-a", {
+      events: [event({ id: "1-1", timestamp: yesterday.toISOString(), summary: "yesterday" })],
+    });
+    await screen.findByText("yesterday");
+    // The compact month/day the annotation and maintenance rows already print,
+    // ahead of the same 24-hour time.
+    const expected = `${yesterday.toLocaleDateString(undefined, { month: "short", day: "numeric" })} 15:12:00`;
+    expect(screen.getByText(expected)).toBeInTheDocument();
+  });
+
+  it("keeps today's rows time-only — the day would be noise on every one of them", async () => {
+    const today = new Date();
+    today.setHours(9, 5, 0, 0);
+    renderRail("node-a", { events: [event({ id: "1-1", timestamp: today.toISOString(), summary: "today" })] });
+    await screen.findByText("today");
+    expect(screen.getByText("09:05:00")).toBeInTheDocument();
+  });
+});
+
 /* ── the pair-aware half (QA scope 2 #21) ─────────────────────────────────── */
 
 describe("matchesScope", () => {

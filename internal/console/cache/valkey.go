@@ -17,11 +17,7 @@ import (
 // DATA.md §5.3's events:* convention.
 const valkeyChannelPrefix = "events:"
 
-// ValkeyBus is a Bus backed by a real Valkey/Redis server via rueidis. It
-// reuses InProcessBus's local fan-out for the "deliver to this replica's
-// ws.Hub subscribers" half of the job; the network half is a single
-// dedicated Receive loop subscribing to "events:*" via PSUBSCRIBE, so N local
-// topics share ONE server-side subscription connection.
+// ValkeyBus is a Bus backed by a real Valkey/Redis server via rueidis.
 type ValkeyBus struct {
 	client rueidis.Client
 	local  *InProcessBus
@@ -32,22 +28,16 @@ type ValkeyBus struct {
 // compile-time proof ValkeyBus satisfies the frozen Bus seam.
 var _ Bus = (*ValkeyBus)(nil)
 
-// NewValkeyBus dials address (host:port) and starts the background receive
-// loop. Transient connection loss is retried by rueidis internally inside
-// Receive; the loop's own backoff is a backstop for what rueidis declines to
-// retry (and for benign subscription-end returns) — not the primary reconnect
-// path. Construction itself only fails on the initial dial (a malformed
-// address or completely unreachable host at startup) — rueidis dials eagerly.
-//
-// Teardown needs Close(): cancelling ctx stops the receive loop but does NOT
-// release the underlying rueidis client, so ctx cancellation alone leaks the
-// connection pool. The owner must call Close() (Task 14 wires this in
-// cmd/console).
-func NewValkeyBus(ctx context.Context, address string, dialTimeout time.Duration) (*ValkeyBus, error) {
+// NewValkeyBus dials address (host:port) and starts the background receive loop; construction
+// itself only fails on the initial dial (a malformed address or completely unreachable host at
+// startup). An empty password means no AUTH.
+func NewValkeyBus(ctx context.Context, address string, dialTimeout time.Duration, password string) (*ValkeyBus, error) {
 	client, err := rueidis.NewClient(rueidis.ClientOption{
 		InitAddress:       []string{address},
 		Dialer:            net.Dialer{Timeout: dialTimeout},
 		ForceSingleClient: true, // a single bundled/external Valkey instance, never a cluster, in M2
+		// Empty password means no AUTH, which is what an unauthenticated bundled Valkey wants.
+		Password: password,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("valkey connect %s: %w", address, err)
@@ -59,35 +49,19 @@ func NewValkeyBus(ctx context.Context, address string, dialTimeout time.Duration
 	return b, nil
 }
 
-// receiveLoop keeps a PSUBSCRIBE on "events:*" alive, exiting only when ctx is
-// cancelled. Note it rarely runs its retry body: rueidis's Receive retries
-// transient connection loss internally (goto retry) and only returns for
-// benign subscription-end frames, cancellation, or errors it declines to
-// retry — this loop is the backstop for those. It follows
-// internal/agent/agent.go's WatchTasks reconnect loop (exponential backoff
-// 1s → 15s) but deliberately deviates from its shape in two ways, both forced
-// by rueidis's Receive contract — see below.
+// receiveLoop keeps a PSUBSCRIBE on "events:*" alive, exiting only when ctx is cancelled.
 func (b *ValkeyBus) receiveLoop(ctx context.Context) {
 	const (
 		minBackoff = time.Second
 		maxBackoff = 15 * time.Second
-		// A Receive call that lasted this long is treated as a fresh incident,
-		// restarting the backoff from minBackoff. Heuristic, not proof of
-		// health: the measured span includes rueidis's internal retries, so a
-		// long outage spent retrying inside Receive also qualifies — the cost
-		// is a ~1s retry pace instead of 15s, still bounded by rueidis's own
-		// internal retry pacing.
+		// A Receive call that lasted this long is treated as a fresh incident, restarting the backoff
+		// from minBackoff.
 		healthySession = 30 * time.Second
 	)
 	backoff := minBackoff
 
 	for {
-		// The command MUST be rebuilt every iteration and never hoisted out of
-		// this loop: rueidis recycles the Completed into a shared sync.Pool on
-		// every nil return from Receive (singleClient.Receive ->
-		// cmds.PutCompleted -> Put(c.cs)). Reusing a hoisted command would
-		// hand a zeroed, pool-owned CommandSlice to the next Receive, panicking
-		// in Verify() or racing a concurrent Publish that drew the same slice.
+		// The command MUST be rebuilt every iteration and never hoisted out of this loop.
 		cmd := b.client.B().Psubscribe().Pattern(valkeyChannelPrefix + "*").Build()
 
 		start := time.Now()
@@ -110,11 +84,8 @@ func (b *ValkeyBus) receiveLoop(ctx context.Context) {
 			backoff = minBackoff
 		}
 
-		// Second deviation from WatchTasks: that loop only ever observes a real
-		// error, so it grows the backoff unconditionally. Receive also returns
-		// nil when the subscription merely ends on a still-healthy connection,
-		// and treating that benign case as a failure would ratchet a perfectly
-		// healthy bus all the way to maxBackoff. So only real errors escalate.
+		// Second deviation from WatchTasks: that loop only ever observes a real error, so it grows the
+		// backoff unconditionally.
 		if err == nil {
 			slog.Info("valkey subscription ended, re-subscribing", "session", session, "backoff", backoff)
 		} else {
@@ -133,10 +104,7 @@ func (b *ValkeyBus) receiveLoop(ctx context.Context) {
 	}
 }
 
-// Publish sends msg to the Valkey channel "events:"+topic. Every replica
-// running a receiveLoop (including this one) receives it back and re-delivers
-// it to local subscribers via InProcessBus.Publish — so a single-process
-// deployment still works end-to-end even with Valkey in the loop.
+// Publish sends msg to the Valkey channel "events:"+topic.
 func (b *ValkeyBus) Publish(ctx context.Context, topic string, msg Message) error {
 	data, err := json.Marshal(msg)
 	if err != nil {

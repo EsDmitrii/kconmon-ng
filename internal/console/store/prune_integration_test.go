@@ -3,9 +3,6 @@
 package store_test
 
 // TestPruneOnce* / TestRun* require a real PostgreSQL.
-// Run: docker run --rm -d -p 5432:5432 -e POSTGRES_PASSWORD=test -e POSTGRES_DB=kconmon postgres:17-alpine
-// Then: KCONMON_TEST_DATABASE_DSN='postgres://postgres:test@127.0.0.1:5432/kconmon?sslmode=disable' \
-//       go test -tags=integration ./internal/console/store/... -v
 
 import (
 	"context"
@@ -22,10 +19,7 @@ import (
 
 const retention90d = 90 * 24 * time.Hour
 
-// newPrunerDB opens a *store.DB with migrations applied, dropping and
-// re-creating the schema first -- same convention as newEventStoreDB
-// (events_integration_test.go); this file shares one database with every
-// other file in package store_test, so each test must leave it clean.
+// newPrunerDB opens a *store.DB with migrations applied, dropping and re-creating the schema first.
 func newPrunerDB(t *testing.T) (*store.DB, string) {
 	t.Helper()
 	dsn := testDSN(t)
@@ -43,11 +37,8 @@ func newPrunerDB(t *testing.T) (*store.DB, string) {
 	return db, dsn
 }
 
-// seedTopologyEventsAtAges inserts one row per element of agesDays: row i has
-// event_time = now - agesDays[i] days and event_seq = seqBase+i. It bulk-inserts
-// via UNNEST in a single round trip rather than one store.EventStore.InsertEvent
-// call per row, since the batch-crossing tests below seed thousands of rows and
-// a round trip each would make the suite slow.
+// seedTopologyEventsAtAges inserts one row per element of agesDays; it bulk-inserts via UNNEST in a
+// single round trip rather than one store.EventStore.InsertEvent call per row.
 func seedTopologyEventsAtAges(t *testing.T, dsn string, seqBase int64, agesDays []int) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), connectTimeout)
@@ -97,10 +88,7 @@ func countTopologyEvents(t *testing.T, dsn string) int64 {
 	return n
 }
 
-// agesSpanning200Days returns 10 ages just inside a 90d retention window and
-// 10 just outside it, with plenty of clearance on both sides of the cutoff so
-// DeleteTopologyEventsBefore's strict "event_time < cutoff" never has to
-// resolve a boundary tie.
+// agesSpanning200Days returns 10 ages just inside a 90d retention window and 10 just outside it.
 func agesSpanning200Days() []int {
 	ages := make([]int, 0, 20)
 	for d := 1; d <= 10; d++ {
@@ -142,21 +130,7 @@ func TestPruneOnceDeletesRowsPastRetention(t *testing.T) {
 	}
 }
 
-// TestPruneOnceSweepsEveryTable is the whole sweep list in one call: each of
-// the nine tables gets one row past retention and one inside it, and PruneOnce
-// must delete exactly the expired one from each and report it under that
-// table's own key. Seeding through the public store API rather than raw SQL is
-// deliberate -- it is what makes the test also prove the sweeps are pointed at
-// the columns the writers actually populate.
-//
-// A configured WEBHOOK and a configured ALERT RULE are seeded too, and both
-// must SURVIVE: they are configuration, not observation, and have no sweep at
-// all (prune.go's table-label comment, M7 Decision 1). Their presence
-// afterwards is the assertion. The alert rule is deliberately backdated on
-// BOTH of its time columns first -- updated_at and last_synced_at -- because
-// those are the two a later reader would most plausibly hang a sweep on, and
-// a rule 200 days past the horizon on both is the row such a sweep would take
-// first.
+// TestPruneOnceSweepsEveryTable is the whole sweep list in one call.
 func TestPruneOnceSweepsEveryTable(t *testing.T) {
 	db, dsn := newPrunerDB(t)
 	p := store.NewPruner(db, retention90d, newTestMetrics())
@@ -232,10 +206,8 @@ func TestPruneOnceSweepsEveryTable(t *testing.T) {
 		}
 	}
 
-	// incidents (by resolved_at). THREE rows, not two: one resolved past the
-	// horizon (swept), one resolved inside it (kept), and one still OPEN and
-	// just as old as the first (kept, because open incidents are never
-	// pruned). The open one is what makes the expected count 1 rather than 2.
+	// incidents (by resolved_at); THREE rows, not two: one resolved past the horizon (swept), one
+	// resolved inside it (kept).
 	for i, tc := range []struct {
 		title      string
 		resolvedAt *time.Time
@@ -406,11 +378,8 @@ func TestPruneOnceSweepsEveryTable(t *testing.T) {
 	}
 }
 
-// TestPruneOnceCrossesBatchBoundary seeds 12000 rows, all past retention --
-// more than pruneBatchSize (5000) -- and asserts one PruneOnce call still
-// deletes every one of them, proving the internal batch loop keeps issuing
-// DELETEs until a batch comes back short rather than stopping after the
-// first 5000.
+// TestPruneOnceCrossesBatchBoundary seeds 12000 rows, all past retention -- more than
+// pruneBatchSize (5000).
 func TestPruneOnceCrossesBatchBoundary(t *testing.T) {
 	db, dsn := newPrunerDB(t)
 	p := store.NewPruner(db, retention90d, newTestMetrics())
@@ -437,11 +406,8 @@ func TestPruneOnceCrossesBatchBoundary(t *testing.T) {
 	}
 }
 
-// TestPruneOnceConcurrentReplicasDoNotDoubleWork is the multi-replica
-// guarantee: two *store.DB backed by two independent pgxpool.Pools (modeling
-// two console replicas against the same PostgreSQL) call PruneOnce at
-// roughly the same time. Exactly one must do the deleting; the other must
-// find pruneLockKey already held and return promptly with nothing deleted.
+// TestPruneOnceConcurrentReplicasDoNotDoubleWork is the multi-replica guarantee; exactly one must
+// do the deleting.
 func TestPruneOnceConcurrentReplicasDoNotDoubleWork(t *testing.T) {
 	dsn := testDSN(t)
 	dropSchema(t, dsn)
@@ -489,10 +455,8 @@ func TestPruneOnceConcurrentReplicasDoNotDoubleWork(t *testing.T) {
 		resultCh <- outcome{d, err}
 	}()
 
-	// Give p1 a head start: 12000 rows over a 5000-row batch size means at
-	// least one pruneBatchPause between batches, which alone comfortably
-	// outlasts this delay, so p2's own pg_try_advisory_lock call below lands
-	// while p1 still holds pruneLockKey.
+	// Give p1 a head start: 12000 rows over a 5000-row batch size means at least one pruneBatchPause
+	// between batches.
 	time.Sleep(30 * time.Millisecond)
 
 	r2, err2 := p2.PruneOnce(runCtx)

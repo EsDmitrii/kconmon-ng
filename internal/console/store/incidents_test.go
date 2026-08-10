@@ -171,8 +171,6 @@ func TestIncidentNotesLengthIsBytesNotRunes(t *testing.T) {
 	}
 }
 
-// TestValidatePinnedBoundsTheArray covers the three numeric bounds Decision 7
-// names: at most 64 entries, ids at most 128 bytes, notes at most 512.
 func TestValidatePinnedBoundsTheArray(t *testing.T) {
 	build := func(n int) json.RawMessage {
 		refs := make([]PinnedRef, n)
@@ -218,11 +216,8 @@ func TestValidatePinnedBoundsTheArray(t *testing.T) {
 	}
 }
 
-// TestValidatePinnedChecksTheDecodedValueNotJustTheBytes is the whole reason
-// pinned is not simply run through validateJSON like labels and params are: a
-// pin whose kind nothing can resolve is well-formed JSON and a dangling
-// reference, and it must be rejected at write time rather than render as
-// nothing forever.
+// TestValidatePinnedChecksTheDecodedValueNotJustTheBytes is the whole reason pinned is not simply
+// run through validateJSON like labels and params are.
 func TestValidatePinnedChecksTheDecodedValueNotJustTheBytes(t *testing.T) {
 	raw := json.RawMessage(`[{"kind":"prometheus-series","id":"up"}]`)
 	if !json.Valid(raw) {
@@ -288,11 +283,8 @@ func TestOrEmptyPinnedArrayStoresAnArrayNotAnObject(t *testing.T) {
 	}
 }
 
-// TestIncidentStatusInvariantHoldsOnUpdateToo asserts the status/resolved_at
-// rule is not create-only: UpdateIncidentStatus checks it BEFORE the UUID
-// pre-check, so a reopen that forgot to clear resolved_at fails on the
-// invariant rather than reaching the database. The *DB has a NIL pool, so a
-// clean return is itself proof no round trip was attempted.
+// TestIncidentStatusInvariantHoldsOnUpdateToo asserts the status/resolved_at rule is not
+// create-only.
 func TestIncidentStatusInvariantHoldsOnUpdateToo(t *testing.T) {
 	db := &DB{}
 	ctx := context.Background()
@@ -310,10 +302,7 @@ func TestIncidentStatusInvariantHoldsOnUpdateToo(t *testing.T) {
 	}
 }
 
-// TestIncidentMalformedIDIsNotFoundWithoutTouchingPgx mirrors the annotation
-// readers' pre-check: every id-taking method on the incident seams answers
-// ErrNotFound for an id that cannot name a row, so the edge answers 404 rather
-// than "incident store unavailable". NIL pool.
+// TestIncidentMalformedIDIsNotFoundWithoutTouchingPgx mirrors the annotation readers' pre-check.
 func TestIncidentMalformedIDIsNotFoundWithoutTouchingPgx(t *testing.T) {
 	db := &DB{}
 	ctx := context.Background()

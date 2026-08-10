@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   DEFINITION_FIELD_PHRASES,
   TARGET_FIELD_PHRASES,
+  TARGET_ADDRESS_PLACEHOLDER,
   TargetsPage,
   fieldForDetail,
   formatLabels,
@@ -210,6 +211,10 @@ function renderPage(
 afterEach(() => {
   cleanup();
   vi.unstubAllGlobals();
+  // The sub-view lives in ?view= now, and jsdom keeps one URL for the whole
+  // file — without this reset a test that opened Schedules would hand the next
+  // one a page already on the Schedules tab.
+  window.history.replaceState({}, "", "/targets");
 });
 
 async function openTab(name: RegExp) {
@@ -217,16 +222,8 @@ async function openTab(name: RegExp) {
 }
 
 /**
- * pickRunAt drives the schedule form's "Run at" DateTimePicker (QA round 3,
- * finding #12): open the trigger, type the local day and wall clock into the
- * picker's own manual fields, apply.
- *
- * The raw `<input type="datetime-local">` this replaced was the LAST one in
- * web/src, and it is why the console now asks for an instant exactly one way.
- * The picker composes through the LOCAL Date constructor, so an expected
- * instant is built the same way rather than from a UTC string — the same
- * helper components/maintenance.test.tsx and components/annotations.test.tsx
- * already use.
+ * pickRunAt drives the schedule form's "Run at" DateTimePicker: open the trigger; the picker
+ * composes through the LOCAL Date constructor.
  */
 function pickRunAt(date: string, time: string) {
   fireEvent.click(screen.getByRole("button", { name: "Run at" }));
@@ -381,6 +378,21 @@ describe("TargetsPage — targets CRUD", () => {
     );
     await waitFor(() => expect(screen.queryByText("api-gw")).not.toBeInTheDocument());
   });
+
+  /* QA scope 2, finding #22 — the accessible name has to carry the whole name
+     (three "Delete" buttons in a list are three identical announcements), and
+     the VISIBLE label has to stay inside its row. */
+  it("keeps the full object name in the accessible name while bounding the pixels", async () => {
+    const long = "edge-gateway-with-a-genuinely-unreasonable-name-for-one-row";
+    renderPage({ targets: [targetRow({ name: long })] });
+    const button = await screen.findByRole("button", { name: `Delete ${long}` });
+    // The visible half is aria-hidden, capped and carries the whole string in
+    // `title` — nothing is lost, only clipped.
+    const label = button.querySelector('[aria-hidden="true"]');
+    expect(label).toHaveAttribute("title", `Delete ${long}`);
+    expect(label?.className).toContain("truncate");
+    expect(label?.className).toMatch(/max-w-\[\d+rem\]/);
+  });
 });
 
 describe("TargetsPage — definitions tab and the projection", () => {
@@ -461,11 +473,7 @@ describe("TargetsPage — definitions tab and the projection", () => {
     expect(screen.getByLabelText("Destination kind")).not.toHaveAttribute("aria-invalid");
   });
 
-  /**
-   * QA round 4, finding #13, client half. The store now refuses an ad-hoc
-   * address the agent could never dial; this form says so at the field rather
-   * than spending a round trip to be told.
-   */
+  /** The store now refuses an ad-hoc address the agent could never dial. */
   it("refuses a malformed ad-hoc address at the field, and never POSTs it", async () => {
     const { calls } = renderPage({});
 
@@ -501,10 +509,8 @@ describe("TargetsPage — definitions tab and the projection", () => {
     );
   });
 
-  // The projection 422 (httpapi's projectionDetail) names no form field at
-  // all: it is about the definition as a whole. It must still render in full,
-  // one level up, rather than being swallowed because the phrase table did
-  // not recognise it.
+  // It must still render in full, one level up, rather than being swallowed because the phrase
+  // table did not recognise it.
   it("falls back to a form-level error, verbatim, for a 422 that names no field", async () => {
     const detail =
       "definition: too many projected series: enabling this definition projects 900 continuous external series (900 agents x 1 protocols), limit 400";
@@ -527,7 +533,9 @@ describe("TargetsPage — schedules tab", () => {
     await openTab(/schedules/i);
     const list = await screen.findByRole("list", { name: /schedules/i });
     expect(within(list).getByText("gw-tcp")).toBeInTheDocument();
-    expect(within(list).getByText(/every 30s/i)).toBeInTheDocument();
+    // Scoped to the cadence CELL: the action names carry the cadence too now
+    // (finding 3), so a bare text query matches several nodes.
+    expect(within(list).getByText("every 30s", { selector: "span.text-muted-foreground" })).toBeInTheDocument();
   });
 
   it("renders an empty schedules list rather than a stub", async () => {
@@ -633,11 +641,7 @@ describe("TargetsPage — schedules tab", () => {
     );
   });
 
-  /* QA round 3, finding #12: the LAST raw <input type="datetime-local"> in
-     web/src. Both halves are pinned — the control is the M5 picker (its trigger
-     announces the popover it opens), and the field is really optional even
-     though the server requires it for this kind, because an operator must be
-     able to un-set it while changing their mind about the kind. */
+  /* Both halves are pinned. */
   it("asks for the run-at through the M5 picker, whose trigger announces its popover", async () => {
     renderPage({ definitions: [definitionRow()] });
     await openTab(/schedules/i);
@@ -712,7 +716,7 @@ describe("TargetsPage — schedules tab", () => {
     const { calls } = renderPage({ definitions: [definitionRow()], schedules: [scheduleRow()] });
 
     await openTab(/schedules/i);
-    fireEvent.click(await screen.findByRole("button", { name: "Disable gw-tcp" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Disable gw-tcp, every 30s" }));
 
     // Not {enabled:false} alone: PUT is a full replace, so an omitted
     // intervalNs would erase the very cadence being toggled.
@@ -725,14 +729,14 @@ describe("TargetsPage — schedules tab", () => {
       }),
     );
     expect(calls.find((c) => c.method === "PUT")?.url).toBe("/api/v1/schedules/s-1");
-    expect(await screen.findByRole("button", { name: "Enable gw-tcp" })).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "Enable gw-tcp, every 30s" })).toBeInTheDocument();
   });
 
   it("deletes a schedule behind an inline confirm, then refetches", async () => {
     const { calls } = renderPage({ definitions: [definitionRow()], schedules: [scheduleRow()] });
 
     await openTab(/schedules/i);
-    fireEvent.click(await screen.findByRole("button", { name: "Delete gw-tcp" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Delete gw-tcp, every 30s" }));
     expect(calls.some((c) => c.method === "DELETE")).toBe(false);
 
     fireEvent.click(screen.getByRole("button", { name: /confirm delete gw-tcp/i }));
@@ -829,14 +833,18 @@ describe("a failing schedule says so (#5)", () => {
     expect(screen.queryByTestId("schedule-failure")).toBeNull();
   });
 
-  it("says nothing for a DISABLED schedule carrying an old error — it is not failing, it is off", async () => {
+  /* This used to assert the OPPOSITE, and the opposite was wrong: switching a
+     cadence off does not unmake the run that failed under it. Hiding the reason
+     the moment someone disables the row is how the only record of WHY it was
+     disabled disappears — usually right when the next person goes looking. */
+  it("keeps a DISABLED schedule's last error on the row — the failure is a fact", async () => {
     renderPage({
       definitions: [definitionRow()],
       schedules: [scheduleRow({ enabled: false, lastError: "stale", lastErrorAt: "2026-01-02T00:00:00Z" })],
     });
     await openTab(/schedules/i);
     expect(await screen.findByText("disabled")).toBeInTheDocument();
-    expect(screen.queryByTestId("schedule-failure")).toBeNull();
+    expect(screen.getByTestId("schedule-failure")).toHaveTextContent("failing: stale");
   });
 });
 
@@ -871,8 +879,7 @@ describe("the Run-at picker refuses the past (#12)", () => {
   });
 });
 
-/* #16. A select is a promise of a choice, and a greyed one with a single
-   option promises a choice that is coming. M4 fixed the plane to "pod". */
+/* #16. A select is a promise of a choice, and a greyed one with a single option promises a choice that is coming. */
 describe("the Plane field is a value, not a dead select (#16)", () => {
   it("renders static text with a title saying why, and no select at all", async () => {
     renderPage({ targets: [targetRow()] });
@@ -905,5 +912,271 @@ describe("one target per click storm (#17)", () => {
 
     await waitFor(() => expect(resourceCalls().filter((c) => c.method === "POST").length).toBe(1));
     expect(resourceCalls().filter((c) => c.method === "POST")).toHaveLength(1);
+  });
+});
+
+/* ── QA scope 5 ─────────────────────────────────────────────────────────── */
+
+/* #25. An enabled schedule whose DEFINITION is disabled fires nothing at all —
+   the scheduler skips it. The row used to say "enabled" and show a fresh
+   cadence anyway, which is the console contradicting what the loop does. */
+describe("a schedule paused by its definition says so (#25)", () => {
+  it("reads paused, not enabled, when the definition behind it is off", async () => {
+    renderPage({
+      definitions: [definitionRow({ enabled: false })],
+      schedules: [scheduleRow()],
+    });
+    await openTab(/schedules/i);
+    const list = await screen.findByRole("list", { name: /schedules/i });
+    expect(within(list).getByText("paused: definition disabled")).toBeInTheDocument();
+    expect(within(list).queryByText("enabled")).toBeNull();
+  });
+
+  it("explains the pause rather than leaving the reader to infer it", async () => {
+    renderPage({ definitions: [definitionRow({ enabled: false })], schedules: [scheduleRow()] });
+    await openTab(/schedules/i);
+    const pill = await screen.findByText("paused: definition disabled");
+    expect(pill).toHaveAttribute("title", expect.stringContaining("gw-tcp"));
+  });
+
+  it("still reads enabled when the definition is on — the pause is not a new default", async () => {
+    renderPage({ definitions: [definitionRow()], schedules: [scheduleRow()] });
+    await openTab(/schedules/i);
+    const list = await screen.findByRole("list", { name: /schedules/i });
+    expect(within(list).getByText("enabled")).toBeInTheDocument();
+    expect(within(list).queryByText("paused: definition disabled")).toBeNull();
+  });
+});
+
+/* #3. Two schedules of one definition produced two IDENTICAL action names. */
+describe("schedule action names are unique within a definition (#3)", () => {
+  const two = [
+    scheduleRow({ id: "s-1", intervalNs: 30_000_000_000 }),
+    scheduleRow({ id: "s-2", intervalNs: 300_000_000_000 }),
+  ];
+
+  it("tells two cadences of one definition apart by name", async () => {
+    renderPage({ definitions: [definitionRow()], schedules: two });
+    await openTab(/schedules/i);
+    expect(await screen.findByRole("button", { name: "Delete gw-tcp, every 30s" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Delete gw-tcp, every 5m" })).toBeInTheDocument();
+  });
+
+  it("leaves no two action names identical across the whole list", async () => {
+    renderPage({ definitions: [definitionRow()], schedules: two });
+    await openTab(/schedules/i);
+    await screen.findByRole("list", { name: /schedules/i });
+    const names = screen.getAllByRole("button").map((b) => b.getAttribute("aria-label") ?? b.textContent);
+    expect(new Set(names).size).toBe(names.length);
+  });
+});
+
+/* #2. PUT /api/v1/schedules/{id} existed; the page offered no way to reach it,
+   so changing a cadence meant delete-and-recreate. */
+describe("a schedule can be edited (#2)", () => {
+  it("seeds the form from the stored row and PUTs a full replace", async () => {
+    const { calls } = renderPage({ definitions: [definitionRow()], schedules: [scheduleRow()] });
+
+    await openTab(/schedules/i);
+    fireEvent.click(await screen.findByRole("button", { name: "Edit gw-tcp, every 30s" }));
+
+    // Seeded, not blank: the cadence being edited is the one already stored.
+    const interval = await screen.findByLabelText(/interval/i);
+    expect(interval).toHaveValue("30");
+
+    fireEvent.change(interval, { target: { value: "120" } });
+    fireEvent.click(screen.getByRole("button", { name: /save schedule/i }));
+
+    await waitFor(() => {
+      const put = calls.find((c) => c.method === "PUT");
+      expect(put?.url).toBe("/api/v1/schedules/s-1");
+      expect(put?.body).toEqual({
+        definitionId: "d-1",
+        kind: "interval",
+        intervalNs: 120_000_000_000,
+        enabled: true,
+      });
+    });
+  });
+
+  it("locks the definition picker, and says why", async () => {
+    renderPage({ definitions: [definitionRow()], schedules: [scheduleRow()] });
+    await openTab(/schedules/i);
+    fireEvent.click(await screen.findByRole("button", { name: "Edit gw-tcp, every 30s" }));
+
+    const picker = await screen.findByLabelText(/definition/i);
+    expect(picker).toBeDisabled();
+    expect(screen.getByText(/belongs to its definition/i)).toBeInTheDocument();
+  });
+});
+
+/* #4/#5. The picker's disablePast blocks past DAYS; on TODAY it still hands
+   back a time that has already gone by, and the server's 422 then stuck to the
+   field long after the reader had changed it. */
+describe("the schedule form answers about the moment it is holding (#4, #5)", () => {
+  const NOW = new Date(2026, 7, 8, 12, 0, 0);
+
+  // shouldAdvanceTime, or react-query's own timers never fire and every await
+  // below hangs — the same shape the #12 block above uses.
+  function freeze() {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    vi.setSystemTime(NOW);
+  }
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("refuses a time earlier TODAY without a round trip", async () => {
+    freeze();
+    const { calls } = renderPage({ definitions: [definitionRow()], schedules: [] });
+
+    await openTab(/schedules/i);
+    fireEvent.click(await screen.findByRole("button", { name: /new schedule/i }));
+    fireEvent.change(screen.getByLabelText("Kind"), { target: { value: "once" } });
+    // Today, but three hours gone.
+    pickRunAt("2026-08-08", "09:00");
+    fireEvent.click(screen.getByRole("button", { name: /create schedule/i }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(/must be in the future/i);
+    expect(calls.find((c) => c.method === "POST" && c.url.includes("/schedules"))).toBeUndefined();
+  });
+
+  it("accepts a time still to come today", async () => {
+    freeze();
+    const { calls } = renderPage({ definitions: [definitionRow()], schedules: [] });
+
+    await openTab(/schedules/i);
+    fireEvent.click(await screen.findByRole("button", { name: /new schedule/i }));
+    fireEvent.change(screen.getByLabelText("Kind"), { target: { value: "once" } });
+    pickRunAt("2026-08-08", "18:00");
+    fireEvent.click(screen.getByRole("button", { name: /create schedule/i }));
+
+    await waitFor(() =>
+      expect(calls.find((c) => c.method === "POST" && c.url.includes("/schedules"))).toBeDefined(),
+    );
+  });
+
+  it("drops a server 422 the moment the field it describes is changed", async () => {
+    const detail = "schedule: kind once requires a run at time in the future";
+    renderPage({
+      definitions: [definitionRow()],
+      schedules: [],
+      onWriteSchedule: () => problem(422, "invalid schedule", detail),
+    });
+
+    await openTab(/schedules/i);
+    fireEvent.click(await screen.findByRole("button", { name: /new schedule/i }));
+    fireEvent.change(screen.getByLabelText("Kind"), { target: { value: "once" } });
+    pickRunAt("2030-01-01", "10:00");
+    fireEvent.click(screen.getByRole("button", { name: /create schedule/i }));
+
+    const runAt = await screen.findByLabelText("Run at");
+    await waitFor(() => expect(runAt).toHaveAttribute("aria-invalid", "true"));
+
+    // Answer it: pick a different moment. The message was about the OLD one.
+    pickRunAt("2031-02-02", "11:00");
+    await waitFor(() => expect(screen.getByLabelText("Run at")).not.toHaveAttribute("aria-invalid"));
+    expect(screen.queryByText(detail)).toBeNull();
+  });
+});
+
+/* #6. The sub-view was React state alone: a reload dropped the reader back on
+   Targets, Back left the page entirely, and the tab could not be linked to. */
+describe("the sub-view lives in the URL (#6)", () => {
+  it("opens the tab ?view= names", async () => {
+    window.history.replaceState({}, "", "/targets?view=schedules");
+    renderPage({ definitions: [definitionRow()], schedules: [scheduleRow()] });
+    expect(await screen.findByRole("list", { name: /schedules/i })).toBeInTheDocument();
+  });
+
+  it("writes the tab into the URL when one is picked, and keeps the default clean", async () => {
+    renderPage({ targets: [targetRow()] });
+    await openTab(/definitions/i);
+    await waitFor(() => expect(window.location.search).toBe("?view=definitions"));
+
+    // Back to the default: no ?view=targets left lying around.
+    await openTab(/targets/i);
+    await waitFor(() => expect(window.location.search).toBe(""));
+  });
+
+  it("follows Back to the tab the reader came from", async () => {
+    renderPage({ targets: [targetRow()], definitions: [definitionRow()] });
+    await openTab(/definitions/i);
+    await waitFor(() => expect(window.location.search).toBe("?view=definitions"));
+
+    act(() => {
+      window.history.back();
+    });
+    await waitFor(() => expect(window.location.search).toBe(""));
+    expect(await screen.findByRole("list", { name: /targets/i })).toBeInTheDocument();
+  });
+
+  it("ignores a ?view= naming no tab rather than rendering nothing", async () => {
+    window.history.replaceState({}, "", "/targets?view=nonsense");
+    renderPage({ targets: [targetRow()] });
+    expect(await screen.findByRole("list", { name: /targets/i })).toBeInTheDocument();
+  });
+});
+
+/* #24. One field, two server rules: kind=url wants an http(s) URL, kind=host
+   wants an IP or a name. The placeholder showed a URL to both. */
+describe("the address placeholder follows the kind (#24)", () => {
+  it("suggests a host for kind=host and a URL for kind=url", async () => {
+    renderPage();
+    fireEvent.click(await screen.findByRole("button", { name: /new target/i }));
+
+    const address = screen.getByLabelText("Address");
+    expect(address).toHaveAttribute("placeholder", TARGET_ADDRESS_PLACEHOLDER.host);
+    expect(address.getAttribute("placeholder")).not.toMatch(/https?:\/\//);
+
+    fireEvent.change(screen.getByLabelText("Kind"), { target: { value: "url" } });
+    expect(screen.getByLabelText("Address")).toHaveAttribute("placeholder", TARGET_ADDRESS_PLACEHOLDER.url);
+  });
+});
+
+/* #1. At 375px the rows ran off the viewport and the Delete button was half
+   clickable. /alerting had already solved this: its action cluster is a
+   flex-wrap container, so a narrow row takes a second line instead of a
+   horizontal scrollbar. All three sub-views now use the same shape. */
+describe("rows wrap instead of overflowing a narrow viewport (#1)", () => {
+  function actionClusters(): HTMLElement[] {
+    return screen
+      .getAllByRole("button")
+      .map((b) => b.parentElement)
+      .filter((el): el is HTMLElement => el !== null && el.className.includes("items-center"));
+  }
+
+  it("wraps the target row's actions", async () => {
+    renderPage({ targets: [targetRow()] });
+    await screen.findByRole("list", { name: /targets/i });
+    const clusters = actionClusters();
+    expect(clusters.length).toBeGreaterThan(0);
+    for (const c of clusters) expect(c.className).toContain("flex-wrap");
+  });
+
+  it("wraps the definition row's actions", async () => {
+    renderPage({ targets: [targetRow()], definitions: [definitionRow()] });
+    await openTab(/definitions/i);
+    await screen.findByRole("list", { name: /definitions/i });
+    const clusters = actionClusters();
+    expect(clusters.length).toBeGreaterThan(0);
+    for (const c of clusters) expect(c.className).toContain("flex-wrap");
+  });
+
+  it("wraps the schedule row's actions", async () => {
+    renderPage({ definitions: [definitionRow()], schedules: [scheduleRow()] });
+    await openTab(/schedules/i);
+    await screen.findByRole("list", { name: /schedules/i });
+    const clusters = actionClusters();
+    expect(clusters.length).toBeGreaterThan(0);
+    for (const c of clusters) expect(c.className).toContain("flex-wrap");
+  });
+
+  it("lets a long address shrink rather than push the row wide", async () => {
+    const long = "a-very-long-hostname-that-does-not-fit.example.internal:65535";
+    renderPage({ targets: [targetRow({ address: long })] });
+    const cell = await screen.findByText(long);
+    expect(cell.className).toContain("min-w-0");
+    expect(cell.className).toContain("truncate");
   });
 });

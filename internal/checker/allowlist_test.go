@@ -58,10 +58,8 @@ func TestNewAllowlistRejectsBareIPWithoutPrefix(t *testing.T) {
 	}
 }
 
-// A 4-in-6 written prefix (::ffff:10.0.0.0/104) is ambiguous: its bit count is
-// in 128-bit space while the addresses it is meant to cover are compared in
-// 32-bit space after unmapping. Rather than silently reinterpret the operator's
-// mask, the constructor refuses it.
+// A 4-in-6 written prefix (::ffff:10.0.0.0/104) is ambiguous; rather than silently reinterpret the
+// operator's mask, the constructor refuses.
 func TestNewAllowlistRejectsMappedV4Prefix(t *testing.T) {
 	_, err := NewAllowlist([]string{"::ffff:10.0.0.0/104"}, nil)
 	if err == nil {
@@ -170,10 +168,8 @@ func TestAllowInvalidAddressIsDenied(t *testing.T) {
 	}
 }
 
-// Loopback, link-local and multicast get no special case in code: they are
-// denied because they sit in no allowed prefix, and allowed the moment an
-// operator writes them down. Both halves are asserted so a future "helpful"
-// hardcoded block or bypass shows up here.
+// Loopback, link-local and multicast get no special case in code: they are denied because they sit
+// in no allowed prefix.
 func TestAllowSpecialRangesFollowTheOperatorNotTheCode(t *testing.T) {
 	special := []string{"127.0.0.1", "::1", "169.254.169.254", "fe80::1", "224.0.0.1", "ff02::1"}
 

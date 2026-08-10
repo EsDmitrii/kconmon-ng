@@ -39,18 +39,7 @@ var upgrader = websocket.Upgrader{
 	CheckOrigin:     checkOrigin,
 }
 
-// checkOrigin is the socket's CSRF defence — the WebSocket analogue of the
-// HTTP API's same-origin CORS default (no CORS headers = same-origin only).
-//
-// A browser cannot be talked out of sending Origin, so requiring Origin's host
-// to equal the request host stops any other site from opening an authenticated
-// socket to the console on a user's behalf. An ABSENT Origin is allowed on
-// purpose: non-browser clients (websocat, tests, probes) do not send one, and
-// they are not subject to the ambient-credential problem Origin exists to
-// solve. Everything else is refused before the upgrade.
-//
-// Operational consequence worth knowing before debugging a 403: a reverse proxy
-// in front of the console must preserve Host, or every upgrade is rejected.
+// checkOrigin is the socket's CSRF defence.
 func checkOrigin(r *http.Request) bool {
 	origin := r.Header.Get("Origin")
 	if origin == "" {
@@ -63,31 +52,13 @@ func checkOrigin(r *http.Request) bool {
 	return strings.EqualFold(u.Host, r.Host)
 }
 
-// ServeWS upgrades one HTTP request with NO per-topic authorization: every
-// topic the hub considers subscribable is subscribable on the resulting
-// socket. It is the plain http.HandlerFunc form and the pre-M7 behaviour,
-// correct wherever the route's own permission gate is already the whole
-// decision.
-//
-// Console's own /ws route does NOT use it — see ServeWSAuthorized.
+// ServeWS upgrades one HTTP request with NO per-topic authorization.
 func (h *Hub) ServeWS(w http.ResponseWriter, r *http.Request) {
 	h.ServeWSAuthorized(w, r, nil)
 }
 
-// ServeWSAuthorized upgrades one HTTP request to the multiplexed WebSocket
-// protocol and runs its two pumps: the read pump on this goroutine (so the
-// handler — and with it the request's metrics observation — lives exactly as
-// long as the socket), and the write pump on one more.
-//
-// authorize (nil = allow every subscribable topic) is captured on the
-// connection and consulted on every subscribe frame. It is what lets ONE hub
-// serve two sockets with different topic sets, which is the whole point: the
-// /ws upgrade can then be admitted for a subject holding runs:read alone —
-// so a custom role can watch its own run live instead of polling — while the
-// fleet-wide topics (live, topology, matrix:*) stay behind events:read on that
-// same socket. Before this seam existed the route's single permission decided
-// the entire socket, and SECURITY.md §10.2 named this ("teaching the hub
-// subject-aware subscribe authorization") as the change that would be needed.
+// ServeWSAuthorized upgrades one HTTP request to the multiplexed WebSocket protocol and runs its
+// two pumps; it is what lets ONE hub serve two sockets with different topic sets.
 func (h *Hub) ServeWSAuthorized(w http.ResponseWriter, r *http.Request, authorize TopicAuthorizer) {
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
@@ -101,13 +72,8 @@ func (h *Hub) ServeWSAuthorized(w http.ResponseWriter, r *http.Request, authoriz
 	c := h.register(authorize)
 	slog.Debug("websocket client connected", "clients", h.ClientCount())
 
-	// Teardown is symmetric in both directions. If the read side ends first,
-	// unregister closes c.done and the write pump exits and closes the socket. If
-	// the hub drops the client (slow, or shutting down), c.done fires, the write
-	// pump closes the socket, and this goroutine's read fails and returns here.
-	// That also covers register refusing a client on an already-stopped hub: its
-	// done channel is closed before the pumps start, so the write pump closes the
-	// socket at once instead of the handler hanging on a read.
+	// Teardown is symmetric in both directions; that also covers register refusing a client on an
+	// already-stopped hub.
 	go h.writePump(c, conn)
 	h.readPump(c, conn)
 

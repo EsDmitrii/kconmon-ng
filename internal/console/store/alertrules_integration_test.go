@@ -3,9 +3,6 @@
 package store_test
 
 // TestAlertRule* / TestListAlertRules* require a real PostgreSQL.
-// Run: docker run --rm -d -p 5432:5432 -e POSTGRES_PASSWORD=test -e POSTGRES_DB=kconmon postgres:17-alpine
-// Then: KCONMON_TEST_DATABASE_DSN='postgres://postgres:test@127.0.0.1:5432/kconmon?sslmode=disable' \
-//       go test -tags=integration ./internal/console/store/... -v
 
 import (
 	"context"
@@ -20,10 +17,8 @@ import (
 	"github.com/EsDmitrii/kconmon-ng/internal/console/store"
 )
 
-// newAlertRulesDB opens a *store.DB with migrations applied, dropping and
-// re-creating the schema first -- same convention as newIncidentsDB. The dsn
-// comes back alongside it because the CHECK-constraint test below has to write
-// this table WITHOUT going through the store.
+// newAlertRulesDB opens a *store.DB with migrations applied, dropping and re-creating the schema
+// first.
 func newAlertRulesDB(t *testing.T) (*store.DB, string) {
 	t.Helper()
 	dsn := testDSN(t)
@@ -55,9 +50,6 @@ func alertRuleInput(name string) store.AlertRuleInput {
 	}
 }
 
-// TestAlertRuleLifecycle is the whole M7 Task 1 flow through the store:
-// create -> get -> list -> the two narrow updates -> delete, with the delete
-// asserted through an independent read.
 func TestAlertRuleLifecycle(t *testing.T) {
 	db, _ := newAlertRulesDB(t)
 	ctx := context.Background()
@@ -163,12 +155,8 @@ func TestAlertRuleLifecycle(t *testing.T) {
 	}
 }
 
-// TestAlertRuleNameUniquenessIsCaseInsensitive is what the lower(name) UNIQUE
-// INDEX buys over the plain column constraint targets uses: two rules named
-// `PairLoss` and `pairloss` would render into two alerts an operator reads as
-// one. Go cannot enforce this -- it cannot see the other rows -- so the index
-// is the only place it can live, and the conflict must surface as
-// ErrAlreadyExists rather than a raw driver error.
+// TestAlertRuleNameUniquenessIsCaseInsensitive is what the lower(name) UNIQUE INDEX buys over the
+// plain column constraint targets uses.
 func TestAlertRuleNameUniquenessIsCaseInsensitive(t *testing.T) {
 	db, _ := newAlertRulesDB(t)
 	ctx := context.Background()
@@ -214,12 +202,8 @@ func TestAlertRuleNameUniquenessIsCaseInsensitive(t *testing.T) {
 	}
 }
 
-// TestAlertRuleCheckConstraintsRejectTheClosedSets is the DB half of the three
-// closed vocabularies and the for_ns >= 0 rule. Validate catches every one of
-// them first for anything going through the store, so the CHECKs are exercised
-// here with raw SQL -- they are the backstop for anything that ever writes
-// this table without going through this package, and a backstop nobody ever
-// fires is a backstop nobody knows is missing.
+// TestAlertRuleCheckConstraintsRejectTheClosedSets is the DB half of the three closed vocabularies
+// and the for_ns >= 0 rule.
 func TestAlertRuleCheckConstraintsRejectTheClosedSets(t *testing.T) {
 	db, dsn := newAlertRulesDB(t)
 	ctx := context.Background()
@@ -279,12 +263,7 @@ func TestAlertRuleCheckConstraintsRejectTheClosedSets(t *testing.T) {
 	}
 }
 
-// TestAlertRuleUpdatesAreTwoDisjointHalves is the whole point of the narrow
-// split (M7 Decision 5): the builder update must reset the rule to unsynced --
-// a changed rule is by definition not the rule that was applied -- and the
-// sync update must never touch a single builder field. Asserted in both
-// directions in one test, because either half alone would pass with a single
-// full-replace UPDATE.
+// TestAlertRuleUpdatesAreTwoDisjointHalves is the whole point of the narrow split.
 func TestAlertRuleUpdatesAreTwoDisjointHalves(t *testing.T) {
 	db, _ := newAlertRulesDB(t)
 	ctx := context.Background()
@@ -392,11 +371,8 @@ func TestAlertRuleUpdatedAtIsMonotonic(t *testing.T) {
 	}
 }
 
-// TestListAlertRulesOrdersByLowerNameAndFiltersEnabled covers both halves of
-// the one listing this table has. The order is asserted with names whose
-// byte-order and case-folded order DISAGREE -- a plain ORDER BY name would put
-// every uppercase name before every lowercase one, which is exactly the
-// jumbled list the lower(name) index exists to prevent.
+// TestListAlertRulesOrdersByLowerNameAndFiltersEnabled covers both halves of the one listing this
+// table has; the order is asserted with names whose byte-order and case-folded order DISAGREE.
 func TestListAlertRulesOrdersByLowerNameAndFiltersEnabled(t *testing.T) {
 	db, _ := newAlertRulesDB(t)
 	ctx := context.Background()
@@ -515,11 +491,8 @@ func TestAlertRuleInvalidInputNeverReachesTheDatabase(t *testing.T) {
 	}
 }
 
-// TestAlertRuleJSONColumnsDefaultToEmptyObjects is orEmptyJSON's claim over
-// this table's three JSONB columns: a nil, an empty slice and a literal JSON
-// null must all read back as {} -- the column's own DEFAULT -- so a rule
-// written without params and one written with null are indistinguishable to
-// every reader.
+// TestAlertRuleJSONColumnsDefaultToEmptyObjects is orEmptyJSON's claim over this table's three
+// JSONB columns: a nil.
 func TestAlertRuleJSONColumnsDefaultToEmptyObjects(t *testing.T) {
 	db, _ := newAlertRulesDB(t)
 	ctx := context.Background()

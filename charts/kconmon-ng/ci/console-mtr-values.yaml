@@ -36,6 +36,8 @@ console:
         # config rather than merely matching the binary's own default.
         timeoutMs: 250
       geoip:
+        # The airgapped path: files supplied by us, no sidecar, no MaxMind account.
+        mode: volume
         asnPath: /geoip/GeoLite2-ASN.mmdb
         cityPath: /geoip/GeoLite2-City.mmdb
         # A PVC rather than a ConfigMap: GeoLite2 files run to ~10 MB, past what

@@ -1,6 +1,7 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { LOCALE_STORAGE_KEY, LocaleProvider } from "@/lib/i18n";
 import { TimeMachineProvider } from "@/lib/timemachine";
 import {
   SettingsPage,
@@ -12,13 +13,8 @@ import {
 } from "./settings";
 
 /**
- * The Settings page is two admin-gated sections over one section everybody
- * sees, so almost every case below is really a question about a BOUNDARY:
- * which permission makes a section exist, which body a write puts on the wire,
- * and which of the two gates (permissions hide, time disables) a control is
- * under. The three that are not boundary questions — the honest lastStatus
- * rendering, the import result table and the export download — are the places
- * where the page could most easily invent a fact the API never stated.
+ * The three that are not boundary questions — the honest lastStatus rendering, the import result
+ * table and the export download.
  */
 
 const AT = "2026-08-01T12:00:00Z";
@@ -32,11 +28,12 @@ const problem = (status: number, title: string, detail: string) =>
     headers: { "Content-Type": "application/problem+json" },
   });
 
-/** The two permissions this page gates on. Both are ADMIN-ONLY in the built-in
- *  roles (internal/console/authz/roles.go): operator holds neither, which is
- *  why the operator case below asserts the both-hidden line rather than a
- *  partially populated page. */
-const ADMIN = ["webhooks:manage", "settings:write", "maintenance:read", "incidents:read"];
+/** The permissions this page gates on. tokens:manage, webhooks:manage and
+ *  settings:write are all ADMIN-ONLY in the built-in roles
+ *  (internal/console/authz/roles.go): operator holds none of them, which is why
+ *  the operator case below asserts the hidden line rather than a partially
+ *  populated page. */
+const ADMIN = ["tokens:manage", "webhooks:manage", "settings:write", "maintenance:read", "incidents:read"];
 const OPERATOR = ["targets:read", "targets:write", "maintenance:read", "maintenance:write", "incidents:read"];
 const VIEWER = ["topology:read", "matrix:read", "events:read"];
 
@@ -65,6 +62,20 @@ function webhookRow(over: Record<string, unknown> = {}) {
     hasSecret: true,
     lastStatus: "",
     failures: 0,
+    createdAt: "2026-01-01T00:00:00Z",
+    ...over,
+  };
+}
+
+/** The instant the token mock calls "now" when deciding whether a row is spent. */
+const NOW_ISO = "2026-08-08T12:00:00Z";
+
+/** GET /api/v1/tokens's per-row shape: metadata only, never a hash or a secret. */
+function tokenRow(over: Record<string, unknown> = {}) {
+  return {
+    id: "t-1",
+    name: "ci-pipeline",
+    owner: "u1",
     createdAt: "2026-01-01T00:00:00Z",
     ...over,
   };
@@ -102,6 +113,15 @@ interface Call {
   body?: unknown;
 }
 
+/** pickExpiry drives the token form's Expires DateTimePicker, the same shape
+ *  pages/targets.test.tsx's pickRunAt drives the schedule form's Run-at. */
+function pickExpiry(date: string, time: string) {
+  fireEvent.click(screen.getByRole("button", { name: "Expires" }));
+  fireEvent.change(screen.getByLabelText("Date"), { target: { value: date } });
+  fireEvent.change(screen.getByLabelText("Time"), { target: { value: time } });
+  fireEvent.click(screen.getByRole("button", { name: "Apply" }));
+}
+
 function renderPage(
   opts: {
     permissions?: string[];
@@ -117,6 +137,17 @@ function renderPage(
     engaged?: boolean;
     /** The rows GET /api/v1/maintenance answers (QA round 3, finding #9). */
     maintenance?: unknown[];
+    /** The rows GET /api/v1/tokens answers (QA round 6, finding #14). */
+    tokens?: unknown[];
+    /** A refusal standing in for GET /api/v1/tokens' 200. */
+    tokensProblem?: Response;
+    /** A refusal standing in for POST /api/v1/tokens' 2xx. */
+    onCreateToken?: (body: unknown) => Response | undefined;
+    /** A language already chosen in this browser, seeded the way a returning
+     *  operator's localStorage would carry it. Absent ⇒ English, always. */
+    locale?: "en" | "ru";
+    /** What GET /api/v1/version answers — About renders the build from it. */
+    versionBody?: Record<string, unknown>;
   } = {},
 ) {
   const {
@@ -129,9 +160,15 @@ function renderPage(
     exportResponse,
     engaged = false,
     maintenance = [],
+    tokens = [],
+    tokensProblem,
+    onCreateToken,
+    locale,
+    versionBody,
   } = opts;
   const rows = [...webhooks] as Record<string, unknown>[];
   const windows = [...maintenance] as Record<string, unknown>[];
+  const tokenRows = [...tokens] as Record<string, unknown>[];
   const calls: Call[] = [];
 
   const fetchMock = vi.fn((url: string, init?: RequestInit) => {
@@ -141,6 +178,9 @@ function renderPage(
     calls.push({ method, url: href, body });
 
     if (href.includes("/api/v1/auth/me")) return Promise.resolve(json(meBody(permissions)));
+    if (href.includes("/api/v1/version")) {
+      return Promise.resolve(json(versionBody ?? { version: "1.4.0", commit: "abc1234", capabilities: [] }));
+    }
     if (href.includes("/api/v1/config")) return Promise.resolve(json(configBody(config)));
     if (href.startsWith("/api/v1/export")) {
       return Promise.resolve(exportResponse ?? json(BUNDLE));
@@ -152,6 +192,36 @@ function renderPage(
     if (href.endsWith("/test") && method === "POST") {
       onTest?.(rows);
       return Promise.resolve(new Response(null, { status: 202 }));
+    }
+    /* Mirrors handleTokensDelete (internal/console/httpapi/tokens.go): DELETE on
+       an ACTIVE token REVOKES it and the row stays in the list with revokedAt
+       set; DELETE on an already-spent one purges it. Splicing on the first
+       DELETE — which is what this mock used to do — hid QA finding #4 entirely,
+       because the row it lied about unmounting is the row that got stuck. */
+    if (href.startsWith("/api/v1/tokens/") && method === "DELETE") {
+      const id = decodeURIComponent(href.slice("/api/v1/tokens/".length));
+      const at = tokenRows.findIndex((r) => (r as { id: string }).id === id);
+      if (at >= 0) {
+        const row = tokenRows[at] as { revokedAt?: string; expiresAt?: string };
+        const spent = row.revokedAt !== undefined || (row.expiresAt !== undefined && row.expiresAt < NOW_ISO);
+        if (spent) tokenRows.splice(at, 1);
+        else tokenRows[at] = { ...row, revokedAt: "2026-08-08T12:00:00Z" };
+      }
+      return Promise.resolve(new Response(null, { status: 204 }));
+    }
+    if (href.startsWith("/api/v1/tokens")) {
+      if (method === "POST") {
+        const override = onCreateToken?.(body);
+        if (override) return Promise.resolve(override);
+        const req = body as { name: string; expiresAt?: string };
+        const created = tokenRow({ id: `t-${tokenRows.length + 1}`, name: req.name, expiresAt: req.expiresAt });
+        tokenRows.push(created);
+        // The one body in this API that carries a plaintext secret.
+        return Promise.resolve(
+          json({ id: created.id, name: created.name, token: "kcm_deadbeef", expiresAt: req.expiresAt }, { status: 201 }),
+        );
+      }
+      return Promise.resolve(tokensProblem ?? json({ tokens: tokenRows }));
     }
     if (href.startsWith("/api/v1/maintenance/") && method === "DELETE") {
       const id = decodeURIComponent(href.slice("/api/v1/maintenance/".length));
@@ -200,19 +270,27 @@ function renderPage(
   // `?at=` is the only way the app itself engages the Time Machine, so the
   // tests engage it the same way rather than by faking the context.
   window.history.pushState({}, "", engaged ? `/settings?at=${AT}` : "/settings");
+  if (locale) localStorage.setItem(LOCALE_STORAGE_KEY, locale);
 
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  /*
+   * LocaleProvider is here so the page's own language switcher is WIRED; the switcher is the one
+   * control that needs a real setLocale.
+   */
   const utils = render(
     <QueryClientProvider client={qc}>
-      <TimeMachineProvider>
-        <SettingsPage />
-      </TimeMachineProvider>
+      <LocaleProvider>
+        <TimeMachineProvider>
+          <SettingsPage />
+        </TimeMachineProvider>
+      </LocaleProvider>
     </QueryClientProvider>,
   );
 
   /** Every request the PAGE itself makes, i.e. excluding the /auth/me and
    *  /config chrome every route fetches regardless of what it renders. */
-  const resourceCalls = () => calls.filter((c) => /^\/api\/v1\/(webhooks|export|import|maintenance)/.test(c.url));
+  const resourceCalls = () =>
+    calls.filter((c) => /^\/api\/v1\/(tokens|webhooks|export|import|maintenance)/.test(c.url));
   return { ...utils, fetchMock, calls, resourceCalls, qc };
 }
 
@@ -221,6 +299,10 @@ afterEach(() => {
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
   window.history.pushState({}, "", "/");
+  /* vitest.setup.ts backs localStorage with ONE Map for this whole file, so a
+     language chosen by the switcher cases below would otherwise translate
+     every test that runs after them. */
+  localStorage.removeItem(LOCALE_STORAGE_KEY);
 });
 
 const bundleFile = (body: unknown) =>
@@ -296,19 +378,16 @@ describe("webhookRequestFrom", () => {
 /* ── section gating ─────────────────────────────────────────────────────── */
 
 describe("section gating", () => {
-  it("admin sees webhooks, export/import and About", async () => {
+  it("admin sees tokens, webhooks, export/import and About", async () => {
     renderPage({ permissions: ADMIN });
-    expect(await screen.findByRole("heading", { name: "Webhooks" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "API tokens" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Webhooks" })).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "Configuration export / import" })).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "About this console" })).toBeInTheDocument();
     expect(screen.queryByText(/can view none of the console's settings/i)).not.toBeInTheDocument();
   });
 
-  /* An operator holds maintenance:write, so as of QA round 3 (finding #9) they
-     DO see one section here — the unbounded maintenance list, the only surface
-     in the console where a future window can be found. They still see neither
-     admin section, and the "none of the settings" line is therefore no longer
-     theirs. */
+  /* An operator holds maintenance:write. */
   it("operator sees the maintenance list, neither admin section, and About", async () => {
     renderPage({ permissions: OPERATOR });
     expect(await screen.findByRole("heading", { name: "Maintenance windows" })).toBeInTheDocument();
@@ -322,9 +401,17 @@ describe("section gating", () => {
     const { resourceCalls } = renderPage({ permissions: VIEWER });
     expect(await screen.findByText(/Your role can view none of the console's settings/i)).toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "Webhooks" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "API tokens" })).not.toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "Maintenance windows" })).not.toBeInTheDocument();
     // HIDE means zero requests, not a hidden section that still fetched.
     expect(resourceCalls()).toEqual([]);
+  });
+
+  it("a role with only tokens:manage sees tokens and nothing else gated", async () => {
+    renderPage({ permissions: ["tokens:manage"] });
+    expect(await screen.findByRole("heading", { name: "API tokens" })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Webhooks" })).not.toBeInTheDocument();
+    expect(screen.queryByText(/can view none of the console's settings/i)).not.toBeInTheDocument();
   });
 
   it("a role with only webhooks:manage sees webhooks and no export/import", async () => {
@@ -341,6 +428,166 @@ describe("section gating", () => {
     // Export/import is entirely button-driven: rendering the section must not
     // fetch a bundle nobody asked for.
     expect(resourceCalls()).toEqual([]);
+  });
+});
+
+/* ── API tokens (QA round 6, finding #14) ───────────────────────────────── */
+
+describe("tokens section", () => {
+  it("lists what the API actually carries: name, owner, created, last used", async () => {
+    renderPage({
+      tokens: [tokenRow({ lastUsedAt: "2026-02-03T04:05:00Z" }), tokenRow({ id: "t-2", name: "grafana" })],
+    });
+
+    const list = await screen.findByRole("list", { name: "API tokens" });
+    const rows = within(list).getAllByTestId("token-row");
+    expect(rows).toHaveLength(2);
+    expect(within(rows[0]).getByText("ci-pipeline")).toBeInTheDocument();
+    expect(within(rows[0]).getByText(/owner u1/)).toBeInTheDocument();
+    expect(within(rows[0]).getByTestId("token-last-used")).toHaveTextContent(
+      `last used ${new Date("2026-02-03T04:05:00Z").toLocaleString()}`,
+    );
+  });
+
+  /* lastUsedAt absent is a FACT — "never used" — not a field the API withheld,
+     so it does not get fmtTime's em-dash. */
+  it("says a token has never been used rather than showing an em-dash", async () => {
+    renderPage({ tokens: [tokenRow()] });
+    expect(await screen.findByTestId("token-last-used")).toHaveTextContent("never used");
+  });
+
+  it("tags a revoked row and offers it no second revoke", async () => {
+    renderPage({ tokens: [tokenRow({ revokedAt: "2026-03-01T00:00:00Z" })] });
+    const row = await screen.findByTestId("token-row");
+    expect(within(row).getByText("revoked")).toBeInTheDocument();
+    expect(within(row).queryByRole("button", { name: /Revoke/ })).not.toBeInTheDocument();
+  });
+
+  it("tags a token whose expiry has passed, without calling it revoked", async () => {
+    renderPage({ tokens: [tokenRow({ expiresAt: "2020-01-01T00:00:00Z" })] });
+    const row = await screen.findByTestId("token-row");
+    expect(within(row).getByText("expired")).toBeInTheDocument();
+    expect(within(row).queryByText("revoked")).not.toBeInTheDocument();
+  });
+
+  it("says so plainly when nothing has been minted", async () => {
+    renderPage({ tokens: [] });
+    expect(await screen.findByText("No tokens. Nothing is calling this API with one.")).toBeInTheDocument();
+  });
+
+  it("surfaces the server's 503 detail verbatim rather than an empty list", async () => {
+    renderPage({
+      tokensProblem: problem(
+        503,
+        "token admin not available",
+        "set console.database.mode in the console config (Helm: console.database.mode) to enable /api/v1/tokens",
+      ),
+    });
+
+    expect(
+      await screen.findByText(
+        "set console.database.mode in the console config (Helm: console.database.mode) to enable /api/v1/tokens",
+      ),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("No tokens. Nothing is calling this API with one.")).not.toBeInTheDocument();
+  });
+
+  describe("create", () => {
+    it("refuses a nameless token client-side and never POSTs it", async () => {
+      const { calls } = renderPage();
+      fireEvent.click(await screen.findByRole("button", { name: "New token" }));
+      fireEvent.click(screen.getByRole("button", { name: "Create token" }));
+
+      expect(await screen.findByText(/A token needs a name/)).toBeInTheDocument();
+      expect(calls.some((c) => c.method === "POST" && c.url.startsWith("/api/v1/tokens"))).toBe(false);
+    });
+
+    it("POSTs the name alone when no expiry was typed", async () => {
+      const { calls } = renderPage();
+      fireEvent.click(await screen.findByRole("button", { name: "New token" }));
+      fireEvent.change(screen.getByLabelText("Name"), { target: { value: "ci-pipeline" } });
+      fireEvent.click(screen.getByRole("button", { name: "Create token" }));
+
+      await screen.findByTestId("minted-token");
+      const post = calls.find((c) => c.method === "POST" && c.url === "/api/v1/tokens");
+      expect(post?.body).toEqual({ name: "ci-pipeline" });
+    });
+
+    it("sends the picked local wall clock as the instant it names", async () => {
+      const { calls } = renderPage();
+      fireEvent.click(await screen.findByRole("button", { name: "New token" }));
+      fireEvent.change(screen.getByLabelText("Name"), { target: { value: "ci-pipeline" } });
+      pickExpiry("2027-01-02", "03:04");
+      fireEvent.click(screen.getByRole("button", { name: "Create token" }));
+
+      await screen.findByTestId("minted-token");
+      const post = calls.find((c) => c.method === "POST" && c.url === "/api/v1/tokens");
+      expect((post?.body as { expiresAt: string }).expiresAt).toBe(new Date(2027, 0, 2, 3, 4).toISOString());
+    });
+
+    /* The one render of a raw token anywhere in this console: it is not stored,
+       not re-fetchable and not in the list. */
+    it("shows the secret ONCE, with the warning that there is no second time", async () => {
+      renderPage();
+      fireEvent.click(await screen.findByRole("button", { name: "New token" }));
+      fireEvent.change(screen.getByLabelText("Name"), { target: { value: "ci-pipeline" } });
+      fireEvent.click(screen.getByRole("button", { name: "Create token" }));
+
+      expect(await screen.findByTestId("minted-token")).toHaveTextContent("kcm_deadbeef");
+      expect(screen.getByText(/this is the only time it is shown/)).toBeInTheDocument();
+
+      fireEvent.click(screen.getByRole("button", { name: "I have saved it" }));
+      expect(screen.queryByTestId("minted-token")).not.toBeInTheDocument();
+    });
+
+    it("copies the secret and says the browser refused when it did", async () => {
+      renderPage();
+      fireEvent.click(await screen.findByRole("button", { name: "New token" }));
+      fireEvent.change(screen.getByLabelText("Name"), { target: { value: "ci-pipeline" } });
+      fireEvent.click(screen.getByRole("button", { name: "Create token" }));
+      await screen.findByTestId("minted-token");
+
+      const writeText = vi.fn(() => Promise.resolve());
+      Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
+      await act(async () => void fireEvent.click(screen.getByRole("button", { name: "Copy token" })));
+      expect(writeText).toHaveBeenCalledWith("kcm_deadbeef");
+      expect(screen.getByText("Token copied.")).toBeInTheDocument();
+
+      // No clipboard at all names the fallback the operator can still act on.
+      Object.defineProperty(navigator, "clipboard", { value: undefined, configurable: true });
+      await act(async () => void fireEvent.click(screen.getByRole("button", { name: "Copy token" })));
+      expect(screen.getByText(/select the token above and copy it/)).toBeInTheDocument();
+    });
+
+    it("renders a refused create verbatim rather than a generic failure", async () => {
+      renderPage({
+        onCreateToken: () => problem(422, "invalid request", `body must be JSON with a non-empty "name"`),
+      });
+      fireEvent.click(await screen.findByRole("button", { name: "New token" }));
+      fireEvent.change(screen.getByLabelText("Name"), { target: { value: "x" } });
+      fireEvent.click(screen.getByRole("button", { name: "Create token" }));
+
+      expect(await screen.findByText(`body must be JSON with a non-empty "name"`)).toBeInTheDocument();
+      expect(screen.queryByTestId("minted-token")).not.toBeInTheDocument();
+    });
+  });
+
+  it("revokes behind the confirm idiom — one click arms, the second sends DELETE", async () => {
+    const { calls } = renderPage({ tokens: [tokenRow()] });
+    fireEvent.click(await screen.findByRole("button", { name: "Revoke ci-pipeline" }));
+    expect(calls.some((c) => c.method === "DELETE")).toBe(false);
+
+    fireEvent.click(screen.getByRole("button", { name: "Confirm revoke ci-pipeline" }));
+    await waitFor(() => expect(calls.some((c) => c.method === "DELETE" && c.url === "/api/v1/tokens/t-1")).toBe(true));
+  });
+
+  /* Engaged, every write on this page is disabled with ONE reason — the same
+     rule the webhook and maintenance rows already follow. */
+  it("disables every token write while the Time Machine is engaged", async () => {
+    renderPage({ tokens: [tokenRow()], engaged: true });
+    const revoke = await screen.findByRole("button", { name: "Revoke ci-pipeline" });
+    expect(revoke).toBeDisabled();
+    expect(screen.getByRole("button", { name: "New token" })).toBeDisabled();
   });
 });
 
@@ -714,9 +961,7 @@ describe("import", () => {
     expect(await screen.findByText(/Dry run — nothing was written/i)).toBeInTheDocument();
   });
 
-  /* M7 Task 12b: choosing a file fires the dry run on its own, and this table
-     is the entire answer — arriving asynchronously well below the input, with
-     nothing to announce it. Polite, like the webhook row's "Test queued". */
+  /* Polite, like the webhook row's "Test queued". */
   it("announces the result instead of appearing silently", async () => {
     renderPage();
     await loadBundle(BUNDLE);
@@ -870,11 +1115,14 @@ describe("About this console", () => {
     expect(screen.getByRole("link", { name: /Explore/ })).toHaveAttribute("href", "/explore");
   });
 
-  it("does not pretend to administer roles or tokens", async () => {
+  /* Roles and bindings are still nobody's business here; API tokens stopped
+     being (QA round 6, finding #14), and the sentence moved with the feature. */
+  it("does not pretend to administer roles, and no longer disowns tokens", async () => {
     renderPage();
     await screen.findByRole("heading", { name: "About this console" });
     expect(screen.queryByRole("heading", { name: /RBAC/i })).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: /token/i })).not.toBeInTheDocument();
+    expect(screen.getByText(/Roles and role bindings are not administered from this console at all/)).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "API tokens" })).toBeInTheDocument();
   });
 });
 
@@ -906,6 +1154,15 @@ describe("webhook form — field-routed refusals (#13)", () => {
     fireEvent.click(await screen.findByRole("button", { name: "New endpoint" }));
   }
 
+  /* The client now refuses an empty event list on its own (#12), so a draft
+     that is meant to REACH the server has to pick one. */
+  function fillValidDraft(over: { name?: string; url?: string } = {}) {
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: over.name ?? "pd" } });
+    fireEvent.change(screen.getByLabelText("URL"), { target: { value: over.url ?? "https://x.test" } });
+    fireEvent.change(screen.getByLabelText(/^Secret/), { target: { value: "s" } });
+    fireEvent.click(screen.getByRole("checkbox", { name: "incident.created" }));
+  }
+
   it("marks the URL box when the server refuses the url, and no other box", async () => {
     renderPage({
       onWriteWebhook: (method) =>
@@ -914,15 +1171,14 @@ describe("webhook form — field-routed refusals (#13)", () => {
           : undefined,
     });
     await openCreate();
-    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "pd" } });
-    fireEvent.change(screen.getByLabelText("URL"), { target: { value: "ftp://x" } });
-    fireEvent.change(screen.getByLabelText(/^Secret/), { target: { value: "s" } });
+    // A URL the CLIENT accepts, so the server's own refusal is what is tested.
+    fillValidDraft({ url: "https://x.test" });
     fireEvent.click(screen.getByRole("button", { name: "Create endpoint" }));
 
     await waitFor(() => expect(screen.getByLabelText("URL")).toHaveAttribute("aria-invalid", "true"));
     expect(screen.getByLabelText("Name")).not.toHaveAttribute("aria-invalid");
     expect(screen.getByLabelText(/^Secret/)).not.toHaveAttribute("aria-invalid");
-    // The server's words still render, verbatim and in one place.
+    // The server's words still render, verbatim — now beside the box they are about.
     expect(screen.getByRole("alert")).toHaveTextContent("must start with http:// or https://");
   });
 
@@ -934,9 +1190,7 @@ describe("webhook form — field-routed refusals (#13)", () => {
           : undefined,
     });
     await openCreate();
-    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "pd" } });
-    fireEvent.change(screen.getByLabelText("URL"), { target: { value: "https://x.test" } });
-    fireEvent.change(screen.getByLabelText(/^Secret/), { target: { value: "s" } });
+    fillValidDraft();
     fireEvent.click(screen.getByRole("button", { name: "Create endpoint" }));
 
     await waitFor(() => expect(screen.getByLabelText("Name")).toHaveAttribute("aria-invalid", "true"));
@@ -944,10 +1198,7 @@ describe("webhook form — field-routed refusals (#13)", () => {
   });
 
   it("marks the events GROUP, which has no single input to mark", async () => {
-    renderPage({
-      onWriteWebhook: (method) =>
-        method === "POST" ? problem(422, "invalid webhook", "webhook: events must not be empty") : undefined,
-    });
+    const { resourceCalls } = renderPage();
     await openCreate();
     fireEvent.change(screen.getByLabelText("Name"), { target: { value: "pd" } });
     fireEvent.change(screen.getByLabelText("URL"), { target: { value: "https://x.test" } });
@@ -957,6 +1208,9 @@ describe("webhook form — field-routed refusals (#13)", () => {
     await waitFor(() =>
       expect(screen.getByRole("group", { name: "Events" })).toHaveAttribute("aria-invalid", "true"),
     );
+    // …and without a round trip: an empty event list is something the browser
+    // can be certain about on its own (#12).
+    expect(resourceCalls().filter((c) => c.method === "POST")).toEqual([]);
   });
 
   it("marks the SECRET box for the one rule it checks client-side", async () => {
@@ -974,9 +1228,7 @@ describe("webhook form — field-routed refusals (#13)", () => {
         method === "POST" ? problem(502, "webhooks unavailable", "failed to reach the webhook store") : undefined,
     });
     await openCreate();
-    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "pd" } });
-    fireEvent.change(screen.getByLabelText("URL"), { target: { value: "https://x.test" } });
-    fireEvent.change(screen.getByLabelText(/^Secret/), { target: { value: "s" } });
+    fillValidDraft();
     fireEvent.click(screen.getByRole("button", { name: "Create endpoint" }));
 
     await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent("failed to reach the webhook store"));
@@ -996,12 +1248,11 @@ describe("webhook form — one submit per click storm (#17)", () => {
     fireEvent.change(screen.getByLabelText("Name"), { target: { value: "pd" } });
     fireEvent.change(screen.getByLabelText("URL"), { target: { value: "https://x.test" } });
     fireEvent.change(screen.getByLabelText(/^Secret/), { target: { value: "s3cret" } });
+    // The client-side basics must PASS, or the storm never reaches the network.
+    fireEvent.click(screen.getByRole("checkbox", { name: "incident.created" }));
 
     const submit = screen.getByRole("button", { name: "Create endpoint" });
-    /* THREE CLICKS IN ONE TASK, with no render between them — the shape an
-       impatient double-click actually has, and the one a useState flag cannot
-       survive: fireEvent.click flushes React between calls, so a suite using
-       it would pass against the very bug this pins. */
+    /* THREE CLICKS IN ONE TASK, with no render between them — the shape an impatient double-click actually has. */
     await act(async () => {
       submit.click();
       submit.click();
@@ -1082,5 +1333,360 @@ describe("subjectLine (#9)", () => {
     const fact = await screen.findByText("Your subject");
     const value = fact.parentElement?.querySelector("dd");
     expect(value?.textContent).not.toMatch(/·\s*$/);
+  });
+});
+
+/* ── language switcher (lib/i18n) ───────────────────────────────────────── */
+
+/** The console's language switch, pinned in BOTH languages. */
+describe("language switcher", () => {
+  const group = () => screen.getByRole("radiogroup", { name: "Interface language" });
+  const option = (name: string) => within(group()).getByRole("radio", { name });
+
+  it("renders for every role, including the one that can view nothing else", async () => {
+    const { resourceCalls } = renderPage({ permissions: VIEWER });
+    expect(await screen.findByRole("heading", { name: "Language" })).toBeInTheDocument();
+    expect(group()).toBeInTheDocument();
+    // A display preference held in this browser: nothing is asked of the API.
+    expect(resourceCalls()).toEqual([]);
+  });
+
+  it("opens on English, with English checked", async () => {
+    renderPage();
+    await screen.findByRole("heading", { name: "Language" });
+    expect(option("English")).toBeChecked();
+    expect(option("Русский")).not.toBeChecked();
+  });
+
+  it("names each language in that language, in both locales", async () => {
+    renderPage({ locale: "ru" });
+    await screen.findByRole("heading", { name: "Язык" });
+    // Endonyms: "Русский" does not become "Russian" for an English reader
+    // hunting for the Russian option, so these two never change.
+    expect(within(screen.getByRole("radiogroup", { name: "Язык интерфейса" })).getByRole("radio", { name: "English" }))
+      .toBeInTheDocument();
+    expect(screen.getByRole("radio", { name: "Русский" })).toBeInTheDocument();
+  });
+
+  it("applies instantly — the section retitles itself on the click", async () => {
+    renderPage();
+    await screen.findByRole("heading", { name: "Language" });
+    fireEvent.click(option("Русский"));
+    expect(screen.getByRole("heading", { name: "Язык" })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Language" })).not.toBeInTheDocument();
+    expect(screen.getByRole("radiogroup", { name: "Язык интерфейса" })).toBeInTheDocument();
+  });
+
+  it("persists the choice, and opens in it next time", async () => {
+    renderPage();
+    await screen.findByRole("heading", { name: "Language" });
+    fireEvent.click(option("Русский"));
+    expect(localStorage.getItem(LOCALE_STORAGE_KEY)).toBe("ru");
+
+    cleanup();
+    renderPage();
+    expect(await screen.findByRole("heading", { name: "Язык" })).toBeInTheDocument();
+  });
+
+  it("is a radiogroup the arrow keys walk, like every other Segmented", async () => {
+    renderPage();
+    await screen.findByRole("heading", { name: "Language" });
+    const english = option("English");
+    expect(english).toHaveAttribute("tabindex", "0");
+    fireEvent.keyDown(english, { key: "ArrowRight" });
+    expect(screen.getByRole("radio", { name: "Русский" })).toBeChecked();
+  });
+
+  it("switches the chrome ONLY — the server's own words stay the server's", async () => {
+    renderPage({
+      permissions: ADMIN,
+      webhooks: [webhookRow({ name: "pagerduty", lastStatus: "failed: 500 Internal Server Error" })],
+      locale: "ru",
+    });
+    await screen.findByRole("heading", { name: "Язык" });
+    // Endpoint name, url, event ids and the delivery outcome are DATA. A
+    // Russian console reports them in the server's words or it is inventing
+    // what the server said.
+    expect(await screen.findByText("pagerduty")).toBeInTheDocument();
+    expect(screen.getByText("failed: 500 Internal Server Error")).toBeInTheDocument();
+    expect(screen.getByText("incident.created")).toBeInTheDocument();
+  });
+});
+
+/* ── QA scope 5 ─────────────────────────────────────────────────────────── */
+
+/* #15. About answered "what am I looking at" without ever saying WHICH BUILD —
+   the first question of any bug report. */
+describe("About names the build it is running (#15)", () => {
+  it("renders the version and commit the server reports", async () => {
+    renderPage({ versionBody: { version: "1.4.0", commit: "9f3c1ab", capabilities: [] } });
+    await waitFor(() => expect(screen.getByTestId("about-version")).toHaveTextContent("1.4.0"));
+    expect(screen.getByTestId("about-commit")).toHaveTextContent("9f3c1ab");
+  });
+
+  it("prints a dev build as the server calls it, without dressing it up", async () => {
+    renderPage({ versionBody: { version: "dev", commit: "unknown", capabilities: [] } });
+    await waitFor(() => expect(screen.getByTestId("about-version")).toHaveTextContent("dev"));
+    expect(screen.getByTestId("about-commit")).toHaveTextContent("unknown");
+  });
+});
+
+/* #14. A revoked row was permanent: the list only ever grew, and the one
+   action the row still needed was the one it did not offer. */
+describe("a spent token can be deleted for good (#14)", () => {
+  it("offers Delete — not Revoke — on a revoked row", async () => {
+    renderPage({ tokens: [tokenRow({ revokedAt: "2026-03-01T00:00:00Z" })] });
+    const row = await screen.findByTestId("token-row");
+    expect(within(row).getByRole("button", { name: "Delete ci-pipeline" })).toBeInTheDocument();
+    expect(within(row).queryByRole("button", { name: "Revoke ci-pipeline" })).toBeNull();
+  });
+
+  it("offers Delete on an EXPIRED row too", async () => {
+    renderPage({ tokens: [tokenRow({ expiresAt: "2020-01-01T00:00:00Z" })] });
+    const row = await screen.findByTestId("token-row");
+    expect(within(row).getByRole("button", { name: "Delete ci-pipeline" })).toBeInTheDocument();
+  });
+
+  it("still says Revoke on a live one — the two acts keep their two words", async () => {
+    renderPage({ tokens: [tokenRow()] });
+    const row = await screen.findByTestId("token-row");
+    expect(within(row).getByRole("button", { name: "Revoke ci-pipeline" })).toBeInTheDocument();
+    expect(within(row).queryByRole("button", { name: "Delete ci-pipeline" })).toBeNull();
+  });
+
+  it("DELETEs behind a confirm, and refetches", async () => {
+    const { calls } = renderPage({ tokens: [tokenRow({ revokedAt: "2026-03-01T00:00:00Z" })] });
+    const row = await screen.findByTestId("token-row");
+    fireEvent.click(within(row).getByRole("button", { name: "Delete ci-pipeline" }));
+    fireEvent.click(within(row).getByRole("button", { name: "Confirm delete ci-pipeline" }));
+
+    await waitFor(() =>
+      expect(calls.find((c) => c.method === "DELETE" && c.url === "/api/v1/tokens/t-1")).toBeDefined(),
+    );
+  });
+
+  /* QA scope 4, finding #4: revoking left the row on screen — correctly, that is
+     what the server does — but the row's own `busy`/`confirming` state was only
+     ever cleared on the FAILURE path, on the assumption that a success unmounts
+     it. A revoke does not. The row came back as "revoked", offered Delete, and
+     the button behind it stayed disabled with a spinner until a reload. */
+  it("mints, revokes and purges a token in one visit, with no remount in between", async () => {
+    const { calls } = renderPage({ tokens: [] });
+
+    /* ── mint ── */
+    fireEvent.click(await screen.findByRole("button", { name: "New token" }));
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "throwaway" } });
+    fireEvent.click(screen.getByRole("button", { name: "Create token" }));
+    const row = await screen.findByTestId("token-row");
+    expect(within(row).getByText("throwaway")).toBeInTheDocument();
+
+    /* ── revoke ── */
+    fireEvent.click(within(row).getByRole("button", { name: "Revoke throwaway" }));
+    fireEvent.click(within(row).getByRole("button", { name: "Confirm revoke throwaway" }));
+
+    /* The row survives the revoke and re-labels itself for the act it now offers. */
+    const purge = await within(await screen.findByTestId("token-row")).findByRole("button", {
+      name: "Delete throwaway",
+    });
+    expect(within(screen.getByTestId("token-row")).getByText("revoked")).toBeInTheDocument();
+    /* THE BUG: this button used to arrive already disabled, spinner and all. */
+    expect(purge).toBeEnabled();
+
+    /* ── purge, in the SAME visit ── */
+    fireEvent.click(purge);
+    fireEvent.click(screen.getByRole("button", { name: "Confirm delete throwaway" }));
+
+    await waitFor(() => expect(screen.queryByTestId("token-row")).toBeNull());
+    const deletes = calls.filter((c) => c.method === "DELETE" && c.url.startsWith("/api/v1/tokens/"));
+    expect(deletes).toHaveLength(2);
+  });
+
+  it("drops the confirm prompt after a revoke instead of leaving it armed", async () => {
+    renderPage({ tokens: [tokenRow()] });
+    const row = await screen.findByTestId("token-row");
+    fireEvent.click(within(row).getByRole("button", { name: "Revoke ci-pipeline" }));
+    fireEvent.click(within(row).getByRole("button", { name: "Confirm revoke ci-pipeline" }));
+
+    await waitFor(() => expect(screen.getByText("revoked")).toBeInTheDocument());
+    /* Neither confirm word is on screen: a second destructive act must be asked for, not inherited. */
+    expect(screen.queryByRole("button", { name: /^Confirm/ })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Cancel" })).toBeNull();
+  });
+});
+
+/* #13. The form offered ten years of past days for an expiry the server
+   refuses, and minting one would only leak a secret for nothing. */
+describe("the token expiry cannot be in the past (#13)", () => {
+  const NOW = new Date(2026, 7, 8, 12, 0, 0);
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("disables past days in the picker", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    vi.setSystemTime(NOW);
+    renderPage();
+    fireEvent.click(await screen.findByRole("button", { name: "New token" }));
+    fireEvent.click(screen.getByRole("button", { name: "Expires" }));
+
+    expect(screen.getByRole("button", { name: "Choose 7 August 2026" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Choose 8 August 2026" })).toBeEnabled();
+  });
+
+  it("refuses a time earlier TODAY without minting anything", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    vi.setSystemTime(NOW);
+    const { calls } = renderPage();
+    fireEvent.click(await screen.findByRole("button", { name: "New token" }));
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "ci" } });
+    pickExpiry("2026-08-08", "09:00");
+    fireEvent.click(screen.getByRole("button", { name: "Create token" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(/must be in the future/i);
+    // No secret was put on the wire for a credential that could never work.
+    expect(calls.find((c) => c.method === "POST" && c.url === "/api/v1/tokens")).toBeUndefined();
+  });
+
+  it("still mints a token with no expiry at all", async () => {
+    const { calls } = renderPage();
+    fireEvent.click(await screen.findByRole("button", { name: "New token" }));
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "forever" } });
+    fireEvent.click(screen.getByRole("button", { name: "Create token" }));
+
+    await screen.findByTestId("minted-token");
+    expect(calls.find((c) => c.method === "POST" && c.url === "/api/v1/tokens")?.body).toEqual({ name: "forever" });
+  });
+});
+
+/* #12. The webhook form learned one problem per round trip, and printed it in
+   a single slot 256px below the box it was about. */
+describe("the webhook form says everything wrong at once (#12)", () => {
+  it("reports name, url, events and secret together, with no round trip", async () => {
+    const { resourceCalls } = renderPage();
+    fireEvent.click(await screen.findByRole("button", { name: "New endpoint" }));
+    fireEvent.click(screen.getByRole("button", { name: "Create endpoint" }));
+
+    await waitFor(() => expect(screen.getByLabelText("Name")).toHaveAttribute("aria-invalid", "true"));
+    expect(screen.getByLabelText("URL")).toHaveAttribute("aria-invalid", "true");
+    expect(screen.getByRole("group", { name: "Events" })).toHaveAttribute("aria-invalid", "true");
+    expect(screen.getByLabelText(/^Secret/)).toHaveAttribute("aria-invalid", "true");
+    expect(resourceCalls().filter((c) => c.method === "POST")).toEqual([]);
+  });
+
+  it("catches a malformed URL and a bad name charset in the same submit", async () => {
+    renderPage();
+    fireEvent.click(await screen.findByRole("button", { name: "New endpoint" }));
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Page Duty" } });
+    fireEvent.change(screen.getByLabelText("URL"), { target: { value: "hooks.example.test" } });
+    fireEvent.click(screen.getByRole("button", { name: "Create endpoint" }));
+
+    await waitFor(() => expect(screen.getByLabelText("Name")).toHaveAttribute("aria-invalid", "true"));
+    expect(screen.getAllByRole("alert").length).toBeGreaterThanOrEqual(2);
+    expect(screen.getByText(/lowercase letters, digits and hyphens/i)).toBeInTheDocument();
+    expect(screen.getByText(/must start with http:\/\/ or https:\/\//i)).toBeInTheDocument();
+  });
+
+  it("puts each message beside its own field, not in one slot far below", async () => {
+    renderPage();
+    fireEvent.click(await screen.findByRole("button", { name: "New endpoint" }));
+    fireEvent.click(screen.getByRole("button", { name: "Create endpoint" }));
+
+    const url = await screen.findByLabelText("URL");
+    const describedBy = url.getAttribute("aria-describedby");
+    expect(describedBy).toBeTruthy();
+    const message = document.getElementById(describedBy!);
+    expect(message).toHaveTextContent(/URL is required/i);
+    // Same container as the field: the message and the box it is about are in
+    // one place now.
+    expect(url.parentElement?.parentElement).toContainElement(message);
+  });
+
+  it("clears a field's message the moment that field is edited", async () => {
+    renderPage();
+    fireEvent.click(await screen.findByRole("button", { name: "New endpoint" }));
+    fireEvent.click(screen.getByRole("button", { name: "Create endpoint" }));
+    await waitFor(() => expect(screen.getByLabelText("Name")).toHaveAttribute("aria-invalid", "true"));
+
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "pagerduty" } });
+    await waitFor(() => expect(screen.getByLabelText("Name")).not.toHaveAttribute("aria-invalid"));
+    // The other fields' verdicts are untouched — only the answered one goes.
+    expect(screen.getByLabelText("URL")).toHaveAttribute("aria-invalid", "true");
+  });
+
+  it("keeps an empty secret legal when EDITING, where blank means keep", async () => {
+    const { calls } = renderPage({
+      webhooks: [{ id: "w-1", name: "pd", url: "https://x.test", events: ["incident.created"], enabled: true, hasSecret: true, lastStatus: "ok", lastAttempt: null, failures: 0 }],
+    });
+    fireEvent.click(await screen.findByRole("button", { name: "Edit pd" }));
+    fireEvent.click(screen.getByRole("button", { name: "Save endpoint" }));
+
+    await waitFor(() => expect(calls.find((c) => c.method === "PUT")).toBeDefined());
+  });
+});
+
+/* #11. «База данных настроен» — Russian agrees the participle with the
+   subject's gender, and one key cannot serve three subjects. */
+describe("the configured flags agree in Russian (#11)", () => {
+  it("says «настроена» for «База данных» and «настроен» for the two masculine ones", async () => {
+    renderPage({
+      locale: "ru",
+      config: { controller: { configured: true }, prometheus: { configured: true }, database: { configured: true } },
+    });
+    expect(await screen.findByText("настроена")).toBeInTheDocument();
+    expect(screen.getAllByText("настроен")).toHaveLength(2);
+  });
+
+  it("negates with the same agreement", async () => {
+    renderPage({
+      locale: "ru",
+      config: { controller: { configured: false }, prometheus: { configured: false }, database: { configured: false } },
+    });
+    expect(await screen.findByText("не настроена")).toBeInTheDocument();
+    expect(screen.getAllByText("не настроен")).toHaveLength(2);
+  });
+});
+
+/* #23. Same question, same two forms: the webhook form is the other one with
+   enough in it to be worth asking about. */
+describe("the webhook form asks before discarding unsaved work (#23)", () => {
+  async function openCreateForm() {
+    fireEvent.click(await screen.findByRole("button", { name: "New endpoint" }));
+  }
+
+  it("closes immediately when nothing was typed", async () => {
+    renderPage();
+    await openCreateForm();
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(screen.queryByLabelText("URL")).toBeNull());
+  });
+
+  it("asks once when the draft is dirty, and keeps the form on Keep editing", async () => {
+    renderPage();
+    await openCreateForm();
+    fireEvent.change(screen.getByLabelText("URL"), { target: { value: "https://x.test" } });
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+
+    expect(await screen.findByText("Discard the changes?")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Keep editing" }));
+    expect(screen.getByLabelText("URL")).toHaveValue("https://x.test");
+  });
+
+  it("closes on the second, explicit answer", async () => {
+    renderPage();
+    await openCreateForm();
+    fireEvent.change(screen.getByLabelText("URL"), { target: { value: "https://x.test" } });
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Discard changes" }));
+
+    await waitFor(() => expect(screen.queryByLabelText("URL")).toBeNull());
+  });
+
+  it("leaves the TOKEN form alone — a two-field form is cheaper to retype", async () => {
+    renderPage();
+    fireEvent.click(await screen.findByRole("button", { name: "New token" }));
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "ci" } });
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(screen.queryByLabelText("Name")).toBeNull());
   });
 });

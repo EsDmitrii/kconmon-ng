@@ -18,9 +18,8 @@ func hopsAB() []PathHop {
 	}
 }
 
-// TestHashPathIsStable is the dedupe key's first requirement (Decision 2): the
-// same ordered IP list always hashes to the same value, because an unstable
-// hash would make every trace look like a new path and defeat the whole table.
+// TestHashPathIsStable is the dedupe key's first requirement: the same ordered IP list always
+// hashes to the same value.
 func TestHashPathIsStable(t *testing.T) {
 	first := HashPath(hopsAB())
 	second := HashPath(hopsAB())
@@ -35,11 +34,8 @@ func TestHashPathIsStable(t *testing.T) {
 	}
 }
 
-// TestHashPathIgnoresEverythingButTheIP is Decision 2's exclusion list, one
-// field at a time. RTTs jitter on every trace and hostnames come from
-// enrichment (mutable, resolved long after the trace); folding either into the
-// key would either defeat dedupe outright or make a path "change" when nothing
-// about the route did.
+// RTTs jitter on every trace and hostnames come from enrichment (mutable, resolved long after the
+// trace).
 func TestHashPathIgnoresEverythingButTheIP(t *testing.T) {
 	base := HashPath(hopsAB())
 
@@ -86,10 +82,7 @@ func TestHashPathDistinguishesConcatenations(t *testing.T) {
 	}
 }
 
-// TestHashPathEmptyIsEmpty keeps a hopless trace out of the table by giving it
-// no key at all: the projector (Task 2) reports false for a hopless result,
-// and this is the store-side backstop that makes a caller that ignored that
-// fail validation instead of writing a snapshot of nothing.
+// TestHashPathEmptyIsEmpty keeps a hopless trace out of the table by giving it no key at all.
 func TestHashPathEmptyIsEmpty(t *testing.T) {
 	if got := HashPath(nil); got != "" {
 		t.Errorf("HashPath(nil) = %q, want \"\"", got)
@@ -250,11 +243,7 @@ func TestEnrichmentValidateRejects(t *testing.T) {
 }
 
 // TestGetPathSnapshotMalformedIDIsNotFoundWithoutTouchingPgx mirrors
-// TestGetRunMalformedIDIsNotFoundWithoutTouchingPgx (checks_test.go): the *DB
-// here has a NIL pool, so a test that returns cleanly is itself proof no
-// round trip was attempted, and an id that cannot name a row in a UUID-keyed
-// table gets the truthful "not found" rather than a database error the edge
-// would report as 502.
+// TestGetRunMalformedIDIsNotFoundWithoutTouchingPgx (checks_test.go).
 func TestGetPathSnapshotMalformedIDIsNotFoundWithoutTouchingPgx(t *testing.T) {
 	db := &DB{}
 	ctx := context.Background()
@@ -269,10 +258,7 @@ func TestGetPathSnapshotMalformedIDIsNotFoundWithoutTouchingPgx(t *testing.T) {
 	}
 }
 
-// TestGetEnrichmentEmptyInputSkipsTheDatabase pins the short-circuit: asking
-// for no IPs is a normal read-path outcome (a snapshot whose hops were all
-// resolved from the in-request cache), and it must not cost a round trip. The
-// nil pool proves it did not take one.
+// TestGetEnrichmentEmptyInputSkipsTheDatabase pins the short-circuit.
 func TestGetEnrichmentEmptyInputSkipsTheDatabase(t *testing.T) {
 	db := &DB{}
 	got, err := db.GetEnrichment(context.Background(), nil)
@@ -296,10 +282,8 @@ func TestPutEnrichmentEmptyInputSkipsTheDatabase(t *testing.T) {
 	}
 }
 
-// TestPutEnrichmentValidatesEveryRow asserts one bad row rejects the whole
-// batch before any of it reaches pgx -- a partially-written cache refresh is
-// worse than a rejected one, since the caller would have no way to tell which
-// half landed.
+// TestPutEnrichmentValidatesEveryRow asserts one bad row rejects the whole batch before any of it
+// reaches pgx.
 func TestPutEnrichmentValidatesEveryRow(t *testing.T) {
 	db := &DB{}
 	rows := []Enrichment{validEnrichment(), {IP: "", ResolvedAt: time.Now()}}

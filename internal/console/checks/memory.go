@@ -12,31 +12,19 @@ import (
 	"github.com/EsDmitrii/kconmon-ng/internal/console/store"
 )
 
-// memoryRingSize bounds MemoryStore's retained runs (Plan Decision 15): with
-// database.mode=disabled there is nowhere durable to put them, so recent runs
-// are kept in a small bounded ring instead of unbounded process memory.
+// memoryRingSize bounds MemoryStore's retained runs: with database.mode=disabled there is nowhere
+// durable to put them.
 const memoryRingSize = 50
 
-// listRunsMinLimit / listRunsMaxLimit / listRunsDefaultLimit mirror
-// store/events.go's minLimit/maxLimit/defaultLimit exactly (1/500/100): those
-// are unexported, so this is a deliberate copy, not an import, kept in sync
-// by hand -- ListRuns must clamp RunFilter.Limit identically regardless of
-// which Store implementation (*store.DB or *MemoryStore) answers it, so a
-// caller cannot tell which backend served a page from its size alone.
+// listRunsMinLimit / listRunsMaxLimit / listRunsDefaultLimit mirror store/events.go's
+// minLimit/maxLimit/defaultLimit exactly (1/500/100).
 const (
 	listRunsMinLimit     = 1
 	listRunsMaxLimit     = 500
 	listRunsDefaultLimit = 100
 )
 
-// memorySnapshotRingSize bounds MemoryStore's retained path snapshots, for the
-// same reason memoryRingSize bounds its runs: with database.mode=disabled
-// there is nowhere durable to put them and an unbounded map is a leak.
-//
-// It is ten times the run ring because the two hold different things. A run is
-// a transient object an operator polls for minutes and then forgets; a
-// snapshot is a pair's ROUTE HISTORY, one row per distinct route, and its
-// whole value is accumulating across many runs. Fifty would evict a stable
+// memorySnapshotRingSize bounds MemoryStore's retained path snapshots; fifty would evict a stable
 // cluster's history within a single scheduled sweep.
 const memorySnapshotRingSize = 500
 
@@ -55,24 +43,15 @@ type snapshotKey struct {
 	pathHash    string
 }
 
-// MemoryStore is the database.mode=disabled fallback for store.RunStore and
-// store.RunReader (Plan Decision 15): a mutex-guarded, insertion-ordered ring
-// of the most recent memoryRingSize (50) runs. It exists so Runner can take
-// the Store interface and never branch on "is there a database" -- with the
-// database on, Runner is handed a *store.DB; with it off, a *MemoryStore.
-// Honestly labelled: runs still work with the database disabled, but only
-// the most recent 50 are retrievable.
+// MemoryStore is the database.mode=disabled fallback for store.RunStore and store.RunReader; it
+// exists so Runner can take the Store interface and never branch on "is there a database".
 type MemoryStore struct {
 	mu      sync.Mutex
 	order   []string // insertion order, oldest first
 	runs    map[string]*memoryRunEntry
 	nextRes int64
 
-	// snapOrder/snaps are the path-history half (M5 Task 2), kept in their own
-	// ring rather than hanging off a run: a snapshot deliberately OUTLIVES the
-	// run that first produced it (the SQL column is ON DELETE SET NULL for
-	// exactly that reason), so tying its lifetime to the 50-run ring would
-	// throw route history away every fifty runs.
+	// snapOrder/snaps are the path-history half, kept in their own ring rather than hanging off a run.
 	snapOrder []snapshotKey // insertion order, oldest first
 	snaps     map[snapshotKey]*store.PathSnapshot
 }
@@ -122,10 +101,7 @@ func (m *MemoryStore) CreateRun(_ context.Context, id, checkType, plane string, 
 	return run, nil
 }
 
-// MarkRunStarted transitions id from "pending" to "running", matching
-// *store.DB's lifecycle guards: store.ErrNotFound when id is unknown (whether
-// it never existed or has since been evicted from the ring),
-// store.ErrWrongState when id names a run that is not "pending".
+// MarkRunStarted transitions id from "pending" to "running", matching *store.DB's lifecycle guards.
 func (m *MemoryStore) MarkRunStarted(_ context.Context, id string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -143,11 +119,8 @@ func (m *MemoryStore) MarkRunStarted(_ context.Context, id string) error {
 	return nil
 }
 
-// FinishRun transitions id from "running" to a terminal status, matching
-// *store.DB's lifecycle guards: store.ErrNotFound when id is unknown,
-// store.ErrWrongState when id names a run that is not "running" -- including
-// one FinishRun already finished, so a retrying caller can treat
-// ErrWrongState as "already finished" exactly as store.DB.FinishRun documents.
+// FinishRun transitions id from "running" to a terminal status, matching *store.DB's lifecycle
+// guards.
 func (m *MemoryStore) FinishRun(_ context.Context, id, status string, pairOK, pairFailed int32) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -167,23 +140,8 @@ func (m *MemoryStore) FinishRun(_ context.Context, id, status string, pairOK, pa
 	return nil
 }
 
-// ReapStuckRuns force-finishes up to limit runs left "running" with CreatedAt
-// strictly before before, recording each as "cancelled", and reports how many
-// it moved -- the same contract *store.DB implements against SQL
-// (store.RunStore.ReapStuckRuns).
-//
-// It exists here for the reason every other method on this type does: with
-// database.mode=disabled the runner is handed a *MemoryStore instead of a
-// *store.DB and must not behave differently. A process that dies mid-run
-// loses this ring entirely, so the reaper has less to do here than against a
-// database -- but a run whose execute goroutine died without reaching
-// FinishRun (a panic outside runOneRecovered's reach, say) leaves exactly the
-// same stuck row in memory that it would on disk.
-//
-// Oldest-first, matching the SQL's ORDER BY created_at, so a limit that
-// cannot cover the whole backlog makes the same progress either way. The
-// insertion-ordered ring means iterating m.order forward IS oldest-first;
-// no sort is needed.
+// ReapStuckRuns force-finishes up to limit runs left "running" with CreatedAt strictly before
+// before; it exists here for the reason every other method on this type does.
 func (m *MemoryStore) ReapStuckRuns(_ context.Context, before time.Time, limit int32) (int64, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -218,9 +176,10 @@ func (m *MemoryStore) UpsertRunResult(_ context.Context, in store.RunResultInput
 		return store.RunResult{}, fmt.Errorf("checks: memory store: upsert run result: %w", store.ErrNotFound)
 	}
 
+	// The match key includes SampleSeq, mirroring check_results_pair_unique since migration 00009.
 	for i := range entry.results {
 		r := &entry.results[i]
-		if r.SourceNode == in.SourceNode && r.DestinationNode == in.DestinationNode {
+		if r.SourceNode == in.SourceNode && r.DestinationNode == in.DestinationNode && r.SampleSeq == in.SampleSeq {
 			r.Success = in.Success
 			r.DurationNs = in.DurationNs
 			r.Error = in.Error
@@ -241,29 +200,13 @@ func (m *MemoryStore) UpsertRunResult(_ context.Context, in store.RunResultInput
 		Error:           in.Error,
 		Result:          in.Result,
 		RecordedAt:      time.Now().UTC(),
+		SampleSeq:       in.SampleSeq,
 	}
 	entry.results = append(entry.results, res)
 	return res, nil
 }
 
-// UpsertPathSnapshot records one trace in path history, matching
-// *store.DB.UpsertPathSnapshot's contract (store.PathSnapshotStore): a route
-// this pair has never taken becomes a new entry and reports isNew; a repeat
-// bumps LastSeen and TraceCount and leaves FirstSeen and the hop payload --
-// the FIRST trace's measurements, M5 Decision 2 -- untouched.
-//
-// It exists for the reason every other method on this type does: with
-// database.mode=disabled the runner is handed a *MemoryStore instead of a
-// *store.DB and the MTR projector must not behave differently. What IS
-// different, and honestly labelled: this history vanishes on restart, and the
-// ring (memorySnapshotRingSize) eventually evicts the oldest entries -- after
-// which that route's next trace reports isNew again, so a database-disabled
-// deployment can see a spurious "route changed" for a route it merely forgot.
-// That is the same posture runs already take, not a new compromise.
-//
-// Validate runs first, exactly as it does in *store.DB, so a caller cannot
-// tell the two backends apart by which malformed inputs they accept -- and so
-// the caller-supplied PathHash is cross-checked against the hops here too.
+// UpsertPathSnapshot records one trace in path history.
 func (m *MemoryStore) UpsertPathSnapshot(_ context.Context, in store.PathSnapshotInput) (store.PathSnapshot, bool, error) { //nolint:gocritic // hugeParam: matches store.PathSnapshotStore's own signature (store/mtr.go)
 	if err := in.Validate(); err != nil {
 		return store.PathSnapshot{}, false, err
@@ -308,10 +251,8 @@ func (m *MemoryStore) UpsertPathSnapshot(_ context.Context, in store.PathSnapsho
 	return *snap, true, nil
 }
 
-// GetRun returns store.ErrNotFound when id does not name a run -- including
-// one the ring has since evicted, which looks identical to "never existed"
-// from here, exactly as it would to a caller polling a run that finished
-// long enough ago to fall off the end.
+// GetRun returns store.ErrNotFound when id does not name a run -- including one the ring has since
+// evicted.
 func (m *MemoryStore) GetRun(_ context.Context, id string) (store.Run, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -322,16 +263,7 @@ func (m *MemoryStore) GetRun(_ context.Context, id string) (store.Run, error) {
 	return entry.run, nil
 }
 
-// ListRuns pages newest-first, filtered by CheckType/Status, using the same
-// opaque cursor encoding *store.DB uses (store.EncodeRunCursor /
-// store.DecodeRunCursor) so a caller cannot tell which backend produced a
-// page from the cursor shape alone. Limit is clamped exactly like
-// *store.DB.ListRuns (clampLimit's contract: 0 defaults to 100, otherwise
-// [1, 500]), and NextCursor is emitted under the same condition *store.DB
-// uses -- len(page) == limit -- rather than "there really is more" (a
-// heuristic *store.DB's own SQL LIMIT-only query cannot improve on either;
-// both backends can hand back a NextCursor whose page turns out empty, and
-// that is an accepted, matched property, not a bug unique to one side).
+// ListRuns pages newest-first, filtered by CheckType/Status.
 func (m *MemoryStore) ListRuns(_ context.Context, f store.RunFilter) (store.RunPage, error) { //nolint:gocritic // hugeParam: RunFilter mirrors store.DB.ListRuns' value semantics
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -365,15 +297,7 @@ func (m *MemoryStore) ListRuns(_ context.Context, f store.RunFilter) (store.RunP
 					break
 				}
 			}
-			// The cursor decoded fine but names no run in the (filtered,
-			// still-retained) list -- most plausibly the ring (memoryRingSize,
-			// 50) evicted it between this page and the last, though a garbage
-			// cursor from outside this process looks identical from here.
-			// Falling through with start left at 0 would silently restart the
-			// caller at page one instead of reporting the page their cursor
-			// actually pointed at is gone -- indistinguishable, from the
-			// caller's side, from every run simply having been deleted
-			// underneath them, so an empty page (not an error) is correct.
+			// The cursor decoded fine but names no run in the (filtered, still-retained) list.
 			if !found {
 				return store.RunPage{Runs: []store.Run{}}, nil
 			}

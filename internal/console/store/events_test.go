@@ -13,11 +13,7 @@ import (
 // wall clock, so nothing here calls time.Now().
 var base = time.Date(2026, 8, 7, 12, 0, 0, 0, time.UTC)
 
-// topoEvent builds one topology_changed EventRecord in the PRE-M7 details
-// shape: reason, nodeName, agentId and no zone key at all. Rows like this are
-// not hypothetical -- every event a pre-M7 controller wrote looks exactly like
-// this and is still inside retention, so the fold has to keep handling them.
-// Use topoEventZoned for what today's controller emits.
+// topoEvent builds one topology_changed EventRecord in the PRE-M7 details shape: reason.
 func topoEvent(t *testing.T, offset time.Duration, reason, node, agent string) EventRecord {
 	t.Helper()
 	return topoRecord(t, offset, reason, node, map[string]string{
@@ -106,10 +102,8 @@ func TestFoldTopologyAddsRegisteredAgents(t *testing.T) {
 	if want := base.Add(time.Minute); !snap.LastChange.Equal(want) {
 		t.Errorf("LastChange = %v, want the last record's time %v", snap.LastChange, want)
 	}
-	// These records are the PRE-M7 shape with no zone key, and podIP is not in
-	// the payload at any version, so the fold must leave both empty rather
-	// than guess -- this pins "what is not reconstructible" as behaviour, not
-	// just a comment.
+	// These records are the PRE-M7 shape with no zone key, and podIP is not in the payload at any
+	// version.
 	for _, n := range snap.Nodes {
 		if n.Zone != "" {
 			t.Errorf("node %s zone = %q, want empty: these events carry no zone key", n.Name, n.Zone)
@@ -186,8 +180,7 @@ func TestFoldTopologyPreM7ZoneChangeKeepsMembershipButHasNoZoneToSet(t *testing.
 	}
 }
 
-// The M7 controller puts the zone in the event, so a reconstruction can put
-// nodes in the zone lanes the live map draws instead of one nameless lane.
+// The controller puts the zone in the event.
 func TestFoldTopologyAttributedEventsCarryTheZone(t *testing.T) {
 	snap := foldTopology([]EventRecord{
 		topoEventZoned(t, 0, topologyReasonRegistered, "node-a", "agent-a", "zone-a"),
@@ -228,10 +221,7 @@ func TestFoldTopologyZoneUpdateMovesTheNodeToTheNewZone(t *testing.T) {
 	}
 }
 
-// A later event that omits the zone must not ERASE a zone the fold already
-// knows: mixed history (pre-M7 rows interleaved with M7 ones, which is exactly
-// what an upgraded console's retention window holds) would otherwise blank out
-// zones at random depending on which row came last.
+// A later event that omits the zone must not ERASE a zone the fold already knows.
 func TestFoldTopologyLaterZonelessEventDoesNotEraseAKnownZone(t *testing.T) {
 	snap := foldTopology([]EventRecord{
 		topoEventZoned(t, 0, topologyReasonRegistered, "node-a", "agent-a", "zone-a"),
@@ -247,10 +237,6 @@ func TestFoldTopologyLaterZonelessEventDoesNotEraseAKnownZone(t *testing.T) {
 }
 
 // The Time Machine's actual question: what did the cluster look like AT t?
-// TopologyAt answers it by handing the fold every row with event_time <= t, so
-// folding successive prefixes of one attributed timeline is that question
-// asked three times. node-b joins between the first two instants and leaves
-// before the third -- the membership has to differ at each.
 func TestFoldTopologyPrefixesGiveTheMembershipAtEachInstant(t *testing.T) {
 	timeline := []EventRecord{
 		topoEventZoned(t, 0, topologyReasonRegistered, "node-a", "agent-a", "zone-a"),
@@ -320,10 +306,7 @@ func TestFoldTopologyDuplicateAddsAreIdempotent(t *testing.T) {
 }
 
 func TestFoldTopologySameTimestampFollowsRowOrder(t *testing.T) {
-	// Two events inside one microsecond: (event_time, id) is the total order
-	// the SQL yields, so the LAST row in the slice wins. Feeding the same pair
-	// in both orders must therefore give opposite answers -- that is what
-	// proves the fold is order-driven and not set-driven.
+	// Feeding the same pair in both orders must therefore give opposite answers.
 	add := topoEvent(t, 0, topologyReasonRegistered, "node-a", "agent-a")
 	remove := topoEvent(t, 0, topologyReasonDeregistered, "node-a", "agent-a")
 
@@ -336,10 +319,8 @@ func TestFoldTopologySameTimestampFollowsRowOrder(t *testing.T) {
 }
 
 func TestFoldTopologyEventNamingNobodyIsCountedNotGuessed(t *testing.T) {
-	// This is TODAY'S PRODUCTION SHAPE: internal/controller/controller.go
-	// publishes pb.TopologyChanged{Reason: reason} and never sets node_name or
-	// agent_id, so every persisted event names nobody. The fold must not
-	// invent a node -- it counts the change and leaves the set alone.
+	// This is TODAY'S PRODUCTION SHAPE: internal/controller/controller.go publishes
+	// pb.TopologyChanged{Reason: reason} and never sets node_name or agent_id.
 	snap := foldTopology([]EventRecord{
 		topoEvent(t, 0, topologyReasonRegistered, "", ""),
 		topoEvent(t, time.Minute, topologyReasonRegistered, "node-a", "agent-a"),

@@ -14,6 +14,7 @@ require (
 	github.com/oschwald/maxminddb-golang/v2 v2.4.1
 	github.com/pressly/goose/v3 v3.27.3
 	github.com/prometheus/client_golang v1.24.1
+	github.com/prometheus/client_model v0.6.2
 	github.com/redis/rueidis v1.0.76
 	github.com/spf13/cobra v1.10.2
 	go.opentelemetry.io/otel v1.45.0
@@ -60,7 +61,6 @@ require (
 	github.com/modern-go/reflect2 v1.0.3-0.20250322232337-35a7c28c31ee // indirect
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
 	github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2 // indirect
-	github.com/prometheus/client_model v0.6.2 // indirect
 	github.com/prometheus/common v0.70.1 // indirect
 	github.com/prometheus/procfs v0.21.1 // indirect
 	github.com/sethvargo/go-retry v0.4.0 // indirect

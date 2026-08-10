@@ -42,9 +42,7 @@ func startAuthorizedServer(t *testing.T, bus cache.Bus, authorize ws.TopicAuthor
 	return hub, srv
 }
 
-// runsReadOnly is the authorizer the whole M3-carry exists for: a custom role
-// holding runs:read but NOT events:read. It may watch its own run and nothing
-// else.
+// runsReadOnly is the authorizer the whole.
 func runsReadOnly(topic string) error {
 	if strings.HasPrefix(topic, "run:") {
 		return nil
@@ -174,13 +172,8 @@ func TestServeWSUnknownTopicGetsAnErrorFrameOverTheWire(t *testing.T) {
 	}
 }
 
-// TestServeWSAuthorizedDeniesTopicsTheConnectionMayNotRead is the wire-level
-// half of the M3-carry fix (SECURITY.md §10.2's "splitting the two properly
-// means teaching the hub subject-aware subscribe authorization"). A connection
-// opened by a subject holding runs:read but not events:read may watch its own
-// run and must be refused the fleet-wide topics — with an error frame, not
-// silence, and with the topic genuinely NOT subscribed, which the second half
-// of this test is what proves.
+// A connection opened by a subject holding runs:read but not events:read may watch its own run and
+// must be refused the fleet-wide topics.
 func TestServeWSAuthorizedDeniesTopicsTheConnectionMayNotRead(t *testing.T) {
 	hub, srv := startAuthorizedServer(t, cache.NewInProcessBus(), runsReadOnly)
 	const runTopic = "run:42"
@@ -202,10 +195,8 @@ func TestServeWSAuthorizedDeniesTopicsTheConnectionMayNotRead(t *testing.T) {
 		t.Errorf("error frame data = %s, want the authorizer's own detail (naming the missing permission)", env.Data)
 	}
 
-	// The refusal must be a refusal, not a warning: a subsequent broadcast on
-	// the denied topic must not reach this client at all. If the denied
-	// subscribe had still set c.topics[live], this live frame would arrive
-	// BEFORE the run frame below and the read would fail the assertion.
+	// The refusal must be a refusal, not a warning: a subsequent broadcast on the denied topic must
+	// not reach this client at all.
 	hub.Broadcast(ws.TopicLive, ws.TypeEvent, json.RawMessage(`{"leaked":true}`))
 
 	send(t, conn, ws.ClientMessage{Action: ws.ActionSubscribe, Topic: runTopic})
@@ -232,11 +223,8 @@ func TestServeWSAuthorizedDeniesTopicsTheConnectionMayNotRead(t *testing.T) {
 	}
 }
 
-// TestServeWSAuthorizedIsPerConnectionNotPerHub is what makes the fix honest:
-// the two sockets below are served by ONE hub, and the same subscribe gets
-// opposite answers on each. A hub-level (or handler-level) gate could not
-// produce this, and a hub-level gate is exactly what SECURITY.md §10.2
-// documented as the reason /ws could not be lowered to runs:read.
+// TestServeWSAuthorizedIsPerConnectionNotPerHub is what makes the fix honest: the two sockets below
+// are served by ONE hub.
 func TestServeWSAuthorizedIsPerConnectionNotPerHub(t *testing.T) {
 	m := metrics.New("kconmon_ng", prometheus.NewRegistry())
 	hub := ws.NewHub(cache.NewInProcessBus(), m)
@@ -267,10 +255,7 @@ func TestServeWSAuthorizedIsPerConnectionNotPerHub(t *testing.T) {
 	}
 }
 
-// TestServeWSNilAuthorizerAllowsEverySubscribableTopic pins the back-compat
-// half of the seam: plain ServeWS (and ServeWSAuthorized with a nil
-// authorizer) keeps the pre-M7 behaviour, where the route's single permission
-// decided the whole socket. Every other test in this file relies on it.
+// TestServeWSNilAuthorizerAllowsEverySubscribableTopic pins the back-compat half of the seam.
 func TestServeWSNilAuthorizerAllowsEverySubscribableTopic(t *testing.T) {
 	hub, srv := startAuthorizedServer(t, cache.NewInProcessBus(), nil)
 	conn := dial(t, srv, nil)
@@ -430,11 +415,8 @@ func TestHubRunClosesLiveSocketsOnShutdown(t *testing.T) {
 	}
 }
 
-// An upgrade that lands after the hub has already shut down must be torn down
-// promptly rather than hanging: register refuses the client with an
-// already-closed done channel, and the pumps have to notice that from the start.
-// Without it a hijacked connection would be leaked for the process's lifetime,
-// since nothing runs closeAllClients a second time.
+// An upgrade that lands after the hub has already shut down must be torn down promptly rather than
+// hanging.
 func TestServeWSTerminatesWhenTheHubIsAlreadyStopped(t *testing.T) {
 	hub, _, srv := startServer(t, cache.NewInProcessBus())
 

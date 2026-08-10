@@ -22,19 +22,16 @@ const (
 )
 
 const (
-	// destinationKindNode resolves Destination against the agent registry. It is
-	// the default and the only kind that existed before M4, so an M3-shaped body
-	// (no destinationKind at all) takes exactly the old path.
+	// destinationKindNode resolves Destination against the agent registry; it is the default and the
+	// only kind that existed.
 	destinationKindNode = "node"
 	// destinationKindExternal skips the registry: DestinationAddress carries the
 	// address to probe and Destination, if present, only names it.
 	destinationKindExternal = "external"
 
-	// capabilityExternalChecks is the AgentMeta.capabilities flag an agent build
-	// advertises when it can probe a destination that is not a registered agent.
-	// A pre-M4 agent advertises nothing and ignores TaskRequest.external_target
-	// silently, which would make it probe an empty AgentMeta; the controller
-	// refuses up front instead (Decision 7).
+	// capabilityExternalChecks is the AgentMeta.capabilities flag an agent build advertises when it
+	// can probe a destination that is not a registered agent; a pre-M4 agent advertises nothing and
+	// ignores TaskRequest.external_target silently.
 	capabilityExternalChecks = "external-checks"
 
 	// externalTargetKindHost is the ExternalTarget.kind this endpoint produces.
@@ -71,9 +68,7 @@ type diagnosticsRequest struct {
 	Destination string `json:"destination"`
 	Type        string `json:"type"`
 	Plane       string `json:"plane"`
-	// DestinationKind is "node" (default, and the ONLY value that existed
-	// before M4) or "external". When "external", Destination is NOT resolved
-	// against the registry and DestinationAddress carries the address.
+	// DestinationKind is "node" or "external".
 	DestinationKind    string `json:"destinationKind,omitempty"`
 	DestinationAddress string `json:"destinationAddress,omitempty"`
 }
@@ -175,10 +170,8 @@ func (h *DiagnosticsHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		Plane:     plane,
 	}
 
-	// destName is what every published event reports as destination_node: the
-	// node name for a node destination, the target NAME for an external one.
-	// The address never appears — name is the only external field allowed to
-	// become an identifier downstream.
+	// destName is what every published event reports as destination_node; the address never appears —
+	// name is the only external field allowed to become an identifier downstream.
 	destName := req.Destination
 
 	if destKind == destinationKindExternal {
@@ -307,10 +300,8 @@ func (h *DiagnosticsHandler) publishProgress(taskID, checkType, source, destinat
 	}})
 }
 
-// publishObserved decodes the agent's CheckResult and emits either a
-// CheckObserved (non-mtr types) or an MTRCompleted (mtr, with hops). Decode
-// failures are logged and swallowed — the HTTP response to the caller (the
-// verbatim CheckResult bytes) is unaffected either way.
+// publishObserved decodes the agent's CheckResult and emits either a CheckObserved (non-mtr types)
+// or an MTRCompleted (mtr, with hops).
 func (h *DiagnosticsHandler) publishObserved(taskID, checkType, plane, source, destination string, detailsJSON []byte) {
 	if h.events == nil {
 		return
@@ -339,10 +330,7 @@ func (h *DiagnosticsHandler) publishObserved(taskID, checkType, plane, source, d
 	}})
 }
 
-// mtrHopsFromDetails pulls the hop list out of a CheckResult.Details that was
-// decoded into `any`: json.Unmarshal rebuilds it as map[string]any/[]any, never
-// as the concrete model.MTRDetails the agent serialized, so the fields are
-// extracted by hand.
+// mtrHopsFromDetails pulls the hop list out of a CheckResult.Details that was decoded into `any`.
 func mtrHopsFromDetails(details any) []*pb.MTRHop {
 	md, isMap := details.(map[string]any)
 	if !isMap {

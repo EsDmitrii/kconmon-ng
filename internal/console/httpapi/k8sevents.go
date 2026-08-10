@@ -9,49 +9,28 @@ import (
 	"github.com/EsDmitrii/kconmon-ng/internal/console/store"
 )
 
-// K8sEventService is the READ half of the captured Kubernetes event table,
-// narrowed the same way EventLister narrows store.EventStore: the writer is
-// internal/console/kubectx (M6 Task 2) and the HTTP layer must not be able to
-// forge a cluster event.
+// K8sEventService is the READ half of the captured Kubernetes event table.
 type K8sEventService interface {
 	store.K8sEventReader
 }
 
 var _ K8sEventService = (*store.DB)(nil)
 
-// k8sEventsUnavailableDetail names BOTH knobs, because they answer two
-// different questions and an operator who is told only one of them will fix
-// the wrong thing.
-//
-// This 503 is about the FIRST one only: s.k8sEvents is nil exactly when there
-// is no database, and no database means there is nowhere for the reader to
-// have written anything. The second knob never produces a 503 -- with a
-// database and the reader off, this route answers 200 with an empty page,
-// which is the honest report of "nothing was captured", not of "this endpoint
-// is unavailable". Saying so here is what stops an operator from concluding
-// their empty timeline is a broken API.
+// k8sEventsUnavailableDetail names BOTH knobs.
 const k8sEventsUnavailableDetail = "captured Kubernetes events live in the database and have no in-memory " +
 	"fallback: set console.database.mode (Helm: console.database.mode) to enable GET /api/v1/k8s-events, and " +
 	"console.kubernetesContext.enabled to capture events into it -- without the capture the endpoint answers " +
 	"an empty page rather than this error"
 
-// k8sEventKinds and k8sEventTypes are the closed vocabularies store's own
-// validation enforces on the write side (store/k8sevents.go). A ?kind= or
-// ?type= outside them can never match a row, so it is rejected as a likely
-// typo rather than silently returning an empty page -- handleEvents' ?type=
-// precedent.
+// k8sEventKinds and k8sEventTypes are the closed vocabularies store's own validation enforces on
+// the write side (store/k8sevents.go); a ?kind= or ?type= outside them can never match a row.
 var (
 	k8sEventKinds = map[string]bool{"Node": true, "Pod": true}
 	k8sEventTypes = map[string]bool{"Normal": true, "Warning": true}
 )
 
-// k8sEventResponse is one captured cluster event on the wire.
-//
-// ID is a STRING even though the column is a bigint, for store.PinnedRef's
-// reason: an incident pins findings from six different tables into ONE
-// heterogeneous list, and one id spelling across it is worth more than a
-// per-source type every reader would have to switch on. The timeline pins
-// these by the value this field carries.
+// k8sEventResponse is one captured cluster event on the wire; ID is a STRING even though the column
+// is a bigint, for store.PinnedRef's reason.
 type k8sEventResponse struct {
 	ID              string    `json:"id"`
 	UID             string    `json:"uid"`
@@ -83,19 +62,8 @@ type k8sEventsListResponse struct {
 	NextCursor string             `json:"nextCursor"`
 }
 
-// handleK8sEvents serves one page of captured Kubernetes events, newest first.
-//
-// It rides events:read rather than a permission of its own (M6 Decision 8):
-// these ARE events, and a separate permission would gate nothing an operator
-// holding events:read could not already infer from the topology and run
-// streams they can read.
-//
-// Filters are all exact matches -- ?name= (a node or pod name), ?kind=
-// (Node|Pod), ?type= (Normal|Warning) -- plus the usual from/to window over
-// event_time. Unlike handleEvents this does NOT reject an inverted window: the
-// caller is the Investigate timeline, driven by a chart's visible range, and a
-// degenerate range there is a range with nothing in it, not a client bug worth
-// a 400 (handleAnnotationsList's reasoning).
+// handleK8sEvents serves one page of captured Kubernetes events; it rides events:read rather than a
+// permission of its own: these ARE events.
 func (s *Server) handleK8sEvents(w http.ResponseWriter, r *http.Request) {
 	if s.k8sEvents == nil {
 		writeProblem(w, http.StatusServiceUnavailable, "kubernetes events not available",

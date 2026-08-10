@@ -48,10 +48,7 @@ build_images() {
     log "Building Docker images locally (tag: $IMAGE_TAG)..."
     docker build --target agent -t "kconmon-ng-agent:$IMAGE_TAG" "$PROJECT_DIR"
     docker build --target controller -t "kconmon-ng-controller:$IMAGE_TAG" "$PROJECT_DIR"
-    # The console lives in its OWN Dockerfile (Makefile's docker-build does the
-    # same): it needs a Node stage to build the SPA before the Go stage, which
-    # the agent/controller Dockerfile has no reason to carry. Expect this one to
-    # take considerably longer than the other two on a cold cache.
+    # The console lives in its OWN Dockerfile (Makefile's docker-build does the same).
     docker build -f "$PROJECT_DIR/Dockerfile.console" \
         --target console -t "kconmon-ng-console:$IMAGE_TAG" "$PROJECT_DIR"
 
@@ -110,10 +107,7 @@ install_monitoring() {
         --timeout=120s
 }
 
-# Both console prerequisites, applied BEFORE the Helm install. The console
-# mounts each of them as a FILE at boot: a missing DSN file leaves the pod
-# short of readiness, and an unreadable encryptionKeyFile is fatal outright,
-# so neither can be created after the fact.
+# Both console prerequisites, applied BEFORE the Helm install.
 install_console_secrets() {
     log "Applying the local Postgres fixture (console database)..."
     kubectl apply -n "$NAMESPACE_APP" -f "$PROJECT_DIR/hack/postgres-local.yaml"
@@ -122,12 +116,8 @@ install_console_secrets() {
         -n "$NAMESPACE_APP" \
         --timeout=180s
 
-    # Generated here and thrown away with the cluster — a fixed key checked
-    # into the repo would be a real key in version control, and this one seals
-    # nothing that outlives the minikube profile. --dry-run=client | apply keeps
-    # `up` re-runnable; note that re-running it ROTATES the key, which makes any
-    # webhook secret stored under the previous one undecryptable. That is fine
-    # for a stand and would not be fine anywhere else.
+    # Generated here and thrown away with the cluster — a fixed key checked into the repo would be a real key in
+    # version control.
     log "Creating the webhook encryption key Secret..."
     kubectl create secret generic kconmon-local-webhooks-key \
         --from-literal=encryptionKey="$(openssl rand -base64 32)" \
@@ -318,19 +308,13 @@ smoke_console() {
     rm -f "$API_BODY"
 }
 
-# The M7 round trip, end to end against a REAL prometheus-operator (not just
-# its CRD, which is all the e2e job has): declare a rule through the API, wait
-# for the reconciler to server-side-apply the bundle, then read the
-# PrometheusRule object back out of the cluster.
+# The round trip, end to end against a REAL prometheus-operator (not just its CRD, which is all the e2e job has).
 alerting_round() {
     log "Alerting round trip (POST rule -> syncStatus=synced -> PrometheusRule)..."
 
     local rule_name
     rule_name="local-smoke-$(date +%s)"
-    # kind "raw" is verbatim -- there is no PromQL parser in the console, so the
-    # expression lands in the bundle unchanged and can be asserted by equality.
-    # `vector(1) > 0` is well-formed and depends on no scrape target, no series
-    # and nothing this cluster monitors.
+    # kind "raw" is verbatim -- there is no PromQL parser in the console.
     local body
     body=$(printf '{"name":"%s","kind":"raw","params":{"expr":"vector(1) > 0"},%s}' \
         "$rule_name" '"severity":"warning","forNs":0,"enabled":true')
@@ -370,10 +354,8 @@ kconmon-local-postgres pod and console.database.* in hack/values-local.yaml"
                 echo "    sync error (attempt $i): $sync_message"
             fi
         fi
-        # Re-kicking is the model, not impatience: the reconciler compares the
-        # live bundle against the desired one BEFORE applying, so the pass
-        # right after a write reports `drift` while already applying the fix.
-        # `synced` is the state of the SECOND pass.
+        # Re-kicking is the model, not impatience: the reconciler compares the live bundle against the desired one
+        # BEFORE applying.
         console_api POST "/api/v1/alert-rules/$rule_id/sync" >/dev/null
         sleep "$SYNC_SLEEP"
     done

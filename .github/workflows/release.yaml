@@ -51,11 +51,8 @@ jobs:
           echo "version=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_OUTPUT"
           echo "build_date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
 
-      # The console image cannot go through goreleaser dockers (those need a
-      # prebuilt binary + thin Dockerfile; Dockerfile.console has a Node build
-      # stage and needs full source context), so it is built here. Deliberately
-      # BEFORE GoReleaser: a console build failure aborts the release before
-      # any GitHub Release draft exists.
+      # The console image cannot go through goreleaser dockers (those need a prebuilt binary + thin Dockerfile;
+      # Dockerfile.console has a Node build stage and needs full source context).
       - name: Build and push console image
         id: console-image
         uses: docker/build-push-action@v7
@@ -118,6 +115,9 @@ jobs:
           printf '%s' "$HELM_TOKEN" | helm registry login ghcr.io -u "${{ github.actor }}" --password-stdin
           VERSION="${GITHUB_REF#refs/tags/v}"
           OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          # Optional subcharts are pinned in Chart.lock; build (not update) so the
+          # published artifact carries exactly the locked versions.
+          helm dependency build charts/kconmon-ng
           helm package charts/kconmon-ng --version "$VERSION" --app-version "$VERSION"
           PUSH_OUT=$(helm push "kconmon-ng-${VERSION}.tgz" "oci://ghcr.io/${OWNER}/charts" 2>&1)
           echo "$PUSH_OUT"
@@ -142,21 +142,15 @@ jobs:
             --config /dev/null:application/vnd.cncf.artifacthub.config.v1+yaml \
             artifacthub-repo.yml:application/vnd.cncf.artifacthub.repository-metadata.layer.v1.yaml
 
-      # Last step on purpose: goreleaser creates the release as a DRAFT
-      # (immutable releases seal assets at publish time), so the release goes
-      # live only after every artifact — archives, krew manifest, chart,
-      # signature, AH metadata — is in place.
+      # Last step on purpose: goreleaser creates the release as a DRAFT (immutable releases seal assets at publish
+      # time).
       - name: Publish release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh release edit "$GITHUB_REF_NAME" --draft=false --latest
 
-      # Opens the version-bump PR in kubernetes-sigs/krew-index, so a release no
-      # longer needs a hand-written krew PR. The bot is a hosted service: the
-      # action posts the release request to it and it opens the PR from its own
-      # fork, so no token or secret of ours is involved. krew maintainers
-      # auto-approve those PRs.
+      # Opens the version-bump PR in kubernetes-sigs/krew-index, so a release no longer needs a hand-written krew PR.
       - name: Open krew-index bump PR
         if: ${{ !contains(github.ref_name, '-') }}
         uses: rajatjindal/krew-release-bot@v0.0.51

@@ -89,12 +89,7 @@ func TestHeaderAuthenticateCustomDelimiter(t *testing.T) {
 	}
 }
 
-// TestHeaderAuthenticateSpoofedXForwardedForDoesNotGrantTrust is the other
-// security-critical case: trust is decided on r.RemoteAddr ONLY. A request
-// from an untrusted peer that ALSO forges an X-Forwarded-For claiming a
-// trusted address must still be rejected -- X-Forwarded-For is exactly as
-// attacker-controlled as any other header this mode reads once (and only
-// once) it has decided to trust the peer.
+// TestHeaderAuthenticateSpoofedXForwardedForDoesNotGrantTrust is the other security-critical case.
 func TestHeaderAuthenticateSpoofedXForwardedForDoesNotGrantTrust(t *testing.T) {
 	t.Parallel()
 	a := newHeaderFixture(t, ",")
@@ -110,14 +105,12 @@ func TestHeaderAuthenticateSpoofedXForwardedForDoesNotGrantTrust(t *testing.T) {
 	}
 }
 
-// TestHeaderAuthenticateDuplicateUserHeaderIsNoCredentials proves an
-// append-not-overwrite proxy bug (or a client that smuggled its own copy of
-// the identity header ahead of the trusted proxy, which then appended
-// rather than replaced) cannot slip a second X-Remote-User value past this
-// authenticator: net/http merges repeated headers, so r.Header.Get alone
-// would silently see only the first value and hide the second one
-// entirely -- that must be treated as "no credentials", not resolved by
-// picking either value.
+// TestHeaderAuthenticateDuplicateUserHeaderIsNoCredentials proves an append-not-overwrite proxy bug
+// (or a client that smuggled its own copy of the identity header ahead of the trusted proxy, which
+// then appended rather than replaced) cannot slip a second X-Remote-User value past this
+// authenticator: net/http merges repeated headers, so r.Header.Get alone would silently see only
+// the first value and hide the second one entirely -- that must be treated as "no credentials", not
+// resolved by picking either value.
 func TestHeaderAuthenticateDuplicateUserHeaderIsNoCredentials(t *testing.T) {
 	t.Parallel()
 	a := newHeaderFixture(t, ",")

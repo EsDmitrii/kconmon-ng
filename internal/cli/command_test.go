@@ -206,11 +206,8 @@ func TestInvalidOutputExit1(t *testing.T) {
 	_ = stderr
 }
 
-// TestCheckCommandRespectsClientDeadline proves the diagnostics call gives up
-// once the client-side deadline (--timeout + slack) elapses, instead of
-// hanging on a controller that never responds (e.g. a stalled port-forward).
-// The slack is shrunk for the duration of the test so a ~100ms deadline is
-// enough to exercise the real code path without slowing the suite down.
+// TestCheckCommandRespectsClientDeadline proves the diagnostics call gives up once the client-side
+// deadline (--timeout + slack) elapses.
 func TestCheckCommandRespectsClientDeadline(t *testing.T) {
 	origSlack := diagnosticsDeadlineSlack
 	diagnosticsDeadlineSlack = 50 * time.Millisecond

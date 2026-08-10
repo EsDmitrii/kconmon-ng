@@ -2,6 +2,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ThemeProvider } from "@/components/theme-provider";
+import { LOCALE_STORAGE_KEY, LocaleProvider, type Locale } from "@/lib/i18n";
 import {
   TIME_MACHINE_DISABLED_REASON,
   TIME_MACHINE_REASON_ID,
@@ -12,19 +13,25 @@ import type { Alert, AuditEntry, Incident, PromResult } from "@/lib/types";
 import { COPY_NOTE_TTL_MS, InvestigatePage } from "./investigate";
 import {
   PIN_KIND_BY_TIMELINE_KIND,
+  PROMQL_MAX_RANGE_MS,
   alertEntries,
   auditDetailLine,
   auditEntries,
   buildExportPayload,
   buildInvestigateURL,
   commitWindow,
+  exportFileName,
+  ignoredInvestigationParams,
   incidentParams,
+  isReadOnlyAudit,
+  pathChangeEntries,
   investigationFailRatioQuery,
   investigationLossQuery,
   investigationRttQuery,
   parseInvestigationParams,
   investigationParamsToSearch,
   pinnedRefFor,
+  rangeExceedsPromBound,
   runTouchesScope,
   samplesFromMatrix,
   scopeCaptionValue,
@@ -47,10 +54,8 @@ import {
 import { formatSeconds } from "@/lib/curated-metrics";
 import { MAINTENANCE_SERIES_NAME, maintenanceOverlaySeries } from "@/lib/annotations";
 
-// Same reason as every other page test in this repo: echarts.init() reaches for
-// a 2d canvas context jsdom does not implement. The signal panels' OPTION is
-// asserted through the pure builders (cursorSeries + the lifted
-// maintenanceOverlaySeries) rather than through a mounted chart.
+// Same reason as every other page test in this repo: echarts.init reaches for a 2d canvas context
+// jsdom does not implement.
 vi.mock("@/components/echart", () => ({
   EChart: ({ className }: { className?: string }) => <div data-testid="echart" className={className} />,
 }));
@@ -188,16 +193,17 @@ interface Options {
   /** The stored incident this console has. `null` = the id in the URL matches
    *  nothing, i.e. GET /api/v1/incidents/{id} answers 404. */
   incident?: Record<string, unknown> | null;
-  /** Route prefixes that answer problem+json instead of a body (QA round 3,
-   *  finding #1): each one becomes a FAILED source, which is a different thing
-   *  from an absent one and the page now says which. */
+  /** Route prefixes that answer problem+json instead of a body: each one becomes a FAILED source. */
   failing?: { prefix: string; status?: number; detail: string }[];
   /** The topology body, so a test can hand the page a controller-less console
    *  whose only evidence of a fleet is its AGENTS (QA round 3, finding #5). */
   topology?: unknown;
-  /** The single sample every INSTANT promql query answers — the fail-ratio the
-   *  delta chip renders (QA round 3, finding #4). */
+  /** The single sample every INSTANT promql query answers — the fail-ratio the delta chip renders. */
   failRatio?: string;
+  /** Mounts a <LocaleProvider> above the page. Absent — which is every case
+   *  but the ru smoke pin at the bottom of this file — the page renders with
+   *  no provider at all, which lib/i18n defines as English. */
+  locale?: Locale;
 }
 
 function renderPage(opts: Options = {}) {
@@ -219,14 +225,14 @@ function renderPage(opts: Options = {}) {
     failing = [],
     topology = topologyBody(),
     failRatio = "0.2",
+    locale,
   } = opts;
+
+  if (locale !== undefined) localStorage.setItem(LOCALE_STORAGE_KEY, locale);
 
   window.history.replaceState({}, "", `/investigate${search}`);
 
-  /* The incident row is STATEFUL across the calls in one render, because that
-     is the only way to exercise what this task actually built: create, then
-     read the permalink back, then patch it three times. A fixed body would let
-     an assertion pass against a page that never sent the write. */
+  /* The incident row is STATEFUL across the calls in one render. */
   let stored: Record<string, unknown> | null = incident;
 
   const calls: Call[] = [];
@@ -321,11 +327,12 @@ function renderPage(opts: Options = {}) {
   vi.stubGlobal("fetch", fetchMock);
 
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const page = <InvestigatePage />;
   const utils = render(
     <QueryClientProvider client={qc}>
       <ThemeProvider>
         <TimeMachineProvider>
-          <InvestigatePage />
+          {locale === undefined ? page : <LocaleProvider>{page}</LocaleProvider>}
         </TimeMachineProvider>
       </ThemeProvider>
     </QueryClientProvider>,
@@ -337,13 +344,7 @@ function renderPage(opts: Options = {}) {
   return { ...utils, calls, urlsFor, postCalls, patchCalls, qc };
 }
 
-/**
- * pickRange drives one DateTimePicker by its aria-label: open the trigger, type
- * the local day and wall clock into the picker's manual fields, apply. The same
- * helper components/annotations.test.tsx and components/maintenance.test.tsx
- * use — the console asks for an instant exactly one way now (QA round 3, #12),
- * so the tests drive it one way too.
- */
+/** pickRange drives one DateTimePicker by its aria-label: open the trigger. */
 function pickRange(triggerName: string, date: string, time: string) {
   fireEvent.click(screen.getByRole("button", { name: triggerName }));
   fireEvent.change(screen.getByLabelText("Date"), { target: { value: date } });
@@ -409,15 +410,14 @@ function annotationRow(over: Record<string, unknown> = {}) {
   };
 }
 
-/* No fake clock: every assertion below either names an absolute instant that
-   came out of a fixture, or checks a SPAN (which a preset computes from one
-   Date.now() call and is therefore exact whatever the wall clock says). A
-   frozen clock would only buy the ability to assert an absolute `from` on a
-   preset — and it would fight @testing-library's timer-aware waitFor for it. */
+/* A frozen clock would only buy the ability to assert an absolute `from` on a preset. */
 afterEach(() => {
   cleanup();
   vi.unstubAllGlobals();
   window.history.replaceState({}, "", "/");
+  /* vitest.setup.ts backs localStorage with one Map per test FILE, so a locale
+     left behind would flip every later case in this one into Russian. */
+  localStorage.removeItem(LOCALE_STORAGE_KEY);
 });
 
 /* ── the URL contract ───────────────────────────────────────────────────── */
@@ -514,6 +514,33 @@ describe("commitWindow (findings #2 and #3)", () => {
     const out = commitWindow(from, to, from);
     expect(out.ok).toBe(false);
     expect(out.ok === false && out.reason).toContain("after the viewed instant");
+  });
+
+  /* The Prometheus bound is NOT one of commitWindow's refusals: seven of this
+     page's nine sources are store-backed and answer a two-day window fine. */
+  it("still commits a window wider than the Prometheus query bound", () => {
+    const wide = new Date(from.getTime() + 29.5 * 60 * 60 * 1000);
+    expect(commitWindow(from, wide, null)).toEqual({ ok: true, from, to: wide, clamped: false });
+  });
+});
+
+/* QA scope 4, finding #5: a 29h30m window fired two range queries the proxy
+   refuses, and the SERVER's own "range 29h30m0s > max 24h0m0s: range exceeds
+   maximum" ended up where the loss and RTT charts belong — untranslated, about a
+   bound nothing on the page had named. */
+describe("rangeExceedsPromBound (QA scope 4, finding #5)", () => {
+  const from = new Date(FROM);
+
+  it("is false at exactly the bound — the proxy's own comparison is strictly greater-than", () => {
+    expect(rangeExceedsPromBound(from, new Date(from.getTime() + PROMQL_MAX_RANGE_MS))).toBe(false);
+  });
+
+  it("is true one millisecond past it", () => {
+    expect(rangeExceedsPromBound(from, new Date(from.getTime() + PROMQL_MAX_RANGE_MS + 1))).toBe(true);
+  });
+
+  it("matches the bound the console's config actually carries", () => {
+    expect(PROMQL_MAX_RANGE_MS).toBe(24 * 60 * 60 * 1000);
   });
 });
 
@@ -1019,9 +1046,7 @@ describe("InvestigatePage — per-source permission gating", () => {
   it("a subject without audit:read gets the muted line and ZERO requests to /api/v1/audit", async () => {
     const { urlsFor } = renderPage({ permissions: ALL_READS.filter((p) => p !== "audit:read") });
 
-    // "Audit rows", not "config changes" (QA round 5, finding #19): most of
-    // what the audit log records is a READ decision, and calling those rows
-    // config changes sent an operator hunting a change nobody made.
+    // "Audit rows", not "config changes": most of what the audit log records is a READ decision.
     expect(await screen.findByText(/audit rows need audit:read/i)).toBeTruthy();
     // Give every other source time to fire so "zero" means zero, not "not yet".
     await waitFor(() => expect(urlsFor("/api/v1/events").length).toBeGreaterThan(0));
@@ -1196,6 +1221,89 @@ describe("InvestigatePage — the timeline", () => {
   });
 });
 
+/*
+ * the timeline's pagination, through the real page The pager's own arithmetic and chrome are pinned
+ * in components/ investigation-timeline.test.tsx.
+ */
+
+/** One event a minute for the whole investigated hour. Sixty rows plus the one
+ *  threshold crossing the loss fixture derives = 61 entries, i.e. two pages at
+ *  the default size and a partial second one. */
+const HOUR_OF_EVENTS = Array.from({ length: 60 }, (_, i) => ({
+  id: `e-${i}`,
+  seq: i + 1,
+  type: "topology_changed",
+  severity: "info",
+  scope: "node-a→node-b",
+  timestamp: `2026-08-08T00:${String(i).padStart(2, "0")}:00Z`,
+  summary: `event number ${i}`,
+  details: null,
+}));
+
+describe("InvestigatePage — the timeline is paginated client-side", () => {
+  it("cuts the merged list into pages while counting the whole window", async () => {
+    renderPage({ events: HOUR_OF_EVENTS });
+
+    await waitFor(() => expect(screen.getAllByTestId("timeline-row")).toHaveLength(50));
+    expect(screen.getByTestId("timeline-count").textContent).toMatch(/61 entries in this window/);
+    expect(screen.getByTestId("timeline-page-label").textContent).toMatch(/page 1 of 2/i);
+
+    fireEvent.click(screen.getByRole("button", { name: "Next page" }));
+    expect(screen.getAllByTestId("timeline-row")).toHaveLength(11);
+    // The count is the window's either way — a pager must not shrink the fleet.
+    expect(screen.getByTestId("timeline-count").textContent).toMatch(/61 entries in this window/);
+  });
+
+  it("issues NOT ONE extra request to turn a page — the window is already fetched", async () => {
+    const { calls } = renderPage({ events: HOUR_OF_EVENTS });
+    await waitFor(() => expect(screen.getAllByTestId("timeline-row")).toHaveLength(50));
+
+    const before = calls.length;
+    fireEvent.click(screen.getByRole("button", { name: "Next page" }));
+    fireEvent.click(within(screen.getByRole("radiogroup", { name: "Rows per page" })).getByRole("radio", { name: "10" }));
+    expect(calls.length).toBe(before);
+  });
+
+  it("keeps the audit, runs and alert captions above the rows on page 2", async () => {
+    renderPage({ events: HOUR_OF_EVENTS });
+    await waitFor(() => expect(screen.getAllByTestId("timeline-row")).toHaveLength(50));
+
+    fireEvent.click(screen.getByRole("button", { name: "Next page" }));
+
+    const sources = within(screen.getByRole("list", { name: "Timeline sources" })).getAllByRole("listitem");
+    const text = sources.map((li) => li.textContent ?? "").join(" ");
+    expect(text).toMatch(/newest 200 audit rows/);
+    expect(text).toMatch(/Runs are the newest/);
+    expect(text).toMatch(/firing NOW/);
+  });
+
+  it("resets to page 1 when the investigated window changes", async () => {
+    renderPage({ events: HOUR_OF_EVENTS });
+    await waitFor(() => expect(screen.getAllByTestId("timeline-row")).toHaveLength(50));
+
+    fireEvent.click(screen.getByRole("button", { name: "Next page" }));
+    expect(screen.getByTestId("timeline-page-label").textContent).toMatch(/page 2 of 2/i);
+
+    fireEvent.click(screen.getByRole("radio", { name: "15m" }));
+    fireEvent.click(screen.getByRole("button", { name: "Investigate" }));
+
+    await waitFor(() =>
+      expect(screen.getByTestId("timeline-page-label").textContent).toMatch(/page 1 of 2/i),
+    );
+  });
+
+  it("keeps the page size out of the URL — the four parameters are the whole contract", async () => {
+    renderPage({ events: HOUR_OF_EVENTS });
+    await waitFor(() => expect(screen.getAllByTestId("timeline-row")).toHaveLength(50));
+
+    fireEvent.click(within(screen.getByRole("radiogroup", { name: "Rows per page" })).getByRole("radio", { name: "10" }));
+    fireEvent.click(screen.getByRole("button", { name: "Next page" }));
+
+    const qs = new URLSearchParams(window.location.search);
+    expect([...qs.keys()].sort()).toEqual(["from", "kind", "scope", "to"]);
+  });
+});
+
 describe("InvestigatePage — correlation", () => {
   it("ranks a path change above an annotation, which is never a cause at all", async () => {
     renderPage({ snapshots: [snapshotRow()], annotations: [annotationRow()] });
@@ -1261,10 +1369,7 @@ describe("InvestigatePage — the actions rail", () => {
     expect((button as HTMLButtonElement).disabled).toBe(true);
   });
 
-  /* Task 7 shipped BOTH writes as disabled seams; Task 8 replaced the incident
-     one. This is the SECOND replacement: "Create maintenance" is a real control
-     now, gated on maintenance:write exactly the way "Save as incident" is gated
-     on incidents:write — so the seam's assertions become its opposite. */
+  /* This is the SECOND replacement: "Create maintenance" is a real control now. */
   it("no longer shows Create maintenance as a disabled seam — it is the real control", async () => {
     renderPage({ permissions: [...ALL_READS, "maintenance:write"] });
     const create = await screen.findByRole("button", { name: "Create maintenance" });
@@ -1387,8 +1492,6 @@ describe("the pin vocabulary", () => {
     expect(PIN_KIND_BY_TIMELINE_KIND.k8s).toBe("k8s");
     expect(PIN_KIND_BY_TIMELINE_KIND.maintenance).toBeNull();
     expect(PIN_KIND_BY_TIMELINE_KIND.threshold).toBeNull();
-    // M7 Task 8: an alert lives in Prometheus, not in a table the pin
-    // vocabulary has a member for.
     expect(PIN_KIND_BY_TIMELINE_KIND.alert).toBeNull();
   });
 
@@ -1714,10 +1817,7 @@ describe("buildInvestigateURL", () => {
   });
 });
 
-/* ══════════════════════════════════════════════════════════════════════════
-   QA round 3 — the page-level pins. One describe per finding, named by it, so
-   a regression report says which decision came back.
-   ══════════════════════════════════════════════════════════════════════════ */
+/* One describe per finding, named by it, so a regression report says which decision came back. */
 
 const PAIR_SEARCH = `?kind=pair&scope=${encodeURIComponent("node-a→node-b")}&from=${FROM}&to=${TO}`;
 
@@ -1761,11 +1861,7 @@ describe("#1 a failed source says so, and stops the page claiming nothing happen
 
 describe("#4 the delta chip survives a fleet running one protocol", () => {
   it("renders a real ratio rather than an em dash when the guarded query returns 1", async () => {
-    /* The end-to-end half of finding #4. The query-shape test above pins the
-       `or vector(0)` guards; this pins what they BUY: on an ICMP-only fleet the
-       two missing protocols now contribute 0 instead of erasing the whole
-       expression, so a scope failing every probe reads 100.0% instead of "—"
-       — which was indistinguishable from "nothing measured". */
+    /* The end-to-end half of . The query-shape test above pins the `or vector(0)` guards; this pins what they BUY. */
     renderPage({ search: PAIR_SEARCH, failRatio: "1" });
     const chip = await screen.findByTestId("matrix-delta");
     await waitFor(() => expect(chip.textContent).toContain("100.0%"));
@@ -1810,13 +1906,44 @@ describe("#2 a refused signal query renders its problem, and the form refuses th
   });
 });
 
+describe("QA scope 4, finding #5 — a window wider than the Prometheus bound", () => {
+  const WIDE = `?kind=pair&scope=${encodeURIComponent("node-a→node-b")}&from=2026-08-06T18:30:00Z&to=2026-08-08T00:00:00Z`;
+
+  it("states the bound in the chart's own slot instead of letting the proxy's sentence stand there", async () => {
+    renderPage({ search: WIDE });
+    const loss = await screen.findByRole("region", { name: "Packet loss" });
+    const alert = await within(loss).findByRole("alert");
+    expect(alert.textContent).toBe(
+      "This range is wider than 24h, and one Prometheus query covers at most that much " +
+        "(console.prometheus.maxRange) — narrow the range to draw this chart. The timeline is not affected.",
+    );
+    /* The RTT pane is refused for the same reason and must say so too. */
+    const rtt = await screen.findByRole("region", { name: "RTT p95" });
+    expect((await within(rtt).findByRole("alert")).textContent).toContain("wider than 24h");
+    expect(within(loss).queryByTestId("echart")).toBeNull();
+  });
+
+  it("never sends the range query, so the raw server refusal cannot reach the page", async () => {
+    const { urlsFor } = renderPage({ search: WIDE });
+    await screen.findByRole("region", { name: "Packet loss" });
+    /* Something else on the page HAS finished fetching, so this is not just an early read. */
+    await waitFor(() => expect(urlsFor("/api/v1/events").length).toBeGreaterThan(0));
+    expect(urlsFor("/api/v1/promql/query_range")).toEqual([]);
+  });
+
+  it("leaves the store-backed timeline alone — its sources carry no such bound", async () => {
+    const { urlsFor } = renderPage({ search: WIDE });
+    await waitFor(() => expect(urlsFor("/api/v1/events").length).toBeGreaterThan(0));
+    expect(urlsFor("/api/v1/annotations").length).toBeGreaterThan(0);
+    /* The instant evaluations behind the delta chip carry no range at all, so they still run. */
+    await waitFor(() => expect(urlsFor("/api/v1/promql/query").length).toBeGreaterThan(0));
+  });
+});
+
 describe("#3 the Time Machine clamps the investigated window", () => {
   const ENGAGED = `${PAIR_SEARCH}&at=2026-08-08T00:30:00Z`;
 
-  /* The clock is frozen for this block only: a preset commit ("1h") is
-     measured from NOW, and against a real wall clock the window would land
-     months after the instant under test — a different branch of commitWindow
-     entirely. */
+  /* The clock is frozen for this block only: a preset commit ("1h") is measured from NOW. */
   beforeEach(() => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     vi.setSystemTime(NOW);
@@ -1830,16 +1957,43 @@ describe("#3 the Time Machine clamps the investigated window", () => {
      therefore no dependence on how far the fake clock has drifted. */
   const CUSTOM = `?kind=pair&scope=${encodeURIComponent("node-a→node-b")}&from=2026-08-08T00:00:00Z&to=2026-08-08T00:45:00Z`;
 
-  it("commits `to` as the viewed instant and says the window moved", async () => {
+  it("commits `to` as the viewed instant and says the window moved — on ARRIVAL, with nothing pressed", async () => {
+    /* QA scope 3, finding #2: the clamp used to live only in apply(), so this
+       very link rendered rows dated after the instant the whole console claimed
+       to be showing until somebody happened to press the button. */
     renderPage({ search: `${CUSTOM}&at=2026-08-08T00:30:00Z` });
-    await screen.findByRole("button", { name: "Investigate" });
-    fireEvent.click(screen.getByRole("button", { name: "Investigate" }));
 
     expect(await screen.findByTestId("clamp-banner")).toHaveTextContent("Window clamped to the viewed instant.");
     // The URL is the contract: `to` is now the instant, `from` is untouched.
     const committed = parseInvestigationParams(window.location.search, NOW);
     expect(committed.to.toISOString()).toBe("2026-08-08T00:30:00.000Z");
     expect(committed.from.toISOString()).toBe("2026-08-08T00:00:00.000Z");
+    // ...and `?at=` survived the correction: the page rewrote its own four keys.
+    expect(new URLSearchParams(window.location.search).get("at")).toBe("2026-08-08T00:30:00Z");
+  });
+
+  it("asks for NOTHING past the viewed instant on a deep link", async () => {
+    const { calls } = renderPage({ search: `${CUSTOM}&at=2026-08-08T00:30:00Z` });
+    await screen.findByTestId("clamp-banner");
+    // Every store-backed source is asked for the CLAMPED window, never the
+    // link's own `to` — the rows on screen are the proof the banner is about.
+    await waitFor(() => expect(calls.some((c) => c.url.startsWith("/api/v1/events"))).toBe(true));
+    const events = calls.filter((c) => c.url.startsWith("/api/v1/events"));
+    for (const c of events) {
+      expect(c.url).toContain(encodeURIComponent("2026-08-08T00:30:00.000Z"));
+      expect(c.url).not.toContain(encodeURIComponent("2026-08-08T00:45:00.000Z"));
+    }
+  });
+
+  it("clamps again when the FORM asks for a window past the instant", async () => {
+    renderPage({ search: `${CUSTOM}&at=2026-08-08T00:30:00Z` });
+    await screen.findByRole("button", { name: "Investigate" });
+    // Reach forward past the instant from the already-clamped fields.
+    pickRange("Range end", "2026-08-08", "23:00");
+    fireEvent.click(screen.getByRole("button", { name: "Investigate" }));
+
+    expect(await screen.findByTestId("clamp-banner")).toHaveTextContent("Window clamped to the viewed instant.");
+    expect(parseInvestigationParams(window.location.search, NOW).to.toISOString()).toBe("2026-08-08T00:30:00.000Z");
   });
 
   it("says nothing when the clamp changed nothing", async () => {
@@ -2227,5 +2381,488 @@ describe("the audit timeline badge names its SOURCE (#19)", () => {
     // The row's own title keeps the action verbatim — the label narrowed, the
     // information did not.
     expect(within(timeline).getByText("GET /api/v1/targets")).toBeInTheDocument();
+  });
+});
+
+/* the Russian is wired ONE smoke pin, not a second copy of the suite. */
+describe("InvestigatePage — Russian", () => {
+  it("renders its chrome, an honesty caption and the pager in Russian", async () => {
+    renderPage({ locale: "ru", events: HOUR_OF_EVENTS });
+
+    expect(await screen.findByRole("heading", { name: "Расследование" })).toBeInTheDocument();
+
+    // The pager: 61 entries over two pages at the default size of 50.
+    await waitFor(() => expect(screen.getAllByTestId("timeline-row")).toHaveLength(50));
+
+    // The honesty caption for the newest 200 audit rows, with its bound intact.
+    const sources = within(screen.getByRole("list", { name: "Источники ленты" })).getAllByRole("listitem");
+    const text = sources.map((li) => li.textContent ?? "").join(" ");
+    expect(text).toMatch(/свежих 200 строк аудита/);
+    expect(text).toMatch(/нет фильтра по времени/);
+
+    expect(screen.getByTestId("timeline-count").textContent).toBe("61 запись в этом интервале");
+    expect(screen.getByTestId("timeline-page-label").textContent).toBe("Страница 1 из 2");
+
+    fireEvent.click(screen.getByRole("button", { name: "Следующая страница" }));
+    expect(screen.getByTestId("timeline-page-label").textContent).toBe("Страница 2 из 2");
+  });
+
+  /* A row here says the whole contract held — the console's connective words moved, the server's did. */
+  it("renders a timeline row's title in Russian, keeping the server's half verbatim", async () => {
+    renderPage({ locale: "ru", maintenance: [maintenanceRow()] });
+
+    const timeline = await screen.findByRole("list", { name: "Записи ленты" });
+    await waitFor(() =>
+      // «Работы» is ours; "switch upgrade" is the reason an operator
+      // typed, and a console that paraphrased it would be inventing a record.
+      expect(within(timeline).getByText("Работы: switch upgrade")).toBeInTheDocument(),
+    );
+    expect(within(timeline).queryByText("Maintenance: switch upgrade")).toBeNull();
+    // The detail line's own words too: «до» for "until", «глобальная» stays
+    // out of it because this window names a real scope.
+    expect(within(timeline).getByText(/node-a→node-b · до /)).toBeInTheDocument();
+  });
+
+  /* The bars' count line, the scope caption behind it, and the honesty
+     sentence a failed read shows — all three are dict/annotations.ts and
+     dict/maintenance.ts reached through the page that mounts them widest. */
+  it("captions the annotation bar in Russian, naming the scope it really queried", async () => {
+    renderPage({ locale: "ru", search: "?kind=cluster&scope=&from=" + FROM + "&to=" + TO });
+
+    // «все области» — scopeCaptionValue's answer for a scope that queried every
+    // one of them, not the "global" value it was NOT filtering by (#7).
+    await waitFor(() =>
+      expect(screen.getByText(/0 заметок в этом интервале · область все области/)).toBeInTheDocument(),
+    );
+  });
+});
+
+/* ══ QA scope 3 ══════════════════════════════════════════════════════════ */
+
+describe("isReadOnlyAudit (finding #8)", () => {
+  it("calls every GET a read, whatever the route", () => {
+    expect(isReadOnlyAudit("GET /api/v1/audit")).toBe(true);
+    expect(isReadOnlyAudit("GET /api/v1/targets")).toBe(true);
+  });
+
+  it("calls the two PromQL POSTs reads — a query is a body, not a change", () => {
+    expect(isReadOnlyAudit("POST /api/v1/promql/query")).toBe(true);
+    expect(isReadOnlyAudit("POST /api/v1/promql/query_range")).toBe(true);
+  });
+
+  it("calls every OTHER write a write, including a POST that only LOOKS harmless", () => {
+    expect(isReadOnlyAudit("POST /api/v1/runs")).toBe(false);
+    expect(isReadOnlyAudit("POST /api/v1/annotations")).toBe(false);
+    expect(isReadOnlyAudit("DELETE /api/v1/incidents/inc-1")).toBe(false);
+    expect(isReadOnlyAudit("PATCH /api/v1/incidents/inc-1")).toBe(false);
+    // The allow-list is exact: a route that merely starts the same way is not on it.
+    expect(isReadOnlyAudit("POST /api/v1/promql/query_saved")).toBe(false);
+  });
+
+  it("survives an action that is not 'METHOD route' at all", () => {
+    expect(isReadOnlyAudit("")).toBe(false);
+    expect(isReadOnlyAudit("GET")).toBe(true);
+  });
+});
+
+describe("auditEntries marks reads, and the ranking honours it (finding #8)", () => {
+  const row = (over: Record<string, unknown> = {}) => ({
+    id: 1757,
+    at: "2026-08-08T00:20:00Z",
+    subjectKind: "user",
+    subjectId: "ada",
+    action: "POST /api/v1/promql/query",
+    resource: "promql",
+    outcome: "allowed",
+    remoteAddr: "10.0.0.1",
+    detail: {},
+    ...over,
+  });
+
+  it("flags the console's own PromQL POST as read-only", () => {
+    const [entry] = auditEntries([row()] as never, new Date(FROM), new Date(TO));
+    expect(entry.readOnly).toBe(true);
+  });
+
+  it("leaves a real configuration change unflagged", () => {
+    const [entry] = auditEntries(
+      [row({ action: "POST /api/v1/targets" })] as never,
+      new Date(FROM),
+      new Date(TO),
+    );
+    expect(entry.readOnly).toBe(false);
+  });
+});
+
+describe("ignoredInvestigationParams (finding #14)", () => {
+  it("is empty for a well-formed link, and for the bare one", () => {
+    expect(ignoredInvestigationParams("")).toEqual([]);
+    expect(
+      ignoredInvestigationParams(`?kind=pair&scope=${encodeURIComponent("a→b")}&from=${FROM}&to=${TO}`),
+    ).toEqual([]);
+  });
+
+  it("names a kind this page does not have", () => {
+    expect(ignoredInvestigationParams("?kind=galaxy")).toContain("kind");
+  });
+
+  it("names a scope the surviving kind has nowhere to put", () => {
+    expect(ignoredInvestigationParams("?kind=cluster&scope=node-a")).toEqual(["scope"]);
+    // ...and a scope alongside a bad kind is dropped for the same reason.
+    expect(ignoredInvestigationParams("?kind=galaxy&scope=node-a")).toEqual(["kind", "scope"]);
+  });
+
+  it("names an instant that will not parse — and not one that will", () => {
+    expect(ignoredInvestigationParams("?from=yesterday")).toEqual(["from"]);
+    expect(ignoredInvestigationParams(`?from=${FROM}&to=lunchtime`)).toEqual(["to"]);
+  });
+});
+
+describe("exportFileName (finding #20)", () => {
+  it("carries no colon — Windows refuses one and browsers mangle it silently", () => {
+    const name = exportFileName(new Date(FROM));
+    expect(name).not.toContain(":");
+    expect(name).toBe("investigation-2026-08-08T00-00-00-000Z.json");
+  });
+
+  it("still names a file for an instant that will not format", () => {
+    expect(exportFileName(new Date("nope"))).toBe("investigation-unknown.json");
+  });
+});
+
+describe("path-change rows never say '1 hops' (finding #22)", () => {
+  const snap = (hops: number) => ({
+    id: "s-9",
+    sourceNode: "node-a",
+    destination: "node-b",
+    pathHash: "abcdef0123456789",
+    hopCount: hops,
+    hops: [],
+    firstSeen: "2026-08-08T00:20:00Z",
+    lastSeen: TO,
+    traceCount: 1,
+  });
+
+  it("labels the counts instead of pluralising them, at one and at many", () => {
+    const one = pathChangeEntries([snap(1)] as never, new Date(FROM), new Date(TO));
+    expect(one[0].detail).toBe("path abcdef012345 · hops: 1 · traces: 1");
+    const many = pathChangeEntries([snap(12)] as never, new Date(FROM), new Date(TO));
+    expect(many[0].detail).toContain("hops: 12");
+    // The shape that produced the bug is gone in both directions.
+    expect(one[0].detail).not.toMatch(/\d hops\b/);
+    expect(many[0].detail).not.toMatch(/\d hops\b/);
+  });
+});
+
+describe("every source failed is an ERROR STATE, not a quiet empty window (finding #1)", () => {
+  /* Every store- and Prometheus-backed leg this page asks for on a pair scope. */
+  const ALL_SOURCES = [
+    "/api/v1/events",
+    "/api/v1/k8s-events",
+    "/api/v1/audit",
+    "/api/v1/annotations",
+    "/api/v1/mtr",
+    "/api/v1/runs",
+    "/api/v1/maintenance",
+    "/api/v1/promql",
+    "/api/v1/alerts",
+  ].map((prefix) => ({ prefix, status: 500, detail: "upstream is down" }));
+
+  it("says no timeline could be assembled, and does NOT claim nothing happened", async () => {
+    renderPage({ failing: ALL_SOURCES });
+
+    const alert = await screen.findByTestId("timeline-all-failed");
+    expect(alert).toHaveAttribute("role", "alert");
+    expect(alert.textContent).toMatch(/No timeline could be assembled/);
+    // The honest-empty copy is the exact lie this replaces.
+    expect(screen.queryByText(/Nothing happened in this window/i)).toBeNull();
+  });
+
+  it("prints NO figure in the delta chip for two evaluations that never came back", async () => {
+    renderPage({ failing: ALL_SOURCES });
+    await screen.findByTestId("timeline-all-failed");
+
+    const chip = screen.getByTestId("matrix-delta");
+    expect(chip.textContent).toContain("upstream is down");
+    // The old behaviour: "0.0% → 0.0%" over a refused pair of queries.
+    expect(chip.textContent).not.toMatch(/\d+\.\d%/);
+    expect(chip.textContent).not.toContain("pp");
+  });
+
+  it("names the fail-ratio pair in the source list, which used to have no line at all", async () => {
+    renderPage({ failing: ALL_SOURCES });
+    expect(await screen.findByText(/Failure-ratio delta: upstream is down/)).toBeTruthy();
+  });
+
+  it("stays a PARTIAL when only one source fails — the two states are not the same claim", async () => {
+    renderPage({ failing: [{ prefix: "/api/v1/events", status: 500, detail: "upstream is down" }] });
+
+    await screen.findByText(/Events: upstream is down/);
+    expect(screen.getByTestId("timeline-partial").textContent).toMatch(/1 source failed/i);
+    expect(screen.queryByTestId("timeline-all-failed")).toBeNull();
+    // ...and the nothing-happened claim is still suppressed by the partial.
+    expect(screen.queryByText(/Nothing happened in this window/i)).toBeNull();
+  });
+
+  it("counts zero out loud rather than dropping the number (finding #15)", async () => {
+    renderPage();
+    await waitFor(() =>
+      expect(screen.getByTestId("timeline-count").textContent).toMatch(/entries in this window/),
+    );
+  });
+});
+
+describe("a permalink to a DELETED incident (finding #3)", () => {
+  it("says the incident is gone and names the id, instead of framing a default investigation", async () => {
+    renderPage({ search: "?incident=inc-gone", incident: null });
+
+    const card = await screen.findByTestId("incident-not-found");
+    expect(card).toHaveAttribute("role", "alert");
+    expect(card.textContent).toMatch(/That incident no longer exists/);
+    expect(card.textContent).toContain("inc-gone");
+  });
+
+  it("drops the ghost ?incident= from the address bar", async () => {
+    renderPage({ search: "?incident=inc-gone", incident: null });
+    await screen.findByTestId("incident-not-found");
+    await waitFor(() => expect(new URLSearchParams(window.location.search).get("incident")).toBeNull());
+  });
+
+  it("keeps the ordinary error card for a failure that is NOT a 404", async () => {
+    renderPage({
+      search: "?incident=inc-1",
+      incident: incidentRow(),
+      failing: [{ prefix: "/api/v1/incidents/", status: 503, detail: "store is down" }],
+    });
+    expect(await screen.findByText(/No incident matches this link/)).toBeTruthy();
+    expect(screen.queryByTestId("incident-not-found")).toBeNull();
+    // A row that may well still exist keeps its link.
+    expect(new URLSearchParams(window.location.search).get("incident")).toBe("inc-1");
+  });
+});
+
+describe("a pinned finding whose row left the window (finding #10)", () => {
+  it("says the row is out of window instead of letting 'audit / 1757' read as a title", async () => {
+    renderPage({
+      search: "?incident=inc-1",
+      permissions: WRITE,
+      incident: incidentRow({ pinned: [{ kind: "audit", id: "1757", note: "the rollout" }] }),
+    });
+
+    const row = await screen.findByTestId("pinned-finding");
+    expect(within(row).getByTestId("pin-out-of-window").textContent).toMatch(
+      /outside the current window; its title is not available here/i,
+    );
+    // The stored kind, the stored id and the operator's own note — nothing invented.
+    expect(row.textContent).toContain("audit");
+    expect(row.textContent).toContain("1757");
+    expect(within(row).getByDisplayValue("the rollout")).toBeTruthy();
+  });
+
+  it("says nothing when the row IS on screen — the caption is about absence", async () => {
+    renderPage({
+      search: "?incident=inc-1",
+      permissions: WRITE,
+      incident: incidentRow({ pinned: [{ kind: "audit", id: "1757" }] }),
+      auditRows: [
+        {
+          id: 1757,
+          at: "2026-08-08T00:20:00Z",
+          subjectKind: "user",
+          subjectId: "ada",
+          action: "POST /api/v1/targets",
+          resource: "targets",
+          outcome: "allowed",
+          remoteAddr: "10.0.0.1",
+          detail: {},
+        },
+      ],
+    });
+
+    const row = await screen.findByTestId("pinned-finding");
+    await waitFor(() => expect(within(row).queryByTestId("pin-out-of-window")).toBeNull());
+  });
+});
+
+describe("a deep link the page cannot honour verbatim (findings #2 and #14)", () => {
+  it("refuses a linked window that lies entirely after the viewed instant, with nothing pressed", async () => {
+    renderPage({
+      search: `?kind=pair&scope=${encodeURIComponent("node-a→node-b")}` +
+        "&from=2026-08-08T00:00:00Z&to=2026-08-08T00:45:00Z&at=2026-08-07T00:00:00Z",
+    });
+    expect(await screen.findByText(/The window is after the viewed instant/)).toBeTruthy();
+    expect(screen.queryByTestId("clamp-banner")).toBeNull();
+    // The address bar states what is actually framed, not what the link asked for.
+    await waitFor(() =>
+      expect(parseInvestigationParams(window.location.search, NOW).to.toISOString()).toBe(
+        "2026-08-07T00:00:00.000Z",
+      ),
+    );
+  });
+
+  it("names every parameter it threw away, warns, and corrects the address bar", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    renderPage({ search: "?kind=galaxy&scope=node-a&from=yesterday" });
+
+    const notice = await screen.findByTestId("ignored-params");
+    expect(notice.textContent).toContain("?kind");
+    expect(notice.textContent).toContain("?scope");
+    expect(notice.textContent).toContain("?from");
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("[investigate] ignoring"));
+
+    // replaceState, and the corrected URL carries only what the page honoured.
+    await waitFor(() => {
+      const qs = new URLSearchParams(window.location.search);
+      expect(qs.get("kind")).toBe("cluster");
+      expect(qs.get("scope")).toBeNull();
+      expect(Number.isNaN(Date.parse(qs.get("from") ?? ""))).toBe(false);
+    });
+    warn.mockRestore();
+  });
+
+  it("is dismissible — it describes an arrival, not a state", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    renderPage({ search: "?kind=galaxy" });
+    await screen.findByTestId("ignored-params");
+    fireEvent.click(screen.getByRole("button", { name: "Dismiss" }));
+    expect(screen.queryByTestId("ignored-params")).toBeNull();
+    warn.mockRestore();
+  });
+
+  it("says nothing for a well-formed link, including the bare one", async () => {
+    renderPage({ search: "" });
+    await screen.findByRole("button", { name: "Investigate" });
+    expect(screen.queryByTestId("ignored-params")).toBeNull();
+  });
+});
+
+describe("an invalid custom range DISABLES, the way an incomplete scope does (finding #13)", () => {
+  async function custom(startDate: string, startTime: string) {
+    renderPage();
+    await screen.findByRole("button", { name: "Investigate" });
+    fireEvent.click(screen.getByRole("radio", { name: "Custom" }));
+    pickRange("Range start", startDate, startTime);
+  }
+
+  const button = () => screen.getByRole("button", { name: "Investigate" }) as HTMLButtonElement;
+
+  it("refuses an inverted range before the click rather than swallowing it after", async () => {
+    await custom("2026-08-09", "12:00");
+    expect(button().disabled).toBe(true);
+    expect(screen.getByTestId("range-invalid").textContent).toBe("The range end must be after its start.");
+  });
+
+  it("re-enables the moment the range makes sense again", async () => {
+    await custom("2026-08-09", "12:00");
+    expect(button().disabled).toBe(true);
+    pickRange("Range start", "2026-08-08", "00:00");
+    expect(button().disabled).toBe(false);
+    expect(screen.queryByTestId("range-invalid")).toBeNull();
+  });
+
+  it("shows ONE reason: the scope's comes first, and the range's waits its turn", async () => {
+    renderPage({ search: "?kind=pair" });
+    await screen.findByRole("button", { name: "Investigate" });
+    fireEvent.click(screen.getByRole("radio", { name: "Custom" }));
+    pickRange("Range start", "2026-08-09", "12:00");
+    expect(screen.getByTestId("scope-incomplete")).toBeTruthy();
+    expect(screen.queryByTestId("range-invalid")).toBeNull();
+  });
+});
+
+describe("the segmented controls are real radiogroups (finding #16)", () => {
+  it("gives Scope and Range the roles and the roving tabindex", async () => {
+    renderPage();
+    await screen.findByRole("button", { name: "Investigate" });
+
+    for (const name of ["Scope kind", "Range preset"]) {
+      const group = screen.getByRole("radiogroup", { name });
+      const radios = within(group).getAllByRole("radio");
+      expect(radios.length).toBeGreaterThan(1);
+      // Exactly one checked, and exactly one in the tab order.
+      expect(radios.filter((r) => r.getAttribute("aria-checked") === "true").length).toBe(1);
+      expect(radios.filter((r) => r.getAttribute("tabindex") === "0").length).toBe(1);
+    }
+  });
+
+  it("gives the timeline's Rows per page the same treatment", async () => {
+    renderPage({
+      events: Array.from({ length: 12 }, (_, i) => ({
+        id: `e-${i}`,
+        seq: i,
+        type: "topology_changed",
+        severity: "info",
+        scope: "node-a→node-b",
+        timestamp: `2026-08-08T00:${String(i).padStart(2, "0")}:00Z`,
+        summary: `event ${i}`,
+        details: null,
+      })),
+    });
+    const group = await screen.findByRole("radiogroup", { name: "Rows per page" });
+    expect(within(group).getAllByRole("radio").map((r) => r.textContent)).toEqual(["10", "50", "100"]);
+  });
+});
+
+describe("the scoring-source link says where it goes (finding #21)", () => {
+  it("keeps the link and adds the air-gap honesty to it", async () => {
+    renderPage();
+    const link = await screen.findByRole("link", { name: "the scoring source" });
+    expect(link.getAttribute("href")).toContain("github.com");
+    expect(link.getAttribute("title")).toMatch(/main branch/);
+    expect(link.getAttribute("title")).toMatch(/air-gapped/);
+  });
+});
+
+describe("the segmented controls fit a 375px viewport (finding #11)", () => {
+  it("lets the track WRAP inside its card instead of drawing past the edge", async () => {
+    renderPage();
+    await screen.findByRole("button", { name: "Investigate" });
+    /* Five scope options measure 356px against a 303px card at 375px. jsdom
+       lays nothing out, so the pin is on the two classes that decide it: a
+       track that may not exceed its parent, and one that is allowed to fold.
+       shrink-0 stays — the track is one control inside a flex-wrap row. */
+    for (const name of ["Scope kind", "Range preset"]) {
+      const track = screen.getByRole("radiogroup", { name });
+      expect(track.className).toContain("max-w-full");
+      expect(track.className).toContain("flex-wrap");
+    }
+  });
+});
+
+describe("the audit caption admits it is cluster-wide (finding #9)", () => {
+  it("names BOTH bounds — the newest N rows, and no scope filter at all", async () => {
+    renderPage();
+    const caption = await screen.findByText(/Config changes come from the newest 200 audit rows/);
+    // The window bound was already stated; the SCOPE bound was the silent one,
+    // and the audit leg is the only source here that ignores the scope entirely.
+    expect(caption.textContent).toMatch(/NOT narrowed to this scope/i);
+    expect(caption.textContent).toMatch(/cluster-wide/i);
+  });
+});
+
+describe("one instant, one shape, in Russian too (findings #7 and #18)", () => {
+  it("draws the timeline's clock in the INTERFACE language, not the browser's default", async () => {
+    renderPage({
+      locale: "ru",
+      events: [
+        {
+          id: "e-1",
+          seq: 1,
+          type: "topology_changed",
+          severity: "warn",
+          scope: "node-a→node-b",
+          timestamp: "2026-08-08T00:05:00Z",
+          summary: "node-b NotReady",
+          details: null,
+        },
+      ],
+    });
+
+    const row = (await screen.findAllByTestId("timeline-row"))[0];
+    const clock = (row.textContent ?? "").trim();
+    // ru-RU is 24-hour: an AM/PM marker here would mean the row had been
+    // formatted with a bare toLocale* and the browser's own locale.
+    expect(clock).not.toMatch(/AM|PM/);
+    expect(clock).toMatch(/^\d{2}:\d{2}:\d{2}/);
   });
 });

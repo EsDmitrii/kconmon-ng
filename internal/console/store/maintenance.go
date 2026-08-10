@@ -12,19 +12,14 @@ import (
 	"github.com/EsDmitrii/kconmon-ng/internal/console/store/gen"
 )
 
-// The maintenance-window bounds (M6 Task 1). Counted in bytes, for
-// annotationTextMaxLen's reason. maintenanceScopeMaxLen also bounds created_by
-// -- a subject reference has no reason to outgrow a scope.
+// The maintenance-window bounds.
 const (
 	maintenanceReasonMaxLen = 512
 	maintenanceScopeMaxLen  = 255
 )
 
-// MaintenanceWindow is one planned-work interval (M6 Decision 6). In M6 it is
-// DATA AND RENDERING, not suppression logic: nothing evaluates alert rules
-// until M7, so there is nothing to suppress. It renders as markArea on scoped
-// charts and as a timeline row, and the correlation panel treats it as an
-// EXPLAINING class rather than an implicating one.
+// MaintenanceWindow is one planned-work interval; it renders as markArea on scoped charts and as a
+// timeline row.
 type MaintenanceWindow struct {
 	ID string
 	// Scope is "" for a global window; any other value names a node, a pair or
@@ -57,10 +52,8 @@ type MaintenanceFilter struct {
 	// scope, a real value, so nil means "every scope" and a pointer to ""
 	// means "the global ones only".
 	Scope *string
-	// From and To bound the window a maintenance window must OVERLAP, not the
-	// window it must be contained in: a window that opened before From and is
-	// still running is exactly the one that explains what the operator is
-	// looking at. Zero on either side is unbounded.
+	// From and To bound the window a maintenance window must OVERLAP, not the window it must be
+	// contained in.
 	From   time.Time // inclusive
 	To     time.Time // exclusive
 	Cursor string    // opaque keyset cursor from a previous page
@@ -73,10 +66,7 @@ type MaintenancePage struct {
 	NextCursor string // "" when the page is the last one
 }
 
-// MaintenanceStore is the write seam: httpapi creates and deletes windows,
-// nothing else does. There is no update by design (M6 Task 4) -- a window is
-// two timestamps and a reason, so delete-and-recreate is both the correction
-// path and the whole of it.
+// MaintenanceStore is the write seam: httpapi creates and deletes windows, nothing else does.
 type MaintenanceStore interface {
 	CreateMaintenanceWindow(ctx context.Context, in MaintenanceInput) (MaintenanceWindow, error)
 	// DeleteMaintenanceWindow returns ErrNotFound when id does not name a
@@ -94,10 +84,7 @@ type MaintenanceReader interface {
 
 var _ MaintenanceReader = (*DB)(nil)
 
-// Validate reports whether in is a well-formed window. The end-after-start
-// rule is checked here AS WELL AS by the table's CHECK: the CHECK is the
-// backstop for anything that ever writes the table without going through this
-// package, and a named error is what the caller can actually act on.
+// Validate reports whether in is a well-formed window.
 func (in *MaintenanceInput) Validate() error {
 	if in.StartAt.IsZero() {
 		return errors.New("store: maintenance window: start at must not be zero")

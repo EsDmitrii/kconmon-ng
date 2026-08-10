@@ -33,10 +33,7 @@ spec:
           port: {{ .Values.config.grpcPort }}
     {{- if .Values.console.enabled }}
     {{- if .Values.controller.events.enabled }}
-    # Console to controller gRPC (EventStream.WatchEvents). This policy's
-    # podSelector is chart-wide (name+instance), so the controller side of any
-    # new console traffic must be opened HERE — the console-scoped policy in
-    # templates/console/ only governs the console Pods themselves.
+    # Console to controller gRPC; the controller side of console traffic is opened here.
     - from:
         - podSelector:
             matchLabels:
@@ -47,9 +44,7 @@ spec:
           port: {{ .Values.config.grpcPort }}
     {{- end }}
     {{- if eq .Values.console.valkey.mode "bundled" }}
-    # Console to the bundled Valkey. Same chart-wide podSelector caveat: this
-    # opens TCP <valkey.port> ingress from console Pods on every Pod this
-    # policy selects, of which only the bundled Valkey actually listens there.
+    # Console to the bundled Valkey.
     - from:
         - podSelector:
             matchLabels:
@@ -101,12 +96,63 @@ spec:
           port: 53
         - protocol: TCP
           port: 53
-    # Kubernetes API (controller needs node access)
+    {{- if .Values.config.checkers.icmp.enabled }}
+    # ICMP probes and reactive MTR: a protocol rule with NO ports, because ICMP has none.
     - to:
-        - namespaceSelector:
+        - podSelector:
             matchLabels:
-              kubernetes.io/metadata.name: default
+              {{- include "kconmon-ng.selectorLabels" . | nindent 14 }}
+              app.kubernetes.io/component: agent
+      ports:
+        - protocol: ICMP
+    {{- end }}
+    {{- if .Values.config.checkers.external.enabled }}
+    # External checks leave the cluster; empty renders TCP 80/443 plus ICMP to 0.0.0.0/0.
+    {{- with .Values.networkPolicy.externalEgress }}
+    {{- toYaml . | nindent 4 }}
+    {{- else }}
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+      ports:
+        - protocol: TCP
+          port: 80
+        - protocol: TCP
+          port: 443
+        - protocol: ICMP
+    {{- end }}
+    {{- end }}
+    {{- if .Values.config.checkers.http.enabled }}
+    # HTTP checker targets; empty renders TCP 80/443 to 0.0.0.0/0.
+    {{- with .Values.networkPolicy.httpEgress }}
+    {{- toYaml . | nindent 4 }}
+    {{- else }}
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+      ports:
+        - protocol: TCP
+          port: 80
+        - protocol: TCP
+          port: 443
+    {{- end }}
+    {{- end }}
+    {{- with .Values.networkPolicy.resolverEgress }}
+    # Explicit DNS resolvers outside the cluster.
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+    # Kubernetes apiserver. ipBlock, not a namespaceSelector: kubernetes.default.svc is a ClusterIP with
+    # no Pod behind it, so a namespaceSelector matches nothing and drops every packet.
+    {{- with .Values.networkPolicy.kubeAPIEgress }}
+    {{- toYaml . | nindent 4 }}
+    {{- else }}
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
       ports:
         - protocol: TCP
           port: 443
+        - protocol: TCP
+          port: 6443
+    {{- end }}
 {{- end }}
