@@ -1,8 +1,7 @@
 ---
-# kconmon-ng default values. Sections in order:
+# kconmon-ng default values, sections in order:
 #   1 Naming  2 Shared config  3 Agent  4 Controller  5 Console
 #   6 Observability  7 Kubernetes  8 Optional dependencies
-# Reasoning, migration notes and examples live in README.md.
 
 # == 1. Naming ==
 
@@ -105,7 +104,6 @@ agent:
   tolerations:
     - operator: Exists
   # NET_RAW is required by the ICMP checker and reactive MTR traces; everything else is dropped.
-  # This is the one workload the restricted PSS profile cannot admit as-is (documented in README).
   securityContext:
     allowPrivilegeEscalation: false
     readOnlyRootFilesystem: true
@@ -312,8 +310,7 @@ console:
     # host:port; required for mode=external.
     address: ""
     dialTimeout: 5s
-    # Password for a Valkey that requires AUTH (the norm for managed and for the subchart).
-    # Empty means no AUTH, which is what the unauthenticated bundled Valkey wants.
+    # Password Secret for a Valkey that requires AUTH; empty means no AUTH.
     existingSecret: ""
     # Key inside that Secret; the chart-managed path writes this same key.
     existingSecretKey: console-valkey-password
@@ -408,8 +405,8 @@ console:
         timeoutMs: 500
       # MaxMind GeoLite2 databases, served from the fixed /geoip mount.
       geoip:
-        # auto (geoipupdate sidecar keeps them fresh) | volume (you supply them) | disabled.
-        # Empty derives it: a volume or a path you set means volume, otherwise disabled.
+        # auto (geoipupdate sidecar) | volume (you supply them) | disabled;
+        # empty means volume when a volume or path is set, else disabled.
         mode: ""
         # Editions the sidecar downloads; also what the default paths are derived from.
         editions:
@@ -611,8 +608,7 @@ serviceAccount:
   # Empty generates the name from the release name; required when create is false.
   name: ""
 
-# ClusterRole/Role and their bindings; they bind to the resolved ServiceAccount
-# name whether or not this chart created it. False means you manage RBAC.
+# ClusterRole/Role and their bindings for the resolved ServiceAccount; false means you manage RBAC.
 rbac:
   create: true
 
@@ -636,9 +632,7 @@ pdb:
   enabled: true
   minAvailable: 1
 
-# == 8. Optional dependencies == subcharts for the product's OWN stack, both off by default.
-# Helm keys subchart values by the dependency ALIAS, so these are top-level
-# blocks and everything under them passes through verbatim. See README.
+# == 8. Optional dependencies == subcharts for the product's OWN stack, keyed by dependency ALIAS, both off by default.
 
 # CloudNativePG OPERATOR; false assumes it is already installed (the Cluster CR is 5.2).
 cnpg-operator:

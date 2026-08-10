@@ -141,8 +141,7 @@ spec:
     # Explicit DNS resolvers outside the cluster.
     {{- toYaml . | nindent 4 }}
     {{- end }}
-    # Kubernetes apiserver. ipBlock, not a namespaceSelector: kubernetes.default.svc is a ClusterIP with
-    # no Pod behind it, so a namespaceSelector matches nothing and drops every packet.
+    # Kubernetes apiserver by ipBlock: kubernetes.default.svc is a ClusterIP with no Pod behind it, so a namespaceSelector matches nothing.
     {{- with .Values.networkPolicy.kubeAPIEgress }}
     {{- toYaml . | nindent 4 }}
     {{- else }}
