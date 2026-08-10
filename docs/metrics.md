@@ -222,25 +222,28 @@ trend chart in the MTR Explorer reads snapshot history rather than Prometheus
 
 ## Default alerting rules
 
-Deployed when `prometheusRule.enabled: true`. The metric prefix in `expr` is
-substituted automatically from `config.metricsPrefix`. Additional rules can be
-appended under `prometheusRule.rules` in Helm values.
+Deployed when `prometheusRule.enabled: true`. The rules live in the chart
+(`charts/kconmon-ng/templates/_rules.tpl`), not in Helm values: each one has an
+`enabled` toggle plus its tunable numbers under
+`prometheusRule.<alertName>.{enabled,threshold,for,severity}`, and extra rules
+are appended verbatim under `prometheusRule.additionalRules`. Metric names in
+`expr` are printed from `config.metricsPrefix` directly. The chart README's
+"Alerting rules" section documents every knob and the reasoning behind each
+rule.
 
-That substitution applies to **this** `PrometheusRule` only. The Grafana
+That prefix substitution applies to **this** `PrometheusRule` only. The Grafana
 dashboards in `dashboards/` are imported as plain JSON with `kconmon_ng_`
 written out literally and nothing rewrites them, so a non-default
-`config.metricsPrefix` means editing the dashboard JSON by hand — the same
-caveat `values.yaml` states next to `metricsPrefix`.
+`config.metricsPrefix` means editing the dashboard JSON by hand.
 
 **There are two different `PrometheusRule` objects once the Console is
-running, and neither implies the other.** This one is static: rendered from
-`prometheusRule.rules` values, edited in Git, gated on
-`prometheusRule.enabled`. The other is written by the Console's alerting
-reconciler (`console.alerting.enabled`) from rules operators build in the UI
-and stored in PostgreSQL. Run both, either, or neither. The Console's renderer
-takes the configured prefix as a constructor argument rather than defaulting to
-`kconmon_ng`, so rules it emits follow `config.metricsPrefix` the way this
-template's `replace` does — the dashboards remain the one surface that does
+running, and neither implies the other.** This one is static: rendered by the
+chart, edited in Git, gated on `prometheusRule.enabled`. The other is written by
+the Console's alerting reconciler (`console.alerting.enabled`) from rules
+operators build in the UI and stored in PostgreSQL. Run both, either, or
+neither. The Console's renderer takes the configured prefix as a constructor
+argument rather than defaulting to `kconmon_ng`, so rules it emits follow
+`config.metricsPrefix` too — the dashboards remain the one surface that does
 not.
 
 ```yaml
@@ -253,31 +256,59 @@ not.
     summary: High UDP packet loss detected between nodes
 
 - alert: TCPChecksFailing
-  expr: rate(kconmon_ng_tcp_results_total{result="fail"}[5m]) > 0
+  expr: >-
+    sum by (source_node, destination_node, source_zone, destination_zone)
+    (rate(kconmon_ng_tcp_results_total{result="fail"}[5m]))
+    /
+    sum by (source_node, destination_node, source_zone, destination_zone)
+    (rate(kconmon_ng_tcp_results_total[5m])) > 0.05
   for: 5m
   labels:
     severity: warning
   annotations:
-    summary: TCP connectivity checks are failing
+    summary: More than 5% of TCP probes on a pair are failing
+
+- alert: PairWentSilent
+  expr: >-
+    sum by (source_node, destination_node)
+    (rate(kconmon_ng_tcp_results_total[1h] offset 5m)) > 0
+    unless
+    sum by (source_node, destination_node)
+    (rate(kconmon_ng_tcp_results_total[5m])) > 0
+  for: 10m
+  labels:
+    severity: warning
+  annotations:
+    summary: No probe results at all from a pair that was reporting an hour ago
 
 - alert: DNSChecksFailing
-  expr: rate(kconmon_ng_dns_results_total{result="fail"}[5m]) > 0
+  expr: >-
+    sum by (source_node, source_zone, host, resolver)
+    (rate(kconmon_ng_dns_results_total{result="fail"}[5m]))
+    /
+    sum by (source_node, source_zone, host, resolver)
+    (rate(kconmon_ng_dns_results_total[5m])) > 0.05
   for: 5m
   labels:
     severity: warning
   annotations:
-    summary: DNS resolution checks are failing
+    summary: More than 5% of DNS resolutions for a host are failing
 
 - alert: ExternalChecksFailing
-  expr: rate(kconmon_ng_external_results_total{result="fail"}[5m]) > 0
+  expr: >-
+    sum by (source_node, source_zone, target, target_kind)
+    (rate(kconmon_ng_external_results_total{result="fail"}[5m]))
+    /
+    sum by (source_node, source_zone, target, target_kind)
+    (rate(kconmon_ng_external_results_total[5m])) > 0.1
   for: 5m
   labels:
     severity: warning
   annotations:
-    summary: External connectivity checks are failing
+    summary: More than 10% of external checks for a target are failing
 
 - alert: KconmonAgentsMissing
-  expr: kconmon_ng_controller_registered_agents < kconmon_ng_controller_expected_agents
+  expr: kconmon_ng_controller_expected_agents - kconmon_ng_controller_registered_agents > 0
   for: 10m
   labels:
     severity: warning
@@ -292,6 +323,30 @@ not.
   annotations:
     summary: No active kconmon-ng controller leader
 ```
+
+Seven rules. `expr`/`for`/`severity` above are what the chart renders at its
+default knob values; the `annotations` are abridged — what ships carries a
+templated `summary` and `description` naming the pair, the zones and the
+measured value.
+
+**`PairWentSilent` is the only one that fires on an absence, and it exists
+because the ratio rules cannot.** A rule like `TCPChecksFailing` divides a
+pair's failing probes by that same pair's total, so a link that stops reporting
+altogether has neither a numerator nor a denominator: the division produces no
+sample at all, the rule stays quiet, and the worst failure — a link nobody is
+measuring any more — reads exactly like a link that never fails. It is written
+as `unless` rather than `rate(...) == 0` because a series that is no longer
+scraped does not go to zero, it ceases to exist, and `A unless B` is a
+difference of label sets: everything probed an hour ago, minus everything still
+being probed. The grouping is deliberately just `(source_node,
+destination_node)` — matching on the four peer labels would read a zone
+relabel as one pair disappearing and another appearing, and fire on a rename.
+The 1h lookback is also the alert's lifetime: once the silence is an hour old
+the offset window empties, the pair leaves the left-hand side and the alert
+resolves, so a cluster scaled down on purpose gets one bounded warning while a
+node that is gone for good belongs to `KconmonAgentsMissing`. The full
+reasoning, including why a rollout does not page anyone, is in the chart
+README's "Alerting rules" section.
 
 ## Self-monitoring
 

@@ -17,19 +17,12 @@ import (
 // DB is an open pool plus the migration state that was applied to it.
 type DB struct {
 	pool *pgxpool.Pool
-	// m meters the auth-path queries (auth.go). It is nil for a DB nobody
-	// called SetMetrics on -- every integration test, and any embedding with
-	// no registry -- and observe is a no-op in that case. eventStore
-	// (events.go) demands a non-nil Metrics in its constructor instead; *DB
-	// cannot, because Open has no Metrics parameter and is called from
-	// contexts (migrations, tests) that have no registry to hand it.
+	// m meters the auth-path queries (auth.go).
 	m *metrics.Metrics
 }
 
-// SetMetrics attaches m to db, so every auth-path query it serves is counted
-// and timed. Call it once, immediately after Open and before db is shared
-// with anything else: it is a plain field write with no synchronization, and
-// the only safe moment to do it is while db is still owned by one goroutine.
+// SetMetrics attaches m to db, so every auth-path query it serves is counted and timed; call it
+// once, immediately after Open and before db is shared with anything else.
 func (db *DB) SetMetrics(m *metrics.Metrics) {
 	db.m = m
 }
@@ -45,15 +38,8 @@ func (db *DB) observe(query string, start time.Time, result string) {
 	db.m.StoreQueries.WithLabelValues(query, result).Inc()
 }
 
-// queryResult classifies one query's outcome into the closed {ok, conflict,
-// error} label set. A unique-constraint conflict is "conflict", matching
-// InsertEvent's use of it for ON CONFLICT DO NOTHING. A miss -- ErrNotFound,
-// whether from pgx.ErrNoRows or from a zero-row UPDATE -- is "ok", NOT
-// "error": an unknown username or an unrecognized token hash is a normal
-// outcome of an authentication attempt, and counting it as a store error
-// would make store_queries_total{result="error"} alarm on nothing more than
-// someone mistyping a login. Whether that miss mattered is the authn layer's
-// question, and AuthRequests{result="invalid"} is where it is answered.
+// queryResult classifies one query's outcome into the closed {ok, conflict, error} label set; a
+// miss -- ErrNotFound, whether from pgx.ErrNoRows or from a zero-row UPDATE -- is "ok".
 func queryResult(err error) string {
 	switch {
 	case err == nil, errors.Is(err, ErrNotFound):
@@ -65,19 +51,8 @@ func queryResult(err error) string {
 	}
 }
 
-// Open dials dsn, applies migrations when migrate is true, and returns a DB.
-// The caller owns Close. A dial failure is returned, NOT swallowed: unlike
-// Valkey (cache.NewValkeyBus, whose failure degrades to an in-process bus)
-// a half-configured database is not a working state — an operator who set
-// database.mode must get a loud boot failure, not silent data loss.
-//
-// connectTimeout bounds only the initial dial (config parse + the first
-// successful connection, proven with a Ping): pgxpool.NewWithConfig itself
-// never blocks on the network, so without an explicit Ping an unroutable
-// host would return a healthy-looking pool immediately and only fail later,
-// mid-request. migrate, when true, runs under ctx (the caller's own
-// deadline, if any) rather than connectTimeout, since applying migrations
-// can legitimately take longer than a single dial.
+// Open dials dsn, applies migrations when migrate is true, and returns a DB; a dial failure is
+// returned.
 func Open(ctx context.Context, dsn string, maxConns int32, connectTimeout time.Duration, migrate bool) (*DB, error) {
 	if dsn == "" {
 		return nil, errors.New("store: dsn must not be empty")

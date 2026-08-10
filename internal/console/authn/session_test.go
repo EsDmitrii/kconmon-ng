@@ -15,11 +15,8 @@ import (
 	"github.com/EsDmitrii/kconmon-ng/internal/console/cache"
 )
 
-// captureLogs swaps the default slog logger for one writing into the
-// returned buffer, restoring the previous logger on test cleanup. NOTE: the
-// tests in this file use t.Parallel(), so the capture window can observe log
-// output from OTHER parallel tests in this package — assert on the presence
-// of specific substrings, never on the buffer being otherwise empty.
+// captureLogs swaps the default slog logger for one writing into the returned buffer; NOTE: the
+// tests in this file use t.Parallel.
 func captureLogs(t *testing.T) *syncBuffer {
 	t.Helper()
 	buf := &syncBuffer{}
@@ -29,10 +26,7 @@ func captureLogs(t *testing.T) *syncBuffer {
 	return buf
 }
 
-// syncBuffer is a mutex-guarded bytes.Buffer: the swapped-in default logger
-// can be written by detached goroutines (token.go's async touch logs its
-// failure after the originating request returns), racing a plain
-// bytes.Buffer against the test goroutine's String() read.
+// syncBuffer is a mutex-guarded bytes.Buffer.
 type syncBuffer struct {
 	mu  sync.Mutex
 	buf bytes.Buffer
@@ -135,10 +129,7 @@ func TestSessionStoreCreateGetRoundtrip(t *testing.T) {
 	}
 }
 
-// TestSessionStoreExpiredSessionIsMissEvenIfKVStillHoldsBytes is the belt-
-// and-braces check: Session.ExpiresAt is honored even when the underlying
-// KV entry's own TTL has not elapsed yet, because an auth decision must
-// never trust the store's TTL alone.
+// TestSessionStoreExpiredSessionIsMissEvenIfKVStillHoldsBytes is the belt-and-braces check.
 func TestSessionStoreExpiredSessionIsMissEvenIfKVStillHoldsBytes(t *testing.T) {
 	t.Parallel()
 	// A long KV ttl: the KV entry itself is nowhere near expiring.
@@ -193,10 +184,8 @@ func TestSessionStoreDeleteIsInstantRevocation(t *testing.T) {
 	}
 }
 
-// TestSessionStoreCorruptedValueIsMissNotPanic proves a corrupted KV entry
-// (e.g. a value written by some future incompatible version, or bit rot)
-// degrades to a clean miss plus a logged warning — never a panic and never a
-// partially-populated Session.
+// TestSessionStoreCorruptedValueIsMissNotPanic proves a corrupted KV entry (e.g. a value written by
+// some future incompatible version, or bit rot) degrades to a clean miss plus a logged warning.
 func TestSessionStoreCorruptedValueIsMissNotPanic(t *testing.T) {
 	t.Parallel()
 	logs := captureLogs(t)

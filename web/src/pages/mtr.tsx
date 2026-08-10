@@ -20,30 +20,33 @@ import {
   getMTRSnapshots,
   listTargets,
 } from "@/lib/api";
+import { localeTag, useLocale, useT } from "@/lib/i18n";
+import { countForm, mtrDict, type MTRKey } from "@/lib/i18n/dict/mtr";
 import { scopeNodeOptions } from "@/lib/investigation-sources";
-import { useWriteGuard } from "@/lib/timemachine";
+import { formatDurationNs, plannedSamplesPerPair, sampleIntervalNs } from "@/lib/run-samples";
+import { useTimeContext, useWriteGuard } from "@/lib/timemachine";
 import type { DestinationKind, MTRDestination, PathSnapshot } from "@/lib/types";
-import { CHECKBOX_CLASS, cn, plural } from "@/lib/utils";
-/* The Runner below builds the SAME POST /api/v1/runs body the Diagnostics run
-   form does, from the same controls. Task 8's brief allows a mechanical export
-   change over there rather than a second copy of any of this here — see the
-   export note in diagnostics.tsx. */
+import { CHECKBOX_CLASS, cn } from "@/lib/utils";
+/* The Runner below builds the SAME POST /api/v1/runs body the Diagnostics run form does, from the same controls. */
 import {
   CONTROL_CLASS,
-  DESTINATION_KIND_LABELS,
   FieldLabel,
   NodeSelector,
   buildRunRequest,
+  durationNsFor,
   estimatePairCount,
+  RUN_DURATIONS,
   toggleName,
 } from "./diagnostics";
 
-/* The hop table moved into its own component when this page passed ~800 lines
-   (M5 Task 7's own instruction). Every name Task 6 exported from here is
-   re-exported so /mtr keeps ONE import site for its pieces and nothing that
-   already depends on them has to learn where they live now. shortHash joined
-   them in Task 8: the diff table and the changes timeline label snapshots with
-   it too, and a component importing this page back would be a cycle. */
+/* The Runner offers the same three destination kinds the Diagnostics form does, and names them the same way. */
+const DESTINATION_KIND_KEYS: Record<DestinationKind, MTRKey> = {
+  node: "runner.kind.node",
+  target: "runner.kind.target",
+  adhoc: "runner.kind.adhoc",
+};
+
+/* The hop table moved into its own component when this page passed ~800 lines. */
 export { fmtRttNs, shortHash, TraceDetail } from "@/components/mtr-hop-table";
 
 /* ── pure helpers (exported for their own tests) ────────────────────────── */
@@ -55,10 +58,7 @@ export interface Pair {
   destination: string;
 }
 
-/** DestinationGroup is one destination with every source that has traced it.
- *  `snapshotCount` is the sum over the group's sources and `lastSeen` the
- *  newest of them — a group header states the group's own truth, not the
- *  first member's. */
+/** DestinationGroup is one destination with every source that has traced it. */
 export interface DestinationGroup {
   destination: string;
   sources: MTRDestination[];
@@ -67,16 +67,8 @@ export interface DestinationGroup {
 }
 
 /**
- * groupDestinations turns the flat list GET /api/v1/mtr/destinations answers
- * into MTR_EXPLORER.md's pane 1 shape: destinations with their sources
- * nested. The grouping is client-side deliberately — the server's row is the
- * (source, destination) pair, which is also the unit pane 2 filters on, so
- * flattening on the wire and nesting for display keeps ONE shape on the API
- * and none of the presentation in the store.
- *
- * Encounter order is preserved on both levels rather than re-sorted: the
- * server already answers most-recently-traced first, and re-sorting here
- * would quietly override an ordering the API documents.
+ * groupDestinations turns the flat list GET /api/v1/mtr/destinations answers into MTR_EXPLORER.md's
+ * pane 1 shape; encounter order is preserved on both levels rather than re-sorted.
  */
 export function groupDestinations(rows: MTRDestination[]): DestinationGroup[] {
   const byDestination = new Map<string, DestinationGroup>();
@@ -98,30 +90,15 @@ export function groupDestinations(rows: MTRDestination[]): DestinationGroup[] {
   return [...byDestination.values()];
 }
 
-/** msOf compares two wire timestamps as instants, not as strings: the server
- *  emits RFC 3339 with whatever offset it is running in, so "2026-08-07T00:00:00+02:00"
- *  and "2026-08-06T23:00:00Z" are the SAME moment and a lexical compare would
- *  get it backwards. An unparseable value sorts oldest rather than throwing. */
+/** msOf compares two wire timestamps as instants. */
 function msOf(ts: string): number {
   const ms = new Date(ts).getTime();
   return Number.isNaN(ms) ? -Infinity : ms;
 }
 
 /**
- * pathChangeFlags marks, index-aligned with `snapshots`, every row whose path
- * differs from the NEXT-OLDER row's. The list arrives newest-first (the
- * store's (source, destination, last_seen DESC, id DESC) index), so the
- * next-older row is simply `i + 1`, and the LAST row is never flagged: it is
- * the oldest route this page knows about, i.e. where the pair started, not a
- * change away from something.
- *
- * The wire truth worth knowing: within one pair, `path_hash` is UNIQUE
- * (mtr_path_snapshots_pair_hash), so on a single-pair page every row but the
- * oldest is flagged. This is still written as a comparison rather than as
- * "flag everything except the last" on purpose — the comparison is what the
- * badge MEANS, it stays correct if a future page ever mixes pairs or replays
- * a repeated hash, and it is the same next-older pairing Task 8's diff picks
- * its two snapshots from.
+ * pathChangeFlags marks, index-aligned with `snapshots`; the list arrives newest-first (the store's
+ * (source, destination, last_seen DESC, id DESC) index).
  */
 export function pathChangeFlags(snapshots: PathSnapshot[]): boolean[] {
   return snapshots.map((s, i) => {
@@ -131,13 +108,7 @@ export function pathChangeFlags(snapshots: PathSnapshot[]): boolean[] {
 }
 
 /**
- * toggleCompare is the two-snapshot selection rule, as a pure function.
- *
- * A diff has exactly two sides, so the list is capped at two — and the third
- * pick does NOT get refused (a checkbox that silently declines to tick is a
- * control that lies). It drops the OLDEST pick and keeps the newest two, which
- * makes "walk down the history ticking rows" a working gesture: each tick
- * compares against the row you ticked just before. Un-ticking removes, and the
+ * toggleCompare is the two-snapshot selection rule, as a pure function; un-ticking removes, and the
  * rule is stated in the pane's own copy rather than left to be discovered.
  */
 export function toggleCompare(selected: string[], id: string): string[] {
@@ -152,14 +123,13 @@ function queryErrorMessage(error: unknown, fallback: string): string {
 
 /* ── shared chrome ──────────────────────────────────────────────────────── */
 
-/** PermissionCard is PAGES.md:126-129's pattern, the same component
- *  targets.tsx and target-card.tsx already use: name the permission, say what
- *  the reader CAN still do, and never render a disabled control in place of
- *  one they simply do not have. */
+/** PermissionCard is PAGES.md:126-129's pattern, the same component targets.tsx and target-card.tsx already use. */
 function PermissionCard({ permission, children }: { permission: string; children: ReactNode }) {
+  const t = useT(mtrDict);
   return (
     <Card role="status" className="p-6">
-      <p className="text-sm font-medium">Requires the {permission} permission</p>
+      {/* The permission STRING is an identifier and interpolates verbatim. */}
+      <p className="text-sm font-medium">{t("permission.title", { permission })}</p>
       <p className="mt-1 max-w-prose text-xs leading-relaxed text-muted-foreground">{children}</p>
     </Card>
   );
@@ -170,9 +140,10 @@ function EmptyNote({ children }: { children: ReactNode }) {
 }
 
 function ListSkeleton() {
+  const t = useT(mtrDict);
   return (
     <div role="status" aria-live="polite" className="mt-4 flex flex-col gap-2">
-      <span className="sr-only">Loading…</span>
+      <span className="sr-only">{t("loading")}</span>
       {Array.from({ length: 3 }, (_, i) => (
         <Skeleton key={i} className="h-10 w-full" />
       ))}
@@ -206,14 +177,17 @@ function DestinationsPane({
    *  of the pair's history it is actually drawing. */
   onSelect: (row: MTRDestination) => void;
 }) {
+  const t = useT(mtrDict);
+  const { locale } = useLocale();
   const query = useQuery({ queryKey: ["mtr", "destinations"], queryFn: getMTRDestinations });
   const groups = useMemo(() => groupDestinations(query.data?.destinations ?? []), [query.data]);
 
   return (
-    <Pane title="Destinations">
+    <Pane title={t("destinations.title")}>
       {query.isError ? (
         <p role="alert" className="mt-3 text-sm text-health-bad">
-          {queryErrorMessage(query.error, "Path history is unavailable")}
+          {/* problem+json is the server's own sentence — verbatim. */}
+          {queryErrorMessage(query.error, t("destinations.error"))}
         </p>
       ) : null}
       {/* isPending, not isLoading: a paused retry (react-query pauses while
@@ -230,11 +204,13 @@ function DestinationsPane({
           that does not.) */}
       {query.isSuccess && groups.length === 0 ? (
         <EmptyNote>
-          Nothing traced yet.{" "}
+          {/* Three keys, not one interpolation: the link sits INSIDE the
+              sentence, which is the one shape a placeholder cannot carry. */}
+          {t("destinations.empty.before")}{" "}
           <a href="/diagnostics" className="text-primary hover:underline">
-            Run an MTR from Diagnostics
+            {t("destinations.empty.link")}
           </a>{" "}
-          — its path lands here.
+          {t("destinations.empty.after")}
         </EmptyNote>
       ) : null}
 
@@ -249,7 +225,9 @@ function DestinationsPane({
             <div key={group.destination}>
               <div className="flex flex-wrap items-baseline justify-between gap-2">
                 <h3 className="truncate text-sm font-medium">{group.destination}</h3>
-                <span className="nums text-xs text-muted-foreground">{plural(group.snapshotCount, "path")}</span>
+                <span className="nums text-xs text-muted-foreground">
+                  {t(`paths.${countForm(locale, group.snapshotCount)}` as MTRKey, { count: group.snapshotCount })}
+                </span>
               </div>
               <ul aria-label={group.destination} className="mt-1.5 flex flex-col gap-1">
                 {group.sources.map((row) => {
@@ -269,9 +247,27 @@ function DestinationsPane({
                           active ? "bg-accent font-medium" : "text-muted-foreground",
                         )}
                       >
-                        <span className="truncate">from {row.sourceNode}</span>
-                        <span className="nums shrink-0 text-muted-foreground">
-                          {row.snapshotCount} · {plural(row.traceCount, "trace")}
+                        {/* The NAME wins the width fight (QA scope 4, finding
+                            #5). The count used to be shrink-0, so in Russian —
+                            where "трассировок" is three times the width of
+                            "traces" — it ate the row and the source collapsed
+                            to «от qa-nod…», which names nothing. flex-1 with a
+                            zero basis hands the leftover to the name and puts
+                            all the shrinking on the count, and the cap keeps
+                            the name at least 55% of the row whatever the
+                            language does. */}
+                        <span
+                          className="min-w-0 flex-1 truncate"
+                          title={t("destinations.from", { node: row.sourceNode })}
+                        >
+                          {t("destinations.from", { node: row.sourceNode })}
+                        </span>
+                        <span
+                          className="nums min-w-0 max-w-[45%] shrink truncate text-muted-foreground"
+                          title={`${row.snapshotCount} · ${t(`traces.${countForm(locale, row.traceCount)}` as MTRKey, { count: row.traceCount })}`}
+                        >
+                          {row.snapshotCount} ·{" "}
+                          {t(`traces.${countForm(locale, row.traceCount)}` as MTRKey, { count: row.traceCount })}
                         </span>
                       </button>
                     </li>
@@ -289,11 +285,9 @@ function DestinationsPane({
 /* ── pane 2: snapshot history ───────────────────────────────────────────── */
 
 /**
- * SnapshotHistory is the pair's loaded routes plus everything two panes need
- * to say about them. It is a HOOK rather than pane-2 state because pane 3's
- * per-hop trend is drawn from these very snapshots (Decision 13: hop RTTs are
- * not in Prometheus), so the pages the reader has loaded are shared data, not
- * one pane's private business. Nothing extra is fetched for the chart.
+ * SnapshotHistory is the pair's loaded routes plus everything two panes need to say about them; it
+ * is a HOOK rather than pane-2 state because pane 3's per-hop trend is drawn from these very
+ * snapshots.
  */
 interface SnapshotHistory {
   snapshots: PathSnapshot[];
@@ -306,19 +300,8 @@ interface SnapshotHistory {
 }
 
 /**
- * useSnapshotHistory loads the pair's distinct routes, newest first, behind the
- * same opaque keyset cursor run history and event scrollback already use — and
- * the same way (pages/diagnostics.tsx's loadRuns is the convention this
- * mirrors, not TanStack's useInfiniteQuery, so the whole repo has one
- * pagination shape).
- *
- * `nextCursor` doubles as "there is nothing more to load" (an exhausted page
- * answers "") and "nothing has loaded yet" (the initial value, also ""), which
- * is the right default for a Load-older button that has not yet heard back.
- *
- * A selection change RESETS to page one rather than appending: the cursor
- * belongs to the pair it was minted for, and pane 2 showing two pairs' routes
- * interleaved would be a lie about what changed.
+ * useSnapshotHistory loads the pair's distinct routes; a selection change RESETS to page one rather
+ * than appending.
  */
 function useSnapshotHistory(pair: Pair | null): SnapshotHistory {
   const [snapshots, setSnapshots] = useState<PathSnapshot[]>([]);
@@ -383,11 +366,13 @@ function HistoryPane({
   compare: string[];
   onToggleCompare: (id: string) => void;
 }) {
+  const t = useT(mtrDict);
+  const { locale } = useLocale();
   const { snapshots, loading, error, hasOlder, loadOlder } = history;
   const changed = useMemo(() => pathChangeFlags(snapshots), [snapshots]);
 
   return (
-    <Pane title="Path history">
+    <Pane title={t("history.title")}>
       {pair ? (
         <p className="mt-0.5 truncate text-xs text-muted-foreground">
           {pair.source} → {pair.destination}
@@ -406,28 +391,30 @@ function HistoryPane({
           panes stack, and the destinations pane is ABOVE this one, not beside
           it — the copy was pointing at empty space. The neutral wording is
           true at every width. */}
-      {!pair ? <EmptyNote>Pick a source to see its path history.</EmptyNote> : null}
+      {!pair ? <EmptyNote>{t("history.noPair")}</EmptyNote> : null}
 
       {error ? (
         <p role="alert" className="mt-3 text-sm text-health-bad">
-          {queryErrorMessage(error, "Path history is unavailable")}
+          {queryErrorMessage(error, t("destinations.error"))}
         </p>
       ) : null}
 
       {pair && loading && snapshots.length === 0 ? <ListSkeleton /> : null}
 
       {pair && !loading && !error && snapshots.length === 0 ? (
-        <EmptyNote>No path recorded for this pair yet.</EmptyNote>
+        <EmptyNote>{t("history.empty")}</EmptyNote>
+      ) : null}
+
+      {/* Two, not one: "tick two paths to diff them" in front of a list with a
+          single row is an instruction the reader cannot follow (QA scope 4,
+          finding #13). The checkbox still renders on a lone row — a "Load
+          older" away there may be a second. */}
+      {snapshots.length >= 2 ? (
+        <p className="mt-3 text-xs leading-relaxed text-muted-foreground">{t("history.compareHint")}</p>
       ) : null}
 
       {snapshots.length > 0 ? (
-        <p className="mt-3 text-xs leading-relaxed text-muted-foreground">
-          Tick two paths to diff them — a third pick replaces the earlier of the two.
-        </p>
-      ) : null}
-
-      {snapshots.length > 0 ? (
-        <ul aria-label="Paths" className="mt-1 divide-y divide-border">
+        <ul aria-label={t("history.list.aria")} className="mt-1 divide-y divide-border">
           {snapshots.map((s, i) => (
             <li key={s.id} className="flex items-center gap-2">
               {/* Outside the row button, not inside it: a checkbox nested in a
@@ -435,7 +422,7 @@ function HistoryPane({
                   ticking one must not also change which trace pane 3 shows. */}
               <input
                 type="checkbox"
-                aria-label={`Compare path ${shortHash(s.pathHash)}`}
+                aria-label={t("history.compare.aria", { hash: shortHash(s.pathHash) })}
                 checked={compare.includes(s.id)}
                 onChange={() => onToggleCompare(s.id)}
                 className={CHECKBOX_CLASS}
@@ -443,7 +430,7 @@ function HistoryPane({
               <button
                 type="button"
                 aria-pressed={s.id === selectedId}
-                aria-label={`Path ${shortHash(s.pathHash)}`}
+                aria-label={t("history.path.aria", { hash: shortHash(s.pathHash) })}
                 title={s.pathHash}
                 onClick={() => onSelectSnapshot(s)}
                 className={cn(
@@ -455,11 +442,21 @@ function HistoryPane({
               >
                 <span className="flex flex-wrap items-center gap-2">
                   <span className="nums font-mono text-xs">{shortHash(s.pathHash)}</span>
-                  <Badge variant="neutral">{plural(s.hopCount, "hop")}</Badge>
-                  {changed[i] ? <Badge variant="warn">path changed</Badge> : null}
+                  <Badge variant="neutral">
+                    {t(`hops.${countForm(locale, s.hopCount)}` as MTRKey, { count: s.hopCount })}
+                  </Badge>
+                  {changed[i] ? <Badge variant="warn">{t("history.changed")}</Badge> : null}
                 </span>
                 <span className="nums text-xs text-muted-foreground">
-                  {fmtTime(s.firstSeen)} → {fmtTime(s.lastSeen)} · {plural(s.traceCount, "trace")}
+                  {/* The stamps are computed here and passed in, never
+                      formatted by the dictionary — and they land INSIDE a
+                      translated sentence, so fmtTime takes the interface
+                      locale rather than the browser's. */}
+                  {t("history.span", {
+                    from: fmtTime(s.firstSeen, locale),
+                    to: fmtTime(s.lastSeen, locale),
+                    traces: t(`traces.${countForm(locale, s.traceCount)}` as MTRKey, { count: s.traceCount }),
+                  })}
                 </span>
               </button>
             </li>
@@ -470,7 +467,7 @@ function HistoryPane({
       {snapshots.length > 0 ? (
         <div className="mt-4 flex justify-center">
           <Button variant="outline" size="sm" disabled={!hasOlder || loading} onClick={loadOlder}>
-            {loading ? "Loading older…" : "Load older"}
+            {loading ? t("history.loadingOlder") : t("history.loadOlder")}
           </Button>
         </div>
       ) : null}
@@ -480,27 +477,7 @@ function HistoryPane({
 
 /* ── pane 3: the trace detail ──────────────────────────────────────────── */
 
-/**
- * DetailPane owns the FETCH; TraceDetail owns the rendering.
- *
- * The by-id read asks for `?enrich=true` — this pane is the ONLY caller that
- * does, which is why the flag is a call-site decision and not a default in
- * lib/api.ts. Server-side that turns on a TTL-cached lookup (Decision 4), so
- * the query key carries the flag too: an un-enriched copy of the same snapshot
- * must never satisfy a read that wants the enrichment map, and the map's
- * ABSENCE is the wire's way of saying "you did not ask".
- *
- * The row that was clicked is already a complete PathSnapshot — the list
- * endpoint ships the full hop payload — so `fallback` renders instantly and
- * the by-id read is what makes the pane authoritative rather than what makes
- * it appear. (The fallback carries no enrichment; the expanders are collapsed
- * by default, so the enriched answer is in hand before anyone opens one.)
- *
- * `history` is passed straight through to the trend: the snapshots pane 2 has
- * already loaded are the trend's whole data source (Decision 13), and its
- * `traceTotal` — the pair's lifetime trace count from the destinations list —
- * is what lets the chart admit how narrow its window is.
- */
+/** DetailPane owns the FETCH; the by-id read asks for `?enrich=true` — this pane is the ONLY caller that does. */
 function DetailPane({
   snapshotId,
   fallback,
@@ -510,6 +487,7 @@ function DetailPane({
   fallback: PathSnapshot | null;
   history: TrendHistory;
 }) {
+  const t = useT(mtrDict);
   const query = useQuery({
     queryKey: ["mtr", "snapshot", snapshotId, "enriched"],
     queryFn: () => getMTRSnapshot(snapshotId as string, true),
@@ -518,11 +496,11 @@ function DetailPane({
   const snapshot = query.data ?? fallback;
 
   return (
-    <Pane title="Trace detail">
-      {snapshotId === null ? <EmptyNote>Pick a path in the history to see its hops.</EmptyNote> : null}
+    <Pane title={t("detail.title")}>
+      {snapshotId === null ? <EmptyNote>{t("detail.empty")}</EmptyNote> : null}
       {snapshotId !== null && query.isError && !snapshot ? (
         <p role="alert" className="mt-3 text-sm text-health-bad">
-          {queryErrorMessage(query.error, "This path is unavailable")}
+          {queryErrorMessage(query.error, t("detail.error"))}
         </p>
       ) : null}
       {snapshotId !== null && !snapshot && !query.isError ? <ListSkeleton /> : null}
@@ -541,24 +519,17 @@ function DetailPane({
 /* ── pane 3, the other half: the diff ───────────────────────────────────── */
 
 /**
- * DiffPane takes over pane 3 while two paths are ticked. It needs NO fetch of
- * its own: the list endpoint ships each snapshot's full hop payload, which is
- * exactly what Decision 3 rests on — a server-side diff endpoint would
- * duplicate this table's presentation logic for zero authority gain.
- *
- * The two are ordered OLDEST first here rather than in the ticking order, so
- * the table always reads forwards in time and "+" always means "the newer path
- * gained this hop". Ties (two snapshots stamped identically, which the store's
- * unique pair+hash constraint does not forbid) fall back to the order they
- * appear in the list, i.e. newest-first — the same order the reader sees.
+ * DiffPane takes over pane 3 while two paths are ticked; the two are ordered OLDEST first here
+ * rather than in the ticking order.
  */
 function DiffPane({ snapshots, compare }: { snapshots: PathSnapshot[]; compare: string[] }) {
+  const t = useT(mtrDict);
   const picked = compare.map((id) => snapshots.find((s) => s.id === id)).filter((s): s is PathSnapshot => s !== undefined);
 
   return (
-    <Pane title="Path diff">
+    <Pane title={t("diff.title")}>
       {picked.length < 2 ? (
-        <EmptyNote>Both paths must still be loaded to diff them.</EmptyNote>
+        <EmptyNote>{t("diff.empty")}</EmptyNote>
       ) : (
         (() => {
           const [a, b] = [...picked].sort((x, y) => new Date(x.firstSeen).getTime() - new Date(y.firstSeen).getTime());
@@ -572,32 +543,14 @@ function DiffPane({ snapshots, compare }: { snapshots: PathSnapshot[]; compare: 
 /* ── the Runner ─────────────────────────────────────────────────────────── */
 
 /**
- * RunnerPane is MTR_EXPLORER.md's "Runner tab launches MTR to any node/target/
- * ad-hoc host". It is the Diagnostics run form with the check type nailed to
- * `mtr` — same endpoint, same body builder, same controls, imported rather
- * than re-typed.
- *
- * Two deliberate differences from the Diagnostics form:
- *
- *  - it does NOT navigate on 202. An operator who launches a trace from here
- *    is in the middle of reading a pair's history; throwing them onto the run
- *    page would cost them that context, so the started run is offered as a
- *    link and the explorer stays put.
- *  - no "Save as definition". A definition is a repeating probe and belongs to
- *    the Definitions tab; this page is about one route, right now.
- *
- * Rendered only with runs:create (the endpoint's own permission, Decision 11 —
- * there is no mtr-specific launch permission), and ABSENT rather than disabled
- * without it: the whole Runner segment disappears, so nobody is shown a
- * control they cannot use.
+ * RunnerPane is MTR_EXPLORER.md's "Runner tab launches MTR to any node/target/ ad-hoc host"; it is
+ * the Diagnostics run form with the check type nailed to `mtr` — same endpoint.
  */
 function RunnerPane({ canReadTargets }: { canReadTargets: boolean }) {
+  const t = useT(mtrDict);
+  const { locale } = useLocale();
   const topo = useTopology();
-  /* The union of controller nodes and the node names the AGENTS report (QA
-     round 4, finding #21) — the same helper the Diagnostics form and the
-     Investigate scope selects use. `topology.nodes` alone is empty on a
-     console with no controller wired, which left this form with no source to
-     trace from at all. */
+  /* The union of controller nodes and the node names the AGENTS report. */
   const nodeNames = useMemo(() => scopeNodeOptions(topo.data), [topo.data]);
 
   const [sourcesAll, setSourcesAll] = useState(true);
@@ -607,16 +560,12 @@ function RunnerPane({ canReadTargets }: { canReadTargets: boolean }) {
   const [destinationKind, setDestinationKind] = useState<DestinationKind>("node");
   const [destinationTargetId, setDestinationTargetId] = useState("");
   const [destinationAddress, setDestinationAddress] = useState("");
+  const [duration, setDuration] = useState("instant");
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string>();
   const [startedRunId, setStartedRunId] = useState<string>();
-  // The three panes to the left of this one are read-only and stay fully usable
-  // while engaged — path history is inherently historical, and its detail/diff
-  // views need no anchoring at all. The Runner is the page's one MUTATION, and
-  // it is the one thing time takes away.
-  /* guard carries the DISABLED flag AND the reason for it — lib/timemachine's
-     useWriteGuard (QA round 2, finding #18; extended here in round 3). Spread it
-     onto the control, and compose any local condition AFTER the spread. */
+  // The three panes to the left of this one are read-only and stay fully usable while engaged.
+  /* guard carries the DISABLED flag AND the reason for it — lib/timemachine's useWriteGuard. */
   const guard = useWriteGuard();
   const writesDisabled = guard.disabled;
 
@@ -630,6 +579,7 @@ function RunnerPane({ canReadTargets }: { canReadTargets: boolean }) {
   });
   const targets = targetsQuery.data?.targets ?? [];
 
+  const durationNs = durationNsFor(duration);
   const request = buildRunRequest({
     type: "mtr",
     sources: sourcesAll ? [] : sources,
@@ -637,6 +587,7 @@ function RunnerPane({ canReadTargets }: { canReadTargets: boolean }) {
     destinationKind,
     destinationTargetId,
     destinationAddress: destinationAddress.trim(),
+    durationNs,
   });
 
   // A target run with nothing picked, or an ad-hoc one with an empty address,
@@ -646,30 +597,35 @@ function RunnerPane({ canReadTargets }: { canReadTargets: boolean }) {
     (destinationKind === "target" && destinationTargetId === "") ||
     (destinationKind === "adhoc" && destinationAddress.trim() === "");
 
-  /* The pair preview and its gate, mirroring the Diagnostics form (QA round 4,
-     finding #9). Start MTR was ENABLED on a console with zero known sources:
-     pressing it posted `sources: []`, which checks.Plan expands to no pairs at
-     all and refuses with a 422 the operator then had to read to learn that the
-     form had nothing to run. An external run is one pair per source; a node
-     run is the self-excluded cross product, exactly as over there. */
+  /* The pair preview and its gate, mirroring the Diagnostics form. */
   const resolvedSources = sourcesAll ? nodeNames : sources;
   const resolvedDestinations = destinationsAll ? nodeNames : destinations;
   const external = destinationKind !== "node";
-  const pairCount = external
-    ? new Set(resolvedSources).size
-    : estimatePairCount(resolvedSources, resolvedDestinations);
-  // Only once the topology has actually ANSWERED. An in-flight GET
-  // /api/v1/topology has an empty node list for a fraction of a second, and
-  // disabling the button on it would make the control flicker dead on every
-  // cold load — "we do not know yet" is not "there is nothing to run".
+  /* Zero while the destination side cannot resolve: sources x destinations has
+     no second factor yet, and "~10 pairs" for a run the server would refuse is
+     a number about nothing (QA scope 4, finding #9). */
+  const pairCount = incompleteDestination
+    ? 0
+    : external
+      ? new Set(resolvedSources).size
+      : estimatePairCount(resolvedSources, resolvedDestinations);
+  // Only once the topology has actually ANSWERED.
   const noPairs = !topo.isPending && pairCount === 0;
+  /* Which side is missing — the same four-way split the Diagnostics form makes. */
+  const pairsReason: MTRKey | null = !noPairs
+    ? null
+    : resolvedSources.length === 0
+      ? "runner.noPairs"
+      : destinationKind === "target" && destinationTargetId === ""
+        ? "runner.noTarget"
+        : destinationKind === "adhoc" && destinationAddress.trim() === ""
+          ? "runner.noAddress"
+          : "runner.noDestinations";
 
-  /* ONE clearing point for the whole form (QA round 4, finding #10) — the same
-     treatment, and the same reasoning, as the Diagnostics run form: the two
-     Segmented controls fire no change event, so a form-level onChange would
-     miss precisely the switch that most obviously invalidates the error. The
-     started-run link goes with it: it names a run the operator has since
-     stopped describing. */
+  /*
+   * ONE clearing point for the whole form — the same treatment, and the same reasoning, as the
+   * Diagnostics run form.
+   */
   useEffect(() => {
     setSubmitError(undefined);
     setStartedRunId(undefined);
@@ -684,31 +640,62 @@ function RunnerPane({ canReadTargets }: { canReadTargets: boolean }) {
       const res = await createRun(request);
       setStartedRunId(res.id);
     } catch (err) {
-      setSubmitError(err instanceof ApiError ? (err.problem.detail || err.problem.title) : "Failed to start the trace");
+      // problem+json is the SERVER's refusal, verbatim; only the network-level
+      // fallback is the console's own sentence.
+      setSubmitError(err instanceof ApiError ? (err.problem.detail || err.problem.title) : t("runner.submitFailed"));
     }
     setSubmitting(false);
   }
 
   return (
     <Card asChild className="p-6">
-      <form onSubmit={handleSubmit} aria-label="Run a trace" className="flex max-w-2xl flex-col gap-5">
+      <form onSubmit={handleSubmit} aria-label={t("runner.aria")} className="flex max-w-2xl flex-col gap-5">
         <div>
-          <h2 className="text-sm font-semibold">Run an MTR</h2>
-          <p className="mt-1 max-w-prose text-xs leading-relaxed text-muted-foreground">
-            The same POST /api/v1/runs the Diagnostics page uses, with the check type fixed to mtr. Every path it
-            produces lands in this page's history.
+          <h2 className="text-sm font-semibold">{t("runner.title")}</h2>
+          <p className="mt-1 max-w-prose text-xs leading-relaxed text-muted-foreground">{t("runner.body")}</p>
+        </div>
+
+        <div>
+          <span className="mb-2 block text-xs font-medium text-muted-foreground">{t("runner.duration")}</span>
+          {/* The same mechanism the Diagnostics form uses, and it fits MTR
+              without a special case: a traced pair is re-traced on the cadence
+              and every trace is kept as its own sample. That also feeds path
+              history once per trace, so an interval MTR run is the most direct
+              way to catch a route that flaps — the very thing a single
+              instant trace cannot see. */}
+          <Segmented
+            aria-label={t("runner.duration.aria")}
+            /* RUN_DURATIONS is the Diagnostics form's table and its VALUES are
+               what both pages post; only "Instant" is a word, and this surface
+               keeps its own copy of it rather than reading another dict. */
+            options={RUN_DURATIONS.map((d) => ({
+              value: d.value,
+              label: d.value === "instant" ? t("runner.duration.instantLabel") : d.label,
+            }))}
+            value={duration}
+            onChange={setDuration}
+            className="flex-wrap"
+          />
+          <p className="mt-2 text-xs text-muted-foreground">
+            {durationNs === 0
+              ? t("runner.duration.instant")
+              : t("runner.duration.interval", {
+                  interval: formatDurationNs(sampleIntervalNs(durationNs), locale),
+                  label: RUN_DURATIONS.find((d) => d.value === duration)?.label ?? "",
+                  samples: plannedSamplesPerPair(durationNs),
+                })}
           </p>
         </div>
 
         <div>
-          <span className="mb-2 block text-xs font-medium text-muted-foreground">Destination</span>
+          <span className="mb-2 block text-xs font-medium text-muted-foreground">{t("runner.destination")}</span>
           {/* "Target" only with targets:read — its picker would otherwise have
               nothing to list and its own GET would be a guaranteed 403. */}
           <Segmented
-            aria-label="Destination"
+            aria-label={t("runner.destination.aria")}
             options={(["node", "target", "adhoc"] as DestinationKind[])
               .filter((k) => k !== "target" || canReadTargets)
-              .map((k) => ({ value: k, label: DESTINATION_KIND_LABELS[k] }))}
+              .map((k) => ({ value: k, label: t(DESTINATION_KIND_KEYS[k]) }))}
             value={destinationKind}
             onChange={setDestinationKind}
           />
@@ -716,7 +703,7 @@ function RunnerPane({ canReadTargets }: { canReadTargets: boolean }) {
 
         <div className="grid gap-4 sm:grid-cols-2">
           <NodeSelector
-            label="Sources"
+            label={t("runner.sources")}
             nodes={nodeNames}
             all={sourcesAll}
             onAllChange={setSourcesAll}
@@ -725,7 +712,7 @@ function RunnerPane({ canReadTargets }: { canReadTargets: boolean }) {
           />
           {destinationKind === "node" ? (
             <NodeSelector
-              label="Destinations"
+              label={t("runner.destinations")}
               nodes={nodeNames}
               all={destinationsAll}
               onAllChange={setDestinationsAll}
@@ -734,7 +721,7 @@ function RunnerPane({ canReadTargets }: { canReadTargets: boolean }) {
             />
           ) : null}
           {destinationKind === "target" ? (
-            <FieldLabel label="Destination target">
+            <FieldLabel label={t("runner.destinationTarget")}>
               {(id) => (
                 <select
                   id={id}
@@ -742,7 +729,7 @@ function RunnerPane({ canReadTargets }: { canReadTargets: boolean }) {
                   onChange={(e) => setDestinationTargetId(e.target.value)}
                   className={CONTROL_CLASS}
                 >
-                  <option value="">— pick a target —</option>
+                  <option value="">{t("runner.destinationTarget.placeholder")}</option>
                   {targets.map((t) => (
                     <option key={t.id} value={t.id}>
                       {t.name}
@@ -753,13 +740,12 @@ function RunnerPane({ canReadTargets }: { canReadTargets: boolean }) {
             </FieldLabel>
           ) : null}
           {destinationKind === "adhoc" ? (
-            <FieldLabel label="Destination address">
+            <FieldLabel label={t("runner.destinationAddress")}>
               {(id) => (
                 <input
                   id={id}
-                  /* Named explicitly as well as by its <label> (QA round 4,
-                     finding #16) — see the Diagnostics twin. */
-                  aria-label="Destination address"
+                  /* Named explicitly as well as by its <label> — see the Diagnostics twin. */
+                  aria-label={t("runner.destinationAddress")}
                   value={destinationAddress}
                   placeholder="10.0.0.1 or example.test"
                   onChange={(e) => setDestinationAddress(e.target.value)}
@@ -775,8 +761,8 @@ function RunnerPane({ canReadTargets }: { canReadTargets: boolean }) {
             the operator can act on (wire a controller, or wait for an agent to
             register). */}
         <span className={cn("nums text-sm", noPairs ? "text-health-bad" : "text-muted-foreground")}>
-          ~{plural(pairCount, "pair")}
-          {noPairs ? " — no sources to trace from, so there is nothing to run" : ""}
+          {t(`runner.pairs.${countForm(locale, pairCount)}` as MTRKey, { count: pairCount })}
+          {pairsReason ? t(pairsReason) : ""}
         </span>
 
         {submitError ? (
@@ -791,16 +777,17 @@ function RunnerPane({ canReadTargets }: { canReadTargets: boolean }) {
           {...guard} disabled={noPairs || incompleteDestination || writesDisabled}
           className="self-start"
         >
-          Start MTR
+          {t("runner.submit")}
         </Button>
 
         {startedRunId ? (
           <p role="status" className="text-sm">
-            Run started —{" "}
+            {/* Three keys: the link is INSIDE the sentence. */}
+            {t("runner.started.before")}{" "}
             <a href={`/diagnostics/runs/${startedRunId}`} className="text-primary hover:underline">
-              watch it here
+              {t("runner.started.link")}
             </a>
-            . Its path lands in the history on the Explorer tab once the run finishes.
+            {t("runner.started.after")}
           </p>
         ) : null}
       </form>
@@ -811,52 +798,19 @@ function RunnerPane({ canReadTargets }: { canReadTargets: boolean }) {
 /* ── the page ───────────────────────────────────────────────────────────── */
 
 /**
- * MTRPage is /mtr: MTR_EXPLORER.md's three panes — the destinations path
- * history knows about, the distinct routes the selected pair has taken, and
- * one route's hops.
- *
- * Three degraded states are DESIGNED here rather than left to fall out of
- * failing requests, in the M4 house pattern (pages/targets.tsx):
- *
- *  1. NO mtr:read — one permission card, ZERO requests. Note how much rarer
- *     this is than M4's equivalent: mtr:read is held by every BUILT-IN role,
- *     viewer included (M5 Decision 11 — path history is telemetry, not
- *     configuration, so M4 Decision 3 deliberately does not apply), and viewer
- *     is what auth.anonymous.role defaults to. Reaching this card means a
- *     hand-rolled role, which is exactly what the copy says, so the reader
- *     goes looking in the right place.
- *
- *  2. database.mode=disabled — one honest line naming console.database.mode
- *     and NO request at all, rather than three requests to collect three
- *     503s. Snapshots live in mtr_path_snapshots; with no store there is no
- *     projection to read. Derived from GET /api/v1/config's
- *     `database.configured`, the same gate the handlers' own 503 reads.
- *     This is the COMMON degraded state for this page.
- *
- *     Order matters, same as on /targets: the permission card comes first,
- *     because "you cannot see this" is about the subject and stays true
- *     regardless of how the console is deployed.
- *
- *  3. mtr:read, a database, and no traces — the empty state points at
- *     Diagnostics, because path history is a projection of MTR results the
- *     console ingested and the fix is to produce one. (Not at this page's own
- *     Runner tab: that arrives in Task 8.)
- *
- * Both gates wait for their answer before deciding. `can()` fails closed
- * while GET /api/v1/auth/me is in flight and `available` is false before
- * /api/v1/config lands, so rendering on the un-resolved value would flash the
- * permission card on every cold load.
+ * MTRPage is /mtr: MTR_EXPLORER.md's three panes — the destinations path history knows about; three
+ * degraded states are DESIGNED here rather than left to fall out of failing requests.
  */
 export function MTRPage() {
+  const t = useT(mtrDict);
+  const { locale } = useLocale();
+  const { at } = useTimeContext();
   const { me, can } = useAuth();
   const { available: dbAvailable, resolved: dbResolved } = useDatabaseAvailable();
   const [pair, setPair] = useState<Pair | null>(null);
   const [snapshot, setSnapshot] = useState<PathSnapshot | null>(null);
-  // The selected pair's LIFETIME trace count, straight off the destinations
-  // row. Kept next to the pair rather than re-derived, because the loaded
-  // snapshots cannot tell you what has not been loaded: this number is the
-  // only thing that lets pane 3 say "3 of 40 traces" instead of implying the
-  // trend is the whole story.
+  // Kept next to the pair rather than re-derived, because the loaded snapshots cannot tell you what
+  // has not been loaded.
   const [traceTotal, setTraceTotal] = useState<number | null>(null);
   // The two snapshot ids ticked for a diff, in tick order (toggleCompare owns
   // the rule). Ids rather than rows, so a "Load older" that re-renders the
@@ -868,10 +822,7 @@ export function MTRPage() {
   const authResolved = me !== undefined;
   const canCreate = can("runs:create");
 
-  // Selecting a different pair drops the open trace AND the comparison: a hop
-  // table belonging to the pair the reader just navigated away from is the
-  // worst kind of stale, and two different pairs' routes are not comparable at
-  // all — they do not even share a destination.
+  // Selecting a different pair drops the open trace AND the comparison.
   const selectPair = useCallback((row: MTRDestination) => {
     const next = { source: row.sourceNode, destination: row.destination };
     setPair((prev) =>
@@ -893,22 +844,16 @@ export function MTRPage() {
   if (!authResolved || !dbResolved) {
     body = (
       <Card role="status" aria-live="polite" className="p-6">
-        <span className="sr-only">Loading…</span>
+        <span className="sr-only">{t("loading")}</span>
         <Skeleton className="h-10 w-full" />
       </Card>
     );
   } else if (!can("mtr:read")) {
-    body = (
-      <PermissionCard permission="mtr:read">
-        Path history is telemetry, and every built-in role holds this permission — viewer included, which is the role an
-        anonymous session gets. Seeing this card means the role in use was defined by hand without it; ask an admin to
-        add mtr:read to it.
-      </PermissionCard>
-    );
+    body = <PermissionCard permission="mtr:read">{t("permission.body")}</PermissionCard>;
   } else if (!dbAvailable) {
     body = (
       <Card role="status" className="p-6">
-        <p className="text-sm">Path history is projected into the database — set console.database.mode</p>
+        <p className="text-sm">{t("database.gate")}</p>
       </Card>
     );
   } else {
@@ -920,10 +865,10 @@ export function MTRPage() {
             segment at all — the reader is not shown a tab they cannot open. */}
         {canCreate ? (
           <Segmented
-            aria-label="View"
+            aria-label={t("view.aria")}
             options={[
-              { value: "explorer", label: "Explorer" },
-              { value: "runner", label: "Runner" },
+              { value: "explorer", label: t("view.explorer") },
+              { value: "runner", label: t("view.runner") },
             ]}
             value={view}
             onChange={setView}
@@ -934,7 +879,18 @@ export function MTRPage() {
         {canCreate && view === "runner" ? (
           <RunnerPane canReadTargets={can("targets:read")} />
         ) : (
-          <div className="grid grid-cols-1 items-start gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.1fr)_minmax(0,1.6fr)]">
+          <>
+            {/* The Explorer is LIVE under a banner that says otherwise, and it
+                stays live because none of the reads behind it takes a time
+                parameter. That is a disclosure, not a footnote: /diagnostics
+                prints the same kind of line over its history list rather than
+                letting the banner speak for data it does not govern. */}
+            {at ? (
+              <p role="status" className="max-w-prose text-xs leading-relaxed text-muted-foreground">
+                {t("explorer.atNote")}
+              </p>
+            ) : null}
+            <div className="grid grid-cols-1 items-start gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.1fr)_minmax(0,1.6fr)]">
             <DestinationsPane selected={pair} onSelect={selectPair} />
             <HistoryPane
               pair={pair}
@@ -952,7 +908,8 @@ export function MTRPage() {
             ) : (
               <DetailPane snapshotId={snapshot?.id ?? null} fallback={snapshot} history={trendHistory} />
             )}
-          </div>
+            </div>
+          </>
         )}
       </div>
     );
@@ -960,8 +917,10 @@ export function MTRPage() {
 
   return (
     <PageShell
-      title="MTR Explorer"
-      description="Every distinct route the fleet's traces have taken, and when each one changed."
+      title={t("title")}
+      /* {at} lands INSIDE a translated sentence, so it takes that sentence's
+         language — lib/i18n's localeTag, same as /diagnostics and /explore. */
+      description={at ? t("description.at", { at: at.toLocaleString(localeTag(locale)) }) : t("description")}
     >
       {body}
     </PageShell>

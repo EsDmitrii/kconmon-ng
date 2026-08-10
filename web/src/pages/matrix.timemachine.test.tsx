@@ -6,10 +6,7 @@ import { FakeSocket } from "@/lib/fake-websocket";
 import { TimeMachineProvider } from "@/lib/timemachine";
 import { MatrixPage } from "./matrix";
 
-/**
- * /matrix engaged: the grid is drawn from PromQL at `t` (plan Decision 7), and
- * the page must not claim any of live mode's guarantees while it does.
- */
+/** /matrix engaged: the grid is drawn from PromQL at `t`. */
 
 const AT = "2026-08-01T12:00:00Z";
 

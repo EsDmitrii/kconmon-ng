@@ -31,10 +31,7 @@ type Controller struct {
 	leader     atomic.Bool
 }
 
-// IsLeader reports whether this replica currently serves as the leader. A real
-// leader-election loop is not yet wired, so the flag defaults to true (matching
-// the controller_leader gauge). SetLeader keeps the two in sync when election
-// lands.
+// IsLeader reports whether this replica currently serves as the leader.
 func (c *Controller) IsLeader() bool {
 	return c.leader.Load()
 }
@@ -67,22 +64,7 @@ func New(cfg *config.Config) *Controller {
 	c.grpcServer = NewGRPCServer(registry, m, cfg.Controller.LeaderElection, c.IsLeader, cfg.Controller.Events.Enabled)
 	c.httpServer = NewHTTPServer(registry, nil, promReg, capabilitiesFor(cfg))
 
-	// One registry mutation, one peer broadcast and one gauge write -- but ONE
-	// EVENT PER AFFECTED AGENT.
-	//
-	// The peer update and the gauge are about the resulting cluster, so they
-	// fire once with the snapshot. The events are about the change itself, and
-	// a single event cannot name several agents: a TTL sweep that evicts three
-	// nodes has to say which three, or the console's topology fold (which
-	// replays these events to reconstruct history) can only apply one of them.
-	// Until M7 this published a bare reason with no subject at all, which is
-	// why reconstructed topology was always empty. See TopologyChange.
-	//
-	// Fan-out is bounded by how many agents one mutation can touch (all of them
-	// only in a full-cluster eviction, which is already a refetch-everything
-	// event for the Console); the subscriber channels are lossy by design, so a
-	// pathological sweep degrades to dropped events with a warning, not to a
-	// blocked registry.
+	// The events are about the change itself, and a single event cannot name several agents.
 	registry.OnChange(func(agents []model.AgentInfo, change TopologyChange) {
 		c.grpcServer.BroadcastPeerUpdate(agents)
 		m.ControllerRegisteredAgents.WithLabelValues().Set(float64(len(agents)))
@@ -215,18 +197,8 @@ func (c *Controller) Run(ctx context.Context) error {
 // the server is stopped forcefully.
 const grpcGracefulStopTimeout = 5 * time.Second
 
-// stopGRPC shuts the gRPC server down without the GracefulStop trap.
-//
-// GracefulStop waits for every active handler to return but does not cancel
-// their stream contexts, so a server-streaming handler parked in a select
-// blocks it forever — which is exactly what happened with a connected agent or
-// a subscribed Console: the process ignored SIGTERM and only died on SIGKILL
-// after terminationGracePeriod. Signalling the handlers first is what makes
-// GracefulStop able to finish at all.
-//
-// The timer is the backstop for anything the signal does not reach (a handler
-// blocked in Send against a stalled client, say): losing a few in-flight RPCs
-// beats hanging the pod.
+// stopGRPC shuts the gRPC server down without the GracefulStop trap; GracefulStop waits for every
+// active handler to return but does not cancel their stream contexts.
 func stopGRPC(grpcSrv *grpc.Server, streams *GRPCServer) {
 	streams.Shutdown()
 

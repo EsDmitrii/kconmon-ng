@@ -54,6 +54,24 @@ serviceMonitor:
 
 prometheusRule:
   enabled: true
+  udpLossHigh:
+    # Quoted on purpose: this is the type `helm --set threshold=0.25` produces.
+    threshold: "0.25"
+    for: 3m
+    severity: critical
+  tcpChecksFailing:
+    # Bare float: the other accepted type, must render identically.
+    threshold: 0.075
+  externalChecksFailing:
+    enabled: false
+  additionalRules:
+    - alert: KconmonNgChartTestRule
+      expr: vector(1) > 0
+      for: 1m
+      labels:
+        severity: none
+      annotations:
+        summary: chart-test rule appended through prometheusRule.additionalRules
 
 networkPolicy:
   enabled: true

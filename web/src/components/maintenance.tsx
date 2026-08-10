@@ -9,44 +9,36 @@ import { ApiError, createMaintenance, deleteMaintenance, getMaintenance } from "
 import {
   GLOBAL_SCOPE,
   MAINTENANCE_REASON_MAX,
+  defaultStartIn,
   mergeMaintenanceWindows,
   outsideWindowNote,
   type FrozenWindow,
 } from "@/lib/annotations";
+import {
+  stampFull,
+  stampShort,
+  useLocale,
+  useT,
+  translate,
+  type Locale,
+  type Translate,
+} from "@/lib/i18n";
+import { countForm, maintenanceDict, type MaintenanceKey } from "@/lib/i18n/dict/maintenance";
 import { useTimeContext, useWriteGuard } from "@/lib/timemachine";
 import type { MaintenanceWindow } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
-/**
- * maintenance.tsx — the REACT half of M6 Task 9's maintenance windows, and a
- * deliberate TWIN of components/annotations.tsx: one hook and one bar, shared
- * by every surface, so "what window do we ask for", "which scopes does this
- * surface see" and "who may write here" are answered once rather than four
- * times. The pure half — the markArea builder and the list folding — lives in
- * lib/annotations.ts beside the annotation overlay it is modelled on.
- *
- * WHY A TWIN RATHER THAN ONE GENERIC COMPONENT. The two shapes look alike and
- * are not: an annotation may be an INSTANT (absent endAt) and a window is
- * always a SPAN with a strictly-later end (the store carries that as a CHECK);
- * an annotation carries `text` and a window carries `reason`; they ride
- * different permissions. A single parameterised component would spend its body
- * branching on those three facts and would still have to be read twice. Two
- * files that say the same thing about scope, and different things about time,
- * is the cheaper honesty.
- *
- * Maintenance windows are DATA AND RENDERING in M6, not suppression (plan
- * Decision 6): nothing evaluates alert rules until M7, so declaring a window
- * silences nothing. What it does is stop the console claiming a degradation was
- * a surprise when somebody had written down that they were upgrading a switch.
- */
+/** The pure half — the markArea builder and the list folding. */
 
 const MAINTENANCE_POLL_MS = 60_000;
 
-/** scopeLabel names a scope for a human — "" is GLOBAL, not "none". The same
- *  vocabulary annotations use, because it is the same vocabulary
- *  (plan Decision 6: the annotations scope convention, verbatim). */
-export function scopeLabel(scope: string): string {
-  return scope === GLOBAL_SCOPE ? "global" : scope;
+/** enT is the ENGLISH translator this file's pure helper defaults to — the
+ *  pattern dict/topology.ts and pages/alerting.tsx established. */
+const enT: Translate<MaintenanceKey> = (key, vars) => translate(maintenanceDict, "en", key, vars);
+
+/** scopeLabel names a scope for a human — "" is GLOBAL. */
+export function scopeLabel(scope: string, t: Translate<MaintenanceKey> = enT): string {
+  return scope === GLOBAL_SCOPE ? t("scope.global") : scope;
 }
 
 export interface MaintenanceResult {
@@ -57,40 +49,57 @@ export interface MaintenanceResult {
   refresh: () => Promise<void>;
 }
 
+/** The half-open range a surface is reading — its chart's X axis and its
+ *  maintenance bar's count, which have to be the same range or the count is
+ *  about something the reader cannot see. */
+export interface TimeWindow {
+  from: Date;
+  to: Date;
+}
+
 /**
- * useMaintenance fetches the declared windows a surface should draw,
- * WINDOW-BOUNDED to exactly the range its chart shows.
+ * useWindowAnchor is the ONE `now` a surface takes, for its chart AND for the
+ * bar beneath it.
  *
- * Everything useAnnotations documents about the window and the scopes holds
- * here verbatim, because it is the same endpoint contract:
- *
- *   scope === ""  → ONE request, `?scope=` (present-but-empty = global only)
- *   scope !== ""  → TWO requests, `?scope=<name>` and `?scope=`, merged
- *
- * and the key carries `at` (or the literal "live") rather than a Date computed
- * during render, so the query does not churn on every frame.
- *
- * The ONE difference from the twin: this hook is PERMISSION-GATED at the
- * request. M6's global constraint is "ZERO requests for sources the operator's
- * role cannot read" — a subject without maintenance:read must cost the API
- * nothing, not fetch a 403 and hide the result.
- *
- * The overlap semantics are the server's: GET /api/v1/maintenance returns
- * windows whose OWN SPAN overlaps [from,to), so a window that opened before the
- * chart's range and is still running is included. That is the one an operator
- * looking at this range most needs.
+ * Both used to call `new Date()` in their own queryFn, milliseconds to seconds
+ * apart, and a window declared in that gap was counted by the bar while sitting
+ * outside the range the chart had already resolved (QA scope 2, finding #20).
+ * Taken ONCE per mount rather than on a ticker: the chart it must agree with
+ * fetches once too, and a bar whose range crept forward under a static chart
+ * would be the same bug wearing a clock.
  */
-export function useMaintenance(scope: string, rangeSeconds: number): MaintenanceResult {
+export function useWindowAnchor(rangeSeconds: number): TimeWindow {
+  const { at } = useTimeContext();
+  const [mountedAt] = useState(() => Date.now());
+  return useMemo(() => {
+    const to = at ?? new Date(mountedAt);
+    return { from: new Date(to.getTime() - rangeSeconds * 1000), to };
+  }, [at, mountedAt, rangeSeconds]);
+}
+
+/**
+ * useMaintenance fetches the declared windows a surface should draw; everything useAnnotations
+ * documents about the window and the scopes holds here verbatim.
+ *
+ * `range` is the shared anchor above, passed by a surface that also draws a
+ * chart. Without it the hook keeps computing its own, which is right for a bar
+ * that stands alone. (Named `range`, not `window`: this file already spends the
+ * word `window` on a declared MaintenanceWindow.)
+ */
+export function useMaintenance(scope: string, rangeSeconds: number, range?: TimeWindow): MaintenanceResult {
   const { at } = useTimeContext();
   const { can } = useAuth();
   const qc = useQueryClient();
   const canRead = can("maintenance:read");
-  const anchor = at ? at.toISOString() : "live";
+  /* The shared anchor keys the cache too — two surfaces on the same scope and
+     the same span but different anchors are two different questions. */
+  const anchor = range ? range.to.toISOString() : at ? at.toISOString() : "live";
 
   const windowFor = useCallback(() => {
+    if (range) return range;
     const to = at ?? new Date();
     return { from: new Date(to.getTime() - rangeSeconds * 1000), to };
-  }, [at, rangeSeconds]);
+  }, [at, rangeSeconds, range]);
 
   const global = useQuery({
     queryKey: ["maintenance", GLOBAL_SCOPE, anchor, rangeSeconds],
@@ -139,28 +148,20 @@ function floorToMinute(d: Date): Date {
   return out;
 }
 
-/** fmtStamp is the FULL local stamp — the row's `title`, and its fallback for
- *  a timestamp that will not parse. */
-function fmtStamp(iso: string): string {
+/* Both stamps go through lib/i18n's shared helpers — the reasoning is spelled
+   out over components/annotations.tsx's pair, and the point of the change is
+   that these two and that pair and the timeline's rows now agree. */
+
+/** fmtStamp is the FULL local stamp — the row's `title`. */
+function fmtStamp(iso: string, locale: Locale): string {
   const d = new Date(iso);
-  return Number.isNaN(d.getTime()) ? iso : d.toLocaleString();
+  return Number.isNaN(d.getTime()) ? iso : stampFull(d, locale);
 }
 
-/**
- * fmtStampCompact is the row's VISIBLE time column, the same treatment
- * components/annotations.tsx got in QA round 2 and this row did not
- * (QA round 3, finding #11).
- *
- * A window renders BOTH edges, so it was carrying two full toLocaleStrings —
- * about 22rem of un-shrinkable text — in lists as narrow as the Investigate
- * page's 24rem column, and the reason (what the row is actually for) was left
- * with about 38px. Month-day-time is the shortest unambiguous form over the
- * span these lists cover, and the whole pair stays one hover away on `title`.
- */
-function fmtStampCompact(iso: string): string {
+/** fmtStampCompact is the row's VISIBLE time column, the same treatment components/annotations.tsx got. */
+function fmtStampCompact(iso: string, locale: Locale): string {
   const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return iso;
-  return d.toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+  return Number.isNaN(d.getTime()) ? iso : stampShort(d, locale);
 }
 
 function Field({ label, children, hint }: { label: string; children: React.ReactNode; hint?: string }) {
@@ -174,36 +175,31 @@ function Field({ label, children, hint }: { label: string; children: React.React
 }
 
 /**
- * CreateMaintenanceForm is the popover the create affordance opens.
- *
- * The scope is FIXED to the surface, shown and not editable — the same rule
- * CreateAnnotationForm documents: a window filed against an object you are not
- * looking at, from a form naming a different one, is invisible here and appears
- * somewhere you never visit.
- *
- * Both edges go through the M5 DateTimePicker rather than a raw
- * datetime-local, and the picker is opened with `allowFuture` because a
- * maintenance window is most often DECLARED IN ADVANCE — the Time Machine's own
- * past-clamp is exactly wrong for this one form.
- *
- * The end>start test below MIRRORS the store's CHECK. It is not a substitute
- * for it: the server still answers 422, and that answer still lands inline
- * under the fields. It exists so the common mistake costs a sentence instead of
- * a round trip.
+ * CreateMaintenanceForm is the popover the create affordance opens; the scope is FIXED to the
+ * surface, shown and not editable.
  */
 function CreateMaintenanceForm({
   scope,
+  frozenWindow,
   onDone,
   onCancel,
 }: {
   scope: string;
-  /** The stored edges, so the bar can say whether they land in the window it is
-   *  showing (QA round 3, finding #8). */
+  /** The window the list behind this form is frozen to, when it has one. It
+   *  decides where the Start field OPENS — see lib/annotations' defaultStartIn. */
+  frozenWindow?: FrozenWindow;
+  /** The stored edges, so the bar can say whether they land in the window it is showing. */
   onDone: (created: { start: Date; end: Date }) => void;
   onCancel: () => void;
 }) {
-  const [start, setStart] = useState(() => floorToMinute(new Date()));
-  const [end, setEnd] = useState(() => new Date(floorToMinute(new Date()).getTime() + DEFAULT_WINDOW_SECONDS * 1000));
+  const t = useT(maintenanceDict);
+  /* NOW, unless now sits outside the frozen window this bar lists — in which
+     case the hour that ENDS at that window's end, so both edges of the declared
+     window land inside the one on screen (QA scope 3, finding #5). */
+  const [start, setStart] = useState(() =>
+    floorToMinute(defaultStartIn(new Date(), frozenWindow, DEFAULT_WINDOW_SECONDS)),
+  );
+  const [end, setEnd] = useState(() => new Date(start.getTime() + DEFAULT_WINDOW_SECONDS * 1000));
   const [reason, setReason] = useState("");
   /* The in-flight guard, not just a disabled look (QA round 5, finding #17):
      begin() is a REF write, so three clicks in one task produce one request.
@@ -215,11 +211,11 @@ function CreateMaintenanceForm({
     e.preventDefault();
     const why = reason.trim();
     if (why === "") {
-      setError("A reason is required.");
+      setError(t("form.error.reasonRequired"));
       return;
     }
     if (end.getTime() <= start.getTime()) {
-      setError("The end must be after the start.");
+      setError(t("form.error.endNotAfterStart"));
       return;
     }
     setError(undefined);
@@ -233,7 +229,7 @@ function CreateMaintenanceForm({
       });
       onDone({ start, end });
     } catch (err) {
-      setError(err instanceof ApiError ? (err.problem.detail || err.problem.title) : "Failed to declare the window");
+      setError(err instanceof ApiError ? (err.problem.detail || err.problem.title) : t("form.error.createFailed"));
       endSubmit();
     }
   }
@@ -246,27 +242,28 @@ function CreateMaintenanceForm({
           the dialog role promises a screen-reader user three behaviours it does
           not have. Escape-to-discard stays deliberately absent: the reason box
           holds typed text, and losing it to a stray keypress has no undo. */}
-      <form role="form" aria-label="New maintenance window" onSubmit={handleSubmit} className="flex flex-col gap-3">
+      <form role="form" aria-label={t("form.aria")} onSubmit={handleSubmit} className="flex flex-col gap-3">
         <p className="text-xs text-muted-foreground">
-          Scope <span className="font-medium text-foreground">{scopeLabel(scope)}</span> — fixed to this view.
+          {t("form.scope.before")}{" "}
+          <span className="font-medium text-foreground">{scopeLabel(scope, t)}</span> {t("form.scope.after")}
         </p>
         <div className="flex flex-wrap items-start gap-3">
-          <Field label="Start">
-            <DateTimePicker aria-label="Start" value={start} onApply={setStart} allowFuture />
+          <Field label={t("form.start")}>
+            <DateTimePicker aria-label={t("form.start")} value={start} onApply={setStart} allowFuture />
           </Field>
-          <Field label="End" hint="Must be after the start — the server refuses anything else.">
-            <DateTimePicker aria-label="End" value={end} onApply={setEnd} allowFuture />
+          <Field label={t("form.end")} hint={t("form.end.hint")}>
+            <DateTimePicker aria-label={t("form.end")} value={end} onApply={setEnd} allowFuture />
           </Field>
         </div>
         <label className="flex flex-col gap-1 text-xs">
-          <span className="font-medium text-muted-foreground">Reason</span>
+          <span className="font-medium text-muted-foreground">{t("form.reason")}</span>
           <textarea
-            aria-label="Reason"
+            aria-label={t("form.reason")}
             value={reason}
             maxLength={MAINTENANCE_REASON_MAX}
             rows={2}
             onChange={(e) => setReason(e.target.value)}
-            placeholder="Core switch firmware upgrade"
+            placeholder={t("form.reason.placeholder")}
             className="rounded-md bg-surface-2 px-2 py-1.5 text-sm text-foreground placeholder:text-muted-foreground/70 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
           />
           <span className="text-[11px] text-muted-foreground">
@@ -280,10 +277,10 @@ function CreateMaintenanceForm({
         ) : null}
         <div className="flex gap-2">
           <Button type="submit" size="sm" loading={submitting}>
-            Create maintenance window
+            {t("form.submit")}
           </Button>
           <Button type="button" size="sm" variant="outline" onClick={onCancel}>
-            Cancel
+            {t("form.cancel")}
           </Button>
         </div>
       </form>
@@ -292,14 +289,8 @@ function CreateMaintenanceForm({
 }
 
 /**
- * MaintenanceRow is one declared window and its delete.
- *
- * EXPORTED for pages/settings.tsx (QA round 3, finding #9), which lists the
- * windows this bar cannot reach — the bar is bounded to the chart's range, so
- * a window declared for next Tuesday existed with no surface anywhere. Sharing
- * the row rather than writing a second one keeps the confirm idiom, the
- * compact stamp and the write guard in ONE place: three things that must not
- * drift between two lists of the same rows.
+ * MaintenanceRow is one declared window and its delete; EXPORTED for pages/settings.tsx, which
+ * lists the windows this bar cannot reach.
  */
 export function MaintenanceRow({
   window: w,
@@ -310,13 +301,12 @@ export function MaintenanceRow({
   canWrite: boolean;
   onChanged: () => void;
 }) {
+  const t = useT(maintenanceDict);
+  const { locale } = useLocale();
   const guard = useWriteGuard();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
-  /* Second-click confirm, the same idiom the annotation rows and
-     pages/alerting.tsx's rule rows use (QA round 2, finding #14). A declared
-     window is somebody's record that a change was planned; deleting it on one
-     mis-aimed click rewrites that record with no undo. */
+  /* Second-click confirm, the same idiom the annotation rows and pages/alerting.tsx's rule rows use. */
   const [confirming, setConfirming] = useState(false);
 
   async function handleDelete() {
@@ -326,7 +316,7 @@ export function MaintenanceRow({
       await deleteMaintenance(w.id);
       onChanged();
     } catch (err) {
-      setError(err instanceof ApiError ? (err.problem.detail || err.problem.title) : "Failed to delete");
+      setError(err instanceof ApiError ? (err.problem.detail || err.problem.title) : t("row.deleteFailed"));
       setBusy(false);
       setConfirming(false);
     }
@@ -342,24 +332,49 @@ export function MaintenanceRow({
           whose end is "Aug 12, 14:…" tells an operator nothing about when the
           change actually finishes, which is the single fact they came for.
 
-          The fix is a column that FITS (w-44) and never truncates: whitespace-
-          nowrap plus shrink-0, so flex takes the space out of the REASON
-          instead, which already truncates and already carries its own title.
-          Below 700px (max-lg here matches the app's own breakpoint use) the
-          range takes a full row of its own above the reason rather than
-          fighting it for one line — basis-full only at that width. */}
+          The fix is a column that FITS and never truncates: shrink-0, so flex
+          takes the space out of the REASON instead, which already truncates and
+          already carries its own title. Below 700px (max-lg here matches the
+          app's own breakpoint use) the range takes a full row of its own above
+          the reason rather than fighting it for one line — basis-full only at
+          that width.
+
+          QA overflow sweep: w-44 did not actually fit. "Aug 9, 11:31 AM →
+          Aug 9, 01:31 PM" measures 198px against an 11rem (176px) column, and
+          because whitespace-nowrap sat on the WHOLE span with no clipping
+          ancestor, the 22px spilled out of the box instead of wrapping. Two
+          changes, and both are needed:
+
+            - w-52 (13rem, 208px) so the ordinary range still gets its one line;
+            - nowrap moved OFF the container and onto each stamp, which leaves
+              the arrow as the only break opportunity. A longer form than the
+              one measured (a two-digit day, a locale that spells the month out)
+              now folds into a second line at the arrow — never mid-timestamp,
+              never past the edge. Widening alone would only move the cliff. */}
       <span
         data-testid="maintenance-stamp"
-        className="nums w-full shrink-0 basis-full whitespace-nowrap text-muted-foreground lg:w-44 lg:basis-auto"
-        title={`${fmtStamp(w.startAt)} → ${fmtStamp(w.endAt)}`}
+        className="nums w-full shrink-0 basis-full text-muted-foreground lg:w-52 lg:basis-auto"
+        title={`${fmtStamp(w.startAt, locale)} → ${fmtStamp(w.endAt, locale)}`}
       >
-        {fmtStampCompact(w.startAt)} → {fmtStampCompact(w.endAt)}
+        <span className="whitespace-nowrap">{fmtStampCompact(w.startAt, locale)}</span>
+        {" → "}
+        <span className="whitespace-nowrap">{fmtStampCompact(w.endAt, locale)}</span>
       </span>
-      <span data-testid="maintenance-reason" className="min-w-0 flex-1 truncate" title={w.reason}>
+      {/* min-w-[10rem]: the confirm state adds a second button to this row, and
+          flex took the space out of the one column that identifies WHICH window
+          is about to be deleted — the reason collapsed to a single character
+          under the very click that asks you to confirm it (QA scope 2, #19).
+          With a floor on the column the row wraps instead, which is the same
+          give the stamp already takes below lg. */}
+      <span
+        data-testid="maintenance-reason"
+        className="min-w-0 flex-1 basis-40 truncate lg:min-w-[10rem]"
+        title={w.reason}
+      >
         {w.reason}
       </span>
-      <span className="max-w-[7rem] shrink-0 truncate text-[11px] text-muted-foreground" title={scopeLabel(w.scope)}>
-        {scopeLabel(w.scope)}
+      <span className="max-w-[7rem] shrink-0 truncate text-[11px] text-muted-foreground" title={scopeLabel(w.scope, t)}>
+        {scopeLabel(w.scope, t)}
       </span>
       {error ? (
         <span role="alert" className="text-[11px] text-health-bad">
@@ -377,13 +392,13 @@ export function MaintenanceRow({
               variant="outline"
               loading={busy}
               {...guard}
-              aria-label={`Confirm delete maintenance window: ${w.reason}`}
+              aria-label={t("row.confirmDelete.aria", { reason: w.reason })}
               onClick={() => void handleDelete()}
             >
-              Confirm delete
+              {t("row.confirmDelete")}
             </Button>
             <Button type="button" size="sm" variant="ghost" onClick={() => setConfirming(false)}>
-              Cancel
+              {t("row.cancel")}
             </Button>
           </>
         ) : (
@@ -392,10 +407,10 @@ export function MaintenanceRow({
             size="sm"
             variant="ghost"
             {...guard}
-            aria-label={`Delete maintenance window: ${w.reason}`}
+            aria-label={t("row.delete.aria", { reason: w.reason })}
             onClick={() => setConfirming(true)}
           >
-            Delete
+            {t("row.delete")}
           </Button>
         )
       ) : null}
@@ -404,18 +419,8 @@ export function MaintenanceRow({
 }
 
 /**
- * MaintenanceBar is the DOM half: the create affordance, and the list that
- * makes each declared window deletable.
- *
- * A list rather than a control inside the band's own tooltip, for the reason
- * AnnotationBar spells out: ECharts draws to a CANVAS, and a tooltip there is a
- * transient non-focusable overlay with no place in the tab order and no
- * presence in any test in this repo. The canvas keeps doing what canvas is good
- * at — showing WHERE, with the reason on hover.
- *
- * The whole bar is HIDDEN without maintenance:read. That is not cosmetics: the
- * hook makes no request either, so a subject who cannot read these sees no
- * empty shell claiming there are none.
+ * MaintenanceBar is the DOM half: the create affordance; a list rather than a control inside the
+ * band's own tooltip.
  */
 export function MaintenanceBar({
   scope,
@@ -424,12 +429,11 @@ export function MaintenanceBar({
   error,
   onChanged,
   frozenWindow,
-  createLabel = "＋ maintenance",
+  createLabel,
   className,
 }: {
   scope: string;
-  /** What the count sentence CALLS the scope, when the surface queried every
-   *  scope rather than this one (QA round 3, finding #7). Defaults to `scope`. */
+  /** What the count sentence CALLS the scope, when the surface queried every scope rather than this one. */
   scopeCaption?: string;
   windows: MaintenanceWindow[];
   error?: Error | null;
@@ -437,12 +441,12 @@ export function MaintenanceBar({
   /** The FROZEN range this bar is listing, when it has one (Investigate) —
    *  see lib/annotations.ts's outsideWindowNote. */
   frozenWindow?: FrozenWindow;
-  /** The create button's text. Investigate's actions rail names it "Create
-   *  maintenance" because that rail speaks in verbs; everywhere else the
-   *  compact twin of "＋ annotate" is what sits under a chart. */
+  /** The create button's text; defaulted in the BODY rather than in the parameter list. */
   createLabel?: string;
   className?: string;
 }) {
+  const t = useT(maintenanceDict);
+  const { locale } = useLocale();
   const { can } = useAuth();
   const guard = useWriteGuard();
   const canRead = can("maintenance:read");
@@ -450,6 +454,20 @@ export function MaintenanceBar({
   const [open, setOpen] = useState(false);
   const [createdNote, setCreatedNote] = useState<string>();
   const triggerRef = useRef<HTMLButtonElement>(null);
+
+  /* The twin of components/annotations.tsx's reset (QA scope 3, finding #4):
+     the note describes one scope and one window and must not outlive either. */
+  const noteScope = `${scope}|${frozenWindow ? `${frozenWindow.from.getTime()}-${frozenWindow.to.getTime()}` : "live"}`;
+  const [seenScope, setSeenScope] = useState(noteScope);
+  if (seenScope !== noteScope) {
+    setSeenScope(noteScope);
+    setCreatedNote(undefined);
+  }
+
+  const handleChanged = () => {
+    setCreatedNote(undefined);
+    onChanged();
+  };
 
   /* Focus comes back to the control that opened the form, the same contract
      AnnotationBar keeps (QA round 2, finding #20): the form is unmounted by
@@ -466,8 +484,11 @@ export function MaintenanceBar({
       <div className="flex flex-wrap items-center gap-2">
         <span className="text-xs text-muted-foreground">
           {error
-            ? "Maintenance windows are unavailable."
-            : `${windows.length} maintenance window${windows.length === 1 ? "" : "s"} in this window · scope ${scopeCaption ?? scopeLabel(scope)}`}
+            ? t("bar.unavailable")
+            : t(`bar.count.${countForm(locale, windows.length)}` as MaintenanceKey, {
+                count: windows.length,
+                scope: scopeCaption ?? scopeLabel(scope, t),
+              })}
         </span>
         {/* HIDE on permission, DISABLE on time — never the other way round. */}
         {canWrite ? (
@@ -481,7 +502,7 @@ export function MaintenanceBar({
             aria-expanded={open}
             onClick={() => setOpen((o) => !o)}
           >
-            {createLabel}
+            {createLabel ?? t("bar.create")}
           </Button>
         ) : null}
       </div>
@@ -489,12 +510,12 @@ export function MaintenanceBar({
       {open ? (
         <CreateMaintenanceForm
           scope={scope}
+          frozenWindow={frozenWindow}
           onDone={({ start, end }) => {
             closeAndRefocus();
-            onChanged();
-            /* Silent for the ordinary in-window create — the row appearing IS
-               the feedback (QA round 3, finding #8). */
-            setCreatedNote(outsideWindowNote(start, end, frozenWindow) ?? undefined);
+            handleChanged();
+            /* Silent for the ordinary in-window create — the row appearing IS the feedback. */
+            setCreatedNote(outsideWindowNote(start, end, frozenWindow, t, locale) ?? undefined);
           }}
           onCancel={closeAndRefocus}
         />
@@ -507,9 +528,9 @@ export function MaintenanceBar({
       ) : null}
 
       {windows.length > 0 ? (
-        <ul aria-label="Maintenance windows in this window" className="m-0 divide-y divide-border/60 p-0">
+        <ul aria-label={t("bar.list.aria")} className="m-0 divide-y divide-border/60 p-0">
           {windows.map((w) => (
-            <MaintenanceRow key={w.id} window={w} canWrite={canWrite} onChanged={onChanged} />
+            <MaintenanceRow key={w.id} window={w} canWrite={canWrite} onChanged={handleChanged} />
           ))}
         </ul>
       ) : null}

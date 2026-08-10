@@ -6,20 +6,24 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+
 	"github.com/EsDmitrii/kconmon-ng/internal/console/authz"
+	"github.com/EsDmitrii/kconmon-ng/internal/console/cache"
 	"github.com/EsDmitrii/kconmon-ng/internal/console/checks"
+	"github.com/EsDmitrii/kconmon-ng/internal/console/controllerclient"
+	"github.com/EsDmitrii/kconmon-ng/internal/console/metrics"
 	"github.com/EsDmitrii/kconmon-ng/internal/console/store"
+	"github.com/EsDmitrii/kconmon-ng/internal/console/ws"
 )
 
-// fakeRunner is a RunService test double: an in-memory map of runs, plus
-// results, so runs_test.go can drive every httpapi-level scenario (happy
-// paths, error mapping, RBAC, audit) without wiring a real controller, hub,
-// bus, or store the way a real *checks.Runner would need.
+// fakeRunner is a RunService test double: an in-memory map of runs.
 type fakeRunner struct {
 	mu        sync.Mutex
 	runs      map[string]checks.Run
@@ -81,11 +85,8 @@ func (f *fakeRunner) List(_ context.Context, _ checks.ListFilter) (checks.RunPag
 	return checks.RunPage{Runs: out}, nil
 }
 
-// Cancel mirrors checks.Runner.Cancel's contract closely enough for the
-// handler's own mapping to be exercised: an unknown id is store.ErrNotFound,
-// and everything else -- including a run that already reached a terminal
-// status -- succeeds, because cancelling a run that just finished is a no-op
-// there, not an error.
+// Cancel mirrors checks.Runner.Cancel's contract closely enough for the handler's own mapping to be
+// exercised.
 func (f *fakeRunner) Cancel(_ context.Context, runID string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -112,9 +113,7 @@ func (f *fakeRunner) seedRun(status string) {
 
 var _ RunService = (*fakeRunner)(nil)
 
-// newRunsTestServer builds a Server with a fixed SubjectUser resolved to
-// role (via a fakeRoleResolver, since the built-in authz.NewPolicy(nil) is
-// used unmodified -- Task 10's real viewer/operator split) and runner wired.
+// newRunsTestServer builds a Server with a fixed SubjectUser resolved to role.
 func newRunsTestServer(t *testing.T, runner RunService, role string) *Server {
 	t.Helper()
 	authr := fakeAuthenticator{subject: authz.Subject{Kind: authz.SubjectUser, ID: "u1"}}
@@ -159,6 +158,111 @@ func TestRunsCreateHappyPath(t *testing.T) {
 	}
 }
 
+// The full-mesh path, end to end, through a REAL *checks.Runner rather than fakeRunner.
+func TestRunsCreateAllToAllPlansOverAgentsWithoutKubernetesNodes(t *testing.T) {
+	ctrl := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/topology" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		// `nodes` deliberately null, exactly as the controller serialises an
+		// unset node watcher (internal/controller/topology.go).
+		_, _ = w.Write([]byte(`{"nodes":null,"agents":[
+			{"id":"a1","nodeName":"qa-node-01","podIP":"10.0.0.1","zone":"zone-a"},
+			{"id":"a2","nodeName":"qa-node-02","podIP":"10.0.0.2","zone":"zone-b"},
+			{"id":"a3","nodeName":"qa-node-03","podIP":"10.0.0.3","zone":"zone-c"}],
+			"timestamp":"2026-01-01T00:00:00Z"}`))
+	}))
+	t.Cleanup(ctrl.Close)
+
+	m := metrics.New("kconmon_ng_test", prometheus.NewRegistry())
+	bus := cache.NewInProcessBus()
+	runner := checks.NewRunner(
+		controllerclient.New(ctrl.URL, 5*time.Second),
+		ws.NewHub(bus, m), bus, checks.NewMemoryStore(), m,
+	)
+	s := newRunsTestServer(t, runner, "operator")
+
+	body := `{"sources":[],"destinations":[],"type":"tcp","plane":"pod","timeoutNs":1000000000}`
+	w := doRequest(t, s, http.MethodPost, "/api/v1/runs", strings.NewReader(body), mutateWithCSRF)
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202 (all<->all over 3 agents): %s", w.Code, w.Body)
+	}
+	var resp runCreateResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	// 3 agents, ordered pairs, self-pairs dropped.
+	if resp.PairTotal != 6 {
+		t.Errorf("pairTotal = %d, want 6", resp.PairTotal)
+	}
+}
+
+// durationNs reaches the spec as-is, and an absent one leaves an instant run instant.
+func TestRunsCreateCarriesDurationIntoTheSpec(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		body         string
+		wantDuration time.Duration
+	}{
+		{
+			name:         "absent durationNs stays an instant run",
+			body:         `{"sources":["n1"],"destinations":["n2"],"type":"tcp","plane":"pod","timeoutNs":1000000000}`,
+			wantDuration: 0,
+		},
+		{
+			name:         "60s interval run",
+			body:         `{"sources":["n1"],"destinations":["n2"],"type":"tcp","plane":"pod","timeoutNs":1000000000,"durationNs":60000000000}`,
+			wantDuration: time.Minute,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			runner := newFakeRunner()
+			s := newRunsTestServer(t, runner, "operator")
+			w := doRequest(t, s, http.MethodPost, "/api/v1/runs", strings.NewReader(tc.body), mutateWithCSRF)
+			if w.Code != http.StatusAccepted {
+				t.Fatalf("status = %d, want 202: %s", w.Code, w.Body)
+			}
+			if len(runner.started) != 1 {
+				t.Fatalf("Start called %d times, want 1", len(runner.started))
+			}
+			if got := runner.started[0].Duration; got != tc.wantDuration {
+				t.Errorf("spec.Duration = %s, want %s", got, tc.wantDuration)
+			}
+		})
+	}
+}
+
+// A duration outside the accepted window is a 422 that NAMES the window.
+func TestRunsCreateDurationOutOfRangeReturns422NamingTheBound(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+	}{
+		{"under the floor", `{"sources":["n1"],"destinations":["n2"],"type":"tcp","plane":"pod","durationNs":1000000}`},
+		{"over the ceiling", `{"sources":["n1"],"destinations":["n2"],"type":"tcp","plane":"pod","durationNs":90000000000000}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// A REAL runner: ValidateDuration lives in Start, and fakeRunner
+			// would happily accept anything.
+			m := metrics.New("kconmon_ng_test", prometheus.NewRegistry())
+			bus := cache.NewInProcessBus()
+			runner := checks.NewRunner(nil, ws.NewHub(bus, m), bus, checks.NewMemoryStore(), m)
+			s := newRunsTestServer(t, runner, "operator")
+
+			w := doRequest(t, s, http.MethodPost, "/api/v1/runs", strings.NewReader(tc.body), mutateWithCSRF)
+			if w.Code != http.StatusUnprocessableEntity {
+				t.Fatalf("status = %d, want 422: %s", w.Code, w.Body)
+			}
+			body := w.Body.String()
+			if !strings.Contains(body, "10s") || !strings.Contains(body, "24h") {
+				t.Errorf("body = %s, want both bounds (10s, 24h0m0s) named in the detail", body)
+			}
+		})
+	}
+}
+
 func TestRunsCreateInvalidBodyReturns400(t *testing.T) {
 	s := newRunsTestServer(t, newFakeRunner(), "operator")
 	w := doRequest(t, s, http.MethodPost, "/api/v1/runs", strings.NewReader(`not json`), mutateWithCSRF)
@@ -197,9 +301,7 @@ func TestRunsCreateUnknownTypeReturns400(t *testing.T) {
 }
 
 func TestRunsRoutesWithNilRunnerReturn503(t *testing.T) {
-	// cmd/console only ever constructs a Runner when controller.url is
-	// configured, so a nil s.runner is simultaneously "no runner" and "no
-	// controller" -- one gate covers both cases the brief calls out.
+	// cmd/console only ever constructs a Runner when controller.url is configured.
 	s := newRunsTestServer(t, nil, "operator")
 
 	for _, tc := range []struct {
@@ -285,9 +387,8 @@ func TestRunsGetUnknownIDReturns404(t *testing.T) {
 	}
 }
 
-// TestRunsRBACViewerReadOnlyOperatorFull exercises Task 10's role split end
-// to end: viewer can GET both routes but is denied POST; operator can do
-// all three.
+// TestRunsRBACViewerReadOnlyOperatorFull exercises the role split end to end: viewer can GET both
+// routes but is denied POST.
 func TestRunsRBACViewerReadOnlyOperatorFull(t *testing.T) {
 	body := `{"sources":["n1"],"destinations":["n2"],"type":"tcp","plane":"pod","timeoutNs":1000000000}`
 
@@ -328,9 +429,8 @@ func TestRunsRBACViewerReadOnlyOperatorFull(t *testing.T) {
 	})
 }
 
-// TestRunsCreateAuditRecordsOneEntry is the brief's explicit case: the audit
-// middleware records exactly one entry for the POST, keyed by the route
-// PATTERN ("POST /api/v1/runs"), not the literal path.
+// TestRunsCreateAuditRecordsOneEntry is the explicit case: the audit middleware records exactly one
+// entry for the POST.
 func TestRunsCreateAuditRecordsOneEntry(t *testing.T) {
 	fs := &fakeAuditStore{}
 	runner := newFakeRunner()
@@ -365,19 +465,14 @@ func TestRunsCreateAuditRecordsOneEntry(t *testing.T) {
 	}
 }
 
-// TestRunsRouteTableCoversAllThreeRoutes is a narrower, targeted check
-// alongside TestEveryAPIRouteHasAPermissionDecision (auth_test.go), which
-// already walks the live router: this pins the exact permission each new
-// route requires, so a future edit to middleware_auth.go's table cannot
-// silently swap runs:read/runs:create between routes without a test noticing.
+// TestRunsRouteTableCoversAllThreeRoutes is a narrower.
 func TestRunsRouteTableCoversAllThreeRoutes(t *testing.T) {
 	cases := map[string]authz.Permission{
 		"POST /api/v1/runs":     authz.PermRunsCreate,
 		"GET /api/v1/runs":      authz.PermRunsRead,
 		"GET /api/v1/runs/{id}": authz.PermRunsRead,
-		// M4 Task 13: cancelling rides on runs:create, deliberately -- see
-		// routeTable's own comment. Pinned here so a later edit cannot quietly
-		// relax it to runs:read and let every viewer stop an operator's run.
+		// Pinned here so a later edit cannot quietly relax it to runs:read and let every viewer stop an
+		// operator's run.
 		"POST /api/v1/runs/{id}/cancel": authz.PermRunsCreate,
 	}
 	for key, want := range cases {
@@ -435,10 +530,8 @@ func TestRunsCancelTerminalRunIsANoOp204(t *testing.T) {
 	}
 }
 
-// TestRunsCancelUnknownRunReturns404 covers both shapes of "no such run": a
-// well-formed UUID nothing was ever stored under, and an id that cannot name
-// a row in a UUID-keyed table at all. Neither is a 502 -- a typo in a run URL
-// must never read as an outage (M3 follow-up #5).
+// TestRunsCancelUnknownRunReturns404 covers both shapes of "no such run": a well-formed UUID
+// nothing was ever stored under.
 func TestRunsCancelUnknownRunReturns404(t *testing.T) {
 	s := newRunsTestServer(t, newFakeRunner(), "operator")
 
@@ -496,11 +589,8 @@ func TestRunsCancelWithoutRunnerReturns503(t *testing.T) {
 	}
 }
 
-// TestRunsCancelIsAuditedWithEmptyDetail pins the audit decision this route
-// makes by NOT appearing in auditDetailAllowlist: it is still recorded (every
-// POST is), attributed to the run through the resource column, and its detail
-// stays the default {} because there is no request body to allow-list keys
-// from.
+// TestRunsCancelIsAuditedWithEmptyDetail pins the audit decision this route makes by NOT appearing
+// in auditDetailAllowlist.
 func TestRunsCancelIsAuditedWithEmptyDetail(t *testing.T) {
 	fs := &fakeAuditStore{}
 	runner := newFakeRunner()
@@ -539,10 +629,6 @@ func newRunsTargetsTestServer(t *testing.T, runner RunService, targets TargetSer
 	return newAuthzServer(t, authr, authz.NewPolicy(nil), extra)
 }
 
-// TestRunsCreateNodeKindIsTheM3Path pins the regression the M4 destination
-// fields must never break: a body without them (and one saying "node"
-// explicitly) produces a Spec with plain node-name Destinations and NO
-// TypedDestinations -- the exact Spec the M3 handler built.
 func TestRunsCreateNodeKindIsTheM3Path(t *testing.T) {
 	for _, body := range []string{
 		`{"sources":["n1"],"destinations":["n2"],"type":"tcp","plane":"pod","timeoutNs":1000000000}`,
@@ -645,9 +731,52 @@ func TestRunsCreateDestinationValidation(t *testing.T) {
 	}
 }
 
-// TestRunsCreateInvalidDestinationFromPlannerIs400 covers the Task 12
-// carry-forward: checks.ErrInvalidDestination out of Runner.Start maps to
-// 400, not the 502 default.
+// An ad-hoc address typed into the diagnostics form is judged by the SAME rule a saved definition's
+// destination_address is (store.ValidateAdhocAddress): a malformed one is refused up front and
+// named, instead of being dispatched and coming back as "agent does not support external
+// destinations" -- which would be a lie about a string no agent was ever asked to dial.
+func TestRunsCreateAdhocAddressValidation(t *testing.T) {
+	for _, c := range []struct {
+		name, address string
+		want          int
+	}{
+		{"url", "https://example.com/health", http.StatusAccepted},
+		{"ipv4", "192.0.2.7", http.StatusAccepted},
+		{"bracketed ipv6 with port", "[2001:db8::1]:8443", http.StatusAccepted},
+		{"dns name with underscore", "qa_node.internal", http.StatusAccepted},
+		{"host with port", "example.com:65535", http.StatusAccepted},
+		{"prose", "not a valid address!!", http.StatusUnprocessableEntity},
+		{"port zero", "example.com:0", http.StatusUnprocessableEntity},
+		{"port above range", "example.com:70000", http.StatusUnprocessableEntity},
+		{"doubled dot", "example..com", http.StatusUnprocessableEntity},
+		{"scheme without host", "https://", http.StatusUnprocessableEntity},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			runner := newFakeRunner()
+			s := newRunsTestServer(t, runner, "operator")
+			body, err := json.Marshal(map[string]any{
+				"sources": []string{"n1"}, "type": "tcp", "plane": "pod", "timeoutNs": 1_000_000_000,
+				"destinationKind": "adhoc", "destinationAddress": c.address,
+			})
+			if err != nil {
+				t.Fatalf("marshal body: %v", err)
+			}
+			w := doRequest(t, s, http.MethodPost, "/api/v1/runs", strings.NewReader(string(body)), mutateWithCSRF)
+			if w.Code != c.want {
+				t.Fatalf("status = %d, want %d: %s", w.Code, c.want, w.Body)
+			}
+			if c.want != http.StatusAccepted {
+				if len(runner.started) != 0 {
+					t.Errorf("refused address still started a run: %+v", runner.started)
+				}
+				if !strings.Contains(w.Body.String(), c.address) {
+					t.Errorf("body %s does not name the refused address %q", w.Body, c.address)
+				}
+			}
+		})
+	}
+}
+
 func TestRunsCreateInvalidDestinationFromPlannerIs400(t *testing.T) {
 	runner := newFakeRunner()
 	runner.startErr = fmt.Errorf("checks: plan: %w: empty address", checks.ErrInvalidDestination)

@@ -1,10 +1,12 @@
 package httpapi
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"log/slog"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -15,12 +17,8 @@ import (
 	"github.com/EsDmitrii/kconmon-ng/internal/console/store"
 )
 
-// TargetService is the subset of *store.DB httpapi needs for CRUD
-// /api/v1/targets: the read seam and the write seam together. A local
-// interface in the shape of RunService (runs.go) rather than *store.DB
-// itself, so a test can substitute a fake with no database at all, and so
-// this package's contract with store cannot widen every time *store.DB grows
-// a method for some other caller.
+// TargetService is the subset of *store.DB httpapi needs for CRUD /api/v1/targets; a local
+// interface in the shape of RunService (runs.go) rather than *store.DB itself.
 type TargetService interface {
 	store.TargetReader
 	store.TargetStore
@@ -28,20 +26,13 @@ type TargetService interface {
 
 var _ TargetService = (*store.DB)(nil)
 
-// targetsUnavailableDetail is served whenever s.targets is nil. Unlike
-// Runner -- which falls back to checks.NewMemoryStore() so on-demand runs
-// still work with the database off (Decision 15) -- targets are
-// CONFIGURATION and get NO in-memory fallback (Decision 13): a probe
-// definition that vanishes on pod restart is worse than one that was never
-// accepted, so the only honest answer is 503 naming the value that turns
-// persistence on.
+// targetsUnavailableDetail is served whenever s.targets is nil; unlike Runner -- which falls back
+// to checks.NewMemoryStore so on-demand runs still work with the database off.
 const targetsUnavailableDetail = "targets are persisted configuration with no in-memory fallback: " +
 	"set console.database.mode in the console config (Helm: console.database.mode) to enable /api/v1/targets"
 
-// Limit bounds for GET /api/v1/targets, mirroring
-// runsMinLimit/runsMaxLimit/runsDefaultLimit (runs.go), themselves a
-// hand-kept-in-sync copy of store's own clampLimit -- same reasoning, store
-// keeps clampLimit private.
+// Limit bounds for GET /api/v1/targets, mirroring runsMinLimit/runsMaxLimit/runsDefaultLimit
+// (runs.go).
 const (
 	targetsMinLimit     = 1
 	targetsMaxLimit     = 500
@@ -102,18 +93,8 @@ type targetRequest struct {
 	Labels  json.RawMessage `json:"labels,omitempty"`
 }
 
-// decodeTargetRequest reads and validates a create/update body. A body that
-// is not JSON at all is a 400 (malformed request); a well-formed body whose
-// VALUES break a target rule is a 422 -- the same distinction handleRunsCreate
-// draws between an unparseable spec and one refused for what it would do.
-//
-// Validation is delegated to store.TargetInput.Validate rather than
-// reimplemented here, deliberately: the name charset rule exists because
-// targets.name becomes a Prometheus label value (migration 00004), and a
-// second copy of that rule in httpapi is a second copy that can drift from
-// the one the database layer actually enforces. The cost is that the detail
-// string is store's, so the internal package prefix is trimmed before it
-// reaches the wire.
+// decodeTargetRequest reads and validates a create/update body; a body that is not JSON at all is a
+// 400 (malformed request).
 func decodeTargetRequest(w http.ResponseWriter, r *http.Request) (store.TargetInput, bool) {
 	var req targetRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -136,16 +117,8 @@ func publicValidationDetail(err error) string {
 	return strings.TrimPrefix(err.Error(), "store: ")
 }
 
-// targetIDFrom resolves the {id} path parameter, answering 404 and reporting
-// false for anything that is not a canonical UUID.
-//
-// M3 follow-up #5: without this guard a malformed id travels all the way to
-// pgx, which rejects it while encoding the query parameter, and the handler's
-// catch-all maps that to 502 -- telling a client the gateway is broken when
-// in fact it asked for something that cannot exist. An unparseable id and an
-// unknown one are indistinguishable to a caller, so both are 404. The check
-// lives here rather than in store because store's parse failure is a legitimate
-// error for its own callers; only the HTTP layer knows it means "not found".
+// targetIDFrom resolves the {id} path parameter; without this guard a malformed id travels all the
+// way to pgx.
 func targetIDFrom(w http.ResponseWriter, r *http.Request) (string, bool) {
 	id := chi.URLParam(r, "id")
 	if _, err := uuid.Parse(id); err != nil {
@@ -155,16 +128,8 @@ func targetIDFrom(w http.ResponseWriter, r *http.Request) (string, bool) {
 	return id, true
 }
 
-// writeTargetStoreError maps a TargetService error to a response. The three
-// sentinels are the whole contract (store/targets.go's TargetReader doc
-// comment); anything else is an opaque backend failure and becomes 502, the
-// same shape handleRunsGet uses for an unexpected store error.
-//
-// ErrAlreadyExists is 422, NOT 409: a duplicate name is a rejected FIELD
-// VALUE in an otherwise well-formed body, indistinguishable from a bad kind
-// as far as the client's fix goes (change the name and resend). 409 is
-// reserved for ErrInUse, which is about the state of OTHER rows, not about
-// anything in this request.
+// writeTargetStoreError maps a TargetService error to a response; ErrAlreadyExists is 422, NOT 409:
+// a duplicate name is a rejected FIELD VALUE in an otherwise well-formed body.
 func writeTargetStoreError(w http.ResponseWriter, name, id string, err error) {
 	switch {
 	case errors.Is(err, store.ErrNotFound):
@@ -173,12 +138,8 @@ func writeTargetStoreError(w http.ResponseWriter, name, id string, err error) {
 		writeProblem(w, http.StatusUnprocessableEntity, "invalid target",
 			"target: name "+strconv.Quote(name)+" is already taken; target names are unique")
 	case errors.Is(err, store.ErrInUse):
-		// The referencing rows cannot be enumerated from here: TargetService
-		// is TargetReader+TargetStore, and definitions live behind
-		// DefinitionReader, which this handler deliberately does not take a
-		// dependency on. So the detail names the resource kind and the query
-		// that lists them (Task 12's GET /api/v1/checks?targetId=), which is
-		// what an operator needs to act.
+		// Only handleTargetsDelete can produce this, and it answers ErrInUse itself with the
+		// names; this branch is the fallback for a caller that could not enumerate them.
 		writeProblem(w, http.StatusConflict, "target in use",
 			"one or more check definitions still reference target "+strconv.Quote(id)+
 				"; delete or re-point those definitions first (they are listable by target id)")
@@ -327,8 +288,80 @@ func (s *Server) handleTargetsDelete(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := s.targets.DeleteTarget(r.Context(), id); err != nil {
+		if errors.Is(err, store.ErrInUse) {
+			s.writeTargetInUse(r.Context(), w, id)
+			return
+		}
 		writeTargetStoreError(w, "", id, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// inUseDefinitionsListed caps how many referencing definitions the 409 spells out; past this the
+// message names the rest by count rather than turning into a wall of text.
+const inUseDefinitionsListed = 10
+
+// writeTargetInUse answers the delete refusal in the terms the operator works in -- the target's
+// NAME and the names of the definitions still pointing at it -- falling back to the id-only
+// wording whenever a lookup cannot be made.
+func (s *Server) writeTargetInUse(ctx context.Context, w http.ResponseWriter, id string) {
+	label := strconv.Quote(id)
+	if t, err := s.targets.GetTarget(ctx, id); err == nil && t.Name != "" {
+		label = strconv.Quote(t.Name)
+	}
+
+	names, more := s.referencingDefinitionNames(ctx, id)
+	if len(names) == 0 {
+		writeProblem(w, http.StatusConflict, "target in use",
+			"one or more check definitions still reference target "+label+
+				"; delete or re-point those definitions first")
+		return
+	}
+
+	quoted := make([]string, 0, len(names))
+	for _, n := range names {
+		quoted = append(quoted, strconv.Quote(n))
+	}
+	listed := strings.Join(quoted, ", ")
+	if more > 0 {
+		listed += " and " + strconv.Itoa(more) + " more"
+	}
+	writeProblem(w, http.StatusConflict, "target in use",
+		"target "+label+" is still referenced by check "+pluralDefinitions(len(names)+more)+" "+listed+
+			"; delete or re-point them first")
+}
+
+// referencingDefinitionNames lists the definitions pointing at target id, capped at
+// inUseDefinitionsListed; more counts the ones past the cap. An absent or failing
+// DefinitionService yields no names at all, which the caller reads as "cannot enumerate".
+func (s *Server) referencingDefinitionNames(ctx context.Context, id string) (names []string, more int) {
+	if s.definitions == nil {
+		return nil, 0
+	}
+	page, err := s.definitions.ListDefinitions(ctx, store.DefinitionFilter{
+		TargetID: id,
+		// One past the cap, so "and N more" can be honest about there being more at all.
+		Limit: inUseDefinitionsListed + 1,
+	})
+	if err != nil {
+		slog.Error("httpapi: list definitions for in-use target failed", "target", id, "error", err) //nolint:gosec // G706: structured slog fields, not string-built log injection
+		return nil, 0
+	}
+	for i := range page.Definitions {
+		names = append(names, page.Definitions[i].Name)
+	}
+	sort.Strings(names)
+	if len(names) > inUseDefinitionsListed {
+		more = len(names) - inUseDefinitionsListed
+		names = names[:inUseDefinitionsListed]
+	}
+	return names, more
+}
+
+func pluralDefinitions(n int) string {
+	if n == 1 {
+		return "definition"
+	}
+	return "definitions"
 }

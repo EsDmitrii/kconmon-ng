@@ -3,8 +3,9 @@ import { act, cleanup, fireEvent, render, screen } from "@testing-library/react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { resetWsClient } from "@/hooks/use-ws-topic";
 import { FakeSocket } from "@/lib/fake-websocket";
+import { LOCALE_STORAGE_KEY, LocaleProvider } from "@/lib/i18n";
 import { parseInvestigationParams } from "@/lib/investigation-sources";
-import { MatrixPage, readProtocolFromLocation } from "./matrix";
+import { degradedProtocolParam, MatrixPage, readProtocolFromLocation } from "./matrix";
 
 const matrixBody = {
   protocol: "tcp", plane: "pod", nodes: ["a", "b"],
@@ -26,11 +27,8 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-// A Response body can only be read once, and MatrixPage now issues two requests
-// (/api/v1/matrix plus the /api/v1/version capability probe useMatrix feature-
-// detects realtime with), so the stub has to mint a fresh Response per call
-// rather than resolve the same instance twice. Same convention as
-// overview.test.tsx.
+// A Response body can only be read once, and MatrixPage now issues two requests (/api/v1/matrix
+// plus the /api/v1/version capability probe useMatrix feature-detects realtime with).
 const json = (body: unknown, init?: ResponseInit) =>
   new Response(JSON.stringify(body), {
     status: 200,
@@ -39,10 +37,8 @@ const json = (body: unknown, init?: ResponseInit) =>
   });
 
 /**
- * The default stub answers /api/v1/version with the matrix body, which has no
- * `capabilities` field — realtime reads false, useWsTopic stays disabled and no
- * socket is constructed. That is the M1 fallback path, and it is what every
- * test here but the last one exercises.
+ * The default stub answers /api/v1/version with the matrix body, which has no `capabilities` field
+ * — realtime reads false.
  */
 function stubFetch(body: unknown, init?: ResponseInit) {
   vi.stubGlobal("fetch", vi.fn(() => Promise.resolve(json(body, init))));
@@ -124,6 +120,17 @@ describe("MatrixPage", () => {
     expect(screen.getByText(/No data/)).toBeInTheDocument();
   });
 
+  /* QA scope 2, finding #12 — the green row claims "fail < 1%" while a cell
+     with no fail samples is green too. The note has to say on what grounds. */
+  it("says what a no-sample cell's green actually rests on", async () => {
+    stubFetch(matrixBody);
+    renderPage();
+    await screen.findByLabelText("a → b: fail 50.0%, RTT p95 2.0ms");
+    const note = screen.getByText(/colour = worst of fail/);
+    expect(note).toHaveTextContent(/absence of a bad signal/);
+    expect(note).toHaveTextContent(/not on a measured zero/);
+  });
+
   it("opens a hover tooltip with the pair's figures", async () => {
     stubFetch(matrixBody);
     renderPage();
@@ -148,6 +155,31 @@ describe("MatrixPage", () => {
     expect(noData).toHaveAttribute("href", "/pairs/b/a");
   });
 
+  /* QA scope 2, finding #14 — every cell opened a card and the two names
+     framing it opened nothing. */
+  it("links each row and column header to that node's own card", async () => {
+    stubFetch(matrixBody);
+    renderPage();
+    await screen.findByLabelText("a → b: fail 50.0%, RTT p95 2.0ms");
+    const headers = screen.getAllByRole("link", { name: "Open the card for a" });
+    // One column header and one row header, both pointing at the same card.
+    expect(headers).toHaveLength(2);
+    for (const h of headers) expect(h).toHaveAttribute("href", "/nodes/a");
+  });
+
+  it("URL-encodes a node name in the header link the same way the cell link does", async () => {
+    stubFetch({
+      protocol: "tcp",
+      plane: "pod",
+      nodes: ["ns/pod a"],
+      cells: [],
+      timestamp: "t",
+    });
+    renderPage();
+    const headers = await screen.findAllByRole("link", { name: "Open the card for ns/pod a" });
+    expect(headers[0]).toHaveAttribute("href", `/nodes/${encodeURIComponent("ns/pod a")}`);
+  });
+
   it("URL-encodes node names that need it in the pair link", async () => {
     stubFetch({
       protocol: "tcp",
@@ -157,9 +189,7 @@ describe("MatrixPage", () => {
       timestamp: "t",
     });
     renderPage();
-    // ANCHORED: the same cell now carries a second labelled affordance,
-    // "Investigate ns/pod a → b" (M6 Task 8), and an unanchored substring
-    // match would find both.
+    // ANCHORED: the same cell now carries a second labelled affordance, "Investigate ns/pod a → b".
     const cell = await screen.findByLabelText(/^ns\/pod a → b/);
     expect(cell).toHaveAttribute("href", `/pairs/${encodeURIComponent("ns/pod a")}/b`);
   });
@@ -206,12 +236,26 @@ describe("MatrixPage — Investigate affordance", () => {
     await screen.findByLabelText("Investigate a → b");
     expect(screen.queryByLabelText("Investigate a → a")).toBeNull();
   });
+
+  it("gives the icon a 40px hit area without changing what is drawn (QA scope 3, finding #19)", async () => {
+    stubFetch(matrixBody);
+    renderPage();
+
+    const link = await screen.findByLabelText("Investigate a → b");
+    /* The painted control is a 12px glyph in a 16px box — a target a trackpad
+       hits by luck and a touch screen does not hit at all. -inset-3 is 12px on
+       each side, i.e. 16 + 24 = 40px of pointer area, and a pseudo-element
+       rather than padding so the glyph stays in the cell's corner where the
+       affordance is learned. jsdom lays nothing out, so the class is the pin. */
+    expect(link.className).toContain("after:-inset-3");
+    expect(link.className).toContain("after:absolute");
+    // The visual size is untouched: still the small icon, still the tight box.
+    expect(link.className).toContain("p-0.5");
+    expect(link.querySelector("svg")?.getAttribute("class")).toContain("size-3");
+  });
 });
 
-/* ── QA round 2, finding #1: the lazy fail counter ──────────────────────────
-   A pair that has never failed emits no fail-ratio sample, so `failRatio:
-   null` beside a real p95 is the NORMAL state of a healthy fleet's cell. The
-   grid used to throw all of it away and draw an em-dash. */
+/* The grid used to throw all of it away and draw an em-dash. */
 
 const lazyBody = {
   protocol: "udp", plane: "pod", nodes: ["a", "b"],
@@ -263,6 +307,28 @@ describe("MatrixPage — a cell measured without a failure ratio", () => {
   });
 });
 
+/* the cell's second LINE, which is the only prose in the grid A pair with a p95. */
+
+const quietBody = {
+  protocol: "tcp", plane: "pod", nodes: ["a", "b"],
+  cells: [
+    // p95 only: the failure counter never fired and TCP reports no loss ratio.
+    { source: "a", destination: "b", failRatio: null, rttP95: 1_800_000 },
+    { source: "b", destination: "a", failRatio: null },
+  ],
+  timestamp: "2026-01-01T00:00:00Z",
+};
+
+describe("MatrixPage — the secondary line of a cell with no failure samples", () => {
+  it("names the missing half in English under the p95", async () => {
+    stubFetch(quietBody);
+    renderPage();
+    const cell = await screen.findByLabelText(/^a → b:/);
+    expect(cell).toHaveTextContent("1.8ms");
+    expect(cell).toHaveTextContent("no fail data");
+  });
+});
+
 /* ── QA round 2, finding #15: the protocol belongs in the URL ────────────── */
 
 describe("readProtocolFromLocation", () => {
@@ -299,5 +365,135 @@ describe("MatrixPage — protocol in the URL", () => {
     fireEvent.click(screen.getByRole("radio", { name: "UDP" }));
     expect(new URLSearchParams(window.location.search).get("protocol")).toBe("udp");
     expect(window.history.length).toBe(before);
+  });
+});
+
+/* ── QA scope 2, finding #17: a degraded param must not stay in the URL ──── */
+
+describe("degradedProtocolParam", () => {
+  it("names the protocol the page actually shows when the URL asked for another", () => {
+    expect(degradedProtocolParam("?protocol=sctp")).toBe("tcp");
+    expect(degradedProtocolParam("?protocol=")).toBe("tcp");
+    expect(degradedProtocolParam("?protocol=TCP")).toBe("tcp");
+  });
+
+  it("stays quiet when the URL and the view already agree", () => {
+    expect(degradedProtocolParam("?protocol=icmp")).toBeNull();
+    expect(degradedProtocolParam("?protocol=tcp")).toBeNull();
+  });
+
+  it("stays quiet with no param at all — the default needs no spelling out", () => {
+    expect(degradedProtocolParam("")).toBeNull();
+    expect(degradedProtocolParam("?at=2026-08-08T12:00:00Z")).toBeNull();
+  });
+});
+
+describe("MatrixPage — a protocol the console cannot probe", () => {
+  afterEach(() => window.history.replaceState({}, "", "/"));
+
+  it("rewrites the URL to the protocol it degraded to, without a new history entry", async () => {
+    window.history.replaceState({}, "", "/matrix?protocol=sctp");
+    stubFetch(matrixBody);
+    const before = window.history.length;
+    renderPage();
+    await screen.findByLabelText(/^a → b:/);
+    expect(new URLSearchParams(window.location.search).get("protocol")).toBe("tcp");
+    expect(window.history.length).toBe(before);
+    expect(screen.getByRole("radio", { name: "TCP" })).toBeChecked();
+  });
+
+  it("leaves an honest URL alone", async () => {
+    window.history.replaceState({}, "", "/matrix?protocol=udp");
+    stubFetch(matrixBody);
+    renderPage();
+    await screen.findByLabelText(/^a → b:/);
+    expect(window.location.search).toBe("?protocol=udp");
+  });
+});
+
+/* ru The only case in this file with a LocaleProvider. */
+
+describe("MatrixPage — ru", () => {
+  afterEach(() => {
+    /* vitest.setup.ts backs localStorage with ONE Map per test FILE. */
+    localStorage.removeItem(LOCALE_STORAGE_KEY);
+  });
+
+  it("renders the grid chrome and the colour caveat in Russian", async () => {
+    localStorage.setItem(LOCALE_STORAGE_KEY, "ru");
+    stubFetch(matrixBody);
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={qc}>
+        <LocaleProvider>
+          <MatrixPage />
+        </LocaleProvider>
+      </QueryClientProvider>,
+    );
+
+    // The grid is what the awaited element proves has landed.
+    expect(await screen.findByText("откуда \\ куда")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Матрица", level: 1 })).toBeInTheDocument();
+    const note = screen.getByText(/^цвет = худшее из доли сбоев/);
+    expect(note).toHaveTextContent("ячейка без выборок сбоев показывает свой p95");
+    // The grounds for that green, in Russian: absence of a bad signal, not a
+    // measured zero (QA scope 2, finding #12).
+    expect(note).toHaveTextContent("плохого сигнала нет, а не потому, что измерен ноль");
+  });
+
+  /* cellSummary is the SHARED reading of a cell — the grid's aria-label after the "src → dst: " part. */
+  it("speaks a cell's whole aria-label in Russian, leaving the names and figures alone", async () => {
+    localStorage.setItem(LOCALE_STORAGE_KEY, "ru");
+    stubFetch(matrixBody);
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={qc}>
+        <LocaleProvider>
+          <MatrixPage />
+        </LocaleProvider>
+      </QueryClientProvider>,
+    );
+
+    expect(await screen.findByLabelText("a → b: сбой 50.0%, RTT p95 2.0ms")).toBeInTheDocument();
+    // The reverse leg measured nothing at all — the ONE case allowed to claim
+    // absence (lib/matrix-cells.ts's isMeasured).
+    expect(screen.getByLabelText("b → a: нет данных")).toBeInTheDocument();
+    expect(screen.queryByLabelText(/no data/)).toBeNull();
+
+    // The transport badge in the same header, from dict/realtime.ts.
+    expect(screen.getByText("Данные с задержкой")).toBeInTheDocument();
+  });
+
+  /*
+   * The phrase had to get SHORTER without getting less true, so this pins both halves of that
+   * bargain — the words that fit.
+   */
+  it("scopes the cell's second line to сбои instead of opening with «нет данных»", async () => {
+    localStorage.setItem(LOCALE_STORAGE_KEY, "ru");
+    stubFetch(quietBody);
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={qc}>
+        <LocaleProvider>
+          <MatrixPage />
+        </LocaleProvider>
+      </QueryClientProvider>,
+    );
+
+    const cell = await screen.findByLabelText(/^a → b:/);
+    expect(cell).toHaveTextContent("1.8ms");
+    expect(cell).toHaveTextContent("сбои: н/д");
+    // Scoped, so the reserved absence phrase cannot lead the line — and the
+    // console still never turns a silent counter into a measured zero.
+    expect(cell).not.toHaveTextContent("нет данных");
+    expect(cell).not.toHaveTextContent("нет сбоев");
+
+    // The unabbreviated sentence is still what the cell is CALLED: the visible
+    // line and the aria-label may differ in length, never in meaning.
+    expect(
+      screen.getByLabelText("a → b: данных о сбоях не записано, RTT p95 1.8ms"),
+    ).toBeInTheDocument();
+    // And the pair nothing measured keeps «нет данных» to itself.
+    expect(screen.getByLabelText("b → a: нет данных")).toBeInTheDocument();
   });
 });

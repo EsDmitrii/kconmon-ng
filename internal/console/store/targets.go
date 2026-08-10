@@ -21,26 +21,16 @@ import (
 	"github.com/EsDmitrii/kconmon-ng/internal/console/store/gen"
 )
 
-// ErrInUse is returned when a delete is refused because another row still
-// references the one being deleted -- today only DeleteTarget, blocked by
-// check_definitions.destination_target_id's ON DELETE RESTRICT (migration
-// 00004). It is deliberately NOT ErrWrongState: nothing about the target is
-// wrong, and nothing about it can be fixed by retrying. The caller's remedy
-// is to delete (or re-point) the definitions first, which
-// ListDefinitions(DefinitionFilter{TargetID: id}) enumerates.
+// ErrInUse is returned when a delete is refused because another row still references the one being
+// deleted.
 var ErrInUse = errors.New("store: in use")
 
 // foreignKeyViolationCode is PostgreSQL's SQLSTATE for a
 // foreign_key_violation, the counterpart to uniqueViolationCode (auth.go).
 const foreignKeyViolationCode = "23503"
 
-// wrapForeignKeyViolation turns a foreign-key PgError into sentinel, leaving
-// every other error (including a nil one) unchanged. The sentinel is a
-// parameter because the same SQLSTATE means opposite things in the two
-// directions: a DELETE refused by ON DELETE RESTRICT means the row is still
-// referenced (ErrInUse), while an INSERT or UPDATE naming a
-// destination_target_id with no targets row means the reference itself is
-// missing (ErrNotFound).
+// wrapForeignKeyViolation turns a foreign-key PgError into sentinel, leaving every other error
+// (including a nil one) unchanged.
 func wrapForeignKeyViolation(err, sentinel error) error {
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) && pgErr.Code == foreignKeyViolationCode {
@@ -49,18 +39,13 @@ func wrapForeignKeyViolation(err, sentinel error) error {
 	return err
 }
 
-// nameMaxLen mirrors the CHECK (length(name) BETWEEN 1 AND 63) both targets
-// and check_definitions carry. Validation rejects an over-long name here so a
-// caller gets a plain "name too long" instead of a raw constraint violation
-// from the driver.
+// nameMaxLen mirrors the CHECK (length(name) BETWEEN 1 AND 63) both targets and check_definitions
+// carry; validation rejects an over-long name here so a caller gets a plain "name too long" instead
+// of a raw constraint violation from the driver.
 const nameMaxLen = 63
 
-// nameRE bounds what may become a Prometheus label value: ASCII alphanumerics
-// plus '-', '_' and '.', never leading or trailing. Postgres only bounds the
-// length; this bounds the charset, because targets.name is the one field that
-// leaves this system as a label value (migration 00004's comment) and a name
-// carrying quotes, whitespace or newlines would land in an exposition-format
-// line.
+// nameRE bounds what may become a Prometheus label value: ASCII alphanumerics plus '-', '_' and
+// '.', never leading or trailing.
 var nameRE = regexp.MustCompile(`^[a-zA-Z0-9]([a-zA-Z0-9_.-]*[a-zA-Z0-9])?$`)
 
 // ---------------------------------------------------------------------------
@@ -86,10 +71,8 @@ type TargetInput struct {
 	Name    string
 	Kind    string // host | url
 	Address string
-	// Labels is a JSON object. nil, an empty slice and the literal JSON null
-	// are all written as {} (see orEmptyJSON); anything else must parse, or
-	// Validate rejects it. These are the target's own descriptive labels
-	// (DATA.md), NOT Prometheus label values -- only Name ever becomes one.
+	// Labels is a JSON object. nil, an empty slice and the literal JSON null are all written as {}
+	// (see orEmptyJSON).
 	Labels json.RawMessage
 }
 
@@ -116,10 +99,8 @@ type TargetStore interface {
 
 var _ TargetStore = (*DB)(nil)
 
-// TargetReader is the read seam: httpapi lists, the assignment planner and
-// the runner resolve one by id. ErrNotFound for an unknown id;
-// ErrAlreadyExists for a duplicate name; ErrInUse when a DELETE is refused
-// by check_definitions' ON DELETE RESTRICT.
+// TargetReader is the read seam: httpapi lists, the assignment planner and the runner resolve one
+// by id.
 type TargetReader interface {
 	GetTarget(ctx context.Context, id string) (Target, error)
 	ListTargets(ctx context.Context, f TargetFilter) (TargetPage, error)
@@ -127,25 +108,12 @@ type TargetReader interface {
 
 var _ TargetReader = (*DB)(nil)
 
-// targetKinds is the closed set migration 00004's "-- host | url" comment
-// names. Enforced here rather than by a CHECK constraint so widening it in a
-// later milestone is code, not a migration (the same reasoning Decision 9
-// applies to check_schedules.kind).
+// targetKinds is the closed set migration 00004's "-- host | url" comment names; enforced here
+// rather than by a CHECK constraint so widening it in a later milestone is code.
 var targetKinds = map[string]bool{"host": true, "url": true}
 
-// Validate reports whether in is a well-formed target. It runs before the
-// INSERT/UPDATE so a caller gets a precise, actionable error instead of a
-// raw constraint violation, and so the charset rule -- which Postgres does
-// not enforce at all -- is applied at the only layer that can. Malformed
-// Labels are rejected here for the same reason: the driver's own complaint
-// about a jsonb literal does not say which field carried it.
-//
-// It NORMALISES Address (trims it) before checking it, and that trimmed value
-// is what CreateTarget/UpdateTarget then write: both take TargetInput by
-// value, so the mutation is confined to the store's own copy. The alternative
-// -- validate the trimmed string and store the raw one -- is how "  10.0.0.1  "
-// used to become a stored target the agent could never dial, because every
-// sender trims before RESOLVING but nothing trims before STORING.
+// Validate reports whether in is a well-formed target; it runs before the INSERT/UPDATE so a caller
+// gets a precise.
 func (in *TargetInput) Validate() error {
 	if err := validateName(in.Name); err != nil {
 		return fmt.Errorf("store: target: %w", err)
@@ -166,31 +134,8 @@ func (in *TargetInput) Validate() error {
 	return nil
 }
 
-// validateTargetAddress rejects an address the agent could never dial FOR THE
-// KIND IT WAS FILED UNDER (QA round 5, finding #11).
-//
-// Before it, targets.address was checked for emptiness alone: "   " was a
-// legal host target, "sdfsdfsdf !!" was a legal url one, and both travelled
-// the whole way to an agent that refused them once per interval, forever, with
-// the only evidence being an ExternalDenyResolve counter -- the exact failure
-// round 4's finding #13 fixed one layer down, on check_definitions.
-//
-// The two kinds are checked SEPARATELY rather than through one permissive
-// union, because targets.kind is what tells the agent WHICH parser to use:
-//
-//   - url  -> checker.validateExternalHTTP, which parses the address as a URL
-//     and demands an http:// or https:// scheme with a non-empty host. It
-//     reads u.Port() and uses u.Path, so a port and a path are both legal
-//     here; that is derived from the function, not assumed about URLs.
-//   - host -> checker.ResolveAllowed, which takes a literal IP verbatim and
-//     sends anything else to LookupNetIP as a NAME, with an optional ":port"
-//     split off first by both senders.
-//
-// So a URL is NOT accepted for kind=host: ResolveAllowed would hand
-// "https://example.test" to DNS whole. And a bare hostname is not accepted for
-// kind=url: url.Parse yields no scheme and validateExternalHTTP refuses it.
-// Accepting either "because it is nearly right" would only move the failure to
-// the agent, which is where it already was.
+// validateTargetAddress rejects an address the agent could never dial FOR THE KIND IT WAS FILED
+// UNDER.
 func validateTargetAddress(kind, address string) error {
 	if kind == "url" {
 		return validateHTTPAddress("address", address)
@@ -198,10 +143,7 @@ func validateTargetAddress(kind, address string) error {
 	return validateHostAddress("address", address)
 }
 
-// validateHTTPAddress is checker.validateExternalHTTP's rule: an http(s) URL
-// with a host. field names the caller's own column so the message routes to
-// the right form field (targets' "address", a definition's "destination
-// address").
+// validateHTTPAddress is checker.validateExternalHTTP's rule: an http(s) URL with a host.
 func validateHTTPAddress(field, address string) error {
 	u, err := url.Parse(strings.TrimSpace(address))
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" {
@@ -210,10 +152,8 @@ func validateHTTPAddress(field, address string) error {
 	return nil
 }
 
-// validateHostAddress is the allowlist half of the same derivation: an IP
-// literal or a resolvable name, optionally with a numeric port both senders'
-// own SplitHostPort+parse would accept. No URL form -- that is
-// validateHTTPAddress's job, and the caller picks by kind.
+// validateHostAddress is the allowlist half of the same derivation: an IP literal or a resolvable
+// name.
 func validateHostAddress(field, address string) error {
 	value := strings.TrimSpace(address)
 	host := value
@@ -264,10 +204,7 @@ func (db *DB) CreateTarget(ctx context.Context, in TargetInput) (Target, error) 
 	if err := in.Validate(); err != nil {
 		return Target{}, err
 	}
-	// The id is minted here rather than by a column DEFAULT so the whole
-	// package keeps one id story: every UUID primary key it writes
-	// (check_runs, targets, check_definitions, check_schedules) is
-	// caller-side, and a create is therefore always retry-identifiable.
+	// The id is minted here rather than by a column DEFAULT so the whole package keeps one id story.
 	tid, err := parseUUID(uuid.NewString())
 	if err != nil {
 		return Target{}, fmt.Errorf("store: create target: %w", err)
@@ -435,11 +372,8 @@ type DefinitionStore interface {
 
 var _ DefinitionStore = (*DB)(nil)
 
-// DefinitionReader is the read seam: httpapi lists, the scheduler resolves
-// one by id when a schedule fires. ErrNotFound for an unknown id -- and for a
-// DestinationTargetID naming no target on create/update, since the missing
-// row is the target's, not the definition's; ErrAlreadyExists for a duplicate
-// name.
+// DefinitionReader is the read seam: httpapi lists, the scheduler resolves one by id when a
+// schedule fires.
 type DefinitionReader interface {
 	GetDefinition(ctx context.Context, id string) (Definition, error)
 	ListDefinitions(ctx context.Context, f DefinitionFilter) (DefinitionPage, error)
@@ -455,12 +389,8 @@ var (
 	checkTypes       = map[string]bool{"tcp": true, "udp": true, "icmp": true, "dns": true, "http": true, "mtr": true}
 )
 
-// Validate reports whether in is a well-formed definition. Beyond the
-// enumerations it enforces the one cross-field rule the schema states but
-// cannot express: destination_target_id belongs to destination_kind='target'
-// and to nothing else, and 'adhoc' is the only kind that carries a literal
-// destination_address. Malformed Params are rejected here, same as
-// TargetInput.Labels.
+// Validate reports whether in is a well-formed definition; beyond the enumerations it enforces the
+// one cross-field rule the schema states but cannot express.
 func (in *DefinitionInput) Validate() error {
 	if err := validateName(in.Name); err != nil {
 		return fmt.Errorf("store: definition: %w", err)
@@ -487,7 +417,7 @@ func (in *DefinitionInput) Validate() error {
 		if in.DestinationAddress == "" {
 			return errors.New("store: definition: destination kind adhoc requires a destination address")
 		}
-		if err := validateAdhocAddress(in.DestinationAddress); err != nil {
+		if err := ValidateAdhocAddress(in.DestinationAddress); err != nil {
 			return fmt.Errorf("store: definition: %w", err)
 		}
 	}
@@ -507,45 +437,10 @@ const (
 	hostLabelMaxLen = 63
 )
 
-// validateAdhocAddress rejects a destination_address the agent could never
-// dial (QA round 4, finding #13). Before it, "sdfsdfsdf !!" was accepted,
-// written to check_definitions, pushed to every assigned agent by the
-// reconciler and refused there once per interval, forever -- with the only
-// evidence being an ExternalDenyResolve counter and a rate-limited agent log.
-//
-// THE RULE IS DERIVED FROM WHAT THE AGENT ACCEPTS, not from what looks tidy.
-// Three files decide that, and this mirrors them rather than tightening them:
-//
-//   - internal/checker/external.go's validateExternalHTTP is the ONLY place an
-//     address is parsed as a URL, and it demands an http:// or https:// scheme
-//     with a non-empty host. So a URL is legal, and only with those schemes.
-//   - internal/checker/allowlist.go's ResolveAllowed takes a literal IP
-//     verbatim (parseLiteral, which also strips the "[::1]" brackets) and
-//     sends anything else to LookupNetIP as a NAME. So an IP or a DNS name is
-//     legal.
-//   - both senders split a ":port" suffix off before authorising -- the
-//     continuous path in checks.externalTarget (net.SplitHostPort, then Atoi
-//     range-checked to [1,65535]) and the one-shot path in
-//     agent.approveExternalTarget (net.SplitHostPort, then ParseUint > 0). A
-//     suffix that does NOT parse that way is left attached and goes to DNS as
-//     part of the name, where it can only fail -- so "host:port" is legal
-//     exactly when the port is a number in range, and "example.test:http" is
-//     not.
-//
-// Deliberately NOT stricter than that. A zone-scoped literal
-// (fe80::1%eth0) parses here and is refused by the allowlist at probe time;
-// that refusal is a POLICY answer belonging to the agent, and encoding it here
-// would make the store the second, quietly diverging arbiter of what an
-// operator may point a check at. Likewise the address is not cross-checked
-// against CheckType: an http URL on a tcp definition is a mistake the
-// reconciler's own classification (adhocTargetKind) already handles.
-//
-// Round 5's finding #11 split the two halves out (validateHTTPAddress,
-// validateHostAddress) so targets can pick ONE of them by kind. This function
-// keeps its own union shape and its own wording: an ad-hoc destination carries
-// no kind column to choose with, so it must accept both forms, and its
-// messages are pinned by DEFINITION_FIELD_PHRASES on the web side.
-func validateAdhocAddress(address string) error {
+// ValidateAdhocAddress rejects a destination_address the agent could never dial. Exported because a
+// SAVED definition and a one-off run typed into the diagnostics form must be judged by one rule --
+// httpapi's POST /api/v1/runs calls it for destinationKind=adhoc.
+func ValidateAdhocAddress(address string) error {
 	value := strings.TrimSpace(address)
 	if value == "" {
 		return errors.New("destination address must not be blank")
@@ -762,11 +657,7 @@ type Schedule struct {
 	Enabled      bool
 	LastFiredAt  *time.Time
 	NextFireAt   *time.Time
-	// LastError is why the LAST fire produced no run, "" when it produced one
-	// (QA round 5, finding #5). It is the whole failure story this table
-	// keeps -- the last attempt, not a history -- and it is cleared by the
-	// next attempt that goes through. LastErrorAt is non-nil exactly when
-	// LastError is non-empty; MarkScheduleFired derives one from the other.
+	// LastError is why the LAST fire produced no run, "" when it produced one.
 	LastError   string
 	LastErrorAt *time.Time
 	CreatedAt   time.Time
@@ -783,9 +674,6 @@ type ScheduleInput struct {
 	RunAt        *time.Time
 	Enabled      bool
 	// NextFireAt is when ListDueSchedules should next hand this schedule out.
-	// nil keeps it out of the due index entirely -- the state a kind="once"
-	// schedule ends in, and the state every schedule starts in until its
-	// owner computes a first fire time.
 	NextFireAt *time.Time
 }
 
@@ -809,15 +697,8 @@ type ScheduleStore interface {
 	CreateSchedule(ctx context.Context, in ScheduleInput) (Schedule, error)
 	UpdateSchedule(ctx context.Context, id string, in ScheduleInput) (Schedule, error)
 	DeleteSchedule(ctx context.Context, id string) error
-	// MarkScheduleFired records a fire and the next one in a single UPDATE.
-	// nextFireAt == nil retires the schedule from the due index without
-	// disabling it. Returns ErrNotFound when id does not name a schedule.
-	//
-	// lastError is why this attempt produced no run, or "" when it produced
-	// one -- the SAME statement, so a reader can never see a fresh
-	// last_fired_at beside a stale failure. Passing "" is how a recovered
-	// schedule goes green again: the column describes the LAST attempt, not
-	// the last bad one.
+	// MarkScheduleFired records a fire and the next one in a single UPDATE. nextFireAt == nil retires
+	// the schedule from the due index without disabling it.
 	MarkScheduleFired(ctx context.Context, id string, firedAt time.Time, nextFireAt *time.Time, lastError string) error
 }
 
@@ -829,30 +710,18 @@ var _ ScheduleStore = (*DB)(nil)
 type ScheduleReader interface {
 	GetSchedule(ctx context.Context, id string) (Schedule, error)
 	ListSchedules(ctx context.Context, f ScheduleFilter) (SchedulePage, error)
-	// ListDueSchedules returns up to limit enabled schedules whose
-	// next_fire_at has passed, soonest first. limit follows the same
-	// clampLimit rule as every other listing here: 0 means "unset" and
-	// yields the default of 100, anything else is clamped into [1,500].
+	// ListDueSchedules returns up to limit enabled schedules whose next_fire_at has passed.
 	ListDueSchedules(ctx context.Context, due time.Time, limit int) ([]Schedule, error)
 }
 
 var _ ScheduleReader = (*DB)(nil)
 
-// scheduleKinds is the closed set migration 00004's "-- once | interval |
-// continuous (cron: later milestone)" comment names. Adding 'cron' is a
-// one-line change here and no migration at all -- which is the entire point
-// of the column being plain TEXT (Decision 9).
+// scheduleKinds is the closed set migration 00004's "-- once | interval | continuous (cron: later
+// milestone)" comment names.
 var scheduleKinds = map[string]bool{"once": true, "interval": true, "continuous": true}
 
-// Validate reports whether in is a well-formed schedule. It enforces the
-// cross-field rules the schema states in a comment but cannot express: run_at
-// belongs to kind='once' and to nothing else, an interval cadence needs a
-// positive interval, and neither 'once' nor 'continuous' may carry one --
-// 'once' because it fires exactly at run_at, 'continuous' because it has no
-// cadence at all (the check runs for as long as it is enabled, so there is no
-// gap between fires for an interval to describe). A non-zero IntervalNs on
-// either is a caller that meant kind='interval', and silently storing a
-// number nothing will ever read is the worse of the two outcomes.
+// Validate reports whether in is a well-formed schedule; it enforces the cross-field rules the
+// schema states in a comment but cannot express.
 func (in *ScheduleInput) Validate() error {
 	if _, err := uuid.Parse(in.DefinitionID); err != nil {
 		return fmt.Errorf("store: schedule: definition id: %w", err)
@@ -967,22 +836,11 @@ func (db *DB) DeleteSchedule(ctx context.Context, id string) error {
 	return nil
 }
 
-// scheduleErrorMaxLen bounds what one fire may write into last_error. The
-// column is unbounded TEXT and the messages it normally carries are one line,
-// but "normally" is not a guarantee: an error joined out of a fan-out failure
-// can be kilobytes, and this string is rendered on a LIST ROW in the console
-// and shipped in every schedules response. Truncating at the store is the one
-// place that bounds every caller, including a future one.
+// scheduleErrorMaxLen bounds what one fire may write into last_error.
 const scheduleErrorMaxLen = 500
 
-// truncateScheduleError caps lastError at scheduleErrorMaxLen BYTES INCLUDING
-// the ellipsis it appends, so the stored value never exceeds the bound the
-// constant states -- a cap that its own marker can push past is not a cap.
-// The marker is there so a reader knows the message continues (the full text
-// is in the console log, which is where a multi-kilobyte error belongs).
-//
-// The cut lands on a RUNE boundary: a byte-sliced UTF-8 message would put a
-// replacement character on the operator's screen.
+// truncateScheduleError caps lastError at scheduleErrorMaxLen BYTES INCLUDING the ellipsis it
+// appends.
 func truncateScheduleError(lastError string) string {
 	if len(lastError) <= scheduleErrorMaxLen {
 		return lastError
@@ -1017,6 +875,27 @@ func (db *DB) MarkScheduleFired(
 	}
 	if rows == 0 {
 		return fmt.Errorf("store: mark schedule fired: %w", ErrNotFound)
+	}
+	return nil
+}
+
+// MarkScheduleSkipped advances a schedule's cadence for an occurrence that produced no run at
+// all -- so it is not re-selected every tick -- while leaving last_fired_at untouched, because
+// nothing fired.
+func (db *DB) MarkScheduleSkipped(ctx context.Context, id string, nextFireAt *time.Time) error {
+	sid, err := parseUUID(id)
+	if err != nil {
+		return fmt.Errorf("store: mark schedule skipped: %w", err)
+	}
+	rows, err := gen.New(db.pool).MarkScheduleSkipped(ctx, gen.MarkScheduleSkippedParams{
+		ID:         sid,
+		NextFireAt: timestamptzFromPtr(nextFireAt),
+	})
+	if err != nil {
+		return fmt.Errorf("store: mark schedule skipped: %w", err)
+	}
+	if rows == 0 {
+		return fmt.Errorf("store: mark schedule skipped: %w", ErrNotFound)
 	}
 	return nil
 }
@@ -1091,10 +970,8 @@ func (db *DB) ListDueSchedules(ctx context.Context, due time.Time, limit int) ([
 // Shared helpers
 // ---------------------------------------------------------------------------
 
-// decodeKeyset turns an opaque (created_at, UUID) cursor into the
-// cur_time/cur_id params every listing in this file binds. An empty cursor
-// yields two invalid (SQL NULL) values, which is what the queries'
-// "cur_time IS NULL OR ..." clause needs to mean "first page".
+// decodeKeyset turns an opaque (created_at, UUID) cursor into the cur_time/cur_id params every
+// listing in this file binds.
 func decodeKeyset(cursor string) (pgtype.Timestamptz, pgtype.UUID, error) {
 	if cursor == "" {
 		return pgtype.Timestamptz{}, pgtype.UUID{}, nil
@@ -1131,29 +1008,8 @@ func optionalUUIDString(id pgtype.UUID) string {
 	return formatUUID(id)
 }
 
-// orEmptyJSON normalises a JSONB payload to something the NOT NULL
-// labels/params columns will accept, substituting {} -- the same value the
-// columns' own DEFAULT '{}'::jsonb would supply, spelled explicitly so an
-// UPDATE (which has no DEFAULT to fall back on) behaves identically to an
-// INSERT. A fresh slice per call, never one shared package-level backing array
-// a caller could scribble on.
-//
-// Three shapes collapse to {}:
-//
-//   - nil -- binds as SQL NULL, which the NOT NULL column rejects.
-//   - an empty (len 0) but non-nil slice -- the shape json.Marshal of an
-//     absent field or a hand-built json.RawMessage{} takes. It reaches the
-//     driver as a zero-length jsonb literal, which Postgres rejects with a raw
-//     "invalid input syntax for type json" the caller cannot act on.
-//   - the literal JSON null. jsonb happily stores a JSON null, but "no labels"
-//     and "labels explicitly set to null" are the same state to every reader
-//     in this system, and only one of them can be the stored one. {} is
-//     chosen because it is what the column defaults to, so a row written
-//     without labels and a row written with null read back identically.
-//
-// Anything else is passed through untouched. Well-formedness is the input's
-// Validate's job, not this function's -- by the time a payload gets here it
-// has already been through json.Valid.
+// orEmptyJSON normalises a JSONB payload to something the NOT NULL labels/params columns will
+// accept, substituting {}.
 func orEmptyJSON(raw json.RawMessage) json.RawMessage {
 	if len(raw) == 0 || bytes.Equal(bytes.TrimSpace(raw), jsonNull) {
 		return json.RawMessage(`{}`)

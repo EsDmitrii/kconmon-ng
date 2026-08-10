@@ -260,14 +260,7 @@ func TestSchedulerNodeLocalRunsOnce(t *testing.T) {
 	}
 }
 
-// A failing CONTINUOUS external check must never trigger an MTR trace. Its
-// destination is an internet host: tracing it on every probe interval would
-// send traffic the operator never asked for and blow up mtr_hop_rtt_seconds,
-// which is labelled by hop_ip.
-//
-// The assertion is twofold: no MTR result reaches the handler, and the
-// per-pair cooldown token is still available — triggerMTR consumes it via
-// TryAcquire before running, so an untouched token proves it returned early.
+// A failing CONTINUOUS external check must never trigger an MTR trace.
 func TestTriggerMTRSkipsExternalFailures(t *testing.T) {
 	var mu sync.Mutex
 	var results []model.CheckResult

@@ -16,10 +16,8 @@ import (
 	"github.com/EsDmitrii/kconmon-ng/internal/console/store"
 )
 
-// fakeMaintenanceStore is one double for MaintenanceService, mutex-guarded
-// like fakeAnnotationStore. Validation goes through the REAL
-// store.MaintenanceInput.Validate so the 422 tests exercise the same rules the
-// database layer (and the table's own CHECK) enforce.
+// fakeMaintenanceStore is one double for MaintenanceService, mutex-guarded like
+// fakeAnnotationStore.
 type fakeMaintenanceStore struct {
 	mu sync.Mutex
 
@@ -133,8 +131,6 @@ func TestMaintenanceWithoutStoreReturn503(t *testing.T) {
 	}
 }
 
-// M6 Decision 8 in test form, against the REAL built-in roles: a declared
-// window is context every role reads, declaring one is an operator statement.
 func TestMaintenanceViewerReadsButCannotWrite(t *testing.T) {
 	for _, role := range []string{"viewer", "alert-editor"} {
 		st := newFakeMaintenanceStore()

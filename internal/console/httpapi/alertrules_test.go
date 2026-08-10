@@ -23,10 +23,8 @@ import (
 	"github.com/EsDmitrii/kconmon-ng/internal/console/store"
 )
 
-// validAlertRuleBody is the body every happy-path case posts: a pair-loss
-// template with both required params, which the REAL renderer turns into a
-// real expression -- no fake renderer anywhere in this file, because the
-// render-before-store contract is precisely what these tests exist to pin.
+// validAlertRuleBody is the body every happy-path case posts: a pair-loss template with both
+// required params.
 const validAlertRuleBody = `{"name":"EdgePairLoss","kind":"pair-loss",` +
 	`"params":{"protocol":"tcp","thresholdPercent":5},` +
 	`"severity":"warning","forNs":300000000000,` +
@@ -109,26 +107,13 @@ func alertRuleRoutes(id string) []struct{ method, path, body string } {
 		{http.MethodPut, "/api/v1/alert-rules/" + id, validAlertRuleBody},
 		{http.MethodDelete, "/api/v1/alert-rules/" + id, ""},
 		{http.MethodPost, "/api/v1/alert-rules/" + id + "/sync", ""},
-		// Import is on this list and not on the 409 one below only because it
-		// hits BOTH gates: it needs the store to write rows into and the
-		// reconciler to read the cluster from, and the 503 wins because a
-		// console with no database has nowhere to adopt anything TO.
+		// Import is on this list and not on the 409 one below only because it hits BOTH gates.
 		{http.MethodPost, "/api/v1/alert-rules/import", `{"name":"someone-elses-rules"}`},
 	}
 }
 
-// ---------------------------------------------------------------------------
-// Import fixtures (M7 Decision 4)
-// ---------------------------------------------------------------------------
-
-// foreignRuleFixture builds a REAL PrometheusRule object -- spec.groups goes in
-// through unstructured.SetNestedSlice, the same way promrules' own tests build
-// theirs, so a fixture that is not deep-copy-JSON compatible fails here rather
-// than passing a shape the apiserver would never produce.
-//
-// The projected counters are computed from the groups rather than passed in,
-// because a fixture whose Groups/Rules disagree with its own object would let a
-// handler bug hide behind a wrong number.
+// foreignRuleFixture builds a REAL PrometheusRule object -- spec.groups goes in through
+// unstructured.SetNestedSlice.
 func foreignRuleFixture(t *testing.T, name string, groups []any) promrules.ForeignRule {
 	t.Helper()
 	obj := &unstructured.Unstructured{Object: map[string]any{
@@ -280,10 +265,7 @@ func TestAlertingOffIs409NamingTheFeatureFlag(t *testing.T) {
 // Authorization matrix, against the REAL built-in roles
 // ---------------------------------------------------------------------------
 
-// alert-editor is NOT in this matrix: the M7 coordinator granted it
-// alerts:manage (delegated alert editing is the role's entire charter —
-// authz's TestM7AlertPermissionsFollowTheIncidentsPosture pins the grant),
-// so it exercises the full CRUD cycle alongside operator/admin below.
+// alert-editor is NOT in this matrix.
 func TestAlertRulesViewerReadsButCannotManage(t *testing.T) {
 	for _, role := range []string{"viewer"} {
 		st := newFakeAlertRuleStore()
@@ -420,10 +402,8 @@ func TestAlertRulesOperatorAndAdminManageTheFullCycle(t *testing.T) {
 	}
 }
 
-// The list is UNFILTERED: it passes enabledOnly=false, so a disabled rule is
-// still listed. That is the whole reason the builder can re-enable one --
-// hiding disabled rules from the only route that lists them would make them
-// unreachable from the UI.
+// The list is UNFILTERED: it passes enabledOnly=false, so a disabled rule is still listed; that is
+// the whole reason the builder can re-enable.
 func TestAlertRulesListIncludesDisabledRules(t *testing.T) {
 	st := newFakeAlertRuleStore()
 	st.seed("EnabledOne", true)
@@ -490,10 +470,8 @@ func TestAlertRuleWriteValidation(t *testing.T) {
 			want: http.StatusUnprocessableEntity, wantText: "params.expr",
 		},
 		{
-			// The store accepts cert-expiry (it is in the column's CHECK) and
-			// the renderer deliberately has no template for it. Caught HERE,
-			// at write time, instead of becoming a stored row that only ever
-			// fails at sync time.
+			// Caught HERE, at write time, instead of becoming a stored row that only ever fails at sync
+			// time.
 			name: "a kind the store allows but the renderer cannot render is 422",
 			body: `{"name":"A","kind":"cert-expiry","params":{},"severity":"warning"}`,
 			want: http.StatusUnprocessableEntity, wantText: "cert-expiry",
@@ -667,10 +645,6 @@ func TestForeignRulesUpstreamFailureIs502(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// Import (adopt a foreign PrometheusRule -- M7 Decision 4)
-// ---------------------------------------------------------------------------
-
 // The whole-route happy path: every ALERTING entry across every group becomes
 // a raw builder row, the recording entry is reported as skipped, and the
 // foreign object is left byte-for-byte as it was found.
@@ -778,10 +752,8 @@ func TestAlertRulesImportAdoptsEveryAlertingRuleAcrossGroups(t *testing.T) {
 	}
 }
 
-// Severity is a CLOSED column and a foreign object's is not, so the import
-// falls back to warning -- and SAYS SO. A note is not a skip: the rule is
-// imported either way, and the report exists so the operator can go fix the
-// one field the console picked for them.
+// Severity is a CLOSED column and a foreign object's is not, so the import falls back to warning --
+// and SAYS SO.
 func TestAlertRulesImportLiftsSeverityAndNotesEveryFallback(t *testing.T) {
 	fixture := foreignRuleFixture(t, "sev", []any{
 		group("g",
@@ -829,11 +801,8 @@ func TestAlertRulesImportLiftsSeverityAndNotesEveryFallback(t *testing.T) {
 	}
 }
 
-// The two label names the renderer OWNS are stripped on the way in. A foreign
-// object carrying kconmon_ng_rule_id is somebody's copy-paste of one of our
-// rules, and it is a note rather than a fatal error: the rule is fine, the
-// label is not the one this console would stamp, and keeping it would put a
-// stale uuid on an alert the firing list matches rules by.
+// The two label names the renderer OWNS are stripped on the way in; a foreign object carrying
+// kconmon_ng_rule_id is somebody's copy-paste of one of our rules.
 func TestAlertRulesImportStripsReservedLabelsWithANote(t *testing.T) {
 	fixture := foreignRuleFixture(t, "reserved", []any{
 		group("g", map[string]any{
@@ -874,11 +843,7 @@ func TestAlertRulesImportStripsReservedLabelsWithANote(t *testing.T) {
 	}
 }
 
-// Adoption must never INVENT a name. A Prometheus alert name is legal in
-// places this store's name column is not (colons, most obviously), and the
-// answer is a per-item skip naming the problem -- not SanitizeAlertName, which
-// would silently store a rule under a name the operator cannot find by
-// searching for the one they wrote.
+// Adoption must never INVENT a name.
 func TestAlertRulesImportSkipsNamesTheStoreRejectsRatherThanRenaming(t *testing.T) {
 	fixture := foreignRuleFixture(t, "names", []any{
 		group("g",
@@ -996,10 +961,8 @@ func TestAlertRulesImportParsesForAndSkipsAnUnreadableOne(t *testing.T) {
 	}
 }
 
-// A report with nothing in `created` is still a 200: the REPORT is the result.
-// A 4xx here would tell a caller their request was wrong when in fact the
-// answer -- "every rule in that object is a recording rule" -- is the useful
-// one, and a status code cannot carry it.
+// A report with nothing in `created` is still a 200: the REPORT is the result; a 4xx here would
+// tell a caller their request was wrong when in fact the answer.
 func TestAlertRulesImportReportsAnEmptyAdoptionAs200(t *testing.T) {
 	fixture := foreignRuleFixture(t, "records-only", []any{
 		group("g",
@@ -1030,11 +993,8 @@ func TestAlertRulesImportReportsAnEmptyAdoptionAs200(t *testing.T) {
 	}
 }
 
-// An object nobody has, and an object the console OWNS, answer the same 404 --
-// and they answer it for the same reason: ListForeign is the only lookup, and
-// it excludes anything carrying the managed-by label. There is no second path
-// by which a caller could reach one of our own bundles through this route and
-// re-adopt it into a duplicate.
+// An object nobody has, and an object the console OWNS, answer the same 404 -- and they answer it
+// for the same reason.
 func TestAlertRulesImportUnknownOrOwnObjectIs404(t *testing.T) {
 	ours := foreignRuleFixture(t, "kconmon-ng-console-rules", []any{
 		group("g", map[string]any{"alert": "AlreadyOurs", "expr": "up == 0"}),
@@ -1125,11 +1085,8 @@ func TestAlertRulesImportRequiresAlertsManage(t *testing.T) {
 	}
 }
 
-// The audit posture is the CRUD routes': the object name is on the row, and
-// the names of the rules it produced are not. Same leak class -- an adopted
-// rule's name is a foreign naming convention that can carry a customer, a
-// cluster or a hostname, and the report the caller just received already
-// listed every one of them.
+// The audit posture is the CRUD routes': the object name is on the row, and the names of the rules
+// it produced are not.
 func TestAlertRulesImportAuditDetailIsTheObjectNameOnly(t *testing.T) {
 	fixture := foreignRuleFixture(t, "someone-elses-rules", []any{
 		group("g", map[string]any{
@@ -1222,6 +1179,9 @@ func TestAlertRulePreviewIsHonestlyPartial(t *testing.T) {
 		name     string
 		prom     *promql.Client
 		wantText string
+		// wantRejected pins the flag a client blocks a save on: PROMETHEUS
+		// refused the expression, as opposed to the console failing to check it.
+		wantRejected bool
 	}{
 		{
 			name: "prometheus rejects the query",
@@ -1230,12 +1190,16 @@ func TestAlertRulePreviewIsHonestlyPartial(t *testing.T) {
 				w.WriteHeader(http.StatusBadRequest)
 				_, _ = w.Write([]byte(`{"status":"error","errorType":"bad_data","error":"parse error: unexpected end"}`))
 			}),
-			wantText: "parse error",
+			wantText:     "parse error",
+			wantRejected: true,
 		},
 		{
 			name:     "prometheus is not configured",
 			prom:     nil,
 			wantText: "prometheus.url",
+			// NOT a rejection: nothing looked at the expression at all, so a
+			// client must stay permissive rather than block on an unknown.
+			wantRejected: false,
 		},
 	}
 
@@ -1260,7 +1224,36 @@ func TestAlertRulePreviewIsHonestlyPartial(t *testing.T) {
 			if !strings.Contains(body.Error, tc.wantText) {
 				t.Errorf("error = %q, want it to mention %q", body.Error, tc.wantText)
 			}
+			if body.Rejected != tc.wantRejected {
+				t.Errorf("rejected = %v, want %v -- the flag separates a PROVEN-bad expression from an unchecked one",
+					body.Rejected, tc.wantRejected)
+			}
 		})
+	}
+}
+
+// TestAlertRulePreviewUnreachablePrometheusIsNotARejection is the case a UI
+// must NOT block on: the console could not reach Prometheus, so the expression
+// was never judged. Blocking here would make an outage look like a bad rule.
+func TestAlertRulePreviewUnreachablePrometheusIsNotARejection(t *testing.T) {
+	prom := newFakePrometheus(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	})
+	s := newM5TestServer(t, "viewer", Deps{AlertRules: newFakeAlertRuleStore(), Prometheus: prom})
+	w := doRequest(t, s, http.MethodPost, "/api/v1/alert-rules/preview",
+		strings.NewReader(validAlertRuleBody), mutateWithCSRF)
+	if w.Code != http.StatusOK {
+		t.Fatalf("preview = %d, want 200: %s", w.Code, w.Body)
+	}
+	var body alertRulePreviewResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body.Error == "" {
+		t.Fatal("error is empty; this case is supposed to fail the query half")
+	}
+	if body.Rejected {
+		t.Errorf("rejected = true for %q -- an unreachable Prometheus judged nothing", body.Error)
 	}
 }
 
@@ -1344,10 +1337,7 @@ func TestAlertsMapsPrometheusAlertsAndFiltersManagedOnly(t *testing.T) {
 	}
 }
 
-// Prom UNCONFIGURED is an honest empty answer, not a 503: the Overview card
-// that reads this route must be able to say "nothing is firing here, and no
-// Prometheus is wired" in one shape. A configured Prometheus that FAILS is a
-// different fact and stays a 502.
+// Prom UNCONFIGURED is an honest empty answer.
 func TestAlertsWithoutPrometheusIsHonestlyEmpty(t *testing.T) {
 	s := newM5TestServer(t, "viewer", Deps{AlertRules: newFakeAlertRuleStore()})
 	w := doRequest(t, s, http.MethodGet, "/api/v1/alerts", nil, nil)
@@ -1380,10 +1370,8 @@ func TestAlertsUpstreamFailureIs502(t *testing.T) {
 // Audit
 // ---------------------------------------------------------------------------
 
-// The allow-list decision for this resource, asserted end to end: the rule
-// NAME reaches the audit row and NOTHING else does -- not the rendered
-// expression, not the params it was rendered from, and not the labels, whose
-// VALUES are operator-typed and routinely carry addresses and team handles.
+// The allow-list decision for this resource, asserted end to end: the rule NAME reaches the audit
+// row and NOTHING else does.
 func TestAlertRuleAuditDetailIsNameOnly(t *testing.T) {
 	audit := &fakeAuditStore{}
 	st := newFakeAlertRuleStore()
@@ -1411,10 +1399,8 @@ func TestAlertRuleAuditDetailIsNameOnly(t *testing.T) {
 	}
 }
 
-// Preview has no allow-list entry at all, which is the conscious default-deny
-// decision this resource needs most: its body is a DRAFT that may carry a raw
-// PromQL expression, and an expression's label matchers are exactly where an
-// internal address ends up.
+// Preview has no allow-list entry at all, which is the conscious default-deny decision this
+// resource needs most.
 func TestAlertRulePreviewAuditDetailIsAlwaysEmpty(t *testing.T) {
 	audit := &fakeAuditStore{}
 	s := newAuditTestServer(t, audit, []authz.Permission{authz.PermAlertsRead},

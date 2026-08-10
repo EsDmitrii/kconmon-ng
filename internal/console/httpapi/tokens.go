@@ -18,24 +18,19 @@ import (
 )
 
 // TokenAdmin is the subset of store.TokenStore the tokens admin API needs.
-// store.TokenStore's GetTokenByHash and TouchTokenLastUsed are deliberately
-// excluded -- those back token AUTHENTICATION (authn.NewTokenFallback), not
-// this admin CRUD surface.
 type TokenAdmin interface {
 	CreateToken(ctx context.Context, name string, hash []byte, owner string, expiresAt *time.Time) (store.Token, error)
 	ListTokens(ctx context.Context) ([]store.Token, error)
-	// GetTokenByID backs resolveInheritedOwner ONLY -- it is not a route.
-	// The admin CRUD surface never needs a single token by id (there is no
-	// GET /api/v1/tokens/{id}); this is here because the mint path knows
-	// which parent row it wants and must not pay for ListTokens to find it.
+	// GetTokenByID backs resolveInheritedOwner and the DELETE state read; it is not a route.
 	GetTokenByID(ctx context.Context, id string) (store.Token, error)
 	RevokeToken(ctx context.Context, id string) error
+	// PurgeToken hard-deletes a row and is only ever called for a token already read as
+	// revoked or expired -- see handleTokensDelete.
+	PurgeToken(ctx context.Context, id string) error
 }
 
-// tokenSecretBytes mirrors authn.EncodeToken's own 32-byte contract
-// (authn/token.go's tokenSecretBytes) -- kept as a local constant, not
-// exported from authn, since this is the only other place in the codebase
-// that mints a token's raw secret.
+// tokenSecretBytes mirrors authn.EncodeToken's own 32-byte contract (authn/token.go's
+// tokenSecretBytes).
 const tokenSecretBytes = 32
 
 // tokensUnavailable answers 503 and reports true when s.tokens is nil
@@ -49,10 +44,8 @@ func (s *Server) tokensUnavailable(w http.ResponseWriter) bool {
 	return false
 }
 
-// tokenResponse is GET /api/v1/tokens's per-row shape. It structurally
-// cannot carry a hash or a secret: store.Token (store/auth.go) has no such
-// field to map from -- the same guarantee store.TokenStore.ListTokens'
-// own doc comment describes.
+// tokenResponse is GET /api/v1/tokens's per-row shape; it structurally cannot carry a hash or a
+// secret.
 type tokenResponse struct {
 	ID         string     `json:"id"`
 	Name       string     `json:"name"`
@@ -93,10 +86,8 @@ type tokenCreateRequest struct {
 	ExpiresAt *time.Time `json:"expiresAt,omitempty"`
 }
 
-// tokenCreateResponse is POST /api/v1/tokens's body: the ONLY place the raw
-// wire-form token ("kcm_...") is ever handed back -- task-17-brief.md
-// verbatim, "exactly once, in the creation response only". It is never
-// stored (only its hash is, via authn.HashTokenSecret) and never logged.
+// tokenCreateResponse is POST /api/v1/tokens's body: the ONLY place the raw wire-form token
+// ("kcm_...") is ever handed back.
 type tokenCreateResponse struct {
 	ID        string     `json:"id"`
 	Name      string     `json:"name"`
@@ -104,46 +95,9 @@ type tokenCreateResponse struct {
 	ExpiresAt *time.Time `json:"expiresAt,omitempty"`
 }
 
-// ownerFor derives api_tokens.owner (migration 00002: "creator subject id
-// (users.id UUID for local users, token id for token-created tokens) or
-// 'system'") from the creating subject alone: subject.ID for both
-// SubjectUser and SubjectToken, else the literal "system" for the
-// degenerate case of no resolvable identity at all (unreachable in practice
-// -- reaching this handler already required holding tokens:manage, which
-// needs a real subject.Roles binding).
-//
-// ownerFor is deliberately pure -- no store access, so it cannot walk a
-// token-minted-token chain back to its root user by itself. handleTokensCreate
-// does that: when subject.Kind is SubjectToken, it takes ownerFor's return
-// value only as a fallback and tries to replace it with the PARENT token's
-// own Owner (resolveInheritedOwner, below), so a freshly minted token
-// inherits the root user directly (chain collapses to depth 1) instead of
-// one more link. ownerFor's subject.ID answer for SubjectToken is only ever
-// actually stored when that lookup fails (parent not found, or the parent's
-// own Owner is empty) or for rows created before this inheritance existed.
-//
-// DisplayName is NEVER used here, unlike the pre-fix version of this
-// function: it is a human-facing display string (for SubjectUser, users.
-// display_name; for header mode, whatever the trusted proxy sent), not a
-// stable, lookupable identifier -- it can collide, change, or simply not
-// name any row at all. authn.WithOwnerDisabledCheck (authn/token.go) needs
-// to look owner back up as a users.id UUID to answer "is this token's
-// creator currently disabled", which subject.ID (User.ID for local mode,
-// authz.go's local-auth Subject construction) provides and DisplayName does
-// not. For SubjectUser under header/OIDC auth, subject.ID is a proxy
-// username or IdP subject with no users row at all -- correct, since that
-// caller's disabled state lives at the proxy/IdP, not in this database, and
-// GetUserByID simply returns ErrNotFound for it (treated as "allow": see
-// authenticateToken). For SubjectToken (a token minting another token),
-// subject.ID is the parent token's own id -- a canonical UUID, exactly like
-// a users.id (store.formatUUID mints both the same way), NOT a non-UUID
-// string that the owner-disabled check's uuid.Parse guard would skip.
-// Without handleTokensCreate's inheritance, that UUID reaches a real
-// GetUserByID call, gets store.ErrNotFound (no users row has a token's id),
-// and is treated as "allow" -- letting a token minted by a token escape the
-// disable chain entirely. Closing that gap is what the inheritance in
-// handleTokensCreate is for; ownerFor's own return value here is only ever
-// the pre-inheritance fallback.
+// ownerFor derives api_tokens.owner (migration 00002: "creator subject id (users.id UUID for local
+// users, token id for token-created tokens) or 'system'") from the creating subject alone;
+// DisplayName is NEVER used here, unlike the pre-fix version of this function.
 func ownerFor(subject authz.Subject) string { //nolint:gocritic // Subject is a value type by design
 	if (subject.Kind == authz.SubjectUser || subject.Kind == authz.SubjectToken) && subject.ID != "" {
 		return subject.ID
@@ -151,13 +105,7 @@ func ownerFor(subject authz.Subject) string { //nolint:gocritic // Subject is a 
 	return "system"
 }
 
-// handleTokensCreate mints a new API token. MUST use authn.HashTokenSecret
-// + authn.EncodeToken (task-17-brief.md hard carry-forward): the single
-// source of truth for the hash input (SHA-256 of the raw 32 secret bytes)
-// and the wire encoding, the exact two functions authenticateToken
-// (authn/token.go) verifies a presented token against -- a divergent
-// implementation here would silently invalidate every token this endpoint
-// issues.
+// handleTokensCreate mints a new API token; MUST use authn.HashTokenSecret + authn.EncodeToken.
 func (s *Server) handleTokensCreate(w http.ResponseWriter, r *http.Request) {
 	if s.tokensUnavailable(w) {
 		return
@@ -165,6 +113,13 @@ func (s *Server) handleTokensCreate(w http.ResponseWriter, r *http.Request) {
 	var req tokenCreateRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Name == "" {
 		writeProblem(w, http.StatusBadRequest, "invalid request", `body must be JSON with a non-empty "name"`)
+		return
+	}
+	// An expiry already in the past mints a credential that can never authenticate, so the
+	// only thing such a request produces is a leaked secret; refuse before generating one.
+	if req.ExpiresAt != nil && !req.ExpiresAt.After(time.Now()) {
+		writeProblem(w, http.StatusUnprocessableEntity, "invalid token",
+			"token: expiry must be in the future")
 		return
 	}
 
@@ -196,10 +151,7 @@ func (s *Server) handleTokensCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// The only response in the API that carries a plaintext secret: keep it
-	// out of every cache on the way back (shared proxies, the browser's own
-	// bfcache/disk cache). Pragma is the HTTP/1.0 spelling, harmless and still
-	// honoured by some intermediaries.
+	// The only response in the API that carries a plaintext secret.
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Pragma", "no-cache")
 	writeJSON(w, tokenCreateResponse{
@@ -210,35 +162,8 @@ func (s *Server) handleTokensCreate(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// resolveInheritedOwner is the mint-time half of the owner-inheritance fix:
-// when a NEW token is minted by a SubjectToken (i.e. an existing token is
-// being used to create another token), parentID is that existing token's own
-// id (subject.ID) and fallback is ownerFor's pre-inheritance answer -- the
-// same parentID, since that is what ownerFor returns for SubjectToken. This
-// looks the parent token up BY ID (store.TokenStore.GetTokenByID -- one row,
-// one index hit) and, if found with a non-empty Owner, returns THAT owner instead: the new
-// token is attributed directly to whatever the parent was ultimately
-// attributed to (a users.id UUID, for a chain rooted at a local user), not to
-// the parent's own id one more link down. This collapses an arbitrarily deep
-// token-mints-token chain to depth 1, so disabling the root user immediately
-// invalidates every token minted anywhere in that chain, not just the
-// immediate child -- see authn.checkOwnerDisabled's doc comment for what
-// happens without this (a parent-token-id owner is a real UUID that reaches
-// GetUserByID, gets ErrNotFound, and is wrongly allowed).
-//
-// Falls back to fallback whenever the parent cannot be attributed with
-// confidence: the lookup itself failing, no row matching parentID (should
-// not happen -- the parent token that just authenticated this very request
-// must exist -- but a fake/incomplete TokenAdmin or a race is not worth
-// failing the mint over), or a parent whose own Owner is empty. Minting a
-// token must never fail over attribution bookkeeping.
-//
-// The two failure modes are logged at different levels on purpose, because
-// they say different things to whoever reads the log. ErrNotFound is a WARN:
-// it is the "should not happen" branch above, and if it ever fires regularly
-// something is wrong with the token lifecycle, not with the database. Anything
-// else is a backend failure and stays an ERROR, the level the ListTokens
-// version of this function used for the same class of thing.
+// resolveInheritedOwner is the mint-time half of the owner-inheritance fix; falls back to fallback
+// whenever the parent cannot be attributed with confidence.
 func (s *Server) resolveInheritedOwner(ctx context.Context, parentID, fallback string) string {
 	parent, err := s.tokens.GetTokenByID(ctx, parentID)
 	switch {
@@ -255,11 +180,46 @@ func (s *Server) resolveInheritedOwner(ctx context.Context, parentID, fallback s
 	}
 }
 
+// tokenIsSpent reports whether a token can no longer authenticate anything -- revoked outright,
+// or past an expiry it carries.
+func tokenIsSpent(t *store.Token, now time.Time) bool {
+	return t.RevokedAt != nil || (t.ExpiresAt != nil && !t.ExpiresAt.After(now))
+}
+
+// handleTokensDelete reads the token's state and acts on it: DELETE on an ACTIVE token revokes,
+// which is what it has always meant; DELETE on one already revoked or expired purges the row, so
+// the list stops growing forever.
 func (s *Server) handleTokensDelete(w http.ResponseWriter, r *http.Request) {
 	if s.tokensUnavailable(w) {
 		return
 	}
 	id := chi.URLParam(r, "id")
+
+	tok, err := s.tokens.GetTokenByID(r.Context(), id)
+	switch {
+	case errors.Is(err, store.ErrNotFound):
+		writeProblem(w, http.StatusNotFound, "not found", "no token with that id")
+		return
+	case err != nil:
+		slog.Error("get token failed", "error", err)
+		writeProblem(w, http.StatusBadGateway, "tokens unavailable", "failed to read token")
+		return
+	}
+
+	if tokenIsSpent(&tok, time.Now()) {
+		if err := s.tokens.PurgeToken(r.Context(), id); err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				writeProblem(w, http.StatusNotFound, "not found", "no token with that id")
+				return
+			}
+			slog.Error("purge token failed", "error", err)
+			writeProblem(w, http.StatusBadGateway, "tokens unavailable", "failed to delete token")
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+
 	if err := s.tokens.RevokeToken(r.Context(), id); err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			writeProblem(w, http.StatusNotFound, "not found", "no active token with that id")

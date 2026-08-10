@@ -65,28 +65,15 @@ func TestTargetInputValidateRejects(t *testing.T) {
 	}
 }
 
-// TestTargetNameLengthRuleMatchesMigration pins the Go-side length bound to
-// the CHECK (length(name) BETWEEN 1 AND 63) migration 00004 declares: if one
-// moves without the other, a name Postgres accepts starts getting rejected in
-// Go (or worse, the reverse -- a raw constraint violation reaching a caller).
+// TestTargetNameLengthRuleMatchesMigration pins the Go-side length bound to the CHECK (length(name)
+// BETWEEN 1 AND 63) migration 00004 declares.
 func TestTargetNameLengthRuleMatchesMigration(t *testing.T) {
 	if nameMaxLen != 63 {
 		t.Fatalf("nameMaxLen = %d, want 63 to match migration 00004's CHECK", nameMaxLen)
 	}
 }
 
-// TestTargetAddressIsValidatedByKind pins QA round 5's finding #11. A target's
-// address used to be checked for EMPTINESS and nothing else, so "   " was a
-// legal host target and "sdfsdfsdf !!" was a legal URL one -- both written to
-// targets, both reaching the agent, both failing there once per interval with
-// no evidence in the console.
-//
-// The rule is validateAdhocAddress's, SPLIT BY KIND rather than widened: the
-// two kinds mean different things to the agent (checker.validateExternalHTTP
-// parses a url target, checker.ResolveAllowed resolves a host one), and a
-// target that carries the wrong shape for its own kind is exactly the mistake
-// this catches. So a URL is not a legal `host` address, and a bare hostname is
-// not a legal `url` one -- neither is "nearly right".
+// The rule is ValidateAdhocAddress's, SPLIT BY KIND rather than widened.
 func TestTargetAddressIsValidatedByKind(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -94,7 +81,7 @@ func TestTargetAddressIsValidatedByKind(t *testing.T) {
 		address string
 		wantOK  bool
 	}{
-		// host: everything validateAdhocAddress takes MINUS the URL form.
+		// host: everything ValidateAdhocAddress takes MINUS the URL form.
 		{"host bare name", "host", "example.test", true},
 		{"host fully-qualified", "host", "example.test.", true},
 		{"host single label", "host", "gateway", true},
@@ -150,10 +137,8 @@ func TestTargetAddressIsValidatedByKind(t *testing.T) {
 	}
 }
 
-// Validate NORMALISES the address it accepts, so what is stored is the string
-// that was checked. Without this, "  10.0.0.1  " passed validation (every
-// sender trims) and was then written verbatim, and the agent -- which does NOT
-// trim before dialling -- got an address it could never resolve.
+// Validate NORMALISES the address it accepts, so what is stored is the string that was checked;
+// without this, " 10.0.0.1 " passed validation (every sender trims) and was then written verbatim.
 func TestTargetInputValidateTrimsTheAddressItAccepts(t *testing.T) {
 	in := TargetInput{Name: "edge-gw", Kind: "host", Address: "  10.0.0.1  "}
 	if err := in.Validate(); err != nil {
@@ -237,15 +222,7 @@ func TestDefinitionInputValidateRejects(t *testing.T) {
 	}
 }
 
-// TestValidateAdhocAddress pins QA round 4's finding #13: an ad-hoc
-// destination_address the agent could never dial used to be accepted, written,
-// pushed to every assigned agent and refused there once per interval, forever.
-//
-// The accepted set is DERIVED FROM THE AGENT, not invented -- see
-// validateAdhocAddress's own doc for the three files it mirrors. Each case
-// below names which of them makes it legal (or not), so a future edit that
-// tightens this rule past what the checker accepts fails here with the reason
-// written down.
+// The accepted set is DERIVED FROM THE AGENT.
 func TestValidateAdhocAddress(t *testing.T) {
 	accepted := []struct{ name, address string }{
 		// allowlist.ResolveAllowed sends a non-literal host to LookupNetIP.
@@ -276,8 +253,8 @@ func TestValidateAdhocAddress(t *testing.T) {
 	}
 	for _, tc := range accepted {
 		t.Run("accepts "+tc.name, func(t *testing.T) {
-			if err := validateAdhocAddress(tc.address); err != nil {
-				t.Errorf("validateAdhocAddress(%q) = %v, want nil", tc.address, err)
+			if err := ValidateAdhocAddress(tc.address); err != nil {
+				t.Errorf("ValidateAdhocAddress(%q) = %v, want nil", tc.address, err)
 			}
 		})
 	}
@@ -304,15 +281,15 @@ func TestValidateAdhocAddress(t *testing.T) {
 	}
 	for _, tc := range rejected {
 		t.Run("rejects "+tc.name, func(t *testing.T) {
-			err := validateAdhocAddress(tc.address)
+			err := ValidateAdhocAddress(tc.address)
 			if err == nil {
-				t.Fatalf("validateAdhocAddress(%q) = nil, want an error", tc.address)
+				t.Fatalf("ValidateAdhocAddress(%q) = nil, want an error", tc.address)
 			}
 			// The console's 422 detail is routed to a form field by phrase
 			// (web/src/pages/targets.tsx's DEFINITION_FIELD_PHRASES), so the
 			// message has to keep naming the field.
 			if !strings.Contains(strings.ToLower(err.Error()), "destination address") {
-				t.Errorf("validateAdhocAddress(%q) error %q does not name the destination address field",
+				t.Errorf("ValidateAdhocAddress(%q) error %q does not name the destination address field",
 					tc.address, err)
 			}
 		})
@@ -391,13 +368,8 @@ func TestScheduleInputValidate(t *testing.T) {
 	}
 }
 
-// TestOrEmptyJSONSubstitutesObject pins the three empty shapes -> {}
-// substitution. Each one fails differently without it: a nil binds as SQL
-// NULL, which the NOT NULL labels/params columns reject; a len-0 slice
-// reaches the driver as a zero-length jsonb literal and comes back as a raw
-// "invalid input syntax for type json"; and a literal null is accepted by
-// jsonb but stores a JSON null, a second spelling of "no labels" that every
-// reader would then have to handle.
+// TestOrEmptyJSONSubstitutesObject pins the three empty shapes -> {} substitution; each one fails
+// differently without it: a nil binds as SQL NULL.
 func TestOrEmptyJSONSubstitutesObject(t *testing.T) {
 	empty := []struct {
 		name string

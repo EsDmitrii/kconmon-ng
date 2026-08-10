@@ -15,11 +15,9 @@ import (
 	"github.com/EsDmitrii/kconmon-ng/internal/console/ws"
 )
 
-// bodyRecordingServer captures every POST /api/v1/diagnostics request body
-// VERBATIM (the raw bytes, not a decoded struct) and answers a canned success.
-// Decoding into a struct would hide exactly what this file exists to pin down:
-// whether a node-only run still puts the same BYTES on the wire it did in M3,
-// now that DiagnoseRequest has grown two more fields.
+// bodyRecordingServer captures every POST /api/v1/diagnostics request body VERBATIM (the raw bytes,
+// not a decoded struct) and answers a canned success; decoding into a struct would hide exactly
+// what this file exists to pin down.
 type bodyRecordingServer struct {
 	mu     sync.Mutex
 	bodies []string
@@ -56,11 +54,6 @@ func startBodyRecordingRunner(t *testing.T) (*bodyRecordingServer, *checks.Runne
 	return rec, checks.NewRunner(ctrl, hub, bus, mem, testMetrics(t)), mem
 }
 
-// TestDispatchBodyForNodeOnlySpecIsM3Identical is the M3 regression guarantee
-// (task-12 brief, TDD item 1): a spec naming only node destinations must put
-// EXACTLY the M3 four-field body on the wire. destinationKind/destinationAddress
-// are `omitempty`, so a node run never mentions them at all -- which is what
-// lets a pre-M4 controller keep serving Console runs unchanged.
 func TestDispatchBodyForNodeOnlySpecIsM3Identical(t *testing.T) {
 	rec, runner, mem := startBodyRecordingRunner(t)
 
@@ -84,9 +77,7 @@ func TestDispatchBodyForNodeOnlySpecIsM3Identical(t *testing.T) {
 	}
 }
 
-// A target destination travels as destinationKind=external with the address
-// alongside it, and "destination" carries the METRIC-SAFE NAME -- never the
-// address (Decision 14).
+// A target destination travels as destinationKind=external with the address alongside it.
 func TestDispatchBodyForTargetDestinationIsExternal(t *testing.T) {
 	rec, runner, mem := startBodyRecordingRunner(t)
 
@@ -173,9 +164,7 @@ func TestExternalPairPersistsLabelNotAddress(t *testing.T) {
 	}
 }
 
-// The spec snapshot persisted for a node-only run must stay byte-identical to
-// M3's too: the new typed-destination field is `omitempty`, so a run that does
-// not use it leaves no trace of it in check_runs.spec.
+// The spec snapshot persisted for a node-only run must stay byte-identical to the too.
 func TestSpecSnapshotForNodeOnlyRunIsM3Identical(t *testing.T) {
 	_, runner, mem := startBodyRecordingRunner(t)
 
@@ -198,8 +187,6 @@ func TestSpecSnapshotForNodeOnlyRunIsM3Identical(t *testing.T) {
 	waitForTerminal(t, mem, id)
 }
 
-// Sanity: the decoded request the controller would see for a node run is
-// exactly the M3 struct, with both new fields at their zero value.
 func TestDiagnoseRequestNodeRunLeavesExternalFieldsZero(t *testing.T) {
 	req := controllerclient.DiagnoseRequest{Source: "n1", Destination: "n2", Type: "tcp", Plane: "pod"}
 	raw, err := json.Marshal(req)

@@ -3,9 +3,6 @@
 package store_test
 
 // TestPathSnapshot* / TestMTRDestinations* / TestEnrichment* require a real PostgreSQL.
-// Run: docker run --rm -d -p 5432:5432 -e POSTGRES_PASSWORD=test -e POSTGRES_DB=kconmon postgres:17-alpine
-// Then: KCONMON_TEST_DATABASE_DSN='postgres://postgres:test@127.0.0.1:5432/kconmon?sslmode=disable' \
-//       go test -tags=integration ./internal/console/store/... -v
 
 import (
 	"context"
@@ -25,10 +22,7 @@ import (
 	"github.com/EsDmitrii/kconmon-ng/internal/console/store"
 )
 
-// newMTRDB opens a *store.DB with migrations applied, dropping and re-creating
-// the schema first -- same convention as newTargetsDB; this file shares one
-// database with every other file in package store_test, so each test must
-// leave it clean.
+// newMTRDB opens a *store.DB with migrations applied, dropping and re-creating the schema first.
 func newMTRDB(t *testing.T) (*store.DB, string) {
 	t.Helper()
 	dsn := testDSN(t)
@@ -72,13 +66,8 @@ func snapshotInput(source, destination string, hops []store.PathHop, seenAt time
 	}
 }
 
-// TestUpsertPathSnapshotDedupesTheSamePath is Decision 2's observable, checked
-// in both directions against a real server. The same route twice must produce
-// ONE row whose trace_count reached 2, with the second call reporting isNew ==
-// false; a different route to the same destination must produce a second row
-// reporting isNew == true. Everything downstream -- the "when did the route
-// change?" alert, the changes timeline, the whole reason this table is
-// content-hashed -- rests on those two booleans being right.
+// The same route twice must produce ONE row whose trace_count reached 2, with the second call
+// reporting isNew == false.
 func TestUpsertPathSnapshotDedupesTheSamePath(t *testing.T) {
 	db, _ := newMTRDB(t)
 	ctx := context.Background()
@@ -151,10 +140,8 @@ func TestUpsertPathSnapshotDedupesTheSamePath(t *testing.T) {
 	}
 }
 
-// TestUpsertPathSnapshotKeepsTheFirstTracesHops pins migration 00005's
-// "hops is the FIRST trace at this path" claim: a repeat over the same route
-// must not overwrite the stored measurements, or the row would describe
-// whichever trace happened last rather than a stable sample of the route.
+// TestUpsertPathSnapshotKeepsTheFirstTracesHops pins migration 00005's "hops is the FIRST trace at
+// this path" claim.
 func TestUpsertPathSnapshotKeepsTheFirstTracesHops(t *testing.T) {
 	db, _ := newMTRDB(t)
 	ctx := context.Background()
@@ -191,10 +178,8 @@ func TestUpsertPathSnapshotKeepsTheFirstTracesHops(t *testing.T) {
 	}
 }
 
-// TestUpsertPathSnapshotNeverWalksLastSeenBackwards is the GREATEST in the
-// ON CONFLICT clause, checked. Results arrive from several agents through
-// several replicas; a late-delivered older trace must bump trace_count but
-// must not make the pair look staler than it is.
+// TestUpsertPathSnapshotNeverWalksLastSeenBackwards is the GREATEST in the ON CONFLICT clause;
+// results arrive from several agents through several replicas.
 func TestUpsertPathSnapshotNeverWalksLastSeenBackwards(t *testing.T) {
 	db, _ := newMTRDB(t)
 	ctx := context.Background()
@@ -246,12 +231,8 @@ func TestUpsertPathSnapshotSeparatesPairs(t *testing.T) {
 	}
 }
 
-// TestUpsertPathSnapshotRunIDSurvivesTheRunsPrune is migration 00005's
-// ON DELETE SET NULL, checked end to end: the retention sweep deletes old
-// check_runs, and a snapshot outliving the run that produced it is the point
-// of path history. The alternative (CASCADE) would silently delete route
-// history along with the run rows, which is the exact data this milestone
-// exists to keep.
+// TestUpsertPathSnapshotRunIDSurvivesTheRunsPrune is migration 00005's ON DELETE SET NULL; the
+// alternative (CASCADE) would silently delete route history along with the run rows.
 func TestUpsertPathSnapshotRunIDSurvivesTheRunsPrune(t *testing.T) {
 	db, dsn := newMTRDB(t)
 	ctx := context.Background()
@@ -477,21 +458,11 @@ func TestListPathSnapshotsPagesNewestFirst(t *testing.T) {
 	}
 }
 
-// snapshotIdxSeedRows is how many snapshot rows the index test seeds. Large
-// enough that a seq scan is genuinely the more expensive plan for a
-// single-pair page, so the index wins on its own merits and no planner knob is
-// touched anywhere in this test -- the same reasoning dueIdxSeedRows carries.
+// snapshotIdxSeedRows is how many snapshot rows the index test seeds.
 const snapshotIdxSeedRows = 20000
 
-// listPathSnapshotsSQL returns the exact SQL text sqlc generated for
-// ListPathSnapshots, read out of the generated file at test time.
-//
-// This is the whole point of the test: EXPLAINing a hand-copied duplicate of
-// the query proves nothing, because queries/mtr.sql could then lose its
-// "ORDER BY last_seen DESC, id DESC" or grow a clause the index cannot be
-// matched against, and every assertion below would keep passing against the
-// stale copy. The generated constant is unexported, so it is extracted with
-// go/parser rather than referenced -- same technique as listDueSchedulesSQL.
+// listPathSnapshotsSQL returns the exact SQL text sqlc generated for ListPathSnapshots; this is the
+// whole point of the test: EXPLAINing a hand-copied duplicate of the query proves nothing.
 func listPathSnapshotsSQL(t *testing.T) string {
 	t.Helper()
 	return generatedSQL(t, "gen/mtr.sql.go", "listPathSnapshots")
@@ -534,24 +505,8 @@ func generatedSQL(t *testing.T, file, ident string) string {
 	return ""
 }
 
-// TestListPathSnapshotsUsesPairSeenIndex asserts the REAL shipped pair browse
-// -- store.DB.ListPathSnapshots, not a copy of its SQL -- is answered by
-// mtr_snapshots_pair_seen_idx, which is the whole reason that index leads with
-// (source_node, destination) and trails with (last_seen DESC, id DESC).
-//
-// Two independent halves, because neither alone is the full claim (the pattern
-// TestListDueSchedulesUsesPartialIndex established):
-//
-//   - The counter half calls db.ListPathSnapshots and watches
-//     pg_stat_user_indexes.idx_scan for the index move. Nothing about the query
-//     text is assumed; if the shipped query stopped matching the index the
-//     counter would stay put.
-//   - The plan half EXPLAINs the SQL extracted from the generated code and
-//     asserts the plan names the index AND contains no Sort node. Both trailing
-//     index columns are DESC, so ORDER BY last_seen DESC, id DESC is supposed
-//     to come out of the scan for free -- an index scan followed by a sort
-//     would satisfy the "uses the index" half while quietly breaking the
-//     promise that a long-lived pair's history stays cheap to page.
+// TestListPathSnapshotsUsesPairSeenIndex asserts the REAL shipped pair browse; nothing about the
+// query text is assumed.
 func TestListPathSnapshotsUsesPairSeenIndex(t *testing.T) {
 	db, dsn := newMTRDB(t)
 	ctx := context.Background()
@@ -570,12 +525,8 @@ func TestListPathSnapshotsUsesPairSeenIndex(t *testing.T) {
 	}
 	defer conn.Release()
 
-	// Seeded in a single statement rather than through UpsertPathSnapshot:
-	// 20k round trips would dominate the suite's runtime, and the rows only
-	// need to be plausible, not created through the public API (which the
-	// lifecycle tests above already cover). 200 pairs share the table so the
-	// leading index columns have real selectivity to exploit, which is
-	// precisely what a seq scan cannot.
+	// Seeded in a single statement rather than through UpsertPathSnapshot: 20k round trips would
+	// dominate the suite's runtime.
 	if _, err = conn.Exec(ctx, `
 INSERT INTO mtr_path_snapshots (
     id, source_node, destination, path_hash, hop_count, hops, first_seen, last_seen, trace_count
@@ -618,13 +569,8 @@ FROM generate_series(1, $1::int) AS g`, snapshotIdxSeedRows); err != nil {
 		}
 	}
 
-	// The counter does not move the instant the query returns: a backend
-	// flushes its pending stats at the end of a command, but no more often
-	// than once a second, and this backend already flushed while seeding. The
-	// loop nudges it with an unrelated statement (a mtr_path_snapshots_pkey
-	// lookup that misses, touching no index this test measures) on each pass;
-	// the nudge landing more than a second after the last flush carries the
-	// pending counts out with it.
+	// The counter does not move the instant the query returns: a backend flushes its pending stats at
+	// the end of a command.
 	deadline := time.Now().Add(30 * time.Second)
 	var after int64
 	for {
@@ -748,10 +694,8 @@ func TestEnrichmentRoundTrip(t *testing.T) {
 	}
 }
 
-// TestEnrichmentBatchIsNotMisZipped is the reason PutEnrichment sends one
-// array of objects rather than six parallel arrays: with several rows in
-// flight, each row's fields must stay with that row. A silent transposition
-// here would attribute every hop's provider to its neighbour.
+// TestEnrichmentBatchIsNotMisZipped is the reason PutEnrichment sends one array of objects rather
+// than six parallel arrays.
 func TestEnrichmentBatchIsNotMisZipped(t *testing.T) {
 	db, _ := newMTRDB(t)
 	ctx := context.Background()
@@ -799,10 +743,7 @@ func TestEnrichmentBatchIsNotMisZipped(t *testing.T) {
 	}
 }
 
-// TestDeletePathSnapshotsBeforeUsesLastSeen pins which column retention reads:
-// a route first observed long ago but still being taken must survive, and one
-// that stopped being taken must not. Getting this backwards would delete
-// exactly the long-lived routes path history is for.
+// TestDeletePathSnapshotsBeforeUsesLastSeen pins which column retention reads.
 func TestDeletePathSnapshotsBeforeUsesLastSeen(t *testing.T) {
 	db, _ := newMTRDB(t)
 	ctx := context.Background()

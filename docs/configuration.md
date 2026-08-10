@@ -24,10 +24,8 @@ controller:
   leaderElection: true # enable leader election for HA (requires k8s RBAC)
   agentTtl: 30s # evict agents that miss heartbeats for this duration
   events:
-    enabled: false # serve EventStream.WatchEvents (Console realtime) and advertise
-    # the "events" capability on GET /api/v1/version. Leader-only: passive
-    # replicas reject subscriptions. Requires a controller image that includes
-    # the M2 event stream (newer than v1.3.3).
+    # Serve EventStream.WatchEvents; leader-only, needs a controller newer than v1.3.3.
+    enabled: false
 
 checkers:
   tcp:
@@ -119,7 +117,11 @@ serviceMonitor:
   interval: 15s
 
 prometheusRule:
-  enabled: true # deploy default alerting rules
+  enabled: true # deploy the seven built-in alerting rules
+  udpLossHigh:
+    threshold: 0.25 # per-rule knobs: enabled / threshold / for / severity
+    # a threshold may also be a string ("0.25") — that is what --set produces
+  additionalRules: [] # your own rules, appended verbatim
 
 networkPolicy:
   enabled: true # restrict ingress/egress to required paths only
@@ -133,8 +135,10 @@ serviceAccount:
   create: true # creates ClusterRole with nodes get/list/watch
 ```
 
-Every value is documented inline in
-[charts/kconmon-ng/values.yaml](../charts/kconmon-ng/values.yaml).
+Every value is listed in
+[charts/kconmon-ng/values.yaml](../charts/kconmon-ng/values.yaml); the reasoning
+behind the alerting rules and the chart's guards is in the
+[chart README](../charts/kconmon-ng/README.md).
 
 ## Console (M1/M2/M3)
 
@@ -159,9 +163,7 @@ console:
   controller:
     url: "" # empty = derive from this release's controller Service
     timeout: 10s
-    # gRPC address of the controller's EventStream. Empty = derive from this
-    # release's controller Service when controller.events.enabled=true,
-    # otherwise realtime stays off and the UI polls with a "Delayed data" badge.
+    # gRPC address of the controller's EventStream; empty = derive from the release's Service.
     grpcAddr: ""
   prometheus:
     url: "" # REQUIRED for the matrix/Explore/PromQL pages; empty = those APIs 503
@@ -182,26 +184,20 @@ console:
       limits: { cpu: 200m, memory: 128Mi }
       requests: { cpu: 50m, memory: 64Mi }
   networkPolicy:
-    # Egress rule list for console -> external Valkey. Empty + mode=external
-    # renders a default allowing TCP console.valkey.port to any namespace;
-    # ignored for mode=bundled (a precise pod-selector rule is rendered).
+    # Egress rules for console -> external Valkey; empty renders a permissive default.
     valkeyEgress: []
-  # PostgreSQL persistence (M3, ADR-001). Optional: with mode=disabled the
-  # console runs exactly the M1/M2 surface, no history, no local/oidc auth.
+  # PostgreSQL persistence; mode=disabled means no history and no local/oidc auth.
   database:
     mode: disabled # cnpg | external | disabled
     existingSecret: "" # mode=external only; must hold a full postgres:// DSN
     existingSecretKey: dsn
-  # Authentication (M3, SECURITY.md §10.1). anonymous is the default and a
-  # fully supported deployment; RBAC still applies, with the fixed role below.
+  # Authentication (SECURITY.md §10.1); anonymous is the default and RBAC still applies.
   auth:
     mode: anonymous # anonymous | local | header | oidc
     anonymous:
       role: viewer
     defaultRole: "" # role for an authenticated subject with no binding; empty = none (403)
-    # mode=local and mode=oidc both require database.mode=cnpg|external.
-    # mode=header requires a non-empty auth.header.trustedProxyCIDRs (no
-    # default — an empty list would be an authentication bypass).
+    # local/oidc require a database; header requires a non-empty trustedProxyCIDRs.
 ```
 
 `controller.events.enabled` turns on the controller's `EventStream.WatchEvents`

@@ -61,10 +61,8 @@ func (c *GRPCClient) OnTask(fn func(context.Context, *pb.TaskRequest)) {
 	c.onTask = fn
 }
 
-// OnExternalAssignment registers the handler invoked for each CONTINUOUS
-// external-check assignment received on the WatchExternalChecks stream. Every
-// message is the agent's COMPLETE assignment, never a delta, so the handler
-// replaces its target list wholesale rather than merging into it.
+// OnExternalAssignment registers the handler invoked for each CONTINUOUS external-check assignment
+// received on the WatchExternalChecks stream; every message is the agent's COMPLETE assignment.
 func (c *GRPCClient) OnExternalAssignment(fn func(*pb.ExternalCheckAssignment)) {
 	c.onExternal = fn
 }
@@ -185,16 +183,9 @@ func (c *GRPCClient) WatchTasks(ctx context.Context) error {
 	}
 }
 
-// WatchExternalChecks subscribes to the controller's continuous external-check
-// assignment stream and invokes the OnExternalAssignment handler for each
-// assignment. It mirrors WatchTasks: it returns on the first stream error so
-// the caller's reconnect loop can re-subscribe.
-//
-// The controller sends the agent's CURRENT assignment immediately on subscribe
-// (an empty one when it has none), so a reconnect always converges without any
-// delta bookkeeping here — including onto a restarted controller that lost
-// every assignment, where the empty send is what tells the agent to stop
-// probing rather than keep a stale target list alive.
+// WatchExternalChecks subscribes to the controller's continuous external-check assignment stream
+// and invokes the OnExternalAssignment handler for each assignment; the controller sends the
+// agent's CURRENT assignment immediately on subscribe (an empty one when it has none).
 func (c *GRPCClient) WatchExternalChecks(ctx context.Context) error {
 	stream, err := c.client.WatchExternalChecks(ctx, &pb.WatchExternalChecksRequest{
 		AgentId: c.agentID,

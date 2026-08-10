@@ -28,33 +28,10 @@ const (
 	testBundleName = "kconmon-ng-console-rules"
 )
 
-// ---------------------------------------------------------------------------
-// The fake dynamic client's quirks — PROBED, not assumed
-//
-// Everything below was established by running it (client-go v0.36.3), the way
-// kubectx pinned the fake clientset's field-selector behaviour. Two of the
-// three are load-bearing for how the rest of this file is written.
-// ---------------------------------------------------------------------------
+// The fake dynamic client's quirks — PROBED, not assumed Everything below was established by
+// running it (client-go v0.36.3).
 
-// TestFakeDynamicClientCannotApply is the quirk that shapes every other test
-// in this file: k8s.io/client-go/dynamic/fake CANNOT server-side-apply an
-// unstructured object AT ALL, in either direction.
-//
-//   - Applying an ABSENT object returns NotFound. testing.tracker.Apply does a
-//     Get first and propagates its error, so the fake never creates on apply —
-//     which is the entire point of SSA against a real apiserver.
-//   - Applying over an EXISTING object fails with "unable to find api field in
-//     struct Unstructured for the json field \"metadata\"". The tracker merges
-//     via strategicpatch.StrategicMergePatch, which reflects over Go struct
-//     tags; *unstructured.Unstructured has none, so the merge cannot run.
-//     client-go's own comment points typed clients at ManagedFieldObjectTracker
-//     for real field-manager support — the DYNAMIC fake has no constructor
-//     that accepts one.
-//
-// So every test that needs an apply installs applyReactor below. This test
-// exists to make that workaround auditable rather than mysterious, and to
-// break loudly if a client-go bump ever fixes the fake — at which point the
-// reactor can go.
+// TestFakeDynamicClientCannotApply is the quirk that shapes every other test in this file.
 func TestFakeDynamicClientCannotApply(t *testing.T) {
 	c := newFakeDynamic(t) // deliberately WITHOUT applyReactor
 	ri := c.Resource(GVR).Namespace(testNamespace)
@@ -79,11 +56,8 @@ func TestFakeDynamicClientCannotApply(t *testing.T) {
 	}
 }
 
-// TestFakeDynamicClientListIsUnfiltered pins the third probed fact: the fake
-// DOES honour a label selector on List (including a negated one), and it
-// returns objects in name order. ListForeign relies on neither — it filters
-// client-side and sorts itself — and this test is what says that redundancy is
-// a choice rather than a misunderstanding of the fake.
+// TestFakeDynamicClientListIsUnfiltered pins the third probed fact; ListForeign relies on neither —
+// it filters client-side and sorts itself.
 func TestFakeDynamicClientListIsUnfiltered(t *testing.T) {
 	c := newFakeDynamic(t,
 		foreignObject("theirs", map[string]any{"app.kubernetes.io/managed-by": "some-other-chart"}),
@@ -119,11 +93,9 @@ func newFakeDynamic(t *testing.T, objects ...runtime.Object) *dynamicfake.FakeDy
 		map[schema.GroupVersionResource]string{GVR: alerting.BundleKind + "List"}, objects...)
 }
 
-// applyReactor emulates what a real apiserver does for a FORCED apply by a
-// SINGLE field manager over an object nobody else owns: create it when absent,
-// replace it when present. That is not general SSA — it is exactly the slice
-// of SSA this package uses, and modelling more would be modelling something
-// the console never asks for.
+// applyReactor emulates what a real apiserver does for a FORCED apply by a SINGLE field manager
+// over an object nobody else owns; that is not general SSA — it is exactly the slice of SSA this
+// package uses.
 func applyReactor(c *dynamicfake.FakeDynamicClient) {
 	tracker := c.Tracker()
 	c.PrependReactor("patch", GVR.Resource, func(action k8stesting.Action) (bool, runtime.Object, error) {
@@ -356,10 +328,6 @@ func TestApplyCreatesThenUpdates(t *testing.T) {
 	}
 }
 
-// TestApplyUsesOurFieldManagerAndForces pins the two apply options Decision 5
-// depends on: without the field manager the object has no owner, and without
-// force a hand edit by another manager would make every apply conflict instead
-// of correcting the drift.
 func TestApplyUsesOurFieldManagerAndForces(t *testing.T) {
 	c := newAppliableFake(t)
 	var seen k8stesting.PatchActionImpl
@@ -577,10 +545,8 @@ func TestCompareAgainstAnAbsentObject(t *testing.T) {
 	}
 }
 
-// TestDiffFitsTheStoreColumn: a bundle that diverges completely still produces
-// a message the store will accept. The bound is applied where the message is
-// built, so a 1 MiB divergence cannot turn a recorded drift into a rejected
-// write.
+// TestDiffFitsTheStoreColumn: a bundle that diverges completely still produces a message the store
+// will accept; the bound is applied where the message is built.
 func TestDiffFitsTheStoreColumn(t *testing.T) {
 	desired := bundleObject(t, strings.Repeat("a", 40_000))
 	live := bundleObject(t, strings.Repeat("b", 40_000))
@@ -724,10 +690,9 @@ func TestReconcileSwallowsAFailedStatusWrite(t *testing.T) {
 // Per-rule render failures
 // ---------------------------------------------------------------------------
 
-// TestReconcileIsolatesAnUnrenderableRule: the store's kind vocabulary is
-// WIDER than the renderer's (cert-expiry is a legal column value that the
-// renderer deliberately dropped, and a params blob can be edited into
-// nonsense). One such row is marked and skipped; the rest still sync.
+// TestReconcileIsolatesAnUnrenderableRule: the store's kind vocabulary is WIDER than the renderer's
+// (cert-expiry is a legal column value that the renderer deliberately dropped, and a params blob
+// can be edited into nonsense).
 func TestReconcileIsolatesAnUnrenderableRule(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
@@ -919,10 +884,7 @@ func TestKickCoalesces(t *testing.T) {
 	}
 }
 
-// TestRunReconcilesImmediatelyThenOnKick pins both halves of the loop's
-// contract: the first pass does not wait for the interval, and a kick brings
-// the next one forward from an interval that would otherwise never elapse
-// inside a test.
+// TestRunReconcilesImmediatelyThenOnKick pins both halves of the loop's contract.
 func TestRunReconcilesImmediatelyThenOnKick(t *testing.T) {
 	c := newAppliableFake(t)
 	st := &fakeStore{rules: []store.AlertRule{row("id-1", "One")}}

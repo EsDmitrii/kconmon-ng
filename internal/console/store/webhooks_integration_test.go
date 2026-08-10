@@ -3,9 +3,6 @@
 package store_test
 
 // TestWebhook* require a real PostgreSQL.
-// Run: docker run --rm -d -p 5432:5432 -e POSTGRES_PASSWORD=test -e POSTGRES_DB=kconmon postgres:17-alpine
-// Then: KCONMON_TEST_DATABASE_DSN='postgres://postgres:test@127.0.0.1:5432/kconmon?sslmode=disable' \
-//       go test -tags=integration ./internal/console/store/... -v
 
 import (
 	"bytes"
@@ -136,10 +133,7 @@ func TestWebhookLifecycle(t *testing.T) {
 	}
 }
 
-// TestWebhookSecretRoundTripsByteForByte is the layering claim against real
-// BYTEA: AES-GCM ciphertext contains NULs and invalid UTF-8, and a store that
-// mangled either -- by round-tripping through a string, say -- would make
-// every delivery signature fail with no visible cause.
+// TestWebhookSecretRoundTripsByteForByte is the layering claim against real BYTEA.
 func TestWebhookSecretRoundTripsByteForByte(t *testing.T) {
 	db := newWebhooksDB(t)
 	ctx := context.Background()
@@ -186,10 +180,8 @@ func TestCreateWebhookDuplicateNameIsAlreadyExists(t *testing.T) {
 	}
 }
 
-// TestUpdateWebhookDeliveryLeavesConfigurationAlone is the split the two write
-// paths exist to keep: the dispatcher writes outcomes, an operator writes
-// configuration, and neither overwrites the other's half. In particular an
-// operator fixing a URL typo must not reset the endpoint's failure history.
+// TestUpdateWebhookDeliveryLeavesConfigurationAlone is the split the two write paths exist to keep;
+// in particular an operator fixing a URL typo must not reset the endpoint's failure history.
 func TestUpdateWebhookDeliveryLeavesConfigurationAlone(t *testing.T) {
 	db := newWebhooksDB(t)
 	ctx := context.Background()
@@ -260,9 +252,7 @@ func TestWebhookInvalidInputNeverReachesTheDatabase(t *testing.T) {
 		t.Fatal("CreateWebhook(file:// url) succeeded, want a validation error")
 	}
 
-	// alert.acknowledged, not alert.fired: M7 widened the closed set to the
-	// two real alert events, so the probe for "outside the set" moved with it
-	// (the unit twin in webhooks_test.go made the same M7 move).
+	// alert.acknowledged, not alert.fired.
 	worse := webhookInput("ops-slack")
 	worse.Events = []string{"alert.acknowledged"}
 	if _, err := db.CreateWebhook(ctx, worse); err == nil {

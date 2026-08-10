@@ -9,11 +9,6 @@ import (
 	pb "github.com/EsDmitrii/kconmon-ng/api/proto"
 )
 
-// TestTaskRequestM3ShapeRoundTripsWithoutNewFields proves the M4 additions
-// are invisible to an M3-shaped message: a TaskRequest that sets only fields
-// 1-4 round-trips to byte-identical wire bytes, and those bytes contain
-// neither TaskRequest's field-5 tag nor AgentMeta's field-7 tag -- which is
-// the property that lets a pre-M4 controller or agent read them unchanged.
 func TestTaskRequestM3ShapeRoundTripsWithoutNewFields(t *testing.T) {
 	m3 := &pb.TaskRequest{
 		TaskId:    "t-1",
@@ -54,22 +49,14 @@ func TestTaskRequestM3ShapeRoundTripsWithoutNewFields(t *testing.T) {
 		t.Fatalf("round trip changed the wire bytes:\n first=%x\nsecond=%x", first, second)
 	}
 
-	// Field 5 of TaskRequest (external_target, wire type 2) would appear as
-	// tag byte 0x2a; field 7 of AgentMeta (capabilities, wire type 2) as
-	// 0x3a. Scanning for the raw byte alone could false-positive inside a
-	// string, so instead assert the semantic absence above AND that an unset
-	// message contributes zero bytes: marshaling with the new fields unset
-	// yields the same size proto.Size reports for the fields-1-4 shape.
+	// Field 5 of TaskRequest (external_target, wire type 2) would appear as tag byte 0x2a.
 	if got, want := proto.Size(m3), len(first); got != want {
 		t.Fatalf("proto.Size disagrees with marshal length: %d != %d", got, want)
 	}
 }
 
-// TestOldAgentMetaUnmarshalsWithEmptyCapabilities proves the other direction
-// of the same guarantee: bytes produced before field 7 existed decode into
-// the new struct with an EMPTY capability list -- the exact signal the
-// controller keys "refuse to dispatch external checks to this agent" on. An
-// old agent can never accidentally advertise a capability.
+// TestOldAgentMetaUnmarshalsWithEmptyCapabilities proves the other direction of the same guarantee;
+// an old agent can never accidentally advertise a capability.
 func TestOldAgentMetaUnmarshalsWithEmptyCapabilities(t *testing.T) {
 	old := &pb.AgentMeta{Id: "a-1", NodeName: "node-a", Zone: "z1"}
 	raw, err := proto.Marshal(old)
@@ -86,11 +73,9 @@ func TestOldAgentMetaUnmarshalsWithEmptyCapabilities(t *testing.T) {
 	}
 }
 
-// TestTaskRequestBothTargetsSetIsDetectable proves the mutual exclusion the
-// schema deliberately does NOT enforce (no oneof -- see kconmon.proto's
-// comment on external_target) is enforceable in code: a malformed both-set
-// request survives the wire with both fields populated, so the agent can see
-// the conflict and report an error result instead of guessing.
+// TestTaskRequestBothTargetsSetIsDetectable proves the mutual exclusion the schema deliberately
+// does NOT enforce (no oneof -- see kconmon.proto's comment on external_target) is enforceable in
+// code.
 func TestTaskRequestBothTargetsSetIsDetectable(t *testing.T) {
 	malformed := &pb.TaskRequest{
 		TaskId:         "t-2",
@@ -118,11 +103,6 @@ func TestTaskRequestBothTargetsSetIsDetectable(t *testing.T) {
 	}
 }
 
-// TestExistingMessagesSurviveTheWatchExternalChecksAddition proves the M4
-// Phase C service/message additions change no existing message's wire
-// encoding: an M3-shaped PeerUpdate and TaskResult round-trip to identical
-// bytes, and proto.Size agrees with the marshaled length -- adding a service
-// RPC and new top-level messages must be invisible to every deployed agent.
 func TestExistingMessagesSurviveTheWatchExternalChecksAddition(t *testing.T) {
 	msgs := []proto.Message{
 		&pb.PeerUpdate{

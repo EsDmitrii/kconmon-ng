@@ -27,16 +27,12 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
-// liveBusTopic is ws.TopicLive spelled out. This package cannot import
-// internal/console/ws (ws imports this one so the Hub can dedupe by
-// LiveEvent.ID), so both sides pin the same literal: here, and in
-// TestTopicLiveIsTheBusTopicTheIngesterPublishesOn in the ws package.
+// liveBusTopic is ws.TopicLive spelled out; this package cannot import internal/console/ws (ws
+// imports this one so the Hub can dedupe by LiveEvent.ID).
 const liveBusTopic = "live"
 
-// preconditionGrace is for the tests that only need the ingester to reach a
-// healthy stream before getting on with their real subject. They are not about
-// the promotion rule, so they do not pay the production connect grace; the two
-// tests that ARE about it keep the default.
+// preconditionGrace is for the tests that only need the ingester to reach a healthy stream before
+// getting on with their real subject.
 const preconditionGrace = 20 * time.Millisecond
 
 // waitFor polls cond until it holds, or fails the test. Used instead of sleeps
@@ -167,11 +163,7 @@ func (f *fakeEventStream) breakStream(t *testing.T) {
 	}
 }
 
-// startFakeEventStream serves the fake on a loopback TCP listener and returns it
-// with its address. A loopback listener, not bufconn: the Ingester takes a plain
-// host:port and dials it with the agent's own grpc.NewClient options, so there is
-// no grpc.WithContextDialer seam to hand a bufconn to. 127.0.0.1:0 keeps it
-// entirely local anyway.
+// startFakeEventStream serves the fake on a loopback TCP listener and returns it with its address.
 func startFakeEventStream(t *testing.T) (*fakeEventStream, string) {
 	t.Helper()
 	fake := newFakeEventStream()
@@ -193,18 +185,12 @@ func serveEventStream(t *testing.T, srv pb.EventStreamServer) string {
 	return lis.Addr().String()
 }
 
-// rejectDelay is how long rejectingEventStream holds an accepted stream before
-// refusing it. Two orders of magnitude below the ingester's connect grace, so
-// correct code still never promotes — but long enough that a regression to
-// promoting on stream creation would hold Healthy() true for a whole 50ms and be
-// caught with certainty rather than probabilistically. Over loopback the
-// rejection would otherwise land within ~1ms of the dial.
+// rejectDelay is how long rejectingEventStream holds an accepted stream before refusing it; two
+// orders of magnitude below the ingester's connect grace.
 const rejectDelay = 50 * time.Millisecond
 
-// rejectingEventStream accepts the subscription and then refuses it, which is
-// exactly what a non-leader controller replica does (the leader gate answers
-// codes.Unavailable). The client sees this at its first Recv, never at the
-// WatchEvents call.
+// rejectingEventStream accepts the subscription and then refuses it; the client sees this at its
+// first Recv, never at the WatchEvents call.
 type rejectingEventStream struct {
 	pb.UnimplementedEventStreamServer
 	calls atomic.Int64
@@ -244,12 +230,7 @@ func countingListener(t *testing.T) (addr string, accepted *atomic.Int64) {
 	return lis.Addr().String(), accepted
 }
 
-// fakeSink is an events.EventSink test double. err makes every call return
-// that error; conflict (checked only when err is nil) makes every call return
-// (false, nil) — the "another replica won the race" outcome; delay, if set,
-// blocks the call until it elapses OR ctx is done, whichever comes first, so
-// a test can exercise the sink's independent timeout without hanging forever
-// if the ingester ever regresses to not deriving one.
+// fakeSink is an events.EventSink test double.
 type fakeSink struct {
 	mu       sync.Mutex
 	received []events.LiveEvent
@@ -350,11 +331,8 @@ func captureLogs(t *testing.T) *capturingHandler {
 	return h
 }
 
-// The metric label is the same (reason="capability") for a controller that is up
-// and not offering events and for one that is unreachable, so the LOG LEVEL is
-// the only thing that distinguishes a supported degraded state from an incident.
-// That makes the level worth pinning: without this test, collapsing the two back
-// into one Info line would go unnoticed.
+// The metric label is the same (reason="capability") for a controller that is up and not offering
+// events and for one that is unreachable.
 func TestIngesterLogsAMissingCapabilityAtInfoAndABrokenPrecheckAtWarn(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -630,11 +608,7 @@ func TestIngesterConnectsOnceTheCapabilityAppears(t *testing.T) {
 	}
 }
 
-// A controller that is DOWN is a different situation from one that is up and not
-// offering events, but it takes the same route through the retry loop: the shared
-// reason="capability" label is a frozen contract, so the distinction lives in the
-// log level (Info for "no capability", Warn for everything else) rather than in
-// the metric. What must hold either way is that no gRPC connection is attempted.
+// A controller that is DOWN is a different situation from one that is up and not offering events.
 func TestIngesterTreatsAControllerOutageAsACapabilityRetryWithoutDialing(t *testing.T) {
 	api, ctrl := startFakeController(t, "events")
 	api.setDown(true)
@@ -676,11 +650,9 @@ func TestIngesterTreatsAControllerOutageAsACapabilityRetryWithoutDialing(t *test
 	}
 }
 
-// The flap guard. A non-leader controller accepts the subscription and rejects it
-// at once, so the stream object exists but no event can ever arrive. Healthy must
-// never go true, because Task 12 derives the console's browser-facing
-// capabilities from it and the realtime badge would otherwise flicker on every
-// retry cycle.
+// A non-leader controller accepts the subscription and rejects it at once; healthy must never go
+// true, because derives the console's browser-facing capabilities from it and the realtime badge
+// would otherwise flicker on every retry cycle.
 func TestIngesterNeverReportsHealthyAgainstARejectingController(t *testing.T) {
 	_, ctrl := startFakeController(t, "events")
 	rejecting := &rejectingEventStream{}
@@ -694,12 +666,8 @@ func TestIngesterNeverReportsHealthyAgainstARejectingController(t *testing.T) {
 	done := make(chan struct{})
 	go func() { defer close(done); ing.Run(ctx) }()
 
-	// Observe until three whole attempts have been rejected, asserting throughout
-	// that the ingester never once reported healthy. The window is defined by the
-	// retry count, not by a duration, so it scales with the backoff instead of
-	// restating it — and the production connect grace is deliberately NOT
-	// shortened here, because the property under test is that the rejection always
-	// beats the grace timer.
+	// Observe until three whole attempts have been rejected, asserting throughout that the ingester
+	// never once reported healthy.
 	const wantRejections = 3
 	deadline := time.Now().Add(30 * time.Second)
 	for testutil.ToFloat64(m.IngesterReconnects.WithLabelValues("stream")) < wantRejections {
@@ -733,11 +701,8 @@ func TestIngesterNeverReportsHealthyAgainstARejectingController(t *testing.T) {
 	}
 }
 
-// Invariant: a grace timer left over from an attempt that has already ended must
-// never promote the ingester. The attempt here is cancelled while its timer is
-// still pending, and Healthy must stay false well past the moment that timer
-// would have fired. Sleeping is the assertion, not a synchronisation shortcut:
-// the test is that nothing happens.
+// Invariant: a grace timer left over from an attempt that has already ended must never promote the
+// ingester.
 func TestIngesterGraceTimerCannotResurrectAFinishedAttempt(t *testing.T) {
 	_, ctrl := startFakeController(t, "events")
 	fake, addr := startFakeEventStream(t)
@@ -775,10 +740,8 @@ func TestIngesterGraceTimerCannotResurrectAFinishedAttempt(t *testing.T) {
 	}
 }
 
-// The other half of the promotion rule: an event received promotes the ingester
-// immediately rather than making it wait out the grace period. The grace is
-// stretched far past the test's own runtime so a promotion can only mean the
-// event did it.
+// The other half of the promotion rule: an event received promotes the ingester immediately rather
+// than making it wait out the grace period.
 func TestIngesterBecomesHealthyOnTheFirstEventAheadOfTheGrace(t *testing.T) {
 	_, ctrl := startFakeController(t, "events")
 	fake, addr := startFakeEventStream(t)
@@ -842,9 +805,8 @@ func topologyEvent(seq uint64) *pb.Event {
 	}
 }
 
-// TestIngesterPersistsAfterPublish is Task 4's core wiring test: a configured
-// EventSink is called once per event, and what it receives matches what the
-// bus received — same Seq, Timestamp, Type and Details.
+// TestIngesterPersistsAfterPublish is the core wiring test: a configured EventSink is called once
+// per event.
 func TestIngesterPersistsAfterPublish(t *testing.T) {
 	_, ctrl := startFakeController(t, "events")
 	fake, addr := startFakeEventStream(t)
@@ -893,12 +855,8 @@ func TestIngesterPersistsAfterPublish(t *testing.T) {
 	}
 }
 
-// TestIngesterPersistsTopologyAttribution is the M7 carry's ingestion half:
-// the controller now names the agent, node and zone behind every topology
-// change, and this is what proves the console does not drop that on the way to
-// the durable row. Scope and summary come from it too, but Details is the
-// load-bearing one -- it is the ONLY thing store.foldTopology reads, so an
-// attribution lost here is a reconstructed topology that stays empty.
+// Scope and summary come from it too, but Details is the load-bearing one -- it is the ONLY thing
+// store.foldTopology reads.
 func TestIngesterPersistsTopologyAttribution(t *testing.T) {
 	_, ctrl := startFakeController(t, "events")
 	fake, addr := startFakeEventStream(t)
@@ -947,11 +905,8 @@ func TestIngesterPersistsTopologyAttribution(t *testing.T) {
 	}
 }
 
-// TestIngesterSinkErrorDoesNotStopPublishing drives three events through a
-// sink that fails on every call. All three must still reach the bus, the
-// ingester must stay connected, and every failure must be counted as
-// EventsPersisted{result="error"} — a database hiccup degrades history, not
-// the realtime feed.
+// TestIngesterSinkErrorDoesNotStopPublishing drives three events through a sink that fails on every
+// call; all three must still reach the bus, the ingester must stay connected.
 func TestIngesterSinkErrorDoesNotStopPublishing(t *testing.T) {
 	_, ctrl := startFakeController(t, "events")
 	fake, addr := startFakeEventStream(t)
@@ -996,10 +951,8 @@ func TestIngesterSinkErrorDoesNotStopPublishing(t *testing.T) {
 	}
 }
 
-// TestIngesterSinkConflictIsNotAnError is the normal N-replica path: another
-// replica already inserted the row, InsertEvent returns (false, nil), and that
-// must be counted as EventsPersisted{result="conflict"} without a single
-// error-level log line.
+// TestIngesterSinkConflictIsNotAnError is the normal N-replica path: another replica already
+// inserted the row.
 func TestIngesterSinkConflictIsNotAnError(t *testing.T) {
 	_, ctrl := startFakeController(t, "events")
 	fake, addr := startFakeEventStream(t)
@@ -1048,10 +1001,6 @@ func TestIngesterSinkConflictIsNotAnError(t *testing.T) {
 	}
 }
 
-// TestIngesterWithoutSinkIsUnchanged is the M1/M2 regression test
-// (database.mode=disabled): constructed with no options at all, the ingester's
-// bus delivery must be identical to before this task, and no EventsPersisted
-// label may move.
 func TestIngesterWithoutSinkIsUnchanged(t *testing.T) {
 	_, ctrl := startFakeController(t, "events")
 	fake, addr := startFakeEventStream(t)
@@ -1092,10 +1041,7 @@ func TestIngesterWithoutSinkIsUnchanged(t *testing.T) {
 	}
 }
 
-// TestIngesterSinkGetsIndependentTimeout proves the sink's context is its own
-// short-lived timeout, not the long-lived stream context: a sink that blocks
-// well past that budget must still let go, so the consume loop can pick up
-// the next event rather than wedging for the life of the stream.
+// TestIngesterSinkGetsIndependentTimeout proves the sink's context is its own short-lived timeout.
 func TestIngesterSinkGetsIndependentTimeout(t *testing.T) {
 	_, ctrl := startFakeController(t, "events")
 	fake, addr := startFakeEventStream(t)
@@ -1123,24 +1069,16 @@ func TestIngesterSinkGetsIndependentTimeout(t *testing.T) {
 		t.Fatal("the first event never reached the bus")
 	}
 
-	// The sink is still blocked inside InsertEvent for event 1 (its own 5s
-	// budget has not elapsed yet). Handing event 2 straight to the fake
-	// stream's channel, bypassing fake.send's own 5s timeout: gRPC's stream
-	// buffering means the server can accept this into its send loop almost
-	// immediately regardless of whether the client has called Recv again, so
-	// that handoff alone proves nothing about the consume loop.
+	// The sink is still blocked inside InsertEvent for event 1 (its own 5s budget has not elapsed
+	// yet).
 	select {
 	case fake.events <- topologyEvent(2):
 	case <-time.After(8 * time.Second):
 		t.Fatal("the fake server never picked up the second event")
 	}
 
-	// What DOES prove the consume loop freed itself is the second event making
-	// it all the way to the bus, which requires publish(ev1) — and therefore
-	// the blocked sink call — to have returned first. The deadline here is
-	// comfortably longer than sinkTimeout (5s) but far short of the fake
-	// sink's 30s delay, so this only passes if the sink's own context, not the
-	// stream context, is what unblocked it.
+	// The deadline here is comfortably longer than sinkTimeout (5s) but far short of the fake sink's
+	// 30s delay.
 	select {
 	case <-msgs:
 	case <-time.After(8 * time.Second):
@@ -1155,10 +1093,7 @@ func TestIngesterSinkGetsIndependentTimeout(t *testing.T) {
 	}
 }
 
-// failingBus wraps a real bus and makes every Publish fail, while Subscribe
-// keeps working: it models a Valkey outage on the publish path only, which is
-// the shape the ingester has to survive. The wrapped bus is still there so the
-// test can prove nothing else changed.
+// failingBus wraps a real bus and makes every Publish fail, while Subscribe keeps working.
 type failingBus struct {
 	inner    cache.Bus
 	err      error
@@ -1175,13 +1110,8 @@ func (b *failingBus) Subscribe(topic string) (<-chan cache.Message, func()) {
 }
 
 // TestIngesterBusErrorStillPersists is the other half of
-// TestIngesterSinkErrorDoesNotStopPublishing: the two failures are
-// independent in BOTH directions. With bus.Publish failing on every call, all
-// three events must still reach the sink and be counted as
-// EventsPersisted{result="ok"} — a Valkey outage degrades realtime, it must
-// not silently stop durable history while the database is healthy. (The
-// earlier bug: publish returned early on the bus error and never reached the
-// sink block at all.)
+// TestIngesterSinkErrorDoesNotStopPublishing; with bus.Publish failing on every call, all three
+// events must still reach the sink and be counted as EventsPersisted{result="ok"}.
 func TestIngesterBusErrorStillPersists(t *testing.T) {
 	_, ctrl := startFakeController(t, "events")
 	fake, addr := startFakeEventStream(t)

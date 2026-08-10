@@ -15,10 +15,8 @@ import (
 	"github.com/EsDmitrii/kconmon-ng/internal/console/store"
 )
 
-// The plaintext secret every webhook test posts, and the marker the fake
-// sealer wraps it in. BOTH are searched for in raw response bodies and audit
-// rows: the sealed form must never appear either, or a leak would merely have
-// changed shape.
+// The plaintext secret every webhook test posts, and the marker the fake sealer wraps it in; BOTH
+// are searched for in raw response bodies and audit rows.
 const (
 	testWebhookSecret = "s3cr3t-signing-key"
 	sealedPrefix      = "SEALED("
@@ -49,8 +47,7 @@ func (f *fakeSealer) sealCalls() int {
 	return f.calls
 }
 
-// fakeTestDispatcher is the TestDispatcher double: it records the ids it was
-// asked to ping, which is the whole of the seam M6 Task 5 will implement.
+// fakeTestDispatcher is the TestDispatcher double: it records the ids it was asked to ping.
 type fakeTestDispatcher struct {
 	mu   sync.Mutex
 	ids  []string
@@ -247,10 +244,8 @@ func TestWebhooksWithoutStoreReturn503(t *testing.T) {
 	}
 }
 
-// M6 Decision 8's sharpest line, against the REAL built-in roles: webhooks are
-// ADMIN ONLY. Every other role -- including the operator that holds
-// incidents:write and can open the very incidents these endpoints fire on --
-// is refused on every route, read included.
+// Every other role -- including the operator that holds incidents:write and can open the very
+// incidents these endpoints fire on.
 func TestWebhooksAreAdminOnly(t *testing.T) {
 	for _, role := range []string{"viewer", "alert-editor", "operator"} {
 		st := newFakeWebhookStore()
@@ -431,9 +426,6 @@ func TestWebhookCreateWithoutSecretIs422(t *testing.T) {
 	}
 }
 
-// M6 Decision 4: the encryption key is OPTIONAL at boot, so the honest place
-// to report it missing is the first request that needs the cipher -- and the
-// 503 must NAME the key, not merely say "unavailable".
 func TestWebhookCreateAndTestWithoutASealerReturn503NamingTheKey(t *testing.T) {
 	st := newFakeWebhookStore()
 	id := st.seed("seeded")
@@ -454,10 +446,9 @@ func TestWebhookCreateAndTestWithoutASealerReturn503NamingTheKey(t *testing.T) {
 	}
 }
 
-// The other half of Decision 4's trade: a console with NO key can still list,
-// read, re-point, disable and delete an endpoint. Gating the whole resource on
-// a key would leave an operator unable to silence a misfiring webhook during
-// exactly the incident that made them want to.
+// The other half of 's trade: a console with NO key can still list; gating the whole resource on a
+// key would leave an operator unable to silence a misfiring webhook during exactly the incident
+// that made them want.
 func TestWebhookRoutesThatNeedNoCipherWorkWithoutASealer(t *testing.T) {
 	st := newFakeWebhookStore()
 	id := st.seed("slack-oncall")
@@ -532,11 +523,7 @@ func TestWebhookCreateValidation(t *testing.T) {
 	}
 }
 
-// The M7 vocabulary reaches the API surface: an endpoint may subscribe to the
-// two alert transitions, alone or alongside incident events (Decision 7). The
-// handler passes events straight through to the store, so what this pins is
-// that nothing in the API layer -- no allow-list, no DTO enum -- kept a copy of
-// the M6 three and quietly rejects the new ones.
+// The vocabulary reaches the API surface: an endpoint may subscribe to the two alert transitions.
 func TestWebhookCreateAcceptsTheAlertEvents(t *testing.T) {
 	for _, c := range []struct {
 		name, events string
@@ -645,9 +632,8 @@ func TestWebhookStoreFailureReturns502(t *testing.T) {
 	}
 }
 
-// M6's global constraint at the audit layer: NEITHER the secret NOR the url
-// may reach an audit row, on create or on update. A hook URL routinely embeds
-// a token in its own path, which is why the ban is on the whole field.
+// the global constraint at the audit layer: NEITHER the secret NOR the url may reach an audit row,
+// on create or on update.
 func TestWebhookAuditDetailNeverCarriesSecretOrURL(t *testing.T) {
 	for _, c := range []struct{ method, path, action string }{
 		{http.MethodPost, "/api/v1/webhooks", "POST /api/v1/webhooks"},

@@ -1,16 +1,12 @@
 import type { EChartsOption, LineSeriesOption, SeriesOption } from "echarts";
 import { chartColors } from "./chart-theme";
+import { stampShort, type Locale, type Translate } from "./i18n";
+import { enT } from "./i18n/dict/annotations";
 import type { Annotation, MaintenanceWindow } from "./types";
 
 /**
- * annotations.ts — the PURE half of M5's annotation overlay: scope constants,
- * list folding, and the ECharts option builder. No React, no fetch.
- *
- * It lives apart from components/annotations.tsx deliberately. EChart is mocked
- * in every page test (echarts.init reaches for a 2d canvas context jsdom does
- * not implement and a real mount throws), so the marker geometry can only be
- * asserted where it is built rather than where it is drawn — and that is this
- * file, unit-tested directly in annotations.test.ts.
+ * It lives apart from components/annotations.tsx deliberately; EChart is mocked in every page test
+ * (echarts.init reaches for a 2d canvas context jsdom does not implement and a real mount throws).
  */
 
 /** GLOBAL_SCOPE is "" — a REAL value on this API, not a missing one. See
@@ -26,10 +22,7 @@ export const ANNOTATION_TEXT_MAX = 1024;
  *  blank legend entry rather than no entry at all. */
 export const ANNOTATION_SERIES_NAME = "Annotations";
 
-/** The server's own bound on a maintenance window's reason
- *  (docs/console-api.yaml's MaintenanceWindowRequest). Mirrored here for the
- *  same reason ANNOTATION_TEXT_MAX is: the form stops a doomed 422 at the
- *  textarea rather than at the wire. */
+/** The server's own bound on a maintenance window's reason (docs/console-api.yaml's MaintenanceWindowRequest). */
 export const MAINTENANCE_REASON_MAX = 512;
 
 /** The maintenance overlay's series name — separate from the annotations one so
@@ -37,29 +30,14 @@ export const MAINTENANCE_REASON_MAX = 512;
  *  notes, and vice versa. */
 export const MAINTENANCE_SERIES_NAME = "Maintenance";
 
-/**
- * isInstant is the whole INSTANT/RANGE distinction, in one place: an absent
- * `endAt` means a mark at a moment (plan Decision 10 — "NULL means instant"),
- * never a span that is still open. A present-but-unparseable endAt degrades to
- * an instant rather than to a band with a NaN edge, which ECharts would render
- * as an area reaching to the end of the axis.
- */
+/** isInstant is the whole INSTANT/RANGE distinction, in one place: an absent `endAt` means a mark at a moment. */
 export function isInstant(a: Annotation): boolean {
   return a.endAt === undefined || a.endAt === "" || Number.isNaN(Date.parse(a.endAt));
 }
 
 /**
- * annotationOverlaySeries builds ONE line series that carries every marker.
- *
- * Markers have to hang off a series — ECharts has no free-floating markLine —
- * so this is an empty line series whose only job is to host them. Instants
- * become markLine entries at their startAt; spans become markArea entries
- * between startAt and endAt. The text rides along as each item's `name`, shown
- * on hover via the emphasis label rather than at rest: a chart with a dozen
- * marks would otherwise be unreadable behind its own annotations.
- *
- * Returns null when there is nothing to draw, so callers can skip the series
- * entirely instead of appending an empty one.
+ * annotationOverlaySeries builds ONE line series that carries every marker; markers have to hang
+ * off a series — ECharts has no free-floating markLine.
  */
 export function annotationOverlaySeries(annotations: Annotation[], dark: boolean): LineSeriesOption | null {
   const colors = chartColors(dark ? "dark" : "light");
@@ -90,14 +68,7 @@ export function annotationOverlaySeries(annotations: Annotation[], dark: boolean
     // it out of the axis tooltip's value list, so hovering the chart still
     // reads the metrics rather than a phantom "Annotations: -".
     data: [],
-    // The LEGEND SWATCH (QA round 4, finding #7). A series with no explicit
-    // colour takes the next entry from ECharts' palette, so the legend key for
-    // "Annotations" was drawn in a blue that appears nowhere on the chart — a
-    // reader looking for the blue thing found a metric line instead. The
-    // markers themselves are drawn in `other`; the key says so now. itemStyle
-    // is what the legend's roundRect icon reads, lineStyle is what a line icon
-    // would, and both are set so the swatch is right whatever icon a caller's
-    // legend config asks for.
+    // A series with no explicit colour takes the next entry from ECharts' palette.
     itemStyle: { color: colors.other },
     lineStyle: { color: colors.other },
     ...(instants.length > 0
@@ -125,13 +96,8 @@ export function annotationOverlaySeries(annotations: Annotation[], dark: boolean
 }
 
 /**
- * withAnnotations appends the overlay to an option a page already built
- * (curated-metrics.ts's toSeriesOption, or any other), without touching what is
- * already there — the caller's object is never mutated, because pages memoise
- * their options and a mutation would be invisible to that memo.
- *
- * Returns the SAME object when there is nothing to overlay, so a memo keyed on
- * identity does not invalidate for an empty annotation list.
+ * withAnnotations appends the overlay to an option a page already built (curated-metrics.ts's
+ * toSeriesOption, or any other).
  */
 export function withAnnotations(option: EChartsOption, annotations: Annotation[], dark: boolean): EChartsOption {
   const overlay = annotationOverlaySeries(annotations, dark);
@@ -145,27 +111,8 @@ export function withAnnotations(option: EChartsOption, annotations: Annotation[]
 }
 
 /**
- * maintenanceOverlaySeries is annotationOverlaySeries' SIBLING: the declared
- * change windows a surface should draw, as one marker-host line series.
- *
- * It was born inline in components/investigation-signals.tsx (M6 Task 7, which
- * said in as many words that Task 9 would lift it) and lives here now, beside
- * the overlay it is modelled on, because five surfaces draw these bands and a
- * band drawn differently per page is a band an operator has to re-learn.
- *
- * A window is ALWAYS a span — the store's own CHECK makes endAt strictly after
- * startAt — so there is no markLine branch here and no isInstant equivalent. A
- * window with an unparseable edge is SKIPPED rather than drawn with a NaN
- * bound, which ECharts renders as a band reaching to the end of the axis.
- *
- * VISUALLY DISTINCT FROM AN ANNOTATION, deliberately. Both are muted bands off
- * the same axis colour (chartColors' `other` and `axis` are the same token), so
- * colour alone could not tell them apart. A maintenance band therefore carries
- * a DASHED OUTLINE and a fainter fill: "somebody declared this" reads as a
- * drawn boundary, "somebody wrote this down" reads as a plain wash. The legend
- * names them apart too. lib/annotations.test.ts asserts the difference from
- * BOTH sides, so an edit that collapses them fails there rather than in an
- * operator's eyes at 3am.
+ * maintenanceOverlaySeries is annotationOverlaySeries' SIBLING; a window with an unparseable edge
+ * is SKIPPED rather than drawn with a NaN bound.
  */
 export function maintenanceOverlaySeries(windows: MaintenanceWindow[], dark: boolean): LineSeriesOption | null {
   const colors = chartColors(dark ? "dark" : "light");
@@ -184,10 +131,7 @@ export function maintenanceOverlaySeries(windows: MaintenanceWindow[], dark: boo
     name: MAINTENANCE_SERIES_NAME,
     type: "line",
     data: [],
-    // Same finding as annotationOverlaySeries above (QA round 4, #7), and the
-    // one the report actually caught: the "Maintenance" legend key was BLUE
-    // while the bands it switches are the axis grey. The swatch names the band
-    // now.
+    // Same finding as annotationOverlaySeries above, and the one the report actually caught.
     itemStyle: { color: colors.axis },
     lineStyle: { color: colors.axis },
     markArea: {
@@ -200,10 +144,8 @@ export function maintenanceOverlaySeries(windows: MaintenanceWindow[], dark: boo
 }
 
 /**
- * withMaintenance is withAnnotations for the bands. Same contract in every
- * respect that matters to a caller: never mutates, returns the SAME object when
- * there is nothing to draw (so a memo keyed on identity survives an empty
- * list), and composes with withAnnotations in either order.
+ * withMaintenance is withAnnotations for the bands; same contract in every respect that matters to
+ * a caller: never mutates.
  */
 export function withMaintenance(option: EChartsOption, windows: MaintenanceWindow[], dark: boolean): EChartsOption {
   const overlay = maintenanceOverlaySeries(windows, dark);
@@ -217,14 +159,8 @@ export function withMaintenance(option: EChartsOption, windows: MaintenanceWindo
 }
 
 /**
- * mergeAnnotations folds the per-scope listings a surface fetches (its own
- * scope, plus the global ones) into one list.
- *
- * De-duplication by id matters because a GLOBAL surface fetches `?scope=` and a
- * scoped one fetches both — and the same global mark can legitimately arrive
- * from both legs of a future caller. Ordering is oldest-first on
- * (startAt, id): a total order, so two renders of the same data never disagree
- * about which of two simultaneous marks comes first.
+ * mergeAnnotations folds the per-scope listings a surface fetches (its own scope, plus the global
+ * ones) into one list; ordering is oldest-first on (startAt, id): a total order.
  */
 export function mergeAnnotations(...lists: Annotation[][]): Annotation[] {
   const byId = new Map<string, Annotation>();
@@ -245,23 +181,16 @@ export interface FrozenWindow {
 }
 
 /**
- * outsideWindowNote is the one line a create form shows when what it just
- * stored will not appear in the list it was created from (QA round 3, #8).
- *
- * The silent case is the whole finding. Everywhere else the created row simply
- * APPEARS after the refresh, and its appearing IS the feedback — no toast
- * needed, and adding one would put a banner on every ordinary success. But the
- * Investigate page's window is FROZEN: an operator annotating "started the
- * rollback" at 14:05, inside a window that ends 13:00, got a form that closed,
- * a list that did not change, and nothing at all to distinguish that from a
- * write that failed.
- *
- * A mark with no end is an INSTANT and has to fall inside the window; a span
- * only has to OVERLAP it, which is the same rule the maintenance endpoint
- * itself applies. Returns null when there is nothing to say — no frozen window,
- * or the row lands where the reader is looking.
+ * outsideWindowNote is the one line a create form shows when what it just stored will not appear in
+ * the list it was created from; everywhere else the created row simply APPEARS after the refresh.
  */
-export function outsideWindowNote(start: Date, end: Date | null, frozen: FrozenWindow | undefined): string | null {
+export function outsideWindowNote(
+  start: Date,
+  end: Date | null,
+  frozen: FrozenWindow | undefined,
+  t: Translate<"created.outsideWindow"> = enT,
+  locale: Locale = "en",
+): string | null {
   if (frozen === undefined) return null;
   const from = frozen.from.getTime();
   const to = frozen.to.getTime();
@@ -270,8 +199,33 @@ export function outsideWindowNote(start: Date, end: Date | null, frozen: FrozenW
   const endMs = end === null ? startMs : end.getTime();
   if (Number.isNaN(startMs) || Number.isNaN(endMs)) return null;
   if (startMs <= to && endMs >= from) return null;
-  const ends = frozen.to.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
-  return `Created — outside this window (which ends ${ends}); press Investigate to reframe.`;
+  /* The stamp lands inside a translated sentence, so it takes that sentence's
+     language — lib/i18n's stampShort, never a bare toLocale* with an options bag
+     (QA scope 3, finding #7: an options bag renders WORDS, and words follow the
+     interface). The DAY comes with it now: a frozen window can be last Tuesday's,
+     and a bare clock said "ends 01:00 PM" without saying which one. */
+  return t("created.outsideWindow", { ends: stampShort(frozen.to, locale) });
+}
+
+/**
+ * defaultStartIn is the instant a create form should OPEN on.
+ *
+ * NOW, while the surface is live or while now already falls inside the frozen
+ * window being listed. Otherwise `spanSeconds` before that window's END — a form
+ * that defaults to now inside a window over last Tuesday stores something the
+ * list it was created from can never show, and every single create from the
+ * Investigate page was therefore born "outside this window" (QA scope 3,
+ * finding #5). Clamped up to the window's start so a span longer than the window
+ * still begins inside it.
+ */
+export function defaultStartIn(now: Date, frozen: FrozenWindow | undefined, spanSeconds = 0): Date {
+  if (frozen === undefined) return now;
+  const from = frozen.from.getTime();
+  const to = frozen.to.getTime();
+  if (!Number.isFinite(from) || !Number.isFinite(to) || from > to) return now;
+  const nowMs = now.getTime();
+  if (nowMs >= from && nowMs <= to) return now;
+  return new Date(Math.max(from, to - spanSeconds * 1000));
 }
 
 /** mergeMaintenanceWindows is mergeAnnotations for the windows: same two legs

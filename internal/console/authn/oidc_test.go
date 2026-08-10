@@ -32,10 +32,7 @@ const (
 	testKeyID        = "test-key-1"
 )
 
-// sharedTestRSAKey is generated once for the whole file: RSA key generation
-// is slow enough (tens of ms) that doing it per-subtest would meaningfully
-// slow the suite, and every fakeIDP in this file only ever uses the key to
-// sign, never to prove anything about key generation itself.
+// sharedTestRSAKey is generated once for the whole file.
 var (
 	sharedTestRSAKeyOnce sync.Once
 	sharedTestRSAKeyVal  *rsa.PrivateKey
@@ -53,13 +50,7 @@ func sharedTestRSAKey(t *testing.T) *rsa.PrivateKey {
 	return sharedTestRSAKeyVal
 }
 
-// fakeIDP is a hand-written OpenID Connect provider double: a real
-// httptest.Server speaking the real protocol (discovery, authorize, token,
-// JWKS) over loopback HTTP, signing real RS256 ID tokens with a locally
-// generated RSA key -- the same "stand up a real loopback server" approach
-// internal/console/ws/conn_test.go uses for WebSockets, chosen so the tests
-// below exercise go-oidc's actual verifier rather than a hand-rolled stand-in
-// for it.
+// fakeIDP is a hand-written OpenID Connect provider double.
 type fakeIDP struct {
 	t   *testing.T
 	key *rsa.PrivateKey
@@ -106,10 +97,8 @@ func (f *fakeIDP) defaultClaims() map[string]any {
 	}
 }
 
-// setClaims replaces the claim set the NEXT successful authorization_code
-// exchange will sign into the ID token. Tests that need one bad field (wrong
-// aud/iss, expired exp, a bare-string groups claim) start from
-// defaultClaims() and override just that key.
+// setClaims replaces the claim set the NEXT successful authorization_code exchange will sign into
+// the ID token.
 func (f *fakeIDP) setClaims(claims map[string]any) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -131,12 +120,7 @@ func (f *fakeIDP) serveDiscovery(w http.ResponseWriter, _ *http.Request) {
 		"response_types_supported":              []string{"code"},
 		"subject_types_supported":               []string{"public"},
 		"id_token_signing_alg_values_supported": []string{"RS256"},
-		// Pins the auth style an operator reading this discovery doc would
-		// expect: OIDCAuthenticator itself hard-pins AuthStyleInHeader
-		// (oidc.go's NewOIDC) rather than trusting go-oidc to read this
-		// field back -- go-oidc's Provider.Endpoint() does not parse it --
-		// but advertising it keeps the doc honest about which style the
-		// fake IdP (and serveToken below) actually requires.
+		// Pins the auth style an operator reading this discovery doc would expect.
 		"token_endpoint_auth_methods_supported": []string{"client_secret_basic"},
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -202,13 +186,8 @@ func (f *fakeIDP) serveToken(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// authenticateClient verifies client_id + client_secret the way a real
-// token endpoint pinned to client_secret_basic would: OIDCAuthenticator's
-// oauth2Config hard-pins AuthStyleInHeader (oidc.go's NewOIDC), so requests
-// arrive as HTTP Basic auth, but the post-form fields are accepted too so
-// this fake stays a useful double for any client that legitimately uses
-// client_secret_post -- exactly one of the two forms need be present and
-// correct, everything else is 401 invalid_client.
+// authenticateClient verifies client_id + client_secret the way a real token endpoint pinned to
+// client_secret_basic would.
 func (f *fakeIDP) authenticateClient(r *http.Request) bool {
 	if id, secret, ok := r.BasicAuth(); ok {
 		return id == testClientID && secret == testClientSecret
@@ -265,10 +244,7 @@ func (f *fakeIDP) serveRefreshGrant(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Deliberately no "refresh_token" key in the response: this exercises
-	// golang.org/x/oauth2's own "don't overwrite RefreshToken with an empty
-	// value on a refresh response" behavior, which OIDCAuthenticator relies
-	// on instead of re-implementing refresh-token rotation itself.
+	// Deliberately no "refresh_token" key in the response.
 	writeTokenJSON(w, map[string]any{
 		"access_token": "refreshed-access-token",
 		"token_type":   "Bearer",
@@ -287,11 +263,8 @@ func writeTokenError(w http.ResponseWriter, code string) {
 	_ = json.NewEncoder(w).Encode(map[string]string{"error": code})
 }
 
-// signRS256 hand-rolls a compact RS256 JWS: base64url(header).base64url(payload).base64url(signature).
-// No JOSE library is used deliberately -- go-oidc/oauth2 do not depend on one
-// beyond go-jose, which importing directly here would promote to a NEW direct
-// go.mod dependency the task brief does not authorize (only go-oidc, plus
-// oauth2's existing promotion, may change go.mod).
+// signRS256 hand-rolls a compact RS256 JWS; no JOSE library is used deliberately -- go-oidc/oauth2
+// do not depend on one beyond go-jose.
 func signRS256(key *rsa.PrivateKey, kid string, claims map[string]any) (string, error) {
 	header := map[string]any{"alg": "RS256", "typ": "JWT", "kid": kid}
 	headerJSON, err := json.Marshal(header)
@@ -320,10 +293,8 @@ func newOIDCFixture(t *testing.T, idp *fakeIDP) (*authn.OIDCAuthenticator, *auth
 	return newOIDCFixtureWithCookieName(t, idp, authn.OIDCSessionCookieName)
 }
 
-// newOIDCFixtureWithCookieName is newOIDCFixture with an explicit cookieName,
-// so a test can pin Task 18's carry-forward fix: NewOIDC honors a
-// non-default auth.session.cookieName instead of always reading the
-// OIDCSessionCookieName constant.
+// newOIDCFixtureWithCookieName is newOIDCFixture with an explicit cookieName, so a test can pin the
+// carry-forward fix.
 func newOIDCFixtureWithCookieName(t *testing.T, idp *fakeIDP, cookieName string) (*authn.OIDCAuthenticator, *authn.SessionStore, *cache.InProcessKV) {
 	t.Helper()
 	kv := cache.NewInProcessKV()
@@ -345,16 +316,10 @@ func newOIDCFixtureWithCookieName(t *testing.T, idp *fakeIDP, cookieName string)
 	return a, sessions, kv
 }
 
-// testReturnTo is the returnTo every fixture in this file drives through
-// AuthorizeURL -- the specific value is not what any test asserts on except
-// TestOIDCFullRoundTripAuthenticatesAndYieldsExpectedSubject, which checks
-// Callback hands it back unchanged.
+// testReturnTo is the returnTo every fixture in this file drives through AuthorizeURL.
 const testReturnTo = "/dashboard"
 
-// authorizeAndRedirect drives AuthorizeURL, then performs the actual HTTP GET
-// against the fake IdP's /authorize endpoint (without following the redirect)
-// to obtain the (state, code) pair the way a browser round trip really would
-// -- this is the "simulate the IdP redirect" step the brief asks for.
+// authorizeAndRedirect drives AuthorizeURL.
 func authorizeAndRedirect(t *testing.T, a *authn.OIDCAuthenticator) (state, code string) {
 	t.Helper()
 	authURL, err := a.AuthorizeURL(context.Background(), testReturnTo)
@@ -477,13 +442,8 @@ func TestOIDCFullRoundTripAuthenticatesAndYieldsExpectedSubject(t *testing.T) {
 	}
 }
 
-// TestOIDCAuthenticateHonorsConfiguredCookieName pins task-18-brief.md's
-// carry-forward fix: Authenticate must read the session cookie under
-// NewOIDC's configured cookieName, not the OIDCSessionCookieName constant.
-// Before the fix, an operator setting a non-default auth.session.cookieName
-// broke session lookup for every oidc-mode request -- httpapi's
-// setSessionCookie already wrote under the configured name, so the cookie it
-// set and the cookie this authenticator read back were never the same one.
+// Before the fix, an operator setting a non-default auth.session.cookieName broke session lookup
+// for every oidc-mode request.
 func TestOIDCAuthenticateHonorsConfiguredCookieName(t *testing.T) {
 	t.Parallel()
 	idp := newFakeIDP(t)
@@ -660,11 +620,7 @@ func TestOIDCCallbackGroupsClaimAbsentYieldsNoGroups(t *testing.T) {
 	if len(subject.Groups) != 0 {
 		t.Errorf("subject.Groups = %v, want empty", subject.Groups)
 	}
-	// OIDCAuthenticator.Authenticate never resolves Roles itself -- role
-	// resolution against groups/defaultRole is the authorize middleware's
-	// job (authz.go's Subject.Roles doc), not this package's -- so with no
-	// groups claim at all, Roles stays exactly as unpopulated as it always
-	// is coming out of this authenticator: nil.
+	// OIDCAuthenticator.Authenticate never resolves Roles itself.
 	if len(subject.Roles) != 0 {
 		t.Errorf("subject.Roles = %v, want empty (role resolution happens downstream)", subject.Roles)
 	}
@@ -744,14 +700,8 @@ func TestOIDCAuthenticateRefreshesNearExpirySessionExactlyOnce(t *testing.T) {
 	}
 }
 
-// TestOIDCAuthenticateConcurrentRefreshesSingleFlight is I1's regression
-// test: N goroutines call Authenticate on the SAME near-expiry session at
-// once. Before maybeRefresh's per-session-id locking, each of them would
-// have called the IdP's token endpoint with the identical refresh token --
-// exactly the scenario that gets a whole grant family revoked under IdP
-// refresh-token rotation + reuse detection. With the lock in place, exactly
-// one of them should reach the token endpoint; the rest re-read the
-// already-refreshed session and return it directly.
+// TestOIDCAuthenticateConcurrentRefreshesSingleFlight is I1's regression test; before
+// maybeRefresh's per-session-id locking.
 func TestOIDCAuthenticateConcurrentRefreshesSingleFlight(t *testing.T) {
 	t.Parallel()
 	idp := newFakeIDP(t)

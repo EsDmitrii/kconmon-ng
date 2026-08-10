@@ -1,9 +1,16 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { OverviewPage, fmtAge, sortFiringAlerts, summarize } from "./overview";
+import { LOCALE_STORAGE_KEY, LocaleProvider, translate, type Translate } from "@/lib/i18n";
+import { overviewDict, type OverviewKey } from "@/lib/i18n/dict/overview";
+import { OverviewPage, fmtAge, foldBounds, nodesTile, sortFiringAlerts, summarize } from "./overview";
 import type { Alert, Matrix, Topology } from "@/lib/types";
 import { fmtEventTime } from "@/lib/utils";
+
+/** The two translators the pure helpers take, so a unit case can read either
+ *  language without mounting a provider. */
+const enT: Translate<OverviewKey> = (k, v) => translate(overviewDict, "en", k, v);
+const ruT: Translate<OverviewKey> = (k, v) => translate(overviewDict, "ru", k, v);
 
 const matrix: Matrix = {
   protocol: "tcp",
@@ -62,9 +69,7 @@ describe("summarize", () => {
     expect(s.readyNodes).toBe(1);
   });
 
-  /* QA round 1, finding #3: a cell with a p95 RTT and no failure ratio was
-     counted as nothing at all, so a page full of latency numbers announced
-     "no probe data". A latency sample IS a measurement. */
+  /* A latency sample IS a measurement. */
   describe("what counts as measured", () => {
     const rttOnly: Matrix = {
       ...matrix,
@@ -130,10 +135,7 @@ describe("OverviewPage", () => {
     expect(screen.getByText("Nodes ready")).toBeInTheDocument();
   });
 
-  /* QA round 1, finding #4: every pair number on this page comes from
-     useMatrix("tcp"), and an unlabelled "Failing pairs" claimed UDP and ICMP
-     too. Label, not aggregate — the qualifier rides the tiles and the section
-     header. */
+  /* Label, not aggregate — the qualifier rides the tiles and the section header. */
   it("qualifies the pair numbers as TCP on the pod plane", async () => {
     vi.stubGlobal(
       "fetch",
@@ -146,8 +148,6 @@ describe("OverviewPage", () => {
     expect(screen.getAllByText("TCP · pod plane").length).toBeGreaterThanOrEqual(3);
   });
 
-  /* QA round 1, finding #3, at the page level: the slate that blamed an empty
-     Prometheus while the RTT column was full. */
   it("does not claim there is no probe data when latency is flowing", async () => {
     const rttOnly = {
       ...matrix,
@@ -162,6 +162,85 @@ describe("OverviewPage", () => {
     expect(await screen.findByText("No failure ratio for these pairs")).toBeInTheDocument();
     expect(screen.queryByText("No probe data in Prometheus yet")).toBeNull();
     expect(screen.getByText(/1 measured pair$/)).toBeInTheDocument();
+  });
+
+  /* ── #1 on the page: the tile refuses to invent an empty cluster ──────── */
+  it("counts the agents when the topology answers with no nodes at all", async () => {
+    const nodeless = {
+      nodes: null,
+      agents: [
+        { id: "a-1", nodeName: "a", podIP: "", zone: "z" },
+        { id: "a-2", nodeName: "b", podIP: "", zone: "z" },
+      ],
+      timestamp: "2026-01-01T00:00:00Z",
+    };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((url: string) => Promise.resolve(String(url).includes("/topology") ? json(nodeless) : json(matrix))),
+    );
+    renderPage();
+
+    expect(
+      await screen.findByText("Counted from agents — no k8s node inventory, so readiness is unknown."),
+    ).toBeInTheDocument();
+    // Tile order is nodes, failing, degraded.
+    expect(screen.getAllByTestId("stat-value")[0]).toHaveTextContent("2");
+    expect(screen.queryByText("0/0")).toBeNull();
+  });
+
+  /* ── #5: zero over zero renders as an em-dash, not as a clean fleet ───── */
+  it("shows an em-dash and the no-data note when nothing was measured", async () => {
+    const unmeasured = { ...matrix, cells: [{ source: "a", destination: "b", failRatio: null }] };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((url: string) => Promise.resolve(String(url).includes("/topology") ? json(topo) : json(unmeasured))),
+    );
+    renderPage();
+
+    await screen.findByText("No probe data in Prometheus yet");
+    const notes = screen.getAllByTestId("tile-note");
+    expect(notes).toHaveLength(2); // the failing tile and the degraded one
+    expect(notes[0]).toHaveTextContent("No pair was measured here, so there is nothing to count.");
+    // Three tiles, and the only counted one is the nodes tile.
+    expect(screen.getAllByText("—")).toHaveLength(2);
+    expect(screen.queryByText("0")).toBeNull();
+  });
+
+  /* ── #7: 9 scored out of 90 measured is not a healthy fleet ───────────── */
+  it("says how much of the measured set is actually scored", async () => {
+    const partly = {
+      ...matrix,
+      cells: [
+        { source: "a", destination: "b", failRatio: 0.001 },
+        { source: "a", destination: "c", failRatio: null, rttP95: 2_000_000 },
+        { source: "b", destination: "c", failRatio: null, rttP95: 3_000_000 },
+      ],
+    };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((url: string) => Promise.resolve(String(url).includes("/topology") ? json(topo) : json(partly))),
+    );
+    renderPage();
+
+    // The healthy slate is what the gap line has to survive next to.
+    expect(await screen.findByText("No failing or degraded pairs")).toBeInTheDocument();
+    expect(screen.getByTestId("scored-gap")).toHaveTextContent(
+      "1 of 3 pairs have a failure ratio; the rest have no failure samples.",
+    );
+  });
+
+  it("says nothing about a gap when every measured pair is scored", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((url: string) => Promise.resolve(String(url).includes("/topology") ? json(topo) : json({
+        ...matrix,
+        cells: [{ source: "a", destination: "b", failRatio: 0.001 }],
+      }))),
+    );
+    renderPage();
+
+    await screen.findByText("No failing or degraded pairs");
+    expect(screen.queryByTestId("scored-gap")).toBeNull();
   });
 });
 
@@ -283,6 +362,27 @@ function renderOverview(opts: PanelOptions = {}) {
   return { ...utils, urls, fetchMock };
 }
 
+/* jsdom computes no layout, so the 375px overflow is pinned STRUCTURALLY: the
+   two panels sit in `grid gap-4 sm:grid-cols-2`, and a grid item's default
+   min-width:auto is what refused to shrink below its own min-content.
+   Measured in Chrome at 375x812 against the live console, /:
+     before  main.scrollWidth 495 / clientWidth 375, both panels 479px wide
+     after   main.scrollWidth 375 / clientWidth 375, both panels 343px wide, 0 elements past the viewport
+   Losing min-w-0 on either panel brings the horizontal scroll straight back. */
+describe("OverviewPage — 375px overflow (QA finding #3)", () => {
+  it("gives both bottom panels min-w-0 so the grid column cannot blow past the viewport", async () => {
+    renderOverview({ incidents: [incidentRow()], alerts: [alertRow()] });
+
+    const incidents = await screen.findByTestId("open-incidents-panel");
+    const alerts = await screen.findByTestId("firing-alerts-panel");
+    expect(incidents.className).toContain("min-w-0");
+    expect(alerts.className).toContain("min-w-0");
+    /* Both must be children of the SAME grid — min-w-0 on an element that is not a grid item fixes nothing. */
+    expect(incidents.parentElement).toBe(alerts.parentElement);
+    expect(incidents.parentElement?.className).toContain("grid");
+  });
+});
+
 describe("OverviewPage — Open incidents (Decision 9)", () => {
   it("lists the open incidents newest-first, each one a permalink into incident mode", async () => {
     renderOverview({ incidents: [incidentRow(), incidentRow({ id: "inc-2", title: "Target flapping", scope: "" })] });
@@ -341,9 +441,7 @@ describe("OverviewPage — Recent events (Decision 9)", () => {
     expect(within(panel).getByRole("link", { name: /open Live/i }).getAttribute("href")).toBe("/live");
   });
 
-  /* QA round 1, finding #10: this card and /live showed the same event at two
-     different times. ONE formatter now, in lib/utils — pages/live.test.tsx
-     pins the same call for the same input on the other side. */
+  /* ONE formatter now, in lib/utils — pages/live.test.tsx pins the same call for the same input on the other side. */
   it("stamps a row with the shared event clock, not a private one", async () => {
     renderOverview({ events: [eventRow()] });
 
@@ -512,13 +610,144 @@ describe("sortFiringAlerts", () => {
 describe("fmtAge", () => {
   it("coarsens: seconds, minutes, hours, then days", () => {
     const now = new Date("2026-01-02T00:00:00Z");
-    expect(fmtAge("2026-01-01T23:59:30Z", now)).toBe("30s");
-    expect(fmtAge("2026-01-01T23:30:00Z", now)).toBe("30m");
-    expect(fmtAge("2026-01-01T00:00:00Z", now)).toBe("24h");
-    expect(fmtAge("2025-12-28T00:00:00Z", now)).toBe("5d");
+    expect(fmtAge("2026-01-01T23:59:30Z", now, enT)).toBe("30s");
+    expect(fmtAge("2026-01-01T23:30:00Z", now, enT)).toBe("30m");
+    expect(fmtAge("2026-01-01T00:00:00Z", now, enT)).toBe("24h");
+    expect(fmtAge("2025-12-28T00:00:00Z", now, enT)).toBe("5d");
+  });
+
+  /* s/m/h/d is English, not arithmetic (QA round 6, finding #9). The letters
+     are dict/alerting.ts's own с/м/ч/д, so one age reads alike on both. */
+  it("takes its unit letters from the dictionary", () => {
+    const now = new Date("2026-01-02T00:00:00Z");
+    expect(fmtAge("2026-01-01T23:59:30Z", now, ruT)).toBe("30 с");
+    expect(fmtAge("2026-01-01T23:30:00Z", now, ruT)).toBe("30 м");
+    expect(fmtAge("2026-01-01T00:00:00Z", now, ruT)).toBe("24 ч");
+    expect(fmtAge("2025-12-28T00:00:00Z", now, ruT)).toBe("5 д");
   });
 
   it("is a dash for an unparseable instant, never NaN", () => {
-    expect(fmtAge("never", new Date())).toBe("—");
+    expect(fmtAge("never", new Date(), enT)).toBe("—");
+  });
+});
+
+/* ── #1: a topology that answered with NO nodes is not a fleet of zero ──── */
+
+describe("nodesTile", () => {
+  const withNodes: Topology = topo;
+  const empty = (over: Partial<Topology> = {}): Topology => ({
+    nodes: [],
+    agents: [],
+    timestamp: "2026-01-01T00:00:00Z",
+    ...over,
+  });
+  const agents = (names: string[]) => names.map((n) => ({ id: `a-${n}`, nodeName: n, podIP: "", zone: "z" }));
+
+  it("prefers the k8s node inventory when it has one", () => {
+    expect(nodesTile(withNodes, false)).toEqual({ kind: "counts", ready: 1, total: 2 });
+  });
+
+  it("counts distinct agent nodes rather than claiming 0/0", () => {
+    // The repro: nodes came back null (api.ts normalizes it to []) while ten
+    // agents were plainly registered.
+    expect(nodesTile(empty({ agents: agents(["a", "b", "b", "c"]) }), false)).toEqual({
+      kind: "noInventory",
+      nodes: 3,
+      source: "agents",
+    });
+  });
+
+  it("falls back to the matrix's nodes when even the agent list is empty", () => {
+    expect(nodesTile(empty(), false, matrix)).toEqual({ kind: "noInventory", nodes: 3, source: "matrix" });
+  });
+
+  it("says 0/0 only when NOTHING knows of a node", () => {
+    expect(nodesTile(empty(), false, { ...matrix, nodes: [] })).toEqual({ kind: "counts", ready: 0, total: 0 });
+  });
+
+  it("keeps loading and unavailable apart", () => {
+    expect(nodesTile(undefined, true)).toEqual({ kind: "loading" });
+    expect(nodesTile(undefined, false)).toEqual({ kind: "unavailable" });
+  });
+});
+
+/* ── #2: a historical fold says how bounded it was ──────────────────────── */
+
+describe("foldBounds", () => {
+  const folded = (over: Partial<Topology>): Topology => ({
+    nodes: [],
+    agents: [],
+    timestamp: "2026-01-01T00:00:00Z",
+    historical: true,
+    ...over,
+  });
+
+  it("says nothing for a live snapshot, whatever counters it carries", () => {
+    expect(foldBounds({ ...folded({ truncated: true }), historical: false }, enT)).toBeUndefined();
+    expect(foldBounds(undefined, enT)).toBeUndefined();
+  });
+
+  it("says nothing for a fold that lost nothing", () => {
+    expect(foldBounds(folded({ eventsFolded: 40, unfoldableEvents: 0, truncated: false }), enT)).toBeUndefined();
+  });
+
+  it("names a truncated window", () => {
+    expect(foldBounds(folded({ truncated: true }), enT)).toBe(
+      "The event window was truncated, so this reconstruction is partial.",
+    );
+  });
+
+  it("counts the events it could not fold", () => {
+    expect(foldBounds(folded({ unfoldableEvents: 7 }), enT)).toBe(
+      "7 events carried no node detail and could not be folded in.",
+    );
+  });
+
+  it("states both bounds when both bit", () => {
+    const both = foldBounds(folded({ truncated: true, unfoldableEvents: 2 }), enT) ?? "";
+    expect(both).toContain("truncated");
+    expect(both).toContain("2 events");
+  });
+});
+
+/*
+ * ru One smoke pin that the Russian half is actually wired to this page; every assertion above this
+ * block reads English and needs no provider.
+ */
+
+describe("OverviewPage — ru", () => {
+  afterEach(() => {
+    /* vitest.setup.ts backs localStorage with ONE Map per test FILE, so a
+       locale left behind here would translate nothing that follows in this
+       file today and everything that follows tomorrow. */
+    localStorage.removeItem(LOCALE_STORAGE_KEY);
+  });
+
+  it("renders the page, the pair qualifier and the unranked caption in Russian", async () => {
+    localStorage.setItem(LOCALE_STORAGE_KEY, "ru");
+    const rttOnly = {
+      ...matrix,
+      cells: [{ source: "a", destination: "b", failRatio: null, rttP95: 2_000_000 }],
+    };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((url: string) => Promise.resolve(String(url).includes("/topology") ? json(topo) : json(rttOnly))),
+    );
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={qc}>
+        <LocaleProvider>
+          <OverviewPage />
+        </LocaleProvider>
+      </QueryClientProvider>,
+    );
+
+    // The caption is the LAST thing to arrive (it needs the matrix), so it is
+    // what the await hangs on — the title renders before any request lands.
+    expect(
+      await screen.findByText(/у серии доли сбоев здесь нет ни одной выборки\..*а не выдаёт себя за норму\.$/),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Обзор", level: 1 })).toBeInTheDocument();
+    expect(screen.getAllByText("TCP · плоскость pod").length).toBeGreaterThanOrEqual(3);
   });
 });

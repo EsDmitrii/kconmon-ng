@@ -26,10 +26,6 @@ func mustCreateRunning(t *testing.T, m *checks.MemoryStore, id string) store.Run
 	return run
 }
 
-// TestMemoryStoreReapStuckRunsFinishesOnlyOldRunningRuns is the
-// database-disabled half of follow-up #6: a run left "running" past the cutoff
-// is force-finished as "cancelled"; a healthy (younger) running run is left
-// exactly as it was.
 func TestMemoryStoreReapStuckRunsFinishesOnlyOldRunningRuns(t *testing.T) {
 	m := checks.NewMemoryStore()
 	ctx := context.Background()
@@ -134,11 +130,8 @@ func (s *cutoffRecordingStore) ReapStuckRuns(_ context.Context, before time.Time
 	return s.reaped, nil
 }
 
-// The scheduler (Task 13) calls Runner.ReapStuckRuns with no cutoff of its
-// own: the cutoff is this package's business, since only this package knows
-// the deadline Start can hand a run (runDeadline over maxPairs at the maximum
-// per-pair timeout). The cutoff must be safely IN THE PAST by at least that
-// ceiling -- reaping anything younger would kill live runs.
+// The scheduler calls Runner.ReapStuckRuns with no cutoff of its own: the cutoff is this package's
+// business.
 func TestRunnerReapStuckRunsUsesAConservativePastCutoff(t *testing.T) {
 	st := &cutoffRecordingStore{MemoryStore: checks.NewMemoryStore(), reaped: 3}
 	runner := checks.NewRunner(nil, nil, nil, st, testMetrics(t))

@@ -25,12 +25,7 @@ import (
 // get an immediate error result.
 const maxConcurrentTasks = 4
 
-// capabilityExternalChecks is the AgentMeta.capabilities flag this agent
-// advertises when, and only when, the operator enabled external destination
-// checks. The controller refuses to dispatch an external_target to an agent
-// that never advertised it (internal/controller/diagnostics.go), so an operator
-// who has not opted in is simply invisible to that dispatch path rather than
-// receiving tasks it would refuse one by one.
+// capabilityExternalChecks is the AgentMeta.capabilities flag this agent advertises when.
 const capabilityExternalChecks = "external-checks"
 
 type Agent struct {
@@ -83,10 +78,7 @@ func New(cfg *config.Config) (*Agent, error) {
 		Capabilities: agentCapabilities(cfg),
 	}
 
-	// The external-destination gate is built here, not lazily at first probe, so
-	// a CIDR the enforcement path would reject fails startup instead. Config
-	// validation already rejected the same input; this is the parse that
-	// actually enforces, and the two use one constructor so they cannot drift.
+	// The external-destination gate is built here, not lazily at first probe.
 	external := ExternalPolicy{}
 	if cfg.Checkers.External.Enabled {
 		allowlist, err := checker.NewAllowlist(cfg.Checkers.External.AllowedCIDRs, cfg.Checkers.External.DeniedCIDRs)
@@ -172,15 +164,7 @@ func New(cfg *config.Config) (*Agent, error) {
 		slog.Info("checker enabled", "type", "http", "interval", cfg.Checkers.HTTP.Interval, "targets", len(httpTargets))
 	}
 
-	// The continuous external checker is registered like any other NodeLocal
-	// checker: it holds its own destinations and ignores the peer list. Its
-	// scheduler interval is a FIXED tick, not a per-target interval, because a
-	// scheduler entry has one interval and an assignment has one per target —
-	// the checker itself skips targets whose own interval has not elapsed.
-	//
-	// It is added with an EMPTY assignment: nothing is probed until the
-	// controller pushes one over WatchExternalChecks, and an emptied assignment
-	// simply goes back to probing nothing without the scheduler noticing.
+	// The continuous external checker is registered like any other NodeLocal checker.
 	var externalChecker *checker.ExternalChecker
 	if external.Enabled {
 		externalChecker = checker.NewExternalChecker(external.Allowlist, external.Resolver, external.Timeout)
@@ -211,13 +195,8 @@ func New(cfg *config.Config) (*Agent, error) {
 	return a, nil
 }
 
-// agentCapabilities returns the opt-in feature flags this agent advertises at
-// registration. It mirrors the controller's capabilitiesFor: feature detection,
-// never version sniffing, and never nil so the list stays a JSON array.
-//
-// external-checks appears ONLY when checkers.external.enabled is true. That is
-// the single switch: an agent that has not opted in never advertises it, so the
-// controller's external dispatch path cannot select it at all.
+// agentCapabilities returns the opt-in feature flags this agent advertises at registration; it
+// mirrors the controller's capabilitiesFor: feature detection, never version sniffing.
 func agentCapabilities(cfg *config.Config) []string {
 	caps := []string{}
 	if cfg.Checkers.External.Enabled {
@@ -297,10 +276,8 @@ func (a *Agent) Run(ctx context.Context) error {
 		}
 	})
 
-	// On-demand diagnostic task executor. Reuses the agent's checker instances
-	// and reports results back over the same gRPC client. Executions run in
-	// goroutines tied to the root ctx (via OnTask below), so they abort on
-	// shutdown and are never awaited by the shutdown path.
+	// On-demand diagnostic task executor; executions run in goroutines tied to the root ctx (via
+	// OnTask below).
 	taskExecutor := NewTaskExecutor(
 		a.checkers,
 		a.mtrChecker,
@@ -361,10 +338,8 @@ func (a *Agent) Run(ctx context.Context) error {
 		}
 	}()
 
-	// WatchTasks runs its own reconnect loop mirroring WatchPeers: on stream
-	// error it re-subscribes after a short backoff. Peer re-registration is
-	// owned by the WatchPeers loop above, so this loop only needs to re-open the
-	// task stream. It exits when the root ctx is cancelled at shutdown.
+	// WatchTasks runs its own reconnect loop mirroring WatchPeers; peer re-registration is owned by
+	// the WatchPeers loop above.
 	go func() {
 		backoff := 1 * time.Second
 		maxBackoff := 15 * time.Second
@@ -383,13 +358,8 @@ func (a *Agent) Run(ctx context.Context) error {
 		}
 	}()
 
-	// WatchExternalChecks runs its own reconnect loop mirroring WatchTasks: on
-	// stream error it re-subscribes after a short backoff. It is started ONLY
-	// when checkers.external.enabled — an agent that never opted in does not
-	// subscribe at all, so there is no stream for the controller to push an
-	// assignment down. Every assignment is absolute, so a reconnect converges on
-	// the controller's current state (including "nothing") with no delta
-	// bookkeeping. It exits when the root ctx is cancelled at shutdown.
+	// WatchExternalChecks runs its own reconnect loop mirroring WatchTasks; it is started ONLY when
+	// checkers.external.enabled.
 	if a.externalChecker != nil {
 		grpcClient.OnExternalAssignment(a.applyExternalAssignment)
 		go func() {
@@ -454,12 +424,8 @@ func (a *Agent) Run(ctx context.Context) error {
 		slog.Info("shutting down agent")
 		a.httpServer.SetReady(false)
 
-		// Stop probing, then tell the controller to drop us immediately so peers
-		// stop probing this pod IP right away instead of after TTL eviction.
-		// Safety note: the heartbeat/re-register goroutines still run here, but they
-		// cannot re-register after this Deregister because reregister() dials with the
-		// already-cancelled root ctx. If reregister ever gets its own context, add an
-		// explicit goroutine drain before deregistering.
+		// Stop probing, then tell the controller to drop us immediately so peers stop probing this pod IP
+		// right away instead of after TTL eviction.
 		a.scheduler.Pause()
 		a.gracefulDeregister(grpcClient)
 
@@ -471,19 +437,9 @@ func (a *Agent) Run(ctx context.Context) error {
 	}
 }
 
-// applyExternalAssignment turns a controller assignment into validated agent
-// specs and swaps them into the external checker. The swap replaces the whole
-// target list under the CHECKER's own mutex and NEVER restarts the scheduler:
-// the external checker is an ordinary NodeLocal checker on a fixed tick, so a
-// new assignment only changes what the next tick probes. Restarting the
-// scheduler to apply one would take every other checker down with it.
-//
-// A spec that fails validation is DROPPED WITH A WARNING and the rest are still
-// applied: one malformed target must not silently disable every other check on
-// this agent. That includes check types the controller already rejects (mtr and
-// udp) — they should never arrive, and they are refused here anyway rather than
-// trusted, because a continuous MTR at an internet host is traffic nobody asked
-// for and unbounded hop_ip cardinality.
+// applyExternalAssignment turns a controller assignment into validated agent specs and swaps them
+// into the external checker; the swap replaces the whole target list under the CHECKER's own mutex
+// and NEVER restarts the scheduler.
 func (a *Agent) applyExternalAssignment(assignment *pb.ExternalCheckAssignment) {
 	specs := assignment.GetSpecs()
 	parsed := make([]checker.ExternalSpec, 0, len(specs))
@@ -572,9 +528,17 @@ func NewResultHandler(m *metrics.PrometheusMetrics, source checker.Target) Resul
 			m.UDPResults.WithLabelValues(resultLabels...).Inc()
 
 		case model.CheckICMP:
-			if d, ok := result.Details.(*ICMPDetails); ok {
-				m.ICMPRtt.WithLabelValues(labels...).Observe(d.RTT.Seconds())
+			// The loss ratio is a GAUGE, so it keeps serving its last written value on every scrape until
+			// something writes again.
+			d, ok := result.Details.(*ICMPDetails)
+			if ok {
 				m.ICMPLossRatio.WithLabelValues(labels...).Set(d.LossRatio)
+			} else if !result.Success {
+				m.ICMPLossRatio.WithLabelValues(labels...).Set(1)
+			}
+			// A probe that got no reply has no round trip, so its duration is the configured timeout.
+			if ok && result.Success {
+				m.ICMPRtt.WithLabelValues(labels...).Observe(d.RTT.Seconds())
 			}
 			m.ICMPResults.WithLabelValues(resultLabels...).Inc()
 
@@ -631,11 +595,8 @@ func NewResultHandler(m *metrics.PrometheusMetrics, source checker.Target) Resul
 	}
 }
 
-// externalTargetKind maps a per-target check type onto the closed label set
-// host|url. It is DERIVED, never taken from ExternalTarget.kind on the wire: a
-// label value that a controller can choose is a label value that can grow
-// without bound, and the mapping is not a judgement call -- an http external
-// check addresses a URL, everything else addresses a host.
+// externalTargetKind maps a per-target check type onto the closed label set host|url; it is
+// DERIVED, never taken from ExternalTarget.kind on the wire.
 func externalTargetKind(t model.CheckType) string {
 	if t == model.CheckHTTP {
 		return "url"
@@ -643,14 +604,8 @@ func externalTargetKind(t model.CheckType) string {
 	return "host"
 }
 
-// recordExternalDetail drives the kconmon_ng_external_* family from ONE probed
-// target.
-//
-// A DENIED probe never reached the network: it is neither a success nor a
-// failure, so it increments denied_total{reason} and nothing else. Counting it
-// as a failure would turn an allowlist misconfiguration into what looks like an
-// outage at the destination, and counting a duration for it would report the
-// latency of a decision rather than of a network.
+// recordExternalDetail drives the kconmon_ng_external_* family from ONE probed target; a DENIED
+// probe never reached the network: it is neither a success nor a failure.
 func recordExternalDetail(m *metrics.PrometheusMetrics, node, zone string, d *ExternalDetails) {
 	kind := externalTargetKind(d.CheckType)
 

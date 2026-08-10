@@ -2,16 +2,15 @@
 
 package store_test
 
-// TestRunStore* / TestRunReader* / TestPruneOnce*CheckRuns require a real
-// PostgreSQL.
-// Run: docker run --rm -d -p 5432:5432 -e POSTGRES_PASSWORD=test -e POSTGRES_DB=kconmon postgres:17-alpine
-// Then: KCONMON_TEST_DATABASE_DSN='postgres://postgres:test@127.0.0.1:5432/kconmon?sslmode=disable' \
-//       go test -tags=integration ./internal/console/store/... -v
+// TestRunStore* / TestRunReader* / TestPruneOnce*CheckRuns require a real PostgreSQL.
 
 import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -21,10 +20,7 @@ import (
 	"github.com/EsDmitrii/kconmon-ng/internal/console/store"
 )
 
-// newChecksDB opens a *store.DB with migrations applied, dropping and
-// re-creating the schema first -- same convention as newEventStoreDB /
-// newPrunerDB; this file shares one database with every other file in
-// package store_test, so each test must leave it clean.
+// newChecksDB opens a *store.DB with migrations applied, dropping and re-creating the schema first.
 func newChecksDB(t *testing.T) (*store.DB, string) {
 	t.Helper()
 	dsn := testDSN(t)
@@ -54,10 +50,7 @@ func mustCreateRun(t *testing.T, ctx context.Context, db *store.DB, pairTotal in
 	return run
 }
 
-// TestCreateRunThenMarkStartedThenUpsertResultsThenFinish is the run
-// lifecycle's happy path: create (pending) -> mark started (running) ->
-// upsert 3 results -> finish (succeeded, with counters), asserting the
-// status and counters persist through GetRun after each step.
+// TestCreateRunThenMarkStartedThenUpsertResultsThenFinish is the run lifecycle's happy path.
 func TestCreateRunThenMarkStartedThenUpsertResultsThenFinish(t *testing.T) {
 	db, _ := newChecksDB(t)
 	ctx := context.Background()
@@ -138,10 +131,7 @@ func TestCreateRunThenMarkStartedThenUpsertResultsThenFinish(t *testing.T) {
 	}
 }
 
-// TestUpsertRunResultTwiceForSamePairOverwrites asserts the retried-pair
-// contract: a second UpsertRunResult for the same (run, source, destination)
-// updates the existing row's values rather than erroring or creating a
-// second row.
+// TestUpsertRunResultTwiceForSamePairOverwrites asserts the retried-pair contract.
 func TestUpsertRunResultTwiceForSamePairOverwrites(t *testing.T) {
 	db, _ := newChecksDB(t)
 	ctx := context.Background()
@@ -229,10 +219,8 @@ func TestFinishRunNotFoundReturnsErrNotFound(t *testing.T) {
 	}
 }
 
-// TestFinishRunOnPendingRunReturnsErrWrongState asserts FinishRun refuses a
-// run that was never started (still "pending", started_at NULL): the
-// running->terminal guard on the UPDATE means 0 rows, and the disambiguating
-// GetRun lookup finds the run present but in the wrong state.
+// TestFinishRunOnPendingRunReturnsErrWrongState asserts FinishRun refuses a run that was never
+// started (still "pending", started_at NULL).
 func TestFinishRunOnPendingRunReturnsErrWrongState(t *testing.T) {
 	db, _ := newChecksDB(t)
 	ctx := context.Background()
@@ -256,11 +244,8 @@ func TestFinishRunOnPendingRunReturnsErrWrongState(t *testing.T) {
 	}
 }
 
-// TestFinishRunTwiceReturnsErrWrongStateAndKeepsFirstValues asserts the
-// idempotent-retry contract from checks.go's FinishRun doc comment: a second
-// FinishRun call on an already-finished run reports ErrWrongState, and the
-// row keeps the FIRST call's values -- the second call's (status, counters)
-// never land.
+// TestFinishRunTwiceReturnsErrWrongStateAndKeepsFirstValues asserts the idempotent-retry contract
+// from checks.go's FinishRun doc comment.
 func TestFinishRunTwiceReturnsErrWrongStateAndKeepsFirstValues(t *testing.T) {
 	db, _ := newChecksDB(t)
 	ctx := context.Background()
@@ -372,10 +357,7 @@ func TestListRunsFiltersByCheckTypeAndStatus(t *testing.T) {
 	}
 }
 
-// TestListRunsPagesWithoutDuplicatesOrGaps seeds 250 runs and pages through
-// them with Limit: 100, asserting 100/100/50 with no duplicate and no
-// missing id, and that the final page's NextCursor is empty -- same shape as
-// events_integration_test.go's TestListEventsPagesWithoutDuplicatesOrGaps.
+// TestListRunsPagesWithoutDuplicatesOrGaps seeds 250 runs and pages through them with Limit: 100.
 func TestListRunsPagesWithoutDuplicatesOrGaps(t *testing.T) {
 	db, _ := newChecksDB(t)
 	ctx := context.Background()
@@ -469,10 +451,7 @@ func TestDeleteRunCascadesResults(t *testing.T) {
 	}
 }
 
-// TestPrunerRemovesOldRunsAndResults is the retention-sweep integration
-// point: a run older than the retention horizon (with a result attached) is
-// removed by Pruner.PruneOnce, cascading its result away, while a fresh run
-// survives.
+// TestPrunerRemovesOldRunsAndResults is the retention-sweep integration point.
 func TestPrunerRemovesOldRunsAndResults(t *testing.T) {
 	db, dsn := newChecksDB(t)
 	ctx := context.Background()
@@ -521,11 +500,8 @@ func TestPrunerRemovesOldRunsAndResults(t *testing.T) {
 	}
 }
 
-// TestFinishRunAcceptsRunningToCancelled pins the one lifecycle transition M4
-// adds: 'cancelled' has been a legal check_runs.status since migration 00003,
-// but nothing ever wrote it. FinishRun's `AND status = 'running'` guard must
-// accept it exactly like every other terminal status -- and must still refuse
-// it from 'pending', so a cancel can never skip the run's own start.
+// FinishRun's `AND status = 'running'` guard must accept it exactly like every other terminal
+// status.
 func TestFinishRunAcceptsRunningToCancelled(t *testing.T) {
 	db, _ := newChecksDB(t)
 	ctx := context.Background()
@@ -557,11 +533,7 @@ func TestFinishRunAcceptsRunningToCancelled(t *testing.T) {
 	}
 }
 
-// TestReapStuckRunsForceFinishesOnlyOldRunningRuns is follow-up #6's store
-// half: a run left 'running' past the cutoff is force-finished as 'cancelled';
-// a healthy running run, a never-started pending run, and an already-terminal
-// run are all left untouched. The scheduler that calls this arrives in Task 13
-// -- this is only the query.
+// The scheduler that calls this arrives.
 func TestReapStuckRunsForceFinishesOnlyOldRunningRuns(t *testing.T) {
 	db, dsn := newChecksDB(t)
 	ctx := context.Background()
@@ -665,5 +637,196 @@ func TestReapStuckRunsHonoursLimit(t *testing.T) {
 	}
 	if n != 2 {
 		t.Fatalf("reaped %d rows, want 2 (the limit)", n)
+	}
+}
+
+// ── migration 00010: the pair-count backfill ────────────────────────────────
+
+// upSQLOf reads a migration file and returns the statements between its Up and
+// Down markers. The test runs the migration's OWN text rather than a copy of it:
+// a copy would keep passing after the file it is meant to pin had drifted.
+func upSQLOf(t *testing.T, name string) string {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join("migrations", name))
+	if err != nil {
+		t.Fatalf("read migration %s: %v", name, err)
+	}
+	body := string(raw)
+	start := strings.Index(body, "-- +goose Up")
+	end := strings.Index(body, "-- +goose Down")
+	if start < 0 || end < 0 || end < start {
+		t.Fatalf("migration %s: no Up/Down markers", name)
+	}
+	return body[start+len("-- +goose Up") : end]
+}
+
+// seedSample writes one probe of one pair.
+func seedSample(t *testing.T, ctx context.Context, db *store.DB, runID, src, dst string, seq int32, ok bool) {
+	t.Helper()
+	if _, err := db.UpsertRunResult(ctx, store.RunResultInput{
+		RunID: runID, SourceNode: src, DestinationNode: dst,
+		Success: ok, DurationNs: 1_000, Result: json.RawMessage(`{}`), SampleSeq: seq,
+	}); err != nil {
+		t.Fatalf("UpsertRunResult(%s→%s seq %d): %v", src, dst, seq, err)
+	}
+}
+
+// pairCounts reads one run's two counters straight out of the table, so the
+// assertion cannot be satisfied by a projection that fixed things on the way out.
+func pairCounts(t *testing.T, ctx context.Context, pool *pgxpool.Pool, runID string) (int32, int32) {
+	t.Helper()
+	var ok, failed int32
+	if err := pool.QueryRow(ctx, `SELECT pair_ok, pair_failed FROM check_runs WHERE id = $1`, runID).Scan(&ok, &failed); err != nil {
+		t.Fatalf("read pair counts: %v", err)
+	}
+	return ok, failed
+}
+
+// TestMigration00010RecomputesPairCountsFromLatestSample is QA scope 4, finding
+// #2. Before the pair-semantics fix an interval run's FinishRun was handed the
+// SAMPLE tallies, so a run over one pair probed twelve times recorded
+// pair_ok = 12 against pair_total = 1 and the run list read it back as
+// "12/1 successful". The relic rows are still in the database; the migration
+// recomputes every terminal run's counters from check_results using the rule the
+// runtime uses now -- a pair is OK when its LATEST sample succeeded.
+func TestMigration00010RecomputesPairCountsFromLatestSample(t *testing.T) {
+	db, dsn := newChecksDB(t)
+	ctx := context.Background()
+
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer pool.Close()
+
+	// ── the relic: an interval run over TWO pairs, probed five times between
+	// them, finished with the sample tallies in the pair columns.
+	relic := mustCreateRun(t, ctx, db, 2)
+	if err := db.MarkRunStarted(ctx, relic.ID); err != nil {
+		t.Fatalf("MarkRunStarted: %v", err)
+	}
+	// a→b recovered: its LAST sample is the successful one.
+	seedSample(t, ctx, db, relic.ID, "a", "b", 0, false)
+	seedSample(t, ctx, db, relic.ID, "a", "b", 1, false)
+	seedSample(t, ctx, db, relic.ID, "a", "b", 2, true)
+	// a→c broke: its last sample failed, however well it started.
+	seedSample(t, ctx, db, relic.ID, "a", "c", 0, true)
+	seedSample(t, ctx, db, relic.ID, "a", "c", 1, false)
+	if err := db.FinishRun(ctx, relic.ID, "partial", 3, 2); err != nil { // 3 ok + 2 failed SAMPLES
+		t.Fatalf("FinishRun: %v", err)
+	}
+
+	// ── a run that was always right: one pair, one sample, counted as a pair.
+	fine := mustCreateRun(t, ctx, db, 1)
+	if err := db.MarkRunStarted(ctx, fine.ID); err != nil {
+		t.Fatalf("MarkRunStarted: %v", err)
+	}
+	seedSample(t, ctx, db, fine.ID, "a", "b", 0, true)
+	if err := db.FinishRun(ctx, fine.ID, "succeeded", 1, 0); err != nil {
+		t.Fatalf("FinishRun: %v", err)
+	}
+
+	// ── a run still in flight: its counters belong to FinishRun, not to this.
+	inFlight := mustCreateRun(t, ctx, db, 4)
+	if err := db.MarkRunStarted(ctx, inFlight.ID); err != nil {
+		t.Fatalf("MarkRunStarted: %v", err)
+	}
+	seedSample(t, ctx, db, inFlight.ID, "a", "b", 0, true)
+	if _, err := pool.Exec(ctx,
+		`UPDATE check_runs SET pair_ok = 7, pair_failed = 7 WHERE id = $1`, inFlight.ID); err != nil {
+		t.Fatalf("dirty the in-flight run: %v", err)
+	}
+
+	// ── a terminal run that never got a single result back.
+	silent := mustCreateRun(t, ctx, db, 3)
+	if err := db.MarkRunStarted(ctx, silent.ID); err != nil {
+		t.Fatalf("MarkRunStarted: %v", err)
+	}
+	if err := db.FinishRun(ctx, silent.ID, "cancelled", 5, 0); err != nil {
+		t.Fatalf("FinishRun: %v", err)
+	}
+
+	if _, err := pool.Exec(ctx, upSQLOf(t, "00010_backfill_pair_counts.sql")); err != nil {
+		t.Fatalf("apply migration 00010: %v", err)
+	}
+
+	// The relic now counts PAIRS by their latest sample: a→b ended OK, a→c ended failed.
+	if ok, failed := pairCounts(t, ctx, pool, relic.ID); ok != 1 || failed != 1 {
+		t.Errorf("relic run: pair_ok/pair_failed = %d/%d, want 1/1", ok, failed)
+	}
+	if ok, failed := pairCounts(t, ctx, pool, fine.ID); ok != 1 || failed != 0 {
+		t.Errorf("already-correct run: pair_ok/pair_failed = %d/%d, want 1/0 (untouched)", ok, failed)
+	}
+	if ok, failed := pairCounts(t, ctx, pool, inFlight.ID); ok != 7 || failed != 7 {
+		t.Errorf("running run: pair_ok/pair_failed = %d/%d, want 7/7 (left to FinishRun)", ok, failed)
+	}
+	// Not skipped, zeroed: "no pair reported" is a count, and 5 was never one.
+	if ok, failed := pairCounts(t, ctx, pool, silent.ID); ok != 0 || failed != 0 {
+		t.Errorf("resultless terminal run: pair_ok/pair_failed = %d/%d, want 0/0", ok, failed)
+	}
+}
+
+// The migration is applied by Open on every start, so running it twice must land
+// the same numbers -- and the second pass must not undo the first.
+func TestMigration00010IsIdempotent(t *testing.T) {
+	db, dsn := newChecksDB(t)
+	ctx := context.Background()
+
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer pool.Close()
+
+	run := mustCreateRun(t, ctx, db, 1)
+	if err := db.MarkRunStarted(ctx, run.ID); err != nil {
+		t.Fatalf("MarkRunStarted: %v", err)
+	}
+	seedSample(t, ctx, db, run.ID, "a", "b", 0, true)
+	seedSample(t, ctx, db, run.ID, "a", "b", 1, false)
+	if err := db.FinishRun(ctx, run.ID, "partial", 1, 1); err != nil {
+		t.Fatalf("FinishRun: %v", err)
+	}
+
+	up := upSQLOf(t, "00010_backfill_pair_counts.sql")
+	for pass := 1; pass <= 2; pass++ {
+		if _, err := pool.Exec(ctx, up); err != nil {
+			t.Fatalf("pass %d: %v", pass, err)
+		}
+		if ok, failed := pairCounts(t, ctx, pool, run.ID); ok != 0 || failed != 1 {
+			t.Fatalf("pass %d: pair_ok/pair_failed = %d/%d, want 0/1", pass, ok, failed)
+		}
+	}
+}
+
+// A run recorded BEFORE migration 00009 has one row per pair at the sample_seq
+// default of 0, so the recomputation has to reach the right answer through the
+// same expression -- the id tiebreak is what makes that true.
+func TestMigration00010HandlesPre00009SingleRowRuns(t *testing.T) {
+	db, dsn := newChecksDB(t)
+	ctx := context.Background()
+
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer pool.Close()
+
+	run := mustCreateRun(t, ctx, db, 2)
+	if err := db.MarkRunStarted(ctx, run.ID); err != nil {
+		t.Fatalf("MarkRunStarted: %v", err)
+	}
+	// Exactly what the old unique constraint allowed: one row per pair, seq 0.
+	seedSample(t, ctx, db, run.ID, "a", "b", 0, true)
+	seedSample(t, ctx, db, run.ID, "a", "c", 0, false)
+	if err := db.FinishRun(ctx, run.ID, "partial", 1, 1); err != nil {
+		t.Fatalf("FinishRun: %v", err)
+	}
+
+	if _, err := pool.Exec(ctx, upSQLOf(t, "00010_backfill_pair_counts.sql")); err != nil {
+		t.Fatalf("apply migration 00010: %v", err)
+	}
+	if ok, failed := pairCounts(t, ctx, pool, run.ID); ok != 1 || failed != 1 {
+		t.Errorf("pre-00009 run: pair_ok/pair_failed = %d/%d, want 1/1", ok, failed)
 	}
 }

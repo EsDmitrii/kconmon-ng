@@ -87,6 +87,7 @@ type CheckResult struct {
 	Error           string
 	Result          json.RawMessage
 	RecordedAt      time.Time
+	SampleSeq       int32
 }
 
 type CheckRun struct {

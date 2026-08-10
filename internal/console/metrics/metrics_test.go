@@ -96,10 +96,6 @@ func TestNewRegistersRealtimeMetrics(t *testing.T) {
 	}
 }
 
-// TestNewRegistersStoreMetrics exercises the M3 persistence metrics. query is
-// a closed set of generated sqlc method names (here: InsertTopologyEvent,
-// ListTopologyEvents); result is always one of ok|conflict|error -- both
-// closed sets are asserted by exercising every value, not just one.
 func TestNewRegistersStoreMetrics(t *testing.T) {
 	reg := prometheus.NewRegistry()
 	m := New("kconmon_ng", reg)
@@ -116,11 +112,7 @@ func TestNewRegistersStoreMetrics(t *testing.T) {
 	for _, result := range []string{"ok", "conflict", "error"} {
 		m.EventsPersisted.WithLabelValues(result).Inc()
 	}
-	// Every RetentionDeleted table label, exercised rather than sampled: the
-	// set is closed (store/prune.go owns it), M5 widened it by three and M6 by
-	// three more. "webhooks" is ABSENT on purpose -- that table is
-	// configuration and is never swept, so it has no series here either; see
-	// prune.go's table-label comment.
+	// Every RetentionDeleted table label, exercised rather than sampled.
 	for _, table := range []string{
 		"topology_events", "audit_log", "check_runs",
 		"mtr_path_snapshots", "mtr_hop_enrichment", "annotations",
@@ -166,10 +158,6 @@ func TestNewRegistersStoreMetrics(t *testing.T) {
 	}
 }
 
-// TestNewRegistersAuthMetrics exercises the M3 auth metrics: AuthRequests's
-// result label (ok|invalid|expired|error) and AuthzDenied's permission
-// label, which must stay bounded by authz.AllPermissions -- every permission
-// this build knows about, and nothing else, is exercised here.
 func TestNewRegistersAuthMetrics(t *testing.T) {
 	reg := prometheus.NewRegistry()
 	m := New("kconmon_ng", reg)
@@ -216,9 +204,6 @@ func TestNewRegistersAuthMetrics(t *testing.T) {
 	}
 }
 
-// TestNewRegistersRunMetrics exercises the M3 checks.Runner metrics (Task
-// 22): RunsTotal's status label (succeeded|partial|failed -- never a
-// boolean) and RunPairs' result label (ok|failed|timeout), both closed sets.
 func TestNewRegistersRunMetrics(t *testing.T) {
 	reg := prometheus.NewRegistry()
 	m := New("kconmon_ng", reg)
@@ -260,9 +245,6 @@ func TestNewRegistersRunMetrics(t *testing.T) {
 	}
 }
 
-// TestNewRegistersRateLimitMetrics exercises the M4 Task 8 limiter metrics:
-// both carry exactly one label, limit, over the CLOSED set runs|login --
-// never a username, subject ID or source IP.
 func TestNewRegistersRateLimitMetrics(t *testing.T) {
 	reg := prometheus.NewRegistry()
 	m := New("kconmon_ng", reg)
@@ -316,9 +298,6 @@ func TestNewRegistersRateLimitMetrics(t *testing.T) {
 	}
 }
 
-// TestNewRegistersExternalReconcilerMetrics exercises the M4 Task 17
-// continuous-assignment metrics: the projected-series gauge carries NO labels
-// at all, and both counters carry exactly one label over a closed set.
 func TestNewRegistersExternalReconcilerMetrics(t *testing.T) {
 	reg := prometheus.NewRegistry()
 	m := New("kconmon_ng", reg)
@@ -392,11 +371,8 @@ func TestNewRegistersExternalReconcilerMetrics(t *testing.T) {
 	}
 }
 
-// TestNewRegistersMTRSnapshotMetric exercises the M5 Task 2 path-history
-// projector metric: exactly one label, result, over the CLOSED set
-// new-path|repeat|error. A hop address, a path hash or a destination in a
-// label here would be the cardinality bomb the whole package's discipline
-// exists to prevent, so the label VALUES are pinned, not just the name.
+// TestNewRegistersMTRSnapshotMetric exercises; a hop address, a path hash or a destination in a
+// label here would be the cardinality bomb the whole package's discipline exists to prevent.
 func TestNewRegistersMTRSnapshotMetric(t *testing.T) {
 	reg := prometheus.NewRegistry()
 	m := New("kconmon_ng", reg)
@@ -441,23 +417,8 @@ func TestNewRegistersMTRSnapshotMetric(t *testing.T) {
 	}
 }
 
-// TestNewRegistersEnrichmentMetrics pins M5 Task 5's two counters and, more
-// importantly, their SHAPE. The obvious single-counter design --
-// enrichment_lookups_total{source,result} with result hit|miss|error -- is
-// wrong: a cache hit is not per-source (one cached row answers rdns, asn and
-// city at once), so "hit" would have had to be attributed to a source that
-// never ran. The split below keeps each counter answering one question:
-//
-//	enrichment_cache_total{result}      -- did the TTL cache answer? hit|miss,
-//	                                       one increment per IP, so hit/(hit+miss)
-//	                                       is the cache hit ratio.
-//	enrichment_lookups_total{source,result} -- what did each source that ACTUALLY
-//	                                       RAN produce? source rdns|asn|city,
-//	                                       result ok|miss|error. Only misses reach
-//	                                       here, so this never double-counts the
-//	                                       cache.
-//
-// Neither carries an IP, a hostname, an ASN, a country or a snapshot id.
+// TestNewRegistersEnrichmentMetrics pins the two counters and, more importantly; the obvious
+// single-counter design -- enrichment_lookups_total{source,result} with result hit|miss|error.
 func TestNewRegistersEnrichmentMetrics(t *testing.T) {
 	reg := prometheus.NewRegistry()
 	m := New("kconmon_ng", reg)
@@ -532,12 +493,7 @@ func TestNewRegistersEnrichmentMetrics(t *testing.T) {
 	}
 }
 
-// TestNewRegistersK8sEventsMetric pins M6 Task 2's counter: exactly one label,
-// result, over the CLOSED set stored|duplicate|filtered|error. The label VALUES
-// are pinned, not just the name, because the tempting widening here -- a node
-// or pod name, a reason, an event type -- is unbounded AND attacker-influenced
-// (anything in the cluster can emit an event naming any object), which makes it
-// the single easiest cardinality bomb in the console.
+// TestNewRegistersK8sEventsMetric pins the counter: exactly one label.
 func TestNewRegistersK8sEventsMetric(t *testing.T) {
 	reg := prometheus.NewRegistry()
 	m := New("kconmon_ng", reg)
@@ -582,13 +538,8 @@ func TestNewRegistersK8sEventsMetric(t *testing.T) {
 	}
 }
 
-// TestNewRegistersWebhookDeliveryMetric pins M6 Task 5's counter: exactly one
-// label, result, over the CLOSED set ok|failed|filtered. The label VALUES are
-// pinned, not just the name, because every tempting widening here is a leak as
-// well as a cardinality bomb -- an endpoint URL, host or name is
-// operator-supplied and names internal infrastructure, and an incident id is
-// unbounded. One increment per DELIVERY, never per HTTP attempt, so a retried
-// delivery that eventually succeeds is exactly one ok.
+// TestNewRegistersWebhookDeliveryMetric pins the counter: exactly one label; one increment per
+// DELIVERY, never per HTTP attempt.
 func TestNewRegistersWebhookDeliveryMetric(t *testing.T) {
 	reg := prometheus.NewRegistry()
 	m := New("kconmon_ng", reg)

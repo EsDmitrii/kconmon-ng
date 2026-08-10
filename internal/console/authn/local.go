@@ -10,19 +10,8 @@ import (
 	"github.com/EsDmitrii/kconmon-ng/internal/console/store"
 )
 
-// UserStore is the subset of store.UserStore the authn package needs, shared
-// by the local authenticator (GetUserByUsername, below) and the token
-// authenticator's optional owner-disabled check (GetUserByID,
-// WithOwnerDisabledCheck in token.go). GetUserByUsername is re-queried on
-// EVERY Authenticate call, not just at login: that is what lets a disabled
-// account be caught on the very next request after an admin flips it (the
-// session cookie alone cannot reflect that -- see SessionStore, which has no
-// notion of the user's Disabled state), and it is also where Subject.ID
-// comes from. store.RoleStore's ListBindingsForSubject doc pins subject_id,
-// for subject_kind='user', to users.id in canonical UUID text form -- never
-// the username -- so Subject.ID here is User.ID (the UUID), not
-// sess.Username, precisely so a downstream role-binding lookup keyed on
-// Subject.ID resolves correctly.
+// UserStore is the subset of store.UserStore the authn package needs; GetUserByUsername is
+// re-queried on EVERY Authenticate call, not just at login.
 type UserStore interface {
 	// GetUserByID returns store.ErrNotFound when id does not name a user.
 	// Used only by WithOwnerDisabledCheck (token.go) -- the local
@@ -40,12 +29,8 @@ type localAuthenticator struct {
 	cookieName string
 }
 
-// NewLocal returns an Authenticator for auth.mode=local: it resolves the
-// session cookie named cookieName into a Session (via sessions), then
-// re-resolves that session's username against users on every call. It does
-// NOT verify a password -- that only happens once, at login (a separate,
-// not-yet-built handler that calls VerifyPassword and sessions.Create); this
-// authenticator only ever reads an already-established session.
+// NewLocal returns an Authenticator for auth.mode=local; it does NOT verify a password -- that only
+// happens once.
 func NewLocal(users UserStore, sessions *SessionStore, cookieName string) Authenticator {
 	return &localAuthenticator{users: users, sessions: sessions, cookieName: cookieName}
 }
@@ -63,10 +48,8 @@ func (l *localAuthenticator) Authenticate(r *http.Request) (authz.Subject, error
 		return authz.Subject{}, fmt.Errorf("authn: local: get session: %w", err)
 	}
 	if !ok {
-		// An id that is absent, corrupted, or already past its own
-		// ExpiresAt (SessionStore.Get collapses all three into ok=false) is
-		// a stale cookie, not an attack: re-prompt login via
-		// ErrNoCredentials, never ErrInvalid.
+		// An id that is absent, corrupted, or already past its own ExpiresAt (SessionStore.Get collapses
+		// all three into ok=false) is a stale cookie.
 		return authz.Subject{}, ErrNoCredentials
 	}
 

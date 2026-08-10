@@ -14,13 +14,9 @@ import (
 // active WatchTasks stream, so there is nobody to run the task.
 var ErrAgentNotSubscribed = errors.New("agent has no active task subscription")
 
-// TaskManager dispatches on-demand diagnostic tasks to agents over their
-// WatchTasks streams and correlates the asynchronous ReportTaskResult callback
-// back to the waiting Dispatch caller.
-//
-// A single mutex guards both maps. Callers must never hold the mutex while
-// sending on a channel or blocking, so there is no interaction with the
-// registry lock or the gRPC stream goroutines beyond the brief map operations.
+// TaskManager dispatches on-demand diagnostic tasks to agents over their WatchTasks streams and
+// correlates the asynchronous ReportTaskResult callback back to the waiting Dispatch caller;
+// callers must never hold the mutex while sending on a channel or blocking.
 type TaskManager struct {
 	mu          sync.Mutex
 	subscribers map[string]chan *pb.TaskRequest
@@ -34,17 +30,9 @@ func NewTaskManager() *TaskManager {
 	}
 }
 
-// Subscribe registers an agent's task channel and returns it alongside a
-// cleanup func that removes the subscription. The cleanup func is idempotent
-// and must be called when the WatchTasks stream ends.
-//
-// The channel is deliberately never closed. Dispatch reads the channel under
-// the mutex, releases it, then sends outside the lock; if cleanup closed the
-// channel it could do so between that read and the send, and a send on a
-// closed channel panics even inside a select. By only deleting the map entry,
-// a Dispatch that races the teardown sends into the abandoned buffered channel
-// that nobody reads and simply times out on its context. The abandoned channel
-// becomes garbage and is collected — no panic, no leak.
+// Subscribe registers an agent's task channel and returns it alongside a cleanup func that removes
+// the subscription; the cleanup func is idempotent and must be called when the WatchTasks stream
+// ends.
 func (tm *TaskManager) Subscribe(agentID string) (tasks <-chan *pb.TaskRequest, cleanup func()) {
 	ch := make(chan *pb.TaskRequest, 16)
 
@@ -65,12 +53,8 @@ func (tm *TaskManager) Subscribe(agentID string) (tasks <-chan *pb.TaskRequest, 
 	return ch, cleanup
 }
 
-// Dispatch sends req to agentID and blocks until the agent reports a result,
-// the context is cancelled, or the context deadline is exceeded. A task ID is
-// generated and stamped on the request when the caller left it empty, so the
-// result can be correlated; a caller that already stamped one (to correlate its
-// own pre-dispatch events with the outcome) keeps it. The pending entry is
-// always removed before returning, so a timed-out task does not leak.
+// Dispatch sends req to agentID and blocks until the agent reports a result, the context is
+// cancelled.
 func (tm *TaskManager) Dispatch(ctx context.Context, agentID string, req *pb.TaskRequest) (*pb.TaskResult, error) {
 	taskID := req.GetTaskId()
 	if taskID == "" {

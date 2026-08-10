@@ -33,7 +33,7 @@ minute it broke.
 <table>
   <tr>
     <td width="50%"><img src="docs/img/console-matrix.png" alt="Console Matrix: N×N heatmap of node-to-node loss and latency, one cell per ordered pair — a broken node reads as a red column"></td>
-    <td width="50%"><img src="docs/img/console-investigate.png" alt="Console Investigate: merged timeline around one scope and window, with ranked candidate causes"></td>
+    <td width="50%"><img src="docs/img/console-investigate.png" alt="Console Investigate: merged timeline around one scope and window, with a causes panel that ranks only when the window holds a threshold crossing"></td>
   </tr>
   <tr>
     <td width="50%"><img src="docs/img/console-alerting.png" alt="Console Alerting: managed rules with their live sync status against the cluster"></td>
@@ -95,11 +95,13 @@ shutdown, so a rolling restart of kconmon-ng does not write false loss into its
 own metrics. Config hot-reloads on change and is parsed with unknown keys
 rejected — a typo fails fast instead of being silently ignored.
 
-Six alert rules ship with the chart (`prometheusRule.enabled=true`): high UDP
-loss, failing TCP, DNS and external checks, plus two that watch the monitor
-itself — `KconmonAgentsMissing` and `KconmonControllerDown`. A kconmon-ng that
-goes quiet pages you instead of looking healthy. Every metric, label and rule is
-in [docs/metrics.md](docs/metrics.md).
+Seven alert rules ship with the chart (`prometheusRule.enabled=true`): high UDP
+loss, failing TCP, DNS and external checks, a pair that went silent, plus two
+that watch the monitor itself — `KconmonAgentsMissing` and
+`KconmonControllerDown`. A kconmon-ng that goes quiet pages you instead of
+looking healthy. Each rule toggles and tunes through
+`prometheusRule.<alertName>.{enabled,threshold,for,severity}`. Every metric,
+label and rule is in [docs/metrics.md](docs/metrics.md).
 
 ### The Console
 
@@ -157,7 +159,7 @@ so your own panels and recording rules are a `grep` away in
 [docs/metrics.md](docs/metrics.md).
 
 <p align="center">
-  <img src="docs/img/overview.png" alt="Grafana Overview dashboard: fleet status tiles, per-protocol failure ratios and the top-10 worst pairs table" width="100%">
+  <img src="docs/img/overview.png" alt="Grafana Overview dashboard: fleet status tiles (10 agents, 0 missing, 90 monitored pairs, 9 failing), per-protocol failure ratios and the top-10 worst pairs table" width="100%">
 </p>
 
 <table>
@@ -203,7 +205,7 @@ sysctl the ICMP checker needs and RBAC for the controller's node watch.
 
 ```bash
 helm upgrade --install kconmon-ng oci://ghcr.io/esdmitrii/charts/kconmon-ng \
-  --version 1.10.0 \
+  --version 2.0.0 \
   --set serviceMonitor.enabled=true \
   --set prometheusRule.enabled=true
 ```
@@ -239,7 +241,7 @@ It is a flag on the same release. Nothing else in the chart changes:
 
 ```bash
 helm upgrade --install kconmon-ng oci://ghcr.io/esdmitrii/charts/kconmon-ng \
-  --version 1.10.0 \
+  --version 2.0.0 \
   --set console.enabled=true \
   --set console.prometheus.url=http://prometheus-operated.monitoring:9090
 

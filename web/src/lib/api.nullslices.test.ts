@@ -1,14 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { getMatrix, getTopology } from "@/lib/api";
 
-/* QA wave finding #1: Go marshals nil slices as JSON null, and a controller
- * running outside a cluster answers {"nodes":null,"agents":[...]} — which
- * killed the landing page and /topology with a TypeError, because types.ts
- * promises non-nullable arrays and every caller rightly trusts that.
- *
- * The transport is the single place that promise is enforced. These pins hold
- * getTopology/getMatrix to it; any new list-shaped endpoint gets the same
- * treatment (normalize at the fetcher, never guard at call sites). */
+/* QA wave : Go marshals nil slices as JSON null; these pins hold getTopology/getMatrix. */
 
 const json = (body: unknown) =>
   new Response(JSON.stringify(body), { status: 200, headers: { "Content-Type": "application/json" } });

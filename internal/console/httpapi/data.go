@@ -14,42 +14,24 @@ import (
 	"github.com/EsDmitrii/kconmon-ng/internal/console/store"
 )
 
-// TopologyHistory is the read seam GET /api/v1/topology?at= takes: the fold
-// half of store.EventStore, narrowed so httpapi can neither write events nor
-// page through them here. store.EventStore's method set is a superset of this
-// one, so the value store.NewEventStore returns assigns directly, with no cast.
+// TopologyHistory is the read seam GET /api/v1/topology?at= takes: the fold half of
+// store.EventStore.
 type TopologyHistory interface {
 	TopologyAt(ctx context.Context, at time.Time) (store.TopologySnapshot, error)
 }
 
-// topologyHistoryUnavailableDetail is ?at='s 503, in annotationsUnavailableDetail's
-// shape. It is deliberately NOT the live route's "controller not configured"
-// message: the two halves of this endpoint have different dependencies, and an
-// operator told to set controller.url when what is actually missing is the
-// database would go looking in the wrong place.
+// topologyHistoryUnavailableDetail is ?at='s 503, in annotationsUnavailableDetail's shape; it is
+// deliberately NOT the live route's "controller not configured" message.
 const topologyHistoryUnavailableDetail = "historical topology is reconstructed from persisted events: " +
 	"set console.database.mode in the console config (Helm: console.database.mode) to enable GET /api/v1/topology?at="
 
 // topologyRetentionDetail is ?at='s 422. It names the value an operator would
 // change, because "we pruned it" is only actionable if you know what to turn up.
 const topologyRetentionDetail = "no events are retained for that instant, so the topology cannot be " +
-	"reconstructed there -- pick a later time, or raise console.database.retentionDays " +
-	"(Helm: console.database.retentionDays) to keep more history in future"
+	"reconstructed there. Pick a later time, or raise console.database.retentionDays to keep more " +
+	"history in future"
 
-// historicalTopology is GET /api/v1/topology?at='s body. nodes, agents and
-// timestamp are byte-for-byte the live response's fields -- same names, same
-// element types (controllerclient.Node/Agent), so one frontend type reads both
-// -- with five fields appended that mark this one as a RECONSTRUCTION:
-//
-//   - historical is always true here and absent from the live body, which is
-//     what lets a client tell the two apart without inspecting the URL it
-//     asked for.
-//   - asOf echoes the requested instant; timestamp carries the event_time of
-//     the last change AT OR BEFORE it (i.e. when this topology actually came
-//     into being), falling back to asOf when no event was folded. The two
-//     differ on purpose: one is the question, the other is the answer's age.
-//   - eventsFolded / unfoldableEvents / truncated are the fold's honesty
-//     budget -- see the handler comment below.
+// historicalTopology is GET /api/v1/topology?at='s body.
 type historicalTopology struct {
 	Nodes            []controllerclient.Node  `json:"nodes"`
 	Agents           []controllerclient.Agent `json:"agents"`
@@ -61,40 +43,8 @@ type historicalTopology struct {
 	Truncated        bool                     `json:"truncated"`
 }
 
-// handleTopology serves the LIVE controller snapshot, or -- with ?at= set --
-// the topology reconstructed from persisted events as of that instant.
-//
-// ?at= absent (or present and empty, which is the same thing a form submits
-// for an untouched field) is the pre-M5 path verbatim: proxy the controller,
-// no store involved, no new failure mode. Nothing below the branch changed.
-//
-// WHAT THE ?at= ANSWER IS WORTH. The reconstruction is bounded by what a
-// topology_changed event records, which is exactly
-// {reason, nodeName, agentId, zone} (internal/console/events/live_event.go,
-// api/proto/kconmon.proto):
-//
-//   - podIP is NEVER recorded, so every folded agent carries an empty podIP;
-//   - ready is not recorded either: it is true for whatever the event log has
-//     seen registered and not since removed, i.e. "present", not "kubelet-ready";
-//   - zone IS recorded since M7, so folded nodes and agents carry the zone
-//     their events last stated -- which is what lets a reconstruction be drawn
-//     with the same zone lanes as the live map;
-//   - and identity depends on the CONTROLLER THAT WROTE THE ROW. Since M7 the
-//     controller attributes every change at its emission site (one event per
-//     affected agent, carrying agent id, node and zone), so current history
-//     folds into a real node set. Rows written BEFORE that carry a reason and
-//     nothing else and are still inside retention on an upgraded console: they
-//     name nobody and land in unfoldableEvents. That is why the counter is in
-//     the response rather than only in a log -- an empty nodes array next to
-//     unfoldableEvents=417 says "these events do not name their subject", not
-//     "the cluster was empty", and the UI quotes both numbers back rather than
-//     assuming either story.
-//
-// Status codes, in the order they are decided: no store -> 503 (the database
-// is what history lives in; the live route stays fine); unparseable at -> 400;
-// at in the future -> 400 (the answer would be a guess, and an empty one);
-// at before the oldest retained event, or no events retained at all -> 422
-// naming console.database.retentionDays.
+// handleTopology serves the LIVE controller snapshot, or -- with ?at= set; that is why the counter
+// is in the response rather than only in a log.
 func (s *Server) handleTopology(w http.ResponseWriter, r *http.Request) {
 	if at := r.URL.Query().Get("at"); at != "" {
 		s.serveHistoricalTopology(w, r, at)
@@ -121,10 +71,8 @@ func (s *Server) handleTopology(w http.ResponseWriter, r *http.Request) {
 // param verbatim, already known to be non-empty. See handleTopology's comment
 // for the fold's contract and the status-code order.
 func (s *Server) serveHistoricalTopology(w http.ResponseWriter, r *http.Request, raw string) {
-	// The dependency gate comes first, exactly as every other store-backed
-	// handler in this package does it: telling an operator their database is
-	// off is more actionable than telling them their timestamp was malformed
-	// on a route that could not have answered either way.
+	// The dependency gate comes first, exactly as every other store-backed handler in this package
+	// does it.
 	if s.topologyHistory == nil {
 		writeProblem(w, http.StatusServiceUnavailable, "historical topology not available",
 			topologyHistoryUnavailableDetail)

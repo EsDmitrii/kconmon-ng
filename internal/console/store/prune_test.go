@@ -12,19 +12,15 @@ import (
 	"github.com/EsDmitrii/kconmon-ng/internal/console/metrics"
 )
 
-// testPruneMetrics returns Metrics on a fresh registry: metrics.New(nil)
-// targets prometheus.DefaultRegisterer, which every test function in this
-// binary would share and collide on ("duplicate metrics collector
-// registration") the second time any test called it.
+// testPruneMetrics returns Metrics on a fresh registry: metrics.New(nil) targets
+// prometheus.DefaultRegisterer.
 func testPruneMetrics() *metrics.Metrics {
 	return metrics.New("kconmon_ng", prometheus.NewRegistry())
 }
 
-// runPruner runs p.Run(ctx) on a background goroutine and reports whether it
-// returned within 1s. A panic inside Run (e.g. a nil-pool dereference the
-// caller did not expect) is converted into a test failure instead of a
-// crashed test binary, since the recover happens before the outer select
-// observes done and the enclosing test function returns.
+// runPruner runs p.Run(ctx) on a background goroutine and reports whether it returned within 1s; a
+// panic inside Run (e.g. a nil-pool dereference the caller did not expect) is converted into a test
+// failure instead of a crashed test binary.
 func runPruner(ctx context.Context, t *testing.T, p *Pruner) bool {
 	t.Helper()
 	done := make(chan struct{})
@@ -46,11 +42,7 @@ func runPruner(ctx context.Context, t *testing.T, p *Pruner) bool {
 	}
 }
 
-// TestRunZeroRetentionIsNoOp asserts the "keep everything" contract:
-// database.retentionDays=0 (internal/console/config/config.go) must make Run
-// return immediately without ever touching db's pool. p.db is nil here, so
-// any code path that dereferences it would panic -- caught by runPruner --
-// rather than merely happening to run fast.
+// TestRunZeroRetentionIsNoOp asserts the "keep everything" contract.
 func TestRunZeroRetentionIsNoOp(t *testing.T) {
 	p := NewPruner(nil, 0, testPruneMetrics())
 
@@ -94,10 +86,8 @@ func TestPruneJitterIsBounded(t *testing.T) {
 	}
 }
 
-// TestPruneSleepReturnsFalseOnCancellation asserts pruneSleep reports "ctx
-// won" rather than "the sleep elapsed" once ctx is done, both for a
-// currently-running sleep and for an already-cancelled ctx (the d<=0 path
-// Run's zero-retention case would otherwise never exercise here).
+// TestPruneSleepReturnsFalseOnCancellation asserts pruneSleep reports "ctx won" rather than "the
+// sleep elapsed" once ctx is done.
 func TestPruneSleepReturnsFalseOnCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -121,26 +111,14 @@ func TestPruneSleepReturnsTrueWhenDurationElapses(t *testing.T) {
 	}
 }
 
-// TestRunSweepsRunsEverySweepEvenWhenAnEarlierOneFails is the unit-level
-// counterpart of PruneOnce's two-sweep contract, exercised through
-// runSweeps's del-closure injection seam (the same shape deleteBatches
-// itself takes) instead of a real database: a failing topology_events sweep
-// must not prevent the unrelated audit_log sweep from running on the same
-// call, both sweeps' partial/complete row counts must still be credited to
-// their own RetentionDeleted metric and map entry, and the failure must
-// still surface in the returned error.
+// TestRunSweepsRunsEverySweepEvenWhenAnEarlierOneFails is the unit-level counterpart of PruneOnce's
+// two-sweep contract.
 func TestRunSweepsRunsEverySweepEvenWhenAnEarlierOneFails(t *testing.T) {
 	m := testPruneMetrics()
 	wantErr := errors.New("boom: statement timeout")
 	secondRan := false
 
-	// The topology_events del closure models deleteBatches' own documented
-	// partial-total behavior: a first full batch (n == pruneBatchSize) commits
-	// and the loop asks for a second batch, which then fails outright. Only
-	// the committed first batch's 5000 rows should end up credited -- a
-	// failing call's own return value is never itself added to the total
-	// (deleteBatches only accumulates n after confirming del returned a nil
-	// error), matching what a real failed DELETE would actually commit: none.
+	// Only the committed first batch's 5000 rows should end up credited.
 	calls := 0
 	deleted, err := runSweeps(context.Background(), m, []sweep{
 		{
@@ -216,12 +194,7 @@ var retentionTables = []string{
 	tableMaintenance,
 }
 
-// TestRetentionTableLabelsAreTheClosedSet pins the label VALUES, not just
-// their count. RetentionDeleted{table} is a closed set (metrics.go), and a typo
-// in one of the M5/M6 additions would not fail any other test, it would just
-// quietly split a dashboard's series in two. The literal strings here are
-// deliberately NOT the constants: a test that compares a constant to itself
-// pins nothing.
+// TestRetentionTableLabelsAreTheClosedSet pins the label VALUES, not just their count.
 func TestRetentionTableLabelsAreTheClosedSet(t *testing.T) {
 	want := []string{
 		"topology_events",
@@ -252,14 +225,8 @@ func TestRetentionTableLabelsAreTheClosedSet(t *testing.T) {
 	}
 }
 
-// TestWebhooksAreNotARetentionTable is the DELIBERATE ABSENCE, pinned so it
-// cannot be "fixed" by a later reader who notices M6 added four tables and
-// only three sweeps. A webhook row is configuration, not observation: it does
-// not accumulate with time, and its only time column records when the endpoint
-// was set up rather than when it last mattered. Ageing rows out of it would
-// silently switch off notifications for a still-wanted endpoint -- a retention
-// policy is not a deconfiguration policy. Endpoints leave that table exactly
-// one way: an operator deletes them.
+// TestWebhooksAreNotARetentionTable is the DELIBERATE ABSENCE, pinned so it cannot be "fixed" by a
+// later reader who notices.
 func TestWebhooksAreNotARetentionTable(t *testing.T) {
 	for _, table := range retentionTables {
 		if table == "webhooks" {
@@ -268,15 +235,8 @@ func TestWebhooksAreNotARetentionTable(t *testing.T) {
 	}
 }
 
-// TestAlertRulesAreNotARetentionTable is the same DELIBERATE ABSENCE for M7's
-// one new table (Decision 1), and the sharper case of the two: alert_rules
-// carries updated_at and last_synced_at, either of which reads like an ageing
-// column to someone extending the sweep list. Neither is. updated_at is when
-// the operator last edited the rule; last_synced_at is when the reconciler
-// last reached the cluster. A rule nobody has touched for a year, that
-// Prometheus has been evaluating the whole time, is the most load-bearing row
-// in the table -- and a sweep on either column would delete exactly that one
-// first. Rules leave the table one way: an operator deletes them.
+// TestAlertRulesAreNotARetentionTable is the same DELIBERATE ABSENCE for the one new table; a rule
+// nobody has touched for a year, that Prometheus has been evaluating the whole time.
 func TestAlertRulesAreNotARetentionTable(t *testing.T) {
 	for _, table := range retentionTables {
 		if table == "alert_rules" {
@@ -285,12 +245,8 @@ func TestAlertRulesAreNotARetentionTable(t *testing.T) {
 	}
 }
 
-// TestRunSweepsCreditsEveryTableIndependently runs one sweep per closed label
-// value with a distinct row count and asserts each landed on its own series.
-// The M5 sweeps share runSweeps with the M3 ones, so the risk being tested is
-// not the loop but the wiring: two sweep entries accidentally carrying the
-// same table label would double one counter and leave another at zero, and
-// only a per-label assertion catches it.
+// TestRunSweepsCreditsEveryTableIndependently runs one sweep per closed label value with a distinct
+// row count and asserts each landed on its own series.
 func TestRunSweepsCreditsEveryTableIndependently(t *testing.T) {
 	m := testPruneMetrics()
 
@@ -325,10 +281,9 @@ func TestRunSweepsCreditsEveryTableIndependently(t *testing.T) {
 // PoolStatsPoller
 // ---------------------------------------------------------------------------
 
-// newFakePoller returns a poller reading from a caller-controlled poolStats,
-// with an interval short enough for a test to observe a second tick. The fake
-// is a plain func rather than a *pgxpool.Stat because pgxpool.Stat cannot be
-// constructed outside its own package -- see poolStats' doc comment.
+// newFakePoller returns a poller reading from a caller-controlled poolStats; the fake is a plain
+// func rather than a *pgxpool.Stat because pgxpool.Stat cannot be constructed outside its own
+// package.
 func newFakePoller(m *metrics.Metrics, stats func() poolStats, interval time.Duration) *PoolStatsPoller {
 	return &PoolStatsPoller{stats: stats, m: m, interval: interval}
 }
@@ -375,11 +330,8 @@ func TestPoolStatsPollerObserveOverwritesPreviousSample(t *testing.T) {
 	}
 }
 
-// TestPoolStatsPollerRunSamplesBeforeFirstTick asserts Run writes the gauge
-// immediately, without waiting out one interval: a replica scraped in its
-// first seconds must not report zeros that are indistinguishable from a pool
-// that failed to open. The interval here is an hour, so only the pre-loop
-// sample can possibly have run.
+// TestPoolStatsPollerRunSamplesBeforeFirstTick asserts Run writes the gauge immediately, without
+// waiting out one interval.
 func TestPoolStatsPollerRunSamplesBeforeFirstTick(t *testing.T) {
 	m := testPruneMetrics()
 	sampled := make(chan struct{}, 1)

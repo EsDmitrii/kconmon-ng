@@ -25,10 +25,7 @@ on:
       - "Dockerfile*"
       - ".goreleaser.yaml"
 
-# No job here needs a writable token: nothing pushes an image
-# (docker/build-push-action runs with push: false), nothing calls the API, and
-# no step reads GITHUB_TOKEN. Declared at workflow level so every job inherits
-# it, including when release.yaml calls this workflow via workflow_call.
+# No job here needs a writable token: nothing pushes an image (docker/build-push-action runs with push: false).
 permissions:
   contents: read
 
@@ -43,10 +40,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      # Render the krew manifest with a stand-in version + dummy archives and
-      # assert it is well-formed. Catches the class of bugs that broke real
-      # releases: a version without the required 'v' prefix, unsubstituted
-      # placeholders, or a missing platform block — before a tag is cut.
+      # Render the krew manifest with a stand-in version + dummy archives and assert it is well-formed.
       - name: Render and validate manifest
         run: |
           set -euo pipefail
@@ -175,10 +169,7 @@ jobs:
         working-directory: web
         run: npm ci
 
-      # api-types.ts is generated from docs/console-api.yaml and committed, so a
-      # spec edit without a regenerate must fail here rather than ship a stale
-      # type. The router-walking Go test guards the other side (spec vs live
-      # chi routes); this guards spec vs generated types.
+      # api-types.ts is generated from docs/console-api.yaml and committed.
       - name: Check generated API types are current
         working-directory: web
         run: |
@@ -231,6 +222,15 @@ jobs:
         uses: azure/setup-helm@v5
         with:
           version: v4.2.3
+
+      - name: values.schema.json has no duplicate keys
+        run: python3 hack/schema-lint.py charts/kconmon-ng/values.schema.json
+
+      - name: Dashboards in sync with the chart copy
+        run: diff -r dashboards charts/kconmon-ng/dashboards
+
+      - name: Fetch chart dependencies
+        run: helm dependency build charts/kconmon-ng
 
       - name: Lint chart
         run: |

@@ -5,23 +5,10 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { TimeMachineProvider } from "@/lib/timemachine";
 import { AlertingPage } from "@/pages/alerting";
 
-/* The paused-retry trap, found LIVE at the M7 final gate.
- *
- * react-query pauses retries while onlineManager reports offline. A query
- * whose first attempt failed and whose retry is paused sits at
- * status:"pending" / fetchStatus:"paused" — isLoading (isPending &&
- * isFetching) is FALSE there, so the old empty-state guard of
- * `!isLoading && !isError && list.length === 0` rendered "No foreign
- * PrometheusRule objects in this namespace" while the API was answering 409
- * problem+json on the wire. A browser that flickered offline once (laptop
- * sleep, flaky wifi, the embedded dev pane) presented a made-up answer as a
- * settled one.
- *
- * The fix across alerting/mtr/settings: skeleton on isPending (covers
- * loading AND paused), empty state ONLY on isSuccess. This file pins the
- * alerting foreign section under the app's REAL mounting conditions
- * (StrictMode + retry:1, main.tsx's own client options) in both worlds:
- * online-error and offline-paused. */
+/*
+ * The fix across alerting/mtr/settings: skeleton on isPending (covers loading AND paused), empty
+ * state ONLY on isSuccess.
+ */
 
 const DETAIL =
   "prometheus rule sync is not running on this console: the alert rules themselves are unaffected and stay readable";
@@ -96,7 +83,7 @@ describe("the foreign section under the app's own mounting conditions", () => {
   it("online: the 409 detail renders, never the empty-state line", { timeout: 15000 }, async () => {
     stubTransport();
     mountLikeMainTsx();
-    await waitFor(() => expect(screen.getByText(DETAIL)).toBeTruthy(), { timeout: 10000 });
+    await waitFor(() => expect(screen.getAllByText(DETAIL).length).toBeGreaterThan(0), { timeout: 10000 });
     expect(screen.queryByText(/No foreign PrometheusRule objects/)).toBeNull();
   });
 
@@ -116,6 +103,6 @@ describe("the foreign section under the app's own mounting conditions", () => {
 
     // Back online: the retry resumes, fails for real, and the honest 409 lands.
     onlineManager.setOnline(true);
-    await waitFor(() => expect(screen.getByText(DETAIL)).toBeTruthy(), { timeout: 10000 });
+    await waitFor(() => expect(screen.getAllByText(DETAIL).length).toBeGreaterThan(0), { timeout: 10000 });
   });
 });

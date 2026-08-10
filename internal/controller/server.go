@@ -69,10 +69,8 @@ func (s *HTTPServer) handleDiagnostics(w http.ResponseWriter, r *http.Request) {
 	h.ServeHTTP(w, r)
 }
 
-// SetExternalChecksHandler hot-injects the continuous external-check
-// assignment handler, mirroring SetDiagnosticsHandler: both need pieces built
-// after the HTTP server. Until set, the route returns 503, which the Console's
-// reconcile client already retries.
+// SetExternalChecksHandler hot-injects the continuous external-check assignment handler, mirroring
+// SetDiagnosticsHandler.
 func (s *HTTPServer) SetExternalChecksHandler(h *ExternalChecksHandler) {
 	s.externalHandler.Store(h)
 }

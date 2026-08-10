@@ -24,10 +24,6 @@ import (
 var errQuerierDown = errors.New("prometheus is down")
 
 // newTestHub builds a real Hub with a fresh registry and no WebSocket clients.
-// Broadcast is then a no-op fan-out, which is exactly right here: these tests
-// assert the pusher's own behaviour (how many recomputes happen, and what
-// PushSnapshots records), not ws framing — Tasks 10-11 cover that. A fresh
-// registry per test keeps promauto from panicking on duplicate registration.
 func newTestHub(t *testing.T) (*ws.Hub, *metrics.Metrics) {
 	t.Helper()
 	hub, m, _ := newTestHubOnBus(t)
@@ -44,11 +40,8 @@ func newTestHubOnBus(t *testing.T) (*ws.Hub, *metrics.Metrics, *cache.InProcessB
 	return ws.NewHub(bus, m), m, bus
 }
 
-// assertNoBusMessages fails if anything at all is queued on ch. It is a bounded
-// non-blocking drain rather than a sleep, so callers must first establish a
-// happens-before barrier — a *later* push cycle counted in PushSnapshots — which
-// guarantees anything the cycle under test could have published is already
-// buffered by the time this runs.
+// assertNoBusMessages fails if anything at all is queued on ch; it is a bounded non-blocking drain
+// rather than a sleep.
 func assertNoBusMessages(t *testing.T, topic string, ch <-chan cache.Message) {
 	t.Helper()
 	select {
@@ -72,10 +65,8 @@ func waitForCounter(t *testing.T, c prometheus.Counter, want float64) {
 	t.Fatalf("counter never reached %v within 5s, last value %v", want, testutil.ToFloat64(c))
 }
 
-// gatedQuerier is a matrix.Querier whose every call announces itself on entered
-// (coalescing, capacity 1) and then blocks until release is closed. That lets a
-// test hold a recompute open, fire a burst of nudges into it, and observe
-// exactly how many recomputes the burst produced.
+// gatedQuerier is a matrix.Querier whose every call announces itself on entered (coalescing,
+// capacity 1) and then blocks until release is closed.
 type gatedQuerier struct {
 	entered chan struct{}
 	release chan struct{}

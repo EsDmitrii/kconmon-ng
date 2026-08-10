@@ -39,13 +39,8 @@ func NewTopologyPusher(ctrl *controllerclient.Client, hub *ws.Hub, interval time
 // Nudge asks for an out-of-band refetch. Non-blocking and coalescing.
 func (p *TopologyPusher) Nudge() { signalNudge(p.nudgeCh) }
 
-// Run pushes once immediately, then on every tick or nudge, until ctx is
-// cancelled. A controller that is unreachable or has no leader is recorded and
-// retried on the next tick; it never terminates the loop.
-//
-// Run must be called exactly once per pusher: a second concurrent Run would
-// share nudgeCh and broadcast the "topology" topic concurrently, violating
-// ws.Hub's one-goroutine-per-topic serialization assumption (see Hub.Broadcast).
+// Run pushes once immediately, then on every tick or nudge, until ctx is cancelled; a controller
+// that is unreachable or has no leader is recorded and retried on the next tick.
 func (p *TopologyPusher) Run(ctx context.Context) {
 	p.push(ctx)
 
@@ -64,10 +59,8 @@ func (p *TopologyPusher) Run(ctx context.Context) {
 	}
 }
 
-// push always broadcasts the controller's own snapshot rather than anything
-// derived from the event that triggered it: TopologyChanged is a refetch
-// signal, not a payload, so the browser can never end up holding a topology the
-// controller does not agree with.
+// push always broadcasts the controller's own snapshot rather than anything derived from the event
+// that triggered it.
 func (p *TopologyPusher) push(ctx context.Context) {
 	topo, err := p.ctrl.Topology(ctx)
 	if err != nil {

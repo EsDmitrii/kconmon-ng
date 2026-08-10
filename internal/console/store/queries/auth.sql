@@ -4,10 +4,8 @@ FROM users
 WHERE username = $1;
 
 -- name: GetUserByID :one
--- password_hash is NEVER selected here: this lookup exists solely to back
--- authn's owner-disabled check (GetUserByID, store/auth.go), which only ever
--- needs Disabled -- same guarantee ListUsers' own comment gives, producing a
--- distinct row type (no password_hash column in its SELECT list at all).
+-- password_hash is NEVER selected here: this lookup exists solely to back authn's owner-disabled
+-- check (GetUserByID, store/auth.go).
 SELECT id, username, display_name, disabled, created_at, updated_at
 FROM users
 WHERE id = $1;
@@ -21,9 +19,7 @@ RETURNING id, username, password_hash, display_name, disabled, created_at, updat
 UPDATE users SET password_hash = $2, updated_at = now() WHERE id = $1;
 
 -- name: ListUsers :many
--- password_hash is NEVER selected here: this result set is exposed to admin
--- UI and API responses, and the hash must never leave the database once
--- written (same guarantee ListTokens gives token_hash).
+-- password_hash is NEVER selected here: this result set is exposed to admin UI and API responses.
 SELECT id, username, display_name, disabled, created_at, updated_at
 FROM users
 ORDER BY username;
@@ -49,9 +45,8 @@ RETURNING name, permissions, created_at;
 DELETE FROM roles WHERE name = $1;
 
 -- name: ListBindingsForSubject :many
--- One round trip per request: resolves both the user's own bindings and every
--- group binding for the caller's group membership in a single query, rather
--- than one query per group.
+-- One round trip per request: resolves both the user's own bindings and every group binding for the
+-- caller's group membership in a single query.
 SELECT id, role_name, subject_kind, subject_id, created_at
 FROM role_bindings
 WHERE (subject_kind = 'user' AND subject_id = sqlc.arg('user_id')::text)
@@ -59,10 +54,7 @@ WHERE (subject_kind = 'user' AND subject_id = sqlc.arg('user_id')::text)
 ORDER BY role_name;
 
 -- name: ListBindings :many
--- Every binding, unscoped -- unlike ListBindingsForSubject (one subject's own
--- resolution), this backs the RBAC admin API's GET /api/v1/rbac/bindings
--- (Task 17) and its delete-role "still referenced" guard rail, neither of
--- which can be answered by a subject-scoped query.
+-- Every binding, unscoped -- unlike ListBindingsForSubject (one subject's own resolution).
 SELECT id, role_name, subject_kind, subject_id, created_at
 FROM role_bindings
 ORDER BY role_name, subject_kind, subject_id;
@@ -76,9 +68,8 @@ RETURNING id, role_name, subject_kind, subject_id, created_at;
 DELETE FROM role_bindings WHERE id = $1;
 
 -- name: GetTokenByHash :one
--- token_hash is deliberately not in the SELECT list, even here: the caller
--- already knows the hash it looked up by, and there is never a reason to hand
--- a hash value back across this boundary.
+-- token_hash is deliberately not in the SELECT list, even here: the caller already knows the hash
+-- it looked up by.
 SELECT id, name, owner, expires_at, last_used_at, revoked_at, created_at
 FROM api_tokens
 WHERE token_hash = $1;
@@ -89,18 +80,8 @@ VALUES ($1, $2, $3, $4)
 RETURNING id, name, owner, expires_at, last_used_at, revoked_at, created_at;
 
 -- name: GetTokenByID :one
--- The single-row counterpart to ListTokens, for the callers that already know
--- WHICH token they want: the mint path (httpapi.resolveInheritedOwner) needs
--- one parent row and used to pay for the whole admin-scale list to find it.
--- token_hash is NEVER selected here either -- for the same reason it is absent
--- from GetTokenByHash's SELECT list: the hash must not leave the database, and
--- this row type must stay structurally identical to the other three so
--- store/auth.go's single tokenRow conversion keeps working.
---
--- No revoked_at/expires_at filtering: revoked and expired tokens are returned
--- as-is, exactly like GetTokenByHash, so the caller decides what those states
--- mean for it. Attributing a new token to a revoked parent's owner is still
--- correct attribution.
+-- The single-row counterpart to ListTokens, for the callers that already know WHICH token they
+-- want.
 SELECT id, name, owner, expires_at, last_used_at, revoked_at, created_at
 FROM api_tokens
 WHERE id = $1;
@@ -115,11 +96,16 @@ ORDER BY created_at DESC;
 -- name: RevokeToken :execrows
 UPDATE api_tokens SET revoked_at = now() WHERE id = $1 AND revoked_at IS NULL;
 
+-- name: PurgeToken :execrows
+-- Hard delete, guarded to rows that can no longer authenticate anything: callers reach this only
+-- for a token they have already read as revoked or expired.
+DELETE FROM api_tokens
+WHERE id = $1
+  AND (revoked_at IS NOT NULL OR (expires_at IS NOT NULL AND expires_at <= now()));
+
 -- name: TouchTokenLastUsed :execrows
--- Callers (the authn layer, Task 14) must debounce this to at most once per
--- minute per token themselves -- see auth.go's TokenStore doc comment. This
--- query is intentionally a plain, cheap single-row UPDATE with no such logic
--- baked in, so the debounce policy stays entirely in the caller's hands.
+-- Callers must debounce this to at most once per minute per token themselves -- see auth.go's
+-- TokenStore doc comment.
 UPDATE api_tokens SET last_used_at = now() WHERE id = $1;
 
 -- name: InsertAuditEntry :one

@@ -15,20 +15,15 @@ import (
 	"github.com/EsDmitrii/kconmon-ng/internal/console/store/gen"
 )
 
-// Sentinel errors the four stores below return. Every consumer compares
-// against these with errors.Is rather than importing pgx to recognize
-// pgx.ErrNoRows or a Postgres error code directly -- store stays the module's
-// only pgx importer.
+// Sentinel errors the four stores below return; every consumer compares against these with
+// errors.Is rather than importing pgx to recognize pgx.ErrNoRows or a Postgres error code directly.
 var (
-	// ErrNotFound is returned by every single-row lookup or targeted
-	// update/delete (GetUserByUsername, GetTokenByHash, UpdateUserPassword,
-	// SetUserDisabled, DeleteRole, DeleteBinding, RevokeToken,
+	// ErrNotFound is returned by every single-row lookup or targeted update/delete (GetUserByUsername,
+	// GetTokenByHash, UpdateUserPassword, SetUserDisabled, DeleteRole, DeleteBinding, RevokeToken,
 	// TouchTokenLastUsed) when no row matches.
 	ErrNotFound = errors.New("store: not found")
-	// ErrAlreadyExists is returned when a unique constraint blocks a write:
-	// CreateUser on a taken username, CreateToken on a colliding token_hash
-	// (astronomically unlikely at 256 random bits, but checked, not assumed),
-	// CreateBinding on a duplicate (role_name, subject_kind, subject_id).
+	// ErrAlreadyExists is returned when a unique constraint blocks a write: CreateUser on a taken
+	// username.
 	ErrAlreadyExists = errors.New("store: already exists")
 )
 
@@ -54,11 +49,8 @@ func wrapUniqueViolation(err error) error {
 	return err
 }
 
-// parseUUID parses s (a canonical UUID string) into the pgtype.UUID every id
-// column in migration 00002 needs. Every public type in this file exposes
-// ids as plain strings -- pgtype.UUID is a gen-package type, and per ADR-001
-// consumers of UserStore/TokenStore/RoleStore must never need to import pgx
-// to use one.
+// parseUUID parses s (a canonical UUID string) into the pgtype.UUID every id column in migration
+// 00002 needs; every public type in this file exposes ids as plain strings.
 func parseUUID(s string) (pgtype.UUID, error) {
 	id, err := uuid.Parse(s)
 	if err != nil {
@@ -101,13 +93,8 @@ func timestamptzFromPtr(t *time.Time) pgtype.Timestamptz {
 type User struct {
 	ID       string
 	Username string
-	// PasswordHash is populated only by GetUserByUsername (for verification)
-	// and by CreateUser (echoing the hash the caller itself supplied). Every
-	// other UserStore method that returns a User (ListUsers) leaves it as the
-	// zero value "". json:"-" so this struct is
-	// never accidentally serialized with a real hash in it -- there is no
-	// legitimate reason for a hash, even an argon2id one, to leave this
-	// package in an HTTP response.
+	// PasswordHash is populated only by GetUserByUsername (for verification) and by CreateUser
+	// (echoing the hash the caller itself supplied).
 	PasswordHash string `json:"-"`
 	DisplayName  string
 	Disabled     bool
@@ -115,16 +102,9 @@ type User struct {
 	UpdatedAt    time.Time
 }
 
-// UserStore is the seam the authn layer (Task 14) and an admin user-management
-// API take.
+// UserStore is the seam the authn layer and an admin user-management API take.
 type UserStore interface {
-	// GetUserByID returns ErrNotFound when no user has that id. A malformed
-	// (non-UUID) id is its own, distinct error -- same house style as
-	// UpdateUserPassword/SetUserDisabled/RevokeToken -- never silently folded
-	// into ErrNotFound. Like ListUsers, the underlying query's SELECT list
-	// omits password_hash entirely: this lookup exists solely to back authn's
-	// owner-disabled check (authn.WithOwnerDisabledCheck), which only ever
-	// needs Disabled, so every returned User has PasswordHash == "".
+	// GetUserByID returns ErrNotFound when no user has that id; a malformed (non-UUID) id is its own.
 	GetUserByID(ctx context.Context, id string) (User, error)
 	// GetUserByUsername returns ErrNotFound when no user has that username.
 	GetUserByUsername(ctx context.Context, username string) (User, error)
@@ -132,10 +112,7 @@ type UserStore interface {
 	CreateUser(ctx context.Context, username, passwordHash, displayName string) (User, error)
 	// UpdateUserPassword returns ErrNotFound when id does not name a user.
 	UpdateUserPassword(ctx context.Context, id, passwordHash string) error
-	// ListUsers never returns a user's password hash: every returned User has
-	// PasswordHash == "". The underlying query's SELECT list omits the column
-	// entirely (same guarantee ListTokens gives token_hash), so there is no
-	// hash value in the row to map in the first place.
+	// ListUsers never returns a user's password hash: every returned User has PasswordHash == "".
 	ListUsers(ctx context.Context) ([]User, error)
 	// CountUsers drives the bootstrap-admin decision: a fresh
 	// database.mode=enabled deployment with zero rows here needs one made,
@@ -173,10 +150,7 @@ func userFromListRow(u *gen.ListUsersRow) User {
 	}
 }
 
-// userFromGetByIDRow maps a GetUserByID row. gen.GetUserByIDRow is a distinct
-// type from gen.User -- its SELECT list omits password_hash, same as
-// gen.ListUsersRow -- so the returned User's PasswordHash is always "",
-// never populated from this path.
+// userFromGetByIDRow maps a GetUserByID row.
 func userFromGetByIDRow(u *gen.GetUserByIDRow) User {
 	return User{
 		ID:          formatUUID(u.ID),
@@ -318,26 +292,11 @@ type RoleStore interface {
 	// custom role.
 	DeleteRole(ctx context.Context, name string) error
 
-	// ListBindingsForSubject resolves every binding for userID and for every
-	// group in groups in ONE round trip -- never one query per group. Pass a
-	// nil or empty groups when the subject has no group memberships.
-	//
-	// subject_id's meaning is pinned per subject_kind. For 'user', subject_id
-	// is users.id, the UUID, in its canonical text form (the same form
-	// User.ID and userID here are in) -- never the username. For 'group',
-	// subject_id is the group name exactly as delivered by header-mode groups
-	// or the OIDC groups claim, with no normalization applied by this store.
-	// A third subject_kind, 'token', is a valid value in the role_bindings
-	// schema (migration 00002) but this query never resolves it -- it has no
-	// WHERE clause branch for subject_kind = 'token' at all. Deciding how (or
-	// whether) a token authenticates as a bindable subject is left entirely
-	// to the authn layer (Task 14).
+	// ListBindingsForSubject resolves every binding for userID and for every group in groups in ONE
+	// round trip.
 	ListBindingsForSubject(ctx context.Context, userID string, groups []string) ([]RoleBinding, error)
-	// ListBindings returns every role binding, unscoped -- for the RBAC
-	// admin API's GET /api/v1/rbac/bindings (Task 17) and its delete-role
-	// "still referenced" guard rail. Added after Task 12 landed: neither
-	// need can be answered by ListBindingsForSubject, which only ever
-	// resolves bindings for ONE subject's own role resolution.
+	// ListBindings returns every role binding; added after landed: neither need can be answered by
+	// ListBindingsForSubject.
 	ListBindings(ctx context.Context) ([]RoleBinding, error)
 	// CreateBinding returns ErrAlreadyExists for a duplicate
 	// (roleName, subjectKind, subjectID).
@@ -461,9 +420,8 @@ func (db *DB) DeleteBinding(ctx context.Context, id int64) error {
 // API tokens
 // ---------------------------------------------------------------------------
 
-// Token is one API token's metadata. TokenHash is deliberately absent: it is
-// SHA-256 of 256 random bits (Decision 11), write-only from this package's
-// perspective -- CreateToken accepts one, nothing ever reads one back out.
+// Token is one API token's metadata; TokenHash is deliberately absent: it is SHA-256 of 256 random
+// bits.
 type Token struct {
 	ID         string
 	Name       string
@@ -474,62 +432,29 @@ type Token struct {
 	CreatedAt  time.Time
 }
 
-// TokenStore is the seam the authn layer (Task 14, bearer-token verification)
-// and an admin token-management API take.
-//
-// TouchTokenLastUsed must NEVER be called synchronously on the request path:
-// a write per authenticated request would serialize every token-authenticated
-// request behind the write connection pool. The authn layer (Task 14) owns a
-// small in-memory debounce map (per token id, at most once per minute) and
-// calls this at most that often. This method itself has no debounce logic --
-// by design, so that policy stays entirely in the caller's hands.
-//
-// api_tokens.owner is a plain text column, not a foreign key into users, and
-// GetTokenByHash never joins users -- this store never rejects a token based
-// on its owner's Disabled state, and never will (that is not a decision a
-// single-row lookup can make correctly; see GetUserByID). Closing that gap
-// happens one layer up: authn.WithOwnerDisabledCheck (internal/console/authn/
-// token.go) wires GetUserByID into the token-verification path, and
-// cmd/console/main.go passes that option to authn.NewTokenFallback whenever a
-// database is configured. A disabled user's still-valid, unexpired tokens
-// stop authenticating once that option is wired; without it (database.mode=
-// disabled, or an authn composition that opts out) they keep authenticating
-// exactly as before, unchanged by this store.
+// TokenStore is the seam the authn layer and an admin token-management API take; TouchTokenLastUsed
+// must NEVER be called synchronously on the request path.
 type TokenStore interface {
-	// GetTokenByHash returns ErrNotFound for an unknown hash. It does NOT
-	// collapse revoked/expired/unknown into one outcome: RevokedAt and
-	// ExpiresAt are returned as-is so the caller can distinguish them
-	// internally. Whether an HTTP response to an untrusted caller may reveal
-	// that distinction is an authn-layer decision, not this store's.
+	// GetTokenByHash returns ErrNotFound for an unknown hash.
 	GetTokenByHash(ctx context.Context, hash []byte) (Token, error)
 	// CreateToken returns ErrAlreadyExists on the (practically impossible)
 	// event of a token_hash collision. expiresAt == nil means the token never
 	// expires.
 	CreateToken(ctx context.Context, name string, hash []byte, owner string, expiresAt *time.Time) (Token, error)
-	// GetTokenByID returns ErrNotFound when id does not name a token. A
-	// malformed (non-UUID) id is its own, distinct error -- the same house
-	// style GetUserByID's doc comment states for this whole file -- never
-	// silently folded into ErrNotFound.
-	//
-	// This is ListTokens' single-row counterpart, and it exists because the
-	// mint path had no such primitive: httpapi.resolveInheritedOwner knows
-	// exactly which parent token it wants and used to page the ENTIRE
-	// api_tokens table in to find it, on every POST /api/v1/tokens made by a
-	// token. Like every other query in this file it never returns a hash --
-	// Token has no field to hold one.
-	//
-	// Revoked and expired tokens are returned as-is, exactly like
-	// GetTokenByHash: this is a lookup, not an admission decision, and the
-	// caller owns what those states mean for it.
+	// GetTokenByID returns ErrNotFound when id does not name a token; a malformed (non-UUID) id is its
+	// own.
 	GetTokenByID(ctx context.Context, id string) (Token, error)
 	// ListTokens never returns a token's hash -- there is no field in Token
 	// to hold one.
 	ListTokens(ctx context.Context) ([]Token, error)
-	// RevokeToken returns ErrNotFound when id does not name a currently
-	// active token (never existed, or already revoked -- both leave the
-	// WHERE revoked_at IS NULL guard matching 0 rows; a caller that must tell
-	// these apart calls GetTokenByHash first).
+	// RevokeToken returns ErrNotFound when id does not name a currently active token (never existed,
+	// or already revoked -- both leave the WHERE revoked_at IS NULL guard matching 0 rows; a caller
+	// that must tell these apart calls GetTokenByHash first).
 	RevokeToken(ctx context.Context, id string) error
+	// PurgeToken hard-deletes a token row, but only one that can no longer authenticate anything
+	// (already revoked, or past its expiry); it returns ErrNotFound for an unknown id AND for a
+	// still-active one, so an active credential cannot be erased without being revoked first.
+	PurgeToken(ctx context.Context, id string) error
 	// TouchTokenLastUsed returns ErrNotFound when id does not name a token.
 	// See the interface doc comment above: never call this synchronously on
 	// every authenticated request.
@@ -538,15 +463,8 @@ type TokenStore interface {
 
 var _ TokenStore = (*DB)(nil)
 
-// tokenRow is the field-for-field shape every api_tokens query row shares
-// (id, name, owner, expires_at, last_used_at, revoked_at, created_at, in that
-// order). sqlc emits a distinct named row type per query -- CreateTokenRow,
-// GetTokenByHashRow, ListTokensRow -- because none of their SELECT lists
-// matches the full ApiToken model (token_hash is always excluded), even
-// though the three are structurally identical. A plain type conversion
-// (tokenRow(r)) at each call site is valid Go precisely because the
-// underlying field sequences match, and is cheaper than three near-duplicate
-// mapping functions.
+// tokenRow is the field-for-field shape every api_tokens query row shares (id, name, owner,
+// expires_at, last_used_at, revoked_at, created_at, in that order).
 type tokenRow struct {
 	ID         pgtype.UUID
 	Name       string
@@ -620,11 +538,7 @@ func (db *DB) ListTokens(ctx context.Context) ([]Token, error) {
 	}
 	tokens := make([]Token, len(rows))
 	for i := range rows {
-		// (*tokenRow)(&rows[i]): a pointer conversion between *ListTokensRow
-		// and *tokenRow, valid because their base types' field sequences are
-		// identical (see tokenRow's doc comment) -- avoids both the 176-byte
-		// per-iteration value copy gocritic flags and a fourth near-duplicate
-		// mapping function.
+		// (*tokenRow)(&rows[i]): a pointer conversion between *ListTokensRow and *tokenRow.
 		tokens[i] = tokenFromRow((*tokenRow)(&rows[i]))
 	}
 	return tokens, nil
@@ -643,6 +557,23 @@ func (db *DB) RevokeToken(ctx context.Context, id string) error {
 	}
 	if rows == 0 {
 		return fmt.Errorf("store: revoke token: %w", ErrNotFound)
+	}
+	return nil
+}
+
+func (db *DB) PurgeToken(ctx context.Context, id string) error {
+	tid, err := parseUUID(id)
+	if err != nil {
+		return fmt.Errorf("store: purge token: %w", err)
+	}
+	start := time.Now()
+	rows, err := gen.New(db.pool).PurgeToken(ctx, tid)
+	db.observe(queryPurgeToken, start, queryResult(err))
+	if err != nil {
+		return fmt.Errorf("store: purge token: %w", err)
+	}
+	if rows == 0 {
+		return fmt.Errorf("store: purge token: %w", ErrNotFound)
 	}
 	return nil
 }

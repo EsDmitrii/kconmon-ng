@@ -12,11 +12,7 @@ import (
 	"github.com/EsDmitrii/kconmon-ng/internal/model"
 )
 
-// TestRegistryRetainsAgentCapabilities pins the round-trip the external
-// destination gate depends on: what an agent advertises in RegisterRequest must
-// survive registry storage and come back out of GetByNodeName and
-// agentInfoToProto, otherwise the controller can never tell an M4 agent from a
-// pre-M4 one.
+// TestRegistryRetainsAgentCapabilities pins the round-trip the external destination gate depends.
 func TestRegistryRetainsAgentCapabilities(t *testing.T) {
 	srv, reg := newTestGRPCServer()
 
@@ -335,12 +331,7 @@ func TestRegistryDeregisterUnknownNoOp(t *testing.T) {
 	}
 }
 
-// --- topology attribution (M7 Task 11) -----------------------------------
-//
-// Every registry mutation that fires OnChange must name WHO it was about.
-// These four tests are the attribution matrix, one per emission site: they are
-// what stops the M3 regression (a Reason with no subject) from coming back,
-// because an unattributed event is invisible to the console's topology fold.
+// topology attribution Every registry mutation that fires OnChange must name WHO it was about.
 
 // recordChanges subscribes to r and returns a snapshot-taking accessor for
 // every TopologyChange observed since subscription.
@@ -444,10 +435,8 @@ func TestDeregisterAttributesTheDepartedAgentsLastKnownPlacement(t *testing.T) {
 	}
 }
 
-// One TTL sweep can take several agents out at once. They are DIFFERENT nodes,
-// so a single subject would attribute the sweep to whichever one the map
-// iteration happened to reach first; the change carries all of them, sorted so
-// the emitted event order is deterministic.
+// One TTL sweep can take several agents out at once; they are DIFFERENT nodes, so a single subject
+// would attribute the sweep to whichever one the map iteration happened to reach.
 func TestEvictStaleAttributesEveryEvictedAgent(t *testing.T) {
 	r := NewRegistry(time.Nanosecond)
 	r.Register(model.AgentInfo{ID: "agent-2", NodeName: "node-2", Zone: "zone-b"})

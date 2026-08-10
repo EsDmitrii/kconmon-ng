@@ -1,8 +1,5 @@
 -- +goose Up
 -- check_runs is one fan-out execution: one spec, N (source, destination) pairs.
--- The spec is snapshotted as JSONB so a run remains readable after the
--- definition that produced it changes (DATA.md §5.2 "Every run: spec snapshot,
--- status, timings, initiator").
 CREATE TABLE check_runs (
     id             UUID        PRIMARY KEY,
     created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -28,10 +25,8 @@ CREATE TABLE check_results (
     success          BOOLEAN     NOT NULL,
     duration_ns      BIGINT      NOT NULL,   -- nanoseconds, repo-wide convention
     error            TEXT        NOT NULL DEFAULT '',
-    -- The agent's model.CheckResult verbatim, exactly as the controller returned
-    -- it (internal/controller/diagnostics.go writes res.GetDetailsJson()
-    -- unmodified). Storing it whole means an MTR hop list survives without a
-    -- schema per check type.
+    -- The agent's model.CheckResult verbatim, exactly as the controller returned it
+    -- (internal/controller/diagnostics.go writes res.GetDetailsJson unmodified).
     result           JSONB       NOT NULL,
     recorded_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
     CONSTRAINT check_results_pair_unique UNIQUE (run_id, source_node, destination_node)

@@ -13,58 +13,36 @@ import (
 
 type Querier interface {
 	CountUsers(ctx context.Context) (int64, error)
-	// id is caller-supplied, same as CreateTarget (targets.sql): the column has a
-	// gen_random_uuid() DEFAULT for anything writing this table by hand, but the
-	// Go layer mints its own so a create is retry-identifiable. The sync columns
-	// are deliberately absent from the INSERT: a rule that has just been typed has
-	// never been applied, and 'unsynced' is exactly the column DEFAULT.
+	// id is caller-supplied, same as CreateTarget (targets.sql); the sync columns are deliberately
+	// absent from the INSERT.
 	CreateAlertRule(ctx context.Context, arg CreateAlertRuleParams) (AlertRule, error)
-	// id is caller-supplied, same as CreateTarget (targets.sql): the column has a
-	// DEFAULT, but minting the UUID in Go keeps the package's one id story and
-	// makes a retried create identifiable rather than a second mark on the chart.
+	// id is caller-supplied, same as CreateTarget (targets.sql): the column has a DEFAULT.
 	CreateAnnotation(ctx context.Context, arg CreateAnnotationParams) (Annotation, error)
 	CreateBinding(ctx context.Context, arg CreateBindingParams) (RoleBinding, error)
-	// destination_target_id is NULL for every destination_kind other than
-	// 'target'; a non-NULL value naming no targets row fails with a
-	// foreign_key_violation, which the Go layer reports as ErrNotFound (the
-	// reference is missing) rather than ErrInUse (which is the DELETE direction).
+	// destination_target_id is NULL for every destination_kind other than 'target'.
 	CreateDefinition(ctx context.Context, arg CreateDefinitionParams) (CheckDefinition, error)
-	// id is caller-supplied, same as CreateTarget and CreateAnnotation: the column
-	// has a DEFAULT, but minting the UUID in Go keeps the package's one id story
-	// and makes a retried create identifiable rather than a second incident.
+	// id is caller-supplied, same as CreateTarget and CreateAnnotation: the column has a DEFAULT.
 	CreateIncident(ctx context.Context, arg CreateIncidentParams) (Incident, error)
 	// id is caller-supplied, same as CreateAnnotation: see that query's comment.
 	CreateMaintenanceWindow(ctx context.Context, arg CreateMaintenanceWindowParams) (MaintenanceWindow, error)
-	// status is always the literal 'pending' -- a caller never gets to create a
-	// run in any other status; the lifecycle only ever advances it forward via
-	// MarkRunStarted and FinishRun below. id is caller-supplied (not DB-default,
-	// unlike users/api_tokens): the runner mints the UUID before this INSERT so
-	// it can also be the ephemeral WS "run:{id}" topic name (Task 20) without a
-	// round trip first.
+	// status is always the literal 'pending' -- a caller never gets to create a run in any other
+	// status.
 	CreateRun(ctx context.Context, arg CreateRunParams) (CheckRun, error)
 	CreateSchedule(ctx context.Context, arg CreateScheduleParams) (CheckSchedule, error)
-	// id is caller-supplied, same as CreateRun (checks.sql): targets.id has no
-	// column DEFAULT, so the Go layer mints the UUID. That also means a caller
-	// retrying a create with the same id gets ErrAlreadyExists rather than a
-	// second row.
+	// id is caller-supplied, same as CreateRun (checks.sql): targets.id has no column DEFAULT; that
+	// also means a caller retrying a create with the same id gets ErrAlreadyExists rather than a second
+	// row.
 	CreateTarget(ctx context.Context, arg CreateTargetParams) (Target, error)
 	CreateToken(ctx context.Context, arg CreateTokenParams) (CreateTokenRow, error)
 	CreateUser(ctx context.Context, arg CreateUserParams) (User, error)
 	// secret_enc travels in and out of this layer as OPAQUE BYTES: the store never
 	// encrypts, decrypts or inspects it (migration 00006's comment on the column).
 	CreateWebhook(ctx context.Context, arg CreateWebhookParams) (Webhook, error)
-	// No cascade and no dependents: a rule references nothing and nothing
-	// references it. The CRD object it rendered into is the reconciler's to
-	// withdraw, not this statement's.
+	// No cascade and no dependents: a rule references nothing and nothing references it.
 	DeleteAlertRule(ctx context.Context, id pgtype.UUID) (int64, error)
-	// No cascade and nothing references an annotation: deleting a mark removes
-	// the mark and nothing else. M5 has no edit (Decision 10), so delete-and-
-	// recreate is the only correction path and it has to be clean.
+	// has no edit, so delete-and-recreate is the only correction path and it has to be clean.
 	DeleteAnnotation(ctx context.Context, id pgtype.UUID) (int64, error)
-	// Retention by start_at: an annotation is pinned to the moment it describes,
-	// so it ages out with the data it annotates rather than with when it was
-	// typed. a alias on the subquery's own FROM for the sqlc v1.31.1 analyzer
-	// quirk documented on DeleteRunsBefore (checks.sql).
+	// Retention by start_at: an annotation is pinned to the moment it describes.
 	DeleteAnnotationsBefore(ctx context.Context, arg DeleteAnnotationsBeforeParams) (int64, error)
 	// al alias on the subquery's own FROM: see DeleteTopologyEventsBefore's
 	// comment in topology_events.sql for why sqlc v1.31.1 needs it even though
@@ -74,455 +52,164 @@ type Querier interface {
 	// ON DELETE CASCADE on check_schedules.definition_id removes the definition's
 	// schedules along with it -- no separate schedule sweep exists or is needed.
 	DeleteDefinition(ctx context.Context, id pgtype.UUID) (int64, error)
-	// The cache's retention sweep. Every row here is re-derivable from the
-	// resolvers that wrote it, so this deletes cheerfully: the cost of being
-	// wrong is one lookup, not lost data. e alias for the same analyzer quirk.
+	// The cache's retention sweep.
 	DeleteEnrichmentBefore(ctx context.Context, arg DeleteEnrichmentBeforeParams) (int64, error)
-	// Nothing references an incident, so deleting one removes the incident and
-	// nothing else. Its permalink (/investigate?incident={id}) simply stops
-	// resolving, which is the honest outcome for a link to something deleted.
+	// Nothing references an incident, so deleting one removes the incident and nothing else.
 	DeleteIncident(ctx context.Context, id pgtype.UUID) (int64, error)
-	// Retention by resolved_at, and note what that does NOT match: an OPEN
-	// incident has a NULL resolved_at, and `NULL < $1` is NULL, never true, so an
-	// open incident can never be selected here however old it is. That is the
-	// point -- an investigation nobody closed is not stale data, it is unfinished
-	// work, and the retention sweep must not close it by deleting it.
-	//
-	// i alias on the subquery's own FROM for the sqlc v1.31.1 analyzer quirk
-	// documented on DeleteRunsBefore (checks.sql).
+	// Retention by resolved_at, and note what that does NOT match: an OPEN incident has a NULL
+	// resolved_at.
 	DeleteIncidentsBefore(ctx context.Context, arg DeleteIncidentsBeforeParams) (int64, error)
 	// Retention by event_time: the capture ages out with the window it describes.
-	// k alias on the subquery's own FROM for the sqlc v1.31.1 analyzer quirk
-	// documented on DeleteTopologyEventsBefore (topology_events.sql).
 	DeleteK8sEventsBefore(ctx context.Context, arg DeleteK8sEventsBeforeParams) (int64, error)
-	// There is no edit by design (M6 Task 4): a window is two timestamps and a
-	// reason, so delete-and-recreate is both the correction path and the whole of
-	// it. Nothing references a window, so this removes it and nothing else.
+	// There is no edit by design: a window is two timestamps and a reason.
 	DeleteMaintenanceWindow(ctx context.Context, id pgtype.UUID) (int64, error)
-	// Retention by end_at, not start_at: a window that is still open is still
-	// current however long ago it began -- the same reasoning
-	// DeletePathSnapshotsBefore applies to last_seen. m alias on the subquery's
-	// own FROM for the sqlc v1.31.1 analyzer quirk documented on DeleteRunsBefore
-	// (checks.sql).
+	// Retention by end_at, not start_at: a window that is still open is still current however long ago
+	// it began.
 	DeleteMaintenanceWindowsBefore(ctx context.Context, arg DeleteMaintenanceWindowsBeforeParams) (int64, error)
-	// Retention by last_seen, not first_seen: a route the pair still takes is
-	// still current however long ago it was first observed. s alias on the
-	// subquery's own FROM for the sqlc v1.31.1 analyzer quirk documented on
-	// DeleteRunsBefore (checks.sql).
+	// Retention by last_seen, not first_seen: a route the pair still takes is still current however
+	// long ago it was first observed.
 	DeletePathSnapshotsBefore(ctx context.Context, arg DeletePathSnapshotsBeforeParams) (int64, error)
 	DeleteRole(ctx context.Context, name string) (int64, error)
-	// cr alias on the subquery's own FROM: sqlc v1.31.1's own query analyzer
-	// (not real PostgreSQL -- verified this exact self-join resolves
-	// unambiguously against a live postgres:17-alpine) reports an ambiguous
-	// column reference for the unaliased form, same quirk documented on
-	// DeleteTopologyEventsBefore (topology_events.sql) and
-	// DeleteAuditEntriesBefore (auth.sql). ON DELETE CASCADE on check_results.run_id
-	// means deleting the run row here is enough to also drop its results -- no
-	// separate check_results sweep exists or is needed.
+	// cr alias on the subquery's own FROM: sqlc v1.31.1's own query analyzer (not real PostgreSQL --
+	// verified this exact self-join resolves unambiguously against a live postgres:17-alpine) reports
+	// an ambiguous column reference for the unaliased form, same quirk documented on
+	// DeleteTopologyEventsBefore (topology_events.sql) and DeleteAuditEntriesBefore (auth.sql).
 	DeleteRunsBefore(ctx context.Context, arg DeleteRunsBeforeParams) (int64, error)
 	DeleteSchedule(ctx context.Context, id pgtype.UUID) (int64, error)
-	// No cascade of any kind: check_definitions.destination_target_id is
-	// ON DELETE RESTRICT, so this statement fails with a foreign_key_violation
-	// (mapped to ErrInUse) while any definition still probes the target.
+	// No cascade of any kind: check_definitions.destination_target_id is ON DELETE RESTRICT.
 	DeleteTarget(ctx context.Context, id pgtype.UUID) (int64, error)
-	// The inner subquery aliases topology_events as te: sqlc v1.31.1's own query
-	// analyzer (not real PostgreSQL -- verified this exact self-join resolves
-	// unambiguously against a live postgres:17-alpine) reports "column reference
-	// event_time is ambiguous" for the unaliased form the brief specifies
-	// verbatim, because it does not scope-resolve the DELETE target table
-	// against the subquery's own FROM. The alias is a no-op for Postgres and
-	// changes nothing about the query's semantics or its plan.
+	// The inner subquery aliases topology_events as te: sqlc v1.31.1's own query analyzer.
 	DeleteTopologyEventsBefore(ctx context.Context, arg DeleteTopologyEventsBeforeParams) (int64, error)
 	DeleteWebhook(ctx context.Context, id pgtype.UUID) (int64, error)
-	// status + finished_at + both pair counters in one UPDATE, so a reader never
-	// observes a run whose status says "succeeded" while pair_ok/pair_failed
-	// still read their zero-value default. AND status = 'running' guards the
-	// running->terminal transition the same way MarkRunStarted's AND status =
-	// 'pending' does: a run that never started, or already finished, is left
-	// untouched (0 rows) rather than silently overwritten by a retry.
+	// status + finished_at + both pair counters in one UPDATE.
 	FinishRun(ctx context.Context, arg FinishRunParams) (int64, error)
 	GetAlertRule(ctx context.Context, id pgtype.UUID) (AlertRule, error)
 	GetAnnotation(ctx context.Context, id pgtype.UUID) (Annotation, error)
 	GetDefinition(ctx context.Context, id pgtype.UUID) (CheckDefinition, error)
-	// The read half of the TTL cache. Callers ask for a whole trace's hop IPs at
-	// once (a snapshot detail is up to 64 of them), so this is one round trip
-	// with an array rather than one per hop. Rows the cache does not have are
-	// simply absent from the result -- a miss is not an error, it is the signal
-	// to resolve.
+	// The read half of the TTL cache; callers ask for a whole trace's hop IPs at once (a snapshot
+	// detail is up to 64 of them).
 	GetEnrichment(ctx context.Context, ips []string) ([]MtrHopEnrichment, error)
 	GetIncident(ctx context.Context, id pgtype.UUID) (Incident, error)
 	GetPathSnapshot(ctx context.Context, id pgtype.UUID) (MtrPathSnapshot, error)
 	GetRun(ctx context.Context, id pgtype.UUID) (CheckRun, error)
+	// ORDER BY id, not (pair, sample_seq): id is insertion order.
 	GetRunResults(ctx context.Context, runID pgtype.UUID) ([]CheckResult, error)
 	GetSchedule(ctx context.Context, id pgtype.UUID) (CheckSchedule, error)
 	GetTarget(ctx context.Context, id pgtype.UUID) (Target, error)
-	// token_hash is deliberately not in the SELECT list, even here: the caller
-	// already knows the hash it looked up by, and there is never a reason to hand
-	// a hash value back across this boundary.
+	// token_hash is deliberately not in the SELECT list, even here: the caller already knows the hash
+	// it looked up by.
 	GetTokenByHash(ctx context.Context, tokenHash []byte) (GetTokenByHashRow, error)
-	// The single-row counterpart to ListTokens, for the callers that already know
-	// WHICH token they want: the mint path (httpapi.resolveInheritedOwner) needs
-	// one parent row and used to pay for the whole admin-scale list to find it.
-	// token_hash is NEVER selected here either -- for the same reason it is absent
-	// from GetTokenByHash's SELECT list: the hash must not leave the database, and
-	// this row type must stay structurally identical to the other three so
-	// store/auth.go's single tokenRow conversion keeps working.
-	//
-	// No revoked_at/expires_at filtering: revoked and expired tokens are returned
-	// as-is, exactly like GetTokenByHash, so the caller decides what those states
-	// mean for it. Attributing a new token to a revoked parent's owner is still
-	// correct attribution.
+	// The single-row counterpart to ListTokens, for the callers that already know WHICH token they
+	// want.
 	GetTokenByID(ctx context.Context, id pgtype.UUID) (GetTokenByIDRow, error)
-	// password_hash is NEVER selected here: this lookup exists solely to back
-	// authn's owner-disabled check (GetUserByID, store/auth.go), which only ever
-	// needs Disabled -- same guarantee ListUsers' own comment gives, producing a
-	// distinct row type (no password_hash column in its SELECT list at all).
+	// password_hash is NEVER selected here: this lookup exists solely to back authn's owner-disabled
+	// check (GetUserByID, store/auth.go).
 	GetUserByID(ctx context.Context, id pgtype.UUID) (GetUserByIDRow, error)
 	GetUserByUsername(ctx context.Context, username string) (User, error)
 	GetWebhook(ctx context.Context, id pgtype.UUID) (Webhook, error)
 	InsertAuditEntry(ctx context.Context, arg InsertAuditEntryParams) (InsertAuditEntryRow, error)
-	// The idempotent capture write (M6 Decision 3). ON CONFLICT DO NOTHING over
-	// (uid, resource_ver) is the same shape InsertTopologyEvent uses over its own
-	// natural key, and for the same reason: the writer re-lists on every watch
-	// expiry, so it re-offers every event it has already stored on every relist,
-	// and "already there" is the NORMAL outcome rather than an error. :execrows
-	// makes that observable -- 0 rows means the conflict fired, 1 means the
-	// revision is new -- which is what the reader's stored|duplicate metric split
-	// is built on.
-	//
-	// Note the key is the PAIR: a recurring event keeps its uid and gets a new
-	// resourceVersion and a bumped count, so each revision lands as its own row
-	// and the timeline can show the recurrence.
+	// The idempotent capture write; ON CONFLICT DO NOTHING over (uid, resource_ver) is the same shape
+	// InsertTopologyEvent uses over its own natural key.
 	InsertK8sEvent(ctx context.Context, arg InsertK8sEventParams) (int64, error)
 	InsertTopologyEvent(ctx context.Context, arg InsertTopologyEventParams) (int64, error)
-	// UNPAGED by design, the same call ListWebhooks makes: the row count is rules
-	// an operator typed -- dozens, not thousands -- bounded by how many were
-	// configured rather than by how long the system has been running. A keyset
-	// cursor over that would be machinery with nothing to do.
-	//
-	// ORDER BY lower(name) is the alert_rules_name_lower_idx order, and it is
-	// TOTAL rather than merely stable: that index is UNIQUE, so no two rows can
-	// share a sort key and no tiebreaker column is needed.
-	//
-	// enabled_only is a plain boolean rather than a nullable narg: "every rule" and
-	// "the enabled ones" are the only two questions this list is ever asked, and
-	// a three-state filter would invent a third nobody has.
+	// UNPAGED by design, the same call ListWebhooks makes: the row count is rules an operator typed --
+	// dozens.
 	ListAlertRules(ctx context.Context, enabledOnly bool) ([]AlertRule, error)
-	// The chart-marker query: every annotation whose interval OVERLAPS the
-	// requested window, newest first. An instant mark (end_at NULL) is treated as
-	// the zero-length interval [start_at, start_at], which coalesce spells out --
-	// without it a NULL end_at would fail the lower-bound test and every instant
-	// mark, i.e. most of them, would vanish from a bounded window.
-	//
-	// The window is half-open: start_at < 'to' and the mark's end >= 'from'. A
-	// NULL bound is unbounded on that side, the same "narg means no filter"
-	// convention every other listing in this package uses.
-	//
-	// scope's filter is the SQL NULL / '' distinction, not the empty-string one
-	// every other listing here uses: '' is the GLOBAL scope, a real value a
-	// caller must be able to ask for, so "no filter" is spelled as a NULL
-	// argument and an empty-string argument selects exactly the global marks.
-	//
-	// (start_at DESC, id DESC) is annotations_time_idx's own order, so the
-	// listing pages without a sort.
+	// The chart-marker query: every annotation whose interval OVERLAPS the requested window.
 	ListAnnotations(ctx context.Context, arg ListAnnotationsParams) ([]Annotation, error)
 	// Same keyset cursor shape as ListTopologyEvents: (at, id) DESC, seeked via
 	// the row-tuple comparison below against audit_log_at_idx.
 	ListAuditEntries(ctx context.Context, arg ListAuditEntriesParams) ([]AuditLog, error)
-	// Every binding, unscoped -- unlike ListBindingsForSubject (one subject's own
-	// resolution), this backs the RBAC admin API's GET /api/v1/rbac/bindings
-	// (Task 17) and its delete-role "still referenced" guard rail, neither of
-	// which can be answered by a subject-scoped query.
+	// Every binding, unscoped -- unlike ListBindingsForSubject (one subject's own resolution).
 	ListBindings(ctx context.Context) ([]RoleBinding, error)
-	// One round trip per request: resolves both the user's own bindings and every
-	// group binding for the caller's group membership in a single query, rather
-	// than one query per group.
+	// One round trip per request: resolves both the user's own bindings and every group binding for the
+	// caller's group membership in a single query.
 	ListBindingsForSubject(ctx context.Context, arg ListBindingsForSubjectParams) ([]RoleBinding, error)
-	// The target_id filter is what check_definitions_target_idx exists for: the
-	// "which definitions would this target's deletion break?" question an admin
-	// API asks before it ever attempts the DELETE.
+	// The target_id filter is what check_definitions_target_idx exists for.
 	ListDefinitions(ctx context.Context, arg ListDefinitionsParams) ([]CheckDefinition, error)
-	// The WHERE clause is written to match check_schedules_due_idx exactly --
-	// "enabled" bare (the index's own predicate) and a plain range test on
-	// next_fire_at (its key), nothing else. next_fire_at IS NOT NULL is left
-	// implicit: a NULL never satisfies <=, and spelling it out would add a clause
-	// the partial index cannot be matched against. ORDER BY next_fire_at is the
-	// index's own order, so the scheduler's due poll is an index range scan with
-	// no sort, however large the table grows.
+	// The WHERE clause is written to match check_schedules_due_idx exactly.
 	ListDueSchedules(ctx context.Context, arg ListDueSchedulesParams) ([]CheckSchedule, error)
-	// The incidents listing, newest-created first. status and scope are exact
-	// matches; from/to bound the window an incident's OWN RANGE must overlap, not
-	// the window it was created in -- an incident that began before the window and
-	// is still open is exactly the one an operator looking at that window needs.
-	//
-	// to_at NULL is an OPEN-ENDED range, so it coalesces to 'infinity' rather than
-	// back onto from_at (which is what annotations does, because there NULL means
-	// an instant mark -- the two columns look alike and mean opposite things).
-	//
-	// scope takes the annotations NULL/'' treatment: '' is the GLOBAL scope, a real
-	// value a caller must be able to ask for, so "no filter" is a SQL NULL
-	// argument and an empty-string argument selects exactly the global incidents.
-	//
-	// (created_at DESC, id DESC) is both index's trailing key order, so a listing
-	// filtered by status rides incidents_status_created_idx and one filtered by
-	// scope rides incidents_scope_idx, neither with a sort.
+	// The incidents listing, newest-created first.
 	ListIncidents(ctx context.Context, arg ListIncidentsParams) ([]Incident, error)
-	// The timeline's K8s source, newest first. Every filter is optional and every
-	// one of them is spelled as a narg so an unbound filter folds out of the plan
-	// entirely -- with name bound the WHERE/ORDER BY pair matches
-	// k8s_events_name_time_idx exactly (equality on the leading column, then the
-	// (event_time DESC, id DESC) keyset), and with name unbound the same query
-	// rides k8s_events_time_idx.
-	//
-	// The window is half-open, [from, to), the same convention every other
-	// listing in this package uses. The cursor is the (event_time, id) bigint
-	// keyset, i.e. the topology_events family, because the primary key here is a
-	// BIGSERIAL rather than a UUID.
+	// The timeline's K8s source; the cursor is the (event_time, id) bigint keyset, i.e. the
+	// topology_events family.
 	ListK8sEvents(ctx context.Context, arg ListK8sEventsParams) ([]K8sEvent, error)
-	// The MTR Explorer's left pane: every (source, destination) pair path history
-	// knows about, with how many distinct routes it has taken and when it was
-	// last traced. Unbounded by design -- the row count is pairs, not traces, so
-	// it is bounded by the cluster's own size rather than by time.
+	// The MTR Explorer's left pane: every (source, destination) pair path history knows about.
 	ListMTRDestinations(ctx context.Context) ([]ListMTRDestinationsRow, error)
-	// Every window whose interval OVERLAPS the requested range, newest first --
-	// the chart-markArea query, so containment would be the wrong test: a window
-	// that opened before the range and is still running inside it is exactly the
-	// one that explains what the operator is looking at.
-	//
-	// Both ends are closed here (the table's own CHECK guarantees end_at >
-	// start_at), so no coalesce is needed: the overlap is `end_at >= from AND
-	// start_at < to`, half-open on the upper bound like every other window in this
-	// package.
-	//
-	// scope takes the annotations NULL/'' treatment -- '' is the global scope, a
-	// real value, so "no filter" is a SQL NULL argument.
-	//
-	// (start_at DESC, id DESC) is maintenance_time_idx's own order, so the listing
-	// pages without a sort.
+	// Every window whose interval OVERLAPS the requested range, newest first -- the chart-markArea
+	// query.
 	ListMaintenanceWindows(ctx context.Context, arg ListMaintenanceWindowsParams) ([]MaintenanceWindow, error)
-	// The pair's route history, newest first. The WHERE/ORDER BY pair is written
-	// to match mtr_snapshots_pair_seen_idx exactly: equality on the two leading
-	// columns, then the (last_seen, id) keyset the cursor carries, then the
-	// index's own DESC ordering -- so a pair with a long history pages without a
-	// sort. Keeping the source/destination filters optional costs nothing here:
-	// with both bound to real values the planner's custom plan folds the
-	// IS NULL arms away and the index scan is what is left.
+	// The pair's route history.
 	ListPathSnapshots(ctx context.Context, arg ListPathSnapshotsParams) ([]MtrPathSnapshot, error)
 	ListRoles(ctx context.Context) ([]Role, error)
-	// Same keyset cursor shape as ListTopologyEvents/ListAuditEntries: (created_at,
-	// id) DESC, seeked via the row-tuple comparison below against
-	// check_runs_created_idx. id is UUID rather than bigint here -- it does not
-	// need to be a meaningful sort order, only a stable deterministic tie-breaker
-	// for rows sharing one created_at.
+	// Same keyset cursor shape as ListTopologyEvents/ListAuditEntries: (created_at, id) DESC.
 	ListRuns(ctx context.Context, arg ListRunsParams) ([]CheckRun, error)
 	ListSchedules(ctx context.Context, arg ListSchedulesParams) ([]CheckSchedule, error)
-	// Same keyset cursor shape as ListRuns: (created_at, id) DESC seeked via a
-	// row-tuple comparison. targets carries no (created_at DESC, id DESC) index
-	// -- it is a curated configuration table an operator maintains by hand, sized
-	// in the tens, so the ordering is a sort over a handful of rows, not a scan
-	// the planner needs help with.
+	// Same keyset cursor shape as ListRuns: (created_at, id) DESC seeked via a row-tuple comparison.
 	ListTargets(ctx context.Context, arg ListTargetsParams) ([]Target, error)
 	// token_hash is NEVER selected here: this result set is exposed to admin UI
 	// and API responses, and the hash must never leave the database once written.
 	ListTokens(ctx context.Context) ([]ListTokensRow, error)
-	//
-	// scope is the EXACT filter. scope_node is the pair-aware one a node/target
-	// card needs: a check between two nodes is stored under the pair scope
-	// "<src>→<dst>" (U+2192 RIGHTWARDS ARROW -- events.pairScope,
-	// internal/console/events/live_event.go, is the only writer of this column's
-	// pair form, so this literal and that one must stay identical), which an
-	// equality filter on a single node name can never see. The two are mutually
-	// exclusive at the HTTP layer (422); ANDed here, because a query that silently
-	// ignored one of two supplied filters would be worse than a narrow answer.
-	//
-	// The LIKE patterns are built from a param, so the name's own LIKE
-	// metacharacters MUST be neutralised: scope carries target names too, and
-	// store.validateName's charset (targets.sql / targets.go nameRE) permits '_'.
-	// Unescaped, scope_node 'a_c' would match 'abc→b'. The triple replace escapes
-	// the escape character first (backslash), then '%' and '_', and ESCAPE '\'
-	// names it -- standard_conforming_strings is on, so '\' here is one backslash.
+	// scope is the EXACT filter. scope_node is the pair-aware one a node/target card needs.
 	ListTopologyEvents(ctx context.Context, arg ListTopologyEventsParams) ([]ListTopologyEventsRow, error)
-	// The topology-at-t fold input: every event of the given type at or before
-	// 'at', OLDEST first, so replaying the rows in order reproduces the node/agent
-	// set as of that instant. (event_time, id) is a total order -- id breaks ties
-	// inside the same microsecond, which the natural key permits -- so the replay
-	// is deterministic across replicas. Rides topology_events_type_time_idx.
-	//
-	// No keyset paging: this returns the whole history up to 'at' in one shot,
-	// bounded by 'lim' (store passes topologyFoldLimit). A fold is only correct
-	// when it sees EVERY event from the beginning of retention, so a page boundary
-	// would silently produce a wrong answer -- the limit is a blast-radius guard
-	// that the store reports as truncated, never a pagination cursor.
+	// A fold is only correct when it sees EVERY event from the beginning of retention.
 	ListTopologyEventsForFold(ctx context.Context, arg ListTopologyEventsForFoldParams) ([]ListTopologyEventsForFoldRow, error)
-	// password_hash is NEVER selected here: this result set is exposed to admin
-	// UI and API responses, and the hash must never leave the database once
-	// written (same guarantee ListTokens gives token_hash).
+	// password_hash is NEVER selected here: this result set is exposed to admin UI and API responses.
 	ListUsers(ctx context.Context) ([]ListUsersRow, error)
-	// Unpaged by design, the same call ListMTRDestinations makes: the row count is
-	// configured endpoints, bounded by how many an operator typed, not by time. A
-	// keyset cursor over a table that will hold single digits of rows would be
-	// machinery with nothing to do.
+	// Unpaged by design, the same call ListMTRDestinations makes: the row count is configured
+	// endpoints.
 	ListWebhooks(ctx context.Context) ([]Webhook, error)
-	// AND status = 'pending' guards the pending->running transition: a run
-	// that's already running, or already terminal, is left untouched (0 rows),
-	// so a caller can tell "no such run" apart from "wrong state" -- see
-	// checks.go's disambiguating GetRun lookup on rows == 0.
+	// AND status = 'pending' guards the pending->running transition: a run that's already running, or
+	// already terminal.
 	MarkRunStarted(ctx context.Context, id pgtype.UUID) (int64, error)
-	// The scheduler's post-dispatch bookkeeping: stamp what just fired and when
-	// the next fire is due, in one UPDATE, so a reader never sees a schedule whose
-	// last_fired_at moved while next_fire_at still points at the fire that already
-	// happened (which would make ListDueSchedules hand it out a second time).
-	// next_fire_at = NULL retires the schedule from the due index without
-	// disabling it -- the terminal state of a kind='once' schedule.
-	//
-	// last_error rides in the SAME statement, and its stamp is DERIVED from it
-	// rather than passed (QA round 5, finding #5): last_error_at is the fire's own
-	// timestamp when there is an error and NULL when there is not, so the pair can
-	// never disagree and a caller cannot write "a failure with no time" or "a time
-	// with no failure". Passing '' is how the scheduler CLEARS a previous failure
-	// on a tick that went through -- the column always describes the LAST attempt,
-	// never the last bad one, or a row would stay red forever after one bad
-	// minute.
+	// The scheduler's post-dispatch bookkeeping: stamp what just fired and when the next fire is due.
 	MarkScheduleFired(ctx context.Context, arg MarkScheduleFiredParams) (int64, error)
-	// The retention floor for the topology-at-t fold (M5 Task 9): the console can
-	// only answer "what did the cluster look like at t" for a t at or after this
-	// row, because the pruner has already deleted everything older and no fold can
-	// invent what was deleted. ORDER BY + LIMIT 1 rather than MIN(event_time) for
-	// two reasons: it is a single lookup on topology_events_time_idx, and an empty
-	// table comes back as pgx.ErrNoRows (a NULL aggregate would need a nullable
-	// column type the sqlc timestamptz->time.Time override deliberately does not
-	// produce, and would then be indistinguishable from a genuine zero time).
+	// The cadence advances but last_fired_at does NOT: nothing fired, and a stamp here would read as
+	// a run that happened. last_error is left alone -- a past failure is still a fact.
+	MarkScheduleSkipped(ctx context.Context, arg MarkScheduleSkippedParams) (int64, error)
+	// The retention floor for the topology-at-t fold.
 	OldestTopologyEventTime(ctx context.Context) (time.Time, error)
-	// The write-back half, one statement for the whole batch. The batch travels
-	// as ONE jsonb array expanded by jsonb_to_recordset rather than as six
-	// parallel arrays: sqlc v1.31.1's own analyzer has no six-argument unnest in
-	// its catalog ("function unnest(unknown, unknown, ...) does not exist"), and
-	// six positional arrays is in any case a shape where one mis-ordered slice on
-	// the Go side silently writes every row's provider into its rdns. One array
-	// of objects cannot be mis-zipped.
-	//
-	// ON CONFLICT DO UPDATE, not DO NOTHING: a re-resolve past the TTL is exactly
-	// when the row must be replaced, and resolved_at moving is what makes the TTL
-	// work at all.
+	// Hard delete, guarded to rows that can no longer authenticate anything: callers reach this only
+	// for a token they have already read as revoked or expired.
+	PurgeToken(ctx context.Context, id pgtype.UUID) (int64, error)
+	// The write-back half, one statement for the whole batch; the batch travels as ONE jsonb array
+	// expanded by jsonb_to_recordset rather than as six parallel arrays.
 	PutEnrichment(ctx context.Context, rows []byte) error
-	// Force-finish runs left 'running' long past any deadline the runner could
-	// have given them (M4 follow-up #6): a Console killed mid-run never writes its
-	// FinishRun, and nothing else would ever move that row out of 'running'.
-	// 'cancelled' is the honest outcome -- the run did not fail its checks, it was
-	// abandoned.
-	//
-	// status = 'running' is half the predicate on purpose: age alone must never be
-	// enough. A pending run that never started, and one that already reached a
-	// terminal status, are both left untouched no matter how old they are (the
-	// retention Pruner is what removes those, not this).
-	//
-	// NO NEW INDEX, and the honest reason is that no existing one helps and no new
-	// one is worth a migration here. check_runs_created_idx (created_at DESC, id
-	// DESC) cannot serve this: created_at < cutoff matches almost the whole table
-	// (every run older than the cutoff, i.e. nearly all of them), so it is not a
-	// selective bound and the planner correctly prefers a sequential scan --
-	// measured at ~667 buffers / ~2ms over 50k rows on postgres:17-alpine, with
-	// the ORDER BY's sort on the 100-row LIMIT costing nothing. The selective
-	// predicate is status = 'running', which would want a PARTIAL index, and that
-	// needs a migration this task does not add. The trade is fine because
-	// check_runs is bounded by the retention sweep (DeleteRunsBefore) and this
-	// query runs on a slow scheduler tick, not per request -- revisit it if run
-	// volume ever makes check_runs large enough for a seq scan to matter.
-	//
-	// ORDER BY created_at (oldest first) matches DeleteRunsBefore's own shape so a
-	// limit that cannot cover the whole backlog still makes forward progress
-	// instead of re-examining the same rows. cr alias on the subquery's own FROM
-	// for the same sqlc v1.31.1 analyzer quirk documented on DeleteRunsBefore above.
+	// Force-finish runs left 'running' long past any deadline the runner could have given them.
 	ReapStuckRuns(ctx context.Context, arg ReapStuckRunsParams) (int64, error)
 	RevokeToken(ctx context.Context, id pgtype.UUID) (int64, error)
 	SetUserDisabled(ctx context.Context, arg SetUserDisabledParams) (int64, error)
-	// Callers (the authn layer, Task 14) must debounce this to at most once per
-	// minute per token themselves -- see auth.go's TokenStore doc comment. This
-	// query is intentionally a plain, cheap single-row UPDATE with no such logic
-	// baked in, so the debounce policy stays entirely in the caller's hands.
+	// Callers must debounce this to at most once per minute per token themselves -- see auth.go's
+	// TokenStore doc comment.
 	TouchTokenLastUsed(ctx context.Context, id pgtype.UUID) (int64, error)
-	// The BUILDER half of the row, and only that half. sync_status is reset to
-	// 'unsynced' and sync_message cleared in the same statement rather than left
-	// alone: a rule whose expression just changed is BY DEFINITION not the rule
-	// that was applied to the cluster, and a stale 'synced' would tell the drift
-	// view -- and the operator -- the opposite. sync_message goes with it because
-	// a message is the explanation OF a status, and an explanation outliving the
-	// status it explained is a lie the UI would render verbatim.
-	//
-	// last_synced_at is deliberately KEPT. It is a historical fact ("the last time
-	// our bytes reached the cluster"), not a claim about the current row, and
-	// clearing it would erase the only evidence that this rule was ever applied.
+	// The BUILDER half of the row, and only that half.
 	UpdateAlertRule(ctx context.Context, arg UpdateAlertRuleParams) (AlertRule, error)
-	// The RECONCILER's write-back (M7 Decision 5), touching the three sync columns
-	// and nothing else -- not even updated_at. updated_at means "when the operator
-	// last changed this rule", and a 60s reconcile loop bumping it would make every
-	// rule in the list look freshly edited every minute, which is the one thing the
-	// column exists to answer.
+	// The RECONCILER's write-back, touching the three sync columns and nothing else -- not even
+	// updated_at.
 	UpdateAlertRuleSyncStatus(ctx context.Context, arg UpdateAlertRuleSyncStatusParams) (AlertRule, error)
 	// Full replace, same contract as UpdateTarget.
 	UpdateDefinition(ctx context.Context, arg UpdateDefinitionParams) (CheckDefinition, error)
 	UpdateIncidentNotes(ctx context.Context, arg UpdateIncidentNotesParams) (Incident, error)
 	UpdateIncidentPinned(ctx context.Context, arg UpdateIncidentPinnedParams) (Incident, error)
-	// One of THREE narrow updates, deliberately not one full replace. An incident
-	// evolves while several people look at it: a full-replace PUT would let a
-	// collaborator's stale copy of `notes` silently overwrite an edit made a second
-	// earlier, and the three fields that actually change (status, notes, pinned)
-	// change for three unrelated reasons. PATCH semantics are assembled from these
-	// in httpapi; the store's surface stays this narrow on purpose.
-	//
-	// resolved_at travels WITH status, never separately: it is status' witness, and
-	// reopening (status back to 'open' with a NULL resolved_at) has to clear it in
-	// the same statement or a reopened incident keeps a resolution time.
+	// One of THREE narrow updates, deliberately not one full replace; an incident evolves while several
+	// people look.
 	UpdateIncidentStatus(ctx context.Context, arg UpdateIncidentStatusParams) (Incident, error)
-	// definition_id is deliberately NOT updatable: re-pointing a schedule at a
-	// different definition is a different schedule, and letting it move would
-	// silently reinterpret last_fired_at/next_fire_at against a cadence they were
-	// never computed for.
-	//
-	// last_error/last_error_at are not touched here either, and that is a separate
-	// decision from the one above: they are a FACT about the last fire, and an
-	// edit is not a fire. Clearing them on save would let an operator make a red
-	// row green by pressing Save on a schedule that is still broken; leaving them
-	// means the row keeps saying what went wrong, with the stamp that says when,
-	// until the next tick either repeats it or clears it (queries below).
+	// definition_id is deliberately NOT updatable: re-pointing a schedule at a different definition is
+	// a different schedule.
 	UpdateSchedule(ctx context.Context, arg UpdateScheduleParams) (CheckSchedule, error)
-	// A full replace, not a patch: every mutable column is written on every call,
-	// so the caller's TargetInput is the whole truth about the row afterwards and
-	// there is no "field absent means keep" ambiguity to get wrong. :one (not
-	// :execrows) so the refreshed updated_at comes back without a second round
-	// trip; an id matching nothing yields pgx.ErrNoRows -> ErrNotFound.
+	// A full replace, not a patch: every mutable column is written on every call.
 	UpdateTarget(ctx context.Context, arg UpdateTargetParams) (Target, error)
 	UpdateUserPassword(ctx context.Context, arg UpdateUserPasswordParams) (int64, error)
-	// A full replace of the CONFIGURED half of the row, and only that half:
-	// last_status/last_attempt/failures are delivery OUTCOMES, written by
-	// UpdateWebhookDelivery, and an operator editing the URL must not reset the
-	// endpoint's failure history along with it.
+	// A full replace of the CONFIGURED half of the row, and only that half.
 	UpdateWebhook(ctx context.Context, arg UpdateWebhookParams) (Webhook, error)
-	// The dispatcher's write-back after a terminal delivery outcome (M6 Decision
-	// 5). failures is set, not incremented, because the dispatcher -- not this
-	// layer -- knows whether the attempt ended a streak (0) or extended one, and a
-	// SET is idempotent under the retry that a += is not.
+	// The dispatcher's write-back after a terminal delivery outcome.
 	UpdateWebhookDelivery(ctx context.Context, arg UpdateWebhookDeliveryParams) (int64, error)
-	// The dedupe write (M5 Decision 2). A trace over a path the pair has already
-	// taken bumps last_seen and trace_count on the existing row; a trace over a
-	// new path inserts one. Which of the two happened is the observable the
-	// caller needs -- "the route changed" is the whole point of this table -- and
-	// (xmax = 0) is how PostgreSQL answers it: the RETURNING clause of an
-	// INSERT ... ON CONFLICT DO UPDATE sees the tuple's xmax, which is zero for a
-	// freshly inserted row and the updating transaction's id for a conflicting
-	// one. Reported back rather than derived from a count, because :one gives no
-	// rows-affected and a follow-up SELECT would race another replica's trace.
-	//
-	// last_seen takes GREATEST rather than EXCLUDED outright: results arrive from
-	// several agents through several replicas and a late-delivered older trace
-	// must not walk the pair's "last seen" backwards. first_seen is never
-	// touched on conflict, so the row keeps the moment the path was discovered.
-	// hops is likewise never overwritten -- the stored payload is the FIRST
-	// trace at this path, by design (migration 00005).
+	// A trace over a path the pair has already taken bumps last_seen and trace_count on the existing
+	// row.
 	UpsertPathSnapshot(ctx context.Context, arg UpsertPathSnapshotParams) (UpsertPathSnapshotRow, error)
 	UpsertRole(ctx context.Context, arg UpsertRoleParams) (Role, error)
 	// A retried pair overwrites rather than erroring: ON CONFLICT ON CONSTRAINT
-	// check_results_pair_unique DO UPDATE, not DO NOTHING.
+	// check_results_pair_unique DO UPDATE.
 	UpsertRunResult(ctx context.Context, arg UpsertRunResultParams) (CheckResult, error)
 }
 

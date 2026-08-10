@@ -1,9 +1,5 @@
 -- +goose Up
--- targets is an external probe destination: name, kind, address, labels
--- (TARGETS.md §7.2 "Target = {name, kind: host|url, address, labels}").
--- name is the ONLY field that ever becomes a Prometheus label value, which is
--- why it is UNIQUE and length-bounded: the label set's cardinality is the
--- operator's curated name list, never the address space (Decision 6).
+-- targets is an external probe destination: name.
 CREATE TABLE targets (
     id         UUID        PRIMARY KEY,
     name       TEXT        NOT NULL UNIQUE CHECK (length(name) BETWEEN 1 AND 63),
@@ -14,11 +10,7 @@ CREATE TABLE targets (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
--- check_definitions is a saved spec: what to probe, from where, how
--- (DATA.md §5.2 "source selector, destination (node/target/adhoc), type,
--- plane, params"). destination_target_id is set only for kind='target' and
--- ON DELETE RESTRICT: deleting a target that a definition still probes must
--- fail loudly rather than silently orphan the definition.
+-- check_definitions is a saved spec: what to probe.
 CREATE TABLE check_definitions (
     id                     UUID        PRIMARY KEY,
     name                   TEXT        NOT NULL UNIQUE CHECK (length(name) BETWEEN 1 AND 63),
@@ -35,10 +27,8 @@ CREATE TABLE check_definitions (
 );
 CREATE INDEX check_definitions_target_idx ON check_definitions (destination_target_id);
 
--- check_schedules binds a definition to a cadence (DATA.md §5.2
--- "one-shot / cron / interval / continuous bindings"). kind is plain TEXT
--- with a comment, not an enum or a CHECK, so adding 'cron' in a later
--- milestone is code and not a migration (Decision 9).
+-- check_schedules binds a definition to a cadence (DATA.md §5.2 "one-shot / cron / interval /
+-- continuous bindings").
 CREATE TABLE check_schedules (
     id            UUID        PRIMARY KEY,
     definition_id UUID        NOT NULL REFERENCES check_definitions(id) ON DELETE CASCADE,

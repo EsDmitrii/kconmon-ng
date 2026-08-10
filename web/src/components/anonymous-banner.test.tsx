@@ -20,9 +20,6 @@ test("shows the anonymous-mode warning", () => {
   expect(screen.getByRole("status")).toHaveTextContent(/do not use in production/i);
 });
 
-// task-19-brief.md: "anonymous-banner.tsx keeps its exact M2 behaviour when
-// mode === 'anonymous' and renders nothing otherwise" — additive, the test
-// above is untouched.
 describe("AnonymousBanner mode prop", () => {
   it("hides for a non-anonymous mode", () => {
     render(<AnonymousBanner mode="local" />);
@@ -35,15 +32,26 @@ describe("AnonymousBanner mode prop", () => {
   });
 });
 
+/* "the fixed role" told an operator nothing they could act on; the role's NAME
+   is on GET /api/v1/config (QA round 6, finding #12). */
+describe("AnonymousBanner role prop", () => {
+  it("names the role everyone has", () => {
+    render(<AnonymousBanner mode="anonymous" role="admin" />);
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "everyone has the admin role (console.auth.anonymous.role)",
+    );
+  });
+
+  it("falls back to the unnamed wording rather than printing a gap", () => {
+    render(<AnonymousBanner mode="anonymous" role="" />);
+    expect(screen.getByRole("status")).toHaveTextContent("everyone has the fixed role");
+    expect(screen.getByRole("status")).not.toHaveTextContent("console.auth.anonymous.role");
+  });
+});
+
 /**
- * TestAnonymousModeRendersExactlyLikeM2 (task-19-brief.md's checklist name,
- * kept verbatim as this file's own test name for traceability): with GET
- * /api/v1/config and GET /api/v1/auth/me both reporting anonymous, the
- * shell (sidebar + banner + page frame) renders the same structure M2
- * shipped — nav items present, the M2 banner copy present, and no
- * auth-only UI (a user menu) — which is the frontend half of the
- * degraded-state guarantee (Phase B checkpoint: "auth.mode=anonymous ...
- * still serves the entire M1/M2 surface with no credentials").
+ * TestAnonymousModeRendersExactlyLikeM2: with GET /api/v1/config and GET /api/v1/auth/me both
+ * reporting anonymous.
  */
 describe("TestAnonymousModeRendersExactlyLikeM2", () => {
   afterEach(() => {
@@ -80,13 +88,8 @@ describe("TestAnonymousModeRendersExactlyLikeM2", () => {
         );
       }),
     );
-    // AppSidebar's NavLinks use TanStack Router's <Link>, which needs a real
-    // RouterProvider (it dereferences the router from context with no null
-    // guard — jsdom aside, there is no "render without a router" mode). This
-    // build mirrors routes.tsx's own root route (AppShell wrapping Outlet)
-    // with one child per NAV_ITEMS path so every <Link to="..."> resolves,
-    // using a memory history rather than the app's real router/history so
-    // this test cannot bleed location state into any other file.
+    // This build mirrors routes.tsx's own root route (AppShell wrapping Outlet) with one child per
+    // NAV_ITEMS path so every <Link to="..."> resolves.
     const testRoot = createRootRoute({
       component: () => (
         <AppShell>

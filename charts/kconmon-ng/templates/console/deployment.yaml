@@ -22,10 +22,48 @@ spec:
     metadata:
       annotations:
         checksum/config: {{ include (print $.Template.BasePath "/console/configmap.yaml") . | sha256sum }}
+        checksum/secret: {{ include (print $.Template.BasePath "/console/secrets.yaml") . | sha256sum }}
       labels:
         {{- include "kconmon-ng.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: console
     spec:
+      {{- $geoip := .Values.console.mtr.enrichment.geoip }}
+      {{- if and (include "kconmon-ng.console.geoipEnabled" .) (eq (include "kconmon-ng.console.geoipMode" .) "auto") }}
+      # NATIVE SIDECAR (k8s 1.29+): an initContainer with restartPolicy Always starts BEFORE the
+      # console and keeps running, so /geoip is populated before the first lookup instead of an hour later.
+      initContainers:
+        # Keeps /geoip fresh; the console reloads a changed file on its own (geoip.reloadInterval).
+        - name: geoipupdate
+          restartPolicy: Always
+          image: "{{ $geoip.image.repository }}:{{ $geoip.image.tag }}"
+          imagePullPolicy: {{ $geoip.image.pullPolicy }}
+          {{- with $geoip.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          env:
+            - name: GEOIPUPDATE_EDITION_IDS
+              value: {{ join " " $geoip.editions | quote }}
+            - name: GEOIPUPDATE_FREQUENCY
+              value: {{ $geoip.updateIntervalHours | int | quote }}
+            - name: GEOIPUPDATE_DB_DIR
+              value: /geoip
+            - name: GEOIPUPDATE_ACCOUNT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "kconmon-ng.console.geoipSecretName" . }}
+                  key: {{ $geoip.accountIdKey }}
+            - name: GEOIPUPDATE_LICENSE_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "kconmon-ng.console.geoipSecretName" . }}
+                  key: {{ $geoip.licenseKeyKey }}
+          volumeMounts:
+            - name: geoip
+              mountPath: /geoip
+          resources:
+            {{- toYaml $geoip.resources | nindent 12 }}
+      {{- end }}
       {{- with .Values.console.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}
@@ -38,29 +76,25 @@ spec:
       tolerations:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-      {{- /* Keyed on the projected Secret volume, not on the database alone
-      (M6): fsGroup is what lets the nonroot process read a 0440 file the
-      kubelet wrote root-owned, and the webhook encryption key is the first
-      such file that does not imply a database. Without this the key-with-no-
-      database deployment mounts a file the console cannot open, and an
-      unreadable encryptionKeyFile is FATAL. */}}
+      {{- /* fsGroup is what lets the nonroot process read the 0440 projected Secret files. */}}
       {{- if and (include "kconmon-ng.console.secretsVolumeEnabled" .) .Values.console.podSecurityContext }}
       securityContext:
         {{- toYaml .Values.console.podSecurityContext | nindent 8 }}
       {{- end }}
-      {{- /* M6: the console gets a Kubernetes identity ONLY when a feature
-      needs one -- see kconmon-ng.console.serviceAccountName for why this is
-      a console-only SA and not the agent/controller one, and
-      kconmon-ng.console.k8sIdentity for the two features (the M6 event reader
-      and the M7 alerting reconciler). With both off this key is absent and the
-      Pod runs as the namespace `default` SA, which is exactly what every
-      release up to chart 1.7.0 did. */}}
+      {{- /* A console-only ServiceAccount, only when a feature needs an identity. */}}
       {{- if include "kconmon-ng.console.k8sIdentity" . }}
       serviceAccountName: {{ include "kconmon-ng.console.serviceAccountName" . }}
+      {{- else }}
+      # No feature here calls the apiserver, so the pod gets no token.
+      automountServiceAccountToken: false
       {{- end }}
       containers:
         - name: console
           image: "{{ .Values.console.image.repository }}:{{ .Values.console.image.tag | default .Chart.AppVersion }}"
+          {{- with .Values.console.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           imagePullPolicy: {{ .Values.console.image.pullPolicy }}
           ports:
             - name: http
@@ -69,15 +103,7 @@ spec:
           env:
             - name: KCONMON_NG_CONSOLE_CONFIG
               value: /etc/kconmon-ng-console/config.yaml
-            {{- /* M6: identity, not configuration -- which is why it is its own
-            env var and not a templated kubernetesContext.namespace. The console
-            reads it ONLY as the fallback for an empty
-            console.kubernetesContext.namespace, so "the namespace this release
-            runs in" needs no value at all and cannot drift from where the Pod
-            actually is. M7 gave it a SECOND reader with the identical rule --
-            an empty console.alerting.namespace resolves through the same
-            helper (config.resolveNamespace) -- so the gate is the shared
-            kconmon-ng.console.k8sIdentity. Nothing else reads it. */}}
+            {{- /* Fallback for an empty kubernetesContext/alerting namespace. */}}
             {{- if include "kconmon-ng.console.k8sIdentity" . }}
             - name: POD_NAMESPACE
               valueFrom:
@@ -89,32 +115,13 @@ spec:
               mountPath: /etc/kconmon-ng-console
               readOnly: true
             {{- if include "kconmon-ng.console.secretsVolumeEnabled" . }}
-            # Deliberately NOT nested under /etc/kconmon-ng-console: the
-            # runtime cannot create a mountpoint inside an already-mounted
-            # read-only volume (CreateContainerError). dsnFile in the rendered
-            # config.yaml points here, and so do
-            # auth.local.bootstrapAdminPasswordFile / auth.oidc.clientSecretFile
-            # below (Task 18) -- one sibling directory, one mount, multiple
-            # projected Secret sources; the same CreateContainerError reasoning
-            # rules out a THIRD mountPath nested under /etc/kconmon-ng-console
-            # for those two files. M6 adds webhooks.encryptionKeyFile as a
-            # fourth source on the same mount -- and the FIRST one that does
-            # not imply a database, which is why the gate is
-            # kconmon-ng.console.secretsVolumeEnabled and no longer the
-            # database mode. The volume keeps its 1.4.0 name: renaming it would
-            # roll every console Pod for a label change.
+            # A sibling directory, not a nested one: a mountpoint cannot be created inside a read-only mount.
             - name: database-dsn
               mountPath: /etc/kconmon-ng-console-secrets
               readOnly: true
             {{- end }}
-            {{- /* M5 hop enrichment. The mount path is FIXED at /geoip and is
-            not a value: the chart would otherwise own two halves of the same
-            fact (a mountPath here and an asnPath in the ConfigMap) with nothing
-            keeping them agreeing, and a drift between them renders perfectly
-            and fails only at runtime. One fixed directory, operator-chosen file
-            names under it. Gated on the same condition as the volume below --
-            the configmap.yaml guard makes the two impossible to separate. */}}
-            {{- if and .Values.console.mtr.enrichment.enabled (or .Values.console.mtr.enrichment.geoip.asnPath .Values.console.mtr.enrichment.geoip.cityPath) }}
+            {{- /* /geoip is fixed, so it cannot drift from the paths in the ConfigMap. */}}
+            {{- if include "kconmon-ng.console.geoipEnabled" . }}
             - name: geoip
               mountPath: /geoip
               readOnly: true
@@ -145,15 +152,7 @@ spec:
           configMap:
             name: {{ include "kconmon-ng.console.fullname" . }}
         {{- if include "kconmon-ng.console.secretsVolumeEnabled" . }}
-        # Projected Secret reference — the chart names the Secret, it never
-        # holds the DSN itself. 0440 + fsGroup above: see the securityContext
-        # comment. Rotation note: read once at boot; rotating the Secret is an
-        # operator-initiated restart (the Deployment rolls on ConfigMap
-        # changes only). auth.mode=local|oidc always implies this whole block
-        # renders (the render guards in configmap.yaml refuse
-        # database.mode=disabled for those two modes), so the bootstrap
-        # password / OIDC client secret sources below can ride the SAME
-        # projected volume as the DSN rather than needing one of their own.
+        # Secrets are referenced by name only and read once at boot.
         - name: database-dsn
           projected:
             defaultMode: 0440
@@ -165,16 +164,20 @@ spec:
                     - key: {{ include "kconmon-ng.console.databaseSecretKey" . }}
                       path: database-dsn
               {{- end }}
-              {{- /* M6 webhook encryption key. The path is what
-              configmap.yaml writes into webhooks.encryptionKeyFile; the two
-              halves are kept together by both being literals in this chart and
-              by the ci/console-investigation-values.yaml render. */}}
+              {{- /* Path must match webhooks.encryptionKeyFile in configmap.yaml. */}}
               {{- with (include "kconmon-ng.console.webhooksKeySecretName" .) }}
               - secret:
                   name: {{ . }}
                   items:
-                    - key: {{ $.Values.console.webhooks.encryptionKeySecret.key }}
+                    - key: {{ include "kconmon-ng.console.webhooksKeyName" $ }}
                       path: webhooks-encryption-key
+              {{- end }}
+              {{- with (include "kconmon-ng.console.valkeySecretName" .) }}
+              - secret:
+                  name: {{ . }}
+                  items:
+                    - key: {{ $.Values.console.valkey.existingSecretKey }}
+                      path: valkey-password
               {{- end }}
               {{- if and (eq .Values.console.auth.mode "local") .Values.console.auth.local.bootstrapAdmin }}
               - secret:
@@ -191,17 +194,14 @@ spec:
                       path: oidc-client-secret
               {{- end }}
         {{- end }}
-        {{- /* console.mtr.enrichment.geoip.volume is an OPAQUE VolumeSource,
-        spliced in verbatim under a chart-owned name. The chart deliberately
-        does not model the {configMap|secret|hostPath|persistentVolumeClaim}
-        union: GeoLite2 mmdb files are ~10 MB (past what many clusters accept in
-        a ConfigMap), operators keep them in genuinely different places, and a
-        re-declared union in values.schema.json goes stale the first time
-        Kubernetes grows a source. The API server validates what you wrote.
-        Unlike the projected Secret above there is no defaultMode here: an mmdb
-        is not a secret, and the console only ever reads it. */}}
-        {{- if and .Values.console.mtr.enrichment.enabled (or .Values.console.mtr.enrichment.geoip.asnPath .Values.console.mtr.enrichment.geoip.cityPath) }}
+        {{- if include "kconmon-ng.console.geoipEnabled" . }}
         - name: geoip
+          {{- if eq (include "kconmon-ng.console.geoipMode" .) "auto" }}
+          # The sidecar owns this directory; losing it on a restart costs one download.
+          emptyDir: {}
+          {{- else }}
+          {{- /* An opaque VolumeSource spliced in verbatim; the API server validates it. */}}
           {{- toYaml .Values.console.mtr.enrichment.geoip.volume | nindent 10 }}
+          {{- end }}
         {{- end }}
 {{- end }}

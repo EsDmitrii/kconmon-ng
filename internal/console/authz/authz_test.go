@@ -7,10 +7,7 @@ import (
 	"github.com/EsDmitrii/kconmon-ng/internal/console/authz"
 )
 
-// TestViewerCoversTheM1M2Surface is the contract that keeps anonymous mode
-// working: it lists every permission the M1/M2 routes require and asserts
-// viewer holds all of them. If a later task adds a permission to an existing
-// route without updating the viewer role, this test tells them.
+// TestViewerCoversTheM1M2Surface is the contract that keeps anonymous mode working.
 func TestViewerCoversTheM1M2Surface(t *testing.T) {
 	t.Parallel()
 
@@ -32,9 +29,7 @@ func TestViewerCoversTheM1M2Surface(t *testing.T) {
 	}
 }
 
-// m4Permissions is the set M4 added for the targets/checks/schedules surface.
-// Listed here once, in AllPermissions order, and reused by every grant
-// assertion below so the role table is pinned from a single place.
+// m4Permissions is the set added for the targets/checks/schedules surface.
 var m4Permissions = []authz.Permission{
 	authz.PermTargetsRead,
 	authz.PermTargetsWrite,
@@ -43,9 +38,8 @@ var m4Permissions = []authz.Permission{
 	authz.PermSchedulesWrite,
 }
 
-// TestOperatorAddsWriteAuthorityOverViewer pins operator - viewer as an
-// EXACT set, not a superset check: runs:create plus the five M4 permissions,
-// nothing more. Widening operator silently is exactly what this refuses.
+// TestOperatorAddsWriteAuthorityOverViewer pins operator - viewer as an EXACT set, not a superset
+// check.
 func TestOperatorAddsWriteAuthorityOverViewer(t *testing.T) {
 	t.Parallel()
 
@@ -68,18 +62,14 @@ func TestOperatorAddsWriteAuthorityOverViewer(t *testing.T) {
 		}
 	}
 
-	// PermissionsFor returns AllPermissions order, so this expectation is
-	// order-stable without sorting. M5: annotations:write is the one M5
-	// permission operator holds that viewer does not (mtr:read and
-	// annotations:read are telemetry and land in BOTH — Plan Decision 11).
+	// PermissionsFor returns AllPermissions order, so this expectation is order-stable without
+	// sorting.
 	want := append([]authz.Permission{authz.PermRunsCreate}, m4Permissions...)
 	want = append(want, authz.PermAnnotationsWrite)
 	// M6: the two statement-class writes (webhooks:manage stays admin-only
 	// and so is in NEITHER role's diff).
 	want = append(want, authz.PermIncidentsWrite, authz.PermMaintenanceWrite)
-	// M7: alerts:manage is the statement half of the alerting pair, on the
-	// incidents:write line. alerts:read is telemetry-class and lands in BOTH
-	// roles, so it is in neither side of this diff.
+	// alerts:manage is the statement half of the alerting pair.
 	want = append(want, authz.PermAlertsManage)
 	if len(diff) != len(want) {
 		t.Fatalf("operator - viewer = %v, want %v", diff, want)
@@ -97,13 +87,6 @@ func TestOperatorAddsWriteAuthorityOverViewer(t *testing.T) {
 	}
 }
 
-// TestM4PermissionsAreDeniedToViewerAndAlertEditor is Decision 3 as a test.
-// viewer is the anonymous default (auth.mode=anonymous +
-// auth.anonymous.role=viewer), so granting it targets:read would silently
-// hand an unauthenticated console the fleet's probe configuration -- and
-// targets:write would hand it the authority to point N agents at an
-// arbitrary address. alert-editor is a placeholder for M7 alerting and has
-// no business mutating targets either.
 func TestM4PermissionsAreDeniedToViewerAndAlertEditor(t *testing.T) {
 	t.Parallel()
 
@@ -118,8 +101,6 @@ func TestM4PermissionsAreDeniedToViewerAndAlertEditor(t *testing.T) {
 	}
 }
 
-// TestM4PermissionsAreGrantedToOperatorAndAdmin is the other half of
-// Decision 3.
 func TestM4PermissionsAreGrantedToOperatorAndAdmin(t *testing.T) {
 	t.Parallel()
 
@@ -134,22 +115,8 @@ func TestM4PermissionsAreGrantedToOperatorAndAdmin(t *testing.T) {
 	}
 }
 
-// TestM7AlertPermissionsFollowTheIncidentsPosture is M7 Task 4's grant
-// decision as a test, in TestM4PermissionsAre*'s two-halves shape.
-//
-// alerts:read is TELEMETRY on M5 Decision 11's line, extended by M6 Decision
-// 8: a rendered alert rule and the set Prometheus is currently firing are
-// CONTEXT on the same charts every role already reads, and the Overview card
-// that shows them is on the landing page. So all four built-in roles hold it,
-// viewer -- the anonymous default -- included.
-//
-// alerts:manage is the STATEMENT half and stops at operator and admin — plus
-// alert-editor, the one deliberate exception, decided by the M7 coordinator:
-// delegated alert editing is that role's entire charter (it sat as a
-// placeholder from M3 to M6 waiting for exactly this permission), and a
-// builtin named alert-editor that cannot edit an alert rule breaks its
-// promise on first click. Narrowing it back is the conscious diff this
-// test guards.
+// TestM7AlertPermissionsFollowTheIncidentsPosture is the grant decision as a test, in
+// TestM4PermissionsAre*'s two-halves shape.
 func TestM7AlertPermissionsFollowTheIncidentsPosture(t *testing.T) {
 	t.Parallel()
 
@@ -176,10 +143,9 @@ func TestM7AlertPermissionsFollowTheIncidentsPosture(t *testing.T) {
 	}
 }
 
-// TestAdminHoldsEveryPermission pins AllPermissions against an explicit
-// expected list (rather than the constant block itself) so that a new
-// Permission constant added without a matching AllPermissions entry fails
-// this test.
+// TestAdminHoldsEveryPermission pins AllPermissions against an explicit expected list (rather than
+// the constant block itself) so that a new Permission constant added without a matching
+// AllPermissions entry fails this test.
 func TestAdminHoldsEveryPermission(t *testing.T) {
 	t.Parallel()
 

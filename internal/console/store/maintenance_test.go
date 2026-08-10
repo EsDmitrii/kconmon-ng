@@ -85,12 +85,8 @@ func TestMaintenanceInputValidateRejects(t *testing.T) {
 	}
 }
 
-// TestMaintenanceEndMustBeStrictlyAfterStart pins the one boundary the CHECK
-// constraint and Validate must agree on exactly: end_at > start_at, so a
-// ZERO-LENGTH window is rejected. An annotation may be an instant mark; a
-// maintenance window may not -- "we did work for zero time" is not a claim the
-// table is meant to be able to hold, and a markArea of zero width renders as
-// nothing.
+// TestMaintenanceEndMustBeStrictlyAfterStart pins the one boundary the CHECK constraint and
+// Validate must agree on exactly.
 func TestMaintenanceEndMustBeStrictlyAfterStart(t *testing.T) {
 	in := validMaintenanceInput()
 	in.EndAt = in.StartAt

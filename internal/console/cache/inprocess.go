@@ -8,10 +8,9 @@ import (
 
 const localSubscriberBuffer = 32
 
-// InProcessBus is a pure in-memory Bus: Publish fans out synchronously to
-// every current local subscriber of the topic. It has no cross-replica
-// delivery — the documented degradation when console.valkey.mode=disabled
-// (ADR-002): only correct for console.replicas=1.
+// InProcessBus is a pure in-memory Bus: Publish fans out synchronously to every current local
+// subscriber of the topic; it has no cross-replica delivery — the documented degradation when
+// console.valkey.mode=disabled (ADR-002).
 type InProcessBus struct {
 	mu   sync.RWMutex
 	subs map[string]map[int]chan Message

@@ -9,10 +9,7 @@ import (
 	"github.com/EsDmitrii/kconmon-ng/internal/console/checks"
 )
 
-// nodePair is a node->node pair -- M3's only shape, and still the shape every
-// test in this file asserts. Pair.Destination is a typed checks.Destination
-// since M4 (Decision 14); for a node destination it carries Kind "node" and
-// the node name, which is exactly what checks.NodeDestination builds.
+// Pair.Destination is a typed checks.Destination.
 func nodePair(src, dst string) checks.Pair {
 	return checks.Pair{Source: src, Destination: checks.NodeDestination(dst)}
 }
@@ -124,15 +121,9 @@ func TestPlanEmptyNodeListIsAClearError(t *testing.T) {
 	}
 }
 
-// TestPlanErrorsCarryExactlyOnePackagePrefix pins the RENDERED message, not
-// just the sentinel identity. handleRunError (internal/console/httpapi/runs.go)
-// puts err.Error() straight into the problem+json detail, so every doubled
-// prefix here is a doubled prefix an operator reads in the UI -- the live smoke
-// rendered "checks: plan: checks: no nodes available to plan against". The
-// package's own convention (memory.go, runner.go, reconciler.go) is exactly one
-// "checks: <op>: " per error-producing site, so the sentinels themselves must
-// not carry it. errors.Is is asserted alongside the string: dropping the prefix
-// must not cost the chain.
+// TestPlanErrorsCarryExactlyOnePackagePrefix pins the RENDERED message; the package's own
+// convention (memory.go, runner.go, reconciler.go) is exactly one "checks: <op>: " per
+// error-producing site.
 func TestPlanErrorsCarryExactlyOnePackagePrefix(t *testing.T) {
 	cases := []struct {
 		name     string
@@ -243,10 +234,8 @@ func TestPlanExplicitBothSidesIgnoresEmptyNodes(t *testing.T) {
 	equalPairs(t, pairs, []checks.Pair{nodePair("a", "b")})
 }
 
-// A spec whose Sources/Destinations are both explicit and non-empty, but
-// whose only combination is a self-pair, must be a clear error -- not a
-// silently persisted, immediately "succeeded" zero-pair run (task-22-brief.md
-// I-3/minor-b).
+// A spec whose Sources/Destinations are both explicit and non-empty, but whose only combination is
+// a self-pair.
 func TestPlanSelfPairOnlyIsNoPairsError(t *testing.T) {
 	_, err := checks.Plan(checks.Spec{Sources: []string{"a"}, Destinations: []string{"a"}, Type: "tcp"}, nil)
 	if !errors.Is(err, checks.ErrNoPairs) {
@@ -254,12 +243,8 @@ func TestPlanSelfPairOnlyIsNoPairsError(t *testing.T) {
 	}
 }
 
-// A raw Sources x Destinations product that vastly exceeds maxPairs must be
-// rejected before Plan allocates anything sized off that product -- a naive
-// implementation sizing the seen-set/pairs slice off len(sources)*len(destinations)
-// would otherwise attempt a huge allocation for a spec this test intentionally
-// keeps large (10k x 10k = 100M). Plan must reject it near-instantly instead
-// (task-22-brief.md I-3).
+// A raw Sources x Destinations product that vastly exceeds maxPairs must be rejected before Plan
+// allocates anything sized off that product.
 func TestPlanHugeCartesianProductRejectedBeforeAllocation(t *testing.T) {
 	sources := make([]string, 10_000)
 	for i := range sources {

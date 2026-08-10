@@ -3,21 +3,13 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-li
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ThemeProvider } from "@/components/theme-provider";
 import { CHART_FALLBACK } from "@/lib/chart-theme";
-import { CURATED_CHARTS } from "@/lib/curated-metrics";
+import { CURATED_CHARTS, RANGE_TOKEN } from "@/lib/curated-metrics";
+import { LOCALE_STORAGE_KEY, LocaleProvider, type Locale } from "@/lib/i18n";
 import { TimeMachineProvider } from "@/lib/timemachine";
 import type { PromResult } from "@/lib/types";
 import { ExplorePage, toCompareOption } from "./explore";
 
-/**
- * Explore's A/B compare panel: ONE extra chart at the top of the page that puts
- * a second leg on A's axes. Two exclusive modes — a second curated metric, or a
- * time shift of A against itself — and no free-form PromQL (that is /console).
- *
- * EChart is mocked (echarts.init reaches for a 2d canvas context jsdom does not
- * implement); the mock re-publishes the series names it was handed, which is
- * how a page test can see that both legs landed in the SAME chart with their
- * leg identity intact.
- */
+/** Explore's A/B compare panel: ONE extra chart at the top of the page that puts a second leg on A's axes. */
 vi.mock("@/components/echart", () => ({
   EChart: ({ option, className }: { option?: { series?: unknown }; className?: string }) => (
     <div
@@ -63,13 +55,18 @@ function stubFetch() {
   return { bodies, fetchMock };
 }
 
-function renderPage() {
+/** `locale` mounts a <LocaleProvider> above the page. Absent — every case but
+ *  the ru smoke pin at the bottom of this file — there is no provider at all,
+ *  which lib/i18n defines as English. */
+function renderPage(locale?: Locale) {
+  if (locale !== undefined) localStorage.setItem(LOCALE_STORAGE_KEY, locale);
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const page = <ExplorePage />;
   return render(
     <QueryClientProvider client={qc}>
       <ThemeProvider>
         <TimeMachineProvider>
-          <ExplorePage />
+          {locale === undefined ? page : <LocaleProvider>{page}</LocaleProvider>}
         </TimeMachineProvider>
       </ThemeProvider>
     </QueryClientProvider>,
@@ -86,8 +83,10 @@ function seriesNames(el: HTMLElement): string[] {
   return raw === "" ? [] : raw.split("|");
 }
 
+/** Explore resolves lib/curated-metrics' RANGE_TOKEN into the drawn window before it posts. */
 function bodiesFor(bodies: RangeBody[], query: string): RangeBody[] {
-  return bodies.filter((b) => b.query === query);
+  const head = query.split(RANGE_TOKEN)[0];
+  return bodies.filter((b) => b.query.startsWith(head));
 }
 
 function setSelect(label: string, value: string) {
@@ -103,6 +102,9 @@ afterEach(() => {
   vi.useRealTimers();
   vi.unstubAllGlobals();
   window.history.pushState({}, "", "/");
+  /* vitest.setup.ts backs localStorage with one Map per test FILE — a locale
+     left behind would flip every later case in this one. */
+  localStorage.removeItem(LOCALE_STORAGE_KEY);
 });
 
 /* ------------------------------------------------------------------ */
@@ -187,12 +189,7 @@ describe("toCompareOption", () => {
 /* The panel on the page                                               */
 /* ------------------------------------------------------------------ */
 
-/**
- * QA round 4, finding #6. Picking "7d earlier" on a Prometheus whose retention
- * is 24h drew leg A alone — no legend entry for B, no error, nothing — and the
- * honest reading of that picture is "the fleet behaved identically a week
- * ago", which is the opposite of the truth.
- */
+/** Picking "7d earlier" on a Prometheus whose retention is 24h drew leg A alone — no legend entry for B. */
 describe("ExplorePage compare panel — a shifted leg that has no data", () => {
   /** Answers the SHIFTED window (any request whose end is older than now by
    *  roughly the shift) with an empty matrix, and everything else normally. */
@@ -387,5 +384,23 @@ describe("ExplorePage compare panel under the Time Machine", () => {
     await waitFor(() => expect(bodies.some((b) => Date.parse(b.end) !== AT_MS)).toBe(true));
     const shifted = bodies.find((b) => Date.parse(b.end) !== AT_MS) as RangeBody;
     expect(Date.parse(shifted.end)).toBe(AT_MS - 7 * 24 * HOUR_MS);
+  });
+});
+
+/* the Russian is wired ONE smoke pin. */
+describe("ExplorePage — Russian", () => {
+  it("names the page and the compare panel, and keeps the no-request promise", async () => {
+    stubFetch();
+    renderPage("ru");
+
+    expect(await screen.findByRole("heading", { name: "Метрики" })).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "Сравнение" })).toBeInTheDocument();
+
+    const idle = screen.getByText(/Выберите вторую метрику или прошлое окно/);
+    expect(idle.textContent).toMatch(/ни один запрос не уходит/);
+
+    // The shift picker's off position, and the metric-B picker's.
+    expect(within(screen.getByLabelText("Сравнить с прошлым")).getByText("Без сдвига")).toBeInTheDocument();
+    expect(within(screen.getByLabelText("Сравнить с метрикой")).getByText("Без второй метрики")).toBeInTheDocument();
   });
 });

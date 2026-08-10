@@ -1,33 +1,14 @@
 ---
-# E2E PostgreSQL fixture for console.database.mode=external.
-#
-# DELIBERATELY NOT CNPG. ADR-001 names the CloudNativePG CRD
-# chicken-and-egg as a known negative: mode=cnpg requires the CNPG
-# operator's CRDs to already exist in the cluster, and this chart does not
-# install the operator. Installing the operator here and waiting for its
-# CRDs would add minutes and a whole new failure mode to e2e for ZERO
-# additional coverage of kconmon-ng's own code -- database.mode=external
-# exercises the identical Go path (DatabaseConfig.ResolveDSN -> store.Open
-# -> goose migrations -> sqlc queries) that mode=cnpg would, the only
-# difference being which controller renders the Postgres Service. The CNPG
-# **rendering** path (the Cluster CR itself) is covered by `make helm-lint`
-# + `helm template` in the chart's own CI (Task 9's verification), not here.
-#
-# Do not "upgrade" this fixture to CNPG -- see the reasoning above before
-# changing it.
-#
-# Applied with `kubectl apply -f` BEFORE the Helm install (the console Pod
-# mounts the Secret below at boot and fails readiness without it).
+# E2E PostgreSQL fixture for console.database.mode=external; installing the operator here and waiting for its CRDs
+# would add minutes and a whole new failure mode to e2e for ZERO additional coverage of kconmon-ng's own code.
 apiVersion: v1
 kind: Secret
 metadata:
   name: kconmon-e2e-postgres
 type: Opaque
 stringData:
-  # console.database.existingSecretKey default is "dsn" -- console-values.yaml
-  # relies on that default rather than overriding it. sslmode=disable: this is
-  # a throwaway single-replica fixture inside an ephemeral kind cluster, never
-  # a pattern to copy for a real deployment.
+  # console.database.existingSecretKey default is "dsn" -- console-values.yaml relies on that default rather than
+  # overriding it.
   dsn: postgres://kconmon:kconmon@kconmon-e2e-postgres:5432/kconmon?sslmode=disable
 ---
 apiVersion: apps/v1

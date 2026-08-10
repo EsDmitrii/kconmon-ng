@@ -1,15 +1,6 @@
-// fake-websocket.ts — hand-written WebSocket double for tests. It implements
-// only the members WsClient actually touches (send/close/readyState/onopen/
-// onmessage/onclose/onerror) plus the emit* drivers a test calls, and is
-// injected either through WsClientOptions.WebSocketImpl (lib/ws.test.ts) or
-// with vi.stubGlobal("WebSocket", FakeSocket) for code that goes through the
-// module-level singleton (hooks + Live page). That is the same
-// mock-at-the-boundary convention as vi.stubGlobal("fetch", …) in
-// lib/api.test.ts; vitest.setup.ts intentionally has no WebSocket stub, so a
-// test that forgets to inject fails loudly instead of dialling for real.
-//
-// This module is imported only from *.test.ts(x) files, so it never reaches the
-// production bundle (rollup only walks what index.html/main.tsx reach).
+// fake-websocket.ts — hand-written WebSocket double for tests; it implements only the members
+// WsClient actually touches (send/close/readyState/onopen/ onmessage/onclose/onerror) plus the
+// emit* drivers a test calls.
 import type { WsEnvelope } from "./ws";
 
 export class FakeSocket {

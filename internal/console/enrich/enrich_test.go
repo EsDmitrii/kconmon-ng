@@ -170,9 +170,6 @@ func TestNewMissingGeoIPPathsAreSilent(t *testing.T) {
 	}
 }
 
-// TestNewUnreadableMMDBDisablesOnlyThatSource is Decision 5's rule: a bad
-// mount degrades that ONE source and never fails the boot, and never takes the
-// other source with it.
 func TestNewUnreadableMMDBDisablesOnlyThatSource(t *testing.T) {
 	junk := filepath.Join(t.TempDir(), "not-an-mmdb.bin")
 	if err := os.WriteFile(junk, []byte("this is definitely not a MaxMind DB"), 0o600); err != nil {
@@ -344,10 +341,8 @@ func TestResolveEmptyInputTakesNoRoundTrip(t *testing.T) {
 	}
 }
 
-// TestResolveWithNoLiveSourceNeverCachesEmptyRows guards the failure mode
-// config validation exists to prevent but a failed mmdb open can still reach:
-// with every source dead, resolving would fill the cache with empty rows and
-// the TTL would then protect that nothing for a day.
+// TestResolveWithNoLiveSourceNeverCachesEmptyRows guards the failure mode config validation exists
+// to prevent but a failed mmdb open can still reach.
 func TestResolveWithNoLiveSourceNeverCachesEmptyRows(t *testing.T) {
 	cfg := enabledConfig()
 	cfg.RDNS.Enabled = false
@@ -487,10 +482,8 @@ func TestResolveMMDBUnknownAddressCountsMiss(t *testing.T) {
 	}
 }
 
-// TestResolveUnparseableHopAddressNeverReachesTheMMDB: mtr can report a hop
-// with a placeholder address. It must not panic, must not be counted as an
-// mmdb error (the database is fine, the input is not), and must still produce
-// a row so the negative result is cached.
+// TestResolveUnparseableHopAddressNeverReachesTheMMDB; it must not panic, must not be counted as an
+// mmdb error (the database is fine, the input is not).
 func TestResolveUnparseableHopAddressNeverReachesTheMMDB(t *testing.T) {
 	cfg := enabledConfig()
 	cfg.RDNS.Enabled = false
@@ -566,10 +559,8 @@ func TestResolveRespectsCallerDeadlineAndReturnsPartials(t *testing.T) {
 
 // --- the httpapi seam -----------------------------------------------------
 
-// TestGetEnrichmentIsResolveBehindTheReadOnlySeam: Resolver satisfies
-// httpapi.EnrichmentReader's method, so swapping it in is one Deps field and
-// the handler is untouched. It NEVER returns an error -- every failure inside
-// is already degraded to a missing key.
+// TestGetEnrichmentIsResolveBehindTheReadOnlySeam; it NEVER returns an error -- every failure
+// inside is already degraded to a missing key.
 func TestGetEnrichmentIsResolveBehindTheReadOnlySeam(t *testing.T) {
 	cache := newFakeCache()
 	cache.getErr = errors.New("cache down")
@@ -613,4 +604,89 @@ func itoa(n int) string {
 		n /= 10
 	}
 	return string(b[i:])
+}
+
+// --- geoip hot reload (M8) -------------------------------------------------
+//
+// The sidecar path (maxmind/geoipupdate refreshing /geoip on an interval) is
+// only honest if the reader actually notices. These tests drive reloadGeoIP
+// directly rather than waiting on the ticker: the ticker is one line, the
+// swap is the behaviour.
+
+// copyFixture puts the ASN fixture at a writable path so the test can age it.
+func copyFixture(t *testing.T, dst string) {
+	t.Helper()
+	b, err := os.ReadFile(asnFixture)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(dst, b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestGeoIPReloadPicksUpAReplacedFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "GeoLite2-ASN.mmdb")
+	copyFixture(t, path)
+
+	cfg := enabledConfig()
+	cfg.RDNS.Enabled = false
+	cfg.GeoIP = config.GeoIPConfig{ASNPath: path}
+	r := newTestResolver(t, cfg, newFakeCache(), nil, testMetrics(t))
+
+	before := r.asn
+	if before == nil {
+		t.Fatal("asn reader should be open at boot")
+	}
+	// geoipupdate writes a new database; only the mtime tells us so.
+	copyFixture(t, path)
+	future := time.Now().Add(2 * time.Hour)
+	if err := os.Chtimes(path, future, future); err != nil {
+		t.Fatal(err)
+	}
+
+	r.reloadGeoIP()
+
+	if r.asn == nil {
+		t.Fatal("asn reader must stay open across a reload")
+	}
+	if r.asn == before {
+		t.Error("a changed mmdb must be reopened, so the sidecar's refresh is actually served")
+	}
+}
+
+func TestGeoIPReloadIgnoresAnUnchangedFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "GeoLite2-ASN.mmdb")
+	copyFixture(t, path)
+
+	cfg := enabledConfig()
+	cfg.RDNS.Enabled = false
+	cfg.GeoIP = config.GeoIPConfig{ASNPath: path}
+	r := newTestResolver(t, cfg, newFakeCache(), nil, testMetrics(t))
+
+	before := r.asn
+	r.reloadGeoIP()
+	if r.asn != before {
+		t.Error("an untouched mmdb must not be reopened: reopening mmaps a multi-megabyte file for nothing")
+	}
+}
+
+func TestGeoIPReloadEnablesASourceThatWasMissingAtBoot(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "GeoLite2-ASN.mmdb")
+
+	cfg := enabledConfig() // rdns stays on, so the resolver has a live source at boot
+	cfg.GeoIP = config.GeoIPConfig{ASNPath: path}
+	r := newTestResolver(t, cfg, newFakeCache(), nil, testMetrics(t))
+	if r.asn != nil {
+		t.Fatal("a missing mmdb must leave the source off at boot")
+	}
+
+	// The sidecar's FIRST download lands after the console started.
+	copyFixture(t, path)
+	r.reloadGeoIP()
+
+	if r.asn == nil {
+		t.Error("the first download after boot must switch the source on without a restart")
+	}
 }

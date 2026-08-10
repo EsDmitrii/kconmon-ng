@@ -16,11 +16,7 @@ type ZoneResolver interface {
 	ZoneFor(nodeName string) string
 }
 
-// The closed set of topology-change reasons. These strings are the wire
-// contract: they travel in pb.TopologyChanged.reason, get persisted in the
-// console's topology_events rows, and the console's fold branches on them
-// (internal/console/store/events.go, which mirrors them by hand because the
-// dependency runs the other way). Renaming one silently breaks history.
+// The closed set of topology-change reasons.
 const (
 	reasonAgentRegistered   = "agent_registered"
 	reasonZoneUpdated       = "zone_updated"
@@ -28,44 +24,22 @@ const (
 	reasonAgentEvicted      = "agent_evicted"
 )
 
-// TopologySubject names ONE agent a topology change was about, with the node
-// and zone it occupied at that moment. For a departure (deregister/evict) that
-// is the placement it HAD — captured before the map entry goes away, because
-// nothing can look it up afterwards.
+// TopologySubject names ONE agent a topology change was about, with the node and zone it occupied
+// at that moment.
 type TopologySubject struct {
 	AgentID  string
 	NodeName string
 	Zone     string
 }
 
-// TopologyChange is what a registry mutation tells its OnChange subscribers:
-// the reason, and every agent that reason was about.
-//
-// Subjects exists because a reason alone is not history. Until M7 the registry
-// handed subscribers a bare reason string, the controller published
-// pb.TopologyChanged{Reason: reason}, and the console's fold over persisted
-// events could never say WHICH node joined or left — so reconstructed topology
-// was structurally correct and permanently empty. Every mutation below knows
-// its subject at the call site; this type is how that knowledge survives to
-// the event.
-//
-// Subjects may hold several agents: a zone relabel moves every agent on the
-// node, and one TTL sweep can evict several at once. It is empty only for a
-// reason that genuinely has no agent subject — see Events.
+// TopologyChange is what a registry mutation tells its OnChange subscribers: the reason; until the
+// registry handed subscribers a bare reason string.
 type TopologyChange struct {
 	Reason   string
 	Subjects []TopologySubject
 }
 
-// Events renders the change as the events to publish: ONE per subject, so the
-// console's fold sees each node join or leave separately rather than having to
-// guess which of N agents a single event meant.
-//
-// With no subjects it still returns one reason-only event. That is deliberate:
-// a TopologyChanged is also the live Console's refetch signal, and swallowing
-// it would leave the UI stale until the next poll. Such an event is honest
-// about naming nobody, and the fold counts it as unfoldable rather than
-// guessing.
+// Events renders the change as the events to publish: ONE per subject.
 func (c TopologyChange) Events() []*pb.TopologyChanged {
 	if len(c.Subjects) == 0 {
 		return []*pb.TopologyChanged{{Reason: c.Reason}}

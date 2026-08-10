@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { resetWsClient } from "@/hooks/use-ws-topic";
 import { FakeSocket } from "@/lib/fake-websocket";
@@ -41,7 +41,13 @@ const matrixBody = {
 
 function renderPage(
   pathname = "/nodes/node-a",
-  opts: { runs?: unknown[]; permissions?: string[]; incidents?: unknown[] } = {},
+  opts: {
+    runs?: unknown[];
+    permissions?: string[];
+    incidents?: unknown[];
+    topology?: unknown;
+    matrix?: unknown;
+  } = {},
 ) {
   window.history.pushState({}, "", pathname);
   const fetchMock = vi.fn((url: string) => {
@@ -53,8 +59,10 @@ function renderPage(
         json({ subject: { kind: "user", id: "u1", displayName: "Ada", groups: [], roles: [] }, permissions: opts.permissions ?? [] }),
       );
     }
-    if (href.includes("/api/v1/topology")) return Promise.resolve(json(topologyBody));
-    if (href.includes("/api/v1/matrix")) return Promise.resolve(json(matrixBody));
+    if (href.includes("/api/v1/topology")) return Promise.resolve(json(opts.topology ?? topologyBody));
+    if (href.includes("/api/v1/matrix")) return Promise.resolve(json(opts.matrix ?? matrixBody));
+    if (href.startsWith("/api/v1/maintenance")) return Promise.resolve(json({ windows: [], nextCursor: "" }));
+    if (href.startsWith("/api/v1/annotations")) return Promise.resolve(json({ annotations: [], nextCursor: "" }));
     if (href.startsWith("/api/v1/incidents")) return Promise.resolve(json({ incidents: opts.incidents ?? [], nextCursor: "" }));
     if (href.startsWith("/api/v1/events")) return Promise.resolve(json({ events: [], nextCursor: "" }));
     if (href.startsWith("/api/v1/runs")) return Promise.resolve(json({ runs: opts.runs ?? [], nextCursor: "" }));
@@ -116,13 +124,13 @@ describe("nodeHealth", () => {
   });
 
   it("reads unknown with no outbound data", () => {
-    expect(nodeHealth(true, [], "node-a")).toEqual({ percent: null, tier: "unknown" });
+    expect(nodeHealth(true, [], "node-a")).toEqual({ percent: null, tier: "unknown", scored: 0, total: 0 });
   });
 
   /* QA round 2, finding #1: a node whose pairs have simply never failed. */
   it("does NOT read a measured-but-unscored node as No data", () => {
     const measured = [{ source: "node-a", destination: "node-b", failRatio: null, rttP95: 2_200_000 }];
-    expect(nodeHealth(true, measured, "node-a")).toEqual({ percent: null, tier: "ok" });
+    expect(nodeHealth(true, measured, "node-a")).toEqual({ percent: null, tier: "ok", scored: 0, total: 1 });
   });
 
   it("takes the tier from packet loss when no failure ratio was reported", () => {
@@ -134,7 +142,29 @@ describe("nodeHealth", () => {
 
   it("still reads unknown when nothing measured the node at all", () => {
     const silent = [{ source: "node-a", destination: "node-b", failRatio: null }];
-    expect(nodeHealth(true, silent, "node-a")).toEqual({ percent: null, tier: "unknown" });
+    expect(nodeHealth(true, silent, "node-a")).toEqual({ percent: null, tier: "unknown", scored: 0, total: 1 });
+  });
+
+  /* QA scope 2, finding #3 — the figure and the evidence behind it. */
+  it("reports how many of the node's pairs actually produced the figure", () => {
+    const nine = Array.from({ length: 9 }, (_, i) => ({
+      source: "node-a",
+      destination: `node-${i}`,
+      failRatio: i === 0 ? 0 : null,
+      ...(i === 0 ? { rttP95: 1e6 } : {}),
+    }));
+    const h = nodeHealth(true, nine, "node-a");
+    expect(h.percent).toBeCloseTo(100, 5);
+    expect(h.scored).toBe(1);
+    expect(h.total).toBe(9);
+  });
+
+  it("counts a self-cell in neither half", () => {
+    const withSelf = [
+      { source: "node-a", destination: "node-a", failRatio: 0 },
+      { source: "node-a", destination: "node-b", failRatio: 0.02 },
+    ];
+    expect(nodeHealth(true, withSelf, "node-a")).toMatchObject({ scored: 1, total: 1 });
   });
 });
 
@@ -157,10 +187,7 @@ describe("NodeCardPage", () => {
     expect(screen.getByText("2.0%")).toBeInTheDocument();
   });
 
-  // QA scope 2 #21: `scope=node-a` is an EQUALITY filter, so the rail missed
-  // every row a check between two nodes writes ("node-a→node-b"). scopeNode is
-  // the pair-aware param, and the two are mutually exclusive server-side (422),
-  // so the exact-scope one must be gone from the URL, not merely accompanied.
+  // QA scope 2 #21: `scope=node-a` is an EQUALITY filter.
   it("requests the recent-changes rail with the pair-aware scopeNode filter", async () => {
     const { fetchMock } = renderPage("/nodes/node-a");
     await waitFor(() =>
@@ -170,6 +197,147 @@ describe("NodeCardPage", () => {
     const url = new URL(String(call?.[0]), "http://localhost");
     expect(url.searchParams.get("scopeNode")).toBe("node-a");
     expect(url.searchParams.get("scope")).toBeNull();
+  });
+});
+
+/* ── QA scope 2, findings #3–#6, #14, #18, #21 ───────────────────────────── */
+
+describe("NodeCardPage — the header figure and the evidence under it", () => {
+  it("states the denominator when the figure rests on part of the pairs", async () => {
+    renderPage("/nodes/node-a");
+    // matrixBody: node-a has ONE outbound cell, and it is scored — so the
+    // figure covers everything there is and needs no qualifier.
+    await waitFor(() => expect(screen.getByTestId("node-health-percent")).toHaveTextContent("98.0% healthy"));
+    expect(screen.getByTestId("node-health-percent")).not.toHaveTextContent("scored");
+  });
+
+  it("qualifies the figure when most of the node's pairs produced no ratio", async () => {
+    const partial = {
+      protocol: "tcp",
+      plane: "pod",
+      nodes: ["node-a", "node-b", "node-c"],
+      cells: [
+        { source: "node-a", destination: "node-b", failRatio: 0, rttP95: 1e6 },
+        // Measured by nothing at all: it counts in the denominator and not in
+        // the numerator, which is precisely the gap the header now discloses.
+        { source: "node-a", destination: "node-c", failRatio: null },
+      ],
+      timestamp: "t",
+    };
+    renderPage("/nodes/node-a", { matrix: partial });
+    await waitFor(() =>
+      expect(screen.getByTestId("node-health-percent")).toHaveTextContent("100.0% healthy · 1 of 2 pairs scored"),
+    );
+  });
+});
+
+describe("NodeCardPage — the per-destination breakdown", () => {
+  it("links every destination row at the pair card, URL-encoding both halves", async () => {
+    renderPage("/nodes/node-a");
+    const link = await screen.findByRole("link", { name: "node-b" });
+    expect(link).toHaveAttribute("href", "/pairs/node-a/node-b");
+  });
+
+  it("grows a packet-loss column when the cells carry loss, so the header reconciles", async () => {
+    const lossy = {
+      protocol: "udp",
+      plane: "pod",
+      nodes: ["node-a", "node-b"],
+      cells: [{ source: "node-a", destination: "node-b", failRatio: null, rttP95: 1e6, lossRatio: 0.2 }],
+      timestamp: "t",
+    };
+    renderPage("/nodes/node-a", { matrix: lossy });
+    // The header says Failing off 20% loss; the table now SHOWS that 20%.
+    await waitFor(() => expect(screen.getByText("Failing")).toBeInTheDocument());
+    expect(screen.getByRole("columnheader", { name: "Packet loss" })).toBeInTheDocument();
+    expect(screen.getByText("20.0%")).toBeInTheDocument();
+  });
+
+  it("has no loss column at all on a protocol whose cells carry none", async () => {
+    renderPage("/nodes/node-a");
+    await waitFor(() => expect(screen.getByRole("columnheader", { name: "Fail ratio" })).toBeInTheDocument());
+    expect(screen.queryByRole("columnheader", { name: "Packet loss" })).toBeNull();
+  });
+
+  it("says 'no fail data' rather than an em-dash for a lazy failure counter", async () => {
+    const silentCounter = {
+      protocol: "tcp",
+      plane: "pod",
+      nodes: ["node-a", "node-b"],
+      cells: [{ source: "node-a", destination: "node-b", failRatio: null, rttP95: 1e6 }],
+      timestamp: "t",
+    };
+    renderPage("/nodes/node-a", { matrix: silentCounter });
+    // The matrix's own two readings, on the card that used one glyph for both.
+    expect(await screen.findByText("no fail data")).toBeInTheDocument();
+    expect(screen.queryByText("no data")).toBeNull();
+  });
+
+  it("keeps 'no data' for a destination nothing measured", async () => {
+    const unprobed = {
+      protocol: "tcp",
+      plane: "pod",
+      nodes: ["node-a", "node-b"],
+      cells: [{ source: "node-a", destination: "node-b", failRatio: null }],
+      timestamp: "t",
+    };
+    renderPage("/nodes/node-a", { matrix: unprobed });
+    expect(await screen.findByText("no data")).toBeInTheDocument();
+  });
+});
+
+describe("NodeCardPage — an empty podIP", () => {
+  it("draws the em-dash for the historical shape's empty string, not a blank cell", async () => {
+    const emptyIP = {
+      nodes: [{ name: "node-a", zone: "z1", ready: true }],
+      agents: [{ id: "agent-1", nodeName: "node-a", podIP: "", zone: "z1" }],
+      timestamp: "t",
+    };
+    renderPage("/nodes/node-a", { topology: emptyIP });
+    await waitFor(() => expect(screen.getByText("Pod IP")).toBeInTheDocument());
+    const cell = screen.getByText("Pod IP").parentElement?.querySelector("dd");
+    expect(cell).toHaveTextContent("—");
+  });
+});
+
+describe("NodeCardPage — the protocol in the URL", () => {
+  afterEach(() => window.history.replaceState({}, "", "/"));
+
+  it("opens on the protocol a shared link named", async () => {
+    renderPage("/nodes/node-a?protocol=icmp");
+    await waitFor(() => expect(screen.getByRole("radio", { name: "ICMP" })).toBeChecked());
+  });
+
+  it("REPLACES the protocol on a switch, leaving one history entry", async () => {
+    renderPage("/nodes/node-a");
+    await waitFor(() => expect(screen.getByRole("radio", { name: "TCP" })).toBeChecked());
+    const before = window.history.length;
+    fireEvent.click(screen.getByRole("radio", { name: "UDP" }));
+    expect(new URLSearchParams(window.location.search).get("protocol")).toBe("udp");
+    expect(window.history.length).toBe(before);
+  });
+
+  it("normalises a protocol this console cannot probe", async () => {
+    renderPage("/nodes/node-a?protocol=sctp");
+    await waitFor(() => expect(new URLSearchParams(window.location.search).get("protocol")).toBe("tcp"));
+  });
+});
+
+describe("NodeCardPage — maintenance", () => {
+  it("mounts the same bar the pair and target cards carry, scoped to this node", async () => {
+    const { fetchMock } = renderPage("/nodes/node-a", { permissions: ["maintenance:read"] });
+    expect(await screen.findByTestId("maintenance-bar")).toBeInTheDocument();
+    const scopes = fetchMock.mock.calls
+      .map((c) => String(c[0]))
+      .filter((h) => h.startsWith("/api/v1/maintenance"))
+      .map((h) => new URL(h, "http://localhost").searchParams.get("scope"));
+    expect(scopes).toContain("node-a");
+  });
+
+  it("shows no bar at all without maintenance:read", async () => {
+    renderPage("/nodes/node-a");
+    await waitFor(() => expect(screen.getByText("Annotations")).toBeInTheDocument());
+    expect(screen.queryByTestId("maintenance-bar")).toBeNull();
   });
 });
 

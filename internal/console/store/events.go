@@ -25,9 +25,8 @@ const (
 	defaultLimit = 100
 )
 
-// Query and result labels for the store metrics below. query is the closed
-// set of generated gen.Queries method names this package actually calls;
-// result is ok|conflict|error. Never widen either set with per-call data
+// Query and result labels for the store metrics below. query is the closed set of generated
+// gen.Queries method names this package actually calls; never widen either set with per-call data
 // (table names, row counts, user or run IDs).
 const (
 	queryInsertTopologyEvent       = "InsertTopologyEvent"
@@ -35,10 +34,7 @@ const (
 	queryOldestTopologyEventTime   = "OldestTopologyEventTime"
 	queryListTopologyEventsForFold = "ListTopologyEventsForFold"
 
-	// The auth-path queries (auth.go): users, roles and role bindings, API
-	// tokens, audit log. Every one of *DB's auth.go methods is metered, so
-	// this list and the set of gen.Queries calls that file makes must stay
-	// exactly in step.
+	// Every one of *DB's auth.go methods is metered.
 	queryGetUserByID              = "GetUserByID"
 	queryGetUserByUsername        = "GetUserByUsername"
 	queryCreateUser               = "CreateUser"
@@ -58,15 +54,14 @@ const (
 	queryCreateToken              = "CreateToken"
 	queryListTokens               = "ListTokens"
 	queryRevokeToken              = "RevokeToken"
+	queryPurgeToken               = "PurgeToken"
 	queryTouchTokenLastUsed       = "TouchTokenLastUsed"
 	queryInsertAuditEntry         = "InsertAuditEntry"
 	queryListAuditEntries         = "ListAuditEntries"
 	queryDeleteAuditEntriesBefore = "DeleteAuditEntriesBefore"
 
-	// The MTR path-history and annotation queries (mtr.go, annotations.go).
-	// The Delete*Before sweeps are deliberately absent: the pruner reports
-	// its own work through RetentionDeleted{table}, and metering the same
-	// DELETEs twice under two different metrics would double-count them.
+	// The MTR path-history and annotation queries (mtr.go, annotations.go); the Delete*Before sweeps
+	// are deliberately absent.
 	queryUpsertPathSnapshot  = "UpsertPathSnapshot"
 	queryListMTRDestinations = "ListMTRDestinations"
 	queryListPathSnapshots   = "ListPathSnapshots"
@@ -78,10 +73,7 @@ const (
 	queryListAnnotations     = "ListAnnotations"
 	queryDeleteAnnotation    = "DeleteAnnotation"
 
-	// The M6 investigation queries (k8sevents.go, incidents.go,
-	// maintenance.go, webhooks.go). The Delete*Before sweeps are absent for
-	// the same reason M5's are: the pruner reports its own work through
-	// RetentionDeleted{table}.
+	// The investigation queries (k8sevents.go, incidents.go, maintenance.go, webhooks.go).
 	queryInsertK8sEvent          = "InsertK8sEvent"
 	queryListK8sEvents           = "ListK8sEvents"
 	queryCreateIncident          = "CreateIncident"
@@ -101,9 +93,6 @@ const (
 	queryUpdateWebhookDelivery   = "UpdateWebhookDelivery"
 	queryDeleteWebhook           = "DeleteWebhook"
 
-	// The M7 alerting queries (alertrules.go). alert_rules is configuration
-	// and has no sweep at all, so unlike the M5/M6 blocks above there is not
-	// even a Delete*Before to leave out.
 	queryCreateAlertRule           = "CreateAlertRule"
 	queryGetAlertRule              = "GetAlertRule"
 	queryListAlertRules            = "ListAlertRules"
@@ -129,23 +118,13 @@ type EventRecord struct {
 	Details   json.RawMessage
 }
 
-// EventFilter selects a page. All fields optional; Limit is clamped to [1,500].
-//
-// Scope and ScopeNode are two different questions about the same column and
-// httpapi refuses the pair with a 422 (they would only ever narrow each other).
-// Setting both here is therefore not a documented shape, but it is not
-// undefined either: the query ANDs them, which is the honest reading of "apply
-// every filter you were given".
+// EventFilter selects a page; scope and ScopeNode are two different questions about the same column
+// and httpapi refuses the pair with a 422 (they would only ever narrow each other).
 type EventFilter struct {
 	Types []string // OR-ed; empty = all
 	Scope string   // exact match; empty = all
-	// ScopeNode matches a NAME on either side of the scope: the bare scope
-	// itself, or a pair scope ("<src>→<dst>", events.pairScope) naming it as
-	// source or destination. This is what an object card asks -- a node's own
-	// events plus every check that ran to or from it -- and what Scope, being
-	// an equality filter, structurally cannot answer. Empty = no filter. The
-	// name is matched LITERALLY: its LIKE metacharacters are escaped in the
-	// query, so a target name carrying '_' cannot widen into a wildcard.
+	// ScopeNode matches a NAME on either side of the scope: the bare scope itself; this is what an
+	// object card asks -- a node's own events plus every check that ran.
 	ScopeNode string
 	From      time.Time // inclusive; zero = unbounded
 	To        time.Time // exclusive; zero = unbounded
@@ -188,10 +167,7 @@ func (s *eventStore) observe(query string, start time.Time, result string) {
 	s.m.StoreQueries.WithLabelValues(query, result).Inc()
 }
 
-// InsertEvent persists rec. inserted is false, with a nil error, exactly when
-// ON CONFLICT DO NOTHING fired because another replica already wrote this
-// (EventSeq, EventTime) pair -- the normal multi-replica case, which callers
-// must not log as an error.
+// InsertEvent persists rec. inserted is false, with a nil error.
 func (s *eventStore) InsertEvent(ctx context.Context, rec EventRecord) (bool, error) { //nolint:gocritic // hugeParam: EventStore is the pinned public interface (task-3-brief.md), value semantics intentional
 	start := time.Now()
 	rows, err := s.q.InsertTopologyEvent(ctx, gen.InsertTopologyEventParams{
@@ -220,10 +196,8 @@ func (s *eventStore) InsertEvent(ctx context.Context, rec EventRecord) (bool, er
 	return inserted, nil
 }
 
-// ListEvents returns one page matching f, newest first. NextCursor is set
-// only when the page came back exactly as full as requested: a short page
-// proves there is nothing older left to return, so encoding a cursor for it
-// would only earn the caller one guaranteed-empty extra round trip.
+// ListEvents returns one page matching f; NextCursor is set only when the page came back exactly as
+// full as requested.
 func (s *eventStore) ListEvents(ctx context.Context, f EventFilter) (EventPage, error) { //nolint:gocritic // hugeParam: EventStore is the pinned public interface (task-3-brief.md), value semantics intentional
 	limit := clampLimit(f.Limit)
 
@@ -309,40 +283,8 @@ func (s *eventStore) ListEvents(ctx context.Context, f EventFilter) (EventPage, 
 	return EventPage{Events: events, NextCursor: nextCursor}, nil
 }
 
-// --- topology-at-t (M5 Task 9) -------------------------------------------
-//
-// WHAT A topology_changed EVENT ACTUALLY CARRIES, and therefore what this
-// fold can and cannot reconstruct. The persisted details JSON is exactly
-// events.topologyChangedDetails (internal/console/events/live_event.go):
-//
-//	{"reason": "...", "nodeName": "...", "agentId": "...", "zone": "..."}
-//
-// reason is the controller registry's own label -- agent_registered,
-// zone_updated, agent_deregistered, agent_evicted (api/proto/kconmon.proto,
-// internal/controller/registry.go). That is the WHOLE payload:
-//
-//   - Node/agent IDENTITY is reconstructible ONLY when the event names it.
-//     Since M7 the controller attributes every change at its emission site --
-//     one event per affected agent, carrying agent id, node and zone -- so
-//     current history folds into a real node set. History written BEFORE that
-//     (still inside retention on an upgraded console) carries a reason and
-//     nothing else: those rows name nobody, and the fold's honest answer for
-//     them is to change nothing and count them in UnfoldableEvents. A large
-//     UnfoldableEvents next to an empty node set means the window is mostly
-//     pre-M7 history, not that the cluster was empty.
-//   - ZONE is recorded since M7, including by zone_updated (whose entire
-//     subject is the new zone), so folded nodes and agents carry the zone the
-//     events last stated. It stays empty for pre-M7 rows, and an event that
-//     omits it never ERASES a zone already folded -- see the zone rule in
-//     foldTopology.
-//   - POD IP is never recorded, at any version. Folded agents always carry an
-//     empty PodIP.
-//   - READINESS is not recorded. Ready is true for every node the fold has
-//     seen registered and not since removed -- "present per the event log",
-//     which is the only readiness this history contains.
-//
-// Removals are a REASON, not a separate event type: agent_deregistered and
-// agent_evicted are the two that take a subject out of the set.
+// topology-at-t WHAT A topology_changed EVENT ACTUALLY CARRIES, and therefore what this fold can
+// and cannot reconstruct.
 const (
 	topologyReasonRegistered   = "agent_registered"
 	topologyReasonZoneUpdated  = "zone_updated"
@@ -350,27 +292,15 @@ const (
 	topologyReasonEvicted      = "agent_evicted"
 )
 
-// eventTypeTopologyChanged mirrors events.TypeTopologyChanged. Duplicated as a
-// private const rather than imported: the dependency runs the other way round
-// (events.Ingester writes THROUGH this store), and store importing the console's
-// event-projection package would invert it.
+// eventTypeTopologyChanged mirrors events.TypeTopologyChanged; duplicated as a private const rather
+// than imported.
 const eventTypeTopologyChanged = "topology_changed"
 
-// topologyFoldLimit bounds the fold's single query. A fold is only correct
-// when it sees EVERY event from the beginning of retention, so this is a
-// blast-radius guard, never a page size: hitting it means the answer is
-// missing the NEWEST events and TopologySnapshot.Truncated says so. At the
-// default 90-day retention, topology churn is orders of magnitude below this
-// (an event per agent registration/eviction), so a truncated fold means either
-// a pathological flapping cluster or a misconfigured retention -- both worth
-// the WARN it logs.
+// topologyFoldLimit bounds the fold's single query; a fold is only correct when it sees EVERY event
+// from the beginning of retention.
 const topologyFoldLimit = 100_000
 
-// TopologyNode is one node in a reconstructed topology. Field-for-field the
-// durable twin of controllerclient.Node, so httpapi can serve the same JSON
-// keys for a folded snapshot as for the live passthrough. Zone comes from the
-// events and is empty for pre-M7 history; Ready is presence-derived -- see the
-// block comment above.
+// TopologyNode is one node in a reconstructed topology.
 type TopologyNode struct {
 	Name  string
 	Zone  string
@@ -399,21 +329,15 @@ type TopologySnapshot struct {
 	// when no event was folded at all.
 	LastChange time.Time
 
-	// OldestRetained is the event_time of the OLDEST row still in
-	// topology_events, whatever its type: the retention floor. Zero means the
-	// table is empty. A caller asking about an instant before this cannot be
-	// answered honestly -- the events that would have built that set are gone.
+	// OldestRetained is the event_time of the OLDEST row still in topology_events, whatever its type;
+	// a caller asking about an instant before this cannot be answered honestly.
 	OldestRetained time.Time
 
 	// EventsFolded counts every row the fold consumed, including the ones that
 	// could not move the set.
 	EventsFolded int
 
-	// UnfoldableEvents counts rows that could NOT move the set: they named
-	// neither a node nor an agent (every pre-M7 row, none written since),
-	// carried unparseable details, or used a reason this build does not know.
-	// A large value next to an empty node set is the signal that the history
-	// is thin, not that the cluster was empty.
+	// UnfoldableEvents counts rows that could NOT move the set.
 	UnfoldableEvents int
 
 	// Truncated reports that topologyFoldLimit cut the history off, so the
@@ -431,17 +355,9 @@ type topologyChangeDetails struct {
 	Zone     string `json:"zone"`
 }
 
-// TopologyAt reconstructs the node/agent set as of at by replaying every
-// topology_changed event with event_time <= at in (event_time, id) order.
-//
-// The returned snapshot ALWAYS carries OldestRetained, even when the fold
-// itself is empty: that is what lets the caller tell "nothing had happened
-// yet" apart from "the events for that instant have been pruned", which is a
-// 422 rather than an empty 200. Both facts come back from this one call so the
-// caller needs no second round trip to decide.
-//
-// See the block comment above for the fold's contract -- what the events do
-// and do not record.
+// TopologyAt reconstructs the node/agent set as of at by replaying every topology_changed event
+// with event_time <= at in (event_time, id) order; the returned snapshot ALWAYS carries
+// OldestRetained, even when the fold itself is empty.
 func (s *eventStore) TopologyAt(ctx context.Context, at time.Time) (TopologySnapshot, error) {
 	oldestStart := time.Now()
 	oldest, err := s.q.OldestTopologyEventTime(ctx)
@@ -493,10 +409,8 @@ func (s *eventStore) TopologyAt(ctx context.Context, at time.Time) (TopologySnap
 	return snap, nil
 }
 
-// foldTopology replays recs -- assumed already ordered (event_time, id)
-// ascending -- into the node/agent set they describe. Pure: no clock, no I/O,
-// no package state, so the whole contract is unit-testable over synthetic
-// records. OldestRetained is NOT set here; only the caller knows it.
+// foldTopology replays recs -- assumed already ordered (event_time, id) ascending; OldestRetained
+// is NOT set here.
 func foldTopology(recs []EventRecord) TopologySnapshot {
 	// Membership plus the last placement each subject was seen with. Zone is
 	// carried rather than recomputed because only the event that mentions it
@@ -527,12 +441,7 @@ func foldTopology(recs []EventRecord) TopologySnapshot {
 
 		switch d.Reason {
 		case topologyReasonRegistered, topologyReasonZoneUpdated:
-			// The zone rule: an event that states one WINS (zone_updated
-			// exists precisely to restate it), an event that omits one leaves
-			// what is already known ALONE. Overwriting with "" would blank
-			// zones at random across the mixed history an upgraded console
-			// holds -- pre-M7 rows carry no zone key at all -- while ignoring
-			// a stated zone would make a relabel invisible.
+			// The zone rule: an event that states one WINS (zone_updated exists precisely to restate it).
 			if d.NodeName != "" {
 				if _, seen := nodes[d.NodeName]; d.Zone != "" || !seen {
 					nodes[d.NodeName] = d.Zone

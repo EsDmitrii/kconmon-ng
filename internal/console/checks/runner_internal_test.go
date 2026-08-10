@@ -3,6 +3,8 @@ package checks
 import (
 	"context"
 	"encoding/json"
+	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -18,13 +20,7 @@ import (
 	"github.com/EsDmitrii/kconmon-ng/internal/console/ws"
 )
 
-// This file is white-box (package checks, not checks_test): it calls
-// unexported methods (execute, runOneRecovered) directly. That is
-// deliberate, not a shortcut around runner_test.go's black-box style --
-// Start's own runDeadline computation (batches*perPairTimeout + a 30s slack
-// floor) cannot be driven below ~31s through the public API, which is far
-// too slow for a unit test that specifically wants to observe "runCtx's
-// deadline fires mid-dispatch."
+// That is deliberate, not a shortcut around runner_test.go's black-box style.
 
 // slowFakeCtrl's Diagnose blocks for delay or until ctx is cancelled,
 // whichever comes first -- the shape a slow controller/agent produces, which
@@ -44,13 +40,7 @@ func (f *slowFakeCtrl) Diagnose(ctx context.Context, _ controllerclient.Diagnose
 	}
 }
 
-// panicOnceFakeCtrl panics on its first Diagnose call, then answers normally
-// -- runOneRecovered's recover() test (task-22-brief.md minor c) wants a
-// panic that lands inside one pair's dispatch, not a real controller/network
-// failure, which the public Diagnose sentinels already cover. panicked is an
-// atomic.Bool, not a plain bool: execute dispatches pairs concurrently (up to
-// maxConcurrency in flight), and this fake is shared across every pair's
-// goroutine.
+// panicOnceFakeCtrl panics on its first Diagnose call, then answers normally.
 type panicOnceFakeCtrl struct {
 	panicked atomic.Bool
 }
@@ -66,11 +56,8 @@ func (f *panicOnceFakeCtrl) Diagnose(context.Context, controllerclient.DiagnoseR
 	return json.RawMessage(`{"success":true}`), nil
 }
 
-// ctxObservingStore wraps a *MemoryStore and records whether ctx was already
-// Done (i.e. runCtx-expired) at the moment FinishRun/UpsertRunResult were
-// called -- the exact question I-1 (task-22-brief.md) exists to answer: both
-// calls must still happen, and succeed, on a context that has NOT itself
-// already expired, even after runCtx (the run's own deadline) has.
+// ctxObservingStore wraps a *MemoryStore and records whether ctx was already Done (i.e.
+// runCtx-expired) at the moment FinishRun/UpsertRunResult were called.
 type ctxObservingStore struct {
 	*MemoryStore
 
@@ -104,11 +91,8 @@ func (s *ctxObservingStore) UpsertPathSnapshot(ctx context.Context, in store.Pat
 	return s.MemoryStore.UpsertPathSnapshot(ctx, in)
 }
 
-// mtrThenCancelCtrl answers with a complete mtr trace and then cancels the
-// run's own context before returning it -- the shape that makes the projection
-// hook's context discipline observable. A pair whose result HAS arrived must
-// still be projected, so the snapshot write cannot be handed runCtx: it would
-// be Done before the write ever started.
+// mtrThenCancelCtrl answers with a complete mtr trace and then cancels the run's own context before
+// returning it; a pair whose result HAS arrived must still be projected.
 type mtrThenCancelCtrl struct {
 	cancel context.CancelFunc
 	body   json.RawMessage
@@ -123,10 +107,315 @@ func (f *mtrThenCancelCtrl) Diagnose(context.Context, controllerclient.DiagnoseR
 	return f.body, nil
 }
 
-// A trace that arrived must reach path history even though the run's own
-// context was cancelled between the dispatch and the write -- the same
-// terminal-op guarantee UpsertRunResult has, applied to the projection that
-// immediately follows it (M5 Task 2).
+// The stuck-run reaper's cutoff MUST clear the longest duration Start accepts.
+func TestMaxRunLifetimeCoversTheLongestAcceptedDuration(t *testing.T) {
+	got := maxRunLifetime()
+	if got <= MaxRunDuration {
+		t.Fatalf("maxRunLifetime() = %s, want > MaxRunDuration (%s) -- the reaper would kill live interval runs", got, MaxRunDuration)
+	}
+	// And it must clear the deadline Start actually hands the worst case, with
+	// the reap slack still on top.
+	worst := runDeadline(maxPairs, maxPerPairTimeout, MaxRunDuration)
+	if got < worst+reapSlack {
+		t.Errorf("maxRunLifetime() = %s, want at least %s (worst-case deadline + reapSlack)", got, worst+reapSlack)
+	}
+}
+
+// The sampling schedule is a documented contract (the API states the cap), so
+// its arithmetic is pinned rather than left to emerge.
+func TestSampleIntervalAndPlannedRoundsRespectTheCap(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		duration     time.Duration
+		wantInterval time.Duration
+		wantRounds   int
+	}{
+		{"instant", 0, 0, 1},
+		// Short runs sit on the MinSampleInterval floor.
+		{"10s floor", 10 * time.Second, MinSampleInterval, 2},
+		{"1m", time.Minute, MinSampleInterval, 12},
+		{"15m", 15 * time.Minute, MinSampleInterval, 180},
+		// From here the interval widens so the cap is never exceeded.
+		{"1h", time.Hour, 7200 * time.Millisecond, MaxSamplesPerPair},
+		{"24h", 24 * time.Hour, 172800 * time.Millisecond, MaxSamplesPerPair},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := SampleInterval(tc.duration); got != tc.wantInterval {
+				t.Errorf("SampleInterval(%s) = %s, want %s", tc.duration, got, tc.wantInterval)
+			}
+			if got := plannedRounds(tc.duration); got != tc.wantRounds {
+				t.Errorf("plannedRounds(%s) = %d, want %d", tc.duration, got, tc.wantRounds)
+			}
+			if got := plannedRounds(tc.duration); got > MaxSamplesPerPair {
+				t.Errorf("plannedRounds(%s) = %d exceeds the documented cap %d", tc.duration, got, MaxSamplesPerPair)
+			}
+		})
+	}
+}
+
+// countingCtrl answers every Diagnose with the same successful result and
+// counts the calls -- the seam for asserting that an interval run actually
+// RE-PROBES rather than dispatching once and sleeping.
+type countingCtrl struct {
+	calls atomic.Int32
+	topo  *controllerclient.Topology
+}
+
+func (c *countingCtrl) Topology(context.Context) (*controllerclient.Topology, error) {
+	return c.topo, nil
+}
+
+func (c *countingCtrl) Diagnose(context.Context, controllerclient.DiagnoseRequest, time.Duration) (json.RawMessage, error) {
+	c.calls.Add(1)
+	return json.RawMessage(`{"type":"tcp","success":true,"duration":1000000}`), nil
+}
+
+// An interval run must probe every pair ONCE PER ROUND and keep every probe as its own sample.
+func TestExecuteIntervalRunKeepsEverySampleAndReProbes(t *testing.T) {
+	m := metrics.New("kconmon_ng_test_interval", prometheus.NewRegistry())
+	bus := cache.NewInProcessBus()
+	hub := ws.NewHub(bus, m)
+	st := NewMemoryStore()
+	ctrl := &countingCtrl{}
+	r := NewRunner(ctrl, hub, bus, st, m)
+
+	spec := Spec{
+		Sources: []string{"n1"}, Destinations: []string{"n2", "n3"},
+		Type: "tcp", Plane: "pod", Timeout: 1 * time.Second, Duration: time.Minute,
+	}
+	pairs := []Pair{
+		{Source: "n1", Destination: NodeDestination("n2")},
+		{Source: "n1", Destination: NodeDestination("n3")},
+	}
+	specJSON, err := json.Marshal(spec)
+	if err != nil {
+		t.Fatalf("marshal spec: %v", err)
+	}
+	run, err := st.CreateRun(context.Background(), uuid.NewString(), spec.Type, spec.Plane, specJSON, "user", "u1", int32(len(pairs)))
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+
+	runCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	const rounds = 3
+	r.execute(runCtx, cancel, run.ID, pairs, &spec, 1*time.Second, rounds, 20*time.Millisecond, false)
+
+	// 2 pairs x 3 rounds.
+	if got := ctrl.calls.Load(); got != 6 {
+		t.Errorf("Diagnose calls = %d, want 6 (2 pairs x 3 rounds)", got)
+	}
+	results, err := st.GetRunResults(context.Background(), run.ID)
+	if err != nil {
+		t.Fatalf("GetRunResults: %v", err)
+	}
+	if len(results) != 6 {
+		t.Fatalf("stored results = %d, want 6 -- every sample is kept, not overwritten", len(results))
+	}
+	// Each pair carries seqs 0,1,2 exactly once.
+	seqs := map[string]map[int32]int{}
+	for i := range results {
+		key := results[i].SourceNode + "->" + results[i].DestinationNode
+		if seqs[key] == nil {
+			seqs[key] = map[int32]int{}
+		}
+		seqs[key][results[i].SampleSeq]++
+	}
+	for key, bySeq := range seqs {
+		for seq := int32(0); seq < rounds; seq++ {
+			if bySeq[seq] != 1 {
+				t.Errorf("pair %s sample_seq %d appeared %d times, want exactly 1", key, seq, bySeq[seq])
+			}
+		}
+	}
+
+	final, err := st.GetRun(context.Background(), run.ID)
+	if err != nil {
+		t.Fatalf("GetRun: %v", err)
+	}
+	if final.Status != "succeeded" {
+		t.Errorf("status = %q, want succeeded", final.Status)
+	}
+	// pairOk/pairFailed count PAIRS, never samples: 2 pairs x 3 all-ok rounds is
+	// 2/2, the same numerator the run detail page shows.
+	if final.PairOK != 2 || final.PairFailed != 0 {
+		t.Errorf("pair counts = ok:%d failed:%d, want ok:2 failed:0 (pairs, not samples)", final.PairOK, final.PairFailed)
+	}
+	if final.PairTotal != 2 {
+		t.Errorf("PairTotal = %d, want 2 -- ok/total must be commensurable", final.PairTotal)
+	}
+}
+
+// lastRoundFailsCtrl succeeds for every pair except one destination's FINAL
+// sample -- the shape that separates "latest sample" from "any sample".
+type lastRoundFailsCtrl struct {
+	failDestination string
+	rounds          int32
+
+	mu    sync.Mutex
+	calls map[string]int32
+}
+
+func (c *lastRoundFailsCtrl) Topology(context.Context) (*controllerclient.Topology, error) {
+	return nil, nil //nolint:nilnil // never consulted by execute
+}
+
+func (c *lastRoundFailsCtrl) Diagnose(_ context.Context, req controllerclient.DiagnoseRequest, _ time.Duration) (json.RawMessage, error) {
+	c.mu.Lock()
+	if c.calls == nil {
+		c.calls = map[string]int32{}
+	}
+	c.calls[req.Destination]++
+	n := c.calls[req.Destination]
+	c.mu.Unlock()
+	if req.Destination == c.failDestination && n == c.rounds {
+		return json.RawMessage(`{"type":"tcp","success":false,"error":"last sample failed"}`), nil
+	}
+	return json.RawMessage(`{"type":"tcp","success":true,"duration":1000000}`), nil
+}
+
+// The stored pairOk/pairFailed an interval run finishes with must apply the run
+// detail page's rule -- a pair is OK when its LATEST sample succeeded -- so the
+// history list and the detail page cannot disagree about the same run.
+func TestExecuteIntervalRunCountsPairsByTheirLatestSample(t *testing.T) {
+	m := metrics.New("kconmon_ng_test_latestsample", prometheus.NewRegistry())
+	bus := cache.NewInProcessBus()
+	hub := ws.NewHub(bus, m)
+	st := NewMemoryStore()
+	const rounds = 3
+	ctrl := &lastRoundFailsCtrl{failDestination: "n3", rounds: rounds}
+	r := NewRunner(ctrl, hub, bus, st, m)
+
+	spec := Spec{
+		Sources: []string{"n1"}, Destinations: []string{"n2", "n3"},
+		Type: "tcp", Plane: "pod", Timeout: time.Second, Duration: time.Minute,
+	}
+	pairs := []Pair{
+		{Source: "n1", Destination: NodeDestination("n2")},
+		{Source: "n1", Destination: NodeDestination("n3")},
+	}
+	specJSON, err := json.Marshal(spec)
+	if err != nil {
+		t.Fatalf("marshal spec: %v", err)
+	}
+	run, err := st.CreateRun(context.Background(), uuid.NewString(), spec.Type, spec.Plane, specJSON, "user", "u1", int32(len(pairs)))
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+
+	runCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	r.execute(runCtx, cancel, run.ID, pairs, &spec, time.Second, rounds, 20*time.Millisecond, false)
+
+	final, err := st.GetRun(context.Background(), run.ID)
+	if err != nil {
+		t.Fatalf("GetRun: %v", err)
+	}
+	// n3 sent 2 OK samples and then failed; counted per sample it would be 5/1.
+	if final.PairOK != 1 || final.PairFailed != 1 {
+		t.Errorf("pair counts = ok:%d failed:%d, want ok:1 failed:1 (n3's latest sample failed)", final.PairOK, final.PairFailed)
+	}
+	// The status still reads every sample: one bad sample out of six is partial.
+	if final.Status != "partial" {
+		t.Errorf("status = %q, want partial", final.Status)
+	}
+}
+
+// An instant run is one round and must be indistinguishable.
+func TestExecuteInstantRunStillWritesOneSampleZeroPerPair(t *testing.T) {
+	m := metrics.New("kconmon_ng_test_instant", prometheus.NewRegistry())
+	bus := cache.NewInProcessBus()
+	hub := ws.NewHub(bus, m)
+	st := NewMemoryStore()
+	ctrl := &countingCtrl{}
+	r := NewRunner(ctrl, hub, bus, st, m)
+
+	spec := Spec{Sources: []string{"n1"}, Destinations: []string{"n2"}, Type: "tcp", Plane: "pod", Timeout: time.Second}
+	pairs := []Pair{{Source: "n1", Destination: NodeDestination("n2")}}
+	specJSON, _ := json.Marshal(spec) //nolint:errcheck // fixed spec always marshals
+	run, err := st.CreateRun(context.Background(), uuid.NewString(), spec.Type, spec.Plane, specJSON, "user", "u1", 1)
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+
+	runCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	r.execute(runCtx, cancel, run.ID, pairs, &spec, time.Second, plannedRounds(0), SampleInterval(0), false)
+
+	results, err := st.GetRunResults(context.Background(), run.ID)
+	if err != nil {
+		t.Fatalf("GetRunResults: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("stored results = %d, want 1", len(results))
+	}
+	if results[0].SampleSeq != 0 {
+		t.Errorf("sample_seq = %d, want 0 for an instant run", results[0].SampleSeq)
+	}
+	if got := ctrl.calls.Load(); got != 1 {
+		t.Errorf("Diagnose calls = %d, want 1", got)
+	}
+	// And the spec snapshot must not have grown a duration key.
+	if strings.Contains(string(specJSON), "Duration") {
+		t.Errorf("instant spec snapshot = %s, want no Duration key (omitempty)", specJSON)
+	}
+}
+
+// Cancelling an interval run mid-flight stops the ROUND LOOP, not just the round in progress.
+func TestExecuteIntervalRunCancelStopsTheRoundLoop(t *testing.T) {
+	m := metrics.New("kconmon_ng_test_intervalcancel", prometheus.NewRegistry())
+	bus := cache.NewInProcessBus()
+	hub := ws.NewHub(bus, m)
+	st := NewMemoryStore()
+	ctrl := &countingCtrl{}
+	r := NewRunner(ctrl, hub, bus, st, m)
+
+	spec := Spec{
+		Sources: []string{"n1"}, Destinations: []string{"n2"},
+		Type: "tcp", Plane: "pod", Timeout: time.Second, Duration: time.Hour,
+	}
+	pairs := []Pair{{Source: "n1", Destination: NodeDestination("n2")}}
+	specJSON, _ := json.Marshal(spec) //nolint:errcheck // fixed spec always marshals
+	run, err := st.CreateRun(context.Background(), uuid.NewString(), spec.Type, spec.Plane, specJSON, "user", "u1", 1)
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+
+	runCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	// Register the control the way Start does, so the cancelled flag is what
+	// decides the terminal status.
+	ctl := &runControl{cancel: cancel}
+	r.runControls.Store(run.ID, ctl)
+
+	go func() {
+		time.Sleep(60 * time.Millisecond)
+		ctl.cancelled.Store(true)
+		ctl.cancel()
+	}()
+
+	done := make(chan struct{})
+	go func() {
+		// 500 rounds, 20ms apart, would be 10 seconds if the cancel were ignored.
+		r.execute(runCtx, cancel, run.ID, pairs, &spec, time.Second, 500, 20*time.Millisecond, false)
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("execute did not return after cancel -- the round loop ignored runCtx")
+	}
+
+	final, err := st.GetRun(context.Background(), run.ID)
+	if err != nil {
+		t.Fatalf("GetRun: %v", err)
+	}
+	if final.Status != statusCancelled {
+		t.Errorf("status = %q, want %q", final.Status, statusCancelled)
+	}
+	if got := ctrl.calls.Load(); got >= 500 {
+		t.Errorf("Diagnose calls = %d, want far fewer than the 500 planned rounds", got)
+	}
+}
+
+// A trace that arrived must reach path history even though the run's own context was cancelled
+// between the dispatch and the write.
 func TestExecuteProjectsMTRSnapshotOnAContextOutlivingTheRun(t *testing.T) {
 	m := metrics.New("kconmon_ng_test_m5", prometheus.NewRegistry())
 	bus := cache.NewInProcessBus()
@@ -146,20 +435,15 @@ func TestExecuteProjectsMTRSnapshotOnAContextOutlivingTheRun(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal spec: %v", err)
 	}
-	// A real UUID, not a "run-m5" placeholder: the run id becomes the
-	// snapshot's RunID and PathSnapshotInput.Validate parses it, exactly as
-	// the FK to check_runs requires. Start mints one with uuid.NewString, so a
-	// placeholder here would test a shape production never produces.
+	// Start mints one with uuid.NewString, so a placeholder here would test a shape production never
+	// produces.
 	run, err := st.CreateRun(context.Background(), uuid.NewString(), spec.Type, spec.Plane, specJSON, "user", "u1", int32(len(pairs)))
 	if err != nil {
 		t.Fatalf("CreateRun: %v", err)
 	}
 
-	// The topic is deliberately left unopened: this test is about the store
-	// hook, and execute's pre-close relay wait would otherwise spend its full
-	// budget waiting for frames the cancelled runCtx already tore the topic's
-	// subscription goroutine away from.
-	r.execute(runCtx, cancel, run.ID, pairs, &spec, 1*time.Second, false)
+	// The topic is deliberately left unopened: this test is about the store hook.
+	r.execute(runCtx, cancel, run.ID, pairs, &spec, 1*time.Second, 1, 0, false)
 
 	if !st.upsertSnapshotCalled {
 		t.Fatal("UpsertPathSnapshot was never called for a successful mtr pair")
@@ -172,11 +456,9 @@ func TestExecuteProjectsMTRSnapshotOnAContextOutlivingTheRun(t *testing.T) {
 	}
 }
 
-// A run whose runCtx deadline fires WHILE a pair is still dispatching (a slow
-// controller/agent -- exactly the case runDeadline's own slack cannot always
-// absorb) must still reach FinishRun and end up in a terminal status, not
-// stuck "running" forever, since nothing reaps a run row (task-22-brief.md
-// I-1).
+// A run whose runCtx deadline fires WHILE a pair is still dispatching (a slow controller/agent --
+// exactly the case runDeadline's own slack cannot always absorb) must still reach FinishRun and end
+// up in a terminal status.
 func TestExecuteFinishesRunAfterRunCtxDeadlineFiresMidDispatch(t *testing.T) {
 	m := metrics.New("kconmon_ng_test_i1", prometheus.NewRegistry())
 	bus := cache.NewInProcessBus()
@@ -202,7 +484,7 @@ func TestExecuteFinishesRunAfterRunCtxDeadlineFiresMidDispatch(t *testing.T) {
 	topic := ws.RunTopic(run.ID)
 	topicOpen := hub.OpenTopic(runCtx, topic)
 
-	r.execute(runCtx, cancel, run.ID, pairs, &spec, 1*time.Second, topicOpen)
+	r.execute(runCtx, cancel, run.ID, pairs, &spec, 1*time.Second, 1, 0, topicOpen)
 
 	if !st.finishRunCalled {
 		t.Fatal("FinishRun was never called")
@@ -226,10 +508,8 @@ func TestExecuteFinishesRunAfterRunCtxDeadlineFiresMidDispatch(t *testing.T) {
 	}
 }
 
-// A panic inside one pair's dispatch must not crash the process or hang
-// wg.Wait() forever waiting on a goroutine that never reached wg.Done(); it
-// must be recorded as a failed pair, logged, and the run must still finish
-// (task-22-brief.md minor c).
+// A panic inside one pair's dispatch must not crash the process or hang wg.Wait forever waiting on
+// a goroutine that never reached wg.Done.
 func TestRunOneRecoveredSurvivesAPanicAndRecordsTheirPairFailed(t *testing.T) {
 	m := metrics.New("kconmon_ng_test_c", prometheus.NewRegistry())
 	bus := cache.NewInProcessBus()
@@ -253,12 +533,8 @@ func TestRunOneRecoveredSurvivesAPanicAndRecordsTheirPairFailed(t *testing.T) {
 	topic := ws.RunTopic(run.ID)
 	topicOpen := hub.OpenTopic(runCtx, topic)
 
-	// If runOneRecovered did not recover the panic, it would surface on the
-	// unexported worker goroutine execute launches internally -- an
-	// unrecovered panic on ANY goroutine crashes the whole test binary, not
-	// just this test, which is itself the strongest possible signal that the
-	// recover() is missing or broken.
-	r.execute(runCtx, cancel, run.ID, pairs, &spec, 2*time.Second, topicOpen)
+	// If runOneRecovered did not recover the panic.
+	r.execute(runCtx, cancel, run.ID, pairs, &spec, 2*time.Second, 1, 0, topicOpen)
 
 	got, err := st.GetRun(context.Background(), run.ID)
 	if err != nil {

@@ -17,17 +17,7 @@ import { RunDetailPage } from "./run-detail";
 import { SettingsPage } from "./settings";
 import { TargetsPage } from "./targets";
 
-/**
- * Plan Decision 8, one case per mutating surface, each asserted in BOTH
- * directions: engaged the control is present and disabled, live it is present
- * and enabled.
- *
- * Both halves matter. "Disabled while engaged" alone would pass just as well
- * for a control that is disabled always, and the rule this task implements is
- * not "hide the write affordances" — permissions hide, time disables
- * (lib/timemachine.tsx). Every assertion below therefore checks the button is
- * IN the document as well as what its disabled state is.
- */
+/** one case per mutating surface, each asserted in BOTH directions: engaged the control is present and disabled. */
 
 const AT = "2026-08-01T12:00:00Z";
 
@@ -42,10 +32,6 @@ const configBody = {
   database: { configured: true },
 };
 
-/* M7 Task 12b joined Settings and Alerting to this matrix, so the subject has
-   to hold their write permissions too — the rule under test is "permissions
-   HIDE, time DISABLES", and a control the subject cannot hold would be absent
-   for the wrong reason. */
 const ADMIN = [
   "runs:create",
   "targets:read",
@@ -299,24 +285,21 @@ describe("Targets, definitions and schedules CRUD", () => {
     engaged("/targets");
     renderPage(<TargetsPage />);
     (await screen.findByRole("radio", { name: "Schedules" })).click();
-    expect(await screen.findByRole("button", { name: "Disable edge-tcp" })).toBeDisabled();
+    expect(await screen.findByRole("button", { name: "Disable edge-tcp, every 1m" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "New schedule" })).toBeDisabled();
-    expect(screen.getByRole("button", { name: "Delete edge-tcp" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Delete edge-tcp, every 1m" })).toBeDisabled();
   });
 
   it("leaves the schedules tab's controls enabled while live", async () => {
     live("/targets");
     renderPage(<TargetsPage />);
     (await screen.findByRole("radio", { name: "Schedules" })).click();
-    expect(await screen.findByRole("button", { name: "Disable edge-tcp" })).toBeEnabled();
+    expect(await screen.findByRole("button", { name: "Disable edge-tcp, every 1m" })).toBeEnabled();
     expect(screen.getByRole("button", { name: "New schedule" })).toBeEnabled();
   });
 });
 
-/* M7 Task 12b (plan Decision 12, checklist item 8) added the two surfaces this
-   matrix was missing. Both pages already implemented the rule; what was absent
-   was the SHARED pin — the file that fails when a new mutating page forgets
-   it, rather than each page's own suite deciding for itself. */
+/* Both pages already implemented the rule; what was absent was the SHARED pin. */
 
 describe("Settings webhooks and configuration import", () => {
   it("disables webhook create, edit, delete and test while engaged", async () => {
@@ -379,21 +362,7 @@ describe("Alerting rules", () => {
   });
 });
 
-/* ══════════════════════════════════════════════════════════════════════════
-   The write guard reaches every mutating surface (QA round 2's finding #18,
-   extended in round 3).
-
-   "Disabled" alone was the M5 rule and it is not enough: a control that gives
-   no reason for being disabled is indistinguishable from a broken one, and the
-   single top-bar banner only helps a sighted reader who has it in view. So the
-   reason travels WITH the control — `title` for the pointer, `aria-describedby`
-   for the screen reader, pointing at the ONE node TimeMachineProvider mounts
-   while engaged.
-
-   One representative control per page, asserted in BOTH directions: while Live
-   the guard must add NOTHING, because an enabled control carrying a "why are
-   you disabled" tooltip is worse than the silence it replaced.
-   ══════════════════════════════════════════════════════════════════════════ */
+/* The write guard reaches every mutating surface; "disabled" alone was the rule and it is not enough. */
 
 function expectGuarded(control: HTMLElement) {
   expect(control).toBeDisabled();

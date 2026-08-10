@@ -8,12 +8,7 @@ import { TimeMachineProvider } from "@/lib/timemachine";
 import type { Topology } from "@/lib/types";
 import { TopologyPage, unfoldableEmpty } from "./topology";
 
-/**
- * The Time Machine half of /topology. Every case here renders the EMPTY node
- * set, which is also why the page can be rendered at all in jsdom: React Flow
- * needs ResizeObserver and only mounts when there are nodes to draw (see
- * topology.test.tsx's own note about this).
- */
+/** The Time Machine half of /topology; every case here renders the EMPTY node set. */
 
 const AT = "2026-08-01T12:00:00Z";
 
@@ -108,11 +103,8 @@ describe("TopologyPage engaged at t", () => {
     expect(screen.queryByText("No nodes reported by the controller yet")).not.toBeInTheDocument();
   });
 
-  // The controller attributes its topology events now, so the only history
-  // that folds to nothing is what an older one wrote. The note has to blame
-  // that stretch of the past and point forward — the old copy blamed the
-  // running controller, which would now send an operator to fix a bug that no
-  // longer exists.
+  // The controller attributes its topology events now, so the only history that folds to nothing is
+  // what an older one wrote.
   it("blames the age of the events, not the controller that is running", async () => {
     renderPage(historical({ unfoldableEvents: 417, eventsFolded: 3 }));
     await screen.findByText("Nothing to reconstruct at this time");
@@ -208,10 +200,10 @@ describe("TopologyPage when the topology query fails", () => {
   });
 });
 
-/* ── QA round 2, finding #5: agents without a node view ──────────────────── */
+/* ── QA scope 2, findings #1 and #2: agents without a node view ──────────── */
 
 describe("TopologyPage with agents but no nodes", () => {
-  it("says which half is missing rather than blaming the DaemonSet", async () => {
+  it("DRAWS the map from the agents instead of showing an empty state", async () => {
     window.history.pushState({}, "", "/topology");
     renderPage({
       nodes: [],
@@ -221,13 +213,46 @@ describe("TopologyPage with agents but no nodes", () => {
       ],
       timestamp: AT,
     });
-    await screen.findByText("No Kubernetes node view");
-    expect(screen.getByText(/2 agents are registered/)).toBeInTheDocument();
-    expect(screen.getByText(/zone lanes cannot be drawn/)).toBeInTheDocument();
-    expect(screen.queryByText(/check that the DaemonSet is running/)).not.toBeInTheDocument();
+    // The edge caption only renders alongside a drawn map.
+    expect(await screen.findByTestId("edge-caption")).toBeInTheDocument();
+    expect(screen.queryByText("No nodes reported by the controller yet")).not.toBeInTheDocument();
+    // And the sentence that claimed lanes were undrawable is gone with it.
+    expect(screen.queryByText(/zone lanes cannot be drawn/)).not.toBeInTheDocument();
   });
 
-  it("keeps the old copy when the agents are missing too — that IS the DaemonSet's case", async () => {
+  it("says where the boxes came from, and that readiness is the field they lack", async () => {
+    window.history.pushState({}, "", "/topology");
+    renderPage({
+      nodes: [],
+      agents: [
+        { id: "a1", nodeName: "n1", podIP: "10.0.0.1", zone: "z1" },
+        { id: "a2", nodeName: "n2", podIP: "10.0.0.2", zone: "z1" },
+      ],
+      timestamp: AT,
+    });
+    const note = await screen.findByTestId("topology-from-agents");
+    expect(note).toHaveTextContent("2 registered agents");
+    expect(note).toHaveTextContent(/readiness is a Kubernetes node condition/);
+  });
+
+  /* QA scope 2, finding #13 — React Flow's own trio ships English aria/title
+     and takes no per-button override, so the map renders our own. */
+  it("names the map's own controls out of this page's dictionary", async () => {
+    window.history.pushState({}, "", "/topology");
+    renderPage({
+      nodes: [],
+      agents: [{ id: "a1", nodeName: "n1", podIP: "10.0.0.1", zone: "z1" }],
+      timestamp: AT,
+    });
+    await screen.findByTestId("edge-caption");
+    expect(screen.getByRole("button", { name: "Zoom in" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Zoom out" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Fit the whole map" })).toBeInTheDocument();
+    // The library's own fourth button (and its baked-in label) is switched off.
+    expect(screen.queryByRole("button", { name: /toggle interactivity/i })).not.toBeInTheDocument();
+  });
+
+  it("keeps the DaemonSet copy for the case that IS the DaemonSet's — nothing on either side", async () => {
     window.history.pushState({}, "", "/topology");
     renderPage({ nodes: [], agents: [], timestamp: AT });
     await screen.findByText("No nodes reported by the controller yet");

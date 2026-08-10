@@ -375,10 +375,7 @@ func TestAlertWatcherIsSilentWhileTheSetIsUnchanged(t *testing.T) {
 
 // --- freeze on failure ------------------------------------------------------
 
-// A dead Prometheus must NOT "resolve" the fleet. The last known firing set is
-// KEPT across a failed poll, so nothing is dispatched, and the recovery poll
-// sees no edge either -- the alerts never went anywhere, only the console's
-// view of them did.
+// A dead Prometheus must NOT "resolve" the fleet.
 func TestAlertWatcherPollErrorFreezesTheFiringSet(t *testing.T) {
 	body := promBody(t,
 		managedAlert(testRuleID, "PairLossHigh", nil),

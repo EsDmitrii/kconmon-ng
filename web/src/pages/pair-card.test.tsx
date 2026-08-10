@@ -6,7 +6,15 @@ import { resetWsClient } from "@/hooks/use-ws-topic";
 import { resetNavigateForTest, setNavigateForTest } from "@/lib/api";
 import { FakeSocket } from "@/lib/fake-websocket";
 import { parseInvestigationParams, scopeFilterValue } from "@/lib/investigation-sources";
-import { findLastRunForPair, PairCardPage, pairFromPath, pairScope, pairSeriesQuery } from "./pair-card";
+import {
+  findLastRunForPair,
+  knownNodes,
+  PairCardPage,
+  pairFromPath,
+  pairScope,
+  pairSeriesQuery,
+  unknownPairEndpoints,
+} from "./pair-card";
 import type { RunDetail } from "@/lib/types";
 
 const json = (body: unknown, init?: ResponseInit) =>
@@ -66,6 +74,7 @@ function renderPage(
     runDetails?: Record<string, RunDetail>;
     onCreate?: (body: unknown) => Response;
     incidents?: unknown[];
+    topology?: unknown;
   } = {},
 ) {
   const { permissions = ["runs:create"], runs = [], runDetails = {}, onCreate, incidents = [] } = opts;
@@ -78,6 +87,20 @@ function renderPage(
     if (href.includes("/api/v1/config")) return Promise.resolve(json(configBody()));
     if (href.includes("/api/v1/auth/me")) return Promise.resolve(json(meBody(permissions)));
     if (href.includes("/api/v1/matrix")) return Promise.resolve(json(matrixBody));
+    if (href.includes("/api/v1/topology")) {
+      return Promise.resolve(
+        json(
+          opts.topology ?? {
+            nodes: [
+              { name: "node-a", zone: "z1", ready: true },
+              { name: "node-b", zone: "z2", ready: true },
+            ],
+            agents: [],
+            timestamp: "t",
+          },
+        ),
+      );
+    }
     if (href.startsWith("/api/v1/incidents")) return Promise.resolve(json({ incidents, nextCursor: "" }));
     if (href.startsWith("/api/v1/events")) return Promise.resolve(json({ events: [], nextCursor: "" }));
     if (href === "/api/v1/runs" && method === "POST") {
@@ -168,11 +191,11 @@ describe("findLastRunForPair", () => {
   it("returns the newest matching run and its result row", () => {
     const older = runDetail("run-1", {
       createdAt: "2026-08-01T00:00:00Z",
-      results: [{ sourceNode: "node-a", destinationNode: "node-b", success: true, durationNs: 5, recordedAt: "t1" }],
+      results: [{ sourceNode: "node-a", destinationNode: "node-b", success: true, durationNs: 5, recordedAt: "t1", sampleSeq: 0 }],
     });
     const newer = runDetail("run-2", {
       createdAt: "2026-08-02T00:00:00Z",
-      results: [{ sourceNode: "node-a", destinationNode: "node-b", success: false, durationNs: 9, error: "timeout", recordedAt: "t2" }],
+      results: [{ sourceNode: "node-a", destinationNode: "node-b", success: false, durationNs: 9, error: "timeout", recordedAt: "t2", sampleSeq: 0 }],
     });
     // getRuns is newest-first, so the details array arrives newest-first too.
     expect(findLastRunForPair([newer, older], "node-a", "node-b")).toEqual({ run: newer, result: newer.results[0] });
@@ -180,7 +203,7 @@ describe("findLastRunForPair", () => {
 
   it("does not match the reverse direction", () => {
     const run = runDetail("run-1", {
-      results: [{ sourceNode: "node-b", destinationNode: "node-a", success: true, durationNs: 5, recordedAt: "t" }],
+      results: [{ sourceNode: "node-b", destinationNode: "node-a", success: true, durationNs: 5, recordedAt: "t", sampleSeq: 0 }],
     });
     expect(findLastRunForPair([run], "node-a", "node-b")).toBeUndefined();
   });
@@ -222,6 +245,73 @@ describe("PairCardPage", () => {
 });
 
 /* ── M6 Task 8: the Investigate entry point + the related-incidents rail ── */
+
+/* ── QA scope 2, finding #7: two endpoints, validated ────────────────────── */
+
+const TOPO = {
+  nodes: [{ name: "node-a", zone: "z1", ready: true }],
+  agents: [{ id: "a-1", nodeName: "node-agent", podIP: "10.0.0.1", zone: "z1" }],
+  timestamp: "t",
+};
+
+describe("knownNodes", () => {
+  it("unions the Kubernetes nodes, the agents' own nodes, the matrix list and both ends of a cell", () => {
+    const known = knownNodes(TOPO, matrixBody);
+    expect([...(known ?? [])].sort()).toEqual(["node-a", "node-agent", "node-b"]);
+  });
+
+  it("counts an agent's node even off-cluster, where `nodes` is the empty half", () => {
+    expect(knownNodes({ nodes: [], agents: TOPO.agents, timestamp: "t" }, undefined)).toEqual(
+      new Set(["node-agent"]),
+    );
+  });
+
+  it("answers null while NOBODY has answered — not-yet is not no-such-node", () => {
+    expect(knownNodes(undefined, undefined)).toBeNull();
+  });
+});
+
+describe("unknownPairEndpoints", () => {
+  it("names the half the fleet does not report", () => {
+    expect(unknownPairEndpoints(new Set(["node-a"]), "node-a", "nope")).toEqual(["nope"]);
+  });
+
+  it("names both when neither is known", () => {
+    expect(unknownPairEndpoints(new Set(["node-a"]), "x", "y")).toEqual(["x", "y"]);
+  });
+
+  it("says nothing for a pair the fleet reports", () => {
+    expect(unknownPairEndpoints(new Set(["node-a", "node-b"]), "node-a", "node-b")).toEqual([]);
+  });
+
+  it("judges nothing without an inventory to judge against", () => {
+    expect(unknownPairEndpoints(null, "node-a", "nope")).toEqual([]);
+    expect(unknownPairEndpoints(new Set(), "node-a", "nope")).toEqual([]);
+  });
+});
+
+describe("PairCardPage — an endpoint the fleet does not report", () => {
+  it("renders the not-found state instead of a working card", async () => {
+    renderPage("/pairs/node-a/there-is-no-such-node");
+    expect(await screen.findByRole("heading", { name: "No such pair", level: 1 })).toBeInTheDocument();
+    expect(screen.getByText(/no node called “there-is-no-such-node”/)).toBeInTheDocument();
+  });
+
+  it("offers NO writes on it — the whole point of the finding", async () => {
+    renderPage("/pairs/node-a/there-is-no-such-node", {
+      permissions: ["runs:create", "annotations:write", "maintenance:read", "maintenance:write"],
+    });
+    await screen.findByRole("heading", { name: "No such pair", level: 1 });
+    expect(screen.queryByTestId("maintenance-bar")).toBeNull();
+    expect(screen.queryByRole("button", { name: /annotate/i })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Run check" })).toBeNull();
+  });
+
+  it("still renders the card for a pair only the AGENTS know about", async () => {
+    renderPage("/pairs/node-a/node-agent", { topology: TOPO });
+    expect(await screen.findByRole("heading", { name: "node-a → node-agent" })).toBeInTheDocument();
+  });
+});
 
 describe("PairCardPage — Investigate entry point", () => {
   it("links to a PAIR investigation joined by the same separator pairScope uses", async () => {

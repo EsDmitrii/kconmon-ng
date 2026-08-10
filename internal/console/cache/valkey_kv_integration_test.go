@@ -175,10 +175,8 @@ func TestValkeyKVIncrWithTTLDoesNotExtendTheWindow(t *testing.T) {
 	}
 }
 
-// TestValkeyKVIncrWithTTLConcurrentFirstHitsNeverLeaveAKeyTTLLess is the
-// race the doc comment reasons about, against a real server: many clients
-// racing on a key that does not exist yet must all agree on 1..N and must
-// leave a key that still expires.
+// TestValkeyKVIncrWithTTLConcurrentFirstHitsNeverLeaveAKeyTTLLess is the race the doc comment
+// reasons about.
 func TestValkeyKVIncrWithTTLConcurrentFirstHitsNeverLeaveAKeyTTLLess(t *testing.T) {
 	kv := newIntegrationKV(t)
 	ctx := context.Background()

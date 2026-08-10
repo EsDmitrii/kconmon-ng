@@ -47,11 +47,7 @@ func (f *failingKV) incrCalls() int {
 	return f.calls
 }
 
-// countingUserStore records whether the login handler ever reached the user
-// lookup. It is the observable proxy for "the limiter runs BEFORE argon2id":
-// GetUserByUsername is the first thing handleAuthLogin does after the
-// rate-limit gate, and every argon2 verification in that handler is
-// downstream of it.
+// countingUserStore records whether the login handler ever reached the user lookup.
 type countingUserStore struct {
 	fakeUserStore
 	mu      sync.Mutex
@@ -129,10 +125,7 @@ func newLoginRateLimitServer(t *testing.T, rl config.RateLimitConfig, kv cache.K
 	return ts, users
 }
 
-// postLoginFrom posts to /api/v1/auth/login from a caller-chosen source
-// address, so the per-IP counter can actually be exercised (httptest's
-// default RemoteAddr is the same 192.0.2.1:1234 for every request, which
-// would make every login in this file share one IP bucket).
+// postLoginFrom posts to /api/v1/auth/login from a caller-chosen source address.
 func postLoginFrom(t *testing.T, s *Server, remoteAddr, body string) *httptest.ResponseRecorder {
 	t.Helper()
 	req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/api/v1/auth/login", strings.NewReader(body))
@@ -189,10 +182,8 @@ func TestRateLimitAllowDisabledWhenLimitIsZero(t *testing.T) {
 	}
 }
 
-// TestRateLimitAllowCountsEveryKeyIndependently is the login shape at the
-// primitive level: two keys, one over its limit, and the OTHER key's count
-// must still advance -- a hot username must not consume an IP's allowance
-// and vice versa.
+// TestRateLimitAllowCountsEveryKeyIndependently is the login shape at the primitive level: two
+// keys, one over its limit.
 func TestRateLimitAllowCountsEveryKeyIndependently(t *testing.T) {
 	kv := cache.NewInProcessKV()
 	t.Cleanup(kv.Close)
@@ -236,8 +227,6 @@ func TestRemoteAddrHostStripsPortAndFallsBack(t *testing.T) {
 	}
 }
 
-// TestRateLimitKeysNamespaceEachLimit pins the key shapes the brief fixes, so
-// a rename cannot silently merge two limits into one counter.
 func TestRateLimitKeysNamespaceEachLimit(t *testing.T) {
 	subject := authz.Subject{Kind: authz.SubjectUser, ID: "u1"}
 	if got, want := runsRateLimitKey(subject), "rl:runs:user:u1"; got != want {
@@ -376,9 +365,7 @@ func TestAuthLoginOverUsernameLimitReturns429BeforeArgon2(t *testing.T) {
 	}
 }
 
-// TestAuthLoginUsernameAndIPCountedIndependently is the brief's explicit
-// requirement: one hot username must not lock out an unrelated IP, and one
-// hot IP must not lock out an unrelated username.
+// TestAuthLoginUsernameAndIPCountedIndependently is the explicit requirement.
 func TestAuthLoginUsernameAndIPCountedIndependently(t *testing.T) {
 	t.Run("hot username does not lock out another user from the same IP", func(t *testing.T) {
 		kv := cache.NewInProcessKV()

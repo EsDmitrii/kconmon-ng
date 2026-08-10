@@ -7,24 +7,13 @@ import (
 	"testing"
 )
 
-// defaultRenderer is the MetricPrefix renderer every pre-existing golden below
-// was written against. It exists so the goldens keep asserting the shipped
-// default while the prefix itself became a constructor argument (M7 Task 3).
+// defaultRenderer is the MetricPrefix renderer every pre-existing golden below was written against.
 var defaultRenderer = NewRenderer("")
 
-// ---------------------------------------------------------------------------
 // Render — golden expressions, one per kind x representative params.
-//
-// These strings ARE the contract. A metric family rename, a window change or a
-// unit conversion has to break here first.
-// ---------------------------------------------------------------------------
 
-// TestRenderHonoursACustomMetricPrefix is the one golden that proves the
-// prefix is CARRIED rather than baked in: a deployment that sets
-// config.metricsPrefix gets expressions over its own families, in every
-// position a family name can appear -- a bare gauge, both sides of a
-// comparison between two families, and inside a rate() within a
-// histogram_quantile.
+// TestRenderHonoursACustomMetricPrefix is the one golden that proves the prefix is CARRIED rather
+// than baked in.
 func TestRenderHonoursACustomMetricPrefix(t *testing.T) {
 	r := NewRenderer("acme_net")
 	if r.Prefix() != "acme_net" {
@@ -715,10 +704,7 @@ func TestParsePromDurationErrors(t *testing.T) {
 	}
 }
 
-// The two functions are inverses, and this is the assertion that keeps them
-// that way: FormatPromDuration's whole output space parses back to the
-// nanoseconds it came from, and every canonical single-unit string it can
-// produce round-trips through Parse and back to itself.
+// The two functions are inverses, and this is the assertion that keeps them that way.
 func TestPromDurationRoundTrips(t *testing.T) {
 	for _, ns := range []int64{
 		0,
@@ -748,11 +734,7 @@ func TestPromDurationRoundTrips(t *testing.T) {
 	}
 }
 
-// The inverse direction is NOT total, and this pins which way it fails: a
-// composite string parses fine and formats back to the single unit that
-// divides evenly, because FormatPromDuration deliberately never emits a
-// compound string (its own doc comment says why). "1h30m" is 90m, and 90m is
-// what comes back.
+// The inverse direction is NOT total, and this pins which way it fails.
 func TestParsePromDurationIsNotOnto(t *testing.T) {
 	ns, err := ParsePromDuration("1h30m")
 	if err != nil {

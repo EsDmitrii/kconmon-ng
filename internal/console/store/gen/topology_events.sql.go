@@ -23,13 +23,7 @@ type DeleteTopologyEventsBeforeParams struct {
 	Limit     int32
 }
 
-// The inner subquery aliases topology_events as te: sqlc v1.31.1's own query
-// analyzer (not real PostgreSQL -- verified this exact self-join resolves
-// unambiguously against a live postgres:17-alpine) reports "column reference
-// event_time is ambiguous" for the unaliased form the brief specifies
-// verbatim, because it does not scope-resolve the DELETE target table
-// against the subquery's own FROM. The alias is a no-op for Postgres and
-// changes nothing about the query's semantics or its plan.
+// The inner subquery aliases topology_events as te: sqlc v1.31.1's own query analyzer.
 func (q *Queries) DeleteTopologyEventsBefore(ctx context.Context, arg DeleteTopologyEventsBeforeParams) (int64, error) {
 	result, err := q.db.Exec(ctx, deleteTopologyEventsBefore, arg.EventTime, arg.Limit)
 	if err != nil {
@@ -109,21 +103,7 @@ type ListTopologyEventsRow struct {
 	Details   json.RawMessage
 }
 
-// scope is the EXACT filter. scope_node is the pair-aware one a node/target
-// card needs: a check between two nodes is stored under the pair scope
-// "<src>→<dst>" (U+2192 RIGHTWARDS ARROW -- events.pairScope,
-// internal/console/events/live_event.go, is the only writer of this column's
-// pair form, so this literal and that one must stay identical), which an
-// equality filter on a single node name can never see. The two are mutually
-// exclusive at the HTTP layer (422); ANDed here, because a query that silently
-// ignored one of two supplied filters would be worse than a narrow answer.
-//
-// The LIKE patterns are built from a param, so the name's own LIKE
-// metacharacters MUST be neutralised: scope carries target names too, and
-// store.validateName's charset (targets.sql / targets.go nameRE) permits '_'.
-// Unescaped, scope_node 'a_c' would match 'abc→b'. The triple replace escapes
-// the escape character first (backslash), then '%' and '_', and ESCAPE '\'
-// names it -- standard_conforming_strings is on, so '\' here is one backslash.
+// scope is the EXACT filter. scope_node is the pair-aware one a node/target card needs.
 func (q *Queries) ListTopologyEvents(ctx context.Context, arg ListTopologyEventsParams) ([]ListTopologyEventsRow, error) {
 	rows, err := q.db.Query(ctx, listTopologyEvents,
 		arg.Types,
@@ -183,17 +163,7 @@ type ListTopologyEventsForFoldRow struct {
 	Details   json.RawMessage
 }
 
-// The topology-at-t fold input: every event of the given type at or before
-// 'at', OLDEST first, so replaying the rows in order reproduces the node/agent
-// set as of that instant. (event_time, id) is a total order -- id breaks ties
-// inside the same microsecond, which the natural key permits -- so the replay
-// is deterministic across replicas. Rides topology_events_type_time_idx.
-//
-// No keyset paging: this returns the whole history up to 'at' in one shot,
-// bounded by 'lim' (store passes topologyFoldLimit). A fold is only correct
-// when it sees EVERY event from the beginning of retention, so a page boundary
-// would silently produce a wrong answer -- the limit is a blast-radius guard
-// that the store reports as truncated, never a pagination cursor.
+// A fold is only correct when it sees EVERY event from the beginning of retention.
 func (q *Queries) ListTopologyEventsForFold(ctx context.Context, arg ListTopologyEventsForFoldParams) ([]ListTopologyEventsForFoldRow, error) {
 	rows, err := q.db.Query(ctx, listTopologyEventsForFold, arg.Type, arg.At, arg.Lim)
 	if err != nil {
@@ -218,14 +188,7 @@ const oldestTopologyEventTime = `-- name: OldestTopologyEventTime :one
 SELECT event_time FROM topology_events ORDER BY event_time LIMIT 1
 `
 
-// The retention floor for the topology-at-t fold (M5 Task 9): the console can
-// only answer "what did the cluster look like at t" for a t at or after this
-// row, because the pruner has already deleted everything older and no fold can
-// invent what was deleted. ORDER BY + LIMIT 1 rather than MIN(event_time) for
-// two reasons: it is a single lookup on topology_events_time_idx, and an empty
-// table comes back as pgx.ErrNoRows (a NULL aggregate would need a nullable
-// column type the sqlc timestamptz->time.Time override deliberately does not
-// produce, and would then be indistinguishable from a genuine zero time).
+// The retention floor for the topology-at-t fold.
 func (q *Queries) OldestTopologyEventTime(ctx context.Context) (time.Time, error) {
 	row := q.db.QueryRow(ctx, oldestTopologyEventTime)
 	var event_time time.Time

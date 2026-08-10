@@ -5,10 +5,7 @@ WORKDIR /web
 COPY web/package.json web/package-lock.json ./
 RUN npm ci
 COPY web/ ./
-# vite.config.ts sets build.outDir to ../internal/console/ui/dist, which does
-# not exist in this stage; override to a stage-local dir the builder copies from.
-# The restore-dist-gitignore closeBundle plugin still writes to the hardcoded
-# ../internal/console/ui/dist path, so pre-create it to avoid ENOENT.
+# vite.config.ts sets build.outDir to ../internal/console/ui/dist, which does not exist in this stage.
 RUN mkdir -p /out /internal/console/ui/dist && npm run build -- --outDir /out --emptyOutDir
 
 FROM golang:1.26-alpine AS builder

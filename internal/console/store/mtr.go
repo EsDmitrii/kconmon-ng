@@ -20,30 +20,18 @@ import (
 // Path snapshots
 // ---------------------------------------------------------------------------
 
-// pathHashLen is the character length of HashPath's output: hex sha256, so 64.
-// Validation checks the length rather than trusting a caller-supplied hash to
-// be one, because path_hash is half of the dedupe key and a short or
-// mis-cased value there would silently split one path into two rows.
+// pathHashLen is the character length of HashPath's output: hex sha256.
 const pathHashLen = sha256.Size * 2
 
-// maxPathHops bounds a snapshot's hop list. 64 is well past any real
-// traceroute (the checker's own TTL ceiling is far lower) and comfortably
-// under the point where a JSONB payload stops being a payload -- it exists so
-// a malformed or hostile result cannot turn one row into a megabyte.
+// maxPathHops bounds a snapshot's hop list.
 const maxPathHops = 64
 
-// hopSep separates hop IPs inside the hashed byte sequence. Without it
-// ["1.2.3", "4.5"] and ["1.2", "34.5"] hash the same bytes and two genuinely
-// different routes dedupe into one row. A newline can never appear inside an
-// IP literal, so no escaping is needed.
+// hopSep separates hop IPs inside the hashed byte sequence; a newline can never appear inside an IP
+// literal, so no escaping is needed.
 const hopSep = "\n"
 
-// PathHop is one hop of a stored trace, and the shape migration 00005's
-// comment on mtr_path_snapshots.hops names. RTTNs is nanoseconds, the
-// repo-wide duration convention on the wire and in storage alike.
-//
-// Only IP takes part in the dedupe key (HashPath, M5 Decision 2). The other
-// fields are the payload: what the FIRST trace at this path measured.
+// PathHop is one hop of a stored trace, and the shape migration 00005's comment on
+// mtr_path_snapshots.hops names; only IP takes part in the dedupe key.
 type PathHop struct {
 	Number    int     `json:"number"`
 	IP        string  `json:"ip"`
@@ -52,25 +40,8 @@ type PathHop struct {
 	LossRatio float64 `json:"lossRatio"`
 }
 
-// HashPath is the content hash that decides whether a trace describes a route
-// the pair has already taken (M5 Decision 2). It reads ONLY the hop IPs, in
-// order:
-//
-//   - not RTTs, which jitter on every single trace -- hashing them would make
-//     every trace a new path and leave the table a write-only log;
-//   - not hostnames, which come from enrichment: rDNS is resolved long after
-//     the trace and is mutable, so a PTR record change would look exactly like
-//     a route change;
-//   - not hop numbers, which are positional and therefore already carried by
-//     the ordering.
-//
-// Order-sensitive: a route that visits the same routers in a different order
-// is a different route. An empty hop list hashes to "" rather than to
-// sha256("") -- a hopless trace has no path to identify, and giving it a
-// well-formed-looking key would let it into the table as a real row.
-//
-// checks (Task 2) is the caller: it already imports this package for
-// UpsertPathSnapshot, so the helper lives here rather than in a third place.
+// HashPath is the content hash that decides whether a trace describes a route the pair has already
+// taken; it reads ONLY the hop IPs, in order: - not RTTs, which jitter on every single trace.
 func HashPath(hops []PathHop) string {
 	if len(hops) == 0 {
 		return ""
@@ -94,10 +65,8 @@ type PathSnapshot struct {
 	Destination string
 	PathHash    string
 	HopCount    int32
-	// Hops is the stored JSONB array of PathHop, verbatim. It is handed back
-	// raw for the same reason Target.Labels is: the API layer re-serializes
-	// it, and a round trip through []PathHop and back would only be an
-	// opportunity to change it.
+	// Hops is the stored JSONB array of PathHop; it is handed back raw for the same reason
+	// Target.Labels is: the API layer re-serializes.
 	Hops       json.RawMessage
 	FirstSeen  time.Time
 	LastSeen   time.Time
@@ -114,10 +83,8 @@ type PathSnapshotInput struct {
 	// Destination is a node NAME or a target NAME, never an address -- the
 	// same metric-safe label the rest of the system uses.
 	Destination string
-	// PathHash may be left empty: Validate derives it from Hops. A caller
-	// that computed it itself (the projector does, to decide whether to write
-	// at all) may set it, and Validate then checks the two agree rather than
-	// trusting it.
+	// PathHash may be left empty: Validate derives it from Hops; a caller that computed it itself (the
+	// projector does, to decide whether to write at all) may set.
 	PathHash string
 	Hops     []PathHop
 	// SeenAt is the trace's own time. It becomes first_seen AND last_seen on
@@ -157,13 +124,10 @@ type MTRDestination struct {
 	LastSeen      time.Time
 }
 
-// PathSnapshotStore is the write seam: the checks runner's projector (Task 2)
-// is its only caller.
+// PathSnapshotStore is the write seam: the checks runner's projector is its only caller.
 type PathSnapshotStore interface {
-	// UpsertPathSnapshot records one trace. isNew reports whether the trace
-	// took a route this pair had never taken -- the "when did the route
-	// change?" observable the whole table exists for. A repeat bumps
-	// last_seen and trace_count and leaves first_seen and hops untouched.
+	// UpsertPathSnapshot records one trace. isNew reports whether the trace took a route this pair had
+	// never taken.
 	UpsertPathSnapshot(ctx context.Context, in PathSnapshotInput) (snap PathSnapshot, isNew bool, err error)
 }
 
@@ -175,10 +139,8 @@ type PathSnapshotReader interface {
 	// most-recently-traced first. Unpaged: the row count is pairs, not
 	// traces.
 	ListMTRDestinations(ctx context.Context) ([]MTRDestination, error)
-	// ListPathSnapshots pages a pair's route history newest-first, same
-	// keyset cursor shape as ListTargets -- except the cursor's time half is
-	// last_seen, not created_at, because that is the order the listing (and
-	// mtr_snapshots_pair_seen_idx) is in.
+	// ListPathSnapshots pages a pair's route history newest-first, same keyset cursor shape as
+	// ListTargets.
 	ListPathSnapshots(ctx context.Context, f SnapshotFilter) (SnapshotPage, error)
 	// GetPathSnapshot returns ErrNotFound when id does not name a snapshot --
 	// including when it is not a UUID at all (GetRun's pre-check reasoning).
@@ -187,11 +149,8 @@ type PathSnapshotReader interface {
 
 var _ PathSnapshotReader = (*DB)(nil)
 
-// Validate reports whether in is a well-formed snapshot, and fills PathHash
-// from Hops when the caller left it empty. It runs before the INSERT so a
-// caller gets a precise error instead of a raw constraint violation, and so
-// the rules Postgres cannot express -- every hop carries an IP, the hash
-// really is this hop list's hash -- are applied at the only layer that can.
+// Validate reports whether in is a well-formed snapshot; it runs before the INSERT so a caller gets
+// a precise error instead of a raw constraint violation.
 func (in *PathSnapshotInput) Validate() error {
 	if in.SourceNode == "" {
 		return errors.New("store: path snapshot: source node must not be empty")
@@ -213,10 +172,7 @@ func (in *PathSnapshotInput) Validate() error {
 	if in.SeenAt.IsZero() {
 		return errors.New("store: path snapshot: seen at must not be zero")
 	}
-	// The hash is derived, then compared rather than merely accepted: a
-	// caller-supplied hash that does not describe these hops would key the row
-	// under a route it is not, which is the one corruption this table cannot
-	// detect later.
+	// The hash is derived, then compared rather than merely accepted.
 	want := HashPath(in.Hops)
 	switch in.PathHash {
 	case "":
@@ -363,10 +319,8 @@ func (db *DB) ListPathSnapshots(ctx context.Context, f SnapshotFilter) (Snapshot
 	return SnapshotPage{Snapshots: snaps, NextCursor: nextCursor}, nil
 }
 
-// GetPathSnapshot applies GetRun's UUID pre-check for the same reason and with
-// the same ErrNotFound answer: an id that is not a UUID cannot name a row in a
-// UUID-keyed table, so "not found" is the truthful answer, and answering it
-// here means every caller of this seam gets it.
+// GetPathSnapshot applies GetRun's UUID pre-check for the same reason and with the same ErrNotFound
+// answer.
 func (db *DB) GetPathSnapshot(ctx context.Context, id string) (PathSnapshot, error) {
 	sid, err := parseUUID(id)
 	if err != nil {
@@ -381,10 +335,7 @@ func (db *DB) GetPathSnapshot(ctx context.Context, id string) (PathSnapshot, err
 	return snapshotFromRow(&s), nil
 }
 
-// DeletePathSnapshotsBefore deletes up to limit snapshots last seen before
-// before, oldest first, and reports how many were removed. Used by Pruner's
-// sweep (prune.go); exposed here too so it is independently testable, same as
-// DeleteRunsBefore.
+// DeletePathSnapshotsBefore deletes up to limit snapshots last seen before before.
 func (db *DB) DeletePathSnapshotsBefore(ctx context.Context, before time.Time, limit int32) (int64, error) {
 	n, err := gen.New(db.pool).DeletePathSnapshotsBefore(ctx, gen.DeletePathSnapshotsBeforeParams{
 		LastSeen: before,
@@ -405,9 +356,7 @@ func (db *DB) DeletePathSnapshotsBefore(ctx context.Context, before time.Time, l
 // string become a primary key.
 const enrichmentIPMaxLen = 64
 
-// Enrichment is one cached lookup about a hop address (M5 Decision 4). Every
-// field is re-derivable from the resolvers that produced it, which is what
-// makes the retention sweep over this table free of consequence.
+// Enrichment is one cached lookup about a hop address.
 type Enrichment struct {
 	IP       string
 	RDNS     string
@@ -536,11 +485,8 @@ func (db *DB) DeleteEnrichmentBefore(ctx context.Context, before time.Time, limi
 	return n, nil
 }
 
-// DecodeHops parses a PathSnapshot.Hops payload back into typed hops. The
-// store itself never needs this -- it hands the JSONB straight through -- but
-// every consumer that wants the hop list rather than its bytes would
-// otherwise re-declare PathHop, and two spellings of the stored shape is one
-// too many.
+// DecodeHops parses a PathSnapshot.Hops payload back into typed hops; the store itself never needs
+// this -- it hands the JSONB straight through.
 func DecodeHops(raw json.RawMessage) ([]PathHop, error) {
 	if len(raw) == 0 {
 		return nil, nil

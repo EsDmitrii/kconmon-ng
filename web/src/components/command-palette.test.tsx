@@ -12,17 +12,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CommandPalette } from "@/components/command-palette";
 import { ThemeProvider } from "@/components/theme-provider";
 import { openCommandPalette } from "@/lib/commands";
+import { LocaleProvider, LOCALE_STORAGE_KEY, type Locale } from "@/lib/i18n";
 import { TimeMachineProvider } from "@/lib/timemachine";
 import { NAV_ITEMS } from "@/nav";
 
-/**
- * The palette lives inside AppShell, so the test mounts it the way the shell
- * does: a memory-history router (its <Link>-free navigation still needs a real
- * router in context), the Time Machine provider it reads, and the theme
- * provider it toggles — the same build anonymous-banner.test.tsx and
- * timemachine-bar.test.tsx already use, so location state cannot bleed between
- * files.
- */
+/** The palette lives inside AppShell, so the test mounts it the way the shell does. */
 const ALL_PERMISSIONS = [
   "runs:create",
   "alerts:manage",
@@ -47,16 +41,23 @@ function stubFetch(permissions: string[]) {
   );
 }
 
-async function renderPalette({ permissions = ALL_PERMISSIONS }: { permissions?: string[] } = {}) {
+async function renderPalette({
+  permissions = ALL_PERMISSIONS,
+  locale,
+}: { permissions?: string[]; locale?: Locale } = {}) {
   stubFetch(permissions);
+  /* Seeded BEFORE the render: LocaleProvider reads the stored choice in a useState initialiser. */
+  if (locale) localStorage.setItem(LOCALE_STORAGE_KEY, locale);
   const testRoot = createRootRoute({
     component: () => (
       <ThemeProvider>
-        <TimeMachineProvider>
-          <CommandPalette />
-          <input aria-label="a page field" />
-          <Outlet />
-        </TimeMachineProvider>
+        <LocaleProvider>
+          <TimeMachineProvider>
+            <CommandPalette />
+            <input aria-label="a page field" />
+            <Outlet />
+          </TimeMachineProvider>
+        </LocaleProvider>
       </ThemeProvider>
     ),
   });
@@ -74,10 +75,8 @@ async function renderPalette({ permissions = ALL_PERMISSIONS }: { permissions?: 
       <RouterProvider router={testRouter} />
     </QueryClientProvider>,
   );
-  // TanStack resolves the initial match asynchronously: nothing at all is in
-  // the document on the first paint, so every test waits for the route to
-  // land before touching the palette (the idiom anonymous-banner.test.tsx
-  // uses with its own findBy*).
+  // TanStack resolves the initial match asynchronously: nothing at all is in the document on the
+  // first paint.
   await screen.findByLabelText("a page field");
   return testRouter;
 }
@@ -86,7 +85,11 @@ const palette = () => screen.getByRole("dialog", { name: /command palette/i });
 const queryPalette = () => screen.queryByRole("dialog", { name: /command palette/i });
 const input = () => screen.getByRole("combobox", { name: /type a command or search/i });
 const options = () => screen.queryAllByRole("option");
-const optionTitles = () => options().map((o) => o.textContent?.replace(/Live only$/, "").trim());
+/* The disabled tag is part of the option's accessible name on purpose (it is
+   visible text, not a title attribute), so it is stripped here to leave the
+   TITLE — in either language, since the tag is translated too. */
+const optionTitles = () =>
+  options().map((o) => o.textContent?.replace(/(Live only|только в реальном времени)$/, "").trim());
 const pressK = (init: KeyboardEventInit = { metaKey: true }) => fireEvent.keyDown(document, { key: "k", ...init });
 
 beforeEach(() => {
@@ -96,6 +99,9 @@ beforeEach(() => {
 afterEach(() => {
   cleanup();
   vi.unstubAllGlobals();
+  /* vitest.setup.ts backs localStorage with one Map per test FILE, so a locale
+     left behind would leak into every later test here — the README says so. */
+  localStorage.removeItem(LOCALE_STORAGE_KEY);
 });
 
 describe("opening and closing", () => {
@@ -150,9 +156,7 @@ describe("opening and closing", () => {
     expect(queryPalette()).not.toBeInTheDocument();
   });
 
-  /* QA round 4, finding #18. CodeMirror binds Mod-k to deleteLine and stops
-     the event, so the PromQL editor asks for the palette by name instead of
-     faking a keystroke (lib/commands' openCommandPalette). */
+  /* CodeMirror binds Mod-k to deleteLine and stops the event. */
   it("opens on the explicit PALETTE_OPEN_EVENT, from a surface that swallowed ⌘K", async () => {
     await renderPalette();
     act(() => openCommandPalette());
@@ -404,5 +408,131 @@ describe("the Tab trap", () => {
     await renderPalette();
     pressK();
     expect(palette()).toHaveAttribute("aria-modal", "true");
+  });
+});
+
+/* the palette in Russian The named gap this closes: DISPLAY follows the locale. */
+
+const ruPalette = () => screen.getByRole("dialog", { name: "Палитра команд" });
+const ruInput = () => screen.getByRole("combobox", { name: "Команда или поиск" });
+
+describe("in Russian", () => {
+  it("names its own dialog, list and input in Russian, placeholder included", async () => {
+    await renderPalette({ locale: "ru" });
+    pressK();
+    expect(ruPalette()).toBeInTheDocument();
+    expect(ruInput()).toHaveAttribute("placeholder", "Команда или поиск…");
+    expect(screen.getByRole("listbox", { name: "Команды" })).toBeInTheDocument();
+  });
+
+  it("translates the group headers — the reason the palette could not ship half-done", async () => {
+    await renderPalette({ locale: "ru" });
+    pressK();
+    for (const name of ["Навигация", "Действия", "Вид"]) {
+      expect(screen.getByRole("group", { name })).toBeInTheDocument();
+    }
+    expect(within(screen.getByRole("group", { name: "Навигация" })).getAllByRole("option")).toHaveLength(
+      NAV_ITEMS.length,
+    );
+  });
+
+  it("shows nav entries with the SIDEBAR's words", async () => {
+    await renderPalette({ locale: "ru" });
+    pressK();
+    expect(optionTitles()).toContain("Матрица");
+    expect(optionTitles()).toContain("Цели и расписания");
+    expect(optionTitles()).not.toContain("Matrix");
+  });
+
+  it("shows the actions and the Time Machine entry in Russian", async () => {
+    await renderPalette({ locale: "ru" });
+    pressK();
+    await waitFor(() => expect(optionTitles()).toContain("Создать правило оповещения…"));
+    expect(optionTitles()).toContain("Машина времени: выбрать момент…");
+    expect(optionTitles()).toContain("Запустить проверку…");
+  });
+
+  it("finds an entry by its Russian name", async () => {
+    await renderPalette({ locale: "ru" });
+    pressK();
+    fireEvent.change(ruInput(), { target: { value: "матрица" } });
+    expect(optionTitles()).toEqual(["Матрица"]);
+  });
+
+  it("finds the SAME entry by its English name, with the console in Russian", async () => {
+    await renderPalette({ locale: "ru" });
+    pressK();
+    fireEvent.change(ruInput(), { target: { value: "matrix" } });
+    expect(optionTitles()).toEqual(["Матрица"]);
+  });
+
+  it("matches the Russian nav description, not just the label", async () => {
+    await renderPalette({ locale: "ru" });
+    pressK();
+    fireEvent.change(ruInput(), { target: { value: "тепловая" } });
+    expect(optionTitles()).toEqual(["Матрица"]);
+  });
+
+  it("still matches the ENGLISH description in Russian — the corpus keeps both", async () => {
+    await renderPalette({ locale: "ru" });
+    pressK();
+    fireEvent.change(ruInput(), { target: { value: "heatmap" } });
+    expect(optionTitles()).toEqual(["Матрица"]);
+  });
+
+  it("performs what it found by a Russian query", async () => {
+    const router = await renderPalette({ locale: "ru" });
+    pressK();
+    fireEvent.change(ruInput(), { target: { value: "топология" } });
+    fireEvent.keyDown(ruInput(), { key: "Enter" });
+    await waitFor(() => expect(router.state.location.pathname).toBe("/topology"));
+  });
+
+  it("says so in Russian when nothing matches", async () => {
+    await renderPalette({ locale: "ru" });
+    pressK();
+    fireEvent.change(ruInput(), { target: { value: "zzzznope" } });
+    expect(options()).toHaveLength(0);
+    expect(screen.getByText("Ничего не найдено")).toBeInTheDocument();
+  });
+
+  it("keeps an English query working for a Russian operator who typed it from muscle memory", async () => {
+    await renderPalette({ locale: "ru" });
+    pressK();
+    fireEvent.change(ruInput(), { target: { value: "switch to" } });
+    expect(options().length).toBeGreaterThan(0);
+  });
+});
+
+describe("in Russian, while the Time Machine is engaged", () => {
+  beforeEach(() => {
+    window.history.pushState({}, "", "/?at=2026-08-07T10:00:00Z");
+  });
+
+  it("offers «Вернуться в реальное время» — the same words the bar uses", async () => {
+    await renderPalette({ locale: "ru" });
+    pressK();
+    expect(optionTitles()).toContain("Вернуться в реальное время");
+  });
+
+  it("tags a disabled write in Russian, and Enter on it still does nothing", async () => {
+    const router = await renderPalette({ locale: "ru" });
+    pressK();
+    await waitFor(() => expect(optionTitles()).toContain("Создать правило оповещения…"));
+    fireEvent.change(ruInput(), { target: { value: "правило" } });
+    const entry = options()[0];
+    expect(entry).toHaveAttribute("aria-disabled", "true");
+    expect(entry.textContent).toContain("только в реальном времени");
+    fireEvent.keyDown(ruInput(), { key: "Enter" });
+    expect(ruPalette()).toBeInTheDocument();
+    expect(router.state.location.pathname).toBe("/");
+  });
+
+  it("returns to Live from a Russian query", async () => {
+    await renderPalette({ locale: "ru" });
+    pressK();
+    fireEvent.change(ruInput(), { target: { value: "вернуться" } });
+    fireEvent.keyDown(ruInput(), { key: "Enter" });
+    expect(new URLSearchParams(window.location.search).get("at")).toBeNull();
   });
 });

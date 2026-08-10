@@ -20,10 +20,7 @@ import (
 // Doubles
 // ---------------------------------------------------------------------------
 
-// fakeAlertRuleStore is the AlertRuleService double. Validation goes through
-// the REAL store.AlertRuleInput.Validate, and uniqueness is enforced on
-// lower(name) exactly as migration 00007's alert_rules_name_lower_idx does --
-// which is the whole natural key the importer merges on.
+// fakeAlertRuleStore is the AlertRuleService double.
 type fakeAlertRuleStore struct {
 	mu sync.Mutex
 
@@ -170,13 +167,8 @@ func (f *fakeAlertRuleStore) seed(name string, enabled bool) store.AlertRule {
 // Server helpers
 // ---------------------------------------------------------------------------
 
-// linkedTargetService is fakeTargetService plus the one thing the two
-// separate fakes do not share and one *store.DB does: the FK space.
-// fakeChecksStore refuses a definition whose destinationTargetId is not in its
-// own `targets` set (standing in for check_definitions.destination_target_id's
-// FOREIGN KEY), so a target created through the targets seam has to appear
-// there too -- exactly as a row inserted into `targets` becomes a legal FK
-// referent for the same database's `check_definitions`.
+// linkedTargetService is fakeTargetService plus the one thing the two separate fakes do not share
+// and one *store.DB does.
 type linkedTargetService struct {
 	*fakeTargetService
 	checks *fakeChecksStore
@@ -204,10 +196,9 @@ type exportFixture struct {
 	maintenance *fakeMaintenanceStore
 }
 
-// newExportServer wires a Server at the given BUILT-IN role with every
-// config seam behind a fake. The role is real (authz.NewPolicy(nil)), so
-// these tests prove settings:write actually lands where roles.go put it --
-// admin alone -- rather than where a synthetic test role would.
+// newExportServer wires a Server at the given BUILT-IN role with every config seam behind a fake;
+// the role is real (authz.NewPolicy(nil)), so these tests prove settings:write actually lands where
+// roles.go put.
 func newExportServer(t *testing.T, role string) exportFixture {
 	t.Helper()
 	checks := newFakeChecksStore()
@@ -260,10 +251,8 @@ func doImport(t *testing.T, fx *exportFixture, req importRequest) (int, importRe
 	return w.Code, out
 }
 
-// seedFullConfig fills every collection with one interlinked row set: a
-// target, a definition POINTING AT IT, a schedule pointing at the definition,
-// an alert rule, a webhook and a maintenance window. This is the fixture the
-// remap tests round-trip.
+// seedFullConfig fills every collection with one interlinked row set: a target, a definition
+// POINTING AT IT.
 func seedFullConfig(t *testing.T, fx *exportFixture) {
 	t.Helper()
 	ctx := context.Background()
@@ -307,10 +296,7 @@ func seedFullConfig(t *testing.T, fx *exportFixture) {
 // Authorization
 // ---------------------------------------------------------------------------
 
-// TestExportImportAreAdminOnly pins the permission decision: the bundle
-// reveals every webhook URL and every probe address this console holds, so it
-// takes the admin-only posture. operator holds targets:write and
-// incidents:write and still must not reach either route.
+// TestExportImportAreAdminOnly pins the permission decision.
 func TestExportImportAreAdminOnly(t *testing.T) {
 	for _, role := range []string{"viewer", "operator", "alert-editor"} {
 		fx := newExportServer(t, role)
@@ -385,10 +371,8 @@ func TestExportCarriesEveryConfigCollection(t *testing.T) {
 	}
 }
 
-// TestExportNeverCarriesASecret is the one absolute. The sealed bytes the
-// store holds are recognisable ("SEALED(...)"), so this asserts on the RAW
-// response body: neither the plaintext, nor the ciphertext, nor a
-// "secret"/"secretEnc" key may appear anywhere in an export.
+// The sealed bytes the store holds are recognisable ("SEALED(...)"), so this asserts on the RAW
+// response body.
 func TestExportNeverCarriesASecret(t *testing.T) {
 	fx := newExportServer(t, "admin")
 	seedFullConfig(t, &fx)
@@ -409,11 +393,6 @@ func TestExportNeverCarriesASecret(t *testing.T) {
 	}
 }
 
-// TestExportOmitsObservationFields pins Decision 9's "declarative config
-// only" line at the field level: a schedule's fire bookkeeping and an alert
-// rule's reconciler outcome are observations of a running system, not
-// configuration, and re-importing them would assert a sync that never
-// happened.
 func TestExportOmitsObservationFields(t *testing.T) {
 	fx := newExportServer(t, "admin")
 	seedFullConfig(t, &fx)
@@ -465,10 +444,8 @@ func TestImportRejectsMalformedAndBundlelessBodies(t *testing.T) {
 // Import: the remap
 // ---------------------------------------------------------------------------
 
-// TestImportIntoFreshConsoleRemapsEveryReference is the core of the task. The
-// store mints its own UUIDs (store.CreateTarget: "the id is minted here"), so
-// nothing in a bundle keeps its exported id. Every bundle-internal reference
-// must therefore be re-pointed at the id the store actually assigned.
+// The store mints its own UUIDs (store.CreateTarget: "the id is minted here"); every
+// bundle-internal reference must therefore be re-pointed at the id the store actually assigned.
 func TestImportIntoFreshConsoleRemapsEveryReference(t *testing.T) {
 	source := newExportServer(t, "admin")
 	seedFullConfig(t, &source)
@@ -536,9 +513,8 @@ func TestImportIsIdempotent(t *testing.T) {
 			t.Errorf("%s = %+v, want exactly one update and no errors", name, got)
 		}
 	}
-	// A maintenance window has no UPDATE in the store by design (M6: two
-	// timestamps and a reason, delete-and-recreate is the correction path),
-	// so an identical one is SKIPPED, never rewritten.
+	// A maintenance window has no UPDATE in the store by design, so an identical one is SKIPPED, never
+	// rewritten.
 	if res.MaintenanceWindows.Skipped != 1 || res.MaintenanceWindows.Created != 0 {
 		t.Errorf("maintenanceWindows = %+v, want exactly one skip", res.MaintenanceWindows)
 	}
@@ -563,10 +539,8 @@ func TestImportIsIdempotent(t *testing.T) {
 	}
 }
 
-// TestImportCrossReferencesPreExistingRowsByName is the third remap case: the
-// bundle's target is NOT new here -- a row with the same name already exists
-// under a DIFFERENT uuid -- so the bundle's definition must be re-pointed at
-// the pre-existing row rather than at the id it was exported with.
+// TestImportCrossReferencesPreExistingRowsByName is the third remap case: the bundle's target is
+// NOT new here.
 func TestImportCrossReferencesPreExistingRowsByName(t *testing.T) {
 	source := newExportServer(t, "admin")
 	seedFullConfig(t, &source)
@@ -648,10 +622,7 @@ func TestImportDanglingReferenceIsAPerItemErrorNamingBoth(t *testing.T) {
 	}
 }
 
-// TestImportItemErrorNeverAbortsTheRest: an invalid item is reported and
-// SKIPPED PAST, deliberately -- the import is per-item statements, not one
-// transaction (a partial import with a precise error list beats an
-// all-or-nothing rollback for config reconciliation).
+// TestImportItemErrorNeverAbortsTheRest: an invalid item is reported and SKIPPED PAST.
 func TestImportItemErrorNeverAbortsTheRest(t *testing.T) {
 	fx := newExportServer(t, "admin")
 	bundle := exportBundle{
@@ -684,10 +655,8 @@ func TestImportItemErrorNeverAbortsTheRest(t *testing.T) {
 	}
 }
 
-// TestImportAmbiguousScheduleIsAnError: check_schedules has no name column
-// and no unique constraint, so the importer's natural key is (definition,
-// kind). Two schedules of the same kind on one definition make that key
-// identify nothing, and guessing which to overwrite is worse than saying so.
+// TestImportAmbiguousScheduleIsAnError: check_schedules has no name column and no unique
+// constraint.
 func TestImportAmbiguousScheduleIsAnError(t *testing.T) {
 	fx := newExportServer(t, "admin")
 	ctx := context.Background()
@@ -721,12 +690,8 @@ func TestImportAmbiguousScheduleIsAnError(t *testing.T) {
 	}
 }
 
-// TestImportWebhookWithoutASecretIsSkippedWithAWarning pins the M6 keyless
-// posture as it actually is: store.WebhookInput.Validate REFUSES an empty
-// secret ("every delivery is signed"), and a bundle never carries one, so an
-// endpoint this console does not already have cannot be created by an import.
-// It is skipped, with a warning naming the remedy -- never an error the
-// operator could fix by editing the bundle, and never a fabricated key.
+// It is skipped, with a warning naming the remedy -- never an error the operator could fix by
+// editing the bundle.
 func TestImportWebhookWithoutASecretIsSkippedWithAWarning(t *testing.T) {
 	fx := newExportServer(t, "admin")
 	bundle := exportBundle{
@@ -755,10 +720,9 @@ func TestImportWebhookWithoutASecretIsSkippedWithAWarning(t *testing.T) {
 	}
 }
 
-// TestImportWebhookUpdateKeepsTheStoredSecret: the one webhook path that DOES
-// write. The bundle carries no secret, so the update must read the stored
-// ciphertext back and pass it through unchanged -- an operator fixing a URL
-// must not silently destroy the signing key.
+// TestImportWebhookUpdateKeepsTheStoredSecret: the one webhook path that DOES write; the bundle
+// carries no secret, so the update must read the stored ciphertext back and pass it through
+// unchanged.
 func TestImportWebhookUpdateKeepsTheStoredSecret(t *testing.T) {
 	fx := newExportServer(t, "admin")
 	ctx := context.Background()
@@ -793,10 +757,8 @@ func TestImportWebhookUpdateKeepsTheStoredSecret(t *testing.T) {
 	}
 }
 
-// TestImportAlertRuleMergesCaseInsensitively pins Task 1's natural key:
-// alert_rules is unique on lower(name) (migration 00007), so a bundle rule
-// named "EdgePairLoss" must UPDATE a stored "edgepairloss" rather than
-// attempt a create the database would reject.
+// TestImportAlertRuleMergesCaseInsensitively pins the natural key: alert_rules is unique on
+// lower(name) (migration 00007).
 func TestImportAlertRuleMergesCaseInsensitively(t *testing.T) {
 	fx := newExportServer(t, "admin")
 	stored := fx.alertRules.seed("edgepairloss", true)
@@ -829,10 +791,8 @@ func TestImportAlertRuleMergesCaseInsensitively(t *testing.T) {
 // Dry run
 // ---------------------------------------------------------------------------
 
-// TestImportDryRunWritesNothing is the zero-write proof: the SAME bundle is
-// run twice against the same fixture, once dry and once for real, and the dry
-// pass must produce the identical per-collection result while leaving every
-// fake byte-identical to how it started.
+// TestImportDryRunWritesNothing is the zero-write proof: the SAME bundle is run twice against the
+// same fixture.
 func TestImportDryRunWritesNothing(t *testing.T) {
 	source := newExportServer(t, "admin")
 	seedFullConfig(t, &source)
@@ -904,10 +864,6 @@ func TestImportDryRunResolvesBundleInternalReferences(t *testing.T) {
 // Audit
 // ---------------------------------------------------------------------------
 
-// TestImportWritesOneAuditRowWithCountsAndNoItemNames: an import is one audit
-// row carrying the dryRun flag and the per-collection COUNTS. Item names are
-// banned there for the reason a target's address is (audit.go): an audit log
-// is read by more people and retained longer than the config it describes.
 func TestImportWritesOneAuditRowWithCountsAndNoItemNames(t *testing.T) {
 	audit := &fakeAuditStore{}
 	authr := fakeAuthenticator{subject: authz.Subject{Kind: authz.SubjectUser, ID: "u1"}}

@@ -3,9 +3,6 @@
 package store_test
 
 // TestTarget* / TestDefinition* / TestSchedule* require a real PostgreSQL.
-// Run: docker run --rm -d -p 5432:5432 -e POSTGRES_PASSWORD=test -e POSTGRES_DB=kconmon postgres:17-alpine
-// Then: KCONMON_TEST_DATABASE_DSN='postgres://postgres:test@127.0.0.1:5432/kconmon?sslmode=disable' \
-//       go test -tags=integration ./internal/console/store/... -v
 
 import (
 	"context"
@@ -25,10 +22,8 @@ import (
 	"github.com/EsDmitrii/kconmon-ng/internal/console/store"
 )
 
-// newTargetsDB opens a *store.DB with migrations applied, dropping and
-// re-creating the schema first -- same convention as newChecksDB; this file
-// shares one database with every other file in package store_test, so each
-// test must leave it clean.
+// newTargetsDB opens a *store.DB with migrations applied, dropping and re-creating the schema
+// first.
 func newTargetsDB(t *testing.T) (*store.DB, string) {
 	t.Helper()
 	dsn := testDSN(t)
@@ -169,10 +164,7 @@ func TestCreateTargetDuplicateNameIsAlreadyExists(t *testing.T) {
 	}
 }
 
-// TestDeleteTargetReferencedByDefinitionIsInUse is the ON DELETE RESTRICT
-// contract: the delete fails loudly with ErrInUse AND the definition survives
-// intact -- a silently orphaned definition is exactly what the RESTRICT
-// exists to prevent.
+// TestDeleteTargetReferencedByDefinitionIsInUse is the ON DELETE RESTRICT contract.
 func TestDeleteTargetReferencedByDefinitionIsInUse(t *testing.T) {
 	db, _ := newTargetsDB(t)
 	ctx := context.Background()
@@ -231,15 +223,8 @@ func TestCreateDefinitionUnknownTargetIsNotFound(t *testing.T) {
 	}
 }
 
-// TestCreateDefinitionRejectsUndialableAdhocAddress is QA round 4's finding
-// #13 at the STORE boundary: "sdfsdfsdf !!" used to be accepted, written to
-// check_definitions, pushed to every assigned agent by the reconciler and
-// refused there once per interval forever.
-//
-// The probe goes through CreateDefinition and UpdateDefinition rather than
-// through Validate directly (targets_test.go covers the rule itself): the
-// point here is that NOTHING IS WRITTEN, which only a real INSERT can show —
-// and that an existing, well-formed row cannot be edited into a broken one.
+// The probe goes through CreateDefinition and UpdateDefinition rather than through Validate
+// directly (targets_test.go covers the rule itself).
 func TestCreateDefinitionRejectsUndialableAdhocAddress(t *testing.T) {
 	db, _ := newTargetsDB(t)
 	ctx := context.Background()
@@ -363,10 +348,8 @@ func TestCreateScheduleUnknownDefinitionIsNotFound(t *testing.T) {
 	}
 }
 
-// TestListTargetsKeysetPagesWithoutDuplicates walks every page of a 25-row
-// table two at a time and asserts each id is seen exactly once: the property
-// a keyset cursor exists to guarantee and an OFFSET would break under
-// concurrent inserts.
+// TestListTargetsKeysetPagesWithoutDuplicates walks every page of a 25-row table two at a time and
+// asserts each id is seen exactly once.
 func TestListTargetsKeysetPagesWithoutDuplicates(t *testing.T) {
 	db, _ := newTargetsDB(t)
 	ctx := context.Background()
@@ -577,13 +560,8 @@ func TestListDueSchedulesReturnsOnlyEnabledPastDue(t *testing.T) {
 	}
 }
 
-// TestScheduleLastErrorRoundTrips is migration 00008's boundary test (QA round
-// 5, finding #5): the two columns exist, they default to the healthy pair, the
-// UPDATE derives the stamp from the text, and a later good fire clears both.
-//
-// Every assertion here is against a REAL PostgreSQL, because the derivation
-// lives in SQL (a CASE in MarkScheduleFired) and a Go-side fake proves nothing
-// about it.
+// TestScheduleLastErrorRoundTrips is migration 00008's boundary test: the two columns exist, they
+// default to the healthy pair.
 func TestScheduleLastErrorRoundTrips(t *testing.T) {
 	db, _ := newTargetsDB(t)
 	ctx := context.Background()
@@ -692,10 +670,6 @@ func TestScheduleLastErrorIsTruncated(t *testing.T) {
 	}
 }
 
-// TestTargetAddressIsValidatedByKindAgainstPostgres is finding #11's boundary
-// test at the layer that actually WRITES: the shape rule lives in Go (Postgres
-// bounds nothing about an address), so a create that should be refused must be
-// shown never reaching the table.
 func TestTargetAddressIsValidatedByKindAgainstPostgres(t *testing.T) {
 	db, _ := newTargetsDB(t)
 	ctx := context.Background()
@@ -735,25 +709,12 @@ func TestTargetAddressIsValidatedByKindAgainstPostgres(t *testing.T) {
 	}
 }
 
-// dueIdxSeedRows is how many enabled, already-due schedules the index test
-// seeds. It has to be large enough that an index range scan is genuinely the
-// cheaper plan, because the previous version of this test bought that with
-// "SET enable_seqscan = off" -- and a plan the planner was forced into proves
-// only that the index is *usable*, not that it will ever be *chosen*. At 50k
-// rows the seq-scan alternative also has to top-N sort 50k rows to answer
-// ORDER BY next_fire_at LIMIT 100, so the index wins on its own merits and no
-// planner knob is touched anywhere in this test.
+// dueIdxSeedRows is how many enabled, already-due schedules the index test seeds; it has to be
+// large enough that an index range scan is genuinely the cheaper plan.
 const dueIdxSeedRows = 50000
 
-// listDueSchedulesSQL returns the exact SQL text sqlc generated for
-// ListDueSchedules, read out of the generated file at test time.
-//
-// This is the whole point of the test: EXPLAINing a hand-copied duplicate of
-// the query proves nothing, because queries/targets.sql could then lose its
-// "ORDER BY next_fire_at" or grow a "next_fire_at IS NOT NULL" clause (which
-// the partial index cannot be matched against) and every assertion below
-// would keep passing against the stale copy. The generated constant is
-// unexported, so it is extracted with go/parser rather than referenced.
+// listDueSchedulesSQL returns the exact SQL text sqlc generated for ListDueSchedules; this is the
+// whole point of the test: EXPLAINing a hand-copied duplicate of the query proves nothing.
 func listDueSchedulesSQL(t *testing.T) string {
 	t.Helper()
 	const (
@@ -794,10 +755,7 @@ func listDueSchedulesSQL(t *testing.T) string {
 	return ""
 }
 
-// idxScans reads pg_stat_user_indexes.idx_scan for one index. idx_scan is
-// NULL until the index is first scanned (PostgreSQL 16+), hence the coalesce,
-// and the snapshot is cleared first because a backend caches the stats it has
-// already read within a transaction.
+// idxScans reads pg_stat_user_indexes.idx_scan for one index.
 func idxScans(t *testing.T, ctx context.Context, conn *pgxpool.Conn, index string) int64 {
 	t.Helper()
 	if _, err := conn.Exec(ctx, "SELECT pg_stat_clear_snapshot()"); err != nil {
@@ -813,25 +771,8 @@ func idxScans(t *testing.T, ctx context.Context, conn *pgxpool.Conn, index strin
 	return n
 }
 
-// TestListDueSchedulesUsesPartialIndex asserts the REAL shipped due poll --
-// store.DB.ListDueSchedules, not a copy of its SQL -- is answered by
-// check_schedules_due_idx, which is the whole reason that index carries a
-// WHERE enabled predicate.
-//
-// Two independent halves, because neither alone is the full claim:
-//
-//   - The counter half calls db.ListDueSchedules and watches
-//     pg_stat_user_indexes.idx_scan for the index move. Nothing about the
-//     query text is assumed; if the shipped query stopped matching the index
-//     the counter would stay put. Postgres flushes a backend's pending stats
-//     asynchronously (no sooner than ~1s after the last flush), so the read
-//     polls rather than checking once.
-//   - The plan half EXPLAINs the SQL extracted from the generated code and
-//     asserts the plan names the index AND contains no Sort node. The index
-//     is on next_fire_at, so ORDER BY next_fire_at is supposed to come out of
-//     the scan for free -- an index scan followed by a sort would satisfy the
-//     "uses the index" half while quietly breaking the promise that the poll
-//     stays cheap as the table grows.
+// TestListDueSchedulesUsesPartialIndex asserts the REAL shipped due poll; nothing about the query
+// text is assumed.
 func TestListDueSchedulesUsesPartialIndex(t *testing.T) {
 	db, dsn := newTargetsDB(t)
 	ctx := context.Background()
@@ -852,11 +793,8 @@ func TestListDueSchedulesUsesPartialIndex(t *testing.T) {
 	}
 	defer conn.Release()
 
-	// Seeded in a single statement rather than through CreateSchedule: 50k
-	// round trips would dominate the suite's runtime, and the rows only need
-	// to be plausible, not created through the public API (which the
-	// lifecycle tests already cover). next_fire_at ascends with the physical
-	// order, matching what a real scheduler's insert pattern produces.
+	// Seeded in a single statement rather than through CreateSchedule: 50k round trips would dominate
+	// the suite's runtime.
 	if _, err := conn.Exec(ctx, `
 INSERT INTO check_schedules (id, definition_id, kind, interval_ns, enabled, next_fire_at)
 SELECT gen_random_uuid(), $1::uuid, 'interval', 60000000000, true,
@@ -886,15 +824,8 @@ FROM generate_series(1, $2::int) AS g`, def.ID, dueIdxSeedRows); err != nil {
 		}
 	}
 
-	// The counter does not move the instant the query returns. A backend
-	// flushes its pending stats at the end of a command, but no more often
-	// than once a second -- and this backend already flushed while seeding, so
-	// the due poll's counts sit pending. Left alone they would surface only
-	// when the idle-stats timeout fires ten seconds later, so the loop nudges
-	// the pool's backend with an unrelated statement (a targets_pkey lookup
-	// that misses, touching no index this test measures) on each pass: the
-	// nudge that lands more than a second after the last flush carries the
-	// pending counts out with it, which happens on the second or third pass.
+	// The counter does not move the instant the query returns; left alone they would surface only when
+	// the idle-stats timeout fires ten seconds later.
 	deadline := time.Now().Add(30 * time.Second)
 	var after int64
 	for {
@@ -983,13 +914,9 @@ func TestTargetMalformedIDIsNotErrNotFound(t *testing.T) {
 	}
 }
 
-// TestEmptyJSONShapesReachTheDatabaseAsEmptyObject is orEmptyJSON's claim
-// checked where it actually matters. Only nil used to be substituted, and the
-// other two shapes failed in different ways against a live server: a len-0
-// json.RawMessage reached the driver as a zero-length jsonb literal and came
-// back as a raw "invalid input syntax for type json", and the literal null was
-// accepted but stored a JSON null -- a second, silent spelling of "no labels"
-// that every reader downstream would then have to know about.
+// TestEmptyJSONShapesReachTheDatabaseAsEmptyObject is orEmptyJSON's claim checked where it actually
+// matters; only nil used to be substituted, and the other two shapes failed in different ways
+// against a live server.
 func TestEmptyJSONShapesReachTheDatabaseAsEmptyObject(t *testing.T) {
 	db, _ := newTargetsDB(t)
 	ctx := context.Background()

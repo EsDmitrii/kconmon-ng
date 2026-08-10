@@ -3,17 +3,8 @@ import { ApiError, createMaintenance, deleteMaintenance, getMaintenance } from "
 import type { MaintenanceWindow } from "./types";
 
 /**
- * The maintenance half of lib/api.ts — M6 Task 9's write pair beside the read
- * Task 7 already shipped, in its own file for the reason
- * api.annotations.test.ts is: a milestone's additions do not belong appended to
- * a 500-line suite whose assertions predate them.
- *
- * Two wire facts carry the weight here. `scope` is the annotations three-state
- * (absent / present-but-empty / a value), so the serialiser must test
- * `!== undefined` rather than truthiness — a `q.scope ? ...` guard would
- * silently turn "the global windows only" into "every window in the fleet".
- * And the CREATE body is a fixed shape: RFC3339 instants and a scope the caller
- * pins, because the server reads no default from anywhere else.
+ * The maintenance half of lib/api.ts; `scope` is the annotations three-state (absent /
+ * present-but-empty / a value).
  */
 
 const json = (body: unknown, init?: ResponseInit) =>

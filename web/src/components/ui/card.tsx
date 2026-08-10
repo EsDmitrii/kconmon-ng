@@ -1,11 +1,7 @@
 import * as React from "react";
 import { cn } from "@/lib/utils";
 
-/* Card: the surface primitive. Depth comes from bg-card + shadow-card, never
-   a 1px outline (index.css rule 2). Default p-6; callers override with their
-   own p-* utility. `asChild` merges the card classes onto the single child
-   element instead of wrapping it — used where the card is semantically a
-   <section> or other landmark. */
+/* Card: the surface primitive; depth comes from bg-card + shadow-card, never a 1px outline (index.css rule 2). */
 export interface CardProps extends React.HTMLAttributes<HTMLDivElement> {
   asChild?: boolean;
   /* Adds a whisper of hover lift (translateY + raised shadow) — for cards the

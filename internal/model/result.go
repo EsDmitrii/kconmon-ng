@@ -14,13 +14,8 @@ const (
 	CheckDNS  CheckType = "dns"
 	CheckHTTP CheckType = "http"
 	CheckMTR  CheckType = "mtr"
-	// CheckExternal is the result type of the CONTINUOUS external checker. It
-	// lives here rather than in the checker package because an external result
-	// travels the same CheckResult path as every other one, and the result
-	// handler's switch over CheckType has to name it to stay exhaustive. The
-	// per-target CHECK TYPE (tcp/icmp/dns/http) of an external probe is carried
-	// inside ExternalDetails, not here: one external result covers every
-	// assigned target at once.
+	// CheckExternal is the result type of the CONTINUOUS external checker; it lives here rather than
+	// in the checker package because an external result travels the same CheckResult path.
 	CheckExternal CheckType = "external"
 )
 
@@ -75,11 +70,8 @@ type HTTPDetails struct {
 	TotalTime    time.Duration `json:"totalTime"`
 }
 
-// ExternalDenyReason is why the allowlist refused a probe. It is a CLOSED set
-// because it becomes a metric label value: the refusal errors themselves are
-// deliberately vague (they must never echo an attacker-chosen name back to the
-// controller), so the reason has to travel as a type rather than be recovered
-// by matching error text.
+// ExternalDenyReason is why the allowlist refused a probe; it is a CLOSED set because it becomes a
+// metric label value.
 type ExternalDenyReason string
 
 const (
@@ -94,15 +86,9 @@ const (
 	ExternalDenyDisabled ExternalDenyReason = "disabled"
 )
 
-// ExternalDetails is one target's outcome inside an external CheckResult.
-// CheckResult.Details carries a SLICE of these, the same shape the DNS and
-// HTTP checkers use, because one Check probes every assigned target.
-//
-// Name is the ONLY field that may ever become a metric label value (see the
-// ExternalTarget comment in api/proto/kconmon.proto); DefinitionID is
-// correlation only and the address appears nowhere at all. ResolvedIPs is a
-// COUNT rather than the addresses: an external DNS answer is attacker-
-// influenced and unbounded, so it must never reach a label.
+// ExternalDetails is one target's outcome inside an external CheckResult; name is the ONLY field
+// that may ever become a metric label value (see the ExternalTarget comment in
+// api/proto/kconmon.proto).
 type ExternalDetails struct {
 	DefinitionID string    `json:"definitionId,omitempty"`
 	Name         string    `json:"name"`

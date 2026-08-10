@@ -69,14 +69,7 @@ describe("useCapabilities", () => {
     expect(result.current.realtime).toBe(false);
   });
 
-  /**
-   * `resolved` must be pending-shaped, not fetching-shaped. Every background
-   * refetch (one per CAPABILITIES_POLL_MS, forever) is a fetch in flight over
-   * data we already have, and a `resolved` built on isFetching would drop to
-   * false on each one — flashing the Live page's skeleton over a working feed
-   * four times a minute. Swapping the two would still pass every other test
-   * here, so this pins it explicitly.
-   */
+  /** `resolved` must be pending-shaped, not fetching-shaped. */
   it("stays resolved across a background refetch", async () => {
     const { qc, wrapper } = harness(["events"]);
     const { result } = renderHook(() => useCapabilities(), { wrapper });

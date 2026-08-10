@@ -20,11 +20,8 @@ import (
 	"github.com/EsDmitrii/kconmon-ng/internal/console/authz"
 )
 
-// OIDCCallbackPath is the fixed path the console's OIDC redirect handler is
-// wired up at (a later task adds the route). auth.oidc.redirectURL must end
-// with it — go-oidc's code-flow callback is a fixed, well-known endpoint, not
-// operator-configurable, so pinning it here catches a misconfigured
-// redirectURL at boot instead of as a runtime 404 from the IdP redirect.
+// OIDCCallbackPath is the fixed path the console's OIDC redirect handler is wired up at (a later
+// task adds the route).
 const OIDCCallbackPath = "/api/v1/auth/oidc/callback"
 
 // Config is the Console runtime configuration. auth.mode selects one of
@@ -49,63 +46,20 @@ type Config struct {
 	Alerting          AlertingConfig          `yaml:"alerting"`
 }
 
-// WebhooksConfig carries the ONE thing the outbound webhook dispatcher
-// (internal/console/webhooks, M6 Task 5) cannot derive for itself: the AES-GCM
-// key that encrypts each endpoint's HMAC signing secret at rest (M6 Decision
-// 4). Everything else about a webhook -- its URL, its event filter, its
-// enabled flag -- is a database row an admin typed; only the key is a
-// deployment secret, so only the key is config.
-//
-// The whole block is OPTIONAL, and that is deliberate. A console that never
-// declares a webhook must not fail to start over a cipher it will never use,
-// so an empty block leaves the feature keyless: every read/update/delete route
-// keeps working and the two operations that actually need the cipher --
-// creating an endpoint and testing one -- answer 503 naming this value
-// (httpapi's webhookKeyUnavailableDetail). A key that IS configured but
-// unusable is the opposite case: that is a broken Secret mount, not a
-// deliberate omission, and cmd/console refuses to start on it the same way it
-// refuses to start on an unreadable database.dsnFile.
+// WebhooksConfig carries the ONE thing the outbound webhook dispatcher cannot derive for itself.
 type WebhooksConfig struct {
 	// EncryptionKey is 32 raw bytes, base64-encoded (standard encoding). It
 	// belongs in a Secret, not a ConfigMap -- prefer EncryptionKeyFile.
 	EncryptionKey string `yaml:"encryptionKey"`
-	// EncryptionKeyFile is a path to a file holding the same base64 value;
-	// it WINS over EncryptionKey when both somehow reach this struct, and
-	// setting both in a config file is refused outright -- database.dsnFile's
-	// rule, for database.dsnFile's reason.
+	// EncryptionKeyFile is a path to a file holding the same base64 value.
 	EncryptionKeyFile string `yaml:"encryptionKeyFile"`
-	// AlertPollInterval is how often the alert-transition watcher
-	// (internal/console/webhooks.AlertWatcher, M7 Decision 7) reads
-	// Prometheus' current alert set to detect fired/resolved edges.
-	//
-	// It lives under webhooks rather than under alerting, and the distinction
-	// is not cosmetic: alerting.syncInterval is how often rules are pushed
-	// INTO Prometheus, while this is how often alert STATE is read back out,
-	// and it exists for exactly one purpose -- firing deliveries. Turn
-	// webhooks off (no key) and this knob does nothing; turn alerting off and
-	// it does nothing either. Reusing the reconcile cadence would have tied
-	// two unrelated frequencies together, and an operator who wants alert
-	// deliveries within ten seconds would have had to reconcile CRDs every ten
-	// seconds to get them.
-	//
-	// It is also, directly, the RESOLUTION GRANULARITY of every alert.resolved
-	// delivery: the console detects a resolution by an alert's absence from a
-	// poll, so "resolved at" means "resolved somewhere in the interval ending
-	// here". Shortening it sharpens that number and costs one more GET per
-	// interval per replica; lengthening it blunts it.
-	//
-	// Spelled as a duration, AlertingConfig.SyncInterval's reasoning: the
-	// ns-integer convention belongs to the wire and the database, not to
-	// operator-typed configuration.
+	// AlertPollInterval is how often the alert-transition watcher reads Prometheus' current alert set
+	// to detect fired/resolved edges; it lives under webhooks rather than under alerting, and the
+	// distinction is not cosmetic.
 	AlertPollInterval time.Duration `yaml:"alertPollInterval"`
 }
 
-// DefaultWebhookAlertPollInterval is the alert-state poll cadence. Thirty
-// seconds: a resolution notice that is up to half a minute late is still
-// useful, and the read is a single unfiltered GET that Prometheus answers from
-// memory. Exported so cmd/console's log line and the chart's docs quote one
-// number, and repeated as webhooks.DefaultAlertPollInterval so that package can
-// be constructed without importing config.
+// DefaultWebhookAlertPollInterval is the alert-state poll cadence.
 const DefaultWebhookAlertPollInterval = 30 * time.Second
 
 // webhookKeyLen is the AES-256-GCM key length. Pinned rather than "whatever
@@ -113,15 +67,8 @@ const DefaultWebhookAlertPollInterval = 30 * time.Second
 // operator can fix, not a quietly weaker cipher nothing reports.
 const webhookKeyLen = 32
 
-// ResolveEncryptionKey returns the decoded webhook encryption key: the trimmed
-// contents of EncryptionKeyFile when set, otherwise EncryptionKey. A nil
-// return with a nil error means NO key is configured, which is the documented
-// keyless state, not a failure. Called once at boot by cmd/console -- never per
-// delivery.
-//
-// Mirrors DatabaseConfig.ResolveDSN's shape exactly: the mounted file wins, and
-// resolution is an explicit method rather than something Load bakes in, so a
-// test can pin either side.
+// ResolveEncryptionKey returns the decoded webhook encryption key: the trimmed contents of
+// EncryptionKeyFile when set.
 func (w *WebhooksConfig) ResolveEncryptionKey() ([]byte, error) {
 	raw := w.EncryptionKey
 	source := "webhooks.encryptionKey"
@@ -135,10 +82,7 @@ func (w *WebhooksConfig) ResolveEncryptionKey() ([]byte, error) {
 	return decodeWebhookKey(source, raw)
 }
 
-// decodeWebhookKey turns a base64 string into the 32-byte key, or reports why
-// it cannot. The error NEVER echoes the value: a decode failure is about the
-// shape of a secret, and repeating the secret to say it is malformed would put
-// it in a log line.
+// decodeWebhookKey turns a base64 string into the 32-byte key, or reports why it cannot.
 func decodeWebhookKey(field, raw string) ([]byte, error) {
 	trimmed := strings.TrimSpace(raw)
 	if trimmed == "" {
@@ -156,20 +100,8 @@ func decodeWebhookKey(field, raw string) ([]byte, error) {
 	return key, nil
 }
 
-// validate enforces webhooks.* invariants that need no I/O: the two ways of
-// naming the key are mutually exclusive, and an INLINE key must already be
-// well-formed. The FILE is not read here -- validation is pure by convention in
-// this package, and cmd/console's ResolveEncryptionKey call is where a bad
-// mount is caught, on the same footing as an unreadable database.dsnFile.
-//
-// alertingEnabled is passed IN rather than reached for, because the alert-poll
-// cadence is the one webhooks.* setting whose validity depends on another
-// block: the watcher only runs when a key is configured AND alerting is on, and
-// checking the interval on a console with neither would turn a leftover zero in
-// somebody's values.yaml into a boot failure over a loop that will never start.
-// That is AlertingConfig.validate's own posture -- check a knob only when the
-// feature that reads it is on -- applied across a block boundary, the way
-// validateAuth already reaches for the database DSN.
+// validate enforces webhooks.* invariants that need no I/O: the two ways of naming the key are
+// mutually exclusive.
 func (w *WebhooksConfig) validate(alertingEnabled bool) error {
 	if w.EncryptionKey != "" && w.EncryptionKeyFile != "" {
 		return errors.New("set either webhooks.encryptionKey or webhooks.encryptionKeyFile, not both")
@@ -177,10 +109,8 @@ func (w *WebhooksConfig) validate(alertingEnabled bool) error {
 	if _, err := decodeWebhookKey("webhooks.encryptionKey", w.EncryptionKey); err != nil {
 		return err
 	}
-	// "Webhooks enabled" is "a key is named", which is exactly the condition
-	// cmd/console builds the dispatcher on. The FILE is not read to decide it:
-	// naming a key file is the operator's declaration of intent, and whether
-	// the mount is actually there is cmd/console's question, not validation's.
+	// "Webhooks enabled" is "a key is named", which is exactly the condition cmd/console builds the
+	// dispatcher on.
 	keyed := w.EncryptionKey != "" || w.EncryptionKeyFile != ""
 	if keyed && alertingEnabled && w.AlertPollInterval <= 0 {
 		return fmt.Errorf("webhooks.alertPollInterval must be positive when a webhook encryption key "+
@@ -190,68 +120,31 @@ func (w *WebhooksConfig) validate(alertingEnabled bool) error {
 	return nil
 }
 
-// KubernetesContextConfig configures the Kubernetes event reader
-// (internal/console/kubectx, M6 Decision 3): the only part of the Console that
-// talks to the apiserver. It captures core/v1 Events for nodes in the fleet
-// topology and for pods in one namespace, so the Investigate timeline can show
-// "the kubelet restarted this pod" next to "loss to this node spiked".
-//
-// Enabled defaults to FALSE for the same reason mtr.enrichment does: turning it
-// on gives the console pod a NEW egress and a NEW RBAC grant (events/nodes/pods
-// read), and an unfiltered cluster event firehose is a cardinality and privacy
-// bug, not a feature. Switching it on is a deliberate act by an operator who
-// has also applied the RBAC.
-//
-// The captured rows live in PostgreSQL, so the whole block is inert with
-// database.mode=disabled — cmd/console warns and skips the reader rather than
-// watching events it has nowhere to put.
+// KubernetesContextConfig configures the Kubernetes event reader: the only part of the Console that
+// talks to the apiserver.
 type KubernetesContextConfig struct {
 	// Enabled is the master gate.
 	Enabled bool `yaml:"enabled"`
-	// Namespace is the ONE namespace whose pod events are captured. Empty --
-	// the default -- means "the namespace this pod runs in", read from the
-	// POD_NAMESPACE environment variable (the chart sets it from
-	// metadata.namespace via the downward API), falling back to "default" when
-	// even that is unset, which is what a non-cluster process gets.
-	//
-	// It is deliberately one namespace and not a list: the release namespace is
-	// where the agents and the controller run, and widening this is how a
-	// capture turns into a cluster-wide event firehose (Decision 3, and the
-	// leak-conscious constraint the milestone opens with).
+	// Namespace is the ONE namespace whose pod events are captured.
 	Namespace string `yaml:"namespace"`
-	// ResyncInterval forces a periodic relist even while the watch is healthy.
-	// It is the reader's backstop against a watch that is silently wedged --
-	// connected, delivering nothing -- which no error path can detect. Ten
-	// minutes because the apiserver keeps events for an hour by default, so a
-	// relist at this cadence cannot miss one, and every relisted row the
-	// database already holds costs one conflicting INSERT and a duplicate
-	// counter increment, never a duplicate row.
+	// ResyncInterval forces a periodic relist even while the watch is healthy; ten minutes because the
+	// apiserver keeps events for an hour by default.
 	ResyncInterval time.Duration `yaml:"resyncInterval"`
 }
 
-// podNamespaceEnv is the downward-API variable the chart sets on the console
-// pod. It is read ONLY as the fallback for an empty
-// kubernetesContext.namespace: KCONMON_NG_CONSOLE_CONFIG stays the console's
-// one true env var for configuration, and this is identity, not configuration.
+// podNamespaceEnv is the downward-API variable the chart sets on the console pod; it is read ONLY
+// as the fallback for an empty kubernetesContext.namespace.
 const podNamespaceEnv = "POD_NAMESPACE"
 
-// ResolveNamespace returns the effective namespace for pod-event capture:
-// Namespace when set, else $POD_NAMESPACE, else "default". Called once at
-// startup (kubectx.New and cmd/console's log line) -- never per event.
-//
-// It mirrors DatabaseConfig.ResolveDSN's shape: the config field wins, the
-// mounted/injected value is the fallback, and resolution is an explicit method
-// rather than something Load bakes in, so a test can pin either side.
+// ResolveNamespace returns the effective namespace for pod-event capture: Namespace when set;
+// called once at startup (kubectx.New and cmd/console's log line) -- never per event.
 func (k *KubernetesContextConfig) ResolveNamespace() string {
 	return resolveNamespace(k.Namespace)
 }
 
-// resolveNamespace is the shared three-step fallback both namespace-bearing
-// blocks use (kubernetesContext and alerting). It is one function rather than
-// two copies because the two blocks MUST agree: the console's alert bundle
-// belongs in the same namespace the event reader watches -- its own -- and two
-// implementations of "which namespace am I in" is exactly how they would come
-// to disagree after a later edit to one of them.
+// resolveNamespace is the shared three-step fallback both namespace-bearing blocks use
+// (kubernetesContext and alerting); it is one function rather than two copies because the two
+// blocks MUST agree.
 func resolveNamespace(explicit string) string {
 	if explicit != "" {
 		return explicit
@@ -262,11 +155,8 @@ func resolveNamespace(explicit string) string {
 	return "default"
 }
 
-// validate enforces kubernetesContext.* invariants. Like SchedulerConfig's, the
-// interval is only checked when the feature is enabled: a leftover zero in the
-// values.yaml of an operator who never switched the reader on must not be a
-// boot failure. When it IS on, a non-positive resync would fire a relist
-// storm, so it is rejected rather than silently re-defaulted.
+// validate enforces kubernetesContext.* invariants; like SchedulerConfig's, the interval is only
+// checked when the feature is enabled.
 func (k *KubernetesContextConfig) validate() error {
 	if k.Enabled && k.ResyncInterval <= 0 {
 		return fmt.Errorf("kubernetesContext.resyncInterval must be positive when kubernetesContext.enabled is true, got %v",
@@ -275,60 +165,17 @@ func (k *KubernetesContextConfig) validate() error {
 	return nil
 }
 
-// AlertingConfig configures the PrometheusRule reconciler
-// (internal/console/promrules, M7 Decision 3): the loop that renders the
-// alert_rules table into ONE PrometheusRule object and server-side-applies it
-// into the console's own namespace.
-//
-// Enabled defaults to FALSE for kubernetesContext's reason and one more. The
-// shared reason: switching it on grants the console pod a NEW RBAC verb set
-// (get/list/watch/patch on monitoring.coreos.com/prometheusrules, Role-scoped,
-// SECURITY.md §10.3) that an operator has to apply deliberately. The extra
-// one: the CRD may not exist at all -- the Prometheus Operator is not a
-// dependency of this chart -- and a reconciler that is on by default would
-// turn "no operator installed" into a permanent error state on a console that
-// never asked for alerting.
-//
-// The rules themselves live in PostgreSQL (alert_rules, M7 Task 1), so the
-// whole block is inert with database.mode=disabled -- cmd/console warns and
-// skips the reconciler rather than applying an empty bundle over whatever is
-// already there.
+// AlertingConfig configures the PrometheusRule reconciler; the extra one: the CRD may not exist.
 type AlertingConfig struct {
 	// Enabled is the master gate.
 	Enabled bool `yaml:"enabled"`
-	// Namespace is the namespace the bundle object is applied into. Empty --
-	// the default -- means "the namespace this pod runs in", read from
-	// POD_NAMESPACE exactly the way kubernetesContext.namespace is.
-	//
-	// It is deliberately ONE namespace and deliberately the console's own:
-	// Decision 3 pins the grant to a Role + RoleBinding, and a Role cannot
-	// reach across namespaces. Pointing this elsewhere does not widen the
-	// grant, it just makes every apply fail with a forbidden that the
-	// reconciler will faithfully write into every rule's sync_message.
+	// Namespace is the namespace the bundle object is applied into.
 	Namespace string `yaml:"namespace"`
-	// SyncInterval is the reconcile cadence. Sixty seconds because a reconcile
-	// is a single SSA of a few kilobytes and the loop exists to CONVERGE, not
-	// to react -- reacting is what Kick() is for, and every CRUD write through
-	// the API calls it, so this interval only ever covers drift somebody
-	// introduced out of band. It is jittered +/-20% in the loop so N replicas
-	// do not apply in lockstep.
-	//
-	// Spelled as a duration, not a *Ns integer: every other cadence in this
-	// file (scheduler.tickInterval, kubernetesContext.resyncInterval,
-	// mtr.enrichment.ttl) is a yaml duration, and the ns-integer convention
-	// belongs to the WIRE and the DATABASE (ADR: durations ns), not to
-	// operator-typed configuration.
+	// SyncInterval is the reconcile cadence; sixty seconds because a reconcile is a single SSA of a
+	// few kilobytes and the loop exists to CONVERGE.
 	SyncInterval time.Duration `yaml:"syncInterval"`
-	// BundleName is the name of the single PrometheusRule object the console
-	// owns. One object, not one per rule (M7 Task 2's RenderBundle): a single
-	// SSA target means drift is one comparison and a partial apply is
-	// impossible.
-	//
-	// It is configurable only so two consoles can share a namespace without
-	// fighting over the same object. Changing it on a live install ORPHANS the
-	// previous object -- the reconciler owns what it is pointed at and deletes
-	// nothing -- which is why the default is spelled out rather than derived
-	// from the release name.
+	// BundleName is the name of the single PrometheusRule object the console owns; it is configurable
+	// only so two consoles can share a namespace without fighting over the same object.
 	BundleName string `yaml:"bundleName"`
 }
 
@@ -347,10 +194,8 @@ func (a *AlertingConfig) ResolveNamespace() string {
 	return resolveNamespace(a.Namespace)
 }
 
-// validate enforces alerting.* invariants, and like KubernetesContextConfig's
-// it only checks them when the feature is ON: a leftover zero in the values.yaml
-// of an operator who never switched the reconciler on must not be a boot
-// failure.
+// validate enforces alerting.* invariants, and like KubernetesContextConfig's it only checks them
+// when the feature is ON.
 func (a *AlertingConfig) validate() error {
 	if !a.Enabled {
 		return nil
@@ -362,17 +207,12 @@ func (a *AlertingConfig) validate() error {
 	if a.BundleName == "" {
 		return errors.New("alerting.bundleName must not be empty when alerting.enabled is true")
 	}
-	// The name becomes a Kubernetes object name, so it is checked HERE rather
-	// than discovered as a rejected apply 60 seconds into the process's life.
-	// A boot error names the key; an apply rejection names nothing an operator
-	// can grep for.
+	// The name becomes a Kubernetes object name.
 	if err := validateDNS1123Subdomain("alerting.bundleName", a.BundleName); err != nil {
 		return err
 	}
-	// The namespace is checked only when it is EXPLICIT: the resolved value
-	// comes from the downward API, which the apiserver already guarantees is a
-	// legal namespace name, and reading the environment during validation would
-	// make Validate impure.
+	// The namespace is checked only when it is EXPLICIT: the resolved value comes from the downward
+	// API.
 	if a.Namespace != "" {
 		if err := validateDNS1123Subdomain("alerting.namespace", a.Namespace); err != nil {
 			return err
@@ -384,12 +224,10 @@ func (a *AlertingConfig) validate() error {
 // dns1123SubdomainMaxLen is the Kubernetes object-name bound (RFC 1123).
 const dns1123SubdomainMaxLen = 253
 
-// validateDNS1123Subdomain applies the Kubernetes object-name grammar
-// (lowercase alphanumerics, '-' and '.', starting and ending alphanumeric).
-// Hand-rolled rather than imported from k8s.io/apimachinery/pkg/util/validation
-// so internal/console/config keeps its zero-Kubernetes-import posture: this
-// package is loaded by every console test and by the config-lint path, and it
-// has no business dragging the apimachinery validation tree in for one grammar.
+// validateDNS1123Subdomain applies the Kubernetes object-name grammar (lowercase alphanumerics, '-'
+// and '.', starting and ending alphanumeric); hand-rolled rather than imported from
+// k8s.io/apimachinery/pkg/util/validation so internal/console/config keeps its
+// zero-Kubernetes-import posture.
 func validateDNS1123Subdomain(field, value string) error {
 	bad := func() error {
 		return fmt.Errorf("%s must be a valid Kubernetes object name "+
@@ -410,29 +248,14 @@ func validateDNS1123Subdomain(field, value string) error {
 	return nil
 }
 
-// MTRConfig groups everything the Console does with MTR path history beyond
-// simply storing it. Today that is exactly one thing — hop enrichment — but
-// the block exists rather than a top-level `enrichment:` key because the next
-// MTR-shaped knob (a projector cap, a snapshot retention override) belongs
-// beside it, not beside `prometheus:`.
+// MTRConfig groups everything the Console does with MTR path history beyond simply storing it;
+// today that is exactly one thing — hop enrichment.
 type MTRConfig struct {
 	Enrichment EnrichmentConfig `yaml:"enrichment"`
 }
 
-// EnrichmentConfig configures the hop-address enrichment resolver
-// (internal/console/enrich): a TTL cache in mtr_hop_enrichment over two
-// independently-gated sources, rDNS and MaxMind mmdb files.
-//
-// Enabled defaults to FALSE, for a stronger reason than SchedulerConfig's:
-// enrichment is the only part of the Console that makes the pod talk to
-// something other than the controller, Prometheus, Valkey and PostgreSQL. rDNS
-// sends every hop address in the fleet's traces to whatever resolver the pod's
-// /etc/resolv.conf names. That is a deliberate act with an egress footprint,
-// not a default.
-//
-// The cache lives in PostgreSQL, so the whole block is inert with
-// database.mode=disabled — cmd/console warns and skips the resolver rather
-// than resolving the same address on every single read.
+// EnrichmentConfig configures the hop-address enrichment resolver (internal/console/enrich);
+// enabled defaults to FALSE, for a stronger reason than SchedulerConfig's.
 type EnrichmentConfig struct {
 	// Enabled is the master gate. With it off, nothing below is read and the
 	// snapshot-detail handler keeps serving the cache-only view Task 4 built.
@@ -442,45 +265,29 @@ type EnrichmentConfig struct {
 	// internal DNS and no MaxMind licence runs rdns-only.
 	RDNS  RDNSConfig  `yaml:"rdns"`
 	GeoIP GeoIPConfig `yaml:"geoip"`
-	// TTL is a cache row's lifetime. A row older than this is re-resolved on
-	// the next read that wants it (M5 Decision 4: no background refresher --
-	// an address nobody looks at costs nothing). 24h by default because the
-	// answers are slow-moving: a hop's PTR record and its ASN change on the
-	// order of months.
+	// TTL is a cache row's lifetime.
 	TTL time.Duration `yaml:"ttl"`
 }
 
 // RDNSConfig gates the reverse-DNS source and bounds it.
 type RDNSConfig struct {
 	Enabled bool `yaml:"enabled"`
-	// TimeoutMs bounds ONE lookup, not the batch. It is milliseconds rather
-	// than a time.Duration because the useful range is 100-1000ms and an
-	// operator who writes `timeoutMs: 500` cannot accidentally mean 500ns --
-	// a resolver budget that quietly rounds to nothing would make every hop
-	// look unresolvable.
+	// TimeoutMs bounds ONE lookup; it is milliseconds rather than a time.Duration because the useful
+	// range is 100-1000ms and an operator who writes `timeoutMs: 500` cannot accidentally mean 500ns.
 	TimeoutMs int `yaml:"timeoutMs"`
 }
 
-// GeoIPConfig points at the two mmdb files (Decision 5: operator-provided
-// volumes, never downloaded by the Console). An empty path is that source
-// switched off, the same "empty means disabled" convention controller.url,
-// prometheus.url and valkey.address already use. An UNREADABLE path is not a
-// boot failure either: enrich.New warns and disables that one source, because
-// a bad mount must never cost the operator their trace history.
+// GeoIPConfig points at the two mmdb files; an UNREADABLE path is not a boot failure either.
 type GeoIPConfig struct {
 	ASNPath  string `yaml:"asnPath"`  // e.g. /geoip/GeoLite2-ASN.mmdb; empty = ASN/provider lookups off
 	CityPath string `yaml:"cityPath"` // e.g. /geoip/GeoLite2-City.mmdb; empty = geo lookups off
+	// ReloadInterval re-stats the two paths and reopens whichever changed, so a geoipupdate sidecar
+	// refreshing the files is picked up without restarting the console. Zero (the default) never reloads,
+	// which is the right answer for an operator who mounts their own read-only copies.
+	ReloadInterval time.Duration `yaml:"reloadInterval"`
 }
 
-// validate enforces mtr.enrichment.* invariants. Everything is checked ONLY
-// when the master gate is on, SchedulerConfig.validate's convention: rejecting
-// a leftover zero for a feature the operator has not switched on would be a
-// boot failure over nothing.
-//
-// The all-sources-off case fails CLOSED and names all three knobs. It is the
-// one misconfiguration that would otherwise be invisible: the resolver would
-// start, every lookup would resolve to an empty row, and the cache would fill
-// with authoritative-looking nothing that the TTL then protects for a day.
+// validate enforces mtr.enrichment.* invariants; everything is checked ONLY when the master gate.
 func (e *EnrichmentConfig) validate() error {
 	if !e.Enabled {
 		return nil
@@ -505,33 +312,17 @@ func (m *MTRConfig) validate() error {
 	return m.Enrichment.validate()
 }
 
-// SchedulerConfig configures the schedule loop (internal/console/scheduler):
-// the advisory-locked tick that fires due check_schedules rows through the
-// diagnostics runner and drives the stuck-run reaper.
-//
-// Enabled defaults to FALSE on purpose. Schedules can already be created and
-// stored (M4 Task 4) without anything acting on them, so an upgrade to the
-// milestone that adds this loop must not, on its own, start dispatching fleet
-// traffic from rows an operator entered while nothing was consuming them.
-// Turning it on is a deliberate act.
+// SchedulerConfig configures the schedule loop (internal/console/scheduler); schedules can already
+// be created and stored without anything acting on them.
 type SchedulerConfig struct {
-	// Enabled turns the loop on. It also requires a resolved database DSN --
-	// check_schedules and the cross-replica advisory lock both live in
-	// PostgreSQL -- and a controller, since a fired schedule becomes an
-	// ordinary diagnostics run; cmd/console logs and skips the loop rather
-	// than failing to start when either is missing.
+	// Enabled turns the loop on; it also requires a resolved database DSN.
 	Enabled bool `yaml:"enabled"`
-	// TickInterval is the poll cadence. Short by design (seconds): the
-	// advisory lock is taken and released per tick, so a replica that dies
-	// mid-tick delays exactly one tick instead of wedging the fleet until
-	// its session is reaped.
+	// Short by design (seconds): the advisory lock is taken and released per tick.
 	TickInterval time.Duration `yaml:"tickInterval"`
 }
 
-// validate enforces scheduler.* invariants. The tick interval is only
-// checked when the loop is enabled: a disabled loop never reads it, and
-// rejecting a leftover zero in an operator's values.yaml for a feature they
-// have not switched on would be a boot failure over nothing.
+// validate enforces scheduler.* invariants; the tick interval is only checked when the loop is
+// enabled: a disabled loop never reads.
 func (s *SchedulerConfig) validate() error {
 	if s.Enabled && s.TickInterval <= 0 {
 		return fmt.Errorf("scheduler.tickInterval must be positive when scheduler.enabled is true, got %v", s.TickInterval)
@@ -540,33 +331,18 @@ func (s *SchedulerConfig) validate() error {
 }
 
 // RateLimitConfig configures the console's fixed-window request limits
-// (internal/console/httpapi/ratelimit.go). Both are counts per MINUTE, and
-// both follow the same "0 disables THAT limit" convention
-// database.retentionDays already uses for pruning -- a negative value is a
-// configuration error, not a disable.
-//
-// The window is counted in the cache.KV, so with console.valkey.mode=valkey
-// the limit is cluster-wide, and with console.valkey.mode=disabled it is
-// per-replica (the in-process KV has no cross-replica visibility, ADR-002):
-// N replicas then admit up to N times the configured rate. That is weaker
-// than configured, never stronger.
+// (internal/console/httpapi/ratelimit.go); that is weaker than configured.
 type RateLimitConfig struct {
 	// RunsPerMinute caps POST /api/v1/runs per SUBJECT per minute (default
 	// 10): a diagnostics run fans out to up to 400 agent pairs, so an
 	// unbounded caller is a controller-load amplifier.
 	RunsPerMinute int `yaml:"runsPerMinute"`
-	// LoginPerMinute caps POST /api/v1/auth/login per USERNAME and, counted
-	// independently, per SOURCE IP per minute (default 5). This one is an
-	// availability control, not just an anti-brute-force one: argon2id is
-	// deliberately 64 MiB per verification, and unlimited concurrent logins
-	// against a 256Mi console pod is an unauthenticated OOM.
+	// LoginPerMinute caps POST /api/v1/auth/login per USERNAME and, counted independently, per SOURCE
+	// IP per minute (default 5).
 	LoginPerMinute int `yaml:"loginPerMinute"`
 }
 
-// validate enforces rateLimit.* invariants. Zero is legal (that limit is
-// off); negative is not -- it would otherwise silently read as "off" too,
-// hiding a typo in an operator's values.yaml behind a disabled security
-// control.
+// validate enforces rateLimit.* invariants; zero is legal (that limit is off).
 func (rl *RateLimitConfig) validate() error {
 	if rl.RunsPerMinute < 0 {
 		return fmt.Errorf("rateLimit.runsPerMinute must be >= 0 (0 disables the limit), got %d", rl.RunsPerMinute)
@@ -591,6 +367,34 @@ type ControllerConfig struct {
 type ValkeyConfig struct {
 	Address     string        `yaml:"address"`     // host:port; empty = disabled (in-process fallback)
 	DialTimeout time.Duration `yaml:"dialTimeout"` // default 5s
+	// Password is here for completeness and local development ONLY; the chart never templates it.
+	Password string `yaml:"password"`
+	// PasswordFile holds the password in a mounted Secret, the same posture as database.dsnFile.
+	// A Valkey that requires AUTH is the norm, not the exception: the bitnami subchart turns
+	// requirepass on by default, and every managed Valkey does too.
+	PasswordFile string `yaml:"passwordFile"` // WINS over Password when set
+}
+
+// ResolvePassword returns the effective Valkey password: PasswordFile's trimmed contents when set,
+// otherwise Password. Empty means no AUTH. Called once at boot, never per request.
+func (v *ValkeyConfig) ResolvePassword() (string, error) {
+	if v.PasswordFile == "" {
+		return v.Password, nil
+	}
+	data, err := os.ReadFile(v.PasswordFile) //nolint:gosec // path comes from operator config, not user input
+	if err != nil {
+		return "", fmt.Errorf("read valkey.passwordFile %q: %w", v.PasswordFile, err)
+	}
+	return strings.TrimSpace(string(data)), nil
+}
+
+// validate mirrors database.dsn/dsnFile: naming both is a mistake worth reporting, not a precedence
+// puzzle for the reader.
+func (v *ValkeyConfig) validate() error {
+	if v.Password != "" && v.PasswordFile != "" {
+		return errors.New("set either valkey.password or valkey.passwordFile, not both")
+	}
+	return nil
 }
 
 // PrometheusConfig configures the console's Prometheus HTTP API client.
@@ -603,11 +407,6 @@ type PrometheusConfig struct {
 }
 
 // DatabaseConfig configures the console's PostgreSQL store (internal/console/store).
-// An empty resolved DSN disables persistence entirely: GET /api/v1/events answers
-// 503, run history is in-memory only, and the whole M1/M2 surface is unchanged.
-// This is the same "empty means off" convention Controller.URL, Prometheus.URL,
-// Controller.GRPCAddr and Valkey.Address already use; Helm's
-// console.database.mode=cnpg|external|disabled resolves INTO it.
 type DatabaseConfig struct {
 	DSN            string        `yaml:"dsn"`            // postgres://... ; MUST NOT carry a password (use DSNFile)
 	DSNFile        string        `yaml:"dsnFile"`        // path to a file holding the full DSN; WINS over DSN when set
@@ -716,15 +515,10 @@ func defaults() *Config {
 		// Same shape again: the gate stays off, the namespace stays empty (=
 		// resolve from POD_NAMESPACE), and the cadence is pre-defaulted.
 		KubernetesContext: KubernetesContextConfig{ResyncInterval: 10 * time.Minute},
-		// The key stays empty (= the documented keyless state) and only the
-		// cadence is pre-defaulted, so a console that turns webhooks and
-		// alerting on gets a working alert-transition watcher without a third
-		// line of config.
+		// The key stays empty (= the documented keyless state) and only the cadence is pre-defaulted.
 		Webhooks: WebhooksConfig{AlertPollInterval: DefaultWebhookAlertPollInterval},
-		// Same shape once more: the gate stays off, the namespace stays empty
-		// (= resolve from POD_NAMESPACE), and both the cadence and the object
-		// name are pre-defaulted, so turning the reconciler on is a one-line
-		// change.
+		// Same shape once more: the gate stays off, the namespace stays empty (= resolve from
+		// POD_NAMESPACE).
 		Alerting: AlertingConfig{
 			SyncInterval: DefaultAlertingSyncInterval,
 			BundleName:   DefaultAlertingBundleName,
@@ -774,13 +568,7 @@ func (d *DatabaseConfig) validate() error {
 	return nil
 }
 
-// validateAuth enforces the full auth.* matrix (SECURITY.md §10.1): a
-// per-mode switch plus the cross-cutting rules that apply regardless of
-// mode (session, defaultRole). local and oidc need a resolved database DSN
-// (Decision 7: users/sessions live in PostgreSQL); anonymous and header do
-// not, since roles come from config/headers, not a users table — this is
-// why the DSN check lives here, at the Config level, rather than inside
-// AuthConfig or DatabaseConfig alone.
+// validateAuth enforces the full auth.* matrix (SECURITY.md §10.1).
 func (c *Config) validateAuth() error {
 	switch c.Auth.Mode {
 	case "anonymous":
@@ -831,10 +619,7 @@ func (c *Config) validateAuth() error {
 	return nil
 }
 
-// validate enforces header mode's invariants (SECURITY.md §10.1: "behind
-// trusted proxy; explicit opt-in"). An empty TrustedProxyCIDRs is rejected
-// rather than defaulted, because a mode that trusts an unauthenticated
-// request header from anywhere is an auth bypass, not a mode.
+// validate enforces header mode's invariants.
 func (h *HeaderConfig) validate() error {
 	if h.UserHeader == "" {
 		return errors.New("auth.header.userHeader must not be empty")
@@ -851,11 +636,7 @@ func (h *HeaderConfig) validate() error {
 	return nil
 }
 
-// validate enforces oidc mode's invariants. The issuer must not carry a
-// trailing slash: go-oidc discovery appends /.well-known/openid-configuration,
-// and a doubled slash produces a confusing 404. redirectURL must end with
-// OIDCCallbackPath, the fixed route the console's OIDC handler is wired up
-// at.
+// validate enforces oidc mode's invariants; the issuer must not carry a trailing slash.
 func (o *OIDCConfig) validate() error {
 	u, err := url.Parse(o.Issuer)
 	if o.Issuer == "" || err != nil || u.Scheme != "https" || u.Host == "" {
@@ -950,6 +731,9 @@ func (c *Config) Validate() error {
 	}
 	if c.Valkey.DialTimeout <= 0 {
 		return fmt.Errorf("valkey.dialTimeout must be positive, got %v", c.Valkey.DialTimeout)
+	}
+	if err := c.Valkey.validate(); err != nil {
+		return err
 	}
 	if err := c.Database.validate(); err != nil {
 		return err

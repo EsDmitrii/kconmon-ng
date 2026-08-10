@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Inbox, Search } from "lucide-react";
 import { PageShell } from "@/components/page-shell";
 import { RealtimeBadge } from "@/components/realtime-badge";
@@ -8,6 +8,11 @@ import { Segmented } from "@/components/ui/segmented";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tooltip } from "@/components/ui/tooltip";
 import { useMatrix } from "@/hooks/use-matrix";
+import { localeTag, useLocale, useT } from "@/lib/i18n";
+import { matrixDict, type MatrixKey } from "@/lib/i18n/dict/matrix";
+/* cellSummary's own table — dict/matrix.ts's NOT-HERE list says why the shared
+   reading of a cell is not this page's to fork. */
+import { matrixCellsDict } from "@/lib/i18n/dict/matrix-cells";
 import { buildInvestigateURL } from "@/lib/investigation-sources";
 import {
   cellSummary,
@@ -25,15 +30,7 @@ import { cn } from "@/lib/utils";
 // separator; node names are DNS labels today, but this stays robust regardless.
 const pairKey = (source: string, destination: string) => `${source}\0${destination}`;
 
-/* One measure, one mark: the cell's colour AND its primary figure both encode
-   the pair's SEVERITY (healthy < 1%, degraded 1–10%, failing ≥ 10%) — the
-   failure ratio when there is one, packet loss when there is not; RTT p95 is
-   the secondary, muted line. The fill is the -soft token so --foreground stays
-   legible, and a saturated left rail repeats the state so the grid still reads
-   in greyscale.
-   The reading itself lives in lib/matrix-cells.ts, shared with Overview, the
-   object cards and the topology edges — this page must not grow a second
-   opinion about what "measured" means (QA round 2, finding #1). */
+/* The reading itself lives in lib/matrix-cells.ts, shared with Overview, the object cards and the topology edges. */
 type Tier = CellTier;
 
 /* Healthy stays quiet (a neutral surface + green rail) so an all-green grid
@@ -62,21 +59,20 @@ const TIER_DOT: Record<Tier, string> = {
   unknown: "bg-health-unknown",
 };
 
-const LEGEND: { tier: Tier; label: string }[] = [
-  { tier: "ok", label: "Healthy · fail < 1%" },
-  { tier: "warn", label: "Degraded · 1–10%" },
-  { tier: "bad", label: "Failing · ≥ 10%" },
-  { tier: "unknown", label: "No data" },
+/* Tier → its legend row, in the order the legend renders them. The WORDS are
+   dict/matrix.ts's; this is the reading order, which is not a translation. */
+const LEGEND: { tier: Tier; key: MatrixKey }[] = [
+  { tier: "ok", key: "legend.ok" },
+  { tier: "warn", key: "legend.warn" },
+  { tier: "bad", key: "legend.bad" },
+  { tier: "unknown", key: "legend.unknown" },
 ];
 
-/* PROTOCOL_PARAM is this page's own URL key, carried the way lib/timemachine's
-   `?at=` is carried: read off window.location, written through window.history.
-   TanStack Router owns navigation here but no route declares a search schema
-   (timemachine.tsx documents that decision), so this is the house idiom for a
-   page-level param rather than a second one.
-   REPLACE, not push: flipping the protocol segmented control is a change of
-   lens on the same page, and a Back button that walked backwards through four
-   protocol flips before leaving the page is not what the gesture means. */
+/*
+ * PROTOCOL_PARAM is this page's own URL key, carried the way lib/timemachine's `?at=` is carried;
+ * TanStack Router owns navigation here but no route declares a search schema (timemachine.tsx
+ * documents that decision).
+ */
 const PROTOCOL_PARAM = "protocol";
 
 /** readProtocolFromLocation resolves ?protocol= into one of the three the
@@ -88,7 +84,23 @@ export function readProtocolFromLocation(search: string): Protocol {
   return PROTOCOLS.includes(raw as Protocol) ? (raw as Protocol) : "tcp";
 }
 
-function writeProtocol(p: Protocol): void {
+/**
+ * degradedProtocolParam answers "is the URL still claiming something this page
+ * is not showing?" — a `?protocol=sctp` that silently became TCP left the lie
+ * in the address bar, which is the string an operator copies and shares (QA
+ * scope 2, finding #17). Null when the URL and the view already agree, which
+ * includes the ordinary no-param case: the default needs no spelling out.
+ */
+export function degradedProtocolParam(search: string): Protocol | null {
+  const raw = new URLSearchParams(search).get(PROTOCOL_PARAM);
+  if (raw === null) return null;
+  const resolved = readProtocolFromLocation(search);
+  return raw === resolved ? null : resolved;
+}
+
+/** writeProtocol is the ONE writer of ?protocol=, shared with the object cards
+ *  so a second surface cannot invent a second spelling of the same key. */
+export function writeProtocol(p: Protocol): void {
   const url = new URL(window.location.href);
   url.searchParams.set(PROTOCOL_PARAM, p);
   window.history.replaceState({}, "", `${url.pathname}${url.search}${url.hash}`);
@@ -97,10 +109,24 @@ function writeProtocol(p: Protocol): void {
 const HEADER_CELL =
   "sticky z-10 bg-surface p-2 text-left text-[11px] font-medium text-muted-foreground";
 
+/**
+ * NodeLabel is a row/column header, and headers were the grid's dead end: every
+ * CELL opened its pair card while the two names framing it opened nothing (QA
+ * scope 2, finding #14). The link is the whole label, so the target keeps its
+ * hit area, and it lands on the same /nodes/{name} route the topology map's own
+ * boxes navigate to.
+ */
 function NodeLabel({ name }: { name: string }) {
+  const t = useT(matrixDict);
   return (
     <Tooltip content={name}>
-      <span className="block max-w-[9rem] truncate">{name}</span>
+      <a
+        href={`/nodes/${encodeURIComponent(name)}`}
+        aria-label={t("header.node", { node: name })}
+        className="block max-w-[9rem] truncate rounded hover:text-foreground hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+      >
+        {name}
+      </a>
     </Tooltip>
   );
 }
@@ -114,9 +140,11 @@ function GridCell({
   dst: string;
   cell: MatrixCell | undefined;
 }) {
+  const t = useT(matrixDict);
+  const tc = useT(matrixCellsDict);
   if (src === dst) {
     return (
-      <td aria-label={`${src}: self`} className="p-0.5">
+      <td aria-label={t("cell.self", { node: src })} className="p-0.5">
         <div className="flex h-12 w-full min-w-16 items-center justify-center rounded-md bg-surface-2/40 text-muted-foreground/40">
           —
         </div>
@@ -130,7 +158,7 @@ function GridCell({
   const tier = cellTier(cell);
   const measured = isMeasured(cell);
   const fail = cell?.failRatio ?? null;
-  const label = `${src} → ${dst}: ${cellSummary(cell)}`;
+  const label = `${src} → ${dst}: ${cellSummary(cell, tc)}`;
 
   const tooltip = (
     <div className="flex min-w-44 flex-col gap-1">
@@ -140,17 +168,19 @@ function GridCell({
         <span className="truncate">{dst}</span>
       </div>
       {!measured ? (
-        <div className="text-muted-foreground">No probe data in Prometheus for this pair.</div>
+        <div className="text-muted-foreground">{t("tooltip.unmeasured")}</div>
       ) : (
         <dl className="nums grid grid-cols-[auto_1fr] gap-x-4 gap-y-0.5 text-muted-foreground">
-          <dt>Failure ratio</dt>
+          <dt>{t("tooltip.failRatio")}</dt>
           {/* "no samples" rather than a dash or a fabricated 0%: the series
               exists and reported nothing, which is a different fact from a
               measured zero and from an unprobed pair. */}
-          <dd className="text-right text-popover-foreground">{fail === null ? "no samples" : fmtRatio(fail)}</dd>
+          <dd className="text-right text-popover-foreground">
+            {fail === null ? t("tooltip.noSamples") : fmtRatio(fail)}
+          </dd>
           {cell?.rttP95 !== undefined ? (
             <>
-              <dt>RTT p95</dt>
+              <dt>{t("tooltip.rtt")}</dt>
               <dd className="text-right text-popover-foreground">{fmtRtt(cell.rttP95)}</dd>
             </>
           ) : null}
@@ -160,7 +190,7 @@ function GridCell({
               the failure ratio cannot. */}
           {cell?.lossRatio !== undefined ? (
             <>
-              <dt>Packet loss</dt>
+              <dt>{t("tooltip.loss")}</dt>
               <dd className="text-right text-popover-foreground">{fmtRatio(cell.lossRatio)}</dd>
             </>
           ) : null}
@@ -169,24 +199,13 @@ function GridCell({
     </div>
   );
 
-  // Every non-self cell opens the pair's object card (task-25-brief.md), even
-  // one with no data yet -- an operator may want the page open before probe
-  // data exists. A real <a href> keeps native keyboard focus/activation
-  // (Tab, Enter) instead of hand-rolling it on a div, and lets the existing
-  // hover/focus Tooltip wrapper attach its handlers exactly as before.
+  // Every non-self cell opens the pair's object card, even one with no data yet.
   const pairHref = `/pairs/${encodeURIComponent(src)}/${encodeURIComponent(dst)}`;
 
-  /* The Investigate affordance (plan Decision 11) lives INSIDE the cell, as a
-     sibling of the pair link rather than a new column or a new row: the cell IS
-     the pair's affordance, and a second grid layer would double the width of a
-     table that is already N x N.
-     It cannot go in the tooltip, which is the other thing this cell has: that
-     bubble is `pointer-events-none` by construction (components/ui/tooltip.tsx
-     renders it in a body portal at a measured position), so a link inside it
-     could be read but never clicked.
-     Nested anchors are invalid HTML, hence the sibling + `absolute` rather than
-     an <a> within the <a>. It stays in the tab order and is only VISUALLY
-     revealed on hover/focus-within, so the grid does not sprout N x N icons. */
+  /*
+   * The Investigate affordance lives INSIDE the cell, as a sibling of the pair link rather than a
+   * new column or a new row.
+   */
   const investigateHref = buildInvestigateURL({ kind: "pair", a: src, b: dst }, new Date());
 
   return (
@@ -214,8 +233,18 @@ function GridCell({
           ) : fail === null ? (
             <>
               <span className="nums text-[13px] font-semibold leading-tight">{fmtRtt(cell?.rttP95)}</span>
-              <span className="nums text-[10.5px] leading-tight text-muted-foreground">
-                {cell?.lossRatio === undefined ? "no fail data" : `loss ${fmtRatio(cell.lossRatio)}`}
+              {/* px-1 text-center is the give this line needs and the hero
+                  figure does not: it is the only WORDS in the grid, so it is
+                  the only thing a longer language can push into the tier rail
+                  (`before:w-[3px]`, hard against the left edge) or spill out of
+                  `overflow-hidden`. Padded and centred, a string too wide for
+                  the column wraps to a second centred line INSIDE the cell
+                  instead of being painted over — two 13.125px lines still clear
+                  the h-12 box under the 16.25px hero. */}
+              <span className="nums px-1 text-center text-[10.5px] leading-tight text-muted-foreground">
+                {cell?.lossRatio === undefined
+                  ? t("cell.noFailData")
+                  : t("cell.loss", { ratio: fmtRatio(cell.lossRatio) })}
               </span>
             </>
           ) : (
@@ -230,11 +259,20 @@ function GridCell({
       </Tooltip>
       <a
         href={investigateHref}
-        aria-label={`Investigate ${src} → ${dst}`}
+        data-testid="cell-investigate"
+        aria-label={t("cell.investigate", { src, dst })}
         className={cn(
           "absolute right-1 top-1 rounded p-0.5 text-muted-foreground opacity-0",
           "group-hover:opacity-100 focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
           "hover:bg-accent hover:text-accent-foreground",
+          /* The DRAWN control is a 12px glyph in a 16px box, which is a target
+             a trackpad hits by luck and a touch screen does not hit at all (QA
+             scope 3, finding #19). The pseudo-element takes it to 40×40 without
+             moving a pixel of what is painted: -inset-3 is 12px on each side of
+             the 16px box. It is deliberately a pseudo rather than padding —
+             padding would push the glyph off the cell's top-right corner, and
+             the corner is where the affordance is learned. */
+          "after:absolute after:-inset-3 after:content-['']",
         )}
       >
         <Search aria-hidden="true" className="size-3" />
@@ -244,9 +282,10 @@ function GridCell({
 }
 
 function MatrixSkeleton() {
+  const t = useT(matrixDict);
   return (
     <div role="status" aria-live="polite" className="flex flex-col gap-2">
-      <span className="sr-only">Loading matrix…</span>
+      <span className="sr-only">{t("loading")}</span>
       <div className="flex gap-2">
         {Array.from({ length: 7 }, (_, i) => (
           <Skeleton key={i} className={cn("h-4", i === 0 ? "w-28" : "w-16")} />
@@ -265,14 +304,19 @@ function MatrixSkeleton() {
 }
 
 export function MatrixPage() {
-  /* Read ON MOUNT, so a shared /matrix?protocol=icmp link opens on ICMP
-     instead of silently on TCP (QA round 2, finding #15). Lazy initialiser:
-     window.location is read once, not on every render. */
+  const t = useT(matrixDict);
+  const { locale } = useLocale();
+  /* Read ON MOUNT, so a shared /matrix?protocol=icmp link opens on ICMP instead of silently on TCP. */
   const [protocol, setProtocolState] = useState<Protocol>(() => readProtocolFromLocation(window.location.search));
   const setProtocol = (p: Protocol) => {
     setProtocolState(p);
     writeProtocol(p);
   };
+  /* replaceState, not push: the degraded URL was never a place to go back to. */
+  useEffect(() => {
+    const fixed = degradedProtocolParam(window.location.search);
+    if (fixed) writeProtocol(fixed);
+  }, []);
   const { at } = useTimeContext();
   const { data, isLoading, error, live } = useMatrix(protocol);
 
@@ -284,21 +328,21 @@ export function MatrixPage() {
 
   return (
     <PageShell
-      title="Matrix"
+      title={t("title")}
       description={
-        at
-          ? `N×N node connectivity as of ${at.toLocaleString()}, evaluated straight from Prometheus at that instant.`
-          : "Live N×N node connectivity, recomputed from Prometheus every 15s."
+        /* The stamp lands INSIDE a translated sentence, so it takes that
+           sentence's language — lib/i18n's localeTag, not the bare default. */
+        at ? t("description.engaged", { at: at.toLocaleString(localeTag(locale)) }) : t("description.live")
       }
       actions={
         <>
           <Segmented
-            aria-label="Protocol"
+            aria-label={t("protocol.aria")}
             options={PROTOCOLS.map((p) => ({ value: p, label: p.toUpperCase() }))}
             value={protocol}
             onChange={setProtocol}
           />
-          <Badge variant="neutral">plane: pod</Badge>
+          <Badge variant="neutral">{t("plane")}</Badge>
           {/* How fresh the grid actually is — pushed, or up to 15s of polling
               behind. Both states carry a label, never colour alone. Engaged the
               question is moot (the grid is pinned to an instant on purpose) and
@@ -309,7 +353,7 @@ export function MatrixPage() {
     >
       {error ? (
         <Card role="alert" className="border-l-4 border-l-health-bad bg-health-bad-soft/40 p-5">
-          <p className="text-sm font-medium">Matrix is unavailable</p>
+          <p className="text-sm font-medium">{t("error.title")}</p>
           <p className="mt-1 text-xs leading-relaxed text-muted-foreground">{error.message}</p>
         </Card>
       ) : null}
@@ -326,12 +370,10 @@ export function MatrixPage() {
               <Inbox className="size-5" />
             </span>
             <p className="text-sm font-medium">
-              {at ? "No probe data in Prometheus at this time" : "No probe data in Prometheus yet"}
+              {t(at ? "empty.engaged.title" : "empty.live.title")}
             </p>
             <p className="max-w-sm text-xs leading-relaxed text-muted-foreground">
-              {at
-                ? `Nothing was scraped for ${protocol.toUpperCase()} probes at that instant — it may predate the deployment, or fall outside Prometheus' own retention.`
-                : `The ${protocol.toUpperCase()} matrix fills in once the agents complete a probe round and Prometheus scrapes them — usually within a minute of the DaemonSet becoming ready.`}
+              {t(at ? "empty.engaged.body" : "empty.live.body", { protocol: protocol.toUpperCase() })}
             </p>
           </div>
         ) : null}
@@ -341,12 +383,12 @@ export function MatrixPage() {
             <div className="overflow-x-auto">
               <table className="border-separate border-spacing-0">
                 <caption className="sr-only">
-                  Node-to-node failure ratio matrix, {protocol.toUpperCase()}
+                  {t("grid.caption", { protocol: protocol.toUpperCase() })}
                 </caption>
                 <thead>
                   <tr>
                     <th className={cn(HEADER_CELL, "left-0 top-0 z-20")} scope="col">
-                      src \ dst
+                      {t("grid.corner")}
                     </th>
                     {data.nodes.map((n) => (
                       <th key={n} className={cn(HEADER_CELL, "top-0")} scope="col">
@@ -371,21 +413,19 @@ export function MatrixPage() {
             </div>
 
             <div className="flex flex-wrap items-center gap-x-5 gap-y-2 border-t border-border pt-4 text-xs text-muted-foreground">
-              {LEGEND.map(({ tier, label }) => (
+              {LEGEND.map(({ tier, key }) => (
                 <span key={tier} className="flex items-center gap-1.5">
                   <span
                     aria-hidden="true"
                     className={cn("size-2.5 rounded-full", TIER_DOT[tier])}
                   />
-                  {label}
+                  {t(key)}
                 </span>
               ))}
               {/* Says what the colour actually reads now: the worst ratio the
                   cell carries, which on a pair with no failure samples is its
                   packet loss. */}
-              <span className="ml-auto hidden sm:block">
-                colour = worst of fail % and packet loss · a cell with no fail samples shows its p95
-              </span>
+              <span className="ml-auto hidden sm:block">{t("legend.note")}</span>
             </div>
           </div>
         ) : null}

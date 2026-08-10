@@ -8,11 +8,7 @@ import (
 	"github.com/redis/rueidis"
 )
 
-// ValkeyKV is a KV backed by a real Valkey/Redis server via rueidis, reusing
-// the rueidis client an already-open ValkeyBus holds rather than dialling a
-// second connection pool — see NewValkeyKVFromBus. TTL is native: every
-// value is written with a PX expiry, so Valkey itself does the reclaiming
-// (no local sweeper needed, unlike InProcessKV).
+// ValkeyKV is a KV backed by a real Valkey/Redis server via rueidis.
 type ValkeyKV struct {
 	client rueidis.Client
 }
@@ -20,10 +16,7 @@ type ValkeyKV struct {
 // compile-time proof ValkeyKV satisfies KV.
 var _ KV = (*ValkeyKV)(nil)
 
-// NewValkeyKVFromBus builds a ValkeyKV around vb's already-open rueidis
-// client. It does not dial and does not own the client: closing it is
-// ValkeyBus.Close's job, so cmd/console's existing closeBus stays the single
-// teardown point for both the Bus and the KV built on top of it.
+// NewValkeyKVFromBus builds a ValkeyKV around vb's already-open rueidis client.
 func NewValkeyKVFromBus(vb *ValkeyBus) *ValkeyKV {
 	return &ValkeyKV{client: vb.client}
 }
@@ -56,29 +49,8 @@ func (kv *ValkeyKV) Set(ctx context.Context, key string, val []byte, ttl time.Du
 	return nil
 }
 
-// IncrWithTTL is INCR followed by PEXPIRE ... NX, pipelined into a single
-// round trip (rueidis DoMulti sends both on the same connection, in order,
-// with one write and one read).
-//
-// Why NX rather than "EXPIRE only when INCR returned 1": INCR returning 1
-// does identify the caller that created the window, but making the EXPIRE
-// conditional on that in the CLIENT means a client that dies between its INCR
-// and its EXPIRE leaves the key with no TTL at all -- and a rate-limit counter
-// that never expires is a permanent lockout for that subject. Letting EVERY
-// call issue PEXPIRE NX moves the condition into the server: it arms the TTL
-// iff the key currently has none, so
-//   - the normal case is unchanged (the second and later hits of a window find
-//     a TTL already set and NX makes their PEXPIRE a no-op -- the window stays
-//     FIXED, never extended);
-//   - a concurrent first-hit race is harmless by construction rather than by
-//     luck (whichever call wins arms the TTL, the losers no-op);
-//   - a TTL-less key left behind by a crash mid-pipeline self-heals on the very
-//     next hit, at the cost of that one window starting late, which is the
-//     benign direction to fail in.
-//
-// PEXPIRE ... NX needs Valkey 9 / Redis 7+ (the chart pins valkey:9). The
-// milliseconds unit matches Set's Px, so sub-second TTLs survive the trip --
-// integration tests rely on that.
+// IncrWithTTL is INCR followed by PEXPIRE; letting EVERY call issue PEXPIRE NX moves the condition
+// into the server.
 func (kv *ValkeyKV) IncrWithTTL(ctx context.Context, key string, ttl time.Duration) (int64, error) {
 	resps := kv.client.DoMulti(ctx,
 		kv.client.B().Incr().Key(key).Build(),
@@ -89,10 +61,7 @@ func (kv *ValkeyKV) IncrWithTTL(ctx context.Context, key string, ttl time.Durati
 	if err != nil {
 		return 0, fmt.Errorf("valkey kv incr %s: %w", key, err)
 	}
-	// The PEXPIRE reply itself (1 = armed, 0 = a TTL was already there) carries
-	// no decision -- both are the expected outcomes above -- but a transport or
-	// server error on it must not be swallowed: it would mean a key counting up
-	// with no expiry, i.e. a limit that never releases.
+	// The PEXPIRE reply itself (1 = armed, 0 = a TTL was already there) carries no decision.
 	if expErr := resps[1].Error(); expErr != nil {
 		return 0, fmt.Errorf("valkey kv incr %s: set window ttl: %w", key, expErr)
 	}

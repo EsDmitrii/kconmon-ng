@@ -7,10 +7,7 @@ import (
 	"time"
 )
 
-// TestOpenEmptyDSNReturnsError asserts the guard rail: cmd/console must never
-// reach Open with persistence disabled (an empty resolved DSN), and if it
-// somehow did, Open must fail clearly rather than dial a default local
-// socket (pgxpool.ParseConfig("") is a valid, non-empty config).
+// TestOpenEmptyDSNReturnsError asserts the guard rail.
 func TestOpenEmptyDSNReturnsError(t *testing.T) {
 	_, err := Open(context.Background(), "", 10, time.Second, false)
 	if err == nil {
@@ -18,17 +15,12 @@ func TestOpenEmptyDSNReturnsError(t *testing.T) {
 	}
 }
 
-// TestOpenUnroutableHostRespectsConnectTimeout asserts Open returns in
-// roughly connectTimeout rather than hanging: pgxpool.NewWithConfig never
-// itself blocks on the network, so this also exercises the explicit Ping
-// Open performs to force the first real connection attempt.
+// TestOpenUnroutableHostRespectsConnectTimeout asserts Open returns in roughly connectTimeout
+// rather than hanging.
 func TestOpenUnroutableHostRespectsConnectTimeout(t *testing.T) {
 	const connectTimeout = 500 * time.Millisecond
-	// 192.0.2.1 is TEST-NET-1 (RFC 5737), reserved for documentation and
-	// never routed anywhere: no host there ever responds, so this exercises
-	// the timeout path rather than an authentication or DNS failure. Picked
-	// over a 10/8 address on purpose -- RFC 1918 space is routed inside many
-	// corporate networks and CI runners, where a fast RST would flake this.
+	// 192.0.2.1 is TEST-NET-1 (RFC 5737), reserved for documentation and never routed anywhere: no
+	// host there ever responds.
 	const dsn = "postgres://user:pass@192.0.2.1:5432/db?sslmode=disable"
 
 	start := time.Now()

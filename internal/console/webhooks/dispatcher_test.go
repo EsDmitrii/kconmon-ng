@@ -38,10 +38,9 @@ type delivery struct {
 	failures   int32
 }
 
-// fakeStore is the Store double: the endpoints the dispatcher lists, plus
-// every outcome it wrote. Deliveries run on their own goroutines, so both
-// halves are mutex-guarded and every write is announced on `updated` -- a test
-// that slept instead would be a flake waiting for a slow CI box.
+// fakeStore is the Store double: the endpoints the dispatcher lists, plus every outcome it wrote;
+// deliveries run on their own goroutines, so both halves are mutex-guarded and every write is
+// announced on `updated`.
 type fakeStore struct {
 	mu    sync.Mutex
 	hooks map[string]store.Webhook
@@ -522,10 +521,9 @@ func TestAlertPayloadFieldSetIsClosedAndStable(t *testing.T) {
 					decoded.Alert.Labels, decoded.Alert.Annotations)
 			}
 
-			// resolvedAt is the key the M6 reasoning is repeated for: PRESENT
-			// on both events, null on fired. Asserted on the RAW bytes,
-			// because a `null` and a missing key decode identically into a
-			// *time.Time and only one of them is the contract.
+			// resolvedAt is the key the reasoning is repeated for: PRESENT on both events; asserted on the
+			// RAW bytes, because a `null` and a missing key decode identically into a *time.Time and only
+			// one of them is the contract.
 			raw := string(body)
 			switch event {
 			case store.WebhookEventAlertFired:
@@ -1047,10 +1045,8 @@ func TestDispatchTestOnAnUnknownEndpointErrors(t *testing.T) {
 
 // --- secrecy ----------------------------------------------------------------
 
-// The plaintext secret, its sealed form and the signing key must be absent
-// from EVERY log line the dispatcher emits, at Debug level and up. Asserted on
-// captured output rather than by reading the code, because the leak that
-// matters is the one someone adds later.
+// The plaintext secret, its sealed form and the signing key must be absent from EVERY log line the
+// dispatcher emits.
 func TestSecretNeverReachesTheLogs(t *testing.T) {
 	var buf lockedBuffer
 	restore := slog.Default()

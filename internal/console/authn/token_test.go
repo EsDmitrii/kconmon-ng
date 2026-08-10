@@ -18,12 +18,7 @@ import (
 	"github.com/EsDmitrii/kconmon-ng/internal/console/store"
 )
 
-// waitFor polls cond until it holds, or fails the test. Needed because
-// tokenAuthenticator.touch (I-1's fix) dispatches TouchTokenLastUsed on a
-// detached goroutine now, so its effect on fakeTokenStore is no longer
-// observable synchronously right after Authenticate returns. Same pattern
-// internal/console/events/ingester_test.go uses for its own async
-// assertions.
+// waitFor polls cond until it holds, or fails the test.
 func waitFor(t *testing.T, what string, cond func() bool) {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
@@ -36,11 +31,8 @@ func waitFor(t *testing.T, what string, cond func() bool) {
 	t.Fatalf("timed out waiting for %s", what)
 }
 
-// makeToken returns a wire-format token ("kcm_<43-char base64url>") built
-// from a deterministic 32-byte secret, plus the SHA-256 digest of that raw
-// secret -- the exact hash a real store.TokenStore would have stored under
-// token_hash (migration 00002: "SHA-256 of 256 random bits"), pinning this
-// package's hashing convention against silent drift.
+// makeToken returns a wire-format token ("kcm_<43-char base64url>") built from a deterministic
+// 32-byte secret.
 func makeToken(seed byte) (wire string, hash []byte) {
 	secret := make([]byte, 32)
 	for i := range secret {
@@ -105,11 +97,7 @@ func (f *fakeTokenStore) setTouchErr(err error) {
 	f.touchErr = err
 }
 
-// spyUserStore is an authn.UserStore double for WithOwnerDisabledCheck
-// tests: keyed by id (not username -- GetUserByUsername is never called on
-// this path, but is still implemented, trivially, to satisfy the interface),
-// and it counts GetUserByID calls so a test can assert the "system"/non-UUID
-// owner path never even reaches the store.
+// spyUserStore is an authn.UserStore double for WithOwnerDisabledCheck tests.
 type spyUserStore struct {
 	mu      sync.Mutex
 	byID    map[string]store.User
@@ -141,11 +129,8 @@ func (f *spyUserStore) callCount() int {
 	return len(f.idCalls)
 }
 
-// TestTokenFallbackOwnerDisabledCheckDisabledOwnerIsErrDisabled proves the
-// core of I-2 / the PAT-disable-fix: a token whose owner (a users.id UUID)
-// is currently Disabled must fail authentication once
-// WithOwnerDisabledCheck is wired in, even though the token itself is
-// perfectly live (not revoked, not expired).
+// TestTokenFallbackOwnerDisabledCheckDisabledOwnerIsErrDisabled proves the core of I-2 / the
+// PAT-disable-fix.
 func TestTokenFallbackOwnerDisabledCheckDisabledOwnerIsErrDisabled(t *testing.T) {
 	t.Parallel()
 
@@ -190,11 +175,9 @@ func TestTokenFallbackOwnerDisabledCheckEnabledOwnerSucceeds(t *testing.T) {
 	}
 }
 
-// TestTokenFallbackOwnerDisabledCheckUnknownOwnerUUIDSucceeds covers a token
-// whose owner is a well-formed UUID that names no row in users at all --
-// e.g. it was created by a header/OIDC subject, whose disable state lives
-// upstream, not in this database. GetUserByID's ErrNotFound must be treated
-// as "allow", not propagated as a hard failure.
+// TestTokenFallbackOwnerDisabledCheckUnknownOwnerUUIDSucceeds covers a token whose owner is a
+// well-formed UUID that names no row in users at all; GetUserByID's ErrNotFound must be treated as
+// "allow", not propagated as a hard failure.
 func TestTokenFallbackOwnerDisabledCheckUnknownOwnerUUIDSucceeds(t *testing.T) {
 	t.Parallel()
 
@@ -211,14 +194,13 @@ func TestTokenFallbackOwnerDisabledCheckUnknownOwnerUUIDSucceeds(t *testing.T) {
 	}
 }
 
-// TestTokenFallbackOwnerDisabledCheckSystemOwnerSkipsLookupEntirely covers
-// the "system" owner (and, by the same non-UUID logic, empty/legacy data --
-// but NOT a token id: token ids are canonical UUIDs, exactly like a
-// users.id, so a token-minted-token's owner does NOT take this skip-the-
-// lookup path -- see TestTokenFallbackOwnerDisabledCheckParentTokenOwnerUUIDAllowsThroughErrNotFound
-// below for that case instead): the check must not even call GetUserByID for
-// "system", proven here with a spy that would otherwise report the owner as
-// disabled if it were ever looked up.
+// TestTokenFallbackOwnerDisabledCheckSystemOwnerSkipsLookupEntirely covers the "system" owner (and,
+// by the same non-UUID logic, empty/legacy data -- but NOT a token id: token ids are canonical
+// UUIDs, exactly like a users.id, so a token-minted-token's owner does NOT take this
+// skip-the-lookup path -- see
+// TestTokenFallbackOwnerDisabledCheckParentTokenOwnerUUIDAllowsThroughErrNotFound below for that
+// case instead): the check must not even call GetUserByID for "system", proven here with a spy that
+// would otherwise report the owner as disabled if it were ever looked up.
 func TestTokenFallbackOwnerDisabledCheckSystemOwnerSkipsLookupEntirely(t *testing.T) {
 	t.Parallel()
 
@@ -237,12 +219,8 @@ func TestTokenFallbackOwnerDisabledCheckSystemOwnerSkipsLookupEntirely(t *testin
 	}
 }
 
-// TestTokenFallbackOwnerDisabledCheckStoreErrorPropagates proves the check
-// fails closed on an infra error from GetUserByID: it must be propagated as
-// a real error, never collapsed into ErrInvalid (which would make a
-// transient store outage indistinguishable from "this token was never
-// valid", the same enumeration-oracle concern authenticateToken's other
-// error handling already guards against elsewhere).
+// TestTokenFallbackOwnerDisabledCheckStoreErrorPropagates proves the check fails closed on an infra
+// error from GetUserByID.
 func TestTokenFallbackOwnerDisabledCheckStoreErrorPropagates(t *testing.T) {
 	t.Parallel()
 
@@ -266,20 +244,9 @@ func TestTokenFallbackOwnerDisabledCheckStoreErrorPropagates(t *testing.T) {
 	}
 }
 
-// TestTokenFallbackOwnerDisabledCheckParentTokenOwnerUUIDAllowsThroughErrNotFound
-// pins the transitive-gap scenario that motivated the mint-time owner
-// inheritance in httpapi/tokens.go's handleTokensCreate: for a token whose
-// owner is a PARENT TOKEN's own id -- a canonical UUID, exactly like a
-// users.id (store.formatUUID mints both the same way) -- checkOwnerDisabled
-// parses it as a UUID, calls GetUserByID for REAL (unlike the "system"
-// owner case above, which never reaches the store at all), gets
-// store.ErrNotFound (no users row has a token's id), and allows. This is
-// the transitive gap: absent handleTokensCreate's inheritance, a token
-// minted by a token would ride this exact path forever, even after its
-// ultimate root user is disabled. This test exists as its own named case
-// (distinct from TestTokenFallbackOwnerDisabledCheckUnknownOwnerUUIDSucceeds,
-// which covers the same code path for a header/OIDC-created token's owner)
-// so the token-created-token story has its own entry in the test list.
+// TestTokenFallbackOwnerDisabledCheckParentTokenOwnerUUIDAllowsThroughErrNotFound pins the
+// transitive-gap scenario that motivated the mint-time owner inheritance in httpapi/tokens.go's
+// handleTokensCreate.
 func TestTokenFallbackOwnerDisabledCheckParentTokenOwnerUUIDAllowsThroughErrNotFound(t *testing.T) {
 	t.Parallel()
 
@@ -346,10 +313,8 @@ func TestTokenFallbackValidTokenResolvesSubjectWithoutConsultingInner(t *testing
 	if len(inner.calls) != 0 {
 		t.Errorf("expected inner not to be consulted for a resolved token, got %d calls", len(inner.calls))
 	}
-	// TouchTokenLastUsed now runs on a detached goroutine (I-1: it must
-	// never run synchronously on the request path), so its effect is not
-	// guaranteed to be visible the instant Authenticate returns -- wait for
-	// it instead of asserting on it immediately.
+	// TouchTokenLastUsed now runs on a detached goroutine (I-1: it must never run synchronously on the
+	// request path).
 	waitFor(t, "TouchTokenLastUsed to be called once", func() bool { return ts.touchCount("tok-1") == 1 })
 }
 
@@ -425,10 +390,9 @@ func authorizationRequest(value string) *http.Request {
 	return r
 }
 
-// TestTokenFallbackPassesCookieCarryingRequestToInnerUntouched proves a
-// request with no bearer token (here, one carrying only a session cookie) is
-// handed to inner as the EXACT same *http.Request -- not a copy, not a
-// reconstruction -- and inner's result is returned verbatim.
+// TestTokenFallbackPassesCookieCarryingRequestToInnerUntouched proves a request with no bearer
+// token (here, one carrying only a session cookie) is handed to inner as the EXACT same
+// *http.Request.
 func TestTokenFallbackPassesCookieCarryingRequestToInnerUntouched(t *testing.T) {
 	t.Parallel()
 
@@ -469,9 +433,8 @@ func TestTokenFallbackTouchIsDebouncedPerToken(t *testing.T) {
 	inner := &spyInner{err: authn.ErrNoCredentials, mode: "anonymous"}
 	a := authn.NewTokenFallback(ts, inner)
 
-	// The first request's touch must be allowed to actually land (and
-	// update the debounce bookkeeping, which -- since I-1 -- only happens
-	// on a SUCCESSFUL write) before the next two requests can be a
+	// The first request's touch must be allowed to actually land (and update the debounce bookkeeping,
+	// which -- since I-1 -- only happens on a SUCCESSFUL write) before the next two requests can be a
 	// meaningful test of the debounce window at all.
 	if _, err := a.Authenticate(bearerRequest(wire)); err != nil {
 		t.Fatalf("Authenticate: %v", err)
@@ -484,25 +447,16 @@ func TestTokenFallbackTouchIsDebouncedPerToken(t *testing.T) {
 		}
 	}
 
-	// Give any (incorrectly fired) second touch a brief moment to land on
-	// its detached goroutine, then assert it never does. This is an
-	// absence check, not a presence check, so waitFor's "poll until true"
-	// shape does not apply here -- a bounded sleep is the correct tool.
+	// Give any (incorrectly fired) second touch a brief moment to land on its detached goroutine, then
+	// assert it never does.
 	time.Sleep(50 * time.Millisecond)
 	if got := ts.touchCount("tok-debounce"); got != 1 {
 		t.Errorf("expected 3 requests within the 60s debounce window to touch last-used exactly once, got %d", got)
 	}
 }
 
-// TestTokenFallbackFailedTouchStillDebounces pins the debounce-on-ATTEMPT
-// policy: touchedAt[id] is stamped inside the debounce's critical section,
-// before the write is dispatched, so a FAILED touch still debounces the next
-// touchDebounce window. The alternative (advance bookkeeping only on
-// success) re-opens the storm the debounce exists to prevent — with a
-// broken write path every authenticated request would dispatch another
-// failing write, self-reinforcing under exactly the store outage that broke
-// the first one. Losing up to 60s of last-used accuracy after a failed
-// write is the accepted cost; auth itself must still succeed.
+// TestTokenFallbackFailedTouchStillDebounces pins the debounce-on-ATTEMPT policy; the alternative
+// (advance bookkeeping only on success) re-opens the storm the debounce exists to prevent.
 func TestTokenFallbackFailedTouchStillDebounces(t *testing.T) {
 	t.Parallel()
 
@@ -536,9 +490,6 @@ func TestTokenFallbackFailedTouchStillDebounces(t *testing.T) {
 	}
 }
 
-// TestTokenFallbackBearerSchemeIsCaseInsensitive proves M-1: RFC 7235 §2.1
-// makes the auth-scheme token case-insensitive, so "bearer kcm_..." and
-// "BEARER kcm_..." must resolve exactly like the canonical "Bearer kcm_...".
 func TestTokenFallbackBearerSchemeIsCaseInsensitive(t *testing.T) {
 	t.Parallel()
 
@@ -567,14 +518,8 @@ func TestTokenFallbackBearerSchemeIsCaseInsensitive(t *testing.T) {
 	}
 }
 
-// TestEncodeTokenHashTokenSecretRoundTrip proves I-3's exported round trip:
-// EncodeToken renders a raw secret into wire form, decoding that wire form
-// back out (the same way authenticateToken does internally) yields the
-// original secret bytes, and HashTokenSecret computed from those recovered
-// bytes matches HashTokenSecret computed directly from the original secret
-// -- i.e. the exact hash a real token-creation endpoint (Task 17) would
-// compute and store is the exact hash verification recovers and looks up
-// with. This is the "single source of truth" I-3 exists to guarantee.
+// TestEncodeTokenHashTokenSecretRoundTrip proves I-3's exported round trip: EncodeToken renders a
+// raw secret into wire form.
 func TestEncodeTokenHashTokenSecretRoundTrip(t *testing.T) {
 	t.Parallel()
 

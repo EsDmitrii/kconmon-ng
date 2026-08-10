@@ -1,7 +1,4 @@
-// Package promql is the Console's guarded, read-only Prometheus HTTP API
-// client: /api/v1/query and /api/v1/query_range passthrough with a request
-// timeout, a range cap, and a response size cap. It never re-shapes
-// Prometheus's response envelope.
+// Package promql is the Console's guarded, read-only Prometheus HTTP API client.
 package promql
 
 import (
@@ -81,18 +78,8 @@ func (c *Client) QueryRange(ctx context.Context, query string, start, end time.T
 	return c.post(ctx, "/api/v1/query_range", form)
 }
 
-// Alerts reads Prometheus's CURRENT alert set (/api/v1/alerts) verbatim, with
-// the same guards every other call here carries: the client's request timeout
-// and the response size cap.
-//
-// It is a GET with no parameters because that is the whole of the upstream
-// endpoint -- there is nothing to filter server-side, and Prometheus does not
-// accept a POST here (unlike /api/v1/query, which is POSTed precisely so a
-// long expression is not a URL). Filtering is the API layer's job, on the
-// decoded set.
-//
-// The envelope is returned unre-shaped, exactly like Query's: this package
-// never interprets what Prometheus said.
+// Alerts reads Prometheus's CURRENT alert set (/api/v1/alerts) verbatim; the envelope is returned
+// unre-shaped, exactly like Query's.
 func (c *Client) Alerts(ctx context.Context) (json.RawMessage, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.base+"/api/v1/alerts", http.NoBody)
 	if err != nil {

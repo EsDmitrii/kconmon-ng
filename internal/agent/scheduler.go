@@ -239,14 +239,7 @@ func (s *Scheduler) triggerMTR(ctx context.Context, peer checker.Target, failedR
 		return
 	}
 
-	// Check types that must never trigger a trace. DNS and HTTP are node-local:
-	// their "destination" is not a peer, so a trace would be aimed at the wrong
-	// host. MTR would recurse.
-	//
-	// External belongs here for a harder reason: its destinations are internet
-	// hosts, and tracing one on every probe interval is both traffic the
-	// operator never asked for and a cardinality event — mtr_hop_rtt_seconds is
-	// labelled by hop_ip, which is unbounded along an internet path.
+	// Check types that must never trigger a trace.
 	if failedResult.Type == model.CheckDNS || failedResult.Type == model.CheckHTTP ||
 		failedResult.Type == model.CheckMTR || failedResult.Type == model.CheckExternal {
 		return

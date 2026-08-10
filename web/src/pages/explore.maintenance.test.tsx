@@ -6,15 +6,7 @@ import { TimeMachineProvider } from "@/lib/timemachine";
 import type { MaintenanceWindow } from "@/lib/types";
 import { ExplorePage } from "./explore";
 
-/**
- * Explore's maintenance overlay — mirroring explore.annotations.test.tsx
- * exactly, because the page's treatment of the two is deliberately identical:
- * Explore is a GLOBAL surface and only that (five fleet-wide aggregates with no
- * object identity), so it reads and writes scope "" and nothing else.
- *
- * EChart is mocked; the mock re-publishes the windows it was handed. The band
- * GEOMETRY is asserted where it is built, in lib/annotations.test.ts.
- */
+/** Explore's maintenance overlay — mirroring explore.annotations.test.tsx exactly. */
 vi.mock("@/components/echart", () => ({
   EChart: ({ className, maintenance }: { className?: string; maintenance?: MaintenanceWindow[] }) => (
     <div data-testid="echart" className={className} data-maintenance={(maintenance ?? []).map((w) => w.id).join(",")} />

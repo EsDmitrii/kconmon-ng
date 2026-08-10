@@ -19,10 +19,7 @@ import (
 	"google.golang.org/grpc/keepalive"
 )
 
-// busTopicLive is the cache.Bus topic the live feed travels on. It MUST equal
-// ws.TopicLive; this package cannot import ws (ws imports this one, to dedupe
-// by LiveEvent.ID), so the equality is pinned by ingester_test.go, which
-// subscribes through ws.TopicLive and would fail if the two ever drifted.
+// busTopicLive is the cache.Bus topic the live feed travels on; it MUST equal ws.TopicLive.
 const busTopicLive = "live"
 
 // capabilityEvents is the flag the controller must advertise on
@@ -43,12 +40,9 @@ const (
 	maxBackoff     = 15 * time.Second
 )
 
-// connectGrace is how long a stream must survive without the server hanging up
-// before the ingester reports healthy on the strength of the connection alone
-// (an event arriving sooner promotes it immediately). It damps the Healthy flap
-// against a controller that accepts and then instantly rejects every stream,
-// which matters because Task 12 derives the console's browser-facing
-// capabilities from Healthy.
+// connectGrace is how long a stream must survive without the server hanging up before the ingester
+// reports healthy on the strength of the connection alone (an event arriving sooner promotes it
+// immediately).
 const connectGrace = 2 * time.Second
 
 // gRPC keepalive, identical to internal/agent/grpc_client.go's dial options —
@@ -59,11 +53,9 @@ const (
 	keepaliveTimeout = 5 * time.Second
 )
 
-// sinkTimeout bounds one EventSink.InsertEvent call. It is independent of the
-// stream context (which lives as long as the whole attempt, and dies on
-// reconnect) and of context.Background() (which would outlive shutdown): a
-// database hiccup must degrade history within a bounded time, never wedge the
-// consume loop for the life of the stream.
+// sinkTimeout bounds one EventSink.InsertEvent call; it is independent of the stream context (which
+// lives as long as the whole attempt, and dies on reconnect) and of context.Background (which would
+// outlive shutdown).
 const sinkTimeout = 5 * time.Second
 
 var (
@@ -75,9 +67,7 @@ var (
 	errNoControllerClient = errors.New("controller HTTP client is not configured, cannot run the capability precheck")
 )
 
-// EventSink durably records a live event. Satisfied by *store.DB via a thin
-// adapter in cmd/console. Nil sink = persistence off (the default, and the
-// entire M1/M2 posture).
+// EventSink durably records a live event.
 type EventSink interface {
 	InsertEvent(ctx context.Context, ev LiveEvent) (inserted bool, err error)
 }
@@ -87,27 +77,18 @@ type EventSink interface {
 type Option func(*Ingester)
 
 // WithEventSink turns on durable persistence of every published live event.
-// Omit it (the default) to leave persistence off, exactly as in M1/M2.
 func WithEventSink(sink EventSink) Option {
 	return func(i *Ingester) { i.sink = sink }
 }
 
-// Ingester is one console replica's client for the controller's
-// EventStream.WatchEvents stream. It runs forever: capability precheck, dial,
-// consume, publish to the bus, and on any failure back off and start over.
-//
-// Every replica runs its own Ingester, so with several replicas the same
-// pb.Event is ingested (and published) more than once. That redundancy is the
-// point — a replica whose own stream is down still serves events another replica
-// ingested — and the ws.Hub de-duplicates by LiveEvent.ID on the way out.
+// Ingester is one console replica's client for the controller's EventStream.WatchEvents stream.
 type Ingester struct {
 	ctrl     *controllerclient.Client
 	grpcAddr string
 	bus      cache.Bus
 	metrics  *metrics.Metrics
 
-	// sink is nil unless WithEventSink was passed to NewIngester, which is the
-	// entire M1/M2 posture and every deployment with database.mode=disabled.
+	// sink is nil unless WithEventSink was passed to NewIngester.
 	sink EventSink
 
 	// connectGrace defaults to the connectGrace const. Overridable via
@@ -118,13 +99,7 @@ type Ingester struct {
 	connected atomic.Bool
 }
 
-// NewIngester returns an ingester for the controller at grpcAddr. An empty
-// grpcAddr means realtime ingestion is disabled: Run returns immediately and
-// Healthy always reports false, which is what makes the console's own
-// /api/v1/version correctly advertise no "events" capability.
-//
-// opts is variadic so the existing call sites (cmd/console and
-// ingester_test.go) need no edit; today the only Option is WithEventSink.
+// NewIngester returns an ingester for the controller at grpcAddr.
 func NewIngester(ctrl *controllerclient.Client, grpcAddr string, bus cache.Bus, m *metrics.Metrics, opts ...Option) *Ingester {
 	i := &Ingester{ctrl: ctrl, grpcAddr: grpcAddr, bus: bus, metrics: m, connectGrace: connectGrace}
 	for _, opt := range opts {
@@ -133,24 +108,12 @@ func NewIngester(ctrl *controllerclient.Client, grpcAddr string, bus cache.Bus, 
 	return i
 }
 
-// Healthy reports whether this replica currently holds a WatchEvents stream
-// that has proven itself — see consume for what "proven" means. It is the single
-// input to the console's "events" capability flag, so it must be true only while
-// events can actually arrive, and must not flap while a controller is refusing
-// subscriptions.
-//
-// One case the grace period cannot detect: a connection that is open but
-// blackholed (the peer vanished without a FIN) satisfies the grace and reports
-// healthy until the gRPC keepalive above declares it dead — Time + Timeout, so
-// ~15s worst case. The keepalive is the backstop for that; the grace only
-// separates "accepted then refused" from "actually streaming".
+// Healthy reports whether this replica currently holds a WatchEvents stream that has proven itself;
+// it is the single input to the console's "events" capability flag.
 func (i *Ingester) Healthy() bool { return i.connected.Load() }
 
-// Run blocks until ctx is cancelled, reconnecting with the repo's standard
-// 1s→15s doubling backoff (the shape in internal/agent/agent.go's WatchTasks
-// loop). Like that loop it does not reset the backoff after a successful
-// connection: the ceiling is 15s, so the worst case is a 15s hole, and a
-// stream that flaps is better served by a calm retry rate than a fast one.
+// Run blocks until ctx is cancelled, reconnecting with the repo's standard 1s→15s doubling backoff
+// (the shape in internal/agent/agent.go's WatchTasks loop).
 func (i *Ingester) Run(ctx context.Context) {
 	if i.grpcAddr == "" {
 		slog.Info("realtime event ingestion disabled: no controller gRPC address configured")
@@ -167,13 +130,7 @@ func (i *Ingester) Run(ctx context.Context) {
 		i.metrics.IngesterReconnects.WithLabelValues(reason).Inc()
 		switch {
 		case errors.Is(err, errNoCapability):
-			// Not an error condition: a controller with events disabled, or a
-			// pre-M2 controller, is a supported deployment. Info, not Warn.
-			//
-			// Only THIS case is benign. Every other precheck failure — an
-			// unreachable or 5xx controller, a DNS failure, a missing HTTP
-			// client — shares the reason="capability" metric label but is a real
-			// problem, so it must not hide behind the same Info line.
+			// Only THIS case is benign.
 			slog.Info("controller is not offering realtime events yet, retrying",
 				"error", err, "backoff", backoff)
 		case reason == reasonCapability:
@@ -217,11 +174,7 @@ func (i *Ingester) attempt(ctx context.Context) (string, error) {
 	}
 	defer func() { _ = conn.Close() }()
 
-	// A Go server-streaming client returns from WatchEvents BEFORE the server has
-	// accepted the stream, so this error is only ever a client-side/transport
-	// one. Server rejections — notably the leader gate, where a non-leader
-	// replica answers codes.Unavailable — arrive at the first Recv in consume
-	// and are counted reason="stream", not reason="dial".
+	// A Go server-streaming client returns from WatchEvents BEFORE the server has accepted the stream.
 	stream, err := pb.NewEventStreamClient(conn).WatchEvents(ctx, &pb.WatchEventsRequest{})
 	if err != nil {
 		return reasonDial, fmt.Errorf("open WatchEvents stream on %s: %w", i.grpcAddr, err)
@@ -230,8 +183,7 @@ func (i *Ingester) attempt(ctx context.Context) (string, error) {
 	return reasonStream, i.consume(ctx, stream)
 }
 
-// precheck is Decision 4a: feature-detect before every dial attempt, including
-// every reconnect, and treat "no capability" as just another failed attempt.
+// precheck is a: feature-detect before every dial attempt, including every reconnect.
 func (i *Ingester) precheck(ctx context.Context) error {
 	if i.ctrl == nil {
 		return errNoControllerClient
@@ -246,16 +198,8 @@ func (i *Ingester) precheck(ctx context.Context) error {
 	return nil
 }
 
-// consume runs the stream to its end. It does NOT report the ingester healthy
-// just because the stream object exists: a Go server-streaming client hands back
-// a stream before the server has accepted it, so a controller that rejects every
-// subscription (a non-leader answering codes.Unavailable) would otherwise flap
-// Healthy — and therefore the console's advertised capabilities and the
-// browser's realtime badge — true/false on every retry cycle.
-//
-// Healthy turns on at the first proof the stream really works: the first event
-// received, or connectGrace elapsed without the server hanging up, whichever
-// comes first. It turns off the moment this function returns.
+// consume runs the stream to its end; it does NOT report the ingester healthy just because the
+// stream object exists.
 func (i *Ingester) consume(ctx context.Context, stream pb.EventStream_WatchEventsClient) error {
 	gate := &connectGate{ing: i}
 	defer gate.finish()
@@ -275,10 +219,7 @@ func (i *Ingester) consume(ctx context.Context, stream pb.EventStream_WatchEvent
 	}
 }
 
-// connectGate owns the connected state of ONE attempt. It exists to make two
-// things impossible: reporting healthy twice, and — the subtle one — a grace
-// timer that fires after the attempt already failed silently resurrecting
-// connected for the next attempt to inherit.
+// connectGate owns the connected state of ONE attempt.
 type connectGate struct {
 	ing *Ingester
 
@@ -287,10 +228,7 @@ type connectGate struct {
 	up       bool // this attempt promoted the ingester and owes a demotion
 }
 
-// markConnected promotes the ingester at most once per attempt, and never after
-// finish. Called from both the stream goroutine and the grace timer goroutine.
-// The log happens after the lock is released: a slog handler is arbitrary
-// user-supplied code and has no business running inside this mutex.
+// markConnected promotes the ingester at most once per attempt, and never after finish.
 func (g *connectGate) markConnected() {
 	if !g.promote() {
 		return
@@ -324,10 +262,8 @@ func (g *connectGate) finish() {
 	}
 }
 
-// setConnected keeps Healthy and the ingester_connected gauge in step. The
-// gauge is written BEFORE the flag on purpose: Healthy() is what the console's
-// /api/v1/version capability check reads, so anything that observes
-// Healthy() == true must already see the gauge at 1 rather than a stale 0.
+// setConnected keeps Healthy and the ingester_connected gauge in step; the gauge is written BEFORE
+// the flag on purpose.
 func (i *Ingester) setConnected(up bool) {
 	value := 0.0
 	if up {
@@ -337,23 +273,8 @@ func (i *Ingester) setConnected(up bool) {
 	i.connected.Store(up)
 }
 
-// publish converts one controller event and hands it to the bus. Every failure
-// here drops a single event and is logged; none of them ends the stream, because
-// one unconvertible event must not cost the console its realtime feed.
-//
-// The bus and the sink are ordered but INDEPENDENT, in both directions.
-// Ordered: the bus goes first because realtime delivery is the user-visible
-// path with a hard latency budget, while durable history is the recoverable
-// one. Independent: neither failure is allowed to suppress the other write.
-//   - A sink failure never aborts or delays the publish that already happened
-//     -- a database hiccup degrades history, it does not blind the Live page.
-//   - A bus failure never skips the sink -- a Valkey outage degrades realtime,
-//     it does not stop durable history while the database is perfectly healthy
-//     (the events would then be unrecoverable, which is strictly worse than the
-//     case this ordering exists to protect against).
-//
-// So the bus error below is logged and metered and then execution FALLS
-// THROUGH to the sink block; do not turn it back into an early return.
+// publish converts one controller event and hands it to the bus; every failure here drops a single
+// event and is logged.
 func (i *Ingester) publish(ctx context.Context, ev *pb.Event) {
 	live, err := ToLiveEvent(ev)
 	if err != nil {

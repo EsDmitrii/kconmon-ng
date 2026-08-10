@@ -3,8 +3,8 @@ apiVersion: v2
 name: kconmon-ng
 description: Kubernetes Node Connectivity Monitor - Next Generation
 type: application
-version: 1.10.0
-appVersion: "1.9.0"
+version: 2.0.0
+appVersion: "2.0.0"
 keywords:
   - kubernetes
   - connectivity
@@ -17,6 +17,21 @@ home: https://github.com/EsDmitrii/kconmon-ng
 sources:
   - https://github.com/EsDmitrii/kconmon-ng
 
+# Optional subcharts for the product's OWN stack. Both are OFF by default, and
+# the monitoring stack stays external — this chart consumes Prometheus, it does
+# not install it. Helm puts subchart values under the ALIAS key, so they are
+# configured from the top-level `cnpg-operator:` and `valkey:` blocks.
+dependencies:
+  - name: cloudnative-pg
+    alias: cnpg-operator
+    version: 0.29.0
+    repository: https://cloudnative-pg.github.io/charts
+    condition: cnpg-operator.enabled
+  - name: valkey
+    version: 0.11.0
+    repository: oci://ghcr.io/valkey-io/valkey-helm
+    condition: valkey.enabled
+
 annotations:
   artifacthub.io/license: Apache-2.0
   artifacthub.io/links: |
@@ -25,6 +40,152 @@ annotations:
     - name: Documentation
       url: https://github.com/EsDmitrii/kconmon-ng#readme
   artifacthub.io/changes: |
+    - kind: fixed
+      description: >-
+        appVersion is 2.0.0, and every config key the chart added is gated on the resolved console
+        image tag — a pinned older image no longer receives keys it would reject at startup
+    - kind: fixed
+      description: >-
+        serviceAccount.create=false no longer strips serviceAccountName from the agent and controller;
+        RBAC moved to its own rbac.create knob and binds to the resolved ServiceAccount name
+    - kind: added
+      description: >-
+        console.valkey.existingSecret/existingSecretKey plus a managed secret sibling, and
+        valkey.passwordFile in the console config — mode=dependency/external can finally AUTH
+    - kind: added
+      description: >-
+        NetworkPolicy gained the rules the checkers actually need — ICMP (a protocol rule with no
+        ports), external/http/resolver egress, geoipupdate egress — and the apiserver rule is an
+        ipBlock everywhere (a namespaceSelector matches pods, never the apiserver)
+    - kind: added
+      description: >-
+        restricted-PSS defaults on every workload (runAsNonRoot, drop ALL, seccomp RuntimeDefault,
+        read-only root where possible) and automountServiceAccountToken false where no API call is made
+    - kind: fixed
+      description: >-
+        geoip.mode defaults to derived, so a 1.x upgrade with enrichment keeps working; disabled no
+        longer leaks fake /geoip paths past the binary's own guard; geoipupdate is a native sidecar
+    - kind: fixed
+      description: >-
+        Agent-side config guards (httpPort==grpcPort, empty dns.hosts, http/external without targets),
+        dashboards follow config.metricsPrefix, controller PDB gates on replicaCount > 1,
+        checksum/secret rolls the console on a managed-Secret change, and alerting.namespace fails fast
+    - kind: added
+      description: >-
+        GeoLite2 databases now keep themselves current — console.mtr.enrichment.geoip.mode=auto (the
+        new default) runs MaxMind's own geoipupdate image as a sidecar into an emptyDir at /geoip.
+        mode=volume keeps the bring-your-own-files path for airgapped installs, mode=disabled turns
+        the sources off
+    - kind: added
+      description: >-
+        The console reloads a refreshed mmdb WITHOUT a restart: the enrichment reader re-stats both
+        files every geoip.reloadInterval and swaps the reopened database in under a lock, so no
+        in-flight lookup can read a closed mmap. A half-written download is retried on the next tick
+    - kind: added
+      description: >-
+        dashboards.enabled renders dashboards/*.json as ConfigMaps carrying the grafana_dashboard
+        sidecar label, with namespace/folder/label knobs — the chart shipped them but installed nothing
+    - kind: added
+      description: >-
+        NOTES.txt now names what THIS release left undecided (no scrape, no alerts, no dashboards,
+        empty console.prometheus.url, anonymous auth, no database, valkey off with replicas > 1)
+    - kind: changed
+      description: >-
+        BREAKING — every existingSecretKey default is now component-scoped and unique, so one shared
+        Secret can hold the whole stack's credentials: dsn -> console-database-dsn, password ->
+        console-local-admin-password, clientSecret -> console-oidc-client-secret, encryptionKey ->
+        console-webhooks-encryption-key. Set existingSecretKey explicitly to keep the old names
+    - kind: changed
+      description: >-
+        Naming unified on existingSecret/existingSecretKey chart-wide. Renamed with a deprecation
+        shim (old key honoured alone, both set fails fast): backup.credentialsSecret ->
+        backup.existingSecret, webhooks.encryptionKeySecret.{name,key} ->
+        webhooks.{existingSecret,existingSecretKey}, controller.grpcAddr -> controller.grpcAddress
+    - kind: changed
+      description: >-
+        Chart-managed Secrets now take SEMANTIC fields instead of a free-form stringData map —
+        secret.dsn, secret.password, secret.clientSecret, secret.encryptionKey and
+        secret.{accessKeyId,secretAccessKey}, following bitnami/postgresql, bitnami/valkey and grafana
+    - kind: changed
+      description: >-
+        values.yaml regrouped into eight numbered sections (naming, shared config, agent, controller,
+        console, observability, kubernetes, dependencies); key order is render-neutral and proven so
+    - kind: added
+      description: >-
+        deprecated-keys-values.yaml chart-test profile that renders byte-identically to its new-name twin
+    - kind: added
+      description: >-
+        Optional subcharts for the product's own stack — cloudnative-pg 0.29.0 (alias
+        `cnpg-operator`) and the OFFICIAL valkey-io/valkey-helm 0.11.0 (`valkey`), both OFF
+        by default and pinned in a committed Chart.lock.
+        The monitoring stack stays EXTERNAL: this chart consumes Prometheus, never installs it
+    - kind: added
+      description: >-
+        console.valkey.mode=dependency — a fourth mode pointing the console at the Valkey subchart's
+        primary Service; bundled stays the default and is unchanged
+    - kind: changed
+      description: >-
+        A fresh clone now needs `helm dependency build charts/kconmon-ng` before lint/template/package;
+        the Makefile targets, CI, e2e and the release workflow all run it
+    - kind: added
+      description: >-
+        dependencies-values.yaml chart-test profile with both subcharts enabled. Installing the CNPG
+        operator and the Cluster CR in ONE release is documented as unsupported (templates/crds plus
+        an async webhook race) — the README gives the two-step flow instead
+    - kind: added
+      description: >-
+        Chart-managed Secrets — every existingSecret consumer gained a sibling secret block
+        {create,name,annotations,labels,<field>}, so the chart can render the Secret itself
+        instead of only referencing one. OFF by default; existingSecret is unchanged
+    - kind: added
+      description: >-
+        Secret field values are rendered VERBATIM, so ${vault:...} placeholders and the injector
+        annotations that resolve them (Vault webhook, External Secrets, SOPS) survive templating
+    - kind: added
+      description: >-
+        Covers console.database (dsn), console.auth.local (password), console.auth.oidc
+        (clientSecret), console.webhooks (encryptionKey) and console.database.cnpg.backup
+        (accessKeyId/secretAccessKey)
+    - kind: added
+      description: >-
+        Fail-fast guards — existingSecret together with secret.create names the conflict, and an
+        empty required field names the field; the chart writes only the keys it reads
+    - kind: added
+      description: >-
+        console-managed-secrets-values.yaml chart-test profile covering the create path end to end
+    - kind: changed
+      description: >-
+        The seven built-in alert rules moved OUT of values.yaml and into the chart
+        (templates/_rules.tpl). Rendering is byte-identical; values.yaml now exposes only knobs
+    - kind: added
+      description: >-
+        Per-rule knobs prometheusRule.<alertName>.{enabled,threshold,for,severity} for
+        udpLossHigh, tcpChecksFailing, pairWentSilent, dnsChecksFailing, externalChecksFailing,
+        kconmonAgentsMissing and kconmonControllerDown — each toggles and tunes one rule.
+        A threshold accepts a number (0.25) or a string ("0.25"), because helm --set types only
+        integers, booleans and null, and renders identically either way
+    - kind: added
+      description: >-
+        prometheusRule.additionalRules — user rules appended verbatim, with no metric-prefix
+        rewriting, so they can be written against any prefix
+    - kind: changed
+      description: >-
+        prometheusRule.rules is DEPRECATED but still honoured: a non-empty list replaces every
+        built-in rule and keeps the pre-1.12 expr prefix rewrite, so existing installs are unaffected
+    - kind: changed
+      description: >-
+        Built-in rule expressions print config.metricsPrefix directly instead of being rewritten with
+        replace "kconmon_ng"; the rewrite survives only on the deprecated prometheusRule.rules path
+    - kind: changed
+      description: >-
+        values.yaml and every chart template lost their comment essays; the reasoning now lives
+        in the chart README
+    - kind: added
+      description: >-
+        PairWentSilent alert — the seventh built-in rule, and the only one that fires on ABSENCE:
+        a pair that was probed within the last hour and has then reported nothing for ~15m total
+        (a 5m detection window plus `for: 10m`). The ratio rules cannot see this, because a silent
+        pair is 0/0 and produces no sample at all
     - kind: added
       description: >-
         Alerting (M7) — the console MANAGES Prometheus alert rules and Prometheus EVALUATES them:

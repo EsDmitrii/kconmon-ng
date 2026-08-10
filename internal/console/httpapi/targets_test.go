@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -16,12 +17,7 @@ import (
 	"github.com/EsDmitrii/kconmon-ng/internal/console/store"
 )
 
-// fakeTargetService is a TargetService double, mutex-guarded (the audit
-// drain goroutine never touches it, but -race sees the httptest handler
-// goroutine and the test goroutine both reading it). It reproduces the
-// three sentinels the real *store.DB returns -- ErrNotFound,
-// ErrAlreadyExists, ErrInUse -- which is the entire contract handleTargets*
-// maps to status codes, so no database is needed to pin that mapping.
+// fakeTargetService is a TargetService double.
 type fakeTargetService struct {
 	mu sync.Mutex
 	// byID is the authoritative map; byName enforces targets_name_key, the
@@ -141,11 +137,7 @@ func orEmptyLabels(raw json.RawMessage) json.RawMessage {
 	return raw
 }
 
-// newTargetsTestServer wires a Server whose subject holds the given BUILT-IN
-// role -- "operator" and "viewer" are the two the brief names, and using the
-// real compiled-in role sets (authz.NewPolicy(nil)) rather than a synthetic
-// "tester" role is the point: it proves targets:read/targets:write actually
-// land where M4 Task 2 put them.
+// newTargetsTestServer wires a Server whose subject holds the given BUILT-IN role.
 func newTargetsTestServer(t *testing.T, role string, targets TargetService, extra Deps) *Server { //nolint:gocritic // hugeParam: test helper
 	t.Helper()
 	authr := fakeAuthenticator{subject: authz.Subject{Kind: authz.SubjectUser, ID: "u1"}}
@@ -227,11 +219,7 @@ func TestTargetsCreateDuplicateNameReturns422(t *testing.T) {
 	}
 }
 
-// TestTargetsCreateValidationReturns422 covers the validation half of 422:
-// every case store.TargetInput.Validate rejects (which httpapi calls
-// directly, so there is exactly ONE target-validation rule set in the
-// codebase) must answer 422 with a detail naming the field, never 400 --
-// the body is well-formed JSON shaped exactly as documented.
+// TestTargetsCreateValidationReturns422 covers the validation half of 422.
 func TestTargetsCreateValidationReturns422(t *testing.T) {
 	cases := []struct {
 		name, body, wantField string
@@ -259,14 +247,8 @@ func TestTargetsCreateValidationReturns422(t *testing.T) {
 	}
 }
 
-// TestTargetsCreateMalformedJSONReturns400 covers the OTHER side of the
-// 400/422 split: a body that is not JSON at all -- including one whose
-// "labels" value is syntactically broken, which the outer decoder rejects
-// before store.TargetInput.Validate ever sees it (labels is a
-// json.RawMessage inside the request struct, so the whole document has to
-// parse). That is why there is no "malformed labels -> 422" case: it is
-// unreachable over HTTP, and validateJSON stays a backstop for store's
-// non-HTTP callers.
+// TestTargetsCreateMalformedJSONReturns400 covers the OTHER side of the 400/422 split: a body that
+// is not JSON at all.
 func TestTargetsCreateMalformedJSONReturns400(t *testing.T) {
 	for _, body := range []string{
 		`{"name":`,
@@ -289,11 +271,6 @@ func TestTargetsGetUnknownIDReturns404(t *testing.T) {
 	}
 }
 
-// TestTargetsMalformedUUIDReturns404 is M3 follow-up #5: an id that is not a
-// canonical UUID must be answered 404 by httpapi itself. Before this guard
-// the string reached pgx, which rejected it as a scan/encode failure and
-// surfaced as a 502 -- an unknown id and an unparseable one are the same
-// thing to a client, and neither is a gateway fault.
 func TestTargetsMalformedUUIDReturns404(t *testing.T) {
 	fake := newFakeTargetService()
 	s := newTargetsTestServer(t, "operator", fake, Deps{})
@@ -387,6 +364,93 @@ func TestTargetsDeleteInUseReturns409(t *testing.T) {
 	}
 }
 
+// TestTargetsDeleteInUseNamesTargetAndDefinitions pins finding 17: the refusal
+// is only actionable if it says WHICH target and WHICH definitions, by the
+// names the operator sees in the UI -- a bare UUID makes them go hunting.
+func TestTargetsDeleteInUseNamesTargetAndDefinitions(t *testing.T) {
+	fake := newFakeTargetService()
+	checks := newFakeChecksStore()
+	s := newTargetsTestServer(t, "operator", fake, Deps{Definitions: checks})
+
+	w := doRequest(t, s, http.MethodPost, "/api/v1/targets", strings.NewReader(validTargetBody), mutateWithCSRF)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("create status %d: %s", w.Code, w.Body)
+	}
+	var created targetResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &created); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	fake.inUse[created.ID] = true
+
+	checks.targets[created.ID] = true
+	for _, name := range []string{"edge-icmp", "edge-tcp"} {
+		if _, err := checks.CreateDefinition(context.Background(), store.DefinitionInput{
+			Name: name, SourceSelection: "all", DestinationKind: "target",
+			DestinationTargetID: created.ID, CheckType: "icmp", Plane: "node", Enabled: true,
+		}); err != nil {
+			t.Fatalf("seed definition %s: %v", name, err)
+		}
+	}
+
+	w = doRequest(t, s, http.MethodDelete, "/api/v1/targets/"+created.ID, nil, mutateWithCSRF)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("status %d, want 409: %s", w.Code, w.Body)
+	}
+	detail := problemDetail(t, w.Body.Bytes())
+	if !strings.Contains(detail, `"edge-lb"`) {
+		t.Errorf("409 detail = %q, want the TARGET named %q, not just its id", detail, "edge-lb")
+	}
+	for _, name := range []string{"edge-icmp", "edge-tcp"} {
+		if !strings.Contains(detail, strconv.Quote(name)) {
+			t.Errorf("409 detail = %q, want it to list the referencing definition %q", detail, name)
+		}
+	}
+	if strings.Contains(detail, created.ID) {
+		t.Errorf("409 detail = %q, still leads with the raw UUID", detail)
+	}
+}
+
+// problemDetail pulls the "detail" string out of an application/problem+json
+// body, so an assertion reads the sentence the operator reads rather than its
+// JSON-escaped spelling.
+func problemDetail(t *testing.T, raw []byte) string {
+	t.Helper()
+	var p struct {
+		Detail string `json:"detail"`
+	}
+	if err := json.Unmarshal(raw, &p); err != nil {
+		t.Fatalf("decode problem body %s: %v", raw, err)
+	}
+	return p.Detail
+}
+
+// TestTargetsDeleteInUseWithoutDefinitionsServiceStillRefuses pins the
+// fallback: with no DefinitionService wired the refusal cannot enumerate
+// anything, and it must still be a 409 rather than a crash.
+func TestTargetsDeleteInUseWithoutDefinitionsServiceStillRefuses(t *testing.T) {
+	fake := newFakeTargetService()
+	s := newTargetsTestServer(t, "operator", fake, Deps{})
+	w := doRequest(t, s, http.MethodPost, "/api/v1/targets", strings.NewReader(validTargetBody), mutateWithCSRF)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("create status %d: %s", w.Code, w.Body)
+	}
+	var created targetResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &created); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	fake.inUse[created.ID] = true
+
+	w = doRequest(t, s, http.MethodDelete, "/api/v1/targets/"+created.ID, nil, mutateWithCSRF)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("status %d, want 409: %s", w.Code, w.Body)
+	}
+	// The target name is readable from the TargetService alone, so it is named
+	// even here; only the definition list is missing.
+	if detail := problemDetail(t, w.Body.Bytes()); !strings.Contains(detail, `"edge-lb"`) {
+		t.Errorf("409 detail = %q, want the target named", detail)
+	}
+}
+
 func TestTargetsDeleteReturns204(t *testing.T) {
 	s := newTargetsTestServer(t, "operator", newFakeTargetService(), Deps{})
 	w := doRequest(t, s, http.MethodPost, "/api/v1/targets", strings.NewReader(validTargetBody), mutateWithCSRF)
@@ -438,10 +502,6 @@ func TestTargetsListInvalidCursorReturns400(t *testing.T) {
 	}
 }
 
-// TestTargetsViewerIsForbiddenOnAllFive pins Decision 3 as a live-chain
-// behaviour, not a permission-table opinion: viewer is what
-// auth.anonymous.role defaults to, so a viewer gaining any of these would
-// hand the whole anonymous internet the fleet's probe configuration.
 func TestTargetsViewerIsForbiddenOnAllFive(t *testing.T) {
 	s := newTargetsTestServer(t, "viewer", newFakeTargetService(), Deps{})
 	for _, c := range targetRoutes(uuid.NewString()) {
@@ -519,10 +579,8 @@ func TestTargetsRouteTableCoversAllFiveRoutes(t *testing.T) {
 	}
 }
 
-// TestTargetsAuditDetailNeverCarriesTheAddress pins the allow-list decision
-// this task made consciously (DATA.md:32): name and kind only. An audit log
-// is read by more people than a target list is, and the address is the one
-// field that names internal infrastructure.
+// TestTargetsAuditDetailNeverCarriesTheAddress pins the allow-list decision this task made
+// consciously (DATA.md:32).
 func TestTargetsAuditDetailNeverCarriesTheAddress(t *testing.T) {
 	for _, c := range []struct{ method, pathSuffix string }{
 		{http.MethodPost, ""},
@@ -558,12 +616,7 @@ func TestTargetsAuditDetailNeverCarriesTheAddress(t *testing.T) {
 	}
 }
 
-// TestPanicInHandlerReturns500AndExactlyOneAuditRow is M3 follow-up #4: an
-// unrecovered panic must become a 500 problem+json (never a dropped
-// connection), and it must still be attributable -- exactly one audit row,
-// outcome "error", carrying the route pattern and the acting subject. One
-// row, not two: auditMutation's own recordAudit sits AFTER next.ServeHTTP,
-// so a panic unwinds straight past it and only the recoverer records.
+// One row, not two: auditMutation's own recordAudit sits AFTER next.ServeHTTP.
 func TestPanicInHandlerReturns500AndExactlyOneAuditRow(t *testing.T) {
 	captureLogs(t)
 	fs := &fakeAuditStore{}
@@ -618,10 +671,8 @@ func TestPanicWithoutAuditStoreStillReturns500(t *testing.T) {
 	}
 }
 
-// TestPanicIsCountedByInstrument proves the recoverer sits INSIDE
-// s.instrument (brief: "outermost middleware after s.instrument"), which is
-// the only arrangement where a panic-born 500 is still counted with its
-// route pattern rather than escaping the metric entirely.
+// TestPanicIsCountedByInstrument proves the recoverer sits INSIDE s.instrument (brief: "outermost
+// middleware after s.instrument").
 func TestPanicIsCountedByInstrument(t *testing.T) {
 	captureLogs(t)
 	fake := newFakeTargetService()
@@ -636,10 +687,6 @@ func TestPanicIsCountedByInstrument(t *testing.T) {
 	}
 }
 
-// TestAuditFlushLogsDroppedCount is the last piece of follow-up #4: on
-// shutdown the drain reports how many rows this process dropped, so a
-// silently lossy audit trail leaves a trace in the pod's own logs rather
-// than only in a metric nobody scraped before the pod went away.
 func TestAuditFlushLogsDroppedCount(t *testing.T) {
 	logs := captureLogs(t)
 	fs := newStalledAuditStore()

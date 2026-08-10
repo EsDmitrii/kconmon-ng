@@ -1,33 +1,6 @@
 ---
-# The PrometheusRule CRD, for the e2e kind cluster only (M7 Decision 14).
-#
-# WHAT THIS IS. A MINIMAL, HAND-WRITTEN CustomResourceDefinition for
-# prometheusrules.monitoring.coreos.com. It is NOT a verbatim copy of
-# prometheus-operator's bundle.yaml entry: that object is ~30 KB of generated
-# OpenAPI whose description strings run far past this repo's 120-column
+# The PrometheusRule CRD, for the e2e kind cluster only.
 # yamllint limit, so vendoring it byte-for-byte would mean either a lint
-# carve-out or a hand-reflowed "copy" that is no longer a copy. The
-# group/version/kind/names/scope below match upstream exactly
-# (monitoring.coreos.com/v1, Namespaced, PrometheusRule/PrometheusRuleList/
-# prometheusrules/prometheusrule); the schema is a faithful but deliberately
-# lenient subset of upstream's spec.groups[].rules[] shape.
-#
-# WHY IT IS ENOUGH. The Prometheus Operator itself is NOT installed in the e2e
-# cluster and no Prometheus ever evaluates these rules. What the e2e suite
-# needs from this file is exactly one thing: a real, served, namespaced
-# resource that the console's server-side apply can create, read, list and
-# patch through internal/console/promrules -- which is what turns
-# TestConsoleAlertRuleSyncAgainstRealCRD's syncStatus assertions from "the
-# code path ran" into "the object landed in the apiserver". SSA needs the CRD,
-# not the controller behind it.
-#
-# WHAT IT DOES NOT COVER. Upstream validates more than this schema does
-# (duration patterns, the int-or-string expr, partial_response_strategy's
-# enum). A rule shape that upstream would reject and this CRD accepts would
-# therefore pass e2e and fail in a real cluster. That gap is accepted
-# knowingly: the renderer's output shape is pinned by
-# internal/console/alerting's golden tests, and this file exists to prove the
-# APPLY works, not to re-validate the render.
 apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
@@ -85,10 +58,9 @@ spec:
                               type: string
                             record:
                               type: string
-                            # Upstream declares expr as int-or-string; the
-                            # same relaxation is kept here so a numeric expr
-                            # in somebody's foreign object is not rejected by
-                            # the fixture cluster when the real one accepts it.
+                            # Upstream declares expr as int-or-string; the same relaxation is kept here so a numeric
+                            # expr in somebody's foreign object is not rejected by the fixture cluster when the real
+                            # one accepts it.
                             expr:
                               x-kubernetes-int-or-string: true
                             for:

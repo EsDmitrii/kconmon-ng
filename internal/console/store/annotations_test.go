@@ -90,10 +90,8 @@ func TestAnnotationInputValidateRejects(t *testing.T) {
 	}
 }
 
-// TestAnnotationTextLengthIsBytesNotRunes pins which unit the 1024 bound is
-// in: the column stores bytes, so a caller that squeezed 1024 multi-byte
-// runes past a rune-counting check would still be a caller whose text is four
-// kilobytes. The limit is the storage's, so it is counted the storage's way.
+// TestAnnotationTextLengthIsBytesNotRunes pins which unit the 1024 bound is in: the column stores
+// bytes.
 func TestAnnotationTextLengthIsBytesNotRunes(t *testing.T) {
 	in := validAnnotationInput()
 	in.Text = strings.Repeat("ы", annotationTextMaxLen) // 2 bytes per rune

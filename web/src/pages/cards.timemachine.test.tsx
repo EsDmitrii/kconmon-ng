@@ -11,9 +11,8 @@ import { PairCardPage } from "./pair-card";
 import { TargetCardPage } from "./target-card";
 
 /**
- * One pinned query per card family, plus the shared "Recent changes" rail:
- * engaged, every read a card makes is anchored at `t` — range windows END
- * there, instant queries EVALUATE there, and the rail is BOUNDED there.
+ * One pinned query per card family, plus the shared "Recent changes" rail: engaged, every read a
+ * card makes is anchored at `t`.
  */
 
 const AT = "2026-08-01T12:00:00Z";
@@ -194,12 +193,7 @@ describe("TargetCardPage engaged at t", () => {
     expect(rec.instant[0].time).toBeUndefined();
   });
 
-  /* QA round 5, finding #4. The header above says "state as of t", so an
-     operator reasonably reads the definitions and cadences below it as the
-     ones that existed AT t — and they are not. GET /api/v1/checks and
-     /api/v1/schedules take no `?at=` and have no history table behind them;
-     they answer with the current configuration, always. The honest line is
-     the only fix that is not a milestone. */
+  /* The honest line is the only fix that is not a milestone. */
   it("says the config panel is shown as of NOW, because it is (#4)", async () => {
     window.history.pushState({}, "", `/targets/t-1?at=${AT}`);
     stubFetch();
@@ -220,11 +214,6 @@ describe("TargetCardPage engaged at t", () => {
 function escapeRe(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
-
-/* ── QA round 2, finding #6: the run scans leaked the present ───────────────
-   GET /api/v1/runs has no time filter (internal/console/httpapi/runs.go), so
-   both Diagnostics panels were rendering NOW's newest page under a banner
-   reading "you are viewing 12:00". */
 
 const AFTER = { id: "run-after", createdAt: "2026-08-01T12:30:00Z", startedAt: "2026-08-01T12:30:05Z" };
 const BEFORE = { id: "run-before", createdAt: "2026-08-01T11:00:00Z", startedAt: "2026-08-01T11:00:05Z" };

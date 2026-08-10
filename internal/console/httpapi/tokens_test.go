@@ -16,23 +16,14 @@ import (
 	"github.com/EsDmitrii/kconmon-ng/internal/console/store"
 )
 
-// fakeTokenStore is a store.TokenStore double, mutex-guarded. It implements
-// the full interface (not just TokenAdmin) so the SAME instance can back
-// both the tokens admin API (Deps.Tokens) and authn.NewTokenFallback's
-// TokenStore -- letting TestTokensCreatedTokenAuthenticates prove a token
-// this endpoint mints actually authenticates, against the real hashing
-// path, with no separate/divergent fake.
+// fakeTokenStore is a store.TokenStore double.
 type fakeTokenStore struct {
 	mu     sync.Mutex
 	tokens map[string]store.Token
 	hashes map[string]string // hex(hash) -> id
 	nextN  int
 
-	// listCalls / getByIDCalls count the two read paths separately, so
-	// TestTokensCreateResolvesParentByIDWithoutAFullScan can assert on WHICH
-	// query the mint path pays for and not merely on the owner it ends up
-	// storing (the full scan produced the identical owner -- that is exactly
-	// why the cost sat unnoticed from M3 to M7).
+	// listCalls / getByIDCalls count the two read paths separately.
 	listCalls    int
 	getByIDCalls int
 }
@@ -95,6 +86,24 @@ func (f *fakeTokenStore) RevokeToken(_ context.Context, id string) error {
 	return nil
 }
 
+// PurgeToken drops the row outright; the handler only reaches it for a token
+// it has already read as revoked or expired.
+func (f *fakeTokenStore) PurgeToken(_ context.Context, id string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	t, ok := f.tokens[id]
+	if !ok {
+		return store.ErrNotFound
+	}
+	delete(f.tokens, id)
+	for h, hid := range f.hashes {
+		if hid == t.ID {
+			delete(f.hashes, h)
+		}
+	}
+	return nil
+}
+
 func (f *fakeTokenStore) GetTokenByHash(_ context.Context, hash []byte) (store.Token, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -153,9 +162,8 @@ func TestTokensCreateRejectsEmptyName(t *testing.T) {
 	}
 }
 
-// TestTokensCreateResponseShapeAndSecrecy pins the brief's response shape
-// verbatim -- {"id","name","token":"kcm_...","expiresAt"} -- and that the
-// token appears here, in the CREATION response, exactly once.
+// TestTokensCreateResponseShapeAndSecrecy pins the response shape verbatim --
+// {"id","name","token":"kcm_...","expiresAt"}.
 func TestTokensCreateResponseShapeAndSecrecy(t *testing.T) {
 	s := newTokensTestServer(t, newFakeTokenStore())
 	w := doRequest(t, s, http.MethodPost, "/api/v1/tokens", strings.NewReader(`{"name":"ci"}`), mutateWithCSRF)
@@ -186,10 +194,7 @@ func TestTokensCreateResponseShapeAndSecrecy(t *testing.T) {
 	}
 }
 
-// TestTokensCreatedTokenAuthenticates is the brief's last failing test:
-// POST /api/v1/tokens returns a token that then authenticates successfully
-// against a permitted route, and a second GET /api/v1/tokens does not
-// contain it.
+// TestTokensCreatedTokenAuthenticates is the last failing test.
 func TestTokensCreatedTokenAuthenticates(t *testing.T) {
 	tokens := newFakeTokenStore()
 	policy := authz.NewPolicy(map[string][]authz.Permission{"tester": {authz.PermTokensManage}})
@@ -256,13 +261,7 @@ func TestTokensDeleteRevokesNotDeletes(t *testing.T) {
 	}
 }
 
-// TestOwnerFor pins ownerFor's contract directly, table-style, against the
-// regression that would silently no-op the whole owner-disabled check: a
-// SubjectUser with a non-empty DisplayName must still return ID, never
-// DisplayName -- DisplayName is a human-facing string (users.display_name,
-// or whatever a trusted header proxy sent) that authn.checkOwnerDisabled
-// cannot look up as a users.id UUID, so returning it here would make every
-// disable check silently pass every token through.
+// TestOwnerFor pins ownerFor's contract directly.
 func TestOwnerFor(t *testing.T) {
 	const userID = "11111111-1111-1111-1111-111111111111"
 	const tokenID = "tok-parent-1"
@@ -303,12 +302,7 @@ func TestOwnerFor(t *testing.T) {
 	}
 }
 
-// TestTokensCreateInheritsOwnerFromParentToken is I-3's structural fix: a
-// token minted by a request authenticated AS an existing token (subject.Kind
-// == authz.SubjectToken) must inherit that PARENT token's own Owner, not the
-// parent token's id -- collapsing an arbitrarily deep token-mints-token
-// chain to depth 1, so disabling the root user invalidates every descendant
-// in one step.
+// TestTokensCreateInheritsOwnerFromParentToken is I-3's structural fix.
 func TestTokensCreateInheritsOwnerFromParentToken(t *testing.T) {
 	tokens := newFakeTokenStore()
 	const rootUserID = "22222222-2222-2222-2222-222222222222"
@@ -352,12 +346,8 @@ func TestTokensCreateInheritsOwnerFromParentToken(t *testing.T) {
 	}
 }
 
-// TestTokensCreateFallsBackToSubjectIDWhenParentTokenNotFound proves the
-// mint must never fail over attribution bookkeeping: when the creating
-// subject is a SubjectToken whose id names no row in the store at all (e.g.
-// a fake/incomplete TokenAdmin, or a genuine race), ownerFor's original
-// answer -- the subject's own id -- is still stored, exactly as before this
-// fix.
+// TestTokensCreateFallsBackToSubjectIDWhenParentTokenNotFound proves the mint must never fail over
+// attribution bookkeeping.
 func TestTokensCreateFallsBackToSubjectIDWhenParentTokenNotFound(t *testing.T) {
 	tokens := newFakeTokenStore()
 	policy := authz.NewPolicy(map[string][]authz.Permission{"tester": {authz.PermTokensManage}})
@@ -394,19 +384,8 @@ func TestTokensCreateFallsBackToSubjectIDWhenParentTokenNotFound(t *testing.T) {
 	}
 }
 
-// TestTokensCreateResolvesParentByIDWithoutAFullScan is the M3-carry half of
-// the owner-inheritance fix: the ATTRIBUTION was already correct (the two
-// tests above pin it), what was wrong was its cost. resolveInheritedOwner
-// looked the parent up by paging the entire api_tokens table in through
-// ListTokens -- the admin-scale query behind GET /api/v1/tokens -- and then
-// scanning it in Go for one id it already had. On a fleet with thousands of
-// tokens that is the whole table decoded, allocated and discarded on every
-// POST /api/v1/tokens made BY a token, which is the automation path and so
-// the one most likely to be hot.
-//
-// The assertion is deliberately on the call counts and not on the owner: both
-// implementations store the same owner, so an owner-only test would go on
-// passing if the full scan came back.
+// On a fleet with thousands of tokens that is the whole table decoded; the assertion is
+// deliberately on the call counts and not on the owner.
 func TestTokensCreateResolvesParentByIDWithoutAFullScan(t *testing.T) {
 	tokens := newFakeTokenStore()
 	const rootUserID = "22222222-2222-2222-2222-222222222222"
@@ -464,5 +443,104 @@ func TestTokensDeleteNotFound(t *testing.T) {
 	w := doRequest(t, s, http.MethodDelete, "/api/v1/tokens/does-not-exist", nil, mutateWithCSRF)
 	if w.Code != http.StatusNotFound {
 		t.Fatalf("status %d, want 404: %s", w.Code, w.Body)
+	}
+}
+
+// TestTokensCreateRejectsPastExpiry pins finding 13: a token whose expiry is
+// already in the past can never authenticate, so minting one only leaks a
+// secret for nothing -- the request is refused before any secret is generated.
+func TestTokensCreateRejectsPastExpiry(t *testing.T) {
+	tokens := newFakeTokenStore()
+	s := newTokensTestServer(t, tokens)
+
+	past := time.Now().Add(-time.Hour).UTC().Format(time.RFC3339Nano)
+	w := doRequest(t, s, http.MethodPost, "/api/v1/tokens",
+		strings.NewReader(`{"name":"stillborn","expiresAt":"`+past+`"}`), mutateWithCSRF)
+	if w.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status %d, want 422: %s", w.Code, w.Body)
+	}
+	if !strings.Contains(w.Body.String(), "expiry must be in the future") {
+		t.Errorf("detail = %s, want it to say the expiry must be in the future", w.Body)
+	}
+	// Nothing was minted, so no secret was ever put on the wire.
+	if got, _ := tokens.ListTokens(context.Background()); len(got) != 0 {
+		t.Errorf("store holds %d token(s) after a rejected mint, want 0", len(got))
+	}
+}
+
+// TestTokensCreateAcceptsFutureExpiry is the other half of finding 13: the
+// guard rejects the past, not every expiry.
+func TestTokensCreateAcceptsFutureExpiry(t *testing.T) {
+	s := newTokensTestServer(t, newFakeTokenStore())
+	future := time.Now().Add(time.Hour).UTC().Format(time.RFC3339Nano)
+	w := doRequest(t, s, http.MethodPost, "/api/v1/tokens",
+		strings.NewReader(`{"name":"ci","expiresAt":"`+future+`"}`), mutateWithCSRF)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status %d, want 200: %s", w.Code, w.Body)
+	}
+}
+
+// TestTokensDeleteRevokesThenPurges pins finding 14's chosen semantics: DELETE
+// on an ACTIVE token still means revoke, DELETE on an already-revoked or
+// expired one purges the row, and a third DELETE has nothing left to find.
+func TestTokensDeleteRevokesThenPurges(t *testing.T) {
+	tokens := newFakeTokenStore()
+	s := newTokensTestServer(t, tokens)
+
+	w := doRequest(t, s, http.MethodPost, "/api/v1/tokens", strings.NewReader(`{"name":"ci"}`), mutateWithCSRF)
+	if w.Code != http.StatusOK {
+		t.Fatalf("create status %d: %s", w.Code, w.Body)
+	}
+	var created struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &created); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	// First DELETE: revoke. The row survives, carrying its revokedAt.
+	if w := doRequest(t, s, http.MethodDelete, "/api/v1/tokens/"+created.ID, nil, mutateWithCSRF); w.Code != http.StatusNoContent {
+		t.Fatalf("first delete = %d, want 204: %s", w.Code, w.Body)
+	}
+	rows, err := tokens.ListTokens(context.Background())
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(rows) != 1 || rows[0].RevokedAt == nil {
+		t.Fatalf("after the first delete: %d row(s), revokedAt set = %v; want 1 revoked row", len(rows), len(rows) == 1 && rows[0].RevokedAt != nil)
+	}
+
+	// Second DELETE: purge. The list stops growing forever.
+	if w := doRequest(t, s, http.MethodDelete, "/api/v1/tokens/"+created.ID, nil, mutateWithCSRF); w.Code != http.StatusNoContent {
+		t.Fatalf("second delete = %d, want 204: %s", w.Code, w.Body)
+	}
+	if rows, _ := tokens.ListTokens(context.Background()); len(rows) != 0 {
+		t.Fatalf("after the purge: %d row(s), want 0", len(rows))
+	}
+
+	// Third DELETE: there is genuinely nothing there now.
+	if w := doRequest(t, s, http.MethodDelete, "/api/v1/tokens/"+created.ID, nil, mutateWithCSRF); w.Code != http.StatusNotFound {
+		t.Fatalf("third delete = %d, want 404: %s", w.Code, w.Body)
+	}
+}
+
+// TestTokensDeleteExpiredPurgesInOneCall pins the second half of finding 14's
+// semantics: an EXPIRED token is already unusable, so the single DELETE a user
+// reaches for purges it rather than revoking a credential that cannot be used.
+func TestTokensDeleteExpiredPurgesInOneCall(t *testing.T) {
+	tokens := newFakeTokenStore()
+	s := newTokensTestServer(t, tokens)
+
+	expired := time.Now().Add(-time.Hour)
+	tok, err := tokens.CreateToken(context.Background(), "stale", []byte("hash"), "u1", &expired)
+	if err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	if w := doRequest(t, s, http.MethodDelete, "/api/v1/tokens/"+tok.ID, nil, mutateWithCSRF); w.Code != http.StatusNoContent {
+		t.Fatalf("delete = %d, want 204: %s", w.Code, w.Body)
+	}
+	if rows, _ := tokens.ListTokens(context.Background()); len(rows) != 0 {
+		t.Fatalf("after deleting an expired token: %d row(s), want 0", len(rows))
 	}
 }

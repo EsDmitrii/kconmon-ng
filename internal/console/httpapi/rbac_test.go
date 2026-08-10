@@ -192,9 +192,8 @@ func TestRBACRolesDeleteNotFound(t *testing.T) {
 	}
 }
 
-// TestRBACRolesDeleteBlockedWhileBound is the brief's guard rail: a role
-// may not be deleted while bindings reference it (409); once the binding
-// is gone, delete succeeds.
+// TestRBACRolesDeleteBlockedWhileBound is the guard rail: a role may not be deleted while bindings
+// reference it (409).
 func TestRBACRolesDeleteBlockedWhileBound(t *testing.T) {
 	roleAdmin := newFakeRoleAdmin()
 	s := newRBACTestServer(t, roleAdmin)

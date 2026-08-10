@@ -172,9 +172,7 @@ func runUntil(t *testing.T, r *Reader, m *metrics.Metrics, want float64) map[str
 	return got
 }
 
-// TestFilterMatrix is Decision 3 as a table. The node half FAILS CLOSED: a node
-// event is kept only when the topology vouches for the node, and no topology at
-// all means no node events -- never "keep them, the controller is down".
+// The node half FAILS CLOSED: a node event is kept only when the topology vouches for the node.
 func TestFilterMatrix(t *testing.T) {
 	for _, tc := range []struct {
 		name         string
@@ -292,10 +290,8 @@ func TestStoreErrorIsCounted(t *testing.T) {
 	}
 }
 
-// TestMessageTruncatedToOneKiB: an event message is operator-visible text of
-// unbounded length written by anything in the cluster. It is cut to 1 KiB with
-// a visible marker, so a truncated message reads as truncated rather than as a
-// message that happened to end there.
+// TestMessageTruncatedToOneKiB: an event message is operator-visible text of unbounded length
+// written by anything in the cluster; it is cut to 1 KiB with a visible marker.
 func TestMessageTruncatedToOneKiB(t *testing.T) {
 	ev := podEvent("p1", testNamespace, testNamespace, "agent-x", "10")
 	ev.Message = strings.Repeat("a", 5000)
@@ -344,11 +340,7 @@ func TestTruncateMessageBoundaries(t *testing.T) {
 	}
 }
 
-// TestEventTimeFallbackOrder pins the messy-timestamp order. core/v1 Events are
-// written by many components across many versions: the modern events API fills
-// EventTime, the legacy one fills First/LastTimestamp, and plenty of emitters
-// fill some subset. LastTimestamp wins because "when did this last happen" is
-// what a timeline row means.
+// LastTimestamp wins because "when did this last happen" is what a timeline row means.
 func TestEventTimeFallbackOrder(t *testing.T) {
 	last := time.Date(2026, 8, 8, 12, 0, 0, 0, time.UTC)
 	micro := time.Date(2026, 8, 8, 11, 0, 0, 0, time.UTC)
@@ -505,10 +497,8 @@ func TestNodeSetIsRefreshedAfterTheWindow(t *testing.T) {
 	}
 }
 
-// TestRelistOnWatchClose: a closed watch channel is the apiserver's ordinary
-// "your resourceVersion is too old" signal. The reader must go back to a LIST,
-// not sit on a dead channel -- the failure mode that makes a capture look alive
-// while it silently stops capturing.
+// TestRelistOnWatchClose: a closed watch channel is the apiserver's ordinary "your resourceVersion
+// is too old" signal; the reader must go back to a LIST, not sit on a dead channel.
 func TestRelistOnWatchClose(t *testing.T) {
 	cs := fake.NewClientset(podEvent("p1", testNamespace, testNamespace, "agent-x", "10"))
 

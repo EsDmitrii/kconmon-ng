@@ -3,9 +3,6 @@
 package store_test
 
 // TestEventStore* require a real PostgreSQL.
-// Run: docker run --rm -d -p 5432:5432 -e POSTGRES_PASSWORD=test -e POSTGRES_DB=kconmon postgres:17-alpine
-// Then: KCONMON_TEST_DATABASE_DSN='postgres://postgres:test@127.0.0.1:5432/kconmon?sslmode=disable' \
-//       go test -tags=integration ./internal/console/store/... -v
 
 import (
 	"context"
@@ -22,17 +19,12 @@ import (
 )
 
 // newTestMetrics returns Metrics on a fresh registry: metrics.New(nil) targets
-// prometheus.DefaultRegisterer, which every test function in this binary
-// would share and collide on ("duplicate metrics collector registration")
-// the second time any test called it.
+// prometheus.DefaultRegisterer.
 func newTestMetrics() *metrics.Metrics {
 	return metrics.New("kconmon_ng", prometheus.NewRegistry())
 }
 
-// newEventStoreDB opens a *store.DB with migrations applied, dropping and
-// re-creating the schema first so every test starts from a clean
-// topology_events table -- there is no per-test schema, this file shares one
-// database with store_integration_test.go.
+// newEventStoreDB opens a *store.DB with migrations applied.
 func newEventStoreDB(t *testing.T) *store.DB {
 	t.Helper()
 	dsn := testDSN(t)
@@ -106,11 +98,7 @@ func TestInsertEventThenListRoundTrip(t *testing.T) {
 	}
 }
 
-// TestInsertEventDuplicateIsIdempotent is the single most important
-// assertion in Phase A: two console replicas racing to ingest the same
-// controller event (same EventSeq, same EventTime) must not duplicate the
-// row. The second insert reports inserted=false and the table still holds
-// exactly one row.
+// TestInsertEventDuplicateIsIdempotent is the single most important assertion in Phase A.
 func TestInsertEventDuplicateIsIdempotent(t *testing.T) {
 	db := newEventStoreDB(t)
 	m := newTestMetrics()
@@ -195,10 +183,8 @@ func TestListEventsFiltersByScope(t *testing.T) {
 	}
 }
 
-// TestListEventsFiltersByScopeNode asserts the pair-aware filter a node card
-// needs: the node's OWN scope plus every pair scope naming it on either side,
-// and nothing else. The near-miss rows ("a-x→b", "b→x-a") are the whole point
-// -- a substring or unanchored match would drag them in.
+// TestListEventsFiltersByScopeNode asserts the pair-aware filter a node card needs; the near-miss
+// rows ("a-x→b", "b→x-a") are the whole point.
 func TestListEventsFiltersByScopeNode(t *testing.T) {
 	db := newEventStoreDB(t)
 	m := newTestMetrics()
@@ -228,12 +214,7 @@ func TestListEventsFiltersByScopeNode(t *testing.T) {
 	}
 }
 
-// TestListEventsScopeNodeEscapesLIKEMetacharacters is the escaping gate. Node
-// names cannot contain _ or %, but a scope is not always a node name: targets
-// carry store.validateName's charset (internal/console/store/targets.go
-// nameRE), which ALLOWS underscore, and a target name reaches this column
-// through pairScope the same way a node name does. Unescaped, "a_c" would
-// LIKE-match "abc→b" -- a card quietly showing another object's events.
+// Node names cannot contain _ or %, but a scope is not always a node name.
 func TestListEventsScopeNodeEscapesLIKEMetacharacters(t *testing.T) {
 	db := newEventStoreDB(t)
 	m := newTestMetrics()
@@ -365,10 +346,7 @@ func mustInsert(t *testing.T, ctx context.Context, es store.EventStore, ev store
 	}
 }
 
-// jsonEqual compares a and b as parsed JSON values rather than raw bytes:
-// Postgres's jsonb type re-serializes on read (e.g. adding a space after a
-// key's colon), so a byte-exact comparison of a value that survived a round
-// trip through the database is not a valid test.
+// jsonEqual compares a and b as parsed JSON values rather than raw bytes.
 func jsonEqual(t *testing.T, a, b json.RawMessage) bool {
 	t.Helper()
 	var va, vb any
@@ -381,10 +359,8 @@ func jsonEqual(t *testing.T, a, b json.RawMessage) bool {
 	return reflect.DeepEqual(va, vb)
 }
 
-// topoRec builds one topology_changed row whose details carry the exact four
-// keys events.topologyChangedDetails marshals, with the zone the M7 controller
-// attributes. The zone travels through real JSONB storage here, which is the
-// only place that round trip is exercised.
+// topoRec builds one topology_changed row whose details carry the exact four keys
+// events.topologyChangedDetails marshals; the zone travels through real JSONB storage here.
 func topoRec(seq int64, ts time.Time, reason, node, agent, zone string) store.EventRecord {
 	scope := node
 	if scope == "" {

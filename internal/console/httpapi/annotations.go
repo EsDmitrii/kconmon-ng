@@ -15,10 +15,7 @@ import (
 	"github.com/EsDmitrii/kconmon-ng/internal/console/store"
 )
 
-// AnnotationService is the subset of *store.DB httpapi needs for
-// /api/v1/annotations: the read seam and the write seam together, composed in
-// TargetService's shape. There is no update half because there is no update
-// -- an annotation is a mark, not a document (M5 Decision 10).
+// AnnotationService is the subset of *store.DB httpapi needs for /api/v1/annotations.
 type AnnotationService interface {
 	store.AnnotationReader
 	store.AnnotationStore
@@ -27,10 +24,7 @@ type AnnotationService interface {
 var _ AnnotationService = (*store.DB)(nil)
 
 // annotationsUnavailableDetail is served whenever s.annotations is nil, in
-// targetsUnavailableDetail's shape: an operator note that vanishes on pod
-// restart is worse than one that was never accepted, so there is no
-// in-memory fallback and the honest answer names the value that turns
-// persistence on.
+// targetsUnavailableDetail's shape.
 const annotationsUnavailableDetail = "annotations are persisted operator notes with no in-memory fallback: " +
 	"set console.database.mode in the console config (Helm: console.database.mode) to enable /api/v1/annotations"
 
@@ -83,11 +77,9 @@ type annotationRequest struct {
 	Text    string     `json:"text"`
 }
 
-// annotationAuthor renders the subject as the "<kind>:<id>" reference
-// store.Annotation.CreatedBy documents ("user:<name>", "token:<name>"). An
-// anonymous subject -- what auth.mode=anonymous produces -- has no id to
-// attribute, and "anonymous" is the honest record of that rather than an
-// empty string that reads like a lost value.
+// annotationAuthor renders the subject as the "<kind>:<id>" reference store.Annotation.CreatedBy
+// documents ("user:<name>", "token:<name>"); an anonymous subject -- what auth.mode=anonymous
+// produces -- has no id to attribute.
 func annotationAuthor(subject authz.Subject) string { //nolint:gocritic // Subject is a value type by design
 	if subject.ID == "" || subject.Kind == authz.SubjectAnonymous {
 		return string(authz.SubjectAnonymous)
@@ -107,20 +99,8 @@ func annotationIDFrom(w http.ResponseWriter, r *http.Request) (string, bool) {
 	return id, true
 }
 
-// handleAnnotationsList serves one page of annotations, newest first, behind
-// an opaque keyset cursor.
-//
-// ?scope= carries THREE states, which is why store.AnnotationFilter.Scope is
-// a pointer: absent means every scope, present-but-empty means the GLOBAL
-// ones only ("" is a real scope value here), and any other value is an exact
-// match. from/to bound the window an annotation must OVERLAP; either side
-// absent is unbounded on that side.
-//
-// Unlike GET /api/v1/events this does NOT reject from >= to. An events query
-// with an inverted window is a client bug worth naming; an annotations query
-// is driven by a chart's visible range, and a degenerate range there is
-// simply a range with nothing in it -- the honest answer is an empty page,
-// not a 400 the chart has to special-case.
+// handleAnnotationsList serves one page of annotations, newest first, behind an opaque keyset
+// cursor.
 func (s *Server) handleAnnotationsList(w http.ResponseWriter, r *http.Request) {
 	if s.annotationsUnavailable(w) {
 		return
@@ -172,15 +152,8 @@ func (s *Server) handleAnnotationsList(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, annotationsListResponse{Annotations: out, NextCursor: page.NextCursor})
 }
 
-// handleAnnotationsCreate pins one mark: 201 with a Location header naming
-// the new row, matching POST /api/v1/targets.
-//
-// A body that is not JSON at all (or whose startAt/endAt is not RFC3339) is a
-// 400; a well-formed body whose VALUES break an annotation rule is a 422 --
-// the same distinction decodeTargetRequest draws. Validation is delegated to
-// store.AnnotationInput.Validate rather than reimplemented here, so the
-// 1024-byte text bound and the end-at-before-start-at rule cannot drift from
-// the ones the database layer actually enforces.
+// handleAnnotationsCreate pins one mark: 201 with a Location header naming the new row; validation
+// is delegated to store.AnnotationInput.Validate rather than reimplemented here.
 func (s *Server) handleAnnotationsCreate(w http.ResponseWriter, r *http.Request) {
 	if s.annotationsUnavailable(w) {
 		return
@@ -225,11 +198,8 @@ func (s *Server) handleAnnotationsCreate(w http.ResponseWriter, r *http.Request)
 // sentinel, so the prefix is the only discriminator there is.
 const annotationValidationPrefix = "store: annotation: "
 
-// isAnnotationValidationError reports whether err came from
-// store.AnnotationInput.Validate rather than from the database. Deliberately
-// narrow: anything that is not recognisably a validation error stays a 502,
-// because reporting an outage as "your annotation was rejected" would send
-// the operator to fix a note that was never the problem.
+// isAnnotationValidationError reports whether err came from store.AnnotationInput.Validate rather
+// than from the database.
 func isAnnotationValidationError(err error) bool {
 	if errors.Is(err, store.ErrNotFound) || errors.Is(err, store.ErrAlreadyExists) || errors.Is(err, store.ErrInUse) {
 		return false

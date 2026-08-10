@@ -4,6 +4,9 @@ metadata:
   name: "{{ include "kconmon-ng.fullname" . }}-connection-test"
   labels:
     {{- include "kconmon-ng.labels" . | nindent 4 }}
+    # Deliberately NOT a selectorLabels match: the NetworkPolicy podSelector would
+    # otherwise capture this Pod and drop its probe to the controller's HTTP port.
+    app.kubernetes.io/component: test
   annotations:
     "helm.sh/hook": test
     "helm.sh/hook-weight": "1"
@@ -11,7 +14,7 @@ metadata:
 spec:
   containers:
     - name: connection-test
-      image: curlimages/curl:latest
+      image: curlimages/curl:8.18.0
       command:
         - sh
         - -c

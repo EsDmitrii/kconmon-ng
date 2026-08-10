@@ -2,18 +2,11 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MaintenanceBar, useMaintenance } from "@/components/maintenance";
+import { stampShort } from "@/lib/i18n";
 import { TimeMachineProvider } from "@/lib/timemachine";
 import type { MaintenanceWindow } from "@/lib/types";
 
-/**
- * The shared maintenance hook + bar — the annotations twin, and tested the same
- * way for the same reasons. What is asserted here is everything the twin's own
- * suite asserts about SCOPE (which requests a surface makes, and the
- * empty-vs-absent distinction), plus the two facts maintenance adds: a window
- * is a SPAN with a strict end, and reading one is permission-gated at the
- * request rather than at the pixel (M6's "ZERO requests for sources the
- * operator's role cannot read").
- */
+/** The shared maintenance hook + bar — the annotations twin, and tested the same way for the same reasons. */
 
 const NOW = "2026-08-01T12:00:00Z";
 
@@ -119,10 +112,7 @@ async function openForm(scope = "") {
   return view;
 }
 
-/** Drives one of the two DateTimePickers: open it, type the local day and
- *  wall-clock into its manual fields, apply. The picker is the M5 component and
- *  composes through the LOCAL Date constructor, so the expected instant in a
- *  test is built the same way rather than from a UTC string. */
+/** Drives one of the two DateTimePickers: open it, type the local day and wall-clock into its manual fields. */
 function pickInstant(triggerName: "Start" | "End", date: string, time: string) {
   fireEvent.click(screen.getByRole("button", { name: triggerName }));
   fireEvent.change(screen.getByLabelText("Date"), { target: { value: date } });
@@ -268,12 +258,11 @@ describe("MaintenanceBar affordances", () => {
     await screen.findByText(/scope node-a→node-b/);
   });
 
-  /* QA round 3, finding #11: the stamp column is now COMPACT and capped, the
-     same treatment components/annotations.tsx got in round 2 — two full
-     toLocaleStrings were about 22rem of un-shrinkable text, and in the
-     Investigate page's 24rem column that left the reason with ~38px. */
-  const compact = (iso: string) =>
-    new Date(iso).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+  /* stampShort is the shared helper every compact column draws through now, and
+     it takes the INTERFACE locale rather than a bare undefined (QA scope 3,
+     findings #7 and #18). "en" here because these cases render without a
+     provider, which lib/i18n defines as English. */
+  const compact = (iso: string) => stampShort(new Date(iso), "en");
 
   it("shows a window as a SPAN — both edges, not just its start", async () => {
     stubFetch({ byScope: { "": [win()] } });
@@ -283,21 +272,34 @@ describe("MaintenanceBar affordances", () => {
     expect(row.textContent).toContain(compact("2026-08-01T11:45:00Z"));
   });
 
-  /* QA round 5, finding #6. The column used to be w-28 AND truncate, which cut
-     the END of the range — the one edge an operator reads to answer "when does
-     this change finish?". It is now wide enough to hold the compact pair and
-     never truncates; the REASON is what gives way, and it already has a title
-     of its own. */
+  /* It is now wide enough to hold the compact pair and never truncates; the REASON is what gives way. */
   it("gives the range column room and never truncates it, keeping the FULL pair on title", async () => {
     stubFetch({ byScope: { "": [win()] } });
     renderHarness("");
     const stamp = await screen.findByTestId("maintenance-stamp");
-    expect(stamp.className).toContain("lg:w-44");
-    expect(stamp.className).toContain("whitespace-nowrap");
+    expect(stamp.className).toContain("lg:w-52");
     expect(stamp.className).toContain("shrink-0");
     expect(stamp.className).not.toContain("truncate");
     expect(stamp.getAttribute("title")).toBe(
       `${new Date("2026-08-01T11:30:00Z").toLocaleString()} → ${new Date("2026-08-01T11:45:00Z").toLocaleString()}`,
+    );
+  });
+
+  /* The measurement this pins: on /settings the range "Aug 9, 11:31 AM → Aug 9, 01:31 PM" is 198px wide. */
+  it("wraps at the arrow instead of overflowing — nowrap is per-stamp, not on the box", async () => {
+    stubFetch({ byScope: { "": [win()] } });
+    renderHarness("");
+    const stamp = await screen.findByTestId("maintenance-stamp");
+    // The container must NOT forbid the wrap...
+    expect(stamp.className).not.toContain("whitespace-nowrap");
+    // ...and each edge must stay in one piece.
+    const stamps = stamp.querySelectorAll("span.whitespace-nowrap");
+    expect(stamps.length).toBe(2);
+    expect(stamps[0].textContent).toBe(compact("2026-08-01T11:30:00Z"));
+    expect(stamps[1].textContent).toBe(compact("2026-08-01T11:45:00Z"));
+    // The arrow is the break opportunity, and the visible text is unchanged.
+    expect(stamp.textContent).toBe(
+      `${compact("2026-08-01T11:30:00Z")} → ${compact("2026-08-01T11:45:00Z")}`,
     );
   });
 
@@ -317,6 +319,23 @@ describe("MaintenanceBar affordances", () => {
     const reason = await screen.findByTestId("maintenance-reason");
     expect(reason.className).toContain("flex-1");
     expect(reason.className).toContain("min-w-0");
+  });
+
+  /* QA scope 2, finding #19 — arming the delete adds a SECOND button to the
+     row, and flex took every pixel of it out of the one column that says which
+     window is about to go. The reason collapsed to a single character under
+     the click asking you to confirm it. */
+  it("keeps the reason readable once the confirm pair is in the row", async () => {
+    stubFetch({ byScope: { "": [win({ reason: "core switch firmware upgrade" })] } });
+    renderHarness("");
+    fireEvent.click(await screen.findByRole("button", { name: /delete maintenance window/i }));
+    await screen.findByRole("button", { name: /confirm delete maintenance window/i });
+    const reason = screen.getByTestId("maintenance-reason");
+    // A width FLOOR plus its own basis, so the row wraps rather than crushing
+    // the identity out of it.
+    expect(reason.className).toMatch(/basis-\d+/);
+    expect(reason.className).toMatch(/min-w-\[\d+rem\]/);
+    expect(reason).toHaveTextContent("core switch firmware upgrade");
   });
 });
 
@@ -462,8 +481,6 @@ describe("delete flow", () => {
     expect(screen.getByText("already deleted")).toBeTruthy();
   });
 
-  /* QA round 2, finding #14: a declared window is somebody's record that a
-     change was planned, and one mis-aimed click used to erase it. */
   it("asks for a second click before deleting anything", async () => {
     const { deleteIds } = stubFetch({ byScope: { "": [win({ id: "doomed", reason: "wrong day" })] } });
     renderHarness("");
@@ -499,10 +516,7 @@ describe("a time-disabled maintenance control carries its reason", () => {
   });
 });
 
-/* #17, the components family (the annotation form is this form's twin and
-   carries the same guard). The button LOOKED guarded — Button disables itself
-   while `loading` — but the flag it read was useState, which the handler about
-   to set it cannot see. */
+/* The button LOOKED guarded — Button disables itself while `loading` — but the flag it read was useState. */
 describe("one window per click storm (#17)", () => {
   it("POSTs once for three rapid clicks", async () => {
     const { createBodies } = stubFetch();

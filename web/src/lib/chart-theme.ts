@@ -1,8 +1,4 @@
-/* Single source of chart colour. ECharts renders to canvas and cannot consume
-   CSS custom properties, so the design-system tokens are read off the document
-   root at runtime and handed to ECharts as concrete hsl() strings. Under jsdom
-   (or any environment where the variables resolve empty) the documented token
-   values below are used — they mirror index.css and are exported for tests. */
+/* Single source of chart colour; ECharts renders to canvas and cannot consume CSS custom properties. */
 
 export interface ChartColors {
   series: string[];
@@ -13,14 +9,7 @@ export interface ChartColors {
   surface: string;
 }
 
-/* Documented values of the index.css tokens, per theme. Keep in sync with
-   index.css — the fallback test pins these.
-
-   NOTE the comma syntax: canvas accepts modern space-separated hsl(), but
-   zrender parses colours with its OWN parser when deriving hover/emphasis
-   state colours, and that parser only understands the comma form. Feeding it
-   `hsl(210 68% 59%)` renders fine at rest and turns every line invisible the
-   moment the axis pointer activates a state transition. */
+/* Documented values of the index.css tokens; NOTE the comma syntax: canvas accepts modern space-separated hsl. */
 export const CHART_FALLBACK: Record<"dark" | "light", ChartColors> = {
   dark: {
     series: [

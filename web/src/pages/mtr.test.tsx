@@ -2,6 +2,8 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ThemeProvider } from "@/components/theme-provider";
+import { LOCALE_STORAGE_KEY, LocaleProvider, type Locale } from "@/lib/i18n";
+import { TimeMachineProvider } from "@/lib/timemachine";
 import { MTRPage, groupDestinations, pathChangeFlags, shortHash, toggleCompare } from "./mtr";
 
 // Same reason as target-card.test.tsx: echarts.init() needs a canvas context
@@ -107,8 +109,7 @@ function renderPage(
     prometheusConfigured?: boolean;
     destinations?: unknown[];
     nodes?: string[];
-    /** Agents the controller does NOT list as nodes — the controller-less
-     *  console of finding #21. */
+    /** Agents the controller does NOT list as nodes. */
     agents?: string[];
     targets?: unknown[];
     onDestinations?: () => Response;
@@ -117,6 +118,13 @@ function renderPage(
     onSnapshots?: (qs: URLSearchParams) => Response;
     onSnapshot?: (id: string, qs: URLSearchParams) => Response;
     onRun?: (body: unknown) => Response;
+    /** Mounts a <LocaleProvider> above the page. Absent — every case but the ru
+     *  smoke pin at the bottom of this file — there is no provider at all,
+     *  which lib/i18n defines as English. */
+    locale?: Locale;
+    /** RFC 3339 instant to engage the Time Machine at, through the URL — the
+     *  same seam pages/diagnostics.test.tsx uses. */
+    at?: string;
   } = {},
 ) {
   const {
@@ -131,7 +139,11 @@ function renderPage(
     onSnapshots,
     onSnapshot,
     onRun,
+    locale,
+    at,
   } = opts;
+  if (locale !== undefined) localStorage.setItem(LOCALE_STORAGE_KEY, locale);
+  window.history.pushState({}, "", at ? `/mtr?at=${at}` : "/mtr");
   const calls: Call[] = [];
 
   const fetchMock = vi.fn((url: string, init?: RequestInit) => {
@@ -179,11 +191,14 @@ function renderPage(
   vi.stubGlobal("fetch", fetchMock);
 
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const page = (
+    <TimeMachineProvider>
+      <MTRPage />
+    </TimeMachineProvider>
+  );
   const utils = render(
     <QueryClientProvider client={qc}>
-      <ThemeProvider>
-        <MTRPage />
-      </ThemeProvider>
+      <ThemeProvider>{locale === undefined ? page : <LocaleProvider>{page}</LocaleProvider>}</ThemeProvider>
     </QueryClientProvider>,
   );
 
@@ -200,6 +215,9 @@ function renderPage(
 afterEach(() => {
   cleanup();
   vi.unstubAllGlobals();
+  /* vitest.setup.ts backs localStorage with one Map per test FILE — a locale
+     left behind would flip every later case in this one. */
+  localStorage.removeItem(LOCALE_STORAGE_KEY);
 });
 
 /** Clicks the pane-1 row for a pair; the accessible name carries BOTH halves
@@ -330,6 +348,27 @@ describe("MTRPage — destinations pane", () => {
     expect(within(within(pane).getByRole("list", { name: "api-gw" })).getAllByRole("button")).toHaveLength(1);
     // The group header states the GROUP's total, not its first member's.
     expect(within(pane).getByText("5 paths")).toBeInTheDocument();
+  });
+
+  /* QA scope 4, finding #5: the count column was shrink-0, so a Russian row —
+     "трассировок" against "traces" — squeezed the source name down to
+     «от qa-nod…», which identifies nothing. */
+  it("gives the source name the width and lets the count column be the one that truncates", async () => {
+    renderPage({
+      destinations: [destinationRow({ sourceNode: "qa-node-worker-07", destination: "node-b" })],
+    });
+
+    const row = await screen.findByRole("button", { name: /qa-node-worker-07.*node-b/ });
+    const [name, count] = Array.from(row.children) as HTMLElement[];
+    // The name grows into the leftover and cannot be shrunk away...
+    expect(name.className).toMatch(/flex-1/);
+    // ...and the count is capped and shrinkable, which is what makes it yield
+    // first. `shrink-0` here is the bug.
+    expect(count.className).not.toMatch(/shrink-0/);
+    expect(count.className).toMatch(/max-w-\[45%\]/);
+    // Whichever side does clip, the full text stays reachable.
+    expect(name).toHaveAttribute("title", expect.stringContaining("qa-node-worker-07"));
+    expect(count).toHaveAttribute("title", expect.stringContaining("traces"));
   });
 
   it("makes no snapshots request until a pair is picked", async () => {
@@ -594,6 +633,16 @@ describe("MTRPage — comparing two paths", () => {
     expect(screen.getByText(/replaces the earlier/i)).toBeInTheDocument();
   });
 
+  /* QA scope 4, finding #13: an instruction the reader cannot follow. */
+  it("withholds the two-path hint when there is only one path to tick", async () => {
+    renderPage({ onSnapshots: () => json({ snapshots: [snapshotRow()], nextCursor: "" }) });
+
+    await selectPair("node-a", "node-b");
+
+    expect(await screen.findByRole("checkbox", { name: /^Compare path/ })).toBeInTheDocument();
+    expect(screen.queryByText(/replaces the earlier/i)).not.toBeInTheDocument();
+  });
+
   it("shows the diff — older on the left, newer on the right — once two are picked", async () => {
     renderPage({ onSnapshots: twoPaths });
 
@@ -807,10 +856,7 @@ describe("MTRPage — runner tab", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent(/no pairs/i);
   });
 
-  /* QA round 4, finding #9. Start MTR was enabled with zero known sources:
-     pressing it posted `sources: []`, which checks.Plan expands to no pairs
-     and refuses — a 422 the operator had to read to learn the form had
-     nothing to run. Diagnostics' noPairs gate, mirrored. */
+  /* Start MTR was enabled with zero known sources: pressing it posted `sources: []`. */
   it("disables Start MTR with no sources at all, and says why", async () => {
     renderPage({ permissions: RUNNER, nodes: [] });
 
@@ -843,6 +889,22 @@ describe("MTRPage — runner tab", () => {
     expect(await screen.findByText(/~2 pairs/)).toBeInTheDocument();
   });
 
+  /* QA scope 4, finding #9 — the Runner carries the Diagnostics form's bug and
+     therefore its fix: with no destination resolved there is no second factor
+     in sources x destinations, so the estimate is zero and says which side is
+     missing. */
+  it("estimates ZERO, and names the missing side, while the ad-hoc address is empty", async () => {
+    renderPage({ permissions: RUNNER, nodes: ["node-a", "node-b"] });
+
+    await openRunner();
+    fireEvent.click(await screen.findByRole("radio", { name: /ad-hoc/i }));
+    await waitFor(() => expect(screen.getByText(/~0 pairs/)).toBeInTheDocument());
+    expect(screen.getByText(/no address typed yet/i)).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText(/destination address/i), { target: { value: "10.0.0.9" } });
+    await waitFor(() => expect(screen.getByText(/~2 pairs/)).toBeInTheDocument());
+  });
+
   it("does not flicker dead while the topology request is still in flight", async () => {
     renderPage({ permissions: RUNNER, nodes: ["node-a", "node-b"] });
 
@@ -852,8 +914,6 @@ describe("MTRPage — runner tab", () => {
     expect(screen.getByRole("button", { name: /start mtr/i })).toBeEnabled();
   });
 
-  /* QA round 4, finding #21: `topology.nodes` is empty on a console with no
-     controller wired, which left this form with nothing to trace FROM. */
   it("lists the agents' own node names when the controller reports none", async () => {
     renderPage({ permissions: RUNNER, nodes: [], agents: ["node-a", "node-b"] });
 
@@ -920,5 +980,109 @@ describe("MTRPage — copy", () => {
 
     expect(await screen.findByText("Pick a source to see its path history.")).toBeInTheDocument();
     expect(screen.queryByText(/on the left/i)).not.toBeInTheDocument();
+  });
+});
+
+/* QA scope 4, findings #4 and #15 — the Explorer is LIVE under the "viewing
+   past" banner, because none of the reads behind it takes a time parameter.
+   That has to be SAID, the way /diagnostics says it over its history list. */
+describe("MTRPage — Time Machine disclosure", () => {
+  const AT = "2026-08-08T02:14:00Z";
+
+  it("names the endpoints and admits the routes are the ones recorded now", async () => {
+    renderPage({ at: AT });
+
+    const note = await screen.findByText(/take no time parameter/i);
+    expect(note).toBeInTheDocument();
+    expect(note).toHaveTextContent("GET /api/v1/mtr/destinations");
+    expect(note).toHaveTextContent(/recorded NOW/);
+  });
+
+  it("amends the subtitle instead of leaving it promising a view of the viewed instant", async () => {
+    renderPage({ at: AT });
+
+    expect(await screen.findByText(/is NOT cut to .* — it is live/)).toBeInTheDocument();
+  });
+
+  it("says none of it while Live — there is nothing to disclose", async () => {
+    renderPage();
+
+    await screen.findByRole("button", { name: /node-a.*node-b/ });
+    expect(screen.queryByText(/take no time parameter/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/it is live/)).not.toBeInTheDocument();
+  });
+});
+
+/* ── MTR runner duration (Task 2) ───────────────────────────────────────── */
+
+describe("MTR runner duration", () => {
+  const RUNNER = ["mtr:read", "runs:create"];
+
+  async function openRunner() {
+    fireEvent.click(await screen.findByRole("radio", { name: /runner/i }));
+  }
+
+  // MTR reuses the run mechanism wholesale -- same endpoint, same runner, same sample_seq.
+  it("defaults to Instant and sends no durationNs", async () => {
+    const { runCalls } = renderPage({ permissions: RUNNER });
+
+    await openRunner();
+    expect(await screen.findByRole("radio", { name: "Instant" })).toBeChecked();
+    fireEvent.click(screen.getByRole("button", { name: /start mtr/i }));
+
+    await waitFor(() => expect(runCalls()).toHaveLength(1));
+    expect(runCalls()[0].body).not.toHaveProperty("durationNs");
+  });
+
+  it("sends durationNs for a picked duration", async () => {
+    const { runCalls } = renderPage({ permissions: RUNNER });
+
+    await openRunner();
+    await screen.findByRole("radio", { name: "Instant" });
+    fireEvent.click(screen.getByRole("radio", { name: "5m" }));
+    fireEvent.click(screen.getByRole("button", { name: /start mtr/i }));
+
+    await waitFor(() => expect(runCalls()).toHaveLength(1));
+    const body = runCalls()[0].body as { type?: string; durationNs?: number };
+    expect(body.type).toBe("mtr");
+    expect(body.durationNs).toBe(300_000_000_000);
+  });
+
+  // The third consumer of formatDurationNs moves with the other two: «раз в 5 с», not "5s".
+  it("renders the cadence span in the interface language", async () => {
+    renderPage({ permissions: RUNNER, locale: "ru" });
+
+    fireEvent.click(await screen.findByRole("radio", { name: "Запуск" }));
+    fireEvent.click(await screen.findByRole("radio", { name: "1m" }));
+    const caption = await screen.findByText(/Каждая пара трассируется заново раз в/);
+    expect(caption.textContent).toMatch(/раз в 5 с /);
+    expect(caption.textContent).not.toMatch(/раз в 5s/);
+  });
+});
+
+/* the Russian is wired ONE smoke pin. */
+describe("MTRPage — Russian", () => {
+  it("names its panes and its honest empty state in Russian", async () => {
+    renderPage({ locale: "ru", destinations: [] });
+
+    expect(await screen.findByRole("region", { name: "Назначения" })).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "История путей" })).toBeInTheDocument();
+
+    // The empty state keeps its caveat AND its remedy: nothing has been traced,
+    // and the place to trace something is Diagnostics.
+    expect(await screen.findByText(/Пока ничего не трассировали\./)).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Запустите MTR из Диагностики" })).toBeInTheDocument();
+  });
+
+  it("counts paths and traces with the right Russian plural form", async () => {
+    renderPage({
+      locale: "ru",
+      destinations: [destinationRow({ snapshotCount: 2, traceCount: 5 })],
+    });
+
+    // 2 → «пути» (few), 5 → «трассировок» (many). A two-form language would
+    // render «2 путей» here.
+    expect(await screen.findByText("2 пути")).toBeInTheDocument();
+    expect(await screen.findByText(/5 трассировок/)).toBeInTheDocument();
   });
 });

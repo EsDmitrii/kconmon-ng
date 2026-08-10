@@ -8,10 +8,8 @@ import (
 	"github.com/EsDmitrii/kconmon-ng/internal/console/checks"
 )
 
-// Plan's node-only path is M3 verbatim: every destination it produces must be
-// a Kind "node" Destination whose Node is the node name, and whose Label --
-// the value that becomes a metric label, a progress frame's "destination",
-// and check_results.destination_node -- is that same name.
+// Plan's node-only path is verbatim: every destination it produces must be a Kind "node"
+// Destination whose Node is the node name.
 func TestNodeDestinationLabelIsTheNodeName(t *testing.T) {
 	d := checks.NodeDestination("node-a")
 	if d.Kind != checks.DestKindNode {
@@ -25,10 +23,7 @@ func TestNodeDestinationLabelIsTheNodeName(t *testing.T) {
 	}
 }
 
-// A target/adhoc destination's Label is its NAME, never its address: the name
-// is the only external field allowed to become an identifier downstream
-// (internal/controller/diagnostics.go's destName comment). An unnamed adhoc
-// destination falls back to the address, since something must identify it.
+// A target/adhoc destination's Label is its NAME, never its address.
 func TestExternalDestinationLabelPrefersName(t *testing.T) {
 	named := checks.Destination{Kind: checks.DestKindTarget, Name: "api-prod", Address: "api.example.com:443"}
 	if got := named.Label(); got != "api-prod" {
@@ -61,9 +56,7 @@ func TestPlanTypedTargetDestinationOnly(t *testing.T) {
 	equalPairs(t, pairs, want)
 }
 
-// Node destinations and typed destinations coexist in one spec: the node half
-// keeps its M3 expansion (and self-pair exclusion), the typed half is appended
-// after it, in order.
+// Node destinations and typed destinations coexist in one spec.
 func TestPlanMixesNodeAndTypedDestinations(t *testing.T) {
 	pairs, err := checks.Plan(checks.Spec{
 		Sources:      []string{"n1"},
@@ -83,10 +76,8 @@ func TestPlanMixesNodeAndTypedDestinations(t *testing.T) {
 	equalPairs(t, pairs, want)
 }
 
-// The full-mesh fallback ("no destinations named -> every node") must NOT fire
-// when the spec names typed destinations only: an operator who asked for one
-// external target does not want a whole-cluster mesh silently added, and an
-// empty node list is not an error in that case either.
+// The full-mesh fallback ("no destinations named -> every node") must NOT fire when the spec names
+// typed destinations only.
 func TestPlanTypedDestinationsSuppressNodeFallback(t *testing.T) {
 	pairs, err := checks.Plan(checks.Spec{
 		Sources:           []string{"n1"},

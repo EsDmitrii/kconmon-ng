@@ -23,8 +23,10 @@ spec:
         {{- include "kconmon-ng.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: controller
     spec:
-      {{- with .Values.serviceAccount.create }}
-      serviceAccountName: {{ include "kconmon-ng.serviceAccountName" $ }}
+      serviceAccountName: {{ include "kconmon-ng.serviceAccountName" . }}
+      {{- with .Values.controller.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
       {{- end }}
       {{- with .Values.controller.nodeSelector }}
       nodeSelector:
@@ -42,6 +44,10 @@ spec:
         - name: controller
           image: "{{ .Values.controller.image.repository }}:{{ .Values.controller.image.tag | default .Chart.AppVersion }}"
           imagePullPolicy: {{ .Values.controller.image.pullPolicy }}
+          {{- with .Values.controller.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           ports:
             - name: http
               containerPort: {{ .Values.config.httpPort }}

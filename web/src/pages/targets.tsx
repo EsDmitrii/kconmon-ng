@@ -1,4 +1,4 @@
-import { useEffect, useId, useMemo, useState, type FormEvent, type ReactNode } from "react";
+import { useCallback, useEffect, useId, useMemo, useState, type FormEvent, type ReactNode } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { PageShell } from "@/components/page-shell";
 import { Badge } from "@/components/ui/badge";
@@ -10,6 +10,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { useAuth } from "@/hooks/use-auth";
 import { useDatabaseAvailable } from "@/hooks/use-capabilities";
 import { useSubmitGuard } from "@/hooks/use-submit-guard";
+import { subscribeToLocation } from "@/lib/location";
 import {
   ApiError,
   checksProjection,
@@ -26,12 +27,13 @@ import {
   updateSchedule,
   updateTarget,
 } from "@/lib/api";
-// Read directly in each mutating component rather than threaded down from the
-// page as a prop: it is a context read, it costs nothing, and every affordance
-// that needs it then states its own dependency instead of inheriting one four
-// levels up. See lib/timemachine.tsx for the hide-vs-disable rule these all
-// follow — `canWrite` decides whether a control EXISTS, this decides whether it
-// is usable right now.
+// Read directly in each mutating component rather than threaded down from the page as a prop: it is
+// a context read.
+import { stampFull, useLocale, useT, type Locale, type Translate, type Vars } from "@/lib/i18n";
+import { pluralKey, targetsDict, type TargetsKey } from "@/lib/i18n/dict/targets";
+/* The ad-hoc address refusal is lib/utils.ts's, shared with the run form on
+   /diagnostics — one rule, one sentence, one table. */
+import { validationDict } from "@/lib/i18n/dict/validation";
 import { useWriteGuard } from "@/lib/timemachine";
 import {
   CHECK_TYPES,
@@ -48,16 +50,73 @@ import {
   type TargetKind,
   type TargetRequest,
 } from "@/lib/types";
-import { ADHOC_ADDRESS_ERROR, CHECKBOX_CLASS, cn, isValidAdhocAddress } from "@/lib/utils";
+import { CHECKBOX_CLASS, cn, isValidAdhocAddress } from "@/lib/utils";
 
+/* The tab STRIP is a value plus the key that names it, not a value plus a
+   label: `Tab` is derived from these values and is a type, while what the
+   segment reads is a translation the page resolves at render. */
 const TABS = [
-  { value: "targets", label: "Targets" },
-  { value: "definitions", label: "Definitions" },
-  { value: "schedules", label: "Schedules" },
-] as const;
+  { value: "targets", labelKey: "tab.targets" },
+  { value: "definitions", labelKey: "tab.definitions" },
+  { value: "schedules", labelKey: "tab.schedules" },
+] as const satisfies readonly { value: string; labelKey: TargetsKey }[];
 type Tab = (typeof TABS)[number]["value"];
 
+/** VIEW_PARAM puts the sub-view in the URL, so a reload, a Back and a pasted
+ *  link all land on the tab the reader was actually looking at. */
+export const VIEW_PARAM = "view";
+
+function tabFromSearch(search: string): Tab {
+  const raw = new URLSearchParams(search).get(VIEW_PARAM);
+  return TABS.some((tb) => tb.value === raw) ? (raw as Tab) : "targets";
+}
+
+/**
+ * useTabParam keeps ?view= and the rendered tab as one value.
+ *
+ * Selecting a tab PUSHES, so Back returns to the previous one rather than
+ * leaving the page entirely; arriving via Back or a reload re-reads the param,
+ * which is why this subscribes instead of reading once on mount the way
+ * alerting's ?rule= does — that one is a landing hint, this one is the
+ * control's own state.
+ */
+function useTabParam(): [Tab, (next: Tab) => void] {
+  const [tab, setTab] = useState<Tab>(() => tabFromSearch(window.location.search));
+
+  useEffect(
+    () =>
+      subscribeToLocation(() => {
+        setTab(tabFromSearch(window.location.search));
+      }),
+    [],
+  );
+
+  const select = useCallback((next: Tab) => {
+    const url = new URL(window.location.href);
+    if (url.searchParams.get(VIEW_PARAM) === next) return;
+    // The default view stays a CLEAN url: /targets, not /targets?view=targets.
+    if (next === "targets") url.searchParams.delete(VIEW_PARAM);
+    else url.searchParams.set(VIEW_PARAM, next);
+    window.history.pushState({}, "", url);
+    setTab(next);
+  }, []);
+
+  return [tab, select];
+}
+
 const TARGET_KINDS: TargetKind[] = ["host", "url"];
+
+/* One field serves both kinds, and the server validates them by two different
+   rules: kind=url wants an http(s) URL with a host, kind=host wants an IP or a
+   resolvable name with an optional port. A single placeholder that showed a URL
+   to someone filling in a HOST was suggesting the exact value that comes back a
+   422 — the same reasoning, and the same shape, as diagnostics.tsx's
+   ADHOC_PLACEHOLDER. Addresses are syntax, so the examples live here rather
+   than in the dictionary. */
+export const TARGET_ADDRESS_PLACEHOLDER: Record<TargetKind, string> = {
+  host: "10.0.0.1 · edge-gateway.internal · 10.0.0.1:8443",
+  url: "https://example.test/health",
+};
 const SOURCE_SELECTIONS: SourceSelection[] = ["all", "per-zone", "one-per-zone"];
 const DESTINATION_KINDS: DestinationKind[] = ["node", "target", "adhoc"];
 
@@ -68,21 +127,7 @@ const DESTINATION_KINDS: DestinationKind[] = ["node", "target", "adhoc"];
  */
 export const PROJECTION_DEBOUNCE_MS = 250;
 
-/* ── 422 → form field ───────────────────────────────────────────────────────
-   A rejected write comes back as RFC 7807 problem+json with exactly four
-   members (docs/console-api.yaml's Problem schema) — there is NO field
-   pointer. So the field a `detail` belongs to is recovered from the field
-   NOUN the server's own message leads with: store.TargetInput.Validate and
-   store.DefinitionInput.Validate build every message as "<resource>: <field>
-   ..." (internal/console/store/targets.go), and the duplicate-name /
-   unknown-target 422s httpapi writes by hand keep the same shape.
-
-   This is a PRESENTATION heuristic, not a contract. A detail that matches no
-   phrase is still shown, verbatim, as a form-level error — the server's words
-   are never dropped on the floor just because this table did not recognise
-   them. Adding a real `errors[]` member to Problem would let this go away;
-   until then, the failure mode is "the message renders one level up", not
-   "the message disappears". */
+/* A detail that matches no phrase is still shown, verbatim, as a form-level error. */
 
 export type TargetField = "name" | "kind" | "address" | "labels";
 export type DefinitionField =
@@ -107,12 +152,10 @@ export const TARGET_FIELD_PHRASES: readonly (readonly [TargetField, string])[] =
 
 export type ScheduleField = "definitionId" | "kind" | "intervalNs" | "runAt";
 
-/** Same most-specific-first rule as the two tables below/above. The one
- *  ordering subtlety: store's enum message ("kind %q must be one of once,
- *  interval, continuous") CONTAINS the word "interval", so it would land on
- *  intervalNs rather than kind — harmless in practice, because the kind
- *  control is a three-option select that cannot produce an invalid kind at
- *  all, and a message that lands one field over still renders in full. */
+/**
+ * Same most-specific-first rule as the two tables below/above; the one ordering subtlety: store's
+ * enum message ("kind %q must be one of once, interval, continuous") CONTAINS the word "interval".
+ */
 export const SCHEDULE_FIELD_PHRASES: readonly (readonly [ScheduleField, string])[] = [
   ["definitionId", "definition id"],
   ["runAt", "run at"],
@@ -165,11 +208,8 @@ function errorsFromProblem<F extends string>(
 /* ── labels ─────────────────────────────────────────────────────────────── */
 
 /**
- * parseLabels reads the "k=v, k=v" text field into the object the API takes.
- * It THROWS on a malformed pair rather than dropping it: a label silently
- * discarded on the way to a FULL-replace PUT is a label deleted from the
- * stored target, which is the one outcome an operator would never guess from
- * the UI.
+ * parseLabels reads the "k=v, k=v" text field into the object the API takes; it THROWS on a
+ * malformed pair rather than dropping.
  */
 export function parseLabels(text: string): Record<string, string> {
   const out: Record<string, string> = {};
@@ -177,10 +217,29 @@ export function parseLabels(text: string): Record<string, string> {
     const part = raw.trim();
     if (part === "") continue;
     const eq = part.indexOf("=");
-    if (eq <= 0) throw new Error(`labels must be "key=value" pairs separated by commas; got ${JSON.stringify(part)}`);
+    if (eq <= 0) throw new LabelSyntaxError(part);
     out[part.slice(0, eq).trim()] = part.slice(eq + 1).trim();
   }
   return out;
+}
+
+/**
+ * LabelSyntaxError is a plain Error with the OFFENDING FRAGMENT attached.
+ *
+ * The message is unchanged, byte for byte — parseLabels is a pure exported
+ * parser and its sentence is pinned as data. What the subclass adds is the one
+ * thing the form needed and could not recover from a formatted string: WHICH
+ * fragment was wrong, so the field can render the same sentence in the reader's
+ * own language with the same quoted bytes in it. A caller that only catches
+ * `Error` and reads `.message` is unaffected.
+ */
+export class LabelSyntaxError extends Error {
+  readonly part: string;
+  constructor(part: string) {
+    super(`labels must be "key=value" pairs separated by commas; got ${JSON.stringify(part)}`);
+    this.name = "LabelSyntaxError";
+    this.part = part;
+  }
 }
 
 export function formatLabels(labels: Record<string, string> | undefined): string {
@@ -254,6 +313,7 @@ function SelectField<T extends string>({
   options,
   error,
   disabled,
+  hint,
 }: {
   label: string;
   value: T;
@@ -261,9 +321,12 @@ function SelectField<T extends string>({
   options: readonly { value: T; label: string }[];
   error?: string;
   disabled?: boolean;
+  /** Why the field reads the way it does — a locked picker owes the reader a reason. */
+  hint?: string;
 }) {
   const id = useId();
   const errorId = `${id}-error`;
+  const hintId = `${id}-hint`;
   return (
     <div className="flex flex-col gap-1 text-[13px]">
       <label htmlFor={id} className="text-muted-foreground">
@@ -274,7 +337,7 @@ function SelectField<T extends string>({
         value={value}
         disabled={disabled}
         aria-invalid={error ? true : undefined}
-        aria-describedby={error ? errorId : undefined}
+        aria-describedby={cn(error ? errorId : undefined, hint ? hintId : undefined) || undefined}
         onChange={(e) => onChange(e.target.value as T)}
         className={cn(fieldClasses(!!error), "disabled:opacity-70")}
       >
@@ -284,6 +347,11 @@ function SelectField<T extends string>({
           </option>
         ))}
       </select>
+      {hint ? (
+        <span id={hintId} className="text-xs leading-relaxed text-muted-foreground">
+          {hint}
+        </span>
+      ) : null}
       {error ? (
         <span id={errorId} role="alert" className="text-xs leading-relaxed text-health-bad">
           {error}
@@ -301,9 +369,13 @@ function plainOptions<T extends string>(values: readonly T[]): { value: T; label
  *  the reader CAN still do, and never render a disabled control in place of
  *  one they simply do not have. */
 function PermissionCard({ permission, children }: { permission: string; children: ReactNode }) {
+  const t = useT(targetsDict);
+  /* The permission STRING is interpolated, never translated: "targets:write"
+     is what an operator asks their admin for and what authz.go's role tables
+     spell. Only the sentence around it is ours. */
   return (
     <Card role="status" className="p-6">
-      <p className="text-sm font-medium">Requires the {permission} permission</p>
+      <p className="text-sm font-medium">{t("permission.requires", { permission })}</p>
       <p className="mt-1 max-w-prose text-xs leading-relaxed text-muted-foreground">{children}</p>
     </Card>
   );
@@ -314,9 +386,10 @@ function EmptyRow({ children }: { children: ReactNode }) {
 }
 
 function ListSkeleton() {
+  const t = useT(targetsDict);
   return (
     <div role="status" aria-live="polite" className="mt-4 flex flex-col gap-2">
-      <span className="sr-only">Loading…</span>
+      <span className="sr-only">{t("loading")}</span>
       {Array.from({ length: 3 }, (_, i) => (
         <Skeleton key={i} className="h-10 w-full" />
       ))}
@@ -328,19 +401,20 @@ function queryErrorMessage(error: unknown, fallback: string): string {
   return error instanceof ApiError ? (error.problem.detail ?? error.problem.title) : fallback;
 }
 
-function fmtTime(timestamp?: string | null): string {
+/** The locale is required: a bare toLocaleString() reorders the date and swaps in AM/PM from
+ *  whatever the browser was installed in — "8/10/2026 3:47 AM" on a Russian page. */
+function fmtTime(timestamp: string | null | undefined, locale: Locale): string {
   if (!timestamp) return "—";
   const d = new Date(timestamp);
-  return Number.isNaN(d.getTime()) ? timestamp : d.toLocaleString();
+  return Number.isNaN(d.getTime()) ? timestamp : stampFull(d, locale);
 }
 
 /* ── Targets tab ────────────────────────────────────────────────────────── */
 
 function TargetForm({ initial, onDone }: { initial?: Target; onDone: () => void }) {
+  const t = useT(targetsDict);
   const qc = useQueryClient();
-  /* guard carries the DISABLED flag AND the reason for it — lib/timemachine's
-     useWriteGuard (QA round 2, finding #18; extended here in round 3). Spread it
-     onto the control, and compose any local condition AFTER the spread. */
+  /* guard carries the DISABLED flag AND the reason for it — lib/timemachine's useWriteGuard. */
   const guard = useWriteGuard();
   const [name, setName] = useState(initial?.name ?? "");
   const [kind, setKind] = useState<TargetKind>(initial?.kind ?? "host");
@@ -359,7 +433,14 @@ function TargetForm({ initial, onDone }: { initial?: Target; onDone: () => void 
     try {
       parsedLabels = parseLabels(labels);
     } catch (err) {
-      setErrors({ labels: err instanceof Error ? err.message : "labels are malformed" });
+      setErrors({
+        labels:
+          err instanceof LabelSyntaxError
+            ? t("targets.form.labelsSyntax", { part: JSON.stringify(err.part) })
+            : err instanceof Error
+              ? err.message
+              : t("targets.form.labelsMalformed"),
+      });
       return;
     }
     // A full replace, so every field goes on the wire — an omitted one means
@@ -372,7 +453,7 @@ function TargetForm({ initial, onDone }: { initial?: Target; onDone: () => void 
       await qc.invalidateQueries({ queryKey: ["targets"] });
       onDone();
     } catch (err) {
-      setErrors(errorsFromProblem(err, TARGET_FIELD_PHRASES, "Failed to save the target"));
+      setErrors(errorsFromProblem(err, TARGET_FIELD_PHRASES, t("targets.form.failed")));
       end();
     }
   }
@@ -380,25 +461,37 @@ function TargetForm({ initial, onDone }: { initial?: Target; onDone: () => void 
   return (
     <Card asChild className="p-6">
       <form onSubmit={handleSubmit} className="flex flex-col gap-4">
-        <h3 className="text-sm font-semibold">{initial ? `Edit ${initial.name}` : "New target"}</h3>
+        <h3 className="text-sm font-semibold">
+          {initial ? t("targets.form.edit", { name: initial.name }) : t("targets.form.create")}
+        </h3>
         <div className="grid gap-4 sm:grid-cols-2">
-          <TextField label="Name" value={name} onChange={setName} error={errors.name} placeholder="edge-gateway" />
+          {/* The placeholders stay: "edge-gateway" and "env=prod, tier=edge"
+              are example VALUES, and a Russian sample label key would be an
+              example nobody can paste. Only the connective in the address
+              placeholder is prose, so only that one is translated. */}
+          <TextField
+            label={t("targets.form.name")}
+            value={name}
+            onChange={setName}
+            error={errors.name}
+            placeholder="edge-gateway"
+          />
           <SelectField
-            label="Kind"
+            label={t("targets.form.kind")}
             value={kind}
             onChange={setKind}
             options={plainOptions(TARGET_KINDS)}
             error={errors.kind}
           />
           <TextField
-            label="Address"
+            label={t("targets.form.address")}
             value={address}
             onChange={setAddress}
             error={errors.address}
-            placeholder="10.0.0.1 or https://example.test/health"
+            placeholder={TARGET_ADDRESS_PLACEHOLDER[kind]}
           />
           <TextField
-            label="Labels"
+            label={t("targets.form.labels")}
             value={labels}
             onChange={setLabels}
             error={errors.labels}
@@ -415,10 +508,10 @@ function TargetForm({ initial, onDone }: { initial?: Target; onDone: () => void 
               nothing, so it stays live — a modal an operator cannot dismiss
               would be the mode holding the page hostage. */}
           <Button type="submit" loading={submitting} {...guard}>
-            {initial ? "Save target" : "Create target"}
+            {initial ? t("targets.form.save") : t("targets.form.createButton")}
           </Button>
           <Button type="button" variant="outline" onClick={onDone}>
-            Cancel
+            {t("cancel")}
           </Button>
         </div>
       </form>
@@ -426,11 +519,29 @@ function TargetForm({ initial, onDone }: { initial?: Target; onDone: () => void 
   );
 }
 
+/**
+ * RowActionLabel is the VISIBLE half of a row button whose label carries the
+ * object's own name.
+ *
+ * "Delete {name}" is the right thing for a screen reader — three "Delete"
+ * buttons in a list are three identical announcements — but a 60-character
+ * target name rendered in full blew the row's width apart (QA scope 2, #22).
+ * The name stays whole in the aria-label and in `title`; only the pixels are
+ * bounded, and the truncation is CSS, so nothing has to guess a character
+ * count for a language it has not seen.
+ */
+function RowActionLabel({ text }: { text: string }) {
+  return (
+    <span aria-hidden="true" className="block max-w-[14rem] truncate" title={text}>
+      {text}
+    </span>
+  );
+}
+
 function TargetRowActions({ target, onEdit }: { target: Target; onEdit: () => void }) {
+  const t = useT(targetsDict);
   const qc = useQueryClient();
-  /* guard carries the DISABLED flag AND the reason for it — lib/timemachine's
-     useWriteGuard (QA round 2, finding #18; extended here in round 3). Spread it
-     onto the control, and compose any local condition AFTER the spread. */
+  /* guard carries the DISABLED flag AND the reason for it — lib/timemachine's useWriteGuard. */
   const guard = useWriteGuard();
   const [confirming, setConfirming] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -446,7 +557,7 @@ function TargetRowActions({ target, onEdit }: { target: Target; onEdit: () => vo
       // A 409 (the target is still referenced by a definition) lands here and
       // is worth every word the server wrote: it names the query that lists
       // the offending definitions.
-      setError(queryErrorMessage(err, "Failed to delete the target"));
+      setError(queryErrorMessage(err, t("targets.row.deleteFailed")));
       setBusy(false);
       setConfirming(false);
     }
@@ -454,26 +565,39 @@ function TargetRowActions({ target, onEdit }: { target: Target; onEdit: () => vo
 
   if (confirming) {
     return (
-      <span className="flex items-center gap-2">
-        <Button size="sm" variant="outline" loading={busy} {...guard} onClick={handleDelete}>
-          Confirm delete {target.name}
+      <span className="flex flex-wrap items-center gap-2">
+        <Button
+          size="sm"
+          variant="outline"
+          loading={busy}
+          {...guard}
+          aria-label={t("targets.row.confirmDelete", { name: target.name })}
+          onClick={handleDelete}
+        >
+          <RowActionLabel text={t("targets.row.confirmDelete", { name: target.name })} />
         </Button>
         <Button size="sm" variant="ghost" onClick={() => setConfirming(false)}>
-          Cancel
+          {t("cancel")}
         </Button>
       </span>
     );
   }
   return (
-    <span className="flex items-center gap-2">
+    <span className="flex flex-wrap items-center gap-2">
       {/* Edit opens a form whose only purpose is to submit a PUT, so it is
           disabled with the write it leads to rather than left to dead-end at a
           greyed Save. */}
-      <Button size="sm" variant="ghost" {...guard} onClick={onEdit}>
-        Edit {target.name}
+      <Button size="sm" variant="ghost" {...guard} aria-label={t("targets.row.edit", { name: target.name })} onClick={onEdit}>
+        <RowActionLabel text={t("targets.row.edit", { name: target.name })} />
       </Button>
-      <Button size="sm" variant="ghost" {...guard} onClick={() => setConfirming(true)}>
-        Delete {target.name}
+      <Button
+        size="sm"
+        variant="ghost"
+        {...guard}
+        aria-label={t("targets.row.delete", { name: target.name })}
+        onClick={() => setConfirming(true)}
+      >
+        <RowActionLabel text={t("targets.row.delete", { name: target.name })} />
       </Button>
       {error ? (
         <span role="alert" className="text-xs text-health-bad">
@@ -485,9 +609,8 @@ function TargetRowActions({ target, onEdit }: { target: Target; onEdit: () => vo
 }
 
 function TargetsTab({ canWrite }: { canWrite: boolean }) {
-  /* guard carries the DISABLED flag AND the reason for it — lib/timemachine's
-     useWriteGuard (QA round 2, finding #18; extended here in round 3). Spread it
-     onto the control, and compose any local condition AFTER the spread. */
+  const t = useT(targetsDict);
+  /* guard carries the DISABLED flag AND the reason for it — lib/timemachine's useWriteGuard. */
   const guard = useWriteGuard();
   const [editing, setEditing] = useState<{ mode: "none" } | { mode: "create" } | { mode: "edit"; target: Target }>({
     mode: "none",
@@ -498,16 +621,13 @@ function TargetsTab({ canWrite }: { canWrite: boolean }) {
   return (
     <div className="flex flex-col gap-4">
       {canWrite ? null : (
-        <PermissionCard permission="targets:write">
-          The list below is complete and current — creating, editing and deleting targets is what needs the extra
-          permission. Ask an operator to change the fleet's probe configuration.
-        </PermissionCard>
+        <PermissionCard permission="targets:write">{t("targets.gate.write")}</PermissionCard>
       )}
 
       {canWrite && editing.mode === "none" ? (
         <div>
           <Button size="sm" {...guard} onClick={() => setEditing({ mode: "create" })}>
-            New target
+            {t("targets.new")}
           </Button>
         </div>
       ) : null}
@@ -521,18 +641,18 @@ function TargetsTab({ canWrite }: { canWrite: boolean }) {
 
       <Card asChild className="p-6">
         <section>
-          <h2 className="text-sm font-semibold">Targets</h2>
+          <h2 className="text-sm font-semibold">{t("targets.heading")}</h2>
           {query.isError ? (
             <p role="alert" className="mt-3 text-sm text-health-bad">
-              {queryErrorMessage(query.error, "Targets are unavailable")}
+              {queryErrorMessage(query.error, t("targets.unavailable"))}
             </p>
           ) : null}
           {query.isLoading ? <ListSkeleton /> : null}
           {!query.isLoading && targets.length === 0 && !query.isError ? (
-            <EmptyRow>No targets yet. External checks probe what is listed here.</EmptyRow>
+            <EmptyRow>{t("targets.empty")}</EmptyRow>
           ) : null}
           {targets.length > 0 ? (
-            <ul aria-label="Targets" className="mt-4 divide-y divide-border">
+            <ul aria-label={t("targets.listAria")} className="mt-4 divide-y divide-border">
               {targets.map((t) => (
                 <li key={t.id} className="flex flex-wrap items-center gap-3 py-3 text-sm">
                   {/* The row's name is the way into the Target card
@@ -549,12 +669,12 @@ function TargetsTab({ canWrite }: { canWrite: boolean }) {
                     {t.name}
                   </a>
                   <Badge variant="neutral">{t.kind}</Badge>
-                  <span className="truncate text-xs text-muted-foreground">{t.address}</span>
+                  <span className="min-w-0 truncate text-xs text-muted-foreground">{t.address}</span>
                   {Object.keys(t.labels).length > 0 ? (
-                    <span className="truncate text-xs text-muted-foreground">{formatLabels(t.labels)}</span>
+                    <span className="min-w-0 truncate text-xs text-muted-foreground">{formatLabels(t.labels)}</span>
                   ) : null}
                   {canWrite ? (
-                    <span className="ml-auto">
+                    <span className="ml-auto flex flex-wrap items-center gap-2">
                       <TargetRowActions target={t} onEdit={() => setEditing({ mode: "edit", target: t })} />
                     </span>
                   ) : null}
@@ -575,24 +695,42 @@ function TargetsTab({ canWrite }: { canWrite: boolean }) {
  *  boolean that gates submit is the one the response carried, so the warning
  *  and the enforcement cannot disagree. See DefinitionForm's projection
  *  comment for why that matters. */
-function projectionWarning(p: Projection): string {
-  return (
-    `~${p.series} series (${p.agents} agents × ${p.protocols} protocol${p.protocols === 1 ? "" : "s"}) — ` +
-    `above the ${p.limit}-series limit; narrow sourceSelection to one-per-zone, or save this definition disabled`
-  );
+function projectionVars(p: Projection, t: Translate<TargetsKey>): Vars {
+  /* The three nouns are looked up per COUNT, not pluralised by a suffix: "5
+     протоколов" and "2 протокола" are different words, and the `${n === 1 ?
+     "" : "s"}` the English used cannot produce either. English resolves all
+     three forms to the word it always used, so the rendered English is
+     unchanged. */
+  return {
+    series: p.series,
+    seriesWord: t(pluralKey(p.series, "count.series.one", "count.series.few", "count.series.many")),
+    agents: p.agents,
+    agentsWord: t(pluralKey(p.agents, "count.agents.one", "count.agents.few", "count.agents.many")),
+    protocols: p.protocols,
+    protocolsWord: t(
+      pluralKey(p.protocols, "count.protocols.one", "count.protocols.few", "count.protocols.many"),
+    ),
+    limit: p.limit,
+  };
 }
 
-function tryParseParams(text: string): { ok: true; value: Record<string, unknown> | undefined } | { ok: false; message: string } {
+/* The two refusals are returned as KEYS rather than sentences: this is a pure
+   parser and must not hold a translator, while the field that renders the
+   result already has one. `params` itself stays untranslated inside both
+   sentences — it is the wire field's name. */
+function tryParseParams(
+  text: string,
+): { ok: true; value: Record<string, unknown> | undefined } | { ok: false; messageKey: TargetsKey } {
   const trimmed = text.trim();
   if (trimmed === "") return { ok: true, value: undefined };
   try {
     const parsed: unknown = JSON.parse(trimmed);
     if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
-      return { ok: false, message: "params must be a JSON object" };
+      return { ok: false, messageKey: "definitions.form.paramsNotObject" };
     }
     return { ok: true, value: parsed as Record<string, unknown> };
   } catch {
-    return { ok: false, message: "params must be valid JSON" };
+    return { ok: false, messageKey: "definitions.form.paramsNotJson" };
   }
 }
 
@@ -605,6 +743,8 @@ function DefinitionForm({
   targets: Target[];
   onDone: () => void;
 }) {
+  const t = useT(targetsDict);
+  const tv = useT(validationDict);
   const qc = useQueryClient();
   /* guard carries the DISABLED flag AND the reason for it — lib/timemachine's
      useWriteGuard (QA round 2, finding #18; extended here in round 3). Spread it
@@ -706,7 +846,7 @@ function DefinitionForm({
     e.preventDefault();
     setErrors({});
     if (!params.ok) {
-      setErrors({ params: params.message });
+      setErrors({ params: t(params.messageKey) });
       return;
     }
     /* The client mirror of store.validateAdhocAddress (QA round 4, finding
@@ -727,7 +867,7 @@ function DefinitionForm({
       // required field, and duplicating it here would give one condition two
       // wordings. This branch is only about a value that IS there and cannot
       // be dialled.
-      setErrors({ destinationAddress: ADHOC_ADDRESS_ERROR });
+      setErrors({ destinationAddress: tv("adhoc.address") });
       return;
     }
     if (!begin()) return;
@@ -737,7 +877,7 @@ function DefinitionForm({
       await qc.invalidateQueries({ queryKey: ["definitions"] });
       onDone();
     } catch (err) {
-      setErrors(errorsFromProblem(err, DEFINITION_FIELD_PHRASES, "Failed to save the definition"));
+      setErrors(errorsFromProblem(err, DEFINITION_FIELD_PHRASES, t("definitions.form.failed")));
       end();
     }
   }
@@ -745,25 +885,37 @@ function DefinitionForm({
   return (
     <Card asChild className="p-6">
       <form onSubmit={handleSubmit} className="flex flex-col gap-4">
-        <h3 className="text-sm font-semibold">{initial ? `Edit ${initial.name}` : "New definition"}</h3>
+        <h3 className="text-sm font-semibold">
+          {initial ? t("definitions.form.edit", { name: initial.name }) : t("definitions.form.create")}
+        </h3>
         <div className="grid gap-4 sm:grid-cols-2">
-          <TextField label="Name" value={name} onChange={setName} error={errors.name} placeholder="edge-gateway-tcp" />
+          {/* Every select below renders its WIRE VALUES as its labels
+              (plainOptions). They stay English because they are not English —
+              they are the strings the API stores and the operator greps for:
+              tcp, one-per-zone, adhoc. Only the field NAMES are translated. */}
+          <TextField
+            label={t("definitions.form.name")}
+            value={name}
+            onChange={setName}
+            error={errors.name}
+            placeholder="edge-gateway-tcp"
+          />
           <SelectField
-            label="Check type"
+            label={t("definitions.form.checkType")}
             value={checkType}
             onChange={setCheckType}
             options={plainOptions(CHECK_TYPES)}
             error={errors.checkType}
           />
           <SelectField
-            label="Source selection"
+            label={t("definitions.form.sourceSelection")}
             value={sourceSelection}
             onChange={setSourceSelection}
             options={plainOptions(SOURCE_SELECTIONS)}
             error={errors.sourceSelection}
           />
           <SelectField
-            label="Destination kind"
+            label={t("definitions.form.destinationKind")}
             value={destinationKind}
             onChange={setDestinationKind}
             options={plainOptions(DESTINATION_KINDS)}
@@ -771,16 +923,19 @@ function DefinitionForm({
           />
           {destinationKind === "target" ? (
             <SelectField
-              label="Destination target"
+              label={t("definitions.form.destinationTarget")}
               value={destinationTargetId}
               onChange={setDestinationTargetId}
-              options={[{ value: "", label: "— pick a target —" }, ...targets.map((t) => ({ value: t.id, label: t.name }))]}
+              options={[
+                { value: "", label: t("definitions.form.pickTarget") },
+                ...targets.map((target) => ({ value: target.id, label: target.name })),
+              ]}
               error={errors.destinationTargetId}
             />
           ) : null}
           {destinationKind === "adhoc" ? (
             <TextField
-              label="Destination address"
+              label={t("definitions.form.destinationAddress")}
               value={destinationAddress}
               onChange={setDestinationAddress}
               error={errors.destinationAddress}
@@ -796,10 +951,11 @@ function DefinitionForm({
               cannot vary should read as a value, and the title says WHY rather
               than leaving an operator to guess whether they lack a permission. */}
           <div className="flex flex-col gap-1 text-[13px]">
-            <span className="text-muted-foreground">Plane</span>
+            <span className="text-muted-foreground">{t("definitions.form.plane")}</span>
+            {/* "pod" is the VALUE, and the one value there is — it stays. */}
             <span
               data-testid="definition-plane"
-              title="Definitions probe from the pod network. M4 ships no second plane, so this is fixed rather than chosen."
+              title={t("definitions.form.planeNote")}
               className="flex h-9 items-center text-[13px]"
             >
               pod
@@ -813,7 +969,7 @@ function DefinitionForm({
         </div>
 
         <TextField
-          label="Params (JSON)"
+          label={t("definitions.form.params")}
           value={paramsText}
           onChange={setParamsText}
           error={errors.params}
@@ -828,7 +984,7 @@ function DefinitionForm({
             onChange={(e) => setEnabled(e.target.checked)}
             className={CHECKBOX_CLASS}
           />
-          Enabled
+          {t("definitions.form.enabled")}
         </label>
 
         {projection ? (
@@ -836,11 +992,7 @@ function DefinitionForm({
             role="status"
             className={cn("nums text-sm", projection.overLimit ? "text-health-bad" : "text-muted-foreground")}
           >
-            {projection.overLimit
-              ? projectionWarning(projection)
-              : `~${projection.series} series (${projection.agents} agents × ${projection.protocols} protocol${
-                  projection.protocols === 1 ? "" : "s"
-                }), limit ${projection.limit}`}
+            {t(projection.overLimit ? "projection.over" : "projection.ok", projectionVars(projection, t))}
           </p>
         ) : null}
 
@@ -852,10 +1004,10 @@ function DefinitionForm({
 
         <div className="flex gap-2">
           <Button type="submit" loading={submitting} {...guard} disabled={blocked || writesDisabled}>
-            {initial ? "Save definition" : "Create definition"}
+            {initial ? t("definitions.form.save") : t("definitions.form.createButton")}
           </Button>
           <Button type="button" variant="outline" onClick={onDone}>
-            Cancel
+            {t("cancel")}
           </Button>
         </div>
       </form>
@@ -864,6 +1016,7 @@ function DefinitionForm({
 }
 
 function DefinitionRowActions({ definition, onEdit }: { definition: CheckDefinition; onEdit: () => void }) {
+  const t = useT(targetsDict);
   const qc = useQueryClient();
   /* guard carries the DISABLED flag AND the reason for it — lib/timemachine's
      useWriteGuard (QA round 2, finding #18; extended here in round 3). Spread it
@@ -880,7 +1033,7 @@ function DefinitionRowActions({ definition, onEdit }: { definition: CheckDefinit
       await deleteCheck(definition.id);
       await qc.invalidateQueries({ queryKey: ["definitions"] });
     } catch (err) {
-      setError(queryErrorMessage(err, "Failed to delete the definition"));
+      setError(queryErrorMessage(err, t("definitions.row.deleteFailed")));
       setBusy(false);
       setConfirming(false);
     }
@@ -888,23 +1041,42 @@ function DefinitionRowActions({ definition, onEdit }: { definition: CheckDefinit
 
   if (confirming) {
     return (
-      <span className="flex items-center gap-2">
-        <Button size="sm" variant="outline" loading={busy} {...guard} onClick={handleDelete}>
-          Confirm delete {definition.name}
+      <span className="flex flex-wrap items-center gap-2">
+        <Button
+          size="sm"
+          variant="outline"
+          loading={busy}
+          {...guard}
+          aria-label={t("definitions.row.confirmDelete", { name: definition.name })}
+          onClick={handleDelete}
+        >
+          <RowActionLabel text={t("definitions.row.confirmDelete", { name: definition.name })} />
         </Button>
         <Button size="sm" variant="ghost" onClick={() => setConfirming(false)}>
-          Cancel
+          {t("cancel")}
         </Button>
       </span>
     );
   }
   return (
-    <span className="flex items-center gap-2">
-      <Button size="sm" variant="ghost" {...guard} onClick={onEdit}>
-        Edit {definition.name}
+    <span className="flex flex-wrap items-center gap-2">
+      <Button
+        size="sm"
+        variant="ghost"
+        {...guard}
+        aria-label={t("definitions.row.edit", { name: definition.name })}
+        onClick={onEdit}
+      >
+        <RowActionLabel text={t("definitions.row.edit", { name: definition.name })} />
       </Button>
-      <Button size="sm" variant="ghost" {...guard} onClick={() => setConfirming(true)}>
-        Delete {definition.name}
+      <Button
+        size="sm"
+        variant="ghost"
+        {...guard}
+        aria-label={t("definitions.row.delete", { name: definition.name })}
+        onClick={() => setConfirming(true)}
+      >
+        <RowActionLabel text={t("definitions.row.delete", { name: definition.name })} />
       </Button>
       {error ? (
         <span role="alert" className="text-xs text-health-bad">
@@ -915,10 +1087,13 @@ function DefinitionRowActions({ definition, onEdit }: { definition: CheckDefinit
   );
 }
 
-function destinationLabel(d: CheckDefinition, targets: Target[]): string {
+/* "every node" is the only one of the three destinations that is a PHRASE
+   rather than a name — the other two return a target's name or an operator's
+   own address, both of which are data. */
+function destinationLabel(d: CheckDefinition, targets: Target[], t: Translate<TargetsKey>): string {
   switch (d.destinationKind) {
     case "node":
-      return "every node";
+      return t("definitions.destination.everyNode");
     case "target":
       return targets.find((t) => t.id === d.destinationTargetId)?.name ?? d.destinationTargetId;
     case "adhoc":
@@ -929,6 +1104,7 @@ function destinationLabel(d: CheckDefinition, targets: Target[]): string {
 }
 
 function DefinitionsTab({ canRead, canWrite }: { canRead: boolean; canWrite: boolean }) {
+  const t = useT(targetsDict);
   /* guard carries the DISABLED flag AND the reason for it — lib/timemachine's
      useWriteGuard (QA round 2, finding #18; extended here in round 3). Spread it
      onto the control, and compose any local condition AFTER the spread. */
@@ -945,27 +1121,19 @@ function DefinitionsTab({ canRead, canWrite }: { canRead: boolean; canWrite: boo
   const targets = targetsQuery.data?.targets ?? [];
 
   if (!canRead) {
-    return (
-      <PermissionCard permission="checks:read">
-        Check definitions say what the fleet probes and how often. Reading them is granted to the operator and admin
-        roles.
-      </PermissionCard>
-    );
+    return <PermissionCard permission="checks:read">{t("definitions.gate.read")}</PermissionCard>;
   }
 
   return (
     <div className="flex flex-col gap-4">
       {canWrite ? null : (
-        <PermissionCard permission="checks:write">
-          The list below is complete and current. Creating, editing and deleting definitions — and asking for the
-          projected series count before enabling one — all need the write permission.
-        </PermissionCard>
+        <PermissionCard permission="checks:write">{t("definitions.gate.write")}</PermissionCard>
       )}
 
       {canWrite && editing.mode === "none" ? (
         <div>
           <Button size="sm" {...guard} onClick={() => setEditing({ mode: "create" })}>
-            New definition
+            {t("definitions.new")}
           </Button>
         </div>
       ) : null}
@@ -980,30 +1148,33 @@ function DefinitionsTab({ canRead, canWrite }: { canRead: boolean; canWrite: boo
 
       <Card asChild className="p-6">
         <section>
-          <h2 className="text-sm font-semibold">Check definitions</h2>
+          <h2 className="text-sm font-semibold">{t("definitions.heading")}</h2>
           {query.isError ? (
             <p role="alert" className="mt-3 text-sm text-health-bad">
-              {queryErrorMessage(query.error, "Check definitions are unavailable")}
+              {queryErrorMessage(query.error, t("definitions.unavailable"))}
             </p>
           ) : null}
           {query.isLoading ? <ListSkeleton /> : null}
           {!query.isLoading && definitions.length === 0 && !query.isError ? (
-            <EmptyRow>No check definitions yet.</EmptyRow>
+            <EmptyRow>{t("definitions.empty")}</EmptyRow>
           ) : null}
           {definitions.length > 0 ? (
-            <ul aria-label="Check definitions" className="mt-4 divide-y divide-border">
+            <ul aria-label={t("definitions.listAria")} className="mt-4 divide-y divide-border">
               {definitions.map((d) => (
                 <li key={d.id} className="flex flex-wrap items-center gap-3 py-3 text-sm">
                   <span className="font-medium">{d.name}</span>
+                  {/* checkType and sourceSelection are the row's own stored
+                      values, shown as they are stored. The PILL beside them is
+                      this page describing a boolean, so it translates. */}
                   <span className="text-xs uppercase tracking-wide text-muted-foreground">{d.checkType}</span>
                   <span className="text-xs text-muted-foreground">
-                    {d.sourceSelection} → {destinationLabel(d, targets)}
+                    {d.sourceSelection} → {destinationLabel(d, targets, t)}
                   </span>
                   <Badge variant={d.enabled ? "ok" : "neutral"} dot>
-                    {d.enabled ? "enabled" : "disabled"}
+                    {d.enabled ? t("definitions.enabled") : t("definitions.disabled")}
                   </Badge>
                   {canWrite ? (
-                    <span className="ml-auto">
+                    <span className="ml-auto flex flex-wrap items-center gap-2">
                       <DefinitionRowActions
                         definition={d}
                         onEdit={() => setEditing({ mode: "edit", definition: d })}
@@ -1031,14 +1202,82 @@ export function fmtIntervalNs(ns: number): string {
   return `${Number((minutes / 60).toFixed(2))}h`;
 }
 
-function cadence(s: Schedule): string {
+/**
+ * intervalParts splits a nanosecond cadence into the number and the UNIT it is
+ * counted in — the same s/m/h ladder fmtIntervalNs walks, kept as data so a
+ * language that inflects can pick a word per unit instead of gluing a letter
+ * onto a digit.
+ */
+export type IntervalUnit = "second" | "minute" | "hour";
+
+export function intervalParts(ns: number): { value: number; unit: IntervalUnit } | null {
+  if (!ns) return null;
+  const seconds = ns / 1_000_000_000;
+  if (seconds < 60) return { value: Number(seconds.toFixed(3)), unit: "second" };
+  const minutes = seconds / 60;
+  if (minutes < 60) return { value: Number(minutes.toFixed(2)), unit: "minute" };
+  return { value: Number((minutes / 60).toFixed(2)), unit: "hour" };
+}
+
+/**
+ * fmtCadence renders "every <interval>" as a SENTENCE in the reader's own
+ * grammar.
+ *
+ * English glues a unit letter onto a number and is done — "every 1m" — so the
+ * English path is left exactly as it was. Russian cannot do that: «каждые 1m»
+ * is not a thing anyone writes, and it was what this row said. So on the
+ * Russian path a cadence of exactly ONE unit takes the singular phrase
+ * («каждую минуту»), and every other count takes a plural phrase with a
+ * NON-DECLINING abbreviation («каждые 5 мин») — the one form that stays
+ * grammatical for every number without carrying a case table around.
+ */
+export interface CadencePhrases {
+  /** "every {interval}" / «каждые {interval}» — the counted form. */
+  interval: (interval: string) => string;
+  /** The phrase for exactly one of each unit: "every minute" / «каждую минуту». */
+  every: Record<IntervalUnit, string>;
+  /** The non-declining unit abbreviation used inside the counted form. */
+  unit: Record<IntervalUnit, string>;
+}
+
+/* The phrases come in rather than a Translate, because the two callers read
+   from two different dictionaries (targets' "schedules.*" and cards'
+   "schedule.*") and one shared key union would have forced them into one. */
+export function fmtCadence(ns: number, locale: Locale, phrases: CadencePhrases): string {
+  const parts = intervalParts(ns);
+  if (locale === "en" || !parts) {
+    return phrases.interval(fmtIntervalNs(ns));
+  }
+  if (parts.value === 1) {
+    return phrases.every[parts.unit];
+  }
+  return phrases.interval(`${parts.value} ${phrases.unit[parts.unit]}`);
+}
+
+/* The cadence is a SENTENCE about a schedule, not the schedule's `kind` field,
+   so it translates — while the fallback for a kind this build has never heard
+   of renders that kind verbatim, because inventing prose for an unknown value
+   would be worse than showing it. */
+function cadence(s: Schedule, locale: Locale, t: Translate<TargetsKey>): string {
   switch (s.kind) {
     case "interval":
-      return `every ${fmtIntervalNs(s.intervalNs)}`;
+      return fmtCadence(s.intervalNs, locale, {
+        interval: (interval) => t("schedules.cadence.interval", { interval }),
+        every: {
+          second: t("schedules.cadence.every.second"),
+          minute: t("schedules.cadence.every.minute"),
+          hour: t("schedules.cadence.every.hour"),
+        },
+        unit: {
+          second: t("schedules.cadence.unit.second"),
+          minute: t("schedules.cadence.unit.minute"),
+          hour: t("schedules.cadence.unit.hour"),
+        },
+      });
     case "once":
-      return `once at ${fmtTime(s.runAt)}`;
+      return t("schedules.cadence.once", { at: fmtTime(s.runAt, locale) });
     case "continuous":
-      return "continuous";
+      return t("schedules.cadence.continuous");
     default:
       return s.kind;
   }
@@ -1107,26 +1346,58 @@ export function localDateTimeToIso(value: string): string | null {
  * message names, through the same fieldForDetail heuristic the other two
  * forms use.
  */
-function ScheduleForm({ definitions, onDone }: { definitions: CheckDefinition[]; onDone: () => void }) {
+function ScheduleForm({
+  initial,
+  definitions,
+  onDone,
+}: {
+  /** Present in EDIT mode: PUT /api/v1/schedules/{id} is a full replace, so the
+   *  form is seeded from the stored row and sends every field back. */
+  initial?: Schedule;
+  definitions: CheckDefinition[];
+  onDone: () => void;
+}) {
+  const t = useT(targetsDict);
+  const { locale } = useLocale();
   const qc = useQueryClient();
   /* guard carries the DISABLED flag AND the reason for it — lib/timemachine's
      useWriteGuard (QA round 2, finding #18; extended here in round 3). Spread it
      onto the control, and compose any local condition AFTER the spread. */
   const guard = useWriteGuard();
-  const [definitionId, setDefinitionId] = useState(definitions[0]?.id ?? "");
-  const [kind, setKind] = useState<ScheduleKind>("interval");
-  const [intervalSeconds, setIntervalSeconds] = useState("60");
+  const [definitionId, setDefinitionId] = useState(initial?.definitionId ?? definitions[0]?.id ?? "");
+  const [kind, setKind] = useState<ScheduleKind>(initial?.kind ?? "interval");
+  const [intervalSeconds, setIntervalSeconds] = useState(
+    initial && initial.intervalNs > 0 ? String(initial.intervalNs / 1_000_000_000) : "60",
+  );
   /* null, not a Date: "no moment chosen yet" is a real state of this field and
      the server refuses a `once` schedule without one. A picker seeded with now
      would offer an instant that is already in the past by the time it is
      submitted. */
-  const [runAt, setRunAt] = useState<Date | null>(null);
-  const [enabled, setEnabled] = useState(true);
+  const [runAt, setRunAt] = useState<Date | null>(initial?.runAt ? new Date(initial.runAt) : null);
+  const [enabled, setEnabled] = useState(initial?.enabled ?? true);
   /* The in-flight guard, not just a disabled look (QA round 5, finding #17):
      begin() is a REF write, so three clicks in one task produce one request.
      hooks/use-submit-guard.ts says why a useState flag cannot do this. */
   const { submitting, begin, end } = useSubmitGuard();
   const [errors, setErrors] = useState<FieldErrors<ScheduleField>>({});
+
+  /* A server 422 describes the value that was SENT. The moment the reader
+     changes that value the message is about something that no longer exists on
+     screen, so it goes — along with any form-level detail, which was a verdict
+     on the same draft. Editing is how someone answers an error; the answer must
+     not be shouted down by the error it answers. */
+  function edit<T>(field: ScheduleField, set: (v: T) => void): (v: T) => void {
+    return (v) => {
+      setErrors((prev) => {
+        if (prev[field] === undefined && prev.form === undefined) return prev;
+        const next = { ...prev };
+        delete next[field];
+        delete next.form;
+        return next;
+      });
+      set(v);
+    };
+  }
 
   async function handleSubmit(e: FormEvent) {
     e.preventDefault();
@@ -1136,14 +1407,21 @@ function ScheduleForm({ definitions, onDone }: { definitions: CheckDefinition[];
     if (kind === "interval") {
       const seconds = Number(intervalSeconds);
       if (!Number.isFinite(seconds) || seconds <= 0) {
-        setErrors({ intervalNs: "interval must be a positive number of seconds" });
+        setErrors({ intervalNs: t("schedules.form.error.interval") });
         return;
       }
       req.intervalNs = Math.round(seconds * 1_000_000_000);
     }
     if (kind === "once") {
       if (runAt === null) {
-        setErrors({ runAt: "kind once requires a run at time" });
+        setErrors({ runAt: t("schedules.form.error.runAt") });
+        return;
+      }
+      /* The picker's disablePast only blocks past DAYS; on today it still hands
+         back a time that has already gone by, and the server answers that with
+         a 422. Saying so here costs no round trip — the 422 remains the net. */
+      if (runAt.getTime() <= Date.now()) {
+        setErrors({ runAt: t("schedules.form.error.runAtPast") });
         return;
       }
       req.runAt = runAt.toISOString();
@@ -1151,11 +1429,12 @@ function ScheduleForm({ definitions, onDone }: { definitions: CheckDefinition[];
 
     if (!begin()) return;
     try {
-      await createSchedule(req);
+      if (initial) await updateSchedule(initial.id, req);
+      else await createSchedule(req);
       await qc.invalidateQueries({ queryKey: ["schedules"] });
       onDone();
     } catch (err) {
-      setErrors(errorsFromProblem(err, SCHEDULE_FIELD_PHRASES, "Failed to save the schedule"));
+      setErrors(errorsFromProblem(err, SCHEDULE_FIELD_PHRASES, t("schedules.form.failed")));
       end();
     }
   }
@@ -1163,37 +1442,50 @@ function ScheduleForm({ definitions, onDone }: { definitions: CheckDefinition[];
   return (
     <Card asChild className="p-6">
       <form onSubmit={handleSubmit} className="flex flex-col gap-4">
-        <h3 className="text-sm font-semibold">New schedule</h3>
+        <h3 className="text-sm font-semibold">
+          {initial
+            ? t("schedules.form.edit", {
+                cadence: cadence(initial, locale, t),
+                name: definitions.find((d) => d.id === initial.definitionId)?.name ?? initial.definitionId,
+              })
+            : t("schedules.form.create")}
+        </h3>
         <div className="grid gap-4 sm:grid-cols-2">
+          {/* Which definition a schedule fires is not a cadence edit; changing
+              it would silently move the row to another check. Editing keeps the
+              picker visible (the reader needs to see WHOSE cadence this is) and
+              locked, with the reason spelled out. */}
           <SelectField
-            label="Definition"
+            label={t("schedules.form.definition")}
             value={definitionId}
-            onChange={setDefinitionId}
+            onChange={edit("definitionId", setDefinitionId)}
+            disabled={!!initial}
+            hint={initial ? t("schedules.form.definitionFixed") : undefined}
             options={[
-              { value: "", label: "— pick a definition —" },
+              { value: "", label: t("schedules.form.pickDefinition") },
               ...definitions.map((d) => ({ value: d.id, label: d.name })),
             ]}
             error={errors.definitionId}
           />
           <SelectField
-            label="Kind"
+            label={t("schedules.form.kind")}
             value={kind}
-            onChange={setKind}
+            onChange={edit("kind", setKind)}
             options={plainOptions(SCHEDULE_KINDS)}
             error={errors.kind}
           />
           {kind === "interval" ? (
             <TextField
-              label="Interval (seconds)"
+              label={t("schedules.form.interval")}
               value={intervalSeconds}
-              onChange={setIntervalSeconds}
+              onChange={edit("intervalNs", setIntervalSeconds)}
               error={errors.intervalNs}
               placeholder="60"
             />
           ) : null}
           {kind === "once" ? (
             <div className="flex flex-col gap-1 text-[13px]">
-              <span className="text-muted-foreground">Run at</span>
+              <span className="text-muted-foreground">{t("schedules.form.runAt")}</span>
               {/* The M5 DateTimePicker, not a raw <input type="datetime-local">
                   (QA round 3, finding #12) — the LAST one in web/src, and the
                   reason the whole console now asks for an instant exactly one
@@ -1218,19 +1510,25 @@ function ScheduleForm({ definitions, onDone }: { definitions: CheckDefinition[];
                   and the Time Machine picker sets neither flag. */}
               <div className="flex items-center gap-1">
                 <DateTimePicker
-                  aria-label="Run at"
+                  aria-label={t("schedules.form.runAt")}
                   aria-invalid={!!errors.runAt}
                   value={runAt}
-                  label={runAt === null ? "Not set" : undefined}
+                  label={runAt === null ? t("schedules.form.runAtNotSet") : undefined}
                   allowFuture
                   disablePast
-                  onApply={setRunAt}
+                  onApply={edit("runAt", setRunAt)}
                 />
                 {/* A field the server requires is still one an operator must be
                     able to un-set while they change their mind about the kind. */}
                 {runAt !== null ? (
-                  <Button type="button" size="sm" variant="ghost" aria-label="Clear run at" onClick={() => setRunAt(null)}>
-                    Clear
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="ghost"
+                    aria-label={t("schedules.form.runAtClearAria")}
+                    onClick={() => edit("runAt", setRunAt)(null)}
+                  >
+                    {t("schedules.form.runAtClear")}
                   </Button>
                 ) : null}
               </div>
@@ -1244,13 +1542,9 @@ function ScheduleForm({ definitions, onDone }: { definitions: CheckDefinition[];
         </div>
 
         <p className="max-w-prose text-xs leading-relaxed text-muted-foreground">
-          {kind === "interval"
-            ? `Intervals below ${MIN_INTERVAL_SECONDS}s are raised to ${MIN_INTERVAL_SECONDS}s.`
-            : null}
-          {kind === "once" ? "A one-off fire, and it must be in the future." : null}
-          {kind === "continuous"
-            ? "Continuous schedules are pushed to the agents and never fire on the scheduler's clock — they carry no interval and no run-at."
-            : null}
+          {kind === "interval" ? t("schedules.form.hint.interval", { seconds: MIN_INTERVAL_SECONDS }) : null}
+          {kind === "once" ? t("schedules.form.hint.once") : null}
+          {kind === "continuous" ? t("schedules.form.hint.continuous") : null}
         </p>
 
         <label className="flex items-center gap-2 text-sm">
@@ -1260,7 +1554,7 @@ function ScheduleForm({ definitions, onDone }: { definitions: CheckDefinition[];
             onChange={(e) => setEnabled(e.target.checked)}
             className={CHECKBOX_CLASS}
           />
-          Enabled
+          {t("schedules.form.enabled")}
         </label>
 
         {errors.form ? (
@@ -1271,10 +1565,10 @@ function ScheduleForm({ definitions, onDone }: { definitions: CheckDefinition[];
 
         <div className="flex gap-2">
           <Button type="submit" loading={submitting} {...guard}>
-            Create schedule
+            {initial ? t("schedules.form.save") : t("schedules.form.createButton")}
           </Button>
           <Button type="button" variant="outline" onClick={onDone}>
-            Cancel
+            {t("cancel")}
           </Button>
         </div>
       </form>
@@ -1287,7 +1581,17 @@ function ScheduleForm({ definitions, onDone }: { definitions: CheckDefinition[];
  *  cadence (scheduleRequestFrom) — and re-enabling a "once" schedule whose
  *  moment has passed is a 422 from the server's future-run-at rule, which is
  *  the honest answer and renders right here rather than being pre-empted. */
-function ScheduleRowActions({ schedule, label }: { schedule: Schedule; label: string }) {
+function ScheduleRowActions({
+  schedule,
+  label,
+  onEdit,
+}: {
+  schedule: Schedule;
+  /** Already carries the cadence — see rowLabel in SchedulesTab, finding 3. */
+  label: string;
+  onEdit: () => void;
+}) {
+  const t = useT(targetsDict);
   const qc = useQueryClient();
   /* guard carries the DISABLED flag AND the reason for it — lib/timemachine's
      useWriteGuard (QA round 2, finding #18; extended here in round 3). Spread it
@@ -1312,24 +1616,29 @@ function ScheduleRowActions({ schedule, label }: { schedule: Schedule; label: st
 
   if (confirming) {
     return (
-      <span className="flex items-center gap-2">
+      <span className="flex flex-wrap items-center gap-2">
         <Button
           size="sm"
           variant="outline"
           loading={busy}
           {...guard}
-          onClick={() => run(() => deleteSchedule(schedule.id), "Failed to delete the schedule")}
+          aria-label={t("schedules.row.confirmDelete", { name: label })}
+          onClick={() => run(() => deleteSchedule(schedule.id), t("schedules.row.deleteFailed"))}
         >
-          Confirm delete {label}
+          <RowActionLabel text={t("schedules.row.confirmDelete", { name: label })} />
         </Button>
         <Button size="sm" variant="ghost" onClick={() => setConfirming(false)}>
-          Cancel
+          {t("cancel")}
         </Button>
       </span>
     );
   }
   return (
-    <span className="flex items-center gap-2">
+    <span className="flex flex-wrap items-center gap-2">
+      {/* One key per direction rather than a translated verb glued to a name:
+          «Включить X» and «Выключить X» are two whole sentences, and the
+          English `{verb} {label}` shape cannot produce either without the
+          interpolation being in the wrong half. */}
       <Button
         size="sm"
         variant="ghost"
@@ -1338,14 +1647,44 @@ function ScheduleRowActions({ schedule, label }: { schedule: Schedule; label: st
         onClick={() =>
           run(
             () => updateSchedule(schedule.id, scheduleRequestFrom(schedule, !schedule.enabled)),
-            "Failed to update the schedule",
+            t("schedules.row.updateFailed"),
           )
         }
+        aria-label={
+          schedule.enabled
+            ? t("schedules.row.disable", { name: label })
+            : t("schedules.row.enable", { name: label })
+        }
       >
-        {schedule.enabled ? "Disable" : "Enable"} {label}
+        <RowActionLabel
+          text={
+            schedule.enabled
+              ? t("schedules.row.disable", { name: label })
+              : t("schedules.row.enable", { name: label })
+          }
+        />
       </Button>
-      <Button size="sm" variant="ghost" {...guard} onClick={() => setConfirming(true)}>
-        Delete {label}
+      <Button
+        size="sm"
+        variant="ghost"
+        loading={busy}
+        {...guard}
+        aria-label={t("schedules.row.edit", { name: label })}
+        onClick={onEdit}
+      >
+        <RowActionLabel text={t("schedules.row.edit", { name: label })} />
+      </Button>
+      {/* loading={busy} for the same reason the toggle carries it: while one of
+          this row's writes is in flight, none of the others may start. */}
+      <Button
+        size="sm"
+        variant="ghost"
+        loading={busy}
+        {...guard}
+        aria-label={t("schedules.row.delete", { name: label })}
+        onClick={() => setConfirming(true)}
+      >
+        <RowActionLabel text={t("schedules.row.delete", { name: label })} />
       </Button>
       {error ? (
         <span role="alert" className="text-xs text-health-bad">
@@ -1368,11 +1707,15 @@ function ScheduleRowActions({ schedule, label }: { schedule: Schedule; label: st
  * the write affordances ABSENT rather than disabled (PAGES.md:126-129).
  */
 function SchedulesTab({ canRead, canWrite }: { canRead: boolean; canWrite: boolean }) {
+  const t = useT(targetsDict);
+  const { locale } = useLocale();
   /* guard carries the DISABLED flag AND the reason for it — lib/timemachine's
      useWriteGuard (QA round 2, finding #18; extended here in round 3). Spread it
      onto the control, and compose any local condition AFTER the spread. */
   const guard = useWriteGuard();
-  const [creating, setCreating] = useState(false);
+  const [editing, setEditing] = useState<
+    { mode: "none" } | { mode: "create" } | { mode: "edit"; schedule: Schedule }
+  >({ mode: "none" });
   const query = useQuery({ queryKey: ["schedules"], queryFn: () => listSchedules(), enabled: canRead });
   // Named, not numbered: a schedule row that shows only a definition UUID
   // tells an operator nothing. Same ["definitions"] cache entry the
@@ -1380,75 +1723,115 @@ function SchedulesTab({ canRead, canWrite }: { canRead: boolean; canWrite: boole
   const definitionsQuery = useQuery({ queryKey: ["definitions"], queryFn: () => listChecks(), enabled: canRead });
   const schedules = query.data?.schedules ?? [];
   const definitions = definitionsQuery.data?.definitions ?? [];
-  const names = useMemo(() => {
-    const map = new Map<string, string>();
-    for (const d of definitionsQuery.data?.definitions ?? []) map.set(d.id, d.name);
+  /* The whole definition, not just its name: a schedule's row needs the
+     definition's `enabled` flag too, because an enabled schedule under a
+     DISABLED definition fires nothing at all (finding 25). */
+  const defs = useMemo(() => {
+    const map = new Map<string, CheckDefinition>();
+    for (const d of definitionsQuery.data?.definitions ?? []) map.set(d.id, d);
     return map;
   }, [definitionsQuery.data]);
 
   if (!canRead) {
-    return (
-      <PermissionCard permission="checks:read">
-        Schedules have no read permission of their own — listing them rides on the definitions they belong to.
-      </PermissionCard>
-    );
+    return <PermissionCard permission="checks:read">{t("schedules.gate.read")}</PermissionCard>;
   }
 
   return (
     <div className="flex flex-col gap-4">
       {canWrite ? null : (
-        <PermissionCard permission="schedules:write">
-          The list below is complete and current. Creating a cadence, enabling or disabling one, and deleting one all
-          need the write permission — reading them only needs checks:read.
-        </PermissionCard>
+        <PermissionCard permission="schedules:write">{t("schedules.gate.write")}</PermissionCard>
       )}
 
-      {canWrite && !creating ? (
+      {canWrite && editing.mode === "none" ? (
         <div>
-          <Button size="sm" {...guard} onClick={() => setCreating(true)}>
-            New schedule
+          <Button size="sm" {...guard} onClick={() => setEditing({ mode: "create" })}>
+            {t("schedules.new")}
           </Button>
         </div>
       ) : null}
-      {canWrite && creating ? <ScheduleForm definitions={definitions} onDone={() => setCreating(false)} /> : null}
+      {canWrite && editing.mode !== "none" ? (
+        <ScheduleForm
+          key={editing.mode === "edit" ? editing.schedule.id : "create"}
+          initial={editing.mode === "edit" ? editing.schedule : undefined}
+          definitions={definitions}
+          onDone={() => setEditing({ mode: "none" })}
+        />
+      ) : null}
 
       <Card asChild className="p-6">
         <section>
-          <h2 className="text-sm font-semibold">Schedules</h2>
+          <h2 className="text-sm font-semibold">{t("schedules.heading")}</h2>
           {query.isError ? (
             <p role="alert" className="mt-3 text-sm text-health-bad">
-              {queryErrorMessage(query.error, "Schedules are unavailable")}
+              {queryErrorMessage(query.error, t("schedules.unavailable"))}
             </p>
           ) : null}
           {query.isLoading ? <ListSkeleton /> : null}
           {!query.isLoading && schedules.length === 0 && !query.isError ? (
-            <EmptyRow>No schedules yet.</EmptyRow>
+            <EmptyRow>{t("schedules.empty")}</EmptyRow>
           ) : null}
           {schedules.length > 0 ? (
-            <ul aria-label="Schedules" className="mt-4 divide-y divide-border">
+            <ul aria-label={t("schedules.listAria")} className="mt-4 divide-y divide-border">
               {schedules.map((s) => {
-                const label = names.get(s.definitionId) ?? s.definitionId;
+                const def = defs.get(s.definitionId);
+                const label = def?.name ?? s.definitionId;
+                const cadenceText = cadence(s, locale, t);
+                /* Two schedules of one definition used to produce two IDENTICAL
+                   action names ("Delete gw-tcp"), which is unusable by voice or
+                   by screen reader. The cadence is what actually tells them
+                   apart, so it rides in the accessible name (finding 3). */
+                const rowLabel = t("schedules.rowAria", { name: label, cadence: cadenceText });
                 /* A schedule ALWAYS advances its cadence, fired or not — so
                    before finding #5 a schedule whose definition pointed at a
                    deleted target looked exactly like a healthy one: enabled, a
                    fresh "last", a "next" a minute out. The pill carries the
                    state and the line carries the reason. */
-                const failing = s.enabled && s.lastError !== "";
+                const paused = s.enabled && def !== undefined && !def.enabled;
+                /* The failure is shown whether or not the schedule is switched
+                   on: a run that failed, failed. Switching the cadence off
+                   afterwards does not unmake it, and hiding the reason is how
+                   an operator loses the only record of why. */
+                const failing = s.lastError !== "";
                 return (
                   <li key={s.id} className="flex flex-wrap items-center gap-3 py-3 text-sm">
                     <span className="font-medium">{label}</span>
+                    {/* s.kind is the stored value (once/interval/continuous)
+                        and stays; the cadence next to it is the sentence this
+                        page builds out of it, so that one translates. */}
                     <Badge variant="neutral">{s.kind}</Badge>
-                    <span className="text-xs text-muted-foreground">{cadence(s)}</span>
-                    <Badge variant={!s.enabled ? "neutral" : failing ? "warn" : "ok"} dot>
-                      {s.enabled ? "enabled" : "disabled"}
+                    <span className="text-xs text-muted-foreground">{cadenceText}</span>
+                    {/* Paused is its own state, not a shade of "enabled": the
+                        row IS on, and it still fires nothing, because the
+                        definition behind it is off. Saying "enabled" here was
+                        the console contradicting what the scheduler does. */}
+                    <Badge
+                      variant={paused ? "unknown" : !s.enabled ? "neutral" : failing ? "warn" : "ok"}
+                      dot
+                      title={paused ? t("schedules.paused.title", { name: label }) : undefined}
+                    >
+                      {paused
+                        ? t("schedules.paused")
+                        : s.enabled
+                          ? t("schedules.enabled")
+                          : t("schedules.disabled")}
                     </Badge>
                     {/* nextFireAt is null for a continuous schedule (the loop
                         never fires one) and for a retired "once" — fmtTime
                         renders that as an em dash rather than inventing a
                         time. */}
-                    <span className="ml-auto text-xs text-muted-foreground">next {fmtTime(s.nextFireAt)}</span>
-                    <span className="text-xs text-muted-foreground">last {fmtTime(s.lastFiredAt)}</span>
-                    {canWrite ? <ScheduleRowActions schedule={s} label={label} /> : null}
+                    <span className="ml-auto text-xs text-muted-foreground">
+                      {t("schedules.row.next", { at: fmtTime(s.nextFireAt, locale) })}
+                    </span>
+                    <span className="text-xs text-muted-foreground">
+                      {t("schedules.row.last", { at: fmtTime(s.lastFiredAt, locale) })}
+                    </span>
+                    {canWrite ? (
+                      <ScheduleRowActions
+                        schedule={s}
+                        label={rowLabel}
+                        onEdit={() => setEditing({ mode: "edit", schedule: s })}
+                      />
+                    ) : null}
                     {failing ? (
                       /* Full width (basis-full) under the row rather than
                          inline: the server's own message is a sentence, and
@@ -1458,9 +1841,9 @@ function SchedulesTab({ canRead, canWrite }: { canRead: boolean; canWrite: boole
                       <p
                         data-testid="schedule-failure"
                         className="basis-full text-xs leading-relaxed text-health-bad"
-                        title={s.lastErrorAt ? `Recorded ${fmtTime(s.lastErrorAt)}` : undefined}
+                        title={s.lastErrorAt ? t("schedules.row.recorded", { at: fmtTime(s.lastErrorAt, locale) }) : undefined}
                       >
-                        failing: {s.lastError}
+                        {t("schedules.row.failing", { message: s.lastError })}
                       </p>
                     ) : null}
                   </li>
@@ -1519,9 +1902,10 @@ function SchedulesTab({ canRead, canWrite }: { canRead: boolean; canWrite: boole
  * about, applied to `me` as well.
  */
 export function TargetsPage() {
+  const t = useT(targetsDict);
   const { me, can } = useAuth();
   const { available: dbAvailable, resolved: dbResolved } = useDatabaseAvailable();
-  const [tab, setTab] = useState<Tab>("targets");
+  const [tab, setTab] = useTabParam();
 
   const authResolved = me !== undefined;
 
@@ -1529,28 +1913,28 @@ export function TargetsPage() {
   if (!authResolved || !dbResolved) {
     body = (
       <Card role="status" aria-live="polite" className="p-6">
-        <span className="sr-only">Loading…</span>
+        <span className="sr-only">{t("loading")}</span>
         <Skeleton className="h-10 w-full" />
       </Card>
     );
   } else if (!can("targets:read")) {
-    body = (
-      <PermissionCard permission="targets:read">
-        External targets, their check definitions and their schedules are configuration, not telemetry: reading them is
-        granted to the operator and admin roles, and deliberately not to viewer — which is the role an anonymous
-        session gets. Sign in with an account that holds it.
-      </PermissionCard>
-    );
+    body = <PermissionCard permission="targets:read">{t("gate.read")}</PermissionCard>;
   } else if (!dbAvailable) {
     body = (
       <Card role="status" className="p-6">
-        <p className="text-sm">Targets, definitions and schedules are stored in the database — set console.database.mode</p>
+        {/* console.database.mode is a config key and stays one. */}
+        <p className="text-sm">{t("gate.noDatabase")}</p>
       </Card>
     );
   } else {
     body = (
       <>
-        <Segmented aria-label="Section" options={TABS} value={tab} onChange={setTab} />
+        <Segmented
+          aria-label={t("tabs.aria")}
+          options={TABS.map((tb) => ({ value: tb.value, label: t(tb.labelKey) }))}
+          value={tab}
+          onChange={setTab}
+        />
         {tab === "targets" ? <TargetsTab canWrite={can("targets:write")} /> : null}
         {tab === "definitions" ? (
           <DefinitionsTab canRead={can("checks:read")} canWrite={can("checks:write")} />
@@ -1563,10 +1947,9 @@ export function TargetsPage() {
   }
 
   return (
-    <PageShell
-      title="Targets & Schedules"
-      description="External probe targets, the check definitions that point at them, and their schedules."
-    >
+    /* The title is the SAME words the sidebar's nav.targets uses — one surface,
+       one name, wherever the operator reads it. */
+    <PageShell title={t("title")} description={t("description")}>
       {body}
     </PageShell>
   );

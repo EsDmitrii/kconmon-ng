@@ -1,62 +1,4 @@
-// Package promrules is the Console's PrometheusRule sync: it renders the
-// alert_rules table into ONE PrometheusRule object and server-side-applies it
-// into the Console's own namespace (M7 Decision 3).
-//
-// # What it is, and what it deliberately is not
-//
-// It is a CONVERGENCE loop, not an event pipeline. Prometheus evaluates alert
-// rules; the Console only makes sure the cluster is holding the bytes the
-// database says it should. Nothing here reads alert state, nothing here talks
-// to Alertmanager, and nothing here decides that an alert fired.
-//
-// It is also the only part of the Console besides kubectx that talks to the
-// apiserver, and its grant is deliberately the smallest one that can do the
-// job: a namespaced Role over exactly one resource
-// (monitoring.coreos.com/v1 prometheusrules), never a ClusterRole. The
-// constructor takes a dynamic.Interface rather than building one, so the
-// in-cluster config lives in cmd/console next to kubectx's -- internal/console
-// must not import internal/controller, and cmd is where that copy already is.
-//
-// # Every replica runs this loop, on purpose (Decision 5)
-//
-// The scheduler serializes itself on a PostgreSQL advisory lock and this does
-// not, and the difference is not an oversight. The scheduler FIRES SIDE
-// EFFECTS: two replicas ticking together would run one check twice, and there
-// is no way to undo the second run. This loop ASSERTS STATE: every replica
-// renders the same bytes from the same rows and applies them with the same
-// field manager, so N replicas racing produce exactly the object one replica
-// would have produced. Last write wins, and every candidate write is identical.
-//
-// The cost of a lock here would be real -- a replica that cannot get the lock
-// does not converge, so a wedged lock holder becomes a silent sync outage --
-// and the benefit is a few redundant PATCHes a minute. The jittered interval is
-// what keeps those PATCHes from arriving in lockstep.
-//
-// # Drift semantics: RECORD, THEN FIX
-//
-// A reconcile ALWAYS re-asserts our bytes. Drift is what we OBSERVED in the
-// live object immediately BEFORE re-asserting, and it is recorded on the rules
-// so an operator learns that somebody edited the CRD by hand -- not so the
-// console can leave the hand edit in place. There is no mode in which this
-// package sees drift and declines to fix it.
-//
-// That has one consequence worth stating plainly, because it looks like a bug
-// in the status column and is not: a rule that reports sync_status=drift also
-// carries a fresh last_synced_at. Both are true. The drift was observed, the
-// apply then happened, and the very next reconcile will report the same rule
-// as synced. A status of drift means "the cluster had diverged as of
-// last_synced_at, and we corrected it", never "the cluster is diverged right
-// now and we left it".
-//
-// # Failure is a status, never a crash
-//
-// The PrometheusRule CRD may not exist (the Prometheus Operator is not a
-// dependency of this chart), the Role may not have been applied, the apiserver
-// may be down. Every one of those is written back onto every enabled rule as
-// sync_status=error with a message naming the CAUSE CLASS (crd-missing,
-// forbidden, other), and the loop keeps its cadence. The rules themselves live
-// in PostgreSQL, so a degraded sync costs an operator nothing but the
-// alerting: the builder, the list and the API all keep working.
+// Package promrules is the Console's PrometheusRule sync; Prometheus evaluates alert rules.
 package promrules
 
 import (
@@ -93,36 +35,25 @@ var GVR = schema.GroupVersionResource{
 }
 
 const (
-	// FieldManager is the server-side-apply field manager the console owns.
-	// Every apply uses it AND force=true, which is correct precisely because
-	// the object is ours end to end: force only ever takes fields back from
-	// whoever edited them out of band, which is the drift this package exists
-	// to correct.
+	// FieldManager is the server-side-apply field manager the console owns; every apply uses it AND
+	// force=true, which is correct precisely because the object is ours end to end.
 	FieldManager = "kconmon-ng-console"
 
-	// DefaultInterval backs up config validation. The reconciler is only ever
-	// built from a validated config, so a non-positive interval here means a
-	// hand-built caller -- repaired rather than trusted, because a zero would
-	// be a hot apply loop against the apiserver.
+	// DefaultInterval backs up config validation; the reconciler is only ever built from a validated
+	// config.
 	DefaultInterval = 60 * time.Second
 
-	// jitterFraction is the +/-20% spread on the interval. Same constant and
-	// same idiom as the webhook dispatcher's retry spread, for the same
-	// reason: N replicas started by one rollout must not converge on the same
-	// second forever.
+	// jitterFraction is the +/-20% spread on the interval; same constant and same idiom as the webhook
+	// dispatcher's retry spread, for the same reason.
 	jitterFraction = 0.2
 
-	// syncMessageMaxLen mirrors store's alertRuleSyncMessageMaxLen. The store
-	// would reject a longer message and the reconciler would then log a write
-	// failure instead of recording the outcome it just observed, so the bound
-	// is applied HERE, where the message is built.
+	// syncMessageMaxLen mirrors store's alertRuleSyncMessageMaxLen; the store would reject a longer
+	// message and the reconciler would then log a write failure instead of recording the outcome it
+	// just observed.
 	syncMessageMaxLen = 1024
 	truncationMarker  = "..."
 
-	// logRateLimit bounds this package's own logging. A cluster with no CRD
-	// produces one failing reconcile per interval forever; at one line a
-	// minute per key that is a readable signal, at one line per reconcile it
-	// is noise an operator learns to ignore.
+	// logRateLimit bounds this package's own logging.
 	logRateLimit = time.Minute
 )
 
@@ -154,10 +85,8 @@ type Client struct {
 	namespace string
 }
 
-// NewClient binds dyn to one namespace. The dynamic.Interface is built by the
-// caller (cmd/console, from the in-cluster REST config) for kubectx's reason:
-// this package must be constructible in a test with a fake client and no
-// cluster anywhere.
+// NewClient binds dyn to one namespace; the dynamic.Interface is built by the caller (cmd/console,
+// from the in-cluster REST config) for kubectx's reason.
 func NewClient(dyn dynamic.Interface, namespace string) (*Client, error) {
 	if dyn == nil {
 		return nil, errors.New("promrules: dynamic client must not be nil")
@@ -172,10 +101,7 @@ func NewClient(dyn dynamic.Interface, namespace string) (*Client, error) {
 // Namespace reports the namespace this client is bound to.
 func (c *Client) Namespace() string { return c.namespace }
 
-// Apply server-side-applies obj. One call, no read-modify-write and no
-// create-then-update fallback: SSA creates the object when it is absent and
-// merges when it is present, and adding a fallback would only mean a second
-// code path that a real apiserver never takes.
+// Apply server-side-applies obj; one call, no read-modify-write and no create-then-update fallback.
 func (c *Client) Apply(ctx context.Context, obj *unstructured.Unstructured) (*unstructured.Unstructured, error) {
 	return c.ri.Apply(ctx, obj.GetName(), obj, metav1.ApplyOptions{
 		FieldManager: FieldManager,
@@ -190,10 +116,8 @@ func (c *Client) Get(ctx context.Context, name string) (*unstructured.Unstructur
 	return c.ri.Get(ctx, name, metav1.GetOptions{})
 }
 
-// ForeignRule is one PrometheusRule in the namespace that the console does NOT
-// own (M7 Decision 4). It is listed read-only; adoption is an explicit import
-// that copies the groups into builder rows and creates a NEW object, and this
-// package never mutates a foreign object under any circumstance.
+// ForeignRule is one PrometheusRule in the namespace that the console does NOT own; it is listed
+// read-only.
 type ForeignRule struct {
 	// Name is the object's name.
 	Name string
@@ -203,27 +127,17 @@ type ForeignRule struct {
 	// and recording alike, because a recording rule is still something an
 	// import would have to carry.
 	Rules int
-	// ManagedBy is the value of app.kubernetes.io/managed-by, or "" when the
-	// object carries no such label. Surfaced because "managed by some other
-	// chart" and "managed by nobody" are different facts for an operator
-	// deciding whether to import.
+	// ManagedBy is the value of app.kubernetes.io/managed-by, or "" when the object carries no such
+	// label.
 	ManagedBy string
-	// Object is the raw object, handed straight to the API layer (Task 4).
-	// Carried rather than projected because an import has to read the actual
-	// groups, and a second projection here would be a shape to keep in sync.
+	// Object is the raw object, handed straight to the API layer; carried rather than projected
+	// because an import has to read the actual groups.
 	Object *unstructured.Unstructured
 }
 
-// ListForeign returns every PrometheusRule in the namespace that is not ours,
-// sorted by name.
-//
-// The filter is CLIENT-SIDE on purpose. The server-side alternative
-// (`app.kubernetes.io/managed-by!=kconmon-ng-console`) is subtly wrong-adjacent
-// -- an inequality selector also matches objects with no such label, which is
-// what we want, but it makes the definition of "foreign" live in a selector
-// string instead of next to the constant it is checked against. The list is a
-// namespace's worth of PrometheusRules, dozens at the very most, so there is
-// nothing to optimise.
+// ListForeign returns every PrometheusRule in the namespace that is not ours, sorted by name; the
+// server-side alternative (`app.kubernetes.io/managed-by!=kconmon-ng-console`) is subtly
+// wrong-adjacent.
 func (c *Client) ListForeign(ctx context.Context) ([]ForeignRule, error) {
 	list, err := c.ri.List(ctx, metav1.ListOptions{})
 	if err != nil {
@@ -249,10 +163,8 @@ func (c *Client) ListForeign(ctx context.Context) ([]ForeignRule, error) {
 	return out, nil
 }
 
-// countGroups counts spec.groups and the rule entries inside them. Every shape
-// that is not what the CRD promises counts as zero rather than erroring: this
-// is a read of somebody else's object, and refusing to list a malformed
-// foreign rule would hide it from the operator who needs to see it most.
+// countGroups counts spec.groups and the rule entries inside them; every shape that is not what the
+// CRD promises counts as zero rather than erroring.
 func countGroups(obj *unstructured.Unstructured) (groups, rules int) {
 	raw, found, err := unstructured.NestedSlice(obj.Object, "spec", "groups")
 	if !found || err != nil {
@@ -277,20 +189,8 @@ func countGroups(obj *unstructured.Unstructured) (groups, rules int) {
 // Drift
 // ---------------------------------------------------------------------------
 
-// Compare reports whether the live object diverges from the desired one on the
-// fields the console RENDERS, and returns a compact diff when it does.
-//
-// Only the rendered fields are compared, and that scope is the whole design.
-// A live object carries resourceVersion, uid, creationTimestamp, managedFields
-// and whatever annotations the cluster's own tooling stapled on; none of that
-// is ours, none of it is something an apply would change, and comparing it
-// would report drift on every single reconcile forever. What IS compared:
-// spec, our managed-by label, and our rule-ids annotation -- exactly the three
-// things RenderBundle produces.
-//
-// It takes desired explicitly rather than reading it off a Reconciler field:
-// the desired bundle is per-reconcile state, and hanging it off the loop would
-// make this racy for no gain. Pure function, no I/O, no clock.
+// Compare reports whether the live object diverges from the desired one on the fields the console
+// RENDERS; only the rendered fields are compared, and that scope is the whole design.
 func Compare(desired, live *unstructured.Unstructured) (drift bool, diff string) {
 	want := renderRelevantJSON(desired)
 	got := renderRelevantJSON(live)
@@ -300,10 +200,7 @@ func Compare(desired, live *unstructured.Unstructured) (drift bool, diff string)
 	return true, lineDiff(want, got)
 }
 
-// renderRelevantJSON projects an object down to the fields we own and renders
-// them as stable, indented JSON. encoding/json sorts map keys, so the same
-// object always produces the same bytes -- which is what makes a byte
-// comparison a legitimate drift test.
+// renderRelevantJSON projects an object down to the fields we own and renders them as stable.
 func renderRelevantJSON(obj *unstructured.Unstructured) string {
 	if obj == nil {
 		return "<absent>"
@@ -331,14 +228,8 @@ func renderRelevantJSON(obj *unstructured.Unstructured) string {
 	return string(out)
 }
 
-// lineDiff renders a compact unified-ish diff of two texts.
-//
-// It is NOT a minimal edit script and does not try to be. The common prefix
-// and suffix are elided and the divergent middle is printed whole, which for
-// the shape this actually sees -- one expression changed, one rule added,
-// somebody's editor reindented a block -- reads exactly like a real diff at a
-// fraction of the cost. An LCS would be O(n*m) per reconcile to produce a
-// better rendering of a string that is then truncated to 1 KiB anyway.
+// lineDiff renders a compact unified-ish diff of two texts; an LCS would be O(n*m) per reconcile to
+// produce a better rendering of a string that is then truncated to 1 KiB anyway.
 func lineDiff(want, got string) string {
 	a := strings.Split(want, "\n")
 	b := strings.Split(got, "\n")
@@ -369,10 +260,7 @@ func lineDiff(want, got string) string {
 	return strings.TrimRight(sb.String(), "\n")
 }
 
-// truncate bounds s at syncMessageMaxLen bytes INCLUDING the marker, cutting
-// on a rune boundary. Same shape and same reason as kubectx's message bound:
-// the column has a length CHECK, and a message the store rejects turns a
-// recorded outcome into a logged write failure.
+// truncate bounds s at syncMessageMaxLen bytes INCLUDING the marker, cutting on a rune boundary.
 func truncate(s string) string {
 	if len(s) <= syncMessageMaxLen {
 		return s
@@ -392,16 +280,8 @@ func truncate(s string) string {
 // Error classification
 // ---------------------------------------------------------------------------
 
-// Classify names the cause class of a failed API call.
-//
-// The NotFound case is the one that needs stating. A dynamic client builds its
-// URL from the GVR without consulting discovery, so a request for a resource
-// no apiserver serves comes back as a 404 -- the same status code a missing
-// OBJECT produces. That ambiguity is harmless HERE and only here: Apply
-// creates the object when it is absent, so an apply can never 404 on a missing
-// object. A NotFound from an APPLY therefore means the RESOURCE is missing,
-// which is the CRD. (Get is ambiguous, which is why Reconcile never classifies
-// a failed Get -- it just skips the drift observation.)
+// Classify names the cause class of a failed API call; that ambiguity is harmless HERE and only
+// here: Apply creates the object when it is absent.
 func Classify(err error) string {
 	switch {
 	case err == nil:
@@ -438,10 +318,7 @@ func causeMessage(cause, namespace string, err error) string {
 // Reconciler
 // ---------------------------------------------------------------------------
 
-// Store is the narrow store seam: the two methods this package calls, and no
-// others. Same convention checks.Runner's Store follows -- a local interface
-// naming exactly what is used, so a test substitutes a fake without a database
-// and a reader can see the whole persistence surface in four lines.
+// Store is the narrow store seam: the two methods this package calls.
 type Store interface {
 	// ListAlertRules(ctx, true) is the only call made: the reconciler renders
 	// ENABLED rules and nothing else.
@@ -473,10 +350,8 @@ type Reconciler struct {
 	bundleName string
 	interval   time.Duration
 
-	// kick is capacity 1, which IS the coalescing rule: a kick that arrives
-	// while a reconcile is in flight queues exactly one more pass, and ten
-	// kicks in the same second queue exactly one. Anything larger would let a
-	// burst of CRUD writes schedule a burst of identical applies.
+	// kick is capacity 1, which IS the coalescing rule; anything larger would let a burst of CRUD
+	// writes schedule a burst of identical applies.
 	kick chan struct{}
 
 	// now is time.Now indirected so a test can assert the lastSyncedAt that
@@ -486,10 +361,8 @@ type Reconciler struct {
 	logs *logLimiter
 }
 
-// New builds a Reconciler. It never touches the network and never fails on
-// anything an operator can misconfigure: the config layer already rejected a
-// bad interval and a bad bundle name, so the only errors here are nil
-// dependencies, which are programmer errors.
+// New builds a Reconciler; it never touches the network and never fails on anything an operator can
+// misconfigure.
 func New(d Deps) (*Reconciler, error) { //nolint:gocritic // hugeParam: Deps is a construction payload, value semantics match ReconcilerDeps
 	if d.Client == nil {
 		return nil, errors.New("promrules: client must not be nil")
@@ -517,9 +390,8 @@ func New(d Deps) (*Reconciler, error) { //nolint:gocritic // hugeParam: Deps is 
 	}, nil
 }
 
-// Kick asks for a reconcile as soon as the loop is free. Non-blocking and
-// coalescing: it is called from HTTP handlers (Task 4) after every alert-rule
-// write, and a handler must never wait on a Kubernetes round trip.
+// Kick asks for a reconcile as soon as the loop is free; non-blocking and coalescing: it is called
+// from HTTP handlers after every alert-rule write.
 func (r *Reconciler) Kick() {
 	select {
 	case r.kick <- struct{}{}:
@@ -529,9 +401,8 @@ func (r *Reconciler) Kick() {
 	}
 }
 
-// ListForeign delegates to the client, so callers that hold the reconciler
-// (Task 4's API layer, which also needs Kick) do not additionally have to be
-// handed the client.
+// ListForeign delegates to the client, so callers that hold the reconciler do not additionally have
+// to be handed the client.
 func (r *Reconciler) ListForeign(ctx context.Context) ([]ForeignRule, error) {
 	return r.client.ListForeign(ctx)
 }
@@ -539,12 +410,9 @@ func (r *Reconciler) ListForeign(ctx context.Context) ([]ForeignRule, error) {
 // Namespace reports the namespace the bundle is applied into.
 func (r *Reconciler) Namespace() string { return r.client.Namespace() }
 
-// Run reconciles immediately, then on every jittered interval and on every
-// kick, until ctx is cancelled. Spawned through cmd/console's `spawn` helper,
-// whose wg.Wait blocks shutdown on this return.
-//
-// It reconciles FIRST and waits after, so a console that just started applies
-// the operator's rules now rather than a minute from now.
+// Run reconciles immediately, then on every jittered interval and on every kick; it reconciles
+// FIRST and waits after, so a console that just started applies the operator's rules now rather
+// than a minute from now.
 func (r *Reconciler) Run(ctx context.Context) {
 	for ctx.Err() == nil {
 		if err := r.Reconcile(ctx); err != nil && ctx.Err() == nil {
@@ -569,14 +437,8 @@ func (r *Reconciler) Run(ctx context.Context) {
 	}
 }
 
-// Reconcile is ONE pass: read the enabled rules, render, observe, apply,
-// write the outcome back onto every rule. Exported so a test (and Task 4's
-// synchronous POST /{id}/sync) can run exactly one.
-//
-// The returned error is the loop's log line. It is NOT the operator's report:
-// the operator's report is the per-rule sync_status this method writes before
-// returning, which is why every failure path writes statuses first and returns
-// second.
+// Reconcile is ONE pass: read the enabled rules, render, observe, apply, write the outcome back
+// onto every rule.
 func (r *Reconciler) Reconcile(ctx context.Context) error {
 	rows, err := r.store.ListAlertRules(ctx, true)
 	if err != nil {
@@ -591,10 +453,6 @@ func (r *Reconciler) Reconcile(ctx context.Context) error {
 		rule, rerr := r.renderable(&rows[i])
 		if rerr != nil {
 			// One unrenderable row must not cost the other rules their sync.
-			// It is marked, dropped from the bundle, and the pass continues --
-			// which is also what makes a stored 'cert-expiry' rule (a kind the
-			// store accepts and the renderer deliberately dropped) show up as
-			// a named error on that one rule instead of a dead sync.
 			r.setStatus(ctx, rows[i].ID, store.AlertSyncStatusError, truncate("render: "+rerr.Error()), nil)
 			continue
 		}
@@ -644,10 +502,7 @@ func (r *Reconciler) Reconcile(ctx context.Context) error {
 		return fmt.Errorf("apply %s %s/%s: %w", alerting.BundleKind, r.client.Namespace(), r.bundleName, aerr)
 	}
 
-	// The apply succeeded, so lastSyncedAt moves -- including for a rule
-	// reported as drift. See the package doc: drift is past tense here, the
-	// correction already happened, and pretending nothing was applied would be
-	// the dishonest option.
+	// The apply succeeded, so lastSyncedAt moves -- including for a rule reported as drift.
 	now := r.now()
 	status, message := store.AlertSyncStatusSynced, ""
 	if drift {
@@ -659,12 +514,8 @@ func (r *Reconciler) Reconcile(ctx context.Context) error {
 	return nil
 }
 
-// renderable turns one stored row into the renderer's input and proves it
-// renders. The proof is a single-rule bundle rather than a bare Render,
-// because the things that make a row unappliable are spread across both: the
-// EXPRESSION comes from Render, but the severity, the alert-name sanitisation,
-// the reserved labels and the `for` duration are all checked by RenderBundle.
-// Checking one rule at a time is what buys per-rule attribution.
+// renderable turns one stored row into the renderer's input and proves it renders; the proof is a
+// single-rule bundle rather than a bare Render.
 func (r *Reconciler) renderable(row *store.AlertRule) (alerting.Rule, error) {
 	params, err := decodeObject("params", row.Params)
 	if err != nil {
@@ -695,10 +546,7 @@ func (r *Reconciler) renderable(row *store.AlertRule) (alerting.Rule, error) {
 	return rule, nil
 }
 
-// setStatus records one rule's outcome. A failed write is logged and swallowed
-// on purpose: the reconcile itself either happened or did not, and failing the
-// whole pass because the bookkeeping row would not update would turn a
-// database hiccup into a sync outage.
+// setStatus records one rule's outcome; a failed write is logged and swallowed on purpose.
 func (r *Reconciler) setStatus(ctx context.Context, id, status, message string, at *time.Time) {
 	if _, err := r.store.UpdateAlertRuleSyncStatus(ctx, id, status, message, at); err != nil {
 		if r.logs.allow("status:" + status) {

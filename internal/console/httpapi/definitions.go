@@ -17,12 +17,8 @@ import (
 	"github.com/EsDmitrii/kconmon-ng/internal/console/store"
 )
 
-// DefinitionService is the subset of *store.DB httpapi needs for CRUD
-// /api/v1/checks: the read seam and the write seam together. Same shape and
-// same reasoning as TargetService (targets.go) -- a local interface so a test
-// can substitute a fake with no database at all, and so this package's
-// contract with store cannot widen every time *store.DB grows a method for
-// some other caller.
+// DefinitionService is the subset of *store.DB httpapi needs for CRUD /api/v1/checks; same shape
+// and same reasoning as TargetService (targets.go).
 type DefinitionService interface {
 	store.DefinitionReader
 	store.DefinitionStore
@@ -30,68 +26,38 @@ type DefinitionService interface {
 
 var _ DefinitionService = (*store.DB)(nil)
 
-// TopologySource is the one thing the projection guard needs from the
-// controller: a live topology snapshot to resolve a definition's agent
-// selection against. A local interface rather than *controllerclient.Client
-// itself, for the same reason OIDCFlow (server.go) is one -- the projection
-// tests supply a FIXED fake topology and must not need a controller, an HTTP
-// server, or a leader election to do it.
+// TopologySource is the one thing the projection guard needs from the controller; a local interface
+// rather than *controllerclient.Client itself.
 type TopologySource interface {
 	Topology(ctx context.Context) (*controllerclient.Topology, error)
 }
 
 var _ TopologySource = (*controllerclient.Client)(nil)
 
-// definitionsUnavailableDetail is served whenever s.definitions is nil. Check
-// definitions are CONFIGURATION, exactly like targets, and get NO in-memory
-// fallback (Decision 13): a probe definition that vanishes on pod restart is
-// worse than one that was never accepted.
+// definitionsUnavailableDetail is served whenever s.definitions is nil; check definitions are
+// CONFIGURATION, exactly like targets, and get NO in-memory fallback.
 const definitionsUnavailableDetail = "check definitions are persisted configuration with no in-memory fallback: " +
 	"set console.database.mode in the console config (Helm: console.database.mode) to enable /api/v1/checks"
 
-// projectionUnavailableDetail is POST /api/v1/checks/projection's 503. The
-// projected series count is a function of the CURRENT topology, so without a
-// controller there is no number to report -- and reporting a made-up one
-// would be worse than reporting none, since the UI displays it as the
-// enforcement threshold.
+// projectionUnavailableDetail is POST /api/v1/checks/projection's 503. The projected series count
+// is a function of the CURRENT topology.
 const projectionUnavailableDetail = "the projected series count is computed against the live topology: " +
 	"set controller.url in the console config (Helm: console.controller.url) to enable /api/v1/checks/projection"
 
-// maxProjectedSeries bounds the continuous external series ONE definition may
-// project (Decision 12). 400 is not an arbitrary round number: it is
-// checks.maxPairs, the bound the diagnostics runner already applies to one
-// run's fan-out, and reusing it keeps the console's two cardinality guards
-// telling an operator the same story instead of two different ones.
-//
-// The bound is PER DEFINITION, not fleet-wide, and that is load-bearing:
-// POST /api/v1/checks/projection reports the number for the single definition
-// in its body, the UI shows exactly that number, and create/update enforce
-// exactly that number -- so the warning can never disagree with the
-// enforcement, which is the whole point of the endpoint existing. A
-// fleet-wide sum would be a different number from the one the form displays.
+// maxProjectedSeries bounds the continuous external series ONE definition may project; the bound is
+// PER DEFINITION, not fleet-wide, and that is load-bearing.
 const maxProjectedSeries = 400
 
-// protocolsPerDefinition is the "protocols" half of Decision 12's
-// `agents x protocols`. A definition names exactly ONE check_type
-// (store.DefinitionInput.CheckType, one of tcp|udp|icmp|dns|http|mtr), so it
-// contributes one protocol's worth of series per assigned agent today. It is
-// named rather than inlined because the wire shape reports it separately: the
-// day a definition can probe several protocols from one spec, this becomes a
-// function of the definition and nothing about projectionResponse changes.
+// protocolsPerDefinition is the "protocols" half; it is named rather than inlined because the wire
+// shape reports it separately.
 const protocolsPerDefinition = 1
 
-// errTopologyUnavailable is projectDefinition's "no number can be computed"
-// signal -- no TopologySource wired, or the controller did not answer. It is
-// deliberately distinct from a validation failure: the projection endpoint
-// turns it into 503/502, while create/update fail OPEN on it (see
-// enforceProjection).
+// errTopologyUnavailable is projectDefinition's "no number can be computed" signal -- no
+// TopologySource wired.
 var errTopologyUnavailable = errors.New("httpapi: topology unavailable for projection")
 
-// tooManySeriesMsg opens the projection guard's 422 detail, echoing
-// checks.ErrTooManyPairs's wording. Deliberately a plain string, not an
-// error sentinel: it is only ever interpolated into projectionDetail — never
-// returned, wrapped, or matched with errors.Is — and declaring it as an
-// error would invite exactly that misreading.
+// tooManySeriesMsg opens the projection guard's 422 detail; deliberately a plain string, not an
+// error sentinel.
 const tooManySeriesMsg = "too many projected series"
 
 // definitionsUnavailable answers 503 and reports true when no
@@ -104,10 +70,8 @@ func (s *Server) definitionsUnavailable(w http.ResponseWriter) bool {
 	return false
 }
 
-// definitionResponse is one check definition on the wire. Params is passed
-// through as raw JSON (always an object -- store writes {} for an absent
-// one), never re-marshalled through a map, so key order stays whatever was
-// stored -- same contract targetResponse.Labels has.
+// definitionResponse is one check definition on the wire; params is passed through as raw JSON
+// (always an object -- store writes {} for an absent one).
 type definitionResponse struct {
 	ID                  string          `json:"id"`
 	Name                string          `json:"name"`
@@ -146,11 +110,8 @@ type definitionsListResponse struct {
 	NextCursor  string               `json:"nextCursor"`
 }
 
-// definitionRequest is POST /api/v1/checks's, PUT /api/v1/checks/{id}'s and
-// POST /api/v1/checks/projection's body. The first two are FULL replaces,
-// matching store.DefinitionInput's own contract: an omitted field means
-// "empty", never "leave as-is". The projection endpoint reads the same shape
-// so the UI can send the form it is about to submit, unchanged.
+// definitionRequest is POST /api/v1/checks's; the first two are FULL replaces, matching
+// store.DefinitionInput's own contract.
 type definitionRequest struct {
 	Name                string          `json:"name"`
 	SourceSelection     string          `json:"sourceSelection"`
@@ -163,12 +124,8 @@ type definitionRequest struct {
 	Enabled             bool            `json:"enabled"`
 }
 
-// decodeDefinitionRequest reads and validates a create/update/projection
-// body. A body that is not JSON at all is a 400 (malformed request); a
-// well-formed body whose VALUES break a definition rule is a 422 -- the same
-// distinction decodeTargetRequest draws, for the same reason, and validation
-// is delegated to store.DefinitionInput.Validate rather than reimplemented
-// here so the two copies cannot drift.
+// decodeDefinitionRequest reads and validates a create/update/projection body; a body that is not
+// JSON at all is a 400 (malformed request).
 func decodeDefinitionRequest(w http.ResponseWriter, r *http.Request) (store.DefinitionInput, bool) {
 	var req definitionRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -191,11 +148,7 @@ func decodeDefinitionRequest(w http.ResponseWriter, r *http.Request) (store.Defi
 	return in, true
 }
 
-// definitionIDFrom resolves the {id} path parameter, answering 404 and
-// reporting false for anything that is not a canonical UUID -- the same
-// M3-follow-up-#5 guard targetIDFrom documents at length: without it a
-// malformed id reaches pgx, which fails while ENCODING the parameter, and the
-// catch-all would report 502 for something that simply cannot exist.
+// definitionIDFrom resolves the {id} path parameter.
 func definitionIDFrom(w http.ResponseWriter, r *http.Request) (string, bool) {
 	id := chi.URLParam(r, "id")
 	if _, err := uuid.Parse(id); err != nil {
@@ -205,15 +158,7 @@ func definitionIDFrom(w http.ResponseWriter, r *http.Request) (string, bool) {
 	return id, true
 }
 
-// writeDefinitionStoreError maps a DefinitionService error to a response, the
-// same three-sentinel contract writeTargetStoreError handles.
-//
-// ErrNotFound is the one that carries extra weight here: store's
-// DefinitionReader doc comment states it is ALSO returned when
-// DestinationTargetID names no target (the FK violation), and that case is a
-// rejected field value in the request body, not a missing definition. The
-// caller therefore tells this function which of the two it is -- see
-// writeDefinitionCreateError.
+// writeDefinitionStoreError maps a DefinitionService error to a response.
 func writeDefinitionStoreError(w http.ResponseWriter, name, id string, err error) {
 	switch {
 	case errors.Is(err, store.ErrNotFound):
@@ -230,12 +175,7 @@ func writeDefinitionStoreError(w http.ResponseWriter, name, id string, err error
 	}
 }
 
-// writeDefinitionCreateError is writeDefinitionStoreError for the CREATE
-// path, where ErrNotFound cannot mean "this definition does not exist" -- it
-// has no id yet. It can only mean destinationTargetId names no target, which
-// is a rejected FIELD VALUE and therefore 422, exactly as a duplicate name
-// is. Answering 404 here would tell a client the endpoint it just POSTed to
-// is missing.
+// writeDefinitionCreateError is writeDefinitionStoreError for the CREATE path.
 func writeDefinitionCreateError(w http.ResponseWriter, in *store.DefinitionInput, err error) {
 	if errors.Is(err, store.ErrNotFound) {
 		writeProblem(w, http.StatusUnprocessableEntity, "invalid check definition",
@@ -261,9 +201,8 @@ func (s *Server) handleChecksList(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	// Same pre-check the {id} routes apply, extended to the query filter: a
-	// typo'd targetId is the CLIENT's error (400), never "the store is down"
-	// (502) — the exact class M3 follow-up #5 closed for path params.
+	// Same pre-check the {id} routes apply, extended to the query filter: a typo'd targetId is the
+	// CLIENT's error (400).
 	if tid := q.Get("targetId"); tid != "" {
 		if _, err := uuid.Parse(tid); err != nil {
 			writeProblem(w, http.StatusBadRequest, "invalid targetId", "targetId must be a UUID")
@@ -292,10 +231,8 @@ func (s *Server) handleChecksList(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, definitionsListResponse{Definitions: out, NextCursor: page.NextCursor})
 }
 
-// parseOptionalBool maps a query parameter to store's *bool "nil means both"
-// filter convention. Anything that is not exactly "true" or "false" -- including
-// the empty string -- is treated as UNSET rather than as a 400, the same
-// leniency parseTargetsLimit applies to an unparseable ?limit=.
+// parseOptionalBool maps a query parameter to store's *bool "nil means both" filter convention;
+// anything that is not exactly "true" or "false" -- including the empty string.
 func parseOptionalBool(raw string) *bool {
 	switch raw {
 	case "true":
@@ -309,13 +246,8 @@ func parseOptionalBool(raw string) *bool {
 	}
 }
 
-// handleChecksCreate creates one check definition: 201 with a Location header
-// naming the new row, matching handleTargetsCreate.
-//
-// The projection guard runs BEFORE the store call, and only for a definition
-// arriving enabled: an operator drafting something over the limit must be
-// able to save it disabled (Decision 12), so the gated action is enabling,
-// not saving.
+// handleChecksCreate creates one check definition: 201 with a Location header naming the new row;
+// the projection guard runs BEFORE the store call, and only for a definition arriving enabled.
 func (s *Server) handleChecksCreate(w http.ResponseWriter, r *http.Request) {
 	if s.definitionsUnavailable(w) {
 		return
@@ -384,10 +316,7 @@ func (s *Server) handleChecksUpdate(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, definitionResponseFrom(&def))
 }
 
-// handleChecksDelete removes one check definition. Its schedules go with it:
-// check_schedules.definition_id is ON DELETE CASCADE (migration 00004), which
-// store.DefinitionStore's own doc comment states, so there is no second call
-// to make and no orphan to clean up here.
+// handleChecksDelete removes one check definition.
 func (s *Server) handleChecksDelete(w http.ResponseWriter, r *http.Request) {
 	if s.definitionsUnavailable(w) {
 		return
@@ -404,10 +333,7 @@ func (s *Server) handleChecksDelete(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// projectionResponse is POST /api/v1/checks/projection's 200 body. Agents is
-// the count the selection resolves to against the CURRENT topology, so the
-// same definition can project differently as the cluster scales -- which is
-// exactly the fact the operator needs to see before enabling it.
+// projectionResponse is POST /api/v1/checks/projection's 200 body.
 type projectionResponse struct {
 	Agents    int  `json:"agents"`
 	Protocols int  `json:"protocols"`
@@ -416,15 +342,7 @@ type projectionResponse struct {
 	OverLimit bool `json:"overLimit"`
 }
 
-// handleChecksProjection reports what a definition WOULD project, persisting
-// nothing. It is the server-side arbiter of Decision 12 and the number the UI
-// displays, so the warning can never disagree with the enforcement: the
-// enabled-definition gate in create/update calls the very same function
-// against the very same limit.
-//
-// It is deliberately gated on checks:write, not checks:read: the body is a
-// draft definition, and a caller who cannot create one has nothing to ask
-// this question about.
+// handleChecksProjection reports what a definition WOULD project, persisting nothing.
 func (s *Server) handleChecksProjection(w http.ResponseWriter, r *http.Request) {
 	in, ok := decodeDefinitionRequest(w, r)
 	if !ok {
@@ -444,10 +362,8 @@ func (s *Server) handleChecksProjection(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, proj)
 }
 
-// projectDefinition resolves in's agent selection against the live topology
-// and returns the projected series count. No store access and no side
-// effects: this is the same number whether it is asked for by the projection
-// endpoint or by the create/update gate.
+// projectDefinition resolves in's agent selection against the live topology and returns the
+// projected series count.
 func (s *Server) projectDefinition(ctx context.Context, in *store.DefinitionInput) (projectionResponse, error) {
 	if s.topology == nil {
 		return projectionResponse{}, errTopologyUnavailable
@@ -468,23 +384,8 @@ func (s *Server) projectDefinition(ctx context.Context, in *store.DefinitionInpu
 	}, nil
 }
 
-// projectedAgents counts the agents a selection resolves to against topo.
-//
-// "all" and "per-zone" both resolve to EVERY agent -- per-zone groups the
-// same agent set by zone rather than shrinking it (Plan Decision 11 and Task
-// 5: "per-zone yields every agent grouped, one-per-zone yields exactly one
-// per zone"), so grouping changes how the work is dispatched, not how many
-// series come out of it. "one-per-zone" is the only mode that shrinks the
-// count, and that is precisely why it is the default: it is bounded by ZONE
-// count, and node count is the number that grows without an operator
-// noticing.
-//
-// Zoneless agents are never dropped: under "all"/"per-zone" each counts
-// individually, and under "one-per-zone" they collectively form ONE
-// empty-string bucket (N zoneless agents -> one representative), the same
-// rule the "" zone key gives any other zone. Dropping them would
-// under-report the projection and make the guard lie in the unsafe
-// direction. A nil topo yields 0.
+// projectedAgents counts the agents a selection resolves to against topo; "all" and "per-zone" both
+// resolve to EVERY agent.
 func projectedAgents(selection string, topo *controllerclient.Topology) int {
 	if topo == nil {
 		return 0
@@ -499,28 +400,15 @@ func projectedAgents(selection string, topo *controllerclient.Topology) int {
 	return len(zones)
 }
 
-// enforceProjection is create/update's half of Decision 12. It answers 422
-// and reports false when in arrives ENABLED and would project past
-// maxProjectedSeries; it reports true (let the write through) in every other
-// case, including a disabled definition -- which is never projected at all,
-// because an operator drafting one must not be blocked.
-//
-// It fails OPEN when the topology cannot be read: a controller outage must
-// not become a configuration-write outage, the same direction Decision 8
-// chose for the rate limiter ("a Valkey outage must not become a login
-// outage"). The consequence is bounded and visible: the number is a
-// cardinality bound, not a security boundary, the WARN below names the
-// definition that slipped through, and Task 17's reconciler recomputes the
-// fleet-wide projection on every tick with a gauge to alert on.
+// enforceProjection is create/update's half; it fails OPEN when the topology cannot be read.
 func (s *Server) enforceProjection(w http.ResponseWriter, r *http.Request, in *store.DefinitionInput) bool {
 	if !in.Enabled {
 		return true
 	}
 	proj, err := s.projectDefinition(r.Context(), in)
 	if err != nil {
-		// Decision 8: fail open AND count it — a controller outage must not
-		// become a config-write outage, but a bypassed guard must be
-		// alertable, not just a log line.
+		// fail open AND count it — a controller outage must not become a config-write outage, but a
+		// bypassed guard must be alertable.
 		s.metrics.ProjectionGuardFailOpen.WithLabelValues().Inc()
 		slog.Warn("httpapi: projection guard could not read the topology, allowing the write", //nolint:gosec // G706: structured slog fields, not string-built log injection
 			"definition", in.Name, "error", err)
@@ -533,11 +421,7 @@ func (s *Server) enforceProjection(w http.ResponseWriter, r *http.Request, in *s
 	return false
 }
 
-// projectionDetail spells the arithmetic out in full, because the number on
-// its own tells an operator nothing about which knob to turn: it names the
-// product, both factors, the limit, and the one selection change that
-// actually shrinks the left factor. The sentinel's own text leads, in the
-// shape checks.ErrTooManyPairs's "computed %d pairs, limit %d" detail uses.
+// projectionDetail spells the arithmetic out in full.
 func projectionDetail(selection string, proj projectionResponse) string {
 	detail := fmt.Sprintf("definition: %s: enabling this definition projects %d continuous external series "+
 		"(%d agents x %d protocols), limit %d",

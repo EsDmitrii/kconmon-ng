@@ -1,16 +1,6 @@
 {{- if and .Values.console.enabled (eq .Values.console.database.mode "cnpg") }}
 {{- $db := .Values.console.database }}
-{{- /* NIL GUARDS. A Helm values override that names a key and gives it no
-value (`cnpg:`, `storage:`, `backup:` with nothing indented under it) does not
-"leave the chart default alone" — it merges a null over the default and DELETES
-the sub-tree. Every dotted access below it then dies with the Go template
-runtime's own message, "nil pointer evaluating interface {}.enabled", which
-names neither the value nor the file the operator has to fix. The two blocks
-this chart cannot supply a sane fallback for (instances/storage.size are
-deployment decisions, not chart opinions) fail with an actionable message
-instead; backup needs no message at all, because "no backup block" and "backup
-disabled" are the same thing, so it degrades to an empty dict and the
-enabled-check below reads false. */}}
+{{- /* Nil guards: a null override deletes the sub-tree, so fail with an actionable message. */}}
 {{- if not $db.cnpg }}
 {{- fail "console.database.mode=cnpg requires a non-empty console.database.cnpg block: it was overridden with null/empty, which DELETES the chart's own defaults (instances, storage.size) rather than restoring them — drop the override, or set console.database.cnpg.instances and console.database.cnpg.storage.size explicitly" }}
 {{- end }}
@@ -18,10 +8,7 @@ enabled-check below reads false. */}}
 {{- fail "console.database.mode=cnpg requires a non-empty console.database.cnpg.storage block: it was overridden with null/empty, which DELETES the chart's default storage.size — drop the override, or set console.database.cnpg.storage.size explicitly" }}
 {{- end }}
 {{- $backup := $db.cnpg.backup | default dict }}
-{{- /* CRD ORDERING TRAP (ADR-001 "Negative"): this CR requires the CNPG
-operator's CRDs to already exist — the chart deliberately does not install
-the operator. `helm install` fails with "no matches for kind Cluster" until
-the operator is installed. */}}
+{{- /* Requires the CNPG operator CRDs; this chart does not install the operator. */}}
 apiVersion: postgresql.cnpg.io/v1
 kind: Cluster
 metadata:
@@ -50,14 +37,14 @@ spec:
       {{- with $backup.endpointURL }}
       endpointURL: {{ . | quote }}
       {{- end }}
-      # Credentials referenced BY NAME only (never created or read by this
-      # chart). Keys follow CNPG's documented convention.
+      # Credentials referenced by name only, using CNPG's key convention.
+      {{- $backupSecret := include "kconmon-ng.console.backupSecretName" . }}
       s3Credentials:
         accessKeyId:
-          name: {{ required "console.database.cnpg.backup.credentialsSecret is required when backup.enabled" $backup.credentialsSecret | quote }}
+          name: {{ $backupSecret | quote }}
           key: ACCESS_KEY_ID
         secretAccessKey:
-          name: {{ $backup.credentialsSecret | quote }}
+          name: {{ $backupSecret | quote }}
           key: ACCESS_SECRET_KEY
   {{- end }}
 {{- if $backup.enabled }}

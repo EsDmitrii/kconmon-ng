@@ -1,36 +1,5 @@
 ---
-# A PrometheusRule this console does NOT own -- the fixture behind
-# TestConsoleAlertRuleForeignImport (M7 Decision 4).
-#
-# "Foreign" is decided by ONE fact and internal/console/promrules.ListForeign
-# checks exactly it: the object does not carry
-# app.kubernetes.io/managed-by=kconmon-ng-console. The label below is a
-# DIFFERENT value on purpose rather than absent, because the API serves
-# managedBy verbatim and "managed by some other tool" and "managed by nobody"
-# are different facts for an operator deciding whether to adopt -- so the
-# fixture pins the first of the two, which is the one with something to check.
-#
-# Applied by .github/workflows/e2e.yaml BEFORE the test run, into the release
-# namespace (default), the same way the Postgres and webhook-key fixtures are.
-# The test never creates it and never deletes it: it is harness state with a
-# fixed name, and the cluster it lives in is thrown away with the job. What
-# the test DOES clean up is the console ROW an import mints from it, which is
-# what keeps the suite re-runnable -- adoption refuses a name already taken.
-#
-# The two entries are deliberately different shapes, because the import has a
-# different answer for each:
-#
-#   - the ALERT is adoptable: it becomes one kind="raw" builder row whose
-#     severity is lifted out of the label set (critical, so no fallback note)
-#     and whose `for` is parsed to nanoseconds (2m -> 120000000000).
-#   - the RECORD is not: a recording rule produces a time series, and
-#     alert_rules has no column that could mean that, so it comes back in the
-#     import report's `skipped` list naming the reason.
-#
-# The expression is `vector(1) > 0` for the same reason every alerting e2e
-# rule uses it: it is valid PromQL that needs no data, no scrape target and no
-# Prometheus to be a well-formed rule -- and nothing in this cluster ever
-# evaluates it (the operator is not installed; see prometheusrule-crd.yaml).
+# A PrometheusRule this console does NOT own -- the fixture behind TestConsoleAlertRuleForeignImport.
 apiVersion: monitoring.coreos.com/v1
 kind: PrometheusRule
 metadata:

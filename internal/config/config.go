@@ -95,20 +95,8 @@ type MTRCheckerConfig struct {
 	MaxHops  int           `yaml:"maxHops"`
 }
 
-// ExternalCheckerConfig gates every probe whose destination is not a peer
-// agent: both continuous target checks and one-shot external diagnostics.
-// AllowedCIDRs has NO default and an empty list is a VALIDATION ERROR when
-// the feature is enabled, not "allow everything" -- the identical posture
-// auth.header.trustedProxyCIDRs already takes in the Console
-// (internal/console/config/config.go, HeaderConfig).
-//
-// Timeout bounds the resolution-and-authorisation step of an external task
-// (DNS lookup plus allowlist check), NOT the probe itself: the probe stays
-// governed by its own checkers.<type>.timeout, so enabling external checks
-// cannot silently truncate a long MTR trace.
-//
-// MaxTargets caps how many operator-defined external targets the agent will
-// accept; it is validated here and consumed by the target-list plumbing.
+// ExternalCheckerConfig gates every probe whose destination is not a peer agent; timeout bounds the
+// resolution-and-authorisation step of an external task (DNS lookup plus allowlist check).
 type ExternalCheckerConfig struct {
 	Enabled      bool          `yaml:"enabled"`
 	AllowedCIDRs []string      `yaml:"allowedCidrs"`
@@ -372,18 +360,8 @@ func applyDerivedDefaults(cfg *Config) {
 	}
 }
 
-// validateExternal fails startup on any external-checks misconfiguration that
-// would otherwise widen what the agent may probe.
-//
-// A DISABLED block is not inspected at all -- not even parsed into an
-// Allowlist. An operator with a half-written block in values.yaml gets an inert
-// feature, not a crash-looping DaemonSet, and the single gate on the enforcing
-// path stays checkers.external.enabled.
-//
-// An ENABLED block with an empty allowedCidrs is rejected rather than treated
-// as "allow everything": that is the same posture the Console takes for
-// auth.header.trustedProxyCIDRs, and for the same reason -- an empty list that
-// means "everything" is a bypass wearing a config key's clothes.
+// validateExternal fails startup on any external-checks misconfiguration that would otherwise widen
+// what the agent may probe.
 func validateExternal(e ExternalCheckerConfig) error {
 	if !e.Enabled {
 		return nil

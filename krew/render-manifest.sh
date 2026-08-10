@@ -1,11 +1,6 @@
 #!/usr/bin/env bash
-# Render the krew plugin manifest from krew/kconmon.yaml.tmpl by substituting the
-# release version and the sha256 of each platform archive built by goreleaser.
-#
-# Usage: krew/render-manifest.sh <version> <dist-dir> <output-file>
-#   version:    release version WITHOUT the leading "v" (e.g. 1.3.0)
-#   dist-dir:   goreleaser output dir containing kconmon_<version>_<os>_<arch>.tar.gz
-#   output:     path to write the rendered manifest (e.g. kconmon.yaml)
+# Render the krew plugin manifest from krew/kconmon.yaml.tmpl by substituting the release version and the sha256 of
+# each platform archive built by goreleaser.
 set -euo pipefail
 
 VERSION="${1:?version required (no leading v)}"

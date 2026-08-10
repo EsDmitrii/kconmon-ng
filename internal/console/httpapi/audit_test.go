@@ -107,10 +107,9 @@ func mutateWithCSRF(r *http.Request) {
 	r.Header.Set(csrfHeaderName, "tok-1")
 }
 
-// newAuditTestServer wires a Server holding perms (granted to role
-// "tester") plus the given Auditor and any extra optional deps
-// (RBAC/Tokens) the audit-detail-allowlist tests below need to exercise a
-// real mutating route.
+// newAuditTestServer wires a Server holding perms (granted to role "tester") plus the given Auditor
+// and any extra optional deps (RBAC/Tokens) the audit-detail-allowlist tests below need to exercise
+// a real mutating route.
 func newAuditTestServer(t *testing.T, audit Auditor, perms []authz.Permission, extra Deps) *Server { //nolint:gocritic // hugeParam: test helper
 	t.Helper()
 	policy := authz.NewPolicy(map[string][]authz.Permission{"tester": perms})
@@ -168,9 +167,7 @@ func TestAuditInvalidCursorReturns400(t *testing.T) {
 	}
 }
 
-// TestAuditMutationWritesOneRow is the brief's first failing test: a
-// mutation writes exactly one audit row with the route pattern as action
-// and the acting subject recorded.
+// TestAuditMutationWritesOneRow is the first failing test.
 func TestAuditMutationWritesOneRow(t *testing.T) {
 	fs := &fakeAuditStore{}
 	roleAdmin := newFakeRoleAdmin()
@@ -241,9 +238,8 @@ func TestAuditSuccessfulGETIsNotAudited(t *testing.T) {
 	}
 }
 
-// TestAuditDetailAllowlistDropsSecrets is the brief's fourth failing test:
-// detail never contains an allow-list-violating key, even when the request
-// body is a fixture full of secrets.
+// TestAuditDetailAllowlistDropsSecrets is the fourth failing test: detail never contains an
+// allow-list-violating key.
 func TestAuditDetailAllowlistDropsSecrets(t *testing.T) {
 	fs := &fakeAuditStore{}
 	roleAdmin := newFakeRoleAdmin()
@@ -267,9 +263,8 @@ func TestAuditDetailAllowlistDropsSecrets(t *testing.T) {
 	}
 }
 
-// TestAuditPromQLDetailIsAlwaysEmpty pins the brief's explicit example: a
-// PromQL query string must never reach detail. POST /api/v1/promql/query
-// has no auditDetailAllowlist entry at all, so its detail is always {}.
+// TestAuditPromQLDetailIsAlwaysEmpty pins the explicit example: a PromQL query string must never
+// reach detail.
 func TestAuditPromQLDetailIsAlwaysEmpty(t *testing.T) {
 	fs := &fakeAuditStore{}
 	s := newAuditTestServer(t, fs, []authz.Permission{authz.PermPromQLQuery}, Deps{})
@@ -289,18 +284,13 @@ func TestAuditPromQLDetailIsAlwaysEmpty(t *testing.T) {
 	}
 }
 
-// TestAuditFullBufferDropsAndCounts is the brief's fifth failing test: a
-// full audit buffer drops and counts rather than blocking, and the request
-// still completes within a tight budget.
+// TestAuditFullBufferDropsAndCounts is the fifth failing test: a full audit buffer drops and counts
+// rather than blocking.
 func TestAuditFullBufferDropsAndCounts(t *testing.T) {
 	fs := newStalledAuditStore()
 	s := newAuditTestServer(t, fs, []authz.Permission{}, Deps{})
-	// auth.mode=local in authTestConfig, but logout is a public route with
-	// no permission decision at all -- exactly what this test needs: a
-	// trivial, always-allowed mutation that also passes CSRF (subject
-	// Kind=="" here, since Deps.Roles above only fills Roles for a
-	// non-anonymous authenticate call, and fakeAuthenticator IS
-	// SubjectUser -- so still add the CSRF pair defensively).
+	// auth.mode=local in authTestConfig, but logout is a public route with no permission decision at
+	// all.
 	post := func(r *http.Request) { mutateWithCSRF(r) }
 
 	// First request: the drain goroutine dequeues it and blocks inside

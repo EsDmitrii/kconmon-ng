@@ -12,24 +12,20 @@ import type {
   PromResult,
   RunDetail,
 } from "./types";
+import { stampFull, type Locale, type Translate } from "./i18n";
+import { enT, investigationSourcesDict, type InvestigationSourcesKey } from "./i18n/dict/investigation-sources";
 import { escapeLabelValue } from "./utils";
 
+/** T is this module's translator, spelled once. Every function that renders a
+ *  sentence takes one as an OPTIONAL TRAILING parameter defaulting to `enT`,
+ *  which is what keeps every existing call, fixture and English assertion
+ *  answering the same bytes — the shape pages/alerting.tsx's parsePromDuration
+ *  and pages/settings.tsx's parseBundle already use. */
+type T = Translate<InvestigationSourcesKey>;
+
 /**
- * investigation-sources.ts — the PURE half of Investigation Mode's page: the
- * scope vocabulary and its URL encoding, the PromQL each scope produces, and
- * the mappers that turn each source's API rows into lib/investigation.ts's
- * TimelineEntry.
- *
- * It sits beside lib/investigation.ts (merge + correlation) rather than inside
- * pages/investigate.tsx for the same reason lib/annotations.ts sits beside
- * components/annotations.tsx: this is where the decisions an operator can
- * DISAGREE with live — which label family a target belongs to, what counts as a
- * run touching a pair, which sources need a client-side window filter — and
- * every one of them is unit-testable without mounting a page or stubbing fetch.
- *
- * No React, no fetch, no wall clock: `now` is a parameter wherever a default
- * range is needed, so a permalink resolves identically in a test and in a
- * browser.
+ * investigation-sources.ts — the PURE half of Investigation Mode's page: the scope vocabulary and
+ * its URL encoding.
  */
 
 /* ── the scope vocabulary ───────────────────────────────────────────────── */
@@ -75,16 +71,9 @@ function parseInstant(raw: string | null): Date | null {
 }
 
 /**
- * parseInvestigationParams resolves a query string into the investigation it
- * names. It is TOTAL: every malformed input degrades to something the page can
- * actually fetch rather than to an error state, because this function's inputs
- * are hand-typed URLs, stale bookmarks and links pasted into chat.
- *
- * An unknown kind becomes "cluster" — the one scope that needs no object and
- * can therefore always be rendered. An unparseable instant falls back to the
- * default hour, anchored to the OTHER end when that one parsed, so a link
- * carrying a good `to` and a typo'd `from` still frames the moment its author
- * meant.
+ * parseInvestigationParams resolves a query string into the investigation it names; it is TOTAL:
+ * every malformed input degrades to something the page can actually fetch rather than to an error
+ * state.
  */
 export function parseInvestigationParams(search: string, now: Date): InvestigationParams {
   const qs = new URLSearchParams(search);
@@ -114,6 +103,49 @@ export function parseInvestigationParams(search: string, now: Date): Investigati
   return { kind, a, b, from, to };
 }
 
+/**
+ * ignoredInvestigationParams names every parameter the URL carried that
+ * parseInvestigationParams then THREW AWAY. The parser is total on purpose — a
+ * `?kind=galaxy` renders the cluster rather than an error page — but total and
+ * SILENT are two different things: an operator who mistyped a parameter got a
+ * plausible default and no way to know their link was not being honoured
+ * (QA scope 3, finding #14). Same contract lib/timemachine.tsx keeps for `?at=`,
+ * which warns and then cleans the URL.
+ *
+ * Returned in URL order and empty for every well-formed link, including the bare
+ * one: a default that was never overridden is not an ignored parameter.
+ */
+export function ignoredInvestigationParams(search: string): string[] {
+  const qs = new URLSearchParams(search);
+  const out: string[] = [];
+  const rawKind = qs.get("kind");
+  const kindOk = rawKind === null || (SCOPE_KINDS as string[]).includes(rawKind);
+  if (!kindOk) out.push("kind");
+  const rawScope = qs.get("scope");
+  /* A scope is only ignored when the kind that survived has nowhere to put it:
+     the cluster names no object. A scope alongside an unparseable kind is
+     dropped for exactly that reason, so it is reported too. */
+  if (rawScope !== null && rawScope !== "" && (kindOk ? rawKind === null || rawKind === "cluster" : true)) {
+    out.push("scope");
+  }
+  for (const key of ["from", "to"] as const) {
+    const raw = qs.get(key);
+    if (raw !== null && parseInstant(raw) === null) out.push(key);
+  }
+  return out;
+}
+
+/**
+ * exportFileName is the download's name. The instant is ISO with its COLONS
+ * REPLACED (QA scope 3, finding #20): a colon is a path separator on classic
+ * macOS, illegal in a Windows filename, and browsers silently mangle or refuse
+ * such a download rather than saying so.
+ */
+export function exportFileName(from: Date): string {
+  const iso = Number.isNaN(from.getTime()) ? "unknown" : from.toISOString().replace(/[:.]/g, "-");
+  return `investigation-${iso}.json`;
+}
+
 /** scopeParamValue is the `?scope=` half of the permalink: the two-object kinds
  *  join with the arrow, the single-object kinds are the name itself, and the
  *  cluster has none. */
@@ -141,36 +173,24 @@ export function investigationParamsToSearch(p: InvestigationParams): string {
 /* ── what the entry form is allowed to commit (QA round 3) ─────────────── */
 
 /**
- * scopeIncompleteReason answers "may the Investigate button fire yet?" for a
- * DRAFT scope, in the operator's words, or null when the draft is complete
- * (QA round 3, finding #6).
- *
- * Every incomplete scope used to commit happily and produce a URL naming an
- * object that does not exist: `?kind=pair&scope=node-a→` filters events by a
- * scope string nothing was ever written under, so the page rendered an empty
- * timeline — which reads exactly like a quiet fleet. An empty answer that looks
- * like a healthy answer is the worst failure mode this page has, so the commit
- * is refused BEFORE it can produce one, with the reason next to the button.
- *
- * A pair of one node with itself is refused too: the peer metric family carries
- * no self-pair, and every source would answer empty for the same reason.
- * `cluster` is always complete — it names no object by definition.
+ * scopeIncompleteReason answers "may the Investigate button fire yet?" for a DRAFT scope; a pair of
+ * one node with itself is refused too: the peer metric family carries no self-pair.
  */
-export function scopeIncompleteReason(scope: InvestigationScope): string | null {
+export function scopeIncompleteReason(scope: InvestigationScope, t: T = enT): string | null {
   switch (scope.kind) {
     case "pair":
-      if (scope.a === "") return "Choose a source node.";
-      if (scope.b === "") return "Choose a destination node.";
-      if (scope.a === scope.b) return "A pair needs two different nodes.";
+      if (scope.a === "") return t("scope.incomplete.sourceNode");
+      if (scope.b === "") return t("scope.incomplete.destinationNode");
+      if (scope.a === scope.b) return t("scope.incomplete.samePair");
       return null;
     case "zone-pair":
-      if (scope.a === "") return "Choose a source zone.";
-      if (scope.b === "") return "Choose a destination zone.";
+      if (scope.a === "") return t("scope.incomplete.sourceZone");
+      if (scope.b === "") return t("scope.incomplete.destinationZone");
       return null;
     case "node":
-      return scope.a === "" ? "Choose a node." : null;
+      return scope.a === "" ? t("scope.incomplete.node") : null;
     case "target":
-      return scope.a === "" ? "Choose a target." : null;
+      return scope.a === "" ? t("scope.incomplete.target") : null;
     default:
       return null;
   }
@@ -185,60 +205,48 @@ export type WindowCommit =
   | { ok: false; reason: string };
 
 /**
- * commitWindow is the ONE gate between the range fields and `params`
- * (QA round 3, findings #2 and #3).
+ * PROMQL_MAX_RANGE_MS mirrors console.prometheus.maxRange, whose default is 24h
+ * (internal/console/config/config.go) and whose refusal is
+ * internal/console/promql/client.go's `end.Sub(start) > MaxRange`. It is a
+ * CONSTANT rather than a value read from the API because /api/v1/config does not
+ * publish the guards — it answers `prometheus: {configured}` and nothing more.
  *
- * Two rules, in this order:
- *
- *  1. AN INVERTED RANGE IS REFUSED AT THE FORM. `from >= to` produced a
- *     negative span, which every range query answered with an error the charts
- *     rendered as dead space and the timeline rendered as "nothing happened".
- *     Refusing costs a sentence; committing costs an investigation that lies.
- *
- *  2. THE VIEWED INSTANT CLAMPS THE FUTURE EDGE. While the Time Machine is
- *     engaged at `t` the whole console is showing the fleet as of `t`, and an
- *     investigation whose window ran past it was quietly mixing data from after
- *     the instant the operator pinned — the one thing "@ t" promises not to do.
- *     So `to` becomes min(to, t). A window that lies ENTIRELY after `t` cannot
- *     be clamped into anything meaningful (it would collapse to a point or
- *     invert), so it is refused rather than silently rewritten.
- *
- * `at === null` (Live) is the identity case: nothing to clamp against.
+ * It is deliberately NOT a commitWindow refusal. Only two of this page's nine
+ * sources are range queries against Prometheus; the timeline's events,
+ * annotations, audit rows, runs, path changes and maintenance windows are all
+ * store-backed and have no such bound, so refusing a two-day window at the form
+ * would take away an investigation the console can perfectly well answer in
+ * order to spare two charts. The two charts state the bound themselves instead.
  */
-export function commitWindow(from: Date, to: Date, at: Date | null): WindowCommit {
+export const PROMQL_MAX_RANGE_MS = 24 * 60 * 60 * 1000;
+
+/** rangeExceedsPromBound answers whether the committed window is wider than a single query_range may be. */
+export function rangeExceedsPromBound(from: Date, to: Date): boolean {
+  return to.getTime() - from.getTime() > PROMQL_MAX_RANGE_MS;
+}
+
+/**
+ * commitWindow is the ONE gate between the range fields and `params`; a window that lies ENTIRELY
+ * after `t` cannot be clamped into anything meaningful (it would collapse to a point or invert).
+ */
+export function commitWindow(from: Date, to: Date, at: Date | null, t: T = enT): WindowCommit {
   if (from.getTime() >= to.getTime()) {
-    return { ok: false, reason: "The range end must be after its start." };
+    return { ok: false, reason: t("window.inverted") };
   }
   if (at === null) return { ok: true, from, to, clamped: false };
   if (from.getTime() >= at.getTime()) {
-    return {
-      ok: false,
-      reason: "The window is after the viewed instant — move the range back, or return to Live.",
-    };
+    return { ok: false, reason: t("window.afterInstant") };
   }
   if (to.getTime() > at.getTime()) return { ok: true, from, to: at, clamped: true };
   return { ok: true, from, to, clamped: false };
 }
 
-/** The banner line the page shows under its header when commitWindow moved an
- *  edge. One sentence, stated as a fact about the window rather than as a
- *  warning about the mode — the Time Machine bar already explains the mode. */
-export const CLAMPED_BANNER = "Window clamped to the viewed instant.";
+/** The banner line the page shows under its header when commitWindow moved an edge. */
+export const CLAMPED_BANNER = investigationSourcesDict.en["banner.clamped"];
 
-/**
- * scopeCaptionValue is what the annotation / maintenance bars should CALL the
- * scope they are showing (QA round 3, finding #7).
- *
- * It exists because scopeFilterValue and scopesToQuery disagree on purpose for
- * the two wide scopes: the filter value is "" (there is no zone member in that
- * vocabulary) but scopesToQuery turns "" into ONE UNFILTERED request, i.e.
- * every scope in the console. The bars captioned that "scope global", which
- * named the one scope value they were NOT filtering by — an operator reading
- * "3 annotations · scope global" next to three per-node notes has been told
- * something false about where those rows came from.
- */
-export function scopeCaptionValue(scope: InvestigationScope): string {
-  return scopesToQuery(scope)[0] === undefined ? "all scopes" : scopeFilterValue(scope);
+/** scopeCaptionValue is what the annotation / maintenance bars should CALL the scope they are showing. */
+export function scopeCaptionValue(scope: InvestigationScope, t: T = enT): string {
+  return scopesToQuery(scope)[0] === undefined ? t("scope.allScopes") : scopeFilterValue(scope);
 }
 
 /* ── the scope selects' options (QA round 3, finding #5) ────────────────── */
@@ -258,20 +266,7 @@ function dedupeSorted(values: (string | undefined)[]): string[] {
   return [...new Set(values.filter((v): v is string => v !== undefined && v !== ""))].sort();
 }
 
-/**
- * scopeNodeOptions is the node/pair selects' option list: the union of the
- * topology's NODES and the node names its AGENTS report (QA round 3, #5).
- *
- * GET /api/v1/topology answers two lists, and `nodes` is the CONTROLLER's view
- * — empty whenever the console has no controller wired, which is precisely the
- * console that still has agents reporting in and metrics to investigate. The
- * selects read `nodes` alone and were therefore empty on exactly that console:
- * every scope but `cluster` was unreachable from the form, with no explanation,
- * on a page whose whole job is to be pointed at an object.
- *
- * The union is the honest set — an agent's nodeName IS a node this fleet has
- * measurements for — and dedupe means a node in both lists appears once.
- */
+/** scopeNodeOptions is the node/pair selects' option list. */
 export function scopeNodeOptions(topo: ScopeOptionSource | undefined): string[] {
   return dedupeSorted([...(topo?.nodes ?? []).map((n) => n.name), ...(topo?.agents ?? []).map((a) => a.nodeName)]);
 }
@@ -288,23 +283,8 @@ export function scopeZoneOptions(topo: ScopeOptionSource | undefined): string[] 
 export const INVESTIGATE_PATH = "/investigate";
 
 /**
- * buildInvestigateURL is the SINGLE writer of an "Investigate this" link — the
- * node/pair/target cards' header action and every matrix cell.
- *
- * It exists so the entry contract has one spelling rather than four. The URL is
- * the whole contract (Decision 11), which means a card that hand-assembled
- * `?scope=node-a-node-b` with a hyphen instead of PAIR_SEPARATOR would open an
- * investigation of a node that does not exist — silently, with an empty
- * timeline that reads as a quiet fleet. Composing investigationParamsToSearch
- * (parseInvestigationParams' own inverse) makes the round trip a property a
- * test can pin in both directions instead of a convention four call sites are
- * trusted to remember.
- *
- * `now` is a parameter, not `new Date()`: the same reason nothing else in this
- * file reads the wall clock — a link must resolve identically in a test and in
- * a browser. The default span is DEFAULT_RANGE_SECONDS, the hour the page
- * itself opens on, so arriving from a card and arriving from the sidebar frame
- * the same window.
+ * buildInvestigateURL is the SINGLE writer of an "Investigate this" link; it exists so the entry
+ * contract has one spelling rather than four.
  */
 export function buildInvestigateURL(
   scope: InvestigationScope,
@@ -318,10 +298,7 @@ export function buildInvestigateURL(
 
 /* ── incident mode: the row is the authority (plan Decision 7) ──────────── */
 
-/** incidentPermalink is /investigate?incident={id} — the ONLY parameter an
- *  incident link carries. Scope and range come from the row, so a link that
- *  also spelled them could disagree with the incident it names after a single
- *  edit. */
+/** incidentPermalink is /investigate?incident={id} — the ONLY parameter an incident link carries. */
 export function incidentPermalink(id: string): string {
   return `${INVESTIGATE_PATH}?incident=${encodeURIComponent(id)}`;
 }
@@ -339,26 +316,8 @@ export const PIN_NOTE_MAX = 512;
 export type PinKind = PinnedRef["kind"];
 
 /**
- * PIN_KIND_BY_TIMELINE_KIND maps a timeline row's class onto that closed set.
- *
- * Three of the nine are deliberately UNPINNABLE, and `null` is the honest
- * answer rather than a fallback kind:
- *   - `maintenance` — a declared window lives in maintenance_windows, a table
- *     the pin vocabulary has no member for. Pinning it as, say, "annotation"
- *     would store an id that resolves to nothing.
- *   - `threshold` — a derived row. Its "id" is a synthetic signal:direction:
- *     instant string computed from a PromQL response; there is no row anywhere
- *     to point at, and re-deriving it needs the query, not the id.
- *   - `alert` (M7 Task 8) — the same problem one step further out: a firing
- *     alert lives in PROMETHEUS, not in any table this console owns, and its
- *     id here is a fingerprint of the label set. It also stops existing the
- *     moment the alert resolves, so a pin would dangle by design.
- * The UI hides the pin toggle on all three rather than offering a control the
- * server would reject.
- *
- * `path-change` is the one RENAME: the timeline calls the class what an
- * operator calls it, and the store names the TABLE the id came from
- * (mtr_path_snapshots → "snapshot"). Same fact, two vocabularies, one map.
+ * PIN_KIND_BY_TIMELINE_KIND maps a timeline row's class onto that closed set; three of the nine are
+ * deliberately UNPINNABLE.
  */
 export const PIN_KIND_BY_TIMELINE_KIND: Record<TimelineKind, PinKind | null> = {
   event: "event",
@@ -381,9 +340,8 @@ export function pinKey(ref: { kind: string; id: string }): string {
 }
 
 /**
- * pinnedRefFor turns a timeline row into the PinnedRef the API stores, or null
- * when this class of row cannot be pinned at all. A row with no `ref` is also
- * null: without an identity there is nothing to point at.
+ * pinnedRefFor turns a timeline row into the PinnedRef the API stores, or null when this class of
+ * row cannot be pinned at all.
  */
 export function pinnedRefFor(entry: TimelineEntry): PinnedRef | null {
   const kind = PIN_KIND_BY_TIMELINE_KIND[entry.kind];
@@ -392,22 +350,8 @@ export function pinnedRefFor(entry: TimelineEntry): PinnedRef | null {
 }
 
 /**
- * scopeFromIncidentScope reads an incident's stored `scope` back into the
- * page's scope vocabulary — the INVERSE of scopeFilterValue, and lossy in one
- * documented place.
- *
- * The stored string is the annotations/events vocabulary ("" global, a node
- * name, `src→dst`, a target name), which carries no KIND: a bare name is a node
- * and a target spelled identically. So the target list decides, and the caller
- * passes whatever names it holds (targets:read gated). Without that permission
- * the list is empty and a target incident reopens as a NODE scope — the page
- * says so next to the header strip rather than quietly querying the wrong
- * metric family.
- *
- * A wide scope ("" — a zone pair or a cluster investigation, both of which
- * store "") comes back as `cluster`: the one kind that needs no object and can
- * therefore always be rendered, the same degradation parseInvestigationParams
- * already makes for an unknown kind.
+ * scopeFromIncidentScope reads an incident's stored `scope` back into the page's scope vocabulary;
+ * without that permission the list is empty and a target incident reopens as a NODE scope.
  */
 export function scopeFromIncidentScope(scope: string, targetNames: readonly string[]): InvestigationScope {
   if (scope === "") return { kind: "cluster", a: "", b: "" };
@@ -420,14 +364,9 @@ export function scopeFromIncidentScope(scope: string, targetNames: readonly stri
 }
 
 /**
- * incidentParams is what `?incident={id}` hydrates the page with: the saved
- * scope and the saved range.
- *
- * An ABSENT toAt is an OPEN-ENDED incident ("from then until further notice",
- * the opposite of an annotation's absent endAt) and frames to `now` — which is
- * the honest read of "still going" and the only one that keeps the signal
- * charts covering the present. An unparseable fromAt degrades to the default
- * hour before `to` rather than to a NaN range that would render an empty page.
+ * incidentParams is what `?incident={id}` hydrates the page with; an ABSENT toAt is an OPEN-ENDED
+ * incident ("from then until further notice", the opposite of an annotation's absent endAt) and
+ * frames to `now`.
  */
 export function incidentParams(incident: Incident, targetNames: readonly string[], now: Date): InvestigationParams {
   const scope = scopeFromIncidentScope(incident.scope, targetNames);
@@ -438,15 +377,8 @@ export function incidentParams(incident: Incident, targetNames: readonly string[
 }
 
 /**
- * scopeFilterValue is the ANNOTATIONS/EVENTS scope vocabulary (plan Decision 6)
- * — "" global, a node name, a pair `src→dst`, a target name.
- *
- * A zone pair answers "" because that vocabulary simply has no zone member: no
- * annotation, event or maintenance window is ever filed against a zone pair, so
- * pretending one could be filtered by it would produce a permanently empty
- * result that looks like a quiet fleet. The wide scopes ask for EVERY scope
- * instead (see scopesToQuery below), which is the honest read of "investigate
- * two zones": all the context, none of it filtered by a key nothing writes.
+ * scopeFilterValue is the ANNOTATIONS/EVENTS scope vocabulary — "" global; a zone pair answers ""
+ * because that vocabulary simply has no zone member: no annotation.
  */
 export function scopeFilterValue(scope: InvestigationScope): string {
   switch (scope.kind) {
@@ -461,16 +393,8 @@ export function scopeFilterValue(scope: InvestigationScope): string {
 }
 
 /**
- * scopesToQuery turns a scope into the list of `scope` parameter values a
- * three-state endpoint (annotations, maintenance, incidents) must be asked for.
- *
- *   wide scope (zone pair, cluster) → [undefined], i.e. ONE request with the
- *     parameter ABSENT: every scope, which is what "the whole cluster" means.
- *   narrow scope                    → [<name>, ""], i.e. TWO requests: this
- *     object's own marks and the GLOBAL ones, exactly as
- *     components/annotations.tsx's useAnnotations already does. The endpoint
- *     matches a scope EXACTLY and "" is a real value, not a wildcard, so there
- *     is no single request that returns both.
+ * scopesToQuery turns a scope into the list of `scope` parameter values a three-state endpoint
+ * (annotations, maintenance, incidents) must be asked for.
  */
 export function scopesToQuery(scope: InvestigationScope): (string | undefined)[] {
   const value = scopeFilterValue(scope);
@@ -501,11 +425,10 @@ function peerSelector(scope: InvestigationScope): string {
   }
 }
 
-/** externalSelector is the EXTERNAL family's ({source_node, source_zone,
- *  target, target_kind}) — a target scope's only home. There is no
- *  destination_node there, which is why a target can never be queried through
- *  peerSelector and vice versa: the wrong family yields an EMPTY series, not a
- *  wrong number. */
+/**
+ * externalSelector is the EXTERNAL family's ({source_node, source_zone, target, target_kind}) — a
+ * target scope's only home.
+ */
 function externalSelector(scope: InvestigationScope): string {
   return `target="${escapeLabelValue(scope.a)}"`;
 }
@@ -514,32 +437,15 @@ const braces = (sel: string) => (sel === "" ? "" : `{${sel}}`);
 
 const withResult = (sel: string, result: string) => (sel === "" ? `{result="${result}"}` : `{${sel},result="${result}"}`);
 
-/** tag adds a synthetic label so `or` unions the operands instead of letting
- *  the first non-empty one shadow the rest — three expressions that all reduce
- *  to an EMPTY label set collide, and `a or b` would answer `a` alone. Same
- *  trick pages/pair-card.tsx's pairSeriesQuery and components/
- *  mtr-changes-timeline.tsx's pairLossQuery already use. */
+/**
+ * tag adds a synthetic label so `or` unions the operands instead of letting the first non-empty one
+ * shadow the rest.
+ */
 const tag = (expr: string, value: string) => `label_replace(${expr}, "signal", "${value}", "", "")`;
 
 /**
- * investigationLossQuery is the scope's packet loss as ONE series.
- *
- * `max(...)` over the union, not `avg` or `sum`: a loss RATIO is not additive
- * (two zones summed happily exceed 1.0), and for a scope covering many pairs
- * the honest one-number summary of "was this losing packets?" is the worst
- * observation in it. For a single pair the max IS the pair.
- *
- * The result feeds BOTH the signal chart and lib/investigation.ts's
- * thresholdCrossings, which is why it is one query and not two.
- *
- * DELIBERATELY NOT `or vector(0)`-guarded, unlike investigationFailRatioQuery
- * (QA round 3, finding #4 named this function as the sibling to check). The
- * empty-sum trap needs a BINARY operator to bite, and there is none here: the
- * three protocol arms are joined with `or`, which already unions rather than
- * intersecting, and `max()` over the union is defined for whichever arms
- * exist. Adding `or vector(0)` would be worse than useless — it would make a
- * scope nothing is probing report a confident 0% packet loss, which is the
- * exact lie the chip's "—" exists to avoid.
+ * investigationLossQuery is the scope's packet loss as ONE series; the empty-sum trap needs a
+ * BINARY operator to bite, and there is none here.
  */
 export function investigationLossQuery(scope: InvestigationScope): string {
   if (scope.kind === "target") {
@@ -577,37 +483,12 @@ export function investigationRttQuery(scope: InvestigationScope): string {
 }
 
 /**
- * orZero guards ONE aggregate against being absent (QA round 3, finding #4).
- *
- * PromQL's `+` is a binary operator between two instant VECTORS and it drops
- * every sample whose label set has no partner on the other side. A bare
- * `sum(rate(...))` over a metric family that has no series at all evaluates to
- * the EMPTY vector, and empty + anything is empty — so on a fleet running ICMP
- * only, `(tcp + udp + icmp)` was empty, the whole ratio was empty, and the delta
- * chip read "—" for a scope that was measurably failing every probe.
- *
- * `expr or vector(0)` is the documented replacement: `or` yields the left side
- * when it has samples and the right side only for the label sets the left is
- * missing, and both operands here carry the EMPTY label set (an unaggregated
- * `sum()` drops every label, and `vector(0)` has none), so the guard fires
- * exactly when the operand is absent and never adds a spurious second sample.
- *
- * A denominator of literally zero (nothing probed at all) then makes the ratio
- * 0/0 = NaN, which lib/investigation-signals.tsx's firstSample already reads as
- * "not measured" and renders as "—". That is the honest answer, and it is a
- * different answer from "measured, and none of it failed".
+ * orZero guards ONE aggregate against being absent; a bare `sum(rate(...))` over a metric family
+ * that has no series at all evaluates to the EMPTY vector.
  */
 const orZero = (expr: string) => `(${expr} or vector(0))`;
 
-/**
- * investigationFailRatioQuery is the matrix delta chip's number: failed probes
- * over all probes for the scope, the same ratio internal/console/matrix's
- * failRatioQuery computes per cell, aggregated across the three peer protocols
- * (or the external family for a target).
- *
- * Every per-protocol sum wears orZero above, so an absent protocol contributes
- * 0 to both halves instead of erasing the ratio (finding #4).
- */
+/** investigationFailRatioQuery is the matrix delta chip's number; every per-protocol sum wears orZero above. */
 export function investigationFailRatioQuery(scope: InvestigationScope): string {
   if (scope.kind === "target") {
     const sel = externalSelector(scope);
@@ -642,18 +523,9 @@ function firstSeriesValues(res: PromResult | undefined): [number, string][] {
 }
 
 /**
- * samplesFromMatrix folds the loss and RTT range responses onto ONE ascending
- * series of samples for lib/investigation.ts's thresholdCrossings.
- *
- * The two responses are merged BY TIMESTAMP rather than zipped by index: they
- * are separate queries, can be scraped at different resolutions and can have
- * different lengths, and a sample carrying the wrong partner's value would move
- * a threshold crossing to a time nothing happened. A field with no partner is
- * left ABSENT, which SignalSample documents as "not measured here" — never 0,
- * which would read as a perfect probe.
- *
- * RTT arrives in SECONDS from Prometheus and leaves in NANOSECONDS, the store's
- * duration unit and what SignalSample.rttNs declares.
+ * samplesFromMatrix folds the loss and RTT range responses onto ONE ascending series of samples for
+ * lib/investigation.ts's thresholdCrossings; the two responses are merged BY TIMESTAMP rather than
+ * zipped by index.
  */
 export function samplesFromMatrix(loss: PromResult | undefined, rtt: PromResult | undefined): SignalSample[] {
   const byMs = new Map<number, SignalSample>();
@@ -707,17 +579,8 @@ export function eventEntries(events: LiveEvent[]): TimelineEntry[] {
 }
 
 /**
- * auditDetailLine renders the row's allow-listed `detail` map next to who did
- * it. The map is whatever the per-route allow-list let through — {} for almost
- * everything (SECURITY.md's documented lossiness) — so the subject and the
- * resource carry the line when it is empty, rather than an empty "{}".
- *
- * EMPTY SEGMENTS ARE DROPPED, not rendered as a gap (QA round 3, finding #18).
- * `resource` is optional in practice — a login row names no object — and the
- * old fixed template printed the separator anyway, producing "user:ada ·  ·
- * ok" and, on a row whose outcome was also blank, a line ending in a dangling
- * "· ·". A separator is a joint between two things; with nothing on one side it
- * is punctuation claiming a field that is not there.
+ * auditDetailLine renders the row's allow-listed `detail` map next to who did it; the map is
+ * whatever the per-route allow-list let through.
  */
 export function auditDetailLine(row: AuditEntry): string {
   const kv = Object.entries(row.detail ?? {})
@@ -727,17 +590,33 @@ export function auditDetailLine(row: AuditEntry): string {
 }
 
 /**
- * auditEntries: configuration changes.
+ * READ_ONLY_AUDIT_POSTS is the CLOSED list of POST routes that only read. A POST
+ * is a change by default and this list is the exception the console makes for
+ * itself: PromQL is expressed as a request body, so evaluating a query has to be
+ * a POST even though it stores nothing.
  *
- * CLIENT-SIDE window filtering, and the only source here that needs it: GET
- * /api/v1/audit has no from/to at all (docs/console-api.yaml). The page says so
- * in its source list, because the consequence is real — a console busy enough
- * to fill the fetched page with newer rows can hide older in-range ones.
- *
- * A DENIED row is a warning rather than context: somebody tried to change
- * something during the incident window and was refused, which is exactly the
- * kind of thing an operator wants to see coloured.
+ * THE CONSTRAINT, and it is the whole reason the list is spelled out rather than
+ * pattern-matched: a route belongs here ONLY if it cannot change any state a
+ * later request could observe. Adding a route that does write would hide a real
+ * configuration change from the cause ranking, which is the most expensive kind
+ * of wrong an investigation surface can be.
  */
+const READ_ONLY_AUDIT_POSTS = ["/api/v1/promql/query", "/api/v1/promql/query_range"];
+
+/**
+ * isReadOnlyAudit answers "did this audited request only READ?" from the row's
+ * `action`, which the API defines as a method plus a route pattern ("POST
+ * /api/v1/runs"). GET, plus the two PromQL POSTs above — nothing else.
+ */
+export function isReadOnlyAudit(action: string): boolean {
+  const space = action.indexOf(" ");
+  const method = (space === -1 ? action : action.slice(0, space)).toUpperCase();
+  if (method === "GET") return true;
+  const route = space === -1 ? "" : action.slice(space + 1).trim();
+  return method === "POST" && READ_ONLY_AUDIT_POSTS.includes(route);
+}
+
+/** auditEntries: configuration changes; CLIENT-SIDE window filtering, and the only source here that needs. */
 export function auditEntries(rows: AuditEntry[], from: Date, to: Date): TimelineEntry[] {
   const out: TimelineEntry[] = [];
   for (const row of rows) {
@@ -749,6 +628,9 @@ export function auditEntries(rows: AuditEntry[], from: Date, to: Date): Timeline
       severity: row.outcome === "denied" ? "warn" : row.outcome === "error" ? "error" : "info",
       title: row.action,
       detail: auditDetailLine(row),
+      /* The row STAYS in the timeline — the badge already says "audit" out loud
+         — and is only kept out of the cause candidates (finding #8). */
+      readOnly: isReadOnlyAudit(row.action),
       ref: { kind: "audit", id: String(row.id) },
     });
   }
@@ -758,7 +640,7 @@ export function auditEntries(rows: AuditEntry[], from: Date, to: Date): Timeline
 /** annotationEntries: the operator notes already on this scope's charts, as
  *  rows. CAUSE_WEIGHTS scores them 0 — a note ABOUT a problem is never its
  *  cause — so they are context, never a suspect. */
-export function annotationEntries(annotations: Annotation[]): TimelineEntry[] {
+export function annotationEntries(annotations: Annotation[], t: T = enT): TimelineEntry[] {
   const out: TimelineEntry[] = [];
   for (const a of annotations) {
     const at = validAt(a.startAt);
@@ -767,8 +649,10 @@ export function annotationEntries(annotations: Annotation[]): TimelineEntry[] {
       at,
       kind: "annotation",
       severity: "info",
+      /* The note's own text is the title, verbatim — an operator wrote it and
+         this console does not paraphrase it. Only "" → «глобальная» moves. */
       title: a.text,
-      detail: `${a.scope === "" ? "global" : a.scope} · ${a.createdBy}`,
+      detail: `${a.scope === "" ? t("scope.global") : a.scope} · ${a.createdBy}`,
       ref: { kind: "annotation", id: a.id },
     });
   }
@@ -778,7 +662,7 @@ export function annotationEntries(annotations: Annotation[]): TimelineEntry[] {
 /** pathChangeEntries: one row per DISTINCT route the pair has taken, at the
  *  instant that route was first seen. Filtered to the window client-side — GET
  *  /api/v1/mtr/snapshots pages by last_seen and takes no time filter. */
-export function pathChangeEntries(snapshots: PathSnapshot[], from: Date, to: Date): TimelineEntry[] {
+export function pathChangeEntries(snapshots: PathSnapshot[], from: Date, to: Date, t: T = enT): TimelineEntry[] {
   const out: TimelineEntry[] = [];
   for (const s of snapshots) {
     const at = validAt(s.firstSeen);
@@ -787,8 +671,15 @@ export function pathChangeEntries(snapshots: PathSnapshot[], from: Date, to: Dat
       at,
       kind: "path-change",
       severity: "warn",
-      title: `Route changed: ${s.sourceNode} ${PAIR_SEPARATOR} ${s.destination}`,
-      detail: `path ${s.pathHash.slice(0, 12)} · ${s.hopCount} hops · ${s.traceCount} traces`,
+      title: t("entry.pathChange.title", { src: s.sourceNode, sep: PAIR_SEPARATOR, dst: s.destination }),
+      detail: t("entry.pathChange.detail", {
+        hash: s.pathHash.slice(0, 12),
+        hops: s.hopCount,
+        traces: s.traceCount,
+      }),
+      /* The id is the snapshot's, never the title's: mergeTimeline dedupes on
+         it and a pin permalinks by it, so it must read the same in both
+         languages. */
       ref: { kind: "path-change", id: s.id },
     });
   }
@@ -803,17 +694,24 @@ const RUN_SEVERITY: Record<string, TimelineEntry["severity"]> = {
 
 /** runEntries: the diagnostic runs that touched this scope. Weight 0 in
  *  CAUSE_WEIGHTS — a probe fired AT the problem is not what started it. */
-export function runEntries(runs: RunDetail[]): TimelineEntry[] {
+export function runEntries(runs: RunDetail[], t: T = enT): TimelineEntry[] {
   const out: TimelineEntry[] = [];
   for (const r of runs) {
     const at = validAt(r.createdAt);
     if (!at) continue;
     out.push({
       at,
+      /* `r.type` and `r.status` go through untranslated: they are the runs
+         enum, the same tokens the Diagnostics page's badges and the API
+         itself use. */
       kind: "run",
       severity: RUN_SEVERITY[r.status] ?? "info",
-      title: `${r.type} run ${r.status}`,
-      detail: `${r.pairOk}/${r.pairTotal} ok · started by ${r.initiatorKind}:${r.initiatorId}`,
+      title: t("entry.run.title", { type: r.type, status: r.status }),
+      detail: t("entry.run.detail", {
+        ok: r.pairOk,
+        total: r.pairTotal,
+        by: `${r.initiatorKind}:${r.initiatorId}`,
+      }),
       ref: { kind: "run", id: r.id },
     });
   }
@@ -840,16 +738,12 @@ export function k8sEntries(events: K8sEvent[]): TimelineEntry[] {
   return out;
 }
 
-/**
- * maintenanceEntries: one row at each declared window's START.
- *
- * Deliberately NOT re-filtered to the range: the endpoint already answers the
- * windows that OVERLAP it, and a window that began before `from` and is still
- * running is precisely the one that explains the degradation. Its row therefore
- * sorts ahead of the range — which is honest about when it started, and is why
- * the detail line names both edges.
- */
-export function maintenanceEntries(windows: MaintenanceWindow[]): TimelineEntry[] {
+/** maintenanceEntries: one row at each declared window's START. */
+export function maintenanceEntries(
+  windows: MaintenanceWindow[],
+  t: T = enT,
+  locale: Locale = "en",
+): TimelineEntry[] {
   const out: TimelineEntry[] = [];
   for (const w of windows) {
     const at = validAt(w.startAt);
@@ -858,8 +752,16 @@ export function maintenanceEntries(windows: MaintenanceWindow[]): TimelineEntry[
       at,
       kind: "maintenance",
       severity: "info",
-      title: `Maintenance: ${w.reason}`,
-      detail: `${w.scope === "" ? "global" : w.scope} · until ${new Date(w.endAt).toLocaleString()} · ${w.createdBy}`,
+      title: t("entry.maintenance.title", { reason: w.reason }),
+      /* The end stamp goes through lib/i18n's stampFull rather than a bare
+         toLocaleString: it sits INSIDE a translated sentence, and the same
+         window is drawn by the maintenance bar three inches away — one shape or
+         the page is speaking two languages about one instant (finding #18). */
+      detail: t("entry.maintenance.detail", {
+        scope: w.scope === "" ? t("scope.global") : w.scope,
+        until: stampFull(new Date(w.endAt), locale),
+        by: w.createdBy,
+      }),
       ref: { kind: "maintenance", id: w.id },
     });
   }
@@ -868,11 +770,10 @@ export function maintenanceEntries(windows: MaintenanceWindow[]): TimelineEntry[
 
 /* ── source 9: firing alerts (M7 Task 8, plan Decision 6) ────────────────── */
 
-/** ALERT_SEVERITY maps Prometheus's severity LABEL onto the timeline's three
- *  levels. The label is a free string (a foreign rule may carry anything, or
- *  nothing), so an unrecognised value reads as info rather than as an error —
- *  the console does not know what somebody else's word means, and colouring it
- *  red on a guess would be a claim it cannot support. */
+/**
+ * ALERT_SEVERITY maps Prometheus's severity LABEL onto the timeline's three levels; the label is a
+ * free string (a foreign rule may carry anything, or nothing).
+ */
 const ALERT_SEVERITY: Record<string, TimelineEntry["severity"]> = {
   critical: "error",
   warning: "warn",
@@ -890,38 +791,10 @@ function alertLabelLine(labels: Record<string, string>): string {
 }
 
 /**
- * alertEntries: the alerts Prometheus is firing NOW, placed on the window.
- *
- * THE HONESTY THIS SOURCE IS BUILT AROUND. GET /api/v1/alerts serves current
- * state and nothing else — no alert history endpoint exists anywhere in this
- * system — so this mapper can only say what is firing at fetch time, and it
- * says exactly that in two shapes:
- *
- *   - `activeAt` INSIDE the window → one row at activeAt. This alert started
- *     during the investigation, which is the fact a timeline wants.
- *   - `activeAt` BEFORE the window → one row at `from`, titled "already firing
- *     when this window opens". The row is deliberately NOT at the instant it
- *     names, so the detail spells the true start out in ISO — an operator
- *     reading a local clock in the left column must not be able to mistake the
- *     displaced row for a start inside the window.
- *
- * There are NO resolved rows, and their absence is a decision rather than an
- * omission: nothing records when an alert stopped. An alert missing from this
- * response might have resolved a second ago or an hour ago, or have never
- * fired in this window at all, and synthesizing a "resolved" row from an
- * absence would date an event that was never observed. The page's source note
- * states this out loud.
- *
- * PENDING alerts are dropped: pending is not fired (the same line the webhook
- * contract draws), and `activeAt` on a pending alert is when it went ACTIVE,
- * not when it fired — a row from it would be an early lie about a state that
- * may never arrive. An alert with no `activeAt` is dropped too: there is no
- * instant to place it at, and `from` is a claim, not a default.
- *
- * `to` bounds the future edge: an alert that started after the window closed
- * belongs to a different investigation.
+ * GET /api/v1/alerts serves current state and nothing else — no alert history endpoint exists
+ * anywhere in this system.
  */
-export function alertEntries(alerts: Alert[], from: Date, to: Date): TimelineEntry[] {
+export function alertEntries(alerts: Alert[], from: Date, to: Date, t: T = enT): TimelineEntry[] {
   const out: TimelineEntry[] = [];
   for (const a of alerts) {
     if (a.state !== "firing") continue;
@@ -931,14 +804,20 @@ export function alertEntries(alerts: Alert[], from: Date, to: Date): TimelineEnt
     const labels = alertLabelLine(a.labels);
     const severity = ALERT_SEVERITY[a.severity] ?? "info";
     const before = started.getTime() < from.getTime();
+    /* `a.severity` is the rule's own LABEL — a free string a foreign rule may
+       have written — and renders verbatim. Only its ABSENCE is this console's
+       word to choose. */
+    const severityText = a.severity === "" ? t("entry.alert.noSeverity") : a.severity;
     out.push({
       at: before ? from : started,
       kind: "alert",
       severity,
-      title: before ? `Alert ${a.name} — already firing when this window opens` : `Alert firing: ${a.name}`,
+      title: before
+        ? t("entry.alert.title.before", { name: a.name })
+        : t("entry.alert.title", { name: a.name }),
       detail: before
-        ? `${a.severity === "" ? "no severity" : a.severity} · firing since ${started.toISOString()} · ${labels}`
-        : `${a.severity === "" ? "no severity" : a.severity} · ${labels}`,
+        ? t("entry.alert.detail.before", { severity: severityText, since: started.toISOString(), labels })
+        : t("entry.alert.detail", { severity: severityText, labels }),
       /* The identity is the SERIES, not the rule: one rule fires once per label
          set, and keying on ruleId (or on the name) would let mergeTimeline
          dedupe two genuinely different firing pairs into one row. */
@@ -949,25 +828,9 @@ export function alertEntries(alerts: Alert[], from: Date, to: Date): TimelineEnt
 }
 
 /**
- * scopeFromAlertLabels reads an investigation scope out of an alert's labels,
- * or null when they name nothing this page can open.
- *
- * The label names are the probe metrics' own (internal/metrics/prometheus.go,
- * restated in internal/console/alerting/render.go's groupBy lists), which is
- * why a rule built from a template lands here with a usable scope for free and
- * a raw expression only does so if its author grouped by the same labels.
- *
- * NULL IS THE POINT. A link built from labels that do not name an object opens
- * an investigation of something that does not exist — an empty timeline that
- * reads as a quiet fleet. The three shapes below are the only ones the label
- * set can support, and everything else gets no link rather than a wrong one:
- *   - source_node + destination_node → the pair
- *   - source_node alone              → that node
- *   - target alone                   → that external target
- * A destination_node with no source is deliberately NOT a node scope: the node
- * kind asks the peer metric family as a SOURCE, so it would silently answer a
- * different question. An empty label VALUE is an absent label, never a scope
- * named "".
+ * scopeFromAlertLabels reads an investigation scope out of an alert's labels; the label names are
+ * the probe metrics' own (internal/metrics/prometheus.go, restated in
+ * internal/console/alerting/render.go's groupBy lists).
  */
 export function scopeFromAlertLabels(labels: Record<string, string>): InvestigationScope | null {
   const at = (key: string): string => labels[key] ?? "";
@@ -980,23 +843,7 @@ export function scopeFromAlertLabels(labels: Record<string, string>): Investigat
   return null;
 }
 
-/**
- * runTouchesScope filters already-fetched run details down to the ones whose
- * SPEC names this scope — the same client-side scan pages/target-card.tsx's
- * runsTouchingTarget does, and for the same reason: GET /api/v1/runs has no
- * scope filter, and a run's destinations live in the spec only GET
- * /api/v1/runs/{id} returns.
- *
- * The spec is the snapshot checks.Spec marshals into check_runs.spec, so its
- * keys are Go's exported field names while a typed Destination carries its own
- * lowercase json tags. An EMPTY sources/destinations list means "every node in
- * the current topology" (checks.Spec's own doc comment), which genuinely does
- * touch every pair — reading it as "no nodes" would hide exactly the
- * fleet-wide runs an investigation most wants to see.
- *
- * A zone pair and the cluster take every run: neither is expressible in a run
- * spec, and a run over the fleet is context for both.
- */
+/** runTouchesScope filters already-fetched run details down to the ones whose SPEC names this scope. */
 export function runTouchesScope(spec: unknown, scope: InvestigationScope): boolean {
   if (scope.kind === "cluster" || scope.kind === "zone-pair") return true;
   if (typeof spec !== "object" || spec === null) return false;
@@ -1033,15 +880,7 @@ export interface ExportPayload {
   causes: { at: string; kind: string; title: string; score: number }[];
 }
 
-/**
- * buildExportPayload is what the Export button downloads: the parameters, the
- * assembled timeline and the ranking — the three things somebody would have to
- * reproduce by hand to check the console's work.
- *
- * Dates become ISO strings HERE rather than at JSON.stringify time, so the
- * shape is pinned by a test instead of by the serialiser's behaviour, and the
- * file reads the same in every timezone that opens it.
- */
+/** buildExportPayload is what the Export button downloads: the parameters, the assembled timeline and the ranking. */
 export function buildExportPayload(
   params: InvestigationParams,
   entries: TimelineEntry[],

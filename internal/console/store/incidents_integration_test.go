@@ -3,9 +3,6 @@
 package store_test
 
 // TestIncident* / TestListIncidents* require a real PostgreSQL.
-// Run: docker run --rm -d -p 5432:5432 -e POSTGRES_PASSWORD=test -e POSTGRES_DB=kconmon postgres:17-alpine
-// Then: KCONMON_TEST_DATABASE_DSN='postgres://postgres:test@127.0.0.1:5432/kconmon?sslmode=disable' \
-//       go test -tags=integration ./internal/console/store/... -v
 
 import (
 	"context"
@@ -49,8 +46,6 @@ func incidentInput(title string, from time.Time) store.IncidentInput {
 	}
 }
 
-// TestIncidentLifecycle is the whole M6 flow through the store: create ->
-// get -> the three narrow updates -> resolve -> reopen -> delete.
 func TestIncidentLifecycle(t *testing.T) {
 	db := newIncidentsDB(t)
 	ctx := context.Background()
@@ -210,10 +205,8 @@ func TestIncidentInvalidInputNeverReachesTheDatabase(t *testing.T) {
 	}
 }
 
-// TestIncidentPinnedIsStoredAsAJSONArray is the orEmptyPinnedArray claim
-// checked against real jsonb: the column must hold an ARRAY for a caller who
-// supplied nothing, because every reader unmarshals it into a slice and an
-// object would fail at read time, in the UI, long after the write.
+// TestIncidentPinnedIsStoredAsAJSONArray is the orEmptyPinnedArray claim checked against real
+// jsonb.
 func TestIncidentPinnedIsStoredAsAJSONArray(t *testing.T) {
 	db := newIncidentsDB(t)
 	ctx := context.Background()
@@ -306,11 +299,8 @@ func TestListIncidentsStatusAndScopeFilters(t *testing.T) {
 	}
 }
 
-// TestListIncidentsWindowIsOverlapNotContainment is the range filter's real
-// claim, and the one a naive "from_at BETWEEN from AND to" gets wrong. It also
-// pins the open-ended case: a nil ToAt extends to infinity, so an incident
-// that began long before the window and was never closed still overlaps it --
-// which is exactly the incident an operator looking at that window needs.
+// TestListIncidentsWindowIsOverlapNotContainment is the range filter's real claim; it also pins the
+// open-ended case: a nil ToAt extends to infinity.
 func TestListIncidentsWindowIsOverlapNotContainment(t *testing.T) {
 	db := newIncidentsDB(t)
 	ctx := context.Background()
@@ -438,13 +428,8 @@ func TestGetIncidentUnknownIDIsNotFound(t *testing.T) {
 	}
 }
 
-// TestDeleteIncidentsBeforeNeverPrunesAnOpenIncident is the rule the whole
-// retention story for this table turns on. Three incidents, all ancient:
-//
-//   - resolved long ago -> deleted;
-//   - resolved recently -> kept (its resolution is inside the window);
-//   - never resolved -> KEPT, however old, because an investigation nobody
-//     closed is unfinished work rather than stale data.
+// TestDeleteIncidentsBeforeNeverPrunesAnOpenIncident is the rule the whole retention story for this
+// table turns on; three incidents, all ancient: - resolved long ago -> deleted.
 func TestDeleteIncidentsBeforeNeverPrunesAnOpenIncident(t *testing.T) {
 	db := newIncidentsDB(t)
 	ctx := context.Background()

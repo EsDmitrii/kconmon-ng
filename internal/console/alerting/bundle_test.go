@@ -9,21 +9,8 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 )
 
-// marshalBundle serializes the object the way the dynamic client will: as JSON.
-//
-// The brief's first choice was a sigs.k8s.io/yaml golden. That module IS in the
-// build graph, but only as an INDIRECT requirement, so importing it here makes
-// `go mod tidy -diff` non-empty (it promotes the line into the direct require
-// block) — a go.mod edit this task is not allowed to make. gopkg.in/yaml.v3 is
-// a direct dependency and would avoid that, but its emitter writes 4-space maps
-// and indented sequences, which is not what a PrometheusRule looks like in any
-// repo. encoding/json is the brief's own named fallback, it is the byte shape
-// server-side apply actually puts on the wire, and json.Marshal sorts map keys,
-// which is exactly the determinism this golden exists to pin.
-// HTML escaping is off: PromQL is full of < and >, and the k8s JSON
-// serializers do not escape them either, so < in a golden would be an
-// artefact of encoding/json's browser-safety default rather than the bytes the
-// API server sees.
+// marshalBundle serializes the object the way the dynamic client will: as JSON; that module IS in
+// the build graph, but only as an INDIRECT requirement.
 func marshalBundle(t *testing.T, obj *unstructured.Unstructured) string {
 	t.Helper()
 	var buf strings.Builder

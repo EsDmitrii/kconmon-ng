@@ -22,6 +22,8 @@ import {
 // Read in each mutating component rather than threaded down as a prop, the same
 // way pages/settings.tsx and pages/targets.tsx do it: a permission decides
 // whether a control EXISTS, this decides whether it is usable right now.
+import { stampFull, translate, useLocale, useT, type Locale, type Translate } from "@/lib/i18n";
+import { alertingDict, pluralKey, type AlertingKey } from "@/lib/i18n/dict/alerting";
 import { useWriteGuard } from "@/lib/timemachine";
 import type {
   AlertRule,
@@ -35,51 +37,7 @@ import type {
 } from "@/lib/types";
 import { CHECKBOX_CLASS, cn } from "@/lib/utils";
 
-/**
- * The Alerting page (M7 Task 7, plan Decisions 2/4/5/6).
- *
- * Prometheus evaluates, the console MANAGES. Nothing on this page evaluates
- * anything: a rule is builder fields in PostgreSQL, the server renders them
- * into PromQL, and a reconciler server-side-applies one PrometheusRule bundle
- * holding every enabled rule. What the page shows is that pipeline's own
- * account of itself.
- *
- * THREE SECTIONS, and the split between them is a dependency split, not a
- * layout choice:
- *
- *   1. Rules — needs the DATABASE. Lists, creates, edits and deletes work on a
- *      console with alerting switched off; the rules simply sit in PostgreSQL
- *      with nothing applying them.
- *   2. Builder — the same database, plus (for the live preview only) whatever
- *      Prometheus the console proxies.
- *   3. Foreign rules — needs the CLUSTER, i.e. the reconciler. With alerting
- *      off this section is the only one that stops working.
- *
- * That is why the two failures render as two different section states rather
- * than one page-level banner: the API answers 503 for "no database" and 409 for
- * "sync is disabled", and it is the ONE place in this API where those two come
- * apart (httpapi/alertrules.go's alertingDisabledDetail says so at length). A
- * page that collapsed them would send an operator looking at their database for
- * a reconciler nobody asked to start.
- *
- * WHAT THE PAGE IS NOT ALLOWED TO CLAIM. Three facts belong to the server and
- * are rendered as the server states them, never improved on:
- *
- *   - A sync kick answers 202. It means the work was REQUESTED. The outcome
- *     lands on the rules as syncStatus/syncMessage/lastSyncedAt and is read
- *     back on the next list, so the ack says "requested" and stops there.
- *   - A preview's two halves fail independently. `series` is an ANSWER only
- *     when `error` is absent; with an error, 0 series means nobody counted.
- *   - An import report's created/skipped/notes are three different statements
- *     and all three are rendered. Collapsing them into a toast would make an
- *     operator re-check rules that adopted perfectly.
- *
- * DEGRADED MODE. Neither section pre-checks `database.configured` the way
- * pages/targets.tsx does — pages/settings.tsx's newer line: the 503 the routes
- * answer with names console.database.mode in its own detail, in better words
- * than a second copy here would, and rendering the server's sentence verbatim
- * keeps one authority on what is missing instead of two that can drift.
- */
+/** Prometheus evaluates, the console MANAGES; with alerting off this section is the only one that stops working. */
 
 /* ── shared bits ────────────────────────────────────────────────────────── */
 
@@ -117,19 +75,41 @@ function ErrorLine({ testId, children }: { testId?: string; children: ReactNode 
   );
 }
 
+/**
+ * SyncDisabledNotice is the ONE rendering of "rule sync is not running here" —
+ * the 409 whose paragraph names console.alerting.enabled. It exists as a
+ * component rather than as a class repeated in three places because it used to
+ * BE three places: amber and role=status in the managed section, red and
+ * role=alert in the foreign list, red again in the click banner, all printing
+ * the same server sentence and each implying a different severity for it.
+ * Amber, always: a console that does not sync is configured that way, no rule is
+ * at risk, and nothing here is a failure to act on.
+ */
+function SyncDisabledNotice({ testId, children }: { testId: string; children: ReactNode }) {
+  return (
+    <p role="status" data-testid={testId} className="mt-3 max-w-prose text-xs leading-relaxed text-health-warn">
+      {children}
+    </p>
+  );
+}
+
 function PermissionCard({ permission, children }: { permission: string; children: ReactNode }) {
+  const t = useT(alertingDict);
+  /* The permission string is interpolated, never translated — "alerts:manage"
+     is what an operator asks for and what authz/roles.go spells. */
   return (
     <Card role="status" className="p-6">
-      <p className="text-sm font-medium">Requires the {permission} permission</p>
+      <p className="text-sm font-medium">{t("permission.requires", { permission })}</p>
       <p className="mt-1 max-w-prose text-xs leading-relaxed text-muted-foreground">{children}</p>
     </Card>
   );
 }
 
 function ListSkeleton() {
+  const t = useT(alertingDict);
   return (
     <div role="status" aria-live="polite" className="mt-4 flex flex-col gap-2">
-      <span className="sr-only">Loading…</span>
+      <span className="sr-only">{t("loading")}</span>
       {Array.from({ length: 3 }, (_, i) => (
         <Skeleton key={i} className="h-10 w-full" />
       ))}
@@ -137,19 +117,15 @@ function ListSkeleton() {
   );
 }
 
+/** enT is the English translator this file's PURE helpers default to. */
+const enT: Translate<AlertingKey> = (key, vars) => translate(alertingDict, "en", key, vars);
+
 /* ── durations ──────────────────────────────────────────────────────────── */
 
 /**
- * DURATION_UNITS is Prometheus's duration grammar in the DESCENDING order the
- * grammar itself requires, mirroring internal/console/alerting/render.go's
- * promDurationUnit table. The order is load-bearing twice: it is the legality
- * check for a composite string (a unit may only be followed by a smaller one),
- * and it is why "ms" can sit next to "m" without ambiguity — the scanner reads
- * a whole letter run, so "500ms" yields the unit "ms" and never "m" plus a
- * stray "s".
- *
- * y and w are 365d and 7d, Prometheus's own definitions. They are accepted on
- * the way IN and never emitted on the way out (see formatPromDuration).
+ * DURATION_UNITS is Prometheus's duration grammar in the DESCENDING order the grammar itself
+ * requires; the order is load-bearing twice: it is the legality check for a composite string (a
+ * unit may only be followed by a smaller one).
  */
 const DURATION_UNITS: readonly (readonly [unit: string, ns: number])[] = [
   ["y", 365 * 24 * 3600 * 1e9],
@@ -161,25 +137,20 @@ const DURATION_UNITS: readonly (readonly [unit: string, ns: number])[] = [
   ["ms", 1e6],
 ];
 
+/**
+ * A refusal carries `message` — the sentence, already in the caller's language
+ * — and nothing else the caller has to reassemble. The translator is threaded
+ * IN rather than the key threaded out, so the type stays the two-case union it
+ * has always been and every existing reader of `.message` is unaffected.
+ */
 export type DurationParse = { ok: true; ns: number } | { ok: false; message: string };
 
 /**
- * parsePromDuration reads what an operator typed into the `for` box.
- *
- * ONE input, not a value box plus a unit select. A `for` is a Prometheus
- * duration and operators already write it as one — "30s", "5m", "2h" is the
- * vocabulary of every alerting rule anybody has ever read — so a text box that
- * accepts exactly that string is the control that needs no translation in
- * either direction. A value+unit pair would also have to decide what "90" plus
- * "seconds" renders as when the stored value is 90s (a unit select cannot show
- * "1m30s"), and that is a rounding decision this page has no business making.
- *
- * An EMPTY box is 0, not an error: the API's forNs is optional and omitting it
- * means "fire as soon as the expression holds", which is a real and common
- * choice. A bare number IS an error — "30" could mean seconds or minutes, and
- * guessing which is exactly the bug this box exists to prevent.
+ * parsePromDuration reads what an operator typed into the `for` box; a value+unit pair would also
+ * have to decide what "90" plus "seconds" renders as when the stored value is 90s (a unit select
+ * cannot show "1m30s").
  */
-export function parsePromDuration(text: string): DurationParse {
+export function parsePromDuration(text: string, t: Translate<AlertingKey> = enT): DurationParse {
   const s = text.trim();
   if (s === "") return { ok: true, ns: 0 };
 
@@ -190,7 +161,7 @@ export function parsePromDuration(text: string): DurationParse {
     const digitsAt = i;
     while (i < s.length && s[i] >= "0" && s[i] <= "9") i++;
     if (i === digitsAt) {
-      return { ok: false, message: `"${s}" is not a duration: write a number and a unit, like 30s, 5m or 2h` };
+      return { ok: false, message: t("duration.notADuration", { text: s }) };
     }
     const digits = s.slice(digitsAt, i);
 
@@ -198,14 +169,16 @@ export function parsePromDuration(text: string): DurationParse {
     while (i < s.length && s[i] >= "a" && s[i] <= "z") i++;
     const unit = s.slice(lettersAt, i);
     if (unit === "") {
-      return { ok: false, message: `"${s}" has no unit: write ${digits}s, ${digits}m or ${digits}h` };
+      return { ok: false, message: t("duration.noUnit", { text: s, digits }) };
     }
     const at = DURATION_UNITS.findIndex(([u]) => u === unit);
     if (at === -1) {
-      return { ok: false, message: `"${unit}" is not a Prometheus duration unit (ms, s, m, h, d, w, y)` };
+      /* The unit LIST inside the sentence stays as it is: those seven letters
+         are Prometheus's grammar, not vocabulary. */
+      return { ok: false, message: t("duration.badUnit", { unit }) };
     }
     if (at <= lastUnit) {
-      return { ok: false, message: `"${s}" must run from the largest unit to the smallest, like 1h30m` };
+      return { ok: false, message: t("duration.order", { text: s }) };
     }
     lastUnit = at;
     ns += Number(digits) * DURATION_UNITS[at][1];
@@ -213,19 +186,7 @@ export function parsePromDuration(text: string): DurationParse {
   return { ok: true, ns };
 }
 
-/**
- * formatPromDuration is the inverse, and it mirrors render.go's own
- * FormatPromDuration byte for byte: the largest unit that divides EVENLY, never
- * a compound. 300s renders "5m" and 90s renders "90s" rather than "1m30s",
- * because a single-unit string is what somebody typed into this box in the
- * first place and a compound would make two equal durations render differently
- * depending on which unit the UI happened to pick.
- *
- * Units stop at days on the way out: "1w" reads as a different setting than the
- * 7d that was entered. A value that is not a whole number of milliseconds can
- * only reach the browser from a row this page did not write, so it is printed
- * in nanoseconds rather than rounded into a lie.
- */
+/** formatPromDuration is the inverse, and it mirrors render.go's own FormatPromDuration byte for byte. */
 export function formatPromDuration(ns: number): string {
   if (ns === 0) return "0s";
   if (ns < 0 || !Number.isFinite(ns)) return `${ns}ns`;
@@ -240,40 +201,35 @@ export function formatPromDuration(ns: number): string {
  *  that has never been applied has no lastSyncedAt, and inventing "never
  *  synced, probably" out of an absent field is the page speaking for the
  *  reconciler. The absolute instant stays available as a title. */
-export function relativeTime(iso: string | undefined, now: Date): string {
+export function relativeTime(iso: string | undefined, now: Date, t: Translate<AlertingKey> = enT): string {
   if (!iso) return "—";
-  const t = new Date(iso).getTime();
-  if (Number.isNaN(t)) return iso;
-  const seconds = Math.floor((now.getTime() - t) / 1000);
-  if (seconds < 0) return "just now";
-  if (seconds < 60) return `${seconds}s ago`;
+  const at = new Date(iso).getTime();
+  /* An unparseable stamp renders VERBATIM — it is the server's bytes, and a
+     translated guess about them would be this console inventing a time. */
+  if (Number.isNaN(at)) return iso;
+  const seconds = Math.floor((now.getTime() - at) / 1000);
+  if (seconds < 0) return t("age.justNow");
+  if (seconds < 60) return t("age.seconds", { count: seconds });
   const minutes = Math.floor(seconds / 60);
-  if (minutes < 60) return `${minutes}m ago`;
+  if (minutes < 60) return t("age.minutes", { count: minutes });
   const hours = Math.floor(minutes / 60);
-  if (hours < 24) return `${hours}h ago`;
-  return `${Math.floor(hours / 24)}d ago`;
+  if (hours < 24) return t("age.hours", { count: hours });
+  return t("age.days", { count: Math.floor(hours / 24) });
 }
 
-function absoluteTime(iso?: string): string | undefined {
+/** The locale is required: a bare toLocaleString() reorders the date and swaps in AM/PM from
+ *  whatever the browser was installed in — "8/10/2026 3:47 AM" on a Russian page. */
+function absoluteTime(iso: string | undefined, locale: Locale): string | undefined {
   if (!iso) return undefined;
   const d = new Date(iso);
-  return Number.isNaN(d.getTime()) ? iso : d.toLocaleString();
+  return Number.isNaN(d.getTime()) ? iso : stampFull(d, locale);
 }
 
 /* ── the closed schemas, mirrored ───────────────────────────────────────── */
 
 /**
- * RESERVED_LABEL_NAMES are the two label names the renderer stamps on every
- * rule entry itself (alerting/render.go's SeverityLabel and RuleIDLabel), so a
- * user label of either name is an ERROR and never a silent override.
- *
- * This is the ONE server rule mirrored client-side on this page, and it earns
- * that place the way settings.tsx's blank-secret check does: everything else —
- * the name charset, the param ranges, the label-name grammar — is left to the
- * server's 422, whose wording is better than a second copy would be. This one
- * is mirrored because it is the only case where a form the operator can see
- * being filled in is guaranteed to be refused, and the refusal is about a field
- * they can fix in place.
+ * RESERVED_LABEL_NAMES are the two label names the renderer stamps on every rule entry itself
+ * (alerting/render.go's SeverityLabel and RuleIDLabel).
  */
 export const RESERVED_LABEL_NAMES: readonly string[] = ["severity", "kconmon_ng_rule_id"];
 
@@ -287,154 +243,123 @@ export function reservedLabelMessage(key: string): string | undefined {
 export interface ParamField {
   /** The WIRE key. A dot means the param is nested (pair-loss's `scope`). */
   key: string;
-  label: string;
-  /** "target" is "text" that KNOWS what it names (QA round 5, finding #15):
-   *  rendered as a select over the console's own targets when the reader holds
-   *  targets:read, and as the plain box otherwise. It is a rendering hint, not
-   *  a wire type — the value on the wire is the target's NAME either way. */
+  /** What the FORM calls this param, as a dictionary key — the wire key above
+   *  is the identity, this is only the label over the box. */
+  labelKey: AlertingKey;
+  /** "target" is "text" that KNOWS what it names. */
   type: "number" | "text" | "expr" | "enum" | "target";
   required: boolean;
   /** Set for `enum`; values are the wire values. */
   options?: readonly string[];
   /** Set on an enum whose wire value is a NUMBER (zone-latency's quantile). */
   numeric?: boolean;
-  hint?: string;
+  hintKey?: AlertingKey;
 }
 
 /**
- * KIND_PARAMS mirrors internal/console/alerting/render.go's `kindSchemas`
- * table — the CLOSED per-kind param schema — field for field, including which
- * ones are required.
- *
- * Mirrored rather than derived because there is nothing to derive from:
- * openapi-typescript emits AlertRule.params as an open `{[key: string]:
- * unknown}` (the OpenAPI schema cannot express "closed, but differently per
- * kind"), so the shape of the form is knowledge this file has to carry. Every
- * entry below cites the Go it came from:
- *
- *   pair-loss             protocol (tcp|udp|icmp, required), thresholdPercent
- *                         (required, 0-100 — percentParam), scope.sourceNode,
- *                         scope.destNode (scopeSchema, both optional strings)
- *   zone-latency          protocol (required), quantile (required, one of
- *                         0.5/0.95/0.99 — validQuantiles), thresholdMs
- *                         (required, > 0 — positiveParam), sourceZone, destZone
- *   dns-failures          thresholdPercent (required, 0-100)
- *   http-ttfb             thresholdMs (required, > 0), url. The quantile is
- *                         FIXED at 0.95 (TTFBQuantile) and is not a param.
- *   agent-missing         none. `for` lives on the rule, so a forMinutes param
- *                         here would be a second place meaning the same thing.
- *   external-target-down  targetName
- *   raw                   expr (required)
- *
- * cert-expiry is absent on purpose and is absent from the API enum too: the
- * alert_rules.kind CHECK constraint accepts it, no template renders it (no
- * certificate-expiry metric family exists in this codebase), and a write is
- * 422ed. A form field for it would offer an alert that can never fire.
- *
- * The units are the OPERATOR's, not the metric's: loss thresholds are PERCENT
- * against ratio gauges and latency thresholds are MILLISECONDS against second
- * histograms, and render.go does both conversions at render time so the stored
- * params stay in the units that were typed.
+ * KIND_PARAMS mirrors internal/console/alerting/render.go's `kindSchemas` table; mirrored rather
+ * than derived because there is nothing to derive.
  */
 export const KIND_PARAMS: Record<AlertRuleKind, readonly ParamField[]> = {
   "pair-loss": [
-    { key: "protocol", label: "Protocol", type: "enum", required: true, options: ["tcp", "udp", "icmp"] },
+    { key: "protocol", labelKey: "param.protocol", type: "enum", required: true, options: ["tcp", "udp", "icmp"] },
     {
       key: "thresholdPercent",
-      label: "Loss threshold (%)",
+      labelKey: "param.thresholdPercent.loss",
       type: "number",
       required: true,
-      hint: "0–100. The loss metrics are ratios; the renderer multiplies by 100, so this is the percentage a chart shows.",
+      hintKey: "param.thresholdPercent.loss.hint",
     },
-    { key: "scope.sourceNode", label: "Source node", type: "text", required: false, hint: "Optional. Blank means every source." },
-    { key: "scope.destNode", label: "Destination node", type: "text", required: false, hint: "Optional. Blank means every destination." },
+    {
+      key: "scope.sourceNode",
+      labelKey: "param.scope.sourceNode",
+      type: "text",
+      required: false,
+      hintKey: "param.scope.sourceNode.hint",
+    },
+    {
+      key: "scope.destNode",
+      labelKey: "param.scope.destNode",
+      type: "text",
+      required: false,
+      hintKey: "param.scope.destNode.hint",
+    },
   ],
   "zone-latency": [
-    { key: "protocol", label: "Protocol", type: "enum", required: true, options: ["tcp", "udp", "icmp"] },
+    { key: "protocol", labelKey: "param.protocol", type: "enum", required: true, options: ["tcp", "udp", "icmp"] },
     {
       key: "quantile",
-      label: "Quantile",
+      labelKey: "param.quantile",
       type: "enum",
       required: true,
       numeric: true,
       options: ["0.5", "0.95", "0.99"],
-      hint: "The three the renderer accepts.",
+      hintKey: "param.quantile.hint",
     },
     {
       key: "thresholdMs",
-      label: "Latency threshold (ms)",
+      labelKey: "param.thresholdMs.latency",
       type: "number",
       required: true,
-      hint: "Greater than 0. The histograms are in seconds; the renderer converts.",
+      hintKey: "param.thresholdMs.latency.hint",
     },
-    { key: "sourceZone", label: "Source zone", type: "text", required: false, hint: "Optional." },
-    { key: "destZone", label: "Destination zone", type: "text", required: false, hint: "Optional." },
+    { key: "sourceZone", labelKey: "param.sourceZone", type: "text", required: false, hintKey: "param.optional" },
+    { key: "destZone", labelKey: "param.destZone", type: "text", required: false, hintKey: "param.optional" },
   ],
   "dns-failures": [
     {
       key: "thresholdPercent",
-      label: "Failure threshold (%)",
+      labelKey: "param.thresholdPercent.dns",
       type: "number",
       required: true,
-      hint: "0–100, as a share of the DNS results counter.",
+      hintKey: "param.thresholdPercent.dns.hint",
     },
   ],
   "http-ttfb": [
     {
       key: "thresholdMs",
-      label: "TTFB threshold (ms)",
+      labelKey: "param.thresholdMs.ttfb",
       type: "number",
       required: true,
-      hint: "Greater than 0. The quantile is fixed at 0.95.",
+      hintKey: "param.thresholdMs.ttfb.hint",
     },
-    { key: "url", label: "URL", type: "text", required: false, hint: "Optional. Blank means every probed URL." },
+    { key: "url", labelKey: "param.url", type: "text", required: false, hintKey: "param.url.hint" },
   ],
   "agent-missing": [],
   "external-target-down": [
     /* type "target", not "text": the value has to match a target's name
        EXACTLY or the rendered expression selects nothing, and a free box gave
        an operator no way to know what the names are (finding #15). */
-    { key: "targetName", label: "Target name", type: "target", required: false, hint: "Optional. Blank means every external target." },
+    {
+      key: "targetName",
+      labelKey: "param.targetName",
+      type: "target",
+      required: false,
+      hintKey: "param.targetName.hint",
+    },
   ],
   raw: [
-    {
-      key: "expr",
-      label: "PromQL expression",
-      type: "expr",
-      required: true,
-      hint: "Stored verbatim. Validity is what the preview below reports — this console ships no Prometheus parser.",
-    },
+    { key: "expr", labelKey: "param.expr", type: "expr", required: true, hintKey: "param.expr.hint" },
   ],
 };
 
-/** ALERT_RULE_KINDS is the select's order and the one-line blurb next to each
- *  option. Templates first, `raw` last: raw is the escape hatch, and a builder
- *  that offers it first teaches operators to skip the templates that carry the
- *  metric names for them. */
-export const ALERT_RULE_KINDS: readonly (readonly [AlertRuleKind, string])[] = [
-  ["pair-loss", "packet loss between nodes"],
-  ["zone-latency", "cross-zone latency quantile"],
-  ["dns-failures", "DNS failure share"],
-  ["http-ttfb", "HTTP time-to-first-byte"],
-  ["agent-missing", "registered agents below expected"],
-  ["external-target-down", "external target failing"],
-  ["raw", "hand-written PromQL"],
+/**
+ * ALERT_RULE_KINDS is the select's order and the key of the one-line blurb next to each option; the
+ * KIND is the template's identifier and renders as itself.
+ */
+export const ALERT_RULE_KINDS: readonly (readonly [AlertRuleKind, AlertingKey])[] = [
+  ["pair-loss", "kind.pair-loss"],
+  ["zone-latency", "kind.zone-latency"],
+  ["dns-failures", "kind.dns-failures"],
+  ["http-ttfb", "kind.http-ttfb"],
+  ["agent-missing", "kind.agent-missing"],
+  ["external-target-down", "kind.external-target-down"],
+  ["raw", "kind.raw"],
 ];
 
 const SEVERITIES: readonly AlertSeverity[] = ["info", "warning", "critical"];
 
-/**
- * problemField routes a 422's detail to the form field it is about, so the
- * message lands where the value is instead of at the bottom of a form.
- *
- * The renderer's errors already NAME the param that caused them
- * (`pair-loss: param "thresholdPercent" is required`), which is the whole
- * reason they are surfaced verbatim — the caller typed that param a second
- * ago — so matching the quoted name is enough and no message is rewritten.
- * Anything this cannot place returns undefined and the caller banners it,
- * which is the honest failure direction: a message shown in the wrong place is
- * worse than one shown at the top.
- */
+/** problemField routes a 422's detail to the form field it is about. */
 export function problemField(detail: string): string | undefined {
   const param = /param "([^"]+)"/.exec(detail);
   if (param) return param[1];
@@ -447,19 +372,8 @@ export function problemField(detail: string): string | undefined {
 /* ── rule ⇄ request ─────────────────────────────────────────────────────── */
 
 /**
- * alertRuleRequestFrom turns a STORED rule back into a write body.
- *
- * It exists because PUT /api/v1/alert-rules/{id} is a FULL REPLACE with no
- * PATCH counterpart, so the row toggle — which changes exactly one boolean —
- * still has to send everything. Sending everything by hand at each call site is
- * how a field goes missing, and one field going missing here is not cosmetic:
- * `enabled` OMITTED means TRUE on the wire, so a partial body would silently
- * re-enable a rule somebody deliberately turned off. This function writes it
- * explicitly, always.
- *
- * renderedExpr and the three sync fields are deliberately absent: the first is
- * the server's (it re-renders from these params on every write) and the others
- * are the reconciler's.
+ * alertRuleRequestFrom turns a STORED rule back into a write body; sending everything by hand at
+ * each call site is how a field goes missing.
  */
 export function alertRuleRequestFrom(rule: AlertRule, over: Partial<AlertRuleRequest> = {}): AlertRuleRequest {
   return {
@@ -549,18 +463,8 @@ function draftFrom(rule?: AlertRule): RuleDraft {
 }
 
 /**
- * paramsFromDraft types and nests the form's strings into the params object.
- *
- * An empty optional field is OMITTED rather than sent as "": params are CLOSED
- * per kind and the renderer rejects an empty string param by name
- * (`must not be empty`), so a blank box has to mean "not set" — which is what
- * it looks like to the person who left it blank.
- *
- * A number that will not parse is sent as the STRING the operator typed, on
- * purpose: the server then answers `param "x" must be a number` naming the
- * field, which is a better message than anything this function could invent,
- * and NaN would go on the wire as null and be reported as a missing param
- * instead of a malformed one.
+ * paramsFromDraft types and nests the form's strings into the params object; an empty optional
+ * field is OMITTED rather than sent as "".
  */
 export function paramsFromDraft(kind: AlertRuleKind, params: Record<string, string>): Record<string, unknown> {
   const out: Record<string, unknown> = {};
@@ -617,6 +521,16 @@ const SEVERITY_TONE: Record<AlertSeverity, "neutral" | "warn" | "bad"> = {
   critical: "bad",
 };
 
+/** SYNC_KEYS names each reconciler state on screen. Beside SYNC_TONE rather
+ *  than inside it: one decides the colour, the other the word, and a row that
+ *  changed only one of them would be the pill lying with its own paint. */
+const SYNC_KEYS: Record<AlertSyncStatus, AlertingKey> = {
+  synced: "sync.synced",
+  drift: "sync.drift",
+  error: "sync.error",
+  unsynced: "sync.unsynced",
+};
+
 function RuleRow({
   rule,
   canManage,
@@ -631,23 +545,21 @@ function RuleRow({
   onEdit: () => void;
   onSyncConflict: (detail: string) => void;
 }) {
+  const t = useT(alertingDict);
+  const { locale } = useLocale();
   const qc = useQueryClient();
-  /* guard carries the DISABLED flag AND the reason for it — lib/timemachine's
-     useWriteGuard (QA round 2, finding #18). Spread it onto the control; the
-     alias below is for the controls that compose it with a local condition,
-     which must be applied AFTER the spread to win. */
+  const ruleSync = useRuleSync();
+  /* Spread it onto the control; the alias below is for the controls that compose it with a local condition. */
   const guard = useWriteGuard();
   const writesDisabled = guard.disabled;
   const detailsId = useId();
   const rowRef = useRef<HTMLLIElement>(null);
   const [expanded, setExpanded] = useState(focused);
 
-  /* The deep link's landing (QA round 1, finding #17): a firing alert on the
-     Overview used to drop the reader at the top of an unsorted list to find
-     the rule themselves. The row opens and comes into view ONCE, on arrival —
-     not on every render, or collapsing it by hand would fight the effect.
-     scrollIntoView is guarded: jsdom has none, the same guard the palette and
-     the picker's wheels carry. */
+  /*
+   * The deep link's landing: a firing alert on the Overview used to drop the reader at the top of
+   * an unsorted list to find the rule themselves.
+   */
   useEffect(() => {
     if (!focused) return;
     rowRef.current?.scrollIntoView?.({ block: "center" });
@@ -664,7 +576,7 @@ function RuleRow({
       await updateAlertRule(rule.id, alertRuleRequestFrom(rule, { enabled: !rule.enabled }));
       await qc.invalidateQueries({ queryKey: ["alert-rules"] });
     } catch (err) {
-      setError(queryErrorMessage(err, "Failed to save the rule"));
+      setError(queryErrorMessage(err, t("row.saveFailed")));
     }
     setBusy(false);
   }
@@ -676,7 +588,7 @@ function RuleRow({
       await deleteAlertRule(rule.id);
       await qc.invalidateQueries({ queryKey: ["alert-rules"] });
     } catch (err) {
-      setError(queryErrorMessage(err, "Failed to delete the rule"));
+      setError(queryErrorMessage(err, t("row.deleteFailed")));
       setBusy(false);
       setConfirming(false);
     }
@@ -692,8 +604,8 @@ function RuleRow({
       // 409 is not this row's failure — it is the whole console's alerting
       // switch, and it says so in a paragraph. It goes to the section banner so
       // it is stated ONCE, however many rows the operator clicks.
-      if (problemStatus(err) === 409) onSyncConflict(queryErrorMessage(err, "Prometheus rule sync is disabled"));
-      else setError(queryErrorMessage(err, "Failed to request a reconcile"));
+      if (problemStatus(err) === 409) onSyncConflict(queryErrorMessage(err, t("row.syncDisabled")));
+      else setError(queryErrorMessage(err, t("row.syncFailed")));
       setBusy(false);
       return;
     }
@@ -704,28 +616,39 @@ function RuleRow({
   return (
     <li ref={rowRef} data-testid="rule-row" className="flex flex-wrap items-center gap-3 py-3 text-sm">
       <span className="font-medium">{rule.name}</span>
+      {/* kind and severity are WIRE VALUES: the builder writes them, the
+          renderer stamps severity onto the rule as a label, and Alertmanager
+          routes on it. They render as themselves in both languages. */}
       <Badge variant="neutral">{rule.kind}</Badge>
       <Badge variant={SEVERITY_TONE[rule.severity]}>{rule.severity}</Badge>
-      {/* The reconciler's one-liner rides the chip as a title so it is reachable
-          without expanding, and is repeated in full in the details panel: a
-          title alone is invisible to touch and to anyone not hovering. */}
+      {/* syncStatus is the opposite case and does translate: nothing writes it
+          and nothing routes on it — it is the reconciler's verdict rendered as
+          a pill. A status this build has never heard of still renders, as
+          itself. The reconciler's one-liner rides the chip as a title so it is
+          reachable without expanding, and is repeated in full in the details
+          panel: a title alone is invisible to touch and to anyone not
+          hovering. */}
       <span data-testid="sync-status" title={rule.syncMessage === "" ? undefined : rule.syncMessage}>
-        <Badge variant={SYNC_TONE[rule.syncStatus]}>{rule.syncStatus}</Badge>
+        <Badge variant={SYNC_TONE[rule.syncStatus]}>
+          {SYNC_KEYS[rule.syncStatus] ? t(SYNC_KEYS[rule.syncStatus]) : rule.syncStatus}
+        </Badge>
       </span>
-      <span data-testid="last-synced" title={absoluteTime(rule.lastSyncedAt)} className="text-xs text-muted-foreground">
-        {relativeTime(rule.lastSyncedAt, new Date())}
+      <span data-testid="last-synced" title={absoluteTime(rule.lastSyncedAt, locale)} className="text-xs text-muted-foreground">
+        {relativeTime(rule.lastSyncedAt, new Date(), t)}
       </span>
       {canManage ? (
         <input
           type="checkbox"
-          aria-label={`Enabled ${rule.name}`}
+          aria-label={t("row.enabledAria", { name: rule.name })}
           checked={rule.enabled}
           {...guard} disabled={writesDisabled || busy}
           onChange={() => void handleToggle()}
           className={CHECKBOX_CLASS}
         />
       ) : (
-        <Badge variant={rule.enabled ? "ok" : "unknown"}>{rule.enabled ? "enabled" : "disabled"}</Badge>
+        <Badge variant={rule.enabled ? "ok" : "unknown"}>
+          {rule.enabled ? t("row.enabled") : t("row.disabled")}
+        </Badge>
       )}
 
       <span className="ml-auto flex flex-wrap items-center gap-2">
@@ -738,30 +661,46 @@ function RuleRow({
           variant="ghost"
           aria-expanded={expanded}
           aria-controls={detailsId}
-          onClick={() => setExpanded((v) => !v)}
+          onClick={() => {
+            setExpanded((v) => {
+              writeFocusedRule(rule.id, !v);
+              return !v;
+            });
+          }}
         >
-          Details for {rule.name}
+          {t("row.details", { name: rule.name })}
         </Button>
         {canManage ? (
           confirming ? (
             <>
               <Button size="sm" variant="outline" loading={busy} {...guard} onClick={() => void handleDelete()}>
-                Confirm delete {rule.name}
+                {t("row.confirmDelete", { name: rule.name })}
               </Button>
               <Button size="sm" variant="ghost" onClick={() => setConfirming(false)}>
-                Cancel
+                {t("cancel")}
               </Button>
             </>
           ) : (
             <>
-              <Button size="sm" variant="ghost" {...guard} disabled={writesDisabled || busy} onClick={() => void handleSync()}>
-                Sync {rule.name} now
+              {/* A control must not offer what the thing behind it refuses: with
+                  sync off this button can only ever produce the 409 the section
+                  header is already showing. The reason rides on it, so the
+                  disabled state is never a mystery. */}
+              <Button
+                size="sm"
+                variant="ghost"
+                {...guard}
+                disabled={writesDisabled || busy || ruleSync.disabled}
+                title={ruleSync.disabled ? ruleSync.message : undefined}
+                onClick={() => void handleSync()}
+              >
+                {t("row.sync", { name: rule.name })}
               </Button>
               <Button size="sm" variant="ghost" {...guard} onClick={onEdit}>
-                Edit {rule.name}
+                {t("row.edit", { name: rule.name })}
               </Button>
               <Button size="sm" variant="ghost" {...guard} onClick={() => setConfirming(true)}>
-                Delete {rule.name}
+                {t("row.delete", { name: rule.name })}
               </Button>
             </>
           )
@@ -770,22 +709,27 @@ function RuleRow({
 
       {expanded ? (
         <div id={detailsId} className="w-full border-l-2 border-border pl-3 text-xs">
-          <p className="text-muted-foreground">Rendered expression</p>
+          <p className="text-muted-foreground">{t("row.renderedExpr")}</p>
           {/* The SERVER's bytes, not a re-render: renderedExpr is on the row so
               the expression an operator reads is the one the bundle carries. */}
           <code className="mt-1 block break-all whitespace-pre-wrap font-mono text-[12px]">{rule.renderedExpr}</code>
           {rule.syncMessage === "" ? null : (
             <p className="mt-2 leading-relaxed text-muted-foreground">{rule.syncMessage}</p>
           )}
+          {/* "for" keeps its own name inside the line — it is the rule's field,
+              the same three letters the form's box is labelled with. */}
           <p className="mt-2 text-muted-foreground">
-            for {formatPromDuration(rule.forNs)} · last applied {absoluteTime(rule.lastSyncedAt) ?? "never"}
+            {t("row.forLine", {
+              duration: formatPromDuration(rule.forNs),
+              at: absoluteTime(rule.lastSyncedAt, locale) ?? t("row.never"),
+            })}
           </p>
         </div>
       ) : null}
 
       {kicked ? (
         <span role="status" data-testid="sync-ack" className="w-full text-xs text-muted-foreground">
-          Reconcile requested. The outcome lands on this row as its sync status — it is not known yet.
+          {t("row.syncAck")}
         </span>
       ) : null}
       {error ? (
@@ -800,14 +744,9 @@ function RuleRow({
 /* ── the builder ────────────────────────────────────────────────────────── */
 
 /**
- * PREVIEW_DEBOUNCE_MS is how long the builder waits after the last edit before
- * asking the server to render and evaluate the draft.
- *
- * The preview is a POST that runs an instant query against Prometheus, so
- * firing one per keystroke would put a real query on the cluster for every
- * digit of a threshold. Kept well under vitest's waitFor budget so the tests
- * exercise the real timer instead of a fake clock — settings.tsx's
- * TEST_REFETCH_DELAY_MS reasoning.
+ * PREVIEW_DEBOUNCE_MS is how long the builder waits after the last edit before asking the server to
+ * render and evaluate the draft; the preview is a POST that runs an instant query against
+ * Prometheus.
  */
 export const PREVIEW_DEBOUNCE_MS = 300;
 
@@ -841,23 +780,30 @@ function Field({
   );
 }
 
+/** PairEditor names its strings by KEY rather than deriving them from one noun. */
 function PairEditor({
-  legend,
-  noun,
+  legendKey,
+  nounKey,
+  addKey,
+  removeKey,
   pairs,
   disabled,
   onChange,
 }: {
-  legend: string;
-  /** "Label" or "Annotation" — the singular that names each row's two boxes. */
-  noun: string;
+  legendKey: AlertingKey;
+  /** The singular that names each row's two boxes, for the aria-labels. */
+  nounKey: AlertingKey;
+  addKey: AlertingKey;
+  removeKey: AlertingKey;
   pairs: Pair[];
   disabled: boolean;
   onChange: (pairs: Pair[]) => void;
 }) {
+  const t = useT(alertingDict);
+  const noun = t(nounKey);
   return (
     <fieldset className="flex flex-col gap-2 text-[13px]">
-      <legend className="text-muted-foreground">{legend}</legend>
+      <legend className="text-muted-foreground">{t(legendKey)}</legend>
       {pairs.map((pair, i) => (
         <div key={i} className="flex flex-wrap items-center gap-2">
           {/* Placeholders, because "Add label" produces TWO identical empty
@@ -866,15 +812,15 @@ function PairEditor({
               operator had only the order to go on, and the order is the one
               thing a two-box row does not communicate. */}
           <input
-            aria-label={`${noun} name ${i + 1}`}
-            placeholder="name"
+            aria-label={t("pairs.nameAria", { noun, index: i + 1 })}
+            placeholder={t("pairs.namePlaceholder")}
             value={pair.key}
             onChange={(e) => onChange(pairs.map((p, j) => (i === j ? { ...p, key: e.target.value } : p)))}
             className={fieldClasses(reservedLabelMessage(pair.key.trim()) !== undefined)}
           />
           <input
-            aria-label={`${noun} value ${i + 1}`}
-            placeholder="value"
+            aria-label={t("pairs.valueAria", { noun, index: i + 1 })}
+            placeholder={t("pairs.valuePlaceholder")}
             value={pair.value}
             onChange={(e) => onChange(pairs.map((p, j) => (i === j ? { ...p, value: e.target.value } : p)))}
             className={fieldClasses(false)}
@@ -885,13 +831,13 @@ function PairEditor({
             variant="ghost"
             onClick={() => onChange(pairs.filter((_, j) => j !== i))}
           >
-            Remove {noun.toLowerCase()} {i + 1}
+            {t(removeKey, { index: i + 1 })}
           </Button>
         </div>
       ))}
       <div>
         <Button type="button" size="sm" variant="outline" disabled={disabled} onClick={() => onChange([...pairs, { key: "", value: "" }])}>
-          Add {noun.toLowerCase()}
+          {t(addKey)}
         </Button>
       </div>
     </fieldset>
@@ -909,16 +855,20 @@ function PreviewPanel({
   preview?: AlertRulePreview;
   error?: string;
 }) {
+  const t = useT(alertingDict);
   return (
-    <div role="region" aria-label="Expression preview" aria-live="polite" className="rounded-md border border-border p-4">
-      <p className="text-[13px] font-medium">Preview</p>
+    <div
+      role="region"
+      aria-label={t("preview.region")}
+      aria-live="polite"
+      className="rounded-md border border-border p-4"
+    >
+      <p className="text-[13px] font-medium">{t("preview.heading")}</p>
       {!ready ? (
-        <p className="mt-1 max-w-prose text-xs leading-relaxed text-muted-foreground">
-          Fill the required parameters to preview the expression. Nothing is asked of Prometheus until then.
-        </p>
+        <p className="mt-1 max-w-prose text-xs leading-relaxed text-muted-foreground">{t("preview.notReady")}</p>
       ) : null}
       {ready && loading && !preview ? (
-        <p className="mt-1 text-xs text-muted-foreground">Rendering…</p>
+        <p className="mt-1 text-xs text-muted-foreground">{t("preview.rendering")}</p>
       ) : null}
       {error ? <ErrorLine>{error}</ErrorLine> : null}
       {preview ? (
@@ -929,15 +879,14 @@ function PreviewPanel({
               {/* The two halves failed independently. The expression rendered —
                   that is a real result and it is shown — but nobody counted, so
                   `series` is not a number this may print. */}
-              <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
-                The expression rendered. It could not be evaluated, so how many series it matches is unknown.
-              </p>
+              <p className="mt-2 text-xs leading-relaxed text-muted-foreground">{t("preview.notEvaluated")}</p>
+              {/* Prometheus's own error, verbatim. */}
               <p className="mt-1 text-xs leading-relaxed text-health-warn">{preview.error}</p>
             </>
           ) : (
             <p className="mt-2 text-xs text-muted-foreground">
-              Matches {preview.series} series right now.
-              {preview.series === 0 ? " That is the answer, not a failure: nothing matches at this instant." : ""}
+              {t("preview.matches", { series: preview.series })}
+              {preview.series === 0 ? t("preview.matchesZero") : ""}
             </p>
           )}
         </>
@@ -947,28 +896,37 @@ function PreviewPanel({
 }
 
 function RuleForm({ initial, onDone }: { initial?: AlertRule; onDone: () => void }) {
+  const t = useT(alertingDict);
   const qc = useQueryClient();
-  /* guard carries the DISABLED flag AND the reason for it — lib/timemachine's
-     useWriteGuard (QA round 2, finding #18). Spread it onto the control. */
+  /* guard carries the DISABLED flag AND the reason for it — lib/timemachine's useWriteGuard. */
   const guard = useWriteGuard();
   const [draft, setDraft] = useState<RuleDraft>(() => draftFrom(initial));
+  /* The draft as it was handed over, for the discard prompt below. A ref, not
+     state: it never changes after mount, and comparing serialisations is
+     cheaper than threading a dirty flag through every field. */
+  const pristine = useRef(JSON.stringify(draftFrom(initial)));
+  const dirty = JSON.stringify(draft) !== pristine.current;
+  const [discarding, setDiscarding] = useState(false);
   /* The in-flight guard, not just a disabled look (QA round 5, finding #17):
      begin() is a REF write, so three clicks in one task produce one request.
      hooks/use-submit-guard.ts says why a useState flag cannot do this. */
   const { submitting, begin, end } = useSubmitGuard();
   const [formError, setFormError] = useState<{ message: string; field?: string }>();
   const [preview, setPreview] = useState<AlertRulePreview>();
+  /* The previewKey whose preview came back with rejected=true. Held as the KEY
+     rather than a boolean so any edit to the expression clears the block on its
+     own: a different draft has a different key, and the block simply stops
+     matching. */
+  const [rejectedKey, setRejectedKey] = useState<string>();
   const [previewError, setPreviewError] = useState<string>();
   const [previewLoading, setPreviewLoading] = useState(false);
 
   const fields = paramFieldsFor(draft.kind);
 
-  /* The target list behind a "target" param (QA round 5, finding #15).
-     PERMISSION-GATED and KIND-GATED at the request, the same rule every other
-     source in this console follows: a form with no target field, or a reader
-     without targets:read, costs the API nothing. Falling back to the free box
-     rather than hiding the field is the honest direction — a reader who cannot
-     LIST targets may still know the name of one. */
+  /*
+   * The target list behind a "target" param; falling back to the free box rather than hiding the
+   * field is the honest direction.
+   */
   const { can } = useAuth();
   const needsTargets = fields.some((f) => f.type === "target");
   const canReadTargets = can("targets:read");
@@ -990,13 +948,11 @@ function RuleForm({ initial, onDone }: { initial?: AlertRule; onDone: () => void
     [draft.labels],
   );
 
-  const duration = parsePromDuration(draft.forText);
+  const duration = parsePromDuration(draft.forText, t);
   const previewReady = fields.every((f) => !f.required || (draft.params[f.key] ?? "").trim() !== "");
 
-  // The preview body is what a SAVE would send, minus the two fields that
-  // cannot change the expression: the name (which only seeds the alertname) and
-  // the severity (a label). Keying the debounce on the rest means typing a name
-  // does not put an instant query on the cluster.
+  // The preview body is what a SAVE would send, minus the two fields that cannot change the
+  // expression.
   const previewBody: AlertRuleRequest = {
     name: draft.name,
     kind: draft.kind,
@@ -1010,12 +966,27 @@ function RuleForm({ initial, onDone }: { initial?: AlertRule; onDone: () => void
   const previewKey = JSON.stringify({ kind: previewBody.kind, params: previewBody.params, labels: previewBody.labels });
   const bodyRef = useRef(previewBody);
   bodyRef.current = previewBody;
+  const keyRef = useRef(previewKey);
+  keyRef.current = previewKey;
+
+  /* The block, and its exact scope: the LAST preview of the expression
+     currently in the form proved that Prometheus refuses it. Saving anyway
+     would put an expression into the rule bundle that Prometheus rejects,
+     which on a sync-enabled console poisons the whole bundle — every other
+     rule in it stops being applied too, over one rule nobody could have
+     saved by accident.
+
+     A preview is never REQUIRED: there is no PromQL parser in the browser, so
+     "no preview yet" means "not known to be bad" and stays permissive. Only a
+     proven rejection blocks, and any edit lifts it. */
+  const exprRejected = rejectedKey !== undefined && rejectedKey === previewKey;
 
   useEffect(() => {
     if (!previewReady) {
       setPreview(undefined);
       setPreviewError(undefined);
       setPreviewLoading(false);
+      setRejectedKey(undefined);
       return;
     }
     let cancelled = false;
@@ -1026,11 +997,17 @@ function RuleForm({ initial, onDone }: { initial?: AlertRule; onDone: () => void
           if (cancelled) return;
           setPreview(p);
           setPreviewError(undefined);
+          // rejected=true means PROMETHEUS parsed this expression and refused
+          // it. Anything else — unreachable, unconfigured, too much data — left
+          // the expression unjudged and must not block a save.
+          setRejectedKey(p.rejected ? keyRef.current : undefined);
         })
         .catch((err: unknown) => {
           if (cancelled) return;
           setPreview(undefined);
-          setPreviewError(queryErrorMessage(err, "The preview could not be rendered"));
+          setPreviewError(queryErrorMessage(err, t("preview.failed")));
+          // The round trip itself failed, so nothing was proven either way.
+          setRejectedKey(undefined);
         })
         .finally(() => {
           if (!cancelled) setPreviewLoading(false);
@@ -1057,6 +1034,7 @@ function RuleForm({ initial, onDone }: { initial?: AlertRule; onDone: () => void
   async function handleSubmit(e: FormEvent) {
     e.preventDefault();
     setFormError(undefined);
+    if (exprRejected) return;
     if (reservedMessage) return;
     if (!duration.ok) {
       setFormError({ message: duration.message, field: "for" });
@@ -1070,7 +1048,7 @@ function RuleForm({ initial, onDone }: { initial?: AlertRule; onDone: () => void
       await qc.invalidateQueries({ queryKey: ["alert-rules"] });
       onDone();
     } catch (err) {
-      const message = queryErrorMessage(err, "Failed to save the rule");
+      const message = queryErrorMessage(err, t("form.failed"));
       setFormError({ message, field: problemField(message) });
       end();
     }
@@ -1078,16 +1056,17 @@ function RuleForm({ initial, onDone }: { initial?: AlertRule; onDone: () => void
 
   return (
     <Card asChild className="p-6">
-      <form onSubmit={handleSubmit} aria-label={initial ? `Edit ${initial.name}` : "New alert rule"} className="flex flex-col gap-4">
-        <h3 className="text-sm font-semibold">{initial ? `Edit ${initial.name}` : "New rule"}</h3>
+      <form
+        onSubmit={handleSubmit}
+        aria-label={initial ? t("form.editAria", { name: initial.name }) : t("form.createAria")}
+        className="flex flex-col gap-4"
+      >
+        <h3 className="text-sm font-semibold">
+          {initial ? t("form.edit", { name: initial.name }) : t("form.create")}
+        </h3>
 
         <div className="grid gap-4 sm:grid-cols-2">
-          <Field
-            label="Name"
-            testId="name"
-            error={errorFor("name")}
-            hint="Seeds the alert's own name, so it becomes a Prometheus label value. CamelCase is the convention."
-          >
+          <Field label={t("form.name")} testId="name" error={errorFor("name")} hint={t("form.nameHint")}>
             {(id, invalid) => (
               <input
                 id={id}
@@ -1099,7 +1078,7 @@ function RuleForm({ initial, onDone }: { initial?: AlertRule; onDone: () => void
             )}
           </Field>
 
-          <Field label="Kind" testId="kind">
+          <Field label={t("form.kind")} testId="kind">
             {(id) => (
               <select
                 id={id}
@@ -1107,9 +1086,11 @@ function RuleForm({ initial, onDone }: { initial?: AlertRule; onDone: () => void
                 onChange={(e) => setDraft((d) => ({ ...d, kind: e.target.value as AlertRuleKind }))}
                 className={fieldClasses(false)}
               >
-                {ALERT_RULE_KINDS.map(([kind, blurb]) => (
+                {/* The kind is the stored identifier and stays; the blurb after
+                    the dash is this page explaining it, and translates. */}
+                {ALERT_RULE_KINDS.map(([kind, blurbKey]) => (
                   <option key={kind} value={kind}>
-                    {kind} — {blurb}
+                    {kind} — {t(blurbKey)}
                   </option>
                 ))}
               </select>
@@ -1121,11 +1102,13 @@ function RuleForm({ initial, onDone }: { initial?: AlertRule; onDone: () => void
           {fields.map((field) => (
             <Field
               key={field.key}
-              label={field.label}
+              label={t(field.labelKey)}
               hint={
                 field.type === "target" && !targetsReady
-                  ? `${field.hint ?? ""} Type the exact target name — this console cannot list them for you here.`.trim()
-                  : field.hint
+                  ? `${field.hintKey ? t(field.hintKey) : ""} ${t("form.targetFallbackHint")}`.trim()
+                  : field.hintKey
+                    ? t(field.hintKey)
+                    : undefined
               }
               testId={field.key.split(".").pop() ?? field.key}
               error={errorFor(field.key)}
@@ -1141,7 +1124,7 @@ function RuleForm({ initial, onDone }: { initial?: AlertRule; onDone: () => void
                     {/* "" is a real, meaningful value here — every external
                         target — so it is named rather than left as an em dash
                         the enum select uses for "unset". */}
-                    <option value="">every external target</option>
+                    <option value="">{t("form.everyTarget")}</option>
                     {targetNames.map((name) => (
                       <option key={name} value={name}>
                         {name}
@@ -1153,7 +1136,9 @@ function RuleForm({ initial, onDone }: { initial?: AlertRule; onDone: () => void
                         save, which would widen the rule to every target. */}
                     {(draft.params[field.key] ?? "") !== "" &&
                     !targetNames.includes(draft.params[field.key] ?? "") ? (
-                      <option value={draft.params[field.key]}>{draft.params[field.key]} (no such target)</option>
+                      <option value={draft.params[field.key]}>
+                        {t("form.noSuchTarget", { name: draft.params[field.key] ?? "" })}
+                      </option>
                     ) : null}
                   </select>
                 ) : field.type === "enum" ? (
@@ -1163,7 +1148,9 @@ function RuleForm({ initial, onDone }: { initial?: AlertRule; onDone: () => void
                     onChange={(e) => setDraft((d) => ({ ...d, params: { ...d.params, [field.key]: e.target.value } }))}
                     className={fieldClasses(invalid)}
                   >
-                    <option value="">—</option>
+                    <option value="">{t("form.enumUnset")}</option>
+                    {/* The options are the WIRE values (tcp, 0.95). They are
+                        what the form writes and stay as they are. */}
                     {(field.options ?? []).map((option) => (
                       <option key={option} value={option}>
                         {option}
@@ -1195,19 +1182,23 @@ function RuleForm({ initial, onDone }: { initial?: AlertRule; onDone: () => void
           ))}
           {fields.length === 0 && KIND_PARAMS[draft.kind] !== undefined ? (
             <p data-testid="no-params" className="max-w-prose text-xs leading-relaxed text-muted-foreground">
-              This template takes no parameters. How long the condition must hold is the rule's own “for”.
+              {t("form.noParams")}
             </p>
           ) : null}
           {KIND_PARAMS[draft.kind] === undefined ? (
             <p data-testid="unknown-kind" className="max-w-prose text-xs leading-relaxed text-health-warn">
-              This build has no template for “{draft.kind}”, so it cannot show you its parameters or render an
-              expression from them. Pick a kind above; saving this one is refused by the server.
+              {t("form.unknownKind", { kind: draft.kind })}
             </p>
           ) : null}
         </div>
 
         <div className="grid gap-4 sm:grid-cols-2">
-          <Field label="Severity" testId="severity" error={errorFor("severity")} hint="The label Alertmanager routes on.">
+          <Field
+            label={t("form.severity")}
+            testId="severity"
+            error={errorFor("severity")}
+            hint={t("form.severityHint")}
+          >
             {(id, invalid) => (
               <select
                 id={id}
@@ -1225,10 +1216,10 @@ function RuleForm({ initial, onDone }: { initial?: AlertRule; onDone: () => void
           </Field>
 
           <Field
-            label="For"
+            label={t("form.for")}
             testId="for"
             error={errorFor("for") ?? (draft.forText.trim() !== "" && !duration.ok ? duration.message : undefined)}
-            hint="How long the expression must hold — 30s, 5m, 2h. Blank fires as soon as it holds."
+            hint={t("form.forHint")}
           >
             {(id, invalid) => (
               <input
@@ -1243,17 +1234,24 @@ function RuleForm({ initial, onDone }: { initial?: AlertRule; onDone: () => void
         </div>
 
         <PairEditor
-          legend="Labels"
-          noun="Label"
+          legendKey="pairs.labels"
+          nounKey="pairs.noun.label"
+          addKey="pairs.add.label"
+          removeKey="pairs.remove.label"
           pairs={draft.labels}
           disabled={false}
           onChange={(labels) => setDraft((d) => ({ ...d, labels }))}
         />
+        {/* reservedMessage is the SERVER's own sentence, reproduced so client
+            and server refuse a reserved label in identical words — so it is
+            data here, and renders as written. */}
         {reservedMessage ? <ErrorLine testId="builder-error">{reservedMessage}</ErrorLine> : null}
 
         <PairEditor
-          legend="Annotations"
-          noun="Annotation"
+          legendKey="pairs.annotations"
+          nounKey="pairs.noun.annotation"
+          addKey="pairs.add.annotation"
+          removeKey="pairs.remove.annotation"
           pairs={draft.annotations}
           disabled={false}
           onChange={(annotations) => setDraft((d) => ({ ...d, annotations }))}
@@ -1266,22 +1264,44 @@ function RuleForm({ initial, onDone }: { initial?: AlertRule; onDone: () => void
             onChange={(e) => setDraft((d) => ({ ...d, enabled: e.target.checked }))}
             className={CHECKBOX_CLASS}
           />
-          <span>Enabled</span>
+          <span>{t("form.enabled")}</span>
         </label>
 
         <PreviewPanel ready={previewReady} loading={previewLoading} preview={preview} error={previewError} />
 
         {bannerError ? <ErrorLine testId="builder-error">{bannerError}</ErrorLine> : null}
+        {exprRejected ? (
+          <p role="alert" data-testid="rejected-expr-block" className="text-sm leading-relaxed text-health-bad">
+            {t("form.rejectedBlock")}
+          </p>
+        ) : null}
 
         <div className="flex gap-2">
-          <Button type="submit" loading={submitting} {...guard}>
-            {initial ? "Save rule" : "Create rule"}
+          <Button type="submit" loading={submitting} {...guard} disabled={guard.disabled || exprRejected}>
+            {initial ? t("form.save") : t("form.createButton")}
           </Button>
           {/* Cancel closes a form and touches nothing, so it stays live even
-              while the Time Machine is engaged — settings.tsx's line. */}
-          <Button type="button" variant="outline" onClick={onDone}>
-            Cancel
-          </Button>
+              while the Time Machine is engaged — settings.tsx's line. It asks
+              first only when there is something to lose: this is the longest
+              form in the console, and closing it by mistake costs an operator
+              every field they filled in. */}
+          {discarding ? (
+            <>
+              <Button type="button" variant="outline" onClick={onDone}>
+                {t("form.discard")}
+              </Button>
+              <Button type="button" variant="ghost" onClick={() => setDiscarding(false)}>
+                {t("form.keepEditing")}
+              </Button>
+              <span role="status" className="self-center text-xs text-muted-foreground">
+                {t("form.discardConfirm")}
+              </span>
+            </>
+          ) : (
+            <Button type="button" variant="outline" onClick={() => (dirty ? setDiscarding(true) : onDone())}>
+              {t("cancel")}
+            </Button>
+          )}
         </div>
       </form>
     </Card>
@@ -1290,22 +1310,63 @@ function RuleForm({ initial, onDone }: { initial?: AlertRule; onDone: () => void
 
 /* ── sections ───────────────────────────────────────────────────────────── */
 
-/**
- * RULE_PARAM is the deep link the Overview's firing-alert rows point at:
- * /alerting?rule=<id> opens THAT rule's details instead of dropping the reader
- * at the top of the list (QA round 1, finding #17). Read straight off
- * window.location, the same way lib/timemachine.tsx reads `?at=` — no router
- * search-param framework is adopted here either.
- */
+/** RULE_PARAM is the deep link the Overview's firing-alert rows point at. */
 export const RULE_PARAM = "rule";
 
 function focusedRuleId(): string {
   return new URLSearchParams(window.location.search).get(RULE_PARAM) ?? "";
 }
 
+/**
+ * writeFocusedRule keeps ?rule= and the expanded row in step, in BOTH
+ * directions: the link already opened a row on arrival, but the row could not
+ * produce the link — an operator who found the rule by scrolling had no way to
+ * hand it to anyone. Expanding writes the param; collapsing clears it, but only
+ * when it still names this row, so collapsing one row cannot silently unlink
+ * another that is also open.
+ *
+ * replaceState, not pushState: expanding a row is not a navigation, and one
+ * history entry per twirl would turn Back into an undo of nothing.
+ */
+function writeFocusedRule(id: string, expanded: boolean): void {
+  const url = new URL(window.location.href);
+  const current = url.searchParams.get(RULE_PARAM);
+  if (expanded) {
+    if (current === id) return;
+    url.searchParams.set(RULE_PARAM, id);
+  } else {
+    if (current !== id) return;
+    url.searchParams.delete(RULE_PARAM);
+  }
+  window.history.replaceState({}, "", url);
+}
+
+/**
+ * useRuleSync reads whether prometheus rule sync is running on this console,
+ * and the server's own sentence for why not.
+ *
+ * The evidence is the /foreign endpoint's 409 — the same one a Sync button used
+ * to produce only AFTER being clicked. It is a read this page already makes
+ * (ForeignSection), on the same query key, so asking here costs no extra round
+ * trip; react-query serves both callers from one entry.
+ *
+ * Undisclosed until the answer is IN: `disabled` stays false while the query is
+ * pending, so a cold load does not flash "sync is off" at a console where it is
+ * on.
+ */
+function useRuleSync(): { disabled: boolean; message?: string } {
+  const query = useQuery({ queryKey: ["foreign-alert-rules"], queryFn: listForeignAlertRules });
+  if (query.isError && problemStatus(query.error) === 409) {
+    // The server's paragraph, verbatim: it names console.alerting.enabled and
+    // says the rules themselves are unaffected. Nothing here paraphrases it.
+    return { disabled: true, message: queryErrorMessage(query.error, "") || undefined };
+  }
+  return { disabled: false };
+}
+
 function RulesSection({ canManage }: { canManage: boolean }) {
-  /* guard carries the DISABLED flag AND the reason for it — lib/timemachine's
-     useWriteGuard (QA round 2, finding #18). Spread it onto the control. */
+  const t = useT(alertingDict);
+  /* guard carries the DISABLED flag AND the reason for it — lib/timemachine's useWriteGuard. */
   const guard = useWriteGuard();
   /* Read ONCE, on mount: the param is where the reader arrived from, not a
      control. Re-reading it on every render would re-open a row the operator
@@ -1315,17 +1376,14 @@ function RulesSection({ canManage }: { canManage: boolean }) {
     mode: "none",
   });
   const [syncConflict, setSyncConflict] = useState<string>();
+  const ruleSync = useRuleSync();
   const query = useQuery({ queryKey: ["alert-rules"], queryFn: listAlertRules });
   const rules = query.data?.rules ?? [];
 
-  /* A ?rule= that names nothing SAYS SO (QA round 5, finding #18). Before it,
-     an operator following a link to a rule somebody had since deleted got the
-     ordinary rules list with nothing opened and nothing said — indistinguishable
-     from a link that worked and a rule that happens to be collapsed, so the
-     natural conclusion was "the deep link is broken".
-     Only once the list has SETTLED: while the query is pending there is no
-     evidence either way, and a notice that flashes on every cold load is worse
-     than the silence it replaces. */
+  /*
+   * A ?rule= that names nothing SAYS SO; only once the list has SETTLED: while the query is pending
+   * there is no evidence either way.
+   */
   const unknownRule = focusedRule !== "" && query.isSuccess && !rules.some((r) => r.id === focusedRule);
 
   return (
@@ -1334,7 +1392,7 @@ function RulesSection({ canManage }: { canManage: boolean }) {
         editing.mode === "none" ? (
           <div>
             <Button size="sm" {...guard} onClick={() => setEditing({ mode: "create" })}>
-              New rule
+              {t("rules.new")}
             </Button>
           </div>
         ) : (
@@ -1346,23 +1404,28 @@ function RulesSection({ canManage }: { canManage: boolean }) {
         )
       ) : null}
 
-      <SectionCard title="Alert rules">
-        <p className="mt-1 max-w-prose text-xs leading-relaxed text-muted-foreground">
-          Rules this console manages. They live in the database and are applied to the cluster as one PrometheusRule
-          object; the status on each row is the reconciler's view of whether the cluster agrees, as of the instant next
-          to it.
-        </p>
+      <SectionCard title={t("rules.heading")}>
+        <p className="mt-1 max-w-prose text-xs leading-relaxed text-muted-foreground">{t("rules.blurb")}</p>
         {unknownRule ? (
           <p
             role="status"
             data-testid="unknown-rule-notice"
             className="mt-3 text-xs leading-relaxed text-muted-foreground"
           >
-            No rule matches this link — it may have been deleted.
+            {t("rules.unknownLink")}
           </p>
         ) : null}
-        {syncConflict ? <ErrorLine testId="rules-sync-banner">{syncConflict}</ErrorLine> : null}
-        {query.isError ? <ErrorLine>{queryErrorMessage(query.error, "Alert rules are unavailable")}</ErrorLine> : null}
+        {/* Said ONCE, up front, when the console already knows: a reader should
+            not have to click Sync and read a 409 to learn that nothing on this
+            console applies these rules. */}
+        {ruleSync.disabled && ruleSync.message ? (
+          <SyncDisabledNotice testId="sync-disabled-notice">{ruleSync.message}</SyncDisabledNotice>
+        ) : null}
+        {/* The 409's own paragraph — it names console.alerting.enabled and
+            explains that the rules above are unaffected. Rendered verbatim.
+            Still here for the console that only learns this ON the click. */}
+        {syncConflict ? <SyncDisabledNotice testId="rules-sync-banner">{syncConflict}</SyncDisabledNotice> : null}
+        {query.isError ? <ErrorLine>{queryErrorMessage(query.error, t("rules.unavailable"))}</ErrorLine> : null}
         {/* isPending, not isLoading: a query whose retry is PAUSED (react-query
             pauses retries while the browser thinks it is offline) is pending
             but not fetching — isLoading is false there, and an empty-state
@@ -1371,12 +1434,10 @@ function RulesSection({ canManage }: { canManage: boolean }) {
             gate; the only honest empty is isSuccess && empty. */}
         {query.isPending ? <ListSkeleton /> : null}
         {query.isSuccess && rules.length === 0 ? (
-          <p className="px-1 py-10 text-center text-xs text-muted-foreground">
-            No rules yet. Prometheus is evaluating nothing on this console's behalf.
-          </p>
+          <p className="px-1 py-10 text-center text-xs text-muted-foreground">{t("rules.empty")}</p>
         ) : null}
         {rules.length > 0 ? (
-          <ul aria-label="Alert rules" className="mt-4 divide-y divide-border">
+          <ul aria-label={t("rules.listAria")} className="mt-4 divide-y divide-border">
             {rules.map((rule) => (
               <RuleRow
                 key={rule.id}
@@ -1394,22 +1455,20 @@ function RulesSection({ canManage }: { canManage: boolean }) {
   );
 }
 
-/* role="status" for the same reason the sync ack above it has one: the report
-   appears when the POST answers, nowhere near the button that was pressed, and
-   an operator who does not happen to be looking at that row never learns the
-   import landed. Polite, not an alert — the import SUCCEEDED; its refusal is
-   the role="alert" line next to it. */
+/* role="status" for the same reason the sync ack above it has one: the report appears when the POST answers. */
 function ImportReport({ report }: { report: AlertRuleImportReport }) {
+  const t = useT(alertingDict);
   return (
     <div role="status" data-testid="import-report" className="mt-3 w-full border-l-2 border-border pl-3 text-xs">
       {/* The three arrays are three different statements and are rendered as
           three, always — including when one is empty. A skip means "this is NOT
           in your console"; a note means "this IS, and one field is the
-          console's choice rather than your object's". */}
+          console's choice rather than your object's". Only the three HEADINGS
+          are ours; every name and every reason below them is the server's. */}
       <div data-testid="import-created">
-        <p className="font-medium">Created</p>
+        <p className="font-medium">{t("import.created")}</p>
         {report.created.length === 0 ? (
-          <p className="text-muted-foreground">none</p>
+          <p className="text-muted-foreground">{t("import.none")}</p>
         ) : (
           <ul className="mt-1 flex flex-col gap-0.5">
             {report.created.map((name) => (
@@ -1422,14 +1481,14 @@ function ImportReport({ report }: { report: AlertRuleImportReport }) {
       </div>
 
       <div data-testid="import-skipped" className="mt-3">
-        <p className="font-medium">Skipped</p>
+        <p className="font-medium">{t("import.skipped")}</p>
         {report.skipped.length === 0 ? (
-          <p className="text-muted-foreground">none</p>
+          <p className="text-muted-foreground">{t("import.none")}</p>
         ) : (
           <dl className="mt-1 flex flex-col gap-1">
             {report.skipped.map((item, i) => (
               <div key={`${item.name}-${i}`} className="flex flex-wrap gap-x-2">
-                <dt className="font-mono">{item.name === "" ? "(unnamed entry)" : item.name}</dt>
+                <dt className="font-mono">{item.name === "" ? t("import.unnamed") : item.name}</dt>
                 {/* Verbatim: the server names the entry as the FOREIGN object
                     spells it and says why in one sentence. */}
                 <dd className="text-muted-foreground">{item.reason}</dd>
@@ -1440,9 +1499,9 @@ function ImportReport({ report }: { report: AlertRuleImportReport }) {
       </div>
 
       <div data-testid="import-notes" className="mt-3">
-        <p className="font-medium">Notes</p>
+        <p className="font-medium">{t("import.notes")}</p>
         {report.notes.length === 0 ? (
-          <p className="text-muted-foreground">none</p>
+          <p className="text-muted-foreground">{t("import.none")}</p>
         ) : (
           <dl className="mt-1 flex flex-col gap-1">
             {report.notes.map((item, i) => (
@@ -1455,18 +1514,15 @@ function ImportReport({ report }: { report: AlertRuleImportReport }) {
         )}
       </div>
 
-      <p className="mt-3 max-w-prose leading-relaxed text-muted-foreground">
-        Adoption copies: the original object is untouched, and the same alerts now exist twice in the cluster until its
-        owner removes it. That is their decision, and this console will not make it for them.
-      </p>
+      <p className="mt-3 max-w-prose leading-relaxed text-muted-foreground">{t("import.adoption")}</p>
     </div>
   );
 }
 
 function ForeignRow({ rule, canManage }: { rule: ForeignRule; canManage: boolean }) {
+  const t = useT(alertingDict);
   const qc = useQueryClient();
-  /* guard carries the DISABLED flag AND the reason for it — lib/timemachine's
-     useWriteGuard (QA round 2, finding #18). Spread it onto the control. */
+  /* guard carries the DISABLED flag AND the reason for it — lib/timemachine's useWriteGuard. */
   const guard = useWriteGuard();
   const [busy, setBusy] = useState(false);
   const [report, setReport] = useState<AlertRuleImportReport>();
@@ -1481,7 +1537,7 @@ function ForeignRow({ rule, canManage }: { rule: ForeignRule; canManage: boolean
       setReport(result);
       await qc.invalidateQueries({ queryKey: ["alert-rules"] });
     } catch (err) {
-      setError(queryErrorMessage(err, "The import was refused"));
+      setError(queryErrorMessage(err, t("foreign.importRefused")));
     }
     setBusy(false);
   }
@@ -1489,11 +1545,13 @@ function ForeignRow({ rule, canManage }: { rule: ForeignRule; canManage: boolean
   return (
     <li className="flex flex-wrap items-center gap-3 py-3 text-sm">
       <span className="font-medium">{rule.name}</span>
+      {/* Three Russian forms where English has two, so the noun is chosen by
+          count rather than by an `=== 1` suffix — see pluralKey. */}
       <span className="text-xs text-muted-foreground">
-        {rule.groups} {rule.groups === 1 ? "group" : "groups"}
+        {rule.groups} {t(pluralKey(rule.groups, "count.groups.one", "count.groups.few", "count.groups.many"))}
       </span>
       <span className="text-xs text-muted-foreground">
-        {rule.rules} {rule.rules === 1 ? "rule" : "rules"}
+        {rule.rules} {t(pluralKey(rule.rules, "count.rules.one", "count.rules.few", "count.rules.many"))}
       </span>
       {/* An object carrying no managed-by label gets an em dash, not a blank:
           "nobody claims this" is a fact, and a blank cell reads as a bug. */}
@@ -1503,7 +1561,7 @@ function ForeignRow({ rule, canManage }: { rule: ForeignRule; canManage: boolean
       {canManage ? (
         <span className="ml-auto">
           <Button size="sm" variant="ghost" loading={busy} {...guard} onClick={() => void handleImport()}>
-            Import {rule.name}
+            {t("foreign.import", { name: rule.name })}
           </Button>
         </span>
       ) : null}
@@ -1518,6 +1576,7 @@ function ForeignRow({ rule, canManage }: { rule: ForeignRule; canManage: boolean
 }
 
 function ForeignSection({ canManage }: { canManage: boolean }) {
+  const t = useT(alertingDict);
   // A key of its own rather than ["alert-rules", "foreign"]: a rule write
   // invalidates ["alert-rules"] by prefix, and this list is a read of the
   // CLUSTER that a database write cannot have changed.
@@ -1525,26 +1584,31 @@ function ForeignSection({ canManage }: { canManage: boolean }) {
   const foreign = query.data?.foreign ?? [];
 
   return (
-    <SectionCard title="Foreign rules">
-      <p className="mt-1 max-w-prose text-xs leading-relaxed text-muted-foreground">
-        PrometheusRule objects in this console's namespace that it does not own. Read-only: this console never writes to
-        somebody else's object. Importing COPIES a rule's alerting entries into console-managed rows.
-      </p>
+    <SectionCard title={t("foreign.heading")}>
+      <p className="mt-1 max-w-prose text-xs leading-relaxed text-muted-foreground">{t("foreign.blurb")}</p>
       {/* Whatever the server said — the 409 that names console.alerting.enabled
           and explains that the rules above are unaffected, or the 503 that names
           console.database.mode — is rendered as it was written. Both are one
-          sentence better than a paraphrase of them. */}
-      {query.isError ? <ErrorLine>{queryErrorMessage(query.error, "Foreign rules are unavailable")}</ErrorLine> : null}
+          sentence better than a paraphrase of them. The 409 takes the amber
+          notice the managed section gives it, because it is the SAME standing
+          condition read through a second endpoint; everything else is red. */}
+      {query.isError ? (
+        problemStatus(query.error) === 409 ? (
+          <SyncDisabledNotice testId="foreign-sync-disabled-notice">
+            {queryErrorMessage(query.error, t("foreign.unavailable"))}
+          </SyncDisabledNotice>
+        ) : (
+          <ErrorLine>{queryErrorMessage(query.error, t("foreign.unavailable"))}</ErrorLine>
+        )
+      ) : null}
       {/* isPending / isSuccess, not !isLoading && !isError — the paused-retry
           trap; see the rules list above. */}
       {query.isPending ? <ListSkeleton /> : null}
       {query.isSuccess && foreign.length === 0 ? (
-        <p className="px-1 py-10 text-center text-xs text-muted-foreground">
-          No foreign PrometheusRule objects in this namespace.
-        </p>
+        <p className="px-1 py-10 text-center text-xs text-muted-foreground">{t("foreign.empty")}</p>
       ) : null}
       {foreign.length > 0 ? (
-        <ul aria-label="Foreign PrometheusRule objects" className="mt-4 divide-y divide-border">
+        <ul aria-label={t("foreign.listAria")} className="mt-4 divide-y divide-border">
           {foreign.map((rule) => (
             <ForeignRow key={rule.name} rule={rule} canManage={canManage} />
           ))}
@@ -1557,22 +1621,11 @@ function ForeignSection({ canManage }: { canManage: boolean }) {
 /* ── page ───────────────────────────────────────────────────────────────── */
 
 /**
- * AlertingPage's floor is alerts:read, and without it the page asks for
- * NOTHING — pages/targets.tsx's first degraded state, for the same reason: a
- * page that fires requests it cannot read the answers to collects 403s to
- * render as errors, when the honest statement is one card about the subject.
- *
- * alerts:read is held by EVERY built-in role including viewer, so that card is
- * for a hand-rolled role rather than a common state. alerts:manage is held by
- * operator, admin AND alert-editor — the last is the deliberate exception to
- * "statement-class writes stop at operator", because editing alert rules is
- * that role's entire charter (authz/roles.go says so at length).
- *
- * The gate waits for `me` before deciding: `can()` fails closed while GET
- * /api/v1/auth/me is in flight, so rendering on the un-resolved value would
- * flash the permission card on every cold load.
+ * AlertingPage's floor is alerts:read, and without it the page asks for NOTHING —
+ * pages/targets.tsx's first degraded state.
  */
 export function AlertingPage() {
+  const t = useT(alertingDict);
   const { me, can } = useAuth();
   const canRead = can("alerts:read");
   const canManage = can("alerts:manage");
@@ -1581,18 +1634,12 @@ export function AlertingPage() {
   if (me === undefined) {
     body = (
       <Card role="status" aria-live="polite" className="p-6">
-        <span className="sr-only">Loading…</span>
+        <span className="sr-only">{t("loading")}</span>
         <Skeleton className="h-10 w-full" />
       </Card>
     );
   } else if (!canRead) {
-    body = (
-      <PermissionCard permission="alerts:read">
-        Alert rules are what this console asks Prometheus to evaluate, and the foreign rules beside them are objects in
-        its namespace. Every built-in role holds alerts:read; a role that does not sees this instead of a page firing
-        requests it cannot read the answers to.
-      </PermissionCard>
-    );
+    body = <PermissionCard permission="alerts:read">{t("gate.read")}</PermissionCard>;
   } else {
     body = (
       <>
@@ -1603,10 +1650,8 @@ export function AlertingPage() {
   }
 
   return (
-    <PageShell
-      title="Alerting"
-      description="Console-managed Prometheus alert rules, what the cluster thinks of them, and the rules it holds that this console does not own."
-    >
+    /* The title is the same word the sidebar's nav.alerting uses. */
+    <PageShell title={t("title")} description={t("description")}>
       {body}
     </PageShell>
   );

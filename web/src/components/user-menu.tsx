@@ -2,26 +2,18 @@ import { useEffect, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { ChevronUp, LogOut, KeyRound } from "lucide-react";
 import { logout } from "@/lib/api";
+import { useT } from "@/lib/i18n";
+import { userMenuDict } from "@/lib/i18n/dict/user-menu";
 import type { Me } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
-/**
- * UserMenu — display name, roles, "Sign out", and (only with tokens:manage)
- * a link to token management. Rendered by AppSidebar in place of the M0/M1
- * static footer text, and only when the caller already knows `me` is a real
- * (non-anonymous) subject — see app-sidebar.tsx.
- *
- * No route for standalone token management exists yet (only the
- * /api/v1/tokens REST surface does — see internal/console/httpapi/tokens.go);
- * the link below points at /settings, the nearest existing NAV_ITEMS entry
- * ("Auth, RBAC, retention, maintenance, webhooks, export/import"), pending a
- * dedicated page in a later task.
- */
+/** UserMenu — display name, roles, "Sign out", and (only with tokens:manage) a link to token management. */
 export function UserMenu({ me, can }: { me: Me; can: (p: string) => boolean }) {
   const [open, setOpen] = useState(false);
   const [signingOut, setSigningOut] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
   const queryClient = useQueryClient();
+  const t = useT(userMenuDict);
 
   useEffect(() => {
     if (!open) return;
@@ -44,10 +36,7 @@ export function UserMenu({ me, can }: { me: Me; can: (p: string) => boolean }) {
     try {
       await logout();
     } finally {
-      // Invalidate regardless of whether the request itself succeeded —
-      // handleAuthLogout is idempotent server-side and always clears the
-      // cookies client-side isn't guaranteed on a network failure, but the
-      // UI must not get stuck showing a stale signed-in identity either way.
+      // Invalidate regardless of whether the request itself succeeded.
       await queryClient.invalidateQueries({ queryKey: ["me"] });
       setSigningOut(false);
       setOpen(false);
@@ -81,17 +70,21 @@ export function UserMenu({ me, can }: { me: Me; can: (p: string) => boolean }) {
           <div className="px-2 py-1.5">
             <div className="truncate text-[13px] font-medium text-foreground">{me.subject.displayName}</div>
             <div className="mt-0.5 truncate text-[11px] text-muted-foreground">
-              {me.subject.roles.length > 0 ? me.subject.roles.join(", ") : "no roles bound"}
+              {/* The role NAMES are permission vocabulary and stay as the
+                  server resolved them; only the "there are none" line is ours. */}
+              {me.subject.roles.length > 0 ? me.subject.roles.join(", ") : t("roles.none")}
             </div>
           </div>
           {can("tokens:manage") ? (
             <a
-              href="/settings"
+              // The anchor is pages/settings.tsx's TOKENS_ANCHOR: this link
+              // used to land on a page with no tokens section on it at all.
+              href="/settings#tokens"
               role="menuitem"
               className="flex items-center gap-2 rounded-sm px-2 py-1.5 text-[13px] text-foreground hover:bg-accent/60"
             >
               <KeyRound aria-hidden="true" className="size-3.5 shrink-0" />
-              Token management
+              {t("tokens")}
             </a>
           ) : null}
           <button
@@ -102,7 +95,7 @@ export function UserMenu({ me, can }: { me: Me; can: (p: string) => boolean }) {
             className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left text-[13px] text-foreground hover:bg-accent/60 disabled:opacity-50"
           >
             <LogOut aria-hidden="true" className="size-3.5 shrink-0" />
-            {signingOut ? "Signing out…" : "Sign out"}
+            {signingOut ? t("signOut.pending") : t("signOut")}
           </button>
         </div>
       ) : null}

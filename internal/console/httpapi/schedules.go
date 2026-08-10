@@ -14,15 +14,8 @@ import (
 	"github.com/EsDmitrii/kconmon-ng/internal/console/store"
 )
 
-// ScheduleService is the subset of *store.DB httpapi needs for CRUD
-// /api/v1/schedules -- the read seam and the write seam together, the same
-// local-interface shape as TargetService and DefinitionService.
-//
-// It carries MarkScheduleFired and ListDueSchedules along with everything
-// else, because store.ScheduleStore/ScheduleReader declare them; no handler
-// in this package calls either. Those two belong to the scheduler loop, and
-// the alternative -- a second, narrower interface asserting the same *store.DB
-// -- would buy nothing but a name.
+// ScheduleService is the subset of *store.DB httpapi needs for CRUD /api/v1/schedules; those two
+// belong to the scheduler loop, and the alternative.
 type ScheduleService interface {
 	store.ScheduleReader
 	store.ScheduleStore
@@ -30,30 +23,16 @@ type ScheduleService interface {
 
 var _ ScheduleService = (*store.DB)(nil)
 
-// schedulesUnavailableDetail is served whenever s.schedules is nil. Same
-// Decision 13 reasoning as targets and definitions: a cadence that evaporates
-// on pod restart is worse than one that was never accepted.
+// schedulesUnavailableDetail is served whenever s.schedules is nil; same reasoning as targets and
+// definitions.
 const schedulesUnavailableDetail = "schedules are persisted configuration with no in-memory fallback: " +
 	"set console.database.mode in the console config (Helm: console.database.mode) to enable /api/v1/schedules"
 
-// minScheduleInterval is the floor an interval cadence is CLAMPED UP to. A
-// one-second schedule against a definition that fans out to hundreds of pairs
-// is a self-DoS with no legitimate use: the runner's own per-pair timeout
-// ceiling alone (120s) means such a schedule would fire long before its
-// previous run finished.
-//
-// Clamping rather than refusing follows this codebase's established handling
-// of an out-of-range bound -- store's clampLimit, the runner's [1s,120s]
-// timeout clamp -- and it is not silent: create/update answer with the STORED
-// row, so a client that asked for 1s is told, in the response it already
-// reads, that it got 10s.
+// minScheduleInterval is the floor an interval cadence is CLAMPED UP to; a one-second schedule
+// against a definition that fans out to hundreds of pairs is a self-DoS with no legitimate use.
 const minScheduleInterval = 10 * time.Second
 
-// cronDeferredDetail is the honest, specific refusal Decision 9 asks for.
-// kind='cron' is not an invalid enum value that happens to be misspelled --
-// it is a real cadence this milestone consciously did not ship, and saying so
-// is the difference between an operator waiting for a later release and an
-// operator hunting a typo that is not there.
+// cronDeferredDetail is the honest, specific refusal.
 const cronDeferredDetail = "schedule: cron schedules land in a later milestone: " +
 	`use "kind":"interval" with "intervalNs", or "kind":"once" with "runAt"`
 
@@ -67,18 +46,8 @@ func (s *Server) schedulesUnavailable(w http.ResponseWriter) bool {
 	return false
 }
 
-// scheduleResponse is one schedule on the wire. IntervalNs is nanoseconds,
-// the repo-wide duration convention (API.md); RunAt/LastFiredAt/NextFireAt
-// are nullable and marshal as JSON null when unset, which is the honest
-// encoding of "this schedule has never fired" -- a zero timestamp would read
-// as the year 1.
-//
-// LastError/LastErrorAt are the failing-schedule pair (QA round 5, finding
-// #5). LastError is a plain string with "" for "the last attempt went
-// through", never omitempty: a client rendering "failing: <lastError>" needs
-// the field to be PRESENT and empty to know the schedule is healthy, and an
-// absent key would be indistinguishable from an older server that had no such
-// concept.
+// scheduleResponse is one schedule on the wire; IntervalNs is nanoseconds, the repo-wide duration
+// convention (API.md).
 type scheduleResponse struct {
 	ID           string     `json:"id"`
 	DefinitionID string     `json:"definitionId"`
@@ -109,12 +78,8 @@ type schedulesListResponse struct {
 	NextCursor string             `json:"nextCursor"`
 }
 
-// scheduleRequest is POST /api/v1/schedules's and PUT
-// /api/v1/schedules/{id}'s body, a full replace like every other write in
-// this package. NextFireAt is deliberately absent: it is scheduler
-// bookkeeping, seeded here (seedNextFireAt) and advanced by
-// MarkScheduleFired, never something a client sets -- letting a client write
-// it would let it schedule a fire in the past and stampede the loop.
+// scheduleRequest is POST /api/v1/schedules's and PUT /api/v1/schedules/{id}'s body; NextFireAt is
+// deliberately absent: it is scheduler bookkeeping.
 type scheduleRequest struct {
 	DefinitionID string     `json:"definitionId"`
 	Kind         string     `json:"kind"`
@@ -123,25 +88,8 @@ type scheduleRequest struct {
 	Enabled      bool       `json:"enabled"`
 }
 
-// decodeScheduleRequest reads a create/update body into a store.ScheduleInput
-// with every rule applied, in the order that produces the most useful message:
-//
-//  1. unparseable body -> 400 (malformed request, not a rejected value);
-//  2. kind='cron' -> 422 naming the milestone, BEFORE the enum check, so the
-//     one deferred kind never degrades into a generic "must be one of ..."
-//     (Decision 9);
-//  3. the interval floor, applied by clamping;
-//  4. store.ScheduleInput.Validate -- the enum and every cross-field rule,
-//     delegated rather than reimplemented so the two copies cannot drift;
-//  5. the rules store cannot enforce because it has no clock: run_at must be
-//     in the FUTURE. store only requires it to be present, which is correct
-//     for store (the scheduler writes historical rows through other paths),
-//     but a create that schedules a fire in the past is either a timezone
-//     mistake or a stale form, and firing immediately is not what either one
-//     meant.
-//
-// defID is the definition the schedule belongs to. On create it comes from
-// the body; on update it comes from the STORED row (see handleSchedulesUpdate).
+// decodeScheduleRequest reads a create/update body into a store.ScheduleInput with every rule
+// applied.
 func decodeScheduleRequest(w http.ResponseWriter, r *http.Request, defID string) (store.ScheduleInput, bool) {
 	var req scheduleRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -188,14 +136,9 @@ func decodeScheduleRequest(w http.ResponseWriter, r *http.Request, defID string)
 	return in, true
 }
 
-// clampScheduleInterval raises a positive sub-floor interval to
-// minScheduleInterval. A zero or negative one is passed through untouched so
-// store's own Validate produces the message ("kind interval requires a
-// positive interval" / "kind once must not carry an interval"), rather than
-// this function silently inventing a cadence nobody asked for. Kinds other
-// than 'interval' are left alone for the same reason: store rejects an
-// interval on them, and clamping first would turn a caller's mistake into a
-// stored value.
+// clampScheduleInterval raises a positive sub-floor interval to minScheduleInterval; a zero or
+// negative one is passed through untouched so store's own Validate produces the message ("kind
+// interval requires a positive interval" / "kind once must not carry an interval").
 func clampScheduleInterval(kind string, ns int64) int64 {
 	if kind == "interval" && ns > 0 && ns < int64(minScheduleInterval) {
 		return int64(minScheduleInterval)
@@ -204,19 +147,8 @@ func clampScheduleInterval(kind string, ns int64) int64 {
 }
 
 // seedNextFireAt gives a new or edited schedule its place in the due index
-// (check_schedules_due_idx, WHERE enabled). The scheduler advances it from
-// there through MarkScheduleFired; without a seed a schedule would sit
-// forever with next_fire_at IS NULL and never be handed out, which is a
-// schedule that silently does nothing.
-//
-//   - once: run_at, the single moment it exists for.
-//   - interval: NOW, so the first run happens on the next tick and the cadence
-//     starts from a real observation. Waiting a full interval before the first
-//     fire would mean a 24h schedule tells the operator nothing for a day.
-//   - continuous: nil. These are agent-side by definition -- the reconciler
-//     pushes them to agents, and the scheduler loop skips them -- so putting
-//     one in the due index would be an invitation to fire something that has
-//     no fires.
+// (check_schedules_due_idx, WHERE enabled); the scheduler advances it from there through
+// MarkScheduleFired.
 func seedNextFireAt(in *store.ScheduleInput) *time.Time {
 	switch in.Kind {
 	case "once":
@@ -251,13 +183,8 @@ func writeScheduleStoreError(w http.ResponseWriter, id string, err error) {
 	writeProblem(w, http.StatusBadGateway, "schedules unavailable", "failed to reach the schedules store")
 }
 
-// writeScheduleCreateError is the CREATE path's mapping, where ErrNotFound
-// means something completely different: store.ScheduleReader's doc comment
-// states it is returned "for a DefinitionID naming no definition on create,
-// since the missing row is the definition's". The schedule being created has
-// no id to be missing, so this is a rejected FIELD VALUE in the body -> 422,
-// which is also exactly what the task brief pins ("a schedule referencing an
-// unknown definition -> 422").
+// writeScheduleCreateError is the CREATE path's mapping, where ErrNotFound means something
+// completely different.
 func writeScheduleCreateError(w http.ResponseWriter, defID string, err error) {
 	if errors.Is(err, store.ErrNotFound) {
 		writeProblem(w, http.StatusUnprocessableEntity, "invalid schedule",
@@ -348,17 +275,8 @@ func (s *Server) handleSchedulesGet(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, scheduleResponseFrom(&sched))
 }
 
-// handleSchedulesUpdate replaces one schedule's cadence in full.
-//
-// definitionId is NOT updatable, and the refusal is explicit rather than
-// silent: store's UpdateSchedule query says re-pointing a schedule at another
-// definition "is a different schedule, and letting it move would silently
-// reinterpret last_fired_at/next_fire_at against a cadence they were never
-// computed for", and its SQL simply does not touch the column. Accepting a
-// different definitionId in the body and ignoring it would leave a client
-// convinced it had moved the schedule. So the stored row is read first -- one
-// extra round trip, which also turns an unknown id into a 404 before any
-// write is attempted -- and a mismatched body value is a 422.
+// handleSchedulesUpdate replaces one schedule's cadence in full; accepting a different definitionId
+// in the body and ignoring it would leave a client convinced it had moved the schedule.
 func (s *Server) handleSchedulesUpdate(w http.ResponseWriter, r *http.Request) {
 	if s.schedulesUnavailable(w) {
 		return

@@ -1,7 +1,5 @@
-// Package events turns the controller's WatchEvents gRPC stream into the
-// browser-facing "live" feed: LiveEvent is the JSON projection of pb.Event, and
-// Ingester is the long-lived client that dials the controller, converts every
-// event and publishes it on the cache.Bus for the ws.Hub to fan out.
+// Package events turns the controller's WatchEvents gRPC stream into the browser-facing "live"
+// feed.
 package events
 
 import (
@@ -43,12 +41,8 @@ const scopeCluster = "cluster"
 // LiveEvent is the browser-facing JSON projection of pb.Event, mirrored by hand
 // in web/src/lib/types.ts (repo convention: no codegen).
 type LiveEvent struct {
-	// ID is "<seq>-<unixNano>", built only from controller-assigned values so
-	// every console replica derives the SAME id for the same pb.Event. That is
-	// what makes it usable as the ws.Hub's dedupe key (and as the React list
-	// key). Never mix a local clock or a per-replica id in here. The nanos are
-	// always a whole number of microseconds -- see ToLiveEvent for why that is
-	// load-bearing for the persisted-scrollback path.
+	// ID is "<seq>-<unixNano>", built only from controller-assigned values so every console replica
+	// derives the SAME id for the same pb.Event.
 	ID        string          `json:"id"`
 	Seq       uint64          `json:"seq"`
 	Type      string          `json:"type"`
@@ -59,17 +53,8 @@ type LiveEvent struct {
 	Details   json.RawMessage `json:"details"`
 }
 
-// Details payloads: one struct per event type, so the JSON keys are a compiled
-// contract rather than a map literal — these structs ARE the wire contract the
-// web client's ws types mirror.
-// topologyChangedDetails is also the durable shape: the ingester persists it
-// verbatim into topology_events.details, and the store's fold parses it back
-// (internal/console/store/events.go, topologyChangeDetails, mirrored by hand).
-// Adding a key here without adding it there loses the field to history.
-//
-// Zone is the agent's failure domain at the moment of the change -- for
-// zone_updated, the NEW one. It is what lets a reconstructed topology group
-// nodes into the same zone lanes the live map draws.
+// Details payloads: one struct per event type, so the JSON keys are a compiled contract rather than
+// a map literal.
 type topologyChangedDetails struct {
 	Reason   string `json:"reason"`
 	NodeName string `json:"nodeName"`
@@ -111,33 +96,15 @@ type diagnosticProgressDetails struct {
 	State     string `json:"state"`
 }
 
-// ToLiveEvent projects a controller event onto the browser-facing shape. The
-// error case callers must handle is ErrUnknownPayload: a nil event, an event
-// with no payload, or a oneof wrapper whose inner message is nil or of a variant
-// this build does not know. Every known payload converts, including one whose
-// fields are all empty. The marshal error below it is defensive only —
-// unreachable for the current all-scalar details structs — and is kept so a
-// future payload with a custom marshaller cannot fail silently.
+// ToLiveEvent projects a controller event onto the browser-facing shape; the error case callers
+// must handle is ErrUnknownPayload: a nil event.
 func ToLiveEvent(ev *pb.Event) (LiveEvent, error) {
 	if ev == nil || ev.GetPayload() == nil {
 		return LiveEvent{}, ErrUnknownPayload
 	}
 
-	// The timestamp comes from the controller and nowhere else. A nil Timestamp
-	// yields the Unix epoch, which looks wrong but is IDENTICAL on every
-	// replica; substituting time.Now() here would give the same event a
-	// different id per replica and defeat the hub's dedupe.
-	//
-	// Truncated to microseconds because the id must survive a store round trip:
-	// topology_events.event_time is TIMESTAMPTZ, whose resolution is 1 µs, so a
-	// controller timestamp carrying sub-µs nanos comes back from Postgres
-	// rounded and httpapi's toLiveEvent (which rebuilds the SAME "<seq>-<nanos>"
-	// string from the persisted row) would derive a different id for the same
-	// event -- the Live page dedupes socket frames against scrollback rows by
-	// id, so the two would render as duplicates. Truncating here makes the
-	// projection already-µs-aligned, hence the id an invariant of the event
-	// rather than of where it was read from. Both the id and the Timestamp
-	// field use this value; they must not diverge.
+	// The timestamp comes from the controller and nowhere else; a nil Timestamp yields the Unix epoch,
+	// which looks wrong but is IDENTICAL on every replica.
 	ts := ev.GetTimestamp().AsTime().UTC().Truncate(time.Microsecond)
 
 	out := LiveEvent{

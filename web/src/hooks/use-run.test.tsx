@@ -106,7 +106,7 @@ describe("mergeRunPairs", () => {
   it("a socket frame and a polled result for the SAME pair render once, REST wins", () => {
     const frames = new Map([["a\0b", frame({ state: "succeeded", success: true, durationNs: 5 })]]);
     const rows = mergeRunPairs(
-      [{ sourceNode: "a", destinationNode: "b", success: true, durationNs: 9, recordedAt: "t" }],
+      [{ sourceNode: "a", destinationNode: "b", success: true, durationNs: 9, recordedAt: "t", sampleSeq: 0 }],
       frames,
     );
     expect(rows).toHaveLength(1);
@@ -116,7 +116,7 @@ describe("mergeRunPairs", () => {
   it("keeps pairs from both sources when they name different pairs", () => {
     const frames = new Map([["c\0d", frame({ source: "c", destination: "d" })]]);
     const rows = mergeRunPairs(
-      [{ sourceNode: "a", destinationNode: "b", success: true, durationNs: 1, recordedAt: "t" }],
+      [{ sourceNode: "a", destinationNode: "b", success: true, durationNs: 1, recordedAt: "t", sampleSeq: 0 }],
       frames,
     );
     expect(rows).toHaveLength(2);
@@ -137,8 +137,8 @@ describe("useRun with realtime off", () => {
                   status: "succeeded",
                   pairOk: 2,
                   results: [
-                    { sourceNode: "a", destinationNode: "b", success: true, durationNs: 1, recordedAt: "t" },
-                    { sourceNode: "b", destinationNode: "a", success: true, durationNs: 1, recordedAt: "t" },
+                    { sourceNode: "a", destinationNode: "b", success: true, durationNs: 1, recordedAt: "t", sampleSeq: 0 },
+                    { sourceNode: "b", destinationNode: "a", success: true, durationNs: 1, recordedAt: "t", sampleSeq: 0 },
                   ],
                 })
               : runBody({ status: "running" }),
@@ -271,11 +271,8 @@ describe("useRun with realtime on", () => {
     });
 
     await waitFor(() => expect(result.current.live).toBe(false));
-    // Pins the no-reconnect-loop claim: `socketEnabled` going false must
-    // actually tear down the subscription over the wire (WsClient.unsubscribe,
-    // lib/ws.ts), not just flip the hook's own `live` flag -- otherwise the
-    // server would keep dispatching frames for a topic the hook believes it
-    // has left.
+    // Pins the no-reconnect-loop claim: `socketEnabled` going false must actually tear down the
+    // subscription over the wire (WsClient.unsubscribe, lib/ws.ts).
     expect(FakeSocket.last().sent).toContain(JSON.stringify({ action: "unsubscribe", topic: runTopic(RUN_ID) }));
   });
 
@@ -300,7 +297,7 @@ describe("useRun permalink guarantee", () => {
       runBody({
         status: "succeeded",
         pairOk: 1,
-        results: [{ sourceNode: "a", destinationNode: "b", success: true, durationNs: 4, recordedAt: "t" }],
+        results: [{ sourceNode: "a", destinationNode: "b", success: true, durationNs: 4, recordedAt: "t", sampleSeq: 0 }],
       }),
     );
     const { result } = renderHook(() => useRun(RUN_ID), { wrapper });

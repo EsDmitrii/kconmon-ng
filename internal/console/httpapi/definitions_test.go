@@ -19,18 +19,9 @@ import (
 	"github.com/EsDmitrii/kconmon-ng/internal/console/store"
 )
 
-// fakeChecksStore is one double for BOTH DefinitionService and
-// ScheduleService, mutex-guarded like fakeTargetService for the same -race
-// reason. Keeping them in one struct is what lets it reproduce the two
-// cross-table behaviours the handlers depend on and that no separate pair of
-// fakes could show:
-//
-//   - check_schedules.definition_id ON DELETE CASCADE -- DeleteDefinition
-//     drops the definition's schedules, so the test can assert the cascade
-//     happened rather than merely that a delete was called;
-//   - the same column's FOREIGN KEY -- CreateSchedule against an unknown
-//     definition returns ErrNotFound, which is what the real *store.DB turns
-//     the FK violation into (store.ScheduleReader's doc comment).
+// fakeChecksStore is one double for BOTH DefinitionService and ScheduleService; keeping them in one
+// struct is what lets it reproduce the two cross-table behaviours the handlers depend on and that
+// no separate pair of fakes could show.
 type fakeChecksStore struct {
 	mu sync.Mutex
 
@@ -191,10 +182,8 @@ func topologyWith(perZone int, zones ...string) *controllerclient.Topology {
 	return topo
 }
 
-// newChecksTestServer wires a Server whose subject holds the given BUILT-IN
-// role, using the real compiled-in role sets -- so these tests prove
-// checks:read/checks:write/schedules:write actually land where M4 Task 2 put
-// them, not where a synthetic test role would.
+// newChecksTestServer wires a Server whose subject holds the given BUILT-IN role, using the real
+// compiled-in role sets.
 func newChecksTestServer(t *testing.T, role string, extra Deps) *Server {
 	t.Helper()
 	authr := fakeAuthenticator{subject: authz.Subject{Kind: authz.SubjectUser, ID: "u1"}}
@@ -202,10 +191,7 @@ func newChecksTestServer(t *testing.T, role string, extra Deps) *Server {
 	return newAuthzServer(t, authr, authz.NewPolicy(nil), extra)
 }
 
-// newOperatorChecksServer is newChecksTestServer for the common case: the
-// operator role (the lowest built-in one holding checks:*/schedules:write, so
-// every non-authorization test runs at the least privilege that can reach the
-// handler) with one fake behind both the definitions and the schedules seam.
+// newOperatorChecksServer is newChecksTestServer for the common case.
 func newOperatorChecksServer(t *testing.T, st *fakeChecksStore, topo TopologySource) *Server {
 	t.Helper()
 	return newChecksTestServer(t, "operator", Deps{Definitions: st, Schedules: st, Topology: topo})
@@ -442,10 +428,7 @@ func TestDefinitionsViewerIsForbiddenOperatorIsNot(t *testing.T) {
 	}
 }
 
-// The projection math, per selection mode, against a FIXED topology: 3 agents
-// in each of 2 zones. "all" and "per-zone" resolve to every agent (per-zone
-// groups the same set, it does not shrink it); "one-per-zone" resolves to one
-// per zone, which is the whole reason it is the default.
+// The projection math, per selection mode, against a FIXED topology: 3 agents in each of 2 zones.
 func TestProjectionMathPerSelectionMode(t *testing.T) {
 	topo := topologyWith(3, "zone-a", "zone-b")
 	s := newOperatorChecksServer(t, newFakeChecksStore(), fakeTopology{topo: topo})
@@ -599,9 +582,7 @@ func TestDefinitionsUpdateEnablingOverTheLimitReturns422(t *testing.T) {
 	}
 }
 
-// A controller outage must not become a configuration-write outage: the guard
-// fails OPEN, the same direction Decision 8 chose for the rate limiter. The
-// bound is a cardinality guard, not a security boundary.
+// A controller outage must not become a configuration-write outage.
 func TestProjectionGuardFailsOpenWhenTopologyIsUnavailable(t *testing.T) {
 	for name, topo := range map[string]TopologySource{
 		"no topology source": nil,
@@ -618,10 +599,8 @@ func TestProjectionGuardFailsOpenWhenTopologyIsUnavailable(t *testing.T) {
 	}
 }
 
-// NewServer falls back to the controller when no explicit Topology is wired,
-// and -- the trap Deps.Events documents -- a nil *controllerclient.Client must
-// NOT become a typed-nil interface that sails past projectDefinition's nil
-// gate and panics on a nil receiver.
+// NewServer falls back to the controller when no explicit Topology is wired, and -- the trap
+// Deps.Events documents.
 func TestTopologyFallsBackToControllerWithoutTypedNil(t *testing.T) {
 	s := newChecksTestServer(t, "operator", Deps{Definitions: newFakeChecksStore()})
 	if s.topology != nil {
@@ -649,11 +628,8 @@ func TestProjectedAgentsCountsEmptyZoneAsItsOwnBucket(t *testing.T) {
 	}
 }
 
-// TestChecksAuditDetailNeverCarriesDestinationOrParams pins M4 Task 4's
-// audit allow-list decision the same way targets_test pins its address
-// exclusion: destinationAddress names internal infrastructure and params can
-// carry request bodies, and neither may ever land in the long-retained,
-// widely-read audit table. Allow-listed keys (name, checkType) must appear.
+// TestChecksAuditDetailNeverCarriesDestinationOrParams pins the audit allow-list decision the same
+// way targets_test pins its address exclusion; allow-listed keys (name, checkType) must appear.
 func TestChecksAuditDetailNeverCarriesDestinationOrParams(t *testing.T) {
 	fs := &fakeAuditStore{}
 	st := newFakeChecksStore()
@@ -679,20 +655,15 @@ func TestChecksAuditDetailNeverCarriesDestinationOrParams(t *testing.T) {
 	}
 }
 
-// TestAuditDetailAllowlistIsPinned is the generic guard the per-route tests
-// back up: the WHOLE allow-list, route by route and key by key, against a
-// hand-pinned copy. Widening any route's keys (the failure mode that leaks a
-// body field into audit_log) fails here consciously, with this comment in
-// the diff.
+// TestAuditDetailAllowlistIsPinned is the generic guard the per-route tests back up: the WHOLE
+// allow-list.
 func TestAuditDetailAllowlistIsPinned(t *testing.T) {
 	want := map[string][]string{
 		"POST /api/v1/auth/login":    {"username"},
 		"POST /api/v1/rbac/roles":    {"name", "permissions"},
 		"POST /api/v1/rbac/bindings": {"roleName", "subjectKind", "subjectId"},
 		"POST /api/v1/tokens":        {"name", "expiresAt"},
-		// destinationKind joined the runs entry in M4 (diagnostics form v2):
-		// a closed enum, safe by the same reasoning as type/plane; the
-		// external address and target id stay banned.
+		// destinationKind joined the runs entry.
 		"POST /api/v1/runs":        {"type", "plane", "destinationKind"},
 		"POST /api/v1/targets":     {"name", "kind"},
 		"PUT /api/v1/targets/{id}": {"name", "kind"},
@@ -705,57 +676,33 @@ func TestAuditDetailAllowlistIsPinned(t *testing.T) {
 		// out (reconstructible from the row, noise in the audit trail).
 		"POST /api/v1/schedules":     {"definitionId", "kind", "enabled"},
 		"PUT /api/v1/schedules/{id}": {"definitionId", "kind", "enabled"},
-		// annotations: the SCOPE alone. "text" is free-form operator prose
-		// and must never reach an audit row (M5 Task 4) — pinned here and
-		// asserted per-route by
-		// TestAnnotationsCreateAuditDetailIsScopeOnlyAndNeverText.
+		// annotations: the SCOPE alone; "text" is free-form operator prose and must never reach an audit
+		// row.
 		"POST /api/v1/annotations": {"scope"},
-		// incidents: what was opened, about what, and where it stands. "notes"
-		// (free-form prose) and "pinned" (an open array whose refs carry more
-		// free-form prose) must never reach an audit row — pinned here and
-		// asserted per-route by
-		// TestIncidentsCreateAuditDetailIsTitleScopeStatusOnly.
+		// incidents: what was opened, about what, and where it stands; "notes" (free-form prose) and
+		// "pinned" (an open array whose refs carry more free-form prose) must never reach an audit row.
 		"POST /api/v1/incidents":       {"title", "scope", "status"},
 		"PATCH /api/v1/incidents/{id}": {"status"},
 		// maintenance: the SCOPE alone. "reason" is free text, on the exact
 		// annotations "text" line.
 		"POST /api/v1/maintenance": {"scope"},
-		// webhooks: name + the event filter. NEVER "secret" (the HMAC signing
-		// key) and NEVER "url" (external infrastructure whose path routinely
-		// embeds a token) — asserted per-route by
-		// TestWebhookAuditDetailNeverCarriesSecretOrURL.
+		// webhooks: name + the event filter; NEVER "secret" (the HMAC signing key) and NEVER "url"
+		// (external infrastructure whose path routinely embeds a token).
 		"POST /api/v1/webhooks":     {"name", "events"},
 		"PUT /api/v1/webhooks/{id}": {"name", "events"},
-		// alert rules: the NAME alone. "params" carries a raw rule's PromQL
-		// expression (a pile of label matchers naming internal addresses) and
-		// "labels"/"annotations" are operator-typed maps whose values carry
-		// runbook URLs and hostnames — all three banned outright, and asserted
-		// per-route by TestAlertRuleAuditDetailIsNameOnly. /preview has NO
-		// entry on purpose (its body is a draft carrying exactly that
-		// expression) — pinned by TestAlertRulePreviewAuditDetailIsAlwaysEmpty.
+		// alert rules: the NAME alone.
 		"POST /api/v1/alert-rules":     {"name"},
 		"PUT /api/v1/alert-rules/{id}": {"name"},
-		// import (adopt-foreign): the FOREIGN OBJECT's name, which is the whole
-		// body. The names of the rules it adopted stay off the row — they follow
-		// somebody else's naming convention and routinely carry a customer or a
-		// hostname — and so do the counts, which are derivable from the object
-		// and from GET /api/v1/alert-rules. Asserted per-route by
-		// TestAlertRulesImportAuditDetailIsTheObjectNameOnly.
+		// import (adopt-foreign): the FOREIGN OBJECT's name, which is the whole body.
 		"POST /api/v1/alert-rules/import": {"name"},
-		// import: the dryRun FLAG alone. "bundle" is the whole declarative
-		// configuration of a console — every probe address and every webhook
-		// URL in one object — and is banned outright; what the import did
-		// reaches the row as counts, through auditResultAllowlist below.
+		// import: the dryRun FLAG alone.
 		"POST /api/v1/import": {"dryRun"},
 	}
 	assertAllowlistPinned(t, "auditDetailAllowlist", auditDetailAllowlist, want)
 }
 
-// TestAuditResultAllowlistIsPinned is TestAuditDetailAllowlistIsPinned for the
-// second, handler-computed channel (M7 Task 6). Same default-deny posture,
-// same conscious-widening guard: every key here must name a COUNT, because a
-// count is the one class of value that cannot carry a name, an address, an
-// expression or a secret.
+// TestAuditResultAllowlistIsPinned is TestAuditDetailAllowlistIsPinned for the second; same
+// default-deny posture, same conscious-widening guard: every key here must name a COUNT.
 func TestAuditResultAllowlistIsPinned(t *testing.T) {
 	want := map[string][]string{
 		"POST /api/v1/import": {

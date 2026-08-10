@@ -213,14 +213,7 @@ func TestMemoryStoreListRunsFiltersAndOrdersNewestFirst(t *testing.T) {
 	}
 }
 
-// ListRuns' Limit clamp must match store/events.go's clampLimit exactly
-// (task-22-brief.md minor d): 0 defaults to 100, not *store.DB's own default
-// of some other number and not a MemoryStore-only default -- a caller must
-// not be able to tell which backend answered a request from its page size.
-// 60 runs are created, past memoryRingSize (50), so every case below is
-// itself further bounded by "only 50 runs are retained at all" -- that ring
-// bound, not the Limit clamp, is what caps the "over 500" and "zero
-// defaults to 100" cases at 50 rather than 500/100.
+// ListRuns' Limit clamp must match store/events.go's clampLimit exactly: 0 defaults to 100.
 func TestMemoryStoreListRunsLimitClampMirrorsStoreClampLimit(t *testing.T) {
 	m := checks.NewMemoryStore()
 	ctx := context.Background()
@@ -254,13 +247,8 @@ func TestMemoryStoreListRunsLimitClampMirrorsStoreClampLimit(t *testing.T) {
 	}
 }
 
-// NextCursor must be emitted exactly when len(page) == limit, matching
-// *store.DB.ListRuns' own condition (checks.go), not "there is provably
-// more" -- both backends share this same imprecise-but-matched heuristic.
-// Run ids must be real UUIDs here (unlike this file's other tests' plain
-// "r1"/"run-00" ids): store.DecodeRunCursor -- shared with *store.DB, not a
-// MemoryStore-only format -- rejects a non-UUID id, and this test actually
-// round-trips a cursor ListRuns itself produced.
+// NextCursor must be emitted exactly when len(page) == limit, matching *store.DB.ListRuns' own
+// condition (checks.go).
 func TestMemoryStoreListRunsNextCursorMatchesLimitLikeDB(t *testing.T) {
 	m := checks.NewMemoryStore()
 	ctx := context.Background()
@@ -288,10 +276,7 @@ func TestMemoryStoreListRunsNextCursorMatchesLimitLikeDB(t *testing.T) {
 	}
 }
 
-// A cursor that decodes fine but names a run no longer in the (bounded,
-// 50-entry) ring -- most plausibly evicted between two page requests -- must
-// come back as an empty page, not silently restart the caller from the
-// beginning of the list (task-22-brief.md minor d).
+// A cursor that decodes fine but names a run no longer in the (bounded, 50-entry) ring.
 func TestMemoryStoreListRunsCursorNotFoundIsEmptyPageNotRestart(t *testing.T) {
 	m := checks.NewMemoryStore()
 	ctx := context.Background()

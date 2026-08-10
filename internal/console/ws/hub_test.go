@@ -101,11 +101,8 @@ func TestMatrixTopicShape(t *testing.T) {
 	}
 }
 
-// TopicLive must equal the bus topic internal/console/events publishes on (its
-// unexported busTopicLive). The two constants cannot reference each other — ws
-// imports events so the Hub can dedupe by LiveEvent.ID, so events cannot import
-// ws — so each side pins the same literal: this test, and liveBusTopic in
-// internal/console/events/ingester_test.go.
+// TopicLive must equal the bus topic internal/console/events publishes on (its unexported
+// busTopicLive).
 func TestTopicLiveIsTheBusTopicTheIngesterPublishesOn(t *testing.T) {
 	if TopicLive != "live" {
 		t.Errorf("TopicLive = %q, want %q", TopicLive, "live")
@@ -402,11 +399,7 @@ func TestHubDropsMalformedAndIDLessLiveMessages(t *testing.T) {
 	c := h.register(nil)
 	subscribeClient(h, c, TopicLive, 0)
 
-	// Barrier: publish valid events with UNIQUE ids until one is delivered, so
-	// the hub's bus subscription is demonstrably live before the malformed
-	// publishes — otherwise those could be dropped by the bus itself (no
-	// subscriber yet) and the test would pass vacuously. Unique ids keep
-	// events_deduped_total at zero.
+	// Barrier: publish valid events with UNIQUE ids until one is delivered.
 	deadline := time.Now().Add(5 * time.Second)
 	for i := 1; ; i++ {
 		barrier := liveEventBytes(t, "barrier-"+strconv.Itoa(i), uint64(i))
@@ -427,22 +420,7 @@ func TestHubDropsMalformedAndIDLessLiveMessages(t *testing.T) {
 		}
 	}
 
-	// Each malformed pair is followed by a uniquely-ID'd valid probe, and the
-	// loop waits for that probe before publishing the next pair. The hub reads
-	// its subscription serially, so a delivered probe proves the two frames
-	// ahead of it were processed — and dropped — rather than merely still queued.
-	//
-	// The pacing is load-bearing, not style. cache.InProcessBus gives each
-	// subscriber a 32-slot channel and drops on full instead of blocking the
-	// publisher (inprocess.go: localSubscriberBuffer). The earlier shape of this
-	// test fired 41 publishes in one tight loop past those 32 slots and then
-	// waited on a single trailing sentinel, so whenever the hub goroutine was
-	// not scheduled fast enough the bus threw the sentinel away and the test
-	// timed out. That is a bounded-channel overflow by construction, not a race
-	// in the hub: it merely looked like a rare flake on a fast machine while
-	// failing constantly on a loaded CI runner. Waiting per iteration keeps at
-	// most three messages in flight, and asserting per pair is strictly stronger
-	// than one sentinel for the whole batch.
+	// Each malformed pair is followed by a uniquely-ID'd valid probe.
 	for i := 0; i < 20; i++ {
 		if err := bus.Publish(ctx, TopicLive, cache.Message{Type: TypeEvent, Data: json.RawMessage(`{not json`)}); err != nil {
 			t.Fatalf("Publish: %v", err)
@@ -464,11 +442,7 @@ func TestHubDropsMalformedAndIDLessLiveMessages(t *testing.T) {
 			if live.ID == probeID {
 				break
 			}
-			// Only barrier frames may precede a probe: barriers were published
-			// before this loop, and every earlier probe was already consumed by
-			// the iteration that published it. A delivered ID-less frame
-			// ({"seq":1}) would unmarshal cleanly, so it has to be rejected
-			// explicitly here instead of being skipped as a "straggler".
+			// Only barrier frames may precede a probe: barriers were published before this loop.
 			if !strings.HasPrefix(live.ID, "barrier-") {
 				t.Fatalf("non-barrier frame %q was delivered — malformed/ID-less events must be dropped", live.ID)
 			}
@@ -555,9 +529,6 @@ func TestHubClientCountAndGaugeTrackRegistration(t *testing.T) {
 	}
 }
 
-// Task 14's shutdown ordering depends on this: http.Server.Shutdown does not
-// track hijacked connections, so cancelling the Hub's context is what releases
-// live WebSocket clients.
 func TestHubRunClosesEveryClientOnContextCancel(t *testing.T) {
 	h, m := newTestHub(t, cache.NewInProcessBus())
 
@@ -628,10 +599,7 @@ func TestRunTopicShape(t *testing.T) {
 	}
 }
 
-// Without OpenTopic, a run:{id} subscribe is the same M2 rejection as any
-// other unknown topic. This is the "before" half of the required test: the
-// UI's fallback (REST polling) depends on this staying an out-loud error, not
-// a silently-idle topic.
+// Without OpenTopic, a run:{id} subscribe.
 func TestSubscribeToUnopenedRunTopicIsRejected(t *testing.T) {
 	h, _ := newTestHub(t, cache.NewInProcessBus())
 	c := h.register(nil)
@@ -695,10 +663,7 @@ func TestOpenTopicMakesSubscribeSucceedAndDeliversBusMessages(t *testing.T) {
 	}
 }
 
-// run:{id} data frames must never mint a ws_messages_sent_total series keyed
-// by run ID -- the same closed-label-set constraint
-// TestHubErrorFramesDoNotMintTopicMetricLabels enforces for client-chosen
-// junk topics, now for a controller-assigned but still per-run-unique one.
+// run:{id} data frames must never mint a ws_messages_sent_total series keyed by run ID.
 func TestOpenTopicDataFramesDoNotMintTopicMetricLabels(t *testing.T) {
 	bus := cache.NewInProcessBus()
 	h, m := newTestHub(t, bus)
@@ -719,13 +684,8 @@ func TestOpenTopicDataFramesDoNotMintTopicMetricLabels(t *testing.T) {
 	}
 }
 
-// CloseTopic keeps replay working immediately after (the browser reconnect
-// case its doc comment describes), and only after reapDelay has actually
-// elapsed is the topic gone -- subscribe errors again, OpenTopicCount drops,
-// and h.seq/h.rings hold no trace of the key. That last assertion is the
-// leak test this task exists to pass: a topic that is merely inaccessible but
-// still present in those maps would still be the unbounded growth Broadcast's
-// doc comment warned about.
+// CloseTopic keeps replay working immediately after (the browser reconnect case its doc comment
+// describes).
 func TestCloseTopicKeepsReplayThenReapsAfterDelay(t *testing.T) {
 	h, m := newTestHub(t, cache.NewInProcessBus())
 	topic := RunTopic("closes-then-reaps")
@@ -910,10 +870,8 @@ func TestHubRunShutdownClosesEveryEphemeralSubscription(t *testing.T) {
 	if got := h.OpenTopicCount(); got != 0 {
 		t.Errorf("OpenTopicCount after shutdown = %d, want 0", got)
 	}
-	// The per-topic goroutines' deferred unsubscribe runs asynchronously to
-	// closeAllClients cancelling their context, so poll for it rather than
-	// asserting immediately. +1 is Run's own TopicLive subscription, torn
-	// down by the same shutdown through the same countingBus.
+	// The per-topic goroutines' deferred unsubscribe runs asynchronously to closeAllClients cancelling
+	// their context.
 	const wantUnsubscribes = topics + 1
 	deadline := time.Now().Add(5 * time.Second)
 	for {
@@ -961,10 +919,8 @@ func TestWSTopicsGaugeTracksRegistryAcrossOpenCloseReap(t *testing.T) {
 	}
 }
 
-// Concurrent OpenTopic/CloseTopic/Broadcast/subscribe on overlapping topics,
-// meant to run under -race. No assertions on delivery outcome -- this is
-// purely a data-race and deadlock check for the shared h.mu across the new
-// ephemeral-registry paths and the pre-existing client/ring paths.
+// Concurrent OpenTopic/CloseTopic/Broadcast/subscribe on overlapping topics, meant to run under
+// -race.
 func TestHubEphemeralTopicsConcurrentAccessRace(t *testing.T) {
 	bus := cache.NewInProcessBus()
 	h, _ := newTestHub(t, bus)
@@ -1059,11 +1015,8 @@ func TestHubEphemeralTopicsConcurrentAccessRace(t *testing.T) {
 
 // --- Fix pass regression tests (code review on Task 20) ---
 
-// subscribeCountingBus wraps InProcessBus and counts Subscribe calls per
-// topic. It exists for TestOpenTopicConcurrentSameTopicSubscribesOnlyOnce:
-// OpenTopic must reserve a topic's registry slot atomically with the cap/
-// idempotence check BEFORE calling bus.Subscribe, precisely so two racing
-// OpenTopic(sameTopic) calls cannot each start their own bus subscription.
+// subscribeCountingBus wraps InProcessBus and counts Subscribe calls per topic; it exists for
+// TestOpenTopicConcurrentSameTopicSubscribesOnlyOnce.
 type subscribeCountingBus struct {
 	*cache.InProcessBus
 	mu     sync.Mutex
@@ -1087,11 +1040,7 @@ func (b *subscribeCountingBus) subscribeCount(topic string) int {
 	return b.counts[topic]
 }
 
-// OpenTopic must not hold h.mu across h.bus.Subscribe, but two concurrent
-// OpenTopic calls for the SAME topic must still result in exactly one bus
-// subscription: OpenTopic's reservation (a placeholder ephemeralTopic
-// inserted under the lock before Subscribe runs) is what a second, racing
-// caller sees as "already open" and returns on without subscribing again.
+// OpenTopic must not hold h.mu across h.bus.Subscribe.
 func TestOpenTopicConcurrentSameTopicSubscribesOnlyOnce(t *testing.T) {
 	bus := newSubscribeCountingBus()
 	h, _ := newTestHub(t, bus)
@@ -1122,10 +1071,8 @@ func TestOpenTopicConcurrentSameTopicSubscribesOnlyOnce(t *testing.T) {
 	}
 }
 
-// The cap check and the registry insert must be atomic across concurrent
-// OpenTopic calls for DIFFERENT topics too, or more than one caller could read
-// len(h.ephemeral) < maxEphemeralTopics before either had reserved a slot and
-// all of them would squeeze past the cap.
+// The cap check and the registry insert must be atomic across concurrent OpenTopic calls for
+// DIFFERENT topics too.
 func TestOpenTopicConcurrentDifferentTopicsRespectsCapExactly(t *testing.T) {
 	h, _ := newTestHub(t, cache.NewInProcessBus())
 	ctx := context.Background()
@@ -1167,15 +1114,7 @@ func TestOpenTopicConcurrentDifferentTopicsRespectsCapExactly(t *testing.T) {
 	}
 }
 
-// The reap-vs-in-flight-Broadcast resurrection race: a Broadcast call that
-// read its message off the topic's bus subscription before reapTopicLocked
-// ran must NOT recreate h.seq/h.rings once it finally gets h.mu. This test
-// forces the interleaving deterministically by holding h.mu itself across the
-// publish and the reap, guaranteeing that whenever runEphemeralTopic's
-// goroutine gets around to calling Broadcast, it blocks on h.mu until AFTER
-// the reap has already run and released it -- so Broadcast's guard is
-// exercised against a topic that is provably already gone, not merely
-// probably gone by scheduling luck.
+// The reap-vs-in-flight-Broadcast resurrection race.
 func TestBroadcastDoesNotResurrectAReapedRunTopic(t *testing.T) {
 	bus := cache.NewInProcessBus()
 	h, _ := newTestHub(t, bus)
@@ -1190,14 +1129,8 @@ func TestBroadcastDoesNotResurrectAReapedRunTopic(t *testing.T) {
 		h.mu.Unlock()
 		t.Fatalf("Publish: %v", err)
 	}
-	// Give runEphemeralTopic's goroutine a chance to read the message and reach
-	// its own h.mu.Lock() call inside Broadcast -- there is no signal for
-	// "blocked on a mutex" to wait on instead, but correctness here does not
-	// actually depend on the goroutine having reached that point yet: h.mu is
-	// held for the whole publish-then-reap sequence below, so whenever the
-	// goroutine's Broadcast call does acquire the lock -- before this sleep,
-	// during it, or after -- it can only do so once the reap (also inside this
-	// critical section) has already completed.
+	// Give runEphemeralTopic's goroutine a chance to read the message and reach its own h.mu.Lock call
+	// inside Broadcast.
 	time.Sleep(50 * time.Millisecond)
 
 	et := h.ephemeral[topic]
@@ -1225,10 +1158,8 @@ func TestBroadcastDoesNotResurrectAReapedRunTopic(t *testing.T) {
 	}
 }
 
-// CloseTopic's terminal frame is what tells an already-subscribed client the
-// run is over instead of the topic silently going idle. A second CloseTopic
-// call must not send a second one -- idempotence applies to the broadcast,
-// not just the registry state.
+// CloseTopic's terminal frame is what tells an already-subscribed client the run is over instead of
+// the topic silently going idle.
 func TestCloseTopicBroadcastsTerminalFrameToSubscribedClient(t *testing.T) {
 	h, _ := newTestHub(t, cache.NewInProcessBus())
 	topic := RunTopic("terminal-frame")
@@ -1258,13 +1189,8 @@ func TestCloseTopicBroadcastsTerminalFrameToSubscribedClient(t *testing.T) {
 	expectNoEnvelope(t, c)
 }
 
-// CloseTopicWithFinal must deliver its final data frame strictly before the
-// TypeClosed control frame -- lower Seq, and first in delivery order -- to a
-// subscribed client, and must do so as one atomic pair (a second call after
-// the topic is already closed sends neither frame). This is the ordering
-// guarantee task-22-brief.md's I-2 exists to make structural instead of a
-// race between an async bus-fed publish and CloseTopic's own synchronous
-// Broadcast (see CloseTopicWithFinal's doc comment).
+// CloseTopicWithFinal must deliver its final data frame strictly before the TypeClosed control
+// frame -- lower Seq.
 func TestCloseTopicWithFinalOrdersFinalFrameStrictlyBeforeClosed(t *testing.T) {
 	h, _ := newTestHub(t, cache.NewInProcessBus())
 	topic := RunTopic("final-before-closed")
@@ -1304,10 +1230,8 @@ func TestCloseTopicWithFinalOrdersFinalFrameStrictlyBeforeClosed(t *testing.T) {
 	expectNoEnvelope(t, c)
 }
 
-// reapTopicLocked must clear the reaped topic out of every currently
-// subscribed client's c.topics map, or a long-lived connection that
-// subscribed to many short-lived run:{id} topics over its lifetime would
-// accumulate a dead entry per run forever.
+// reapTopicLocked must clear the reaped topic out of every currently subscribed client's c.topics
+// map.
 func TestReapTopicLockedClearsTopicFromSubscribedClientsTopicsMap(t *testing.T) {
 	h, _ := newTestHub(t, cache.NewInProcessBus())
 	topic := RunTopic("reap-clears-client")

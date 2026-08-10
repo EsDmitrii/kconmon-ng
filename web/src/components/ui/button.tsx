@@ -3,8 +3,13 @@ import { cva, type VariantProps } from "class-variance-authority";
 import { Loader2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
+/* disabled:opacity-65, not 50: at half opacity a disabled label measured 3.18:1
+   against the light theme's page background, under WCAG AA's 4.5:1 for 14px
+   text, and a disabled control still has to be READ — the Sync button on
+   /alerting carries the reason it is off in its own title. 65 lands at 5.03:1
+   on light and 7.44:1 on dark, so one value covers both themes. */
 const buttonVariants = cva(
-  "inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium transition-[background-color,box-shadow,color] duration-(--dur) ease-(--ease) focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background disabled:pointer-events-none disabled:opacity-50",
+  "inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium transition-[background-color,box-shadow,color] duration-(--dur) ease-(--ease) focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background disabled:pointer-events-none disabled:opacity-65",
   {
     variants: {
       variant: {

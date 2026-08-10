@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"gopkg.in/yaml.v3"
 )
 
 func TestLoadDefaultsWhenFileMissing(t *testing.T) {
@@ -42,9 +44,8 @@ func TestLoadFromFileOverrides(t *testing.T) {
 }
 
 func TestValidateRejectsIncompleteOIDCMode(t *testing.T) {
-	// auth.mode=oidc is supported since M3, but this file supplies none of
-	// oidc's required fields (issuer, clientID, clientSecretFile,
-	// redirectURL) and no database DSN, so it must still fail validation.
+	// auth.mode=oidc is supported since , but this file supplies none of oidc's required fields
+	// (issuer, clientID, clientSecretFile, redirectURL) and no database DSN.
 	p := filepath.Join(t.TempDir(), "config.yaml")
 	if err := os.WriteFile(p, []byte("auth:\n  mode: oidc\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -54,10 +55,6 @@ func TestValidateRejectsIncompleteOIDCMode(t *testing.T) {
 	}
 }
 
-// TestAnonymousDefaultsUnchanged is the M1/M2 regression: a defaulted Config
-// (no config file at all) must still resolve to mode=anonymous/role=viewer
-// and pass Validate() outright — the M3 auth matrix must not make the
-// degraded-state default invalid.
 func TestAnonymousDefaultsUnchanged(t *testing.T) {
 	cfg := defaults()
 	if cfg.Auth.Mode != "anonymous" || cfg.Auth.Anonymous.Role != "viewer" {
@@ -454,9 +451,6 @@ func TestValidateRejectsBadValkeyAddress(t *testing.T) {
 	}
 }
 
-// TestLoadRateLimitDefaults pins the two defaults the M4 Task 8 limiter
-// ships with: the console is rate-limited out of the box, not only once an
-// operator opts in.
 func TestLoadRateLimitDefaults(t *testing.T) {
 	cfg, err := Load(filepath.Join(t.TempDir(), "nope.yaml"))
 	if err != nil {
@@ -497,10 +491,8 @@ func TestValidateRateLimits(t *testing.T) {
 	}
 }
 
-// TestLoadRateLimitZeroIsHonoredNotDefaulted guards the one way an explicit
-// "off" could silently come back on: yaml decodes 0 onto the defaulted
-// struct, so an operator who writes runsPerMinute: 0 must end up with 0, not
-// with the 10 defaults() put there.
+// TestLoadRateLimitZeroIsHonoredNotDefaulted guards the one way an explicit "off" could silently
+// come back on.
 func TestLoadRateLimitZeroIsHonoredNotDefaulted(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "config.yaml")
 	if err := os.WriteFile(p, []byte("rateLimit:\n  runsPerMinute: 0\n  loginPerMinute: 0\n"), 0o600); err != nil {
@@ -696,10 +688,8 @@ func TestResolveDSNEmptyWhenUnset(t *testing.T) {
 	}
 }
 
-// TestLoadMTREnrichmentDefaults pins the off-by-default posture of M5's
-// enrichment block: the master gate is false, both geoip paths are empty, and
-// the two budgets are pre-defaulted so switching a source on is a one-line
-// change (SchedulerConfig's exact convention).
+// TestLoadMTREnrichmentDefaults pins the off-by-default posture of the enrichment block: the master
+// gate is false.
 func TestLoadMTREnrichmentDefaults(t *testing.T) {
 	cfg, err := Load(filepath.Join(t.TempDir(), "nope.yaml"))
 	if err != nil {
@@ -760,10 +750,7 @@ func TestLoadMTREnrichmentFromYAML(t *testing.T) {
 	}
 }
 
-// TestValidateMTREnrichment is the fail-closed table: a master gate that is on
-// with nothing behind it is a configuration error naming the three knobs, and
-// a budget that can never elapse is rejected rather than silently treated as
-// "no cache" or "no timeout".
+// TestValidateMTREnrichment is the fail-closed table.
 func TestValidateMTREnrichment(t *testing.T) {
 	const enabledPrefix = "mtr:\n  enrichment:\n    enabled: true\n"
 	for _, tc := range []struct {
@@ -814,9 +801,8 @@ func TestValidateMTREnrichmentAllSourcesOffNamesTheKnobs(t *testing.T) {
 	}
 }
 
-// TestLoadKubernetesContextDefaults pins M6 Task 2's block: the gate is off,
-// the namespace is empty (= resolve at runtime), and the resync cadence is
-// pre-defaulted so switching the reader on is a one-line change.
+// TestLoadKubernetesContextDefaults pins the block: the gate is off, the namespace is empty (=
+// resolve at runtime).
 func TestLoadKubernetesContextDefaults(t *testing.T) {
 	cfg, err := Load(filepath.Join(t.TempDir(), "nope.yaml"))
 	if err != nil {
@@ -908,11 +894,8 @@ func TestValidateKubernetesContextNamesTheKnob(t *testing.T) {
 	}
 }
 
-// TestResolveNamespacePrecedence pins the three-step fallback the reader and
-// the chart both depend on: the explicit key wins, POD_NAMESPACE is the
-// downward-API fallback, and "default" is what a process outside a cluster
-// gets. A whitespace-only POD_NAMESPACE is treated as unset, the same way
-// ResolveDSN trims its file.
+// TestResolveNamespacePrecedence pins the three-step fallback the reader and the chart both depend
+// on; a whitespace-only POD_NAMESPACE is treated as unset, the same way ResolveDSN trims its file.
 func TestResolveNamespacePrecedence(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
@@ -936,14 +919,8 @@ func TestResolveNamespacePrecedence(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// alerting.* (M7 Task 3)
-// ---------------------------------------------------------------------------
-
-// TestLoadAlertingDefaults pins the block's defaults: the gate is off, the
-// namespace is empty (= resolve from POD_NAMESPACE), and both the cadence and
-// the bundle name are pre-defaulted so switching the reconciler on is a
-// one-line change.
+// TestLoadAlertingDefaults pins the block's defaults: the gate is off, the namespace is empty (=
+// resolve from POD_NAMESPACE).
 func TestLoadAlertingDefaults(t *testing.T) {
 	cfg, err := Load(filepath.Join(t.TempDir(), "nope.yaml"))
 	if err != nil {
@@ -1116,11 +1093,8 @@ func TestLoadWebhookDefaults(t *testing.T) {
 	}
 }
 
-// alertPollInterval lives under webhooks, not under alerting, because it is
-// not a property of alerting at all: alerting.syncInterval is how often rules
-// are pushed INTO Prometheus, and this is how often alert STATE is read back
-// out for the sole purpose of firing deliveries. Switch webhooks off and this
-// knob does nothing; switch alerting off and it does nothing either.
+// alertPollInterval lives under webhooks, not under alerting, because it is not a property of
+// alerting at all.
 func TestLoadWebhookAlertPollIntervalDefault(t *testing.T) {
 	cfg, err := Load("/nonexistent/config.yaml")
 	if err != nil {
@@ -1151,11 +1125,7 @@ func TestLoadWebhookAlertPollIntervalFromYAML(t *testing.T) {
 	}
 }
 
-// The interval is only load-bearing when BOTH gates are on -- a key is
-// configured (so deliveries can be signed at all) and alerting is enabled (so
-// there is alert state to read). A leftover zero on a console with neither
-// must not be a boot failure, exactly as AlertingConfig treats its own
-// intervals.
+// The interval is only load-bearing when BOTH gates are on.
 func TestWebhookAlertPollIntervalIsValidatedOnlyWhenBothGatesAreOn(t *testing.T) {
 	for _, tc := range []struct {
 		name            string
@@ -1340,4 +1310,59 @@ func TestResolveEncryptionKeyFilePrecedenceAndErrors(t *testing.T) {
 			t.Errorf("empty key file = (%v, %v), want (nil, nil)", key, e)
 		}
 	})
+}
+
+// --- valkey auth (2.0.0) ---------------------------------------------------
+//
+// console.valkey.mode=dependency/external point at a Valkey that almost always
+// requires a password (bitnami's subchart enables requirepass by default), so
+// the config has to be able to carry one -- from a FILE, exactly like the DSN.
+
+func TestValkeyResolvePasswordReadsTheFile(t *testing.T) {
+	dir := t.TempDir()
+	f := filepath.Join(dir, "valkey-password")
+	if err := os.WriteFile(f, []byte("s3cr3t\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	v := ValkeyConfig{Address: "valkey:6379", PasswordFile: f}
+	got, err := v.ResolvePassword()
+	if err != nil {
+		t.Fatalf("ResolvePassword: %v", err)
+	}
+	if got != "s3cr3t" {
+		t.Errorf("password = %q, want %q (trailing newline must be trimmed)", got, "s3cr3t")
+	}
+}
+
+func TestValkeyResolvePasswordEmptyWithoutAFile(t *testing.T) {
+	v := ValkeyConfig{Address: "valkey:6379"}
+	got, err := v.ResolvePassword()
+	if err != nil || got != "" {
+		t.Errorf("no passwordFile must mean no password, got %q err %v", got, err)
+	}
+}
+
+func TestValkeyResolvePasswordUnreadableFileIsAnError(t *testing.T) {
+	v := ValkeyConfig{Address: "valkey:6379", PasswordFile: filepath.Join(t.TempDir(), "nope")}
+	if _, err := v.ResolvePassword(); err == nil {
+		t.Error("an unreadable passwordFile must be an error, not a silent empty password")
+	}
+}
+
+func TestValkeyInlinePasswordIsRejected(t *testing.T) {
+	v := ValkeyConfig{Address: "valkey:6379", Password: "inline", PasswordFile: "/x"}
+	if err := v.validate(); err == nil {
+		t.Error("password and passwordFile together must be rejected, like dsn/dsnFile")
+	}
+}
+
+func TestValkeyPasswordFileParsesFromYAML(t *testing.T) {
+	// The console rejects unknown fields, so the key has to exist in the struct.
+	var c Config
+	if err := yaml.Unmarshal([]byte("valkey:\n  address: v:6379\n  passwordFile: /etc/p\n"), &c); err != nil {
+		t.Fatalf("valkey.passwordFile must be a known field: %v", err)
+	}
+	if c.Valkey.PasswordFile != "/etc/p" {
+		t.Errorf("passwordFile = %q", c.Valkey.PasswordFile)
+	}
 }

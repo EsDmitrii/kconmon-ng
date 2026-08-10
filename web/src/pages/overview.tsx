@@ -8,6 +8,8 @@ import { useAuth } from "@/hooks/use-auth";
 import { useDatabaseAvailable } from "@/hooks/use-capabilities";
 import { useMatrix } from "@/hooks/use-matrix";
 import { useTopology } from "@/hooks/use-topology";
+import { useT, type Translate } from "@/lib/i18n";
+import { overviewDict, type OverviewKey } from "@/lib/i18n/dict/overview";
 import { getEvents, getIncidents, listAlerts } from "@/lib/api";
 import { buildInvestigateURL, incidentPermalink, scopeFromAlertLabels } from "@/lib/investigation-sources";
 import { isMeasured } from "@/lib/matrix-cells";
@@ -28,17 +30,11 @@ export interface OverviewSummary {
   worstPairs: MatrixCell[]; // top 5, failing/degraded only, worst first
 }
 
-/* isMeasured used to live here (QA round 1, finding #3). It is now
-   lib/matrix-cells.ts's, imported above and shared with the grid, the object
-   cards and the topology edges — round 2's finding #1 was the same misreading
-   surviving in four OTHER files, which is what a private copy buys. The one
-   change on the way out: packet loss counts as a measurement too. */
+/* isMeasured used to live here. */
 
 /**
- * compareWorst orders the problem table: failure ratio first, RTT as the
- * tiebreak. Two pairs failing at the same ratio are not equally bad — the
- * slower one is where an operator should look — and a comparator that left
- * them in map order would reshuffle them between renders.
+ * compareWorst orders the problem table: failure ratio first, RTT as the tiebreak; two pairs
+ * failing at the same ratio are not equally bad.
  */
 function compareWorst(a: MatrixCell, b: MatrixCell): number {
   const fa = a.failRatio ?? 0;
@@ -47,10 +43,7 @@ function compareWorst(a: MatrixCell, b: MatrixCell): number {
   return (b.rttP95 ?? 0) - (a.rttP95 ?? 0);
 }
 
-// Health tiers mirror the matrix/topology thresholds: fail ≥ 10% is "failing",
-// 1%–10% is "degraded". A tier still needs a failure ratio — a cell with only
-// an RTT is measured but unranked, which is why pairsScored exists next to
-// pairsTotal rather than one number standing in for both.
+// A tier still needs a failure ratio — a cell with only an RTT is measured but unranked.
 export function summarize(matrix: Matrix, topo?: Topology): OverviewSummary {
   const measured = matrix.cells.filter(isMeasured);
   const scored = matrix.cells.filter((c) => c.failRatio !== null);
@@ -67,10 +60,48 @@ export function summarize(matrix: Matrix, topo?: Topology): OverviewSummary {
   };
 }
 
-/** The qualifier every pair number on this page needs: the tiles and the worst
- *  list read ONE protocol on ONE plane (useMatrix("tcp") below), and an
- *  unlabelled "Failing pairs" claims the whole fleet's UDP and ICMP too. */
-const MATRIX_QUALIFIER = "TCP · pod plane";
+/* It moved into the dictionary rather than staying a module constant because a constant cannot see the locale. */
+
+/** T is this page's translator, threaded into the pure helpers below. */
+type T = Translate<OverviewKey>;
+
+/**
+ * NodesTile is what the "Nodes ready" tile can honestly say. `noInventory` is the case that used to
+ * read "0/0": the topology ANSWERED and carried no nodes, while agents (or the matrix) plainly knew
+ * of some.
+ */
+export type NodesTile =
+  | { kind: "loading" }
+  | { kind: "unavailable" }
+  | { kind: "counts"; ready: number; total: number }
+  | { kind: "noInventory"; nodes: number; source: "agents" | "matrix" };
+
+export function nodesTile(topo: Topology | undefined, loading: boolean, matrix?: Matrix): NodesTile {
+  if (!topo) return loading ? { kind: "loading" } : { kind: "unavailable" };
+  if (topo.nodes.length > 0) {
+    return { kind: "counts", ready: topo.nodes.filter((n) => n.ready).length, total: topo.nodes.length };
+  }
+  // One agent per node (DaemonSet), so distinct nodeNames IS a node count.
+  const fromAgents = new Set(topo.agents.map((a) => a.nodeName)).size;
+  if (fromAgents > 0) return { kind: "noInventory", nodes: fromAgents, source: "agents" };
+  const fromMatrix = matrix?.nodes.length ?? 0;
+  if (fromMatrix > 0) return { kind: "noInventory", nodes: fromMatrix, source: "matrix" };
+  // Nothing anywhere knows of a node: 0/0 is the answer, not a cover story.
+  return { kind: "counts", ready: 0, total: 0 };
+}
+
+/**
+ * foldBounds is the historical fold's own admission of incompleteness, or undefined while the
+ * counters say nothing was lost.
+ */
+export function foldBounds(topo: Topology | undefined, t: T): string | undefined {
+  if (!topo?.historical) return undefined;
+  const lines: string[] = [];
+  if (topo.truncated === true) lines.push(t("tiles.nodesReady.bounded.truncated"));
+  const unfoldable = topo.unfoldableEvents ?? 0;
+  if (unfoldable > 0) lines.push(t("tiles.nodesReady.bounded.unfoldable", { count: unfoldable }));
+  return lines.length > 0 ? lines.join(" ") : undefined;
+}
 
 function fmtRtt(ns?: number): string {
   if (ns === undefined) return "—";
@@ -79,21 +110,21 @@ function fmtRtt(ns?: number): string {
 
 type Tone = "warn" | "bad";
 
-/* Stat tile: the number is the hero, the label is a quiet caption above it. A
-   tone only appears when the value itself means trouble, and it arrives on three
-   channels at once — a left rail, the figure's colour and a worded badge — so
-   the state survives greyscale and colour-blind readers. */
+/* A tone only appears when the value itself means trouble, and it arrives on three channels at once — a left rail. */
 function StatTile({
   label,
   value,
   tone,
   hint,
+  note,
   toneLabel,
 }: {
   label: string;
   value: ReactNode;
   tone?: Tone;
   hint?: string;
+  /** A second line, for what BOUNDS the value rather than what qualifies it. */
+  note?: string;
   toneLabel?: string;
 }) {
   return (
@@ -112,6 +143,7 @@ function StatTile({
       </div>
       <div className="mt-3 flex flex-wrap items-baseline gap-x-3 gap-y-2">
         <span
+          data-testid="stat-value"
           className={cn(
             "nums text-4xl font-semibold leading-none tracking-tight",
             tone === "bad" && "text-health-bad",
@@ -125,6 +157,11 @@ function StatTile({
         ) : null}
       </div>
       {hint ? <p className="mt-2 text-xs text-muted-foreground">{hint}</p> : null}
+      {note ? (
+        <p data-testid="tile-note" className="mt-1 text-xs leading-relaxed text-muted-foreground">
+          {note}
+        </p>
+      ) : null}
     </Card>
   );
 }
@@ -156,9 +193,10 @@ function SkeletonBar({ className }: { className?: string }) {
 /* Loading state mirrors the shape of the loaded page — three tiles and a table —
    so nothing jumps when the data lands. */
 function OverviewSkeleton() {
+  const t = useT(overviewDict);
   return (
     <div role="status" aria-live="polite" className="flex flex-col gap-6">
-      <span className="sr-only">Loading overview…</span>
+      <span className="sr-only">{t("loading")}</span>
       <div className="grid gap-4 sm:grid-cols-3">
         {[0, 1, 2].map((i) => (
           <Card key={i} className="p-5">
@@ -179,28 +217,27 @@ function OverviewSkeleton() {
   );
 }
 
-/* ── M6: the two panels that used to be placeholders (plan Decision 9) ─────
-   Both follow the house degradation pattern the object cards already use: a
-   missing READ permission and a console with no database are DIFFERENT facts
-   and get different sentences, and neither issues a request. An empty list
-   after a successful read is a third fact again — "nothing is open" is an
-   answer, not a failure. */
+/*
+ * the two panels that used to be placeholders Both follow the house degradation pattern the object
+ * cards already use.
+ */
 
 const OPEN_INCIDENTS_LIMIT = 5;
 const RECENT_EVENTS_LIMIT = 10;
 
-/** The one-line database note, worded once so both panels say the same thing
- *  the Investigate page and the object cards already say. */
-const DB_NOTE = "History needs a database — set console.database.mode. Nothing was requested.";
+/* The one-line database note is dict/overview.ts's "db.note", worded once so
+   both panels say the same thing the Investigate page and the object cards
+   already say. */
 
 function PanelNote({ children }: { children: ReactNode }) {
   return <p className="mt-2 text-xs leading-relaxed text-muted-foreground">{children}</p>;
 }
 
 function PanelSkeleton({ rows }: { rows: number }) {
+  const t = useT(overviewDict);
   return (
     <div role="status" aria-live="polite" className="mt-3 flex flex-col gap-2">
-      <span className="sr-only">Loading…</span>
+      <span className="sr-only">{t("panel.loading")}</span>
       {Array.from({ length: rows }, (_, i) => (
         <Skeleton key={i} className="h-6 w-full" />
       ))}
@@ -210,39 +247,33 @@ function PanelSkeleton({ rows }: { rows: number }) {
 
 /** fmtAge is the "how long has this been going" column — coarse on purpose:
  *  an incident open for three days does not become more legible at minute
- *  precision, and a bare timestamp makes the reader do the subtraction. */
-export function fmtAge(iso: string, now: Date): string {
+ *  precision, and a bare timestamp makes the reader do the subtraction. The
+ *  unit letter comes from the dictionary; s/m/h/d is English, not arithmetic. */
+export function fmtAge(iso: string, now: Date, t: T): string {
   const then = new Date(iso);
   if (Number.isNaN(then.getTime())) return "—";
   const seconds = Math.max(0, Math.round((now.getTime() - then.getTime()) / 1000));
-  if (seconds < 60) return `${seconds}s`;
+  if (seconds < 60) return t("age.seconds", { count: seconds });
   const minutes = Math.round(seconds / 60);
-  if (minutes < 60) return `${minutes}m`;
+  if (minutes < 60) return t("age.minutes", { count: minutes });
   const hours = Math.round(minutes / 60);
-  if (hours < 48) return `${hours}h`;
-  return `${Math.round(hours / 24)}d`;
+  if (hours < 48) return t("age.hours", { count: hours });
+  return t("age.days", { count: Math.round(hours / 24) });
 }
 
-/**
- * OpenIncidents is the Overview's link into Investigation Mode: the newest five
- * incidents still open, each one a permalink that hydrates the whole page from
- * the saved row (/investigate?incident={id} — there is no incident page).
- */
+/** OpenIncidents is the Overview's link into Investigation Mode: the newest five incidents still open. */
 function OpenIncidents() {
+  const t = useT(overviewDict);
   const { me, can } = useAuth();
   const { available, resolved } = useDatabaseAvailable();
   const { at } = useTimeContext();
   const canRead = can("incidents:read");
   const enabled = me !== undefined && canRead && resolved && available;
 
-  /* Engaged, "open" is the wrong question to ask this endpoint. `status` is a
-     NOW fact (it is resolved_at's witness), so an incident that was ongoing at
-     t and has since been resolved would be filtered out of a view of t.
-     ListIncidents' from/to bound the window an incident's OWN RANGE must
-     overlap — from_at < to AND coalesce(to_at,'infinity') >= from — so the
-     one-second window [t, t+1s) selects exactly the incidents whose range
-     covers t, which is what "open as of t" means. The Time Machine's own
-     precision is the second, so that window is the finest honest one. */
+  /*
+   * Engaged, "open" is the wrong question to ask this endpoint; `status` is a NOW fact (it is
+   * resolved_at's witness).
+   */
   const query = useQuery({
     queryKey: at ? ["overview", "incidents", "at", at.toISOString()] : ["overview", "incidents"],
     queryFn: () =>
@@ -254,23 +285,30 @@ function OpenIncidents() {
     enabled,
   });
   const incidents = query.data?.incidents ?? [];
-  const now = new Date();
+  /* Engaged, "how long has this been open" is measured from the instant on
+     screen: against the wall clock a row asked for at t reported an age that
+     included every hour since t. */
+  const now = at ?? new Date();
 
   return (
-    <Card asChild className="p-6">
-      <section aria-label="Open incidents">
-        <h2 className="text-sm font-semibold">Open incidents</h2>
+    /* min-w-0: this Card is a GRID CHILD (the two-panel row at the bottom of the
+       page), and a grid item's default min-width:auto refuses to shrink below
+       its content's min-content width — at 375px that pushed the implicit
+       column to 479px and the whole main to a 495px horizontal scroll. */
+    <Card asChild className="min-w-0 p-6" data-testid="open-incidents-panel">
+      <section aria-label={t("incidents.title")}>
+        <h2 className="text-sm font-semibold">{t("incidents.title")}</h2>
 
         {me !== undefined && !canRead ? (
-          <PanelNote>Open incidents need incidents:read — none was requested.</PanelNote>
+          <PanelNote>{t("incidents.denied")}</PanelNote>
         ) : resolved && !available ? (
-          <PanelNote>{DB_NOTE}</PanelNote>
+          <PanelNote>{t("db.note")}</PanelNote>
         ) : query.isError ? (
-          <PanelNote>The incident list is unavailable right now.</PanelNote>
+          <PanelNote>{t("incidents.error")}</PanelNote>
         ) : !enabled || query.isLoading ? (
           <PanelSkeleton rows={3} />
         ) : incidents.length === 0 ? (
-          <PanelNote>No open incidents. Saving an investigation on /investigate opens one.</PanelNote>
+          <PanelNote>{t("incidents.empty")}</PanelNote>
         ) : (
           <ul className="mt-3 flex flex-col divide-y divide-border">
             {incidents.map((i) => (
@@ -278,9 +316,9 @@ function OpenIncidents() {
                 <a href={incidentPermalink(i.id)} className="min-w-0 flex-1 truncate text-sm text-primary hover:underline">
                   {i.title}
                 </a>
-                <Badge variant="neutral">{i.scope === "" ? "global" : i.scope}</Badge>
+                <Badge variant="neutral">{i.scope === "" ? t("incidents.scope.global") : i.scope}</Badge>
                 <span className="nums w-10 shrink-0 text-right text-xs text-muted-foreground">
-                  {fmtAge(i.fromAt, now)}
+                  {fmtAge(i.fromAt, now, t)}
                 </span>
               </li>
             ))}
@@ -301,33 +339,28 @@ function isKnownSeverity(v: string): v is LiveEventSeverity {
   return v === "info" || v === "warn" || v === "error";
 }
 
-/* The Live feed's own wording, kept identical here on purpose (QA round 1,
-   finding #14): the same event was "warn" on this card and "Warn" on /live,
-   which reads as two vocabularies for one fact. Live's capitalized form wins
-   because it is the one an operator spends the most time in front of. An
-   unknown severity is still printed raw — Go's field is an open string. */
-const SEVERITY_LABELS: Record<LiveEventSeverity, string> = {
-  info: "Info",
-  warn: "Warn",
-  error: "Error",
+/*
+ * The Live feed's own wording, kept identical here on purpose: the same event was "warn" on this
+ * card and "Warn" on /live.
+ */
+const SEVERITY_KEYS: Record<LiveEventSeverity, OverviewKey> = {
+  info: "severity.info",
+  warn: "severity.warn",
+  error: "severity.error",
 };
 
 /**
- * OverviewEventRow is a deliberately MINIMAL copy of pages/live.tsx's EventRow
- * (the seam: live.tsx does not export it, and exporting a row built for a
- * full-width virtualised feed into a half-width summary card would drag its
- * five fixed-width columns along).
- *
- * Same vocabulary — clock, severity badge, summary, scope — in the space this
- * card actually has. If the Live row ever becomes exported and fluid, this is
- * the thing to delete.
+ * OverviewEventRow is a deliberately MINIMAL copy of pages/live.tsx's EventRow (the seam: live.tsx
+ * does not export it, and exporting a row built for a full-width virtualised feed into a half-width
+ * summary card would drag its five fixed-width columns along).
  */
 function OverviewEventRow({ event }: { event: LiveEvent }) {
+  const t = useT(overviewDict);
   return (
     <li data-testid="overview-event" className="flex items-center gap-3 py-2">
       <span className="nums w-16 shrink-0 text-xs text-muted-foreground">{fmtEventTime(event.timestamp)}</span>
       <Badge variant={isKnownSeverity(event.severity) ? SEVERITY_VARIANT[event.severity] : "unknown"} dot>
-        {isKnownSeverity(event.severity) ? SEVERITY_LABELS[event.severity] : event.severity}
+        {isKnownSeverity(event.severity) ? t(SEVERITY_KEYS[event.severity]) : event.severity}
       </Badge>
       <span className="min-w-0 flex-1 truncate text-sm" title={event.summary}>
         {event.summary}
@@ -339,9 +372,9 @@ function OverviewEventRow({ event }: { event: LiveEvent }) {
   );
 }
 
-/** RecentEvents finally wires the events API M3 shipped: the newest ten, and a
- *  link to the page that streams them live rather than a poll on this one. */
+/** RecentEvents finally wires the events API. */
 function RecentEvents() {
+  const t = useT(overviewDict);
   const { me, can } = useAuth();
   const { available, resolved } = useDatabaseAvailable();
   const { at } = useTimeContext();
@@ -361,24 +394,26 @@ function RecentEvents() {
 
   return (
     <Card asChild className="p-6">
-      <section aria-label="Recent events">
+      <section aria-label={t("events.title")}>
         <div className="flex flex-wrap items-baseline justify-between gap-2">
-          <h2 className="text-sm font-semibold">Recent events</h2>
+          <h2 className="text-sm font-semibold">{t("events.title")}</h2>
           <a href="/live" className="text-xs text-primary hover:underline">
-            open Live
+            {t("events.open")}
           </a>
         </div>
 
         {me !== undefined && !canRead ? (
-          <PanelNote>Fleet events need events:read — none was requested.</PanelNote>
+          <PanelNote>{t("events.denied")}</PanelNote>
         ) : resolved && !available ? (
-          <PanelNote>{DB_NOTE}</PanelNote>
+          <PanelNote>{t("db.note")}</PanelNote>
         ) : query.isError ? (
-          <PanelNote>The event feed is unavailable right now.</PanelNote>
+          <PanelNote>{t("events.error")}</PanelNote>
         ) : !enabled || query.isLoading ? (
           <PanelSkeleton rows={4} />
         ) : events.length === 0 ? (
-          <PanelNote>Nothing has happened yet. Agent restarts, node readiness changes and MTR triggers land here.</PanelNote>
+          /* "Nothing has happened yet" is a LIVE sentence; bounded by to=t it
+             would be claiming the fleet had never done anything by then. */
+          <PanelNote>{t(at ? "events.empty.engaged" : "events.empty")}</PanelNote>
         ) : (
           <ul className="mt-3 flex flex-col divide-y divide-border">
             {events.map((e) => (
@@ -391,13 +426,10 @@ function RecentEvents() {
   );
 }
 
-/* ── M7 Task 8: Firing alerts (plan Decision 6) ──────────────────────────────
-   The card that replaced the "arrives with a later milestone" placeholder. It
-   is the operator's morning view, which is why it asks for the WHOLE fleet's
-   firing state rather than only the rules this console manages: an alert
-   somebody else wrote is still firing in this cluster, and a console that hid
-   it would make its own silence mean less than it does. Foreign rows are shown
-   and TAGGED — displayed, never claimed. */
+/*
+ * It is the operator's morning view, which is why it asks for the WHOLE fleet's firing state rather
+ * than only the rules this console manages.
+ */
 
 const ALERT_SEVERITY_RANK: Record<string, number> = { critical: 0, warning: 1, info: 2 };
 const ALERT_SEVERITY_TONE: Record<string, "neutral" | "warn" | "bad"> = {
@@ -413,19 +445,8 @@ const ALERT_SEVERITY_TONE: Record<string, "neutral" | "warn" | "bad"> = {
 const FIRING_ALERTS_LIMIT = 8;
 
 /**
- * sortFiringAlerts is the card's order: severity first, then the OLDEST
- * firing first inside a severity band.
- *
- * Oldest-first is the deliberate half. "Newest first" is the feed instinct, but
- * this is not a feed: the alert that has been critical for three hours is the
- * one nobody has dealt with, and it is exactly the one a newest-first list
- * pushes off the bottom of a truncated card.
- *
- * An unrecognised severity sorts LAST rather than being dropped or guessed at:
- * a foreign rule may label anything at all, and the console does not know what
- * somebody else's word ranks as. The order is total (severity, then start, then
- * name) so two renders of the same firing set never disagree, and the input is
- * not mutated.
+ * sortFiringAlerts is the card's order: severity first; an unrecognised severity sorts LAST rather
+ * than being dropped or guessed.
  */
 export function sortFiringAlerts(alerts: Alert[]): Alert[] {
   const rank = (a: Alert) => ALERT_SEVERITY_RANK[a.severity] ?? Object.keys(ALERT_SEVERITY_RANK).length;
@@ -449,6 +470,7 @@ function alertLabelLine(labels: Record<string, string>): string {
 /** One firing row. The label set travels in a `title` attribute on a truncated
  *  line — the worst-pairs table's own idiom for detail that will not fit. */
 function FiringAlertRow({ alert, now }: { alert: Alert; now: Date }) {
+  const t = useT(overviewDict);
   const managed = alert.ruleId !== undefined && alert.ruleId !== "";
   const scope = scopeFromAlertLabels(alert.labels);
   const labels = alertLabelLine(alert.labels);
@@ -456,10 +478,8 @@ function FiringAlertRow({ alert, now }: { alert: Alert; now: Date }) {
   return (
     <li data-testid="firing-alert" className="flex flex-wrap items-baseline gap-x-3 gap-y-1 py-2">
       {managed ? (
-        // ?rule= rather than a bare /alerting: the list can be long and the row
-        // an operator is chasing is one of many, so the link names it and the
-        // page opens it (pages/alerting.tsx reads the param). Same idiom as
-        // /investigate?incident=.
+        // ?rule= rather than a bare /alerting: the list can be long and the row an operator is
+        // chasing is one of many.
         <a
           href={`/alerting?rule=${encodeURIComponent(alert.ruleId as string)}`}
           data-testid="firing-alert-name"
@@ -473,17 +493,17 @@ function FiringAlertRow({ alert, now }: { alert: Alert; now: Date }) {
         </span>
       )}
       <Badge variant={ALERT_SEVERITY_TONE[alert.severity] ?? "unknown"} dot>
-        {alert.severity === "" ? "no severity" : alert.severity}
+        {alert.severity === "" ? t("alerts.noSeverity") : alert.severity}
       </Badge>
       {managed ? null : (
         // Not a warning, a FACT: this console does not own the rule, so it
         // offers no edit path to it and says why the link is missing.
-        <Badge variant="neutral" title="This console does not manage the rule behind this alert.">
-          unmanaged
+        <Badge variant="neutral" title={t("alerts.unmanaged.title")}>
+          {t("alerts.unmanaged")}
         </Badge>
       )}
       <span className="nums w-10 shrink-0 text-right text-xs text-muted-foreground">
-        {alert.activeAt === undefined ? "—" : fmtAge(alert.activeAt, now)}
+        {alert.activeAt === undefined ? "—" : fmtAge(alert.activeAt, now, t)}
       </span>
       <span
         data-testid="firing-alert-labels"
@@ -494,44 +514,32 @@ function FiringAlertRow({ alert, now }: { alert: Alert; now: Date }) {
       </span>
       {scope ? (
         <a href={buildInvestigateURL(scope, now)} className="text-xs text-primary hover:underline">
-          investigate
+          {t("alerts.investigate")}
         </a>
       ) : null}
     </li>
   );
 }
 
-/**
- * FiringAlerts reads GET /api/v1/alerts, whose degraded shape is the reason
- * this card can be honest at all: `promConfigured` rides IN the 200 body, so
- * "nothing is firing" and "nobody is watching" are two different sentences
- * here rather than one empty list. A 502 is neither — Prometheus is wired and
- * did not answer — and it is surfaced with the server's own detail, because
- * rendering a failing evaluator as a quiet fleet is the worst lie this page
- * could tell.
- *
- * No database gating: the firing set is Prometheus's, not the store's.
- */
+/** FiringAlerts reads GET /api/v1/alerts, whose degraded shape is the reason this card can be honest at all. */
 function FiringAlerts() {
+  const t = useT(overviewDict);
   const { me, can } = useAuth();
   const { at } = useTimeContext();
   const engaged = at !== null;
   const canRead = can("alerts:read");
-  /* Engaged this card asks for NOTHING. /api/v1/alerts is Prometheus's ACTIVE
-     alert set — a now-only signal by design, with no history behind it — so
-     the only two things this card could do at t are lie (render now's firing
-     set under a past instant) or say so. It says so, and the request is not
-     made at all rather than made and discarded. */
+  /*
+   * Engaged this card asks for NOTHING; it says so, and the request is not made at all rather than
+   * made and discarded.
+   */
   const enabled = me !== undefined && canRead && !engaged;
 
   const query = useQuery({ queryKey: ["overview", "alerts"], queryFn: listAlerts, enabled });
   const now = new Date();
-  /* PENDING is not firing. The route serves both states (a rule's `for` window
-     is exactly the gap between them) and a card called "Firing alerts" that
-     listed pending rows would be claiming a page that has not happened — the
-     same line the webhook contract draws, and the same one the /investigate
-     source draws. A response carrying only pending alerts therefore renders
-     "Nothing is firing", which is true. */
+  /*
+   * The route serves both states (a rule's `for` window is exactly the gap between them) and a card
+   * called "Firing alerts" that listed pending rows would be claiming a page that has not happened.
+   */
   const alerts = useMemo(
     () => sortFiringAlerts((query.data?.alerts ?? []).filter((a) => a.state === "firing")),
     [query.data],
@@ -540,34 +548,32 @@ function FiringAlerts() {
   const hidden = alerts.length - shown.length;
 
   return (
-    <Card asChild className="p-6">
-      <section aria-label="Firing alerts">
+    /* min-w-0 for the same reason as OpenIncidents above: grid child, min-width:auto, 375 → 495. */
+    <Card asChild className="min-w-0 p-6" data-testid="firing-alerts-panel">
+      <section aria-label={t("alerts.title")}>
         <div className="flex flex-wrap items-baseline justify-between gap-2">
-          <h2 className="text-sm font-semibold">Firing alerts</h2>
+          <h2 className="text-sm font-semibold">{t("alerts.title")}</h2>
           {canRead ? (
             <a href="/alerting" className="text-xs text-primary hover:underline">
-              open Alerting
+              {t("alerts.open")}
             </a>
           ) : null}
         </div>
 
         {engaged ? (
-          <PanelNote>Alert state is a live-only signal — Prometheus keeps no firing history here.</PanelNote>
+          <PanelNote>{t("alerts.engaged")}</PanelNote>
         ) : me !== undefined && !canRead ? (
-          <PanelNote>Firing alerts need alerts:read — none was requested.</PanelNote>
+          <PanelNote>{t("alerts.denied")}</PanelNote>
         ) : query.isError ? (
-          <PanelNote>
-            {query.error instanceof Error ? query.error.message : "The firing set is unavailable right now."}
-          </PanelNote>
+          /* The server's own sentence wins; the key is only the fallback for a
+             rejection that arrived without one. */
+          <PanelNote>{query.error instanceof Error ? query.error.message : t("alerts.error")}</PanelNote>
         ) : !enabled || query.isLoading ? (
           <PanelSkeleton rows={3} />
         ) : query.data?.promConfigured === false ? (
-          <PanelNote>
-            Prometheus is not configured for this console — set console.prometheus.address. There is no firing state to
-            show.
-          </PanelNote>
+          <PanelNote>{t("alerts.noPrometheus")}</PanelNote>
         ) : alerts.length === 0 ? (
-          <PanelNote>Nothing is firing. Rules live on /alerting; Prometheus evaluates them.</PanelNote>
+          <PanelNote>{t("alerts.empty")}</PanelNote>
         ) : (
           <>
             <ul className="mt-3 flex flex-col divide-y divide-border">
@@ -577,7 +583,7 @@ function FiringAlerts() {
             </ul>
             {hidden > 0 ? (
               <PanelNote>
-                {hidden} more firing alert{hidden === 1 ? " is" : "s are"} not shown here.
+                {t(hidden === 1 ? "alerts.hidden.one" : "alerts.hidden.many", { count: hidden })}
               </PanelNote>
             ) : null}
           </>
@@ -588,26 +594,29 @@ function FiringAlerts() {
 }
 
 function WorstPairsTable({ pairs }: { pairs: MatrixCell[] }) {
+  const t = useT(overviewDict);
   return (
     <div className="overflow-x-auto">
       <table className="w-full text-sm">
-        <caption className="sr-only">Worst pairs by failure ratio</caption>
+        <caption className="sr-only">{t("table.caption")}</caption>
         <thead>
           <tr className="border-b border-border text-left text-[11px] uppercase tracking-[0.07em] text-muted-foreground">
+            {/* "#" is a symbol, not a word — the rank column reads the same in
+                every language, so it stays out of the dictionary. */}
             <th scope="col" className="w-10 py-3 pr-4 font-semibold">
               #
             </th>
             <th scope="col" className="py-3 pr-6 font-semibold">
-              Pair
+              {t("table.pair")}
             </th>
             <th scope="col" className="py-3 pr-6 text-right font-semibold">
-              Fail %
+              {t("table.fail")}
             </th>
             <th scope="col" className="py-3 pr-6 text-right font-semibold">
-              p95 RTT
+              {t("table.rtt")}
             </th>
             <th scope="col" className="py-3 font-semibold">
-              Status
+              {t("table.status")}
             </th>
           </tr>
         </thead>
@@ -645,7 +654,7 @@ function WorstPairsTable({ pairs }: { pairs: MatrixCell[] }) {
                 <td className="nums py-4 pr-6 text-right text-muted-foreground">{fmtRtt(c.rttP95)}</td>
                 <td className="py-4">
                   <Badge variant={failing ? "bad" : "warn"} dot>
-                    {failing ? "Failing" : "Degraded"}
+                    {t(failing ? "table.status.failing" : "table.status.degraded")}
                   </Badge>
                 </td>
               </tr>
@@ -657,18 +666,7 @@ function WorstPairsTable({ pairs }: { pairs: MatrixCell[] }) {
   );
 }
 
-/**
- * PageProblem is one failed dependency, said in its own sentence.
- *
- * The page used to surface `matrix.error ?? topo.error` — one slot for two
- * independent queries — so with both down the topology detail was silently
- * dropped, and the historical fold's 422 (the one that names
- * console.database.retentionDays, i.e. the only actionable one) was exactly
- * the message a reader lost while the NODES READY tile quietly showed an
- * em-dash (QA round 1, finding #5). Two failures are two facts and get two
- * lines, each carrying the server's own detail: ApiError's message IS
- * problem.detail, so the retention sentence arrives verbatim.
- */
+/** PageProblem is one failed dependency, said in its own sentence. */
 function PageProblem({ what, error }: { what: string; error: Error }) {
   return (
     <div data-testid="overview-problem">
@@ -679,40 +677,46 @@ function PageProblem({ what, error }: { what: string; error: Error }) {
 }
 
 export function OverviewPage() {
+  const t = useT(overviewDict);
   const topo = useTopology();
   const matrix = useMatrix("tcp");
   const { isLive } = useTimeContext();
 
   const summary = matrix.data ? summarize(matrix.data, topo.data) : undefined;
-  // summarize()'s topology-absent fallback (readyNodes = totalNodes) is meant
-  // for "no data at all" — it must not be read as "all nodes ready" while the
-  // topology query is still in flight or has genuinely errored (e.g. the
-  // controller isn't configured, per Task 11). The tile shows an explicit
-  // loading/unknown state in those cases instead of a silently optimistic count.
-  const nodesReadyDisplay = topo.data
-    ? `${summary?.readyNodes ?? 0}/${summary?.totalNodes ?? 0}`
-    : topo.isLoading
-      ? "…"
-      : "—";
+  const nodes = nodesTile(topo.data, topo.isLoading, matrix.data);
+  const nodesValue =
+    nodes.kind === "counts"
+      ? `${nodes.ready}/${nodes.total}`
+      : nodes.kind === "noInventory"
+        ? String(nodes.nodes)
+        : nodes.kind === "loading"
+          ? "…"
+          : "—";
+  const nodesHint =
+    nodes.kind === "unavailable"
+      ? t("tiles.nodesReady.noTopology")
+      : nodes.kind === "noInventory"
+        ? t(nodes.source === "agents" ? "tiles.nodesReady.fromAgents" : "tiles.nodesReady.fromMatrix")
+        : undefined;
+  /* Zero measured pairs means zero over zero, and a bare 0 there reads as a
+     clean fleet — the tile takes the nodes tile's em-dash instead. */
+  const noPairs = summary !== undefined && summary.pairsTotal === 0;
+  const pairsValue = (n: number) => (noPairs ? "—" : n);
+  const pairsNote = noPairs ? t("tiles.pairs.noData") : undefined;
 
   return (
-    <PageShell
-      title="Overview"
-      description="Cluster health at a glance, recomputed from Prometheus every 15s."
-    >
+    <PageShell title={t("title")} description={t(isLive ? "description" : "description.engaged")}>
       <div className="flex flex-col gap-6">
         {matrix.error || topo.error ? (
           <Card role="alert" className="flex flex-col gap-3 border-l-4 border-l-health-bad bg-health-bad-soft/40 p-5">
-            {matrix.error ? <PageProblem what="The pair matrix is unavailable" error={matrix.error} /> : null}
-            {topo.error ? <PageProblem what="The node list is unavailable" error={topo.error} /> : null}
+            {matrix.error ? <PageProblem what={t("problem.matrix")} error={matrix.error} /> : null}
+            {topo.error ? <PageProblem what={t("problem.topology")} error={topo.error} /> : null}
             {/* Only true while Live: engaged, both queries have their poll off
                 on purpose (a past instant's answer cannot change), so promising
                 a retry that is never going to happen would be a second lie
                 stacked on the first. */}
             {isLive ? (
-              <p className="text-xs leading-relaxed text-muted-foreground">
-                The page keeps retrying every 15s. If it persists, check that the console can reach Prometheus.
-              </p>
+              <p className="text-xs leading-relaxed text-muted-foreground">{t("problem.retry")}</p>
             ) : null}
           </Card>
         ) : null}
@@ -723,25 +727,29 @@ export function OverviewPage() {
           <>
             <div className="grid gap-4 sm:grid-cols-3">
               <StatTile
-                label="Nodes ready"
-                value={nodesReadyDisplay}
-                hint={topo.data ? undefined : "Topology unavailable"}
+                label={t("tiles.nodesReady")}
+                value={nodesValue}
+                hint={nodesHint}
+                /* A historical fold is only as complete as the events it had. */
+                note={foldBounds(topo.data, t)}
               />
               {/* Both pair tiles carry the qualifier: they count ONE protocol
                   on ONE plane, and the bare label claimed the whole fleet. */}
               <StatTile
-                label="Failing pairs"
-                value={summary.pairsFailing}
+                label={t("tiles.failing")}
+                value={pairsValue(summary.pairsFailing)}
                 tone={summary.pairsFailing > 0 ? "bad" : undefined}
-                toneLabel="Fail ≥ 10%"
-                hint={MATRIX_QUALIFIER}
+                toneLabel={t("tiles.failing.tone")}
+                hint={t("qualifier")}
+                note={pairsNote}
               />
               <StatTile
-                label="Degraded pairs"
-                value={summary.pairsDegraded}
+                label={t("tiles.degraded")}
+                value={pairsValue(summary.pairsDegraded)}
                 tone={summary.pairsDegraded > 0 ? "warn" : undefined}
-                toneLabel="Fail 1–10%"
-                hint={MATRIX_QUALIFIER}
+                toneLabel={t("tiles.degraded.tone")}
+                hint={t("qualifier")}
+                note={pairsNote}
               />
             </div>
 
@@ -749,32 +757,44 @@ export function OverviewPage() {
               <section>
                 <div className="flex flex-wrap items-baseline justify-between gap-2">
                   <span className="flex flex-wrap items-baseline gap-2">
-                    <h2 className="text-sm font-semibold">Worst pairs</h2>
-                    <Badge variant="neutral">{MATRIX_QUALIFIER}</Badge>
+                    <h2 className="text-sm font-semibold">{t("worstPairs.title")}</h2>
+                    <Badge variant="neutral">{t("qualifier")}</Badge>
                   </span>
                   <p className="nums text-xs text-muted-foreground">
-                    {summary.pairsTotal} measured pair{summary.pairsTotal === 1 ? "" : "s"}
+                    {t(summary.pairsTotal === 1 ? "worstPairs.measured.one" : "worstPairs.measured.many", {
+                      count: summary.pairsTotal,
+                    })}
                   </p>
                 </div>
+                {/* Stated wherever the gap exists, not only at scored=0: 9
+                    ranked out of 90 measured is not a healthy fleet. */}
+                {summary.pairsScored > 0 && summary.pairsScored < summary.pairsTotal ? (
+                  <p data-testid="scored-gap" className="mt-1 text-xs leading-relaxed text-muted-foreground">
+                    {t("worstPairs.scoredGap", { scored: summary.pairsScored, total: summary.pairsTotal })}
+                  </p>
+                ) : null}
                 {summary.worstPairs.length === 0 ? (
                   summary.pairsTotal === 0 ? (
                     <BlankSlate
-                      title="No probe data in Prometheus yet"
-                      body="Pairs appear here once the agents have completed a probe round and Prometheus has scraped them — usually within a minute of the DaemonSet becoming ready."
+                      title={t(isLive ? "worstPairs.empty.noData.title" : "worstPairs.empty.noData.title.engaged")}
+                      body={t(isLive ? "worstPairs.empty.noData.body" : "worstPairs.empty.noData.body.engaged")}
                     />
                   ) : summary.pairsScored === 0 ? (
-                    // Measured, but not RANKABLE: latency arrived and the
-                    // failure-ratio series did not, so "nothing is failing" is
-                    // a claim this page has no samples for. Naming the missing
-                    // half is the honest half of finding #3.
+                    // Measured, but not RANKABLE: latency arrived and the failure-ratio series did
+                    // not.
                     <BlankSlate
-                      title="No failure ratio for these pairs"
-                      body={`${summary.pairsTotal} pair${summary.pairsTotal === 1 ? " is" : "s are"} reporting latency, but the failure-ratio series has no samples here — worst-first ranking needs it, so this list stays empty rather than reading as healthy.`}
+                      title={t("worstPairs.empty.unscored.title")}
+                      body={t(
+                        summary.pairsTotal === 1
+                          ? "worstPairs.empty.unscored.body.one"
+                          : "worstPairs.empty.unscored.body.many",
+                        { count: summary.pairsTotal },
+                      )}
                     />
                   ) : (
                     <BlankSlate
-                      title="No failing or degraded pairs"
-                      body="Every scored pair is under a 1% failure ratio. Anything that crosses that line shows up here, worst first."
+                      title={t("worstPairs.empty.healthy.title")}
+                      body={t("worstPairs.empty.healthy.body")}
                     />
                   )
                 ) : (

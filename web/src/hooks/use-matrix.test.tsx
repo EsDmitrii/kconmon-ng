@@ -31,10 +31,8 @@ const udpPushed: Matrix = {
 };
 
 /**
- * The REST answer for a given protocol. The server echoes the protocol it was
- * asked for, and this test file leans on that: a fixture that answered a UDP
- * request with a TCP-labelled matrix would make the cross-protocol test below
- * unable to tell a correct answer from the bug it guards against.
+ * The REST answer for a given protocol; the server echoes the protocol it was asked for, and this
+ * test file leans.
  */
 const polledFor = (protocol: string): Matrix => ({ ...polled, protocol });
 

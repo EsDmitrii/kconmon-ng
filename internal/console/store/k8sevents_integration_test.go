@@ -3,9 +3,6 @@
 package store_test
 
 // TestK8sEvent* / TestListK8sEvents* require a real PostgreSQL.
-// Run: docker run --rm -d -p 5432:5432 -e POSTGRES_PASSWORD=test -e POSTGRES_DB=kconmon postgres:17-alpine
-// Then: KCONMON_TEST_DATABASE_DSN='postgres://postgres:test@127.0.0.1:5432/kconmon?sslmode=disable' \
-//       go test -tags=integration ./internal/console/store/... -v
 
 import (
 	"context"
@@ -19,10 +16,8 @@ import (
 	"github.com/EsDmitrii/kconmon-ng/internal/console/store"
 )
 
-// newK8sEventsDB opens a *store.DB with migrations applied, dropping and
-// re-creating the schema first -- same convention as newAnnotationsDB; this
-// file shares one database with every other file in package store_test, so
-// each test must leave it clean.
+// newK8sEventsDB opens a *store.DB with migrations applied, dropping and re-creating the schema
+// first.
 func newK8sEventsDB(t *testing.T) (*store.DB, string) {
 	t.Helper()
 	dsn := testDSN(t)
@@ -55,16 +50,7 @@ func k8sEventInput(uid, rv, name string, at time.Time) store.K8sEventInput {
 	}
 }
 
-// TestInsertK8sEventDedupesOnUIDAndResourceVersion is the capture's whole
-// idempotence claim (M6 Decision 3). Three inserts, one uid:
-//
-//   - the first revision inserts;
-//   - re-offering the SAME (uid, resourceVersion) -- what a relist after a
-//     watch expiry does for every current object -- inserts nothing and is not
-//     an error;
-//   - a NEW resourceVersion for the same uid DOES insert, because a recurring
-//     event is a new revision with a bumped count and the timeline has to be
-//     able to show the recurrence. That is why the key is the pair.
+// TestInsertK8sEventDedupesOnUIDAndResourceVersion is the capture's whole idempotence claim.
 func TestInsertK8sEventDedupesOnUIDAndResourceVersion(t *testing.T) {
 	db, _ := newK8sEventsDB(t)
 	ctx := context.Background()
@@ -114,10 +100,8 @@ func TestInsertK8sEventDedupesOnUIDAndResourceVersion(t *testing.T) {
 	}
 }
 
-// TestInsertK8sEventRoundTripsEveryField asserts nothing is dropped or
-// transposed between the input struct, the ten INSERT parameters and the read
-// back -- ten same-typed columns in a row is exactly the shape a mis-ordered
-// parameter list hides in.
+// TestInsertK8sEventRoundTripsEveryField asserts nothing is dropped or transposed between the input
+// struct.
 func TestInsertK8sEventRoundTripsEveryField(t *testing.T) {
 	db, _ := newK8sEventsDB(t)
 	ctx := context.Background()
@@ -361,39 +345,18 @@ func TestDeleteK8sEventsBeforeUsesEventTime(t *testing.T) {
 	}
 }
 
-// k8sIdxSeedRows is how many capture rows the index test seeds. Large enough
-// that a seq scan is genuinely the more expensive plan for a single-name page,
-// so the index wins on its own merits and no planner knob is touched -- the
-// same reasoning snapshotIdxSeedRows carries.
+// k8sIdxSeedRows is how many capture rows the index test seeds.
 const k8sIdxSeedRows = 20000
 
-// listK8sEventsSQL returns the exact SQL text sqlc generated for
-// ListK8sEvents, read out of the generated file at test time. EXPLAINing a
-// hand-copied duplicate would prove nothing -- see listPathSnapshotsSQL's
-// comment for the whole of that reasoning.
+// listK8sEventsSQL returns the exact SQL text sqlc generated for ListK8sEvents; EXPLAINing a
+// hand-copied duplicate would prove nothing.
 func listK8sEventsSQL(t *testing.T) string {
 	t.Helper()
 	return generatedSQL(t, "gen/k8s_events.sql.go", "listK8sEvents")
 }
 
-// TestListK8sEventsUsesNameTimeIndex asserts the REAL shipped scoped timeline
-// -- store.DB.ListK8sEvents, not a copy of its SQL -- is answered by
-// k8s_events_name_time_idx, which is the whole reason that index leads with
-// name and trails with (event_time DESC, id DESC).
-//
-// Two independent halves, the pattern TestListPathSnapshotsUsesPairSeenIndex
-// established:
-//
-//   - The counter half calls db.ListK8sEvents and watches
-//     pg_stat_user_indexes.idx_scan for the index move. Nothing about the query
-//     text is assumed; if the shipped query stopped matching the index the
-//     counter would stay put.
-//   - The plan half EXPLAINs the SQL extracted from the generated code and
-//     asserts the plan names the index AND carries no Sort node. Both trailing
-//     index columns are DESC, so ORDER BY event_time DESC, id DESC is supposed
-//     to come out of the scan for free -- an index scan followed by a sort
-//     would satisfy the "uses the index" half while quietly breaking the
-//     promise that a long-running capture stays cheap to page per node.
+// TestListK8sEventsUsesNameTimeIndex asserts the REAL shipped scoped timeline; nothing about the
+// query text is assumed.
 func TestListK8sEventsUsesNameTimeIndex(t *testing.T) {
 	db, dsn := newK8sEventsDB(t)
 	ctx := context.Background()
@@ -410,11 +373,8 @@ func TestListK8sEventsUsesNameTimeIndex(t *testing.T) {
 	}
 	defer conn.Release()
 
-	// Seeded in a single statement rather than through InsertK8sEvent: 20k
-	// round trips would dominate the suite's runtime, and the rows only need
-	// to be plausible. 200 names share the table so the leading index column
-	// has real selectivity to exploit, which is precisely what a seq scan
-	// cannot.
+	// Seeded in a single statement rather than through InsertK8sEvent: 20k round trips would dominate
+	// the suite's runtime.
 	if _, err = conn.Exec(ctx, `
 INSERT INTO k8s_events (uid, resource_ver, event_time, kind, name, namespace, reason, type, message, count)
 SELECT gen_random_uuid()::text,
@@ -452,10 +412,7 @@ FROM generate_series(1, $1::int) AS g`, k8sIdxSeedRows); err != nil {
 		}
 	}
 
-	// The counter does not move the instant the query returns -- see
-	// TestListPathSnapshotsUsesPairSeenIndex's comment on the stats flush. The
-	// nudge here is an unrelated single-row listing that touches no index this
-	// test measures.
+	// The counter does not move the instant the query returns.
 	deadline := time.Now().Add(30 * time.Second)
 	var after int64
 	for {

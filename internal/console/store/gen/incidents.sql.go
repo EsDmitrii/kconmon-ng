@@ -32,9 +32,7 @@ type CreateIncidentParams struct {
 	ResolvedAt pgtype.Timestamptz
 }
 
-// id is caller-supplied, same as CreateTarget and CreateAnnotation: the column
-// has a DEFAULT, but minting the UUID in Go keeps the package's one id story
-// and makes a retried create identifiable rather than a second incident.
+// id is caller-supplied, same as CreateTarget and CreateAnnotation: the column has a DEFAULT.
 func (q *Queries) CreateIncident(ctx context.Context, arg CreateIncidentParams) (Incident, error) {
 	row := q.db.QueryRow(ctx, createIncident,
 		arg.ID,
@@ -69,9 +67,7 @@ const deleteIncident = `-- name: DeleteIncident :execrows
 DELETE FROM incidents WHERE id = $1
 `
 
-// Nothing references an incident, so deleting one removes the incident and
-// nothing else. Its permalink (/investigate?incident={id}) simply stops
-// resolving, which is the honest outcome for a link to something deleted.
+// Nothing references an incident, so deleting one removes the incident and nothing else.
 func (q *Queries) DeleteIncident(ctx context.Context, id pgtype.UUID) (int64, error) {
 	result, err := q.db.Exec(ctx, deleteIncident, id)
 	if err != nil {
@@ -90,14 +86,8 @@ type DeleteIncidentsBeforeParams struct {
 	Limit      int32
 }
 
-// Retention by resolved_at, and note what that does NOT match: an OPEN
-// incident has a NULL resolved_at, and `NULL < $1` is NULL, never true, so an
-// open incident can never be selected here however old it is. That is the
-// point -- an investigation nobody closed is not stale data, it is unfinished
-// work, and the retention sweep must not close it by deleting it.
-//
-// i alias on the subquery's own FROM for the sqlc v1.31.1 analyzer quirk
-// documented on DeleteRunsBefore (checks.sql).
+// Retention by resolved_at, and note what that does NOT match: an OPEN incident has a NULL
+// resolved_at.
 func (q *Queries) DeleteIncidentsBefore(ctx context.Context, arg DeleteIncidentsBeforeParams) (int64, error) {
 	result, err := q.db.Exec(ctx, deleteIncidentsBefore, arg.ResolvedAt, arg.Limit)
 	if err != nil {
@@ -156,22 +146,7 @@ type ListIncidentsParams struct {
 	Lim      int32
 }
 
-// The incidents listing, newest-created first. status and scope are exact
-// matches; from/to bound the window an incident's OWN RANGE must overlap, not
-// the window it was created in -- an incident that began before the window and
-// is still open is exactly the one an operator looking at that window needs.
-//
-// to_at NULL is an OPEN-ENDED range, so it coalesces to 'infinity' rather than
-// back onto from_at (which is what annotations does, because there NULL means
-// an instant mark -- the two columns look alike and mean opposite things).
-//
-// scope takes the annotations NULL/” treatment: ” is the GLOBAL scope, a real
-// value a caller must be able to ask for, so "no filter" is a SQL NULL
-// argument and an empty-string argument selects exactly the global incidents.
-//
-// (created_at DESC, id DESC) is both index's trailing key order, so a listing
-// filtered by status rides incidents_status_created_idx and one filtered by
-// scope rides incidents_scope_idx, neither with a sort.
+// The incidents listing, newest-created first.
 func (q *Queries) ListIncidents(ctx context.Context, arg ListIncidentsParams) ([]Incident, error) {
 	rows, err := q.db.Query(ctx, listIncidents,
 		arg.Status,
@@ -287,16 +262,8 @@ type UpdateIncidentStatusParams struct {
 	ResolvedAt pgtype.Timestamptz
 }
 
-// One of THREE narrow updates, deliberately not one full replace. An incident
-// evolves while several people look at it: a full-replace PUT would let a
-// collaborator's stale copy of `notes` silently overwrite an edit made a second
-// earlier, and the three fields that actually change (status, notes, pinned)
-// change for three unrelated reasons. PATCH semantics are assembled from these
-// in httpapi; the store's surface stays this narrow on purpose.
-//
-// resolved_at travels WITH status, never separately: it is status' witness, and
-// reopening (status back to 'open' with a NULL resolved_at) has to clear it in
-// the same statement or a reopened incident keeps a resolution time.
+// One of THREE narrow updates, deliberately not one full replace; an incident evolves while several
+// people look.
 func (q *Queries) UpdateIncidentStatus(ctx context.Context, arg UpdateIncidentStatusParams) (Incident, error) {
 	row := q.db.QueryRow(ctx, updateIncidentStatus, arg.ID, arg.Status, arg.ResolvedAt)
 	var i Incident

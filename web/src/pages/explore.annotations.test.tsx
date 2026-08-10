@@ -6,17 +6,7 @@ import { TimeMachineProvider } from "@/lib/timemachine";
 import type { Annotation } from "@/lib/types";
 import { ExplorePage } from "./explore";
 
-/**
- * Explore's annotation overlay. Explore is a GLOBAL surface and only that —
- * these five charts are fleet-wide aggregates with no object identity — so the
- * scope assertions here are the load-bearing ones.
- *
- * EChart is mocked (echarts.init reaches for a 2d canvas context jsdom does not
- * implement); the mock re-publishes the annotations it was handed as a data
- * attribute, which is how a page test can see that the markers reached the
- * chart at all. The marker GEOMETRY is asserted where it is built, in
- * lib/annotations.test.ts.
- */
+/** Explore's annotation overlay; explore is a GLOBAL surface. */
 vi.mock("@/components/echart", () => ({
   EChart: ({ className, annotations }: { className?: string; annotations?: Annotation[] }) => (
     <div data-testid="echart" className={className} data-annotations={(annotations ?? []).map((a) => a.id).join(",")} />
@@ -128,10 +118,8 @@ describe("ExplorePage annotations", () => {
     await waitFor(() => expect(annotationQueries.length).toBeGreaterThan(0));
     expect(spanSecondsOf(annotationQueries[0])).toBe(3600);
     fireEvent.click(screen.getByRole("radio", { name: "15m" }));
-    // The picker's own seconds, not a fixed instant: vi's fake clock is set to
-    // advance with real time here (shouldAdvanceTime), so the window's END
-    // legitimately moves between the two requests while its LENGTH is the thing
-    // the range picker actually controls.
+    // The picker's own seconds, not a fixed instant: vi's fake clock is set to advance with real
+    // time here (shouldAdvanceTime).
     await waitFor(() => expect(annotationQueries.map(spanSecondsOf)).toContain(900));
   });
 
@@ -154,10 +142,7 @@ describe("ExplorePage annotations", () => {
     const { createBodies } = stubFetch();
     renderPage();
     fireEvent.click(await screen.findByRole("button", { name: /annotate/i }));
-    // Both edges go through the M5 DateTimePicker now (QA round 2, #13), so
-    // the start is composed through its manual fields rather than typed into
-    // a datetime-local — and through the LOCAL Date constructor, which is what
-    // the picker itself uses.
+    // Both edges go through the DateTimePicker now.
     fireEvent.click(await screen.findByRole("button", { name: "Start" }));
     fireEvent.change(screen.getByLabelText("Date"), { target: { value: "2026-08-01" } });
     fireEvent.change(screen.getByLabelText("Time"), { target: { value: "11:30" } });

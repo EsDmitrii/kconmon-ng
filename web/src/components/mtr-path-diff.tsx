@@ -1,4 +1,6 @@
-import { fmtRttNs, fmtTime, isPlaceholderHop, shortHash } from "@/components/mtr-hop-table";
+import { fmtRttNs, fmtTime, isPlaceholderHop, ScrollableX, shortHash } from "@/components/mtr-hop-table";
+import { useLocale, useT, type Translate } from "@/lib/i18n";
+import { mtrDetailDict, type MTRDetailKey } from "@/lib/i18n/dict/mtr-detail";
 import type { MTRHop, PathSnapshot } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
@@ -7,14 +9,8 @@ import { cn } from "@/lib/utils";
 export type DiffKind = "same" | "changed" | "added" | "removed";
 
 /**
- * DiffRow is one line of the aligned two-column table: what the OLDER path had
- * there (`aHop`), what the NEWER one has (`bHop`), and how to read the pair.
- *
- * `rttDeltaNs` is present ONLY on `same` rows — it is `bHop.rttNs -
- * aHop.rttNs`, i.e. how much slower (positive) or faster (negative) the very
- * same machine answers now. A `changed` row holds two DIFFERENT addresses, and
- * subtracting one machine's RTT from another's would produce a number that
- * looks like a latency change and is not one.
+ * DiffRow is one line of the aligned two-column table: what the OLDER path had there (`aHop`);
+ * `rttDeltaNs` is present ONLY on `same` rows — it is `bHop.rttNs - aHop.rttNs`.
  */
 export interface DiffRow {
   kind: DiffKind;
@@ -23,37 +19,12 @@ export interface DiffRow {
   rttDeltaNs?: number;
 }
 
-/** anchorable is the equality the alignment is built on: the hop ADDRESS, and
- *  only for hops that have one. The tracer writes "*" for a hop that never
- *  answered (isPlaceholderHop), and two unanswered hops are two unknowns —
- *  anchoring them to each other would assert that the same silent machine sits
- *  at both positions, which nothing in the payload supports. */
+/** anchorable is the equality the alignment is built on: the hop ADDRESS, and only for hops that have one. */
 function anchorable(x: MTRHop, y: MTRHop): boolean {
   return !isPlaceholderHop(x.ip) && x.ip === y.ip;
 }
 
-/**
- * lcsAnchors is the alignment, stated honestly: a longest common subsequence
- * over hop IPs. Every pair it returns is a hop that appears in BOTH paths, in
- * an order both paths agree on.
- *
- * What that buys and what it costs:
- *
- *  - An inserted or withdrawn hop shifts everything after it, and LCS still
- *    lines the tail up — which position-only alignment (`a[i]` vs `b[i]`) does
- *    not: one extra hop at the top would otherwise report the whole rest of the
- *    trace as changed.
- *  - A REORDER — the same addresses in a different order — has no common
- *    subsequence containing both, so LCS reports it as one removal plus one
- *    addition rather than as a move. That is a real limitation of this
- *    alignment and it is deliberately not papered over: "the route now visits
- *    10.0.0.2 after 10.0.0.3" and "10.0.0.2 left and a new 10.0.0.2 joined" are
- *    indistinguishable from the hop list alone, and the diff says the thing it
- *    can actually see.
- *
- * O(n·m) over ≤64 hops each (the tracer's own cap), so ≤4096 cells — the cost
- * of the table is irrelevant next to the fetch that produced the snapshots.
- */
+/** lcsAnchors is the alignment, stated honestly: a longest common subsequence over hop IPs. */
 function lcsAnchors(a: MTRHop[], b: MTRHop[]): [number, number][] {
   const n = a.length;
   const m = b.length;
@@ -80,21 +51,7 @@ function lcsAnchors(a: MTRHop[], b: MTRHop[]): [number, number][] {
   return anchors;
 }
 
-/**
- * diffPaths aligns two snapshots' hop lists and says what happened between
- * them. `a` is the OLDER path and `b` the newer one — the caller orders them
- * (by first_seen), and every kind below is phrased from the older path's point
- * of view: `added` means the newer path gained the hop.
- *
- * Alignment = LCS over hop IPs (see lcsAnchors), then, in each gap BETWEEN two
- * anchors, the leftover a-side and b-side hops are zipped positionally into
- * `changed` rows — this is the "same place in the route, different machine"
- * case, which is what a rerouted hop actually looks like — and whichever side
- * runs out first leaves the surplus as plain `removed`/`added` rows.
- *
- * Pure and total: no snapshot metadata is read, nothing is sorted, and an
- * empty list on either side is a legal input.
- */
+/** diffPaths aligns two snapshots' hop lists and says what happened between them. */
 export function diffPaths(a: MTRHop[], b: MTRHop[]): DiffRow[] {
   const rows: DiffRow[] = [];
   let ai = 0;
@@ -149,11 +106,19 @@ const KIND_CLASS: Record<DiffKind, string> = {
   removed: "text-health-bad",
 };
 
-const KIND_TITLE: Record<DiffKind, string> = {
-  same: "the same address in both paths",
-  changed: "a different address at the same place in the route",
-  added: "only the newer path visits this hop",
-  removed: "only the older path visited this hop",
+/* DiffKind is a TYPE before it is a word — the same call dict/palette.ts made for CommandGroup. */
+const KIND_KEY: Record<DiffKind, MTRDetailKey> = {
+  same: "diff.kind.same",
+  changed: "diff.kind.changed",
+  added: "diff.kind.added",
+  removed: "diff.kind.removed",
+};
+
+const KIND_TITLE_KEY: Record<DiffKind, MTRDetailKey> = {
+  same: "diff.kind.same.title",
+  changed: "diff.kind.changed.title",
+  added: "diff.kind.added.title",
+  removed: "diff.kind.removed.title",
 };
 
 function HopCell({ hop }: { hop: MTRHop | undefined }) {
@@ -175,48 +140,43 @@ function deltaClass(ns: number | undefined): string {
 }
 
 function ColumnHeader({ label, snapshot }: { label: string; snapshot: PathSnapshot }) {
+  const { locale } = useLocale();
   return (
     <th scope="col" className="px-2 py-1.5 text-left font-medium">
       <span className="block text-[11px] uppercase tracking-wide text-muted-foreground">{label}</span>
       <span className="nums font-mono text-xs" title={snapshot.pathHash}>
         {shortHash(snapshot.pathHash)}
       </span>
-      <span className="nums block text-[11px] text-muted-foreground">{fmtTime(snapshot.firstSeen)}</span>
+      <span className="nums block text-[11px] text-muted-foreground">{fmtTime(snapshot.firstSeen, locale)}</span>
     </th>
   );
 }
 
 /**
- * PathDiff is Decision 3's whole UI: two snapshot payloads the API already
- * returned, aligned client-side. `a` is the OLDER of the two and `b` the newer
- * — the caller sorts them by first_seen, and the column headers name both so
- * the direction is never a guess.
- *
- * An all-`same` diff renders as one sentence instead of a wall of "=" rows:
- * two snapshots of one pair have DISTINCT path hashes by construction
- * (mtr_path_snapshots_pair_hash is unique over source+destination+hash), so an
- * identical hop ORDER here means the two routes differ only in the RTTs
- * recorded on them — worth saying, not worth a table.
+ * PathDiff is 's whole UI: two snapshot payloads the API already returned, aligned client-side; `a`
+ * is the OLDER of the two and `b` the newer — the caller sorts them by first_seen.
  */
 export function PathDiff({ a, b }: { a: PathSnapshot; b: PathSnapshot }) {
+  const t: Translate<MTRDetailKey> = useT(mtrDetailDict);
   const rows = diffPaths(a.hops, b.hops);
   const identical = rows.length > 0 && rows.every((r) => r.kind === "same");
 
   return (
-    <div className="mt-4 overflow-x-auto">
+    /* The four-column diff has a min-width and lives in the narrowest pane, so
+       it is the likeliest table in the console to run off its card — same
+       affordance as the hop table (QA scope 4, finding #6). */
+    <ScrollableX className="mt-4">
       {identical ? (
-        <p className="mb-3 text-xs leading-relaxed text-muted-foreground">
-          Both paths visit the same hops in the same order — only the recorded round-trip times differ.
-        </p>
+        <p className="mb-3 text-xs leading-relaxed text-muted-foreground">{t("diff.identical")}</p>
       ) : null}
-      <table aria-label="Path diff" className="w-full min-w-md text-xs">
+      <table aria-label={t("diff.aria")} className="w-full min-w-md text-xs">
         <thead>
           <tr className="border-b border-border align-bottom">
             <th scope="col" className="w-6 px-2 py-1.5 text-left font-medium">
-              <span className="sr-only">Change</span>
+              <span className="sr-only">{t("diff.change")}</span>
             </th>
-            <ColumnHeader label="Older" snapshot={a} />
-            <ColumnHeader label="Newer" snapshot={b} />
+            <ColumnHeader label={t("diff.older")} snapshot={a} />
+            <ColumnHeader label={t("diff.newer")} snapshot={b} />
             <th scope="col" className="px-2 py-1.5 text-right font-medium">
               Δ RTT
             </th>
@@ -226,7 +186,11 @@ export function PathDiff({ a, b }: { a: PathSnapshot; b: PathSnapshot }) {
           {rows.map((row, i) => (
             <tr key={i} className={row.kind === "same" ? undefined : "bg-surface-2/40"}>
               <td className="px-2 py-1.5">
-                <span aria-label={row.kind} title={KIND_TITLE[row.kind]} className={cn("font-mono", KIND_CLASS[row.kind])}>
+                <span
+                  aria-label={t(KIND_KEY[row.kind])}
+                  title={t(KIND_TITLE_KEY[row.kind])}
+                  className={cn("font-mono", KIND_CLASS[row.kind])}
+                >
                   {KIND_MARK[row.kind]}
                 </span>
               </td>
@@ -239,6 +203,6 @@ export function PathDiff({ a, b }: { a: PathSnapshot; b: PathSnapshot }) {
           ))}
         </tbody>
       </table>
-    </div>
+    </ScrollableX>
   );
 }

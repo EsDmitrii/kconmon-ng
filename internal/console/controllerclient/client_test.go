@@ -188,10 +188,7 @@ func TestDiagnoseClampsTimeoutTo120s(t *testing.T) {
 	}
 }
 
-// A sub-second timeout must be rounded UP to 1s, never encoded as the
-// literal "timeout=0" -- int(timeout.Seconds()) truncates toward zero, and a
-// server told "timeout=0" could read that as "no timeout" rather than "the
-// smallest possible one" (task-22-brief.md minor a).
+// A sub-second timeout must be rounded UP to 1s, never encoded as the literal "timeout=0".
 func TestDiagnoseSubSecondTimeoutRoundsUpTo1s(t *testing.T) {
 	var gotTimeout string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -209,16 +206,7 @@ func TestDiagnoseSubSecondTimeoutRoundsUpTo1s(t *testing.T) {
 	}
 }
 
-// TestDiagnoseNotCappedByClientWideTimeout is I-4 (task-22-brief.md): a
-// server that sleeps past New()'s own configured timeout (200ms here) but
-// within the timeout given to Diagnose must still succeed -- proving
-// Diagnose's own per-request bound (not the shared http.Client.Timeout New()
-// configures for Topology/Version) is what actually governs the wait. Before
-// the fix, hc.Timeout applied to every request through the single shared
-// client regardless of context deadline, silently truncating every dispatch
-// to whatever controller.timeout happened to be configured to (commonly
-// 10s), no matter what timeout the caller asked Diagnose for or what the
-// controller itself had been told to honour.
+// TestDiagnoseNotCappedByClientWideTimeout is I-4.
 func TestDiagnoseNotCappedByClientWideTimeout(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		time.Sleep(500 * time.Millisecond)
@@ -289,10 +277,7 @@ func TestDiagnoseRetries503ThenErrUnavailable(t *testing.T) {
 	}
 }
 
-// TestDiagnoseDoesNotRetry502Or504 is the most important assertion in this
-// file (task-22-brief.md): a dispatch that reached an agent and then failed
-// or timed out must not be silently re-run against a cluster the operator is
-// diagnosing, unlike 503 above.
+// TestDiagnoseDoesNotRetry502Or504 is the most important assertion in this file.
 func TestDiagnoseDoesNotRetry502Or504(t *testing.T) {
 	for _, status := range []int{http.StatusBadGateway, http.StatusGatewayTimeout} {
 		t.Run(http.StatusText(status), func(t *testing.T) {
@@ -314,11 +299,8 @@ func TestDiagnoseDoesNotRetry502Or504(t *testing.T) {
 	}
 }
 
-// A 501 means the SOURCE agent predates external checks
-// (internal/controller/diagnostics.go's capability gate). Retrying cannot make
-// an old agent grow the capability, so this must be single-shot exactly like
-// 400/404/502/504 -- and it needs its own sentinel so a caller can tell "this
-// cluster's agents are too old" apart from "the check failed".
+// A 501 means the SOURCE agent predates external checks (internal/controller/diagnostics.go's
+// capability gate); retrying cannot make an old agent grow the capability.
 func TestDiagnose501IsExternalUnsupportedAndDoesNotRetry(t *testing.T) {
 	var calls atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -345,9 +327,8 @@ func TestDiagnose501IsExternalUnsupportedAndDoesNotRetry(t *testing.T) {
 	}
 }
 
-// DiagnoseRequest's two M4 fields are `omitempty`: a node dispatch puts
-// exactly the pre-M4 four-field body on the wire, byte for byte, so a
-// controller that predates them sees no change at all.
+// DiagnoseRequest's two fields are `omitempty`: a node dispatch puts exactly the pre-M4 four-field
+// body on the wire.
 func TestDiagnoseNodeRequestBodyOmitsExternalFields(t *testing.T) {
 	var gotBody string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -410,10 +391,6 @@ func TestDiagnoseBodyCappedAtMaxBodyBytes(t *testing.T) {
 		t.Errorf("len(data) = %d, want %d (capped)", len(data), maxBodyBytes)
 	}
 }
-
-// ---------------------------------------------------------------------------
-// PutExternalChecks (M4 Task 17)
-// ---------------------------------------------------------------------------
 
 func externalSpecs() map[string][]controllerclient.ExternalCheckSpec {
 	return map[string][]controllerclient.ExternalCheckSpec{

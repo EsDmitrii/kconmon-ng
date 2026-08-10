@@ -93,10 +93,7 @@ describe("useWsTopic", () => {
     expect(result.current.connected).toBe(false);
   });
 
-  // State must not outlive its subscription on the `enabled` axis either: a
-  // realtime outage-and-recovery re-runs consumers' seeding effects, and a
-  // payload retained across the disabled window would overwrite fresher polled
-  // data with the pre-outage snapshot.
+  // State must not outlive its subscription on the `enabled` axis either.
   it("drops the retained payload when the subscription is disabled", () => {
     const { result, rerender } = renderHook(
       ({ enabled }: { enabled: boolean }) => useWsTopic<{ n: number }>(TOPIC_TOPOLOGY, { enabled }),
@@ -118,10 +115,7 @@ describe("useWsTopic", () => {
     expect(result.current.data).toBeUndefined();
   });
 
-  // A topic change must never expose the previous topic's payload, not even for
-  // the single render between "caller asked for the new topic" and "the effect
-  // resubscribed" — that window is what put one protocol's matrix under
-  // another protocol's label.
+  // A topic change must never expose the previous topic's payload.
   it("reports nothing for a new topic until that topic delivers", () => {
     const { result, rerender } = renderHook(({ topic }: { topic: string }) => useWsTopic<{ n: string }>(topic), {
       initialProps: { topic: "matrix:tcp:pod" },
@@ -154,14 +148,8 @@ describe("useWsTopic", () => {
     expect(result.current.lastSeq).toBe(1);
   });
 
-  // The singleton is page-wide, so a StrictMode double-mount must not be able
-  // to wedge realtime for the rest of the session: WsClient.close() is
-  // irreversible, and the hook's teardown therefore only unsubscribes.
-  //
-  // The socket is driven open BEFORE the StrictMode hook mounts, on purpose: a
-  // subscribe/unsubscribe is only written to the wire while the connection is
-  // open, so on a still-connecting socket the double-mount is invisible and any
-  // assertion about it would pass just as well without StrictMode.
+  // The singleton is page-wide, so a StrictMode double-mount must not be able to wedge realtime for
+  // the rest of the session.
   it("survives a StrictMode double-mount without killing the shared client", () => {
     const keepalive = renderHook(() => useWsTopic("matrix:tcp:pod"));
     act(() => {

@@ -1,6 +1,5 @@
-// Package matrix computes the N×N node connectivity matrix from Prometheus
-// instant queries over the agent probe metrics (docs/metrics.md). No caching,
-// no persistence: M1 recomputes per request; the frontend polls.
+// Package matrix computes the N×N node connectivity matrix from Prometheus instant queries over the
+// agent probe metrics (docs/metrics.md).
 package matrix
 
 import (
@@ -164,11 +163,7 @@ func vectorByPair(ctx context.Context, q Querier, query string) (map[pair]float6
 		if err != nil {
 			continue
 		}
-		// ParseFloat ACCEPTS "NaN" and "+Inf" (no error), and Prometheus emits
-		// both: 0/0 from a pair whose series went stale mid-window, quantiles
-		// over empty buckets. A NaN here poisons json.Marshal for the whole
-		// matrix (empty-200 REST answers, dropped WS snapshots), and +Inf
-		// overflows the ns conversion into a MaxInt64 "RTT". Not a sample.
+		// ParseFloat ACCEPTS "NaN" and "+Inf" (no error), and Prometheus emits both.
 		if math.IsNaN(v) || math.IsInf(v, 0) {
 			continue
 		}

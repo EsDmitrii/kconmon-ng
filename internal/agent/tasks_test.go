@@ -341,10 +341,8 @@ func (s *stubResolver) callCount() int {
 	return s.calls
 }
 
-// newExternalExecutor builds an executor whose external gate is enabled with
-// the given allow/deny lists and a stub resolver.
-// The reporter is always nil here: every external test drives executeOne
-// directly, so nothing is reported.
+// newExternalExecutor builds an executor whose external gate is enabled with the given allow/deny
+// lists and a stub resolver.
 func newExternalExecutor(t *testing.T, r checker.Resolver, allowed, denied []string, checkers ...*fakeChecker) *TaskExecutor {
 	t.Helper()
 	cmap := make(map[model.CheckType]checker.Checker, len(checkers))
@@ -662,11 +660,7 @@ func TestExternalDeniedDestinationRefusedBeforeCheckerLookup(t *testing.T) {
 	}
 }
 
-// TestExternalAddressWithEmbeddedPortIsSplitNotResolved pins the M4
-// final-gate smoke finding: the Console's one-shot path sends the operator's
-// "host:port" spelling verbatim with port 0, and handing that raw to the
-// allowlist turned every such probe into a "resolve" denial. The boundary
-// split must authorise the bare host and dial the embedded port.
+// The boundary split must authorise the bare host and dial the embedded port.
 func TestExternalAddressWithEmbeddedPortIsSplitNotResolved(t *testing.T) {
 	allow, err := checker.NewAllowlist([]string{"127.0.0.0/8"}, nil)
 	if err != nil {

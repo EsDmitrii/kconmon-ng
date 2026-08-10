@@ -12,22 +12,14 @@ import (
 	"github.com/EsDmitrii/kconmon-ng/internal/console/store/gen"
 )
 
-// annotationTextMaxLen and annotationScopeMaxLen are M5 Decision 10's bounds.
-// Both are counted in BYTES, not runes: the columns store bytes, and a caller
-// that squeezed 1024 multi-byte runes past a rune-counting check would still
-// be a caller whose note is four kilobytes.
-//
-// annotationScopeMaxLen also bounds created_by, which is a subject reference
-// ("user:<name>", "token:<name>") and has no reason to be longer than a scope.
+// annotationTextMaxLen and annotationScopeMaxLen are the bounds; both are counted in BYTES, not
+// runes: the columns store bytes.
 const (
 	annotationTextMaxLen  = 1024
 	annotationScopeMaxLen = 255
 )
 
-// Annotation is one operator note pinned to a moment or a span (M5 Decision
-// 10). EndAt is nil for an instant mark -- which means "a point in time", not
-// "still open": an annotation is a mark, not a document, which is also why M5
-// has create/list/delete and no edit.
+// Annotation is one operator note pinned to a moment or a span.
 type Annotation struct {
 	ID      string
 	StartAt time.Time
@@ -57,11 +49,8 @@ type AnnotationFilter struct {
 	// package, because "" is a real value here: it is the global scope. nil
 	// means "every scope"; a pointer to "" means "the global ones only".
 	Scope *string
-	// From and To bound the window an annotation must OVERLAP to be returned,
-	// not the window its start must fall in: a span that began before From and
-	// is still running at From is exactly the annotation a chart needs to
-	// draw. An instant mark counts as the zero-length span [StartAt, StartAt].
-	// Zero on either side is unbounded.
+	// From and To bound the window an annotation must OVERLAP to be returned, not the window its start
+	// must fall in.
 	From   time.Time // inclusive
 	To     time.Time // exclusive
 	Cursor string    // opaque keyset cursor from a previous page
@@ -95,11 +84,8 @@ type AnnotationReader interface {
 
 var _ AnnotationReader = (*DB)(nil)
 
-// Validate reports whether in is a well-formed annotation. The three rules are
-// M5 Decision 10's: text 1..1024 bytes, end_at at or after start_at, scope at
-// most 255 bytes. A zero StartAt is rejected on top of those -- the column is
-// NOT NULL, so it would otherwise store year 1 and land the mark at the far
-// left of every chart forever.
+// Validate reports whether in is a well-formed annotation; a zero StartAt is rejected on top of
+// those -- the column is NOT NULL.
 func (in *AnnotationInput) Validate() error {
 	if in.StartAt.IsZero() {
 		return errors.New("store: annotation: start at must not be zero")

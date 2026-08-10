@@ -17,10 +17,12 @@ entire web console, and that is mostly what this post is about.
 
 Repo: <https://github.com/EsDmitrii/kconmon-ng> (Apache 2.0).
 
-![Console Overview: 3 of 3 nodes healthy, worst node pairs, firing critical alerts and an open incident](../img/console-overview.png)
-*docs/img/console-overview.png. The Overview page: cluster health, the worst
-pairs right now, what is firing, and what someone already opened an incident
-for.*
+![Console Overview: 9 nodes counted from agents, 9 of 90 pairs failing, the five worst pairs all ending at qa-node-07 at 17%, two critical UdpPairLoss alerts and one open incident](../img/console-overview.png)
+*docs/img/console-overview.png. The Overview page: nine nodes counted from the
+agents themselves, with the tile admitting there is no k8s node inventory here
+so readiness is unknown. Nine of ninety pairs carry a failure ratio, all five
+worst ones end at qa-node-07 at 17%, UdpPairLoss is firing critical, and someone
+has already opened an incident for exactly that.*
 
 ## The failures that cost you the evening are the partial ones
 
@@ -99,10 +101,12 @@ A few decisions that only matter at 3am:
 * Config hot-reloads on change and is parsed with unknown keys rejected. A typo
   fails fast instead of being silently ignored.
 
-Six alert rules ship with the chart when `prometheusRule.enabled=true`: high UDP
-loss, failing TCP, DNS and external checks, plus two that watch the monitor
-itself, `KconmonAgentsMissing` and `KconmonControllerDown`. A kconmon-ng that
-goes quiet pages you instead of looking healthy.
+Seven alert rules ship with the chart when `prometheusRule.enabled=true`: high
+UDP loss, failing TCP, DNS and external checks, `PairWentSilent` for a pair that
+was probed within the last hour and has stopped reporting entirely, plus two
+that watch the monitor itself, `KconmonAgentsMissing` and
+`KconmonControllerDown`. A kconmon-ng that goes quiet pages you instead of
+looking healthy.
 
 ## The console
 
@@ -125,9 +129,10 @@ The matrix is N×N, one cell per ordered pair, coloured by loss and latency. A
 broken node reads as a red column, a one-directional problem reads as a single
 cell, and a zone-boundary problem reads as a block.
 
-![Console Matrix: a 10-node fleet where one node down shows up as a red column](../img/console-matrix.png)
-*docs/img/console-matrix.png: a 10-node fleet with one node down. You do not
-have to interpret this one.*
+![Console Matrix: a 10-node UDP matrix where every cell into qa-node-07 is red at 16.7–17% and the rest of the grid is green](../img/console-matrix.png)
+*docs/img/console-matrix.png: ten nodes, UDP, pod plane. The column into
+qa-node-07 sits at 16.7–17%, over the legend's 10% failing threshold, while its
+own outbound row reads "no fail data". You do not have to interpret this one.*
 
 With `controller.events.enabled` the matrix and the topology map are pushed over
 a WebSocket. Without it they poll, and the page says which of the two it is
@@ -155,9 +160,12 @@ outage, which is the classic way these panels start lying.
 No ML, and the constants are exported from one module that the docs restate
 rather than paraphrase.
 
-![Console Investigate: timeline of a break with an annotation and firing alerts](../img/console-investigate.png)
-*docs/img/console-investigate.png: one break, with the annotation someone left
-and the alerts that fired around it, on the same timeline.*
+![Console Investigate: a qa-node-07 timeline carrying a rollout annotation, an audit row, two failed runs and five firing UdpPairLoss rows](../img/console-investigate.png)
+*docs/img/console-investigate.png: one scope, one window. The annotation someone
+left about a network-agent rollout, the runs that failed, and five UdpPairLoss
+rows on the same timeline. Likely causes ranks nothing here and says why: no
+threshold crossing inside the range, and inventing an anchor is how these panels
+start lying.*
 
 Save it as an incident and the permalink rehydrates the exact scope and window
 from the stored row, so the link cannot drift away from the incident it names.
@@ -171,8 +179,11 @@ PromQL is evaluated at `t`, and the Live feed becomes scrollback.
 Every mutating control is disabled behind a banner while it is engaged. You
 cannot change the fleet from inside the past.
 
-![Console Time Machine: the same matrix resolved at a past instant](../img/console-timemachine.png)
-*docs/img/console-timemachine.png: the matrix as it was, not as it is.*
+![Console Time Machine: the matrix resolved at 10:49:03 under a banner naming the instant, with the qa-node-07 column at 19.5–20.5%](../img/console-timemachine.png)
+*docs/img/console-timemachine.png: the same matrix evaluated straight from
+Prometheus at 10:49:03 instead of now. The banner names the instant and holds
+the way back to Live; the qa-node-07 column reads 19.5–20.5% there, a little
+worse than it is live.*
 
 ### 4. Alerting: turn the finding into a rule
 
@@ -239,15 +250,18 @@ nothing stops you from staying in Grafana. Three dashboards ship in
 [`dashboards/`](https://github.com/EsDmitrii/kconmon-ng/tree/main/dashboards):
 cluster overview, zone heatmap, per-node detail.
 
-![Grafana Overview dashboard](../img/overview.png)
-*docs/img/overview.png: the bundled Grafana overview dashboard (the dashboards
-are being reworked, so treat the visuals as indicative).*
+![Grafana Overview dashboard: 10 agents registered and reporting, 0 missing, leader OK, 90 monitored pairs, 9 with failures, and a top-10 worst pairs table](../img/overview.png)
+*docs/img/overview.png: the bundled Grafana overview dashboard on the same
+fleet: 10 agents, 90 monitored pairs, 9 of them failing, and the worst-pairs
+table pointing at qa-node-07 again.*
 
-![Grafana zone heatmap dashboard](../img/zone-heatmap.png)
-*docs/img/zone-heatmap.png: cross-zone latency and loss.*
+![Grafana zone heatmap dashboard: zone-to-zone loss, RTT and MTR trigger matrices, with the zone-c column carrying all of it](../img/zone-heatmap.png)
+*docs/img/zone-heatmap.png: cross-zone latency and loss. Everything landing in
+zone-c carries ~3.5% UDP loss and the only MTR traces of the hour.*
 
-![Grafana node detail dashboard](../img/node-detail.png)
-*docs/img/node-detail.png: one node, broken down by destination.*
+![Grafana node detail dashboard: qa-node-01 with 9 peers probed, 4.03% worst outbound failure ratio and 0% inbound](../img/node-detail.png)
+*docs/img/node-detail.png: one node, broken down by destination. qa-node-01
+probes 9 peers, its worst outbound ratio is 4.03% and inbound is clean.*
 
 Metric names are stable and documented, so your own panels and recording rules
 are a grep away in
@@ -312,7 +326,7 @@ RBAC for the controller's node watch.
 
 ```bash
 helm upgrade --install kconmon-ng oci://ghcr.io/esdmitrii/charts/kconmon-ng \
-  --version 1.10.0 \
+  --version 2.0.0 \
   --set serviceMonitor.enabled=true \
   --set prometheusRule.enabled=true
 ```
@@ -347,7 +361,7 @@ It is a flag on the same release. Nothing else in the chart changes:
 
 ```bash
 helm upgrade --install kconmon-ng oci://ghcr.io/esdmitrii/charts/kconmon-ng \
-  --version 1.10.0 \
+  --version 2.0.0 \
   --set console.enabled=true \
   --set console.prometheus.url=http://prometheus-operated.monitoring:9090
 
@@ -360,6 +374,22 @@ incidents and alert rules need `console.database.mode=cnpg` or `external`;
 realtime push needs `controller.events.enabled=true`; alerting needs
 `console.alerting.enabled=true` plus the Prometheus Operator's `PrometheusRule`
 CRD. Every knob is documented inline in `charts/kconmon-ng/values.yaml`.
+
+### What the 2.0.0 chart does for you
+
+Chart 2.0.0 is mostly about the steps you used to do by hand. Every credential
+the chart consumes can still come from an `existingSecret` you own, or from a
+`secret:` block the chart renders for you, and field values are written
+verbatim, so a `${vault:...}` placeholder passes through byte-for-byte and an
+injector resolves it at admission. The CloudNativePG operator and the official
+Valkey chart are available as optional subcharts, both off by default, so an
+install that does not ask for them renders exactly as before. GeoLite2 no longer
+needs staging: `geoip.mode=auto` runs MaxMind's own `geoipupdate` image as a
+sidecar, and the console re-stats the two files and reopens whichever changed,
+so a refreshed database is picked up without a restart. Dashboards render as
+ConfigMaps with the `grafana_dashboard` sidecar label, and the pods carry
+restricted-PSS defaults. The one exception is the agent: it needs `NET_RAW` for
+ICMP and MTR, and therefore a `baseline` namespace or an explicit exemption.
 
 ## Watching it catch something
 
@@ -395,7 +425,7 @@ Some things I would want to know if I were reading someone else's post:
   moving part. kconmon-ng trades that simplicity for protocol depth and per-hop
   diagnostics.
 
-On testing: the frontend is at 1521 tests across 68 files, and 28 Go packages
+On testing: the frontend is at 2099 tests across 81 files, and 29 Go packages
 carry tests that CI runs with the race detector on every PR, alongside lint,
 cross-compile and a chart lint against the CI value sets. A `v*` tag publishes
 images and the chart to GHCR and runs e2e.
@@ -411,5 +441,5 @@ Issues and PRs are open. If you run it and it lies to you about your network, I
 would genuinely like to hear about it.
 
 * Repo: <https://github.com/EsDmitrii/kconmon-ng>
-* Chart: `oci://ghcr.io/esdmitrii/charts/kconmon-ng`, version 1.10.0
+* Chart: `oci://ghcr.io/esdmitrii/charts/kconmon-ng`, version 2.0.0
 * License: Apache 2.0

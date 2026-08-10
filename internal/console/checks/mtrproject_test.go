@@ -36,11 +36,8 @@ func mtrPair(src, dst string) *checks.Pair {
 	return &checks.Pair{Source: src, Destination: checks.NodeDestination(dst)}
 }
 
-// mtrResultJSON builds the bytes the runner actually stores: the agent's
-// serialized model.CheckResult, verbatim, with an MTRDetails Details block.
-// Written as a literal rather than marshalled from model types so the test
-// pins the WIRE shape the projector has to parse, not whatever the Go structs
-// happen to serialize to today.
+// mtrResultJSON builds the bytes the runner actually stores; written as a literal rather than
+// marshalled from model types so the test pins the WIRE shape the projector has to parse.
 func mtrResultJSON(hops string) json.RawMessage {
 	return json.RawMessage(`{"type":"mtr","success":true,"source":"n1","destination":"n2",` +
 		`"duration":5000000,"timestamp":"2026-08-07T12:00:00Z",` +
@@ -55,12 +52,7 @@ func hop(number int, ip string, rttNs int64, loss float64) string {
 	return string(b)
 }
 
-// TestProjectMTRSnapshotBuildsInputFromStoredResult is the happy path: the
-// stored result's hop list becomes the snapshot payload verbatim (rtt in ns,
-// hostname carried), keyed by the pair's own labels, and the whole thing
-// passes the store's own Validate -- the gate UpsertPathSnapshot applies, so a
-// projector that builds something the store would reject fails here rather
-// than in production.
+// TestProjectMTRSnapshotBuildsInputFromStoredResult is the happy path.
 func TestProjectMTRSnapshotBuildsInputFromStoredResult(t *testing.T) {
 	raw := json.RawMessage(`{"type":"mtr","success":true,"details":{"target":"10.0.0.2","hops":[` +
 		`{"number":1,"ip":"10.0.0.254","hostname":"gw.local","rtt":500000,"lossRatio":0},` +
@@ -105,13 +97,9 @@ func TestProjectMTRSnapshotBuildsInputFromStoredResult(t *testing.T) {
 	}
 }
 
-// TestProjectMTRSnapshotDropsUnreachableHopsPreservingNumbering pins the one
-// normalization decision the projector makes. A hop that never answered
-// carries no address ("*" from internal/checker/mtr.go, or "" from any other
-// producer) and cannot be part of a route's identity -- but the hop NUMBERS of
-// the hops that did answer are left exactly as the agent reported them: the
-// hole in the numbering says "hop 3 and 4 were silent", which renumbering
-// would erase.
+// TestProjectMTRSnapshotDropsUnreachableHopsPreservingNumbering pins the one normalization decision
+// the projector makes; a hop that never answered carries no address ("*" from
+// internal/checker/mtr.go, or "" from any other producer) and cannot be part of a route's identity.
 func TestProjectMTRSnapshotDropsUnreachableHopsPreservingNumbering(t *testing.T) {
 	raw := mtrResultJSON(
 		hop(1, "10.0.0.254", 500000, 0) + "," +
@@ -143,10 +131,8 @@ func TestProjectMTRSnapshotDropsUnreachableHopsPreservingNumbering(t *testing.T)
 	}
 }
 
-// TestProjectMTRSnapshotHashIsStableAcrossJitterAndSilentHops is the property
-// the whole dedupe rests on (M5 Decision 2): the same routers in the same
-// order are the SAME path, no matter what the RTTs did, whether rDNS answered,
-// or whether an intermediate hop happened to be silent on one of the traces.
+// TestProjectMTRSnapshotHashIsStableAcrossJitterAndSilentHops is the property the whole dedupe
+// rests on.
 func TestProjectMTRSnapshotHashIsStableAcrossJitterAndSilentHops(t *testing.T) {
 	first := mtrResultJSON(
 		hop(1, "10.0.0.254", 500000, 0) + "," +
@@ -275,11 +261,6 @@ func TestProjectMTRSnapshotNilSpecOrPairIsFalse(t *testing.T) {
 	}
 }
 
-// TestProjectMTRSnapshotUsesDestinationLabelNeverAddress: destination is the
-// metric-safe NAME everywhere downstream (Destination.Label's contract), and
-// path history is no exception -- an address must never become the key of a
-// history row. The adhoc case pins Label's own documented fallback: with no
-// name given there is nothing else to call it by.
 func TestProjectMTRSnapshotUsesDestinationLabelNeverAddress(t *testing.T) {
 	raw := mtrResultJSON(hop(1, "10.0.0.2", 100, 0))
 
@@ -310,10 +291,9 @@ func TestProjectMTRSnapshotUsesDestinationLabelNeverAddress(t *testing.T) {
 // The runner hook
 // ---------------------------------------------------------------------------
 
-// mtrFakeCtrl answers every Diagnose with a fixed body (or a fixed error). It
-// stands in for the HTTP fake the rest of runner_test.go uses because these
-// tests need control over the RESULT PAYLOAD, which
-// fakeDiagnosticsServer.handler builds itself and never gives a Details block.
+// mtrFakeCtrl answers every Diagnose with a fixed body (or a fixed error); it stands in for the
+// HTTP fake the rest of runner_test.go uses because these tests need control over the RESULT
+// PAYLOAD.
 type mtrFakeCtrl struct {
 	body json.RawMessage
 	err  error
@@ -330,11 +310,8 @@ func (f *mtrFakeCtrl) Diagnose(context.Context, controllerclient.DiagnoseRequest
 	return f.body, nil
 }
 
-// recordingSnapshotStore is a checks.Store that records every
-// UpsertPathSnapshot call and can be made to fail them. It EMBEDS a
-// *checks.MemoryStore rather than reimplementing the seam, so the runs half of
-// the interface behaves exactly as it does everywhere else in this file and
-// the dedupe answer (isNew) comes from the real in-memory implementation.
+// recordingSnapshotStore is a checks.Store that records every UpsertPathSnapshot call and can be
+// made to fail them; it EMBEDS a *checks.MemoryStore rather than reimplementing the seam.
 type recordingSnapshotStore struct {
 	*checks.MemoryStore
 
@@ -404,10 +381,7 @@ func runMTRPair(t *testing.T, runner *checks.Runner, st *recordingSnapshotStore,
 	return id
 }
 
-// TestRunnerProjectsMTRResultIntoPathHistory is the hook's happy path: a
-// finished mtr pair leaves a snapshot keyed by the pair's own labels and
-// stamped with the run that produced it, and the first trace on a route counts
-// as new-path.
+// TestRunnerProjectsMTRResultIntoPathHistory is the hook's happy path.
 func TestRunnerProjectsMTRResultIntoPathHistory(t *testing.T) {
 	body := mtrResultJSON(hop(1, "10.0.0.254", 500000, 0) + "," + hop(2, "10.0.0.2", 2000000, 0))
 	runner, st, m := mtrRunner(t, body, nil)
@@ -442,10 +416,8 @@ func TestRunnerProjectsMTRResultIntoPathHistory(t *testing.T) {
 	}
 }
 
-// TestRunnerCountsARepeatedRouteAsRepeat: the same route traced twice is one
-// row and one new-path increment, not two. This is the property that makes
-// new-path an alerting primitive at all -- if a stable route counted as new on
-// every trace, the signal would be pure noise.
+// TestRunnerCountsARepeatedRouteAsRepeat: the same route traced twice is one row and one new-path
+// increment; this is the property that makes new-path an alerting primitive.
 func TestRunnerCountsARepeatedRouteAsRepeat(t *testing.T) {
 	body := mtrResultJSON(hop(1, "10.0.0.254", 500000, 0) + "," + hop(2, "10.0.0.2", 2000000, 0))
 	runner, st, m := mtrRunner(t, body, nil)
@@ -464,10 +436,7 @@ func TestRunnerCountsARepeatedRouteAsRepeat(t *testing.T) {
 	}
 }
 
-// TestRunnerSnapshotFailureDoesNotFailThePair is the projection's cardinal
-// rule: check_results is the authority and the snapshot is a projection of it,
-// so a store failure here is logged, counted on the error label, and otherwise
-// invisible -- the pair still succeeded, and so did the run.
+// TestRunnerSnapshotFailureDoesNotFailThePair is the projection's cardinal rule.
 func TestRunnerSnapshotFailureDoesNotFailThePair(t *testing.T) {
 	body := mtrResultJSON(hop(1, "10.0.0.254", 500000, 0) + "," + hop(2, "10.0.0.2", 2000000, 0))
 	runner, st, m := mtrRunner(t, body, nil)
@@ -514,9 +483,7 @@ func TestRunnerDoesNotProjectNonMTRRuns(t *testing.T) {
 	}
 }
 
-// TestRunnerDoesNotProjectAFailedMTRDispatch: a pair the controller refused
-// has no result payload, so there is nothing to project -- and that is a
-// silence, not an error. Counting it on the error label would make a
+// TestRunnerDoesNotProjectAFailedMTRDispatch; counting it on the error label would make a
 // controller outage look like a path-history outage.
 func TestRunnerDoesNotProjectAFailedMTRDispatch(t *testing.T) {
 	runner, st, m := mtrRunner(t, nil, errors.New("induced dispatch failure"))
@@ -542,10 +509,8 @@ func memSnapshotInput(hops []store.PathHop, seenAt time.Time) store.PathSnapshot
 	}
 }
 
-// TestMemoryStoreUpsertPathSnapshotDedupesLikeTheDatabase pins the parity the
-// database-disabled mode depends on: the same route twice is one row with
-// trace_count 2, a bumped last_seen, an untouched first_seen and the FIRST
-// trace's hop payload; only the first says isNew.
+// TestMemoryStoreUpsertPathSnapshotDedupesLikeTheDatabase pins the parity the database-disabled
+// mode depends on.
 func TestMemoryStoreUpsertPathSnapshotDedupesLikeTheDatabase(t *testing.T) {
 	m := checks.NewMemoryStore()
 	ctx := context.Background()
@@ -619,10 +584,6 @@ func TestMemoryStoreUpsertPathSnapshotNewRouteIsANewRow(t *testing.T) {
 	}
 }
 
-// TestMemoryStoreUpsertPathSnapshotValidatesLikeTheDatabase: the in-memory
-// implementation applies store.PathSnapshotInput.Validate for the same reason
-// *store.DB does -- a caller must not be able to tell the two backends apart
-// by which malformed inputs they accept.
 func TestMemoryStoreUpsertPathSnapshotValidatesLikeTheDatabase(t *testing.T) {
 	m := checks.NewMemoryStore()
 	ctx := context.Background()

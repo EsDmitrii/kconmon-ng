@@ -1,5 +1,9 @@
-import { describe, expect, it } from "vitest";
-import { buildFlow, nodeNavigationPath } from "./topology";
+import { QueryClient, QueryClientProvider, onlineManager } from "@tanstack/react-query";
+import { cleanup, render, screen } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { ThemeProvider } from "@/components/theme-provider";
+import { LOCALE_STORAGE_KEY, LocaleProvider } from "@/lib/i18n";
+import { TopologyPage, buildFlow, mapNodes, nodeNavigationPath, unfoldableEmpty } from "./topology";
 import type { Matrix, Topology } from "@/lib/types";
 
 const topo: Topology = {
@@ -84,8 +88,6 @@ describe("nodeNavigationPath", () => {
     expect(nodeNavigationPath({ id: "zone:z1", type: "zone" })).toBeUndefined();
   });
 
-  /* QA round 2, finding #7: a click on a map of 12:00 must land on a card of
-     12:00. The stamp is the Time Machine's own (RFC 3339, UTC, seconds). */
   it("carries the engaged instant to the node card", () => {
     const at = new Date("2026-08-01T12:00:00Z");
     expect(nodeNavigationPath({ id: "node-a", type: "topoNode" }, at)).toBe(
@@ -163,5 +165,307 @@ describe("buildFlow — node accessibility", () => {
     const quiet: Matrix = { protocol: "tcp", plane: "pod", nodes: ["n1"], cells: [], timestamp: "t" };
     const oneReady: Topology = { nodes: [{ name: "n1", zone: "z1", ready: true }], agents: [], timestamp: "t" };
     expect(buildFlow(oneReady, quiet).nodes.find((n) => n.id === "n1")?.ariaLabel).toBe("n1, zone z1, healthy");
+  });
+});
+
+/* ── QA scope 2, findings #1 and #2: nodes:null, agents:full ─────────────── */
+
+const agentsOnly: Topology = {
+  nodes: [],
+  agents: [
+    { id: "a-1", nodeName: "n1", podIP: "10.0.0.1", zone: "z1" },
+    { id: "a-2", nodeName: "n2", podIP: "10.0.0.2", zone: "z2" },
+    /* A second agent on a node already seen — one lane, not two. */
+    { id: "a-3", nodeName: "n1", podIP: "10.0.0.3", zone: "z1" },
+  ],
+  timestamp: "t",
+};
+
+describe("mapNodes", () => {
+  it("prefers the Kubernetes node set whenever the controller has one", () => {
+    const { nodes, source } = mapNodes(topo);
+    expect(source).toBe("nodes");
+    expect(nodes.map((n) => n.name)).toEqual(["n1", "n2"]);
+    expect(nodes[1].ready).toBe(false);
+  });
+
+  it("falls back to the agents, deduped by node name, when nodes is empty", () => {
+    const { nodes, source } = mapNodes(agentsOnly);
+    expect(source).toBe("agents");
+    expect(nodes.map((n) => n.name)).toEqual(["n1", "n2"]);
+    expect(nodes.map((n) => n.zone)).toEqual(["z1", "z2"]);
+  });
+
+  it("leaves readiness UNDEFINED off-cluster rather than guessing either way", () => {
+    expect(mapNodes(agentsOnly).nodes.every((n) => n.ready === undefined)).toBe(true);
+  });
+
+  it("has nothing to draw when both halves are empty", () => {
+    expect(mapNodes({ nodes: [], agents: [], timestamp: "t" }).nodes).toHaveLength(0);
+  });
+});
+
+describe("buildFlow — built from agents", () => {
+  it("draws the zone lanes the old empty state said could not be drawn", () => {
+    const { nodes, source } = buildFlow(agentsOnly, matrix);
+    expect(source).toBe("agents");
+    expect(nodes.filter((n) => n.type === "zone").map((n) => (n.data as { label: string }).label)).toEqual([
+      "z1",
+      "z2",
+    ]);
+    expect(nodes.filter((n) => n.type === "topoNode").map((n) => n.id)).toEqual(["n1", "n2"]);
+  });
+
+  it("takes per-node health from the matrix, the one signal that survives the fallback", () => {
+    const { nodes } = buildFlow(agentsOnly, matrix);
+    // n1's worst outbound path is 20%.
+    expect(nodes.find((n) => n.id === "n1")?.className).toContain("failing");
+    // n2 has no outbound problem and, crucially, is NOT condemned for an
+    // unknown readiness the way `!n.ready` used to condemn it.
+    expect(nodes.find((n) => n.id === "n2")?.className).toContain("topo-node--ok");
+  });
+
+  it("announces the readiness gap instead of sounding like a confirmed-ready node", () => {
+    const { nodes } = buildFlow(agentsOnly, matrix);
+    expect(nodes.find((n) => n.id === "n2")?.ariaLabel).toBe("n2, zone z2, healthy, readiness unknown");
+  });
+
+  it("still draws the problem edges between two agent-derived boxes", () => {
+    const { edges, problemTotal } = buildFlow(agentsOnly, matrix);
+    expect(problemTotal).toBe(1);
+    expect(edges[0].id).toBe("n1->n2");
+  });
+});
+
+describe("unfoldableEmpty", () => {
+  it("stays silent when the map has boxes to draw, however they were built", () => {
+    expect(
+      unfoldableEmpty({ ...agentsOnly, historical: true, unfoldableEvents: 417, eventsFolded: 3 }),
+    ).toBeNull();
+  });
+
+  it("still fires for a reconstruction with nothing on either side", () => {
+    expect(
+      unfoldableEmpty({ nodes: [], agents: [], timestamp: "t", historical: true, unfoldableEvents: 417, eventsFolded: 3 }),
+    ).toEqual({ unfoldableEvents: 417, eventsFolded: 3 });
+  });
+});
+
+/* ru The only case in this file that renders the page at all, and the only one with a LocaleProvider. */
+
+const AT = "2026-08-01T12:00:00Z";
+
+const json = (body: unknown) =>
+  new Response(JSON.stringify(body), { status: 200, headers: { "Content-Type": "application/json" } });
+
+describe("TopologyPage — ru", () => {
+  afterEach(() => {
+    cleanup();
+    vi.unstubAllGlobals();
+    /* onlineManager is module-global, so a paused-query case that did not reset it would pause every test after it. */
+    onlineManager.setOnline(true);
+    /* vitest.setup.ts backs localStorage with ONE Map per test FILE. */
+    localStorage.removeItem(LOCALE_STORAGE_KEY);
+  });
+
+  it("renders the header and the unfoldable-history note in Russian", async () => {
+    localStorage.setItem(LOCALE_STORAGE_KEY, "ru");
+    const unfoldable: Topology = {
+      nodes: [],
+      agents: [],
+      timestamp: AT,
+      historical: true,
+      asOf: AT,
+      eventsFolded: 3,
+      unfoldableEvents: 417,
+      truncated: false,
+    };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((url: string) => {
+        const href = String(url);
+        if (href.startsWith("/api/v1/topology")) return Promise.resolve(json(unfoldable));
+        if (href.includes("/api/v1/promql/query")) {
+          return Promise.resolve(json({ status: "success", data: { resultType: "vector", result: [] } }));
+        }
+        return Promise.resolve(json({}));
+      }),
+    );
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={qc}>
+        <ThemeProvider>
+          <LocaleProvider>
+            <TopologyPage />
+          </LocaleProvider>
+        </ThemeProvider>
+      </QueryClientProvider>,
+    );
+
+    expect(await screen.findByText("На этот момент восстанавливать нечего")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Топология", level: 1 })).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        /^Консоль нашла событий топологии на этот момент и раньше: 417, а свернуть в набор узлов смогла 3: остальные не называют узел, и строить карту не из чего\..*этот отрезок истории восстановить нельзя/,
+      ),
+    ).toBeInTheDocument();
+  });
+
+  /* A dead controller is the one failure an operator opening this page is most
+     likely to hit, and the page answered it with a BLANK main: heading, subtitle
+     and nothing else. Both branches are pinned — with and without a node set to
+     fall back on — because they are two different honest answers, not one. */
+  const problem = (status: number, title: string, detail: string) =>
+    new Response(JSON.stringify({ type: "about:blank", title, status, detail }), {
+      status,
+      headers: { "Content-Type": "application/problem+json" },
+    });
+
+  it("shows the error card, not a blank page, when the controller is down and nothing was ever loaded", async () => {
+    localStorage.setItem(LOCALE_STORAGE_KEY, "ru");
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((url: string) => {
+        const href = String(url);
+        if (href.startsWith("/api/v1/topology")) {
+          return Promise.resolve(problem(502, "controller unavailable", "no controller leader answered after retries"));
+        }
+        if (href.includes("/api/v1/promql/query")) {
+          return Promise.resolve(json({ status: "success", data: { resultType: "vector", result: [] } }));
+        }
+        return Promise.resolve(json({}));
+      }),
+    );
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={qc}>
+        <ThemeProvider>
+          <LocaleProvider>
+            <TopologyPage />
+          </LocaleProvider>
+        </ThemeProvider>
+      </QueryClientProvider>,
+    );
+
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("Топология недоступна");
+    /* The server's own detail, verbatim — that sentence is the only thing that
+       tells the operator WHICH half of the system is down. */
+    expect(screen.getByTestId("topology-problem")).toHaveTextContent("no controller leader answered after retries");
+  });
+
+  it("shows the error card for a proxy 502 that carries no problem+json body", async () => {
+    localStorage.setItem(LOCALE_STORAGE_KEY, "ru");
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((url: string) => {
+        const href = String(url);
+        if (href.startsWith("/api/v1/topology")) {
+          return Promise.resolve(
+            new Response("<html>502 Bad Gateway</html>", {
+              status: 502,
+              statusText: "Bad Gateway",
+              headers: { "Content-Type": "text/html" },
+            }),
+          );
+        }
+        return Promise.resolve(json({}));
+      }),
+    );
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={qc}>
+        <ThemeProvider>
+          <LocaleProvider>
+            <TopologyPage />
+          </LocaleProvider>
+        </ThemeProvider>
+      </QueryClientProvider>,
+    );
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("Топология недоступна");
+  });
+
+  it("shows the error card when the request never reaches the console at all", async () => {
+    localStorage.setItem(LOCALE_STORAGE_KEY, "ru");
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((url: string) => {
+        const href = String(url);
+        if (href.startsWith("/api/v1/topology")) return Promise.reject(new TypeError("Failed to fetch"));
+        return Promise.resolve(json({}));
+      }),
+    );
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={qc}>
+        <ThemeProvider>
+          <LocaleProvider>
+            <TopologyPage />
+          </LocaleProvider>
+        </ThemeProvider>
+      </QueryClientProvider>,
+    );
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("Топология недоступна");
+  });
+
+  /* The state that actually produced the blank page: react-query's default
+     networkMode pauses a query when the browser reports no connection, and a
+     PAUSED query is pending WITHOUT fetching — so `isLoading` is false, there
+     is no data and no error, and every branch on this page used to opt out at
+     once. */
+  it("says the request was never sent instead of going blank while the query is paused", async () => {
+    localStorage.setItem(LOCALE_STORAGE_KEY, "ru");
+    onlineManager.setOnline(false);
+    vi.stubGlobal("fetch", vi.fn(() => Promise.resolve(json({}))));
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={qc}>
+        <ThemeProvider>
+          <LocaleProvider>
+            <TopologyPage />
+          </LocaleProvider>
+        </ThemeProvider>
+      </QueryClientProvider>,
+    );
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("Браузер сообщает, что соединения нет");
+  });
+
+  /* The other half of finding #1: an error ON TOP of a node set that did load
+     is not the same answer as an error with nothing behind it, and saying
+     "Топология недоступна" over a map that is on screen is the dishonest one. */
+  it("keeps the loaded node set and downgrades the error to a stale notice", async () => {
+    localStorage.setItem(LOCALE_STORAGE_KEY, "ru");
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((url: string) => {
+        const href = String(url);
+        if (href.startsWith("/api/v1/topology")) {
+          return Promise.resolve(problem(502, "controller unavailable", "no controller leader answered after retries"));
+        }
+        return Promise.resolve(json({}));
+      }),
+    );
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    qc.setQueryData(["topology"], { nodes: [], agents: [], timestamp: AT } satisfies Topology);
+    render(
+      <QueryClientProvider client={qc}>
+        <ThemeProvider>
+          <LocaleProvider>
+            <TopologyPage />
+          </LocaleProvider>
+        </ThemeProvider>
+      </QueryClientProvider>,
+    );
+
+    /* The data-derived state survives the failed refresh… */
+    expect(await screen.findByText("Контроллер пока не сообщил ни одного узла")).toBeInTheDocument();
+    /* …and the failure is a notice about the REFRESH, not a claim that the page has nothing. */
+    const stale = await screen.findByRole("status");
+    expect(stale).toHaveTextContent("Данные не обновляются");
+    expect(screen.getByTestId("topology-problem")).toHaveTextContent("no controller leader answered after retries");
+    expect(screen.queryByText("Топология недоступна")).not.toBeInTheDocument();
   });
 });

@@ -7,14 +7,7 @@ import (
 	"testing"
 )
 
-// The run readers must reject a malformed id BEFORE they touch pgx (follow-up
-// #5's other half). Two things are asserted at once here, and the second is
-// the reason this test constructs a *DB with a NIL pool: reaching
-// gen.New(db.pool) with a nil pool panics, so a test that returns cleanly is
-// itself proof that no database round trip was attempted. Without the
-// pre-check, httpapi's GET /api/v1/runs/{id} answers 502 ("run history
-// unavailable") for a typo in a URL, where 404 is the truthful answer -- an id
-// that is not a UUID cannot name a row in a UUID-keyed table.
+// The run readers must reject a malformed id BEFORE they touch pgx.
 func TestGetRunMalformedIDIsNotFoundWithoutTouchingPgx(t *testing.T) {
 	db := &DB{}
 	ctx := context.Background()

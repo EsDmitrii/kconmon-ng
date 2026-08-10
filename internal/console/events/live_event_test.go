@@ -312,24 +312,15 @@ const subMicroNanos int64 = 1753400000000123456
 // what ToLiveEvent must already have produced.
 const subMicroTruncatedNanos int64 = 1753400000000123000
 
-// storeRoundTrip models the ONE lossy step between ToLiveEvent and the
-// scrollback endpoint: topology_events.event_time is TIMESTAMPTZ, so whatever
-// the ingester wrote comes back truncated to microseconds. No database is
-// needed to model it faithfully — the resolution is the whole of the loss.
+// storeRoundTrip models the ONE lossy step between ToLiveEvent and the scrollback endpoint.
 func storeRoundTrip(ts time.Time) time.Time { return ts.UTC().Truncate(time.Microsecond) }
 
-// rebuildID is httpapi.toLiveEvent's id expression (internal/console/httpapi/
-// events.go), duplicated here because that package cannot be imported from this
-// one. TestEventsScrollbackIDMatchesTheLiveID in httpapi pins the same rule from
-// the other side; if the two ever diverge, this constant is the contract.
+// rebuildID is httpapi.toLiveEvent's id expression (internal/console/httpapi/ events.go).
 func rebuildID(seq uint64, ts time.Time) string {
 	return fmt.Sprintf("%d-%d", seq, ts.UnixNano())
 }
 
-// A LiveEvent's id must survive persistence. The Live page dedupes the
-// WebSocket frame against the scrollback row by id, so if ToLiveEvent kept
-// sub-microsecond nanos the two ids would differ after a Postgres round trip
-// and the same event would render twice.
+// A LiveEvent's id must survive persistence.
 func TestToLiveEventIDSurvivesAMicrosecondStoreRoundTrip(t *testing.T) {
 	ev := &pb.Event{
 		Seq:       77,
