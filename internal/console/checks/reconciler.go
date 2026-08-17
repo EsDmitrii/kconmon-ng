@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/EsDmitrii/kconmon-ng/internal/checker"
 	"github.com/EsDmitrii/kconmon-ng/internal/console/controllerclient"
 	"github.com/EsDmitrii/kconmon-ng/internal/console/metrics"
 	"github.com/EsDmitrii/kconmon-ng/internal/console/store"
@@ -56,6 +57,13 @@ const (
 const (
 	skipCheckType       = "check-type"
 	skipDestinationKind = "destination-kind"
+	// skipUnrunnable is a definition every agent would refuse to parse -- checkType=http against a
+	// target of kind host, checkType=dns with no params.query. Pushing it wastes a slot in every
+	// agent's assignment and produces nothing but one WARN per agent per push, forever, while the
+	// Console goes on listing the definition as enabled. The write routes refuse these at the door
+	// (see httpapi.refuseUnrunnableDefinition); this is the backstop for a row that predates the
+	// guard or was written straight to the database.
+	skipUnrunnable = "unrunnable"
 )
 
 // externalCheckTypes mirrors internal/controller's own validExternalCheckTypes
@@ -342,6 +350,25 @@ func (r *Reconciler) continuousDefinitions(ctx context.Context) ([]Definition, m
 			spec, specErr = r.resolveTarget(ctx, &def, spec)
 			if specErr != nil {
 				return nil, nil, specErr
+			}
+			/* And the SAME parse every agent applies, before the push rather than after.
+			   An agent that cannot parse a spec drops it with an agent-local WARN; nothing reached
+			   the controller, nothing reached the Console, and the definition kept its "enabled"
+			   badge while producing no result on any node. Running the parser here turns that into a
+			   counted skip with a reason, next to the two skips this loop already reports. */
+			if _, perr := checker.ParseExternalSpec(&checker.ExternalSpecInput{
+				DefinitionID: spec.DefinitionID,
+				Name:         spec.Target.Name,
+				Address:      spec.Target.Address,
+				Port:         spec.Target.Port,
+				CheckType:    spec.CheckType,
+				Interval:     time.Duration(spec.IntervalNs),
+				Timeout:      time.Duration(spec.TimeoutNs),
+				ParamsJSON:   spec.Params,
+			}); perr != nil {
+				r.skip(&def, skipUnrunnable,
+					"checks: reconcile: skipping continuous definition, no agent can parse it: "+perr.Error())
+				continue
 			}
 			specs[def.ID] = spec
 		}

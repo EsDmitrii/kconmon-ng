@@ -214,13 +214,17 @@ func TestWSRevalidatorRepublishesTheSubjectSoTheTopicGateNarrows(t *testing.T) {
 		t.Fatalf("setup: the wide role was refused the topology topic: %v", err)
 	}
 
-	// The admin swaps the binding for a narrower role.
+	// The admin swaps the binding for a narrower role. The CONNECTION survives -- the subject still
+	// holds events:read -- but the topic it no longer has must stop being admitted.
 	roles.set([]string{"narrow"})
-	if err := revalidate(); err == nil {
-		t.Error("a role change left the socket open; its already-subscribed topics are not re-gated by anything")
+	if err := revalidate(); err != nil {
+		t.Errorf("the socket was closed over a change that touched one topic: %v", err)
 	}
 	if err := authorize(ws.TopicTopology); err == nil {
 		t.Error("the topic gate still admits topology after the role was narrowed")
+	}
+	if err := authorize(ws.TopicLive); err != nil {
+		t.Errorf("a topic the subject still holds was refused: %v", err)
 	}
 }
 
@@ -265,10 +269,14 @@ func TestWSRevalidatorFollowsPermissionsNotRoleNames(t *testing.T) {
 		t.Fatalf("setup: a live subject fails revalidation: %v", err)
 	}
 
-	// The ROLE is edited in place: same name, fewer permissions.
+	// The ROLE is edited in place: same name, fewer permissions. The gate must follow the
+	// permissions even though the name list did not move.
 	policy.Reload(map[string][]authz.Permission{"editable": {authz.PermEventsRead}})
-	if err := revalidate(); err == nil {
-		t.Error("a role edited in place left the socket open; its already-subscribed topics are not re-gated by anything")
+	if err := revalidate(); err != nil {
+		t.Errorf("the socket was closed over a permission change it can survive: %v", err)
+	}
+	if err := s.wsTopicAuthorizer(cell)(ws.TopicTopology); err == nil {
+		t.Error("the topic gate still admits topology after the role lost topology:read")
 	}
 }
 

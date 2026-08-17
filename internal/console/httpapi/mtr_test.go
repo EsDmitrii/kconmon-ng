@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -70,15 +71,41 @@ func (f *fakeMTRStore) ListPathTraces(_ context.Context, filter store.TraceFilte
 	return store.TracePage{Traces: out}, nil
 }
 
-func (f *fakeMTRStore) ListMTRDestinations(context.Context, int) ([]store.MTRDestination, error) {
+func (f *fakeMTRStore) ListMTRDestinations(_ context.Context, limit int, cursor string) (store.MTRDestinationPage, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.destsErr != nil {
-		return nil, f.destsErr
+		return store.MTRDestinationPage{}, f.destsErr
 	}
-	out := make([]store.MTRDestination, len(f.dests))
-	copy(out, f.dests)
-	return out, nil
+	/* The fake PAGES, because the real store does: a double that hands back everything regardless of
+	   limit and cursor cannot show whether the handler walks the listing or silently truncates it. */
+	sorted := make([]store.MTRDestination, len(f.dests))
+	copy(sorted, f.dests)
+	slices.SortFunc(sorted, func(a, b store.MTRDestination) int {
+		if c := strings.Compare(a.SourceNode, b.SourceNode); c != 0 {
+			return c
+		}
+		return strings.Compare(a.Destination, b.Destination)
+	})
+	start := 0
+	if cursor != "" {
+		curSrc, curDst, _, err := store.DecodePairCursor(cursor)
+		if err != nil {
+			return store.MTRDestinationPage{}, err
+		}
+		for start < len(sorted) &&
+			(sorted[start].SourceNode < curSrc ||
+				(sorted[start].SourceNode == curSrc && sorted[start].Destination <= curDst)) {
+			start++
+		}
+	}
+	end := min(start+limit, len(sorted))
+	page := store.MTRDestinationPage{Destinations: sorted[start:end]}
+	if end < len(sorted) {
+		last := sorted[end-1]
+		page.NextCursor = store.EncodePairCursor(last.SourceNode, last.Destination)
+	}
+	return page, nil
 }
 
 func (f *fakeMTRStore) ListPathSnapshots(_ context.Context, filter store.SnapshotFilter) (store.SnapshotPage, error) { //nolint:gocritic // hugeParam: test double mirrors the store signature

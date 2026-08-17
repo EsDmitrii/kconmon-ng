@@ -170,10 +170,21 @@ func (h *reconcileHarness) addContinuous(id, checkType, selection string) {
 	h.st.schedules = append(h.st.schedules, store.Schedule{
 		ID: "sched-" + id, DefinitionID: id, Kind: "continuous", Enabled: true,
 	})
+	/* The destination and params MATCH the check type, because the agent's parser demands it and the
+	   reconciler now runs that parser before pushing. A fixture that gave every check type
+	   "api.example.com:443" and `{}` was more lenient than any real agent: an http spec built that
+	   way is dropped by every one of them. */
+	address, params := "api.example.com:443", json.RawMessage(`{}`)
+	switch checkType {
+	case "http":
+		address = "https://api.example.com/healthz"
+	case "dns":
+		params = json.RawMessage(`{"query":"api.example.com"}`)
+	}
 	h.st.definitions[id] = store.Definition{
 		ID: id, Name: "def-" + id, SourceSelection: selection,
-		DestinationKind: "adhoc", DestinationAddress: "api.example.com:443",
-		CheckType: checkType, Plane: "pod", Params: json.RawMessage(`{}`), Enabled: true,
+		DestinationKind: "adhoc", DestinationAddress: address,
+		CheckType: checkType, Plane: "pod", Params: params, Enabled: true,
 	}
 }
 

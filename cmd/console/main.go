@@ -114,6 +114,28 @@ func (r roleResolver) RolesFor(ctx context.Context, s authz.Subject) ([]string, 
 // it matches the frontend's MATRIX_POLL_MS/TOPOLOGY_POLL_MS (both 15s).
 const pushInterval = 15 * time.Second
 
+/*
+drainConsole runs shutdown's two halves in the ONE order that works: the in-flight runs first, the
+realtime pipeline they publish onto second.
+
+It exists as a function so the order can be tested. It was the other way round once, and the hub was
+gone by the time the runs finished: every cancelled run's execute() waited on a relay counter for a
+topic closeAllClients had already reaped, so TopicSeq answered 0, the target was unreachable by
+construction, and each run spun the full relay timeout before logging a WARN blaming the bus for
+dropping frames that had all been delivered. Every rolling update produced that false alarm and spent
+a fifth of the finish budget busy-waiting. In this order the terminal run.finished frame also reaches
+a client that is still attached, which is what it is for.
+*/
+func drainConsole(finishRuns, drainRealtime func()) {
+	slog.Info("http server stopped, finishing in-flight runs")
+	finishRuns()
+	slog.Info("draining realtime pipeline")
+	drainRealtime()
+}
+
+// runDrainBudget bounds how long shutdown waits for in-flight runs to reach their own FinishRun.
+const runDrainBudget = 10 * time.Second
+
 func main() {
 	configPath := os.Getenv("KCONMON_NG_CONSOLE_CONFIG")
 	if configPath == "" {
@@ -672,30 +694,27 @@ func main() {
 
 	runErr := srv.Run(rootCtx)
 
-	slog.Info("http server stopped, finishing in-flight runs")
-	/* RUNS FIRST, then the realtime pipeline they publish onto.
-	   This used to be the other way round, and the hub was gone by the time the runs finished: every
-	   cancelled run's execute() waited on a relay counter for a topic closeAllClients had already
-	   reaped, so TopicSeq answered 0, the target was unreachable by construction, and each run spun
-	   the full 2 s relay timeout before logging a WARN blaming the bus for dropping frames that had
-	   all been delivered. Every rolling update produced that false alarm and spent a fifth of the
-	   10 s finish budget busy-waiting. In this order the terminal run.finished frame also reaches a
-	   client that is still attached, which is what it is for. */
-	if runner != nil {
-		/* CANCEL first, then wait. Waiting without cancelling was dead time: a run's context is
-		   derived from Background with its own deadline, so nothing about shutdown reached it, and
-		   anything longer than the budget below could not finish inside it. The process then exited
-		   mid-run and left the row in 'running' for the reaper to correct tens of minutes later — on
-		   every rolling update. Cancelled runs reach their own FinishRun with status 'cancelled' and
-		   real counters, which is what the budget is for. */
-		runner.CancelAll()
-		waitCtx, waitCancel := context.WithTimeout(context.Background(), 10*time.Second)
-		runner.Wait(waitCtx)
-		waitCancel()
-	}
-	// It covers ONLY the components spawned above (hub.Run, ingester, pushers, relay).
-	slog.Info("draining realtime pipeline")
-	stopBackground()
+	drainConsole(
+		func() {
+			if runner == nil {
+				return
+			}
+			/* CANCEL first, then wait. Waiting without cancelling was dead time: a run's context is
+			   derived from Background with its own deadline, so nothing about shutdown reached it,
+			   and anything longer than the budget below could not finish inside it. The process then
+			   exited mid-run and left the row in 'running' for the reaper to correct tens of minutes
+			   later — on every rolling update. Cancelled runs reach their own FinishRun with status
+			   'cancelled' and real counters, which is what the budget is for. */
+			runner.CancelAll()
+			waitCtx, waitCancel := context.WithTimeout(context.Background(), runDrainBudget)
+			runner.Wait(waitCtx)
+			waitCancel()
+		},
+		func() {
+			// It covers ONLY the components spawned above (hub.Run, ingester, pushers, relay).
+			stopBackground()
+		},
+	)
 	wg.Wait()
 	closeBus()
 	// The in-process KV runs its own TTL-sweep goroutine; the Valkey-backed

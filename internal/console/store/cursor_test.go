@@ -217,3 +217,35 @@ func TestDecodeRunCursorNeverPanics(t *testing.T) {
 		}()
 	}
 }
+
+/*
+ * The pair cursor round-trips any name the store accepts, including one carrying the separator.
+ *
+ * A separator-joined cursor decodes to the WRONG pair when a field contains it, which silently pages
+ * from somewhere else in the listing.
+ */
+func TestPairCursorRoundTripsFieldsContainingTheSeparator(t *testing.T) {
+	for _, c := range [][2]string{
+		{"node-a", "10.0.0.1"},
+		{"node|a", "dest|b"},
+		{"", ""},
+		{"node-a", ""},
+		{"", "dest"},
+	} {
+		enc := EncodePairCursor(c[0], c[1])
+		src, dst, ok, err := DecodePairCursor(enc)
+		if err != nil || !ok {
+			t.Fatalf("DecodePairCursor(%q) = %v, %v, %v, %v", enc, src, dst, ok, err)
+		}
+		if src != c[0] || dst != c[1] {
+			t.Errorf("round trip of %q/%q gave %q/%q", c[0], c[1], src, dst)
+		}
+	}
+
+	if _, _, ok, err := DecodePairCursor(""); ok || err != nil {
+		t.Errorf("empty cursor must be the first page, got ok=%v err=%v", ok, err)
+	}
+	if _, _, _, err := DecodePairCursor("!!not-base64!!"); err == nil {
+		t.Error("a malformed cursor must be an error, not a silent reset to page one")
+	}
+}

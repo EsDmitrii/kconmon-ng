@@ -3,6 +3,7 @@ package ws
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strconv"
 	"strings"
 	"sync"
@@ -1370,5 +1371,51 @@ func TestEnvelopesCarryTheHubEpoch(t *testing.T) {
 	got := nextEnvelope(t, c)
 	if got.Epoch == "" || got.Epoch != h.Epoch() {
 		t.Errorf("envelope epoch = %q, want the hub's own %q", got.Epoch, h.Epoch())
+	}
+}
+
+/*
+ * Narrowing a permission must reach the topics a socket is ALREADY on.
+ *
+ * The per-topic gate ran once, at subscribe, and never again: a role narrowed underneath an open
+ * connection left it streaming the very snapshots the REST routes had begun refusing, until the
+ * browser tab closed. Closing the whole connection was the first fix and it was too blunt — it costs
+ * every other topic on that socket a reconnect for a change that touched one of them.
+ */
+func TestRegateDropsOnlyTheTopicsThatAreNoLongerPermitted(t *testing.T) {
+	h, _ := newTestHub(t, cache.NewInProcessBus())
+
+	// The gate reads a mutable set, exactly as the real one reads the connection's current subject.
+	allowed := map[string]bool{TopicLive: true, TopicTopology: true}
+	c := h.register(func(topic string) error {
+		if allowed[topic] {
+			return nil
+		}
+		return errors.New("missing permission: " + topic)
+	})
+
+	h.subscribe(c, TopicLive, 0, "")
+	h.subscribe(c, TopicTopology, 0, "")
+	if !c.topics[TopicLive] || !c.topics[TopicTopology] {
+		t.Fatalf("setup: subscriptions did not take: %v", c.topics)
+	}
+
+	// topology:read is revoked; events:read is not.
+	allowed[TopicTopology] = false
+
+	dropped := h.regate(c)
+	if len(dropped) != 1 || dropped[0] != TopicTopology {
+		t.Fatalf("regate dropped %v, want only %q", dropped, TopicTopology)
+	}
+	if c.topics[TopicTopology] {
+		t.Error("the revoked topic is still subscribed: the socket keeps receiving what the REST route now refuses")
+	}
+	if !c.topics[TopicLive] {
+		t.Error("a topic the subject still holds was dropped: the whole socket paid for one topic's change")
+	}
+
+	// Idempotent: a second pass has nothing left to take.
+	if again := h.regate(c); len(again) != 0 {
+		t.Errorf("second regate dropped %v, want nothing", again)
 	}
 }

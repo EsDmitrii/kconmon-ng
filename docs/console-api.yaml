@@ -951,17 +951,25 @@ paths:
     get:
       operationId: listMTRDestinations
       tags: [observability]
-      summary: Every (source, destination) pair MTR path history knows about.
+      summary: One page of the (source, destination) pairs MTR path history knows about.
       description: >-
-        Unpaged on purpose -- the row count is PAIRS, not traces. A pair with
-        snapshotCount 1 and traceCount 4000 has a stable route.
+        Paged behind an opaque keyset cursor. The row count is PAIRS, not traces
+        -- a pair with snapshotCount 1 and traceCount 4000 has a stable route --
+        but pairs are sources x destinations, so a large fleet still exceeds any
+        single page. Walk `nextCursor` to exhaustion for the whole set; pages are
+        ordered by (sourceNode, destination), and the client sorts for display.
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Cursor"
       responses:
         "200":
-          description: Every known pair, most-recently-traced first.
+          description: One page of pairs, ordered by pair.
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/MTRDestinationList"
+        "400":
+          $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
         "403":
@@ -3307,16 +3315,22 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/MTRDestination"
+        nextCursor:
+          type: string
+          description: >-
+            Opaque keyset cursor for the following page; absent on the last one.
+            Pass it back as `?cursor=` to continue the walk. The cursor is the
+            PAIR, not `lastSeen`: every repeat trace bumps `lastSeen`, so a
+            cursor over it would let a pair jump above the cursor and be skipped
+            from a page it was never on. Pages therefore arrive ordered by
+            (sourceNode, destination) and the client sorts the assembled set for
+            display.
         truncated:
           type: boolean
           description: >-
-            The listing was CUT at `limit`. Pairs are sources x destinations, so
-            a large fleet exceeds any single page: the ones that did not fit are
-            missing from the Explorer entirely and every per-destination
-            snapshot/trace total is short by their counts. The server has always
-            sent this field; it was absent from this schema, so no generated
-            client could read it and the console presented a capped listing as a
-            complete one.
+            More pairs exist than this body carries — the same fact `nextCursor`
+            carries, kept for a client that does not page. Pairs are sources x
+            destinations, so a large fleet exceeds any single page.
       additionalProperties: false
 
     MTRHop:

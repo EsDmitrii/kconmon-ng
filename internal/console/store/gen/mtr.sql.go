@@ -120,10 +120,19 @@ SELECT source_node,
        min(first_seen)::timestamptz AS first_seen,
        max(last_seen)::timestamptz AS last_seen
 FROM mtr_path_snapshots
+WHERE ($1::boolean = false
+       OR (source_node, destination) > ($2::text, $3::text))
 GROUP BY source_node, destination
-ORDER BY max(last_seen) DESC, source_node, destination
-LIMIT $1
+ORDER BY source_node, destination
+LIMIT $4
 `
+
+type ListMTRDestinationsParams struct {
+	HasCursor         bool
+	CursorSource      string
+	CursorDestination string
+	Lim               int32
+}
 
 type ListMTRDestinationsRow struct {
 	SourceNode    string
@@ -140,8 +149,20 @@ type ListMTRDestinationsRow struct {
 // list": a hundred nodes is ten thousand rows, aggregated over the whole snapshot table on every
 // request, materialised in the store and marshalled by the handler, for any caller holding
 // mtr:read. The limit is the caller's, and the handler caps it.
-func (q *Queries) ListMTRDestinations(ctx context.Context, lim int32) ([]ListMTRDestinationsRow, error) {
-	rows, err := q.db.Query(ctx, listMTRDestinations, lim)
+//
+// PAGED on the pair itself, not on last_seen. The pane displays most-recently-traced first, but a
+// keyset cursor over a mutable sort key drops rows -- see ListPathSnapshots below, which spells out
+// the same trap -- and every repeat trace bumps last_seen. (source_node, destination) never changes,
+// so walking it is complete by construction and the caller sorts the assembled set for display.
+// Before this the listing was capped with no way to ask for the rest: the pairs past the cap were
+// missing from the Explorer entirely and every per-destination total was short by their counts.
+func (q *Queries) ListMTRDestinations(ctx context.Context, arg ListMTRDestinationsParams) ([]ListMTRDestinationsRow, error) {
+	rows, err := q.db.Query(ctx, listMTRDestinations,
+		arg.HasCursor,
+		arg.CursorSource,
+		arg.CursorDestination,
+		arg.Lim,
+	)
 	if err != nil {
 		return nil, err
 	}

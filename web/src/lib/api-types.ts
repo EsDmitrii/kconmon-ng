@@ -370,8 +370,8 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * Every (source, destination) pair MTR path history knows about.
-         * @description Unpaged on purpose -- the row count is PAIRS, not traces. A pair with snapshotCount 1 and traceCount 4000 has a stable route.
+         * One page of the (source, destination) pairs MTR path history knows about.
+         * @description Paged behind an opaque keyset cursor. The row count is PAIRS, not traces -- a pair with snapshotCount 1 and traceCount 4000 has a stable route -- but pairs are sources x destinations, so a large fleet still exceeds any single page. Walk `nextCursor` to exhaustion for the whole set; pages are ordered by (sourceNode, destination), and the client sorts for display.
          */
         get: operations["listMTRDestinations"];
         put?: never;
@@ -1375,7 +1375,9 @@ export interface components {
         };
         MTRDestinationList: {
             destinations: components["schemas"]["MTRDestination"][];
-            /** @description The listing was CUT at `limit`. Pairs are sources x destinations, so a large fleet exceeds any single page: the ones that did not fit are missing from the Explorer entirely and every per-destination snapshot/trace total is short by their counts. The server has always sent this field; it was absent from this schema, so no generated client could read it and the console presented a capped listing as a complete one. */
+            /** @description Opaque keyset cursor for the following page; absent on the last one. Pass it back as `?cursor=` to continue the walk. The cursor is the PAIR, not `lastSeen`: every repeat trace bumps `lastSeen`, so a cursor over it would let a pair jump above the cursor and be skipped from a page it was never on. Pages therefore arrive ordered by (sourceNode, destination) and the client sorts the assembled set for display. */
+            nextCursor?: string;
+            /** @description More pairs exist than this body carries — the same fact `nextCursor` carries, kept for a client that does not page. Pairs are sources x destinations, so a large fleet exceeds any single page. */
             truncated?: boolean;
         };
         /** @description One hop of a stored trace. Only `ip` takes part in the dedupe hash; the rest is the payload of the FIRST trace that took this path. */
@@ -3372,14 +3374,19 @@ export interface operations {
     };
     listMTRDestinations: {
         parameters: {
-            query?: never;
+            query?: {
+                /** @description Page size, clamped into [1,500]. An unparseable value is treated as unset. */
+                limit?: components["parameters"]["Limit"];
+                /** @description Opaque keyset cursor from the previous page's nextCursor. Malformed, or minted by another server, is 400. */
+                cursor?: components["parameters"]["Cursor"];
+            };
             header?: never;
             path?: never;
             cookie?: never;
         };
         requestBody?: never;
         responses: {
-            /** @description Every known pair, most-recently-traced first. */
+            /** @description One page of pairs, ordered by pair. */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -3388,6 +3395,7 @@ export interface operations {
                     "application/json": components["schemas"]["MTRDestinationList"];
                 };
             };
+            400: components["responses"]["BadRequest"];
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
             502: components["responses"]["BadGateway"];

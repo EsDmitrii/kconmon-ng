@@ -473,7 +473,7 @@ function DestinationsPane({
 }) {
   const t = useT(mtrDict);
   const query = useQuery({ queryKey: ["mtr", "destinations"], queryFn: getMTRDestinations });
-  const groups = useMemo(() => groupDestinations(query.data?.destinations ?? []), [query.data]);
+  const groups = useMemo(() => groupDestinations(query.data?.items ?? []), [query.data]);
   /* One page of destinations at a time: a fleet that traces everything to
      everything has as many groups as it has nodes. */
   const pager = usePager(groups);
