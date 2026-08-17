@@ -1,18 +1,35 @@
 ## kconmon-ng v2.0.0
 
-> Batteries-included chart and a console that tells the truth about time. The
-> chart now ships its own database operator, cache and dashboards, so a stand
-> comes up from one `helm install`. The Time Machine moved out of the top bar
-> and into each page's own time controls, and the charts pin their axis to the
-> window you asked for rather than to the data that happened to arrive. MTR
-> gained a Runner, path history that reads as a timeline, and external targets.
+> A chart that installs monitoring and nothing else, a console that survives more
+> than one replica, and one that tells the truth about time. The chart no longer
+> ships a database or a cache — point it at the ones you already run. The Time
+> Machine moved out of the top bar and into each page's own time controls, and
+> the charts pin their axis to the window you asked for rather than to the data
+> that happened to arrive. MTR gained a Runner, path history that reads as a
+> timeline, and external targets.
+
+### Breaking
+
+- **The chart no longer installs PostgreSQL or Valkey.** `database.mode`,
+  `database.cnpg.*` and the bundled subcharts are gone: set
+  `database.existingSecret` to a Secret holding a `postgres://` DSN and
+  `redis.existingSecret` to one holding a `redis://` DSN, and any managed
+  instance works — RDS, a StatefulSet, a CloudNativePG cluster you run yourself.
+  Every removed key fails the render with a message naming its replacement
+  (`templates/_migrations.tpl`), so no old value is silently honoured.
+- **`console.database.*` moved to the top-level `database.*`**, and
+  `console.*` keys that described the bundled datastores went with it.
 
 ### Added
 
-- **Chart 2.0.0, batteries included** — the CloudNativePG operator, Valkey and
-  the Grafana dashboards ship as part of the release, and `console.database.mode`
-  gained `cnpg`. A NetworkPolicy set covers every component, fail-closed on
-  external egress.
+- **Chart 2.0.0, templates split per component** — agent, controller, console,
+  shared and observability each own their directory, with a NetworkPolicy set
+  covering every component, fail-closed on external egress. Render-time guards
+  refuse a port collision, an OIDC `redirectURL` the console would not start on,
+  and more than one console replica without a shared cache.
+- **The console scales past one replica** — sessions, the fixed-window rate-limit
+  counters and the realtime fan-out live in the Redis-compatible server, and the
+  controller elects a leader so exactly one replica drives the reconcilers.
 - **MTR Runner and path history** — start a trace from the Explorer itself,
   with a settable cadence and duration; every distinct route the fleet has taken
   is kept, diffed and drawn on a timeline of when it changed.
@@ -48,7 +65,43 @@
 ### Fixed
 
 - WebSocket topics are authorized per topic: `events:read` no longer carries the
-  topology and matrix snapshots that `topology:read` and `matrix:read` gate.
+  topology and matrix snapshots that `topology:read` and `matrix:read` gate, and
+  a permission taken away reaches a socket that is already open — the topics it
+  may no longer have are dropped, the rest of the connection is left alone.
+- **The audit row describes the mutation that happened.** A body could name one
+  thing for the handler and another for the audit log by spelling a key in a
+  different case, and a value carrying a NUL made the whole row unwritable — in
+  both directions the caller chose whether their own privileged action was
+  recorded. The extraction now matches keys the way `encoding/json` matches
+  struct fields, and is bounded before it is decoded, so a wide body on the
+  public login route can no longer take the replica past its memory limit.
+- **A broken alert rule no longer freezes the whole bundle.** Editing a deployed
+  rule into PromQL the apiserver rejects used to stop every other rule from
+  being applied, while the API answered 2xx and Prometheus kept evaluating the
+  stale set. The quarantine now keys on rendered content rather than rule ids,
+  offers each suspect to the cluster on its own, and removes the object only
+  when every rule was offered and every one refused.
+- **`auth.mode=anonymous` is not exempt from CSRF.** Any page an operator's
+  browser visited could POST into a console kept off the internet; a
+  cross-origin write is now refused, while a script that sends no `Origin` is
+  unaffected.
+- **The node-local HTTP checker verifies certificates.** An expired certificate,
+  one issued for another hostname or an interceptor's CA all used to pass, so an
+  https check could not fail on the condition it was added to notice; opt out per
+  target with `insecureSkipVerify`.
+- **External metrics separate the checks on one target** — the series carry
+  `check_type`, so an icmp and a tcp check on the same target no longer average
+  each other's failures away under the `ExternalChecksFailing` rule.
+- **A check no agent could run is refused when it is written**, instead of being
+  dropped by every agent with nothing but a log line while the console listed it
+  as enabled.
+- **The MTR destination listing is complete.** It is paged behind a keyset
+  cursor rather than capped, so no pair is missing from the Explorer and no
+  per-destination total is short.
+- A subscriber that stops reading its peer-update stream is torn down rather than
+  holding a controller goroutine and its connection slot until TCP notices.
+- Shutdown finishes in-flight runs before tearing down the pipeline they publish
+  onto, so a rolling update no longer logs dropped frames that were delivered.
 - Every request body is capped, so one oversized POST can no longer take a
   console replica past its memory limit.
 - The OIDC callback binds its `state` to the browser that started the flow.
