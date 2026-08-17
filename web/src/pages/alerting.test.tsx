@@ -1288,3 +1288,30 @@ describe("the rule builder asks before discarding unsaved work (#23)", () => {
     await waitFor(() => expect(screen.queryByLabelText("Name")).toBeNull());
   });
 });
+
+/* ── the owner's rule: every list on every page is paged ────────────────── */
+
+describe("the managed rules list is PAGED", () => {
+  const rules = (n: number) =>
+    Array.from({ length: n }, (_, i) =>
+      ruleRow({ id: `rule-${String(i).padStart(3, "0")}`, name: `Rule${String(i).padStart(3, "0")}` }),
+    );
+
+  it("shows one page-worth and counts it against the whole rule set", async () => {
+    renderPage({ permissions: VIEWER, rules: rules(70), foreign: [] });
+
+    expect(await screen.findByText("Rule000")).toBeInTheDocument();
+    expect(screen.getByTestId("pager-showing")).toHaveTextContent("Showing 10 of 70 rules");
+    expect(screen.queryByText("Rule060")).not.toBeInTheDocument();
+  });
+
+  it("reaches the rules past the first page, in the order the server sent them", async () => {
+    renderPage({ permissions: VIEWER, rules: rules(70), foreign: [] });
+    expect(await screen.findByText("Rule000")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Next page" }));
+    expect(screen.getByText("Rule010")).toBeInTheDocument();
+    expect(screen.getByTestId("pager-showing")).toHaveTextContent("Showing 10 of 70 rules");
+    expect(screen.getByTestId("pager-page")).toHaveTextContent("Page 2 of 7");
+  });
+});

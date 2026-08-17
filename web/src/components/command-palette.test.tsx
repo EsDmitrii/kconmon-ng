@@ -11,6 +11,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testi
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CommandPalette } from "@/components/command-palette";
 import { ThemeProvider } from "@/components/theme-provider";
+import { TimeMachineControl } from "@/components/timemachine-control";
 import { openCommandPalette } from "@/lib/commands";
 import { LocaleProvider, LOCALE_STORAGE_KEY, type Locale } from "@/lib/i18n";
 import { TimeMachineProvider } from "@/lib/timemachine";
@@ -44,7 +45,12 @@ function stubFetch(permissions: string[]) {
 async function renderPalette({
   permissions = ALL_PERMISSIONS,
   locale,
-}: { permissions?: string[]; locale?: Locale } = {}) {
+  /* Whether the page on screen offers a Time Machine trigger. True is the
+     time-aware page (Overview, Matrix, Explore…); false is Targets, Alerting,
+     Settings and the 404, which do not opt in — the palette's picker command
+     has nothing to click there and must not be offered. */
+  timeMachine = true,
+}: { permissions?: string[]; locale?: Locale; timeMachine?: boolean } = {}) {
   stubFetch(permissions);
   /* Seeded BEFORE the render: LocaleProvider reads the stored choice in a useState initialiser. */
   if (locale) localStorage.setItem(LOCALE_STORAGE_KEY, locale);
@@ -54,6 +60,7 @@ async function renderPalette({
         <LocaleProvider>
           <TimeMachineProvider>
             <CommandPalette />
+            {timeMachine ? <TimeMachineControl /> : null}
             <input aria-label="a page field" />
             <Outlet />
           </TimeMachineProvider>
@@ -534,5 +541,47 @@ describe("in Russian, while the Time Machine is engaged", () => {
     fireEvent.change(ruInput(), { target: { value: "вернуться" } });
     fireEvent.keyDown(ruInput(), { key: "Enter" });
     expect(new URLSearchParams(window.location.search).get("at")).toBeNull();
+  });
+});
+
+/*
+The picker command CLICKS a control, and the control is opt-in per page: Targets, Alerting,
+Settings and the 404 do not honour ?at= and carry none. Offering the command there answered a
+keystroke with nothing at all — no picker, no message, and the palette had already closed and
+taken the focus with it (owner report).
+*/
+describe("Time Machine picker entry follows the page's own control", () => {
+  it("is offered on a page that has the control", async () => {
+    await renderPalette();
+    pressK();
+    expect(optionTitles()).toContain("Toggle Time Machine — pick a time…");
+  });
+
+  it("is absent on a page that has none, rather than opening nothing", async () => {
+    await renderPalette({ timeMachine: false });
+    pressK();
+    expect(optionTitles()).not.toContain("Toggle Time Machine — pick a time…");
+  });
+
+  /* Return to Live calls the context directly, so it keeps working everywhere —
+     including the pages that never offer the picker. */
+  it("still offers Return to Live there while engaged", async () => {
+    window.history.pushState({}, "", "/?at=2026-08-07T10:00:00Z");
+    await renderPalette({ timeMachine: false });
+    pressK();
+    expect(optionTitles()).toContain("Return to Live");
+  });
+
+  /* The answer is re-read on every open: one console session walks between
+     pages that have the control and pages that do not. */
+  it("re-reads the page on each open rather than remembering the first answer", async () => {
+    await renderPalette({ timeMachine: false });
+    pressK();
+    expect(optionTitles()).not.toContain("Toggle Time Machine — pick a time…");
+
+    cleanup();
+    await renderPalette();
+    pressK();
+    expect(optionTitles()).toContain("Toggle Time Machine — pick a time…");
   });
 });

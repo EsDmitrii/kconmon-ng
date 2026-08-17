@@ -1,4 +1,4 @@
-import { fmtRttNs, fmtTime, isPlaceholderHop, ScrollableX, shortHash } from "@/components/mtr-hop-table";
+import { fmtRttNs, fmtTime, isPlaceholderHop, shortHash } from "@/components/mtr-hop-table";
 import { useLocale, useT, type Translate } from "@/lib/i18n";
 import { mtrDetailDict, type MTRDetailKey } from "@/lib/i18n/dict/mtr-detail";
 import type { MTRHop, PathSnapshot } from "@/lib/types";
@@ -52,7 +52,11 @@ function lcsAnchors(a: MTRHop[], b: MTRHop[]): [number, number][] {
 }
 
 /** diffPaths aligns two snapshots' hop lists and says what happened between them. */
-export function diffPaths(a: MTRHop[], b: MTRHop[]): DiffRow[] {
+export function diffPaths(aHops: MTRHop[], bHops: MTRHop[]): DiffRow[] {
+  /* Both sides are LISTS or they are nothing; a `null` hops field reaching the
+     alignment threw out of the whole page (hostile-QA probe E). */
+  const a = Array.isArray(aHops) ? aHops : [];
+  const b = Array.isArray(bHops) ? bHops : [];
   const rows: DiffRow[] = [];
   let ai = 0;
   let bi = 0;
@@ -70,7 +74,11 @@ export function diffPaths(a: MTRHop[], b: MTRHop[]): DiffRow[] {
 
   for (const [x, y] of lcsAnchors(a, b)) {
     gap(x, y);
-    rows.push({ kind: "same", aHop: a[x], bHop: b[y], rttDeltaNs: b[y].rttNs - a[x].rttNs });
+    /* Only a delta between two REAL readings is a delta; subtracting an absent
+       RTT produced NaN, which fmtRttDeltaNs then had to print as an em dash
+       anyway — this says the same thing one step earlier. */
+    const both = Number.isFinite(b[y].rttNs) && Number.isFinite(a[x].rttNs);
+    rows.push({ kind: "same", aHop: a[x], bHop: b[y], rttDeltaNs: both ? b[y].rttNs - a[x].rttNs : undefined });
     ai = x + 1;
     bi = y + 1;
   }
@@ -79,13 +87,71 @@ export function diffPaths(a: MTRHop[], b: MTRHop[]): DiffRow[] {
   return rows;
 }
 
+/* ── the change, in words ────────────────────────────────────────────────── */
+
+/** What one path-to-path change WAS, structured so the sentence stays in the dictionary. */
+export type PathChangeKind = "same" | "changed" | "added" | "removed" | "several";
+
+export interface PathChangeSummary {
+  kind: PathChangeKind;
+  /** 1-based hop position, present only when a single hop accounts for it. */
+  hop?: number;
+  from?: string;
+  to?: string;
+  /** How many hops moved in all. */
+  total: number;
+}
+
+/**
+ * summarisePathChange turns two hop lists into a sentence a reader can act on.
+ *
+ * The Explorer badged a row "path changed" and put two twelve-character hashes
+ * beside it, which says that something moved and nothing about what (owner:
+ * «ничего не понятно»). An MTR exists to show a ROUTE, so a route change is
+ * described as one: which hop, from what, to what.
+ *
+ * It reads diffPaths rather than re-deriving an alignment, so the words and the
+ * diff table can never disagree about what happened. RTT is deliberately not a
+ * change: the hash is over the hop ADDRESSES, and a slower hop is the same hop.
+ */
+export function summarisePathChange(a: MTRHop[], b: MTRHop[]): PathChangeSummary {
+  const moved = diffPaths(a, b).filter((r) => {
+    if (r.kind === "same") return false;
+    /* A hop that did not answer is an ABSENCE, not an address, so diffPaths
+       refuses to anchor on it (correctly — two stars are not evidence of the
+       same router). For a SENTENCE, though, "hop 2: * → *" describes no
+       observable change and is exactly the noise this function exists to
+       replace. The diff table keeps its own, stricter reading. */
+    const bothSilent =
+      r.aHop !== undefined &&
+      r.bHop !== undefined &&
+      isPlaceholderHop(r.aHop.ip) &&
+      isPlaceholderHop(r.bHop.ip);
+    return !bothSilent;
+  });
+  if (moved.length === 0) return { kind: "same", total: 0 };
+  if (moved.length > 1) return { kind: "several", total: moved.length };
+
+  const [row] = moved;
+  const hop = row.bHop?.number ?? row.aHop?.number;
+  if (row.kind === "changed") {
+    return { kind: "changed", hop, from: row.aHop?.ip, to: row.bHop?.ip, total: 1 };
+  }
+  if (row.kind === "added") return { kind: "added", hop, to: row.bHop?.ip, total: 1 };
+  return { kind: "removed", hop, from: row.aHop?.ip, total: 1 };
+}
+
 /** fmtRttDeltaNs is fmtRttNs's signed twin: the sign is the whole message, so
  *  a slower hop reads "+2.0ms" and never "2.0ms". Zero keeps its unsigned form
  *  — "+0.0ms" would claim a direction the number does not have. */
 export function fmtRttDeltaNs(ns: number | undefined): string {
-  if (ns === undefined || Number.isNaN(ns)) return "—";
-  const ms = ns / 1e6;
-  return `${ms > 0 ? "+" : ""}${ms.toFixed(1)}ms`;
+  if (typeof ns !== "number" || !Number.isFinite(ns)) return "—";
+  const shown = (ns / 1e6).toFixed(1);
+  /* A delta of a few microseconds ROUNDS to nothing, and "-0.0ms" is the same
+     claim about a direction that "+0.0" was already refused for (hostile-QA
+     probe N). Read the sign off the number that will actually be printed. */
+  if (Number(shown) === 0) return "0.0ms";
+  return `${ns > 0 ? "+" : ""}${shown}ms`;
 }
 
 /* ── the table ──────────────────────────────────────────────────────────── */
@@ -122,12 +188,18 @@ const KIND_TITLE_KEY: Record<DiffKind, MTRDetailKey> = {
 };
 
 function HopCell({ hop }: { hop: MTRHop | undefined }) {
-  if (!hop) return <td className="px-2 py-1.5 text-muted-foreground">—</td>;
+  if (!hop) return <td className="px-1.5 py-1.5 text-muted-foreground">—</td>;
   return (
-    <td className="px-2 py-1.5">
-      <span className="nums font-mono text-muted-foreground">{hop.number}</span>{" "}
-      <span className="nums font-mono">{isPlaceholderHop(hop.ip) ? "*" : hop.ip}</span>{" "}
-      <span className="nums text-muted-foreground">{fmtRttNs(hop.rttNs)}</span>
+    /* Address over RTT rather than beside it: the two columns have to sit side
+       by side inside the narrowest pane on the page, and a single line of
+       "2 10.244.9.17 1.2ms" twice over is what used to push the newer path off
+       the right edge. The address is the thing being compared, so it leads. */
+    <td className="px-1.5 py-1.5 align-top">
+      <span className="flex items-baseline gap-1">
+        <span className="nums font-mono text-[10px] text-muted-foreground">{hop.number}</span>
+        <span className="nums min-w-0 break-all font-mono">{isPlaceholderHop(hop.ip) ? "*" : hop.ip}</span>
+      </span>
+      <span className="nums block text-[10px] text-muted-foreground">{fmtRttNs(hop.rttNs)}</span>
     </td>
   );
 }
@@ -142,7 +214,7 @@ function deltaClass(ns: number | undefined): string {
 function ColumnHeader({ label, snapshot }: { label: string; snapshot: PathSnapshot }) {
   const { locale } = useLocale();
   return (
-    <th scope="col" className="px-2 py-1.5 text-left font-medium">
+    <th scope="col" className="px-1.5 py-1.5 text-left font-medium">
       <span className="block text-[11px] uppercase tracking-wide text-muted-foreground">{label}</span>
       <span className="nums font-mono text-xs" title={snapshot.pathHash}>
         {shortHash(snapshot.pathHash)}
@@ -158,6 +230,9 @@ function ColumnHeader({ label, snapshot }: { label: string; snapshot: PathSnapsh
  */
 export function PathDiff({ a, b }: { a: PathSnapshot; b: PathSnapshot }) {
   const t: Translate<MTRDetailKey> = useT(mtrDetailDict);
+  /* diffPaths tolerates a hops field that is not a list; the caller — pages/
+     mtr.tsx's DiffPane — is the one that catches the pair with nothing to
+     align at all and says so in words instead of drawing an empty table. */
   const rows = diffPaths(a.hops, b.hops);
   const identical = rows.length > 0 && rows.every((r) => r.kind === "same");
 
@@ -165,19 +240,30 @@ export function PathDiff({ a, b }: { a: PathSnapshot; b: PathSnapshot }) {
     /* The four-column diff has a min-width and lives in the narrowest pane, so
        it is the likeliest table in the console to run off its card — same
        affordance as the hop table (QA scope 4, finding #6). */
-    <ScrollableX className="mt-4">
+    <div className="mt-4">
       {identical ? (
         <p className="mb-3 text-xs leading-relaxed text-muted-foreground">{t("diff.identical")}</p>
       ) : null}
-      <table aria-label={t("diff.aria")} className="w-full min-w-md text-xs">
+      {/* The KEY the marks always needed. `~`, `+` and `−` carried a title and
+          an aria-label, which is to say they were legible to a screen reader and
+          to nobody looking at the screen (owner: «ничего не понятно»). */}
+      <ul aria-label={t("diff.legend")} className="mb-2 flex flex-wrap gap-x-4 gap-y-1 text-[11px]">
+        {(["changed", "added", "removed"] as const).map((kind) => (
+          <li key={kind} className="flex items-center gap-1.5 text-muted-foreground">
+            <span aria-hidden="true" className={cn("font-mono", KIND_CLASS[kind])}>{KIND_MARK[kind]}</span>
+            {t(KIND_KEY[kind])}
+          </li>
+        ))}
+      </ul>
+      <table aria-label={t("diff.aria")} className="w-full text-xs">
         <thead>
           <tr className="border-b border-border align-bottom">
-            <th scope="col" className="w-6 px-2 py-1.5 text-left font-medium">
+            <th scope="col" className="w-5 px-1.5 py-1.5 text-left font-medium">
               <span className="sr-only">{t("diff.change")}</span>
             </th>
             <ColumnHeader label={t("diff.older")} snapshot={a} />
             <ColumnHeader label={t("diff.newer")} snapshot={b} />
-            <th scope="col" className="px-2 py-1.5 text-right font-medium">
+            <th scope="col" className="px-1.5 py-1.5 text-right font-medium">
               Δ RTT
             </th>
           </tr>
@@ -185,7 +271,7 @@ export function PathDiff({ a, b }: { a: PathSnapshot; b: PathSnapshot }) {
         <tbody className="divide-y divide-border">
           {rows.map((row, i) => (
             <tr key={i} className={row.kind === "same" ? undefined : "bg-surface-2/40"}>
-              <td className="px-2 py-1.5">
+              <td className="px-1.5 py-1.5 align-top">
                 <span
                   aria-label={t(KIND_KEY[row.kind])}
                   title={t(KIND_TITLE_KEY[row.kind])}
@@ -196,13 +282,13 @@ export function PathDiff({ a, b }: { a: PathSnapshot; b: PathSnapshot }) {
               </td>
               <HopCell hop={row.aHop} />
               <HopCell hop={row.bHop} />
-              <td className={cn("nums px-2 py-1.5 text-right", deltaClass(row.rttDeltaNs))}>
+              <td className={cn("nums px-1.5 py-1.5 align-top text-right", deltaClass(row.rttDeltaNs))}>
                 {fmtRttDeltaNs(row.rttDeltaNs)}
               </td>
             </tr>
           ))}
         </tbody>
       </table>
-    </ScrollableX>
+    </div>
   );
 }

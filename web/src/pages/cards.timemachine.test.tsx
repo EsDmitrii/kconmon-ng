@@ -114,11 +114,19 @@ describe("RecentChanges engaged at t", () => {
     expect(rec.eventQueries[0].get("to")).toBe(AT_ISO);
   });
 
-  it("states the cut where the rows are", async () => {
+  /* The stamp obeys the console's HOUSE CLOCK, which is 24-hour (lib/utils' own rule).
+     This used to assert a bare toLocaleString(), i.e. the locale's default — and that default is
+     12-hour in en-US, so the rail header read "8/17/2026, 12:30:00 PM" directly above rows stamped
+     "11:48:27". At night the two notations collide on the same hour outright, and the reader has to
+     work out which convention each line is using. The assertion follows the rule now, not the
+     default. */
+  it("states the cut where the rows are, on the console's own 24-hour clock", async () => {
     window.history.pushState({}, "", `/nodes/node-a?at=${AT}`);
     stubFetch();
     renderCard(<RecentChanges scope="node-a" />);
-    await screen.findByText(`up to ${new Date(AT).toLocaleString()}`);
+    await screen.findByText(`up to ${new Date(AT).toLocaleString(undefined, { hour12: false })}`);
+    // And no AM/PM anywhere in the rail, which is the property that actually matters.
+    expect(screen.queryByText(/\b(AM|PM)\b/)).toBeNull();
   });
 
   it("stops listening to the socket, so the present cannot trickle in", async () => {

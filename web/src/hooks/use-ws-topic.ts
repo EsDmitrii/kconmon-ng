@@ -58,6 +58,12 @@ export function useWsTopic<T>(topic: string, opts?: { enabled?: boolean }): WsTo
     const off = ws.subscribe<T>(topic, (env: WsEnvelope<T>) => {
       if (env.type === "error") {
         console.warn("console websocket: server rejected topic", topic, env.data);
+        /* The socket is open, but nothing will ever arrive on THIS topic, so
+           reporting it as connected handed the caller a green Live badge over a
+           view whose polling it had already switched off. A reconnect
+           re-subscribes and onStateChange flips this back on `open`, so a
+           transient refusal still recovers. */
+        setConnected(false);
         return;
       }
       setValue({ topic, data: env.data, seq: env.seq });

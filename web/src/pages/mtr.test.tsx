@@ -4,7 +4,16 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { ThemeProvider } from "@/components/theme-provider";
 import { LOCALE_STORAGE_KEY, LocaleProvider, type Locale } from "@/lib/i18n";
 import { TimeMachineProvider } from "@/lib/timemachine";
-import { MTRPage, groupDestinations, pathChangeFlags, shortHash, toggleCompare } from "./mtr";
+import {
+  MTRPage,
+  deepLinkDestination,
+  deepLinkSource,
+  destinationPage,
+  groupDestinations,
+  pathChangeFlags,
+  shortHash,
+  toggleCompare,
+} from "./mtr";
 
 // Same reason as target-card.test.tsx: echarts.init() needs a canvas context
 // jsdom does not have. The trend's DATA is asserted in
@@ -117,6 +126,8 @@ function renderPage(
      *  test can make page two depend on the cursor it was handed. */
     onSnapshots?: (qs: URLSearchParams) => Response;
     onSnapshot?: (id: string, qs: URLSearchParams) => Response;
+    /** GET /api/v1/mtr/snapshots/{id}/traces — the individual traces behind one route. */
+    onTraces?: (id: string, qs: URLSearchParams) => Response;
     onRun?: (body: unknown) => Response;
     /** Mounts a <LocaleProvider> above the page. Absent — every case but the ru
      *  smoke pin at the bottom of this file — there is no provider at all,
@@ -125,6 +136,8 @@ function renderPage(
     /** RFC 3339 instant to engage the Time Machine at, through the URL — the
      *  same seam pages/diagnostics.test.tsx uses. */
     at?: string;
+    /** The ?destination= a shared link carries, through the same URL. */
+    destination?: string;
   } = {},
 ) {
   const {
@@ -138,12 +151,17 @@ function renderPage(
     onDestinations,
     onSnapshots,
     onSnapshot,
+    onTraces,
     onRun,
     locale,
     at,
+    destination: linked,
   } = opts;
   if (locale !== undefined) localStorage.setItem(LOCALE_STORAGE_KEY, locale);
-  window.history.pushState({}, "", at ? `/mtr?at=${at}` : "/mtr");
+  const qs = new URLSearchParams();
+  if (at) qs.set("at", at);
+  if (linked) qs.set("destination", linked);
+  window.history.pushState({}, "", qs.size > 0 ? `/mtr?${qs}` : "/mtr");
   const calls: Call[] = [];
 
   const fetchMock = vi.fn((url: string, init?: RequestInit) => {
@@ -170,7 +188,14 @@ function renderPage(
       if (onRun) return Promise.resolve(onRun(body));
       return Promise.resolve(json({ id: "run-1" }, { status: 202 }));
     }
-    // Detail before list: the detail path is a longer path under the same prefix.
+    // Traces before detail before list: each is a longer path under the same prefix.
+    if (href.startsWith("/api/v1/mtr/snapshots/") && href.split("?")[0].endsWith("/traces")) {
+      const [path, query = ""] = href.slice("/api/v1/mtr/snapshots/".length).split("?");
+      const id = decodeURIComponent(path.slice(0, -"/traces".length));
+      const qs = new URLSearchParams(query);
+      if (onTraces) return Promise.resolve(onTraces(id, qs));
+      return Promise.resolve(json({ traces: [], nextCursor: "", scanned: 0 }));
+    }
     if (href.startsWith("/api/v1/mtr/snapshots/")) {
       const [path, query = ""] = href.slice("/api/v1/mtr/snapshots/".length).split("?");
       const qs = new URLSearchParams(query);
@@ -190,7 +215,10 @@ function renderPage(
   });
   vi.stubGlobal("fetch", fetchMock);
 
-  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  /* staleTime mirrors main.tsx's own 10s. It is load-bearing for the warm-cache case: with the
+     default 0 every remount refetches, which would hide a component that renders from state instead
+     of from the cache. */
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: 10_000 } } });
   const page = (
     <TimeMachineProvider>
       <MTRPage />
@@ -220,23 +248,59 @@ afterEach(() => {
   localStorage.removeItem(LOCALE_STORAGE_KEY);
 });
 
+/** Opens a destination card. Cards are collapsed on arrival — a fleet's worth of
+ *  source rows expanded inline was the wall this pane used to be — so every
+ *  interaction with a row goes through its card first. */
+async function expandDestination(destination: string) {
+  const header = await screen.findByRole("button", { name: new RegExp(`^${destination}[,:]`) });
+  if (header.getAttribute("aria-expanded") !== "true") fireEvent.click(header);
+  return header;
+}
+
 /** Clicks the pane-1 row for a pair; the accessible name carries BOTH halves
  *  because a source name alone is ambiguous across destination groups. */
 async function selectPair(source: string, destination: string) {
-  fireEvent.click(await screen.findByRole("button", { name: new RegExp(`${source}.*${destination}`) }));
+  await expandDestination(destination);
+  fireEvent.click(await screen.findByRole("button", { name: new RegExp(`${source}.*→.*${destination}`) }));
+}
+
+
+/* Ticking two boxes is a SELECTION; the comparison opens on the reader's word.
+   The old three-pane layout swapped pane 3 the moment the second box was ticked
+   — a dialog thrown at you mid-choice — so every case that wants the diff now
+   presses the button the way a reader does. */
+async function openCompare() {
+  // By the COUNT, not the word: the button is translated and this helper runs in both locales.
+  fireEvent.click(await screen.findByRole("button", { name: /\(2\/2\)$/ }));
+  // One dialog is open at a time, so the role alone addresses it in any language.
+  return screen.findByRole("dialog");
 }
 
 describe("groupDestinations", () => {
-  it("groups the flat API list by destination, sources within, in encounter order", () => {
+  /* The endpoint answers newest-traced first, so the pane arrived in an order
+     nobody could scan and reshuffled itself whenever a trace landed. */
+  it("groups the flat API list by destination and sorts BOTH levels by name", () => {
     const groups = groupDestinations([
-      destinationRow({ sourceNode: "node-a", destination: "node-b" }),
       destinationRow({ sourceNode: "node-c", destination: "node-b" }),
+      destinationRow({ sourceNode: "node-a", destination: "node-b" }),
       destinationRow({ sourceNode: "node-a", destination: "api-gw" }),
     ]);
 
-    expect(groups.map((g) => g.destination)).toEqual(["node-b", "api-gw"]);
-    expect(groups[0].sources.map((s) => s.sourceNode)).toEqual(["node-a", "node-c"]);
-    expect(groups[1].sources.map((s) => s.sourceNode)).toEqual(["node-a"]);
+    expect(groups.map((g) => g.destination)).toEqual(["api-gw", "node-b"]);
+    expect(groups[1].sources.map((s) => s.sourceNode)).toEqual(["node-a", "node-c"]);
+  });
+
+  /* An operator reads m9 before m10; a codepoint sort does not. */
+  it("reads the numbers in a node name rather than its codepoints", () => {
+    const groups = groupDestinations(
+      ["m10", "m2", "m9"].flatMap((n) => [
+        destinationRow({ sourceNode: `src-${n}`, destination: `dst-${n}` }),
+        destinationRow({ sourceNode: `src-${n}`, destination: "one" }),
+      ]),
+    );
+
+    expect(groups.map((g) => g.destination)).toEqual(["dst-m2", "dst-m9", "dst-m10", "one"]);
+    expect(groups[3].sources.map((s) => s.sourceNode)).toEqual(["src-m2", "src-m9", "src-m10"]);
   });
 
   it("sums each group's snapshot counts and keeps the newest lastSeen of its members", () => {
@@ -250,8 +314,72 @@ describe("groupDestinations", () => {
     expect(groups[0].lastSeen).toBe("2026-08-07T00:00:00Z");
   });
 
+  /* The collapsed card claims both figures, so the group has to carry both. */
+  it("sums the group's TRACES too, which is the other half of a shut card's summary", () => {
+    const groups = groupDestinations([
+      destinationRow({ sourceNode: "node-a", traceCount: 9 }),
+      destinationRow({ sourceNode: "node-c", traceCount: 4 }),
+    ]);
+
+    expect(groups[0].traceCount).toBe(13);
+  });
+
   it("is empty for an empty list rather than inventing a group", () => {
     expect(groupDestinations([])).toEqual([]);
+  });
+});
+
+describe("deepLinkDestination", () => {
+  it("reads the destination a shared link names", () => {
+    expect(deepLinkDestination("?destination=api-gw")).toBe("api-gw");
+  });
+
+  it("decodes a name that had to be escaped to travel in a URL", () => {
+    expect(deepLinkDestination("?destination=10.0.0.1%2F32")).toBe("10.0.0.1/32");
+  });
+
+  it("is null for a plain link, and for an empty parameter that names nothing", () => {
+    expect(deepLinkDestination("")).toBeNull();
+    expect(deepLinkDestination("?at=2026-08-08T00:00:00Z")).toBeNull();
+    expect(deepLinkDestination("?destination=")).toBeNull();
+  });
+});
+
+describe("deepLinkSource", () => {
+  it("reads the source half of a pair link", () => {
+    expect(deepLinkSource("?source=node-a&destination=node-b")).toBe("node-a");
+  });
+
+  it("decodes an escaped name", () => {
+    expect(deepLinkSource("?source=10.0.0.1%2F32&destination=x")).toBe("10.0.0.1/32");
+  });
+
+  it("is null for a destination-only link and an empty parameter", () => {
+    expect(deepLinkSource("?destination=node-b")).toBeNull();
+    expect(deepLinkSource("?source=")).toBeNull();
+    expect(deepLinkSource("")).toBeNull();
+  });
+});
+
+describe("destinationPage", () => {
+  const groups = (n: number) =>
+    groupDestinations(
+      Array.from({ length: n }, (_, i) => destinationRow({ destination: `dst-${String(i).padStart(2, "0")}` })),
+    );
+
+  it("is page 1 for a destination in the first page-worth", () => {
+    expect(destinationPage(groups(25), "dst-03", 10)).toBe(1);
+  });
+
+  it("finds the page a card further down the list actually sits on", () => {
+    expect(destinationPage(groups(25), "dst-17", 10)).toBe(2);
+    expect(destinationPage(groups(25), "dst-24", 10)).toBe(3);
+  });
+
+  it("is null when the list does not hold it, so nothing is turned to on a guess", () => {
+    expect(destinationPage(groups(25), "nowhere", 10)).toBeNull();
+    expect(destinationPage(groups(25), null, 10)).toBeNull();
+    expect(destinationPage([], "dst-00", 10)).toBeNull();
   });
 });
 
@@ -341,13 +469,15 @@ describe("MTRPage — destinations pane", () => {
     });
 
     const pane = await screen.findByRole("region", { name: /destinations/i });
-    expect(await within(pane).findByRole("heading", { name: "node-b" })).toBeInTheDocument();
+    expect(await within(pane).findByRole("heading", { name: /^node-b/ })).toBeInTheDocument();
+    await expandDestination("node-b");
+    await expandDestination("api-gw");
     // One list per destination, each labelled with the destination's name.
     expect(within(pane).getAllByRole("list")).toHaveLength(2);
     expect(within(within(pane).getByRole("list", { name: "node-b" })).getAllByRole("button")).toHaveLength(2);
     expect(within(within(pane).getByRole("list", { name: "api-gw" })).getAllByRole("button")).toHaveLength(1);
     // The group header states the GROUP's total, not its first member's.
-    expect(within(pane).getByText("5 paths")).toBeInTheDocument();
+    expect(within(pane).getByRole("button", { name: /^node-b/ })).toHaveTextContent("5 paths");
   });
 
   /* QA scope 4, finding #5: the count column was shrink-0, so a Russian row —
@@ -358,8 +488,9 @@ describe("MTRPage — destinations pane", () => {
       destinations: [destinationRow({ sourceNode: "qa-node-worker-07", destination: "node-b" })],
     });
 
+    await expandDestination("node-b");
     const row = await screen.findByRole("button", { name: /qa-node-worker-07.*node-b/ });
-    const [name, count] = Array.from(row.children) as HTMLElement[];
+    const [name, , count] = Array.from(row.children) as HTMLElement[];
     // The name grows into the leftover and cannot be shrunk away...
     expect(name.className).toMatch(/flex-1/);
     // ...and the count is capped and shrinkable, which is what makes it yield
@@ -374,8 +505,201 @@ describe("MTRPage — destinations pane", () => {
   it("makes no snapshots request until a pair is picked", async () => {
     const { snapshotListCalls } = renderPage();
 
+    await expandDestination("node-b");
     await screen.findByRole("button", { name: /node-a.*node-b/ });
     expect(snapshotListCalls()).toEqual([]);
+  });
+});
+
+/* ── the owner's report: every card arrived expanded, which at fleet scale is a
+      wall of rows nobody can read past ───────────────────────────────────── */
+
+describe("MTRPage — destination cards collapse", () => {
+  /** n sources, all tracing the same destination. */
+  const fanIn = (n: number, destination = "node-b") =>
+    Array.from({ length: n }, (_, i) =>
+      destinationRow({
+        sourceNode: `node-${String(i).padStart(2, "0")}`,
+        destination,
+        snapshotCount: 2,
+        traceCount: 3,
+      }),
+    );
+
+  it("opens collapsed: the header names the destination and counts it, and no source row is drawn", async () => {
+    renderPage({ destinations: fanIn(12) });
+
+    const header = await screen.findByRole("button", { name: /^node-b/ });
+    expect(header).toHaveAttribute("aria-expanded", "false");
+    // The summary is the card's whole claim while it is shut: 24 paths, 36 traces.
+    expect(header).toHaveTextContent("24 paths");
+    expect(header).toHaveTextContent("36 traces");
+    expect(screen.queryByRole("list", { name: "node-b" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /node-00.*→.*node-b/ })).not.toBeInTheDocument();
+  });
+
+  it("expands on a click and shuts again on the next one", async () => {
+    renderPage({ destinations: fanIn(3) });
+
+    const header = await screen.findByRole("button", { name: /^node-b/ });
+    fireEvent.click(header);
+    expect(header).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByRole("list", { name: "node-b" })).toBeInTheDocument();
+    // The control names what it opened, so a reader who cannot see it is told.
+    expect(header.getAttribute("aria-controls")).toBe(screen.getByRole("list", { name: "node-b" }).id);
+
+    fireEvent.click(header);
+    expect(header).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByRole("list", { name: "node-b" })).not.toBeInTheDocument();
+  });
+
+  it("holds one open state PER card — opening one leaves its neighbour shut", async () => {
+    renderPage({ destinations: [...fanIn(2, "node-b"), ...fanIn(2, "api-gw")] });
+
+    await expandDestination("node-b");
+    expect(screen.getByRole("list", { name: "node-b" })).toBeInTheDocument();
+    expect(screen.queryByRole("list", { name: "api-gw" })).not.toBeInTheDocument();
+
+    await expandDestination("api-gw");
+    // Opening the second does not shut the first: this is not an accordion.
+    expect(screen.getByRole("list", { name: "node-b" })).toBeInTheDocument();
+    expect(screen.getByRole("list", { name: "api-gw" })).toBeInTheDocument();
+  });
+
+  it("pages an expanded card's own sources past ten, counting them against the whole card", async () => {
+    renderPage({ destinations: fanIn(23) });
+
+    await expandDestination("node-b");
+    const list = screen.getByRole("list", { name: "node-b" });
+    expect(within(list).getAllByRole("listitem")).toHaveLength(10);
+    expect(screen.getByTestId("pager-showing")).toHaveTextContent("Showing 10 of 23 sources");
+
+    fireEvent.click(screen.getByRole("button", { name: "Next page" }));
+    expect(within(screen.getByRole("list", { name: "node-b" })).getAllByRole("listitem")).toHaveLength(10);
+    expect(screen.getByRole("button", { name: /node-10.*→.*node-b/ })).toBeInTheDocument();
+  });
+
+  /* Live acceptance on rev13: the collapsed header read "kco…" and the rows
+     "from kconmon…" while the pane beside them stood half empty. Two causes and
+     both are fixed — the header's COUNTS were shrink-0, so they took what they
+     wanted and left the name the remainder, and the pane itself was the
+     narrowest of the three columns while the widest one had nothing in it. */
+  it("lets the destination name take the width and makes the COUNTS yield first", async () => {
+    renderPage({ destinations: fanIn(2) });
+
+    const header = await screen.findByRole("button", { name: /^node-b[,:]/ });
+    const [, name, , counts] = Array.from(header.children) as HTMLElement[];
+    // The name grows into every spare pixel and can never be shrunk away...
+    expect(name.className).toMatch(/flex-1/);
+    expect(name.className).toMatch(/min-w-0/);
+    // ...and the counts are the shrinkable half. `shrink-0` here is the bug.
+    expect(counts.className).not.toMatch(/shrink-0/);
+    expect(counts.className).toMatch(/truncate/);
+    // Whichever side does clip, the whole string stays reachable.
+    expect(name).toHaveAttribute("title", "node-b");
+    expect(counts).toHaveAttribute("title", expect.stringContaining("traces"));
+  });
+
+  it("never abbreviates a twenty-character node name in the markup itself", async () => {
+    // Truncation is the browser's, on overflow, and reversible by widening the
+    // window. A name cut in JS would be gone for good.
+    renderPage({
+      destinations: [
+        destinationRow({ sourceNode: "kconmon-prod-m10", destination: "kconmon-prod-worker-07" }),
+      ],
+    });
+
+    const header = await expandDestination("kconmon-prod-worker-07");
+    expect(header).toHaveTextContent("kconmon-prod-worker-07");
+    const row = screen.getByRole("button", { name: /kconmon-prod-m10.*→/ });
+    expect(row).toHaveTextContent("from kconmon-prod-m10");
+    expect(row.children[0]).toHaveAttribute("title", "from kconmon-prod-m10");
+  });
+
+  /* TWO panes now, not three: the trace opens over the page instead of taking a
+     column, and the width it freed goes to the route history — the pane that
+     carries a whole route per row. The destinations pane holds names, which are
+     shorter than routes, so here it is deliberately the narrower of the two. */
+  it("gives the route history the wider half of the row", async () => {
+    renderPage({ destinations: fanIn(2) });
+    await screen.findByRole("button", { name: /^node-b[,:]/ });
+
+    const panes = screen.getByTestId("mtr-panes");
+    const widths = (panes.className.match(/minmax\(0,([\d.]+)fr\)/g) ?? []).map((m) =>
+      Number(m.replace(/[^\d.]/g, "")),
+    );
+    expect(widths).toHaveLength(2);
+    expect(widths[1]).toBeGreaterThan(widths[0]);
+  });
+
+  it("draws no inner pager for a card that fits on one page", async () => {
+    renderPage({ destinations: fanIn(4) });
+
+    await expandDestination("node-b");
+    expect(screen.queryByTestId("pager-showing")).not.toBeInTheDocument();
+  });
+});
+
+describe("MTRPage — a shared link opens the card it names", () => {
+  it("expands the deep-linked destination and leaves the others shut", async () => {
+    renderPage({
+      destination: "api-gw",
+      destinations: [
+        destinationRow({ sourceNode: "node-a", destination: "node-b" }),
+        destinationRow({ sourceNode: "node-a", destination: "api-gw" }),
+      ],
+    });
+
+    expect(await screen.findByRole("list", { name: "api-gw" })).toBeInTheDocument();
+    expect(screen.queryByRole("list", { name: "node-b" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /^api-gw/ })).toHaveAttribute("aria-expanded", "true");
+  });
+
+  it("turns to the PAGE the deep-linked destination is on, not just to its card", async () => {
+    renderPage({
+      destination: "dst-17",
+      destinations: Array.from({ length: 25 }, (_, i) =>
+        destinationRow({ sourceNode: "node-a", destination: `dst-${String(i).padStart(2, "0")}` }),
+      ),
+    });
+
+    // dst-17 is the eighteenth group, i.e. page 2 at ten cards a page. A link
+    // that opened a card nobody could see would be no link at all.
+    expect(await screen.findByRole("list", { name: "dst-17" })).toBeInTheDocument();
+    expect(screen.getByTestId("pager-page")).toHaveTextContent("Page 2 of 3");
+  });
+
+  it("ignores a destination the fleet has never traced rather than emptying the pane", async () => {
+    renderPage({
+      destination: "nowhere",
+      destinations: [destinationRow({ sourceNode: "node-a", destination: "node-b" })],
+    });
+
+    expect(await screen.findByRole("button", { name: /^node-b/ })).toHaveAttribute("aria-expanded", "false");
+  });
+});
+
+/* ── the owner's second report on this pane ─────────────────────────────── */
+
+describe("MTRPage — the source row never runs its name into a count", () => {
+  /**
+   * The row read "from kconmon-prod-m10" followed straight by "2 · 3 traces",
+   * so the node name and the leading snapshot count arrived as one string:
+   * «from kconmon-prod-m102 · 3 traces». Two things were wrong and both are
+   * fixed — the count led with a BARE DIGIT that named no unit, and nothing
+   * separated the two spans but a CSS gap, which is not a character.
+   */
+  it("gives the leading count its noun and puts a separator between the two halves", async () => {
+    renderPage({
+      destinations: [
+        destinationRow({ sourceNode: "kconmon-prod-m10", destination: "node-b", snapshotCount: 2, traceCount: 3 }),
+      ],
+    });
+
+    await expandDestination("node-b");
+    const row = await screen.findByRole("button", { name: /kconmon-prod-m10.*→.*node-b/ });
+    expect(row.textContent).toBe("from kconmon-prod-m10 · 2 paths · 3 traces");
+    expect(row.textContent).not.toMatch(/m102/);
   });
 });
 
@@ -415,7 +739,7 @@ describe("MTRPage — history pane", () => {
     expect(within(rows[2]).queryByText(/path changed/i)).not.toBeInTheDocument();
   });
 
-  it("'Load older' appends the next page via cursor and disables itself once nextCursor is empty", async () => {
+  it("'Load older' appends the next page via cursor and gives way to an end-of-list line", async () => {
     renderPage({
       onSnapshots: (qs) =>
         json(
@@ -434,7 +758,32 @@ describe("MTRPage — history pane", () => {
     expect(await screen.findByText(/aaaaaaaaaaaa/)).toBeInTheDocument();
     // Appended, not replaced.
     expect(screen.getByText(/bbbbbbbbbbbb/)).toBeInTheDocument();
-    await waitFor(() => expect(screen.getByRole("button", { name: /load older/i })).toBeDisabled());
+    /* And once there is nothing older, the button GOES rather than sitting there greyed out. A
+       permanently disabled control reads as broken — the owner reported exactly that against a pair
+       whose whole route history was already on screen. */
+    await waitFor(() => expect(screen.queryByRole("button", { name: /load older/i })).toBeNull());
+    expect(screen.getByText(/nothing older is retained/i)).toBeInTheDocument();
+  });
+
+  it("counts what it is showing, so 'six routes' cannot be misread as 'six of 232 traces'", async () => {
+    /* The sidebar counts TRACES and this list shows distinct ROUTES; a pair with hundreds of traces
+       honestly has a handful of routes, and the footer is where the two numbers are reconciled. */
+    renderPage({
+      onSnapshots: () =>
+        json({
+          snapshots: [
+            snapshotRow({ id: "s2", pathHash: "bbbbbbbbbbbb2222", traceCount: 147 }),
+            snapshotRow({ id: "s1", pathHash: "aaaaaaaaaaaa1111", traceCount: 85 }),
+          ],
+          nextCursor: "",
+        }),
+    });
+
+    await selectPair("node-a", "node-b");
+
+    const footer = await screen.findByText(/nothing older is retained/i);
+    expect(footer).toHaveTextContent("2 paths");
+    expect(footer).toHaveTextContent("232 traces");
   });
 
   it("re-asks from page one when the selection changes, rather than appending another pair's paths", async () => {
@@ -485,7 +834,7 @@ describe("MTRPage — detail pane", () => {
     });
 
     await selectPair("node-a", "node-b");
-    fireEvent.click(await screen.findByRole("button", { name: /aaaaaaaaaaaa/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /^Path aaaaaaaaaaaa$/ }));
 
     const hops = await screen.findByRole("table", { name: /hops/i });
     await waitFor(() =>
@@ -500,10 +849,13 @@ describe("MTRPage — detail pane", () => {
     expect(within(hops).getByText("2.5ms")).toBeInTheDocument();
   });
 
-  it("prompts for a selection before anything is picked", async () => {
+  /* The detail is no longer a column that sits there empty asking to be filled:
+     it opens when a route is picked and is absent until then. */
+  it("shows no trace detail at all until a route is picked", async () => {
     renderPage();
 
-    expect(await screen.findByText(/pick a path/i)).toBeInTheDocument();
+    await screen.findByRole("heading", { name: /destinations/i });
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
     expect(screen.queryByRole("table", { name: /hops/i })).not.toBeInTheDocument();
   });
 
@@ -517,7 +869,7 @@ describe("MTRPage — detail pane", () => {
     });
 
     await selectPair("node-a", "node-b");
-    fireEvent.click(await screen.findByRole("button", { name: /aaaaaaaaaaaa/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /^Path aaaaaaaaaaaa$/ }));
 
     await waitFor(() => expect(seen).toHaveLength(1));
     expect(seen[0].get("enrich")).toBe("true");
@@ -544,7 +896,7 @@ describe("MTRPage — detail pane", () => {
     });
 
     await selectPair("node-a", "node-b");
-    fireEvent.click(await screen.findByRole("button", { name: /aaaaaaaaaaaa/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /^Path aaaaaaaaaaaa$/ }));
     fireEvent.click(await screen.findByRole("button", { name: /hop 2/i }));
 
     expect(await screen.findByText("core1.example.net")).toBeInTheDocument();
@@ -564,7 +916,7 @@ describe("MTRPage — detail pane", () => {
     });
 
     await selectPair("node-a", "node-b");
-    fireEvent.click(await screen.findByRole("button", { name: /Path aaaaaaaaaaaa/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /^Path aaaaaaaaaaaa\d*$/ }));
     fireEvent.click(await screen.findByRole("button", { name: /trend for 10\.0\.0\.1/i }));
 
     expect(screen.getByTestId("echart")).toBeInTheDocument();
@@ -648,6 +1000,7 @@ describe("MTRPage — comparing two paths", () => {
 
     await selectPair("node-a", "node-b");
     for (const box of await screen.findAllByRole("checkbox", { name: /^Compare path/ })) fireEvent.click(box);
+    await openCompare();
 
     const diff = await screen.findByRole("region", { name: /path diff/i });
     const table = within(diff).getByRole("table", { name: /path diff/i });
@@ -663,6 +1016,7 @@ describe("MTRPage — comparing two paths", () => {
 
     await selectPair("node-a", "node-b");
     for (const box of await screen.findAllByRole("checkbox", { name: /^Compare path/ })) fireEvent.click(box);
+    await openCompare();
 
     const diff = await screen.findByRole("region", { name: /path diff/i });
     expect(within(diff).getAllByLabelText("same")).toHaveLength(2);
@@ -671,19 +1025,21 @@ describe("MTRPage — comparing two paths", () => {
     expect(within(diff).getByText("+2.0ms")).toBeInTheDocument();
   });
 
-  it("un-picking one drops back to the trace detail rather than half a diff", async () => {
+  /* Un-ticking closes the comparison rather than leaving half a diff up, and the
+     button that opens it goes back to saying it cannot yet. */
+  it("closes the comparison when one of the two is un-picked", async () => {
     renderPage({ onSnapshots: twoPaths });
 
     await selectPair("node-a", "node-b");
     const boxes = await screen.findAllByRole("checkbox", { name: /^Compare path/ });
     fireEvent.click(boxes[0]);
     fireEvent.click(boxes[1]);
-    await screen.findByRole("region", { name: /path diff/i });
+    await openCompare();
 
     fireEvent.click(boxes[1]);
 
-    await waitFor(() => expect(screen.queryByRole("region", { name: /path diff/i })).not.toBeInTheDocument());
-    expect(screen.getByRole("region", { name: /trace detail/i })).toBeInTheDocument();
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    expect(screen.getByRole("button", { name: /^Compare \(1\/2\)$/ })).toBeDisabled();
   });
 
   it("drops the comparison when the pair changes — two pairs' routes are not comparable", async () => {
@@ -697,6 +1053,7 @@ describe("MTRPage — comparing two paths", () => {
 
     await selectPair("node-a", "node-b");
     for (const box of await screen.findAllByRole("checkbox", { name: /^Compare path/ })) fireEvent.click(box);
+    await openCompare();
     await screen.findByRole("region", { name: /path diff/i });
 
     await selectPair("node-c", "node-b");
@@ -1007,7 +1364,7 @@ describe("MTRPage — Time Machine disclosure", () => {
   it("says none of it while Live — there is nothing to disclose", async () => {
     renderPage();
 
-    await screen.findByRole("button", { name: /node-a.*node-b/ });
+    await expandDestination("node-b");
     expect(screen.queryByText(/take no time parameter/i)).not.toBeInTheDocument();
     expect(screen.queryByText(/it is live/)).not.toBeInTheDocument();
   });
@@ -1034,6 +1391,93 @@ describe("MTR runner duration", () => {
     expect(runCalls()[0].body).not.toHaveProperty("durationNs");
   });
 
+  /* The bug this pane carried, stated as a test: the caption quoted the BASE cadence — duration/500,
+     floored at 5s — for the one check type that cannot keep it. A 5m MTR over the whole mesh
+     advertised "every 5s" while the run permalink said 3m and the fleet did neither. It reads the
+     same planner mirror the Diagnostics form does now, so all three can only say one thing. */
+  it("names the cadence MTR can actually keep, never the unstretched base one", async () => {
+    renderPage({ permissions: RUNNER, nodes: ["a", "b"] });
+
+    await openRunner();
+    await screen.findByRole("radio", { name: "Instant" });
+    fireEvent.click(screen.getByRole("radio", { name: "5m" }));
+
+    const caption = await screen.findByText(/An MTR trace takes up to 90s per pair/i);
+    expect(caption.textContent).toMatch(/re-traces every pair every 90s/i);
+    expect(caption.textContent).not.toMatch(/every 5s/i);
+  });
+
+  it("offers the same cadence control the Diagnostics form does, for a duration run only", async () => {
+    renderPage({ permissions: RUNNER, nodes: ["a", "b"] });
+
+    await openRunner();
+    await screen.findByRole("radio", { name: "Instant" });
+    expect(screen.queryByTestId("runner-sample-interval")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("radio", { name: "5m" }));
+    const control = await screen.findByRole("radiogroup", { name: "Trace interval" });
+    for (const label of ["Auto", "1s", "5s", "15s", "30s", "1m", "5m"]) {
+      expect(within(control).getByRole("radio", { name: label })).toBeInTheDocument();
+    }
+    expect(within(control).queryByRole("radio", { name: "15m" })).not.toBeInTheDocument();
+    expect(within(control).getByRole("radio", { name: "Auto" })).toBeChecked();
+  });
+
+  it("posts the picked trace interval, and nothing at all on Auto", async () => {
+    const first = renderPage({ permissions: RUNNER, nodes: ["a", "b"] });
+    await openRunner();
+    await screen.findByRole("radio", { name: "Instant" });
+    fireEvent.click(screen.getByRole("radio", { name: "5m" }));
+    fireEvent.click(screen.getByRole("button", { name: /start mtr/i }));
+    await waitFor(() => expect(first.runCalls()).toHaveLength(1));
+    expect(first.runCalls()[0].body).not.toHaveProperty("sampleIntervalNs");
+
+    cleanup();
+    const second = renderPage({ permissions: RUNNER, nodes: ["a", "b"] });
+    await openRunner();
+    await screen.findByRole("radio", { name: "Instant" });
+    fireEvent.click(screen.getByRole("radio", { name: "5m" }));
+    const control = await screen.findByRole("radiogroup", { name: "Trace interval" });
+    fireEvent.click(within(control).getByRole("radio", { name: "30s" }));
+    fireEvent.click(screen.getByRole("button", { name: /start mtr/i }));
+    await waitFor(() => expect(second.runCalls()).toHaveLength(1));
+    expect(second.runCalls()[0].body).toMatchObject({
+      durationNs: 300_000_000_000,
+      sampleIntervalNs: 30_000_000_000,
+    });
+  });
+
+  it("leads with the adjustment when the picked interval is faster than one round of traces", async () => {
+    renderPage({ permissions: RUNNER, nodes: ["a", "b"] });
+
+    await openRunner();
+    await screen.findByRole("radio", { name: "Instant" });
+    fireEvent.click(screen.getByRole("radio", { name: "5m" }));
+    const control = await screen.findByRole("radiogroup", { name: "Trace interval" });
+    fireEvent.click(within(control).getByRole("radio", { name: "1s" }));
+
+    // Accepted, not refused — and said out loud, requested apart from effective.
+    const caption = await screen.findByText(/Every 1s is faster than one round of traces/i);
+    expect(caption.textContent).toMatch(/cannot go faster than every 90s/i);
+    expect(caption.textContent).toMatch(/re-traces every pair every 90s/i);
+  });
+
+  it("names the trace-interval control and its adjustment in Russian", async () => {
+    renderPage({ permissions: RUNNER, nodes: ["a", "b"], locale: "ru" });
+
+    fireEvent.click(await screen.findByRole("radio", { name: "Запуск" }));
+    fireEvent.click(await screen.findByRole("radio", { name: "5m" }));
+
+    const control = await screen.findByRole("radiogroup", { name: "Период трассировки" });
+    expect(within(control).getByRole("radio", { name: "Авто" })).toBeChecked();
+    fireEvent.click(within(control).getByRole("radio", { name: "1s" }));
+
+    const caption = await screen.findByText(/Раз в секунду — быстрее, чем успевает пройти круг трассировок/);
+    expect(caption.textContent).toMatch(/чаще чем раз в 90 секунд этот запуск не пойдёт/);
+    // The abbreviation stays off prose entirely.
+    expect(caption.textContent).not.toMatch(/раз в 90 с[^ек]/);
+  });
+
   it("sends durationNs for a picked duration", async () => {
     const { runCalls } = renderPage({ permissions: RUNNER });
 
@@ -1048,15 +1492,21 @@ describe("MTR runner duration", () => {
     expect(body.durationNs).toBe(300_000_000_000);
   });
 
-  // The third consumer of formatDurationNs moves with the other two: «раз в 5 с», not "5s".
-  it("renders the cadence span in the interface language", async () => {
+  /* The cadence span follows the interface language, and in PROSE it is a WORD: «раз в 90 секунд»,
+     never «раз в 90 с» (a bare «с» reads as the preposition) and never "90s".
+
+     The number itself is the other half of the fix. This caption used to quote the BASE cadence —
+     duration/500 floored at 5s — for the one check type that cannot keep it, so a 1m MTR run
+     advertised «раз в 5 с» while the fleet was walking one round of traces every 90s. */
+  it("renders the cadence span in the interface language, at the cadence MTR actually keeps", async () => {
     renderPage({ permissions: RUNNER, locale: "ru" });
 
     fireEvent.click(await screen.findByRole("radio", { name: "Запуск" }));
     fireEvent.click(await screen.findByRole("radio", { name: "1m" }));
-    const caption = await screen.findByText(/Каждая пара трассируется заново раз в/);
-    expect(caption.textContent).toMatch(/раз в 5 с /);
+    const caption = await screen.findByText(/каждая пара трассируется заново раз в/i);
+    expect(caption.textContent).toMatch(/раз в 90 секунд/);
     expect(caption.textContent).not.toMatch(/раз в 5s/);
+    expect(caption.textContent).not.toMatch(/раз в 90 с[^ек]/);
   });
 });
 
@@ -1081,8 +1531,263 @@ describe("MTRPage — Russian", () => {
     });
 
     // 2 → «пути» (few), 5 → «трассировок» (many). A two-form language would
-    // render «2 путей» here.
-    expect(await screen.findByText("2 пути")).toBeInTheDocument();
-    expect(await screen.findByText(/5 трассировок/)).toBeInTheDocument();
+    // render «2 путей» here. The shut card claims both figures.
+    const header = await expandDestination("node-b");
+    expect(header).toHaveTextContent("2 пути");
+    expect(header).toHaveTextContent("5 трассировок");
+    // The row makes the same claim in the same shape.
+    const row = screen.getByRole("button", { name: /node-a.*→.*node-b/ });
+    expect(row).toHaveTextContent("2 пути · 5 трассировок");
+  });
+
+  it("names the expand control and the card's rows in Russian", async () => {
+    renderPage({ locale: "ru", destinations: [destinationRow({ sourceNode: "node-a", destination: "node-b" })] });
+
+    const header = await screen.findByRole("button", { name: /^node-b/ });
+    expect(header).toHaveAttribute("aria-expanded", "false");
+    fireEvent.click(header);
+    expect(screen.getByRole("button", { name: /node-a.*→.*node-b/ }).textContent).toMatch(/^от node-a · /);
+  });
+});
+
+/* ── the Explorer had to be readable, not just correct ───────────────────── */
+
+/**
+ * The owner on this page: «ничего не понятно». A path was identified by a
+ * twelve-character hash and a row that changed said only "path changed". An MTR
+ * exists to show a ROUTE, so the route is what a row leads with, and a change is
+ * described as a change of route.
+ */
+describe("MTRPage — a path reads as a route", () => {
+  const hop = (n: number, ip: string) => ({ number: n, ip, hostname: "", rttNs: 2_000_000, lossRatio: 0 });
+
+  it("leads with the hop chain and keeps the hash as secondary metadata", async () => {
+    renderPage({
+      onSnapshots: () =>
+        json({
+          snapshots: [
+            snapshotRow({ hops: [hop(1, "10.244.9.17"), hop(2, "10.0.0.9")], hopCount: 2 }),
+          ],
+          nextCursor: "",
+        }),
+    });
+    await selectPair("node-a", "node-b");
+
+    const list = await screen.findByRole("list", { name: "Paths" });
+    // The route, end to end, with the pair's own endpoints framing it.
+    expect(within(list).getByTitle("10.244.9.17 → 10.0.0.9")).toBeInTheDocument();
+    expect(list).toHaveTextContent("10.244.9.17");
+    // The hash is still there — it is what you paste into a ticket — just not
+    // the thing the row is about.
+    expect(list).toHaveTextContent("aaaaaaaaaaaa");
+  });
+
+  it("marks a hop nothing answered for, rather than leaving a bare asterisk", async () => {
+    renderPage({
+      onSnapshots: () =>
+        json({ snapshots: [snapshotRow({ hops: [hop(1, "*"), hop(2, "10.0.0.9")], hopCount: 2 })], nextCursor: "" }),
+    });
+    await selectPair("node-a", "node-b");
+
+    const list = await screen.findByRole("list", { name: "Paths" });
+    expect(within(list).getByTitle("no reply was seen from this hop")).toBeInTheDocument();
+  });
+
+  it("says WHICH hop moved instead of badging a bare 'path changed'", async () => {
+    renderPage({
+      onSnapshots: () =>
+        json({
+          snapshots: [
+            // Newest first, which is the order the store returns.
+            snapshotRow({ id: "s-new", pathHash: "bbbb", hops: [hop(1, "10.244.9.21"), hop(2, "10.0.0.9")] }),
+            snapshotRow({ id: "s-old", pathHash: "aaaa", hops: [hop(1, "10.244.9.17"), hop(2, "10.0.0.9")] }),
+          ],
+          nextCursor: "",
+        }),
+    });
+    await selectPair("node-a", "node-b");
+
+    expect(await screen.findByText("hop 1: 10.244.9.17 → 10.244.9.21")).toBeInTheDocument();
+    expect(screen.queryByText("path changed")).not.toBeInTheDocument();
+  });
+
+  it("counts rather than lists when several hops moved at once", async () => {
+    renderPage({
+      onSnapshots: () =>
+        json({
+          snapshots: [
+            snapshotRow({ id: "s-new", pathHash: "bbbb", hops: [hop(1, "10.0.0.2"), hop(2, "10.0.0.3")] }),
+            snapshotRow({ id: "s-old", pathHash: "aaaa", hops: [hop(1, "10.0.0.7"), hop(2, "10.0.0.8")] }),
+          ],
+          nextCursor: "",
+        }),
+    });
+    await selectPair("node-a", "node-b");
+
+    expect(await screen.findByText("2 hops changed")).toBeInTheDocument();
+  });
+});
+
+describe("MTRPage — the diff says what its marks mean", () => {
+  const hop = (n: number, ip: string) => ({ number: n, ip, hostname: "", rttNs: 2_000_000, lossRatio: 0 });
+
+  it("draws a visible key, not just a title attribute", async () => {
+    renderPage({
+      onSnapshots: () =>
+        json({
+          snapshots: [
+            snapshotRow({ id: "s-new", pathHash: "bbbb", hops: [hop(1, "10.0.0.2")] }),
+            snapshotRow({ id: "s-old", pathHash: "aaaa", hops: [hop(1, "10.0.0.7")] }),
+          ],
+          nextCursor: "",
+        }),
+    });
+    await selectPair("node-a", "node-b");
+
+    const boxes = await screen.findAllByRole("checkbox");
+    fireEvent.click(boxes[0]);
+    fireEvent.click(boxes[1]);
+    await openCompare();
+
+    const legend = await screen.findByRole("list", { name: "What the marks mean" });
+    expect(within(legend).getAllByRole("listitem").map((li) => li.textContent)).toEqual([
+      "~changed",
+      "+added",
+      "−removed",
+    ]);
+  });
+});
+
+/* ── the traces behind a route ───────────────────────────────────────────── */
+
+/*
+ * The owner at a route reading "147 traces": «а как их посмотреть???». The row folds every trace
+ * that walked the path into one count and shows ONE hop table — the last reading. The traces were
+ * in the database the whole time, each with its own clock and its own RTTs.
+ */
+describe("MTRPage — the traces behind a route", () => {
+  const trace = (over: Record<string, unknown> = {}) => ({
+    id: 1,
+    recordedAt: "2026-08-11T14:20:00Z",
+    success: true,
+    durationNs: 2_000_000,
+    hops: [hop({ number: 1, ip: "10.0.0.1", hostname: "gw.internal", rttNs: 1_200_000 })],
+    ...over,
+  });
+
+  it("lists the individual traces under the route's own hop table", async () => {
+    renderPage({
+      onTraces: () =>
+        json({
+          traces: [
+            trace({ id: 2, recordedAt: "2026-08-11T14:21:00Z", durationNs: 3_400_000 }),
+            trace({ id: 1 }),
+          ],
+          nextCursor: "",
+          scanned: 2,
+        }),
+    });
+
+    await selectPair("node-a", "node-b");
+    fireEvent.click(await screen.findByRole("button", { name: /^Path aaaaaaaaaaaa$/ }));
+
+    const list = await screen.findByRole("list", { name: /traces of this route/i });
+    expect(within(list).getAllByRole("listitem")).toHaveLength(2);
+    // Each trace carries its OWN duration — that is the whole reason to list them.
+    expect(within(list).getByText("3.4ms")).toBeInTheDocument();
+    expect(within(list).getByText("2.0ms")).toBeInTheDocument();
+  });
+
+  it("expands one trace into ITS hop readings, not the route's", async () => {
+    renderPage({
+      onTraces: () =>
+        json({
+          traces: [trace({ hops: [hop({ number: 1, ip: "10.9.9.9", hostname: "seen-only-here", rttNs: 7_000_000 })] })],
+          nextCursor: "",
+          scanned: 1,
+        }),
+    });
+
+    await selectPair("node-a", "node-b");
+    fireEvent.click(await screen.findByRole("button", { name: /^Path aaaaaaaaaaaa$/ }));
+
+    const list = await screen.findByRole("list", { name: /traces of this route/i });
+    fireEvent.click(within(list).getAllByRole("button")[0]);
+
+    const hops = await screen.findByRole("table", { name: /hops of this trace/i });
+    expect(within(hops).getByText("10.9.9.9")).toBeInTheDocument();
+    expect(within(hops).getByText("seen-only-here")).toBeInTheDocument();
+    expect(within(hops).getByText("7.0ms")).toBeInTheDocument();
+  });
+
+  it("says a failed trace's error INSTEAD of a latency", async () => {
+    renderPage({
+      onTraces: () =>
+        json({
+          traces: [trace({ success: false, error: "no agent on node-a", durationNs: 90_000_000, hops: [] })],
+          nextCursor: "",
+          scanned: 1,
+        }),
+    });
+
+    await selectPair("node-a", "node-b");
+    fireEvent.click(await screen.findByRole("button", { name: /^Path aaaaaaaaaaaa$/ }));
+
+    const list = await screen.findByRole("list", { name: /traces of this route/i });
+    expect(within(list).getByText("no agent on node-a")).toBeInTheDocument();
+    // The elapsed time of a probe that never came back is dispatch overhead, not a round trip.
+    expect(within(list).queryByText("90ms")).not.toBeInTheDocument();
+  });
+
+  /* The list is DERIVED from the query cache, not accumulated in state from inside queryFn. That
+     distinction is the whole bug: react-query does not re-run queryFn for a cache hit, so
+     re-opening a route within the 10s staleTime left the accumulator empty — and an empty list here
+     renders the "swept by retention" note over a route with hundreds of traces. */
+  it("still lists the traces when the route is re-opened from a warm cache", async () => {
+    let calls = 0;
+    renderPage({
+      onTraces: () => {
+        calls += 1;
+        return json({ traces: [trace(), trace({ id: 2 })], nextCursor: "", scanned: 2 });
+      },
+    });
+
+    await selectPair("node-a", "node-b");
+    fireEvent.click(await screen.findByRole("button", { name: /^Path aaaaaaaaaaaa$/ }));
+    expect(within(await screen.findByRole("list", { name: /traces of this route/i })).getAllByRole("listitem")).toHaveLength(2);
+
+    // Close and re-open the same route, inside the staleTime window.
+    fireEvent.keyDown(screen.getByRole("dialog"), { key: "Escape" });
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: /^Path aaaaaaaaaaaa$/ }));
+
+    const list = await screen.findByRole("list", { name: /traces of this route/i });
+    expect(within(list).getAllByRole("listitem")).toHaveLength(2);
+    expect(screen.queryByText(/no stored traces remain/i)).not.toBeInTheDocument();
+    // And it did NOT have to re-ask to say so.
+    expect(calls).toBe(1);
+  });
+
+  it("explains an empty list rather than showing a blank panel", async () => {
+    renderPage({ onTraces: () => json({ traces: [], nextCursor: "", scanned: 0 }) });
+
+    await selectPair("node-a", "node-b");
+    fireEvent.click(await screen.findByRole("button", { name: /^Path aaaaaaaaaaaa$/ }));
+
+    // Traces age out with the RUN sweep, the route with the path-history one — a route CAN outlive
+    // the traces behind it, and that is what this says.
+    expect(await screen.findByText(/no stored traces remain for this route/i)).toBeInTheDocument();
+  });
+
+  it("counts what it is showing against what the route claims", async () => {
+    renderPage({
+      onTraces: () => json({ traces: [trace()], nextCursor: "", scanned: 1 }),
+      onSnapshot: (id) => json(snapshotRow({ id, traceCount: 147 })),
+    });
+
+    await selectPair("node-a", "node-b");
+    fireEvent.click(await screen.findByRole("button", { name: /^Path aaaaaaaaaaaa$/ }));
+
+    expect(await screen.findByText("1 of 147")).toBeInTheDocument();
   });
 });

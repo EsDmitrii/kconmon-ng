@@ -10,6 +10,7 @@ import { RecentChanges } from "@/components/recent-changes";
 import { useTheme } from "@/components/theme-provider";
 import { Badge, type BadgeProps } from "@/components/ui/badge";
 import { Card } from "@/components/ui/card";
+import { Pager, usePager } from "@/components/ui/pager";
 import { Segmented } from "@/components/ui/segmented";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useAuth } from "@/hooks/use-auth";
@@ -19,7 +20,7 @@ import { toSeriesOption, type CuratedChart } from "@/lib/curated-metrics";
 import { localeTag, stampFull, useLocale, useT, type Locale, type Translate } from "@/lib/i18n";
 import { cardsDict, type CardsKey } from "@/lib/i18n/dict/cards";
 import type { InvestigationScope } from "@/lib/investigation-sources";
-import { useTimeContext } from "@/lib/timemachine";
+import { withAtParam, useTimeContext } from "@/lib/timemachine";
 import type { CheckDefinition, PromResult, RunDetail, Schedule, Target } from "@/lib/types";
 // fmtIntervalNs is imported rather than re-derived so a schedule's cadence
 // reads identically on this card and on the Targets page's own Schedules tab —
@@ -209,6 +210,9 @@ function useTargetChecks(targetId: string, enabled: boolean) {
     enabled,
   });
   const definitions = useMemo(() => definitionsQuery.data?.definitions ?? [], [definitionsQuery.data]);
+  /* Both lists on this card are paged: a target can carry as many checks as
+     somebody has declared, and the run scan returns whatever it scanned. */
+  const defsPager = usePager(definitions, { resetKey: targetId });
   const ids = useMemo(() => definitions.map((d) => d.id), [definitions]);
   const schedulesQuery = useQuery({
     queryKey: ["schedules", "target", targetId, ids.join(",")],
@@ -224,6 +228,7 @@ function useTargetChecks(targetId: string, enabled: boolean) {
   });
   return {
     definitions,
+    defsPager,
     schedules: schedulesQuery.data ?? {},
     isLoading: definitionsQuery.isLoading || (ids.length > 0 && schedulesQuery.isLoading),
     error: definitionsQuery.error ?? schedulesQuery.error,
@@ -291,7 +296,7 @@ function DefinitionRow({ definition, schedules }: { definition: CheckDefinition;
 
 function ChecksTab({ targetId, canRead }: { targetId: string; canRead: boolean }) {
   const t = useT(cardsDict);
-  const { definitions, schedules, isLoading, error } = useTargetChecks(targetId, canRead);
+  const { definitions, defsPager, schedules, isLoading, error } = useTargetChecks(targetId, canRead);
   /* The Time Machine's honest line for this panel; saying so is the only option that is both true and cheap. */
   const { at } = useTimeContext();
 
@@ -318,11 +323,14 @@ function ChecksTab({ targetId, canRead }: { targetId: string; canRead: boolean }
           <p className="px-1 py-10 text-center text-xs text-muted-foreground">{t("target.checks.empty")}</p>
         ) : null}
         {definitions.length > 0 ? (
+          <>
           <ul aria-label={t("target.checks.listAria")} className="mt-4 divide-y divide-border">
-            {definitions.map((d) => (
+            {defsPager.visible.map((d) => (
               <DefinitionRow key={d.id} definition={d} schedules={schedules[d.id] ?? []} />
             ))}
           </ul>
+          <Pager pager={defsPager} subject={t("target.checks.subject")} className="px-0" />
+          </>
         ) : null}
       </section>
     </Card>
@@ -344,7 +352,7 @@ function HistoryTab({ targetName, promConfigured, promResolved }: { targetName: 
      see useWindowAnchor (QA scope 2, finding #20). */
   const range = useWindowAnchor(HISTORY_RANGE_SECONDS);
   /* The scope is the target's NAME. */
-  const { annotations, error: annotationsError, refresh } = useAnnotations(targetName, HISTORY_RANGE_SECONDS);
+  const { annotations, error: annotationsError, refresh } = useAnnotations(targetName, HISTORY_RANGE_SECONDS, range);
   /* The declared change windows over the same hour and the same scope (M6 Task
      9), and for the same reason the annotations are fetched here: a provider's
      maintenance on this target does not depend on Prometheus, so the bands are
@@ -480,8 +488,10 @@ function useTargetRuns(targetName: string, enabled: boolean) {
     () => (detailsQuery.data ? runsTouchingTarget(detailsQuery.data, targetName) : []),
     [detailsQuery.data, targetName],
   );
+  const runsPager = usePager(runs, { resetKey: targetName });
   return {
     runs,
+    runsPager,
     isLoading: runsQuery.isLoading || (ids.length > 0 && detailsQuery.isLoading),
     error: runsQuery.error ?? detailsQuery.error,
   };
@@ -490,7 +500,7 @@ function useTargetRuns(targetName: string, enabled: boolean) {
 function RunsTab({ targetName }: { targetName: string }) {
   const t = useT(cardsDict);
   const { locale } = useLocale();
-  const { runs, isLoading, error } = useTargetRuns(targetName, true);
+  const { runs, runsPager, isLoading, error } = useTargetRuns(targetName, true);
 
   return (
     <Card asChild className="overflow-hidden p-0">
@@ -524,10 +534,11 @@ function RunsTab({ targetName }: { targetName: string }) {
         ) : null}
 
         {runs.length > 0 ? (
+          <>
           <ul className="divide-y divide-border">
-            {runs.map((r) => (
+            {runsPager.visible.map((r) => (
               <li key={r.id} className="flex flex-wrap items-center gap-3 px-4 py-3 text-sm">
-                <a href={`/diagnostics/runs/${r.id}`} className="font-medium text-primary hover:underline">
+                <a href={withAtParam(`/diagnostics/runs/${r.id}`)} className="font-medium text-primary hover:underline">
                   {r.id}
                 </a>
                 <Badge variant={STATUS_VARIANT[r.status] ?? "unknown"} dot>
@@ -541,6 +552,8 @@ function RunsTab({ targetName }: { targetName: string }) {
               </li>
             ))}
           </ul>
+          <Pager pager={runsPager} subject={t("target.runs.subject")} />
+          </>
         ) : null}
       </section>
     </Card>
@@ -565,6 +578,7 @@ function NotFound({ id, known }: { id: string; known: boolean }) {
   const t = useT(cardsDict);
   return (
     <PageShell
+      timeMachine
       title={t("target.notFound.title")}
       description={id ? t("target.notFound.withId", { id }) : t("target.notFound.bare")}
     >
@@ -581,7 +595,7 @@ function NotFound({ id, known }: { id: string; known: boolean }) {
         <p className="max-w-sm text-xs leading-relaxed text-muted-foreground">
           {known ? t("target.notFound.knownBody") : t("target.notFound.unknownBody")}
         </p>
-        <a href="/targets" className="text-xs font-medium text-primary hover:underline">
+        <a href={withAtParam("/targets")} className="text-xs font-medium text-primary hover:underline">
           {t("target.notFound.back")}
         </a>
       </Card>
@@ -636,7 +650,7 @@ export function TargetCardPage() {
 
   if (!authResolved || !dbResolved) {
     return (
-      <PageShell title={t("target.title")} description={t("loading")}>
+      <PageShell timeMachine title={t("target.title")} description={t("loading")}>
         <Card role="status" aria-live="polite" className="p-6">
           <span className="sr-only">{t("target.loading")}</span>
           <Skeleton className="h-4 w-48" />
@@ -653,7 +667,7 @@ export function TargetCardPage() {
   if (!canRead) {
     return (
       /* The DESCRIPTION is the id from the URL — data. */
-      <PageShell title={t("target.title")} description={id}>
+      <PageShell timeMachine title={t("target.title")} description={id}>
         <PermissionCard permission="targets:read">{t("target.gate.read")}</PermissionCard>
       </PageShell>
     );
@@ -662,7 +676,7 @@ export function TargetCardPage() {
   // Database disabled: targets are configuration and get no in-memory fallback.
   if (!dbAvailable) {
     return (
-      <PageShell title={t("target.title")} description={id}>
+      <PageShell timeMachine title={t("target.title")} description={id}>
         <Card role="status" className="p-6">
           <p className="text-sm">{t("target.gate.noDatabase")}</p>
         </Card>
@@ -675,7 +689,7 @@ export function TargetCardPage() {
   if (!target) {
     if (targetQuery.error) {
       return (
-        <PageShell title={t("target.title")} description={id}>
+        <PageShell timeMachine title={t("target.title")} description={id}>
           <Card role="alert" className="border-l-4 border-l-health-bad bg-health-bad-soft/40 p-5">
             <p className="text-sm font-medium">{t("target.unavailable")}</p>
             <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
@@ -686,7 +700,7 @@ export function TargetCardPage() {
       );
     }
     return (
-      <PageShell title={t("target.title")} description={id}>
+      <PageShell timeMachine title={t("target.title")} description={id}>
         <Card role="status" aria-live="polite" className="p-6">
           <span className="sr-only">{t("target.loading")}</span>
           <Skeleton className="h-4 w-48" />
@@ -704,6 +718,7 @@ export function TargetCardPage() {
 
   return (
     <PageShell
+      timeMachine
       title={target.name}
       description={
         at ? t("target.descriptionAt", { at: at.toLocaleString(localeTag(locale)) }) : t("target.description")

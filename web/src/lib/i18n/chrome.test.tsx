@@ -10,7 +10,8 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ThemeProvider } from "@/components/theme-provider";
-import { TimeMachineBar, TIME_MACHINE_TRIGGER_SELECTOR } from "@/components/timemachine-bar";
+import { TimeMachineBar } from "@/components/timemachine-bar";
+import { TimeMachineControl, TIME_MACHINE_TRIGGER_SELECTOR } from "@/components/timemachine-control";
 import { LOCALE_STORAGE_KEY, LocaleProvider, useLocale } from "@/lib/i18n";
 import { TimeMachineProvider } from "@/lib/timemachine";
 import { NAV_ITEMS } from "@/nav";
@@ -254,7 +255,9 @@ describe("Time Machine bar", () => {
     return render(
       <LocaleProvider>
         <TimeMachineProvider>
+          {/* Banner and trigger, the way the chrome and the page header compose them. */}
           <TimeMachineBar />
+          <TimeMachineControl />
         </TimeMachineProvider>
       </LocaleProvider>,
     );
@@ -264,8 +267,10 @@ describe("Time Machine bar", () => {
 
   it("translates the live trigger, label and accessible name together", () => {
     renderBar({ locale: "ru" });
-    const trigger = screen.getByRole("button", { name: "Машина времени: посмотреть консоль на момент в прошлом" });
-    expect(trigger).toHaveTextContent("Машина времени");
+    const trigger = screen.getByRole("button", { name: "Сейчас. Машина времени: посмотреть консоль на момент в прошлом" });
+    // The visible word is the ANCHOR the window ends at; the feature's name
+    // stays in the accessible name and the tooltip.
+    expect(trigger).toHaveTextContent("Сейчас");
   });
 
   it("keeps the palette's seam locale-independent", () => {
@@ -275,7 +280,7 @@ describe("Time Machine bar", () => {
     renderBar({ locale: "ru" });
     const el = document.querySelector<HTMLElement>(TIME_MACHINE_TRIGGER_SELECTOR);
     expect(el).not.toBeNull();
-    expect(el).toHaveTextContent("Машина времени");
+    expect(el).toHaveTextContent("Сейчас");
   });
 
   it("translates the engaged banner, its hint and its escape hatch", () => {
@@ -291,7 +296,7 @@ describe("Time Machine bar", () => {
      (QA round 6, finding #13). Still interpolated, never translated. */
   it("formats the instant in the sentence's own language", () => {
     renderBar({ locale: "ru", at: engagedAt });
-    const stamp = engagedAt.toLocaleString("ru-RU");
+    const stamp = engagedAt.toLocaleString("ru-RU", { hour12: false });
     expect(stamp).not.toBe(engagedAt.toLocaleString("en-US"));
     expect(screen.getByRole("status")).toHaveTextContent(stamp);
     const adjust = screen.getByRole("button", { name: /Изменить момент просмотра/ });
@@ -302,7 +307,7 @@ describe("Time Machine bar", () => {
   it("keeps the English bar byte-for-byte", () => {
     renderBar({ at: engagedAt });
     const banner = screen.getByRole("status");
-    expect(banner).toHaveTextContent(`You are viewing ${engagedAt.toLocaleString()}`);
+    expect(banner).toHaveTextContent(`You are viewing ${engagedAt.toLocaleString(undefined, { hour12: false })}`);
     expect(banner).toHaveTextContent("— return to Live to act.");
     expect(screen.getByRole("button", { name: "Return to Live" })).toBeInTheDocument();
   });

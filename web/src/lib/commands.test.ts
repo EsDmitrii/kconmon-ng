@@ -23,6 +23,7 @@ function ctx(over: Partial<CommandContext> = {}): CommandContext {
     isLive: true,
     returnToLive: () => {},
     openTimeMachinePicker: () => {},
+    hasTimeMachinePicker: true,
     ...over,
   };
 }

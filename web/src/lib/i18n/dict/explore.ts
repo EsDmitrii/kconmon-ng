@@ -40,8 +40,12 @@ const en = {
   "compare.metricA": "Metric A",
   "compare.metricB": "Compare with metric",
   "compare.metricB.none": "No second metric",
-  "compare.with": "with",
-  "compare.orItself": "or itself",
+  /* The mode is a CONTROL now, not a consequence of touching the shift picker.
+     Choosing a shift used to retire the B metric and its lines without saying
+     so, with one line of fine print under the chart as the only notice. */
+  "compare.mode.aria": "Compare A with",
+  "compare.mode.metric": "another metric",
+  "compare.mode.self": "itself, earlier",
   "compare.shift": "Compare with earlier",
   "compare.shift.none": "No shift",
   "compare.shift.earlier": "{label} earlier",
@@ -51,11 +55,13 @@ const en = {
      glyphs away from the Cyrillic А/В confusion. */
   "compare.legA": "A: {title}",
   "compare.legB": "B: {title}",
-  "compare.legB.shifted": "A ({label} earlier)",
+  /* Self-shift mode: both legs are the same metric, so its title says nothing
+     about which is which. The clock does, and so does the stroke — the two legs
+     share a colour, and naming the stroke is what keeps them apart in
+     greyscale, for a colour-blind reader and in a printed screenshot. */
+  "compare.legA.now": "A · now (solid)",
+  "compare.legB.earlier": "A · {label} earlier (dashed)",
 
-  "compare.shiftedNote":
-    "A time shift compares A with itself, so the second-metric picker is off while one is chosen. The earlier leg " +
-    "is drawn over the same window, dimmed and dashed.",
   /* The mixed-units caption names both units, and the two halves are NOT the
      same word list: A's is its declared `unit` ("seconds" | "ratio") because
      that is what the axis is, while B's says what KIND of quantity it is
@@ -106,19 +112,18 @@ export const exploreDict: Dictionary<ExploreKey> = defineDict(en, {
   "compare.metricA": "Метрика A",
   "compare.metricB": "Сравнить с метрикой",
   "compare.metricB.none": "Без второй метрики",
-  "compare.with": "с",
-  "compare.orItself": "или с собой",
+  "compare.mode.aria": "Сравнить A",
+  "compare.mode.metric": "с другой метрикой",
+  "compare.mode.self": "с собой раньше",
   "compare.shift": "Сравнить с прошлым",
   "compare.shift.none": "Без сдвига",
   "compare.shift.earlier": "{label} назад",
 
   "compare.legA": "A: {title}",
   "compare.legB": "B: {title}",
-  "compare.legB.shifted": "A ({label} назад)",
+  "compare.legA.now": "A · сейчас (сплошная)",
+  "compare.legB.earlier": "A · {label} назад (пунктир)",
 
-  "compare.shiftedNote":
-    "Сдвиг во времени сравнивает A саму с собой, поэтому выбор второй метрики выключен. Прошлая линия ложится " +
-    "поверх того же интервала, приглушённой и пунктиром.",
   "compare.unitsDiffer": "B здесь {unitB} на оси A ({unitA}), поэтому смотрите на форму, а не на высоту.",
   "compare.unitB.ratio": "доля",
   "compare.unitB.duration": "длительность",

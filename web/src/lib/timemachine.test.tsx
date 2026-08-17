@@ -1,6 +1,16 @@
-import { render, screen, cleanup, act } from "@testing-library/react";
+import { render, screen, cleanup, act, fireEvent, waitFor } from "@testing-library/react";
+import {
+  createBrowserHistory,
+  createRootRoute,
+  createRoute,
+  createRouter,
+  Link,
+  Outlet,
+  RouterProvider,
+  useRouterState,
+} from "@tanstack/react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { formatAtParam, TimeMachineProvider, useTimeMachine } from "@/lib/timemachine";
+import { AtParamSync, formatAtParam, TimeMachineProvider, useTimeMachine, withAtParam } from "@/lib/timemachine";
 
 /** Probe renders the whole context surface as text plus two buttons. */
 function Probe({ engageAt }: { engageAt?: Date }) {
@@ -286,5 +296,177 @@ describe("useTimeMachine outside a provider", () => {
     const err = vi.spyOn(console, "error").mockImplementation(() => {});
     expect(() => render(<Probe />)).toThrow(/TimeMachineProvider/);
     err.mockRestore();
+  });
+});
+
+/*
+The time context is console-wide and survives a route change on purpose; the URL did not, because
+the router builds the next URL from the route alone. The address bar then read Live while every
+read still resolved at `t`, and a link copied from that page opened a different console.
+
+These cases drive a REAL TanStack router over REAL browser history and click REAL <Link>s. The
+first version of this suite did `pushState(...)` and THEN `rerender(...)`, which is the opposite of
+what the router does — it writes the URL in a queued microtask AFTER notifying React. That fake
+order made the suite green over a component that never wrote anything on a link click.
+*/
+describe("AtParamSync", () => {
+  /* These cases declare their OWN two-route tree; the app's global router type
+     (the Register interface in routes.tsx) knows nothing about it, so the two
+     literal paths are cast past a union that describes a different router. */
+  const to = (path: string) => path as never;
+
+  /** The chrome's own wiring: the sync fed by the router's full href, the way AppShell feeds it. */
+  function Shell() {
+    const href = useRouterState({ select: (s) => s.location.href });
+    return (
+      <TimeMachineProvider>
+        <AtParamSync href={href} />
+        <nav>
+          <Link to={to("/matrix")}>to matrix</Link>
+          <Link to={to("/overview")}>to overview</Link>
+        </nav>
+        <Outlet />
+      </TimeMachineProvider>
+    );
+  }
+
+  async function renderRouter(initial: string) {
+    window.history.replaceState(null, "", initial);
+    const root = createRootRoute({ component: Shell });
+    const tree = root.addChildren([
+      createRoute({ getParentRoute: () => root, path: "/matrix", component: () => <div>matrix page</div> }),
+      createRoute({ getParentRoute: () => root, path: "/overview", component: () => <div>overview page</div> }),
+    ]);
+    const testRouter = createRouter({ routeTree: tree, history: createBrowserHistory() });
+    const view = render(<RouterProvider router={testRouter} />);
+    await screen.findByRole("link", { name: "to overview" });
+    return view;
+  }
+
+  const atParam = () => new URLSearchParams(window.location.search).get("at");
+  const click = (name: string) => fireEvent.click(screen.getByRole("link", { name }));
+
+  it("keeps ?at= across a link click to another page", async () => {
+    await renderRouter("/matrix?at=2026-08-07T10:00:00Z");
+    expect(atParam()).toBe("2026-08-07T10:00:00Z");
+
+    click("to overview");
+
+    await screen.findByText("overview page");
+    await waitFor(() => expect(window.location.pathname).toBe("/overview"));
+    await waitFor(() => expect(atParam()).toBe("2026-08-07T10:00:00Z"));
+  });
+
+  /* The router compares FULL hrefs, so a link back to the page you are on is a
+     real push — and a pathname-keyed effect could not even see it happen. */
+  it("keeps ?at= across a link click to the page already open", async () => {
+    await renderRouter("/matrix?at=2026-08-07T10:00:00Z&protocol=icmp");
+
+    click("to matrix");
+
+    await waitFor(() => expect(window.location.pathname).toBe("/matrix"));
+    await waitFor(() => expect(atParam()).toBe("2026-08-07T10:00:00Z"));
+  });
+
+  it("adds nothing at all while Live", async () => {
+    await renderRouter("/matrix");
+
+    click("to overview");
+
+    await screen.findByText("overview page");
+    await waitFor(() => expect(window.location.pathname).toBe("/overview"));
+    expect(atParam()).toBeNull();
+  });
+
+  /* replaceState, not push: the reader did not make this correction and must
+     not have to press Back through one extra entry per navigation. */
+  it("corrects the URL in place, and keeps the router's own history state", async () => {
+    await renderRouter("/matrix?at=2026-08-07T10:00:00Z");
+    const before = window.history.length;
+    const stateBefore = window.history.state;
+
+    click("to overview");
+    await waitFor(() => expect(atParam()).toBe("2026-08-07T10:00:00Z"));
+
+    // One entry for the router's push, none for our correction.
+    expect(window.history.length).toBe(before + 1);
+    // The router keeps its entry index in history.state; a `{}` would wipe it.
+    expect(window.history.state).not.toBeNull();
+    expect(typeof window.history.state).toBe(typeof stateBefore);
+  });
+
+  it("survives going Back to another engaged page, rather than dropping into Live", async () => {
+    await renderRouter("/matrix?at=2026-08-07T10:00:00Z");
+    click("to overview");
+    await screen.findByText("overview page");
+    await waitFor(() => expect(atParam()).toBe("2026-08-07T10:00:00Z"));
+
+    window.history.back();
+
+    await waitFor(() => expect(window.location.pathname).toBe("/matrix"));
+    await waitFor(() => expect(atParam()).toBe("2026-08-07T10:00:00Z"));
+  });
+
+  /*
+  NOT PINNED HERE, on purpose. Engaging PUSHES an entry, so Back is how the reader leaves the past —
+  and the sync used to re-stamp the instant React was still holding onto the Live entry it landed
+  on, with replaceState: the console stayed engaged AND that entry was destroyed, so Back could
+  never leave the Time Machine again. It happens because the queued write runs BEFORE the
+  provider's own popstate handler, and that ordering is the browser's, not jsdom's — here the
+  provider wins the race and the write is a no-op either way, so a test asserting the outcome
+  passes with and without the guard. Writing one would only prove jsdom's ordering.
+
+  The guard is in lib/timemachine.tsx (`traversing`), and it is verified on the running stand:
+  engage, press Back, and the address bar and the banner both return to Live.
+  */
+
+  it("pushes the NEXT history index rather than erasing the router's own bookkeeping", () => {
+    window.history.replaceState({ __TSR_index: 4, key: "abc" }, "", "/matrix");
+    const view = render(
+      <TimeMachineProvider>
+        <Probe />
+      </TimeMachineProvider>,
+    );
+    act(() => void screen.getByText("engage").click());
+
+    const state = window.history.state as { __TSR_index?: number; key?: string };
+    expect(state.__TSR_index).toBe(5);
+    // Everything else the router put there travels with it.
+    expect(state.key).toBe("abc");
+    view.unmount();
+  });
+});
+
+/*
+Six in-app links are plain anchors rather than router <Link>s, and a raw anchor is a full document
+load: the provider unmounts, the fresh page reads no ?at=, and the reader was silently dropped back
+into Live in the middle of an investigation. The instant travels with the href instead.
+*/
+describe("withAtParam", () => {
+  it("adds nothing while Live", () => {
+    window.history.pushState({}, "", "/overview");
+    expect(withAtParam("/live")).toBe("/live");
+  });
+
+  it("carries the engaged instant onto a plain path", () => {
+    window.history.pushState({}, "", "/overview?at=2026-08-07T10:00:00Z");
+    expect(new URLSearchParams(withAtParam("/live").split("?")[1]).get("at")).toBe("2026-08-07T10:00:00Z");
+  });
+
+  it("keeps the link's own query and hash", () => {
+    window.history.pushState({}, "", "/overview?at=2026-08-07T10:00:00Z");
+    const href = withAtParam("/matrix?protocol=icmp#zone");
+    const params = new URLSearchParams(href.split("?")[1].split("#")[0]);
+    expect(href.startsWith("/matrix?")).toBe(true);
+    expect(params.get("protocol")).toBe("icmp");
+    expect(params.get("at")).toBe("2026-08-07T10:00:00Z");
+    expect(href.endsWith("#zone")).toBe(true);
+  });
+
+  /* A ?at= the console itself would refuse is not one to hand onwards. */
+  it("adds nothing for a URL whose ?at= is not a real instant", () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    window.history.pushState({}, "", "/overview?at=yesterday");
+    expect(withAtParam("/live")).toBe("/live");
   });
 });

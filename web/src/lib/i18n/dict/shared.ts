@@ -22,6 +22,43 @@ import { defineDict, type Dictionary } from "@/lib/i18n";
  */
 
 const en = {
+
+  /* ── ui/modal.tsx ─────────────────────────────────────────────────────────
+     The kit's dialog primitive, mounted by every surface that opens a detail
+     rather than crowding it beside the list. One component, many mounts — the
+     same rule that puts the pager's words here. */
+  "modal.close": "Close",
+
+  /* ── ui/pager.tsx ──────────────────────────────────────────────────────────
+     The one pager every list in the console mounts, so its words live here
+     rather than being retyped into a dozen page dictionaries. The Investigate
+     timeline wrote them first; the owner's product rule ("every list gets
+     pages") made them shared. {subject} is the row's noun, already worded by
+     the calling surface in ITS dictionary — nominative plural, so the Russian
+     never has to decline it after a number. */
+  "pager.size": "Rows per page",
+  "pager.page": "Page {page} of {count}",
+  "pager.prev": "Previous page",
+  "pager.next": "Next page",
+  "pager.showing": "Showing {shown} of {total}",
+  "pager.showing.of": "Showing {shown} of {total} {subject}",
+  "pager.truncated": "listing capped, there are more",
+
+  /* ── components/echart.tsx ─────────────────────────────────────────────────
+     The one chart mount in the console, so its one string lives here too. A
+     hover on a query matching ninety-nine series names the ten nearest the
+     cursor and then says how many it did not — the whole listing is the Table
+     and Raw views under the chart, which is where a listing belongs. Only ever
+     shown for a count above one, so a single form is honest in both languages.
+
+     ONE place now: the tooltip on the panel under the mouse. It used to be two
+     — the neighbours drew a readout box with its own "+n more" tail — and that
+     box is gone: a box on every panel covered the very curves it annotated, so
+     a neighbour marks its samples with dots and says nothing (components/
+     echart.tsx). The dots have no overflow line of their own; they are capped
+     at five and a missing dot reads as "not this one", not as a truncation. */
+  "tooltip.more": "+{count} more",
+
   /* ── the Time Machine's write guard ────────────────────────────────────── */
   /* The sentence a time-disabled control gives for itself, and the one the
      provider mounts once for every aria-describedby pointing at it.
@@ -122,6 +159,19 @@ const en = {
 export type SharedKey = keyof typeof en;
 
 export const sharedDict: Dictionary<SharedKey> = defineDict(en, {
+  "modal.close": "Закрыть",
+  /* «Показано 20 из 90» ставит числа рядом, а существительное — впереди
+     («Пары: показано 20 из 90»), и склонять его после числа не приходится. */
+  "pager.size": "Строк на странице",
+  "pager.page": "Страница {page} из {count}",
+  "pager.prev": "Предыдущая страница",
+  "pager.next": "Следующая страница",
+  "pager.showing": "Показано {shown} из {total}",
+  "pager.showing.of": "{subject}: показано {shown} из {total}",
+  "pager.truncated": "список обрезан, есть ещё",
+
+  "tooltip.more": "ещё {count}",
+
   /* «Машина времени включена» and the way out in the same words chrome.ts's
      bar uses — one concept, one wording, wherever the operator meets it. */
   "timemachine.disabledReason": "Машина времени включена. Чтобы что-то менять, вернитесь в реальное время.",

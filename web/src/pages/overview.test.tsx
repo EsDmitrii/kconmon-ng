@@ -5,7 +5,7 @@ import { LOCALE_STORAGE_KEY, LocaleProvider, translate, type Translate } from "@
 import { overviewDict, type OverviewKey } from "@/lib/i18n/dict/overview";
 import { OverviewPage, fmtAge, foldBounds, nodesTile, sortFiringAlerts, summarize } from "./overview";
 import type { Alert, Matrix, Topology } from "@/lib/types";
-import { fmtEventTime } from "@/lib/utils";
+import { fmtEventStamp, fmtEventTime } from "@/lib/utils";
 
 /** The two translators the pure helpers take, so a unit case can read either
  *  language without mounting a provider. */
@@ -442,11 +442,18 @@ describe("OverviewPage — Recent events (Decision 9)", () => {
   });
 
   /* ONE formatter now, in lib/utils — pages/live.test.tsx pins the same call for the same input on the other side. */
-  it("stamps a row with the shared event clock, not a private one", async () => {
+  /* The DAY, not a bare clock. This card has no lower bound on the window it asks for, and with the
+     Time Machine engaged its `to` is the viewed instant — so its ten newest rows can be days old
+     under a heading that says "Recent events". A bare "03:05" then reads as this afternoon, which is
+     the one reading an operator must not make from a change feed. The two sibling feeds print it
+     this way already. */
+  it("stamps a row with the shared event clock, DAY included, not a private one", async () => {
     renderOverview({ events: [eventRow()] });
 
     const row = await screen.findByTestId("overview-event");
-    expect(within(row).getByText(fmtEventTime("2026-01-01T00:05:00Z"))).toBeInTheDocument();
+    expect(within(row).getByText(fmtEventStamp("2026-01-01T00:05:00Z"))).toBeInTheDocument();
+    // A row from another day carries its date; the bare-clock form would not.
+    expect(within(row).queryByText(fmtEventTime("2026-01-01T00:05:00Z"))).toBeNull();
   });
 
   it("asks for ten", async () => {
@@ -480,13 +487,16 @@ describe("OverviewPage — Firing alerts (Decision 6)", () => {
     expect(await screen.findByTestId("firing-alert")).toBeInTheDocument();
   });
 
-  it("asks for the WHOLE fleet's firing state, not only the rules this console manages", async () => {
+  /* The product decision, at the transport: kconmon-ng is not an aggregator of
+     everybody's alerts. A cluster's own backdrop belongs in Alertmanager and in
+     Grafana; this console shows the rules it manages and nothing else. The route
+     does the filtering, so a foreign alert never crosses the wire. */
+  it("asks ONLY for the rules this console manages", async () => {
     const { urls } = renderOverview({ alerts: [alertRow()] });
     await screen.findByTestId("firing-alert");
 
     const call = urls.find((u) => u.startsWith("/api/v1/alerts"));
-    expect(call).toBe("/api/v1/alerts");
-    expect(call).not.toContain("managedOnly");
+    expect(call).toBe("/api/v1/alerts?managedOnly=true");
   });
 
   it("sorts critical over warning over info", async () => {
@@ -502,10 +512,8 @@ describe("OverviewPage — Firing alerts (Decision 6)", () => {
     expect(rows.map((r) => within(r).getByTestId("firing-alert-name").textContent)).toEqual(["Crit", "Warn", "Info"]);
   });
 
-  it("links a MANAGED alert to /alerting and tags a foreign one as unmanaged", async () => {
-    renderOverview({
-      alerts: [alertRow(), alertRow({ name: "SomebodyElsesRule", ruleId: undefined, severity: "warning" })],
-    });
+  it("links every row to its own rule — there is no unmanaged row left to tag", async () => {
+    renderOverview({ alerts: [alertRow()] });
 
     const rows = await screen.findAllByTestId("firing-alert");
     // ?rule= names the row rather than dropping the reader at the top of the
@@ -513,11 +521,14 @@ describe("OverviewPage — Firing alerts (Decision 6)", () => {
     expect(within(rows[0]).getByRole("link", { name: "PairLossHigh" }).getAttribute("href")).toBe(
       "/alerting?rule=11111111-1111-4111-8111-111111111111",
     );
-    expect(within(rows[0]).queryByText("unmanaged")).toBeNull();
+    // The badge and its two dictionary keys are GONE with the rows they explained.
+    expect(screen.queryByText("unmanaged")).toBeNull();
+  });
 
-    // The console never implies it owns somebody else's rule: no /alerting link.
-    expect(within(rows[1]).queryByRole("link", { name: "SomebodyElsesRule" })).toBeNull();
-    expect(within(rows[1]).getByText("unmanaged")).toBeInTheDocument();
+  it("says the card is bounded to this console's rules rather than implying the cluster is quiet", async () => {
+    renderOverview({ alerts: [alertRow()] });
+    await screen.findByTestId("firing-alert");
+    expect(screen.getByText(/only the rules this console manages/i)).toBeInTheDocument();
   });
 
   it("offers an Investigate link ONLY when the labels carry a scope this page can open", async () => {
@@ -545,15 +556,19 @@ describe("OverviewPage — Firing alerts (Decision 6)", () => {
     expect(within(row).getByTestId("firing-alert-labels").getAttribute("title")).toContain("source_node=node-a");
   });
 
-  it("says nothing is firing — a real answer, not an empty box", async () => {
+  /* "Nothing is firing" would be a claim about the whole cluster, and this card
+     no longer reads the whole cluster: it has to say WHOSE rules are quiet. */
+  it("says none of THIS CONSOLE's rules is firing, not that nothing is", async () => {
     renderOverview({ alerts: [] });
-    expect(await screen.findByText(/nothing is firing/i)).toBeInTheDocument();
+    const note = await screen.findByText(/none of this console's rules is firing/i);
+    expect(note).toBeInTheDocument();
+    expect(screen.queryByText(/^Nothing is firing/i)).toBeNull();
   });
 
   it("does not list a PENDING alert under a card called Firing alerts", async () => {
     renderOverview({ alerts: [alertRow({ state: "pending" })] });
 
-    expect(await screen.findByText(/nothing is firing/i)).toBeInTheDocument();
+    expect(await screen.findByText(/none of this console's rules is firing/i)).toBeInTheDocument();
     expect(screen.queryByTestId("firing-alert")).toBeNull();
   });
 
@@ -561,7 +576,7 @@ describe("OverviewPage — Firing alerts (Decision 6)", () => {
     renderOverview({ alerts: [], promConfigured: false });
 
     expect(await screen.findByText(/prometheus is not configured/i)).toBeInTheDocument();
-    expect(screen.queryByText(/nothing is firing/i)).toBeNull();
+    expect(screen.queryByText(/none of this console's rules is firing/i)).toBeNull();
   });
 
   it("surfaces a 502 verbatim — a failing Prometheus is never a quiet fleet", async () => {
@@ -570,7 +585,7 @@ describe("OverviewPage — Firing alerts (Decision 6)", () => {
     expect(
       await screen.findByText("prometheus is configured but did not answer /api/v1/alerts"),
     ).toBeInTheDocument();
-    expect(screen.queryByText(/nothing is firing/i)).toBeNull();
+    expect(screen.queryByText(/none of this console's rules is firing/i)).toBeNull();
   });
 
   it("without alerts:read: one muted line and ZERO requests", async () => {

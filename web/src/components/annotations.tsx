@@ -4,6 +4,7 @@ import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { DateTimePicker } from "@/components/ui/datetime-picker";
 import { useAuth } from "@/hooks/use-auth";
+import { useConfirmStep } from "@/hooks/use-confirm-step";
 import { useSubmitGuard } from "@/hooks/use-submit-guard";
 import { ApiError, createAnnotation, deleteAnnotation, listAnnotations } from "@/lib/api";
 import {
@@ -16,6 +17,7 @@ import {
 } from "@/lib/annotations";
 import { stampFull, stampShort, useLocale, useT, type Locale, type Translate } from "@/lib/i18n";
 import { annotationsDict, countForm, enT, type AnnotationsKey } from "@/lib/i18n/dict/annotations";
+import type { TimeWindow } from "@/components/maintenance";
 import { useTimeContext, useWriteGuard } from "@/lib/timemachine";
 import type { Annotation } from "@/lib/types";
 import { cn } from "@/lib/utils";
@@ -45,16 +47,27 @@ export interface AnnotationsResult {
  * useAnnotations fetches the marks a surface should draw; the window is expressed as (anchor,
  * rangeSeconds) rather than as two Dates because a `new Date` computed during render changes on
  * every render and would make the query key.
+ *
+ * `range` is components/maintenance.tsx's useWindowAnchor, passed by a surface that also draws a
+ * chart — and it is not optional decoration. Without it this hook recomputed `new Date()` on every
+ * 60s poll while the chart beside it stayed frozen at its mount anchor: after twenty minutes the bar
+ * described [now-1h, now] against a chart drawing [T-1h, T], so a note made since the page opened
+ * was drawn as a markLine past the end of the data and notes from the chart's own first twenty
+ * minutes disappeared from the bar. useMaintenance was given this parameter for exactly that
+ * failure; the annotations half was left behind.
  */
-export function useAnnotations(scope: string, rangeSeconds: number): AnnotationsResult {
+export function useAnnotations(scope: string, rangeSeconds: number, range?: TimeWindow): AnnotationsResult {
   const { at } = useTimeContext();
   const qc = useQueryClient();
-  const anchor = at ? at.toISOString() : "live";
+  /* The shared anchor keys the cache too — two surfaces on the same scope and span but different
+     anchors are two different questions. */
+  const anchor = range ? range.to.toISOString() : at ? at.toISOString() : "live";
 
   const windowFor = useCallback(() => {
+    if (range) return range;
     const to = at ?? new Date();
     return { from: new Date(to.getTime() - rangeSeconds * 1000), to };
-  }, [at, rangeSeconds]);
+  }, [at, rangeSeconds, range]);
 
   const global = useQuery({
     queryKey: ["annotations", GLOBAL_SCOPE, anchor, rangeSeconds],
@@ -269,7 +282,7 @@ function CreateAnnotationForm({
             rows={2}
             onChange={(e) => setText(e.target.value)}
             placeholder={t("form.note.placeholder")}
-            className="rounded-md bg-surface-2 px-2 py-1.5 text-sm text-foreground placeholder:text-muted-foreground/70 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            className="rounded-md bg-surface-2 px-2 py-1.5 text-sm text-foreground placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
           />
         </Field>
         {error ? (
@@ -299,7 +312,7 @@ function AnnotationRow({ annotation, canWrite, onChanged }: { annotation: Annota
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
   /* Second-click confirm, the exact idiom pages/alerting.tsx's rule rows use. */
-  const [confirming, setConfirming] = useState(false);
+  const { confirming, confirmRef, triggerRef, ask, reset } = useConfirmStep();
 
   async function handleDelete() {
     setBusy(true);
@@ -310,7 +323,7 @@ function AnnotationRow({ annotation, canWrite, onChanged }: { annotation: Annota
     } catch (err) {
       setError(err instanceof ApiError ? (err.problem.detail || err.problem.title) : t("row.deleteFailed"));
       setBusy(false);
-      setConfirming(false);
+      reset();
     }
   }
 
@@ -349,7 +362,13 @@ function AnnotationRow({ annotation, canWrite, onChanged }: { annotation: Annota
       {canWrite ? (
         confirming ? (
           <>
+            {/* The confirm step is SPOKEN as well as shown: the row swaps one control for two, and
+                a screen reader hearing nothing reads that as "Delete did nothing". */}
+            <span role="status" className="sr-only">
+              {t("row.confirmDelete.aria", { text: annotation.text })}
+            </span>
             <Button
+              ref={confirmRef}
               type="button"
               size="sm"
               variant="outline"
@@ -360,18 +379,19 @@ function AnnotationRow({ annotation, canWrite, onChanged }: { annotation: Annota
             >
               {t("row.confirmDelete")}
             </Button>
-            <Button type="button" size="sm" variant="ghost" onClick={() => setConfirming(false)}>
+            <Button type="button" size="sm" variant="ghost" onClick={reset}>
               {t("row.cancel")}
             </Button>
           </>
         ) : (
           <Button
+            ref={triggerRef}
             type="button"
             size="sm"
             variant="ghost"
             {...guard}
             aria-label={t("row.delete.aria", { text: annotation.text })}
-            onClick={() => setConfirming(true)}
+            onClick={ask}
           >
             {t("row.delete")}
           </Button>
@@ -494,9 +514,12 @@ export function AnnotationBar({
         </p>
       ) : null}
 
+      {/* NEWEST FIRST for the reader. mergeAnnotations sorts ascending because the chart's markLines
+          and the window arithmetic read it that way; a list of notes is read from the top, and the
+          note somebody just wrote belongs there. */}
       {annotations.length > 0 ? (
         <ul aria-label={t("bar.list.aria")} className="m-0 divide-y divide-border/60 p-0">
-          {annotations.map((a) => (
+          {[...annotations].reverse().map((a) => (
             <AnnotationRow key={a.id} annotation={a} canWrite={canWrite} onChanged={handleChanged} />
           ))}
         </ul>

@@ -1,13 +1,16 @@
 import { Fragment, useEffect, useId, useRef, useState, type FormEvent, type ReactNode } from "react";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useInfiniteQuery, useQuery, useQueryClient } from "@tanstack/react-query";
 import { PageShell } from "@/components/page-shell";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
+import { Pager, usePager } from "@/components/ui/pager";
 import { DateTimePicker } from "@/components/ui/datetime-picker";
 import { Segmented, type SegmentedOption } from "@/components/ui/segmented";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useAuth } from "@/hooks/use-auth";
+import { useConfirmStep } from "@/hooks/use-confirm-step";
+import { useDisclosureFocus } from "@/hooks/use-disclosure-focus";
 import { useSubmitGuard } from "@/hooks/use-submit-guard";
 import { MaintenanceRow } from "@/components/maintenance";
 import {
@@ -30,7 +33,7 @@ import {
 // pages/targets.tsx does it.
 import { stampFull, translate, useLocale, useT, type Locale, type Translate } from "@/lib/i18n";
 import { pluralKey, settingsDict, type SettingsKey } from "@/lib/i18n/dict/settings";
-import { useWriteGuard } from "@/lib/timemachine";
+import { withAtParam, useWriteGuard } from "@/lib/timemachine";
 import type {
   ConfigBundle,
   ConfigImportCollectionResult,
@@ -50,8 +53,22 @@ import { CHECKBOX_CLASS, cn } from "@/lib/utils";
 
 /* ── shared bits ────────────────────────────────────────────────────────── */
 
+/**
+ * queryErrorMessage is what this page says when something failed: the server's
+ * own words whenever it wrote any, and this section's own sentence when it did
+ * not.
+ *
+ * The `?? title` alone was not enough. A refusal that never reached the console
+ * — a gateway's HTML 502, a proxy's empty problem document — arrives with an
+ * ABSENT detail and a title that is the empty statusText, and `"" ` is a string,
+ * so every error slot on this page rendered a red paragraph with nothing in it:
+ * the list stayed empty, the button un-spun, and the operator was looking at a
+ * page that had silently given up. A blank message is worse than a generic one.
+ */
 function queryErrorMessage(error: unknown, fallback: string): string {
-  return error instanceof ApiError ? (error.problem.detail ?? error.problem.title) : fallback;
+  if (!(error instanceof ApiError)) return fallback;
+  const said = [error.problem.detail, error.problem.title].map((s) => s?.trim() ?? "").find((s) => s !== "");
+  return said ?? fallback;
 }
 
 /** The locale is required: a bare toLocaleString() reorders the date and swaps in AM/PM from
@@ -107,9 +124,17 @@ function withNodes(template: string, nodes: Record<string, ReactNode>): ReactNod
 
 /** The two surface names that appear as links in those sentences. Their words
  *  come from this dictionary and match what the sidebar calls the same pages. */
-function SurfaceLink({ href, children }: { href: string; children: ReactNode }) {
+/**
+ * SurfaceLink is a plain in-app link, and it applies withAtParam ITSELF so its callers cannot forget.
+ *
+ * Every one of them passed a bare string ("/explore"), which is a full document load: the Time
+ * Machine provider unmounts, the new one finds no ?at=, and a reader pinned to an instant was
+ * silently returned to Live. Doing it here rather than at four call sites is what keeps the fifth
+ * one honest.
+ */
+function SurfaceLink({ to, children }: { to: string; children: ReactNode }) {
   return (
-    <a href={href} className="text-primary hover:underline">
+    <a href={withAtParam(to)} className="text-primary hover:underline">
       {children}
     </a>
   );
@@ -480,7 +505,7 @@ function WebhookRow({ hook, onEdit }: { hook: Webhook; onEdit: () => void }) {
   const qc = useQueryClient();
   /* guard carries the DISABLED flag AND the reason for it — lib/timemachine's useWriteGuard. */
   const guard = useWriteGuard();
-  const [confirming, setConfirming] = useState(false);
+  const { confirming, confirmRef, triggerRef, ask, reset } = useConfirmStep();
   const [busy, setBusy] = useState(false);
   const [queued, setQueued] = useState(false);
   const [error, setError] = useState<string>();
@@ -497,7 +522,7 @@ function WebhookRow({ hook, onEdit }: { hook: Webhook; onEdit: () => void }) {
     } catch (err) {
       setError(queryErrorMessage(err, t("webhooks.row.deleteFailed")));
       setBusy(false);
-      setConfirming(false);
+      reset();
     }
   }
 
@@ -553,7 +578,9 @@ function WebhookRow({ hook, onEdit }: { hook: Webhook; onEdit: () => void }) {
         <span className="text-xs text-health-bad">
           {t("webhooks.row.failures", {
             count: hook.failures,
-            word: t(pluralKey(hook.failures, "count.failures.one", "count.failures.few", "count.failures.many")),
+            /* The locale, because 21 is singular in Russian and plural in
+               English — pluralKey's own doc comment has the case. */
+            word: t(pluralKey(locale, hook.failures, "count.failures.one", "count.failures.few", "count.failures.many")),
           })}
         </span>
       ) : null}
@@ -561,10 +588,14 @@ function WebhookRow({ hook, onEdit }: { hook: Webhook; onEdit: () => void }) {
       <span className="ml-auto flex flex-wrap items-center gap-2">
         {confirming ? (
           <>
-            <Button size="sm" variant="outline" loading={busy} {...guard} onClick={handleDelete}>
+            {/* Spoken as well as drawn — the row swaps its controls under the reader. */}
+            <span role="status" className="sr-only">
+              {t("webhooks.row.confirmDelete", { name: hook.name })}
+            </span>
+            <Button ref={confirmRef} size="sm" variant="outline" loading={busy} {...guard} onClick={handleDelete}>
               {t("webhooks.row.confirmDelete", { name: hook.name })}
             </Button>
-            <Button size="sm" variant="ghost" onClick={() => setConfirming(false)}>
+            <Button size="sm" variant="ghost" onClick={reset}>
               {t("cancel")}
             </Button>
           </>
@@ -576,7 +607,7 @@ function WebhookRow({ hook, onEdit }: { hook: Webhook; onEdit: () => void }) {
             <Button size="sm" variant="ghost" {...guard} onClick={onEdit}>
               {t("webhooks.row.edit", { name: hook.name })}
             </Button>
-            <Button size="sm" variant="ghost" {...guard} onClick={() => setConfirming(true)}>
+            <Button ref={triggerRef} size="sm" variant="ghost" {...guard} onClick={ask}>
               {t("webhooks.row.delete", { name: hook.name })}
             </Button>
           </>
@@ -605,6 +636,7 @@ function WebhooksSection() {
   });
   const query = useQuery({ queryKey: ["webhooks"], queryFn: listWebhooks });
   const hooks = query.data?.webhooks ?? [];
+  const pager = usePager(hooks);
 
   return (
     <div className="flex flex-col gap-4">
@@ -639,11 +671,14 @@ function WebhooksSection() {
           <p className="px-1 py-10 text-center text-xs text-muted-foreground">{t("webhooks.empty")}</p>
         ) : null}
         {hooks.length > 0 ? (
+          <>
           <ul aria-label={t("webhooks.listAria")} className="mt-4 divide-y divide-border">
-            {hooks.map((hook) => (
+            {pager.visible.map((hook) => (
               <WebhookRow key={hook.id} hook={hook} onEdit={() => setEditing({ mode: "edit", hook })} />
             ))}
           </ul>
+          <Pager pager={pager} subject={t("webhooks.subject")} className="px-0" />
+          </>
         ) : null}
       </SectionCard>
     </div>
@@ -724,6 +759,9 @@ function MintedToken({ minted, onDismiss }: { minted: TokenCreateResponse; onDis
   );
 }
 
+/** TOKEN_NAME_MAX mirrors httpapi.tokenNameMaxLen; see the input's own comment. */
+const TOKEN_NAME_MAX = 63;
+
 function TokenForm({ onMinted, onDone }: { onMinted: (minted: TokenCreateResponse) => void; onDone: () => void }) {
   const t = useT(settingsDict);
   const qc = useQueryClient();
@@ -798,6 +836,9 @@ function TokenForm({ onMinted, onDone }: { onMinted: (minted: TokenCreateRespons
               id={nameId}
               value={name}
               placeholder="ci-pipeline"
+              /* The same 63 the API enforces (httpapi.tokenNameMaxLen). Stopping the typing is
+                 kinder than a 422 after the fact — and the name is display text in every row. */
+              maxLength={TOKEN_NAME_MAX}
               aria-invalid={invalid("name") || undefined}
               aria-describedby={invalid("name") ? `${errorId} ${nameId}-help` : `${nameId}-help`}
               onChange={(e) => setName(e.target.value)}
@@ -866,7 +907,7 @@ function TokenRow({ token }: { token: Token }) {
   const qc = useQueryClient();
   /* guard carries the DISABLED flag AND the reason for it — lib/timemachine's useWriteGuard. */
   const guard = useWriteGuard();
-  const [confirming, setConfirming] = useState(false);
+  const { confirming, confirmRef, triggerRef, ask, reset } = useConfirmStep();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
   const state = tokenState(token, new Date());
@@ -892,12 +933,18 @@ function TokenRow({ token }: { token: Token }) {
        true, which is `loading` on the confirm button, which is disabled. The
        purge then needed a reload to become clickable. */
     setBusy(false);
-    setConfirming(false);
+    reset();
   }
 
   return (
     <li data-testid="token-row" className="flex flex-wrap items-center gap-x-3 gap-y-1 py-3 text-sm">
-      <span className="font-medium">{token.name}</span>
+      {/* The name is SERVER text and can be anything, including 4 000 characters with no space in
+          them. An unbreakable string in a flex row has no width to lay out against, so the row grew
+          to ~950 000 pixels and every page in the console scrolled sideways. It is bounded here and
+          bounded again at the API (tokenNameMaxLen); the whole name stays in the title. */}
+      <span className="min-w-0 max-w-full truncate font-medium" title={token.name}>
+        {token.name}
+      </span>
       {state === "active" ? null : (
         <Badge variant={state === "revoked" ? "bad" : "unknown"}>
           {t(state === "revoked" ? "tokens.revoked" : "tokens.expired")}
@@ -924,22 +971,40 @@ function TokenRow({ token }: { token: Token }) {
       <span className="ml-auto flex flex-wrap items-center gap-2">
         {confirming ? (
           <>
-            <Button size="sm" variant="outline" loading={busy} {...guard} onClick={handleDelete}>
+            <span role="status" className="sr-only">
               {t(spent ? "tokens.row.confirmPurge" : "tokens.row.confirmDelete", { name: token.name })}
+            </span>
+            <Button
+              ref={confirmRef}
+              size="sm"
+              variant="outline"
+              loading={busy}
+              {...guard}
+              aria-label={t(spent ? "tokens.row.confirmPurge" : "tokens.row.confirmDelete", { name: token.name })}
+              onClick={handleDelete}
+            >
+              <span className="block max-w-[18rem] truncate">
+                {t(spent ? "tokens.row.confirmPurge" : "tokens.row.confirmDelete", { name: token.name })}
+              </span>
             </Button>
-            <Button size="sm" variant="ghost" onClick={() => setConfirming(false)}>
+            <Button size="sm" variant="ghost" onClick={reset}>
               {t("cancel")}
             </Button>
           </>
         ) : (
           <Button
+            ref={triggerRef}
             size="sm"
             variant="ghost"
             {...guard}
             title={spent ? t("tokens.row.purgeHint") : undefined}
-            onClick={() => setConfirming(true)}
+            aria-label={t(spent ? "tokens.row.purge" : "tokens.row.delete", { name: token.name })}
+            onClick={ask}
           >
-            {t(spent ? "tokens.row.purge" : "tokens.row.delete", { name: token.name })}
+            {/* Truncated for the same reason the name above is: this label CARRIES the name. */}
+            <span className="block max-w-[18rem] truncate">
+              {t(spent ? "tokens.row.purge" : "tokens.row.delete", { name: token.name })}
+            </span>
           </Button>
         )}
       </span>
@@ -957,25 +1022,44 @@ function TokensSection() {
   /* guard carries the DISABLED flag AND the reason for it — lib/timemachine's useWriteGuard. */
   const guard = useWriteGuard();
   const [creating, setCreating] = useState(false);
+  // The keyboard across the button↔form swap; see hooks/use-disclosure-focus.
+  const createFocus = useDisclosureFocus(creating);
   /* The one-time secret lives HERE rather than in the form, so dismissing the
      form does not take the only copy of it with it. */
   const [minted, setMinted] = useState<TokenCreateResponse>();
   const query = useQuery({ queryKey: ["tokens"], queryFn: listTokens });
   const tokens = query.data?.tokens ?? [];
+  const pager = usePager(tokens);
 
   return (
     <div className="flex flex-col gap-4">
       {creating ? (
-        <TokenForm
-          onMinted={(m) => {
-            setMinted(m);
-            setCreating(false);
-          }}
-          onDone={() => setCreating(false)}
-        />
+        <div ref={createFocus.panelRef} tabIndex={-1}>
+          <TokenForm
+            onMinted={(m) => {
+              setMinted(m);
+              createFocus.onClose();
+              setCreating(false);
+            }}
+            onDone={() => {
+              createFocus.onClose();
+              setCreating(false);
+            }}
+          />
+        </div>
       ) : (
         <div>
-          <Button size="sm" {...guard} onClick={() => setCreating(true)}>
+          {/* The button is REPLACED by the form, so the keyboard has to be handed over; see
+              hooks/use-disclosure-focus. */}
+          <Button
+            ref={createFocus.triggerRef}
+            size="sm"
+            {...guard}
+            onClick={() => {
+              createFocus.onOpen();
+              setCreating(true);
+            }}
+          >
             {t("tokens.new")}
           </Button>
         </div>
@@ -998,11 +1082,14 @@ function TokensSection() {
           <p className="px-1 py-10 text-center text-xs text-muted-foreground">{t("tokens.empty")}</p>
         ) : null}
         {tokens.length > 0 ? (
+          <>
           <ul aria-label={t("tokens.listAria")} className="mt-4 divide-y divide-border">
-            {tokens.map((token) => (
+            {pager.visible.map((token) => (
               <TokenRow key={token.id} token={token} />
             ))}
           </ul>
+          <Pager pager={pager} subject={t("tokens.subject")} className="px-0" />
+          </>
         ) : null}
       </SectionCard>
     </div>
@@ -1011,12 +1098,26 @@ function TokensSection() {
 
 /* ── maintenance windows (QA round 3, finding #9) ───────────────────────── */
 
-/** MaintenanceWindowsSection is the ONLY unbounded view of the declared windows in this console. */
+/**
+ * MaintenanceWindowsSection is the ONLY unbounded view of the declared windows in this console —
+ * and it has to actually be unbounded.
+ *
+ * It used to issue one unparameterised GET and paginate client-side over whatever came back. The API
+ * answers 100 rows plus a nextCursor, ordered start_at DESC, so with more than 100 declared windows
+ * the ones silently missing were the running and the past ones — exactly what an operator opens this
+ * page to find — while future windows stayed. The blurb promised every declared window.
+ */
 function MaintenanceWindowsSection() {
   const t = useT(settingsDict);
   const qc = useQueryClient();
-  const query = useQuery({ queryKey: ["settings", "maintenance"], queryFn: () => getMaintenance() });
-  const windows = query.data?.windows ?? [];
+  const query = useInfiniteQuery({
+    queryKey: ["settings", "maintenance"],
+    queryFn: ({ pageParam }) => getMaintenance({ limit: 100, cursor: pageParam || undefined }),
+    initialPageParam: "",
+    getNextPageParam: (page) => page.nextCursor || undefined,
+  });
+  const windows = query.data?.pages.flatMap((page) => page.windows ?? []) ?? [];
+  const pager = usePager(windows);
 
   const onChanged = () => {
     void qc.invalidateQueries({ queryKey: ["settings", "maintenance"] });
@@ -1030,8 +1131,8 @@ function MaintenanceWindowsSection() {
     <SectionCard title={t("maintenance.heading")}>
       <p className="mt-1 max-w-prose text-xs leading-relaxed text-muted-foreground">
         {withNodes(t("maintenance.blurb"), {
-          investigate: <SurfaceLink href="/investigate">{t("link.investigate")}</SurfaceLink>,
-          explore: <SurfaceLink href="/explore">{t("link.explore")}</SurfaceLink>,
+          investigate: <SurfaceLink to="/investigate">{t("link.investigate")}</SurfaceLink>,
+          explore: <SurfaceLink to="/explore">{t("link.explore")}</SurfaceLink>,
         })}
       </p>
       {query.isError ? (
@@ -1050,14 +1151,36 @@ function MaintenanceWindowsSection() {
         <p className="px-1 py-10 text-center text-xs text-muted-foreground">{t("maintenance.empty")}</p>
       ) : null}
       {windows.length > 0 ? (
+        <>
         <ul aria-label={t("maintenance.listAria")} className="mt-4 divide-y divide-border">
-          {windows.map((w) => (
+          {pager.visible.map((w) => (
             /* The SHARED row (components/maintenance.tsx): same confirm-delete,
                same compact stamp, same write guard. canWrite is true by
                construction — this whole section is behind maintenance:write. */
             <MaintenanceRow key={w.id} window={w} canWrite onChanged={onChanged} />
           ))}
         </ul>
+        <Pager pager={pager} subject={t("maintenance.subject")} className="px-0" />
+        {query.hasNextPage ? (
+          <div className="mt-3 flex items-center gap-3">
+            <Button
+              size="sm"
+              variant="outline"
+              loading={query.isFetchingNextPage}
+              onClick={() => void query.fetchNextPage()}
+            >
+              {t("maintenance.loadMore")}
+            </Button>
+            {/* A failed page is a note BESIDE the button, never the loss of the pages that
+                succeeded — the rule mtr-trace-list.tsx states for the same shape. */}
+            {query.isError ? (
+              <span role="alert" className="text-xs text-health-bad">
+                {queryErrorMessage(query.error, t("maintenance.unavailable"))}
+              </span>
+            ) : null}
+          </div>
+        ) : null}
+        </>
       ) : null}
     </SectionCard>
   );
@@ -1115,6 +1238,11 @@ const IMPORT_COLLECTIONS: readonly (readonly [keyof Omit<ConfigImportResult, "dr
   ["alertRules", "collection.alertRules"],
   ["webhooks", "collection.webhooks"],
   ["maintenanceWindows", "collection.maintenanceWindows"],
+  /* The bundle carries these two as well, and the ledger silently dropped them: an import that
+     created or skipped custom roles reported neither, so the one section whose outcome an operator
+     most needs to see — the access map — was the one the result table did not mention. */
+  ["rbacRoles", "collection.rbacRoles"],
+  ["rbacBindings", "collection.rbacBindings"],
 ];
 
 function ImportNotes({ label, notes, tone }: { label: string; notes: ConfigImportCollectionResult["errors"]; tone: string }) {
@@ -1164,6 +1292,12 @@ function ImportResultTable({ result }: { result: ConfigImportResult }) {
           <tbody className="divide-y divide-border">
             {IMPORT_COLLECTIONS.map(([key, labelKey]) => {
               const c = result[key];
+              /* A collection the response OMITS is skipped, not rendered as zeroes and never crashed
+                 on. The server leaves a section out when the caller may not see it — the rbac ones
+                 are absent without rbac:manage — and reading .created off undefined took the whole
+                 Settings page down with it, turning "you cannot see this section" into a blank
+                 screen. An absent row says the same thing more honestly than a row of zeroes would. */
+              if (!c) return null;
               return (
                 <tr key={key} data-testid={`import-row-${key}`}>
                   <th scope="row" className="py-1.5 pr-4 font-normal">
@@ -1180,6 +1314,7 @@ function ImportResultTable({ result }: { result: ConfigImportResult }) {
       </div>
       {IMPORT_COLLECTIONS.map(([key, labelKey]) => {
         const c = result[key];
+        if (!c) return null;
         if (c.errors.length === 0 && c.warnings.length === 0) return null;
         return (
           <div key={key} className="mt-4">
@@ -1449,8 +1584,8 @@ function AboutSection() {
       <p className="mt-4 max-w-prose text-xs leading-relaxed text-muted-foreground">{t("about.retention")}</p>
       <p className="mt-3 max-w-prose text-xs leading-relaxed text-muted-foreground">
         {withNodes(t("about.maintenance"), {
-          investigate: <SurfaceLink href="/investigate">{t("link.investigate")}</SurfaceLink>,
-          explore: <SurfaceLink href="/explore">{t("link.explore")}</SurfaceLink>,
+          investigate: <SurfaceLink to="/investigate">{t("link.investigate")}</SurfaceLink>,
+          explore: <SurfaceLink to="/explore">{t("link.explore")}</SurfaceLink>,
         })}
       </p>
     </SectionCard>

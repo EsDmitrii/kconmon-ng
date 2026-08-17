@@ -103,6 +103,27 @@ export const FUTURE_PRESETS: readonly PickerPreset[] = [
  */
 export const POPOVER_MIN_HEIGHT_PX = 420;
 
+/**
+ * POPOVER_WIDTH_PX is the popover's drawn width (w-[17.5rem]), a CONSTANT for the same reason the
+ * height is: the side has to be decided before the popover exists.
+ */
+export const POPOVER_WIDTH_PX = 280;
+
+/**
+ * pickerAlignSide decides which EDGE the popover hangs from. Left-aligned is the default and the
+ * tie-break, exactly as "down" is vertically.
+ *
+ * The trigger moved into the page header, where it sits at the RIGHT edge of the row — and a
+ * popover anchored to its left edge ran off the viewport, taking the calendar with it and giving
+ * the whole page a horizontal scrollbar (owner report). Space is measured from the trigger's own
+ * left edge, because that is where a left-aligned popover starts.
+ */
+export function pickerAlignSide(spaceRightOfTriggerLeft: number, spaceLeftOfTriggerRight: number): "left" | "right" {
+  if (!Number.isFinite(spaceRightOfTriggerLeft) || !Number.isFinite(spaceLeftOfTriggerRight)) return "left";
+  if (spaceRightOfTriggerLeft >= POPOVER_WIDTH_PX) return "left";
+  return spaceLeftOfTriggerRight >= POPOVER_WIDTH_PX ? "right" : "left";
+}
+
 /** pickerDropDirection decides which way the popover opens; downward is still the DEFAULT and the tie-break. */
 export function pickerDropDirection(spaceBelow: number, spaceAbove: number): "down" | "up" {
   if (!Number.isFinite(spaceBelow) || !Number.isFinite(spaceAbove)) return "down";
@@ -264,6 +285,7 @@ export function DateTimePicker({
   const suppressWheelRef = React.useRef(false);
   /* Which way the popover opens, decided ONCE at open time from the trigger's box. */
   const [drop, setDrop] = React.useState<"down" | "up">("down");
+  const [side, setSide] = React.useState<"left" | "right">("left");
 
   const today = startOfDay(new Date());
 
@@ -285,6 +307,16 @@ export function DateTimePicker({
     return pickerDropDirection(viewportHeight - rect.bottom, rect.top);
   }, []);
 
+  /** The horizontal twin of measureDropDirection, guarded the same way. */
+  const measureAlignSide = React.useCallback((): "left" | "right" => {
+    const trigger = triggerRef.current;
+    if (!trigger || typeof trigger.getBoundingClientRect !== "function") return "left";
+    const rect = trigger.getBoundingClientRect();
+    const viewportWidth = window.innerWidth || document.documentElement?.clientWidth || 0;
+    if (viewportWidth <= 0) return "left";
+    return pickerAlignSide(viewportWidth - rect.left, rect.right);
+  }, []);
+
   /*
    * One cheap listener, only while open, no rAF: resize already coalesces and the handler is two
    * reads and a compare.
@@ -293,10 +325,11 @@ export function DateTimePicker({
     if (!open) return;
     function remeasure() {
       setDrop(measureDropDirection());
+      setSide(measureAlignSide());
     }
     window.addEventListener("resize", remeasure);
     return () => window.removeEventListener("resize", remeasure);
-  }, [open, measureDropDirection]);
+  }, [open, measureDropDirection, measureAlignSide]);
 
   function openPopover() {
     // Reseed on every open: a draft abandoned three minutes ago is not what
@@ -309,6 +342,7 @@ export function DateTimePicker({
     setTimeOpen(false);
     setMonthYearOpen(false);
     setDrop(measureDropDirection());
+    setSide(measureAlignSide());
     pendingFocusRef.current = true;
     setOpen(true);
   }
@@ -566,8 +600,11 @@ export function DateTimePicker({
           aria-label={t("picker.dialog")}
           onKeyDown={onDialogKeyDown}
           data-drop={drop}
+          data-side={side}
           className={cn(
-            "absolute left-0 z-50 w-[17.5rem] rounded-lg border border-border bg-popover p-3 text-popover-foreground shadow-card",
+            "absolute z-50 w-[17.5rem] rounded-lg border border-border bg-popover p-3 text-popover-foreground shadow-card",
+            /* One of the two, never both — same rule as the vertical class below. */
+            side === "right" ? "right-0" : "left-0",
             /* One of the two, never both — the class IS the direction, so a
                test can read it without a layout engine (finding #16). */
             drop === "up" ? "bottom-full mb-1.5" : "top-full mt-1.5",
@@ -709,7 +746,7 @@ export function DateTimePicker({
                               ? "bg-primary font-medium text-primary-foreground"
                               : "hover:bg-accent hover:text-accent-foreground",
                             !isSelected && isToday && "ring-1 ring-inset ring-border-strong",
-                            !isSelected && outside && "text-muted-foreground/60",
+                            !isSelected && outside && "text-muted-foreground",
                             !isSelected && !outside && "text-foreground",
                           )}
                         >

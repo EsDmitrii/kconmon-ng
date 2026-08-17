@@ -25,7 +25,7 @@ import { cardsDict, type CardsKey } from "@/lib/i18n/dict/cards";
    table — one reading of a cell for every surface that draws one. */
 import { matrixCellsDict } from "@/lib/i18n/dict/matrix-cells";
 import { cellSummary, cellTier, fmtRatio, isMeasured } from "@/lib/matrix-cells";
-import { useTimeContext, useWriteGuard } from "@/lib/timemachine";
+import { withAtParam, useTimeContext, useWriteGuard } from "@/lib/timemachine";
 import type { Matrix, MatrixCell, RunDetail, RunResult, Topology } from "@/lib/types";
 import { escapeLabelValue, runsAtOrBefore } from "@/lib/utils";
 
@@ -65,8 +65,15 @@ const TIER_VARIANT: Record<Tier, NonNullable<BadgeProps["variant"]>> = {
   unknown: "unknown",
 };
 
-function fmtDuration(ns?: number): string {
-  return ns === undefined ? "—" : `${(ns / 1e6).toFixed(0)}ms`;
+/* Sub-millisecond latencies keep a decimal, and the guard covers every shape the wire can send.
+   `=== undefined` was too narrow by exactly the ones that matter: Go marshals a nil *float64 as
+   null, and (null / 1e6).toFixed(0) is "0ms" — the fastest link in the fleet, for a pair with no
+   measurement at all. NaN renders as "NaNms". And toFixed(0) turned a real 0.46ms probe into "0ms",
+   which is the same lie by a different route. */
+function fmtDuration(ns?: number | null): string {
+  if (typeof ns !== "number" || !Number.isFinite(ns)) return "—";
+  const ms = ns / 1e6;
+  return ms < 10 ? `${ms.toFixed(1)}ms` : `${ms.toFixed(0)}ms`;
 }
 
 /** The locale is required: a bare toLocaleString() reorders the date and swaps in AM/PM from
@@ -129,14 +136,16 @@ function PairOverviewTab({ source, destination }: { source: string; destination:
    * use — pairScope's U+2192.
    */
   const scope = pairScope(source, destination);
-  const { annotations, error: annotationsError, refresh } = useAnnotations(scope, PAIR_RANGE_SECONDS);
+  /* ONE hour, resolved once, for the chart and for BOTH bars under it — the same shared anchor the
+     target card takes (QA scope 2, finding #20). It is declared before its consumers because all
+     three of them take it: a bar left to compute its own `now` on a 60s poll drifts away from a
+     chart that resolved its window once at mount. */
+  const range = useWindowAnchor(PAIR_RANGE_SECONDS);
+  const { annotations, error: annotationsError, refresh } = useAnnotations(scope, PAIR_RANGE_SECONDS, range);
   /*
    * The declared change windows over the same hour and the same scope; a separate hook and a
    * separate bar rather than one merged list.
    */
-  /* ONE hour, resolved once, for the chart and for the bar under it — the same
-     shared anchor the target card takes (QA scope 2, finding #20). */
-  const range = useWindowAnchor(PAIR_RANGE_SECONDS);
   const {
     windows,
     error: maintenanceError,
@@ -346,7 +355,7 @@ function PairDiagnosticsTab({
             <div>
               <dt className="text-xs text-muted-foreground">{t("pair.run")}</dt>
               <dd className="mt-0.5">
-                <a href={`/diagnostics/runs/${last.run.id}`} className="font-medium text-primary hover:underline">
+                <a href={withAtParam(`/diagnostics/runs/${last.run.id}`)} className="font-medium text-primary hover:underline">
                   {last.run.id}
                 </a>
               </dd>
@@ -382,7 +391,7 @@ const TABS: { value: PairTab; labelKey: CardsKey }[] = [
 function NotFound() {
   const t = useT(cardsDict);
   return (
-    <PageShell title={t("pair.title")} description={t("pair.notFound.bare")}>
+    <PageShell timeMachine title={t("pair.title")} description={t("pair.notFound.bare")}>
       <Card role="status" className="px-6 py-10 text-center text-sm text-muted-foreground">
         {t("pair.notFound.body")}
       </Card>
@@ -438,6 +447,7 @@ function UnknownEndpoints({ unknown }: { unknown: string[] }) {
   const t = useT(cardsDict);
   return (
     <PageShell
+      timeMachine
       title={t("pair.notFound.unknownEndpoints")}
       description={
         unknown.length === 1
@@ -453,7 +463,7 @@ function UnknownEndpoints({ unknown }: { unknown: string[] }) {
           <SearchX className="size-5" />
         </span>
         <p className="max-w-sm text-xs leading-relaxed text-muted-foreground">{t("pair.notFound.unknownBody")}</p>
-        <a href="/matrix" className="text-xs font-medium text-primary hover:underline">
+        <a href={withAtParam("/matrix")} className="text-xs font-medium text-primary hover:underline">
           {t("pair.notFound.back")}
         </a>
       </Card>
@@ -491,6 +501,7 @@ export function PairCardPage() {
 
   return (
     <PageShell
+      timeMachine
       /* The TITLE is the two node names and the arrow — data, in both. */
       title={`${source} → ${destination}`}
       description={t("pair.description")}

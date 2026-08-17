@@ -445,7 +445,7 @@ describe("tokens section", () => {
     expect(within(rows[0]).getByText("ci-pipeline")).toBeInTheDocument();
     expect(within(rows[0]).getByText(/owner u1/)).toBeInTheDocument();
     expect(within(rows[0]).getByTestId("token-last-used")).toHaveTextContent(
-      `last used ${new Date("2026-02-03T04:05:00Z").toLocaleString()}`,
+      `last used ${new Date("2026-02-03T04:05:00Z").toLocaleString(undefined, { hour12: false })}`,
     );
   });
 
@@ -614,14 +614,16 @@ describe("maintenance windows section", () => {
     expect(resourceCalls().filter((c) => c.url.startsWith("/api/v1/maintenance"))).toEqual([]);
   });
 
-  it("asks for EVERY window — no from, no to, no scope", async () => {
+  it("asks for EVERY window — no from, no to, no scope, and it PAGES", async () => {
     const { resourceCalls } = renderPage({ permissions: ["maintenance:write"], maintenance: [windowRow()] });
     await screen.findByRole("heading", { name: "Maintenance windows" });
     const asked = resourceCalls().filter((c) => c.url.startsWith("/api/v1/maintenance"));
     expect(asked).toHaveLength(1);
-    /* The whole point of this section: a RANGE would hide the future windows
-       it exists to surface, and a scope would hide everybody else's. */
-    expect(asked[0].url).toBe("/api/v1/maintenance");
+    /* The whole point of this section: a RANGE would hide the future windows it exists to surface,
+       and a scope would hide everybody else's. The limit is the OTHER half — the API pages at 100
+       whether or not the caller asks, and this section followed no cursor, so past and running
+       windows fell off the end of a list that claimed to be complete. */
+    expect(asked[0].url).toBe("/api/v1/maintenance?limit=100");
   });
 
   it("lists a window whose whole span is in the FUTURE — the one the bars cannot show", async () => {
@@ -920,9 +922,13 @@ describe("export", () => {
     expect(revoke).toHaveBeenCalledWith("blob:kconmon");
   });
 
-  it("says secrets never travel in a bundle", async () => {
+  it("says secrets never travel in a bundle — and that an import therefore CREATES no endpoint", async () => {
     renderPage();
-    expect(await screen.findByText(/never carries a webhook secret/i)).toBeInTheDocument();
+    /* The old copy said imported endpoints "arrive without one and stay unusable until a secret is
+       set here", which reads as "they arrive". They do not: importWebhooks only updates endpoints
+       that already exist by name, so restoring a bundle onto a fresh console creates zero. */
+    expect(await screen.findByText(/never carries a\s+secret/i)).toBeInTheDocument();
+    expect(screen.getByText(/are NOT created by an import/i)).toBeInTheDocument();
   });
 
   it("renders an export failure instead of downloading an error page", async () => {
@@ -991,7 +997,7 @@ describe("import", () => {
               warnings: [
                 {
                   name: "pagerduty",
-                  reason: "imported without secret: a bundle never carries webhook secrets",
+                  reason: "not imported: a bundle never carries webhook secrets",
                 },
               ],
             },
@@ -1007,7 +1013,7 @@ describe("import", () => {
     // Errors and warnings are the server's own sentences, not a count.
     expect(screen.getByText('definition "edge-tcp" is not in this bundle')).toBeInTheDocument();
     expect(screen.getByText("edge-tcp/interval")).toBeInTheDocument();
-    expect(screen.getByText("imported without secret: a bundle never carries webhook secrets")).toBeInTheDocument();
+    expect(screen.getByText("not imported: a bundle never carries webhook secrets")).toBeInTheDocument();
     expect(screen.getByText("pagerduty")).toBeInTheDocument();
   });
 

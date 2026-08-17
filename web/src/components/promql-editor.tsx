@@ -84,10 +84,15 @@ export function topKeymap(opts: { onRun: () => void }): KeyBinding[] {
 }
 
 /** promqlExtensions is the editor's whole configuration MINUS the theme. */
-export function promqlExtensions(opts: { onRun: () => void; onChange: (v: string) => void }): Extension[] {
+export function promqlExtensions(opts: { onRun: () => void; onChange: (v: string) => void; label?: string }): Extension[] {
   const promql = new PromQLExtension();
   return [
     basicSetup,
+    /* CodeMirror renders its editable surface as a bare contenteditable with role="textbox" and no
+       name of its own, so the primary input of /console announced itself as "edit, multi-line" and
+       nothing else. Every other input in this kit is labelled; this one is labelled the same way,
+       through the extension so the label follows the interface language. */
+    EditorView.contentAttributes.of({ "aria-label": opts.label ?? "PromQL query" }),
     tooltips(tooltipConfig()),
     Prec.highest(keymap.of(topKeymap(opts))),
     keymap.of(defaultKeymap),
@@ -98,14 +103,18 @@ export function promqlExtensions(opts: { onRun: () => void; onChange: (v: string
   ];
 }
 
-export function PromQLEditor({ initial, onChange, onRun }: {
+export function PromQLEditor({ initial, onChange, onRun, label }: {
   initial: string; onChange: (v: string) => void; onRun: () => void;
+  /** The editor's accessible name; the page passes its own translated string. */
+  label?: string;
 }) {
   const host = useRef<HTMLDivElement>(null);
   const runRef = useRef(onRun);
   runRef.current = onRun;
   const changeRef = useRef(onChange);
   changeRef.current = onChange;
+  const labelRef = useRef(label);
+  labelRef.current = label;
   const { theme } = useTheme();
   const themeCompartment = useRef(new Compartment());
   const viewRef = useRef<EditorView | null>(null);
@@ -120,6 +129,7 @@ export function PromQLEditor({ initial, onChange, onRun }: {
           ...promqlExtensions({
             onRun: () => runRef.current(),
             onChange: (v) => changeRef.current(v),
+            label: labelRef.current,
           }),
           themeCompartment.current.of(editorTheme(document.documentElement.classList.contains("dark"))),
         ],

@@ -1,4 +1,4 @@
-import type { RankedCause, SignalSample, TimelineEntry, TimelineKind } from "./investigation";
+import { mergeTimeline, type RankedCause, type SignalSample, type TimelineEntry, type TimelineKind } from "./investigation";
 import type {
   Alert,
   Annotation,
@@ -14,7 +14,7 @@ import type {
 } from "./types";
 import { stampFull, type Locale, type Translate } from "./i18n";
 import { enT, investigationSourcesDict, type InvestigationSourcesKey } from "./i18n/dict/investigation-sources";
-import { escapeLabelValue } from "./utils";
+import { PAIR_ARROW, escapeLabelValue, normalizePairInput } from "./utils";
 
 /** T is this module's translator, spelled once. Every function that renders a
  *  sentence takes one as an OPTIONAL TRAILING parameter defaulting to `enT`,
@@ -37,8 +37,11 @@ export const SCOPE_KINDS: ScopeKind[] = ["pair", "node", "target", "zone-pair", 
 /** PAIR_SEPARATOR is U+2192, the SAME arrow internal/console/events/
  *  live_event.go's pairScope and pages/pair-card.tsx's pairScope use. It is not
  *  cosmetic: a pair investigation filters GET /api/v1/events by exact scope
- *  equality, so a hyphen-arrow here would silently match nothing. */
-export const PAIR_SEPARATOR = "→";
+ *  equality, so a hyphen-arrow here would silently match nothing — which is why
+ *  everything a HUMAN types goes through lib/utils.ts's normalizePairInput
+ *  first, and why this constant is that module's arrow rather than a second
+ *  copy of it. */
+export const PAIR_SEPARATOR = PAIR_ARROW;
 
 export interface InvestigationScope {
   kind: ScopeKind;
@@ -71,6 +74,35 @@ function parseInstant(raw: string | null): Date | null {
 }
 
 /**
+ * MAX_TIME_MS is the widest instant a Date can hold (ECMA-262's ±8.64e15).
+ *
+ * One millisecond past it is an Invalid Date, and an Invalid Date is not a quiet
+ * value on this page: every `toISOString()` it reaches THROWS RangeError, and
+ * this page calls that on `params.from`/`params.to` to build its react-query
+ * key, its permalink and its export payload. A thrown key is a blank page.
+ */
+export const MAX_TIME_MS = 8_640_000_000_000_000;
+
+/**
+ * shiftInstant moves an instant by `deltaMs` and CLAMPS the result back into the
+ * representable range.
+ *
+ * `?from=+275760-09-13T00:00:00.000Z` — the top of the calendar, and a perfectly
+ * ordinary thing to find in a hand-edited permalink — parses fine and then
+ * derives `to = from + 1h`, which overflows to Invalid; the page rendered
+ * nothing at all rather than saying anything. `?to=-271821-04-20T…` is the same
+ * fact at the other end. Clamping keeps the arithmetic TOTAL, which is the
+ * property parseInvestigationParams already promises: the degenerate window that
+ * comes out (both edges on one instant) is then refused by commitWindow with a
+ * sentence, which is what a link naming the end of time deserves.
+ */
+export function shiftInstant(base: Date, deltaMs: number): Date {
+  const ms = base.getTime() + deltaMs;
+  if (!Number.isFinite(ms)) return new Date(deltaMs < 0 ? -MAX_TIME_MS : MAX_TIME_MS);
+  return new Date(Math.min(Math.max(ms, -MAX_TIME_MS), MAX_TIME_MS));
+}
+
+/**
  * parseInvestigationParams resolves a query string into the investigation it names; it is TOTAL:
  * every malformed input degrades to something the page can actually fetch rather than to an error
  * state.
@@ -80,7 +112,11 @@ export function parseInvestigationParams(search: string, now: Date): Investigati
   const rawKind = qs.get("kind") ?? "";
   const kind = (SCOPE_KINDS as string[]).includes(rawKind) ? (rawKind as ScopeKind) : "cluster";
 
-  const rawScope = qs.get("scope") ?? "";
+  /* Normalised because a permalink is hand-EDITED as often as it is copied, and
+     U+2192 is on no keyboard: `?scope=node-a->node-b` used to parse as one node
+     called "node-a->node-b" with an empty peer, and the page then framed an
+     investigation nobody had asked for without a word about it. */
+  const rawScope = normalizePairInput(qs.get("scope") ?? "");
   let a = "";
   let b = "";
   if (kind === "pair" || kind === "zone-pair") {
@@ -97,8 +133,10 @@ export function parseInvestigationParams(search: string, now: Date): Investigati
   const parsedFrom = parseInstant(qs.get("from"));
   const parsedTo = parseInstant(qs.get("to"));
   const span = DEFAULT_RANGE_SECONDS * 1000;
-  const to = parsedTo ?? (parsedFrom ? new Date(parsedFrom.getTime() + span) : now);
-  const from = parsedFrom ?? new Date(to.getTime() - span);
+  /* Both derivations go through shiftInstant: the parsed edge may sit at the very
+     top or bottom of the calendar, and an hour either side of that is Invalid. */
+  const to = parsedTo ?? (parsedFrom ? shiftInstant(parsedFrom, span) : now);
+  const from = parsedFrom ?? shiftInstant(to, -span);
 
   return { kind, a, b, from, to };
 }
@@ -230,14 +268,25 @@ export function rangeExceedsPromBound(from: Date, to: Date): boolean {
  * after `t` cannot be clamped into anything meaningful (it would collapse to a point or invert).
  */
 export function commitWindow(from: Date, to: Date, at: Date | null, t: T = enT): WindowCommit {
+  /* An UNREADABLE window is refused with the same sentence an inverted one gets:
+     every comparison below against a NaN answers false, so an Invalid edge would
+     otherwise walk the whole gate and come out "ok, not clamped" — a window the
+     page then cannot even name in its own query key. */
+  if (!Number.isFinite(from.getTime()) || !Number.isFinite(to.getTime())) {
+    return { ok: false, reason: t("window.inverted") };
+  }
   if (from.getTime() >= to.getTime()) {
     return { ok: false, reason: t("window.inverted") };
   }
-  if (at === null) return { ok: true, from, to, clamped: false };
-  if (from.getTime() >= at.getTime()) {
+  /* Likewise an unreadable INSTANT is no gate at all — comparing both edges
+     against NaN answers "not clamped" to everything, which is the one answer the
+     Time Machine must never get from here. */
+  const instant = at !== null && Number.isFinite(at.getTime()) ? at : null;
+  if (instant === null) return { ok: true, from, to, clamped: false };
+  if (from.getTime() >= instant.getTime()) {
     return { ok: false, reason: t("window.afterInstant") };
   }
-  if (to.getTime() > at.getTime()) return { ok: true, from, to: at, clamped: true };
+  if (to.getTime() > instant.getTime()) return { ok: true, from, to: instant, clamped: true };
   return { ok: true, from, to, clamped: false };
 }
 
@@ -336,7 +385,7 @@ export const PIN_KIND_BY_TIMELINE_KIND: Record<TimelineKind, PinKind | null> = {
  *  id (a bigint 7 is a plausible event AND k8s row), so the kind is part of the
  *  key, never the id alone. */
 export function pinKey(ref: { kind: string; id: string }): string {
-  return `${ref.kind} ${ref.id}`;
+  return `${ref.kind}\u0000${ref.id}`;
 }
 
 /**
@@ -372,7 +421,7 @@ export function incidentParams(incident: Incident, targetNames: readonly string[
   const scope = scopeFromIncidentScope(incident.scope, targetNames);
   const parsedTo = incident.toAt === undefined ? null : parseInstant(incident.toAt);
   const to = parsedTo ?? now;
-  const from = parseInstant(incident.fromAt) ?? new Date(to.getTime() - DEFAULT_RANGE_SECONDS * 1000);
+  const from = parseInstant(incident.fromAt) ?? shiftInstant(to, -DEFAULT_RANGE_SECONDS * 1000);
   return { ...scope, from, to };
 }
 
@@ -529,8 +578,21 @@ function firstSeriesValues(res: PromResult | undefined): [number, string][] {
  */
 export function samplesFromMatrix(loss: PromResult | undefined, rtt: PromResult | undefined): SignalSample[] {
   const byMs = new Map<number, SignalSample>();
-  const at = (seconds: number) => {
+  /**
+   * The wire contract is `[<unix seconds as a NUMBER>, "<value>"]`, and this
+   * checks it rather than trusting it. A `"abc"` there used to become
+   * `new Date(NaN)`, which lib/investigation.ts's crossings then called
+   * `.toISOString()` on to build a ref id — a thrown RangeError and a blank
+   * page, from one malformed row in a proxied response. A `null` was worse than
+   * a throw: `Number(null)` is 0, so it became a sample dated 1970 that
+   * out-ranked every real one and became the investigation's anomaly onset.
+   */
+  const msOf = (seconds: unknown): number | null => {
+    if (typeof seconds !== "number" || !Number.isFinite(seconds)) return null;
     const ms = Math.round(seconds * 1000);
+    return Number.isFinite(ms) && Math.abs(ms) <= MAX_TIME_MS ? ms : null;
+  };
+  const at = (ms: number) => {
     let sample = byMs.get(ms);
     if (!sample) {
       sample = { at: new Date(ms) };
@@ -538,20 +600,45 @@ export function samplesFromMatrix(loss: PromResult | undefined, rtt: PromResult 
     }
     return sample;
   };
-  for (const [ts, raw] of firstSeriesValues(loss)) {
-    const v = Number(raw);
-    if (Number.isFinite(v)) at(ts).loss = v;
-  }
-  for (const [ts, raw] of firstSeriesValues(rtt)) {
-    const v = Number(raw);
-    if (Number.isFinite(v)) at(ts).rttNs = v * 1e9;
-  }
+  const fold = (res: PromResult | undefined, apply: (s: SignalSample, v: number) => void) => {
+    for (const row of firstSeriesValues(res)) {
+      /* A row that is not a pair at all is skipped rather than destructured —
+         `for (const [ts, raw] of …)` over a non-iterable member threw TypeError. */
+      if (!Array.isArray(row)) continue;
+      const ms = msOf(row[0]);
+      if (ms === null) continue;
+      const v = Number(row[1]);
+      if (Number.isFinite(v)) apply(at(ms), v);
+    }
+  };
+  fold(loss, (s, v) => {
+    s.loss = v;
+  });
+  fold(rtt, (s, v) => {
+    s.rttNs = v * 1e9;
+  });
   return [...byMs.values()].sort((x, y) => x.at.getTime() - y.at.getTime());
 }
 
 /* ── sources → TimelineEntry[] ──────────────────────────────────────────── */
 
 export const inRange = (d: Date, from: Date, to: Date) => d.getTime() >= from.getTime() && d.getTime() <= to.getTime();
+
+/**
+ * DASH is what a field the server did NOT send renders as, and `str`/`num` are
+ * the two readers that put it there.
+ *
+ * A timeline row is assembled by string interpolation, and interpolating an
+ * absent field spells the word "undefined" into an operator's evidence —
+ * «Pod api-7: undefined», «undefined/undefined ok». It is not a hypothetical
+ * shape: `omitempty` on the Go side drops a zero-valued field from the JSON
+ * outright, and this console reads three event families it does not own the
+ * schema of. A dash says "not sent"; "undefined" says the console is broken,
+ * and both of those are worse than the truth only one of them tells.
+ */
+const DASH = "—";
+const str = (v: unknown): string => (typeof v === "string" ? v : "");
+const num = (v: unknown): string | number => (typeof v === "number" && Number.isFinite(v) ? v : DASH);
 
 export function validAt(raw: string): Date | null {
   const d = new Date(raw);
@@ -566,13 +653,14 @@ export function eventEntries(events: LiveEvent[]): TimelineEntry[] {
   for (const e of events) {
     const at = validAt(e.timestamp);
     if (!at) continue;
+    const scope = str(e.scope);
     out.push({
       at,
       kind: "event",
       severity: e.severity,
-      title: e.summary,
-      detail: e.scope === "" ? e.type : `${e.type} · ${e.scope}`,
-      ref: { kind: "event", id: e.id },
+      title: str(e.summary),
+      detail: scope === "" ? str(e.type) : `${str(e.type)} · ${scope}`,
+      ref: { kind: "event", id: String(e.id) },
     });
   }
   return out;
@@ -586,7 +674,8 @@ export function auditDetailLine(row: AuditEntry): string {
   const kv = Object.entries(row.detail ?? {})
     .map(([k, v]) => `${k}=${typeof v === "string" ? v : JSON.stringify(v)}`)
     .join(" ");
-  return [`${row.subjectKind}:${row.subjectId}`, row.resource, row.outcome, kv].filter((s) => s !== "").join(" · ");
+  const subject = str(row.subjectKind) === "" && str(row.subjectId) === "" ? "" : `${str(row.subjectKind)}:${str(row.subjectId)}`;
+  return [subject, str(row.resource), str(row.outcome), kv].filter((s) => s !== "").join(" · ");
 }
 
 /**
@@ -609,10 +698,13 @@ const READ_ONLY_AUDIT_POSTS = ["/api/v1/promql/query", "/api/v1/promql/query_ran
  * /api/v1/runs"). GET, plus the two PromQL POSTs above — nothing else.
  */
 export function isReadOnlyAudit(action: string): boolean {
-  const space = action.indexOf(" ");
-  const method = (space === -1 ? action : action.slice(0, space)).toUpperCase();
+  /* An absent `action` used to throw here — and this runs over EVERY audit row
+     the scan returns, so one such row emptied the timeline instead of itself. */
+  const text = str(action);
+  const space = text.indexOf(" ");
+  const method = (space === -1 ? text : text.slice(0, space)).toUpperCase();
   if (method === "GET") return true;
-  const route = space === -1 ? "" : action.slice(space + 1).trim();
+  const route = space === -1 ? "" : text.slice(space + 1).trim();
   return method === "POST" && READ_ONLY_AUDIT_POSTS.includes(route);
 }
 
@@ -626,7 +718,7 @@ export function auditEntries(rows: AuditEntry[], from: Date, to: Date): Timeline
       at,
       kind: "audit",
       severity: row.outcome === "denied" ? "warn" : row.outcome === "error" ? "error" : "info",
-      title: row.action,
+      title: str(row.action) || DASH,
       detail: auditDetailLine(row),
       /* The row STAYS in the timeline — the badge already says "audit" out loud
          — and is only kept out of the cause candidates (finding #8). */
@@ -651,8 +743,8 @@ export function annotationEntries(annotations: Annotation[], t: T = enT): Timeli
       severity: "info",
       /* The note's own text is the title, verbatim — an operator wrote it and
          this console does not paraphrase it. Only "" → «глобальная» moves. */
-      title: a.text,
-      detail: `${a.scope === "" ? t("scope.global") : a.scope} · ${a.createdBy}`,
+      title: str(a.text),
+      detail: [str(a.scope) === "" ? t("scope.global") : str(a.scope), str(a.createdBy) || DASH].join(" · "),
       ref: { kind: "annotation", id: a.id },
     });
   }
@@ -671,11 +763,13 @@ export function pathChangeEntries(snapshots: PathSnapshot[], from: Date, to: Dat
       at,
       kind: "path-change",
       severity: "warn",
-      title: t("entry.pathChange.title", { src: s.sourceNode, sep: PAIR_SEPARATOR, dst: s.destination }),
+      title: t("entry.pathChange.title", { src: str(s.sourceNode), sep: PAIR_SEPARATOR, dst: str(s.destination) }),
       detail: t("entry.pathChange.detail", {
-        hash: s.pathHash.slice(0, 12),
-        hops: s.hopCount,
-        traces: s.traceCount,
+        /* `.slice` on an absent pathHash threw outright — one row without it
+           took the whole page down. */
+        hash: str(s.pathHash).slice(0, 12) || DASH,
+        hops: num(s.hopCount),
+        traces: num(s.traceCount),
       }),
       /* The id is the snapshot's, never the title's: mergeTimeline dedupes on
          it and a pin permalinks by it, so it must read the same in both
@@ -706,11 +800,11 @@ export function runEntries(runs: RunDetail[], t: T = enT): TimelineEntry[] {
          itself use. */
       kind: "run",
       severity: RUN_SEVERITY[r.status] ?? "info",
-      title: t("entry.run.title", { type: r.type, status: r.status }),
+      title: t("entry.run.title", { type: str(r.type) || DASH, status: str(r.status) || DASH }),
       detail: t("entry.run.detail", {
-        ok: r.pairOk,
-        total: r.pairTotal,
-        by: `${r.initiatorKind}:${r.initiatorId}`,
+        ok: num(r.pairOk),
+        total: num(r.pairTotal),
+        by: str(r.initiatorKind) === "" && str(r.initiatorId) === "" ? DASH : `${str(r.initiatorKind)}:${str(r.initiatorId)}`,
       }),
       ref: { kind: "run", id: r.id },
     });
@@ -726,13 +820,18 @@ export function k8sEntries(events: K8sEvent[]): TimelineEntry[] {
   for (const e of events) {
     const at = validAt(e.eventTime);
     if (!at) continue;
+    /* Assembled from the parts the row actually HAS: a K8s event whose reason or
+       message was omitted used to read «Pod api-7: undefined». */
+    const object = [str(e.kind), str(e.name)].filter((s) => s !== "").join(" ");
+    const reason = str(e.reason);
+    const message = str(e.message);
     out.push({
       at,
       kind: "k8s",
       severity: e.type === "Warning" ? "warn" : "info",
-      title: `${e.kind} ${e.name}: ${e.reason}`,
-      detail: e.count > 1 ? `${e.message} (×${e.count})` : e.message,
-      ref: { kind: "k8s", id: e.id },
+      title: [object, reason].filter((s) => s !== "").join(": ") || DASH,
+      detail: typeof e.count === "number" && e.count > 1 ? `${message} (×${e.count})` : message,
+      ref: { kind: "k8s", id: String(e.id) },
     });
   }
   return out;
@@ -748,19 +847,24 @@ export function maintenanceEntries(
   for (const w of windows) {
     const at = validAt(w.startAt);
     if (!at) continue;
+    /* An UNREADABLE end is its own sentence, not a stamp (QA scope 4).
+       `stampFull(new Date(undefined))` renders the literal string "Invalid Date"
+       — three inches from a maintenance bar drawing the same window correctly —
+       and no reader can tell whether that is the console or the window. */
+    const end = validAt(str(w.endAt));
     out.push({
       at,
       kind: "maintenance",
       severity: "info",
-      title: t("entry.maintenance.title", { reason: w.reason }),
+      title: t("entry.maintenance.title", { reason: str(w.reason) || DASH }),
       /* The end stamp goes through lib/i18n's stampFull rather than a bare
          toLocaleString: it sits INSIDE a translated sentence, and the same
          window is drawn by the maintenance bar three inches away — one shape or
          the page is speaking two languages about one instant (finding #18). */
-      detail: t("entry.maintenance.detail", {
-        scope: w.scope === "" ? t("scope.global") : w.scope,
-        until: stampFull(new Date(w.endAt), locale),
-        by: w.createdBy,
+      detail: t(end === null ? "entry.maintenance.detail.noEnd" : "entry.maintenance.detail", {
+        scope: str(w.scope) === "" ? t("scope.global") : str(w.scope),
+        until: end === null ? DASH : stampFull(end, locale),
+        by: str(w.createdBy) || DASH,
       }),
       ref: { kind: "maintenance", id: w.id },
     });
@@ -783,11 +887,27 @@ const ALERT_SEVERITY: Record<string, TimelineEntry["severity"]> = {
 /** alertLabelLine renders the label set deterministically (sorted by key) so
  *  the same alert produces the same line — and the same ref id — on every
  *  render and in every permalink. */
-function alertLabelLine(labels: Record<string, string>): string {
-  return Object.keys(labels)
+function alertLabelLine(labels: Record<string, string> | null | undefined): string {
+  /* Go marshals a nil map as JSON `null`, and this transport does not normalise
+     it: `Object.keys(null)` threw TypeError and took the whole page with it, for
+     an alert that merely had no labels left after grouping. */
+  const set = labels ?? {};
+  return Object.keys(set)
     .sort()
-    .map((k) => `${k}=${labels[k]}`)
+    .map((k) => `${k}=${str(set[k])}`)
     .join(" ");
+}
+
+/**
+ * alertStartedBy is when an alert began, or null when alertEntries would draw no
+ * row for it at all. Extracted so the split below can ask "would this one have a
+ * row?" without keeping a second copy of the rule.
+ */
+function alertStartedBy(a: Alert, to: Date): Date | null {
+  if (a.state !== "firing") return null;
+  const started = a.activeAt === undefined ? null : validAt(a.activeAt);
+  if (started === null || started.getTime() > to.getTime()) return null;
+  return started;
 }
 
 /**
@@ -797,34 +917,125 @@ function alertLabelLine(labels: Record<string, string>): string {
 export function alertEntries(alerts: Alert[], from: Date, to: Date, t: T = enT): TimelineEntry[] {
   const out: TimelineEntry[] = [];
   for (const a of alerts) {
-    if (a.state !== "firing") continue;
-    const started = a.activeAt === undefined ? null : validAt(a.activeAt);
-    if (started === null || started.getTime() > to.getTime()) continue;
+    const started = alertStartedBy(a, to);
+    if (started === null) continue;
 
     const labels = alertLabelLine(a.labels);
-    const severity = ALERT_SEVERITY[a.severity] ?? "info";
+    const severity = ALERT_SEVERITY[str(a.severity)] ?? "info";
+    const name = str(a.name) || DASH;
     const before = started.getTime() < from.getTime();
     /* `a.severity` is the rule's own LABEL — a free string a foreign rule may
        have written — and renders verbatim. Only its ABSENCE is this console's
        word to choose. */
-    const severityText = a.severity === "" ? t("entry.alert.noSeverity") : a.severity;
+    const severityText = str(a.severity) === "" ? t("entry.alert.noSeverity") : str(a.severity);
     out.push({
       at: before ? from : started,
       kind: "alert",
       severity,
-      title: before
-        ? t("entry.alert.title.before", { name: a.name })
-        : t("entry.alert.title", { name: a.name }),
+      title: before ? t("entry.alert.title.before", { name }) : t("entry.alert.title", { name }),
       detail: before
         ? t("entry.alert.detail.before", { severity: severityText, since: started.toISOString(), labels })
         : t("entry.alert.detail", { severity: severityText, labels }),
       /* The identity is the SERIES, not the rule: one rule fires once per label
          set, and keying on ruleId (or on the name) would let mergeTimeline
          dedupe two genuinely different firing pairs into one row. */
-      ref: { kind: "alert", id: `${a.name}{${labels}}` },
+      ref: { kind: "alert", id: `${str(a.name)}{${labels}}` },
     });
   }
   return out;
+}
+
+/**
+ * alertIsOurs is the OWNERSHIP question, and it is answered by the console's own
+ * rule id rather than by anything about the alert's text.
+ *
+ * `ruleId` is lifted off the `kconmon_ng_rule_id` label that
+ * internal/console/alerting/render.go stamps on every rule entry this console
+ * renders, and internal/console/httpapi/alertrules.go strips that label from any
+ * rule imported from outside — so it names the alert_rules row an alert came
+ * from and is absent for a rule this console does not manage. The Overview
+ * card's firing list already splits on exactly this and calls the other half
+ * «не наше правило»; one discriminator, two surfaces.
+ *
+ * The alternative — "does it carry source_node/destination_node?" — is a SCOPE
+ * question wearing an ownership costume, and it is wrong in both directions: a
+ * foreign rule written over this product's metrics would pass it, and one of our
+ * own fleet-wide rules that groups by nothing would fail it.
+ */
+export function alertIsOurs(a: Alert): boolean {
+  return a.ruleId !== undefined && a.ruleId !== "";
+}
+
+/**
+ * alertTouchesScope narrows OUR alerts the way runTouchesScope narrows runs: an
+ * ABSENT label is "everywhere", never "nowhere", so a fleet-wide rule of ours
+ * keeps its row in every scope. The two wide scopes narrow nothing, which is the
+ * call runTouchesScope makes and the one scopeCaptionValue already says out loud.
+ */
+export function alertTouchesScope(
+  labels: Record<string, string> | null | undefined,
+  scope: InvestigationScope,
+): boolean {
+  if (scope.kind === "cluster" || scope.kind === "zone-pair") return true;
+  /* `labels?.` for the same reason alertLabelLine carries its `?? {}` — a nil map
+     off the wire is `null`, and an absent label set is "everywhere", never a
+     crash. */
+  const at = (key: string): string => str(labels?.[key]);
+  const source = at("source_node");
+  const destination = at("destination_node");
+  const target = at("target");
+  if (source === "" && destination === "" && target === "") return true;
+  if (scope.kind === "target") return target === scope.a;
+  if (scope.kind === "node") return source === scope.a || destination === scope.a;
+  /* A pair named in full is directional; a half-labelled alert only has to name
+     one end of the pair under investigation. */
+  if (source !== "" && destination !== "") return source === scope.a && destination === scope.b;
+  const ends = [scope.a, scope.b];
+  return (source !== "" && ends.includes(source)) || (destination !== "" && ends.includes(destination));
+}
+
+/** What scopedAlertEntries drew, and the one thing it did not: nothing is left out without a number naming it. */
+export interface ScopedAlerts {
+  /** This console's own alerts, narrowed to the scope — one row each. */
+  entries: TimelineEntry[];
+  /** Ours that ARE firing in this window and the scope kept out. The caption owes the reader this number. */
+  hiddenByScope: number;
+}
+
+/**
+ * scopedAlertEntries is the timeline's alert source: OUR rules, narrowed to the
+ * investigation scope.
+ *
+ * A foreign alert produces nothing here — not a row, not a summary, not a count.
+ * kconmon-ng is not an aggregator of a cluster's whole firing state: a
+ * kube-prometheus-stack backdrop of TargetDown, etcdMembersDown and Watchdog
+ * belongs in Alertmanager and in Grafana, and on this page it only buries the
+ * rows about the fleet this console probes. lib/api.ts asks the route for the
+ * managed set alone, so foreign alerts do not reach the browser; alertIsOurs
+ * stays in the pipeline as the local guarantee, one line that keeps the rule
+ * true here rather than in a query string three files away.
+ *
+ * The SCOPE is the other half, and it is the half that has to be counted: an
+ * alert of ours firing outside this scope is absent for a reason the reader can
+ * act on, so the page says how many.
+ */
+export function scopedAlertEntries(
+  alerts: Alert[],
+  from: Date,
+  to: Date,
+  scope: InvestigationScope,
+  t: T = enT,
+): ScopedAlerts {
+  const ours = alerts.filter(alertIsOurs);
+  /* Hidden-by-SCOPE is the difference between the rows this window would have
+     drawn and the rows it draws — both sides through the same pipeline, so an
+     alert outside the WINDOW is never blamed on the scope, and a dedupe can
+     never make the two disagree. */
+  const wouldDraw = mergeTimeline(alertEntries(ours, from, to, t));
+  const entries = mergeTimeline(
+    alertEntries(ours.filter((a) => alertTouchesScope(a.labels, scope)), from, to, t),
+  );
+  return { entries, hiddenByScope: wouldDraw.length - entries.length };
 }
 
 /**
@@ -832,8 +1043,8 @@ export function alertEntries(alerts: Alert[], from: Date, to: Date, t: T = enT):
  * the probe metrics' own (internal/metrics/prometheus.go, restated in
  * internal/console/alerting/render.go's groupBy lists).
  */
-export function scopeFromAlertLabels(labels: Record<string, string>): InvestigationScope | null {
-  const at = (key: string): string => labels[key] ?? "";
+export function scopeFromAlertLabels(labels: Record<string, string> | null | undefined): InvestigationScope | null {
+  const at = (key: string): string => str(labels?.[key]);
   const source = at("source_node");
   const destination = at("destination_node");
   const target = at("target");

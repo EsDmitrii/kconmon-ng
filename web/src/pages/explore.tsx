@@ -14,7 +14,14 @@ import { promqlQueryRange } from "@/lib/api";
 import { localeTag, useLocale, useT } from "@/lib/i18n";
 import { exploreDict } from "@/lib/i18n/dict/explore";
 import { GLOBAL_SCOPE } from "@/lib/annotations";
-import { CURATED_CHARTS, chartTitle, resolveRangeToken, toSeriesOption, type CuratedChart } from "@/lib/curated-metrics";
+import {
+  CURATED_CHARTS,
+  chartTitle,
+  resolveRangeToken,
+  toSeriesOption,
+  type CuratedChart,
+  type PlotWindow,
+} from "@/lib/curated-metrics";
 import { useTimeContext } from "@/lib/timemachine";
 import type { Annotation, MaintenanceWindow, PromResult } from "@/lib/types";
 
@@ -41,6 +48,9 @@ const SHIFT_OPTIONS = [
 ] as const;
 
 type ShiftId = (typeof SHIFT_OPTIONS)[number]["value"];
+
+/** Which of the two things the panel compares A with. */
+type CompareMode = "metric" | "self";
 
 /* Leg B is drawn in A's own ramp colour, dimmed and dashed rather than given a palette of its own. */
 const MUTED_OPACITY = 0.45;
@@ -70,22 +80,70 @@ function stepSecondsFor(rangeSeconds: number): number {
  * and therefore its request, with the curated card already asking for that
  * metric over that window.
  */
+/**
+ * exploreWindow is the [start, end] one leg asks Prometheus for, with the anchor
+ * FLOORED onto the sample grid.
+ *
+ * The flooring is the whole of it. Prometheus emits a range query's samples at
+ * start + k·step, so two legs anchored on two independent `new Date()` calls —
+ * which is exactly what two queryFns firing milliseconds apart produce — get two
+ * grids offset by that gap, and NO sample instant in common. ECharts' axis
+ * tooltip collects the series that have a point at the hovered axis value, so at
+ * the cursor only one leg was ever listed (owner report). Floored, both windows
+ * land on the same instants by construction and the shifted leg re-timestamps
+ * onto the current one sample for sample.
+ *
+ * Pure, and exported for exactly that reason: the alignment is a property to
+ * prove, not a thing to eyeball on a chart.
+ */
+export function exploreWindow(
+  anchorMs: number,
+  rangeSeconds: number,
+  shiftSeconds: number,
+  stepSeconds: number,
+): { start: Date; end: Date } {
+  const stepMs = Math.max(stepSeconds, 1) * 1000;
+  const aligned = Math.floor(anchorMs / stepMs) * stepMs;
+  const end = aligned - shiftSeconds * 1000;
+  return { start: new Date(end - rangeSeconds * 1000), end: new Date(end) };
+}
+
 function useExploreQuery(chart: CuratedChart, rangeSeconds: number, shiftSeconds = 0) {
   const { at } = useTimeContext();
   const base = at ? ["explore", chart.id, rangeSeconds, "at", at.toISOString()] : ["explore", chart.id, rangeSeconds];
-  return useQuery({
+  const query = useQuery({
     queryKey: shiftSeconds > 0 ? [...base, "shift", shiftSeconds] : base,
     queryFn: () => {
-      const anchor = at ?? new Date();
-      const end = new Date(anchor.getTime() - shiftSeconds * 1000);
-      const start = new Date(end.getTime() - rangeSeconds * 1000);
-      const stepNs = stepSecondsFor(rangeSeconds) * 1e9;
+      const stepSeconds = stepSecondsFor(rangeSeconds);
+      const { start, end } = exploreWindow((at ?? new Date()).getTime(), rangeSeconds, shiftSeconds, stepSeconds);
+      const stepNs = stepSeconds * 1e9;
       // The curated queries carry lib/curated-metrics' RANGE_TOKEN where a Grafana panel would
       // carry $__range.
       return promqlQueryRange(resolveRangeToken(chart.query, rangeSeconds), start, end, stepNs);
     },
     refetchInterval: at ? false : EXPLORE_POLL_MS,
   });
+
+  /* The span the AXIS shows, recomputed with each answer rather than once per
+     mount: Live the anchor is `now`, and a frozen axis would leave every sample
+     that arrived after mount hanging past its own maximum. Same pure function
+     and the same flooring as the query itself, so the two agree by construction. */
+  const window = useMemo(
+    () => {
+      /* The axis spans the window the READER asked for, unfloored. The QUERY floors
+         its anchor onto the sample grid (exploreWindow, for the compare legs), but
+         the annotation and maintenance bars fetch [anchor − range, anchor] exactly —
+         so a floored axis left up to one step at each edge that the bar listed and
+         no chart could draw, and ECharts drops a mark outside the extent rather
+         than clamping it. */
+      const anchorMs = (at ?? new Date()).getTime() - shiftSeconds * 1000;
+      return { start: new Date(anchorMs - rangeSeconds * 1000), end: new Date(anchorMs) };
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- dataUpdatedAt IS the "new answer" signal
+    [at, rangeSeconds, shiftSeconds, query.dataUpdatedAt],
+  );
+
+  return { query, window };
 }
 
 /** One leg of the compare panel: a curated query, its data, and its identity. */
@@ -118,8 +176,14 @@ function legSeries(leg: CompareLeg, dark: boolean, muted: boolean): echarts.Line
 }
 
 /** Merges two legs onto ONE pair of axes — A's, built by toSeriesOption exactly as the curated cards build theirs. */
-export function toCompareOption(a: CompareLeg, b: CompareLeg | undefined, dark: boolean): echarts.EChartsOption {
-  const base = toSeriesOption(a.chart, a.data, dark);
+export function toCompareOption(
+  a: CompareLeg,
+  b: CompareLeg | undefined,
+  dark: boolean,
+  window?: PlotWindow,
+): echarts.EChartsOption {
+  /* A's window for both: leg B is re-timestamped onto it in legSeries. */
+  const base = toSeriesOption(a.chart, a.data, dark, window);
   return {
     ...base,
     series: [...legSeries(a, dark, false), ...(b ? legSeries(b, dark, true) : [])],
@@ -163,8 +227,12 @@ function ExploreCard({
   /* `chart.title` is the ENGLISH source field and the fixture tests read;
      chartTitle is the one place display language is decided. */
   const { locale } = useLocale();
-  const { data, isLoading, error } = useExploreQuery(chart, rangeSeconds);
-  const option = useMemo(() => (data ? toSeriesOption(chart, data, dark) : undefined), [chart, data, dark]);
+  const { query, window } = useExploreQuery(chart, rangeSeconds);
+  const { data, isPending, error } = query;
+  const option = useMemo(
+    () => (data ? toSeriesOption(chart, data, dark, window) : undefined),
+    [chart, data, dark, window],
+  );
   // promqlQueryRange resolves (rather than throws) for Prometheus's own error envelope (see
   // lib/api.ts).
   const queryError = data?.status === "error" ? (data.error ?? t("chart.queryFailed")) : undefined;
@@ -182,7 +250,8 @@ function ExploreCard({
         {queryError ? (
           <p role="alert" className="mt-3 text-sm text-health-bad">{queryError}</p>
         ) : null}
-        {isLoading && !data ? <ChartSkeleton /> : null}
+        {/* isPending, not isLoading — see the matrix surface. */}
+        {isPending && !data ? <ChartSkeleton /> : null}
         {empty ? <ChartEmpty /> : null}
         {option && !empty && !queryError ? (
           <EChart
@@ -281,19 +350,30 @@ function CompareChart({
   const b = useExploreQuery(legB, rangeSeconds, shiftSeconds);
 
   const option = useMemo(() => {
-    if (!a.data) return undefined;
+    if (!a.query.data) return undefined;
     return toCompareOption(
-      { chart: chartA, label: labelA, data: a.data },
-      b.data ? { chart: legB, label: labelB, data: b.data, shiftMs: shiftSeconds * 1000 } : undefined,
+      { chart: chartA, label: labelA, data: a.query.data },
+      b.query.data
+        ? { chart: legB, label: labelB, data: b.query.data, shiftMs: shiftSeconds * 1000 }
+        : undefined,
       dark,
+      a.window,
     );
-  }, [a.data, b.data, chartA, legB, labelA, labelB, shiftSeconds, dark]);
+  }, [a.query.data, a.window, b.query.data, chartA, legB, labelA, labelB, shiftSeconds, dark]);
 
-  const error = a.error ?? b.error;
-  const queryError = [a.data, b.data].find((d) => d?.status === "error");
+  const error = a.query.error ?? b.query.error;
+  const queryError = [a.query.data, b.query.data].find((d) => d?.status === "error");
+  /* Nothing to draw at all — as opposed to "one leg is missing", which the
+     legend already names, and which is still a chart worth looking at.
+     The panel had no empty state: leg A answering with an empty matrix still
+     produced an option, so it drew a labelled, gridded, entirely BLANK
+     rectangle above five curated cards that were all honestly saying "no series
+     returned for this range". Same fact, and the one panel whose contents the
+     reader chose themselves was the only one that would not say it. */
+  const nothingDrawn = ((option?.series ?? []) as unknown[]).length === 0;
   // The reference leg answered, and answered with nothing. Only meaningful for
   // a time shift — see shiftedLegEmptyNote.
-  const shiftedLegEmpty = shiftSeconds > 0 && isEmptyMatrix(b.data);
+  const shiftedLegEmpty = shiftSeconds > 0 && isEmptyMatrix(b.query.data);
 
   return (
     <>
@@ -302,7 +382,8 @@ function CompareChart({
         <p role="alert" className="mt-3 text-sm text-health-bad">{queryError.error ?? t("chart.queryFailed")}</p>
       ) : null}
       {!option && !error ? <ChartSkeleton /> : null}
-      {option && !queryError ? (
+      {option && !queryError && nothingDrawn ? <ChartEmpty /> : null}
+      {option && !queryError && !nothingDrawn ? (
         <EChart
           option={option}
           annotations={annotations}
@@ -340,13 +421,20 @@ function ComparePanel({
   const [aId, setAId] = useState<string>(CURATED_CHARTS[0].id);
   const [bId, setBId] = useState<string>("");
   const [shiftId, setShiftId] = useState<ShiftId>("");
+  /* The panel compares A with ONE of two things, and which one is now a control
+     rather than a consequence. Choosing a shift used to silently retire the B
+     metric and its lines — «куда делись ноды» — with a line of fine print under
+     the chart as the only notice. */
+  const [mode, setMode] = useState<CompareMode>("metric");
 
   const chartA = CURATED_CHARTS.find((c) => c.id === aId) ?? CURATED_CHARTS[0];
   const shift = SHIFT_OPTIONS.find((s) => s.value === shiftId) ?? SHIFT_OPTIONS[0];
-  const shifted = shift.seconds > 0;
-  // Derived, not an effect: picking A as B too would draw the same line twice,
-  // so that selection simply reads as "none" until one of them moves.
-  const chartB = shifted || bId === aId ? undefined : CURATED_CHARTS.find((c) => c.id === bId);
+  const shifted = mode === "self" && shift.seconds > 0;
+  /* `bId` is KEPT while the reader is in self-shift mode rather than cleared:
+     coming back must restore the metric they picked, not an empty select.
+     Derived, not an effect: picking A as B too would draw the same line twice,
+     so that selection simply reads as "none" until one of them moves. */
+  const chartB = mode === "self" || bId === aId ? undefined : CURATED_CHARTS.find((c) => c.id === bId);
   const active = shifted || chartB !== undefined;
   const unitsDiffer = chartB !== undefined && chartB.unit !== chartA.unit;
 
@@ -362,26 +450,38 @@ function ComparePanel({
               </option>
             ))}
           </CompareSelect>
-          <span className="text-xs text-muted-foreground">{t("compare.with")}</span>
-          <CompareSelect label={t("compare.metricB")} value={bId} onChange={setBId} disabled={shifted}>
-            <option value="">{t("compare.metricB.none")}</option>
-            {CURATED_CHARTS.filter((c) => c.id !== aId).map((c) => (
-              <option key={c.id} value={c.id}>
-                {chartTitle(c, locale)}
-              </option>
-            ))}
-          </CompareSelect>
-          <span className="text-xs text-muted-foreground">{t("compare.orItself")}</span>
-          <CompareSelect label={t("compare.shift")} value={shiftId} onChange={(v) => setShiftId(v as ShiftId)}>
-            {SHIFT_OPTIONS.map((s) => (
-              <option key={s.value} value={s.value}>
-                {s.value === "" ? t("compare.shift.none") : t("compare.shift.earlier", { label: s.label })}
-              </option>
-            ))}
-          </CompareSelect>
+          <Segmented
+            aria-label={t("compare.mode.aria")}
+            options={[
+              { value: "metric", label: t("compare.mode.metric") },
+              { value: "self", label: t("compare.mode.self") },
+            ]}
+            value={mode}
+            onChange={(v) => setMode(v as CompareMode)}
+          />
+          {/* ONE picker, in one place. The other is not rendered at all: a
+              greyed-out neighbour is still a control the reader has to work out
+              the state of, and working it out is what the fine print was for. */}
+          {mode === "metric" ? (
+            <CompareSelect label={t("compare.metricB")} value={bId} onChange={setBId}>
+              <option value="">{t("compare.metricB.none")}</option>
+              {CURATED_CHARTS.filter((c) => c.id !== aId).map((c) => (
+                <option key={c.id} value={c.id}>
+                  {chartTitle(c, locale)}
+                </option>
+              ))}
+            </CompareSelect>
+          ) : (
+            <CompareSelect label={t("compare.shift")} value={shiftId} onChange={(v) => setShiftId(v as ShiftId)}>
+              {SHIFT_OPTIONS.map((s) => (
+                <option key={s.value} value={s.value}>
+                  {s.value === "" ? t("compare.shift.none") : t("compare.shift.earlier", { label: s.label })}
+                </option>
+              ))}
+            </CompareSelect>
+          )}
         </div>
 
-        {shifted ? <p className="mt-2 text-xs text-muted-foreground">{t("compare.shiftedNote")}</p> : null}
         {unitsDiffer ? (
           <p className="mt-2 text-xs text-muted-foreground">
             {t("compare.unitsDiffer", {
@@ -395,14 +495,26 @@ function ComparePanel({
           <CompareChart
             chartA={chartA}
             chartB={chartB}
-            labelA={t("compare.legA", { title: chartTitle(chartA, locale) })}
+            /* In self-shift mode both legs ARE the same metric, so repeating its
+               title twice says nothing; what distinguishes them is which clock
+               each is on. The stroke is named too, because the two legs share a
+               colour and a dashed line is the only other thing telling them
+               apart — greyscale, colour-blindness and a printed screenshot all
+               keep the words. */
+            labelA={
+              shifted ? t("compare.legA.now") : t("compare.legA", { title: chartTitle(chartA, locale) })
+            }
             labelB={
               shifted
-                ? t("compare.legB.shifted", { label: shift.label })
+                ? t("compare.legB.earlier", { label: shift.label })
                 : t("compare.legB", { title: chartB ? chartTitle(chartB, locale) : "" })
             }
-            shiftSeconds={shift.seconds}
-            shiftLabel={shift.label}
+            /* Gated on `shifted`, exactly as the two labels above are: the shift
+               belongs to self-compare mode, and leaving it applied after a switch
+               back to metric-B drew B from a window an hour or a week ago under a
+               label that said "now". */
+            shiftSeconds={shifted ? shift.seconds : 0}
+            shiftLabel={shifted ? shift.label : ""}
             rangeSeconds={rangeSeconds}
             dark={dark}
             annotations={annotations}
@@ -434,6 +546,7 @@ export function ExplorePage() {
 
   return (
     <PageShell
+      timeMachine
       title={t("title")}
       /* {at} lands INSIDE a translated sentence, so it takes that sentence's
          language — lib/i18n's localeTag. Computed here and passed in, never

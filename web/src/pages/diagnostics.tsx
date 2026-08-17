@@ -1,24 +1,30 @@
-import { useCallback, useEffect, useId, useMemo, useState, type FormEvent, type ReactNode } from "react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { ClipboardList } from "lucide-react";
 import { PageShell } from "@/components/page-shell";
 import { Badge, type BadgeProps } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
+import { Pager, usePager } from "@/components/ui/pager";
 import { Segmented } from "@/components/ui/segmented";
 import { useAuth } from "@/hooks/use-auth";
 import { useDatabaseAvailable } from "@/hooks/use-capabilities";
 import { useSubmitGuard } from "@/hooks/use-submit-guard";
 import { useTopology } from "@/hooks/use-topology";
-import { ApiError, createCheck, createRun, getRuns, goTo, listTargets } from "@/lib/api";
-import { localeTag, stampFull, useLocale, useT, type Locale } from "@/lib/i18n";
+import { ApiError, createCheck, createRun, getRuns, goTo, listAllTargets } from "@/lib/api";
+import { localeTag, stampFull, useLocale, useT, type Locale, type Translate } from "@/lib/i18n";
 import { countForm, diagnosticsDict, type DiagnosticsKey } from "@/lib/i18n/dict/diagnostics";
 /* The ad-hoc address refusal is lib/utils.ts's, shared with the definition
    form on /targets — one rule, one sentence, one table. */
 import { validationDict } from "@/lib/i18n/dict/validation";
 import { scopeNodeOptions } from "@/lib/investigation-sources";
-import { formatDurationNs, plannedSamplesPerPair, sampleIntervalNs } from "@/lib/run-samples";
-import { useTimeContext, useWriteGuard } from "@/lib/timemachine";
+import {
+  formatCadenceProse,
+  perPairBudgetNs,
+  planCadenceFor,
+  type PlannedCadence,
+} from "@/lib/run-samples";
+import { withAtParam, useTimeContext, useWriteGuard } from "@/lib/timemachine";
 import {
   CHECK_TYPES,
   type CheckDefinitionRequest,
@@ -230,6 +236,51 @@ export function durationNsFor(value: string): number {
   return RUN_DURATIONS.find((d) => d.value === value)?.ns ?? 0;
 }
 
+/**
+ * RUN_SAMPLE_INTERVALS is the cadence selector, and "Auto" is FIRST and is the
+ * default for the same reason "Instant" is: it posts nothing, so every run made
+ * without touching this control behaves exactly as it did before the control
+ * existed.
+ *
+ * The control exists because the cadence used to be un-dialable — the planner's
+ * own doc said the base cadence "is not something an operator can dial" — while
+ * three different surfaces each reported a different number for it. An operator
+ * who can set it can also be told, in one sentence, what setting it will do.
+ *
+ * `label` is a duration token and stands in both languages, exactly as
+ * RUN_DURATIONS' labels do; only "Auto" is a word, and each form swaps it for
+ * its own dictionary's.
+ */
+export const RUN_SAMPLE_INTERVALS: { value: string; label: string; ns: number }[] = [
+  { value: "auto", label: "Auto", ns: 0 },
+  { value: "1s", label: "1s", ns: 1e9 },
+  { value: "5s", label: "5s", ns: 5e9 },
+  { value: "15s", label: "15s", ns: 15e9 },
+  { value: "30s", label: "30s", ns: 30e9 },
+  { value: "1m", label: "1m", ns: 60e9 },
+  { value: "5m", label: "5m", ns: 300e9 },
+  { value: "15m", label: "15m", ns: 900e9 },
+];
+
+export function sampleIntervalNsFor(value: string): number {
+  return RUN_SAMPLE_INTERVALS.find((d) => d.value === value)?.ns ?? 0;
+}
+
+/**
+ * sampleIntervalOptionsFor drops every preset LONGER than the run.
+ *
+ * The server refuses a cadence above durationNs with a 422 (a cadence that long
+ * collapses to a single sample, which is an instant run the caller did not ask
+ * for), and RUN_DURATIONS' own rule applies here: the server stays the
+ * enforcement point, but the UI does not lead an operator into a refusal. Auto
+ * always survives, and so does the equal case — "every 1m for 1m" is one honest
+ * sample, not an error.
+ */
+export function sampleIntervalOptionsFor(durationNs: number): typeof RUN_SAMPLE_INTERVALS {
+  if (!(durationNs > 0)) return RUN_SAMPLE_INTERVALS.slice(0, 1);
+  return RUN_SAMPLE_INTERVALS.filter((o) => o.ns === 0 || o.ns <= durationNs);
+}
+
 /* ── the external destination, per check type ────────────────────────────────
    One field served all six check types with one label, one placeholder and no
    hint (QA scope 4, finding #10) — so it named the wrong thing for most of
@@ -257,14 +308,20 @@ export const ADHOC_SHAPE: Record<CheckType, AdhocShape> = {
   http: "unsupported",
 };
 
-/* Addresses are syntax and do not translate, so the examples live here rather
-   than in the dictionary. */
-export const ADHOC_PLACEHOLDER: Record<AdhocShape, string> = {
-  hostPort: "example.test or 10.0.0.1:8443",
-  hostPortRequired: "10.0.0.1:53",
-  hostOnly: "example.test or 10.0.0.1",
-  unsupported: "",
+/* Addresses are syntax and do not translate; the CONNECTIVE between two of them
+   is a word, and it used to read "example.test or 10.0.0.1" in the Russian
+   interface. The examples stay here, the joining word comes from the caller. */
+export const ADHOC_PLACEHOLDER: Record<AdhocShape, readonly string[]> = {
+  hostPort: ["example.test", "10.0.0.1:8443"],
+  hostPortRequired: ["10.0.0.1:53"],
+  hostOnly: ["example.test", "10.0.0.1"],
+  unsupported: [],
 };
+
+/** adhocPlaceholder joins the examples with the interface language's own "or". */
+export function adhocPlaceholder(shape: AdhocShape, or: string): string {
+  return ADHOC_PLACEHOLDER[shape].join(` ${or} `);
+}
 
 /**
  * AdhocIssue is what is wrong with (check type, address) as a pair, evaluated on every render — so
@@ -307,6 +364,7 @@ export function buildRunRequest(input: {
   destinationTargetId: string;
   destinationAddress: string;
   durationNs?: number;
+  sampleIntervalNs?: number;
 }): RunCreateRequest {
   const req: RunCreateRequest = {
     type: input.type,
@@ -320,6 +378,13 @@ export function buildRunRequest(input: {
      had. */
   if (input.durationNs && input.durationNs > 0) {
     req.durationNs = input.durationNs;
+    /* Nested, and omitted at zero for the same reason: "Auto" must post the
+       body an interval run posted before this control existed, byte for byte —
+       and a cadence without a duration is a 422 the form has no business
+       collecting. */
+    if (input.sampleIntervalNs && input.sampleIntervalNs > 0) {
+      req.sampleIntervalNs = input.sampleIntervalNs;
+    }
   }
   if (input.destinationKind === "target") {
     req.destinationKind = "target";
@@ -329,6 +394,48 @@ export function buildRunRequest(input: {
     req.destinationAddress = input.destinationAddress;
   }
   return req;
+}
+
+/**
+ * cadenceCaption is the ONE sentence both run builders say about a duration
+ * run's cadence — this form's, and pages/mtr.tsx's Runner.
+ *
+ * It exists because they said different things about the same run. The Runner's
+ * caption named the BASE cadence («раз в 5 с») for a check type that cannot keep
+ * it, while this form had already been made type-aware; a 5m MTR over ten pairs
+ * was advertised at 5s by one screen and 3m by another, and did neither. There
+ * is now one mirror of the planner (planCadenceFor) and one sentence built from
+ * it, so the two surfaces cannot drift again.
+ *
+ * `prefix` rather than a shared key union, for lib/i18n/README.md's reason: two
+ * surfaces, two dictionaries. The keys under each prefix are the same four.
+ *
+ * Order is deliberate. When the plan is not what was PICKED, the adjustment
+ * leads: an operator who has just clicked "1s" needs to learn it will not be 1s
+ * before they are told what it will be. With nothing picked there is nothing to
+ * contradict, and the "mtr" sentence already explains its own stretch by naming
+ * the trace budget — so the note is suppressed rather than made to say the run
+ * betrayed a request nobody made.
+ */
+export function cadenceCaption<K extends string>(
+  t: Translate<K>,
+  locale: string,
+  plan: PlannedCadence,
+  checkType: CheckType,
+  durationValue: string,
+  prefix = "duration.caption",
+): string {
+  const budgetNs = perPairBudgetNs(checkType);
+  const vars = {
+    interval: formatCadenceProse(plan.intervalNs, locale),
+    requested: formatCadenceProse(plan.requestedNs, locale),
+    label: RUN_DURATIONS.find((d) => d.value === durationValue)?.label ?? "",
+    samples: plan.samplesPerPair,
+    budget: formatCadenceProse(budgetNs, locale),
+  };
+  const base = t(`${prefix}.interval${budgetNs > 0 ? ".mtr" : ""}` as K, vars);
+  if (plan.adjusted === "" || plan.requestedNs <= 0) return base;
+  return `${t(`${prefix}.adjusted.${plan.adjusted}` as K, vars)} ${base}`;
 }
 
 export function FieldLabel({ label, children }: { label: string; children: (id: string) => ReactNode }) {
@@ -366,6 +473,9 @@ function RunForm({
   const [destinationTargetId, setDestinationTargetId] = useState("");
   const [destinationAddress, setDestinationAddress] = useState("");
   const [duration, setDuration] = useState("instant");
+  /* "auto" is today's behaviour exactly: nothing is posted, and the console
+     derives the cadence as it always did. */
+  const [sampleInterval, setSampleInterval] = useState("auto");
   /* The in-flight guard, not just a disabled look (QA round 5, finding #17):
      begin() is a REF write, so three clicks in one task produce one request.
      hooks/use-submit-guard.ts says why a useState flag cannot do this. */
@@ -385,10 +495,11 @@ function RunForm({
      of "the targets". */
   const targetsQuery = useQuery({
     queryKey: ["targets"],
-    queryFn: () => listTargets(),
+    // Every page: a picker that stops at the server's first 100 hides targets that exist.
+    queryFn: () => listAllTargets(),
     enabled: canReadTargets && destinationKind === "target",
   });
-  const targets = targetsQuery.data?.targets ?? [];
+  const targets = targetsQuery.data?.items ?? [];
 
   const external = destinationKind !== "node";
   const resolvedSources = sourcesAll ? nodeNames : sources;
@@ -436,7 +547,15 @@ function RunForm({
         ? "pairs.noTarget"
         : destinationKind === "adhoc" && destinationAddress.trim() === ""
           ? "pairs.noAddress"
-          : "pairs.noDestinations";
+          : /* Sources and destinations both non-empty and still no pair means
+               every pair the cross product produced was a node against itself —
+               a one-node cluster with both pickers on All is the whole of it.
+               Saying "no destinations picked" there named the one thing the
+               operator could see was false, and pointed them at a picker that
+               was already right. */
+            resolvedDestinations.length > 0
+            ? "pairs.selfOnly"
+            : "pairs.noDestinations";
 
   /* The external destination's per-type vocabulary and its live verdict. Both
      are derived, never stored: a check-type switch must re-judge whatever is
@@ -447,6 +566,13 @@ function RunForm({
   const adhocIssue = external ? adhocAddressIssue(type, destinationKind === "adhoc" ? destinationAddress : "") : null;
 
   const durationNs = durationNsFor(duration);
+  /* The presets that FIT this duration, and the picked one re-judged against
+     them: shortening the run from 15m to 1m while "5m" was selected must not
+     leave a value the server would refuse standing in a control that still
+     looks chosen. It falls back to Auto, which is always offered. */
+  const intervalOptions = sampleIntervalOptionsFor(durationNs);
+  const intervalValue = intervalOptions.some((o) => o.value === sampleInterval) ? sampleInterval : "auto";
+  const requestedIntervalNs = sampleIntervalNsFor(intervalValue);
   const runRequest = buildRunRequest({
     type,
     sources: sourcesAll ? [] : sources,
@@ -455,7 +581,11 @@ function RunForm({
     destinationTargetId,
     destinationAddress: destinationAddress.trim(),
     durationNs,
+    sampleIntervalNs: requestedIntervalNs,
   });
+  /* ONE mirror of the server's planner for the whole caption: what the run will
+     keep, and whether that is what was asked for. */
+  const plan = planCadenceFor(durationNs, type, pairCount, resolvedSources.length, requestedIntervalNs);
 
   /* ONE clearing point for the whole form (QA round 4, finding #10). A 422
      from a rejected submit stayed on screen while the operator edited the very
@@ -469,7 +599,7 @@ function RunForm({
      clearing an already-clear error is a no-op. */
   useEffect(() => {
     setSubmitError(undefined);
-  }, [type, sourcesAll, destinationsAll, sources, destinations, destinationKind, destinationTargetId, destinationAddress, duration]);
+  }, [type, sourcesAll, destinationsAll, sources, destinations, destinationKind, destinationTargetId, destinationAddress, duration, sampleInterval]);
 
   async function handleSubmit(e: FormEvent) {
     e.preventDefault();
@@ -531,15 +661,30 @@ function RunForm({
             className="flex-wrap"
           />
           <p className="mt-2 text-xs text-muted-foreground">
-            {durationNs === 0
-              ? t("duration.caption.instant")
-              : t("duration.caption.interval", {
-                  interval: formatDurationNs(sampleIntervalNs(durationNs), locale),
-                  label: RUN_DURATIONS.find((d) => d.value === duration)?.label ?? "",
-                  samples: plannedSamplesPerPair(durationNs),
-                })}
+            {durationNs === 0 ? t("duration.caption.instant") : cadenceCaption(t, locale, plan, type, duration)}
           </p>
         </div>
+
+        {/* The cadence control, only for a run that HAS one. It is rendered
+            beneath Duration rather than beside it because it is a refinement of
+            that choice: "Auto" is the whole of what existed before, and every
+            preset above it is bounded by the duration already picked. */}
+        {durationNs > 0 ? (
+          <div data-testid="sample-interval">
+            <span className="mb-2 block text-xs font-medium text-muted-foreground">{t("form.sampleInterval")}</span>
+            <Segmented
+              aria-label={t("form.sampleInterval.aria")}
+              /* Only "Auto" is a word; 1s … 15m are durations and stand. */
+              options={intervalOptions.map((o) => ({
+                value: o.value,
+                label: o.value === "auto" ? t("sampleInterval.auto") : o.label,
+              }))}
+              value={intervalValue}
+              onChange={setSampleInterval}
+              className="flex-wrap"
+            />
+          </div>
+        ) : null}
 
         <div className="flex w-32 flex-col gap-1 text-[13px]">
           <span className="text-muted-foreground">{t("form.plane")}</span>
@@ -626,7 +771,7 @@ function RunForm({
                        future refactor that moves the field out of FieldLabel. */
                     aria-label={t(adhocLabelKey)}
                     value={destinationAddress}
-                    placeholder={ADHOC_PLACEHOLDER[adhocShape]}
+                    placeholder={adhocPlaceholder(adhocShape, t("adhoc.or"))}
                     onChange={(e) => setDestinationAddress(e.target.value)}
                     className={CONTROL_CLASS}
                   />
@@ -893,9 +1038,45 @@ const FILTER_CLASS =
   "h-8 rounded-md border border-border-strong bg-transparent px-2 text-xs " +
   "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring";
 
-function HistoryList({ runs, engaged, filtered }: { runs: RunSummary[]; engaged: boolean; filtered: boolean }) {
+/**
+ * okOfTotal is a run row's "1/2 ok", and an em dash when either counter did not
+ * arrive.
+ *
+ * The interpolation prints whatever it is handed: a row missing pairTotal read
+ * "1/undefined ok" in the one number an operator scans a history list for. Zero
+ * would be worse than the dash — "1/0 ok" is a claim, the dash is an absence.
+ */
+function okOfTotal(t: Translate<DiagnosticsKey>, r: RunSummary): string {
+  if (!Number.isFinite(r.pairOk) || !Number.isFinite(r.pairTotal)) return "—";
+  return t("history.run.okOfTotal", { ok: r.pairOk, total: r.pairTotal });
+}
+
+function HistoryList({
+  runs,
+  engaged,
+  filtered,
+  scope,
+}: {
+  runs: RunSummary[];
+  engaged: boolean;
+  filtered: boolean;
+  /** The list's IDENTITY — the two filters and the viewed instant. See the
+   *  pager's resetKey below. */
+  scope: string;
+}) {
   const t = useT(diagnosticsDict);
   const { locale } = useLocale();
+  /* The history is as long as the fleet has been running diagnostics; the list
+     is paged rather than scrolled forever (the owner's rule for every list).
+
+     resetKey is the two filters and the Time Machine's instant, because each of
+     them REPLACES the rows rather than extending them. Without it, a reader on
+     page 9 of the whole history who narrowed the status to "failed" landed on
+     page 2 of twelve rows — a page they never asked for, holding the tail of a
+     list they had not read the head of. "Load older" is the other case and is
+     deliberately not in the key: it appends to the same list, and the page the
+     reader is on still addresses the same runs. */
+  const pager = usePager(runs, { resetKey: scope });
   if (runs.length === 0) {
     /* A filter that matched nothing is a different fact from "nobody has ever
        run one", and the run form above is not the remedy for it. Checked
@@ -946,21 +1127,22 @@ function HistoryList({ runs, engaged, filtered }: { runs: RunSummary[]; engaged:
     );
   }
   return (
+    <>
     <ul className="mt-4 divide-y divide-border">
-      {runs.map((r) => (
+      {pager.visible.map((r) => (
         <li key={r.id} className="flex flex-wrap items-center gap-3 py-3 text-sm">
-          <a href={`/diagnostics/runs/${r.id}`} className="font-medium text-primary hover:underline">
+          <a href={withAtParam(`/diagnostics/runs/${r.id}`)} className="font-medium text-primary hover:underline">
             {r.id}
           </a>
-          <StatusBadge status={r.status} />
-          <span className="text-xs uppercase tracking-wide text-muted-foreground">{r.type}</span>
-          <span className="nums ml-auto text-xs text-muted-foreground">
-            {t("history.run.okOfTotal", { ok: r.pairOk, total: r.pairTotal })}
-          </span>
+          <StatusBadge status={r.status || "—"} />
+          <span className="text-xs uppercase tracking-wide text-muted-foreground">{r.type || "—"}</span>
+          <span className="nums ml-auto text-xs text-muted-foreground">{okOfTotal(t, r)}</span>
           <span className="text-xs text-muted-foreground">{fmtTime(r.createdAt, locale)}</span>
         </li>
       ))}
     </ul>
+    <Pager pager={pager} subject={t("history.subject")} className="px-0" />
+    </>
   );
 }
 
@@ -1000,18 +1182,28 @@ export function DiagnosticsPage() {
     error: null,
   });
 
+  /* The request TOKEN, and the race it settles: two filter changes in the same
+     second are two in-flight GETs, and whichever the network answers last wins
+     the list — so picking tcp and then mtr could leave tcp's rows on screen
+     under a select reading "mtr", with no way to tell. Only the newest request
+     may write; an older answer is dropped on arrival, error included. */
+  const requestSeq = useRef(0);
+
   const loadRuns = useCallback(async (cursor?: string) => {
+    const seq = (requestSeq.current += 1);
     setHistory((h) => ({ ...h, loading: true, error: null }));
     try {
       // "" is "no filter" and must not reach the query string: the server reads
       // an empty ?type= as no filter too, but sending it is a lie about what
       // was asked for.
       const page = await getRuns({ cursor, type: typeFilter || undefined, status: statusFilter || undefined });
+      if (seq !== requestSeq.current) return;
       // A cursor-less call is page one -- replace, rather than append, so a
       // remount or a future refresh does not just keep growing the list.
       setRuns((prev) => (cursor ? [...prev, ...page.runs] : page.runs));
       setHistory({ nextCursor: page.nextCursor, loading: false, error: null });
     } catch (err) {
+      if (seq !== requestSeq.current) return;
       setHistory({ nextCursor: "", loading: false, error: err });
     }
   }, [typeFilter, statusFilter]);
@@ -1032,6 +1224,7 @@ export function DiagnosticsPage() {
 
   return (
     <PageShell
+      timeMachine
       title={t("title")}
       /* {at} lands INSIDE a translated sentence, so it takes that sentence's
          language — lib/i18n's localeTag. Computed here, never formatted by the
@@ -1106,7 +1299,12 @@ export function DiagnosticsPage() {
             </p>
           ) : null}
 
-          <HistoryList runs={visibleRuns} engaged={at !== null} filtered={typeFilter !== "" || statusFilter !== ""} />
+          <HistoryList
+            runs={visibleRuns}
+            engaged={at !== null}
+            filtered={typeFilter !== "" || statusFilter !== ""}
+            scope={`${typeFilter}|${statusFilter}|${at?.toISOString() ?? ""}`}
+          />
 
           {runs.length > 0 ? (
             <div className="mt-4 flex justify-center">

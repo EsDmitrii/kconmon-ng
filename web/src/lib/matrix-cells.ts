@@ -12,11 +12,16 @@ export type CellTier = "ok" | "warn" | "bad" | "unknown";
 export const DEGRADED_AT = 0.01;
 export const FAILING_AT = 0.1;
 
+/** A wire number counts only when it is actually a finite number; null, NaN and Infinity are not measurements. */
+function finite(v: unknown): v is number {
+  return typeof v === "number" && Number.isFinite(v);
+}
+
 /** isMeasured answers "did anything probe this pair?" — and a latency sample
  *  is an answer. */
 export function isMeasured(cell: MatrixCell | undefined): boolean {
   if (!cell) return false;
-  return cell.failRatio !== null || cell.rttP95 !== undefined || cell.lossRatio !== undefined;
+  return finite(cell.failRatio) || finite(cell.rttP95) || finite(cell.lossRatio);
 }
 
 /**
@@ -27,8 +32,8 @@ export function isMeasured(cell: MatrixCell | undefined): boolean {
 export function severityRatio(cell: MatrixCell | undefined): number | null {
   if (!cell) return null;
   const ratios: number[] = [];
-  if (cell.failRatio !== null && cell.failRatio !== undefined) ratios.push(cell.failRatio);
-  if (cell.lossRatio !== undefined) ratios.push(cell.lossRatio);
+  if (finite(cell.failRatio)) ratios.push(cell.failRatio);
+  if (finite(cell.lossRatio)) ratios.push(cell.lossRatio);
   return ratios.length === 0 ? null : Math.max(...ratios);
 }
 
@@ -49,14 +54,14 @@ export function isProblemCell(cell: MatrixCell | undefined): boolean {
   return ratio !== null && ratio >= DEGRADED_AT;
 }
 
-/** fmtRatio renders a 0–1 ratio as the percentage every surface prints. */
-export function fmtRatio(ratio: number): string {
-  return `${(100 * ratio).toFixed(1)}%`;
+/** fmtRatio renders a 0–1 ratio as the percentage every surface prints; a non-finite ratio is no measurement, not "NaN%". */
+export function fmtRatio(ratio?: number | null): string {
+  return finite(ratio) ? `${(100 * ratio).toFixed(1)}%` : "—";
 }
 
-/** fmtRtt renders nanoseconds as milliseconds, or an em-dash when absent. */
-export function fmtRtt(ns?: number): string {
-  return ns === undefined ? "—" : `${(ns / 1e6).toFixed(1)}ms`;
+/** fmtRtt renders nanoseconds as milliseconds, or an em-dash when absent; null/NaN is absent, never "0.0ms". */
+export function fmtRtt(ns?: number | null): string {
+  return finite(ns) ? `${(ns / 1e6).toFixed(1)}ms` : "—";
 }
 
 /** cellSummary is the sentence a tooltip and an aria-label say about one cell — one wording. */
@@ -64,11 +69,11 @@ export function cellSummary(cell: MatrixCell | undefined, t: Translate<MatrixCel
   if (!isMeasured(cell)) return t("noData");
   const parts: string[] = [];
   parts.push(
-    cell?.failRatio !== null && cell?.failRatio !== undefined
+    finite(cell?.failRatio)
       ? t("fail", { ratio: fmtRatio(cell.failRatio) })
       : t("noFailSignal"),
   );
-  if (cell?.rttP95 !== undefined) parts.push(t("rttP95", { rtt: fmtRtt(cell.rttP95) }));
-  if (cell?.lossRatio !== undefined) parts.push(t("packetLoss", { ratio: fmtRatio(cell.lossRatio) }));
+  if (finite(cell?.rttP95)) parts.push(t("rttP95", { rtt: fmtRtt(cell.rttP95) }));
+  if (finite(cell?.lossRatio)) parts.push(t("packetLoss", { ratio: fmtRatio(cell.lossRatio) }));
   return parts.join(", ");
 }

@@ -59,7 +59,19 @@ export function annotationOverlaySeries(annotations: Annotation[], dark: boolean
   if (instants.length === 0 && ranges.length === 0) return null;
 
   const label = { show: false } as const;
-  const emphasisLabel = { show: true, formatter: "{b}", color: colors.axis, fontSize: 11 };
+  /* INSIDE the plot, and bounded.
+     `position: "top"` draws the label ABOVE the band — outside the grid, where it overprinted the
+     panel title and, for a long reason, ran off the right edge of the card with no way to read it.
+     A marker label belongs in the area it marks; `overflow: "truncate"` keeps a long reason from
+     doing the same thing inside. The whole text is in the row below the chart either way. */
+  const emphasisLabel = {
+    show: true,
+    formatter: "{b}",
+    color: colors.axis,
+    fontSize: 11,
+    width: 220,
+    overflow: "truncate" as const,
+  };
 
   return {
     name: ANNOTATION_SERIES_NAME,
@@ -86,7 +98,7 @@ export function annotationOverlaySeries(annotations: Annotation[], dark: boolean
       ? {
           markArea: {
             label,
-            emphasis: { label: { ...emphasisLabel, position: "top" } },
+            emphasis: { label: { ...emphasisLabel, position: "insideTop" } },
             itemStyle: { color: colors.other, opacity: 0.14 },
             data: ranges,
           } satisfies LineSeriesOption["markArea"],
@@ -118,11 +130,8 @@ export function maintenanceOverlaySeries(windows: MaintenanceWindow[], dark: boo
   const colors = chartColors(dark ? "dark" : "light");
   const data: [{ name: string; xAxis: number }, { xAxis: number }][] = [];
 
-  for (const w of windows) {
-    const start = Date.parse(w.startAt);
-    const end = Date.parse(w.endAt);
-    if (Number.isNaN(start) || Number.isNaN(end)) continue;
-    data.push([{ name: w.reason, xAxis: start }, { xAxis: end }]);
+  for (const span of mergeWindowSpans(windows)) {
+    data.push([{ name: span.reasons.join(" · "), xAxis: span.start }, { xAxis: span.end }]);
   }
 
   if (data.length === 0) return null;
@@ -136,11 +145,55 @@ export function maintenanceOverlaySeries(windows: MaintenanceWindow[], dark: boo
     lineStyle: { color: colors.axis },
     markArea: {
       label: { show: false },
-      emphasis: { label: { show: true, formatter: "{b}", color: colors.axis, fontSize: 11, position: "top" } },
+      emphasis: {
+        label: {
+          show: true,
+          formatter: "{b}",
+          color: colors.axis,
+          fontSize: 11,
+          // Inside the band and bounded — see the annotation overlay's emphasisLabel.
+          position: "insideTop",
+          width: 220,
+          overflow: "truncate",
+        },
+      },
       itemStyle: { color: colors.axis, opacity: 0.08, borderColor: colors.axis, borderWidth: 1, borderType: "dashed" },
       data,
     },
   };
+}
+
+/**
+ * mergeWindowSpans folds overlapping maintenance windows into ONE band each.
+ *
+ * A markArea fill is translucent, and ECharts draws one per entry: two windows that overlap paint
+ * the overlap twice, so the plot came out in two greys with a dashed seam down the middle — which
+ * reads as a chart bug, not as "two maintenance windows overlap here". The union is one band, and
+ * the reasons of everything inside it are joined for the hover label.
+ *
+ * Windows with an unparseable edge are SKIPPED rather than drawn with a NaN bound.
+ */
+export function mergeWindowSpans(
+  windows: MaintenanceWindow[],
+): { start: number; end: number; reasons: string[] }[] {
+  const parsed = windows
+    .map((w) => ({ start: Date.parse(w.startAt), end: Date.parse(w.endAt), reason: w.reason }))
+    .filter((w) => !Number.isNaN(w.start) && !Number.isNaN(w.end))
+    .sort((a, b) => a.start - b.start);
+
+  const out: { start: number; end: number; reasons: string[] }[] = [];
+  for (const w of parsed) {
+    const last = out[out.length - 1];
+    // `<=` so two windows that merely touch (one ends exactly where the next begins) also read as
+    // one uninterrupted period, which is what they are.
+    if (last && w.start <= last.end) {
+      last.end = Math.max(last.end, w.end);
+      if (w.reason && !last.reasons.includes(w.reason)) last.reasons.push(w.reason);
+      continue;
+    }
+    out.push({ start: w.start, end: w.end, reasons: w.reason ? [w.reason] : [] });
+  }
+  return out;
 }
 
 /**

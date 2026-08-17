@@ -46,8 +46,37 @@ const en = {
   "snapshot.lastSeen": "Last seen",
   "snapshot.traces": "Traces",
 
+  /* ── the traces behind the route ───────────────────────────────────────── */
+  /* A route row folds every trace that walked it into one count and one hop
+     table — the LAST reading. The count used to be a dead end: «а как их
+     посмотреть???». These name the list that answers it. */
+  "traces.title": "Traces of this route",
+  "traces.aria": "Traces of this route",
+  "traces.count": "{shown} of {total}",
+  "traces.loading": "Loading traces…",
+  "traces.error": "Could not load the traces of this route.",
+  /* Retention is the honest reason a non-zero count can have an empty list:
+     traces age out with the RUN sweep, the route with the path-history one. */
+  "traces.empty":
+    "No stored traces remain for this route — the route outlived them (traces are kept with the diagnostics runs, not with the path history).",
+  "traces.loadOlder": "Load older",
+  "traces.loadingOlder": "Loading older…",
+  /* A page that failed, said beside the button that asked for it — the pages already on screen stay
+     on screen. */
+  "traces.olderError": "Could not load more traces. The ones above are still what was recorded.",
+  "traces.failed": "failed",
+  "traces.hops.aria": "Hops of this trace",
+
   /* ── the enrichment row ────────────────────────────────────────────────── */
   "hop.enrichment.aria": "Enrichment for hop {number}, {ip}",
+  /* A `*` in a route: the hop did not answer. Not "no hop" — the packet still
+     went through something, it just did not say what. */
+  /* "Did not answer" is what the tracer OBSERVED, and on a cluster where the agent has no raw ICMP
+     socket that is all it can observe: TTL-exceeded replies from intermediate routers are not
+     delivered to the unprivileged datagram socket, so every hop before the destination reads this
+     way whether or not it really answered. The wording says what was seen rather than what the
+     network did. */
+  "hop.silent": "no reply was seen from this hop",
   "enrichment.rdns": "Reverse DNS",
   "enrichment.network": "Network",
   "enrichment.location": "Location",
@@ -80,6 +109,9 @@ const en = {
   "diff.aria": "Path diff",
   /* The marker column's header, screen-reader only. */
   "diff.change": "Change",
+  /* The visible key for the marks. They had a title and an aria-label, which
+     left them legible to a screen reader and to nobody looking at the screen. */
+  "diff.legend": "What the marks mean",
   "diff.older": "Older",
   "diff.newer": "Newer",
   "diff.identical": "Both paths visit the same hops in the same order — only the recorded round-trip times differ.",
@@ -112,6 +144,9 @@ const en = {
      stand-in for a failure that carried no sentence of its own — when it did,
      the server's words render verbatim. */
   "changes.queryFailed": "query failed",
+  /* The pair's route history can reach back further than the PromQL proxy will
+     answer for; the loss series is then the last {hours}h of the same window. */
+  "changes.clamped": "Loss shown for the last {hours}h — the route history reaches further back than this console will query.",
 } as const;
 
 export type MTRDetailKey = keyof typeof en;
@@ -129,7 +164,21 @@ export const mtrDetailDict: Dictionary<MTRDetailKey> = defineDict(en, {
   "snapshot.lastSeen": "Последний раз виден",
   "snapshot.traces": "Трассировок",
 
+  "traces.title": "Трассировки этого маршрута",
+  "traces.aria": "Трассировки этого маршрута",
+  "traces.count": "{shown} из {total}",
+  "traces.loading": "Загружаем трассировки…",
+  "traces.error": "Не удалось загрузить трассировки этого маршрута.",
+  "traces.empty":
+    "Сохранённых трассировок для этого маршрута не осталось: маршрут пережил их — трассировки хранятся вместе с прогонами диагностики, а не с историей путей.",
+  "traces.loadOlder": "Загрузить старые",
+  "traces.loadingOlder": "Загружаем старые…",
+  "traces.olderError": "Не удалось догрузить трассировки. То, что выше, по-прежнему то, что записано.",
+  "traces.failed": "ошибка",
+  "traces.hops.aria": "Хопы этой трассировки",
+
   "hop.enrichment.aria": "Обогащение для хопа {number}, {ip}",
+  "hop.silent": "ответа от этого хопа не получено",
   "enrichment.rdns": "Обратный DNS",
   "enrichment.network": "Сеть",
   "enrichment.location": "Расположение",
@@ -152,6 +201,7 @@ export const mtrDetailDict: Dictionary<MTRDetailKey> = defineDict(en, {
 
   "diff.aria": "Разница путей",
   "diff.change": "Изменение",
+  "diff.legend": "Что значат пометки",
   "diff.older": "Старый",
   "diff.newer": "Новый",
   "diff.identical": "Оба пути проходят одни и те же хопы в том же порядке, различаются только записанные RTT.",
@@ -175,6 +225,7 @@ export const mtrDetailDict: Dictionary<MTRDetailKey> = defineDict(en, {
     "для неё пока нет выборок.",
   "changes.loading": "Загружаем серию потерь для этой пары…",
   "changes.queryFailed": "запрос не выполнен",
+  "changes.clamped": "Потери показаны за последние {hours} ч: история путей уходит дальше, чем консоль готова запросить.",
 });
 
 /** countForm picks between the `.one` / `.few` / `.many` keys above (paths,

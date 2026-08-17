@@ -15,6 +15,8 @@ import {
   PIN_KIND_BY_TIMELINE_KIND,
   PROMQL_MAX_RANGE_MS,
   alertEntries,
+  alertIsOurs,
+  alertTouchesScope,
   auditDetailLine,
   auditEntries,
   buildExportPayload,
@@ -41,12 +43,11 @@ import {
   scopeIncompleteReason,
   scopeNodeOptions,
   scopeZoneOptions,
+  scopedAlertEntries,
   scopesToQuery,
   type InvestigationScope,
 } from "@/lib/investigation-sources";
 import {
-  CURSOR_SERIES_NAME,
-  cursorSeries,
   deltaFromVectors,
   signalChartOption,
   withOverlays,
@@ -430,6 +431,40 @@ describe("parseInvestigationParams", () => {
     expect(p.b).toBe("node-b");
     expect(p.from.toISOString()).toBe(new Date(FROM).toISOString());
     expect(p.to.toISOString()).toBe(new Date(TO).toISOString());
+  });
+
+  /* A permalink is hand-edited as often as it is copied, and U+2192 is not on
+     any keyboard: ?scope=node-a->node-b used to parse as ONE node called
+     "node-a->node-b" with an empty peer, framing an investigation nobody asked
+     for and saying nothing about it. */
+  it.each([
+    ["a hyphen arrow", "node-a->node-b"],
+    ["a long hyphen arrow", "node-a-->node-b"],
+    ["a fat arrow", "node-a=>node-b"],
+    ["a bare greater-than", "node-a>node-b"],
+    ["spaces around the arrow", "node-a -> node-b"],
+  ])("splits a pair written with %s", (_name, typed) => {
+    const p = parseInvestigationParams(`?kind=pair&scope=${encodeURIComponent(typed)}&from=${FROM}&to=${TO}`, NOW);
+    expect(p.a).toBe("node-a");
+    expect(p.b).toBe("node-b");
+  });
+
+  it("splits a ZONE pair the same way — one vocabulary, both wide scopes", () => {
+    const p = parseInvestigationParams(`?kind=zone-pair&scope=${encodeURIComponent("zone-1->zone-2")}`, NOW);
+    expect(p.a).toBe("zone-1");
+    expect(p.b).toBe("zone-2");
+  });
+
+  it("leaves a single node scope whole, hyphens and all", () => {
+    // The shape that must NOT be split: every node in this fleet has a hyphen.
+    const p = parseInvestigationParams("?kind=node&scope=edge-gw-01", NOW);
+    expect(p.a).toBe("edge-gw-01");
+    expect(p.b).toBe("");
+  });
+
+  it("does not split a scope on a bare space — buildInvestigateURL emits those", () => {
+    const p = parseInvestigationParams(`?kind=node&scope=${encodeURIComponent("ns/pod a&b")}`, NOW);
+    expect(p.a).toBe("ns/pod a&b");
   });
 
   it("falls back to a cluster scope over the last hour when the URL says nothing", () => {
@@ -871,6 +906,146 @@ describe("scopeFromAlertLabels", () => {
   });
 });
 
+/* ── who owns a firing alert, and which of ours this scope is about ──────────
+   A cluster running kube-prometheus-stack fires TargetDown, etcdMembersDown and
+   Watchdog around the clock. They used to land in every investigation as
+   individual rows, unscoped, next to the product's own. */
+
+const PAIR: InvestigationScope = { kind: "pair", a: "node-a", b: "node-b" };
+
+/** A foreign row: no rule id, which is the whole of it. */
+function foreignRow(over: Record<string, unknown> = {}): Alert {
+  return alertRow({
+    name: "TargetDown",
+    severity: "warning",
+    labels: { alertname: "TargetDown", severity: "warning", job: "kubelet", namespace: "kube-system" },
+    ruleId: undefined,
+    ...over,
+  });
+}
+
+describe("alertIsOurs", () => {
+  it("is the console's own rule id, the field GET /api/v1/alerts already fills", () => {
+    expect(alertIsOurs(alertRow())).toBe(true);
+  });
+
+  it("is false for an alert carrying no rule id, whatever it is named", () => {
+    expect(alertIsOurs(foreignRow())).toBe(false);
+    // A foreign rule may borrow our name and our labels; it still is not ours.
+    expect(alertIsOurs(foreignRow({ name: "PairLossHigh", labels: { source_node: "node-a" } }))).toBe(false);
+  });
+
+  it("is false for an empty rule id, which the API writes for an unmanaged rule", () => {
+    expect(alertIsOurs(alertRow({ ruleId: "" }))).toBe(false);
+  });
+});
+
+describe("alertTouchesScope", () => {
+  it("keeps a pair alert for its own pair and drops it for another", () => {
+    expect(alertTouchesScope({ source_node: "node-a", destination_node: "node-b" }, PAIR)).toBe(true);
+    expect(alertTouchesScope({ source_node: "node-c", destination_node: "node-d" }, PAIR)).toBe(false);
+  });
+
+  it("keeps an alert that names either end of the pair", () => {
+    expect(alertTouchesScope({ source_node: "node-a" }, PAIR)).toBe(true);
+    expect(alertTouchesScope({ destination_node: "node-b" }, PAIR)).toBe(true);
+    expect(alertTouchesScope({ source_node: "node-z" }, PAIR)).toBe(false);
+  });
+
+  it("keeps an alert that names nothing scopable: it is about the whole fleet", () => {
+    // The same call runTouchesScope makes with an empty Sources list: absent is
+    // "everywhere", never "nowhere".
+    expect(alertTouchesScope({ severity: "critical" }, PAIR)).toBe(true);
+  });
+
+  it("narrows a node scope by either end", () => {
+    const node: InvestigationScope = { kind: "node", a: "node-a", b: "" };
+    expect(alertTouchesScope({ source_node: "node-a", destination_node: "node-b" }, node)).toBe(true);
+    expect(alertTouchesScope({ source_node: "node-b", destination_node: "node-a" }, node)).toBe(true);
+    expect(alertTouchesScope({ source_node: "node-c", destination_node: "node-d" }, node)).toBe(false);
+  });
+
+  it("narrows a target scope by the target label alone", () => {
+    const target: InvestigationScope = { kind: "target", a: "api-gw", b: "" };
+    expect(alertTouchesScope({ target: "api-gw" }, target)).toBe(true);
+    expect(alertTouchesScope({ target: "other" }, target)).toBe(false);
+    expect(alertTouchesScope({ source_node: "node-a" }, target)).toBe(false);
+  });
+
+  it("narrows nothing for the two wide scopes, exactly as runs do not", () => {
+    for (const kind of ["cluster", "zone-pair"] as const) {
+      expect(alertTouchesScope({ source_node: "node-z" }, { kind, a: "zone-1", b: "zone-2" })).toBe(true);
+    }
+  });
+});
+
+describe("scopedAlertEntries", () => {
+  it("keeps our alerts as rows and lets no foreign one through", () => {
+    const out = scopedAlertEntries(
+      [alertRow(), foreignRow(), foreignRow({ name: "etcdMembersDown" }), foreignRow({ name: "Watchdog" })],
+      new Date(FROM),
+      new Date(TO),
+      PAIR,
+    );
+
+    expect(out.entries.map((e) => e.title)).toEqual(["Alert firing: PairLossHigh"]);
+    // Not folded, not summarised, not counted: kconmon-ng is not an aggregator
+    // of everybody's alerts, and a cluster's own backdrop belongs to whoever
+    // wrote those rules.
+    expect(JSON.stringify(out)).not.toMatch(/TargetDown|etcdMembersDown|Watchdog/);
+  });
+
+  it("narrows OUR alerts to the scope and SAYS how many that hid", () => {
+    const out = scopedAlertEntries(
+      [alertRow(), alertRow({ name: "OtherPair", labels: { source_node: "node-c", destination_node: "node-d" } })],
+      new Date(FROM),
+      new Date(TO),
+      PAIR,
+    );
+
+    expect(out.entries).toHaveLength(1);
+    expect(out.hiddenByScope).toBe(1);
+  });
+
+  it("hides nothing on a cluster scope, so the count it reports is nought", () => {
+    const out = scopedAlertEntries(
+      [alertRow(), alertRow({ name: "OtherPair", labels: { source_node: "node-c", destination_node: "node-d" } })],
+      new Date(FROM),
+      new Date(TO),
+      { kind: "cluster", a: "", b: "" },
+    );
+    expect(out.entries).toHaveLength(2);
+    expect(out.hiddenByScope).toBe(0);
+  });
+
+  it("never counts a foreign alert as hidden by the SCOPE", () => {
+    // The scope-hidden line is a promise about OUR rules; counting somebody
+    // else's rule into it would be a number the reader cannot act on.
+    const out = scopedAlertEntries([foreignRow(), foreignRow({ name: "Watchdog" })], new Date(FROM), new Date(TO), PAIR);
+    expect(out.entries).toEqual([]);
+    expect(out.hiddenByScope).toBe(0);
+  });
+
+  it("never counts an out-of-window alert as hidden by the SCOPE", () => {
+    // It has no row for a reason the window already explains; blaming the scope
+    // for it would be a second, false sentence about the same alert.
+    const out = scopedAlertEntries(
+      [alertRow({ name: "Later", activeAt: "2026-08-08T02:00:00Z", labels: { source_node: "node-z" } })],
+      new Date(FROM),
+      new Date(TO),
+      PAIR,
+    );
+    expect(out.entries).toEqual([]);
+    expect(out.hiddenByScope).toBe(0);
+  });
+
+  it("drops a pending alert of ours exactly as alertEntries does", () => {
+    const out = scopedAlertEntries([alertRow({ state: "pending" })], new Date(FROM), new Date(TO), PAIR);
+    expect(out.entries).toEqual([]);
+    expect(out.hiddenByScope).toBe(0);
+  });
+});
+
 describe("buildExportPayload", () => {
   it("pins params, entries and causes into one JSON-safe object", () => {
     const params = { kind: "pair" as const, a: "node-a", b: "node-b", from: new Date(FROM), to: new Date(TO) };
@@ -908,14 +1083,11 @@ describe("buildExportPayload", () => {
 /* ── the signal-panel overlays ──────────────────────────────────────────── */
 
 describe("the signal overlays", () => {
-  it("cursorSeries draws exactly one markLine at the hovered instant", () => {
-    const s = cursorSeries(new Date("2026-08-08T00:20:00Z"), true);
-    expect(s?.markLine?.data).toEqual([{ xAxis: Date.parse("2026-08-08T00:20:00Z") }]);
-  });
-
-  it("cursorSeries is null when nothing is hovered, so the option keeps its identity", () => {
-    expect(cursorSeries(null, true)).toBeNull();
-  });
+  /* The cursor is no longer an overlay AT ALL. It used to be a markLine rebuilt
+     into the option on every hover, which was affordable while only a timeline
+     ROW could move it; a chart hover moves it per pixel, and a setOption per
+     pixel is not. It lives in the page's cursor group now (lib/chart-cursor.tsx)
+     and is drawn as one positioned line — see components/echart.test.tsx. */
 
   it("the LIFTED maintenance builder draws one markArea band per window", () => {
     const s = maintenanceOverlaySeries([maintenanceRow()], false);
@@ -928,7 +1100,7 @@ describe("the signal overlays", () => {
   it("withOverlays appends the SHARED maintenance series to the signal option", () => {
     const out = withOverlays(
       { series: [{ type: "line", name: "loss", data: [] }] },
-      { cursorAt: null, windows: [maintenanceRow()], dark: false },
+      { windows: [maintenanceRow()], dark: false },
     );
     expect((out.series as { name?: string }[]).map((s) => s.name)).toEqual(["loss", MAINTENANCE_SERIES_NAME]);
   });
@@ -949,7 +1121,7 @@ describe("the signal overlays", () => {
 
 describe("signalChartOption", () => {
   const chart = (unit: "seconds" | "ratio") => ({ id: "t", title: "t", unit, query: "" });
-  const overlays = { cursorAt: null, windows: [] };
+  const overlays = { windows: [] };
   const axisLabel = (option: ReturnType<typeof signalChartOption>, axis: "xAxis" | "yAxis") =>
     (option[axis] as { axisLabel?: Record<string, unknown> }).axisLabel ?? {};
 
@@ -971,19 +1143,28 @@ describe("signalChartOption", () => {
     expect(formatter(0.0335)).toBe("34ms");
   });
 
+  /* The name of this case was always right and its assertion was not: it pinned
+     `undefined`, which ECharts reads as "no formatter", so the loss axis printed
+     0.01 next to a tooltip and a neighbour readout saying 1.0%. */
   it("leaves a RATIO axis to the shared builder's own percent formatting", () => {
     const option = signalChartOption(chart("ratio"), matrixBody(LOSS_STEPS), false, overlays);
-    expect(axisLabel(option, "yAxis").formatter).toBeUndefined();
+    const formatter = axisLabel(option, "yAxis").formatter as (v: number) => string;
+    expect(typeof formatter).toBe("function");
+    expect(formatter(0.01)).toBe("1.0%");
+  });
+
+  it("keeps the SECONDS axis in milliseconds, which is the same builder's other answer", () => {
+    const option = signalChartOption(chart("seconds"), matrixBody(LOSS_STEPS), false, overlays);
+    const formatter = axisLabel(option, "yAxis").formatter as (v: number) => string;
+    expect(formatter(0.215)).toBe("215ms");
   });
 
   it("still composes the overlays rather than replacing them", () => {
     const option = signalChartOption(chart("ratio"), matrixBody(LOSS_STEPS), false, {
-      cursorAt: new Date("2026-08-08T00:20:00Z"),
       windows: [maintenanceRow()],
     });
     const names = (option.series as { name?: string }[]).map((s) => s.name);
     expect(names).toContain(MAINTENANCE_SERIES_NAME);
-    expect(names).toContain(CURSOR_SERIES_NAME);
   });
 });
 
@@ -1136,6 +1317,105 @@ describe("InvestigatePage — firing alerts as timeline rows", () => {
   });
 });
 
+/* ── the foreign-alert flood, on the page ────────────────────────────────────
+   Reproduced against a live stand running kube-prometheus-stack: nine firing
+   alerts, none of them ours, every one of them a row in every investigation.
+   The product answer is not a tidier row for them — it is no row at all. */
+
+describe("InvestigatePage — only this console's own alerts reach the timeline", () => {
+  const ours = (over: Record<string, unknown> = {}) => ({
+    name: "PairLossHigh",
+    state: "firing",
+    severity: "critical",
+    labels: { alertname: "PairLossHigh", severity: "critical", source_node: "node-a", destination_node: "node-b" },
+    annotations: {},
+    activeAt: "2026-08-08T00:20:00Z",
+    value: "1e+00",
+    ruleId: "11111111-1111-4111-8111-111111111111",
+    ...over,
+  });
+
+  /** The stand's own noise, in miniature: no rule id on any of it. */
+  const NOISE = [
+    { alertname: "TargetDown", severity: "warning", job: "kubelet" },
+    { alertname: "etcdMembersDown", severity: "critical", job: "etcd" },
+    { alertname: "Watchdog", severity: "none" },
+  ].map((labels) => ({
+    name: labels.alertname,
+    state: "firing",
+    severity: labels.severity,
+    labels,
+    annotations: {},
+    activeAt: "2026-08-07T09:00:00Z",
+    value: "1e+00",
+  }));
+
+  it("asks the route for the managed set only, so foreign alerts never cross the wire", async () => {
+    const { urlsFor } = renderPage({ alerts: [ours()] });
+    await screen.findByText("Alert firing: PairLossHigh");
+    expect(urlsFor("/api/v1/alerts")).toEqual(["/api/v1/alerts?managedOnly=true"]);
+  });
+
+  it("puts no row, no summary and no count on the page for a foreign alert", async () => {
+    renderPage({ alerts: [...NOISE, ours()] });
+
+    expect(await screen.findByText("Alert firing: PairLossHigh")).toBeTruthy();
+    for (const name of ["TargetDown", "etcdMembersDown", "Watchdog"]) {
+      expect(screen.queryByText(new RegExp(name))).toBeNull();
+    }
+    // The collapsed row this defect first shipped as is gone with them.
+    expect(screen.queryByText(/cluster-wide alerts/i)).toBeNull();
+    expect(screen.queryByTestId("timeline-group-members")).toBeNull();
+  });
+
+  it("counts only what it shows: foreign alerts are not in the window count", async () => {
+    renderPage({ alerts: [...NOISE, ours()] });
+    await screen.findByText("Alert firing: PairLossHigh");
+    // One alert of ours + the one threshold crossing the fixture derives.
+    expect(screen.getByTestId("timeline-count").textContent).toBe("2 entries in this window");
+    expect(screen.getAllByTestId("timeline-row")).toHaveLength(2);
+  });
+
+  it("the caption says plainly whose alerts these are", async () => {
+    renderPage({ alerts: [ours()] });
+    const caption = await screen.findByText(/only alerts from rules this console manages/i);
+    expect(caption.textContent).toMatch(/narrowed to this scope/i);
+    // No promise of a cluster-wide row anywhere in the caption.
+    expect(caption.textContent).not.toMatch(/collapse|cluster-wide/i);
+  });
+
+  it("says out loud when the scope kept one of OUR alerts off the timeline", async () => {
+    renderPage({
+      alerts: [
+        ours(),
+        ours({ name: "OtherPair", labels: { alertname: "OtherPair", source_node: "node-c", destination_node: "node-d" } }),
+      ],
+    });
+
+    await screen.findByText("Alert firing: PairLossHigh");
+    expect(screen.getByText(/1 alert from this console's own rules/i)).toBeTruthy();
+    expect(screen.queryByText("Alert firing: OtherPair")).toBeNull();
+  });
+
+  it("keeps that line away when the scope hid nothing", async () => {
+    renderPage({ alerts: [ours()] });
+    await screen.findByText("Alert firing: PairLossHigh");
+    expect(screen.queryByText(/from this console's own rules/i)).toBeNull();
+  });
+
+  it("exports what the timeline shows, with no folded rows left to unfold", async () => {
+    renderPage({ alerts: [ours()] });
+    await screen.findByText("Alert firing: PairLossHigh");
+
+    const payload = buildExportPayload(
+      { kind: "cluster", a: "", b: "", from: new Date(FROM), to: new Date(TO) },
+      [{ at: new Date(FROM), kind: "alert", severity: "error", title: "Alert firing: PairLossHigh" }],
+      [],
+    );
+    expect(payload.entries.map((e) => e.title)).toEqual(["Alert firing: PairLossHigh"]);
+  });
+});
+
 describe("InvestigatePage — the scope decides the request shapes", () => {
   it("a pair scope asks for BOTH nodes' cluster events, name-filtered, and one arrow-scoped event feed", async () => {
     const { urlsFor } = renderPage();
@@ -1178,14 +1458,16 @@ describe("InvestigatePage — the timeline", () => {
       annotations: [annotationRow()],
     });
 
+    /* NEWEST FIRST: the merge is ascending (the onset detection and the correlation ranking read it
+       that way) and the pane reverses it for the reader, so the most recent thing in the window is
+       the first row. */
     const rows = await screen.findAllByTestId("timeline-row");
     const titles = rows.map((r) => r.textContent ?? "");
-    expect(titles[0]).toContain("node-b NotReady");
-    expect(titles[1]).toContain("NodeNotReady");
+    expect(titles[0]).toContain("Packet loss crossed the threshold");
+    expect(titles[1]).toContain("poked the gateway");
     expect(titles[2]).toContain("Route changed");
-    expect(titles[3]).toContain("poked the gateway");
-    // …and the threshold crossing derived from the loss series lands at 00:20.
-    expect(titles[4]).toContain("Packet loss crossed the threshold");
+    expect(titles[3]).toContain("NodeNotReady");
+    expect(titles[4]).toContain("node-b NotReady");
 
     expect(within(rows[2]).getByText("path change")).toBeTruthy();
   });
@@ -1209,15 +1491,21 @@ describe("InvestigatePage — the timeline", () => {
     });
 
     const rows = await screen.findAllByTestId("timeline-row");
-    expect(screen.getByTestId("signal-cursor").textContent).toMatch(/no row hovered/i);
+    expect(screen.getByTestId("signal-cursor").textContent).toMatch(/nothing hovered/i);
 
-    fireEvent.mouseEnter(rows[0]);
+    /* The k8s event is not the newest row any more — the list is newest-first — so it is found by
+       its text rather than by an index that now means something else. */
+    const k8sRow = rows.find((r) => (r.textContent ?? "").includes("NodeNotReady"));
+    if (!k8sRow) {
+      throw new Error("the k8s event row is not in the timeline");
+    }
+    fireEvent.mouseEnter(k8sRow);
     await waitFor(() =>
-      expect(screen.getByTestId("signal-cursor").textContent).toContain(new Date("2026-08-08T00:15:00Z").toLocaleTimeString()),
+      expect(screen.getByTestId("signal-cursor").textContent).toContain(new Date("2026-08-08T00:15:00Z").toLocaleTimeString(undefined, { hour12: false })),
     );
 
     fireEvent.mouseLeave(rows[0]);
-    await waitFor(() => expect(screen.getByTestId("signal-cursor").textContent).toMatch(/no row hovered/i));
+    await waitFor(() => expect(screen.getByTestId("signal-cursor").textContent).toMatch(/nothing hovered/i));
   });
 });
 
@@ -1227,8 +1515,8 @@ describe("InvestigatePage — the timeline", () => {
  */
 
 /** One event a minute for the whole investigated hour. Sixty rows plus the one
- *  threshold crossing the loss fixture derives = 61 entries, i.e. two pages at
- *  the default size and a partial second one. */
+ *  threshold crossing the loss fixture derives = 61 entries, i.e. seven pages at
+ *  the default size of ten, the last of them holding a single row. */
 const HOUR_OF_EVENTS = Array.from({ length: 60 }, (_, i) => ({
   id: `e-${i}`,
   seq: i + 1,
@@ -1244,29 +1532,31 @@ describe("InvestigatePage — the timeline is paginated client-side", () => {
   it("cuts the merged list into pages while counting the whole window", async () => {
     renderPage({ events: HOUR_OF_EVENTS });
 
-    await waitFor(() => expect(screen.getAllByTestId("timeline-row")).toHaveLength(50));
+    await waitFor(() => expect(screen.getAllByTestId("timeline-row")).toHaveLength(10));
     expect(screen.getByTestId("timeline-count").textContent).toMatch(/61 entries in this window/);
-    expect(screen.getByTestId("timeline-page-label").textContent).toMatch(/page 1 of 2/i);
+    expect(screen.getByTestId("pager-page").textContent).toMatch(/page 1 of 7/i);
 
-    fireEvent.click(screen.getByRole("button", { name: "Next page" }));
-    expect(screen.getAllByTestId("timeline-row")).toHaveLength(11);
-    // The count is the window's either way — a pager must not shrink the fleet.
+    // The last page holds the REMAINDER, and the window's count is untouched by
+    // any of it — a pager must not shrink the fleet.
+    for (let i = 0; i < 6; i++) fireEvent.click(screen.getByRole("button", { name: "Next page" }));
+    expect(screen.getByTestId("pager-page").textContent).toMatch(/page 7 of 7/i);
+    expect(screen.getAllByTestId("timeline-row")).toHaveLength(1);
     expect(screen.getByTestId("timeline-count").textContent).toMatch(/61 entries in this window/);
   });
 
   it("issues NOT ONE extra request to turn a page — the window is already fetched", async () => {
     const { calls } = renderPage({ events: HOUR_OF_EVENTS });
-    await waitFor(() => expect(screen.getAllByTestId("timeline-row")).toHaveLength(50));
+    await waitFor(() => expect(screen.getAllByTestId("timeline-row")).toHaveLength(10));
 
     const before = calls.length;
     fireEvent.click(screen.getByRole("button", { name: "Next page" }));
-    fireEvent.click(within(screen.getByRole("radiogroup", { name: "Rows per page" })).getByRole("radio", { name: "10" }));
+    fireEvent.click(within(screen.getByRole("radiogroup", { name: "Rows per page" })).getByRole("radio", { name: "50" }));
     expect(calls.length).toBe(before);
   });
 
   it("keeps the audit, runs and alert captions above the rows on page 2", async () => {
     renderPage({ events: HOUR_OF_EVENTS });
-    await waitFor(() => expect(screen.getAllByTestId("timeline-row")).toHaveLength(50));
+    await waitFor(() => expect(screen.getAllByTestId("timeline-row")).toHaveLength(10));
 
     fireEvent.click(screen.getByRole("button", { name: "Next page" }));
 
@@ -1279,24 +1569,22 @@ describe("InvestigatePage — the timeline is paginated client-side", () => {
 
   it("resets to page 1 when the investigated window changes", async () => {
     renderPage({ events: HOUR_OF_EVENTS });
-    await waitFor(() => expect(screen.getAllByTestId("timeline-row")).toHaveLength(50));
+    await waitFor(() => expect(screen.getAllByTestId("timeline-row")).toHaveLength(10));
 
     fireEvent.click(screen.getByRole("button", { name: "Next page" }));
-    expect(screen.getByTestId("timeline-page-label").textContent).toMatch(/page 2 of 2/i);
+    expect(screen.getByTestId("pager-page").textContent).toMatch(/page 2 of 7/i);
 
     fireEvent.click(screen.getByRole("radio", { name: "15m" }));
     fireEvent.click(screen.getByRole("button", { name: "Investigate" }));
 
-    await waitFor(() =>
-      expect(screen.getByTestId("timeline-page-label").textContent).toMatch(/page 1 of 2/i),
-    );
+    await waitFor(() => expect(screen.getByTestId("pager-page").textContent).toMatch(/page 1 of /i));
   });
 
   it("keeps the page size out of the URL — the four parameters are the whole contract", async () => {
     renderPage({ events: HOUR_OF_EVENTS });
-    await waitFor(() => expect(screen.getAllByTestId("timeline-row")).toHaveLength(50));
+    await waitFor(() => expect(screen.getAllByTestId("timeline-row")).toHaveLength(10));
 
-    fireEvent.click(within(screen.getByRole("radiogroup", { name: "Rows per page" })).getByRole("radio", { name: "10" }));
+    fireEvent.click(within(screen.getByRole("radiogroup", { name: "Rows per page" })).getByRole("radio", { name: "50" }));
     fireEvent.click(screen.getByRole("button", { name: "Next page" }));
 
     const qs = new URLSearchParams(window.location.search);
@@ -1852,8 +2140,16 @@ describe("#1 a failed source says so, and stops the page claiming nothing happen
     expect(screen.queryByText(/Nothing happened in this window/i)).toBeNull();
   });
 
+  /* `prometheusConfigured: false`, and it is the POINT of this case rather than
+     incidental setup (QA scope 4). The default fixture's loss series crosses the
+     threshold, so this window has never been empty once its sources settled —
+     the assertion below used to be satisfied by the phantom empty the pane
+     rendered BEFORE auth resolved and any source had been asked at all, which
+     is the opposite of "every enabled source settled cleanly". With Prometheus
+     unconfigured the derived source is not asked, the seven store-backed ones
+     answer cleanly and empty, and the claim is finally the one this test names. */
   it("still claims nothing happened when every enabled source settled cleanly", async () => {
-    renderPage();
+    renderPage({ prometheusConfigured: false });
     expect(await screen.findByText(/Nothing happened in this window/i)).toBeTruthy();
     expect(screen.queryByTestId("timeline-partial")).toBeNull();
   });
@@ -2391,8 +2687,8 @@ describe("InvestigatePage — Russian", () => {
 
     expect(await screen.findByRole("heading", { name: "Расследование" })).toBeInTheDocument();
 
-    // The pager: 61 entries over two pages at the default size of 50.
-    await waitFor(() => expect(screen.getAllByTestId("timeline-row")).toHaveLength(50));
+    // The pager: 61 entries over seven pages at the default size of ten.
+    await waitFor(() => expect(screen.getAllByTestId("timeline-row")).toHaveLength(10));
 
     // The honesty caption for the newest 200 audit rows, with its bound intact.
     const sources = within(screen.getByRole("list", { name: "Источники ленты" })).getAllByRole("listitem");
@@ -2401,10 +2697,10 @@ describe("InvestigatePage — Russian", () => {
     expect(text).toMatch(/нет фильтра по времени/);
 
     expect(screen.getByTestId("timeline-count").textContent).toBe("61 запись в этом интервале");
-    expect(screen.getByTestId("timeline-page-label").textContent).toBe("Страница 1 из 2");
+    expect(screen.getByTestId("pager-page").textContent).toBe("Страница 1 из 7");
 
     fireEvent.click(screen.getByRole("button", { name: "Следующая страница" }));
-    expect(screen.getByTestId("timeline-page-label").textContent).toBe("Страница 2 из 2");
+    expect(screen.getByTestId("pager-page").textContent).toBe("Страница 2 из 7");
   });
 
   /* A row here says the whole contract held — the console's connective words moved, the server's did. */
@@ -2604,10 +2900,13 @@ describe("every source failed is an ERROR STATE, not a quiet empty window (findi
     expect(screen.queryByText(/Nothing happened in this window/i)).toBeNull();
   });
 
+  /* Same fixture correction as the nothing-happened case above: a genuinely
+     empty SETTLED window, so the zero being counted is a count and not the
+     pre-auth phantom. */
   it("counts zero out loud rather than dropping the number (finding #15)", async () => {
-    renderPage();
+    renderPage({ prometheusConfigured: false });
     await waitFor(() =>
-      expect(screen.getByTestId("timeline-count").textContent).toMatch(/entries in this window/),
+      expect(screen.getByTestId("timeline-count").textContent).toBe("0 entries in this window"),
     );
   });
 });
@@ -2799,7 +3098,7 @@ describe("the segmented controls are real radiogroups (finding #16)", () => {
       })),
     });
     const group = await screen.findByRole("radiogroup", { name: "Rows per page" });
-    expect(within(group).getAllByRole("radio").map((r) => r.textContent)).toEqual(["10", "50", "100"]);
+    expect(within(group).getAllByRole("radio").map((r) => r.textContent)).toEqual(["10", "20", "50", "100"]);
   });
 });
 
@@ -2863,6 +3162,10 @@ describe("one instant, one shape, in Russian too (findings #7 and #18)", () => {
     // ru-RU is 24-hour: an AM/PM marker here would mean the row had been
     // formatted with a bare toLocale* and the browser's own locale.
     expect(clock).not.toMatch(/AM|PM/);
-    expect(clock).toMatch(/^\d{2}:\d{2}:\d{2}/);
+    /* A DAY and a clock, not a clock alone. The window an Investigate timeline covers is arbitrary
+       (?from/?to, an incident permalink, and the 6h preset any time the operator looks between
+       00:00 and 06:00), so newest-first rows across midnight read as out of order when every row
+       says only the time — 23:50 sitting under 00:10. */
+    expect(clock).toMatch(/^\d{1,2}\s*\S+.*\d{1,2}:\d{2}/);
   });
 });

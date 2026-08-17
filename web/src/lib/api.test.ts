@@ -221,6 +221,27 @@ describe("apiFetch: 401 redirect (task-19-brief.md)", () => {
     expect(navigateSpy).toHaveBeenCalledWith("/login?returnTo=%2Fmatrix%3Ffoo%3Dbar");
   });
 
+  /* The owner's report: an unauthenticated hit on the root produced
+     /login?returnTo=%2F — a parameter that asks for the place the login page
+     already goes when nobody asks for anything. */
+  it("writes NO query at all when the target is the root", async () => {
+    window.history.pushState({}, "", "/");
+    const navigateSpy = vi.fn();
+    setNavigateForTest(navigateSpy);
+    mockFetch(401, { type: "about:blank", title: "authentication required", status: 401 }, "application/problem+json");
+    await expect(getMe()).rejects.toBeInstanceOf(ApiError);
+    expect(navigateSpy).toHaveBeenCalledWith("/login");
+  });
+
+  it("still writes one for the root WITH a query, which is not the same place", async () => {
+    window.history.pushState({}, "", "/?protocol=udp");
+    const navigateSpy = vi.fn();
+    setNavigateForTest(navigateSpy);
+    mockFetch(401, { type: "about:blank", title: "authentication required", status: 401 }, "application/problem+json");
+    await expect(getMe()).rejects.toBeInstanceOf(ApiError);
+    expect(navigateSpy).toHaveBeenCalledWith("/login?returnTo=%2F%3Fprotocol%3Dudp");
+  });
+
   it("a 403 does not redirect", async () => {
     window.history.pushState({}, "", "/matrix");
     const navigateSpy = vi.fn();

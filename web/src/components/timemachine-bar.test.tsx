@@ -10,14 +10,20 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { TimeMachineBar } from "@/components/timemachine-bar";
+import { TimeMachineControl } from "@/components/timemachine-control";
+import { PageShell } from "@/components/page-shell";
 import { ThemeProvider } from "@/components/theme-provider";
 import { TimeMachineProvider } from "@/lib/timemachine";
 import { AppShell } from "@/routes";
 
+/* The two halves as the app composes them: the banner in the chrome, the trigger
+   in the page header (components/page-shell.tsx). Rendering one without the
+   other would test a screen that does not exist. */
 function renderBar() {
   return render(
     <TimeMachineProvider>
       <TimeMachineBar />
+      <TimeMachineControl />
     </TimeMachineProvider>,
   );
 }
@@ -44,18 +50,25 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-describe("TimeMachineBar while live", () => {
+describe("Time Machine while live", () => {
   beforeEach(() => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     vi.setSystemTime(NOW);
   });
   afterEach(() => vi.useRealTimers());
 
-  it("renders the toggle only — no banner, no popover", () => {
+  it("renders the trigger only — no banner, no popover", () => {
     renderBar();
     expect(screen.getByRole("button", { name: /time machine/i })).toBeInTheDocument();
     expect(screen.queryByRole("status")).not.toBeInTheDocument();
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+
+  /* Live it says where the window ENDS, which is the one word that connects it
+     to the range presets it now sits beside. */
+  it("reads Now, so the trigger states the anchor rather than naming a feature", () => {
+    renderBar();
+    expect(screen.getByRole("button", { name: /time machine/i })).toHaveTextContent("Now");
   });
 
   it("opens the calendar popover on now", () => {
@@ -120,7 +133,7 @@ describe("TimeMachineBar while live", () => {
   });
 });
 
-describe("TimeMachineBar while engaged", () => {
+describe("Time Machine while engaged", () => {
   const engagedAt = new Date(2026, 7, 7, 15, 34, 0);
 
   beforeEach(() => {
@@ -138,11 +151,11 @@ describe("TimeMachineBar while engaged", () => {
     renderEngaged();
     const banner = screen.getByRole("status");
     expect(banner).toHaveTextContent(/you are viewing/i);
-    expect(banner).toHaveTextContent(engagedAt.toLocaleString());
+    expect(banner).toHaveTextContent(engagedAt.toLocaleString(undefined, { hour12: false }));
     expect(banner).toHaveTextContent(/return to live to act/i);
   });
 
-  it("offers Return to Live, which clears ?at= and drops back to the toggle", () => {
+  it("offers Return to Live, which clears ?at= and drops back to the trigger", () => {
     renderEngaged();
     fireEvent.click(screen.getByRole("button", { name: /return to live/i }));
     expect(screen.queryByRole("status")).not.toBeInTheDocument();
@@ -151,13 +164,22 @@ describe("TimeMachineBar while engaged", () => {
     expect(screen.getByRole("button", { name: /time machine/i })).toBeInTheDocument();
   });
 
+  /* One picker, in one place: the banner used to carry a second one two inches
+     from the first, both naming the same instant. */
+  it("leaves the picking to the header trigger — the banner is a status, not a control", () => {
+    renderEngaged();
+    expect(screen.getAllByRole("button", { name: /change the viewing time/i })).toHaveLength(1);
+    within(screen.getByRole("status")).getByRole("button", { name: /return to live/i });
+    expect(within(screen.getByRole("status")).queryByRole("button", { name: /change the viewing time/i })).toBeNull();
+  });
+
   it("states the instant ONCE, in one format, on both the banner and the chip", () => {
     renderEngaged();
     const adjust = screen.getByRole("button", { name: /change the viewing time/i });
 
-    expect(adjust).toHaveTextContent(engagedAt.toLocaleString());
-    expect(screen.getByRole("status")).toHaveTextContent(engagedAt.toLocaleString());
-    expect(adjust.getAttribute("aria-label")).toContain(engagedAt.toLocaleString());
+    expect(adjust).toHaveTextContent(engagedAt.toLocaleString(undefined, { hour12: false }));
+    expect(screen.getByRole("status")).toHaveTextContent(engagedAt.toLocaleString(undefined, { hour12: false }));
+    expect(adjust.getAttribute("aria-label")).toContain(engagedAt.toLocaleString(undefined, { hour12: false }));
   });
 
   it("shows the engaged instant on the adjust trigger and inside the popover", () => {
@@ -178,7 +200,7 @@ describe("TimeMachineBar while engaged", () => {
 
     // The day moved, the time of day did not.
     expect(atParam()).toBe(asAtParam(new Date(2026, 7, 6, 15, 34, 0)));
-    expect(screen.getByRole("status")).toHaveTextContent(new Date(2026, 7, 6, 15, 34).toLocaleString());
+    expect(screen.getByRole("status")).toHaveTextContent(new Date(2026, 7, 6, 15, 34).toLocaleString(undefined, { hour12: false }));
   });
 
   it("clamps a manually typed future instant to now rather than sending the future to the API", () => {
@@ -194,9 +216,9 @@ describe("TimeMachineBar while engaged", () => {
   });
 });
 
-/** The bar is only useful if it is actually in the chrome. */
-describe("AppShell mounts the Time Machine bar", () => {
-  it("renders the bar above the page frame on every route", async () => {
+/** Both halves are only useful if the real shell actually mounts them. */
+describe("AppShell mounts the Time Machine", () => {
+  it("puts the trigger in the page header, and no banner while live", async () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(() =>
@@ -223,7 +245,17 @@ describe("AppShell mounts the Time Machine bar", () => {
     });
     const testRouter = createRouter({
       routeTree: testRoot.addChildren([
-        createRoute({ getParentRoute: () => testRoot, path: "/", component: () => <div>page content</div> }),
+        createRoute({
+          getParentRoute: () => testRoot,
+          path: "/",
+          /* A real page, because the trigger now travels with PageShell rather
+             than with the chrome. */
+          component: () => (
+            <PageShell timeMachine title="Explore" actions={<button type="button">1h</button>}>
+              page content
+            </PageShell>
+          ),
+        }),
       ]),
       history: createMemoryHistory({ initialEntries: ["/"] }),
     });
@@ -236,7 +268,14 @@ describe("AppShell mounts the Time Machine bar", () => {
       </QueryClientProvider>,
     );
 
-    expect(await screen.findByRole("button", { name: /time machine/i })).toBeInTheDocument();
+    const trigger = await screen.findByRole("button", { name: /time machine/i });
     expect(screen.getByText("page content")).toBeInTheDocument();
+    /* Beside the page's own time filter, in one row — that placement IS the
+       feature here, so assert the shared parent rather than mere presence. */
+    const actionsRow = screen.getByRole("button", { name: "1h" }).parentElement;
+    expect(actionsRow).toContainElement(trigger);
+    // Live pays no banner. By its words, not by role: the anonymous-mode
+    // banner is a role="status" too, and it is a different statement.
+    expect(screen.queryByText(/you are viewing/i)).not.toBeInTheDocument();
   });
 });

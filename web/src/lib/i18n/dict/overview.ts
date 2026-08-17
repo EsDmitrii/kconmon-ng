@@ -43,6 +43,12 @@ const en = {
   "problem.topology": "The node list is unavailable",
   "problem.retry":
     "The page keeps retrying every 15s. If it persists, check that the console can reach Prometheus.",
+  /* The one case where the server's own sentence is NOT what gets printed:
+     nothing readable arrived, so the fetch layer's or the JSON parser's own
+     wording would be standing in for it — a mechanism nobody can act on, in one
+     language whatever the chrome is set to. */
+  "problem.unreadable":
+    "The console could not read the answer. Something between the browser and the console — an ingress, a proxy, a dropped connection — replied instead of it.",
 
   /* ── stat tiles ─────────────────────────────────────────────────────────── */
   "tiles.nodesReady": "Nodes ready",
@@ -111,14 +117,21 @@ const en = {
   "alerts.error": "The firing set is unavailable right now.",
   "alerts.noPrometheus":
     "Prometheus is not configured for this console — set console.prometheus.address. There is no firing state to show.",
-  "alerts.empty": "Nothing is firing. Rules live on /alerting; Prometheus evaluates them.",
+  /* NOT "nothing is firing": this card reads the rules this console manages and
+     no others, so a quiet list is a fact about OUR rules, never about the
+     cluster. Somebody else's rule may well be firing this second. */
+  "alerts.empty": "None of this console's rules is firing. Rules live on /alerting; Prometheus evaluates them.",
   "alerts.hidden.one": "{count} more firing alert is not shown here.",
   "alerts.hidden.many": "{count} more firing alerts are not shown here.",
   /* `severity` is the Prometheus LABEL name, so it stays in both languages —
      this is the badge for a row that carries the label empty. */
   "alerts.noSeverity": "no severity",
-  "alerts.unmanaged": "unmanaged",
-  "alerts.unmanaged.title": "This console does not manage the rule behind this alert.",
+  /* The card's own bound. kconmon-ng is not an aggregator of everybody's alerts:
+     a rule this console does not manage belongs to whoever wrote it, and its
+     firing state is read in Alertmanager and Grafana, not here. */
+  "alerts.managedOnly":
+    "This card lists only the rules this console manages. Anything else firing in this cluster is read in " +
+    "Alertmanager or Grafana, not here.",
   "alerts.investigate": "investigate",
 
   /* ── open incidents ─────────────────────────────────────────────────────── */
@@ -182,6 +195,8 @@ export const overviewDict: Dictionary<OverviewKey> = defineDict(en, {
   "problem.topology": "Список узлов недоступен",
   "problem.retry":
     "Страница повторяет запрос каждые 15 с. Если не отпускает, проверьте, дотягивается ли консоль до Prometheus.",
+  "problem.unreadable":
+    "Консоль не смогла прочитать ответ. Похоже, ответила не она, а что-то по дороге: ingress, прокси или оборвавшееся соединение.",
 
   "tiles.nodesReady": "Готовых узлов",
   "tiles.nodesReady.noTopology": "Топология недоступна",
@@ -232,12 +247,13 @@ export const overviewDict: Dictionary<OverviewKey> = defineDict(en, {
   "alerts.error": "Набор активных оповещений сейчас недоступен.",
   "alerts.noPrometheus":
     "Prometheus для этой консоли не настроен, задайте console.prometheus.address. Пока что состояние срабатываний брать неоткуда.",
-  "alerts.empty": "Ничего не срабатывает. Правила живут на /alerting, вычисляет их Prometheus.",
+  "alerts.empty": "Ни одно правило этой консоли не срабатывает. Правила живут на /alerting, вычисляет их Prometheus.",
   "alerts.hidden.one": "Ещё активных оповещений не показано: {count}.",
   "alerts.hidden.many": "Ещё активных оповещений не показано: {count}.",
   "alerts.noSeverity": "без severity",
-  "alerts.unmanaged": "не управляется",
-  "alerts.unmanaged.title": "Правило за этим оповещением эта консоль не ведёт.",
+  "alerts.managedOnly":
+    "В карточке только правила, которыми управляет эта консоль. Всё остальное, что горит в кластере, смотрят в " +
+    "Alertmanager или Grafana, а не здесь.",
   "alerts.investigate": "расследовать",
 
   "incidents.title": "Открытые инциденты",

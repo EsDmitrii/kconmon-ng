@@ -21,9 +21,9 @@ import { defineDict, type Dictionary } from "@/lib/i18n";
  *     and only its ABSENCE — a transport failure with no body — is ours.
  *   - "RTT p95", "Prometheus", `promql:query`, `console.prometheus.address`,
  *     and "pp" (percentage points, a unit).
- *   - the ECharts SERIES names (CURSOR_SERIES_NAME, and lib/annotations.ts's
- *     two). A series name is what the legend toggles a series BY — identity,
- *     not a label — and all three are exported constants tests read as such.
+ *   - the ECharts SERIES names (lib/annotations.ts's two). A series name is
+ *     what the legend toggles a series BY — identity, not a label — and both
+ *     are exported constants tests read as such.
  */
 
 const en = {
@@ -32,13 +32,18 @@ const en = {
   /* ── the matrix delta chip ─────────────────────────────────────────────── */
   "delta.failRatio": "Fail ratio",
   "delta.caption": "window start vs window end",
+  /* Percentage POINTS, the unit on the delta chip. A word, so it is translated —
+     it used to be a hard-coded "pp" in the Russian interface too. */
+  "delta.unit": "pp",
 
   /* ── the cursor readout ────────────────────────────────────────────────── */
   /* DOM, not a chart tooltip: a canvas marker cannot be focused or read aloud.
      {at} is either the formatted instant (the VIEWER's locale) or the phrase
-     below — one key, so the Russian can put the verb where it belongs. */
+     below — one key, so the Russian can put the verb where it belongs. The
+     cursor is the PAGE's now (lib/chart-cursor.tsx), moved by a timeline row or
+     by hovering any chart, which is why the empty phrase no longer says "row". */
   "cursor": "Cursor {at}",
-  "cursor.none": "— no row hovered",
+  "cursor.none": "— nothing hovered",
 
   /* ── the two lines that replace the charts ─────────────────────────────── */
   /* "Nothing was requested" is the load-bearing half: the panes are not broken
@@ -80,10 +85,11 @@ export const signalsDict: Dictionary<SignalsKey> = defineDict(en, {
   "title": "Сигналы",
 
   "delta.failRatio": "Доля сбоев",
+  "delta.unit": "п.п.",
   "delta.caption": "начало интервала против конца",
 
   "cursor": "Курсор {at}",
-  "cursor.none": "не наведён ни на одну строку",
+  "cursor.none": "ни на что не наведён",
 
   "gated":
     "Панели потерь и RTT читают Prometheus через защищённый прокси, а ему нужно право promql:query. Ничего не " +

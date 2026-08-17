@@ -26,9 +26,32 @@ const RTT_MICROSECOND_FLOOR_NS = 100_000;
  *  of µs and rounding it to "0.0ms" erases the measurement rather than
  *  reporting it. */
 export function fmtRttNs(ns: number | undefined): string {
-  if (ns === undefined || Number.isNaN(ns)) return "—";
-  if (ns > 0 && ns < RTT_MICROSECOND_FLOOR_NS) return `${Math.round(ns / 1e3)}µs`;
+  /* Anything that is not a finite NUMBER is a measurement that did not arrive,
+     and an em dash is what the table already says for one. The old guard tested
+     Number.isNaN alone, which lets three shapes through that the wire really can
+     carry: a JSON `null` (Go marshals ±Inf and a missing int64 that way) divided
+     by 1e6 is 0, so an absent RTT rendered "0.0ms" — a hop reported as answering
+     in no time at all, which is a measurement the console invented (hostile-QA
+     probe N). A string sneaks past it too and renders "NaNms". */
+  if (typeof ns !== "number" || !Number.isFinite(ns)) return "—";
+  /* On the MAGNITUDE, so a negative reading — nonsense, but the wire's nonsense
+     and not ours — reads "-4µs" rather than being rounded into "-0.0ms". */
+  const abs = Math.abs(ns);
+  if (abs > 0 && abs < RTT_MICROSECOND_FLOOR_NS) return `${Math.round(ns / 1e3)}µs`;
   return `${(ns / 1e6).toFixed(1)}ms`;
+}
+
+/**
+ * fmtLossPct is the loss column, in the one shape a percentage may take here.
+ *
+ * lossRatio is `0..1` in the schema and the projector writes nothing else, so
+ * everything below is about a payload that did NOT come from this server: an
+ * absent field rendered "NaN%" in red, and a ratio of 12 rendered "1200%",
+ * which is not a number a reader can do anything with (hostile-QA probes D, O).
+ */
+export function fmtLossPct(ratio: number | undefined): string {
+  if (typeof ratio !== "number" || !Number.isFinite(ratio)) return "—";
+  return `${(Math.min(Math.max(ratio, 0), 1) * 100).toFixed(0)}%`;
 }
 
 /**
@@ -36,8 +59,25 @@ export function fmtRttNs(ns: number | undefined): string {
  * never answered (internal/checker/mtr.go) and any other producer may leave it empty.
  */
 export function isPlaceholderHop(ip: string): boolean {
+  /* A hop with no `ip` KEY at all is the same absence as one with "*", and
+     .trim() on the undefined it leaves behind is a page-killing TypeError. */
+  if (typeof ip !== "string") return true;
   const trimmed = ip.trim();
   return trimmed === "" || trimmed === "*";
+}
+
+/**
+ * hopList is the one place that decides what "this snapshot's hops" means when
+ * the field is not the array the schema promises.
+ *
+ * The server defends this itself (httpapi/mtr.go substitutes `[]` for a nil
+ * slice), so a `null` here means a payload that did not come from it — a proxy,
+ * a replay, an older build. It used to reach `.map` and take the whole console
+ * down to a white screen (hostile-QA probe E), which is a far worse answer than
+ * a path with no hops in it.
+ */
+export function hopList(hops: readonly MTRHop[] | undefined | null): readonly MTRHop[] {
+  return Array.isArray(hops) ? hops : [];
 }
 
 /**
@@ -45,7 +85,10 @@ export function isPlaceholderHop(ip: string): boolean {
  * pages/mtr.tsx because the diff table and changes timeline label snapshots with it too.
  */
 export function shortHash(hash: string): string {
-  return hash.slice(0, 12);
+  /* A snapshot with no pathHash is not a snapshot, but it used to be a white
+     screen — .slice on the undefined threw out of the whole page rather than
+     out of one row's label (hostile-QA probe P). */
+  return typeof hash === "string" ? hash.slice(0, 12) : "";
 }
 
 export type LossTier = "ok" | "warn" | "bad";
@@ -54,6 +97,10 @@ export type LossTier = "ok" | "warn" | "bad";
  *  healthy, 1–10% degraded, 10%+ failing. One console, one meaning for a loss
  *  number: a hop the matrix would call degraded must not read as fine here. */
 export function lossTier(ratio: number): LossTier {
+  /* A loss number that is not a number is not a FAILING hop — it is an unknown
+     one, and the cell beside this prints an em dash for it. Without the guard
+     every comparison below was false and the row came out red (probe D). */
+  if (typeof ratio !== "number" || !Number.isFinite(ratio)) return "ok";
   if (ratio < 0.01) return "ok";
   if (ratio < 0.1) return "warn";
   return "bad";
@@ -85,7 +132,7 @@ export function hopTrendSeries(snapshots: PathSnapshot[], ip: string): [number, 
     const snapshot = snapshots[i];
     const at = new Date(snapshot.firstSeen).getTime();
     if (Number.isNaN(at)) continue;
-    const rttNs = snapshot.hops.find((h) => h.ip === ip)?.rttNs;
+    const rttNs = hopList(snapshot.hops).find((h) => h.ip === ip)?.rttNs;
     points.push([at, rttNs === undefined || Number.isNaN(rttNs) ? null : rttNs / 1e6]);
   }
   return points;
@@ -194,7 +241,8 @@ function trendOption(points: [number, number | null][], ip: string, dark: boolea
     grid: { left: 56, right: 16, top: 12, bottom: 28 },
     tooltip: {
       trigger: "axis",
-      axisPointer: { type: "line", lineStyle: { color: colors.grid } },
+      /* Type set by lib/chart-tooltip.ts; the colour is this chart's own. */
+      axisPointer: { lineStyle: { color: colors.grid } },
       valueFormatter: (value) => fmt(Number(value)),
     },
     xAxis: {
@@ -282,6 +330,68 @@ function HopTrend({ ip, history }: { ip: string; history: TrendHistory }) {
  * ONLY while something is actually off to the right, because an edge fade that is always there is
  * decoration and teaches the reader to ignore it.
  */
+/**
+ * pathChainText is the route as one readable line: the hops in order, a `*`
+ * where nothing answered.
+ *
+ * The Explorer identified a path by a twelve-character hash, which is a key and
+ * not a route — «ничего не понятно». An MTR exists to show WHERE the packets
+ * went, so that is what a row leads with now; the hash stays as the thing you
+ * copy into a bug report.
+ */
+export function pathChainText(hops: readonly MTRHop[]): string {
+  return hopList(hops)
+    .map((h) => (isPlaceholderHop(h.ip) ? "*" : h.ip))
+    .join(" → ");
+}
+
+/**
+ * PathChain draws that line, with the pair's own endpoints framing it so the
+ * route reads end to end rather than starting mid-air.
+ */
+export function PathChain({
+  hops,
+  source,
+  destination,
+  className,
+}: {
+  hops: readonly MTRHop[];
+  source?: string;
+  destination?: string;
+  className?: string;
+}) {
+  const t = useT(mtrDetailDict);
+  /* Wraps rather than scrolls: a thirty-hop route in a narrow pane is several
+     lines of text, which is readable, where one line behind a scrollbar is a
+     route you have to drag to finish reading. */
+  return (
+    <span
+      className={cn("flex flex-wrap items-center gap-x-1 gap-y-0.5 font-mono text-[11px] leading-snug", className)}
+      title={pathChainText(hops)}
+    >
+      {source ? <span className="text-muted-foreground">{source}</span> : null}
+      {hopList(hops).map((hop, i) => (
+        <span key={`${hop.number}-${hop.ip}-${i}`} className="flex items-center gap-1">
+          <span aria-hidden="true" className="text-muted-foreground">→</span>
+          {isPlaceholderHop(hop.ip) ? (
+            /* A hop that did not answer is an absence, and the title says so
+               rather than leaving a bare asterisk to be guessed at. */
+            <span title={t("hop.silent")} className="text-muted-foreground">*</span>
+          ) : (
+            <span title={hop.hostname || undefined}>{hop.ip}</span>
+          )}
+        </span>
+      ))}
+      {destination ? (
+        <span className="flex items-center gap-1">
+          <span aria-hidden="true" className="text-muted-foreground">→</span>
+          <span className="text-muted-foreground">{destination}</span>
+        </span>
+      ) : null}
+    </span>
+  );
+}
+
 export function ScrollableX({ children, className }: { children: ReactNode; className?: string }) {
   const t = useT(mtrDetailDict);
   const ref = useRef<HTMLDivElement>(null);
@@ -332,10 +442,16 @@ export function ScrollableX({ children, className }: { children: ReactNode; clas
 export function TraceDetail({ snapshot, history }: { snapshot: PathSnapshot; history?: TrendHistory }) {
   const t = useT(mtrDetailDict);
   const { locale } = useLocale();
-  // Keyed by hop NUMBER, not by array index or IP: a path may legitimately
-  // repeat an address (a routing loop) and the number is the row's identity.
+  /* Keyed by the row's POSITION in this path, not by its IP and not by the hop
+     number either. A path may legitimately repeat an address (a routing loop),
+     which rules the IP out; and the number is only as unique as the payload
+     makes it — two hops that arrived without one opened and closed together,
+     under one duplicated element id (hostile-QA probe Y). The position is
+     unique by construction, and the table remounts per snapshot (see the `key`
+     in pages/mtr.tsx's DetailPane), so it cannot go stale under a row either. */
   const [expanded, setExpanded] = useState<number | null>(null);
   const [trendHop, setTrendHop] = useState<number | null>(null);
+  const hops = hopList(snapshot.hops);
 
   const toggle = (set: (n: number | null) => void, current: number | null, n: number) =>
     set(current === n ? null : n);
@@ -353,15 +469,45 @@ export function TraceDetail({ snapshot, history }: { snapshot: PathSnapshot; his
         </div>
         <div>
           <dt className="inline">{t("snapshot.traces")} </dt>
-          <dd className="nums inline text-foreground">{snapshot.traceCount}</dd>
+          {/* The em dash this table already uses for a figure that did not
+              arrive; React renders an absent number as nothing at all, which
+              leaves the label standing over empty space. */}
+          <dd className="nums inline text-foreground">
+            {Number.isFinite(snapshot.traceCount) ? snapshot.traceCount : "—"}
+          </dd>
         </div>
       </dl>
 
       <ScrollableX className="mt-4">
-        <table aria-label={t("table.aria")} className="w-full text-sm">
+        {/* FIXED layout, and a floor under the whole table.
+            `table-fixed` is what stops one 63-character rDNS name from widening
+            its own column and shoving RTT and Loss off the card (QA scope 4,
+            finding #6) — under it a column cannot be argued wider by its
+            content, so the numerics keep their places whatever the name is.
+            `min-w` is the other half: below it the columns would be squeezed
+            past reading, so the table stops shrinking and ScrollableX above
+            takes over with the sideways affordance it exists for. */}
+        <table aria-label={t("table.aria")} className="w-full min-w-[32rem] table-fixed text-sm">
+          {/* ── the column contract ────────────────────────────────────────
+              Everything here is a FIXED-shape field except the name: an address
+              is at most an IPv6, an RTT is a small number of milliseconds, a
+              loss is at most "100%". The hostname is the one value with no
+              bound at all — a pod's rDNS is sixty-odd characters — so it is the
+              one column with no width, which under `table-fixed` means it takes
+              everything the others leave. This used to be inverted: the name
+              carried a hard 14rem cap and clipped mid-token («hostname
+              обрезается») while the columns beside it stood half empty. */}
+          <colgroup>
+            <col data-col="expand" className="w-6" />
+            <col data-col="number" className="w-8" />
+            <col data-col="address" className="w-[9rem]" />
+            <col data-col="hostname" />
+            <col data-col="rtt" className="w-[5.5rem]" />
+            <col data-col="loss" className="w-[3.75rem]" />
+          </colgroup>
           <thead>
             <tr className="border-b border-border text-xs text-muted-foreground">
-              <th scope="col" className="w-6 py-2">
+              <th scope="col" className="py-2">
                 <span className="sr-only">{t("table.expand")}</span>
               </th>
               <th scope="col" className="py-2 pr-3 text-left font-medium">
@@ -382,15 +528,16 @@ export function TraceDetail({ snapshot, history }: { snapshot: PathSnapshot; his
             </tr>
           </thead>
           <tbody className="divide-y divide-border">
-            {snapshot.hops.map((h) => (
+            {hops.map((h, i) => (
               <HopRows
-                key={`${h.number}-${h.ip}`}
+                key={i}
                 hop={h}
+                row={i}
                 enrichment={snapshot.enrichment?.[h.ip]}
-                expanded={expanded === h.number}
-                onToggleExpanded={() => toggle(setExpanded, expanded, h.number)}
-                trending={trendHop === h.number}
-                onToggleTrend={history ? () => toggle(setTrendHop, trendHop, h.number) : undefined}
+                expanded={expanded === i}
+                onToggleExpanded={() => toggle(setExpanded, expanded, i)}
+                trending={trendHop === i}
+                onToggleTrend={history ? () => toggle(setTrendHop, trendHop, i) : undefined}
               />
             ))}
           </tbody>
@@ -398,7 +545,7 @@ export function TraceDetail({ snapshot, history }: { snapshot: PathSnapshot; his
       </ScrollableX>
 
       {history && trendHop !== null ? (
-        <HopTrend ip={snapshot.hops.find((h) => h.number === trendHop)?.ip ?? ""} history={history} />
+        <HopTrend ip={hops[trendHop]?.ip ?? ""} history={history} />
       ) : null}
     </div>
   );
@@ -406,6 +553,7 @@ export function TraceDetail({ snapshot, history }: { snapshot: PathSnapshot; his
 
 function HopRows({
   hop,
+  row,
   enrichment,
   expanded,
   onToggleExpanded,
@@ -413,6 +561,9 @@ function HopRows({
   onToggleTrend,
 }: {
   hop: MTRHop;
+  /** This hop's position in the path — the row's identity, and what makes the
+   *  element id below unique whatever the payload put in `number`. */
+  row: number;
   enrichment: Enrichment | undefined;
   expanded: boolean;
   onToggleExpanded: () => void;
@@ -421,7 +572,7 @@ function HopRows({
 }) {
   const t = useT(mtrDetailDict);
   const placeholder = isPlaceholderHop(hop.ip);
-  const detailId = `hop-${hop.number}-detail`;
+  const detailId = `hop-${row}-detail`;
   const tier = lossTier(hop.lossRatio);
 
   return (
@@ -449,13 +600,21 @@ function HopRows({
           )}
         </td>
         <td className="nums py-2 pr-3 align-top text-muted-foreground">{hop.number}</td>
-        <td className="py-2 pr-3 align-top font-mono text-xs">{hop.ip}</td>
-        {/* The truncation lives on a block INSIDE the cell: `truncate` on a
-            <td> does nothing — the cell just grows, and a long rDNS name used
-            to push RTT and Loss off the right edge of the card entirely (QA
-            scope 4, finding #6). The full name stays reachable as a title. */}
+        {/* An address that never arrived reads as the same star the chain draws
+            for it, rather than as an empty cell with nothing in it. */}
+        {/* `break-all` because the column is fixed now: an IPv6 is 39 characters
+            of unbreakable token and wrapping it onto a second line is the only
+            answer that neither clips it nor widens the column. */}
+        <td className="py-2 pr-3 align-top font-mono text-xs break-all">{placeholder ? "*" : hop.ip}</td>
+        {/* The flexible column, and NO truncation: this cell used to carry a
+            hard 14rem cap that cut `10-244-4-21.kconmon-kconmon-ng-…` mid-token
+            with room to spare beside it. A long name WRAPS inside its column
+            instead — two readable lines rather than half an address — which the
+            fixed layout above makes safe: it can no longer push anything out.
+            The title stays regardless, so the whole value is one hover away
+            even where the column really is narrow. */}
         <td className="py-2 pr-3 align-top text-xs text-muted-foreground">
-          <span className="block max-w-[14rem] truncate" title={hop.hostname || undefined}>
+          <span className="block break-all" title={hop.hostname || undefined}>
             {hop.hostname || "—"}
           </span>
         </td>
@@ -479,13 +638,17 @@ function HopRows({
             >
               {fmtRttNs(hop.rttNs)}
             </button>
+          ) : placeholder ? (
+            /* A hop that never answered measured NOTHING: rttNs here is the
+               tracer's own read deadline (the checker stamps time.Since(start)
+               before it inspects the error), and printing it reads as a
+               catastrophic 1000ms. The CLI has said "—" for this since day one. */
+            "—"
           ) : (
             fmtRttNs(hop.rttNs)
           )}
         </td>
-        <td className={cn("nums py-2 text-right align-top", LOSS_CLASS[tier])}>
-          {(hop.lossRatio * 100).toFixed(0)}%
-        </td>
+        <td className={cn("nums py-2 text-right align-top", LOSS_CLASS[tier])}>{fmtLossPct(hop.lossRatio)}</td>
       </tr>
       {expanded && !placeholder ? (
         <tr>

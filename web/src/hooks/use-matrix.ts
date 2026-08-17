@@ -44,5 +44,8 @@ export function useMatrix(protocol: Protocol) {
     refetchInterval: engaged || live ? false : MATRIX_POLL_MS,
   });
 
-  return { data: query.data, isLoading: query.isLoading, error: query.error, live };
+  /* isPending as well as isLoading: a query whose retry is PAUSED (the tab lost focus after a
+     failure) is pending-but-not-fetching, so isLoading is false while there is nothing to draw and
+     no error to show — the surface rendered a heading and blank space, indefinitely. */
+  return { data: query.data, isLoading: query.isLoading, isPending: query.isPending, error: query.error, live };
 }

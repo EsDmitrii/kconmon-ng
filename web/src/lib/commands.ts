@@ -36,8 +36,11 @@ export interface CommandContext {
   toggleTheme: () => void;
   isLive: boolean;
   returnToLive: () => void;
-  /** Opens the Time Machine BAR's own picker. */
+  /** Opens the Time Machine's own picker, wherever the page put it. */
   openTimeMachinePicker: () => void;
+  /** Whether the page currently on screen HAS that picker. The control is opt-in per page, so a
+   *  page that ignores `?at=` has none — and a command that opens nothing must not be offered. */
+  hasTimeMachinePicker: boolean;
 }
 
 /** CommandGroup stays an ENGLISH UNION, because it is a type before it is a word: entries are declared with it. */
@@ -291,7 +294,9 @@ function viewCommands(ctx: CommandContext): Command[] {
       titleRu: ru("view.timemachinePick"),
       group: "View",
       keywords: kw("view.timemachinePick.kw"),
-      visibleWhen: (c) => c.isLive,
+      /* Live AND the page actually has a picker: "Return to Live" below works everywhere because
+         it calls the context directly, but this one clicks a control, and four routes have none. */
+      visibleWhen: (c) => c.isLive && c.hasTimeMachinePicker,
       perform: (c) => c.openTimeMachinePicker(),
     },
     {

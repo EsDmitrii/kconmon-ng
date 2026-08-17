@@ -1,12 +1,19 @@
 import { describe, expect, it } from "vitest";
 import {
   aggregateSamples,
+  effectivePlannedSamplesPerPair,
+  effectiveSampleIntervalNs,
+  formatCadenceNs,
   groupSamplesByPair,
   isIntervalRun,
   MAX_SAMPLES_PER_PAIR,
+  MTR_PER_PAIR_BUDGET_NS,
   pairProgress,
   percentileNs,
+  plannedCadenceFromSpec,
   plannedSamplesPerPair,
+  runCadence,
+  snapshotForSample,
   runDurationNs,
   sampleIntervalNs,
 } from "./run-samples";
@@ -170,7 +177,7 @@ describe("pairProgress", () => {
   // Twelve slots for a 1m run, seven filled, and a tail worth five more cadences.
   it("frames the track and counts the tail down in TIME, not in ticks", () => {
     const p = pairProgress(60 * s, 7);
-    expect(p).toEqual({ expected: 12, arrived: 7, remaining: 5, remainingNs: 25 * s, framed: true });
+    expect(p).toEqual({ planned: 12, expected: 12, arrived: 7, remaining: 5, remainingNs: 25 * s, framed: true });
   });
 
   // Flooring, never rounding up: 72s/5s is 14.4 and the fifteenth probe has nowhere to land.
@@ -195,10 +202,234 @@ describe("pairProgress", () => {
     expect(p.remainingNs).toBe(0);
   });
 
+  /* `planned` is the PLAN's floor and `expected` is the drawn WIDTH, and the two
+     part company in exactly one direction. The strip must widen to hold a
+     thirteenth sample the floor did not predict, but the caption still says what
+     was planned: "13 of ≥12" is the truth, and "13 of ≥13" invents a plan that
+     was never made -- the same ≥ semantics the Go planner ships. */
+  it("keeps the PLANNED floor while the drawn frame widens around it", () => {
+    const over = pairProgress(60 * s, 13);
+    expect(over.planned).toBe(12);
+    expect(over.expected).toBe(13);
+
+    // And with a server-snapshotted cadence, the snapshot's own floor is the one kept.
+    const stretched = pairProgress(900 * s, 11, { intervalNs: 90 * s, samplesPerPair: 10 });
+    expect(stretched.planned).toBe(10);
+    expect(stretched.expected).toBe(11);
+  });
+
+  // The other direction: nothing arrived yet, and the plan is still the whole frame.
+  it("never collapses the frame onto the arrived count", () => {
+    const p = pairProgress(60 * s, 0);
+    expect(p.planned).toBe(12);
+    expect(p.expected).toBe(12);
+    expect(p.remaining).toBe(12);
+  });
+
   // A single-slot track is not worth framing -- see the flag's use in pages/run-detail.tsx.
   it("declines to frame a one-slot track", () => {
     expect(pairProgress(0, 1).framed).toBe(false);
     expect(pairProgress(5 * s, 0).framed).toBe(false);
     expect(pairProgress(10 * s, 0).framed).toBe(true);
+  });
+});
+
+describe("effective cadence for slow check types", () => {
+  const s = 1_000_000_000;
+  const m = 60 * s;
+
+  it("leaves every fast type on the base cadence", () => {
+    // A tcp probe's timeout bounds a failure, not an expectation: planning around it would slow
+    // every healthy run down.
+    for (const type of ["tcp", "udp", "icmp", "dns", "http"]) {
+      expect(effectiveSampleIntervalNs(15 * m, type, 90, 10)).toBe(sampleIntervalNs(15 * m));
+      expect(effectivePlannedSamplesPerPair(15 * m, type, 90, 10)).toBe(plannedSamplesPerPair(15 * m));
+    }
+  });
+
+  it("stretches mtr to its trace budget", () => {
+    // The owner's run: 15m, 4 pairs across 4 sources. One batch of 90s.
+    expect(effectiveSampleIntervalNs(15 * m, "mtr", 4, 4)).toBe(MTR_PER_PAIR_BUDGET_NS);
+    expect(effectivePlannedSamplesPerPair(15 * m, "mtr", 4, 4)).toBe(10);
+  });
+
+  it("counts the whole round, not one pair", () => {
+    // 90 pairs over 10 sources: 12 batches of 90s, so one round outlasts a 15m run.
+    expect(effectiveSampleIntervalNs(15 * m, "mtr", 90, 10)).toBe(12 * MTR_PER_PAIR_BUDGET_NS);
+    expect(effectivePlannedSamplesPerPair(15 * m, "mtr", 90, 10)).toBe(1);
+  });
+
+  it("never plans less than one sample", () => {
+    for (const duration of [10 * s, m, 15 * m, 24 * 60 * m]) {
+      for (const pairs of [1, 4, 90, 400]) {
+        expect(effectivePlannedSamplesPerPair(duration, "mtr", pairs, 10)).toBeGreaterThanOrEqual(1);
+      }
+    }
+  });
+
+  it("treats an instant run as one sample at no cadence", () => {
+    expect(effectiveSampleIntervalNs(0, "mtr", 4, 4)).toBe(0);
+    expect(effectivePlannedSamplesPerPair(0, "mtr", 4, 4)).toBe(1);
+  });
+
+  it("reads the server's snapshot back when the run carries one", () => {
+    expect(plannedCadenceFromSpec({ spec: { PlannedSampleIntervalNs: 90 * s, PlannedSamplesPerPair: 10 } })).toEqual({
+      intervalNs: 90 * s,
+      samplesPerPair: 10,
+    });
+    // A run created before the fields existed falls back to the caller's own derivation.
+    expect(plannedCadenceFromSpec({ spec: { Duration: 15 * m } })).toBeUndefined();
+    expect(plannedCadenceFromSpec(undefined)).toBeUndefined();
+  });
+});
+
+/* ── the cadence the run ACTUALLY ran at ─────────────────────────────────── */
+
+/**
+ * Live acceptance on rev13: a 15m MTR over four pairs executed at the effective
+ * 90s cadence (12 samples over 3 rounds, verified on the stand) while the run
+ * permalink's Cadence tile read "5s" — the BASE cadence off the spec's duration,
+ * which is a number that run never used.
+ *
+ * runCadence is the one answer that tile and the progress frames now share. The
+ * server's own snapshot wins where it exists; the client's mirror of
+ * checks.EffectiveSampleInterval covers the runs created before those fields did.
+ */
+const s = 1_000_000_000;
+
+const run = (spec: unknown, over: { type?: string; pairTotal?: number } = {}) =>
+  ({ spec, type: over.type ?? "mtr", pairTotal: over.pairTotal ?? 4 }) as Parameters<typeof runCadence>[0];
+
+describe("runCadence", () => {
+  it("prefers the cadence the SERVER snapshotted onto the run", () => {
+    const c = runCadence(run({ Duration: 900 * s, Type: "mtr", PlannedSampleIntervalNs: 90 * s, PlannedSamplesPerPair: 10 }), 2);
+    expect(c).toEqual({ intervalNs: 90 * s, samplesPerPair: 10, fromSpec: true });
+  });
+
+  it("derives the EFFECTIVE cadence for a run created before the server recorded one", () => {
+    // 15m/500 floors to 5s, but four mtr pairs over two sources is one round of
+    // 90s, and a cadence cannot be shorter than the round it has to fit.
+    const c = runCadence(run({ Duration: 900 * s, Type: "mtr" }), 2);
+    expect(c?.intervalNs).toBe(90 * s);
+    expect(c?.samplesPerPair).toBe(10);
+    expect(c?.fromSpec).toBe(false);
+  });
+
+  it("leaves a FAST check type on its base cadence — a tcp probe answers in milliseconds", () => {
+    const c = runCadence(run({ Duration: 900 * s, Type: "tcp" }, { type: "tcp" }), 2);
+    expect(c?.intervalNs).toBe(sampleIntervalNs(900 * s));
+  });
+
+  it("is undefined for an instant run, which has no cadence to name", () => {
+    expect(runCadence(run({}), 2)).toBeUndefined();
+    expect(runCadence(undefined, 2)).toBeUndefined();
+  });
+
+  it("survives a run whose sources are not known yet, rather than dividing by none", () => {
+    const c = runCadence(run({ Duration: 900 * s, Type: "mtr" }), 0);
+    expect(c?.intervalNs).toBeGreaterThanOrEqual(90 * s);
+    expect(Number.isFinite(c?.intervalNs)).toBe(true);
+  });
+});
+
+describe("pairProgress at a stretched cadence", () => {
+  it("counts the tail down in the EFFECTIVE interval, not the base one", () => {
+    // Four samples in, six to go, at 90s each — not at 5s each, which would have
+    // promised the run was thirty seconds from finishing.
+    const p = pairProgress(900 * s, 4, { intervalNs: 90 * s, samplesPerPair: 10 });
+    expect(p.expected).toBe(10);
+    expect(p.remaining).toBe(6);
+    expect(p.remainingNs).toBe(540 * s);
+  });
+
+  it("still widens rather than lies when a late sample lands past the plan", () => {
+    const p = pairProgress(900 * s, 11, { intervalNs: 90 * s, samplesPerPair: 10 });
+    expect(p.expected).toBe(11);
+    expect(p.remaining).toBe(0);
+  });
+
+  it("falls back to the base cadence when no cadence is handed to it", () => {
+    expect(pairProgress(60 * s, 7)).toEqual({
+      planned: 12,
+      expected: 12,
+      arrived: 7,
+      remaining: 5,
+      remainingNs: 25 * s,
+      framed: true,
+    });
+  });
+});
+
+describe("formatCadenceNs", () => {
+  it("says a stretched cadence in seconds rather than rounding it to a wrong minute", () => {
+    // "2m" for a 90s round is a third longer than the fleet actually keeps.
+    expect(formatCadenceNs(90 * s, "en")).toBe("90s");
+    expect(formatCadenceNs(173 * s, "en")).toBe("173s");
+  });
+
+  it("leaves a whole number of minutes — and an hour — reading as one", () => {
+    expect(formatCadenceNs(120 * s, "en")).toBe("2m");
+    expect(formatCadenceNs(3600 * s, "en")).toBe("1h");
+  });
+
+  it("keeps short cadences exactly as they always read", () => {
+    expect(formatCadenceNs(5 * s, "en")).toBe("5s");
+    expect(formatCadenceNs(7 * s, "en")).toBe("7s");
+  });
+
+  it("takes the interface language's own unit word", () => {
+    expect(formatCadenceNs(90 * s, "ru")).toBe("90 с");
+    expect(formatCadenceNs(120 * s, "ru")).toBe("2 мин");
+  });
+});
+
+/* ── which recorded ROUTE a probe belongs to ─────────────────────────────── */
+
+/**
+ * The owner on the run permalink: «вся суть MTR — это путь», and «ничего не
+ * кликабельно». A run's results carry a duration and an outcome but no hops —
+ * the path lives in the MTR projection, keyed by pair — so linking a probe to
+ * the route it walked is a matter of matching its instant against the windows
+ * the stored paths cover.
+ */
+describe("snapshotForSample", () => {
+  const snap = (id: string, firstSeen: string, lastSeen: string) =>
+    ({ id, firstSeen, lastSeen }) as Parameters<typeof snapshotForSample>[0][number];
+
+  // Newest first, which is the order the store returns.
+  const snapshots = [
+    snap("new", "2026-08-09T12:00:00Z", "2026-08-09T12:30:00Z"),
+    snap("old", "2026-08-09T11:00:00Z", "2026-08-09T11:59:00Z"),
+  ];
+
+  it("picks the path whose window CONTAINS the probe", () => {
+    expect(snapshotForSample(snapshots, "2026-08-09T11:30:00Z")?.id).toBe("old");
+    expect(snapshotForSample(snapshots, "2026-08-09T12:10:00Z")?.id).toBe("new");
+  });
+
+  it("counts both ends of the window as inside it", () => {
+    expect(snapshotForSample(snapshots, "2026-08-09T12:00:00Z")?.id).toBe("new");
+    expect(snapshotForSample(snapshots, "2026-08-09T11:59:00Z")?.id).toBe("old");
+  });
+
+  it("is undefined for a probe no stored path covers, rather than the nearest one", () => {
+    // Showing a DIFFERENT trace under a tick the reader clicked would be a lie
+    // about which route that probe took.
+    expect(snapshotForSample(snapshots, "2026-08-09T10:00:00Z")).toBeUndefined();
+    expect(snapshotForSample(snapshots, "2026-08-09T13:00:00Z")).toBeUndefined();
+  });
+
+  it("is undefined for an unparsable or missing stamp rather than guessing", () => {
+    expect(snapshotForSample(snapshots, "not a date")).toBeUndefined();
+    expect(snapshotForSample(snapshots, undefined)).toBeUndefined();
+    expect(snapshotForSample([], "2026-08-09T12:10:00Z")).toBeUndefined();
+  });
+
+  it("prefers the NEWEST match when two windows overlap the same instant", () => {
+    const overlapping = [
+      snap("newer", "2026-08-09T11:00:00Z", "2026-08-09T13:00:00Z"),
+      snap("older", "2026-08-09T10:00:00Z", "2026-08-09T12:00:00Z"),
+    ];
+    expect(snapshotForSample(overlapping, "2026-08-09T11:30:00Z")?.id).toBe("newer");
   });
 });

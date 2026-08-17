@@ -1,4 +1,4 @@
-import { defineDict, type Dictionary } from "@/lib/i18n";
+import { DEFAULT_LOCALE, type Locale, defineDict, type Dictionary } from "@/lib/i18n";
 
 /**
  * targets — pages/targets.tsx: the external probe targets, the check
@@ -55,6 +55,8 @@ const en = {
   /* ── Targets tab ───────────────────────────────────────────────────────── */
   "targets.heading": "Targets",
   "targets.listAria": "Targets",
+  /* ui/pager.tsx's noun for this list. */
+  "targets.subject": "targets",
   "targets.empty": "No targets yet. External checks probe what is listed here.",
   "targets.unavailable": "Targets are unavailable",
   "targets.gate.write":
@@ -83,6 +85,7 @@ const en = {
   /* ── Definitions tab ───────────────────────────────────────────────────── */
   "definitions.heading": "Check definitions",
   "definitions.listAria": "Check definitions",
+  "definitions.subject": "definitions",
   "definitions.empty": "No check definitions yet.",
   "definitions.unavailable": "Check definitions are unavailable",
   "definitions.gate.read":
@@ -141,6 +144,7 @@ const en = {
   /* ── Schedules tab ─────────────────────────────────────────────────────── */
   "schedules.heading": "Schedules",
   "schedules.listAria": "Schedules",
+  "schedules.subject": "schedules",
   "schedules.empty": "No schedules yet.",
   "schedules.unavailable": "Schedules are unavailable",
   "schedules.gate.read":
@@ -170,7 +174,12 @@ const en = {
   "schedules.form.hint.continuous":
     "Continuous schedules are pushed to the agents and never fire on the scheduler's clock — they carry no interval " +
     "and no run-at.",
-  "schedules.form.error.interval": "interval must be a positive number of seconds",
+  /* Says what the box WANTS rather than what was wrong with what was typed:
+     one sentence covers "5 seconds", "abc", "0x10", "-1" and an empty box, and
+     an operator reading it knows immediately what to write instead. */
+  "schedules.form.error.interval": "interval must be a positive number of seconds, like 60 or 2.5",
+  /* The other refusal is a RANGE, so it names the bound. */
+  "schedules.form.error.intervalRange": "interval must be at most {max} seconds",
   "schedules.form.error.runAt": "kind once requires a run at time",
   "schedules.row.edit": "Edit {name}",
   "schedules.row.enable": "Enable {name}",
@@ -222,6 +231,7 @@ export const targetsDict: Dictionary<TargetsKey> = defineDict(en, {
 
   "targets.heading": "Цели",
   "targets.listAria": "Цели",
+  "targets.subject": "Цели",
   "targets.empty": "Целей пока нет. Внешние проверки зондируют то, что перечислено здесь.",
   "targets.unavailable": "Цели недоступны",
   "targets.gate.write":
@@ -246,6 +256,7 @@ export const targetsDict: Dictionary<TargetsKey> = defineDict(en, {
 
   "definitions.heading": "Определения проверок",
   "definitions.listAria": "Определения проверок",
+  "definitions.subject": "Проверки",
   "definitions.empty": "Определений проверок пока нет.",
   "definitions.unavailable": "Определения проверок недоступны",
   "definitions.gate.read":
@@ -297,6 +308,7 @@ export const targetsDict: Dictionary<TargetsKey> = defineDict(en, {
 
   "schedules.heading": "Расписания",
   "schedules.listAria": "Расписания",
+  "schedules.subject": "Расписания",
   "schedules.empty": "Расписаний пока нет.",
   "schedules.unavailable": "Расписания недоступны",
   "schedules.gate.read":
@@ -327,7 +339,8 @@ export const targetsDict: Dictionary<TargetsKey> = defineDict(en, {
   "schedules.form.hint.continuous":
     "Непрерывные расписания раздаются агентам и по часам планировщика не срабатывают никогда: ни интервала, " +
     "ни момента запуска у них нет.",
-  "schedules.form.error.interval": "интервал должен быть положительным числом секунд",
+  "schedules.form.error.interval": "интервал — положительное число секунд, например 60 или 2.5",
+  "schedules.form.error.intervalRange": "интервал не может быть больше {max} секунд",
   "schedules.form.error.runAt": "для вида once нужен момент запуска",
   "schedules.row.edit": "Изменить {name}",
   "schedules.row.enable": "Включить {name}",
@@ -373,7 +386,13 @@ export function pluralKey(
   one: TargetsKey,
   few: TargetsKey,
   many: TargetsKey,
+  locale: Locale = DEFAULT_LOCALE,
 ): TargetsKey {
+  /* The RUSSIAN rule was applied to both languages, so an English console
+     printed "21 rule" and "101 pair": Russian sends every number ending in a
+     lone 1 to the .one form, English sends only 1 itself. dict/settings.ts had
+     the locale-aware version all along. */
+  if (locale !== "ru") return Math.abs(count) === 1 ? one : many;
   const hundred = Math.abs(count) % 100;
   const ten = Math.abs(count) % 10;
   if (hundred >= 11 && hundred <= 14) return many;

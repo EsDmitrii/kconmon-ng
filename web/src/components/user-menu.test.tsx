@@ -31,20 +31,20 @@ describe("UserMenu", () => {
   it("opening it shows roles and a sign-out action", () => {
     renderMenu(false);
     fireEvent.click(screen.getByRole("button", { name: /ada lovelace/i }));
-    expect(screen.getByRole("menu")).toBeInTheDocument();
+    expect(screen.getByRole("group", { name: /alice|dmitrii|admin|.+/ })).toBeInTheDocument();
     expect(screen.getByText("viewer, operator")).toBeInTheDocument();
-    expect(screen.getByRole("menuitem", { name: /sign out/i })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /sign out/i })).toBeInTheDocument();
   });
 
   it("shows the token management link only with tokens:manage", () => {
     renderMenu(false);
     fireEvent.click(screen.getByRole("button", { name: /ada lovelace/i }));
-    expect(screen.queryByRole("menuitem", { name: /token management/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: /token management/i })).not.toBeInTheDocument();
 
     cleanup();
     renderMenu(true);
     fireEvent.click(screen.getByRole("button", { name: /ada lovelace/i }));
-    expect(screen.getByRole("menuitem", { name: /token management/i })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /token management/i })).toBeInTheDocument();
   });
 
   /* The link pointed at /settings while that page had no tokens section on it
@@ -52,7 +52,7 @@ describe("UserMenu", () => {
   it("lands on the Settings tokens section, not the top of the page", () => {
     renderMenu(true);
     fireEvent.click(screen.getByRole("button", { name: /ada lovelace/i }));
-    expect(screen.getByRole("menuitem", { name: /token management/i })).toHaveAttribute(
+    expect(screen.getByRole("link", { name: /token management/i })).toHaveAttribute(
       "href",
       `/settings#${TOKENS_ANCHOR}`,
     );
@@ -67,7 +67,7 @@ describe("UserMenu", () => {
     const { qc } = renderMenu(false);
     qc.setQueryData(["me"], me);
     fireEvent.click(screen.getByRole("button", { name: /ada lovelace/i }));
-    fireEvent.click(screen.getByRole("menuitem", { name: /sign out/i }));
+    fireEvent.click(screen.getByRole("button", { name: /sign out/i }));
 
     await waitFor(() => expect(vi.mocked(fetch)).toHaveBeenCalledWith("/api/v1/auth/logout", expect.anything()));
     const [, init] = vi.mocked(fetch).mock.calls[0];
@@ -75,5 +75,31 @@ describe("UserMenu", () => {
     await waitFor(() => expect(qc.getQueryState(["me"])?.isInvalidated).toBe(true));
 
     document.cookie = "csrf=; path=/; expires=Thu, 01 Jan 1970 00:00:00 GMT";
+  });
+});
+
+/* ── where focus goes when the menu closes ───────────────────────────────── */
+
+/*
+ * The menu used to unmount with focus still inside it: document.activeElement fell back to <body>,
+ * and the next Tab restarted at the skip link — a keyboard user at the BOTTOM of the sidebar was
+ * thrown to the TOP of the document, twice (Escape, and again after signing out).
+ */
+describe("UserMenu hands focus back", () => {
+  it("returns focus to the trigger on Escape", async () => {
+    renderMenu(false);
+    const trigger = screen.getByRole("button", { name: /ada lovelace/i });
+    trigger.focus();
+    fireEvent.click(trigger);
+
+    const signOut = await screen.findByRole("button", { name: /sign out/i });
+    signOut.focus();
+    expect(document.activeElement).toBe(signOut);
+
+    fireEvent.keyDown(document, { key: "Escape" });
+
+    expect(screen.queryByRole("button", { name: /sign out/i })).toBeNull();
+    expect(document.activeElement).toBe(trigger);
+    expect(document.activeElement).not.toBe(document.body);
   });
 });

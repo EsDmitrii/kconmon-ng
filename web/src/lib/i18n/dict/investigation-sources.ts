@@ -78,6 +78,11 @@ const en = {
 
   "entry.maintenance.title": "Maintenance: {reason}",
   "entry.maintenance.detail": "{scope} · until {until} · {by}",
+  /* The window's END is missing or unreadable. A stamp is not optional chrome
+     here — "until" with nothing after it, or with the literal "Invalid Date"
+     after it, reads as a broken console rather than as a row the server sent
+     incomplete. */
+  "entry.maintenance.detail.noEnd": "{scope} · end not stated · {by}",
 
   "entry.alert.title": "Alert firing: {name}",
   /* The DISPLACED row: an alert that started before the window is drawn at the
@@ -131,6 +136,7 @@ export const investigationSourcesDict: Dictionary<InvestigationSourcesKey> = def
 
   "entry.maintenance.title": "Работы: {reason}",
   "entry.maintenance.detail": "{scope} · до {until} · {by}",
+  "entry.maintenance.detail.noEnd": "{scope} · конец не указан · {by}",
 
   "entry.alert.title": "Активное оповещение: {name}",
   "entry.alert.title.before": "Оповещение {name}: уже горело, когда интервал открывался",

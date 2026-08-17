@@ -281,7 +281,7 @@ describe("MaintenanceBar affordances", () => {
     expect(stamp.className).toContain("shrink-0");
     expect(stamp.className).not.toContain("truncate");
     expect(stamp.getAttribute("title")).toBe(
-      `${new Date("2026-08-01T11:30:00Z").toLocaleString()} → ${new Date("2026-08-01T11:45:00Z").toLocaleString()}`,
+      `${new Date("2026-08-01T11:30:00Z").toLocaleString(undefined, { hour12: false })} → ${new Date("2026-08-01T11:45:00Z").toLocaleString(undefined, { hour12: false })}`,
     );
   });
 

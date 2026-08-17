@@ -204,6 +204,36 @@ describe("filterEvents", () => {
     expect(filterEvents(events, { type: "all", severity: "all", scope: "NODE-C" }).map((e) => e.seq)).toEqual([2, 3]);
     expect(filterEvents(events, { type: "check_observed", severity: "info", scope: "" })).toHaveLength(0);
   });
+
+  /* U+2192 is not on any keyboard: before this the owner had to copy the arrow
+     out of a row to filter by a pair. Every typeable separator now reads as one. */
+  it.each([
+    ["a hyphen arrow", "node-a->node-b"],
+    ["a long hyphen arrow", "node-a-->node-b"],
+    ["a fat arrow", "node-a=>node-b"],
+    ["a bare greater-than", "node-a>node-b"],
+    ["spaces around the arrow", "node-a -> node-b"],
+    ["the pretty arrow, still", "node-a→node-b"],
+  ])("matches the pair scope typed with %s", (_name, typed) => {
+    expect(filterEvents(events, { type: "all", severity: "all", scope: typed }).map((e) => e.seq)).toEqual([1]);
+  });
+
+  it("stays case-insensitive through the normalisation", () => {
+    expect(filterEvents(events, { type: "all", severity: "all", scope: "NODE-A -> NODE-B" }).map((e) => e.seq)).toEqual([1]);
+  });
+
+  it("keeps a single node name a plain substring, matching either side of a pair", () => {
+    expect(filterEvents(events, { type: "all", severity: "all", scope: "node-a" }).map((e) => e.seq)).toEqual([1, 3]);
+    expect(filterEvents(events, { type: "all", severity: "all", scope: "node-c" }).map((e) => e.seq)).toEqual([2, 3]);
+  });
+
+  it("still matches NOTHING for a pair that is not on the feed", () => {
+    // Normalisation must not become "any two names match any pair".
+    expect(filterEvents(events, { type: "all", severity: "all", scope: "node-b->node-a" })).toHaveLength(0);
+    expect(filterEvents(events, { type: "all", severity: "all", scope: "node-x->node-y" })).toHaveLength(0);
+    // A bare space is not an arrow: this stays a substring nothing carries.
+    expect(filterEvents(events, { type: "all", severity: "all", scope: "node-a node-b" })).toHaveLength(0);
+  });
 });
 
 describe("countMissedEvents", () => {
@@ -518,6 +548,29 @@ describe("LivePage scrollback (Task 5's GET /api/v1/events)", () => {
       fetchMock.mock.calls.some(([url]) => typeof url === "string" && url.includes("type=topology_changed")),
     ).toBe(true);
   });
+
+  /* The scope box drives TWO matchers: the client-side substring over what the
+     socket delivered, and this server-side one, where GET /api/v1/events
+     compares the scope for EQUALITY. A typed "node-a->node-b" matched nothing on
+     either side; it has to be canonical by the time it reaches the query string. */
+  it("sends the CANONICAL arrow to the server for a pair typed with hyphens", async () => {
+    const fetchMock = stubEventsFetch(() => json({ events: [], nextCursor: "" }));
+
+    renderPage(["events"], true);
+    open();
+
+    fireEvent.change(screen.getByLabelText("Scope contains"), { target: { value: "node-a -> node-b" } });
+
+    await vi.waitFor(() =>
+      expect(
+        fetchMock.mock.calls.some(
+          ([url]) =>
+            typeof url === "string" &&
+            new URLSearchParams(url.split("?")[1] ?? "").get("scope") === "node-a→node-b",
+        ),
+      ).toBe(true),
+    );
+  });
 });
 
 /* ── QA round 1: findings #10, #12, #13, #16 ─────────────────────────────── */
@@ -684,12 +737,19 @@ describe("scope filter placeholder", () => {
   it.each(["en", "ru"] as const)("fits the box and keeps the example scope (%s)", (locale) => {
     const placeholder = liveDict[locale]["filters.scope.placeholder"];
     expect(placeholder.length).toBeLessThanOrEqual(BUDGET);
-    expect(placeholder).toContain("node-a→node-b");
+    expect(placeholder).toContain("node-a->node-b");
+  });
+
+  /* The example must be TYPEABLE. U+2192 in a placeholder is an instruction the
+     reader cannot follow on any keyboard, which is how the owner ended up
+     copying the arrow out of a row. */
+  it.each(["en", "ru"] as const)("shows a form a keyboard can produce (%s)", (locale) => {
+    expect(liveDict[locale]["filters.scope.placeholder"]).not.toContain("→");
   });
 
   it("is what the box actually renders", () => {
     renderPage();
-    expect(screen.getByPlaceholderText("Scope — node-a→node-b")).toBeInTheDocument();
+    expect(screen.getByPlaceholderText("Scope — node-a->node-b")).toBeInTheDocument();
   });
 });
 
@@ -790,5 +850,35 @@ describe("Load older is disabled at the cap (#22)", () => {
     open();
     await screen.findByText("event 1");
     expect(screen.getByRole("button", { name: /Load older/ })).toBeEnabled();
+  });
+});
+
+/* ── QA round 5b: a filter is not data loss ───────────────────────────────── */
+
+describe("countMissedEvents and server-filtered history", () => {
+  const ev = (seq: number, over: Partial<LiveEvent> = {}): LiveEvent => ({
+    id: `e${seq}`,
+    seq,
+    type: "check_observed",
+    severity: "info",
+    scope: "cluster",
+    timestamp: new Date(1_700_000_000_000 + seq * 1000).toISOString(),
+    summary: `event ${seq}`,
+    details: null,
+    ...over,
+  });
+
+  it("counts a real hole in the unfiltered stream", () => {
+    expect(countMissedEvents([ev(1), ev(5)])).toBe(3);
+  });
+
+  it("ignores rows the SERVER filtered — those holes are the operator's own filter", () => {
+    const filtered = [ev(1, { filteredHistory: true }), ev(100, { filteredHistory: true })];
+    expect(countMissedEvents(filtered)).toBe(0);
+  });
+
+  it("still sees a hole between unfiltered rows when filtered rows are mixed in", () => {
+    const mixed = [ev(1), ev(4), ev(900, { filteredHistory: true })];
+    expect(countMissedEvents(mixed)).toBe(2);
   });
 });

@@ -49,6 +49,9 @@ export type MTRHop = components["schemas"]["MTRHop"];
 export type Enrichment = components["schemas"]["Enrichment"];
 export type PathSnapshot = components["schemas"]["PathSnapshot"];
 export type PathSnapshotPage = components["schemas"]["PathSnapshotPage"];
+/** One recorded trace of a route — its own clock, its own hops. */
+export type PathTrace = components["schemas"]["PathTrace"];
+export type PathTracePage = components["schemas"]["PathTraceList"];
 
 /** PathSnapshotQuery is the browser-side request shape for GET /api/v1/mtr/snapshots. */
 export interface PathSnapshotQuery {
@@ -227,6 +230,11 @@ export interface LiveEvent {
   timestamp: string;
   summary: string;
   details: unknown;
+  /* CLIENT-ONLY: this row came from a history page the SERVER filtered (?type=/?scope=), so its
+     place in the controller's global sequence is sparse by construction. The live feed's gap
+     detector skips these rows — otherwise the operator's own filter reads as lost events. Never
+     sent, never received; the API knows nothing about it. */
+  filteredHistory?: boolean;
 }
 // EventPage mirrors GET /api/v1/events's body (internal/console/httpapi eventsResponse); NextCursor
 // is never absent on the wire — an exhausted page still answers "".
@@ -307,6 +315,13 @@ export interface RunCreateRequest {
   destinationAddress?: string;
   /** Absent or 0 probes each pair ONCE (an instant run, the default). */
   durationNs?: number;
+  /**
+   * The cadence between one pair's probes. Absent or 0 lets the console derive
+   * it (duration/500, floored at 5s, stretched to one round for a slow check
+   * type) — which is what "Auto" posts and what every run did before the field
+   * existed. Bounded to [1s, durationNs]; outside that the server answers 422.
+   */
+  sampleIntervalNs?: number;
 }
 
 // RunCreateResponse mirrors POST /api/v1/runs's 202 body (httpapi runCreateResponse).
@@ -315,6 +330,18 @@ export interface RunCreateResponse {
   status: string;
   pairTotal: number;
   wsTopic: string;
+  /** The cadence the server actually planned; absent on an instant run. */
+  plannedSampleIntervalNs?: number;
+  plannedSamplesPerPair?: number;
+  /**
+   * sampleIntervalNs echoed back, and why the plan is not it — "cap" (the
+   * 500-samples-per-pair ceiling) or "round" (one round cannot finish that
+   * fast). Absent when nothing was asked, or nothing moved. Two fields rather
+   * than one because the defect they close was one quantity reported as three
+   * different numbers.
+   */
+  requestedSampleIntervalNs?: number;
+  sampleIntervalAdjusted?: "cap" | "round";
 }
 
 // RunSummary mirrors httpapi's runSummary: one row of GET /api/v1/runs, and
@@ -354,6 +381,8 @@ export interface RunResult {
 export interface RunDetail extends RunSummary {
   spec: unknown;
   results: RunResult[];
+  /** True when the run holds MORE results than this response carries — see the spec's own note. */
+  resultsTruncated?: boolean;
 }
 
 // RunPage mirrors httpapi's runsListResponse: GET /api/v1/runs's body, the

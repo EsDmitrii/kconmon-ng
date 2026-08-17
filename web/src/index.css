@@ -143,7 +143,11 @@
   --ring: 211 92% 46%;
 
   --health-ok: 152 55% 34%;
-  --health-warn: 33 88% 42%;
+  /* 33% rather than 42%: this token lands on TEXT — the failure percentage is the hero figure of
+     the Overview's worst-pairs table at 16px/600, which is below WCAG's large-text threshold and so
+     needs 4.5:1. At 42% it was 3.49:1 on a card and 3.11:1 on its own soft background. At 33% it is
+     5.28:1 and 4.71:1. The hue is unchanged, so rails, dots and icons read the same. */
+  --health-warn: 33 88% 33%;
   --health-bad: 357 64% 47%;
   --health-unknown: 224 9% 55%;
   --health-ok-soft: 150 55% 93%;

@@ -67,19 +67,70 @@ function atHref(d: Date | null): { href: string; unchanged: boolean } {
   return { href: `${url.pathname}${url.search}${url.hash}`, unchanged: current === next };
 }
 
-/** writeAt is the OPERATOR's own move, so it pushes: Back/Forward walk the time context. */
+/**
+ * withAtParam carries the instant being viewed onto an in-app href.
+ *
+ * A handful of links are plain <a href> rather than router <Link>s (they sit in panels that render
+ * outside a router in their own tests). A raw anchor is a full document load, so the provider
+ * unmounts and readAtFromLocation sees no ?at= — the reader was silently dropped back into Live in
+ * the middle of an investigation. The param travels with the link instead.
+ */
+export function withAtParam(path: string): string {
+  const at = readAtFromLocation();
+  if (!at) return path;
+  const [base, hash = ""] = path.split("#");
+  const [pathname, search = ""] = base.split("?");
+  const params = new URLSearchParams(search);
+  params.set(AT_PARAM, formatAtParam(at));
+  return `${pathname}?${params.toString()}${hash ? `#${hash}` : ""}`;
+}
+
+/**
+ * traversing is true for the moment a Back/Forward is being delivered.
+ *
+ * A traversal is the URL winning over the console: the provider re-reads `?at=` from the entry the
+ * reader landed on. AtParamSync must NOT re-assert the instant React is still holding over it —
+ * doing so stamped the old instant back onto that entry with replaceState, which both kept the
+ * console engaged and destroyed the entry, so Back could never leave the past again.
+ *
+ * Registered at MODULE LOAD, which puts it ahead of the router's own popstate listener: routes.tsx
+ * imports this module before it calls createRouter(). The flag is therefore up before anything the
+ * router notifies can queue a write, and down again on the next macrotask.
+ */
+let traversing = false;
+if (typeof window !== "undefined") {
+  window.addEventListener("popstate", () => {
+    traversing = true;
+    setTimeout(() => {
+      traversing = false;
+    }, 0);
+  });
+}
+
+/**
+ * writeAt is the OPERATOR's own move, so it pushes: Back/Forward walk the time context.
+ *
+ * The router keeps its entry index in history.state and its traversal arithmetic reads it, so a
+ * push carries the NEXT index rather than an empty object (which erased the index) or a copy of the
+ * current one (which would give two entries the same index).
+ */
 function writeAt(d: Date | null): void {
-  window.history.pushState({}, "", atHref(d).href);
+  const prev = window.history.state as { __TSR_index?: number } | null;
+  const next = typeof prev?.__TSR_index === "number" ? { ...prev, __TSR_index: prev.__TSR_index + 1 } : {};
+  window.history.pushState(next, "", atHref(d).href);
 }
 
 /**
  * syncAtParam makes the URL state what the console is actually showing; replaceState, not push — the
  * operator did not make this correction and must not have to press Back through it.
+ *
+ * The existing history STATE is carried over rather than replaced with `{}`: the router keeps its
+ * own entry index in there, and its back/forward arithmetic reads it.
  */
 function syncAtParam(d: Date | null): void {
   const { href, unchanged } = atHref(d);
   if (unchanged) return;
-  window.history.replaceState({}, "", href);
+  window.history.replaceState(window.history.state, "", href);
 }
 
 export interface TimeMachineValue {
@@ -157,6 +208,52 @@ export function useTimeMachine(): TimeMachineValue {
   const ctx = useContext(TimeMachineContext);
   if (!ctx) throw new Error("useTimeMachine must be used within TimeMachineProvider");
   return ctx;
+}
+
+/**
+ * useTimeMachineControls is useTimeMachine for a control mounted in shared page furniture, where
+ * "no provider" is a real case (a page rendered on its own in a test) rather than a wiring bug:
+ * null means render no control at all, never a dead one.
+ */
+export function useTimeMachineControls(): TimeMachineValue | null {
+  return useContext(TimeMachineContext);
+}
+
+/**
+ * AtParamSync re-asserts `?at=` after a navigation, and renders nothing.
+ *
+ * The time context is console-wide and survives a route change on purpose, but the router builds
+ * the destination URL from the route alone and drops the param this module owns. The address bar
+ * then said Live while every read still resolved at `t`, and a link copied from that page handed
+ * the reader a different console than the one being looked at (owner report).
+ *
+ * Two things this has to get right, and the first version got neither:
+ *
+ *  - It runs LATE. The router notifies React synchronously but writes the real URL in a queued
+ *    microtask, so an effect that reads window.location during the commit still sees the OLD
+ *    address, decides `?at=` is already there, and writes nothing — and the queued write then
+ *    lands without it. Queuing our own write behind the router's is what makes it stick.
+ *  - It keys on the whole HREF, not the pathname. `/matrix?at=…` → `/matrix` is a real push (the
+ *    router compares full hrefs), and a pathname-keyed effect cannot even see it happen.
+ *
+ * The href is passed IN because this module knows nothing about the router.
+ */
+export function AtParamSync({ href }: { href: string }): null {
+  const ctx = useContext(TimeMachineContext);
+  const at = ctx?.at ?? null;
+  useEffect(() => {
+    if (!ctx) return;
+    let live = true;
+    queueMicrotask(() => {
+      // Not during a traversal: see `traversing`. The reader walked to that entry
+      // on purpose, and the provider is about to read it.
+      if (live && !traversing) syncAtParam(at);
+    });
+    return () => {
+      live = false;
+    };
+  }, [ctx, at, href]);
+  return null;
 }
 
 /** LIVE is the value every consumer sees with no provider above it. Frozen and

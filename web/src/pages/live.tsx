@@ -24,7 +24,7 @@ import {
   type LiveEventSeverity,
   type LiveEventType,
 } from "@/lib/types";
-import { cn, fmtEventStamp } from "@/lib/utils";
+import { cn, fmtEventStamp, normalizePairInput } from "@/lib/utils";
 import { TOPIC_LIVE, type WsEnvelope } from "@/lib/ws";
 
 /** The browser keeps a bounded ring of the most recent events and drops the oldest. */
@@ -97,8 +97,16 @@ export function pushEvents(prev: LiveEvent[], incoming: LiveEvent[]): LiveEvent[
   const seen = new Set(prev.map((e) => e.id));
   const fresh: LiveEvent[] = [];
   for (const e of incoming) {
-    if (seen.has(e.id)) continue;
-    seen.add(e.id);
+    // Dedupe on a REAL id only. An id is controller-assigned and never absent
+    // on the wire, but a row that arrives without one is not "the same event"
+    // as every other row that arrives without one — keying them all on
+    // `undefined` collapsed the whole batch into its first member, which is
+    // the one thing a feed built not to lose events must not do.
+    const identified = typeof e.id === "string" && e.id !== "";
+    if (identified) {
+      if (seen.has(e.id)) continue;
+      seen.add(e.id);
+    }
     fresh.push(e);
   }
   if (fresh.length === 0) return prev;
@@ -116,9 +124,16 @@ export function pushEvents(prev: LiveEvent[], incoming: LiveEvent[]): LiveEvent[
   return next;
 }
 
-/** filterEvents applies the three UI filters; scope is a case-insensitive substring. */
+/**
+ * filterEvents applies the three UI filters; scope is a case-insensitive
+ * substring of the NORMALISED box.
+ *
+ * The event's own scope is canonical by construction — the server writes the
+ * arrow — so only the typed side needs normalising: "node-a->node-b",
+ * "node-a => node-b" and "node-a node-b" all become the pair this feed draws.
+ */
 export function filterEvents(events: LiveEvent[], filters: LiveFilters): LiveEvent[] {
-  const scope = filters.scope.trim().toLowerCase();
+  const scope = normalizePairInput(filters.scope).toLowerCase();
   return events.filter(
     (e) =>
       (filters.type === "all" || e.type === filters.type) &&
@@ -127,10 +142,25 @@ export function filterEvents(events: LiveEvent[], filters: LiveFilters): LiveEve
   );
 }
 
-/** The WebSocket envelope's own seq is gapless by construction — the hub numbers what it sends. */
+/** The WebSocket envelope's own seq is gapless by construction — the hub numbers what it sends.
+ *
+ *  An event whose `seq` is not a number is SKIPPED rather than compared: the
+ *  arithmetic below is subtraction, one NaN poisons the accumulator, and a NaN
+ *  total reads as `missed > 0 === false` — so a single malformed row would
+ *  switch the loss warning off for the whole session, which is the one failure
+ *  a loss detector must not have. The holes between the events that ARE
+ *  numbered still get counted.
+ */
 export function countMissedEvents(events: LiveEvent[]): number {
-  if (events.length < 2) return 0;
-  const bySeq = events.slice().sort((a, b) => a.seq - b.seq);
+  /* Rows the server was ASKED to filter are not evidence of loss.
+     History is fetched with ?type= / ?scope= applied server-side and merged into the same ring the
+     socket feeds unfiltered, so those rows are necessarily sparse in the controller's global
+     sequence — and every hole between them was counted as a missing event. Picking a type in the
+     dropdown made this page report ~100 events "may have been missed", i.e. it reported the
+     operator's own filter back to them as data loss. */
+  const numbered = events.filter((e) => Number.isFinite(e.seq) && !e.filteredHistory);
+  if (numbered.length < 2) return 0;
+  const bySeq = numbered.slice().sort((a, b) => a.seq - b.seq);
   let missed = 0;
   for (let i = 0; i + 1 < bySeq.length; i++) {
     const lower = bySeq[i];
@@ -164,7 +194,15 @@ export type FeedRow =
  * controls.
  */
 export function mergeFeedRows(events: LiveEvent[], annotations: Annotation[]): FeedRow[] {
-  const rows: FeedRow[] = events.map((event) => ({ kind: "event", key: event.id, at: timeOf(event), event }));
+  const rows: FeedRow[] = events.map((event, i) => ({
+    kind: "event",
+    // The controller-assigned id, and a positional fallback for a row that
+    // arrived without one — React needs a key that is UNIQUE far more than it
+    // needs one that is stable, and two rows keyed `undefined` render as one.
+    key: typeof event.id === "string" && event.id !== "" ? event.id : `row:${i}`,
+    at: timeOf(event),
+    event,
+  }));
   for (const annotation of annotations) {
     const parsed = Date.parse(annotation.startAt);
     rows.push({
@@ -235,7 +273,13 @@ function EventRow({ event }: { event: LiveEvent }) {
       <span className="w-[5.25rem] shrink-0">
         <SeverityBadge severity={event.severity} />
       </span>
-      <span className="min-w-0 flex-1 truncate text-sm">{event.summary}</span>
+      {/* The whole summary in the title, because the tail is where the node name lives: the fixed
+          columns to the right leave this one about 300px, and the row has no expander, no click
+          handler and no detail view — the truncated half was simply gone. The annotation row beside
+          it has carried a title all along. */}
+      <span title={event.summary} className="min-w-0 flex-1 truncate text-sm">
+        {event.summary}
+      </span>
       <span className="hidden w-40 shrink-0 truncate text-xs text-muted-foreground lg:block">
         {typeLabel(t, event.type)}
       </span>
@@ -310,6 +354,33 @@ function BlankSlate({ title, body, action }: { title: string; body: string; acti
 
 const EMPTY_FILTERS: LiveFilters = { type: "all", severity: "all", scope: "" };
 
+/**
+ * SCOPE_MAX is what the scope box will hold: two Kubernetes node names (253
+ * each) and an arrow, rounded up. Past that the box is not being used as a
+ * filter — it is a paste accident — and the text still travels into a query
+ * string, where a long enough one comes back as a status nobody can act on.
+ */
+export const SCOPE_MAX = 512;
+
+/**
+ * SCOPE_DEBOUNCE_MS is how long the box waits before asking the SERVER. The
+ * client-side filter is applied on every keystroke as it always was — this only
+ * governs the round trip, which used to be one keyset scan per letter typed.
+ */
+export const SCOPE_DEBOUNCE_MS = 250;
+
+/**
+ * sanitizeScope drops the characters a scope can never contain and a query
+ * string should never carry. A NUL byte is the one that matters: text
+ * parameters reach Postgres, which refuses it outright, and the request
+ * came back 502 — an "unavailable" for a byte the console itself sent. None of
+ * these is visible in a node name, so nothing an operator typed on purpose is
+ * lost.
+ */
+export function sanitizeScope(raw: string): string {
+  return raw.replace(/[\u0000-\u001F\u007F]/g, "").slice(0, SCOPE_MAX);
+}
+
 /* Why "Load older" is greyed out is dict/live.ts's "loadOlder.exhausted". */
 
 export function LivePage() {
@@ -337,26 +408,57 @@ export function LivePage() {
     notice: null,
   });
 
+  /* The scope the SERVER has been asked about, which trails the box by
+     SCOPE_DEBOUNCE_MS. The client-side filter still reacts to every keystroke —
+     this only governs the round trip, and typing a node name used to spend one
+     keyset scan per letter. */
+  const [queriedScope, setQueriedScope] = useState("");
+  useEffect(() => {
+    if (queriedScope === filters.scope) return;
+    const timer = setTimeout(() => setQueriedScope(filters.scope), SCOPE_DEBOUNCE_MS);
+    return () => clearTimeout(timer);
+  }, [filters.scope, queriedScope]);
+
+  /* Which load is the CURRENT one. Two of these can be in flight at once (a
+     second filter change while the first is still on the wire), and the first
+     to answer is not necessarily the one the operator is now looking at: a
+     stale answer used to install ITS cursor, so "Load older" then walked a
+     filter that had already been left, and its rows were merged into a feed
+     that no longer asked for them. */
+  const loadGeneration = useRef(0);
+
   /* Server-side filtering keeps a page relevant to what the operator is actually looking at. */
   const loadHistory = useCallback(
     async (cursor?: string) => {
+      const generation = ++loadGeneration.current;
+      const current = () => generation === loadGeneration.current;
       setHistory((h) => ({ ...h, loading: true }));
       try {
         const types = filters.type === "all" ? undefined : [filters.type];
-        const scope = filters.scope.trim() || undefined;
+        /* Normalised here too, and it matters more here: GET /api/v1/events
+           compares the scope for EQUALITY, so a typed hyphen-arrow asked the
+           server for a pair no row has ever been written under. */
+        const scope = normalizePairInput(queriedScope) || undefined;
         // Engaged: `to=t` turns the feed into a scrollback ENDING at t; the cursor pagination
         // underneath is unchanged.
         const page = await getEvents({ types, scope, cursor, ...(at ? { to: at } : {}) });
+        if (!current()) return;
+        /* Tagged when the SERVER filtered this page: those rows carry holes by construction, and
+           the gap detector must not read them as loss (countMissedEvents). An unfiltered page is
+           left alone, so a plain scrollback still contributes to the check. */
+        const filtered = Boolean(types || scope);
+        const rows = filtered ? page.events.map((e) => ({ ...e, filteredHistory: true })) : page.events;
         // Merged through the exact same dedupe/sort pushEvents uses for the socket.
-        setEvents((prev) => pushEvents(prev, page.events));
+        setEvents((prev) => pushEvents(prev, rows));
         setHistory({ nextCursor: page.nextCursor, loading: false, notice: null });
       } catch (err) {
+        if (!current()) return;
         const notice =
           err instanceof ApiError ? (err.problem.detail ?? err.problem.title) : tRef.current("history.fallback");
         setHistory({ nextCursor: "", loading: false, notice });
       }
     },
-    [filters.type, filters.scope, at],
+    [filters.type, queriedScope, at],
   );
 
   // Fetches page one on mount, and again whenever the type or scope filter changes.
@@ -406,6 +508,13 @@ export function LivePage() {
     discardedRef.current = 0;
     setBuffered(0);
     setDiscarded(0);
+    /* The pause goes with the rest of the store, and it has to: engaged there
+       is no tail to hold, and the button that would release it is disabled —
+       so a pause latched before the switch was a state the operator could
+       neither see the point of nor undo, and returning to Live handed them a
+       frozen feed they never asked to freeze. */
+    pausedRef.current = false;
+    setPaused(false);
   }, [atKey]);
 
   // Subscribed unconditionally, and deliberately NOT through useWsTopic: that hook keeps only the
@@ -426,7 +535,15 @@ export function LivePage() {
     });
     const off = ws.subscribe<LiveEvent>(TOPIC_LIVE, (env: WsEnvelope<LiveEvent>) => {
       if (env.type === "error") {
-        setTopicError(typeof env.data === "string" ? env.data : tRef.current("topicError.fallback"));
+        /* The hub sends `{"error": "..."}`, never a bare string, so the string branch was dead and
+           every rejection — an unknown topic, a missing permission — printed the same generic
+           sentence instead of the reason the server gave. */
+        const payload = env.data as unknown;
+        const reason =
+          typeof payload === "object" && payload !== null && typeof (payload as { error?: unknown }).error === "string"
+            ? (payload as { error: string }).error
+            : tRef.current("topicError.fallback");
+        setTopicError(reason);
         return;
       }
       if (env.type !== "event") return;
@@ -556,6 +673,7 @@ export function LivePage() {
 
   return (
     <PageShell
+      timeMachine
       title={t("title")}
       description={
         at
@@ -683,9 +801,15 @@ export function LivePage() {
             <Search aria-hidden="true" className="pointer-events-none absolute left-2.5 size-3.5 text-muted-foreground" />
             <input
               value={filters.scope}
-              onChange={(e) => setFilters((f) => ({ ...f, scope: e.target.value }))}
+              /* Sanitised on the way IN rather than on the way out, so the
+                 box, the client-side filter and the query string are all
+                 looking at the same string — a control character the operator
+                 pasted and cannot see must not be the difference between what
+                 the feed matches and what the server was asked. */
+              onChange={(e) => setFilters((f) => ({ ...f, scope: sanitizeScope(e.target.value) }))}
+              maxLength={SCOPE_MAX}
               placeholder={t("filters.scope.placeholder")}
-              className="h-8 w-64 rounded-md bg-surface-2 pl-8 pr-2 text-sm placeholder:text-muted-foreground/70 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              className="h-8 w-64 rounded-md bg-surface-2 pl-8 pr-2 text-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
             />
           </label>
 
@@ -779,7 +903,9 @@ export function LivePage() {
           />
         ) : null}
 
-        {!connecting && events.length > 0 && visible.length === 0 ? (
+        {/* rows, not `visible`: the list below renders annotation rows too, so gating on the event
+            count alone put "no events match these filters" directly above a populated list. */}
+        {!connecting && events.length > 0 && rows.length === 0 ? (
           <BlankSlate
             title={t("empty.filtered.title")}
             body={t("empty.filtered.body", { count: events.length })}

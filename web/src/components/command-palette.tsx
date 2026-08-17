@@ -2,7 +2,7 @@ import * as React from "react";
 import { useNavigate } from "@tanstack/react-router";
 import { Search } from "lucide-react";
 import { useTheme } from "@/components/theme-provider";
-import { TIME_MACHINE_TRIGGER_SELECTOR } from "@/components/timemachine-bar";
+import { TIME_MACHINE_TRIGGER_SELECTOR } from "@/components/timemachine-control";
 import { useAuth } from "@/hooks/use-auth";
 import {
   buildRegistry,
@@ -44,6 +44,8 @@ export function CommandPalette() {
   const navigate = useNavigate();
 
   const [open, setOpen] = React.useState(false);
+  /* Set when the palette opens; see togglePalette. */
+  const [hasPicker, setHasPicker] = React.useState(false);
   const [query, setQuery] = React.useState("");
   const [activeIndex, setActiveIndex] = React.useState(0);
   const inputRef = React.useRef<HTMLInputElement>(null);
@@ -54,8 +56,8 @@ export function CommandPalette() {
   const restoreRef = React.useRef<HTMLElement | null>(null);
 
   /**
-   * openTimeMachinePicker clicks the Time Machine bar's own trigger; the alternative — engaging at
-   * some instant the palette chose.
+   * openTimeMachinePicker clicks the Time Machine's own trigger, now in the page header; the
+   * alternative — engaging at some instant the palette chose.
    */
   const openTimeMachinePicker = React.useCallback(() => {
     const el = document.querySelector<HTMLElement>(TIME_MACHINE_TRIGGER_SELECTOR);
@@ -75,8 +77,9 @@ export function CommandPalette() {
       isLive,
       returnToLive,
       openTimeMachinePicker,
+      hasTimeMachinePicker: hasPicker,
     }),
-    [can, writesDisabled, navigate, theme, toggle, isLive, returnToLive, openTimeMachinePicker],
+    [can, writesDisabled, navigate, theme, toggle, isLive, returnToLive, openTimeMachinePicker, hasPicker],
   );
 
   const results = React.useMemo(
@@ -121,6 +124,11 @@ export function CommandPalette() {
       restoreRef.current = from instanceof HTMLElement ? from : null;
       setQuery("");
       setActiveIndex(0);
+      /* Whether THIS page has a Time Machine trigger to click, asked once at
+         open time. The control is opt-in per page (components/page-shell.tsx),
+         so on Targets, Alerting and Settings the picker command had nothing to
+         click and answered a keystroke with nothing at all (owner report). */
+      setHasPicker(document.querySelector(TIME_MACHINE_TRIGGER_SELECTOR) !== null);
       setOpen(true);
     },
     [open, close],
@@ -270,7 +278,7 @@ export function CommandPalette() {
             >
               <div
                 aria-hidden="true"
-                className="px-2 pb-1 pt-1.5 text-[10.5px] font-semibold uppercase tracking-[0.1em] text-muted-foreground/70"
+                className="px-2 pb-1 pt-1.5 text-[10.5px] font-semibold uppercase tracking-[0.1em] text-muted-foreground"
               >
                 {t(GROUP_KEYS[section.group])}
               </div>

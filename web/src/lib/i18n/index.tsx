@@ -123,22 +123,29 @@ export function localeTag(locale: Locale): string | undefined {
  * and a 24-hour locale pads to "20:00" on its own regardless.
  */
 
+/* HOUSE_CLOCK is the console's one clock: 24-hour, everywhere.
+   lib/utils.ts states that rule and its own formatters follow it, but these three stamps passed no
+   options at all — so under `en` they inherited en-US's 12-hour clock, and the same page showed a
+   chart tooltip at 21:04 next to a row stamped 9:04 PM. */
+const HOUSE_CLOCK = { hour12: false } as const;
+
 /** stampFull is the whole instant, date and clock — a row `title`, a tooltip,
  *  anything that has room for it. */
 export function stampFull(d: Date, locale: Locale): string {
-  return d.toLocaleString(localeTag(locale));
+  return d.toLocaleString(localeTag(locale), HOUSE_CLOCK);
 }
 
 /** stampClock is the clock alone, for a column that is already inside one
  *  known day (the timeline's rows, the signal cursor). */
 export function stampClock(d: Date, locale: Locale): string {
-  return d.toLocaleTimeString(localeTag(locale));
+  return d.toLocaleTimeString(localeTag(locale), HOUSE_CLOCK);
 }
 
 /** stampShort is the compact column: a day and a clock, no year. About 7rem,
  *  which is what a 20rem rail can actually spare. */
 export function stampShort(d: Date, locale: Locale): string {
   return d.toLocaleString(localeTag(locale), {
+    ...HOUSE_CLOCK,
     month: "short",
     day: "numeric",
     hour: "numeric",
@@ -150,6 +157,7 @@ export function stampShort(d: Date, locale: Locale): string {
  *  may name a day months away and must not read as "this year, probably". */
 export function stampInstant(d: Date, locale: Locale): string {
   return d.toLocaleString(localeTag(locale), {
+    ...HOUSE_CLOCK,
     month: "short",
     day: "numeric",
     year: "numeric",
@@ -234,8 +242,13 @@ export function translate<K extends string>(
   key: K,
   vars?: Vars,
 ): string {
-  const table = dict[locale] as Readonly<Record<string, string | undefined>>;
   const fallback = dict.en as Readonly<Record<string, string | undefined>>;
+  /* `?? fallback` covers the locale this build has no table for, the same way
+     the line below covers the key it has no string for. Reading `dict[locale]`
+     bare threw a TypeError on the first key it was asked for — i.e. it took the
+     whole page down — for a locale a later build dropped, one that reached here
+     from untyped JS, or one restored from a session older than the table. */
+  const table = (dict[locale] ?? fallback) as Readonly<Record<string, string | undefined>>;
   return interpolate(table[key] ?? fallback[key] ?? key, vars);
 }
 

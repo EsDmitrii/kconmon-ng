@@ -1,18 +1,20 @@
-import { useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import type * as echarts from "echarts";
 import { useMutation } from "@tanstack/react-query";
-import { SquareTerminal } from "lucide-react";
+import { ChevronRight, SquareTerminal } from "lucide-react";
 import { EChart } from "@/components/echart";
 import { PageShell } from "@/components/page-shell";
 import { PromQLEditor } from "@/components/promql-editor";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
+import { Pager, usePager } from "@/components/ui/pager";
 import { Segmented } from "@/components/ui/segmented";
 import { useTheme } from "@/components/theme-provider";
 import { promqlQuery, promqlQueryRange } from "@/lib/api";
-import { chartColors, seriesColor } from "@/lib/chart-theme";
-import { localeTag, useLocale, useT } from "@/lib/i18n";
+import { chartColors } from "@/lib/chart-theme";
+import { stampFull, useLocale, useT } from "@/lib/i18n";
 import { promqlConsoleDict, type PromQLConsoleKey } from "@/lib/i18n/dict/promql-console";
+import { paletteColor, seriesIdentities, showLegend, type SeriesIdentity } from "@/lib/prom-series";
 import { toTable } from "@/lib/prom-table";
 import { useTimeContext } from "@/lib/timemachine";
 import type { PromResult } from "@/lib/types";
@@ -61,60 +63,149 @@ function suggestStepId(rangeSeconds: number): string {
 
 interface MatrixEntry { metric: Record<string, string>; values?: [number, string][] }
 
-function labelForEntry(metric: Record<string, string>): string {
-  const parts = Object.entries(metric).map(([k, v]) => `${k}="${v}"`);
-  return parts.length > 0 ? `{${parts.join(", ")}}` : "value";
+/**
+ * ChartSeries is one line on the plot AND one row in the listing under it. The
+ * two are built together, from one call to seriesIdentities, so the legend, the
+ * tooltip and the raw table cannot disagree about what a series is called.
+ */
+export interface ChartSeries {
+  identity: SeriesIdentity;
+  /** The series' own colour, so a table row can carry the line's swatch. */
+  color: string;
+  /** How many points the window holds — the "is this series even sampled" tell. */
+  points: number;
+  /** The last value in the window, or "" for a series with no points at all. */
+  lastValue: string;
 }
 
-// Chart-tab design decision says the Chart tab should "reuse EChart + toSeriesOption-style
-// mapping".
-function toConsoleChartOption(res: PromResult, dark: boolean): echarts.EChartsOption {
-  const entries: MatrixEntry[] =
-    res.status === "success" && res.data?.resultType === "matrix" ? (res.data.result as MatrixEntry[]) : [];
-  const colors = chartColors(dark ? "dark" : "light");
-  const sorted = [...entries].sort((a, b) =>
-    labelForEntry(a.metric).localeCompare(labelForEntry(b.metric)),
-  );
+export interface ChartModel {
+  option: echarts.EChartsOption;
+  series: ChartSeries[];
+  /** The labels every series shares, said once above the listing. */
+  sharedText: string;
+}
 
+function matrixEntries(res: PromResult): MatrixEntry[] {
+  if (res.status !== "success" || res.data?.resultType !== "matrix") return [];
+  /* The same shape check lib/prom-table.ts makes, and for the same reason: this
+     module reads somebody else's JSON. A `result: null` walked straight into
+     `.map` and took the whole page down to the error boundary, which only
+     clears on a route change — so the reader could not get back to the Console
+     without leaving it. */
+  return Array.isArray(res.data.result) ? (res.data.result as MatrixEntry[]) : [];
+}
+
+/**
+ * toChartModel builds the plot and its listing from one result.
+ *
+ * Two things changed when the owner sent the old results back. Series are named
+ * by what DISTINGUISHES them (lib/prom-series.ts) rather than by their whole
+ * label set, which was the string that arrived truncated mid-label everywhere it
+ * was shown. And the legend is drawn only while it is still a legend: ECharts'
+ * scroll legend does not wrap, so at 86 series it became a "1/86" pager, and
+ * past the threshold the raw table below the chart does that job properly.
+ *
+ * Two more when the owner could not read the plot at all — «все полосочки
+ * серые… они все ровные»:
+ *
+ *  - COLOUR comes from lib/prom-series.ts's paletteColor, not chart-theme's
+ *    seriesColor. The latter folds the sixth series and everything after it
+ *    into the axis grey, which is the right answer for a topk(5) curated chart
+ *    and the wrong one for a console where `up` matches 86 series.
+ *  - The Y AXIS does not force a zero baseline. ECharts includes zero in a
+ *    value axis unless `scale` says otherwise, so a latency series at 42ms
+ *    ±0.5ms was a straight line pinned to the top of a 0…45ms axis. A console
+ *    is asked "did this move", not "how big is it next to nothing" — the
+ *    curated charts, which carry a unit and answer the second question, keep
+ *    their zero baseline (lib/curated-metrics.ts).
+ */
+export function toChartModel(res: PromResult, dark: boolean): ChartModel {
+  const entries = matrixEntries(res);
+  const colors = chartColors(dark ? "dark" : "light");
+  const identities = seriesIdentities(entries.map((e) => e.metric));
+  /* Sorted on the MINIMAL identity, which is what the reader sees: ordering by
+     the full label set put `pod="a"` and `pod="z"` next to each other whenever
+     an earlier label happened to differ. */
+  const sorted = entries
+    .map((entry, i) => ({ entry, identity: identities.series[i] }))
+    .sort((a, b) => a.identity.text.localeCompare(b.identity.text));
+
+  const series: ChartSeries[] = sorted.map(({ entry, identity }, i) => {
+    const values = entry.values ?? [];
+    return {
+      identity,
+      color: paletteColor(colors.series, i),
+      points: values.length,
+      lastValue: values.at(-1)?.[1] ?? "",
+    };
+  });
+
+  const legend = showLegend(series.length);
   return {
-    animation: false,
-    textStyle: { color: colors.axis },
-    grid: { left: 56, right: 16, top: 12, bottom: 46 },
-    legend: {
-      bottom: 0,
-      type: "scroll",
-      icon: "roundRect",
-      itemWidth: 10,
-      itemHeight: 2,
-      textStyle: { color: colors.axis, fontSize: 11 },
-      pageIconColor: colors.axis,
-      pageTextStyle: { color: colors.axis },
+    sharedText: identities.sharedText,
+    series,
+    option: {
+      animation: false,
+      textStyle: { color: colors.axis },
+      /* The bottom inset is the legend's room. Without a legend the plot takes
+         it back rather than sitting above a reserved strip of nothing. */
+      grid: { left: 56, right: 16, top: 12, bottom: legend ? 46 : 12 },
+      legend: {
+        show: legend,
+        bottom: 0,
+        type: "scroll",
+        icon: "roundRect",
+        itemWidth: 10,
+        itemHeight: 2,
+        textStyle: { color: colors.axis, fontSize: 11 },
+        pageIconColor: colors.axis,
+        pageTextStyle: { color: colors.axis },
+      },
+      /* The pointer TYPE is the shared layer's (lib/chart-tooltip.ts turns it
+         into a cross on whichever chart the mouse is over); the colour is this
+         surface's and travels with it. */
+      tooltip: { trigger: "axis", axisPointer: { lineStyle: { color: colors.grid } } },
+      xAxis: {
+        type: "time",
+        axisLine: { lineStyle: { color: colors.grid } },
+        // Same anti-smear rule the curated charts take (QA round 2, #19): this
+        // console's plot lives in a narrower column than any of them.
+        axisLabel: { color: colors.axis, hideOverlap: true },
+        splitLine: { show: false },
+      },
+      yAxis: {
+        // Neutral numeric axis, deliberately unformatted — see design note above.
+        type: "value",
+        /* The axis fits the DATA, not the origin. ECharts pulls zero into a
+           value axis by default, which turns every series with a small spread
+           around a large value — a latency, a queue depth, a counter rate —
+           into a flat line hugging the top of the plot. A genuinely constant
+           series still draws flat, because it is. */
+        scale: true,
+        axisLabel: { color: colors.axis },
+        splitLine: { lineStyle: { color: colors.grid } },
+      },
+      series: sorted.map(
+        ({ entry, identity }, i): echarts.LineSeriesOption => ({
+          /* The MINIMAL identity, and this one assignment is what fixes the
+             tooltip too: lib/chart-tooltip.ts's capped formatter prints
+             `seriesName` verbatim. */
+          name: identity.text,
+          type: "line",
+          /* A one-point line draws NOTHING with symbols off, and this page hands
+             the reader a step picker: step 15m over a 15m range is one sample.
+             A chart that holds data and looks empty is the worst answer here. */
+          showSymbol: (entry.values ?? []).length < 2,
+          /* The ROW's colour, read from the row rather than recomputed: the two
+             lists are built from the same `sorted` array in the same order, and
+             taking it from there is what makes a swatch and its line the same
+             colour by construction instead of by coincidence. */
+          color: series[i].color,
+          lineStyle: { width: 2 },
+          data: (entry.values ?? []).map(([ts, v]) => [ts * 1000, Number(v)]),
+        }),
+      ),
     },
-    tooltip: { trigger: "axis", axisPointer: { type: "line", lineStyle: { color: colors.grid } } },
-    xAxis: {
-      type: "time",
-      axisLine: { lineStyle: { color: colors.grid } },
-      // Same anti-smear rule the curated charts take (QA round 2, #19): this
-      // console's plot lives in a narrower column than any of them.
-      axisLabel: { color: colors.axis, hideOverlap: true },
-      splitLine: { show: false },
-    },
-    yAxis: {
-      // Neutral numeric axis, deliberately unformatted — see design note above.
-      type: "value",
-      axisLabel: { color: colors.axis },
-      splitLine: { lineStyle: { color: colors.grid } },
-    },
-    series: sorted.map(
-      (entry, i): echarts.LineSeriesOption => ({
-        name: labelForEntry(entry.metric),
-        type: "line",
-        showSymbol: false,
-        color: seriesColor(colors, i),
-        lineStyle: { width: 2 },
-        data: (entry.values ?? []).map(([ts, v]) => [ts * 1000, Number(v)]),
-      }),
-    ),
   };
 }
 
@@ -219,6 +310,146 @@ export function ResultTabs({
   );
 }
 
+/**
+ * RawSeriesRow is one series in the listing under the chart: its swatch, its
+ * minimal identity, its point count and its last value — plus the way back to
+ * the whole truth.
+ *
+ * The expander is per row and not a page-wide switch: a reader checking one
+ * pod's full labels should not have to turn eighty-five other rows into
+ * paragraphs to do it.
+ */
+function RawSeriesRow({ row, index }: { row: ChartSeries; index: number }) {
+  const t = useT(promqlConsoleDict);
+  const [open, setOpen] = useState(false);
+  /* The ROW's ordinal, not the identity's text. A recording rule can emit two
+     series with an identical label set — lib/prom-series.ts deliberately gives
+     both the same identity rather than a tidy string that hides the collision —
+     and an id derived from that text put two nodes in the document under one id,
+     with two expanders' aria-controls pointing at whichever the browser found
+     first. */
+  const fullId = `promql-series-${index}`;
+
+  return (
+    <>
+      <tr data-testid="raw-row" className="transition-colors duration-(--dur-fast) hover:bg-accent/40">
+        <td className="border-b border-border py-2 pl-4 pr-2 align-top">
+          <button
+            type="button"
+            aria-expanded={open}
+            aria-controls={fullId}
+            aria-label={t("raw.showFull")}
+            title={t("raw.showFull")}
+            onClick={() => setOpen((v) => !v)}
+            className={cn(
+              "flex size-5 items-center justify-center rounded text-muted-foreground",
+              "transition-colors duration-(--dur-fast) ease-(--ease) hover:text-foreground",
+              "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+            )}
+          >
+            <ChevronRight
+              aria-hidden="true"
+              className={cn("size-3.5 transition-transform duration-(--dur-fast) ease-(--ease)", open && "rotate-90")}
+            />
+          </button>
+        </td>
+        <td className="border-b border-border py-2 pr-4 align-top">
+          <span className="flex items-center gap-2">
+            {/* The line's own colour, which is what ties this row to the plot
+                above now that the legend is gone on a big result. */}
+            <span aria-hidden="true" className="size-2 shrink-0 rounded-[2px]" style={{ background: row.color }} />
+            <span
+              data-testid="raw-identity"
+              /* The whole label set is one hover away even before the row is
+                  expanded — the affordance the truncated dump never had. */
+              title={row.identity.fullText}
+              className="min-w-0 flex-1 truncate font-mono text-xs"
+            >
+              {row.identity.text}
+            </span>
+          </span>
+        </td>
+        <td className="nums border-b border-border py-2 pr-4 text-right align-top text-muted-foreground">
+          {row.points}
+        </td>
+        <td className="nums border-b border-border py-2 pr-4 text-right align-top">{row.lastValue}</td>
+      </tr>
+      {open ? (
+        <tr>
+          <td colSpan={4} className="border-b border-border bg-surface-2/40 px-4 py-2">
+            <code
+              id={fullId}
+              data-testid="raw-full-labels"
+              className="block break-all font-mono text-[11px] leading-relaxed text-muted-foreground"
+            >
+              {row.identity.fullText}
+            </code>
+          </td>
+        </tr>
+      ) : null}
+    </>
+  );
+}
+
+/**
+ * RawSeriesTable is Grafana Explore's listing under the plot, and on this page it
+ * is also the legend: past LEGEND_MAX_SERIES the chart draws none, because
+ * ECharts' scroll legend turns into a one-name-at-a-time pager rather than
+ * wrapping. Ten rows a page, the console's own default.
+ */
+function RawSeriesTable({ series, sharedText }: { series: ChartSeries[]; sharedText: string }) {
+  const t = useT(promqlConsoleDict);
+  /* The identity of the LIST, so a new query starts at page one rather than on
+     page nine of a result that no longer exists. The first series is in the
+     key too: a re-run matching the same COUNT under the same shared labels can
+     still be an entirely different set of pods. */
+  const pager = usePager(series, {
+    resetKey: [sharedText, series.length, series[0]?.identity.fullText ?? ""].join("\u0000"),
+  });
+
+  return (
+    <Card className="overflow-hidden p-0">
+      <div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1 border-b border-border px-4 py-2.5">
+        <h3 className="text-[11px] font-medium uppercase tracking-[0.06em] text-muted-foreground">
+          {t("raw.title")}
+        </h3>
+        {/* Said ONCE. These are the labels every series in the result carries,
+            and repeating them on eighty-six rows is what pushed the two
+            characters that differ off the end of every one of them. */}
+        {sharedText ? (
+          <code data-testid="raw-shared" className="min-w-0 truncate font-mono text-[11px] text-muted-foreground">
+            {sharedText}
+          </code>
+        ) : null}
+      </div>
+      <div className="overflow-x-auto">
+        <table data-testid="raw-table" className="w-full border-separate border-spacing-0 text-sm">
+          <caption className="sr-only">{t("raw.caption")}</caption>
+          <thead>
+            <tr className="text-[11px] font-medium uppercase tracking-[0.06em] text-muted-foreground">
+              <th scope="col" className="border-b border-border py-2 pl-4 pr-2 text-left">
+                <span className="sr-only">{t("raw.showFull")}</span>
+              </th>
+              <th scope="col" className="border-b border-border py-2 pr-4 text-left">{t("raw.col.series")}</th>
+              <th scope="col" className="border-b border-border py-2 pr-4 text-right">{t("raw.col.points")}</th>
+              <th scope="col" className="border-b border-border py-2 pr-4 text-right">{t("raw.col.last")}</th>
+            </tr>
+          </thead>
+          <tbody>
+            {pager.visible.map((row, i) => (
+              /* The index disambiguates the one case fullText cannot: two series
+                 agreeing on every label. It also collapses an expanded row when
+                 the page under it turns, which is the right reset. */
+              <RawSeriesRow key={`${row.identity.fullText}#${i}`} row={row} index={i} />
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <Pager pager={pager} subject={t("raw.subject")} />
+    </Card>
+  );
+}
+
 /* The panel half of the same contract: a labelled tabpanel that is itself a tab stop. */
 function ResultPanel({ tab, children }: { tab: ResultTab; children: ReactNode }) {
   return (
@@ -249,12 +480,6 @@ export function PromQLConsolePage() {
   // hand, range changes stop overwriting it — two linked segmented controls
   // that clobber each other read as one duplicated control.
   const stepTouched = useRef(false);
-
-  // Chart is range-only; drop back to Table if the user switches to instant
-  // mode while Chart is selected.
-  useEffect(() => {
-    if (mode === "instant" && activeTab === "chart") setActiveTab("table");
-  }, [mode, activeTab]);
 
   const mutation = useMutation({
     mutationFn: (): Promise<PromResult> => {
@@ -289,8 +514,13 @@ export function PromQLConsolePage() {
     }
   };
 
+  /* A query box can arrive empty — a first visit that cleared it, an earlier
+     session, another tab, a hand-edited localStorage. Run used to stay lit and
+     answer the click with nothing at all. */
+  const runnable = query.trim().length > 0;
+
   const runQuery = () => {
-    if (!query.trim() || mutation.isPending) return;
+    if (!runnable || mutation.isPending) return;
     // Clear the previous result before firing a new one: otherwise a failed
     // re-run would leave the last successful result visible underneath the
     // fresh error banner, misleadingly implying it's still current.
@@ -299,11 +529,35 @@ export function PromQLConsolePage() {
   };
 
   const data = mutation.data;
-  const table = useMemo(() => (data ? toTable(data) : undefined), [data]);
-  const chartOption = useMemo(
-    () => (data && mode === "range" ? toConsoleChartOption(data, theme === "dark") : undefined),
+  /* The stamp is written in the interface language, so the formatter is handed
+     to the builder rather than chosen inside it (lib/prom-table.ts). */
+    // stampFull, for the reason the Time Machine banner takes it: one clock per console.
+  const formatTime = useCallback((ms: number) => stampFull(new Date(ms), locale), [locale]);
+  const table = useMemo(() => (data ? toTable(data, formatTime) : undefined), [data, formatTime]);
+  /* A PromQL result set is whatever the query matched — thousands of series is
+     a normal answer, and the table used to render every one of them. */
+  const pager = usePager(table?.rows ?? [], { resetKey: table?.columns.join("\u0000") ?? "" });
+  const chart = useMemo(
+    /* Built for any MATRIX answer, whatever mode asked for it: an instant query
+       on a range vector (`up[5m]`) comes back as a matrix and draws fine. */
+    () => (data && data.data?.resultType === "matrix" ? toChartModel(data, theme === "dark") : undefined),
     [data, mode, theme],
   );
+
+  /* Drop back to Table when there is no chart to draw. The condition is the
+     RESULT, not the mode: an instant query on a range vector answers with a
+     matrix and charts fine, and gating on the mode disabled the tab while the
+     tooltip explained the block with a reason the data contradicted. */
+  useEffect(() => {
+    // `data` guards the wait: while a query is in flight there is no chart yet
+    // and nothing has been proven unchartable.
+    if (activeTab === "chart" && data !== undefined && chart === undefined) setActiveTab("table");
+  }, [activeTab, chart, data]);
+  /* Memoised for the same reason the table and the chart are, and here it bites
+     hardest: the proxy caps a response at 8 MiB, pretty-printing that is tens of
+     megabytes of string, and this used to be rebuilt on EVERY render — once per
+     keystroke in the query box while the JSON tab was open. */
+  const rawJson = useMemo(() => (data ? JSON.stringify(data, null, 2) : undefined), [data]);
   // promqlQuery/promqlQueryRange resolve (rather than throw) for Prometheus's own error envelope
   // (see lib/api.ts's `handle`).
   const promError = data?.status === "error" ? data : undefined;
@@ -312,11 +566,12 @@ export function PromQLConsolePage() {
 
   return (
     <PageShell
+      timeMachine
       title={t("title")}
       /* {at} lands INSIDE a translated sentence, so it takes that sentence's
          language — lib/i18n's localeTag. Computed here, never formatted by the
          dictionary (QA scope 2, finding #8). */
-      description={at ? t("description.at", { at: at.toLocaleString(localeTag(locale)) }) : t("description")}
+      description={at ? t("description.at", { at: stampFull(at, locale) }) : t("description")}
       actions={
         <>
           <Segmented
@@ -356,7 +611,7 @@ export function PromQLConsolePage() {
               </LabeledControl>
             </>
           ) : null}
-          <Button onClick={runQuery} loading={mutation.isPending}>
+          <Button onClick={runQuery} loading={mutation.isPending} disabled={!runnable}>
             {t("run")}
           </Button>
         </>
@@ -364,7 +619,7 @@ export function PromQLConsolePage() {
     >
       <div className="flex flex-col gap-5">
         <Card className="overflow-hidden p-2">
-          <PromQLEditor initial={query} onChange={handleChange} onRun={runQuery} />
+          <PromQLEditor initial={query} onChange={handleChange} onRun={runQuery} label={t("editor.aria")} />
         </Card>
 
         {mutation.error ? (
@@ -384,13 +639,28 @@ export function PromQLConsolePage() {
         <ResultTabs
           active={activeTab}
           onChange={setActiveTab}
-          isDisabled={(id) => id === "chart" && mode === "instant"}
+          /* The RESULT decides, not the mode: `up[5m]` in instant mode answers
+             with a matrix, which draws perfectly well, and the disabled tab's
+             tooltip was telling the reader something the data contradicted. */
+          /* Disabled only once a RESULT has proven itself unchartable. Before
+             any query there is nothing to draw yet and nothing to refuse — the
+             reader routinely picks the tab first and runs second. */
+          isDisabled={(id) => id === "chart" && data !== undefined && chart === undefined}
         />
 
         {activeTab === "table" ? (
           <ResultPanel tab="table">
             {table && table.rows.length > 0 ? (
               <Card className="overflow-x-auto p-0">
+                {/* The instant every row shares, said ONCE. When the rows
+                    disagree — a series that stopped early — there is no
+                    sentence here and prom-table puts a `time` column in the
+                    table instead. */}
+                {table.at !== null ? (
+                  <p className="border-b border-border px-4 py-2 text-xs text-muted-foreground">
+                    {t(table.kind === "series" ? "table.lastAt" : "table.at", { at: formatTime(table.at) })}
+                  </p>
+                ) : null}
                 <table className="w-full border-separate border-spacing-0 text-sm">
                   <thead>
                     <tr>
@@ -400,13 +670,16 @@ export function PromQLConsolePage() {
                           className="border-b border-border bg-surface px-4 py-2.5 text-left text-[11px] font-medium uppercase tracking-[0.06em] text-muted-foreground"
                           scope="col"
                         >
-                          {c}
+                          {/* Our own columns travel as dictionary keys
+                              (lib/prom-table.ts); a LABEL name is Prometheus's
+                              identifier and is printed as it arrived. */}
+                          {c.startsWith("table.col.") ? t(c as PromQLConsoleKey) : c}
                         </th>
                       ))}
                     </tr>
                   </thead>
                   <tbody>
-                    {table.rows.map((row, i) => (
+                    {pager.visible.map((row, i) => (
                       <tr key={i} className="transition-colors duration-(--dur-fast) hover:bg-accent/40">
                         {row.map((cell, j) => (
                           <td key={j} className="nums border-b border-border px-4 py-2.5">{cell}</td>
@@ -415,6 +688,7 @@ export function PromQLConsolePage() {
                     ))}
                   </tbody>
                 </table>
+                <Pager pager={pager} subject={t("table.subject")} />
               </Card>
             ) : failed ? null : (
               <ResultPlaceholder text={data ? t("table.empty") : t("table.idle")} />
@@ -422,12 +696,23 @@ export function PromQLConsolePage() {
           </ResultPanel>
         ) : null}
 
-        {activeTab === "chart" && mode === "range" ? (
+        {/* Grafana Explore's shape: the picture, and under it the listing of
+            what is IN the picture — at the same time, never one instead of the
+            other. The Chart tab used to be the plot alone, so the only account
+            of its 86 series was a legend that had become a "1/86" pager. */}
+        {/* The panel exists while its TAB is selected — aria-controls has to point
+            at something — and the branches inside it draw the chart, the empty
+            note or the idle line. Gating the panel itself on `chart` left the
+            selected tab controlling an element that was not in the document. */}
+        {activeTab === "chart" ? (
           <ResultPanel tab="chart">
-            {chartOption && chartOption.series && (chartOption.series as unknown[]).length > 0 ? (
-              <Card className="p-5">
-                <EChart option={chartOption} className="h-80 w-full" />
-              </Card>
+            {chart && chart.series.length > 0 ? (
+              <div className="flex flex-col gap-4">
+                <Card className="p-5">
+                  <EChart option={chart.option} className="h-80 w-full" />
+                </Card>
+                <RawSeriesTable series={chart.series} sharedText={chart.sharedText} />
+              </div>
             ) : failed ? null : (
               <ResultPlaceholder text={data ? t("chart.empty") : t("chart.idle")} />
             )}
@@ -438,7 +723,7 @@ export function PromQLConsolePage() {
           <ResultPanel tab="json">
             <Card className="overflow-hidden p-0">
               <pre className="max-h-[32rem] overflow-auto bg-surface-2/50 p-4 font-mono text-xs leading-relaxed">
-                {data ? JSON.stringify(data, null, 2) : t("json.idle")}
+                {rawJson ?? t("json.idle")}
               </pre>
             </Card>
           </ResultPanel>
@@ -463,7 +748,7 @@ function ResultPlaceholder({ text }: { text: string }) {
 function LabeledControl({ label, children }: { label: string; children: ReactNode }) {
   return (
     <span className="flex items-center gap-1.5">
-      <span className="text-[10.5px] font-semibold uppercase tracking-[0.08em] text-muted-foreground/70">
+      <span className="text-[10.5px] font-semibold uppercase tracking-[0.08em] text-muted-foreground">
         {label}
       </span>
       {children}

@@ -4,6 +4,7 @@ import { DateTimePicker } from "@/components/ui/datetime-picker";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { useAuth } from "@/hooks/use-auth";
+import { useConfirmStep } from "@/hooks/use-confirm-step";
 import { useSubmitGuard } from "@/hooks/use-submit-guard";
 import { ApiError, createMaintenance, deleteMaintenance, getMaintenance } from "@/lib/api";
 import {
@@ -264,7 +265,7 @@ function CreateMaintenanceForm({
             rows={2}
             onChange={(e) => setReason(e.target.value)}
             placeholder={t("form.reason.placeholder")}
-            className="rounded-md bg-surface-2 px-2 py-1.5 text-sm text-foreground placeholder:text-muted-foreground/70 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            className="rounded-md bg-surface-2 px-2 py-1.5 text-sm text-foreground placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
           />
           <span className="text-[11px] text-muted-foreground">
             {reason.length}/{MAINTENANCE_REASON_MAX}
@@ -307,7 +308,7 @@ export function MaintenanceRow({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
   /* Second-click confirm, the same idiom the annotation rows and pages/alerting.tsx's rule rows use. */
-  const [confirming, setConfirming] = useState(false);
+  const { confirming, confirmRef, triggerRef, ask, reset } = useConfirmStep();
 
   async function handleDelete() {
     setBusy(true);
@@ -318,7 +319,7 @@ export function MaintenanceRow({
     } catch (err) {
       setError(err instanceof ApiError ? (err.problem.detail || err.problem.title) : t("row.deleteFailed"));
       setBusy(false);
-      setConfirming(false);
+      reset();
     }
   }
 
@@ -386,7 +387,13 @@ export function MaintenanceRow({
       {canWrite ? (
         confirming ? (
           <>
+            {/* Spoken as well as drawn: the row swaps one control for two, and a reader hearing
+                nothing reads the press as "Delete did nothing". */}
+            <span role="status" className="sr-only">
+              {t("row.confirmDelete.aria", { reason: w.reason })}
+            </span>
             <Button
+              ref={confirmRef}
               type="button"
               size="sm"
               variant="outline"
@@ -397,18 +404,19 @@ export function MaintenanceRow({
             >
               {t("row.confirmDelete")}
             </Button>
-            <Button type="button" size="sm" variant="ghost" onClick={() => setConfirming(false)}>
+            <Button type="button" size="sm" variant="ghost" onClick={reset}>
               {t("row.cancel")}
             </Button>
           </>
         ) : (
           <Button
+            ref={triggerRef}
             type="button"
             size="sm"
             variant="ghost"
             {...guard}
             aria-label={t("row.delete.aria", { reason: w.reason })}
-            onClick={() => setConfirming(true)}
+            onClick={ask}
           >
             {t("row.delete")}
           </Button>
@@ -527,9 +535,11 @@ export function MaintenanceBar({
         </p>
       ) : null}
 
+      {/* NEWEST FIRST, the same rule the annotation bar follows: the merge sorts ascending for the
+          chart's markAreas, the LIST is read from the top. */}
       {windows.length > 0 ? (
         <ul aria-label={t("bar.list.aria")} className="m-0 divide-y divide-border/60 p-0">
-          {windows.map((w) => (
+          {[...windows].reverse().map((w) => (
             <MaintenanceRow key={w.id} window={w} canWrite={canWrite} onChanged={handleChanged} />
           ))}
         </ul>

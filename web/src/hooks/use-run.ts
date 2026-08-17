@@ -92,6 +92,11 @@ export function useRun(runId: string): UseRunResult {
   const queryClient = useQueryClient();
   const [frames, setFrames] = useState<Map<string, RunProgressFrame>>(() => new Map());
   const [socketDone, setSocketDone] = useState(false);
+  /* Whether the socket is actually CONNECTED. `live` used to be the subscription's existence alone,
+     so the permalink's badge said "Live" while the socket was down and the page was really being
+     carried by the 5s poll — the one place a reader looks to know which of the two they are seeing.
+     useWsTopic tracks the same state for the matrix and topology surfaces. */
+  const [connected, setConnected] = useState(false);
 
   // A run switch must not carry over the previous run's accumulated frames
   // or its socket-done latch -- each permalink id gets its own fresh state.
@@ -117,9 +122,15 @@ export function useRun(runId: string): UseRunResult {
   const socketEnabled = enabled && realtime && query.data !== undefined && !terminal && !socketDone;
 
   useEffect(() => {
-    if (!socketEnabled) return;
+    if (!socketEnabled) {
+      setConnected(false);
+      return;
+    }
     const topic = runTopic(runId);
-    const off = getWsClient().subscribe<RunProgressFrame | RunFinishedFrame>(topic, (env) => {
+    const ws = getWsClient();
+    // The badge follows the CONNECTION, not the subscription; see `connected`.
+    const offState = ws.onStateChange((state) => setConnected(state === "open"));
+    const off = ws.subscribe<RunProgressFrame | RunFinishedFrame>(topic, (env) => {
       if (env.type === "error") {
         // M2's "unknown topic" rejection (registry full, or this run's
         // topic was already reaped) -- polling alone takes over from here.
@@ -145,7 +156,10 @@ export function useRun(runId: string): UseRunResult {
       // more REST read, not from this bare frame standing in for it.
       void queryClient.refetchQueries({ queryKey: ["run", runId] });
     });
-    return () => off();
+    return () => {
+      off();
+      offState();
+    };
   }, [socketEnabled, runId, queryClient]);
 
   const pairs = useMemo(() => mergeRunPairs(query.data?.results ?? [], frames), [query.data?.results, frames]);
@@ -160,7 +174,7 @@ export function useRun(runId: string): UseRunResult {
     isLoading: query.isLoading,
     notFound,
     error: query.error,
-    live: socketEnabled,
+    live: socketEnabled && connected,
     refetch,
   };
 }

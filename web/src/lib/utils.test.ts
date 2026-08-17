@@ -6,6 +6,7 @@ import {
   fmtEventStamp,
   fmtEventTime,
   isValidAdhocAddress,
+  normalizePairInput,
   plural,
   runInstant,
   runsAtOrBefore,
@@ -187,5 +188,64 @@ describe("CHECKBOX_CLASS", () => {
   it("carries the same size and focus ring as the pickers' controls", () => {
     expect(CHECKBOX_CLASS).toContain("size-4");
     expect(CHECKBOX_CLASS).toContain("focus-visible:ring-ring");
+  });
+});
+
+/* ── the arrow nobody can type ───────────────────────────────────────────────
+   A pair scope is drawn "node-a→node-b" with U+2192, and U+2192 is not on any
+   keyboard. Every scope box matched it literally, so the owner had to copy the
+   arrow out of a row to filter by a pair. */
+
+describe("normalizePairInput", () => {
+  const CANONICAL = "node-a→node-b";
+
+  it.each([
+    ["the arrow itself", "node-a→node-b"],
+    ["a hyphen arrow", "node-a->node-b"],
+    ["a long hyphen arrow", "node-a-->node-b"],
+    ["a very long hyphen arrow", "node-a--->node-b"],
+    ["a fat arrow", "node-a=>node-b"],
+    ["a long fat arrow", "node-a==>node-b"],
+    ["a bare greater-than", "node-a>node-b"],
+    ["spaces around the arrow", "node-a -> node-b"],
+    ["spaces around the pretty arrow", "node-a → node-b"],
+    ["several spaces around the arrow", "node-a   ->   node-b"],
+    ["a tab around the arrow", "node-a\t->\tnode-b"],
+    ["padding on both ends", "   node-a->node-b   "],
+  ])("reads %s as the canonical pair", (_name, typed) => {
+    expect(normalizePairInput(typed)).toBe(CANONICAL);
+  });
+
+  it("leaves a single node name exactly as it was, so substring matching still works", () => {
+    expect(normalizePairInput("node-a")).toBe("node-a");
+    expect(normalizePairInput("  node-a  ")).toBe("node-a");
+    expect(normalizePairInput("cluster")).toBe("cluster");
+  });
+
+  it("keeps an empty box empty rather than inventing a separator", () => {
+    expect(normalizePairInput("")).toBe("");
+    expect(normalizePairInput("   ")).toBe("");
+  });
+
+  it("normalizes a HALF pair, which is how 'anything into node-b' is typed", () => {
+    expect(normalizePairInput("->node-b")).toBe("→node-b");
+    expect(normalizePairInput("node-a->")).toBe("node-a→");
+  });
+
+  it("does not invent an arrow inside a name that merely contains a hyphen", () => {
+    // The one shape that must NOT be touched: a hyphen with no > after it is
+    // part of the name, and every node in this fleet has one.
+    expect(normalizePairInput("node-a")).toBe("node-a");
+    expect(normalizePairInput("edge-gw-01")).toBe("edge-gw-01");
+    expect(normalizePairInput("a-b-c")).toBe("a-b-c");
+  });
+
+  /* SHOULD NOT MATCH. Whitespace on its own is NOT a separator: a scope is not
+     always a hostname, and buildInvestigateURL's own round trip pins
+     "ns/pod a&b" as a node scope. Splitting on a bare space would corrupt a name
+     that was typed correctly, which is worse than the defect being fixed. */
+  it("leaves a bare space alone — a scope may legitimately contain one", () => {
+    expect(normalizePairInput("ns/pod a&b")).toBe("ns/pod a&b");
+    expect(normalizePairInput("node-a node-b")).toBe("node-a node-b");
   });
 });

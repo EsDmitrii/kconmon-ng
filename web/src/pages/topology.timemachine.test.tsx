@@ -122,7 +122,11 @@ describe("TopologyPage engaged at t", () => {
   it("dates the page from the server's asOf rather than from the browser clock", async () => {
     renderPage(historical());
     await screen.findByText("No nodes existed at this time");
-    expect(screen.getByText(new RegExp(new Date(AT).toLocaleString().replace(/[.*+?^${}()|[\]\\]/g, "\\$&")))).toBeInTheDocument();
+    /* The page's own DESCRIPTION, not just any stamp on screen: the Time
+       Machine trigger in the header names the same instant, and it is a
+       different claim (where you are looking FROM, vs what the server folded to). */
+    const stamped = new RegExp(new Date(AT).toLocaleString().replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+    expect(screen.getByText(stamped, { selector: "p" })).toBeInTheDocument();
   });
 
   it("admits a truncated fold instead of passing a partial map off as complete", async () => {

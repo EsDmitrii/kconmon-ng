@@ -4,10 +4,13 @@ import { ThemeProvider } from "@/components/theme-provider";
 import { LOCALE_STORAGE_KEY, LocaleProvider } from "@/lib/i18n";
 import type { Enrichment, MTRHop, PathSnapshot } from "@/lib/types";
 import {
+  fmtLossPct,
   fmtRttNs,
+  hopList,
   hopTrendSeries,
   isPlaceholderHop,
   lossTier,
+  shortHash,
   TraceDetail,
   trendExtent,
   type TrendHistory,
@@ -108,6 +111,60 @@ describe("fmtRttNs", () => {
   it("keeps a genuine ZERO in milliseconds — 0µs would read as a measurement", () => {
     expect(fmtRttNs(0)).toBe("0.0ms");
   });
+
+  /* Hostile QA: a JSON null divided by 1e6 is 0, so an ABSENT reading printed
+     "0.0ms" — a hop reported as answering in no time at all. Everything that is
+     not a finite number is an absence, and the table already has a mark for
+     one. */
+  it("prints the absence mark for anything that is not a finite number", () => {
+    expect(fmtRttNs(null as unknown as number)).toBe("—");
+    expect(fmtRttNs("fast" as unknown as number)).toBe("—");
+    expect(fmtRttNs(Number.POSITIVE_INFINITY)).toBe("—");
+    expect(fmtRttNs(Number.NaN)).toBe("—");
+  });
+
+  /* The microsecond floor reads the MAGNITUDE, so a negative reading — the
+     wire's nonsense, not the console's — keeps its sign instead of being
+     rounded into "-0.0ms". */
+  it("does not round a negative reading into a signed zero", () => {
+    expect(fmtRttNs(-4_000)).toBe("-4µs");
+    expect(fmtRttNs(-2_500_000)).toBe("-2.5ms");
+  });
+});
+
+describe("fmtLossPct", () => {
+  it("renders the ratio as whole percent", () => {
+    expect(fmtLossPct(0)).toBe("0%");
+    expect(fmtLossPct(0.1)).toBe("10%");
+    expect(fmtLossPct(1)).toBe("100%");
+  });
+
+  /* Hostile QA: an absent lossRatio rendered "NaN%" in red, and a ratio of 12
+     rendered "1200%". The schema says 0..1; anything else is a payload this
+     server did not write. */
+  it("says nothing rather than NaN, and stays inside the range the schema promises", () => {
+    expect(fmtLossPct(undefined)).toBe("—");
+    expect(fmtLossPct(null as unknown as number)).toBe("—");
+    expect(fmtLossPct(-0.5)).toBe("0%");
+    expect(fmtLossPct(12)).toBe("100%");
+  });
+});
+
+describe("hopList", () => {
+  it("passes a real list through and answers an empty one for everything else", () => {
+    const hops = [hop()];
+    expect(hopList(hops)).toBe(hops);
+    expect(hopList(null)).toEqual([]);
+    expect(hopList(undefined)).toEqual([]);
+    expect(hopList("nope" as unknown as MTRHop[])).toEqual([]);
+  });
+});
+
+describe("shortHash", () => {
+  it("keeps twelve characters, and answers an empty string for a hash that never arrived", () => {
+    expect(shortHash("aaaaaaaaaaaa0000")).toBe("aaaaaaaaaaaa");
+    expect(shortHash(undefined as unknown as string)).toBe("");
+  });
 });
 
 describe("isPlaceholderHop", () => {
@@ -116,6 +173,13 @@ describe("isPlaceholderHop", () => {
     expect(isPlaceholderHop("")).toBe(true);
     expect(isPlaceholderHop("   ")).toBe(true);
     expect(isPlaceholderHop("10.0.0.1")).toBe(false);
+  });
+
+  /* A hop with no `ip` key at all is the same absence, and .trim() on the
+     undefined it leaves behind is a page-killing TypeError. */
+  it("treats a missing address as an absence rather than throwing on it", () => {
+    expect(isPlaceholderHop(undefined as unknown as string)).toBe(true);
+    expect(isPlaceholderHop(null as unknown as string)).toBe(true);
   });
 });
 
@@ -127,6 +191,28 @@ describe("lossTier", () => {
     expect(lossTier(0.099)).toBe("warn");
     expect(lossTier(0.1)).toBe("bad");
     expect(lossTier(1)).toBe("bad");
+  });
+
+  /* A loss number that is not a number is an UNKNOWN hop, not a failing one;
+     without the guard every threshold below was false and the row came out red
+     next to a cell reading "—". */
+  it("does not paint an unknown hop as a failing one", () => {
+    expect(lossTier(undefined as unknown as number)).toBe("ok");
+    expect(lossTier(Number.NaN)).toBe("ok");
+  });
+});
+
+describe("TraceDetail — payloads this server would not send", () => {
+  it("renders a snapshot whose hops field is not a list at all", () => {
+    renderDetail(snapshot({ hops: null as unknown as MTRHop[] }));
+    expect(screen.getByRole("table", { name: "Hops" })).toBeTruthy();
+    expect(document.body.textContent).not.toMatch(/NaN|undefined/);
+  });
+
+  it("draws the silence mark for a hop with no address, not an empty cell", () => {
+    renderDetail(snapshot({ hopCount: 1, hops: [hop({ ip: "", hostname: "" })] }));
+    const cells = within(screen.getByRole("table", { name: "Hops" })).getAllByRole("cell");
+    expect(cells.map((c) => c.textContent)).toContain("*");
   });
 });
 
@@ -267,14 +353,9 @@ describe("TraceDetail — enrichment row", () => {
 describe("TraceDetail — horizontal overflow", () => {
   const LONG = "edge-router-09.transit.lon.eu-west.example-networks.internal";
 
-  it("bounds and truncates the hostname cell, keeping the full name reachable", () => {
+  it("keeps RTT and Loss on screen next to a long name", () => {
     renderDetail(snapshot({ hops: [hop({ hostname: LONG })] }));
 
-    const cell = screen.getByTitle(LONG);
-    expect(cell).toHaveClass("truncate");
-    // A max-width is what makes `truncate` do anything at all here — `truncate`
-    // on the <td> itself was a no-op and the cell simply grew.
-    expect(cell.className).toMatch(/max-w-\[/);
     // The columns it used to push out are still rendered.
     expect(screen.getByText("Loss")).toBeInTheDocument();
     expect(screen.getByText("RTT")).toBeInTheDocument();
@@ -295,6 +376,72 @@ describe("TraceDetail — horizontal overflow", () => {
 
     fireEvent.scroll(scroller);
     expect(screen.getByRole("note")).toHaveTextContent(/scroll sideways/i);
+  });
+});
+
+/* «hostname обрезается»: `10-244-4-21.kconmon-kconmon-ng-…` clipped mid-token
+   while the column beside it stood half empty. The cap that did it — a hard
+   14rem on the cell — was the fix for QA scope 4 #6 (a long name shoving RTT and
+   Loss off the card) applied to the wrong column: the name is the widest thing
+   in the row and the ONLY thing here that is not a fixed-shape field. */
+describe("TraceDetail — the hostname column", () => {
+  /* The owner's own address, at the length a Kubernetes pod rDNS actually
+     reaches. Pinned by count so a future trim of the fixture cannot quietly
+     weaken what this file claims. */
+  const POD_RDNS = "10-244-4-21.kconmon-kconmon-ng-agents.kconmon.svc.cluster.local";
+
+  it("is a 63-character name, whole in the DOM and whole in the title", () => {
+    expect(POD_RDNS).toHaveLength(63);
+    renderDetail(snapshot({ hops: [hop({ hostname: POD_RDNS })] }));
+
+    // Present as TEXT, not merely as a tooltip: nothing elides it in the markup.
+    const cell = screen.getByText(POD_RDNS);
+    expect(cell).toHaveAttribute("title", POD_RDNS);
+    expect(cell.textContent).toBe(POD_RDNS);
+  });
+
+  /* The layout contract, pinned so the columns cannot be inverted again. The
+     table is FIXED — without that, a single unbreakable 63-character token
+     widens its own column and shoves the numerics out, which is the bug the
+     14rem cap was reaching for. Given fixed layout, whoever has no width takes
+     whatever is left, and that has to be Hostname. */
+  it("gives every column but Hostname a pinned width, and Hostname the rest", () => {
+    const { container } = renderDetail(snapshot());
+
+    const table = container.querySelector("table") as HTMLTableElement;
+    expect(table.className).toMatch(/\btable-fixed\b/);
+
+    /* Order AND pinned-ness in one assertion: exactly one `false`, on the name.
+       Address is a fixed-width mono field; RTT and Loss are narrow numerics. */
+    const cols = [...container.querySelectorAll("colgroup col")];
+    expect(cols.map((c) => [c.getAttribute("data-col"), /(?:^|\s)w-/.test(c.className)])).toEqual([
+      ["expand", true],
+      ["number", true],
+      ["address", true],
+      ["hostname", false],
+      ["rtt", true],
+      ["loss", true],
+    ]);
+  });
+
+  // The inversion guard proper: the cap and the clip may not come back.
+  it("neither caps nor clips the name cell", () => {
+    renderDetail(snapshot({ hops: [hop({ hostname: POD_RDNS })] }));
+
+    const cell = screen.getByText(POD_RDNS);
+    expect(cell.className).not.toMatch(/\btruncate\b/);
+    expect(cell.className).not.toMatch(/max-w-/);
+    // It wraps INSIDE its column instead — a name on two lines is readable, a
+    // name cut mid-token is not.
+    expect(cell).toHaveClass("break-all");
+  });
+
+  // A hop with no name still reads as a hole rather than as empty space.
+  it("keeps the em dash for a hop with no name, and no title on it", () => {
+    renderDetail(snapshot({ hops: [hop({ hostname: "" })] }));
+
+    const cell = screen.getAllByText("—")[0];
+    expect(cell).not.toHaveAttribute("title");
   });
 });
 

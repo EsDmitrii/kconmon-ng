@@ -1,6 +1,6 @@
 import { cleanup, render, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it } from "vitest";
-import { PathDiff, diffPaths, fmtRttDeltaNs } from "./mtr-path-diff";
+import { PathDiff, diffPaths, fmtRttDeltaNs, summarisePathChange } from "./mtr-path-diff";
 import type { MTRHop, PathSnapshot } from "@/lib/types";
 
 function hop(over: Partial<MTRHop> = {}): MTRHop {
@@ -106,6 +106,24 @@ describe("diffPaths", () => {
 
     expect(rows.map((r) => r.kind)).toEqual(["changed"]);
   });
+
+  /* Hostile QA: a hops field that is not a list reached the alignment and threw
+     out of the whole page. The server never sends one — a proxy or a replay
+     might. */
+  it("treats a hops field that is not a list as no hops", () => {
+    expect(diffPaths(null as unknown as MTRHop[], path(["10.0.0.1"])).map((r) => r.kind)).toEqual(["added"]);
+    expect(diffPaths(null as unknown as MTRHop[], undefined as unknown as MTRHop[])).toEqual([]);
+  });
+
+  /* A delta is only a delta between two REAL readings; subtracting an absent
+     RTT produced NaN and the column had to print an em dash for it anyway. */
+  it("carries no delta on a shared hop when one side has no reading", () => {
+    const withRtt = path(["10.0.0.1"], [2_000_000]);
+    const without = [{ number: 1, ip: "10.0.0.1", rttNs: null as unknown as number, lossRatio: 0 }];
+    const [row] = diffPaths(without, withRtt);
+    expect(row.kind).toBe("same");
+    expect(row.rttDeltaNs).toBeUndefined();
+  });
 });
 
 describe("fmtRttDeltaNs", () => {
@@ -114,6 +132,20 @@ describe("fmtRttDeltaNs", () => {
     expect(fmtRttDeltaNs(-800_000)).toBe("-0.8ms");
     expect(fmtRttDeltaNs(0)).toBe("0.0ms");
     expect(fmtRttDeltaNs(undefined)).toBe("—");
+  });
+
+  /* "+0.0ms" was already refused for claiming a direction the number does not
+     have; "-0.0ms" was making the same claim from the other side, for a delta of
+     a few microseconds that rounds to nothing. */
+  it("keeps a delta that rounds to nothing unsigned, whichever way it leans", () => {
+    expect(fmtRttDeltaNs(-4_000)).toBe("0.0ms");
+    expect(fmtRttDeltaNs(4_000)).toBe("0.0ms");
+  });
+
+  it("says nothing for a reading that is not a finite number", () => {
+    expect(fmtRttDeltaNs(Number.NaN)).toBe("—");
+    expect(fmtRttDeltaNs(Number.POSITIVE_INFINITY)).toBe("—");
+    expect(fmtRttDeltaNs(null as unknown as number)).toBe("—");
   });
 });
 
@@ -160,5 +192,85 @@ describe("PathDiff", () => {
     render(<PathDiff a={a} b={snapshot({ id: "twin", pathHash: "cccccccccccc2222", hops: a.hops })} />);
 
     expect(screen.getByText(/same hops in the same order/i)).toBeInTheDocument();
+  });
+});
+
+/* ── "path changed" said in words, not in two hashes ─────────────────────── */
+
+/**
+ * The owner on the Explorer: «ничего не понятно». A row badged "path changed"
+ * next to two twelve-character hashes tells a reader that SOMETHING moved and
+ * nothing about what. The route is the whole point of an MTR, so the change is
+ * described as a route change: which hop, and from what to what.
+ */
+describe("summarisePathChange", () => {
+  const chain = (...ips: string[]) =>
+    ips.map((ip, i) => ({ number: i + 1, ip, hostname: "", rttNs: 1_000_000, lossRatio: 0 }));
+
+  it("names the ONE hop that moved, and both of its addresses", () => {
+    const s = summarisePathChange(chain("10.0.0.1", "10.244.9.17", "10.0.0.9"), chain("10.0.0.1", "10.244.9.21", "10.0.0.9"));
+    expect(s).toEqual({ kind: "changed", hop: 2, from: "10.244.9.17", to: "10.244.9.21", total: 1 });
+  });
+
+  it("names an inserted hop and where it appeared", () => {
+    const s = summarisePathChange(chain("10.0.0.1", "10.0.0.9"), chain("10.0.0.1", "10.0.0.5", "10.0.0.9"));
+    expect(s).toEqual({ kind: "added", hop: 2, to: "10.0.0.5", total: 1 });
+  });
+
+  it("names a hop that dropped out, and where it used to be", () => {
+    const s = summarisePathChange(chain("10.0.0.1", "10.0.0.5", "10.0.0.9"), chain("10.0.0.1", "10.0.0.9"));
+    expect(s).toEqual({ kind: "removed", hop: 2, from: "10.0.0.5", total: 1 });
+  });
+
+  it("counts rather than lists once several hops moved at once", () => {
+    const s = summarisePathChange(chain("a", "b", "c", "d"), chain("a", "x", "y", "d"));
+    expect(s.kind).toBe("several");
+    expect(s.total).toBe(2);
+    // No hop or address: naming one of several would misdescribe the change.
+    expect(s.hop).toBeUndefined();
+  });
+
+  it("says nothing changed when nothing did — the RTTs are not the route", () => {
+    const a = chain("10.0.0.1", "10.0.0.9");
+    const b = chain("10.0.0.1", "10.0.0.9").map((h) => ({ ...h, rttNs: 9_000_000 }));
+    expect(summarisePathChange(a, b)).toEqual({ kind: "same", total: 0 });
+  });
+
+  it("ignores a non-responding hop, which is an absence and not an address", () => {
+    // A `*` hop that stays a `*` has not moved anywhere.
+    const s = summarisePathChange(chain("10.0.0.1", "*", "10.0.0.9"), chain("10.0.0.1", "*", "10.0.0.9"));
+    expect(s.kind).toBe("same");
+  });
+
+  it("survives an empty path on either side rather than throwing", () => {
+    expect(summarisePathChange([], chain("a")).kind).toBe("added");
+    expect(summarisePathChange(chain("a"), []).kind).toBe("removed");
+    expect(summarisePathChange([], []).kind).toBe("same");
+  });
+
+  /* Hostile QA. A hops field that is not a list at all is the shape a proxy or
+     a replay can produce, and this function is called from the history list's
+     badge on every row — it must not be the thing that empties the pane. */
+  it("survives a hops field that is not a list", () => {
+    expect(summarisePathChange(null as unknown as MTRHop[], chain("a")).kind).toBe("added");
+    expect(summarisePathChange(null as unknown as MTRHop[], null as unknown as MTRHop[]).kind).toBe("same");
+  });
+
+  it("says nothing moved when a whole path of silence stays silent", () => {
+    const stars = chain("*", "*", "*");
+    expect(summarisePathChange(stars, stars)).toEqual({ kind: "same", total: 0 });
+  });
+
+  it("carries a unicode address through the sentence untouched", () => {
+    const s = summarisePathChange(chain("узел-一"), chain("маршрутизатор-二"));
+    expect(s).toMatchObject({ kind: "changed", from: "узел-一", to: "маршрутизатор-二" });
+  });
+
+  it("reads a one-hop path that grew a second hop as an addition", () => {
+    expect(summarisePathChange(chain("10.0.0.1"), chain("10.0.0.1", "10.0.0.2"))).toMatchObject({
+      kind: "added",
+      to: "10.0.0.2",
+      total: 1,
+    });
   });
 });
