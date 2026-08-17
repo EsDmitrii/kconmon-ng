@@ -325,9 +325,10 @@ kubectl port-forward svc/kconmon-ng-console 8081:8080
 по-прежнему можно принести своим `existingSecret`, а можно попросить чарт
 отрендерить его блоком `secret:`; значения полей пишутся дословно, поэтому
 плейсхолдер `${vault:...}` доезжает до инжектора байт в байт и разрешается на
-admission. Оператор CloudNativePG и официальный чарт Valkey подключаются
-опциональными сабчартами, оба выключены по умолчанию, так что установка без них
-рендерится ровно как раньше. GeoLite2 больше не надо подкладывать: при
+admission. Своей базы и своего кеша чарт не ставит: направьте
+`database.existingSecret` на Secret с DSN вида `postgres://`, а
+`redis.existingSecret` — на Secret с `redis://`, и подойдёт то, что у вас уже
+крутится: RDS, StatefulSet, свой кластер CloudNativePG. GeoLite2 больше не надо подкладывать: при
 `geoip.mode=auto` рядом с консолью крутится сайдкар из образа `geoipupdate` от
 самой MaxMind, а консоль перечитывает оба файла и переоткрывает тот, что
 изменился, так что свежая база подхватывается без рестарта. Дашборды
@@ -484,7 +485,7 @@ OK udp node-1 -> node-2 (us-east-1a -> us-east-1b)  duration=1.1ms
 
 ```bash
 kubectl krew install --manifest-url \
-  https://github.com/EsDmitrii/kconmon-ng/releases/download/v1.4.0/kconmon.yaml
+  https://github.com/EsDmitrii/kconmon-ng/releases/download/v2.0.0/kconmon.yaml
 ```
 
 ## Ломаем связность руками
