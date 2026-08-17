@@ -1,0 +1,200 @@
+{{- if .Values.networkPolicy.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "kconmon-ng.fullname" . }}
+  labels:
+    {{- include "kconmon-ng.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "kconmon-ng.selectorLabels" . | nindent 6 }}
+    {{- /* The console carries its OWN complete policy, and NetworkPolicies are additive: selecting
+           it here re-opened everything console.networkPolicy.ingressFrom exists to restrict. */}}
+    matchExpressions:
+      - key: app.kubernetes.io/component
+        operator: NotIn
+        values:
+          - console
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # Agent to controller gRPC
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "kconmon-ng.selectorLabels" . | nindent 14 }}
+              app.kubernetes.io/component: agent
+      ports:
+        - protocol: TCP
+          port: {{ .Values.config.grpcPort }}
+    # Agent to agent probes: the UDP probe server on grpcPort, and the TCP checker, which dials the PEER's httpPort and then GETs /readyz on it.
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "kconmon-ng.selectorLabels" . | nindent 14 }}
+              app.kubernetes.io/component: agent
+      ports:
+        - protocol: UDP
+          port: {{ .Values.config.grpcPort }}
+        - protocol: TCP
+          port: {{ .Values.config.httpPort }}
+    # Inbound ICMP probes and reactive MTR: networking.k8s.io/v1 ports accept only TCP/UDP/SCTP, so
+    # this rule omits ports and allows every protocol from the agent peer.
+    #
+    # NOT gated on config.checkers.icmp.enabled any more. MTR has no off switch — the checker is
+    # registered unconditionally and triggerMTR fires on any failed TCP/UDP/DNS probe — so turning
+    # ICMP CHECKS off used to delete the only rule reactive traceroute had, and every trace ran
+    # exactly when a link was already broken and was silently dropped by the policy. The rule's
+    # scope is unchanged either way: agent pods of this release, and nothing else.
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "kconmon-ng.selectorLabels" . | nindent 14 }}
+              app.kubernetes.io/component: agent
+    {{- if .Values.console.enabled }}
+    # Console to controller HTTP API (topology); the Prometheus rule below only covers this when prometheusNamespace is empty.
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "kconmon-ng.selectorLabels" . | nindent 14 }}
+              app.kubernetes.io/component: console
+      ports:
+        - protocol: TCP
+          port: {{ .Values.config.httpPort }}
+    {{- if .Values.controller.events.enabled }}
+    # Console to controller gRPC; the controller side of console traffic is opened here.
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "kconmon-ng.selectorLabels" . | nindent 14 }}
+              app.kubernetes.io/component: console
+      ports:
+        - protocol: TCP
+          port: {{ .Values.config.grpcPort }}
+    {{- end }}
+    {{- end }}
+    # The `helm test` Pod's health probe.
+    #
+    # The Pod is deliberately not a selectorLabels match (it must not be captured by this policy's
+    # own podSelector), which also means no rule admitted it: `helm test` timed out on every install
+    # with networkPolicy.enabled, and reported the hook as Failed. One rule, one label, one port.
+    - from:
+        - podSelector:
+            matchLabels:
+              kconmon-ng.io/role: test
+      ports:
+        - protocol: TCP
+          port: {{ .Values.config.httpPort }}
+    {{- if .Values.networkPolicy.prometheusNamespace }}
+    # Prometheus scraping.
+    #
+    # config.metricsPort ONLY, never config.httpPort.
+    #
+    # The controller's API lives on httpPort — GET /api/v1/topology, POST /api/v1/diagnostics, PUT
+    # /api/v1/external-checks — and authenticates none of it; leader election is availability, not
+    # authorization. This rule cannot name a single pod (a scraper is whatever the operator runs),
+    # so opening httpPort here handed the fleet's control plane to everything sharing the scraper's
+    # namespace: on a real cluster that is Grafana, node-exporter, kube-state-metrics and the
+    # operator. Reproduced from a plain curl pod in `monitoring`: full topology, a real probe
+    # dispatched, and external-check assignments wiped. Narrowing "every namespace" to "one
+    # namespace" moved that blast radius without removing it.
+    #
+    # The components therefore serve /metrics on a listener of their own (internal/metrics/listener.go)
+    # and this rule opens that. Letting a scraper in and letting a caller drive the fleet are now two
+    # different decisions, which is the only shape a NetworkPolicy can express.
+    #
+    # RENDERED ONLY WITH networkPolicy.prometheusNamespace SET: with it unset the chart cannot name
+    # the scraper's namespace, so it opens nothing and the scrape fails visibly (up = 0).
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.networkPolicy.prometheusNamespace | quote }}
+        {{- with .Values.networkPolicy.prometheusPodLabels }}
+        # Narrower still when the operator can name the scraper's pod labels.
+          podSelector:
+            matchLabels:
+              {{- toYaml . | nindent 14 }}
+        {{- end }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.config.metricsPort }}
+    {{- end }}
+  egress:
+    # Agent to controller gRPC
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- include "kconmon-ng.selectorLabels" . | nindent 14 }}
+              app.kubernetes.io/component: controller
+      ports:
+        - protocol: TCP
+          port: {{ .Values.config.grpcPort }}
+    # Agent to agent probes
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- include "kconmon-ng.selectorLabels" . | nindent 14 }}
+              app.kubernetes.io/component: agent
+      ports:
+        - protocol: UDP
+          port: {{ .Values.config.grpcPort }}
+        - protocol: TCP
+          port: {{ .Values.config.httpPort }}
+    # DNS
+    - to:
+        - namespaceSelector: {}
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # ICMP probes and reactive MTR: networking.k8s.io/v1 ports accept only TCP/UDP/SCTP, so this rule
+    # omits ports and allows every protocol to the agent peer. Ungated for the same reason as its
+    # ingress twin above: MTR runs whether or not the ICMP CHECKER is enabled.
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- include "kconmon-ng.selectorLabels" . | nindent 14 }}
+              app.kubernetes.io/component: agent
+    {{- if .Values.config.checkers.external.enabled }}
+    {{- if not .Values.networkPolicy.externalEgress }}
+    {{- fail "config.checkers.external.enabled is true and networkPolicy.enabled is true but networkPolicy.externalEgress is empty: external targets take tcp/icmp/mtr on operator-chosen ports and NetworkPolicy v1 cannot express ICMP as a port rule, so the only default the chart could render is a ports-less rule to 0.0.0.0/0 — allow-everything egress, which it will not do silently. Set networkPolicy.externalEgress to the egress rules your targets need, scoped to config.checkers.external.allowedCidrs (e.g. [{to: [{ipBlock: {cidr: 10.0.0.0/8}}]}]; omit ports on an entry to allow ICMP to that peer), or ask for the old permissive shape explicitly with [{to: [{ipBlock: {cidr: 0.0.0.0/0}}]}]" }}
+    {{- end }}
+    # External checks leave the cluster; the chart renders only the rules named here, because it cannot guess ports it was never told about.
+    {{- toYaml .Values.networkPolicy.externalEgress | nindent 4 }}
+    {{- end }}
+    {{- if .Values.config.checkers.http.enabled }}
+    # HTTP checker targets; empty renders TCP 80/443 to 0.0.0.0/0.
+    {{- with .Values.networkPolicy.httpEgress }}
+    {{- toYaml . | nindent 4 }}
+    {{- else }}
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+      ports:
+        - protocol: TCP
+          port: 80
+        - protocol: TCP
+          port: 443
+    {{- end }}
+    {{- end }}
+    {{- if .Values.config.checkers.dns.resolvers }}
+    {{- if not .Values.networkPolicy.resolverEgress }}
+    {{- fail "config.checkers.dns.resolvers names explicit resolvers and networkPolicy.enabled is true, but networkPolicy.resolverEgress is empty: the only port-53 egress this policy renders is `to: [{namespaceSelector: {}}]`, which selects PODS and can never match an address like 8.8.8.8 — under an enforcing CNI every DNS check against those resolvers times out while the config looks correct. Set networkPolicy.resolverEgress to the rules your resolvers need (e.g. [{to: [{ipBlock: {cidr: 8.8.8.8/32}}], ports: [{protocol: UDP, port: 53}, {protocol: TCP, port: 53}]}]), or clear config.checkers.dns.resolvers to use the Pod's own resolver. This is the same refusal config.checkers.external gets, for the same reason." }}
+    {{- end }}
+    {{- end }}
+    {{- with .Values.networkPolicy.resolverEgress }}
+    # Explicit DNS resolvers outside the cluster.
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+    {{- /* networkPolicy.kubeAPIEgress is NOT spliced here.
+           This policy selects every component except the console — the agent DaemonSet included,
+           which tolerates everything and runs on every node — and the agent has no apiserver client
+           at all (its Pod sets automountServiceAccountToken: false). The values file says "controller
+           only", and it is true only if the rule lands on the controller alone: it is rendered by
+           templates/controller/networkpolicy.yaml, whose podSelector is the controller. Splicing it
+           here as well handed the most exposed component in the deployment whatever egress an
+           operator opened for the apiserver — commonly 0.0.0.0/0 on 443. */}}
+{{- end }}

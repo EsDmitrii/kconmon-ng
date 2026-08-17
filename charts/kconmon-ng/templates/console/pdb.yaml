@@ -1,4 +1,7 @@
 {{- if and .Values.console.enabled .Values.console.pdb.enabled (gt (int .Values.console.replicas) 1) }}
+{{- if ge (int .Values.console.pdb.minAvailable) (int .Values.console.replicas) }}
+{{- fail (printf "console.pdb.minAvailable (%d) is not less than console.replicas (%d): the PDB would allow ZERO voluntary disruptions, so `kubectl drain` on any node running a console replica hangs forever and cluster upgrades or autoscaler scale-downs stall, with nothing in the release marked unhealthy. Set console.pdb.minAvailable below console.replicas, or raise console.replicas." (int .Values.console.pdb.minAvailable) (int .Values.console.replicas)) }}
+{{- end }}
 apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:

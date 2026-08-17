@@ -7,166 +7,414 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "enabled": { "type": "boolean" },
-        "for": { "type": "string" },
-        "severity": { "type": "string" }
+        "enabled": {
+          "type": "boolean"
+        },
+        "for": {
+          "type": "string"
+        },
+        "severity": {
+          "type": "string"
+        }
       }
     },
     "managedSecret": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "create": { "type": "boolean" },
-        "name": { "type": "string" },
-        "annotations": { "type": "object", "additionalProperties": { "type": "string" } },
-        "labels": { "type": "object", "additionalProperties": { "type": "string" } },
-        "dsn": { "type": "string" },
-        "password": { "type": "string" },
-        "clientSecret": { "type": "string" },
-        "encryptionKey": { "type": "string" },
-        "accessKeyId": { "type": "string" },
-        "accountId": { "type": ["string", "number"] },
-        "licenseKey": { "type": "string" },
-        "secretAccessKey": { "type": "string" }
+        "create": {
+          "type": "boolean"
+        },
+        "name": {
+          "type": "string"
+        },
+        "annotations": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "labels": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "dsn": {
+          "type": "string"
+        },
+        "password": {
+          "type": "string"
+        },
+        "clientSecret": {
+          "type": "string"
+        },
+        "encryptionKey": {
+          "type": "string"
+        },
+        "accessKeyId": {
+          "type": "string"
+        },
+        "accountId": {
+          "type": [
+            "string",
+            "number"
+          ]
+        },
+        "licenseKey": {
+          "type": "string"
+        },
+        "secretAccessKey": {
+          "type": "string"
+        }
       }
     },
     "thresholdAlert": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "enabled": { "type": "boolean" },
-        "threshold": {
-          "type": ["number", "string"],
-          "minimum": 0,
-          "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$"
+        "enabled": {
+          "type": "boolean"
         },
-        "for": { "type": "string" },
-        "severity": { "type": "string" }
+        "threshold": {
+          "description": "A RATIO in 0.0-1.0, never a percent. Every rule using this shape compares a rate ratio directly, so a percent-shaped 5 renders `> 5` and can never fire \u2014 silently, because the render succeeds and the alert simply never triggers. The bound is what turns that into a refusal at install time.",
+          "type": [
+            "number",
+            "string"
+          ],
+          "minimum": 0,
+          "maximum": 1,
+          "pattern": "^(0(\\.[0-9]+)?|1(\\.0+)?)$"
+        },
+        "for": {
+          "type": "string"
+        },
+        "severity": {
+          "type": "string"
+        }
       }
     }
   },
   "properties": {
-    "cnpg-operator": { "type": "object" },
-    "valkey": { "type": "object" },
-    "nameOverride": { "type": "string" },
-    "fullnameOverride": { "type": "string" },
-    "global": { "type": "object" },
+    "nameOverride": {
+      "type": "string"
+    },
+    "fullnameOverride": {
+      "type": "string"
+    },
+    "global": {
+      "type": "object"
+    },
     "controller": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "podSecurityContext": { "type": "object" },
-        "securityContext": { "type": "object" },
-        "replicaCount": { "type": "integer", "minimum": 1 },
-        "leaderElection": { "type": "boolean" },
+        "podSecurityContext": {
+          "type": "object"
+        },
+        "securityContext": {
+          "type": "object"
+        },
+        "replicaCount": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "leaderElection": {
+          "type": "boolean"
+        },
         "events": {
           "type": "object",
           "additionalProperties": false,
           "properties": {
-            "enabled": { "type": "boolean" }
+            "enabled": {
+              "type": "boolean"
+            }
           }
         },
         "image": {
           "type": "object",
           "additionalProperties": false,
           "properties": {
-            "repository": { "type": "string" },
-            "tag": { "type": "string" },
-            "pullPolicy": { "type": "string", "enum": ["Always", "IfNotPresent", "Never"] }
+            "repository": {
+              "type": "string"
+            },
+            "tag": {
+              "type": "string"
+            },
+            "pullPolicy": {
+              "type": "string",
+              "enum": [
+                "Always",
+                "IfNotPresent",
+                "Never"
+              ]
+            }
           }
         },
         "resources": {
           "type": "object",
           "additionalProperties": false,
           "properties": {
-            "limits": { "type": "object", "additionalProperties": { "type": ["string", "integer", "number"] } },
-            "requests": { "type": "object", "additionalProperties": { "type": ["string", "integer", "number"] } },
-            "claims": { "type": "array", "items": { "type": "object" } }
+            "limits": {
+              "type": "object",
+              "additionalProperties": {
+                "type": [
+                  "string",
+                  "integer",
+                  "number"
+                ]
+              }
+            },
+            "requests": {
+              "type": "object",
+              "additionalProperties": {
+                "type": [
+                  "string",
+                  "integer",
+                  "number"
+                ]
+              }
+            },
+            "claims": {
+              "type": "array",
+              "items": {
+                "type": "object"
+              }
+            }
           }
         },
-        "nodeSelector": { "type": "object", "additionalProperties": { "type": "string" } },
-        "tolerations": { "type": "array", "items": { "type": "object" } },
-        "affinity": { "type": "object" }
+        "nodeSelector": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "tolerations": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          }
+        },
+        "affinity": {
+          "type": "object"
+        },
+        "pdb": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "minAvailable": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        }
       }
     },
     "agent": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "zone": { "type": "string" },
-        "podAnnotations": { "type": "object", "additionalProperties": { "type": "string" } },
+        "zone": {
+          "type": "string"
+        },
+        "podAnnotations": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
         "image": {
           "type": "object",
           "additionalProperties": false,
           "properties": {
-            "repository": { "type": "string" },
-            "tag": { "type": "string" },
-            "pullPolicy": { "type": "string", "enum": ["Always", "IfNotPresent", "Never"] }
+            "repository": {
+              "type": "string"
+            },
+            "tag": {
+              "type": "string"
+            },
+            "pullPolicy": {
+              "type": "string",
+              "enum": [
+                "Always",
+                "IfNotPresent",
+                "Never"
+              ]
+            }
           }
         },
         "resources": {
           "type": "object",
           "additionalProperties": false,
           "properties": {
-            "limits": { "type": "object", "additionalProperties": { "type": ["string", "integer", "number"] } },
-            "requests": { "type": "object", "additionalProperties": { "type": ["string", "integer", "number"] } },
-            "claims": { "type": "array", "items": { "type": "object" } }
+            "limits": {
+              "type": "object",
+              "additionalProperties": {
+                "type": [
+                  "string",
+                  "integer",
+                  "number"
+                ]
+              }
+            },
+            "requests": {
+              "type": "object",
+              "additionalProperties": {
+                "type": [
+                  "string",
+                  "integer",
+                  "number"
+                ]
+              }
+            },
+            "claims": {
+              "type": "array",
+              "items": {
+                "type": "object"
+              }
+            }
           }
         },
-        "nodeSelector": { "type": "object", "additionalProperties": { "type": "string" } },
-        "tolerations": { "type": "array", "items": { "type": "object" } },
-        "affinity": { "type": "object" },
+        "nodeSelector": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "tolerations": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          }
+        },
+        "affinity": {
+          "type": "object"
+        },
         "securityContext": {
           "type": "object",
           "properties": {
-            "allowPrivilegeEscalation": { "type": "boolean" },
-            "privileged": { "type": "boolean" },
-            "readOnlyRootFilesystem": { "type": "boolean" },
-            "runAsUser": { "type": "integer" },
-            "runAsGroup": { "type": "integer" },
-            "runAsNonRoot": { "type": "boolean" },
-            "procMount": { "type": "string" },
+            "allowPrivilegeEscalation": {
+              "type": "boolean"
+            },
+            "privileged": {
+              "type": "boolean"
+            },
+            "readOnlyRootFilesystem": {
+              "type": "boolean"
+            },
+            "runAsUser": {
+              "type": "integer"
+            },
+            "runAsGroup": {
+              "type": "integer"
+            },
+            "runAsNonRoot": {
+              "type": "boolean"
+            },
+            "procMount": {
+              "type": "string"
+            },
             "capabilities": {
               "type": "object",
               "additionalProperties": false,
               "properties": {
-                "add": { "type": "array", "items": { "type": "string" } },
-                "drop": { "type": "array", "items": { "type": "string" } }
+                "add": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "drop": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
               }
             },
-            "seLinuxOptions": { "type": "object" },
-            "seccompProfile": { "type": "object" },
-            "appArmorProfile": { "type": "object" },
-            "windowsOptions": { "type": "object" }
+            "seLinuxOptions": {
+              "type": "object"
+            },
+            "seccompProfile": {
+              "type": "object"
+            },
+            "appArmorProfile": {
+              "type": "object"
+            },
+            "windowsOptions": {
+              "type": "object"
+            }
           }
         },
         "podSecurityContext": {
           "type": "object",
           "properties": {
-            "runAsUser": { "type": "integer" },
-            "runAsGroup": { "type": "integer" },
-            "runAsNonRoot": { "type": "boolean" },
-            "fsGroup": { "type": "integer" },
-            "fsGroupChangePolicy": { "type": "string", "enum": ["OnRootMismatch", "Always"] },
-            "supplementalGroups": { "type": "array", "items": { "type": "integer" } },
-            "supplementalGroupsPolicy": { "type": "string" },
+            "runAsUser": {
+              "type": "integer"
+            },
+            "runAsGroup": {
+              "type": "integer"
+            },
+            "runAsNonRoot": {
+              "type": "boolean"
+            },
+            "fsGroup": {
+              "type": "integer"
+            },
+            "fsGroupChangePolicy": {
+              "type": "string",
+              "enum": [
+                "OnRootMismatch",
+                "Always"
+              ]
+            },
+            "supplementalGroups": {
+              "type": "array",
+              "items": {
+                "type": "integer"
+              }
+            },
+            "supplementalGroupsPolicy": {
+              "type": "string"
+            },
             "sysctls": {
               "type": "array",
               "items": {
                 "type": "object",
                 "additionalProperties": false,
-                "required": ["name", "value"],
+                "required": [
+                  "name",
+                  "value"
+                ],
                 "properties": {
-                  "name": { "type": "string" },
-                  "value": { "type": "string" }
+                  "name": {
+                    "type": "string"
+                  },
+                  "value": {
+                    "type": "string"
+                  }
                 }
               }
             },
-            "seLinuxOptions": { "type": "object" },
-            "seccompProfile": { "type": "object" },
-            "appArmorProfile": { "type": "object" },
-            "windowsOptions": { "type": "object" }
+            "seLinuxOptions": {
+              "type": "object"
+            },
+            "seccompProfile": {
+              "type": "object"
+            },
+            "appArmorProfile": {
+              "type": "object"
+            },
+            "windowsOptions": {
+              "type": "object"
+            }
           }
+        },
+        "pingGroupRange": {
+          "type": "boolean"
         }
       }
     },
@@ -174,70 +422,169 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "enabled": { "type": "boolean" },
-        "replicas": { "type": "integer", "minimum": 1 },
+        "enabled": {
+          "type": "boolean"
+        },
+        "replicas": {
+          "type": "integer",
+          "minimum": 1
+        },
         "image": {
           "type": "object",
           "additionalProperties": false,
           "properties": {
-            "repository": { "type": "string" },
-            "tag": { "type": "string" },
-            "pullPolicy": { "type": "string", "enum": ["Always", "IfNotPresent", "Never"] }
+            "repository": {
+              "type": "string"
+            },
+            "tag": {
+              "type": "string"
+            },
+            "pullPolicy": {
+              "type": "string",
+              "enum": [
+                "Always",
+                "IfNotPresent",
+                "Never"
+              ]
+            }
           }
         },
         "auth": {
           "type": "object",
           "additionalProperties": false,
           "properties": {
-            "mode": { "type": "string", "enum": ["anonymous", "local", "header", "oidc"] },
+            "mode": {
+              "type": "string",
+              "enum": [
+                "anonymous",
+                "local",
+                "header",
+                "oidc"
+              ]
+            },
             "anonymous": {
               "type": "object",
               "additionalProperties": false,
-              "properties": { "role": { "type": "string" } }
+              "properties": {
+                "role": {
+                  "description": "Fixed role for every anonymous request; one of the four built-ins.",
+                  "type": "string",
+                  "enum": [
+                    "viewer",
+                    "operator",
+                    "alert-editor",
+                    "admin"
+                  ]
+                }
+              }
             },
-            "defaultRole": { "type": "string" },
+            "defaultRole": {
+              "description": "Role for an authenticated subject no binding matches; empty means none. A custom role name is not resolved here \u2014 the console refuses it at startup.",
+              "type": "string",
+              "enum": [
+                "",
+                "viewer",
+                "operator",
+                "alert-editor",
+                "admin"
+              ]
+            },
             "local": {
               "type": "object",
               "additionalProperties": false,
               "properties": {
-                "bootstrapAdmin": { "type": "string" },
-                "existingSecret": { "type": "string" },
-                "existingSecretKey": { "type": "string" },
-                "secret": { "$ref": "#/$defs/managedSecret" }
+                "bootstrapAdmin": {
+                  "type": "string"
+                },
+                "existingSecret": {
+                  "type": "string"
+                },
+                "existingSecretKey": {
+                  "type": "string"
+                },
+                "secret": {
+                  "$ref": "#/$defs/managedSecret"
+                }
               }
             },
             "header": {
               "type": "object",
               "additionalProperties": false,
               "properties": {
-                "userHeader": { "type": "string" },
-                "groupsHeader": { "type": "string" },
-                "groupsDelimiter": { "type": "string" },
-                "trustedProxyCIDRs": { "type": "array", "items": { "type": "string" } }
+                "userHeader": {
+                  "type": "string"
+                },
+                "groupsHeader": {
+                  "type": "string"
+                },
+                "groupsDelimiter": {
+                  "type": "string"
+                },
+                "trustedProxyCIDRs": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
               }
             },
             "oidc": {
               "type": "object",
               "additionalProperties": false,
               "properties": {
-                "issuer": { "type": "string" },
-                "clientID": { "type": "string" },
-                "existingSecret": { "type": "string" },
-                "existingSecretKey": { "type": "string" },
-                "secret": { "$ref": "#/$defs/managedSecret" },
-                "redirectURL": { "type": "string" },
-                "scopes": { "type": "array", "items": { "type": "string" } },
-                "usernameClaim": { "type": "string" },
-                "groupsClaim": { "type": "string" }
+                "issuer": {
+                  "type": "string"
+                },
+                "clientID": {
+                  "type": "string"
+                },
+                "existingSecret": {
+                  "type": "string"
+                },
+                "existingSecretKey": {
+                  "type": "string"
+                },
+                "secret": {
+                  "$ref": "#/$defs/managedSecret"
+                },
+                "redirectURL": {
+                  "type": "string"
+                },
+                "scopes": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "usernameClaim": {
+                  "type": "string"
+                },
+                "groupsClaim": {
+                  "type": "string"
+                }
               }
             },
             "session": {
               "type": "object",
               "additionalProperties": false,
               "properties": {
-                "ttl": { "type": "string" },
-                "cookieName": { "type": "string" },
-                "secure": { "type": "boolean" }
+                "ttl": {
+                  "description": "Absolute session lifetime as a duration string. It has NO zero form: the console refuses to start on auth.session.ttl <= 0 (config.go), because a session with no lifetime is a session that never expires. Only idleTimeout below takes 0.",
+                  "type": "string"
+                },
+                "idleTimeout": {
+                  "description": "Duration string, or the integer 0 which disables the idle bound (documented in values.yaml and the READMEs).",
+                  "type": [
+                    "string",
+                    "integer"
+                  ]
+                },
+                "cookieName": {
+                  "type": "string"
+                },
+                "secure": {
+                  "type": "boolean"
+                }
               }
             }
           }
@@ -246,59 +593,40 @@
           "type": "object",
           "additionalProperties": false,
           "properties": {
-            "url": { "type": "string" },
-            "timeout": { "type": "string" },
-            "grpcAddr": { "type": "string" },
-            "grpcAddress": { "type": "string" }
+            "grpcAddr": {
+              "description": "REMOVED: renamed to grpcAddress. Permissive here so the template's own fail message, which says what to do, wins over a bare schema rejection.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "url": {
+              "type": "string"
+            },
+            "timeout": {
+              "type": "string"
+            },
+            "grpcAddress": {
+              "type": "string"
+            }
           }
         },
         "prometheus": {
           "type": "object",
           "additionalProperties": false,
           "properties": {
-            "url": { "type": "string" },
-            "queryTimeout": { "type": "string" },
-            "maxRange": { "type": "string" },
-            "maxResponseBytes": { "type": "integer", "minimum": 1 }
-          }
-        },
-        "valkey": {
-          "type": "object",
-          "additionalProperties": false,
-          "properties": {
-            "mode": {
-              "type": "string",
-              "enum": ["bundled",
-              "dependency", "external", "disabled"]
+            "url": {
+              "type": "string"
             },
-            "address": { "type": "string" },
-            "dialTimeout": { "type": "string" },
-            "existingSecret": { "type": "string" },
-            "existingSecretKey": { "type": "string" },
-            "secret": { "$ref": "#/$defs/managedSecret" },
-            "podSecurityContext": { "type": "object" },
-            "securityContext": { "type": "object" },
-            "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
-            "image": {
-              "type": "object",
-              "additionalProperties": false,
-              "properties": {
-                "repository": { "type": "string" },
-                "tag": { "type": "string" },
-                "pullPolicy": {
-                  "type": "string",
-                  "enum": ["Always", "IfNotPresent", "Never"]
-                }
-              }
+            "queryTimeout": {
+              "type": "string"
             },
-            "resources": {
-              "type": "object",
-              "additionalProperties": false,
-              "properties": {
-                "limits": { "type": "object", "additionalProperties": { "type": ["string", "integer", "number"] } },
-                "requests": { "type": "object", "additionalProperties": { "type": ["string", "integer", "number"] } },
-                "claims": { "type": "array", "items": { "type": "object" } }
-              }
+            "maxRange": {
+              "type": "string"
+            },
+            "maxResponseBytes": {
+              "type": "integer",
+              "minimum": 1
             }
           }
         },
@@ -306,16 +634,31 @@
           "type": "object",
           "additionalProperties": false,
           "properties": {
-            "runsPerMinute": { "type": "integer", "minimum": 0 },
-            "loginPerMinute": { "type": "integer", "minimum": 0 }
+            "runsPerMinute": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "loginPerMinute": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "promqlPerMinute": {
+              "description": "PromQL proxy requests per subject per minute; 0 disables the limit.",
+              "type": "integer",
+              "minimum": 0
+            }
           }
         },
         "scheduler": {
           "type": "object",
           "additionalProperties": false,
           "properties": {
-            "enabled": { "type": "boolean" },
-            "tickInterval": { "type": "string" }
+            "enabled": {
+              "type": "boolean"
+            },
+            "tickInterval": {
+              "type": "string"
+            }
           }
         },
         "mtr": {
@@ -326,37 +669,97 @@
               "type": "object",
               "additionalProperties": false,
               "properties": {
-                "enabled": { "type": "boolean" },
+                "enabled": {
+                  "type": "boolean"
+                },
                 "rdns": {
                   "type": "object",
                   "additionalProperties": false,
                   "properties": {
-                    "enabled": { "type": "boolean" },
-                    "timeoutMs": { "type": "integer", "minimum": 1 }
+                    "enabled": {
+                      "type": "boolean"
+                    },
+                    "timeoutMs": {
+                      "type": "integer",
+                      "minimum": 1
+                    }
                   }
                 },
                 "geoip": {
                   "type": "object",
                   "additionalProperties": false,
                   "properties": {
-                        "mode": { "type": "string", "enum": ["", "auto", "volume", "disabled"] },
-                        "editions": { "type": "array", "items": { "type": "string" } },
-                        "updateIntervalHours": { "type": "integer", "minimum": 0 },
-                        "reloadInterval": { "type": "string" },
-                        "image": { "type": "object" },
-                        "resources": { "type": "object" },
-                        "securityContext": { "type": "object" },
-                        "existingSecret": { "type": "string" },
-                        "accountIdKey": { "type": "string" },
-                        "licenseKeyKey": { "type": "string" },
-                        "secret": { "$ref": "#/$defs/managedSecret" },
-                    "asnPath": { "type": "string" },
-                    "cityPath": { "type": "string" },
-                    "volume": { "type": "object" }
+                    "mode": {
+                      "type": "string",
+                      "enum": [
+                        "",
+                        "auto",
+                        "volume",
+                        "disabled"
+                      ]
+                    },
+                    "editions": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "updateIntervalHours": {
+                      "type": "integer",
+                      "minimum": 1
+                    },
+                    "reloadInterval": {
+                      "description": "Duration string, or the integer 0 which never reloads (documented in values.yaml).",
+                      "type": [
+                        "string",
+                        "integer"
+                      ]
+                    },
+                    "image": {
+                      "type": "object"
+                    },
+                    "resources": {
+                      "type": "object"
+                    },
+                    "securityContext": {
+                      "type": "object"
+                    },
+                    "existingSecret": {
+                      "type": "string"
+                    },
+                    "accountIdKey": {
+                      "type": "string"
+                    },
+                    "licenseKeyKey": {
+                      "type": "string"
+                    },
+                    "secret": {
+                      "$ref": "#/$defs/managedSecret"
+                    },
+                    "asnPath": {
+                      "type": "string"
+                    },
+                    "cityPath": {
+                      "type": "string"
+                    },
+                    "volume": {
+                      "type": "object"
+                    }
                   }
                 },
-                "ttl": { "type": "string" }
+                "ttl": {
+                  "type": "string"
+                }
               }
+            }
+          }
+        },
+        "serviceAccount": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "name": {
+              "type": "string"
             }
           }
         },
@@ -364,120 +767,124 @@
           "type": "object",
           "additionalProperties": false,
           "properties": {
-            "enabled": { "type": "boolean" },
-            "namespace": { "type": "string" },
-            "resyncInterval": { "type": "string" }
+            "enabled": {
+              "type": "boolean"
+            },
+            "namespace": {
+              "type": "string"
+            },
+            "resyncInterval": {
+              "type": "string"
+            }
           }
         },
         "webhooks": {
           "type": "object",
           "additionalProperties": false,
           "properties": {
-            "existingSecret": { "type": "string" },
-            "existingSecretKey": { "type": "string" },
-            "secret": { "$ref": "#/$defs/managedSecret" },
             "encryptionKeySecret": {
-              "type": "object",
-              "additionalProperties": false,
-              "properties": {
-                "name": { "type": "string" },
-                "key": { "type": ["string", "null"] }
-              }
+              "description": "REMOVED: renamed to existingSecret / existingSecretKey. Permissive here so the template's own fail message wins over a bare schema rejection.",
+              "type": [
+                "object",
+                "null"
+              ]
             },
-            "alertPollInterval": { "type": "string" }
+            "existingSecret": {
+              "type": "string"
+            },
+            "existingSecretKey": {
+              "type": "string"
+            },
+            "secret": {
+              "$ref": "#/$defs/managedSecret"
+            },
+            "alertPollInterval": {
+              "type": "string"
+            }
           }
         },
         "alerting": {
           "type": "object",
           "additionalProperties": false,
           "properties": {
-            "enabled": { "type": "boolean" },
-            "namespace": { "type": "string" },
-            "syncInterval": { "type": "string" },
-            "bundleName": { "type": "string" }
+            "enabled": {
+              "type": "boolean"
+            },
+            "namespace": {
+              "type": "string"
+            },
+            "syncInterval": {
+              "type": "string"
+            },
+            "bundleName": {
+              "type": "string"
+            }
           }
         },
-        "securityContext": { "type": "object" },
+        "securityContext": {
+          "type": "object"
+        },
         "podSecurityContext": {
           "type": "object",
           "properties": {
-            "runAsUser": { "type": "integer" },
-            "runAsGroup": { "type": "integer" },
-            "runAsNonRoot": { "type": "boolean" },
-            "fsGroup": { "type": "integer" },
-            "fsGroupChangePolicy": { "type": "string", "enum": ["OnRootMismatch", "Always"] },
-            "supplementalGroups": { "type": "array", "items": { "type": "integer" } },
-            "supplementalGroupsPolicy": { "type": "string" },
+            "runAsUser": {
+              "type": "integer"
+            },
+            "runAsGroup": {
+              "type": "integer"
+            },
+            "runAsNonRoot": {
+              "type": "boolean"
+            },
+            "fsGroup": {
+              "type": "integer"
+            },
+            "fsGroupChangePolicy": {
+              "type": "string",
+              "enum": [
+                "OnRootMismatch",
+                "Always"
+              ]
+            },
+            "supplementalGroups": {
+              "type": "array",
+              "items": {
+                "type": "integer"
+              }
+            },
+            "supplementalGroupsPolicy": {
+              "type": "string"
+            },
             "sysctls": {
               "type": "array",
               "items": {
                 "type": "object",
                 "additionalProperties": false,
-                "required": ["name", "value"],
+                "required": [
+                  "name",
+                  "value"
+                ],
                 "properties": {
-                  "name": { "type": "string" },
-                  "value": { "type": "string" }
-                }
-              }
-            },
-            "seLinuxOptions": { "type": "object" },
-            "seccompProfile": { "type": "object" },
-            "appArmorProfile": { "type": "object" },
-            "windowsOptions": { "type": "object" }
-          }
-        },
-        "database": {
-          "type": "object",
-          "additionalProperties": false,
-          "properties": {
-            "mode": {
-              "type": "string",
-              "enum": ["cnpg", "external", "disabled"]
-            },
-            "existingSecret": { "type": "string" },
-            "existingSecretKey": { "type": "string" },
-            "secret": { "$ref": "#/$defs/managedSecret" },
-            "maxConns": { "type": "integer", "minimum": 1, "maximum": 1000 },
-            "connectTimeout": { "type": "string" },
-            "migrateOnStart": { "type": "boolean" },
-            "retentionDays": { "type": "integer", "minimum": 0, "maximum": 36500 },
-            "cnpg": {
-              "type": "object",
-              "additionalProperties": false,
-              "properties": {
-                "instances": { "type": "integer", "minimum": 1, "maximum": 16 },
-                "imageName": { "type": "string" },
-                "storage": {
-                  "type": "object",
-                  "additionalProperties": false,
-                  "properties": {
-                    "size": { "type": "string" },
-                    "storageClass": { "type": "string" }
-                  }
-                },
-                "resources": {
-                  "type": "object",
-                  "additionalProperties": false,
-                  "properties": {
-                    "limits": { "type": "object", "additionalProperties": { "type": ["string", "integer", "number"] } },
-                    "requests": { "type": "object", "additionalProperties": { "type": ["string", "integer", "number"] } },
-                    "claims": { "type": "array", "items": { "type": "object" } }
-                  }
-                },
-                "backup": {
-                  "type": "object",
-                  "additionalProperties": false,
-                  "properties": {
-                    "enabled": { "type": "boolean" },
-                    "schedule": { "type": "string" },
-                    "destinationPath": { "type": "string" },
-                    "endpointURL": { "type": "string" },
-                    "credentialsSecret": { "type": "string" },
-                    "existingSecret": { "type": "string" },
-                    "secret": { "$ref": "#/$defs/managedSecret" }
+                  "name": {
+                    "type": "string"
+                  },
+                  "value": {
+                    "type": "string"
                   }
                 }
               }
+            },
+            "seLinuxOptions": {
+              "type": "object"
+            },
+            "seccompProfile": {
+              "type": "object"
+            },
+            "appArmorProfile": {
+              "type": "object"
+            },
+            "windowsOptions": {
+              "type": "object"
             }
           }
         },
@@ -485,48 +892,144 @@
           "type": "object",
           "additionalProperties": false,
           "properties": {
-            "prometheusEgress": { "type": "array", "items": { "type": "object" } },
-            "valkeyEgress": { "type": "array", "items": { "type": "object" } },
-            "databaseEgress": { "type": "array", "items": { "type": "object" } },
-            "oidcEgress": { "type": "array", "items": { "type": "object" } },
-            "kubeAPIEgress": { "type": "array", "items": { "type": "object" } },
-            "geoipEgress": { "type": "array", "items": { "type": "object" } }
+            "ingressFrom": {
+              "type": "array",
+              "items": {
+                "type": "object"
+              }
+            },
+            "prometheusEgress": {
+              "type": "array",
+              "items": {
+                "type": "object"
+              }
+            },
+            "redisEgress": {
+              "description": "Egress rules to the Redis-compatible bus. Empty renders TCP 6379 to any pod or address.",
+              "type": "array",
+              "items": {
+                "type": "object"
+              }
+            },
+            "valkeyEgress": {
+              "description": "REMOVED: renamed to redisEgress. Permissive here so the template's own fail message, which says what to do, wins over a bare schema rejection.",
+              "type": [
+                "array",
+                "null"
+              ]
+            },
+            "valkeyIngressFrom": {
+              "description": "REMOVED: the chart installs no bus. Permissive here so the template's own fail message wins over a bare schema rejection.",
+              "type": [
+                "array",
+                "null"
+              ]
+            },
+            "databaseEgress": {
+              "type": "array",
+              "items": {
+                "type": "object"
+              }
+            },
+            "oidcEgress": {
+              "type": "array",
+              "items": {
+                "type": "object"
+              }
+            },
+            "kubeAPIEgress": {
+              "type": "array",
+              "items": {
+                "type": "object"
+              }
+            },
+            "geoipEgress": {
+              "type": "array",
+              "items": {
+                "type": "object"
+              }
+            },
+            "webhookEgress": {
+              "type": "array",
+              "items": {
+                "type": "object"
+              }
+            }
           }
         },
         "service": {
           "type": "object",
           "additionalProperties": false,
           "properties": {
-            "type": { "type": "string", "enum": ["ClusterIP", "NodePort", "LoadBalancer", "ExternalName"] },
-            "port": { "type": "integer", "minimum": 1, "maximum": 65535 }
+            "type": {
+              "type": "string",
+              "enum": [
+                "ClusterIP",
+                "NodePort",
+                "LoadBalancer",
+                "ExternalName"
+              ]
+            },
+            "port": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 65535
+            }
           }
         },
         "ingress": {
           "type": "object",
           "additionalProperties": false,
           "properties": {
-            "enabled": { "type": "boolean" },
-            "className": { "type": "string" },
-            "annotations": { "type": "object", "additionalProperties": { "type": "string" } },
+            "enabled": {
+              "type": "boolean"
+            },
+            "className": {
+              "type": "string"
+            },
+            "annotations": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "string"
+              }
+            },
             "hosts": {
               "type": "array",
               "items": {
                 "type": "object",
                 "additionalProperties": false,
-                "required": ["host"],
+                "required": [
+                  "host",
+                  "paths"
+                ],
                 "properties": {
-                  "host": { "type": "string" },
+                  "host": {
+                    "type": "string"
+                  },
                   "paths": {
                     "type": "array",
                     "items": {
                       "type": "object",
                       "additionalProperties": false,
-                      "required": ["path"],
+                      "required": [
+                        "path",
+                        "pathType"
+                      ],
                       "properties": {
-                        "path": { "type": "string" },
-                        "pathType": { "type": "string", "enum": ["Exact", "Prefix", "ImplementationSpecific"] }
+                        "path": {
+                          "type": "string"
+                        },
+                        "pathType": {
+                          "type": "string",
+                          "enum": [
+                            "Exact",
+                            "Prefix",
+                            "ImplementationSpecific"
+                          ]
+                        }
                       }
-                    }
+                    },
+                    "minItems": 1
                   }
                 }
               }
@@ -537,8 +1040,15 @@
                 "type": "object",
                 "additionalProperties": false,
                 "properties": {
-                  "secretName": { "type": "string" },
-                  "hosts": { "type": "array", "items": { "type": "string" } }
+                  "secretName": {
+                    "type": "string"
+                  },
+                  "hosts": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
                 }
               }
             }
@@ -548,36 +1058,128 @@
           "type": "object",
           "additionalProperties": false,
           "properties": {
-            "limits": { "type": "object", "additionalProperties": { "type": ["string", "integer", "number"] } },
-            "requests": { "type": "object", "additionalProperties": { "type": ["string", "integer", "number"] } },
-            "claims": { "type": "array", "items": { "type": "object" } }
+            "limits": {
+              "type": "object",
+              "additionalProperties": {
+                "type": [
+                  "string",
+                  "integer",
+                  "number"
+                ]
+              }
+            },
+            "requests": {
+              "type": "object",
+              "additionalProperties": {
+                "type": [
+                  "string",
+                  "integer",
+                  "number"
+                ]
+              }
+            },
+            "claims": {
+              "type": "array",
+              "items": {
+                "type": "object"
+              }
+            }
           }
         },
-        "nodeSelector": { "type": "object", "additionalProperties": { "type": "string" } },
-        "tolerations": { "type": "array", "items": { "type": "object" } },
-        "affinity": { "type": "object" },
+        "nodeSelector": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "tolerations": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          }
+        },
+        "affinity": {
+          "type": "object"
+        },
         "pdb": {
           "type": "object",
           "additionalProperties": false,
           "properties": {
-            "enabled": { "type": "boolean" },
-            "minAvailable": { "type": "integer", "minimum": 0 }
+            "enabled": {
+              "type": "boolean"
+            },
+            "minAvailable": {
+              "type": "integer",
+              "minimum": 0
+            }
           }
+        },
+        "database": {
+          "description": "REMOVED: moved to the top-level database.*. The chart fails with migration instructions.",
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "valkey": {
+          "description": "REMOVED: moved to the top-level redis.*. The chart fails with migration instructions.",
+          "type": [
+            "object",
+            "null"
+          ]
         }
       }
     },
     "config": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["httpPort", "grpcPort"],
+      "required": [
+        "httpPort",
+        "grpcPort"
+      ],
       "properties": {
-        "metricsPrefix": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" },
-        "httpPort": { "type": "integer", "minimum": 1, "maximum": 65535 },
-        "grpcPort": { "type": "integer", "minimum": 1, "maximum": 65535 },
-        "logLevel": { "type": "string", "enum": ["debug", "info", "warn", "error"] },
-        "logFormat": { "type": "string", "enum": ["json", "text"] },
-        "failureDomainLabel": { "type": "string" },
-        "controllerAgentTtl": { "type": "string" },
+        "metricsPrefix": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]*$"
+        },
+        "httpPort": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        },
+        "grpcPort": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        },
+        "logLevel": {
+          "type": "string",
+          "enum": [
+            "debug",
+            "info",
+            "warn",
+            "error"
+          ]
+        },
+        "logFormat": {
+          "type": "string",
+          "enum": [
+            "json",
+            "text"
+          ]
+        },
+        "failureDomainLabel": {
+          "type": "string"
+        },
+        "controllerAgentTtl": {
+          "type": "string",
+          "description": "Grace period before an agent without a heartbeat leaves the peer list. A Go duration of at least 10s (two agent heartbeats); the controller refuses anything shorter, and 0 is not how eviction is disabled.",
+          "pattern": "^[0-9]+(\\.[0-9]+)?(ns|us|ms|s|m|h)(([0-9]+(\\.[0-9]+)?(ns|us|ms|s|m|h))*)$",
+          "not": {
+            "description": "A zero TTL is not how eviction is disabled: the controller derives a ticker period from it and refuses to start.",
+            "pattern": "^0+(\\.0+)?(ns|us|ms|s|m|h)$"
+          }
+        },
         "checkers": {
           "type": "object",
           "additionalProperties": false,
@@ -586,59 +1188,122 @@
               "type": "object",
               "additionalProperties": false,
               "properties": {
-                "enabled": { "type": "boolean" },
-                "interval": { "type": "string" },
-                "timeout": { "type": "string" }
+                "enabled": {
+                  "type": "boolean"
+                },
+                "interval": {
+                  "type": "string"
+                },
+                "timeout": {
+                  "type": "string"
+                }
               }
             },
             "udp": {
               "type": "object",
               "additionalProperties": false,
               "properties": {
-                "enabled": { "type": "boolean" },
-                "interval": { "type": "string" },
-                "timeout": { "type": "string" },
-                "packets": { "type": "integer", "minimum": 1, "maximum": 100 }
+                "enabled": {
+                  "type": "boolean"
+                },
+                "interval": {
+                  "type": "string"
+                },
+                "timeout": {
+                  "type": "string"
+                },
+                "packets": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 100
+                }
               }
             },
             "icmp": {
               "type": "object",
               "additionalProperties": false,
               "properties": {
-                "enabled": { "type": "boolean" },
-                "interval": { "type": "string" },
-                "timeout": { "type": "string" }
+                "enabled": {
+                  "type": "boolean"
+                },
+                "interval": {
+                  "type": "string"
+                },
+                "timeout": {
+                  "type": "string"
+                }
               }
             },
             "dns": {
               "type": "object",
               "additionalProperties": false,
               "properties": {
-                "enabled": { "type": "boolean" },
-                "interval": { "type": "string" },
-                "timeout": { "type": "string" },
-                "hosts": { "type": "array", "items": { "type": "string" } },
-                "resolvers": { "type": "array", "items": { "type": "string" } }
+                "enabled": {
+                  "type": "boolean"
+                },
+                "interval": {
+                  "type": "string"
+                },
+                "timeout": {
+                  "type": "string"
+                },
+                "hosts": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "resolvers": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
               }
             },
             "http": {
               "type": "object",
               "additionalProperties": false,
               "properties": {
-                "enabled": { "type": "boolean" },
-                "interval": { "type": "string" },
-                "timeout": { "type": "string" },
+                "enabled": {
+                  "type": "boolean"
+                },
+                "interval": {
+                  "type": "string"
+                },
+                "timeout": {
+                  "type": "string"
+                },
                 "targets": {
                   "type": "array",
                   "items": {
                     "type": "object",
                     "additionalProperties": false,
-                    "required": ["url"],
+                    "required": [
+                      "url"
+                    ],
                     "properties": {
-                      "url": { "type": "string", "format": "uri" },
-                      "method": { "type": "string", "enum": ["GET", "HEAD"] },
-                      "expectStatus": { "type": "integer" },
-                      "bodyPattern": { "type": "string" }
+                      "url": {
+                        "type": "string",
+                        "format": "uri"
+                      },
+                      "method": {
+                        "type": "string",
+                        "enum": [
+                          "GET",
+                          "HEAD"
+                        ]
+                      },
+                      "expectStatus": {
+                        "type": "integer"
+                      },
+                      "bodyPattern": {
+                        "type": "string"
+                      },
+                      "insecureSkipVerify": {
+                        "type": "boolean",
+                        "description": "Per-target opt-out from certificate verification for the node-local HTTP checker. Off by default -- certificates ARE verified; documented in docs/configuration.md."
+                      }
                     }
                   }
                 }
@@ -648,22 +1313,51 @@
               "type": "object",
               "additionalProperties": false,
               "properties": {
-                "cooldown": { "type": "string" },
-                "maxHops": { "type": "integer", "minimum": 1, "maximum": 64 }
+                "cooldown": {
+                  "type": "string"
+                },
+                "maxHops": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 64
+                }
               }
             },
             "external": {
               "type": "object",
               "additionalProperties": false,
               "properties": {
-                "enabled": { "type": "boolean" },
-                "allowedCidrs": { "type": "array", "items": { "type": "string" } },
-                "deniedCidrs": { "type": "array", "items": { "type": "string" } },
-                "maxTargets": { "type": "integer", "minimum": 0 },
-                "timeout": { "type": "string" }
+                "enabled": {
+                  "type": "boolean"
+                },
+                "allowedCidrs": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "deniedCidrs": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "maxTargets": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "timeout": {
+                  "type": "string"
+                }
               }
             }
           }
+        },
+        "metricsPort": {
+          "description": "Port serving /metrics and the health endpoints, separate from the API port.",
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
         }
       }
     },
@@ -671,71 +1365,264 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "enabled": { "type": "boolean" },
-        "namespace": { "type": "string" },
-        "label": { "type": "string" },
-        "labelValue": { "type": "string" },
-        "folder": { "type": "string" },
-        "extraLabels": { "type": "object", "additionalProperties": { "type": "string" } },
-        "annotations": { "type": "object", "additionalProperties": { "type": "string" } }
+        "enabled": {
+          "type": "boolean"
+        },
+        "namespace": {
+          "type": "string"
+        },
+        "label": {
+          "type": "string"
+        },
+        "labelValue": {
+          "type": "string"
+        },
+        "folder": {
+          "type": "string"
+        },
+        "extraLabels": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "annotations": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        }
       }
     },
     "serviceMonitor": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "enabled": { "type": "boolean" },
-        "interval": { "type": "string" }
+        "enabled": {
+          "type": "boolean"
+        },
+        "interval": {
+          "type": "string"
+        }
       }
     },
     "prometheusRule": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "enabled": { "type": "boolean" },
-        "udpLossHigh": { "$ref": "#/$defs/thresholdAlert" },
-        "tcpChecksFailing": { "$ref": "#/$defs/thresholdAlert" },
-        "pairWentSilent": { "$ref": "#/$defs/alert" },
-        "dnsChecksFailing": { "$ref": "#/$defs/thresholdAlert" },
-        "externalChecksFailing": { "$ref": "#/$defs/thresholdAlert" },
-        "kconmonAgentsMissing": { "$ref": "#/$defs/alert" },
-        "kconmonControllerDown": { "$ref": "#/$defs/alert" },
-        "additionalRules": { "type": "array", "items": { "type": "object" } },
-        "rules": { "type": "array", "items": { "type": "object" } }
+        "rules": {
+          "description": "REMOVED: the pre-1.12 full-override list. Permissive here so the template's own fail message wins over a bare schema rejection.",
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "udpLossHigh": {
+          "$ref": "#/$defs/thresholdAlert"
+        },
+        "tcpChecksFailing": {
+          "$ref": "#/$defs/thresholdAlert"
+        },
+        "pairWentSilent": {
+          "$ref": "#/$defs/alert"
+        },
+        "dnsChecksFailing": {
+          "$ref": "#/$defs/thresholdAlert"
+        },
+        "externalChecksFailing": {
+          "$ref": "#/$defs/thresholdAlert"
+        },
+        "kconmonAgentsMissing": {
+          "$ref": "#/$defs/alert"
+        },
+        "kconmonControllerDown": {
+          "$ref": "#/$defs/alert"
+        },
+        "additionalRules": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          }
+        }
       }
     },
     "networkPolicy": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "enabled": { "type": "boolean" },
-        "prometheusNamespace": { "type": "string" },
-        "kubeAPIEgress": { "type": "array", "items": { "type": "object" } },
-        "externalEgress": { "type": "array", "items": { "type": "object" } },
-        "httpEgress": { "type": "array", "items": { "type": "object" } },
-        "resolverEgress": { "type": "array", "items": { "type": "object" } }
-      }
-    },
-    "pdb": {
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "enabled": { "type": "boolean" },
-        "minAvailable": { "type": "integer", "minimum": 0 }
+        "enabled": {
+          "type": "boolean"
+        },
+        "prometheusNamespace": {
+          "type": "string"
+        },
+        "kubeAPIEgress": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          }
+        },
+        "externalEgress": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          }
+        },
+        "httpEgress": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          }
+        },
+        "resolverEgress": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          }
+        },
+        "prometheusPodLabels": {
+          "description": "Pod labels of the scraper; empty admits the whole prometheusNamespace on the metrics port.",
+          "type": "object"
+        },
+        "cnpgOperatorNamespace": {
+          "type": [
+            "string",
+            "object",
+            "null"
+          ],
+          "description": "REMOVED. Permissive here so the template's own fail message, which says what to do, wins over a bare schema rejection."
+        },
+        "cnpgOperatorPodLabels": {
+          "type": [
+            "string",
+            "object",
+            "null"
+          ],
+          "description": "REMOVED. Permissive here so the template's own fail message, which says what to do, wins over a bare schema rejection."
+        }
       }
     },
     "rbac": {
       "type": "object",
       "additionalProperties": false,
-      "properties": { "create": { "type": "boolean" } }
+      "properties": {
+        "create": {
+          "type": "boolean"
+        }
+      }
     },
     "serviceAccount": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "create": { "type": "boolean" },
-        "name": { "type": "string" }
+        "create": {
+          "type": "boolean"
+        },
+        "name": {
+          "type": "string"
+        }
       }
+    },
+    "database": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "existingSecret": {
+          "description": "Secret holding a full postgres:// DSN; setting it enables the database.",
+          "type": "string"
+        },
+        "existingSecretKey": {
+          "type": "string"
+        },
+        "secret": {
+          "$ref": "#/$defs/managedSecret"
+        },
+        "maxConns": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "connectTimeout": {
+          "type": "string"
+        },
+        "migrateOnStart": {
+          "type": "boolean"
+        },
+        "retentionDays": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "mode": {
+          "description": "REMOVED \u2014 a DSN is the whole configuration. The chart fails with instructions.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "cnpg": {
+          "description": "REMOVED \u2014 the chart does not install PostgreSQL. The chart fails with instructions.",
+          "type": [
+            "object",
+            "null"
+          ]
+        }
+      }
+    },
+    "redis": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "existingSecret": {
+          "description": "Secret holding a full redis:// DSN; setting it enables the shared bus.",
+          "type": "string"
+        },
+        "existingSecretKey": {
+          "type": "string"
+        },
+        "secret": {
+          "$ref": "#/$defs/managedSecret"
+        },
+        "dialTimeout": {
+          "type": "string"
+        },
+        "mode": {
+          "description": "REMOVED \u2014 a DSN is the whole configuration. The chart fails with instructions.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "address": {
+          "description": "REMOVED \u2014 the DSN carries the host. The chart fails with instructions.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "pdb": {
+      "description": "MOVED to controller.pdb. The chart fails with instructions.",
+      "type": [
+        "object",
+        "null"
+      ]
+    },
+    "valkey": {
+      "description": "REMOVED \u2014 no subcharts. The chart fails with instructions.",
+      "type": [
+        "object",
+        "null"
+      ]
+    },
+    "cnpg-operator": {
+      "description": "REMOVED \u2014 no subcharts. The chart fails with instructions.",
+      "type": [
+        "object",
+        "null"
+      ]
     }
   }
 }

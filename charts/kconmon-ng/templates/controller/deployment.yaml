@@ -1,7 +1,10 @@
+{{- if and (gt (int .Values.controller.replicaCount) 1) (not .Values.controller.leaderElection) }}
+{{- fail "controller.replicaCount > 1 with controller.leaderElection=false: every replica accepts registrations through the ClusterIP Service and serves peer lists from its OWN registry, so the agents split into that many disjoint meshes and every cross-partition link goes unprobed -- with no alert, because the leader metric the alerts key on is never published either" }}
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {{ include "kconmon-ng.fullname" . }}-controller
+  name: {{ include "kconmon-ng.controller.fullname" . }}
   labels:
     {{- include "kconmon-ng.labels" . | nindent 4 }}
     app.kubernetes.io/component: controller
@@ -52,12 +55,28 @@ spec:
             - name: http
               containerPort: {{ .Values.config.httpPort }}
               protocol: TCP
+            - name: metrics
+              containerPort: {{ .Values.config.metricsPort }}
+              protocol: TCP
             - name: grpc
               containerPort: {{ .Values.config.grpcPort }}
               protocol: TCP
           env:
             - name: KCONMON_NG_CONFIG
               value: /etc/kconmon-ng/config.yaml
+            {{- if .Values.controller.leaderElection }}
+            {{- /* Lease identity and location; the pod name is what shows up as the lease holder. */}}
+            - name: KCONMON_NG_POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: KCONMON_NG_POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: KCONMON_NG_LEASE_NAME
+              value: {{ include "kconmon-ng.controller.fullname" . }}
+            {{- end }}
           volumeMounts:
             - name: config
               mountPath: /etc/kconmon-ng

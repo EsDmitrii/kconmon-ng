@@ -1,10 +1,15 @@
 ---
-# The combination whose absence hid the missing geoipupdate egress: NetworkPolicy
-# and geoip auto ON together, plus every checker that needs its own egress rule.
+redis:
+  existingSecret: valkey-auth
+database:
+  existingSecret: console-dsn
 networkPolicy:
   enabled: true
   prometheusNamespace: monitoring
-
+  externalEgress:
+    - to:
+        - ipBlock:
+            cidr: 10.0.0.0/8
 config:
   checkers:
     icmp:
@@ -17,19 +22,11 @@ config:
       enabled: true
       allowedCidrs:
         - 10.0.0.0/8
-
 console:
   enabled: true
   replicas: 1
   prometheus:
     url: http://prometheus-operated.monitoring:9090
-  database:
-    mode: external
-    existingSecret: console-dsn
-  valkey:
-    mode: external
-    address: valkey.data.svc.cluster.local:6379
-    existingSecret: valkey-auth
   mtr:
     enrichment:
       enabled: true

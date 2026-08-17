@@ -5,16 +5,16 @@
 {{- fail "auth.mode=header requires a non-empty console.auth.header.trustedProxyCIDRs: without it any client could set X-Remote-User and authenticate as anyone" }}
 {{- end }}
 {{- /* Keyed on the resolved auth mode: local/oidc need PostgreSQL. */}}
-{{- if and (has .Values.console.auth.mode (list "local" "oidc")) (eq .Values.console.database.mode "disabled") }}
-{{- fail "auth.mode=local|oidc requires console.database.mode=cnpg|external (users, tokens and the audit log live in PostgreSQL, SECURITY.md §10.1)" }}
+{{- if and (has .Values.console.auth.mode (list "local" "oidc")) (not (include "kconmon-ng.console.hasDatabase" .)) }}
+{{- fail "auth.mode=local|oidc requires a database (users, tokens and the audit log live in PostgreSQL): set database.existingSecret to a Secret holding a postgres:// DSN, or database.secret.create=true" }}
 {{- end }}
 {{- /* Keyed on the resolved auth mode: local/oidc sessions need Valkey past one replica. */}}
-{{- if and (has .Values.console.auth.mode (list "local" "oidc")) (eq .Values.console.valkey.mode "disabled") (gt (int .Values.console.replicas) 1) }}
-{{- fail "auth.mode=local|oidc with console.valkey.mode=disabled requires console.replicas=1 (sessions live in Valkey per DATA.md §5.3; the in-process KV has no cross-replica visibility, so a browser load-balanced to another replica would be logged out at random): set console.valkey.mode=bundled|external or console.replicas=1" }}
+{{- if and (has .Values.console.auth.mode (list "local" "oidc")) (not (include "kconmon-ng.console.hasRedis" .)) (gt (int .Values.console.replicas) 1) }}
+{{- fail "auth.mode=local|oidc with no Redis-compatible bus requires console.replicas=1 (sessions live in that bus; the in-process KV has no cross-replica visibility, so a browser load-balanced to another replica would be logged out at random): set redis.existingSecret to a Secret holding a redis:// DSN, or console.replicas=1" }}
 {{- end }}
 {{- /* Keyed on the resolved gRPC address: an explicit grpcAddr is still realtime-on. */}}
-{{- if and (include "kconmon-ng.console.controllerGRPCAddr" .) (eq .Values.console.valkey.mode "disabled") (gt (int .Values.console.replicas) 1) }}
-{{- fail "realtime events with console.valkey.mode=disabled require console.replicas=1 (the in-process bus has no cross-replica fan-out, ADR-002): set console.valkey.mode=bundled|external or console.replicas=1" }}
+{{- if and (include "kconmon-ng.console.controllerGRPCAddr" .) (not (include "kconmon-ng.console.hasRedis" .)) (gt (int .Values.console.replicas) 1) }}
+{{- fail "realtime events with no Redis-compatible bus require console.replicas=1 (the in-process bus has no cross-replica fan-out): set redis.existingSecret to a Secret holding a redis:// DSN, or console.replicas=1" }}
 {{- end }}
 {{- /* mode=volume must actually supply a volume, or geoip would be silently off. */}}
 {{- if and (eq (include "kconmon-ng.console.geoipMode" .) "volume") (not .Values.console.mtr.enrichment.geoip.volume) }}
@@ -30,6 +30,7 @@ metadata:
 data:
   config.yaml: |
     httpPort: {{ .Values.console.service.port }}
+    metricsPort: {{ .Values.config.metricsPort }}
     logLevel: {{ .Values.config.logLevel | quote }}
     logFormat: {{ .Values.config.logFormat | quote }}
     metricsPrefix: {{ .Values.config.metricsPrefix | quote }}
@@ -62,7 +63,24 @@ data:
         issuer: {{ .Values.console.auth.oidc.issuer | quote }}
         clientID: {{ .Values.console.auth.oidc.clientID | quote }}
         clientSecretFile: "/etc/kconmon-ng-console-secrets/oidc-client-secret"
-        redirectURL: {{ .Values.console.auth.oidc.redirectURL | quote }}
+        {{- /* The console REFUSES to start on a redirectURL that does not end with the callback path
+               (internal/console/config: it is the route the SPA's OIDC flow returns to, not a page).
+               Without this guard `helm template` and `helm lint` both passed and the pod went
+               straight into CrashLoopBackOff on a fresh OIDC install -- and the chart's own CI values
+               file shipped exactly such a URL. */}}
+        {{- /* Checked WHOLE, not just its suffix: the empty default and a scheme-less value both slid
+               past a suffix-only test and produced the same CrashLoopBackOff the guard exists to
+               prevent. The console requires an absolute http(s) URL ending in the callback path.
+               The SCHEME alone is case-insensitive, matching url.Parse, which lowercases it before
+               the console compares -- a case-sensitive test refused HTTPS:// installs that run fine
+               today. The PATH stays case-sensitive because the console's own suffix check is. */}}
+        {{- $redirect := .Values.console.auth.oidc.redirectURL }}
+        {{- if eq .Values.console.auth.mode "oidc" }}
+        {{- if not (regexMatch "^(?i:https?)://[^[:space:]]+/api/v1/auth/oidc/callback$" ($redirect | toString)) }}
+        {{- fail (printf "console.auth.oidc.redirectURL must be an absolute http(s) URL ending with /api/v1/auth/oidc/callback (got %q) -- the console refuses to start otherwise. Register that exact URL with your IdP." $redirect) }}
+        {{- end }}
+        {{- end }}
+        redirectURL: {{ $redirect | quote }}
         scopes:
           {{- toYaml .Values.console.auth.oidc.scopes | nindent 10 }}
         usernameClaim: {{ .Values.console.auth.oidc.usernameClaim | quote }}
@@ -70,13 +88,14 @@ data:
       {{- end }}
       session:
         ttl: {{ .Values.console.auth.session.ttl | quote }}
+        idleTimeout: {{ .Values.console.auth.session.idleTimeout | quote }}
         cookieName: {{ .Values.console.auth.session.cookieName | quote }}
         secure: {{ .Values.console.auth.session.secure }}
     controller:
       {{- if .Values.console.controller.url }}
       url: {{ .Values.console.controller.url | quote }}
       {{- else }}
-      url: "http://{{ include "kconmon-ng.fullname" . }}-controller:{{ .Values.config.httpPort }}"
+      url: "http://{{ include "kconmon-ng.controller.fullname" . }}:{{ .Values.config.httpPort }}"
       {{- end }}
       timeout: {{ .Values.console.controller.timeout | quote }}
       grpcAddr: {{ include "kconmon-ng.console.controllerGRPCAddr" . | quote }}
@@ -85,23 +104,23 @@ data:
       queryTimeout: {{ .Values.console.prometheus.queryTimeout | quote }}
       maxRange: {{ .Values.console.prometheus.maxRange | quote }}
       maxResponseBytes: {{ .Values.console.prometheus.maxResponseBytes | int64 }}
-    valkey:
-      address: {{ include "kconmon-ng.console.valkeyAddress" . | quote }}
-      dialTimeout: {{ .Values.console.valkey.dialTimeout | quote }}
-      {{- with (include "kconmon-ng.console.valkeySecretName" .) }}
-      passwordFile: "/etc/kconmon-ng-console-secrets/valkey-password"
+    redis:
+      {{- if include "kconmon-ng.console.hasRedis" . }}
+      dsnFile: "/etc/kconmon-ng-console-secrets/redis-dsn"
       {{- end }}
-    {{- if ne .Values.console.database.mode "disabled" }}
+      dialTimeout: {{ .Values.redis.dialTimeout | quote }}
+    {{- if include "kconmon-ng.console.hasDatabase" . }}
     database:
       dsnFile: "/etc/kconmon-ng-console-secrets/database-dsn"
-      maxConns: {{ .Values.console.database.maxConns | int }}
-      connectTimeout: {{ .Values.console.database.connectTimeout | quote }}
-      migrateOnStart: {{ .Values.console.database.migrateOnStart }}
-      retentionDays: {{ .Values.console.database.retentionDays | int }}
+      maxConns: {{ .Values.database.maxConns | int }}
+      connectTimeout: {{ .Values.database.connectTimeout | quote }}
+      migrateOnStart: {{ .Values.database.migrateOnStart }}
+      retentionDays: {{ .Values.database.retentionDays | int }}
     {{- end }}
     rateLimit:
       runsPerMinute: {{ .Values.console.rateLimit.runsPerMinute | int }}
       loginPerMinute: {{ .Values.console.rateLimit.loginPerMinute | int }}
+      promqlPerMinute: {{ .Values.console.rateLimit.promqlPerMinute | int }}
     {{- /* Emitted only when ON; the one gate covers all three consumers. */}}
     {{- if .Values.console.scheduler.enabled }}
     scheduler:
@@ -110,6 +129,11 @@ data:
     {{- end }}
     {{- /* Emitted only when ON: a pre-M5 console image would crashloop on an unknown key. */}}
     {{- if .Values.console.mtr.enrichment.enabled }}
+    {{- /* The console REFUSES this config at boot ("every source is off") and CrashLoopBackOffs, so
+           the chart says so at render time — the same treatment the two geoip misconfigurations get. */}}
+    {{- if and (not .Values.console.mtr.enrichment.rdns.enabled) (not (include "kconmon-ng.console.geoipEnabled" .)) }}
+    {{- fail "console.mtr.enrichment.enabled=true with every source off: set console.mtr.enrichment.rdns.enabled=true and/or console.mtr.enrichment.geoip.mode=auto|volume" }}
+    {{- end }}
     mtr:
       enrichment:
         enabled: true
@@ -143,7 +167,11 @@ data:
     {{- end }}
     {{- /* Emitted only when ON; without a database the binary skips the reconciler. */}}
     {{- if .Values.console.alerting.enabled }}
-    {{- if and .Values.console.alerting.namespace (ne .Values.console.alerting.namespace .Release.Namespace) }}
+    {{- /* Only when THIS chart renders the Role. With rbac.create=false the operator manages RBAC
+           themselves — that is the whole point of the switch — and may well have created the
+           prometheusrules Role in the namespace they named, so refusing to render told them the
+           chart's Role would 403 when the chart renders no Role at all. */}}
+    {{- if and .Values.rbac.create .Values.console.alerting.namespace (ne .Values.console.alerting.namespace .Release.Namespace) }}
     {{- fail (printf "console.alerting.namespace=%q but the chart renders the prometheusrules Role into %q — the reconciler would get a permanent 403. Leave it empty to use the release namespace, or install the chart into %q" .Values.console.alerting.namespace .Release.Namespace .Values.console.alerting.namespace) }}
     {{- end }}
     alerting:

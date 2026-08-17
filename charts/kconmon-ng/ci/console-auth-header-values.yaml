@@ -3,7 +3,7 @@
 # half of the auth gap: header mode had no profile at all).
 #
 # Header mode is the ONLY non-anonymous mode that renders with
-# console.database.mode=disabled — identity comes from a header a trusted
+# database.mode=disabled — identity comes from a header a trusted
 # in-cluster reverse proxy sets, there is no session cookie, no users table and
 # no bootstrap admin — so this profile deliberately leaves the database OFF.
 # That is the render shape no other console profile has: a non-anonymous
@@ -18,7 +18,9 @@
 # below are real, parseable ones (a pod CIDR and its IPv6 counterpart).
 console:
   enabled: true
-  replicas: 2
+  # ONE, because this profile has no redis and the chart refuses the pair (a bus is what makes
+  # sessions and the rate-limit counters shared). Nothing here is about replica counts.
+  replicas: 1
   auth:
     mode: header
     header:

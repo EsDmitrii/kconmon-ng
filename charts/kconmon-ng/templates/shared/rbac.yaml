@@ -1,4 +1,7 @@
 {{- if .Values.rbac.create }}
+{{- if and (not .Values.serviceAccount.create) (not .Values.serviceAccount.name) }}
+{{- fail "rbac.create=true with serviceAccount.create=false requires serviceAccount.name: an empty name resolves to the namespace's DEFAULT ServiceAccount, so these bindings would grant every pod in the namespace the controller's node access and the console's PrometheusRule writes (set serviceAccount.name, or set rbac.create=false and manage RBAC yourself)" }}
+{{- end }}
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -24,6 +27,37 @@ subjects:
   - kind: ServiceAccount
     name: {{ include "kconmon-ng.serviceAccountName" . }}
     namespace: {{ .Release.Namespace }}
+{{- if .Values.controller.leaderElection }}
+---
+{{/* The controller's leader Lease: namespaced, and only the verbs client-go's LeaseLock issues. */}}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "kconmon-ng.fullname" . }}-leader-election
+  labels:
+    {{- include "kconmon-ng.labels" . | nindent 4 }}
+    app.kubernetes.io/component: controller
+rules:
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "create", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "kconmon-ng.fullname" . }}-leader-election
+  labels:
+    {{- include "kconmon-ng.labels" . | nindent 4 }}
+    app.kubernetes.io/component: controller
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "kconmon-ng.fullname" . }}-leader-election
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "kconmon-ng.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}
 {{- end }}
 {{- if and .Values.console.enabled .Values.console.kubernetesContext.enabled .Values.rbac.create }}
 ---
@@ -58,7 +92,7 @@ subjects:
 {{- end }}
 {{- if and .Values.console.enabled .Values.console.alerting.enabled .Values.rbac.create }}
 ---
-{{/* Alerting reconciler grant: a namespaced Role, no delete verb. */}}
+{{/* Alerting reconciler grant: a namespaced Role whose verbs match the promrules client exactly. */}}
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
@@ -69,7 +103,7 @@ metadata:
 rules:
   - apiGroups: ["monitoring.coreos.com"]
     resources: ["prometheusrules"]
-    verbs: ["get", "list", "watch", "create", "update", "patch"]
+    verbs: ["get", "list", "create", "patch", "delete"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

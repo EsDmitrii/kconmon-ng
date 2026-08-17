@@ -1,21 +1,14 @@
 ---
-# Console + oidc auth values for chart testing (Task 18's M3 Phase B/C auth
-# surface: auth.mode=oidc, external PostgreSQL with a dummy existingSecret,
-# realtime with the bundled Valkey, replicas=2, NetworkPolicy on). Exercises
-# a full config.yaml render for a non-anonymous mode together with the oidc
-# egress rule and the session/database render guards, rather than only their
-# individual failure paths (covered separately in the verification block).
+redis:
+  existingSecret: kconmon-console-redis
+database:
+  existingSecret: console-db-dummy
 controller:
   events:
     enabled: true
 console:
   enabled: true
   replicas: 2
-  valkey:
-    mode: bundled
-  database:
-    mode: external
-    existingSecret: console-db-dummy
   auth:
     mode: oidc
     oidc:

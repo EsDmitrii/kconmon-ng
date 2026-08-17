@@ -76,10 +76,16 @@ spec:
       tolerations:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-      {{- /* fsGroup is what lets the nonroot process read the 0440 projected Secret files. */}}
-      {{- if and (include "kconmon-ng.console.secretsVolumeEnabled" .) .Values.console.podSecurityContext }}
+      {{- /* fsGroup is what lets the nonroot process read the 0440 projected Secret files, so it
+             drops when there is no such volume -- but runAsNonRoot and the rest of the context are
+             what a restricted-PSS namespace admits the pod on, and they stay either way. */}}
+      {{- $psc := .Values.console.podSecurityContext }}
+      {{- if not (include "kconmon-ng.console.secretsVolumeEnabled" .) }}
+      {{- $psc = omit ($psc | default dict) "fsGroup" }}
+      {{- end }}
+      {{- with $psc }}
       securityContext:
-        {{- toYaml .Values.console.podSecurityContext | nindent 8 }}
+        {{- toYaml . | nindent 8 }}
       {{- end }}
       {{- /* A console-only ServiceAccount, only when a feature needs an identity. */}}
       {{- if include "kconmon-ng.console.k8sIdentity" . }}
@@ -99,6 +105,11 @@ spec:
           ports:
             - name: http
               containerPort: {{ .Values.console.service.port }}
+              protocol: TCP
+            # /metrics and the health endpoints, on a listener of their OWN: the API port serves the
+            # whole Console API, and a NetworkPolicy cannot admit a scraper to one path only.
+            - name: metrics
+              containerPort: {{ .Values.config.metricsPort }}
               protocol: TCP
           env:
             - name: KCONMON_NG_CONSOLE_CONFIG
@@ -157,7 +168,7 @@ spec:
           projected:
             defaultMode: 0440
             sources:
-              {{- if ne .Values.console.database.mode "disabled" }}
+              {{- if include "kconmon-ng.console.hasDatabase" . }}
               - secret:
                   name: {{ include "kconmon-ng.console.databaseSecretName" . }}
                   items:
@@ -172,12 +183,13 @@ spec:
                     - key: {{ include "kconmon-ng.console.webhooksKeyName" $ }}
                       path: webhooks-encryption-key
               {{- end }}
-              {{- with (include "kconmon-ng.console.valkeySecretName" .) }}
+              {{- /* Path must match redis.dsnFile in configmap.yaml. */}}
+              {{- with (include "kconmon-ng.console.redisSecretName" .) }}
               - secret:
                   name: {{ . }}
                   items:
-                    - key: {{ $.Values.console.valkey.existingSecretKey }}
-                      path: valkey-password
+                    - key: {{ $.Values.redis.existingSecretKey }}
+                      path: redis-dsn
               {{- end }}
               {{- if and (eq .Values.console.auth.mode "local") .Values.console.auth.local.bootstrapAdmin }}
               - secret:

@@ -1,0 +1,44 @@
+{{- if .Values.prometheusRule.enabled }}
+{{- $prefix := .Values.config.metricsPrefix }}
+{{- $rules := include "kconmon-ng.prometheusRule.builtinRules" . | fromYamlArray }}
+{{- $extra := .Values.prometheusRule.additionalRules | default list }}
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ include "kconmon-ng.fullname" . }}
+  labels:
+    {{- include "kconmon-ng.labels" . | nindent 4 }}
+spec:
+  groups:
+    - name: kconmon-ng
+      rules:{{ if and (not $rules) (not $extra) }} []{{ end }}
+        {{- /* The BUILT-INS are re-rendered field by field, because the per-rule knobs
+               (prometheusRule.<alertName>.{enabled,threshold,for,severity}) rewrite them. */}}
+        {{- range $rules }}
+        - alert: {{ .alert }}
+          expr: {{ .expr | quote }}
+          {{- if .for }}
+          for: {{ .for }}
+          {{- end }}
+          {{- if .labels }}
+          labels:
+            {{- toYaml .labels | nindent 12 }}
+          {{- end }}
+          {{- if .annotations }}
+          annotations:
+            {{- toYaml .annotations | nindent 12 }}
+          {{- end }}
+        {{- end }}
+        {{- /* additionalRules is spliced VERBATIM, which is what four places in the docs promise it
+               does. It used to go through the same field-by-field re-render as the built-ins, and
+               that render knows five keys: alert, expr, for, labels, annotations. A PrometheusRule
+               group legitimately holds recording rules too, and a `record:` entry came out as
+               `- alert:` with an empty name and no record key — helm template succeeded and the
+               apiserver rejected the whole object at APPLY time, after the release had started
+               changing. The quiet variant was worse: `keep_firing_for` was simply dropped, so the
+               rule resolved on the first non-firing evaluation and nothing said so. A rule the
+               operator wrote is not the chart's to rewrite. */}}
+        {{- with $extra }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+{{- end }}

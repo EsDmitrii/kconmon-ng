@@ -1,3 +1,4 @@
+{{- include "kconmon-ng.migrations" . }}
 {{- if eq (int .Values.config.httpPort) (int .Values.config.grpcPort) }}
 {{- fail (printf "config.httpPort and config.grpcPort must differ (both are %v): one Pod cannot bind the same port twice" .Values.config.httpPort) }}
 {{- end }}
@@ -21,6 +22,7 @@ data:
     metricsPrefix: {{ .Values.config.metricsPrefix | quote }}
     httpPort: {{ .Values.config.httpPort }}
     grpcPort: {{ .Values.config.grpcPort }}
+    metricsPort: {{ .Values.config.metricsPort }}
     logLevel: {{ .Values.config.logLevel | quote }}
     logFormat: {{ .Values.config.logFormat | quote }}
     failureDomainLabel: {{ .Values.config.failureDomainLabel | quote }}

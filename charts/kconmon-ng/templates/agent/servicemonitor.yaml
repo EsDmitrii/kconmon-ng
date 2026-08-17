@@ -2,7 +2,7 @@
 apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor
 metadata:
-  name: {{ include "kconmon-ng.fullname" . }}-agent
+  name: {{ include "kconmon-ng.agent.fullname" . }}
   labels:
     {{- include "kconmon-ng.labels" . | nindent 4 }}
     app.kubernetes.io/component: agent
@@ -12,7 +12,7 @@ spec:
       {{- include "kconmon-ng.selectorLabels" . | nindent 6 }}
       app.kubernetes.io/component: agent
   endpoints:
-    - port: http
+    - port: metrics
       path: /metrics
       interval: {{ .Values.serviceMonitor.interval }}
 {{- end }}

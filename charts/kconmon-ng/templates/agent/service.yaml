@@ -1,7 +1,7 @@
 apiVersion: v1
 kind: Service
 metadata:
-  name: {{ include "kconmon-ng.fullname" . }}-agent
+  name: {{ include "kconmon-ng.agent.fullname" . }}
   labels:
     {{- include "kconmon-ng.labels" . | nindent 4 }}
     app.kubernetes.io/component: agent
@@ -15,4 +15,9 @@ spec:
     - name: http
       port: {{ .Values.config.httpPort }}
       targetPort: http
+    # Scraped instead of `http`: the controller's API shares that port and authenticates nothing,
+    # so the NetworkPolicy opens this one to Prometheus and leaves the API closed.
+    - name: metrics
+      port: {{ .Values.config.metricsPort }}
+      targetPort: metrics
       protocol: TCP

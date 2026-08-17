@@ -1,4 +1,4 @@
-{{/* Built-in alert rules, emitted as YAML and parsed back by templates/prometheusrule.yaml; see README.md. */}}
+{{/* Built-in alert rules, emitted as YAML and parsed back by templates/observability/prometheusrule.yaml; see README.md. */}}
 
 {{/* Threshold ratio as a percentage, for annotation text. */}}
 {{- define "kconmon-ng.prometheusRule.pct" -}}
@@ -129,10 +129,10 @@
 {{- $t := float64 .threshold }}
 - alert: ExternalChecksFailing
   expr: >-
-    sum by (source_node, source_zone, target, target_kind)
+    sum by (source_node, source_zone, target, target_kind, check_type)
     (rate({{ $prefix }}_external_results_total{result="fail"}[5m]))
     /
-    sum by (source_node, source_zone, target, target_kind)
+    sum by (source_node, source_zone, target, target_kind, check_type)
     (rate({{ $prefix }}_external_results_total[5m]))
     > {{ $t }}
   for: {{ .for }}
@@ -154,17 +154,21 @@
 {{- end }}
 {{- with $pr.kconmonAgentsMissing }}
 {{- if .enabled }}
+{{/* Standbys hold no agents by design, so only the lease holder's counts are evidence. */}}
 - alert: KconmonAgentsMissing
-  expr: {{ $prefix }}_controller_expected_agents - {{ $prefix }}_controller_registered_agents > 0
+  expr: >-
+    ({{ $prefix }}_controller_expected_agents
+    - {{ $prefix }}_controller_registered_agents > 0)
+    and ({{ $prefix }}_controller_leader == 1)
   for: {{ .for }}
   labels:
     severity: {{ .severity }}
   annotations:
     summary: >-
-      {{`{{ $value }}`}} kconmon-ng agent(s) missing per controller
+      {{`{{ $value }}`}} kconmon-ng agent(s) missing on the leading controller
       {{`{{ $labels.instance }}`}}
     description: >-
-      The controller on {{`{{ $labels.instance }}`}} expects one agent per
+      The leading controller on {{`{{ $labels.instance }}`}} expects one agent per
       schedulable node, and {{`{{ $value }}`}} of them have not registered for
       {{ .for }}. The usual causes are a DaemonSet that cannot schedule (taints or
       resources), crash-looping agent pods, or agent-to-controller gRPC

@@ -1,14 +1,12 @@
 ---
-# Console-enabled values for chart testing (anonymous auth, ingress on,
-# M2 realtime with the bundled Valkey).
+redis:
+  existingSecret: kconmon-console-redis
 controller:
   events:
     enabled: true
 console:
   enabled: true
   replicas: 2
-  valkey:
-    mode: bundled
   auth:
     mode: anonymous
     anonymous:

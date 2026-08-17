@@ -1,0 +1,18 @@
+{{- if and .Values.controller.pdb.enabled (gt (int .Values.controller.replicaCount) 1) }}
+{{- if ge (int .Values.controller.pdb.minAvailable) (int .Values.controller.replicaCount) }}
+{{- fail (printf "controller.pdb.minAvailable (%d) is not less than controller.replicaCount (%d): the PDB would allow ZERO voluntary disruptions, so `kubectl drain` on any node running a controller replica hangs forever and cluster upgrades or autoscaler scale-downs stall, with nothing in the release marked unhealthy. This is the same reason the chart refuses to render a PDB at replicaCount 1. Set controller.pdb.minAvailable below controller.replicaCount, or raise controller.replicaCount." (int .Values.controller.pdb.minAvailable) (int .Values.controller.replicaCount)) }}
+{{- end }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "kconmon-ng.controller.fullname" . }}
+  labels:
+    {{- include "kconmon-ng.labels" . | nindent 4 }}
+    app.kubernetes.io/component: controller
+spec:
+  minAvailable: {{ .Values.controller.pdb.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "kconmon-ng.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: controller
+{{- end }}

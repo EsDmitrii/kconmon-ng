@@ -1,7 +1,7 @@
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
-  name: {{ include "kconmon-ng.fullname" . }}-agent
+  name: {{ include "kconmon-ng.agent.fullname" . }}
   labels:
     {{- include "kconmon-ng.labels" . | nindent 4 }}
     app.kubernetes.io/component: agent
@@ -51,7 +51,14 @@ spec:
       tolerations:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-      {{- with .Values.agent.podSecurityContext }}
+      {{- /* The sysctl is appended to podSecurityContext rather than living inside it, so switching it
+             off does not take runAsNonRoot / runAsUser / seccompProfile with it -- the three keys a
+             namespace enforcing restricted PSS requires. */}}
+      {{- $podSec := deepCopy (.Values.agent.podSecurityContext | default dict) }}
+      {{- if .Values.agent.pingGroupRange }}
+      {{- $podSec = merge $podSec (dict "sysctls" (list (dict "name" "net.ipv4.ping_group_range" "value" "0 2147483647"))) }}
+      {{- end }}
+      {{- with $podSec }}
       securityContext:
         {{- toYaml . | nindent 8 }}
       {{- end }}
@@ -66,6 +73,9 @@ spec:
           ports:
             - name: http
               containerPort: {{ .Values.config.httpPort }}
+              protocol: TCP
+            - name: metrics
+              containerPort: {{ .Values.config.metricsPort }}
               protocol: TCP
             - name: grpc
               containerPort: {{ .Values.config.grpcPort }}

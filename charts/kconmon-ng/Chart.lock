@@ -1,9 +1,0 @@
-dependencies:
-- name: cloudnative-pg
-  repository: https://cloudnative-pg.github.io/charts
-  version: 0.29.0
-- name: valkey
-  repository: oci://ghcr.io/valkey-io/valkey-helm
-  version: 0.11.0
-digest: sha256:c7ab48bb59591bbd686e84c668a7a3161b495910c88e561842183976f964f6d9
-generated: "2026-08-10T10:42:20.540191+03:00"
