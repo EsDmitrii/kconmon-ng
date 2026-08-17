@@ -22,6 +22,7 @@ import type {
   IncidentRequest,
   K8sEventPage,
   K8sEventQuery,
+  MTRDestination,
   MTRDestinationList,
   MaintenanceQuery,
   MaintenanceWindow,
@@ -573,18 +574,28 @@ export function deleteSchedule(id: string): Promise<void> {
  * getMTRDestinations is GET /api/v1/mtr/destinations: the (source, destination) pairs path history
  * knows about.
  *
- * The limit is EXPLICIT and it is the server's maximum. The endpoint is bounded (pairs are
- * sources x destinations, so a large fleet is a large listing) and the call used to send no limit
- * at all, taking the 100-row default: on a stand with 101 traced pairs one pair vanished from the
- * Explorer entirely — its path history unreachable from the UI — and every aggregate count under
- * the destination it belonged to was quietly short. The response carries `truncated`, which callers
- * must surface rather than drop.
+ * The limit is EXPLICIT, and the listing is WALKED to the end.
+ *
+ * The endpoint is bounded (pairs are sources x destinations, so a large fleet is a large listing)
+ * and the call used to send no limit at all, taking the 100-row default: on a stand with 101 traced
+ * pairs one pair vanished from the Explorer entirely — its path history unreachable from the UI —
+ * and every aggregate count under the destination it belonged to was quietly short. Sending the
+ * server's maximum fixed one page and left the same hole one order of magnitude further out; the
+ * cursor is what closes it. Pages arrive ordered by (sourceNode, destination) and this file's
+ * callers sort for display.
  */
 export const MTR_DESTINATIONS_LIMIT = 500;
 
-export function getMTRDestinations(): Promise<MTRDestinationList> {
-  const qs = new URLSearchParams({ limit: String(MTR_DESTINATIONS_LIMIT) });
-  return apiFetch(`/api/v1/mtr/destinations?${qs}`).then((r) => handle<MTRDestinationList>(r));
+export function getMTRDestinations(): Promise<{ items: MTRDestination[]; truncated: boolean }> {
+  return collectPages(
+    (cursor) => {
+      const qs = new URLSearchParams({ limit: String(MTR_DESTINATIONS_LIMIT) });
+      if (cursor) qs.set("cursor", cursor);
+      return apiFetch(`/api/v1/mtr/destinations?${qs}`).then((r) => handle<MTRDestinationList>(r));
+    },
+    (page) => page.destinations,
+    (page) => page.nextCursor,
+  );
 }
 
 // getMTRSnapshots is GET /api/v1/mtr/snapshots: one page of the DISTINCT

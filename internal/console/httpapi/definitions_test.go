@@ -816,3 +816,42 @@ func TestChecksUpdateWithAnUnknownTargetIs422NotAMissingDefinition(t *testing.T)
 		t.Errorf("body does not name the real problem: %s", w.Body)
 	}
 }
+
+/*
+ * A check no agent could ever run is refused at the door.
+ *
+ * The agent parses every assignment entry and drops the ones it cannot -- checkType=http against a
+ * host destination, checkType=dns with no params.query. That drop was agent-local: a WARN in one
+ * pod's log, repeated on every push, forever, while the Console listed the definition as enabled and
+ * the operator waited for results that could not arrive from any node.
+ */
+func TestChecksCreateRefusesADefinitionNoAgentCanRun(t *testing.T) {
+	s := newOperatorChecksServer(t, newFakeChecksStore(), nil)
+
+	for _, c := range []struct{ name, body string }{
+		{"http against a host destination", `{"name":"portal","sourceSelection":"all","destinationKind":"adhoc",` +
+			`"destinationAddress":"api.example.com:443","checkType":"http","plane":"pod"}`},
+		{"dns with no query", `{"name":"resolve","sourceSelection":"all","destinationKind":"adhoc",` +
+			`"destinationAddress":"10.0.0.10","checkType":"dns","plane":"pod"}`},
+	} {
+		w := doRequest(t, s, http.MethodPost, "/api/v1/checks", strings.NewReader(c.body), mutateWithCSRF)
+		if w.Code != http.StatusUnprocessableEntity {
+			t.Errorf("%s = %d, want 422: %s", c.name, w.Code, w.Body)
+		}
+	}
+
+	// And the shapes that DO run are untouched.
+	for _, c := range []struct{ name, body string }{
+		{"http against a URL", `{"name":"portal","sourceSelection":"all","destinationKind":"adhoc",` +
+			`"destinationAddress":"https://api.example.com/healthz","checkType":"http","plane":"pod"}`},
+		{"dns with a query", `{"name":"resolve","sourceSelection":"all","destinationKind":"adhoc",` +
+			`"destinationAddress":"10.0.0.10","checkType":"dns","plane":"pod","params":{"query":"api.example.com"}}`},
+		{"tcp against a host", `{"name":"edge","sourceSelection":"all","destinationKind":"adhoc",` +
+			`"destinationAddress":"api.example.com:443","checkType":"tcp","plane":"pod"}`},
+	} {
+		w := doRequest(t, s, http.MethodPost, "/api/v1/checks", strings.NewReader(c.body), mutateWithCSRF)
+		if w.Code != http.StatusCreated {
+			t.Errorf("%s = %d, want 201: %s", c.name, w.Code, w.Body)
+		}
+	}
+}

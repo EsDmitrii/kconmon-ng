@@ -270,6 +270,9 @@ func (s *Server) handleChecksCreate(w http.ResponseWriter, r *http.Request) {
 	if !s.enforceProjection(w, r, &in) {
 		return
 	}
+	if s.refuseUnrunnableDefinition(w, r, &in) {
+		return
+	}
 
 	def, err := s.definitions.CreateDefinition(r.Context(), in)
 	if err != nil {
@@ -316,6 +319,9 @@ func (s *Server) handleChecksUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !s.enforceProjection(w, r, &in) {
+		return
+	}
+	if s.refuseUnrunnableDefinition(w, r, &in) {
 		return
 	}
 

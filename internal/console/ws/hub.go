@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -410,6 +411,37 @@ func (h *Hub) unsubscribe(c *client, topic string) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	delete(c.topics, topic)
+}
+
+/*
+regate re-applies this connection's authorizer to the topics it is ALREADY subscribed to, dropping
+the ones it may no longer have, and reports which went.
+
+The per-topic gate used to run once per subscribe and never again, so narrowing a role left an open
+socket streaming the very snapshots the REST routes had begun refusing -- revocation only took effect
+when the browser tab closed. Closing the whole connection instead was the first fix and it was too
+blunt: it costs every OTHER topic on that socket a reconnect and a resubscribe for a change that
+touched one of them. Dropping exactly the topics that are no longer permitted is the behaviour the
+REST side already has, one route at a time.
+
+The authorizer is the connection's own closure and reads the current subject, so this needs no
+argument: the caller decides WHEN to re-ask, not what the answer is.
+*/
+func (h *Hub) regate(c *client) []string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if c.authorize == nil {
+		return nil
+	}
+	var dropped []string
+	for topic := range c.topics {
+		if err := c.authorize(topic); err != nil {
+			delete(c.topics, topic)
+			dropped = append(dropped, topic)
+		}
+	}
+	slices.Sort(dropped) // a stable order keeps the error frames (and the tests) deterministic
+	return dropped
 }
 
 // topicAllowed reports whether topic may be subscribed.

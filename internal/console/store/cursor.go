@@ -99,3 +99,45 @@ func EncodeRunCursor(createdAt time.Time, id string) string {
 func DecodeRunCursor(cursor string) (createdAt time.Time, id string, ok bool, err error) {
 	return DecodeUUIDCursor(cursor)
 }
+
+/*
+EncodePairCursor builds the keyset cursor GET /api/v1/mtr/destinations hands back.
+
+The sort key is the PAIR ITSELF, not the last_seen the pane displays, and that is deliberate. A
+keyset cursor over a mutable sort key drops rows -- ListPathSnapshots' own comment spells this out --
+and last_seen is bumped by every repeat trace: a pair sitting just below the cursor gets re-traced,
+its last_seen jumps above the cursor, and the next page's predicate excludes it from a page it was
+never on. (source_node, destination) never changes, so paging on it is complete by construction, and
+the caller sorts the assembled set for display.
+
+The two fields are length-prefixed rather than separator-joined: a node name or a destination may
+contain any byte the store accepts, "|" included, and a separator that can appear inside a field is
+a cursor that decodes to the wrong pair.
+*/
+func EncodePairCursor(sourceNode, destination string) string {
+	raw := strconv.Itoa(len(sourceNode)) + cursorSep + sourceNode + destination
+	return base64.RawURLEncoding.EncodeToString([]byte(raw))
+}
+
+// DecodePairCursor is EncodePairCursor's inverse, with the same contract as DecodeCursor: an empty
+// cursor is the well-defined first page, and a malformed one is an error rather than a silent reset.
+func DecodePairCursor(cursor string) (sourceNode, destination string, ok bool, err error) {
+	if cursor == "" {
+		return "", "", false, nil
+	}
+	decoded, err := base64.RawURLEncoding.DecodeString(cursor)
+	if err != nil {
+		return "", "", false, fmt.Errorf("store: decode cursor: %w", err)
+	}
+	raw := string(decoded)
+	sep := strings.Index(raw, cursorSep)
+	if sep < 0 {
+		return "", "", false, fmt.Errorf("store: decode cursor: missing %q separator", cursorSep)
+	}
+	n, err := strconv.Atoi(raw[:sep])
+	if err != nil || n < 0 || sep+1+n > len(raw) {
+		return "", "", false, fmt.Errorf("store: decode cursor: bad source length")
+	}
+	body := raw[sep+1:]
+	return body[:n], body[n:], true, nil
+}

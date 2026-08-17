@@ -170,6 +170,16 @@ func (h *Hub) writePump(c *client, conn *websocket.Conn, revalidate func() error
 					)
 					return
 				}
+				/* The connection survives, but its SUBSCRIPTIONS are re-asked.
+				   A subject can keep the coarse permission that admits the socket and still lose a
+				   narrower one, and the per-topic gate only ever ran at subscribe time -- so a
+				   narrowed role left this socket streaming snapshots the REST routes had begun
+				   refusing. Dropping just those topics, with an error frame naming each, is what the
+				   page needs to stop showing them; the topics the subject still holds are untouched. */
+				for _, topic := range h.regate(c) {
+					slog.Info("websocket topic dropped: permission no longer held", "topic", topic)
+					h.sendError(c, topic, "subscription ended: this connection no longer holds the permission this topic needs")
+				}
 			}
 			if err := conn.SetWriteDeadline(time.Now().Add(writeWait)); err != nil {
 				return

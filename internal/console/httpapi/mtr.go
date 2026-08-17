@@ -98,9 +98,11 @@ type mtrDestinationResponse struct {
 // every other list body in this API (targets/checks/schedules/tokens).
 type mtrDestinationsResponse struct {
 	Destinations []mtrDestinationResponse `json:"destinations"`
-	// True when the page filled the limit, i.e. there are more pairs than this body carries. The
-	// listing is bounded now (see the handler), and a bounded list that does not say so reads as a
-	// complete one.
+	// NextCursor is the opaque keyset cursor for the following page; "" when this is the last one.
+	NextCursor string `json:"nextCursor,omitempty"`
+	// True when there are more pairs than this body carries. Redundant beside nextCursor for a
+	// client that pages, and the only signal for one that does not: a bounded list that does not say
+	// so reads as a complete one.
 	Truncated bool `json:"truncated,omitempty"`
 }
 
@@ -173,20 +175,34 @@ func snapshotIDFrom(w http.ResponseWriter, r *http.Request) (string, bool) {
 }
 
 /*
- * handleMTRDestinations serves the (source, destination) pairs path history knows about,
- * most-recently-traced first, BOUNDED by ?limit= (clamped like every other listing here).
+ * handleMTRDestinations serves the (source, destination) pairs path history knows about, one page at
+ * a time behind an opaque keyset cursor.
  *
  * It used to be unpaged, on the reasoning that the row count is "pairs, not traces". Pairs are
  * sources x destinations: a hundred-node fleet is ten thousand rows, hash-aggregated over the whole
  * snapshot table on every request, materialised in the store and marshalled here — repeatable at
- * will by any caller holding mtr:read.
+ * will by any caller holding mtr:read. Capping it fixed that and created a second problem: the pairs
+ * past the cap were missing from the Explorer entirely, their path history unreachable from the UI,
+ * and every per-destination total was short by their counts, with only a `truncated` flag to say so.
+ * A cursor is the answer to both — bounded per request, complete across the walk.
+ *
+ * The page is ordered by the PAIR, not by last_seen: see the store, which explains why a cursor over
+ * a mutable sort key drops rows. The console assembles the pages and sorts for display.
  */
 func (s *Server) handleMTRDestinations(w http.ResponseWriter, r *http.Request) {
 	if s.mtrUnavailable(w) {
 		return
 	}
-	limit := clampPageLimit(parsePageLimit(r.URL.Query().Get("limit")))
-	dests, err := s.mtr.ListMTRDestinations(r.Context(), limit)
+	q := r.URL.Query()
+	cursor := q.Get("cursor")
+	if cursor != "" {
+		if _, _, _, err := store.DecodePairCursor(cursor); err != nil {
+			writeProblem(w, http.StatusBadRequest, "invalid cursor", "cursor is malformed or does not match this server")
+			return
+		}
+	}
+	limit := clampPageLimit(parsePageLimit(q.Get("limit")))
+	page, err := s.mtr.ListMTRDestinations(r.Context(), limit, cursor)
 	if err != nil {
 		// Logged, never surfaced: the driver error can carry a DSN or other
 		// upstream detail that has no business in an HTTP response body.
@@ -194,17 +210,22 @@ func (s *Server) handleMTRDestinations(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, http.StatusBadGateway, "MTR path history unavailable", "failed to query MTR destinations")
 		return
 	}
-	out := make([]mtrDestinationResponse, 0, len(dests))
-	for i := range dests {
+	out := make([]mtrDestinationResponse, 0, len(page.Destinations))
+	for i := range page.Destinations {
+		d := &page.Destinations[i]
 		out = append(out, mtrDestinationResponse{
-			SourceNode: dests[i].SourceNode, Destination: dests[i].Destination,
-			SnapshotCount: dests[i].SnapshotCount, TraceCount: dests[i].TraceCount,
-			FirstSeen: dests[i].FirstSeen, LastSeen: dests[i].LastSeen,
+			SourceNode: d.SourceNode, Destination: d.Destination,
+			SnapshotCount: d.SnapshotCount, TraceCount: d.TraceCount,
+			FirstSeen: d.FirstSeen, LastSeen: d.LastSeen,
 		})
 	}
-	/* truncated says the listing was CUT, so the console can say so rather than presenting a page as
-	   the whole fleet — the same contract GET /api/v1/runs/{id} uses for its results. */
-	writeJSON(w, mtrDestinationsResponse{Destinations: out, Truncated: len(out) == limit})
+	/* truncated is kept beside nextCursor rather than replaced by it: a client that does not page is
+	   still told its listing is partial, which is the whole point of the flag. */
+	writeJSON(w, mtrDestinationsResponse{
+		Destinations: out,
+		NextCursor:   page.NextCursor,
+		Truncated:    page.NextCursor != "",
+	})
 }
 
 // handleMTRSnapshots serves one pair's route history; BOTH source and destination are required.

@@ -193,7 +193,14 @@ type Querier interface {
 	// list": a hundred nodes is ten thousand rows, aggregated over the whole snapshot table on every
 	// request, materialised in the store and marshalled by the handler, for any caller holding
 	// mtr:read. The limit is the caller's, and the handler caps it.
-	ListMTRDestinations(ctx context.Context, lim int32) ([]ListMTRDestinationsRow, error)
+	//
+	// PAGED on the pair itself, not on last_seen. The pane displays most-recently-traced first, but a
+	// keyset cursor over a mutable sort key drops rows -- see ListPathSnapshots below, which spells out
+	// the same trap -- and every repeat trace bumps last_seen. (source_node, destination) never changes,
+	// so walking it is complete by construction and the caller sorts the assembled set for display.
+	// Before this the listing was capped with no way to ask for the rest: the pairs past the cap were
+	// missing from the Explorer entirely and every per-destination total was short by their counts.
+	ListMTRDestinations(ctx context.Context, arg ListMTRDestinationsParams) ([]ListMTRDestinationsRow, error)
 	// Every window whose interval OVERLAPS the requested range, newest first -- the chart-markArea
 	// query.
 	ListMaintenanceWindows(ctx context.Context, arg ListMaintenanceWindowsParams) ([]MaintenanceWindow, error)

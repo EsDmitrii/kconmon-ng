@@ -24,6 +24,13 @@ RETURNING id, source_node, destination, path_hash, hop_count, hops,
 -- list": a hundred nodes is ten thousand rows, aggregated over the whole snapshot table on every
 -- request, materialised in the store and marshalled by the handler, for any caller holding
 -- mtr:read. The limit is the caller's, and the handler caps it.
+--
+-- PAGED on the pair itself, not on last_seen. The pane displays most-recently-traced first, but a
+-- keyset cursor over a mutable sort key drops rows -- see ListPathSnapshots below, which spells out
+-- the same trap -- and every repeat trace bumps last_seen. (source_node, destination) never changes,
+-- so walking it is complete by construction and the caller sorts the assembled set for display.
+-- Before this the listing was capped with no way to ask for the rest: the pairs past the cap were
+-- missing from the Explorer entirely and every per-destination total was short by their counts.
 SELECT source_node,
        destination,
        count(*)::bigint AS snapshot_count,
@@ -31,8 +38,10 @@ SELECT source_node,
        min(first_seen)::timestamptz AS first_seen,
        max(last_seen)::timestamptz AS last_seen
 FROM mtr_path_snapshots
+WHERE (sqlc.arg('has_cursor')::boolean = false
+       OR (source_node, destination) > (sqlc.arg('cursor_source')::text, sqlc.arg('cursor_destination')::text))
 GROUP BY source_node, destination
-ORDER BY max(last_seen) DESC, source_node, destination
+ORDER BY source_node, destination
 LIMIT sqlc.arg('lim');
 
 -- name: ListPathSnapshots :many

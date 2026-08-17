@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"slices"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -84,12 +83,6 @@ func (s *Server) wsRevalidator(r *http.Request, current *atomic.Pointer[authz.Su
 		return nil
 	}
 	at := *current.Load()
-	/* The permission snapshot this connection was admitted with, kept HERE rather than recomputed
-	   from the stored subject: an admin editing a role in place changes the policy, so resolving the
-	   old subject against the new policy yields the new permissions and the change becomes invisible.
-	   The revalidator runs serially on the write pump's ping tick, so a plain closure variable is the
-	   right amount of machinery. */
-	held := s.policy.PermissionsFor(at)
 	// The request is kept for its credential only; its context ends with the upgrade, so a fresh,
 	// bounded one is used for the store lookups a re-authentication makes.
 	creds := r.Clone(context.Background())
@@ -112,23 +105,15 @@ func (s *Server) wsRevalidator(r *http.Request, current *atomic.Pointer[authz.Su
 		if !s.policy.Can(subject, authz.PermEventsRead) && !s.policy.Can(subject, authz.PermRunsRead) {
 			return errors.New("subject no longer holds events:read or runs:read")
 		}
-		/* Publish the fresh subject so the per-topic gate stops answering from the upgrade snapshot,
-		   and END the connection when the role set actually changed: the topics ALREADY subscribed
-		   are not re-gated by anything, so a narrowed binding would otherwise keep streaming the very
-		   snapshots the REST routes had begun refusing. The browser reconnects at once and
-		   resubscribes under the roles it now holds, which is the state the page should be in. */
-		/* Compared on the PERMISSIONS the roles grant, not on the role NAMES.
-		   A name list is the wrong key twice over: editing a role's permission set in place leaves
-		   the names identical, so a socket kept streaming topics its subject had just lost; and a
-		   binding rewritten to the same roles in a different ORDER read as a change, closing a
-		   healthy connection for nothing. */
-		now := s.policy.PermissionsFor(subject)
-		changed := !slices.Equal(held, now)
-		held = now
+		/* Publish the fresh subject and let the connection re-gate its own topics.
+		   The topic gate reads this pointer, so republishing is what makes a narrowed permission
+		   reach an already-open socket; ws.Hub.regate then drops exactly the subscriptions that are
+		   no longer permitted and sends the page an error frame naming each. Ending the whole
+		   connection was the first fix for this and it was too blunt -- it cost every OTHER topic on
+		   the socket a reconnect and a resubscribe for a change that touched one of them. The socket
+		   itself still ends when the COARSE gate above stops holding, which is the answer to "may
+		   this connection exist at all"; this is the answer to "may it still have THIS topic". */
 		current.Store(&subject)
-		if changed {
-			return errors.New("subject's roles changed; reconnect to resubscribe under them")
-		}
 		return nil
 	}
 }

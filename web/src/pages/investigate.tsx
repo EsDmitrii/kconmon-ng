@@ -1255,7 +1255,7 @@ export function InvestigatePage() {
         return (await getMTRSnapshots({ source: scope.a, destination: scope.b, limit: 50 })).snapshots;
       }
       const all = await getMTRDestinations();
-      const pairs = all.destinations
+      const pairs = all.items
         .filter((d) => (mtrMode === "by-source" ? d.sourceNode === scope.a : d.destination === scope.a))
         .slice(0, MTR_FANOUT);
       const pages = await Promise.all(

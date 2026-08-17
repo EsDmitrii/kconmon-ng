@@ -344,15 +344,17 @@ func TestListMTRDestinationsAggregatesPerPair(t *testing.T) {
 		t.Fatalf("seed node-b: %v", err)
 	}
 
-	dests, err := db.ListMTRDestinations(ctx, 0)
+	page, err := db.ListMTRDestinations(ctx, 0, "")
 	if err != nil {
 		t.Fatalf("ListMTRDestinations: %v", err)
 	}
+	dests := page.Destinations
 	if len(dests) != 2 {
 		t.Fatalf("ListMTRDestinations returned %d pairs, want 2: %+v", len(dests), dests)
 	}
+	// Ordered by the PAIR, which is what the cursor pages on; the console sorts for display.
 	if dests[0].SourceNode != "node-a" {
-		t.Errorf("ListMTRDestinations[0] = %s, want node-a (most recently traced first)", dests[0].SourceNode)
+		t.Errorf("ListMTRDestinations[0] = %s, want node-a (pairs are ordered by name)", dests[0].SourceNode)
 	}
 	if dests[0].SnapshotCount != 2 {
 		t.Errorf("node-a SnapshotCount = %d, want 2 distinct routes", dests[0].SnapshotCount)
@@ -376,15 +378,73 @@ func TestListMTRDestinationsAggregatesPerPair(t *testing.T) {
 func TestListMTRDestinationsEmptyIsAnEmptySlice(t *testing.T) {
 	db, _ := newMTRDB(t)
 
-	dests, err := db.ListMTRDestinations(context.Background(), 0)
+	page, err := db.ListMTRDestinations(context.Background(), 0, "")
 	if err != nil {
 		t.Fatalf("ListMTRDestinations on an empty table: %v", err)
 	}
-	if dests == nil {
+	if page.Destinations == nil {
 		t.Error("ListMTRDestinations returned a nil slice, want an empty non-nil one")
 	}
-	if len(dests) != 0 {
-		t.Errorf("ListMTRDestinations = %+v, want empty", dests)
+	if len(page.Destinations) != 0 {
+		t.Errorf("ListMTRDestinations = %+v, want empty", page.Destinations)
+	}
+	if page.NextCursor != "" {
+		t.Errorf("NextCursor = %q on an empty table, want none", page.NextCursor)
+	}
+}
+
+/*
+ * The cursor walks every pair, and pages on the pair rather than on last_seen.
+ *
+ * The listing used to be capped with no way to ask for the rest: the pairs past the cap were missing
+ * from the Explorer entirely and every per-destination total was short by their counts. Paging on
+ * last_seen would have replaced that with a subtler hole -- a repeat trace bumps it, so a pair below
+ * the cursor can jump above it and be skipped from a page it was never on.
+ */
+func TestListMTRDestinationsWalksEveryPairAcrossPages(t *testing.T) {
+	db, _ := newMTRDB(t)
+	ctx := context.Background()
+	base := time.Now().UTC().Add(-time.Hour).Truncate(time.Microsecond)
+
+	want := map[string]bool{}
+	for i := range 7 {
+		src := fmt.Sprintf("node-%02d", i)
+		if _, _, err := db.UpsertPathSnapshot(ctx, snapshotInput(src, "edge-gw", pathAB(), base.Add(time.Duration(i)*time.Minute))); err != nil {
+			t.Fatalf("seed %s: %v", src, err)
+		}
+		want[src] = true
+	}
+
+	got := map[string]bool{}
+	cursor := ""
+	for pages := 0; ; pages++ {
+		if pages > 10 {
+			t.Fatal("the walk did not terminate")
+		}
+		page, err := db.ListMTRDestinations(ctx, 2, cursor)
+		if err != nil {
+			t.Fatalf("page %d: %v", pages, err)
+		}
+		for i := range page.Destinations {
+			src := page.Destinations[i].SourceNode
+			if got[src] {
+				t.Errorf("pair %s was served twice", src)
+			}
+			got[src] = true
+		}
+		if page.NextCursor == "" {
+			break
+		}
+		cursor = page.NextCursor
+	}
+
+	if len(got) != len(want) {
+		t.Errorf("the walk saw %d pairs, want %d: %v", len(got), len(want), got)
+	}
+	for src := range want {
+		if !got[src] {
+			t.Errorf("pair %s was never served: it is unreachable from the Explorer", src)
+		}
 	}
 }
 

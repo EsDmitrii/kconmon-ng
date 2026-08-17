@@ -134,6 +134,12 @@ type SnapshotPage struct {
 
 // MTRDestination is one (source, destination) pair path history knows about,
 // with the aggregates the Explorer's pair list shows.
+// MTRDestinationPage is one page of pairs plus the cursor for the next.
+type MTRDestinationPage struct {
+	Destinations []MTRDestination
+	NextCursor   string // "" when the page is the last one
+}
+
 type MTRDestination struct {
 	SourceNode  string
 	Destination string
@@ -163,7 +169,7 @@ type PathSnapshotReader interface {
 	   are sources x destinations, so a hundred nodes is ten thousand rows aggregated over the whole
 	   snapshot table, materialised here and marshalled by the handler, on demand, for any caller
 	   holding mtr:read. */
-	ListMTRDestinations(ctx context.Context, limit int) ([]MTRDestination, error)
+	ListMTRDestinations(ctx context.Context, limit int, cursor string) (MTRDestinationPage, error)
 	// ListPathSnapshots pages a pair's route history newest-first, same keyset cursor shape as
 	// ListTargets.
 	ListPathSnapshots(ctx context.Context, f SnapshotFilter) (SnapshotPage, error)
@@ -287,12 +293,31 @@ func (db *DB) UpsertPathSnapshot(ctx context.Context, in PathSnapshotInput) (Pat
 	return snap, row.Inserted, nil
 }
 
-func (db *DB) ListMTRDestinations(ctx context.Context, limit int) ([]MTRDestination, error) {
+/*
+ListMTRDestinations serves one page of pairs, ordered by the pair itself and paged on it.
+
+The Explorer displays most-recently-traced first, but the CURSOR cannot be last_seen: every repeat
+trace bumps it, so a pair just below the cursor can jump above it and be skipped from a page it was
+never on -- the same trap ListPathSnapshots documents. Paging on the immutable (source_node,
+destination) is complete by construction; the caller assembles the pages and sorts for display.
+*/
+func (db *DB) ListMTRDestinations(ctx context.Context, limit int, cursor string) (MTRDestinationPage, error) {
+	curSource, curDest, hasCursor, err := DecodePairCursor(cursor)
+	if err != nil {
+		return MTRDestinationPage{}, fmt.Errorf("store: list mtr destinations: %w", err)
+	}
+	lim := clampLimit(limit)
+
 	start := time.Now()
-	rows, err := gen.New(db.pool).ListMTRDestinations(ctx, int32(clampLimit(limit))) //nolint:gosec // clampLimit bounds this to maxLimit
+	rows, err := gen.New(db.pool).ListMTRDestinations(ctx, gen.ListMTRDestinationsParams{
+		HasCursor:         hasCursor,
+		CursorSource:      curSource,
+		CursorDestination: curDest,
+		Lim:               int32(lim), //nolint:gosec // clampLimit bounds this to maxLimit
+	})
 	db.observe(queryListMTRDestinations, start, queryResult(err))
 	if err != nil {
-		return nil, fmt.Errorf("store: list mtr destinations: %w", err)
+		return MTRDestinationPage{}, fmt.Errorf("store: list mtr destinations: %w", err)
 	}
 	dests := make([]MTRDestination, len(rows))
 	for i := range rows {
@@ -305,7 +330,13 @@ func (db *DB) ListMTRDestinations(ctx context.Context, limit int) ([]MTRDestinat
 			LastSeen:      rows[i].LastSeen,
 		}
 	}
-	return dests, nil
+	page := MTRDestinationPage{Destinations: dests}
+	// A full page is the only reason to offer another: a short one is the end of the listing.
+	if len(dests) == lim && lim > 0 {
+		last := dests[len(dests)-1]
+		page.NextCursor = EncodePairCursor(last.SourceNode, last.Destination)
+	}
+	return page, nil
 }
 
 func (db *DB) ListPathSnapshots(ctx context.Context, f SnapshotFilter) (SnapshotPage, error) { //nolint:gocritic // hugeParam: SnapshotFilter mirrors EventFilter's value semantics (events.go)
