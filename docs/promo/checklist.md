@@ -39,7 +39,8 @@ table, both of which stopped being true several releases ago.
       install, closing links), matching `Chart.yaml` (`appVersion: 2.0.0`), and
       the README install snippets carry the same version.
 - [ ] Confirm the krew manifest URL still points at a release that exists. Both
-      articles use the **v1.4.0** manifest, which is what the README uses.
+      articles and the README now use the **v2.0.0** manifest, which the Release
+      workflow uploads; it does not exist until that tag is pushed.
 - [ ] Verify every PromQL snippet against a live `/metrics` endpoint:
       `make local-up` then `make local-urls`. The histogram queries assume the
       classic `_bucket` suffix, which is what `client_golang` exports today.

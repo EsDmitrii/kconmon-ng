@@ -313,7 +313,7 @@ Install it via krew from a release manifest, until it lands in the krew index:
 
 ```bash
 kubectl krew install --manifest-url \
-  https://github.com/EsDmitrii/kconmon-ng/releases/download/v1.4.0/kconmon.yaml
+  https://github.com/EsDmitrii/kconmon-ng/releases/download/v2.0.0/kconmon.yaml
 ```
 
 ## Quickstart
@@ -382,9 +382,10 @@ Chart 2.0.0 is mostly about the steps you used to do by hand. Every credential
 the chart consumes can still come from an `existingSecret` you own, or from a
 `secret:` block the chart renders for you, and field values are written
 verbatim, so a `${vault:...}` placeholder passes through byte-for-byte and an
-injector resolves it at admission. The CloudNativePG operator and the official
-Valkey chart are available as optional subcharts, both off by default, so an
-install that does not ask for them renders exactly as before. GeoLite2 no longer
+injector resolves it at admission. The chart installs no datastore of its own:
+point `database.existingSecret` at a Secret holding a `postgres://` DSN and
+`redis.existingSecret` at one holding a `redis://` DSN, and whatever you already
+run answers — RDS, a StatefulSet, a CloudNativePG cluster of your own. GeoLite2 no longer
 needs staging: `geoip.mode=auto` runs MaxMind's own `geoipupdate` image as a
 sidecar, and the console re-stats the two files and reopens whichever changed,
 so a refreshed database is picked up without a restart. Dashboards render as
