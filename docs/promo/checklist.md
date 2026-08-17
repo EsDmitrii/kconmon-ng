@@ -55,7 +55,7 @@ the repo at the time of writing:
 
 - 5 protocols, reactive MTR on failure, 5s default interval: `README.md`
 - 7 built-in alert rules, names and expressions: `docs/metrics.md`,
-  `charts/kconmon-ng/templates/prometheusrule.yaml`
+  `charts/kconmon-ng/templates/observability/prometheusrule.yaml`
 - 3 Grafana dashboards: `dashboards/`
 - 12 console pages: `web/src/nav.ts`
 - 25 permissions, 4 built-in roles: `internal/console/authz/authz.go`

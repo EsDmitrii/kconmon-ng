@@ -7,7 +7,7 @@ metadata:
   name: kconmon-local-postgres
 type: Opaque
 stringData:
-  # Key "dsn" is the chart's own console.database.existingSecretKey default; hack/values-local.yaml names it
+  # Key "dsn" is the chart's own database.existingSecretKey default; hack/values-local.yaml names it
   # explicitly anyway.
   dsn: postgres://kconmon:kconmon@kconmon-local-postgres:5432/kconmon?sslmode=disable
 ---

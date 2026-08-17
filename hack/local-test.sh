@@ -324,7 +324,7 @@ alerting_round() {
     if [[ "$status" != "201" ]]; then
         if [[ "$status" == "503" ]]; then
             fail "POST /api/v1/alert-rules -> 503: the console has no database. Check the \
-kconmon-local-postgres pod and console.database.* in hack/values-local.yaml"
+kconmon-local-postgres pod and database.* in hack/values-local.yaml"
         else
             fail "POST /api/v1/alert-rules -> $status (expected 201)"
         fi

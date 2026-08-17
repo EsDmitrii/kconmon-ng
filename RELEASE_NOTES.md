@@ -1,3 +1,71 @@
+## kconmon-ng v2.0.0
+
+> Batteries-included chart and a console that tells the truth about time. The
+> chart now ships its own database operator, cache and dashboards, so a stand
+> comes up from one `helm install`. The Time Machine moved out of the top bar
+> and into each page's own time controls, and the charts pin their axis to the
+> window you asked for rather than to the data that happened to arrive. MTR
+> gained a Runner, path history that reads as a timeline, and external targets.
+
+### Added
+
+- **Chart 2.0.0, batteries included** — the CloudNativePG operator, Valkey and
+  the Grafana dashboards ship as part of the release, and `console.database.mode`
+  gained `cnpg`. A NetworkPolicy set covers every component, fail-closed on
+  external egress.
+- **MTR Runner and path history** — start a trace from the Explorer itself,
+  with a settable cadence and duration; every distinct route the fleet has taken
+  is kept, diffed and drawn on a timeline of when it changed.
+- **External targets** — probe a destination that is not a fleet peer, gated by
+  `config.checkers.external.allowedCidrs` and the cluster's own egress policy.
+  The console refuses at create time a target no agent could ever reach.
+- **Time in the Console's result table** — every figure says when it was read.
+
+### Changed
+
+- **The Time Machine lives with the page's time filters**, not in a strip across
+  the top of every route. It is offered only on the pages that resolve their
+  reads through `?at=`, and the engaged banner stays global because writes are
+  disabled console-wide.
+- **Explore's axis is the window you picked** — a 24h view draws 24 hours even
+  when Prometheus holds less, instead of quietly redrawing three.
+- **MTR Explorer is sorted by name**, both destinations and their sources, with
+  numbers read as numbers (`m9` before `m10`).
+- **OIDC identity is the `sub` claim**, namespaced as `oidc:<sub>` — the only
+  claim OIDC Core §5.7 allows as an identifier. `auth.oidc.usernameClaim` now
+  decides the display name alone, so renaming a person no longer moves their
+  roles (Grafana's CVE-2023-3128 is what the old shape risked). Group membership
+  is re-read on every token refresh. **Bindings made against a username stop
+  granting**; the console names them at boot so they can be remapped.
+- **The configuration bundle carries access control** — custom roles and the
+  grant list, but only for a caller who holds `rbac:manage`. Roles import;
+  bindings never do, because a grant names a person in the source console's own
+  identity namespace.
+- **Only the chart under the cursor shows a tooltip.** Its neighbours keep the
+  shared crosshair and mark their own samples with a dot, instead of each
+  covering its own curves with a box of numbers.
+
+### Fixed
+
+- WebSocket topics are authorized per topic: `events:read` no longer carries the
+  topology and matrix snapshots that `topology:read` and `matrix:read` gate.
+- Every request body is capped, so one oversized POST can no longer take a
+  console replica past its memory limit.
+- The OIDC callback binds its `state` to the browser that started the flow.
+- A role-store failure now refuses rather than granting the default role.
+- External TCP and UDP checks probe what was asked for instead of speaking the
+  agent's own protocol to something that is not an agent.
+- A user binding can no longer be resolved by a subject of another kind: role
+  resolution matches the caller's kind as well as their id.
+- Revoking a role binding is auditable — the audit row names the role and the
+  subject, read before the row is destroyed rather than after.
+- Path history says when it has reached the end instead of leaving a "Load
+  older" button that can never be pressed, and counts the routes it is showing
+  against the traces folded into them.
+- A probe tick on a diagnostics run leads with that probe — its sequence, its
+  clock, its latency or its error — so two ticks on an unchanged route are no
+  longer indistinguishable.
+
 ## kconmon-ng v1.9.0
 
 > Console release, and the last planned milestone. Alert rules you build in the

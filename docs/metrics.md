@@ -5,10 +5,14 @@ label set for peer metrics — "peer" below — is `source_node`,
 `destination_node`, `source_zone`, `destination_zone`.
 
 External checks (M4) use a **different** label set — "external" below:
-`source_node`, `source_zone`, `target`, `target_kind`. There is no
+`source_node`, `source_zone`, `target`, `target_kind`, `check_type`. There is no
 `destination_node` or `destination_zone`, because the destination is not a
-peer: `target` is the operator's NAME for it (never an address) and
-`target_kind` is the closed set `host|url`. **The peer label set is unchanged
+peer: `target` is the operator's NAME for it (never an address),
+`target_kind` is the closed set `host|url` and `check_type` is the probe's own
+type (`icmp|tcp|udp|dns|http`). `check_type` is what keeps two checks on one
+target apart: everything that is not http collapses to `target_kind="host"`, so
+without it an icmp and a tcp check on the same target shared one series and
+averaged each other's failures away. **The peer label set is unchanged
 by M4** — no external family reuses it and no peer family gained a `target`
 label, so an existing dashboard or recording rule keyed on peer labels behaves
 exactly as it did in 1.5.0.
@@ -84,6 +88,7 @@ that never enabled the feature.
 | `kconmon_ng_external_results_total`     | counter   | external + `result` | Results that reached the network                        |
 | `kconmon_ng_external_http_status_code`  | gauge     | external            | Last HTTP status code from an external `http` check     |
 | `kconmon_ng_external_denied_total`      | counter   | external + `reason` | Probes refused by the allowlist: `cidr`/`resolve`/`disabled` |
+| `kconmon_ng_external_specs_rejected_total` | counter | `source_node`, `check_type` | Assignment entries this agent could not parse (a definition no agent can run) |
 
 `external_denied_total` is the one to alert on when a probe never happens:
 a refused probe increments it and **not** `external_results_total`, so a
@@ -101,6 +106,9 @@ means a spec arrived while `checkers.external.enabled` was false.
 | `kconmon_ng_controller_grpc_connections`   | gauge   | Active gRPC streaming connections          |
 | `kconmon_ng_controller_peer_updates_total` | counter | Peer list updates broadcast to agents      |
 | `kconmon_ng_controller_leader`             | gauge   | `1` if this instance is the active leader  |
+| `kconmon_ng_controller_diagnostics_total` | Counter | On-demand diagnostics dispatched, by `type` and `result`. |
+| `kconmon_ng_controller_peer_updates_total` | Counter | Peer-list pushes sent to agents. |
+| `kconmon_ng_controller_event_subscribers` | Gauge | Open event-stream subscribers. |
 | `kconmon_ng_controller_external_subscribers` | gauge | Active agent `WatchExternalChecks` subscriptions on this replica |
 | `kconmon_ng_controller_external_assignments` | gauge | Agents with a non-empty continuous external-check assignment |
 
@@ -115,7 +123,7 @@ The Console exposes its own families under the same prefix, namespaced
 
 | Metric                                             | Type    | Labels     | Description                                                        |
 | -------------------------------------------------- | ------- | ---------- | ------------------------------------------------------------------ |
-| `kconmon_ng_console_rate_limited_total`            | counter | `limit`    | Requests refused with 429, by limit (`runs`, `login`)              |
+| `kconmon_ng_console_rate_limited_total`            | counter | `limit`    | Requests refused with 429, by limit (`runs`, `login`, `promql`)    |
 | `kconmon_ng_console_rate_limit_failopen_total`     | counter | `limit`    | Requests admitted because the KV backend was unreadable (fail-open) |
 | `kconmon_ng_console_projection_guard_failopen_total` | counter | —        | Definition writes admitted because the topology was unreadable      |
 | `kconmon_ng_console_scheduler_ticks_total`         | counter | `result`   | Schedule loop ticks: `ok`, `not-leader`, `error`                    |
@@ -167,7 +175,8 @@ at zero would read as "working and finding nothing".
 
 `kconmon_ng_console_retention_deleted_total{table}` gained **three closed label
 values** in M5 — `mtr_path_snapshots`, `mtr_hop_enrichment`, `annotations` —
-alongside the existing `topology_events`, `audit_log` and `check_runs`.
+alongside the existing `topology_events`, `audit_log`, `check_runs` and
+`check_results`.
 
 M6 additions:
 
@@ -197,8 +206,10 @@ kept incrementing a series would read as a working one.
 
 `kconmon_ng_console_retention_deleted_total{table}` gained **three more closed
 label values** in M6 — `k8s_events`, `incidents`, `maintenance_windows` —
-bringing the set to nine. There is deliberately **no `webhooks` value**: webhook
-rows are configuration, not observation, and are never swept (DATA.md §5.2).
+bringing the set to ten. The tenth is `check_results`, the highest-volume table
+the pruner sweeps: leaving it out of this list made a sweep that was falling
+behind on the biggest table look idle in any view built from these docs. There is deliberately **no `webhooks` value**: webhook
+rows are configuration, not observation, and are never swept.
 
 **No M6 metric carries a node name, a pod name, a namespace, an event reason or
 message, a webhook name, a webhook URL, an endpoint secret, or an incident's
@@ -231,10 +242,10 @@ are appended verbatim under `prometheusRule.additionalRules`. Metric names in
 "Alerting rules" section documents every knob and the reasoning behind each
 rule.
 
-That prefix substitution applies to **this** `PrometheusRule` only. The Grafana
-dashboards in `dashboards/` are imported as plain JSON with `kconmon_ng_`
-written out literally and nothing rewrites them, so a non-default
-`config.metricsPrefix` means editing the dashboard JSON by hand.
+The Grafana dashboards in `dashboards/` get the SAME substitution: the chart
+rewrites `kconmon_ng_` to `<config.metricsPrefix>_` in every panel as it renders
+them (`templates/observability/dashboards.yaml`), so the shipped JSON keeps the literal
+`kconmon_ng_` prefix and needs no hand-editing for a custom prefix.
 
 **There are two different `PrometheusRule` objects once the Console is
 running, and neither implies the other.** This one is static: rendered by the
@@ -243,8 +254,14 @@ the Console's alerting reconciler (`console.alerting.enabled`) from rules
 operators build in the UI and stored in PostgreSQL. Run both, either, or
 neither. The Console's renderer takes the configured prefix as a constructor
 argument rather than defaulting to `kconmon_ng`, so rules it emits follow
-`config.metricsPrefix` too — the dashboards remain the one surface that does
-not.
+`config.metricsPrefix` too.
+
+The DASHBOARDS follow it too, and are stated above: the chart rewrites
+`kconmon_ng_` to `<config.metricsPrefix>_` as it renders each JSON into its
+ConfigMap, so nothing under `dashboards/` needs hand-editing. Every surface the
+chart owns therefore tracks the prefix; the only files that keep the literal
+`kconmon_ng_` are the sources in the repo, which is what makes the rewrite
+possible.
 
 ```yaml
 - alert: UDPLossHigh
@@ -296,10 +313,10 @@ not.
 
 - alert: ExternalChecksFailing
   expr: >-
-    sum by (source_node, source_zone, target, target_kind)
+    sum by (source_node, source_zone, target, target_kind, check_type)
     (rate(kconmon_ng_external_results_total{result="fail"}[5m]))
     /
-    sum by (source_node, source_zone, target, target_kind)
+    sum by (source_node, source_zone, target, target_kind, check_type)
     (rate(kconmon_ng_external_results_total[5m])) > 0.1
   for: 5m
   labels:
@@ -308,7 +325,11 @@ not.
     summary: More than 10% of external checks for a target are failing
 
 - alert: KconmonAgentsMissing
-  expr: kconmon_ng_controller_expected_agents - kconmon_ng_controller_registered_agents > 0
+  # Standbys hold no agents by design, so only the lease holder's counts are evidence.
+  expr: >-
+    (kconmon_ng_controller_expected_agents
+    - kconmon_ng_controller_registered_agents > 0)
+    and (kconmon_ng_controller_leader == 1)
   for: 10m
   labels:
     severity: warning
