@@ -81,10 +81,19 @@ jobs:
 
       - name: Extract current release notes
         run: |
-          # RELEASE_NOTES.md keeps the full history; the GitHub Release body
-          # should carry only the topmost (current) version section.
-          awk '/^## kconmon-ng v/{n++} n==1' RELEASE_NOTES.md > /tmp/current-release-notes.md
-          test -s /tmp/current-release-notes.md
+          # RELEASE_NOTES.md keeps the full history, and the GitHub Release body must carry the
+          # section for THIS TAG -- not merely the topmost one. Taking the top silently published
+          # the previous version's notes whenever a section was forgotten.
+          version="${GITHUB_REF_NAME#v}"
+          awk -v want="## kconmon-ng v${version}" '
+            $0 == want {found = 1; print; next}
+            found && /^## kconmon-ng v/ {exit}
+            found {print}
+          ' RELEASE_NOTES.md > /tmp/current-release-notes.md
+          if [ ! -s /tmp/current-release-notes.md ]; then
+            echo "RELEASE_NOTES.md has no '## kconmon-ng v${version}' section; add it before tagging." >&2
+            exit 1
+          fi
 
       - name: Run GoReleaser
         uses: goreleaser/goreleaser-action@v7
