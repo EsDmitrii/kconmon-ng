@@ -19,3 +19,13 @@ export const NAV_ITEMS: NavItem[] = [
   { path: "/console", label: "Console", description: "PromQL dev-tools." },
   { path: "/settings", label: "Settings", description: "Auth, RBAC, retention, maintenance, webhooks, export/import." },
 ];
+
+/**
+ * navPath widens a literal route path to the `string` TanStack's <Link> accepts.
+ *
+ * The nav routes are BUILT from NAV_ITEMS at module load, so they are not literal
+ * members of the router's registered path union and `to="/live"` does not
+ * typecheck — while `to={item.path}`, which is a `string`, does. This is the same
+ * widening the sidebar gets for free, named so a reader knows it is deliberate.
+ */
+export const navPath = (path: string): string => path;

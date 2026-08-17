@@ -66,6 +66,12 @@ const en = {
   "form.rangeStart": "Range start",
   "form.rangeEnd": "Range end",
   "form.submit": "Investigate",
+  /* The committed scope names something the option list does not have — a
+     drained node, a deleted target, a hand-typed name, or simply a list this
+     subject may not read. The picker draws it anyway (see the Select in
+     pages/investigate.tsx) so that the control and the headline beside the page
+     title agree; the mark is what stops the reader reading it as a live object. */
+  "form.option.missing": "{value} — not in the current topology",
   "form.targetsGated":
     "The target list needs targets:read. The scope still works from a permalink — the URL carries the target's " +
     "name, not its id.",
@@ -270,10 +276,28 @@ const en = {
     "Alert state is a live-only signal — Prometheus keeps no firing history here. Nothing was requested for this " +
     "instant.",
   "source.alertsConfig": "Firing alerts read Prometheus — set console.prometheus.address. Nothing was requested.",
+  /* WHOSE alerts these are, said before anything else about them. The timeline
+     used to carry a cluster's whole kube-prometheus-stack backdrop — TargetDown,
+     etcdMembersDown, Watchdog — as unscoped rows indistinguishable from this
+     product's own. They are not here now, and a caption that did not say so
+     would leave the reader believing this list covers the cluster. */
   "source.alertsNow":
-    "Alerts are the set firing NOW: a row at activeAt for each one that started inside this window, and a row at " +
-    "the window's start for each one that was already firing. Resolutions are not recorded; only what is firing " +
-    "now is visible.",
+    "Only alerts from rules this console manages are here, narrowed to this scope by their labels — a rule this " +
+    "console does not manage belongs to whoever wrote it, and its firing state lives in Alertmanager and Grafana, " +
+    "not on this page. They are the set firing NOW: a row at activeAt for each one that started inside this " +
+    "window, and a row at the window's start for each one that was already firing. Resolutions are not recorded; " +
+    "only what is firing now is visible.",
+  /* Scope filtering is the one way an alert this console DOES own can be absent
+     from the rows, so it is counted and named rather than left to be noticed. */
+  "source.alertsScopeHidden.one":
+    "{count} alert from this console's own rules is firing in this window but outside this scope, so it has no " +
+    "row below.",
+  "source.alertsScopeHidden.few":
+    "{count} alerts from this console's own rules are firing in this window but outside this scope, so they have " +
+    "no rows below.",
+  "source.alertsScopeHidden.many":
+    "{count} alerts from this console's own rules are firing in this window but outside this scope, so they have " +
+    "no rows below.",
 
   /* One line PER FAILED SOURCE. {label} is one of the ten names below and
      {error} is the SERVER's own detail, verbatim. */
@@ -300,6 +324,9 @@ const en = {
   "timeline.entries.few": "{count} entries in this window",
   "timeline.entries.many": "{count} entries in this window",
   "timeline.sources.aria": "Timeline sources",
+  "timeline.sources.summary.one": "{count} note about these sources",
+  "timeline.sources.summary.few": "{count} notes about these sources",
+  "timeline.sources.summary.many": "{count} notes about these sources",
   "timeline.partial.one": "{count} source failed; the timeline below is partial.",
   "timeline.partial.few": "{count} sources failed; the timeline below is partial.",
   "timeline.partial.many": "{count} sources failed; the timeline below is partial.",
@@ -323,12 +350,8 @@ const en = {
   "timeline.pin": "Pin: {title}",
   "timeline.unpin": "Unpin: {title}",
 
-  /* The pager. It sits in the header BELOW the caveats, so turning a page
-     leaves the reader past them and the new rows already in view. */
-  "pager.size": "Rows per page",
-  "pager.page": "Page {page} of {count}",
-  "pager.prev": "Previous page",
-  "pager.next": "Next page",
+  /* The pager's own words moved to dict/shared.ts with the control itself —
+     ui/pager.tsx is one component with a mount on every list now. */
 
   /* The badge on a row, per source. "k8s" is what a cluster event is called
      out loud and stays. `audit` says "audit", not "config change" (QA round 5,
@@ -381,6 +404,7 @@ export const investigateDict: Dictionary<InvestigateKey> = defineDict(en, {
   "form.rangeStart": "Начало диапазона",
   "form.rangeEnd": "Конец диапазона",
   "form.submit": "Расследовать",
+  "form.option.missing": "{value} — нет в текущей топологии",
   "form.targetsGated":
     "Списку целей нужно право targets:read. По постоянной ссылке область всё равно откроется: в адресе лежит имя " +
     "цели, а не её идентификатор.",
@@ -544,9 +568,20 @@ export const investigateDict: Dictionary<InvestigateKey> = defineDict(en, {
     "Активные оповещения читаются из Prometheus, а его адрес не задан: console.prometheus.address. Ничего не " +
     "запрашивалось.",
   "source.alertsNow":
-    "Оповещения берутся набором, активным СЕЙЧАС: строка на activeAt для каждого, что началось внутри " +
-    "интервала, и строка на начало интервала для тех, что уже были активны. Погашения не записываются, видно только то, что " +
-    "горит прямо сейчас.",
+    "Здесь только оповещения по правилам, которыми управляет эта консоль, суженные по меткам до этой области. " +
+    "Правило, которым консоль не управляет, принадлежит тому, кто его написал, и его состояние живёт в " +
+    "Alertmanager и Grafana, а не на этой странице. Набор берётся активным СЕЙЧАС: строка на activeAt для " +
+    "каждого, что началось внутри интервала, и строка на начало интервала для тех, что уже были активны. " +
+    "Погашения не записываются, видно только то, что горит прямо сейчас.",
+  "source.alertsScopeHidden.one":
+    "{count} оповещение по правилам этой консоли горит в интервале, но вне этой области, поэтому строки для него " +
+    "ниже нет.",
+  "source.alertsScopeHidden.few":
+    "{count} оповещения по правилам этой консоли горят в интервале, но вне этой области, поэтому строк для них " +
+    "ниже нет.",
+  "source.alertsScopeHidden.many":
+    "{count} оповещений по правилам этой консоли горят в интервале, но вне этой области, поэтому строк для них " +
+    "ниже нет.",
 
   "source.failed": "{label}: {error}",
   "source.failed.fallback": "запрос не выполнен.",
@@ -568,6 +603,9 @@ export const investigateDict: Dictionary<InvestigateKey> = defineDict(en, {
   "timeline.entries.few": "{count} записи в этом интервале",
   "timeline.entries.many": "{count} записей в этом интервале",
   "timeline.sources.aria": "Источники ленты",
+  "timeline.sources.summary.one": "{count} замечание об источниках",
+  "timeline.sources.summary.few": "{count} замечания об источниках",
+  "timeline.sources.summary.many": "{count} замечаний об источниках",
   "timeline.partial.one": "{count} источник не ответил, лента ниже неполная.",
   "timeline.partial.few": "{count} источника не ответили, лента ниже неполная.",
   "timeline.partial.many": "{count} источников не ответили, лента ниже неполная.",
@@ -583,11 +621,6 @@ export const investigateDict: Dictionary<InvestigateKey> = defineDict(en, {
   "timeline.entries.aria": "Записи ленты",
   "timeline.pin": "Закрепить: {title}",
   "timeline.unpin": "Открепить: {title}",
-
-  "pager.size": "Строк на странице",
-  "pager.page": "Страница {page} из {count}",
-  "pager.prev": "Предыдущая страница",
-  "pager.next": "Следующая страница",
 
   "kind.event": "событие",
   "kind.audit": "аудит",

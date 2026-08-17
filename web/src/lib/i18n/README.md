@@ -376,13 +376,13 @@ to Russian. Every SURFACE has been taken now — none of the four below is a pag
 or a component of ours with a sentence left in it. Three stay for a reason the
 entry gives; the fourth is a third-party dependency.
 
-- **The three ECharts SERIES names** — `CURSOR_SERIES_NAME` ("Timeline
-  cursor"), and `lib/annotations.ts`'s `ANNOTATION_SERIES_NAME` and
-  `MAINTENANCE_SERIES_NAME` ("Maintenance"). They appear in the chart legend.
-  Left English DELIBERATELY: a legend toggles a series *by name*, all three are
-  exported constants tests read as identity, and translating one of three would
-  be worse than translating none. If they are ever translated it has to be all
-  three at once, with the identity question answered first.
+- **The two ECharts SERIES names** — `lib/annotations.ts`'s
+  `ANNOTATION_SERIES_NAME` and `MAINTENANCE_SERIES_NAME` ("Maintenance"). They
+  appear in the chart legend. Left English DELIBERATELY: a legend toggles a
+  series *by name*, both are exported constants tests read as identity, and
+  translating one of two would be worse than translating none. (There were
+  three: `CURSOR_SERIES_NAME` went with the markLine it named, when the time
+  cursor became one shared DOM line per page — see `lib/chart-cursor.tsx`.)
 - **`@xyflow/react`'s built-in `<Controls>`** on `/topology` — zoom in, zoom
   out, fit view, toggle interactivity. Third-party aria-labels; the component
   takes overrides, so this is a small, self-contained job.

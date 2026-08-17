@@ -43,8 +43,22 @@ const en = {
   "empty.engaged.body":
     "Nothing was scraped for {protocol} probes at that instant — it may predate the deployment, or fall outside Prometheus' own retention.",
 
+  /* ── the zoom ───────────────────────────────────────────────────────────────
+     The topology map's own three words, deliberately repeated rather than
+     shared: two surfaces, two files (lib/i18n/README.md). What must NOT differ
+     is the vocabulary, and it does not. */
+  "zoom.aria": "Zoom",
+  "zoom.in": "Zoom in",
+  "zoom.out": "Zoom out",
+  "zoom.fit": "Fit to view",
+  "zoom.level": "{pct}%",
+  /* The shortcut, stated rather than left to be discovered. A plain wheel is
+     deliberately NOT zoom: it is how a grid wider than its box is panned. */
+  "zoom.hint": "Ctrl and the wheel zoom the grid; the wheel alone scrolls it.",
+
   /* ── the grid ───────────────────────────────────────────────────────────── */
   "grid.caption": "Node-to-node failure ratio matrix, {protocol}",
+  "grid.prefix": "Node names drop the shared prefix {prefix}",
   "grid.corner": "src \\ dst",
   "cell.self": "{node}: self",
   "cell.investigate": "Investigate {src} → {dst}",
@@ -99,7 +113,15 @@ export const matrixDict: Dictionary<MatrixKey> = defineDict(en, {
   "empty.engaged.body":
     "Для зондов {protocol} на тот момент ничего не собрано. Возможно, момент раньше развёртывания, а возможно, он выпал из собственного retention Prometheus.",
 
+  "zoom.aria": "Масштаб",
+  "zoom.in": "Приблизить",
+  "zoom.out": "Отдалить",
+  "zoom.fit": "Вписать",
+  "zoom.level": "{pct}%",
+  "zoom.hint": "Ctrl с колесом меняет масштаб, одно колесо прокручивает сетку.",
+
   "grid.caption": "Матрица доли сбоев между узлами, {protocol}",
+  "grid.prefix": "В именах узлов опущен общий префикс {prefix}",
   "grid.corner": "откуда \\ куда",
   "cell.self": "{node}: сам к себе",
   "cell.investigate": "Расследовать {src} → {dst}",

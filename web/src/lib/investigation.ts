@@ -128,6 +128,14 @@ function crossings(
   const out: TimelineEntry[] = [];
   let above = false;
   for (const sample of samples) {
+    /* An UNREADABLE instant never becomes an edge. `sample.at.toISOString()`
+       below is the ref id, and it THROWS on an Invalid Date — so one malformed
+       row in a proxied PromQL response used to take the whole page down rather
+       than one sample out of a series. lib/investigation-sources.ts's
+       samplesFromMatrix is the place that stops building such a sample; this is
+       the line that stops it mattering, because thresholdCrossings is public and
+       a caller may assemble its own series. */
+    if (!Number.isFinite(sample.at.getTime())) continue;
     const isAbove = sample.value > threshold;
     if (isAbove === above) continue;
     above = isAbove;
@@ -270,46 +278,5 @@ export function rankCauses(
   });
 }
 
-/* pagination CLIENT-side, over the already-merged list. */
-
-/** The sizes the selector offers, ascending. */
-export const TIMELINE_PAGE_SIZES = [10, 50, 100] as const;
-
-export type TimelinePageSize = (typeof TIMELINE_PAGE_SIZES)[number];
-
-/** 50 — the middle option, and the number this console already means by "one screenful of history". */
-export const TIMELINE_DEFAULT_PAGE_SIZE: TimelinePageSize = 50;
-
-export interface TimelineSlice {
-  /** 1-based, CLAMPED into [1, pageCount]. Render this, and step prev/next
-   *  from it — a stale number stored in state must never address a row. */
-  page: number;
-  /** At least 1. An empty window is page 1 of 1, never "page 1 of 0". */
-  pageCount: number;
-  /** Half-open [start, end) into the merged array. */
-  start: number;
-  end: number;
-}
-
-/** timelineSlice turns (total, page, size) into the exact cut to render. */
-export function timelineSlice(total: number, page: number, size: number): TimelineSlice {
-  const rows = Number.isFinite(total) && total > 0 ? Math.floor(total) : 0;
-  const per =
-    Number.isFinite(size) && size >= 1 ? Math.floor(size) : (TIMELINE_DEFAULT_PAGE_SIZE as number);
-  const pageCount = Math.max(1, Math.ceil(rows / per));
-  const wanted = Number.isNaN(page) ? 1 : page;
-  const clamped = Math.min(Math.max(Math.floor(Math.min(wanted, pageCount)), 1), pageCount);
-  const start = Math.min((clamped - 1) * per, rows);
-  return { page: clamped, pageCount, start, end: Math.min(start + per, rows) };
-}
-
-/**
- * pageOfIndex is the page-size ANCHOR: which page holds entry `index` once the size becomes `size`;
- * changing the size keeps the first visible entry in view rather than resetting to page 1 (see the
- * caller for why).
- */
-export function pageOfIndex(index: number, size: number): number {
-  if (!Number.isFinite(index) || index <= 0) return 1;
-  const per = Number.isFinite(size) && size >= 1 ? Math.floor(size) : (TIMELINE_DEFAULT_PAGE_SIZE as number);
-  return Math.floor(index / per) + 1;
-}
+/* The client-side pagination that used to live here now serves every list in
+   the console — see lib/pagination.ts and components/ui/pager.tsx. */

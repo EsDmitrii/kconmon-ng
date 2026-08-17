@@ -103,7 +103,7 @@ export function NavDrawer() {
       </button>
 
       {open ? (
-        <div className="fixed inset-0 z-40 md:hidden">
+        <div className="fixed inset-0 z-40 h-[100dvh] md:hidden">
           {/* The scrim is a button so a pointer user can dismiss by tapping
               beside the drawer; aria-hidden because Escape and the trigger are
               the keyboard's two ways out and a third, unlabelled stop in the

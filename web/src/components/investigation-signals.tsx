@@ -1,13 +1,13 @@
-import { useMemo } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type { EChartsOption, LineSeriesOption, SeriesOption } from "echarts";
 import { EChart } from "@/components/echart";
 import { useTheme } from "@/components/theme-provider";
 import { Badge } from "@/components/ui/badge";
 import { Card } from "@/components/ui/card";
 import { maintenanceOverlaySeries } from "@/lib/annotations";
-import { chartColors } from "@/lib/chart-theme";
+import { useChartCursor } from "@/lib/chart-cursor";
 import { ApiError } from "@/lib/api";
-import { formatSeconds, toSeriesOption, type CuratedChart } from "@/lib/curated-metrics";
+import { toSeriesOption, type CuratedChart } from "@/lib/curated-metrics";
 import { stampClock, translate, useLocale, useT, type Translate } from "@/lib/i18n";
 import { PROMQL_MAX_RANGE_MS } from "@/lib/investigation-sources";
 import { signalsDict, type SignalsKey } from "@/lib/i18n/dict/signals";
@@ -28,40 +28,21 @@ function problemDetail(error: Error, t: Translate<SignalsKey> = enT): string {
 
 /** investigation-signals.tsx — the Investigate page's right-hand column: the scope's loss and RTT charts. */
 
-/** The cursor series' name. Named rather than anonymous so it can be switched
- *  off from the legend like any other series. */
-export const CURSOR_SERIES_NAME = "Timeline cursor";
-
-/**
- * cursorSeries is the timeline↔chart sync, in one markLine; null (nothing hovered) returns null
- * rather than an empty series.
+/*
+ * The cursor markLine that used to live here is gone, and the mechanic it served
+ * is not: the timeline's instant now goes into the page's cursor group
+ * (lib/chart-cursor.tsx), which draws ONE line on every chart of the page rather
+ * than a private one on these two. That is also what made hovering a chart able
+ * to move the cursor — a markLine rebuilt per mouse position would have meant a
+ * setOption per frame.
  */
-export function cursorSeries(at: Date | null, dark: boolean): LineSeriesOption | null {
-  if (at === null) return null;
-  const ms = at.getTime();
-  if (!Number.isFinite(ms)) return null;
-  const colors = chartColors(dark ? "dark" : "light");
-  return {
-    name: CURSOR_SERIES_NAME,
-    type: "line",
-    data: [],
-    markLine: {
-      symbol: "none",
-      silent: true,
-      animation: false,
-      label: { show: false },
-      lineStyle: { color: colors.axis, type: "solid", width: 1, opacity: 0.85 },
-      data: [{ xAxis: ms }],
-    },
-  };
-}
 
-/** withOverlays appends the cursor and the maintenance bands to an option a caller already built. */
+/** withOverlays appends the maintenance bands to an option a caller already built. */
 export function withOverlays(
   option: EChartsOption,
-  opts: { cursorAt: Date | null; windows: MaintenanceWindow[]; dark: boolean },
+  opts: { windows: MaintenanceWindow[]; dark: boolean },
 ): EChartsOption {
-  const extra = [maintenanceOverlaySeries(opts.windows, opts.dark), cursorSeries(opts.cursorAt, opts.dark)].filter(
+  const extra = [maintenanceOverlaySeries(opts.windows, opts.dark)].filter(
     (s): s is LineSeriesOption => s !== null,
   );
   if (extra.length === 0) return option;
@@ -103,10 +84,15 @@ function fmtPct(v: number | null): string {
   return v === null ? "—" : `${(v * 100).toFixed(1)}%`;
 }
 
-function fmtSignedPct(v: number | null): string {
+/* "pp" is percentage POINTS, and it is a word: the Russian interface said "pp" too. The rounding
+   guard is the other half — a delta of -0.0004 rendered as "−0.0 pp", which reads as a decrease
+   that did not happen. */
+function fmtSignedPct(v: number | null, unit = "pp"): string {
   if (v === null) return "—";
   const pct = v * 100;
-  return `${pct >= 0 ? "+" : "−"}${Math.abs(pct).toFixed(1)} pp`;
+  const rounded = Number(Math.abs(pct).toFixed(1));
+  const sign = rounded === 0 ? "±" : pct >= 0 ? "+" : "−";
+  return `${sign}${rounded.toFixed(1)} ${unit}`;
 }
 
 /**
@@ -117,19 +103,17 @@ export function signalChartOption(
   chart: CuratedChart,
   result: PromResult,
   dark: boolean,
-  overlays: { cursorAt: Date | null; windows: MaintenanceWindow[] },
+  overlays: { windows: MaintenanceWindow[] },
 ): EChartsOption {
   const base = toSeriesOption(chart, result, dark);
   const withAxes: EChartsOption = {
     ...base,
     xAxis: { ...(base.xAxis as object), axisLabel: { ...(base.xAxis as { axisLabel?: object }).axisLabel, hideOverlap: true } },
-    yAxis: {
-      ...(base.yAxis as object),
-      axisLabel: {
-        ...(base.yAxis as { axisLabel?: object }).axisLabel,
-        formatter: chart.unit === "seconds" ? (value: number) => formatSeconds(value) : undefined,
-      },
-    },
+    /* No yAxis override. toSeriesOption already installs the unit's own
+       formatter — formatSeconds for seconds, formatRatio for ratios — and the
+       override that re-stated the first case set `undefined` for the second,
+       which ECharts reads as "no formatter at all": the packet-loss axis then
+       printed 0.01 beside a tooltip saying 1.0%. */
   } as EChartsOption;
   return withOverlays(withAxes, { ...overlays, dark });
 }
@@ -140,7 +124,6 @@ function SignalChart({
   unit,
   result,
   error,
-  cursorAt,
   windows,
   annotations,
   emptyNote,
@@ -155,7 +138,6 @@ function SignalChart({
   result: PromResult | undefined;
   /** The REJECTION, as opposed to Prometheus's own error envelope below. */
   error?: Error | null;
-  cursorAt: Date | null;
   windows: MaintenanceWindow[];
   annotations: Annotation[];
   emptyNote: string;
@@ -169,8 +151,8 @@ function SignalChart({
   const dark = theme === "dark";
   const chart = useMemo<CuratedChart>(() => ({ id, title, unit, query: "" }), [id, title, unit]);
   const option = useMemo(
-    () => (result ? signalChartOption(chart, result, dark, { cursorAt, windows }) : undefined),
-    [chart, result, dark, cursorAt, windows],
+    () => (result ? signalChartOption(chart, result, dark, { windows }) : undefined),
+    [chart, result, dark, windows],
   );
 
   // promqlQueryRange RESOLVES Prometheus's own error envelope rather than
@@ -199,8 +181,42 @@ function SignalChart({
 }
 
 /**
- * SignalPanels is the right-hand column: the delta chip, the two charts and the cursor readout; the
- * cursor readout is DOM, not a chart tooltip, and deliberately.
+ * CursorReadout says, in words, which instant the page's time cursor is on. It
+ * is DOM rather than a chart tooltip deliberately: a canvas marker cannot be
+ * focused or read aloud.
+ *
+ * It subscribes to the cursor group instead of taking a prop, so that hovering a
+ * CHART moves it as readily as hovering a timeline row does — and so that the
+ * mousemove behind it re-renders one paragraph rather than the Investigate page.
+ * The state is the FORMATTED string, which means React bails out of most frames
+ * of a drag: the clock only ticks once a second.
+ */
+function CursorReadout() {
+  const t = useT(signalsDict);
+  const { locale } = useLocale();
+  const group = useChartCursor();
+  const [text, setText] = useState(() => t("cursor.none"));
+
+  useEffect(() => {
+    if (!group) return;
+    const show = (at: number | null) =>
+      setText(at === null || !Number.isFinite(at) ? t("cursor.none") : stampClock(new Date(at), locale));
+    show(group.current());
+    return group.subscribe(show);
+  }, [group, locale, t]);
+
+  return (
+    <p data-testid="signal-cursor" className="mt-2 text-[11px] text-muted-foreground">
+      {/* The SAME stamp helper the timeline row's own clock uses, so the instant
+          a reader is hovering reads identically in both places (QA scope 3,
+          finding #18). */}
+      {t("cursor", { at: text })}
+    </p>
+  );
+}
+
+/**
+ * SignalPanels is the right-hand column: the delta chip, the two charts and the shared cursor.
  */
 export function SignalPanels({
   scopeLabel,
@@ -210,7 +226,6 @@ export function SignalPanels({
   rttError,
   delta,
   deltaError,
-  cursorAt,
   windows,
   annotations,
   promConfigured,
@@ -229,7 +244,6 @@ export function SignalPanels({
    *  chip printed "0.0% → 0.0% · +0.0 pp" over two requests that never came
    *  back — a figure, in the place a figure lives, describing nothing. */
   deltaError?: Error | null;
-  cursorAt: Date | null;
   windows: MaintenanceWindow[];
   annotations: Annotation[];
   promConfigured: boolean;
@@ -244,7 +258,6 @@ export function SignalPanels({
   rangeTooWide: boolean;
 }) {
   const t = useT(signalsDict);
-  const { locale } = useLocale();
   const tooWide = rangeTooWide ? t("chart.tooWide", { hours: PROMQL_MAX_RANGE_MS / 3_600_000 }) : undefined;
   return (
     <Card asChild className="p-5">
@@ -273,21 +286,14 @@ export function SignalPanels({
               <Badge
                 variant={delta.delta === null ? "unknown" : delta.delta > 0 ? "bad" : delta.delta < 0 ? "ok" : "neutral"}
               >
-                {fmtSignedPct(delta.delta)}
+                {fmtSignedPct(delta.delta, t("delta.unit"))}
               </Badge>
               <span className="text-[11px] text-muted-foreground">{t("delta.caption")}</span>
             </>
           )}
         </div>
 
-        <p data-testid="signal-cursor" className="mt-2 text-[11px] text-muted-foreground">
-          {/* The SAME stamp helper the timeline row's own clock uses, so the
-              instant a reader is hovering reads identically in both places
-              (QA scope 3, finding #18). */}
-          {t("cursor", {
-            at: cursorAt === null ? t("cursor.none") : stampClock(cursorAt, locale),
-          })}
-        </p>
+        <CursorReadout />
 
         {gated ? (
           <p className="mt-3 text-xs leading-relaxed text-muted-foreground">{t("gated")}</p>
@@ -301,7 +307,6 @@ export function SignalPanels({
               unit="ratio"
               result={loss}
               error={lossError}
-              cursorAt={cursorAt}
               windows={windows}
               annotations={annotations}
               emptyNote={t("chart.loss.empty")}
@@ -313,7 +318,6 @@ export function SignalPanels({
               unit="seconds"
               result={rtt}
               error={rttError}
-              cursorAt={cursorAt}
               windows={windows}
               annotations={annotations}
               emptyNote={t("chart.rtt.empty")}

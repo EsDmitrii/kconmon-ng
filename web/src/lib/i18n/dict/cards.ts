@@ -1,4 +1,4 @@
-import { defineDict, type Dictionary } from "@/lib/i18n";
+import { DEFAULT_LOCALE, type Locale, defineDict, type Dictionary } from "@/lib/i18n";
 
 /**
  * cards — the three OBJECT cards: pages/node-card.tsx, pages/pair-card.tsx and
@@ -117,6 +117,8 @@ const en = {
   "node.breakdown.loss": "Packet loss",
   "node.breakdown.rtt": "RTT p95",
   "node.breakdown.empty": "No probe data for this node yet.",
+  /* ui/pager.tsx's nouns for the card's two paged lists. */
+  "node.breakdown.subject": "peers",
   "node.runs.heading": "Runs touching this node",
   "node.runs.scanNote":
     "No server-side node filter on GET /api/v1/runs yet — this scans the most recent {limit} runs' results " +
@@ -125,6 +127,7 @@ const en = {
   "node.runs.unavailable": "Run history is unavailable",
   "node.runs.scanning": "Scanning recent runs…",
   "node.runs.empty": "No runs touching this node in the most recent {limit} runs.",
+  "node.runs.subject": "runs",
   "node.runs.pairs": "{count} {word}",
   "count.pairs.one": "pair",
   "count.pairs.few": "pairs",
@@ -197,6 +200,7 @@ const en = {
   "target.checks.listAria": "Definitions",
   "target.checks.tmNotice": "Target configuration is shown as of now — only the probe series time-travel.",
   "target.checks.unavailable": "Check definitions are unavailable",
+  "target.checks.subject": "checks",
   "target.checks.empty": "No check definition points at this target yet. Until one does, nothing probes it on a schedule.",
   "target.checks.noSchedule": "No schedule — this definition only runs when someone starts it by hand.",
   "target.history.title": "External probe duration p95 by source node",
@@ -221,6 +225,7 @@ const en = {
     "client-side. An older run against this target may exist but will not show up here.",
   "target.runs.unavailable": "Run history is unavailable",
   "target.runs.scanning": "Scanning recent runs…",
+  "target.runs.subject": "runs",
   "target.runs.empty": "No run against this target in the most recent {limit} runs.",
   "target.runs.pairsOk": "{ok}/{total} ok",
   "target.changesNote":
@@ -307,6 +312,7 @@ export const cardsDict: Dictionary<CardsKey> = defineDict(en, {
   "node.breakdown.loss": "Потери пакетов",
   "node.breakdown.rtt": "RTT p95",
   "node.breakdown.empty": "Данных зондирования по этому узлу пока нет.",
+  "node.breakdown.subject": "Соседи",
   "node.runs.heading": "Запуски, затрагивающие этот узел",
   "node.runs.scanNote":
     "Серверного фильтра по узлу у GET /api/v1/runs пока нет, поэтому результаты последних {limit} запусков " +
@@ -316,6 +322,7 @@ export const cardsDict: Dictionary<CardsKey> = defineDict(en, {
   "node.runs.unavailable": "История запусков недоступна",
   "node.runs.scanning": "Просматриваем недавние запуски…",
   "node.runs.empty": "Среди последних {limit} запусков нет ни одного, затрагивающего этот узел.",
+  "node.runs.subject": "Запуски",
   "node.runs.pairs": "{count} {word}",
   "count.pairs.one": "пара",
   "count.pairs.few": "пары",
@@ -384,6 +391,7 @@ export const cardsDict: Dictionary<CardsKey> = defineDict(en, {
   "target.checks.tmNotice":
     "Конфигурация цели показана на текущий момент: во времени путешествуют только серии зондирования.",
   "target.checks.unavailable": "Определения проверок недоступны",
+  "target.checks.subject": "Проверки",
   "target.checks.empty":
     "На эту цель пока не указывает ни одно определение проверки. Пока не укажет, по расписанию её никто не зондирует.",
   "target.checks.noSchedule": "Расписания нет, это определение запускается только руками.",
@@ -406,6 +414,7 @@ export const cardsDict: Dictionary<CardsKey> = defineDict(en, {
     "перебираются на клиенте. Запуск постарше по этой цели вполне может существовать, но сюда не попадёт.",
   "target.runs.unavailable": "История запусков недоступна",
   "target.runs.scanning": "Просматриваем недавние запуски…",
+  "target.runs.subject": "Запуски",
   "target.runs.empty": "Среди последних {limit} запусков нет ни одного по этой цели.",
   "target.runs.pairsOk": "{ok}/{total} успешно",
   "target.changesNote":
@@ -433,7 +442,18 @@ export const cardsDict: Dictionary<CardsKey> = defineDict(en, {
 
 /** pluralKey picks the Russian form for `count`. Duplicated per dictionary on
  *  purpose — see lib/i18n/README.md's one-file-per-surface rule. */
-export function pluralKey(count: number, one: CardsKey, few: CardsKey, many: CardsKey): CardsKey {
+export function pluralKey(
+  count: number,
+  one: CardsKey,
+  few: CardsKey,
+  many: CardsKey,
+  locale: Locale = DEFAULT_LOCALE,
+): CardsKey {
+  /* The RUSSIAN rule was applied to both languages, so an English console
+     printed "21 rule" and "101 pair": Russian sends every number ending in a
+     lone 1 to the .one form, English sends only 1 itself. dict/settings.ts had
+     the locale-aware version all along. */
+  if (locale !== "ru") return Math.abs(count) === 1 ? one : many;
   const hundred = Math.abs(count) % 100;
   const ten = Math.abs(count) % 10;
   if (hundred >= 11 && hundred <= 14) return many;

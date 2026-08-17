@@ -143,7 +143,11 @@ export function RecentChanges({ scope = "", scopeNode = "" }: RecentChangesProps
               sentence's own language (lib/i18n's localeTag). */}
           {at ? (
             <p className="mt-0.5 text-[11px] text-muted-foreground">
-              {t("upTo", { at: at.toLocaleString(localeTag(locale)) })}
+              {/* hour12: false, like every other instant this console prints (lib/utils' own rule).
+                  A bare toLocaleString picks the locale's default, so this header read
+                  "8/17/2026, 12:30:00 PM" directly above rows stamped "11:48:27" — and at night the
+                  two notations collide outright on the same hour. */}
+              {t("upTo", { at: at.toLocaleString(localeTag(locale), { hour12: false }) })}
             </p>
           ) : null}
         </div>

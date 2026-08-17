@@ -10,6 +10,7 @@ import {
   scopeFilterValue,
   type InvestigationScope,
 } from "@/lib/investigation-sources";
+import { useTimeContext, withAtParam } from "@/lib/timemachine";
 import { Badge } from "./ui/badge";
 import { Card } from "./ui/card";
 import { cn } from "@/lib/utils";
@@ -19,11 +20,19 @@ import { cn } from "@/lib/utils";
 const ACTION_CLASS =
   "inline-flex h-8 items-center rounded-md border border-border-strong px-3 text-[13px] hover:bg-accent hover:text-accent-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring";
 
-/** It is a real <a href>, not a click handler; the difference only matters for a tab left open overnight. */
-export function InvestigateLink({ scope, now = new Date() }: { scope: InvestigationScope; now?: Date }) {
+/**
+ * It is a real <a href>, not a click handler; the difference only matters for a tab left open
+ * overnight.
+ *
+ * The window ends at the INSTANT BEING VIEWED, not at now: opened while the Time Machine is engaged,
+ * an Investigate link that anchored on the wall clock walked the reader out of the moment they were
+ * investigating and into the present, without saying so.
+ */
+export function InvestigateLink({ scope, now }: { scope: InvestigationScope; now?: Date }) {
   const t = useT(investigateEntryDict);
+  const { at } = useTimeContext();
   return (
-    <a href={buildInvestigateURL(scope, now)} className={ACTION_CLASS}>
+    <a href={withAtParam(buildInvestigateURL(scope, now ?? at ?? new Date()))} className={ACTION_CLASS}>
       {t("investigate")}
     </a>
   );

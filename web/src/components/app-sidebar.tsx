@@ -130,7 +130,7 @@ export function AppSidebar({ onNavigate }: { onNavigate?: () => void } = {}) {
       <nav aria-label={t("shell.nav.aria")} className="flex-1 overflow-y-auto px-3 pb-4 pt-2">
         {groupItems().map((group) => (
           <div key={group.key} className="mb-5">
-            <div className="mb-1.5 px-2.5 text-[10.5px] font-semibold uppercase tracking-[0.1em] text-muted-foreground/70">
+            <div className="mb-1.5 px-2.5 text-[10.5px] font-semibold uppercase tracking-[0.1em] text-muted-foreground">
               {t(group.key)}
             </div>
             <div className="flex flex-col gap-0.5">
@@ -149,7 +149,7 @@ export function AppSidebar({ onNavigate }: { onNavigate?: () => void } = {}) {
         {me && !isAnonymous ? (
           <UserMenu me={me} can={can} />
         ) : (
-          <span className="text-[11px] text-muted-foreground/70">{t("sidebar.footer")}</span>
+          <span className="text-[11px] text-muted-foreground">{t("sidebar.footer")}</span>
         )}
       </div>
     </aside>

@@ -25,19 +25,60 @@ import { useTheme } from "@/components/theme-provider";
 import { goTo } from "@/lib/api";
 import { localeTag, useLocale, useT, type Translate } from "@/lib/i18n";
 import { enT, topologyDict, type TopologyKey } from "@/lib/i18n/dict/topology";
-import { DEGRADED_AT, FAILING_AT, isProblemCell, severityRatio } from "@/lib/matrix-cells";
+import { DEGRADED_AT, FAILING_AT, fmtRatio, isProblemCell, severityRatio } from "@/lib/matrix-cells";
+import { compareNaturalName } from "@/lib/natural-name";
 import { formatAtParam, useTimeContext } from "@/lib/timemachine";
-import type { Matrix, Topology } from "@/lib/types";
+import type { Matrix, MatrixCell, Topology } from "@/lib/types";
+/* The matrix payload gate, imported from the page that owns the matrix rather
+   than re-stated here: this map colours its boxes and draws its edges from the
+   same cells the grid does, and a figure the grid refuses to print is not one
+   this map may put on an edge label. */
+import { measuredCells } from "./matrix";
 
 import { cn } from "@/lib/utils";
 
-const ZONE_W = 300;
+/* A zone is a GRID of node boxes, not a single column.
+   One column per zone made the drawing tall and thin, so React Flow's fitView had to solve for
+   height: it settled well under scale 1, shrank every label, and left about four fifths of the
+   canvas blank. The column count grows with the fleet (roughly square, capped) so a zone stays a
+   shape a pane can hold. */
+const NODE_W = 260;
+const NODE_GAP = 20;
+const ZONE_PAD = 20;
 const NODE_H = 64;
-/* A node box sits 20px in from the zone's left edge, so ZONE_W minus twice that is every pixel it may occupy. */
-const NODE_MAX_W = ZONE_W - 40;
+const NODE_MAX_W = NODE_W;
+/** ZONE_MAX_COLS keeps a big zone from becoming a wide, one-row strip — the opposite failure. */
+const ZONE_MAX_COLS = 4;
+
+/** zoneColumns is how many node boxes a zone lays out side by side. */
+function zoneColumns(count: number): number {
+  if (count <= 1) return 1;
+  return Math.min(ZONE_MAX_COLS, Math.max(1, Math.ceil(Math.sqrt(count))));
+}
+
+/** zoneWidth is the box a zone of `count` nodes draws at. */
+function zoneWidth(count: number): number {
+  const cols = zoneColumns(count);
+  return ZONE_PAD * 2 + cols * NODE_W + (cols - 1) * NODE_GAP;
+}
 
 /* Edge policy — Progressive Disclosure. */
 const EDGE_CAP = 10;
+
+/* NUL, the same separator pages/matrix.tsx keys its cell map on: a composite key
+   built with a printable separator is only unambiguous while no name contains
+   it. Internal only — it never reaches the DOM. */
+const pairKey = (source: string, destination: string) => `${source}\0${destination}`;
+
+/**
+ * edgeId is the DOM-visible half of the same question. React Flow writes this id
+ * into `data-id` and keys the edge on it, so it cannot carry a NUL — and a bare
+ * `${source}->${destination}` collided the moment a name contained the arrow
+ * ("a->b" → "c" and "a" → "b->c" are both "a->b->c"). Percent-encoding each half
+ * makes the join injective and leaves the ordinary case ("n1->n2") untouched.
+ */
+const edgeId = (source: string, destination: string) =>
+  `${encodeURIComponent(source)}->${encodeURIComponent(destination)}`;
 
 /** health → the word the node's aria-label announces. "ok" is spoken as
  *  "healthy" rather than in the class name's vocabulary (QA round 2, #22). */
@@ -73,17 +114,51 @@ export type MapSource = "nodes" | "agents";
  * survive the fallback is readiness, and `ready: undefined` is how that is
  * carried rather than guessed (QA scope 2, findings #1 and #2).
  */
+/* The controller answers in REGISTRATION order — whichever agent happened to
+   come up first — so a lane redrew itself differently after every rollout and no
+   node was ever where it had been (owner report). lib/natural-name is the fleet's
+   one reading order. */
+
+/** A zone name is printed verbatim, so it has to BE a string; a node whose zone
+ *  label the informer never set comes through as "" (and a reconstructed one can
+ *  come through missing entirely, which used to print the word "undefined" into
+ *  a lane header). Both land on the same unnamed-lane case, resolved to a word
+ *  in buildFlow where the dictionary is. */
+const zoneOf = (zone: unknown): string => (typeof zone === "string" ? zone : "");
+
 export function mapNodes(topo: Topology | undefined): { nodes: MapNode[]; source: MapSource } {
   if (!topo) return { nodes: [], source: "nodes" };
-  if (topo.nodes.length > 0) {
-    return { nodes: topo.nodes.map((n) => ({ name: n.name, zone: n.zone, ready: n.ready })), source: "nodes" };
-  }
-  const byNode = new Map<string, MapNode>();
-  for (const a of topo.agents) {
-    if (a.nodeName === "") continue;
-    if (!byNode.has(a.nodeName)) byNode.set(a.nodeName, { name: a.nodeName, zone: a.zone, ready: undefined });
-  }
-  return { nodes: [...byNode.values()], source: "agents" };
+  const sorted = (nodes: MapNode[]) => nodes.sort((a, b) => compareNaturalName(a.name, b.name));
+  /* Deduplicated BY NAME, the way the agents branch below already was. A node
+     name is this map's React Flow id and its /nodes/{name} link, so a repeated
+     one is not a second box — it is two boxes React Flow cannot tell apart,
+     with a duplicate-key warning for each. The first wins, which is the same
+     rule the agents branch keeps. */
+  const collect = (rows: readonly MapNode[]) => {
+    const byName = new Map<string, MapNode>();
+    for (const r of rows) {
+      if (typeof r.name !== "string" || r.name === "" || byName.has(r.name)) continue;
+      byName.set(r.name, { name: r.name, zone: zoneOf(r.zone), ready: r.ready });
+    }
+    return sorted([...byName.values()]);
+  };
+
+  const rows = (xs: unknown): { name: unknown; zone: unknown; ready?: unknown }[] =>
+    Array.isArray(xs) ? xs.filter((x) => x !== null && typeof x === "object") : [];
+
+  const nodes = collect(
+    rows(topo.nodes).map((n) => ({ name: n.name, zone: n.zone, ready: n.ready }) as MapNode),
+  );
+  if (nodes.length > 0) return { nodes, source: "nodes" };
+
+  return {
+    nodes: collect(
+      rows(topo.agents).map(
+        (a) => ({ name: (a as { nodeName?: unknown }).nodeName, zone: a.zone, ready: undefined }) as MapNode,
+      ),
+    ),
+    source: "agents",
+  };
 }
 
 /**
@@ -97,28 +172,49 @@ export function buildFlow(
 ): { nodes: Node[]; edges: Edge[]; problemTotal: number; source: MapSource } {
   const { nodes: mapped, source } = mapNodes(topo);
   const zones = [...new Set(mapped.map((n) => n.zone))].sort();
+  /* The lane's HEADING, which is not always the lane's key: a node the informer
+     never gave a zone label sits in the "" lane, and a header reading « · 3
+     nodes» names nothing at all. The id stays the raw string — it is a key, not
+     a word — and only what is READ gets the fallback. */
+  /* The word "zone" belongs to the LABEL, not to the value: a real zone reads
+     "zone eu-1", an absent one reads "no zone reported" and must not become
+     "zone no zone reported". */
+  const zoneLabel = (z: string) => (z === "" ? t("zone.none") : z);
+  const zoneSpoken = (z: string) => (z === "" ? t("zone.none") : t("node.aria.zone", { zone: z }));
+  /* The figures are read through pages/matrix.tsx's gate, exactly as the grid
+     reads them: a null, a string or the Infinity a JSON `1e999` parses into is
+     not a measurement, and an edge labelled "NaN%" is worse than no edge. */
+  const cells = measuredCells(matrix?.cells);
   /* severityRatio, not failRatio: on a fleet that has never failed the fail-ratio series has no samples at all. */
   const worstOut = new Map<string, number>();
-  for (const c of matrix?.cells ?? []) {
+  for (const c of cells) {
     const r = severityRatio(c);
     if (r === null) continue;
     worstOut.set(c.source, Math.max(worstOut.get(c.source) ?? 0, r));
   }
 
-  const nodes: Node[] = zones.map((z, i) => {
+  // Zones are laid left to right, each as wide as its own grid needs.
+  let zoneX = 0;
+  const nodes: Node[] = zones.map((z) => {
     const count = mapped.filter((n) => n.zone === z).length;
-    return {
+    const width = zoneWidth(count);
+    const rows = Math.ceil(count / zoneColumns(count));
+    const node: Node = {
       id: `zone:${z}`,
       type: "zone",
-      position: { x: i * (ZONE_W + 80), y: 0 },
-      data: { label: z, count },
+      position: { x: zoneX, y: 0 },
+      data: { label: zoneLabel(z), count },
       className: "topo-zone",
-      style: { width: ZONE_W, height: 64 + count * NODE_H },
+      style: { width, height: 64 + rows * NODE_H },
     };
+    zoneX += width + 80;
+    return node;
   });
 
   for (const z of zones) {
-    mapped.filter((n) => n.zone === z).forEach((n, j) => {
+    const zoneNodes = mapped.filter((n) => n.zone === z);
+    const cols = zoneColumns(zoneNodes.length);
+    zoneNodes.forEach((n, j) => {
       const fail = worstOut.get(n.name) ?? 0;
       /* `ready === false` is the only readiness that can condemn a node.
          `undefined` (the agents-built map) leaves the verdict to the matrix,
@@ -130,14 +226,14 @@ export function buildFlow(
         type: "topoNode",
         parentId: `zone:${z}`,
         extent: "parent",
-        position: { x: 20, y: 52 + j * NODE_H },
+        position: { x: ZONE_PAD + (j % cols) * (NODE_W + NODE_GAP), y: 52 + Math.floor(j / cols) * NODE_H },
         data: { label: n.name, ready: n.ready, health },
         /* The map is a picture, and a picture with no text is nothing to a screen reader. */
         ariaLabel: t(
           n.ready === undefined ? "node.aria.readyUnknown" : n.ready ? "node.aria" : "node.aria.notReady",
           {
             node: n.name,
-            zone: z,
+            zone: zoneSpoken(z),
             health: t(HEALTH_KEYS[health]),
           },
         ),
@@ -149,22 +245,35 @@ export function buildFlow(
 
   // Only draw edges whose both endpoints are boxes on this map, and never a self-loop.
   const known = new Set(mapped.map((n) => n.name));
-  const problems = (matrix?.cells ?? [])
-    .filter((c) => isProblemCell(c) && c.source !== c.destination && known.has(c.source) && known.has(c.destination))
-    .sort((a, b) => (severityRatio(b) ?? 0) - (severityRatio(a) ?? 0));
+  /*
+   * ONE edge per ordered pair, keeping the worst reading of it. Two cells for
+   * the same A→B is a matrix the console did not write and cannot arbitrate, and
+   * drawing both produced two React Flow edges under one id — a duplicate key,
+   * and a "capped 10 of 12" caption counting the same path twice. Worst-of
+   * rather than last-wins, which is the rule every other severity read here uses.
+   */
+  const worstPair = new Map<string, MatrixCell>();
+  for (const c of cells) {
+    if (!isProblemCell(c) || c.source === c.destination) continue;
+    if (!known.has(c.source) || !known.has(c.destination)) continue;
+    const key = pairKey(c.source, c.destination);
+    const prev = worstPair.get(key);
+    if (!prev || (severityRatio(c) ?? 0) > (severityRatio(prev) ?? 0)) worstPair.set(key, c);
+  }
+  const problems = [...worstPair.values()].sort((a, b) => (severityRatio(b) ?? 0) - (severityRatio(a) ?? 0));
 
   const drawn = problems.slice(0, EDGE_CAP);
   /*
    * A→B and B→A are two independent measurements and both get drawn; applied ONLY to a mutual pair
    * — a lone edge stays on the default routing.
    */
-  const drawnKeys = new Set(drawn.map((c) => `${c.source}\0${c.destination}`));
+  const drawnKeys = new Set(drawn.map((c) => pairKey(c.source, c.destination)));
   const edges: Edge[] = drawn.map((c) => {
     const ratio = severityRatio(c) ?? 0;
-    const mutual = drawnKeys.has(`${c.destination}\0${c.source}`);
+    const mutual = drawnKeys.has(pairKey(c.destination, c.source));
     const forward = c.source < c.destination;
     return {
-      id: `${c.source}->${c.destination}`,
+      id: edgeId(c.source, c.destination),
       source: c.source,
       target: c.destination,
       type: "smoothstep",
@@ -175,10 +284,23 @@ export function buildFlow(
       // The label names the vector it came from: a path drawn because of
       // packet loss must not read as a failure percentage.
       data: {
+        /* ONE formatter, the same the grid and the cards use. toFixed(0) here printed a path measured
+           at 9.6% as "10%" while the edge was drawn (and the legend read) as degraded, because the
+           threshold compares 0.096 < 0.1 -- an operator saw a 10% edge in the sub-10% colour. It also
+           collapsed 1.0%, 1.4% and 1.9% into one indistinguishable "1%". */
         failLabel: t(c.failRatio === null ? "edge.label.loss" : "edge.label", {
-          pct: (100 * ratio).toFixed(0),
+          pct: fmtRatio(ratio),
         }),
       },
+      /* React Flow writes ariaLabel onto the edge's own <g>, which is already a
+         tab stop. Without it the ratio lived only in a hover tooltip, so the one
+         number the edge exists to carry was unreachable from the keyboard and
+         unspoken by a screen reader. */
+      ariaLabel: t("edge.aria", {
+        source: c.source,
+        destination: c.destination,
+        detail: t(c.failRatio === null ? "edge.label.loss" : "edge.label", { pct: fmtRatio(ratio) }),
+      }),
       markerEnd: { type: MarkerType.ArrowClosed, width: 14, height: 14 },
       className: ratio >= FAILING_AT ? "topo-edge--failing" : "topo-edge--degraded",
     };
@@ -212,7 +334,7 @@ function TopoNode({ data }: NodeProps) {
   const t = useT(topologyDict);
   /* `ready` is undefined on the agents-built map — the box carries no badge
      there, and the readiness gap is stated once, above the map. */
-  const d = data as { label: string; ready: boolean | undefined };
+  const d = data as { label: string; ready: boolean | undefined; health: "ok" | "degraded" | "failing" };
   return (
     <>
       <Handle type="target" position={Position.Left} className="!size-1.5 !opacity-0" />
@@ -223,6 +345,15 @@ function TopoNode({ data }: NodeProps) {
       <span className="min-w-0 flex-1 truncate" title={d.label}>
         {d.label}
       </span>
+      {/* The health is a WORD as well as a border colour. The colour was the only channel: under
+          deuteranopia healthy and failing simulate to 1.16:1 luminance, so a red/green-blind
+          operator could not tell one box from another anywhere on the map — and the legend above
+          maps the same three hues to words, which does not help. `ok` stays unlabelled: a map where
+          every box carries a chip is a map of chips, and the two states worth naming are the two
+          that mean something is wrong. */}
+      {d.health !== "ok" ? (
+        <Badge variant={d.health === "failing" ? "bad" : "warn"}>{t(HEALTH_KEYS[d.health])}</Badge>
+      ) : null}
       {d.ready === false ? <Badge variant="unknown">{t("node.notReady")}</Badge> : null}
       <Handle type="source" position={Position.Right} className="!size-1.5 !opacity-0" />
     </>
@@ -328,16 +459,45 @@ export function TopologyPage() {
 
   const shown = Math.min(flow.edges.length, flow.problemTotal);
 
+  /**
+   * stamp is the instant the header quotes, or null for the Live sentence.
+   *
+   * The server's `asOf` used to go straight into `new Date(...)`, and `new Date`
+   * answers an Invalid Date for anything it cannot read rather than throwing —
+   * so a stamp the controller mangled was printed, verbatim, as "as of Invalid
+   * Date". A stamp that does not parse is not a stamp: the header falls back to
+   * the instant the OPERATOR asked for, and to the Live sentence when there is
+   * no such instant either.
+   */
+  const stamp = useMemo(() => {
+    const raw = topo.data?.asOf;
+    if (typeof raw === "string") {
+      const parsed = new Date(raw);
+      if (!Number.isNaN(parsed.getTime())) return parsed;
+    }
+    return at;
+  }, [topo.data?.asOf, at]);
+
+  /* One opener for the click and the keyboard: `at` rides along, and the router
+     does the navigating. */
+  const openNode = (node: Node) => {
+    const path = nodeNavigationPath(node, at);
+    if (!path) return;
+    if (router) router.history.push(path);
+    else goTo(path);
+  };
+
   return (
     <PageShell
+      timeMachine
       title={t("title")}
       /* The "as of" copy is keyed on the ENGAGED STATE, not on a successful response. */
       description={
-        at || topo.data?.asOf
+        stamp
           ? t("description.engaged", {
               /* Interpolated into a TRANSLATED sentence, so it takes the
                  sentence's own language — lib/i18n's localeTag. */
-              at: new Date(topo.data?.asOf ?? at ?? Date.now()).toLocaleString(localeTag(locale)),
+              at: stamp.toLocaleString(localeTag(locale)),
             })
           : t("description.live")
       }
@@ -473,7 +633,7 @@ export function TopologyPage() {
           </div>
 
           <Card className="overflow-hidden p-0">
-            <div className="h-[calc(100vh-19rem)] min-h-[420px]">
+            <div className="h-[calc(100dvh-19rem)] min-h-[420px]">
               <ReactFlow
                 nodes={flow.nodes}
                 edges={edges}
@@ -485,15 +645,48 @@ export function TopologyPage() {
                 nodesDraggable={false}
                 nodesConnectable={false}
                 elementsSelectable={false}
-                onNodeClick={(_, node) => {
-                  // `at` rides along, and the router does the navigating.
-                  const path = nodeNavigationPath(node, at);
-                  if (!path) return;
-                  if (router) router.history.push(path);
-                  else goTo(path);
+                onNodeClick={(_, node) => openNode(node)}
+                /* React Flow makes every node a tab stop and activates none of
+                   them, so the map's only navigation was mouse-only. It exposes
+                   no per-node key handler, but it does stamp `data-id` on the
+                   wrapper that holds the focus — so the focused node is
+                   resolvable from the event itself. */
+                onKeyDown={(event) => {
+                  if (event.key !== "Enter" && event.key !== " ") return;
+                  const wrapper = (event.target as HTMLElement | null)?.closest?.(".react-flow__node");
+                  const id = wrapper?.getAttribute("data-id");
+                  const node = id ? flow.nodes.find((n) => n.id === id) : undefined;
+                  if (!node) return;
+                  event.preventDefault();
+                  openNode(node);
                 }}
                 onEdgeMouseEnter={(_, e) => setHoveredEdge(e.id)}
                 onEdgeMouseLeave={() => setHoveredEdge(null)}
+                /* FOCUS reveals the same label hover does. The failure percentage on an edge existed
+                   only under a pointer, so a keyboard user — and anyone on a touch screen, where
+                   there is no hover at all — could see that a path was bad and never how bad.
+                   React Flow has no onEdgeFocus prop, so the focus is caught where it lands: the
+                   edge's own DOM element carries data-id, exactly as the node handler above uses. */
+                onFocusCapture={(event) => {
+                  const edge = (event.target as HTMLElement | null)?.closest?.(".react-flow__edge");
+                  const id = edge?.getAttribute("data-id");
+                  if (id) setHoveredEdge(id);
+                }}
+                onBlurCapture={(event) => {
+                  if ((event.target as HTMLElement | null)?.closest?.(".react-flow__edge")) {
+                    setHoveredEdge(null);
+                  }
+                }}
+                /* React Flow's built-in a11y strings are English and speak about
+                   dragging a node that is not draggable here. Both node keys are
+                   set on purpose: with keyboard a11y ENABLED the library renders
+                   the `keyboardDisabled` variant, so overriding only `.default`
+                   would change nothing on screen. */
+                ariaLabelConfig={{
+                  "node.a11yDescription.default": t("flow.node.a11y"),
+                  "node.a11yDescription.keyboardDisabled": t("flow.node.a11y"),
+                  "edge.a11yDescription.default": t("flow.edge.a11y"),
+                }}
                 proOptions={{ hideAttribution: true }}
               >
                 <Background gap={24} size={1.5} />

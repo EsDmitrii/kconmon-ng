@@ -72,7 +72,11 @@ const en = {
 
   /* ── Time Machine bar ──────────────────────────────────────────────────── */
   "timemachine.label": "Time Machine",
-  "timemachine.trigger": "Time Machine — view the console at a past time",
+  "timemachine.trigger": "Now — Time Machine, view the console at a past time",
+  /* The control sits beside the page's range presets, which choose how LONG the
+     window is; this one chooses where it ENDS, and says so in one word. */
+  "timemachine.now": "Now",
+  "timemachine.hint": "Time Machine: the presets pick how far back, this picks the moment you are looking from.",
   /* {at} is the bar's ONE stamp, formatted in the INTERFACE language (lib/i18n's
      localeTag) because it lands inside these sentences — see
      components/timemachine-bar.tsx. */
@@ -129,7 +133,9 @@ export const chromeDict: Dictionary<ChromeKey> = defineDict(en, {
     "Аутентификация выключена, у всех одна фиксированная роль. Не используйте в продакшене.",
 
   "timemachine.label": "Машина времени",
-  "timemachine.trigger": "Машина времени: посмотреть консоль на момент в прошлом",
+  "timemachine.trigger": "Сейчас. Машина времени: посмотреть консоль на момент в прошлом",
+  "timemachine.now": "Сейчас",
+  "timemachine.hint": "Машина времени: пресеты задают глубину окна, а это — момент, из которого вы смотрите.",
   "timemachine.viewing": "Вы смотрите состояние на {at}.",
   "timemachine.viewingHint": "Чтобы что-то менять, вернитесь в реальное время.",
   "timemachine.change": "Изменить момент просмотра, сейчас {at}",

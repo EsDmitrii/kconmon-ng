@@ -165,8 +165,8 @@ function openMenu(me: Me, ru: boolean) {
 describe("the user menu in Russian", () => {
   it("translates both menu items and leaves the ROLE names as the server resolved them", () => {
     openMenu(ada, true);
-    expect(screen.getByRole("menuitem", { name: userMenuDict.ru["tokens"] })).toBeInTheDocument();
-    expect(screen.getByRole("menuitem", { name: userMenuDict.ru["signOut"] })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: userMenuDict.ru["tokens"] })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: userMenuDict.ru["signOut"] })).toBeInTheDocument();
     expect(screen.getByText("viewer, operator")).toBeInTheDocument();
   });
 
@@ -184,16 +184,16 @@ describe("the user menu in Russian", () => {
     });
     vi.stubGlobal("fetch", vi.fn().mockReturnValue(held));
     openMenu(ada, true);
-    fireEvent.click(screen.getByRole("menuitem", { name: userMenuDict.ru["signOut"] }));
+    fireEvent.click(screen.getByRole("button", { name: userMenuDict.ru["signOut"] }));
 
-    expect(await screen.findByRole("menuitem", { name: userMenuDict.ru["signOut.pending"] })).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: userMenuDict.ru["signOut.pending"] })).toBeInTheDocument();
     release();
   });
 
   it("keeps the English menu byte-for-byte with the provider mounted", () => {
     openMenu(ada, false);
-    expect(screen.getByRole("menuitem", { name: "Token management" })).toBeInTheDocument();
-    expect(screen.getByRole("menuitem", { name: "Sign out" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Token management" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Sign out" })).toBeInTheDocument();
   });
 });
 

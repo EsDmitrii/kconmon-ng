@@ -11,6 +11,7 @@ import {
   isInstant,
   maintenanceOverlaySeries,
   mergeAnnotations,
+  mergeWindowSpans,
   outsideWindowNote,
   mergeMaintenanceWindows,
   withAnnotations,
@@ -365,5 +366,62 @@ describe("outsideWindowNote", () => {
 
   it("stays silent rather than guessing when an instant will not parse", () => {
     expect(outsideWindowNote(new Date("nope"), null, frozen)).toBeNull();
+  });
+});
+
+/* ── QA round 5 + owner report: overlapping windows painted twice ────────── */
+
+describe("mergeWindowSpans", () => {
+  const span = (startAt: string, endAt: string, reason: string) => win({ id: reason, startAt, endAt, reason });
+
+  it("folds overlapping windows into one band and keeps both reasons", () => {
+    const spans = mergeWindowSpans([
+      span("2026-08-13T20:00:00Z", "2026-08-14T00:55:00Z", "long"),
+      span("2026-08-13T23:56:00Z", "2026-08-14T00:26:00Z", "short"),
+    ]);
+    expect(spans).toHaveLength(1);
+    expect(spans[0].reasons).toEqual(["long", "short"]);
+    expect(spans[0].end).toBe(Date.parse("2026-08-14T00:55:00Z"));
+  });
+
+  it("joins windows that merely touch, and leaves a gap alone", () => {
+    expect(
+      mergeWindowSpans([
+        span("2026-08-13T20:00:00Z", "2026-08-13T21:00:00Z", "a"),
+        span("2026-08-13T21:00:00Z", "2026-08-13T22:00:00Z", "b"),
+      ]),
+    ).toHaveLength(1);
+    expect(
+      mergeWindowSpans([
+        span("2026-08-13T20:00:00Z", "2026-08-13T21:00:00Z", "a"),
+        span("2026-08-13T22:00:00Z", "2026-08-13T23:00:00Z", "b"),
+      ]),
+    ).toHaveLength(2);
+  });
+
+  it("skips a window with an unparseable edge rather than drawing a NaN bound", () => {
+    expect(mergeWindowSpans([span("nonsense", "2026-08-13T21:00:00Z", "a")])).toEqual([]);
+  });
+
+  it("draws ONE markArea for overlapping windows, so the fills stop stacking", () => {
+    const series = maintenanceOverlaySeries(
+      [
+        span("2026-08-13T20:00:00Z", "2026-08-14T00:55:00Z", "long"),
+        span("2026-08-13T23:56:00Z", "2026-08-14T00:26:00Z", "short"),
+      ],
+      true,
+    );
+    expect(series?.markArea?.data as unknown[]).toHaveLength(1);
+  });
+});
+
+describe("marker labels stay inside the plot", () => {
+  it("puts the maintenance label inside the band and bounds its width", () => {
+    const series = maintenanceOverlaySeries([win({ reason: "a reason long enough to run off the card" })], true);
+    const label = series?.markArea?.emphasis?.label as { position?: string; width?: number; overflow?: string };
+    // "top" drew it ABOVE the grid, over the panel title and off the right edge.
+    expect(label.position).toBe("insideTop");
+    expect(label.overflow).toBe("truncate");
+    expect(label.width).toBeGreaterThan(0);
   });
 });

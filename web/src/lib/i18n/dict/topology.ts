@@ -93,21 +93,36 @@ const en = {
   /* ── what buildFlow writes into the picture ─────────────────────────────── */
   "zone.one": "{zone} · {count} node",
   "zone.many": "{zone} · {count} nodes",
+  /* The lane for nodes the informer gave no zone label. A NAME is needed
+     because the lane header is «{zone} · N nodes» and the empty string made it
+     read « · 3 nodes» — a heading that names nothing, next to headings that do.
+     It says what is true (no zone was reported), not that the nodes are
+     zoneless in Kubernetes' eyes. */
+  "zone.none": "no zone reported",
   "node.notReady": "not ready",
   /* React Flow renders `ariaLabel` onto the node element, so this IS what a
      screen reader says about each box: who, where, how. */
-  "node.aria": "{node}, zone {zone}, {health}",
-  "node.aria.notReady": "{node}, zone {zone}, {health}, not ready",
+  /* {zone} arrives ALREADY worded — a real zone name, or the "no zone reported"
+     sentence — so this template must not prefix it with the word again. */
+  "node.aria.zone": "zone {zone}",
+  /* An edge is a tab stop of its own; {detail} is edge.label / edge.label.loss. */
+  "edge.aria": "{source} to {destination}, {detail}",
+  /* React Flow's own per-element instructions, which are English by default and
+     describe dragging that this read-only map does not allow. */
+  "flow.node.a11y": "Press Enter to open this node's card.",
+  "flow.edge.a11y": "A path between two nodes.",
+  "node.aria": "{node}, {zone}, {health}",
+  "node.aria.notReady": "{node}, {zone}, {health}, not ready",
   /* The agents-built map's third form. A box with no "not ready" badge would
      otherwise be announced exactly like a node the informer confirmed ready. */
-  "node.aria.readyUnknown": "{node}, zone {zone}, {health}, readiness unknown",
+  "node.aria.readyUnknown": "{node}, {zone}, {health}, readiness unknown",
   "health.ok": "healthy",
   "health.degraded": "degraded",
   "health.failing": "failing",
   /* The hover label on a problem edge. It names the vector the percentage came
      from: a path drawn because of packet loss must not read as a failure %. */
-  "edge.label": "{pct}%",
-  "edge.label.loss": "{pct}% loss",
+  "edge.label": "{pct}",
+  "edge.label.loss": "{pct} loss",
 
   /* ── the React Flow control cluster ─────────────────────────────────────── */
   /* Rendered as our OWN ControlButtons: the library's default trio ships with
@@ -177,15 +192,20 @@ export const topologyDict: Dictionary<TopologyKey> = defineDict(en, {
 
   "zone.one": "{zone} · узлов: {count}",
   "zone.many": "{zone} · узлов: {count}",
+  "zone.none": "зона не указана",
   "node.notReady": "не готов",
-  "node.aria": "{node}, зона {zone}, {health}",
-  "node.aria.notReady": "{node}, зона {zone}, {health}, не готов",
-  "node.aria.readyUnknown": "{node}, зона {zone}, {health}, готовность неизвестна",
+  "node.aria.zone": "зона {zone}",
+  "edge.aria": "{source} → {destination}, {detail}",
+  "flow.node.a11y": "Нажмите Enter, чтобы открыть карточку узла.",
+  "flow.edge.a11y": "Путь между двумя узлами.",
+  "node.aria": "{node}, {zone}, {health}",
+  "node.aria.notReady": "{node}, {zone}, {health}, не готов",
+  "node.aria.readyUnknown": "{node}, {zone}, {health}, готовность неизвестна",
   "health.ok": "в норме",
   "health.degraded": "деградация",
   "health.failing": "сбой",
-  "edge.label": "{pct}%",
-  "edge.label.loss": "{pct}% потерь",
+  "edge.label": "{pct}",
+  "edge.label.loss": "{pct} потерь",
 
   "controls.aria": "Управление картой",
   "controls.zoomIn": "Приблизить",

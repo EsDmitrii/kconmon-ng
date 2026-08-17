@@ -509,3 +509,37 @@ describe("NodeCardPage — the header percentage", () => {
     expect(screen.queryByText(/healthy/)).toBeNull();
   });
 });
+
+/*
+ * An EMPTY zone is absence, not a value.
+ *
+ * The topology API sends an unlabelled node's zone as an empty STRING, so `??` never reached the
+ * agent fallback and the identity card rendered the "Zone" label with nothing under it — visually
+ * identical to a cell still loading, where its three siblings print an em dash.
+ */
+describe("NodeCardPage — a node the cluster never labelled", () => {
+  it("renders an em-dash for an empty zone rather than a blank cell", async () => {
+    renderWithTopology({
+      status: 200,
+      body: {
+        nodes: [{ name: "node-a", zone: "", ready: true }],
+        agents: [],
+        timestamp: "t",
+      },
+    });
+    await screen.findByText("Zone");
+    expect(screen.getAllByText("—").length).toBeGreaterThanOrEqual(1);
+  });
+
+  it("still falls back to the agent's zone when the node's is empty", async () => {
+    renderWithTopology({
+      status: 200,
+      body: {
+        nodes: [{ name: "node-a", zone: "", ready: true }],
+        agents: [{ id: "agent-1", nodeName: "node-a", podIP: "10.0.0.1", zone: "z9" }],
+        timestamp: "t",
+      },
+    });
+    await waitFor(() => expect(screen.getByText("z9")).toBeInTheDocument());
+  });
+});

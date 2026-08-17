@@ -4,8 +4,10 @@ import { PageShell } from "@/components/page-shell";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
+import { Pager, usePager } from "@/components/ui/pager";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useAuth } from "@/hooks/use-auth";
+import { useConfirmStep } from "@/hooks/use-confirm-step";
 import { useSubmitGuard } from "@/hooks/use-submit-guard";
 import {
   ApiError,
@@ -14,7 +16,7 @@ import {
   importForeignAlertRules,
   listAlertRules,
   listForeignAlertRules,
-  listTargets,
+  listAllTargets,
   previewAlertRule,
   syncAlertRules,
   updateAlertRule,
@@ -41,8 +43,21 @@ import { CHECKBOX_CLASS, cn } from "@/lib/utils";
 
 /* ── shared bits ────────────────────────────────────────────────────────── */
 
+/**
+ * queryErrorMessage prefers the SERVER's own sentence and falls back to ours the
+ * moment there is no sentence to prefer.
+ *
+ * The `.trim() ||` is the whole point (QA hostile pass). `detail ?? title` is
+ * the right order, but both halves are strings that can arrive empty —
+ * `{"type":"about:blank","status":500}` is a legal problem+json envelope, and a
+ * proxy between the browser and the console is entitled to send one. An empty
+ * string then rendered as an empty red paragraph in the list, and as NOTHING AT
+ * ALL wherever the caller stores it in state and gates the JSX on truthiness:
+ * a refused delete simply looked like a delete that had not been clicked.
+ */
 function queryErrorMessage(error: unknown, fallback: string): string {
-  return error instanceof ApiError ? (error.problem.detail ?? error.problem.title) : fallback;
+  if (!(error instanceof ApiError)) return fallback;
+  return (error.problem.detail ?? error.problem.title ?? "").trim() || fallback;
 }
 
 function problemStatus(error: unknown): number | undefined {
@@ -105,6 +120,31 @@ function PermissionCard({ permission, children }: { permission: string; children
   );
 }
 
+/**
+ * RowActionLabel is the VISIBLE half of a row button whose label carries the
+ * object's own name — pages/targets.tsx's component, for its reason, applied
+ * here in the hostile pass because this page had the same defect and never got
+ * the same fix.
+ *
+ * "Delete {name}" is the right thing for a screen reader: four buttons reading
+ * "Delete" in a list are four identical announcements. But a rule name is a
+ * free string an operator types, this row carries FOUR of those buttons, and a
+ * 400-character name rendered in full put sixteen hundred characters of button
+ * text into one flex row. The name stays whole in the aria-label and in
+ * `title`; only the pixels are bounded, and the truncation is CSS, so nothing
+ * has to guess a character count for a language it has not seen.
+ *
+ * Not lifted into components/ui: it is six lines with no state, and the two
+ * copies are cheaper to read than a shared import that has to explain itself.
+ */
+function RowActionLabel({ text }: { text: string }) {
+  return (
+    <span aria-hidden="true" className="block max-w-[14rem] truncate" title={text}>
+      {text}
+    </span>
+  );
+}
+
 function ListSkeleton() {
   const t = useT(alertingDict);
   return (
@@ -146,6 +186,20 @@ const DURATION_UNITS: readonly (readonly [unit: string, ns: number])[] = [
 export type DurationParse = { ok: true; ns: number } | { ok: false; message: string };
 
 /**
+ * MAX_DURATION_NS is what a Prometheus `for` is stored in on the other side: a
+ * Go time.Duration, i.e. int64 nanoseconds, which tops out a shade under 292
+ * years.
+ *
+ * The bound is a REFUSAL rather than a clamp because of what the old parser did
+ * without one (QA hostile pass): `ns += Number(digits) * unit` on a long enough
+ * digit run is Infinity, the parse answered ok, JSON.stringify wrote that field
+ * as `null`, and the server read `null` back as ZERO. The rule saved with a
+ * `for` of 0s — firing instantly, forever — and not one thing on screen ever
+ * said the number had been thrown away.
+ */
+export const MAX_DURATION_NS = 9_223_372_036_854_775_807;
+
+/**
  * parsePromDuration reads what an operator typed into the `for` box; a value+unit pair would also
  * have to decide what "90" plus "seconds" renders as when the stored value is 90s (a unit select
  * cannot show "1m30s").
@@ -183,13 +237,29 @@ export function parsePromDuration(text: string, t: Translate<AlertingKey> = enT)
     lastUnit = at;
     ns += Number(digits) * DURATION_UNITS[at][1];
   }
+  /* Checked AFTER the loop, not per term: "100y100y" is refused by the ordering
+     rule long before it could overflow, and a composite that only overflows on
+     its last term is still one value the box cannot hold. */
+  if (!Number.isFinite(ns) || ns > MAX_DURATION_NS) {
+    return { ok: false, message: t("duration.tooLong", { text: s }) };
+  }
   return { ok: true, ns };
 }
 
-/** formatPromDuration is the inverse, and it mirrors render.go's own FormatPromDuration byte for byte. */
+/** formatPromDuration is the inverse, and it mirrors render.go's own
+ *  FormatPromDuration byte for byte for every value a rule can really carry.
+ *
+ *  A value it CANNOT carry is where the mirror stops (QA hostile pass): NaN,
+ *  Infinity and an absent field all fell through to the template literal and
+ *  put the words "NaNns" and "undefinedns" on screen, in a row and in the `for`
+ *  box of the builder that opened it. There is no duration to state, so the
+ *  console states none — the same em dash it already uses for an instant it
+ *  does not have. A NEGATIVE ns keeps render.go's own rendering: that is a real
+ *  int64 the server could have written, and showing it is how anyone finds out. */
 export function formatPromDuration(ns: number): string {
+  if (!Number.isFinite(ns)) return "—";
   if (ns === 0) return "0s";
-  if (ns < 0 || !Number.isFinite(ns)) return `${ns}ns`;
+  if (ns < 0) return `${ns}ns`;
   for (const unit of ["d", "h", "m", "s", "ms"]) {
     const size = DURATION_UNITS.find(([u]) => u === unit)?.[1] ?? 0;
     if (size > 0 && ns % size === 0) return `${ns / size}${unit}`;
@@ -430,6 +500,25 @@ function mapFrom(pairs: Pair[]): Record<string, string> {
 }
 
 /**
+ * duplicateKey returns the first key two rows share, or undefined.
+ *
+ * mapFrom is a fold into an object, so a repeated key does not error — it
+ * OVERWRITES, and the survivor is whichever row happens to come last. On screen
+ * both rows stay, both look saved, and one of the two values is simply gone
+ * (QA hostile pass). The form refuses instead, by name, next to the boxes.
+ */
+export function duplicateKey(pairs: Pair[]): string | undefined {
+  const seen = new Set<string>();
+  for (const pair of pairs) {
+    const key = pair.key.trim();
+    if (key === "") continue;
+    if (seen.has(key)) return key;
+    seen.add(key);
+  }
+  return undefined;
+}
+
+/**
  * paramFieldsFor is the ONE way this file reads KIND_PARAMS, because the lookup
  * can miss. AlertRuleKind is the set the API ACCEPTS, while the alert_rules
  * kind CHECK constraint additionally allows `cert-expiry` — a row that predates
@@ -564,12 +653,22 @@ function RuleRow({
     if (!focused) return;
     rowRef.current?.scrollIntoView?.({ block: "center" });
   }, [focused]);
-  const [confirming, setConfirming] = useState(false);
+  const { confirming, confirmRef, triggerRef, ask, reset } = useConfirmStep();
   const [busy, setBusy] = useState(false);
   const [kicked, setKicked] = useState(false);
   const [error, setError] = useState<string>();
+  /* The in-flight guard for this ROW's three writes (QA hostile pass). `busy`
+     is state, so `disabled={busy}` only takes effect after React commits — and
+     three clicks landing in ONE task all read the pre-commit value and all
+     fire. The enable checkbox was the visible case: hammering it sent three
+     PUTs, whose responses then raced to decide what "enabled" ended up as.
+     `begin()` is a REF write and settles immediately, which is the whole
+     reason hooks/use-submit-guard.ts exists; the two forms on this page
+     already use it, and a row's writes need it for the same reason. */
+  const { begin, end } = useSubmitGuard();
 
   async function handleToggle() {
+    if (!begin()) return;
     setBusy(true);
     setError(undefined);
     try {
@@ -579,9 +678,11 @@ function RuleRow({
       setError(queryErrorMessage(err, t("row.saveFailed")));
     }
     setBusy(false);
+    end();
   }
 
   async function handleDelete() {
+    if (!begin()) return;
     setBusy(true);
     setError(undefined);
     try {
@@ -589,12 +690,18 @@ function RuleRow({
       await qc.invalidateQueries({ queryKey: ["alert-rules"] });
     } catch (err) {
       setError(queryErrorMessage(err, t("row.deleteFailed")));
-      setBusy(false);
-      setConfirming(false);
+      reset();
     }
+    /* busy released on BOTH paths, for the same reason `end()` is. The success path almost always
+       unmounts this row a moment later, but "almost always" is not a guarantee: a 204 whose refetch
+       then fails leaves the row on screen with every control on it — confirm, the enable checkbox,
+       Sync — disabled forever and nothing saying why. Only a page reload recovered it. */
+    setBusy(false);
+    end();
   }
 
   async function handleSync() {
+    if (!begin()) return;
     setBusy(true);
     setError(undefined);
     setKicked(false);
@@ -607,10 +714,12 @@ function RuleRow({
       if (problemStatus(err) === 409) onSyncConflict(queryErrorMessage(err, t("row.syncDisabled")));
       else setError(queryErrorMessage(err, t("row.syncFailed")));
       setBusy(false);
+      end();
       return;
     }
     setBusy(false);
     setKicked(true);
+    end();
   }
 
   return (
@@ -637,14 +746,21 @@ function RuleRow({
         {relativeTime(rule.lastSyncedAt, new Date(), t)}
       </span>
       {canManage ? (
-        <input
-          type="checkbox"
-          aria-label={t("row.enabledAria", { name: rule.name })}
-          checked={rule.enabled}
-          {...guard} disabled={writesDisabled || busy}
-          onChange={() => void handleToggle()}
-          className={CHECKBOX_CLASS}
-        />
+        /* LABELLED, and labelled with the same word a read-only reader gets from the badge below. A
+           bare checkbox in a row of pills says nothing about what it toggles: the only clue was an
+           aria-label, so a sighted operator had to infer it from position, and the two audiences saw
+           two different controls for one fact. */
+        <label className="flex items-center gap-1.5 text-xs text-muted-foreground">
+          <input
+            type="checkbox"
+            aria-label={t("row.enabledAria", { name: rule.name })}
+            checked={rule.enabled}
+            {...guard} disabled={writesDisabled || busy}
+            onChange={() => void handleToggle()}
+            className={CHECKBOX_CLASS}
+          />
+          {rule.enabled ? t("row.enabled") : t("row.disabled")}
+        </label>
       ) : (
         <Badge variant={rule.enabled ? "ok" : "unknown"}>
           {rule.enabled ? t("row.enabled") : t("row.disabled")}
@@ -661,6 +777,7 @@ function RuleRow({
           variant="ghost"
           aria-expanded={expanded}
           aria-controls={detailsId}
+          aria-label={t("row.details", { name: rule.name })}
           onClick={() => {
             setExpanded((v) => {
               writeFocusedRule(rule.id, !v);
@@ -668,15 +785,27 @@ function RuleRow({
             });
           }}
         >
-          {t("row.details", { name: rule.name })}
+          <RowActionLabel text={t("row.details", { name: rule.name })} />
         </Button>
         {canManage ? (
           confirming ? (
             <>
-              <Button size="sm" variant="outline" loading={busy} {...guard} onClick={() => void handleDelete()}>
+              {/* Spoken as well as drawn — the row swaps its controls under the reader. */}
+              <span role="status" className="sr-only">
                 {t("row.confirmDelete", { name: rule.name })}
+              </span>
+              <Button
+                ref={confirmRef}
+                size="sm"
+                variant="outline"
+                loading={busy}
+                {...guard}
+                aria-label={t("row.confirmDelete", { name: rule.name })}
+                onClick={() => void handleDelete()}
+              >
+                <RowActionLabel text={t("row.confirmDelete", { name: rule.name })} />
               </Button>
-              <Button size="sm" variant="ghost" onClick={() => setConfirming(false)}>
+              <Button size="sm" variant="ghost" onClick={reset}>
                 {t("cancel")}
               </Button>
             </>
@@ -692,15 +821,29 @@ function RuleRow({
                 {...guard}
                 disabled={writesDisabled || busy || ruleSync.disabled}
                 title={ruleSync.disabled ? ruleSync.message : undefined}
+                aria-label={t("row.sync", { name: rule.name })}
                 onClick={() => void handleSync()}
               >
-                {t("row.sync", { name: rule.name })}
+                <RowActionLabel text={t("row.sync", { name: rule.name })} />
               </Button>
-              <Button size="sm" variant="ghost" {...guard} onClick={onEdit}>
-                {t("row.edit", { name: rule.name })}
+              <Button
+                size="sm"
+                variant="ghost"
+                {...guard}
+                aria-label={t("row.edit", { name: rule.name })}
+                onClick={onEdit}
+              >
+                <RowActionLabel text={t("row.edit", { name: rule.name })} />
               </Button>
-              <Button size="sm" variant="ghost" {...guard} onClick={() => setConfirming(true)}>
-                {t("row.delete", { name: rule.name })}
+              <Button
+                ref={triggerRef}
+                size="sm"
+                variant="ghost"
+                {...guard}
+                aria-label={t("row.delete", { name: rule.name })}
+                onClick={ask}
+              >
+                <RowActionLabel text={t("row.delete", { name: rule.name })} />
               </Button>
             </>
           )
@@ -932,10 +1075,11 @@ function RuleForm({ initial, onDone }: { initial?: AlertRule; onDone: () => void
   const canReadTargets = can("targets:read");
   const targetsQuery = useQuery({
     queryKey: ["targets"],
-    queryFn: () => listTargets(),
+    // Every page: a picker that stops at the server's first 100 hides targets that exist.
+    queryFn: () => listAllTargets(),
     enabled: needsTargets && canReadTargets,
   });
-  const targetNames = (targetsQuery.data?.targets ?? []).map((t) => t.name);
+  const targetNames = (targetsQuery.data?.items ?? []).map((t) => t.name);
   /* Only once the list has ARRIVED. Rendering the select while the query is in
      flight would show an operator editing an existing rule an empty dropdown
      that silently does not contain their own stored value. */
@@ -947,6 +1091,11 @@ function RuleForm({ initial, onDone }: { initial?: AlertRule; onDone: () => void
     () => draft.labels.map((p) => reservedLabelMessage(p.key.trim())).find((m) => m !== undefined),
     [draft.labels],
   );
+  /* Same "live, not on submit" rule, for the other way a pair list can be
+     wrong. Labels and annotations are checked separately because they become
+     two separate maps, and a key may legitimately appear in both. */
+  const duplicateLabel = useMemo(() => duplicateKey(draft.labels), [draft.labels]);
+  const duplicateAnnotation = useMemo(() => duplicateKey(draft.annotations), [draft.annotations]);
 
   const duration = parsePromDuration(draft.forText, t);
   const previewReady = fields.every((f) => !f.required || (draft.params[f.key] ?? "").trim() !== "");
@@ -1036,6 +1185,8 @@ function RuleForm({ initial, onDone }: { initial?: AlertRule; onDone: () => void
     setFormError(undefined);
     if (exprRejected) return;
     if (reservedMessage) return;
+    // A refusal already on screen, next to the offending row.
+    if (duplicateLabel !== undefined || duplicateAnnotation !== undefined) return;
     if (!duration.ok) {
       setFormError({ message: duration.message, field: "for" });
       return;
@@ -1246,6 +1397,9 @@ function RuleForm({ initial, onDone }: { initial?: AlertRule; onDone: () => void
             and server refuse a reserved label in identical words — so it is
             data here, and renders as written. */}
         {reservedMessage ? <ErrorLine testId="builder-error">{reservedMessage}</ErrorLine> : null}
+        {duplicateLabel !== undefined ? (
+          <ErrorLine testId="builder-error">{t("pairs.duplicate", { name: duplicateLabel })}</ErrorLine>
+        ) : null}
 
         <PairEditor
           legendKey="pairs.annotations"
@@ -1256,6 +1410,9 @@ function RuleForm({ initial, onDone }: { initial?: AlertRule; onDone: () => void
           disabled={false}
           onChange={(annotations) => setDraft((d) => ({ ...d, annotations }))}
         />
+        {duplicateAnnotation !== undefined ? (
+          <ErrorLine testId="builder-error">{t("pairs.duplicate", { name: duplicateAnnotation })}</ErrorLine>
+        ) : null}
 
         <label className="flex items-center gap-2 text-[13px]">
           <input
@@ -1379,6 +1536,26 @@ function RulesSection({ canManage }: { canManage: boolean }) {
   const ruleSync = useRuleSync();
   const query = useQuery({ queryKey: ["alert-rules"], queryFn: listAlertRules });
   const rules = query.data?.rules ?? [];
+  /* A cluster's managed rule set grows without a ceiling; the list is paged. */
+  const pager = usePager(rules);
+
+  /* And ?rule= has to land ON the rule, not on page 1.
+     Overview links a firing alert straight here by id precisely so the operator arrives at that row;
+     `focused` was only computed for rows in pager.visible, so with more than one page of rules the
+     link silently did nothing — the reader landed on page 1, top of the list, with no indication
+     that the rule they clicked was three pages down. The page is moved once per (id, list) pair, and
+     never while the reader is paging by hand: focusedPage is derived from the rule's INDEX, so it
+     only changes when the id or the list does. */
+  const focusedIndex = focusedRule === "" ? -1 : rules.findIndex((r) => r.id === focusedRule);
+  const focusedPage = focusedIndex < 0 ? 0 : Math.floor(focusedIndex / pager.size) + 1;
+  const [sentToPage, setSentToPage] = useState(0);
+  if (focusedPage > 0 && focusedPage !== sentToPage) {
+    setSentToPage(focusedPage);
+    pager.setPage(focusedPage);
+  }
+  if (focusedPage === 0 && sentToPage !== 0) {
+    setSentToPage(0);
+  }
 
   /*
    * A ?rule= that names nothing SAYS SO; only once the list has SETTLED: while the query is pending
@@ -1437,8 +1614,9 @@ function RulesSection({ canManage }: { canManage: boolean }) {
           <p className="px-1 py-10 text-center text-xs text-muted-foreground">{t("rules.empty")}</p>
         ) : null}
         {rules.length > 0 ? (
+          <>
           <ul aria-label={t("rules.listAria")} className="mt-4 divide-y divide-border">
-            {rules.map((rule) => (
+            {pager.visible.map((rule) => (
               <RuleRow
                 key={rule.id}
                 rule={rule}
@@ -1449,6 +1627,8 @@ function RulesSection({ canManage }: { canManage: boolean }) {
               />
             ))}
           </ul>
+          <Pager pager={pager} subject={t("rules.subject")} className="px-0" />
+          </>
         ) : null}
       </SectionCard>
     </div>
@@ -1458,6 +1638,16 @@ function RulesSection({ canManage }: { canManage: boolean }) {
 /* role="status" for the same reason the sync ack above it has one: the report appears when the POST answers. */
 function ImportReport({ report }: { report: AlertRuleImportReport }) {
   const t = useT(alertingDict);
+  /* `?? []` on all three, though the schema says all three are required (QA
+     hostile pass). The report is assembled in Go, where a nil slice marshals as
+     JSON `null`, and the only thing standing between this panel and a
+     render-time TypeError — a WHITE SCREEN, on the one panel whose whole job is
+     to report — is that httpapi's newAlertRuleImportResponse remembers to seed
+     each slice. That is a promise held on the other side of the wire; this is
+     three characters. */
+  const created = report.created ?? [];
+  const skipped = report.skipped ?? [];
+  const notes = report.notes ?? [];
   return (
     <div role="status" data-testid="import-report" className="mt-3 w-full border-l-2 border-border pl-3 text-xs">
       {/* The three arrays are three different statements and are rendered as
@@ -1467,11 +1657,11 @@ function ImportReport({ report }: { report: AlertRuleImportReport }) {
           are ours; every name and every reason below them is the server's. */}
       <div data-testid="import-created">
         <p className="font-medium">{t("import.created")}</p>
-        {report.created.length === 0 ? (
+        {created.length === 0 ? (
           <p className="text-muted-foreground">{t("import.none")}</p>
         ) : (
           <ul className="mt-1 flex flex-col gap-0.5">
-            {report.created.map((name) => (
+            {created.map((name) => (
               <li key={name} className="font-mono">
                 {name}
               </li>
@@ -1482,11 +1672,11 @@ function ImportReport({ report }: { report: AlertRuleImportReport }) {
 
       <div data-testid="import-skipped" className="mt-3">
         <p className="font-medium">{t("import.skipped")}</p>
-        {report.skipped.length === 0 ? (
+        {skipped.length === 0 ? (
           <p className="text-muted-foreground">{t("import.none")}</p>
         ) : (
           <dl className="mt-1 flex flex-col gap-1">
-            {report.skipped.map((item, i) => (
+            {skipped.map((item, i) => (
               <div key={`${item.name}-${i}`} className="flex flex-wrap gap-x-2">
                 <dt className="font-mono">{item.name === "" ? t("import.unnamed") : item.name}</dt>
                 {/* Verbatim: the server names the entry as the FOREIGN object
@@ -1500,11 +1690,11 @@ function ImportReport({ report }: { report: AlertRuleImportReport }) {
 
       <div data-testid="import-notes" className="mt-3">
         <p className="font-medium">{t("import.notes")}</p>
-        {report.notes.length === 0 ? (
+        {notes.length === 0 ? (
           <p className="text-muted-foreground">{t("import.none")}</p>
         ) : (
           <dl className="mt-1 flex flex-col gap-1">
-            {report.notes.map((item, i) => (
+            {notes.map((item, i) => (
               <div key={`${item.name}-${i}`} className="flex flex-wrap gap-x-2">
                 <dt className="font-mono">{item.name}</dt>
                 <dd className="text-muted-foreground">{item.note}</dd>
@@ -1521,6 +1711,8 @@ function ImportReport({ report }: { report: AlertRuleImportReport }) {
 
 function ForeignRow({ rule, canManage }: { rule: ForeignRule; canManage: boolean }) {
   const t = useT(alertingDict);
+  /* The plural forms below are chosen per LANGUAGE, not per count alone. */
+  const { locale } = useLocale();
   const qc = useQueryClient();
   /* guard carries the DISABLED flag AND the reason for it — lib/timemachine's useWriteGuard. */
   const guard = useWriteGuard();
@@ -1548,10 +1740,10 @@ function ForeignRow({ rule, canManage }: { rule: ForeignRule; canManage: boolean
       {/* Three Russian forms where English has two, so the noun is chosen by
           count rather than by an `=== 1` suffix — see pluralKey. */}
       <span className="text-xs text-muted-foreground">
-        {rule.groups} {t(pluralKey(rule.groups, "count.groups.one", "count.groups.few", "count.groups.many"))}
+        {rule.groups} {t(pluralKey(rule.groups, "count.groups.one", "count.groups.few", "count.groups.many", locale))}
       </span>
       <span className="text-xs text-muted-foreground">
-        {rule.rules} {t(pluralKey(rule.rules, "count.rules.one", "count.rules.few", "count.rules.many"))}
+        {rule.rules} {t(pluralKey(rule.rules, "count.rules.one", "count.rules.few", "count.rules.many", locale))}
       </span>
       {/* An object carrying no managed-by label gets an em dash, not a blank:
           "nobody claims this" is a fact, and a blank cell reads as a bug. */}
@@ -1560,8 +1752,17 @@ function ForeignRow({ rule, canManage }: { rule: ForeignRule; canManage: boolean
       </span>
       {canManage ? (
         <span className="ml-auto">
-          <Button size="sm" variant="ghost" loading={busy} {...guard} onClick={() => void handleImport()}>
-            {t("foreign.import", { name: rule.name })}
+          {/* Same bound as the managed rows above: a PrometheusRule's
+              metadata.name is up to 253 characters and this button carries it. */}
+          <Button
+            size="sm"
+            variant="ghost"
+            loading={busy}
+            {...guard}
+            aria-label={t("foreign.import", { name: rule.name })}
+            onClick={() => void handleImport()}
+          >
+            <RowActionLabel text={t("foreign.import", { name: rule.name })} />
           </Button>
         </span>
       ) : null}
@@ -1582,6 +1783,7 @@ function ForeignSection({ canManage }: { canManage: boolean }) {
   // CLUSTER that a database write cannot have changed.
   const query = useQuery({ queryKey: ["foreign-alert-rules"], queryFn: listForeignAlertRules });
   const foreign = query.data?.foreign ?? [];
+  const pager = usePager(foreign);
 
   return (
     <SectionCard title={t("foreign.heading")}>
@@ -1608,11 +1810,17 @@ function ForeignSection({ canManage }: { canManage: boolean }) {
         <p className="px-1 py-10 text-center text-xs text-muted-foreground">{t("foreign.empty")}</p>
       ) : null}
       {foreign.length > 0 ? (
+        <>
         <ul aria-label={t("foreign.listAria")} className="mt-4 divide-y divide-border">
-          {foreign.map((rule) => (
-            <ForeignRow key={rule.name} rule={rule} canManage={canManage} />
+          {pager.visible.map((rule, i) => (
+            /* The name is the object's identity in ONE namespace; the list can span
+               several, so two rows may legitimately share it. The index disambiguates
+               rather than letting React reconcile two different objects as one. */
+            <ForeignRow key={`${rule.name}-${i}`} rule={rule} canManage={canManage} />
           ))}
         </ul>
+        <Pager pager={pager} subject={t("foreign.subject")} className="px-0" />
+        </>
       ) : null}
     </SectionCard>
   );

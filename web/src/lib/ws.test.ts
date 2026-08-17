@@ -422,3 +422,47 @@ describe("WsClient robustness", () => {
     warn.mockRestore();
   });
 });
+
+/* ── QA round 5b: a cursor belongs to the hub that issued it ──────────────── */
+
+describe("WsClient epoch discipline", () => {
+  it("sends the cursor with the epoch it was issued under", () => {
+    vi.useFakeTimers();
+    const client = newClient();
+    client.subscribe("live", () => {});
+
+    const first = FakeSocket.last();
+    first.emitOpen();
+    first.emitEnvelope({ topic: "live", type: "event", seq: 6, epoch: "replica-a", data: {} });
+    first.emitClose();
+
+    vi.advanceTimersByTime(1_000);
+    const second = FakeSocket.last();
+    second.emitOpen();
+    expect(second.sent).toEqual(['{"action":"subscribe","topic":"live","lastSeq":6,"epoch":"replica-a"}']);
+
+    client.close();
+  });
+
+  it("drops every cursor when the epoch changes — the numbering is new", () => {
+    vi.useFakeTimers();
+    const client = newClient();
+    client.subscribe("live", () => {});
+
+    const sock = FakeSocket.last();
+    sock.emitOpen();
+    sock.emitEnvelope({ topic: "live", type: "event", seq: 412, epoch: "replica-a", data: {} });
+    // The reconnect landed on another replica, which numbers from its own 1.
+    sock.emitEnvelope({ topic: "live", type: "event", seq: 3, epoch: "replica-b", data: {} });
+    sock.emitClose();
+
+    vi.advanceTimersByTime(1_000);
+    const next = FakeSocket.last();
+    next.emitOpen();
+    // 412 is meaningless on replica-b, and asking for "everything after 412" there replayed nothing
+    // at all: the cursor is now 3, in replica-b's own series.
+    expect(next.sent).toEqual(['{"action":"subscribe","topic":"live","lastSeq":3,"epoch":"replica-b"}']);
+
+    client.close();
+  });
+});

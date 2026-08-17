@@ -52,6 +52,8 @@ const en = {
   /* ── webhooks ──────────────────────────────────────────────────────────── */
   "webhooks.heading": "Webhooks",
   "webhooks.listAria": "Webhook endpoints",
+  /* ui/pager.tsx's noun for this list. */
+  "webhooks.subject": "endpoints",
   "webhooks.blurb":
     "Outbound endpoints the console signs and POSTs incident events to. Delivery is asynchronous with a retry " +
     "ladder, so the last outcome below is what actually happened, not what was attempted.",
@@ -105,6 +107,7 @@ const en = {
   /* ── API tokens ────────────────────────────────────────────────────────── */
   "tokens.heading": "API tokens",
   "tokens.listAria": "API tokens",
+  "tokens.subject": "tokens",
   "tokens.blurb":
     "Bearer tokens for calling this API without a session. The console stores a hash, never the token, so the " +
     "secret below is shown once at creation and cannot be recovered afterwards — a lost one is replaced, not read.",
@@ -155,6 +158,7 @@ const en = {
   /* ── maintenance windows ───────────────────────────────────────────────── */
   "maintenance.heading": "Maintenance windows",
   "maintenance.listAria": "All maintenance windows",
+  "maintenance.subject": "windows",
   /* {investigate} and {explore} are LINKS the page drops in — one sentence,
      one key, and the translation decides where the two links sit in it. */
   "maintenance.blurb":
@@ -162,6 +166,7 @@ const en = {
     "the charts cannot show because those are bounded to what the chart plots. Declaring a window still happens " +
     "next to the chart it explains, on {investigate} or {explore}; this list is for finding and removing one.",
   "maintenance.empty": "No maintenance windows have been declared.",
+  "maintenance.loadMore": "Load older windows",
   "maintenance.unavailable": "Maintenance windows are unavailable",
 
   /* The two surfaces named in the sentences above and in About. The SAME
@@ -173,8 +178,11 @@ const en = {
   "bundle.heading": "Configuration export / import",
   "bundle.blurb":
     "Targets, check definitions, schedules, alert rules, webhook endpoints and maintenance windows — what was " +
-    "declared, never what was observed. A bundle never carries a webhook secret; imported endpoints arrive without " +
-    "one and stay unusable until a secret is set here.",
+    "declared, never what was observed. With rbac:manage the bundle also carries custom ROLES (bindings are " +
+    "exported for the record and never imported: a binding names a person in the source console's identity " +
+    "namespace). Every section applies only if you hold the permission its own page requires. Webhook endpoints " +
+    "are NOT created by an import: a bundle never carries a secret and an endpoint cannot exist without one. " +
+    "Create the endpoint here first, then import to apply the bundle's url, events and enabled flag.",
   "bundle.export": "Export configuration",
   "bundle.exportFailed": "Failed to export the configuration",
   "bundle.field": "Configuration bundle",
@@ -204,6 +212,8 @@ const en = {
   "collection.alertRules": "Alert rules",
   "collection.webhooks": "Webhooks",
   "collection.maintenanceWindows": "Maintenance windows",
+  "collection.rbacRoles": "Custom roles",
+  "collection.rbacBindings": "Role bindings",
 
   /* ── About ─────────────────────────────────────────────────────────────── */
   "about.heading": "About this console",
@@ -259,6 +269,7 @@ export const settingsDict: Dictionary<SettingsKey> = defineDict(en, {
 
   "webhooks.heading": "Вебхуки",
   "webhooks.listAria": "Точки доставки вебхуков",
+  "webhooks.subject": "Точки доставки",
   "webhooks.blurb":
     "Исходящие точки: консоль подписывает событие инцидента и отправляет его POST-ом. Доставка асинхронная, с " +
     "лестницей повторов, поэтому последний исход в строке говорит, чем всё кончилось, а не что было предпринято.",
@@ -310,6 +321,7 @@ export const settingsDict: Dictionary<SettingsKey> = defineDict(en, {
 
   "tokens.heading": "Токены API",
   "tokens.listAria": "Токены API",
+  "tokens.subject": "Токены",
   "tokens.blurb":
     "Bearer-токены для обращений к этому API без сессии. Консоль хранит хеш, а не сам токен, поэтому секрет " +
     "показывается один раз при создании и потом его уже не достать: потерянный не читают, а выпускают заново.",
@@ -353,11 +365,13 @@ export const settingsDict: Dictionary<SettingsKey> = defineDict(en, {
 
   "maintenance.heading": "Окна работ",
   "maintenance.listAria": "Все окна работ",
+  "maintenance.subject": "Окна работ",
   "maintenance.blurb":
     "Все объявленные окна работ, без отсечки по времени, включая те, что целиком впереди. Полосы под графиками " +
     "их не покажут: полоса ограничена тем отрезком, который рисует график. Объявляют окно по-прежнему там, где оно " +
     "что-то объясняет, на {investigate} или {explore}. Этот список нужен для другого: найти окно и убрать.",
   "maintenance.empty": "Окна работ ещё не объявлялись.",
+  "maintenance.loadMore": "Показать более старые окна",
   "maintenance.unavailable": "Окна работ недоступны",
 
   "link.investigate": "Расследование",
@@ -366,8 +380,11 @@ export const settingsDict: Dictionary<SettingsKey> = defineDict(en, {
   "bundle.heading": "Экспорт и импорт конфигурации",
   "bundle.blurb":
     "Цели, определения проверок, расписания, правила оповещений, точки вебхуков и окна работ. Только объявленное, " +
-    "ничего из наблюдённого. Секрет вебхука в пакет не кладётся: импортированные точки приезжают без него и не " +
-    "работают, пока секрет не задан здесь.",
+    "ничего из наблюдённого. С правом rbac:manage пакет несёт ещё и пользовательские РОЛИ (привязки экспортируются " +
+    "для истории и никогда не импортируются: привязка называет человека в пространстве имён исходной консоли). " +
+    "Каждый раздел применяется, только если у вас есть право, которого требует его собственная страница. Точки " +
+    "вебхуков импорт НЕ создаёт: секрет в пакет не кладётся, а без секрета точки не существует. Сначала создайте " +
+    "точку здесь, потом импортируйте — импорт применит url, события и флаг включения.",
   "bundle.export": "Экспортировать конфигурацию",
   "bundle.exportFailed": "Не удалось экспортировать конфигурацию",
   "bundle.field": "Пакет конфигурации",
@@ -397,6 +414,8 @@ export const settingsDict: Dictionary<SettingsKey> = defineDict(en, {
   "collection.alertRules": "Правила оповещений",
   "collection.webhooks": "Вебхуки",
   "collection.maintenanceWindows": "Окна работ",
+  "collection.rbacRoles": "Пользовательские роли",
+  "collection.rbacBindings": "Привязки ролей",
 
   "about.heading": "Об этой консоли",
   "about.authMode": "Режим аутентификации",
@@ -425,9 +444,27 @@ export const settingsDict: Dictionary<SettingsKey> = defineDict(en, {
     "не администрируются вообще, а токены API — да, в разделе выше.",
 });
 
-/** pluralKey picks the Russian form for `count`. Duplicated per dictionary on
- *  purpose — see lib/i18n/README.md's one-file-per-surface rule. */
-export function pluralKey(count: number, one: SettingsKey, few: SettingsKey, many: SettingsKey): SettingsKey {
+/**
+ * pluralKey picks the form `count` takes IN THE LANGUAGE ON SCREEN. Duplicated
+ * per dictionary on purpose — see lib/i18n/README.md's one-file-per-surface
+ * rule — and it takes the locale for the same reason dict/annotations.ts's
+ * countForm does.
+ *
+ * It did not, and the doc comment justified that with "English fills all three
+ * slots with the same word, so the Russian rule runs there too and changes
+ * nothing". That is not true of this table: `count.failures.*` is
+ * failure/failures/failures, and the Russian rule sends 21, 31, 101 and 1001 to
+ * the ONE form. An English console read «21 failure». English has exactly two
+ * forms and only the number 1 takes the singular.
+ */
+export function pluralKey(
+  locale: string,
+  count: number,
+  one: SettingsKey,
+  few: SettingsKey,
+  many: SettingsKey,
+): SettingsKey {
+  if (locale !== "ru") return count === 1 ? one : many;
   const hundred = Math.abs(count) % 100;
   const ten = Math.abs(count) % 10;
   if (hundred >= 11 && hundred <= 14) return many;

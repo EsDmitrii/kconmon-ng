@@ -4,11 +4,14 @@ import { PageShell } from "@/components/page-shell";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
+import { Pager, usePager } from "@/components/ui/pager";
 import { DateTimePicker } from "@/components/ui/datetime-picker";
 import { Segmented } from "@/components/ui/segmented";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useAuth } from "@/hooks/use-auth";
 import { useDatabaseAvailable } from "@/hooks/use-capabilities";
+import { useConfirmStep } from "@/hooks/use-confirm-step";
+import { useDisclosureFocus } from "@/hooks/use-disclosure-focus";
 import { useSubmitGuard } from "@/hooks/use-submit-guard";
 import { subscribeToLocation } from "@/lib/location";
 import {
@@ -20,21 +23,21 @@ import {
   deleteCheck,
   deleteSchedule,
   deleteTarget,
-  listChecks,
-  listSchedules,
-  listTargets,
+  listAllChecks,
+  listAllSchedules,
+  listAllTargets,
   updateCheck,
   updateSchedule,
   updateTarget,
 } from "@/lib/api";
 // Read directly in each mutating component rather than threaded down from the page as a prop: it is
 // a context read.
-import { stampFull, useLocale, useT, type Locale, type Translate, type Vars } from "@/lib/i18n";
+import { DEFAULT_LOCALE, stampFull, useLocale, useT, type Locale, type Translate, type Vars } from "@/lib/i18n";
 import { pluralKey, targetsDict, type TargetsKey } from "@/lib/i18n/dict/targets";
 /* The ad-hoc address refusal is lib/utils.ts's, shared with the run form on
    /diagnostics — one rule, one sentence, one table. */
 import { validationDict } from "@/lib/i18n/dict/validation";
-import { useWriteGuard } from "@/lib/timemachine";
+import { withAtParam, useWriteGuard } from "@/lib/timemachine";
 import {
   CHECK_TYPES,
   type CheckDefinition,
@@ -200,7 +203,14 @@ function errorsFromProblem<F extends string>(
   // The casts are unavoidable with a generic key: TS cannot prove a computed
   // key of type F indexes Partial<Record<F | "form", string>>.
   if (!(err instanceof ApiError)) return { form: fallback } as FieldErrors<F>;
-  const detail = err.problem.detail ?? err.problem.title;
+  /* WORDLESS problems fall back (QA hostile pass). `detail ?? title` is the
+     right preference, but both halves are strings a proxy can send empty —
+     `{"type":"about:blank","status":422}` under application/problem+json is a
+     legal envelope — and an empty string put in `form` is FALSY, so the JSX
+     that renders it rendered nothing at all: a refused write left the form
+     sitting there looking as though it had been accepted. A refusal must
+     always carry words, even when the words have to be ours. */
+  const detail = (err.problem.detail ?? err.problem.title ?? "").trim() || fallback;
   const field = fieldForDetail(detail, phrases);
   return (field ? { [field]: detail } : { form: detail }) as FieldErrors<F>;
 }
@@ -397,8 +407,13 @@ function ListSkeleton() {
   );
 }
 
+/** queryErrorMessage prefers the server's own sentence and falls back to ours
+ *  the moment there is no sentence — see errorsFromProblem for why a blank
+ *  `detail`/`title` is a case worth spending a `||` on: a red alert with no
+ *  text in it is indistinguishable from no alert at all. */
 function queryErrorMessage(error: unknown, fallback: string): string {
-  return error instanceof ApiError ? (error.problem.detail ?? error.problem.title) : fallback;
+  if (!(error instanceof ApiError)) return fallback;
+  return (error.problem.detail ?? error.problem.title ?? "").trim() || fallback;
 }
 
 /** The locale is required: a bare toLocaleString() reorders the date and swaps in AM/PM from
@@ -411,7 +426,16 @@ function fmtTime(timestamp: string | null | undefined, locale: Locale): string {
 
 /* ── Targets tab ────────────────────────────────────────────────────────── */
 
-function TargetForm({ initial, onDone }: { initial?: Target; onDone: () => void }) {
+function TargetForm({
+  initial,
+  onDone,
+  panelRef,
+}: {
+  initial?: Target;
+  onDone: () => void;
+  /** Focus target for the button→form handover; see hooks/use-disclosure-focus. */
+  panelRef?: React.RefObject<HTMLDivElement | null>;
+}) {
   const t = useT(targetsDict);
   const qc = useQueryClient();
   /* guard carries the DISABLED flag AND the reason for it — lib/timemachine's useWriteGuard. */
@@ -459,6 +483,7 @@ function TargetForm({ initial, onDone }: { initial?: Target; onDone: () => void 
   }
 
   return (
+    <div ref={panelRef} tabIndex={-1}>
     <Card asChild className="p-6">
       <form onSubmit={handleSubmit} className="flex flex-col gap-4">
         <h3 className="text-sm font-semibold">
@@ -516,6 +541,7 @@ function TargetForm({ initial, onDone }: { initial?: Target; onDone: () => void 
         </div>
       </form>
     </Card>
+    </div>
   );
 }
 
@@ -543,7 +569,8 @@ function TargetRowActions({ target, onEdit }: { target: Target; onEdit: () => vo
   const qc = useQueryClient();
   /* guard carries the DISABLED flag AND the reason for it — lib/timemachine's useWriteGuard. */
   const guard = useWriteGuard();
-  const [confirming, setConfirming] = useState(false);
+  /* The two-press delete, with the keyboard kept whole — hooks/use-confirm-step. */
+  const { confirming, confirmRef, triggerRef, ask, reset } = useConfirmStep();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
 
@@ -559,14 +586,19 @@ function TargetRowActions({ target, onEdit }: { target: Target; onEdit: () => vo
       // the offending definitions.
       setError(queryErrorMessage(err, t("targets.row.deleteFailed")));
       setBusy(false);
-      setConfirming(false);
+      reset();
     }
   }
 
   if (confirming) {
     return (
       <span className="flex flex-wrap items-center gap-2">
+        {/* Spoken as well as drawn — the row swaps its controls under the reader. */}
+        <span role="status" className="sr-only">
+          {t("targets.row.confirmDelete", { name: target.name })}
+        </span>
         <Button
+          ref={confirmRef}
           size="sm"
           variant="outline"
           loading={busy}
@@ -576,7 +608,7 @@ function TargetRowActions({ target, onEdit }: { target: Target; onEdit: () => vo
         >
           <RowActionLabel text={t("targets.row.confirmDelete", { name: target.name })} />
         </Button>
-        <Button size="sm" variant="ghost" onClick={() => setConfirming(false)}>
+        <Button size="sm" variant="ghost" onClick={reset}>
           {t("cancel")}
         </Button>
       </span>
@@ -591,11 +623,12 @@ function TargetRowActions({ target, onEdit }: { target: Target; onEdit: () => vo
         <RowActionLabel text={t("targets.row.edit", { name: target.name })} />
       </Button>
       <Button
+        ref={triggerRef}
         size="sm"
         variant="ghost"
         {...guard}
         aria-label={t("targets.row.delete", { name: target.name })}
-        onClick={() => setConfirming(true)}
+        onClick={ask}
       >
         <RowActionLabel text={t("targets.row.delete", { name: target.name })} />
       </Button>
@@ -615,8 +648,16 @@ function TargetsTab({ canWrite }: { canWrite: boolean }) {
   const [editing, setEditing] = useState<{ mode: "none" } | { mode: "create" } | { mode: "edit"; target: Target }>({
     mode: "none",
   });
-  const query = useQuery({ queryKey: ["targets"], queryFn: () => listTargets() });
-  const targets = query.data?.targets ?? [];
+  /* Every page, not the first one. The server answers 100 rows plus a cursor, and this page used to
+     read the array and stop: a fleet with 122 targets showed 100 and the pager's caption asserted
+     that was all of them. */
+  // The keyboard across the button↔form swap; see hooks/use-disclosure-focus.
+  const formFocus = useDisclosureFocus(editing.mode !== "none");
+  const query = useQuery({ queryKey: ["targets"], queryFn: () => listAllTargets() });
+  const targets = query.data?.items ?? [];
+  /* Every list on this page is paged rather than scrolled: a fleet's target
+     inventory is not a fixed dozen. */
+  const pager = usePager(targets);
 
   return (
     <div className="flex flex-col gap-4">
@@ -626,7 +667,16 @@ function TargetsTab({ canWrite }: { canWrite: boolean }) {
 
       {canWrite && editing.mode === "none" ? (
         <div>
-          <Button size="sm" {...guard} onClick={() => setEditing({ mode: "create" })}>
+          {/* The button is REPLACED by the form; see hooks/use-disclosure-focus. */}
+          <Button
+            ref={formFocus.triggerRef}
+            size="sm"
+            {...guard}
+            onClick={() => {
+              formFocus.onOpen();
+              setEditing({ mode: "create" });
+            }}
+          >
             {t("targets.new")}
           </Button>
         </div>
@@ -635,7 +685,11 @@ function TargetsTab({ canWrite }: { canWrite: boolean }) {
         <TargetForm
           key={editing.mode === "edit" ? editing.target.id : "create"}
           initial={editing.mode === "edit" ? editing.target : undefined}
-          onDone={() => setEditing({ mode: "none" })}
+          panelRef={formFocus.panelRef}
+          onDone={() => {
+            formFocus.onClose();
+            setEditing({ mode: "none" });
+          }}
         />
       ) : null}
 
@@ -647,13 +701,17 @@ function TargetsTab({ canWrite }: { canWrite: boolean }) {
               {queryErrorMessage(query.error, t("targets.unavailable"))}
             </p>
           ) : null}
-          {query.isLoading ? <ListSkeleton /> : null}
-          {!query.isLoading && targets.length === 0 && !query.isError ? (
+          {/* isPending, not isLoading. A read that FAILED while the tab was in the background parks
+              at pending/paused with error still null, so isLoading is false — and the empty branch
+              then rendered "nothing here yet" for a list nobody managed to read. */}
+          {query.isPending ? <ListSkeleton /> : null}
+          {query.isSuccess && targets.length === 0 ? (
             <EmptyRow>{t("targets.empty")}</EmptyRow>
           ) : null}
           {targets.length > 0 ? (
+            <>
             <ul aria-label={t("targets.listAria")} className="mt-4 divide-y divide-border">
-              {targets.map((t) => (
+              {pager.visible.map((t) => (
                 <li key={t.id} className="flex flex-wrap items-center gap-3 py-3 text-sm">
                   {/* The row's name is the way into the Target card
                       (pages/target-card.tsx). A plain <a href>, not a router
@@ -663,7 +721,7 @@ function TargetsTab({ canWrite }: { canWrite: boolean }) {
                       the same choice pages/diagnostics.tsx already makes for a
                       run permalink. */}
                   <a
-                    href={`/targets/${encodeURIComponent(t.id)}`}
+                    href={withAtParam(`/targets/${encodeURIComponent(t.id)}`)}
                     className="font-medium text-primary hover:underline"
                   >
                     {t.name}
@@ -681,6 +739,8 @@ function TargetsTab({ canWrite }: { canWrite: boolean }) {
                 </li>
               ))}
             </ul>
+            <Pager pager={pager} subject={t("targets.subject")} truncated={query.data?.truncated} className="px-0" />
+            </>
           ) : null}
         </section>
       </Card>
@@ -695,7 +755,7 @@ function TargetsTab({ canWrite }: { canWrite: boolean }) {
  *  boolean that gates submit is the one the response carried, so the warning
  *  and the enforcement cannot disagree. See DefinitionForm's projection
  *  comment for why that matters. */
-function projectionVars(p: Projection, t: Translate<TargetsKey>): Vars {
+function projectionVars(p: Projection, t: Translate<TargetsKey>, locale: Locale = DEFAULT_LOCALE): Vars {
   /* The three nouns are looked up per COUNT, not pluralised by a suffix: "5
      протоколов" and "2 протокола" are different words, and the `${n === 1 ?
      "" : "s"}` the English used cannot produce either. English resolves all
@@ -703,12 +763,12 @@ function projectionVars(p: Projection, t: Translate<TargetsKey>): Vars {
      unchanged. */
   return {
     series: p.series,
-    seriesWord: t(pluralKey(p.series, "count.series.one", "count.series.few", "count.series.many")),
+    seriesWord: t(pluralKey(p.series, "count.series.one", "count.series.few", "count.series.many", locale)),
     agents: p.agents,
-    agentsWord: t(pluralKey(p.agents, "count.agents.one", "count.agents.few", "count.agents.many")),
+    agentsWord: t(pluralKey(p.agents, "count.agents.one", "count.agents.few", "count.agents.many", locale)),
     protocols: p.protocols,
     protocolsWord: t(
-      pluralKey(p.protocols, "count.protocols.one", "count.protocols.few", "count.protocols.many"),
+      pluralKey(p.protocols, "count.protocols.one", "count.protocols.few", "count.protocols.many", locale),
     ),
     limit: p.limit,
   };
@@ -751,6 +811,9 @@ function DefinitionForm({
      onto the control, and compose any local condition AFTER the spread. */
   const guard = useWriteGuard();
   const writesDisabled = guard.disabled;
+  /* The projection sentence below counts nouns, and the plural form of a noun
+     is a question about the LANGUAGE, not only about the number. */
+  const { locale } = useLocale();
   const [name, setName] = useState(initial?.name ?? "");
   const [checkType, setCheckType] = useState<CheckType>(initial?.checkType ?? "tcp");
   const [sourceSelection, setSourceSelection] = useState<SourceSelection>(initial?.sourceSelection ?? "one-per-zone");
@@ -992,7 +1055,7 @@ function DefinitionForm({
             role="status"
             className={cn("nums text-sm", projection.overLimit ? "text-health-bad" : "text-muted-foreground")}
           >
-            {t(projection.overLimit ? "projection.over" : "projection.ok", projectionVars(projection, t))}
+            {t(projection.overLimit ? "projection.over" : "projection.ok", projectionVars(projection, t, locale))}
           </p>
         ) : null}
 
@@ -1022,7 +1085,8 @@ function DefinitionRowActions({ definition, onEdit }: { definition: CheckDefinit
      useWriteGuard (QA round 2, finding #18; extended here in round 3). Spread it
      onto the control, and compose any local condition AFTER the spread. */
   const guard = useWriteGuard();
-  const [confirming, setConfirming] = useState(false);
+  /* The two-press delete, with the keyboard kept whole — hooks/use-confirm-step. */
+  const { confirming, confirmRef, triggerRef, ask, reset } = useConfirmStep();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
 
@@ -1035,14 +1099,19 @@ function DefinitionRowActions({ definition, onEdit }: { definition: CheckDefinit
     } catch (err) {
       setError(queryErrorMessage(err, t("definitions.row.deleteFailed")));
       setBusy(false);
-      setConfirming(false);
+      reset();
     }
   }
 
   if (confirming) {
     return (
       <span className="flex flex-wrap items-center gap-2">
+        {/* Spoken as well as drawn — the row swaps its controls under the reader. */}
+        <span role="status" className="sr-only">
+          {t("definitions.row.confirmDelete", { name: definition.name })}
+        </span>
         <Button
+          ref={confirmRef}
           size="sm"
           variant="outline"
           loading={busy}
@@ -1052,7 +1121,7 @@ function DefinitionRowActions({ definition, onEdit }: { definition: CheckDefinit
         >
           <RowActionLabel text={t("definitions.row.confirmDelete", { name: definition.name })} />
         </Button>
-        <Button size="sm" variant="ghost" onClick={() => setConfirming(false)}>
+        <Button size="sm" variant="ghost" onClick={reset}>
           {t("cancel")}
         </Button>
       </span>
@@ -1070,11 +1139,12 @@ function DefinitionRowActions({ definition, onEdit }: { definition: CheckDefinit
         <RowActionLabel text={t("definitions.row.edit", { name: definition.name })} />
       </Button>
       <Button
+        ref={triggerRef}
         size="sm"
         variant="ghost"
         {...guard}
         aria-label={t("definitions.row.delete", { name: definition.name })}
-        onClick={() => setConfirming(true)}
+        onClick={ask}
       >
         <RowActionLabel text={t("definitions.row.delete", { name: definition.name })} />
       </Button>
@@ -1112,13 +1182,14 @@ function DefinitionsTab({ canRead, canWrite }: { canRead: boolean; canWrite: boo
   const [editing, setEditing] = useState<
     { mode: "none" } | { mode: "create" } | { mode: "edit"; definition: CheckDefinition }
   >({ mode: "none" });
-  const query = useQuery({ queryKey: ["definitions"], queryFn: () => listChecks(), enabled: canRead });
+  const query = useQuery({ queryKey: ["definitions"], queryFn: () => listAllChecks(), enabled: canRead });
   // The definition form's target picker needs the target list; same query key
   // the Targets tab uses, so this shares one cache entry rather than
   // introducing a second notion of "the targets".
-  const targetsQuery = useQuery({ queryKey: ["targets"], queryFn: () => listTargets(), enabled: canRead });
-  const definitions = query.data?.definitions ?? [];
-  const targets = targetsQuery.data?.targets ?? [];
+  const targetsQuery = useQuery({ queryKey: ["targets"], queryFn: () => listAllTargets(), enabled: canRead });
+  const definitions = query.data?.items ?? [];
+  const targets = targetsQuery.data?.items ?? [];
+  const pager = usePager(definitions);
 
   if (!canRead) {
     return <PermissionCard permission="checks:read">{t("definitions.gate.read")}</PermissionCard>;
@@ -1154,13 +1225,17 @@ function DefinitionsTab({ canRead, canWrite }: { canRead: boolean; canWrite: boo
               {queryErrorMessage(query.error, t("definitions.unavailable"))}
             </p>
           ) : null}
-          {query.isLoading ? <ListSkeleton /> : null}
-          {!query.isLoading && definitions.length === 0 && !query.isError ? (
+          {/* isPending, not isLoading. A read that FAILED while the tab was in the background parks
+              at pending/paused with error still null, so isLoading is false — and the empty branch
+              then rendered "nothing here yet" for a list nobody managed to read. */}
+          {query.isPending ? <ListSkeleton /> : null}
+          {query.isSuccess && definitions.length === 0 ? (
             <EmptyRow>{t("definitions.empty")}</EmptyRow>
           ) : null}
           {definitions.length > 0 ? (
+            <>
             <ul aria-label={t("definitions.listAria")} className="mt-4 divide-y divide-border">
-              {definitions.map((d) => (
+              {pager.visible.map((d) => (
                 <li key={d.id} className="flex flex-wrap items-center gap-3 py-3 text-sm">
                   <span className="font-medium">{d.name}</span>
                   {/* checkType and sourceSelection are the row's own stored
@@ -1184,6 +1259,8 @@ function DefinitionsTab({ canRead, canWrite }: { canRead: boolean; canWrite: boo
                 </li>
               ))}
             </ul>
+            <Pager pager={pager} subject={t("definitions.subject")} truncated={query.data?.truncated} className="px-0" />
+            </>
           ) : null}
         </section>
       </Card>
@@ -1194,7 +1271,12 @@ function DefinitionsTab({ canRead, canWrite }: { canRead: boolean; canWrite: boo
 /* ── Schedules tab ──────────────────────────────────────────────────────── */
 
 export function fmtIntervalNs(ns: number): string {
-  if (!ns) return "—";
+  /* Number.isFinite, not just falsiness (QA hostile pass): `!ns` already caught
+     0, NaN, null and undefined, but an INFINITE cadence walked straight through
+     the s/m/h ladder and came out of `.toFixed(2)` as the literal string
+     "Infinity", so the row read "Infinityh". A cadence this console cannot state
+     is an em dash — the same answer it already gives for one that is absent. */
+  if (!Number.isFinite(ns) || !ns) return "—";
   const seconds = ns / 1_000_000_000;
   if (seconds < 60) return `${Number(seconds.toFixed(3))}s`;
   const minutes = seconds / 60;
@@ -1211,7 +1293,9 @@ export function fmtIntervalNs(ns: number): string {
 export type IntervalUnit = "second" | "minute" | "hour";
 
 export function intervalParts(ns: number): { value: number; unit: IntervalUnit } | null {
-  if (!ns) return null;
+  /* Same guard, same reason as fmtIntervalNs: null means "no phrase to build",
+     and fmtCadence answers that by falling back to fmtIntervalNs's em dash. */
+  if (!Number.isFinite(ns) || !ns) return null;
   const seconds = ns / 1_000_000_000;
   if (seconds < 60) return { value: Number(seconds.toFixed(3)), unit: "second" };
   const minutes = seconds / 60;
@@ -1316,6 +1400,51 @@ export function scheduleRequestFrom(s: Schedule, enabled: boolean): ScheduleRequ
  *  is advisory text, not a client-side gate. */
 const MIN_INTERVAL_SECONDS = 10;
 
+/**
+ * MAX_INTERVAL_SECONDS is where a double stops being able to hold the answer.
+ *
+ * The box is seconds and the wire is nanoseconds, so every value is multiplied
+ * by a billion before it is sent. Past Number.MAX_SAFE_INTEGER nanoseconds the
+ * product is no longer the number that was typed — it is the nearest double to
+ * it — and past ~9.2e9 seconds it is Infinity, which JSON.stringify writes as
+ * `null` and the server reads back as ZERO. Both directions end the same way:
+ * a cadence stored that nobody asked for. ~104 days is the honest ceiling.
+ */
+export const MAX_INTERVAL_SECONDS = Math.floor(Number.MAX_SAFE_INTEGER / 1_000_000_000);
+
+/**
+ * parseIntervalSeconds reads the "Interval (seconds)" box.
+ *
+ * Deliberately NOT `Number()` (QA hostile pass). `Number()` is a coercion, not
+ * a reading: it answers 16 for "0x10", 3 for "0b11", Infinity for "1e400" and
+ * 1e300 for "1e300" — so a box labelled *seconds* accepted hexadecimal, and a
+ * value whose nanoseconds overflowed sailed past a `Number.isFinite` check that
+ * was looking at the wrong number. What an operator means by "seconds" is a
+ * plain decimal, so that is the whole grammar:
+ *
+ *   ok:false  — anything that is not `digits` or `digits.digits`
+ *   ok:false  — zero (the server needs a positive cadence)
+ *   ok:false  — a value whose NANOSECONDS are past exact integer range
+ *   ok:true   — the whole nanoseconds to send
+ *
+ * The two refusals are returned as KEYS rather than sentences: this is a pure
+ * parser and must not hold a translator, exactly like tryParseParams above.
+ */
+export function parseIntervalSeconds(
+  text: string,
+): { ok: true; ns: number } | { ok: false; messageKey: TargetsKey } {
+  const s = text.trim();
+  if (!/^\d+(?:\.\d+)?$/.test(s)) return { ok: false, messageKey: "schedules.form.error.interval" };
+  const seconds = Number(s);
+  if (!(seconds > 0)) return { ok: false, messageKey: "schedules.form.error.interval" };
+  if (seconds > MAX_INTERVAL_SECONDS) return { ok: false, messageKey: "schedules.form.error.intervalRange" };
+  const ns = Math.round(seconds * 1_000_000_000);
+  // Belt and braces: the bound above is the readable rule, this is the
+  // invariant the wire actually depends on.
+  if (!Number.isSafeInteger(ns)) return { ok: false, messageKey: "schedules.form.error.intervalRange" };
+  return { ok: true, ns };
+}
+
 /** localDateTimeToIso turns a local wall-clock string ("2026-08-08T10:00") into
  *  the RFC 3339 instant the API takes; null for anything unparseable, so the
  *  form reports it instead of posting "Invalid Date".
@@ -1405,12 +1534,12 @@ function ScheduleForm({
 
     const req: ScheduleRequest = { definitionId, kind, enabled };
     if (kind === "interval") {
-      const seconds = Number(intervalSeconds);
-      if (!Number.isFinite(seconds) || seconds <= 0) {
-        setErrors({ intervalNs: t("schedules.form.error.interval") });
+      const parsed = parseIntervalSeconds(intervalSeconds);
+      if (!parsed.ok) {
+        setErrors({ intervalNs: t(parsed.messageKey, { max: MAX_INTERVAL_SECONDS }) });
         return;
       }
-      req.intervalNs = Math.round(seconds * 1_000_000_000);
+      req.intervalNs = parsed.ns;
     }
     if (kind === "once") {
       if (runAt === null) {
@@ -1597,7 +1726,9 @@ function ScheduleRowActions({
      useWriteGuard (QA round 2, finding #18; extended here in round 3). Spread it
      onto the control, and compose any local condition AFTER the spread. */
   const guard = useWriteGuard();
-  const [confirming, setConfirming] = useState(false);
+  /* The two-press delete, with the keyboard kept whole: this row swaps the Delete button for a
+     confirm pair, which destroys the focused node. See hooks/use-confirm-step. */
+  const { confirming, confirmRef, triggerRef, ask, reset } = useConfirmStep();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
 
@@ -1611,13 +1742,18 @@ function ScheduleRowActions({
       setError(queryErrorMessage(err, fallback));
     }
     setBusy(false);
-    setConfirming(false);
+    reset();
   }
 
   if (confirming) {
     return (
       <span className="flex flex-wrap items-center gap-2">
+        {/* Spoken as well as drawn — the row swaps its controls under the reader. */}
+        <span role="status" className="sr-only">
+          {t("schedules.row.confirmDelete", { name: label })}
+        </span>
         <Button
+          ref={confirmRef}
           size="sm"
           variant="outline"
           loading={busy}
@@ -1627,7 +1763,7 @@ function ScheduleRowActions({
         >
           <RowActionLabel text={t("schedules.row.confirmDelete", { name: label })} />
         </Button>
-        <Button size="sm" variant="ghost" onClick={() => setConfirming(false)}>
+        <Button size="sm" variant="ghost" onClick={reset}>
           {t("cancel")}
         </Button>
       </span>
@@ -1677,12 +1813,13 @@ function ScheduleRowActions({
       {/* loading={busy} for the same reason the toggle carries it: while one of
           this row's writes is in flight, none of the others may start. */}
       <Button
+        ref={triggerRef}
         size="sm"
         variant="ghost"
         loading={busy}
         {...guard}
         aria-label={t("schedules.row.delete", { name: label })}
-        onClick={() => setConfirming(true)}
+        onClick={ask}
       >
         <RowActionLabel text={t("schedules.row.delete", { name: label })} />
       </Button>
@@ -1716,19 +1853,20 @@ function SchedulesTab({ canRead, canWrite }: { canRead: boolean; canWrite: boole
   const [editing, setEditing] = useState<
     { mode: "none" } | { mode: "create" } | { mode: "edit"; schedule: Schedule }
   >({ mode: "none" });
-  const query = useQuery({ queryKey: ["schedules"], queryFn: () => listSchedules(), enabled: canRead });
+  const query = useQuery({ queryKey: ["schedules"], queryFn: () => listAllSchedules(), enabled: canRead });
   // Named, not numbered: a schedule row that shows only a definition UUID
   // tells an operator nothing. Same ["definitions"] cache entry the
   // Definitions tab fills.
-  const definitionsQuery = useQuery({ queryKey: ["definitions"], queryFn: () => listChecks(), enabled: canRead });
-  const schedules = query.data?.schedules ?? [];
-  const definitions = definitionsQuery.data?.definitions ?? [];
+  const definitionsQuery = useQuery({ queryKey: ["definitions"], queryFn: () => listAllChecks(), enabled: canRead });
+  const schedules = query.data?.items ?? [];
+  const definitions = definitionsQuery.data?.items ?? [];
+  const pager = usePager(schedules);
   /* The whole definition, not just its name: a schedule's row needs the
      definition's `enabled` flag too, because an enabled schedule under a
      DISABLED definition fires nothing at all (finding 25). */
   const defs = useMemo(() => {
     const map = new Map<string, CheckDefinition>();
-    for (const d of definitionsQuery.data?.definitions ?? []) map.set(d.id, d);
+    for (const d of definitionsQuery.data?.items ?? []) map.set(d.id, d);
     return map;
   }, [definitionsQuery.data]);
 
@@ -1766,13 +1904,17 @@ function SchedulesTab({ canRead, canWrite }: { canRead: boolean; canWrite: boole
               {queryErrorMessage(query.error, t("schedules.unavailable"))}
             </p>
           ) : null}
-          {query.isLoading ? <ListSkeleton /> : null}
-          {!query.isLoading && schedules.length === 0 && !query.isError ? (
+          {/* isPending, not isLoading. A read that FAILED while the tab was in the background parks
+              at pending/paused with error still null, so isLoading is false — and the empty branch
+              then rendered "nothing here yet" for a list nobody managed to read. */}
+          {query.isPending ? <ListSkeleton /> : null}
+          {query.isSuccess && schedules.length === 0 ? (
             <EmptyRow>{t("schedules.empty")}</EmptyRow>
           ) : null}
           {schedules.length > 0 ? (
+            <>
             <ul aria-label={t("schedules.listAria")} className="mt-4 divide-y divide-border">
-              {schedules.map((s) => {
+              {pager.visible.map((s) => {
                 const def = defs.get(s.definitionId);
                 const label = def?.name ?? s.definitionId;
                 const cadenceText = cadence(s, locale, t);
@@ -1850,6 +1992,8 @@ function SchedulesTab({ canRead, canWrite }: { canRead: boolean; canWrite: boole
                 );
               })}
             </ul>
+            <Pager pager={pager} subject={t("schedules.subject")} truncated={query.data?.truncated} className="px-0" />
+            </>
           ) : null}
         </section>
       </Card>

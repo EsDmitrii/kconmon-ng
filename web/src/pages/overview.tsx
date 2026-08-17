@@ -8,14 +8,14 @@ import { useAuth } from "@/hooks/use-auth";
 import { useDatabaseAvailable } from "@/hooks/use-capabilities";
 import { useMatrix } from "@/hooks/use-matrix";
 import { useTopology } from "@/hooks/use-topology";
-import { useT, type Translate } from "@/lib/i18n";
+import { localeTag, useLocale, useT, type Translate } from "@/lib/i18n";
 import { overviewDict, type OverviewKey } from "@/lib/i18n/dict/overview";
-import { getEvents, getIncidents, listAlerts } from "@/lib/api";
+import { getEvents, getIncidents, isServerSentence, listAlerts } from "@/lib/api";
 import { buildInvestigateURL, incidentPermalink, scopeFromAlertLabels } from "@/lib/investigation-sources";
 import { isMeasured } from "@/lib/matrix-cells";
-import { useTimeContext } from "@/lib/timemachine";
+import { withAtParam, useTimeContext } from "@/lib/timemachine";
 import type { Alert, LiveEvent, LiveEventSeverity, Matrix, MatrixCell, Topology } from "@/lib/types";
-import { cn, fmtEventTime } from "@/lib/utils";
+import { cn, fmtEventStamp } from "@/lib/utils";
 
 export interface OverviewSummary {
   totalNodes: number;
@@ -43,10 +43,23 @@ function compareWorst(a: MatrixCell, b: MatrixCell): number {
   return (b.rttP95 ?? 0) - (a.rttP95 ?? 0);
 }
 
+/**
+ * isScored is what "this pair can be RANKED" means, and it is deliberately
+ * stricter than `!== null`. An absent key is `undefined`, which is not null and
+ * used to be counted among the ranked — so a pair the console cannot place in a
+ * tier padded the scored count, closed the scored/measured gap line and left
+ * the page choosing "no failing or degraded pairs", which is a health claim
+ * about pairs nobody scored. NaN and Infinity are the same case: they compare
+ * false against every threshold, so they can only ever be counted as healthy.
+ */
+function isScored(cell: MatrixCell): boolean {
+  return typeof cell.failRatio === "number" && Number.isFinite(cell.failRatio);
+}
+
 // A tier still needs a failure ratio — a cell with only an RTT is measured but unranked.
 export function summarize(matrix: Matrix, topo?: Topology): OverviewSummary {
   const measured = matrix.cells.filter(isMeasured);
-  const scored = matrix.cells.filter((c) => c.failRatio !== null);
+  const scored = matrix.cells.filter(isScored);
   const failing = scored.filter((c) => (c.failRatio ?? 0) >= 0.1);
   const degraded = scored.filter((c) => (c.failRatio ?? 0) >= 0.01 && (c.failRatio ?? 0) < 0.1);
   return {
@@ -103,8 +116,18 @@ export function foldBounds(topo: Topology | undefined, t: T): string | undefined
   return lines.length > 0 ? lines.join(" ") : undefined;
 }
 
-function fmtRtt(ns?: number): string {
-  if (ns === undefined) return "—";
+/**
+ * fmtRtt renders nanoseconds as milliseconds, or an em-dash for anything that
+ * is not a real measurement.
+ *
+ * `=== undefined` was too narrow by exactly the shapes the wire actually sends:
+ * Go marshals a nil *float64 as null, and null/1e6 is 0 — so a pair with NO
+ * latency sample reported 0.0ms, the fastest link in the fleet. JSON.parse
+ * turns an out-of-range literal into Infinity, which toFixed renders as the
+ * word. Neither is a number an operator may read as a latency.
+ */
+function fmtRtt(ns?: number | null): string {
+  if (typeof ns !== "number" || !Number.isFinite(ns)) return "—";
   return `${(ns / 1e6).toFixed(1)}ms`;
 }
 
@@ -225,6 +248,22 @@ function OverviewSkeleton() {
 const OPEN_INCIDENTS_LIMIT = 5;
 const RECENT_EVENTS_LIMIT = 10;
 
+/*
+ * PANEL_POLL_MS is the cadence the three lower Overview panels (firing alerts, open incidents,
+ * recent events) refetch at. Same 15s as MATRIX_POLL_MS / CAPABILITIES_POLL_MS, deliberately: the
+ * page header tells the operator the view recomputes every 15 seconds.
+ *
+ * They had no refetchInterval at all, so they were fetched once on mount and never again. Overview
+ * is the page an operator leaves open, and beside these three the tiles and the worst-pairs table
+ * update from the WebSocket matrix push while the incident "age" column keeps counting — so the
+ * panels looked live while a new incident, a rule that started firing, or an event that landed after
+ * mount never appeared, and a resolved alert never went away.
+ *
+ * Engaged (Time Machine) they must NOT poll: `enabled` already goes false there, because at a pinned
+ * instant "what is open now" is the wrong question — the same rule useMatrix follows.
+ */
+const PANEL_POLL_MS = 15_000;
+
 /* The one-line database note is dict/overview.ts's "db.note", worded once so
    both panels say the same thing the Investigate page and the object cards
    already say. */
@@ -283,6 +322,7 @@ function OpenIncidents() {
           : { status: "open", limit: OPEN_INCIDENTS_LIMIT },
       ),
     enabled,
+    refetchInterval: enabled ? PANEL_POLL_MS : false,
   });
   const incidents = query.data?.incidents ?? [];
   /* Engaged, "how long has this been open" is measured from the instant on
@@ -316,7 +356,11 @@ function OpenIncidents() {
                 <a href={incidentPermalink(i.id)} className="min-w-0 flex-1 truncate text-sm text-primary hover:underline">
                   {i.title}
                 </a>
-                <Badge variant="neutral">{i.scope === "" ? t("incidents.scope.global") : i.scope}</Badge>
+                {/* TRUNCATED and shrinkable: a scope is a node or pair name off the wire, and an
+                    unbounded nowrap badge pushed the title and the age clean off the card. */}
+                <Badge variant="neutral" className="max-w-[12rem] shrink truncate" title={i.scope}>
+                  {i.scope === "" ? t("incidents.scope.global") : i.scope}
+                </Badge>
                 <span className="nums w-10 shrink-0 text-right text-xs text-muted-foreground">
                   {fmtAge(i.fromAt, now, t)}
                 </span>
@@ -356,9 +400,16 @@ const SEVERITY_KEYS: Record<LiveEventSeverity, OverviewKey> = {
  */
 function OverviewEventRow({ event }: { event: LiveEvent }) {
   const t = useT(overviewDict);
+  const { locale } = useLocale();
   return (
     <li data-testid="overview-event" className="flex items-center gap-3 py-2">
-      <span className="nums w-16 shrink-0 text-xs text-muted-foreground">{fmtEventTime(event.timestamp)}</span>
+      {/* The DAY, not a bare clock. This card is fed with `to = t` when the Time Machine is engaged
+          and has no lower bound at all, so its ten newest rows can be days old — and under a heading
+          that says "Recent events", beside a banner naming another date, a bare "14:03" reads as
+          this afternoon. The two sibling feeds (/live, recent-changes) already print it this way. */}
+      <span className="nums w-24 shrink-0 text-xs text-muted-foreground">
+        {fmtEventStamp(event.timestamp, localeTag(locale))}
+      </span>
       <Badge variant={isKnownSeverity(event.severity) ? SEVERITY_VARIANT[event.severity] : "unknown"} dot>
         {isKnownSeverity(event.severity) ? t(SEVERITY_KEYS[event.severity]) : event.severity}
       </Badge>
@@ -389,6 +440,7 @@ function RecentEvents() {
     queryKey: at ? ["overview", "events", "at", at.toISOString()] : ["overview", "events"],
     queryFn: () => getEvents({ limit: RECENT_EVENTS_LIMIT, ...(at ? { to: at } : {}) }),
     enabled,
+    refetchInterval: enabled ? PANEL_POLL_MS : false,
   });
   const events = query.data?.events ?? [];
 
@@ -397,7 +449,7 @@ function RecentEvents() {
       <section aria-label={t("events.title")}>
         <div className="flex flex-wrap items-baseline justify-between gap-2">
           <h2 className="text-sm font-semibold">{t("events.title")}</h2>
-          <a href="/live" className="text-xs text-primary hover:underline">
+          <a href={withAtParam("/live")} className="text-xs text-primary hover:underline">
             {t("events.open")}
           </a>
         </div>
@@ -427,8 +479,8 @@ function RecentEvents() {
 }
 
 /*
- * It is the operator's morning view, which is why it asks for the WHOLE fleet's firing state rather
- * than only the rules this console manages.
+ * It is the operator's morning view, and it asks for the rules this console MANAGES and no others:
+ * kconmon-ng is not an aggregator of a cluster's whole firing state. See lib/api.ts's listAlerts.
  */
 
 const ALERT_SEVERITY_RANK: Record<string, number> = { critical: 0, warning: 1, info: 2 };
@@ -460,6 +512,17 @@ export function sortFiringAlerts(alerts: Alert[]): Alert[] {
   });
 }
 
+/**
+ * alertLabels is the one place a row's label map is read, and it tolerates the
+ * map not being there. Go marshals a nil map as null: Object.keys(null) throws,
+ * and with no error boundary over this route ONE such row took the whole
+ * Overview to a blank page.
+ */
+function alertLabels(alert: Alert): Record<string, string> {
+  const labels: unknown = alert.labels;
+  return labels !== null && typeof labels === "object" ? (labels as Record<string, string>) : {};
+}
+
 function alertLabelLine(labels: Record<string, string>): string {
   return Object.keys(labels)
     .sort()
@@ -467,41 +530,41 @@ function alertLabelLine(labels: Record<string, string>): string {
     .join(" ");
 }
 
+/**
+ * alertSeverity is the badge's text. "" is the documented empty case and an
+ * ABSENT key is the same case — rendering `undefined` there produced a coloured
+ * chip with nothing in it, which asserts a severity the row does not carry.
+ */
+function alertSeverity(alert: Alert): string {
+  return typeof alert.severity === "string" ? alert.severity.trim() : "";
+}
+
 /** One firing row. The label set travels in a `title` attribute on a truncated
  *  line — the worst-pairs table's own idiom for detail that will not fit. */
 function FiringAlertRow({ alert, now }: { alert: Alert; now: Date }) {
   const t = useT(overviewDict);
-  const managed = alert.ruleId !== undefined && alert.ruleId !== "";
-  const scope = scopeFromAlertLabels(alert.labels);
-  const labels = alertLabelLine(alert.labels);
+  const labelMap = alertLabels(alert);
+  const scope = scopeFromAlertLabels(labelMap);
+  const labels = alertLabelLine(labelMap);
+  const severity = alertSeverity(alert);
 
   return (
     <li data-testid="firing-alert" className="flex flex-wrap items-baseline gap-x-3 gap-y-1 py-2">
-      {managed ? (
-        // ?rule= rather than a bare /alerting: the list can be long and the row an operator is
-        // chasing is one of many.
-        <a
-          href={`/alerting?rule=${encodeURIComponent(alert.ruleId as string)}`}
-          data-testid="firing-alert-name"
-          className="min-w-0 flex-1 truncate text-sm text-primary hover:underline"
-        >
-          {alert.name}
-        </a>
-      ) : (
-        <span data-testid="firing-alert-name" className="min-w-0 flex-1 truncate text-sm" title={alert.name}>
-          {alert.name}
-        </span>
-      )}
-      <Badge variant={ALERT_SEVERITY_TONE[alert.severity] ?? "unknown"} dot>
-        {alert.severity === "" ? t("alerts.noSeverity") : alert.severity}
+      {/* Every row here is a rule this console manages — lib/api.ts asks for no
+          others — so every name links to its rule. The "unmanaged" badge that
+          used to sit beside a foreign row went with the rows it explained. */}
+      {/* ?rule= rather than a bare /alerting: the list can be long and the row an
+          operator is chasing is one of many. */}
+      <a
+        href={withAtParam(`/alerting?rule=${encodeURIComponent(alert.ruleId ?? "")}`)}
+        data-testid="firing-alert-name"
+        className="min-w-0 flex-1 truncate text-sm text-primary hover:underline"
+      >
+        {alert.name}
+      </a>
+      <Badge variant={ALERT_SEVERITY_TONE[severity] ?? "unknown"} dot>
+        {severity === "" ? t("alerts.noSeverity") : severity}
       </Badge>
-      {managed ? null : (
-        // Not a warning, a FACT: this console does not own the rule, so it
-        // offers no edit path to it and says why the link is missing.
-        <Badge variant="neutral" title={t("alerts.unmanaged.title")}>
-          {t("alerts.unmanaged")}
-        </Badge>
-      )}
       <span className="nums w-10 shrink-0 text-right text-xs text-muted-foreground">
         {alert.activeAt === undefined ? "—" : fmtAge(alert.activeAt, now, t)}
       </span>
@@ -534,7 +597,12 @@ function FiringAlerts() {
    */
   const enabled = me !== undefined && canRead && !engaged;
 
-  const query = useQuery({ queryKey: ["overview", "alerts"], queryFn: listAlerts, enabled });
+  const query = useQuery({
+    queryKey: ["overview", "alerts"],
+    queryFn: listAlerts,
+    enabled,
+    refetchInterval: enabled ? PANEL_POLL_MS : false,
+  });
   const now = new Date();
   /*
    * The route serves both states (a rule's `for` window is exactly the gap between them) and a card
@@ -554,7 +622,7 @@ function FiringAlerts() {
         <div className="flex flex-wrap items-baseline justify-between gap-2">
           <h2 className="text-sm font-semibold">{t("alerts.title")}</h2>
           {canRead ? (
-            <a href="/alerting" className="text-xs text-primary hover:underline">
+            <a href={withAtParam("/alerting")} className="text-xs text-primary hover:underline">
               {t("alerts.open")}
             </a>
           ) : null}
@@ -565,9 +633,13 @@ function FiringAlerts() {
         ) : me !== undefined && !canRead ? (
           <PanelNote>{t("alerts.denied")}</PanelNote>
         ) : query.isError ? (
-          /* The server's own sentence wins; the key is only the fallback for a
-             rejection that arrived without one. */
-          <PanelNote>{query.error instanceof Error ? query.error.message : t("alerts.error")}</PanelNote>
+          /* The server's own sentence wins, and ONLY the server's: ApiError is
+             what carries problem+json through verbatim. Any other rejection —
+             a cut connection, a proxy's HTML page under a JSON content type —
+             would otherwise make the fetch layer's or the JSON parser's own
+             wording the operator's error line, naming a mechanism nobody can
+             act on. */
+          <PanelNote>{isServerSentence(query.error) ? query.error.message : t("alerts.error")}</PanelNote>
         ) : !enabled || query.isLoading ? (
           <PanelSkeleton rows={3} />
         ) : query.data?.promConfigured === false ? (
@@ -578,7 +650,7 @@ function FiringAlerts() {
           <>
             <ul className="mt-3 flex flex-col divide-y divide-border">
               {shown.map((a) => (
-                <FiringAlertRow key={`${a.name}{${alertLabelLine(a.labels)}}`} alert={a} now={now} />
+                <FiringAlertRow key={`${a.name}{${alertLabelLine(alertLabels(a))}}`} alert={a} now={now} />
               ))}
             </ul>
             {hidden > 0 ? (
@@ -586,6 +658,10 @@ function FiringAlerts() {
                 {t(hidden === 1 ? "alerts.hidden.one" : "alerts.hidden.many", { count: hidden })}
               </PanelNote>
             ) : null}
+            {/* WHOSE alerts these are. Without it a card headed "Firing alerts"
+                over a filtered list reads as the cluster's whole firing state,
+                which is the one thing it is not. */}
+            <PanelNote>{t("alerts.managedOnly")}</PanelNote>
           </>
         )}
       </section>
@@ -626,7 +702,10 @@ function WorstPairsTable({ pairs }: { pairs: MatrixCell[] }) {
             const failing = fail >= 0.1;
             return (
               <tr
-                key={`${c.source} ${c.destination}`}
+                /* The rank leads the key: two cells naming the same pair is
+                   nonsense the wire can still carry, and two rows under one
+                   React key render as one. */
+                key={`${i} ${c.source} ${c.destination}`}
                 className="transition-colors duration-(--dur) ease-(--ease) hover:bg-accent/40"
               >
                 <td className="nums py-4 pr-4 text-xs text-muted-foreground">{i + 1}</td>
@@ -666,12 +745,26 @@ function WorstPairsTable({ pairs }: { pairs: MatrixCell[] }) {
   );
 }
 
+/**
+ * problemDetail is the second line of a failed-dependency card: the SERVER's
+ * own sentence when it sent one, and this console's own when it did not.
+ *
+ * `error.message` alone was right only for problem+json. A cut connection or a
+ * proxy answering an HTML page under a JSON content type produced a fetch or
+ * parser message — "Failed to fetch", "Unexpected end of JSON input" — which
+ * names a mechanism no operator can act on and is in one language whatever the
+ * chrome is set to.
+ */
+function problemDetail(error: Error, t: T): string {
+  return isServerSentence(error) ? error.message : t("problem.unreadable");
+}
+
 /** PageProblem is one failed dependency, said in its own sentence. */
-function PageProblem({ what, error }: { what: string; error: Error }) {
+function PageProblem({ what, detail }: { what: string; detail: string }) {
   return (
     <div data-testid="overview-problem">
       <p className="text-sm font-medium">{what}</p>
-      <p className="mt-1 text-xs leading-relaxed text-muted-foreground">{error.message}</p>
+      <p className="mt-1 text-xs leading-relaxed text-muted-foreground">{detail}</p>
     </div>
   );
 }
@@ -705,12 +798,12 @@ export function OverviewPage() {
   const pairsNote = noPairs ? t("tiles.pairs.noData") : undefined;
 
   return (
-    <PageShell title={t("title")} description={t(isLive ? "description" : "description.engaged")}>
+    <PageShell timeMachine title={t("title")} description={t(isLive ? "description" : "description.engaged")}>
       <div className="flex flex-col gap-6">
         {matrix.error || topo.error ? (
           <Card role="alert" className="flex flex-col gap-3 border-l-4 border-l-health-bad bg-health-bad-soft/40 p-5">
-            {matrix.error ? <PageProblem what={t("problem.matrix")} error={matrix.error} /> : null}
-            {topo.error ? <PageProblem what={t("problem.topology")} error={topo.error} /> : null}
+            {matrix.error ? <PageProblem what={t("problem.matrix")} detail={problemDetail(matrix.error, t)} /> : null}
+            {topo.error ? <PageProblem what={t("problem.topology")} detail={problemDetail(topo.error, t)} /> : null}
             {/* Only true while Live: engaged, both queries have their poll off
                 on purpose (a past instant's answer cannot change), so promising
                 a retry that is never going to happen would be a second lie

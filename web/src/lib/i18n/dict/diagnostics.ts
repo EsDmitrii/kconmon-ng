@@ -27,6 +27,8 @@ import { defineDict, type Dictionary } from "@/lib/i18n";
 
 const en = {
   "title": "Diagnostics",
+  /* Joins the two address examples in the ad-hoc destination placeholder. */
+  "adhoc.or": "or",
   "description": "Run on-demand checks against the mesh, and browse run history.",
   "description.at":
     "Run on-demand checks against the mesh. History is cut to {at} — runs started later are not listed.",
@@ -49,6 +51,27 @@ const en = {
   "duration.caption.interval":
     "Each pair is probed every {interval} for {label} — about {samples} samples per pair. " +
     "The run stays running, and cancellable, until it finishes.",
+  /* mtr plans its own cadence: a trace walks up to 30 hops in sequence, so the base 5s cadence
+     cannot hold one and the server stretches the interval instead of refusing the run. */
+  "duration.caption.interval.mtr":
+    "An MTR trace takes up to {budget} per pair, so a {label} run traces every {interval} — " +
+    "about {samples} traces per pair. The run stays running, and cancellable, until it finishes.",
+
+  /* ── the cadence control ───────────────────────────────────────────────────
+     "Auto" posts nothing and is exactly the behaviour that existed before this
+     control did; the presets above it are bounded by the duration already
+     picked, because the server refuses a cadence longer than the run. */
+  "form.sampleInterval": "Sample interval",
+  "form.sampleInterval.aria": "Sample interval",
+  "sampleInterval.auto": "Auto",
+  /* The two sentences a picked cadence may earn. Neither replaces the caption
+     above — they LEAD it, because an operator who has just clicked 1s needs to
+     learn it will not be 1s before being told what it will be. {requested} is
+     what they picked; {interval} is what the run will keep. */
+  "duration.caption.adjusted.cap":
+    "Every {requested} would be more than 500 samples for one pair, which is the ceiling, so this run cannot go faster than every {interval}.",
+  "duration.caption.adjusted.round":
+    "Every {requested} is faster than one round over this many pairs can finish, so this run cannot go faster than every {interval}.",
 
   "form.plane": "Plane",
   "form.destination": "Destination",
@@ -108,6 +131,14 @@ const en = {
      one is something the operator can act on. */
   "pairs.noSources": " — no sources to check from, so there is nothing to run",
   "pairs.noDestinations": " — no destinations picked, so there is nothing to check against",
+  /* The one-node cluster, and the reason this key exists: with both pickers on
+     All and the one node there is sitting in both of them, "no destinations
+     picked" was the single thing the operator could SEE was untrue. A run's
+     pairs are the cross product minus the self-pairs, and on a cluster of one
+     that leaves nothing — a fact about the fleet, not about the form. */
+  "pairs.selfOnly":
+    " — the same nodes are on both sides and a node never probes itself, so no pair is left; " +
+    "add a node, or send the run at a target or an ad-hoc address",
   "pairs.noTarget": " — no target picked yet, so there is no destination to check against",
   "pairs.noAddress": " — no address typed yet, so there is no destination to check against",
 
@@ -153,6 +184,8 @@ const en = {
   "history.emptyAt.title": "No runs at or before the viewed instant",
   "history.emptyAt.body": "Every run on the loaded page started later than this. Return to Live, or load older pages.",
   "history.run.okOfTotal": "{ok}/{total} ok",
+  /* ui/pager.tsx's noun for this list — "Showing 50 of 214 runs". */
+  "history.subject": "runs",
   "history.loadOlder": "Load older",
   "history.loadingOlder": "Loading older…",
 
@@ -164,6 +197,7 @@ const en = {
 export type DiagnosticsKey = keyof typeof en;
 
 export const diagnosticsDict: Dictionary<DiagnosticsKey> = defineDict(en, {
+  "adhoc.or": "или",
   "title": "Диагностика",
   "description": "Запуск проверок по требованию и история запусков.",
   "description.at":
@@ -178,9 +212,24 @@ export const diagnosticsDict: Dictionary<DiagnosticsKey> = defineDict(en, {
   "form.duration.aria": "Длительность",
   "duration.instant": "Мгновенно",
   "duration.caption.instant": "По одному зонду на пару, прямо сейчас.",
+  /* «раз в {interval}» получает слово целиком, а не сокращение: «раз в 5 с» глаз читает как
+     предлог «с» и спотыкается ровно там, где надо назвать период. Формы даёт
+     formatCadenceProse (lib/run-samples.ts). */
   "duration.caption.interval":
     "Каждая пара зондируется раз в {interval} на протяжении {label}, это примерно {samples} проб на пару. " +
     "Запуск идёт и остаётся отменяемым, пока не закончится.",
+  "duration.caption.interval.mtr":
+    "Трассировка MTR занимает до {budget} на пару, поэтому за {label} каждая пара трассируется " +
+    "раз в {interval}, это примерно {samples} трассировок на пару. " +
+    "Запуск идёт и остаётся отменяемым, пока не закончится.",
+
+  "form.sampleInterval": "Период опроса",
+  "form.sampleInterval.aria": "Период опроса",
+  "sampleInterval.auto": "Авто",
+  "duration.caption.adjusted.cap":
+    "Раз в {requested} — это больше 500 проб на пару, а это потолок, так что чаще чем раз в {interval} этот запуск не пойдёт.",
+  "duration.caption.adjusted.round":
+    "Раз в {requested} — быстрее, чем успевает пройти один круг по такому числу пар, так что чаще чем раз в {interval} этот запуск не пойдёт.",
 
   "form.plane": "Плоскость",
   "form.destination": "Назначение",
@@ -223,6 +272,9 @@ export const diagnosticsDict: Dictionary<DiagnosticsKey> = defineDict(en, {
     "{sources}×{destinations}), сузьте выбор",
   "pairs.noSources": ", и проверять не с чего: источников нет",
   "pairs.noDestinations": ", и проверять нечего: назначения не выбраны",
+  "pairs.selfOnly":
+    ", и пар не остаётся: с обеих сторон одни и те же узлы, а сам себя узел не проверяет. " +
+    "Добавьте узел или отправьте запуск в цель либо на произвольный адрес",
   "pairs.noTarget": ", и проверять некуда: цель ещё не выбрана",
   "pairs.noAddress": ", и проверять некуда: адрес ещё не введён",
 
@@ -256,6 +308,7 @@ export const diagnosticsDict: Dictionary<DiagnosticsKey> = defineDict(en, {
   "history.emptyAt.body":
     "Все запуски на загруженной странице начались позже. Вернитесь в реальное время или подгрузите старые страницы.",
   "history.run.okOfTotal": "{ok}/{total} успешно",
+  "history.subject": "Запуски",
   "history.loadOlder": "Загрузить старые",
   "history.loadingOlder": "Загружаем старые…",
 

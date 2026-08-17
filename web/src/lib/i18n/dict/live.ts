@@ -39,10 +39,15 @@ const en = {
   "filters.type": "Type",
   "filters.type.all": "All types",
   "filters.scope.label": "Scope contains",
-  /* node-a→node-b is an EXAMPLE scope, not a word: it stays as typed. Both
-     halves are measured against the box (w-64 minus pl-8/pr-2 = 216px at 14px):
-     the longer wordings clipped mid-example, en at 221px and ru at 314px. */
-  "filters.scope.placeholder": "Scope — node-a→node-b",
+  /* node-a->node-b is an EXAMPLE scope, not a word: it stays as typed in both
+     languages. The hyphen arrow rather than the pretty one on PURPOSE — a
+     placeholder shows what a keyboard can produce, and U+2192 cannot be typed on
+     any of them; the box normalises "->", "-->", "=>" and ">" into the arrow the
+     rows are drawn with (lib/utils.ts's normalizePairInput), so the example is
+     the shortest thing that actually works. Both halves are measured against the
+     box (w-64 minus pl-8/pr-2 = 216px at 14px): the longer wordings clipped
+     mid-example, en at 221px and ru at 314px. */
+  "filters.scope.placeholder": "Scope — node-a->node-b",
   "filters.clear": "Clear filters",
 
   "pause": "Pause",
@@ -143,7 +148,7 @@ export const liveDict: Dictionary<LiveKey> = defineDict(en, {
   "filters.type": "Тип",
   "filters.type.all": "Все типы",
   "filters.scope.label": "Область содержит",
-  "filters.scope.placeholder": "Область — node-a→node-b",
+  "filters.scope.placeholder": "Область — node-a->node-b",
   "filters.clear": "Сбросить фильтры",
 
   "pause": "Пауза",

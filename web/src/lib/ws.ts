@@ -9,6 +9,8 @@ export interface WsEnvelope<T = unknown> {
   topic: string;
   type: "snapshot" | "delta" | "event" | "error" | "closed";
   seq: number;
+  /** Which hub numbered this seq; see ClientMessage.epoch. Absent on frames from an older server. */
+  epoch?: string;
   data: T;
 }
 
@@ -38,6 +40,12 @@ interface ClientMessage {
   action: "subscribe" | "unsubscribe";
   topic: string;
   lastSeq?: number;
+  /* Whose numbering `lastSeq` belongs to. Sequence numbers are per-hub and start at 1, so a cursor
+     from one console replica means nothing on another: after a rollout a tab used to ask its new
+     replica to replay "everything after 412", that replica's counter was at 7, and it replayed
+     NOTHING — the whole gap lost in silence, while the feed looked alive because fresh broadcasts
+     arrive regardless of seq. The server ignores a cursor whose epoch is not its own. */
+  epoch?: string;
 }
 
 /**
@@ -66,6 +74,8 @@ export class WsClient {
    * make the hub replay what this tab already has.
    */
   private readonly resumeSeq = new Map<string, number>();
+  /** The hub epoch every cursor in resumeSeq belongs to; see ClientMessage.epoch. */
+  private epoch = "";
   /** Highest seq DELIVERED per topic on the current connection, used only to drop stale snapshot frames. */
   private deliveredSeq = new Map<string, number>();
   /** Last delivered envelope per SNAPSHOT topic. */
@@ -246,6 +256,13 @@ export class WsClient {
     // it moves neither cursor.
     if (env.type !== "error" && typeof env.seq === "number") {
       const snapshot = isSnapshotTopic(env.topic);
+      /* A new epoch is a NEW numbering: every cursor held for the old one is meaningless, and
+         keeping it would make the next resume ask for frames that will never come. */
+      if (env.epoch && env.epoch !== this.epoch) {
+        this.epoch = env.epoch;
+        this.resumeSeq.clear();
+        this.deliveredSeq.clear();
+      }
       if (snapshot && env.seq <= (this.deliveredSeq.get(env.topic) ?? 0)) return;
       this.deliveredSeq.set(env.topic, Math.max(this.deliveredSeq.get(env.topic) ?? 0, env.seq));
       this.resumeSeq.set(env.topic, Math.max(this.resumeSeq.get(env.topic) ?? 0, env.seq));
@@ -258,7 +275,13 @@ export class WsClient {
   /** sendSubscribe frames a subscribe, with a resume cursor for the live topic only. */
   private sendSubscribe(topic: string): void {
     const lastSeq = isSnapshotTopic(topic) ? 0 : this.lastSeqFor(topic);
-    this.send(lastSeq > 0 ? { action: "subscribe", topic, lastSeq } : { action: "subscribe", topic });
+    // The cursor travels with the epoch it was issued under; see ClientMessage.epoch. A server that
+    // does not stamp one leaves this.epoch empty, and the frame is exactly what it always was.
+    if (lastSeq <= 0) {
+      this.send({ action: "subscribe", topic });
+      return;
+    }
+    this.send(this.epoch ? { action: "subscribe", topic, lastSeq, epoch: this.epoch } : { action: "subscribe", topic, lastSeq });
   }
 
   private send(msg: ClientMessage): void {

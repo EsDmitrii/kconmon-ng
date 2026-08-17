@@ -1,4 +1,4 @@
-import { defineDict, type Dictionary } from "@/lib/i18n";
+import { DEFAULT_LOCALE, type Locale, defineDict, type Dictionary } from "@/lib/i18n";
 
 /**
  * alerting — pages/alerting.tsx: the console-managed Prometheus rules, the
@@ -50,6 +50,9 @@ const en = {
   "duration.noUnit": "\"{text}\" has no unit: write {digits}s, {digits}m or {digits}h",
   "duration.badUnit": "\"{unit}\" is not a Prometheus duration unit (ms, s, m, h, d, w, y)",
   "duration.order": "\"{text}\" must run from the largest unit to the smallest, like 1h30m",
+  /* 292 years is not a round number and is not ours: it is where an int64 of
+     nanoseconds ends, which is what Prometheus stores a `for` in. */
+  "duration.tooLong": "\"{text}\" is longer than a Prometheus `for` can hold — the limit is about 292y",
 
   /* ── relative time ─────────────────────────────────────────────────────── */
   "age.justNow": "just now",
@@ -61,6 +64,8 @@ const en = {
   /* ── rule list ─────────────────────────────────────────────────────────── */
   "rules.heading": "Alert rules",
   "rules.listAria": "Alert rules",
+  /* ui/pager.tsx's noun for this list. */
+  "rules.subject": "rules",
   "rules.blurb":
     "Rules this console manages. They live in the database and are applied to the cluster as one PrometheusRule " +
     "object; the status on each row is the reconciler's view of whether the cluster agrees, as of the instant next " +
@@ -146,6 +151,10 @@ const en = {
   "pairs.add.annotation": "Add annotation",
   "pairs.remove.label": "Remove label {index}",
   "pairs.remove.annotation": "Remove annotation {index}",
+  /* Two rows with one key are not a typo the form can resolve on the operator's
+     behalf: the map they become keeps ONE of the two values, and which one is
+     an accident of order. So it is refused, next to the boxes, by name. */
+  "pairs.duplicate": "\"{name}\" is set twice — remove one of the two rows, or the other value is lost",
 
   /* ── preview ───────────────────────────────────────────────────────────── */
   "preview.region": "Expression preview",
@@ -200,6 +209,7 @@ const en = {
   /* ── foreign rules ─────────────────────────────────────────────────────── */
   "foreign.heading": "Foreign rules",
   "foreign.listAria": "Foreign PrometheusRule objects",
+  "foreign.subject": "objects",
   "foreign.blurb":
     "PrometheusRule objects in this console's namespace that it does not own. Read-only: this console never writes " +
     "to somebody else's object. Importing COPIES a rule's alerting entries into console-managed rows.",
@@ -244,6 +254,7 @@ export const alertingDict: Dictionary<AlertingKey> = defineDict(en, {
   "duration.noUnit": "у «{text}» нет единицы: напишите {digits}s, {digits}m или {digits}h",
   "duration.badUnit": "«{unit}» не входит в единицы длительности Prometheus (ms, s, m, h, d, w, y)",
   "duration.order": "«{text}» должно идти от большей единицы к меньшей, например 1h30m",
+  "duration.tooLong": "«{text}» длиннее, чем `for` в Prometheus может хранить: предел — примерно 292y",
 
   "age.justNow": "только что",
   "age.seconds": "{count} с назад",
@@ -253,6 +264,7 @@ export const alertingDict: Dictionary<AlertingKey> = defineDict(en, {
 
   "rules.heading": "Правила оповещений",
   "rules.listAria": "Правила оповещений",
+  "rules.subject": "Правила",
   "rules.blurb":
     "Правила, которыми управляет консоль. Лежат они в базе, а к кластеру применяются одним объектом " +
     "PrometheusRule. Статус в строке показывает, как реконсилер видит согласие кластера, по состоянию на " +
@@ -326,6 +338,7 @@ export const alertingDict: Dictionary<AlertingKey> = defineDict(en, {
   "pairs.add.annotation": "Добавить примечание",
   "pairs.remove.label": "Удалить метку {index}",
   "pairs.remove.annotation": "Удалить примечание {index}",
+  "pairs.duplicate": "«{name}» задано дважды — уберите одну из строк, иначе второе значение потеряется",
 
   "preview.region": "Предпросмотр выражения",
   "preview.heading": "Предпросмотр",
@@ -377,6 +390,7 @@ export const alertingDict: Dictionary<AlertingKey> = defineDict(en, {
 
   "foreign.heading": "Чужие правила",
   "foreign.listAria": "Чужие объекты PrometheusRule",
+  "foreign.subject": "Объекты",
   "foreign.blurb":
     "Объекты PrometheusRule в пространстве имён консоли, которыми она не владеет. Только чтение: в чужой объект " +
     "консоль не пишет никогда. Импорт КОПИРУЕТ записи оповещений правила в строки под управлением консоли.",
@@ -404,7 +418,18 @@ export const alertingDict: Dictionary<AlertingKey> = defineDict(en, {
 /** pluralKey picks the Russian form for `count`. Duplicated per dictionary on
  *  purpose — lib/i18n/README.md's one-file-per-surface rule beats sharing six
  *  lines of arithmetic through a file every surface would then touch. */
-export function pluralKey(count: number, one: AlertingKey, few: AlertingKey, many: AlertingKey): AlertingKey {
+export function pluralKey(
+  count: number,
+  one: AlertingKey,
+  few: AlertingKey,
+  many: AlertingKey,
+  locale: Locale = DEFAULT_LOCALE,
+): AlertingKey {
+  /* The RUSSIAN rule was applied to both languages, so an English console
+     printed "21 rule" and "101 pair": Russian sends every number ending in a
+     lone 1 to the .one form, English sends only 1 itself. dict/settings.ts had
+     the locale-aware version all along. */
+  if (locale !== "ru") return Math.abs(count) === 1 ? one : many;
   const hundred = Math.abs(count) % 100;
   const ten = Math.abs(count) % 10;
   if (hundred >= 11 && hundred <= 14) return many;

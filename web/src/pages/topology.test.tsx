@@ -2,7 +2,8 @@ import { QueryClient, QueryClientProvider, onlineManager } from "@tanstack/react
 import { cleanup, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ThemeProvider } from "@/components/theme-provider";
-import { LOCALE_STORAGE_KEY, LocaleProvider } from "@/lib/i18n";
+import { LOCALE_STORAGE_KEY, LocaleProvider, translate, type Translate } from "@/lib/i18n";
+import { topologyDict, type TopologyKey } from "@/lib/i18n/dict/topology";
 import { TopologyPage, buildFlow, mapNodes, nodeNavigationPath, unfoldableEmpty } from "./topology";
 import type { Matrix, Topology } from "@/lib/types";
 
@@ -42,7 +43,7 @@ describe("buildFlow", () => {
     expect(edges).toHaveLength(1);
     expect(edges[0].id).toBe("n1->n2");
     expect(edges[0].label).toBeUndefined(); // percentage appears on hover only
-    expect(edges[0].data).toMatchObject({ failLabel: "20%" });
+    expect(edges[0].data).toMatchObject({ failLabel: "20.0%" });
     expect(problemTotal).toBe(1);
   });
 
@@ -66,10 +67,10 @@ describe("buildFlow", () => {
     expect(problemTotal).toBe(15);
     expect(edges).toHaveLength(10);
     // Worst first, and the strongest failure (15%) survived the cap.
-    expect(edges[0].data).toMatchObject({ failLabel: "15%" });
+    expect(edges[0].data).toMatchObject({ failLabel: "15.0%" });
     const kept = edges.map((e) => (e.data as { failLabel: string }).failLabel);
-    expect(kept).not.toContain("5%"); // the 5 weakest (1–5%) were dropped
-    expect(kept).toContain("6%");
+    expect(kept).not.toContain("5.0%"); // the 5 weakest (1–5%) were dropped
+    expect(kept).toContain("6.0%");
   });
 });
 
@@ -120,7 +121,7 @@ describe("buildFlow — a pair measured without a failure ratio", () => {
 
   it("names the vector the percentage came from", () => {
     const { edges } = buildFlow(topo, lossy);
-    expect(edges[0].data).toMatchObject({ failLabel: "5% loss" });
+    expect(edges[0].data).toMatchObject({ failLabel: "5.0% loss" });
   });
 
   it("colours the source node from the loss it cannot see in the fail series", () => {
@@ -180,6 +181,48 @@ const agentsOnly: Topology = {
   ],
   timestamp: "t",
 };
+
+describe("mapNodes ordering", () => {
+  /* The controller answers in REGISTRATION order — whichever agent came up
+     first — so the map's lanes reshuffled after every rollout and no node was
+     ever where the operator last saw it. */
+  const node = (name: string) => ({ name, zone: "z1", ready: true });
+
+  /* m02 and m2 are the same NUMBER, so the collator calls them equal and the
+     tie-break decides. It has to be the names themselves, not the order the
+     controller happened to answer in — that is the very thing this sort exists to
+     stop (lib/natural-name). */
+  it("reads names the way an operator does, m10 last, and breaks a 02/2 tie the same way every time", () => {
+    const registrationOrders = [
+      [node("kconmon-prod-m10"), node("kconmon-prod-m2"), node("kconmon-prod-m02")],
+      [node("kconmon-prod-m02"), node("kconmon-prod-m10"), node("kconmon-prod-m2")],
+    ];
+
+    // A plain codepoint sort puts m10 above m2, because "1" sorts before "2".
+    for (const nodes of registrationOrders) {
+      const mapped = mapNodes({ nodes, agents: [], timestamp: "t" } as never);
+      expect(mapped.nodes.map((n) => n.name)).toEqual([
+        "kconmon-prod-m02",
+        "kconmon-prod-m2",
+        "kconmon-prod-m10",
+      ]);
+    }
+  });
+
+  it("orders the agents-built map too, which is the same map by another route", () => {
+    const { nodes, source } = mapNodes({
+      nodes: [],
+      agents: [
+        { agentId: "a1", nodeName: "worker-10", zone: "z1", ready: true },
+        { agentId: "a2", nodeName: "worker-2", zone: "z1", ready: true },
+      ],
+      timestamp: "t",
+    } as never);
+
+    expect(source).toBe("agents");
+    expect(nodes.map((n) => n.name)).toEqual(["worker-2", "worker-10"]);
+  });
+});
 
 describe("mapNodes", () => {
   it("prefers the Kubernetes node set whenever the controller has one", () => {
@@ -467,5 +510,294 @@ describe("TopologyPage — ru", () => {
     expect(stale).toHaveTextContent("Данные не обновляются");
     expect(screen.getByTestId("topology-problem")).toHaveTextContent("no controller leader answered after retries");
     expect(screen.queryByText("Топология недоступна")).not.toBeInTheDocument();
+  });
+});
+
+/* ── a payload the map cannot stand behind ─────────────────────────────────
+ *
+ * QA scope 4. The map drew whatever the two responses said, and four shapes got
+ * through that need no hostile server behind them — three of them producing a
+ * React Flow graph with colliding ids, which is a duplicate-key warning today
+ * and a box that updates as its twin tomorrow.
+ */
+describe("buildFlow — a node list that repeats itself or names nothing", () => {
+  const T = (over: Partial<Topology>): Topology => ({ nodes: [], agents: [], timestamp: "t", ...over });
+
+  /* A node name IS the React Flow id and the /nodes/{name} link, so a repeat is
+     not a second node — it is two boxes nothing can tell apart. The agents
+     branch had always deduped; the Kubernetes branch had not. */
+  it("draws one box per NAME, so the graph's ids stay unique", () => {
+    const { nodes } = buildFlow(
+      T({ nodes: [
+        { name: "dup", zone: "z1", ready: true },
+        { name: "dup", zone: "z2", ready: false },
+        { name: "other", zone: "z1", ready: true },
+      ] }),
+    );
+
+    const ids = nodes.map((n) => n.id);
+    expect(new Set(ids).size).toBe(ids.length);
+    expect(nodes.filter((n) => n.type === "topoNode").map((n) => n.id)).toEqual(["dup", "other"]);
+  });
+
+  it("steps over a row that is null or names no node at all", () => {
+    const { nodes } = buildFlow(
+      T({ nodes: [null, { name: "", zone: "z", ready: true }, { name: "real", zone: "z", ready: true }] as never }),
+    );
+
+    expect(nodes.filter((n) => n.type === "topoNode").map((n) => n.id)).toEqual(["real"]);
+  });
+
+  it("has nothing to draw, rather than throwing, when the halves are not lists", () => {
+    const { nodes, edges } = buildFlow({ nodes: null, agents: "none", timestamp: "t" } as never);
+    expect(nodes).toEqual([]);
+    expect(edges).toEqual([]);
+  });
+});
+
+describe("buildFlow — the lane for nodes with no reported zone", () => {
+  /* Not a hypothetical: a cluster whose nodes carry no topology.kubernetes.io/zone
+     label answers with `zone: ""` for every one of them, and the lane header
+     «{zone} · N nodes» then read « · 10 nodes» — a heading naming nothing, in a
+     row of headings that do. */
+  const unzoned: Topology = {
+    nodes: [{ name: "n1", zone: "", ready: true }, { name: "n2", zone: "", ready: true }],
+    agents: [],
+    timestamp: "t",
+  };
+
+  it("gives the lane a name instead of an empty string", () => {
+    const zone = buildFlow(unzoned).nodes.find((n) => n.type === "zone");
+    expect(zone?.data).toMatchObject({ label: "no zone reported", count: 2 });
+    // The id stays the raw key — it is a handle, not a word.
+    expect(zone?.id).toBe("zone:");
+  });
+
+  it("carries the same name into what a screen reader hears about the box", () => {
+    const box = buildFlow(unzoned).nodes.find((n) => n.id === "n1");
+    // The word "zone" belongs to the label, not to the value: it used to be said
+    // twice — "zone no zone reported".
+    expect(box?.ariaLabel).toBe("n1, no zone reported, healthy");
+  });
+
+  it("says it in Russian when that is the reader's language", () => {
+    const ruT: Translate<TopologyKey> = (key, vars) => translate(topologyDict, "ru", key, vars);
+    const { nodes } = buildFlow(unzoned, undefined, ruT);
+    expect(nodes.find((n) => n.type === "zone")?.data).toMatchObject({ label: "зона не указана" });
+    expect(nodes.find((n) => n.id === "n1")?.ariaLabel).toBe("n1, зона не указана, в норме");
+  });
+
+  it("leaves a zone the controller DID report exactly as it is", () => {
+    const zone = buildFlow(topo).nodes.find((n) => n.type === "zone");
+    expect(zone?.data).toMatchObject({ label: "z1" });
+  });
+});
+
+describe("buildFlow — edges the matrix says twice, or names it cannot join", () => {
+  const pair = (nodes: string[]): Topology => ({
+    nodes: nodes.map((name) => ({ name, zone: "z", ready: true })),
+    agents: [],
+    timestamp: "t",
+  });
+  const m = (cells: Matrix["cells"]): Matrix => ({
+    protocol: "tcp", plane: "pod", nodes: [], cells, timestamp: "t",
+  });
+
+  /* Two cells for one A→B is a matrix the console did not write and cannot
+     arbitrate; drawing both gave React Flow two edges under one id and counted
+     the same path twice in the "showing N of M" caption. */
+  it("draws one edge per ordered pair, keeping the WORST reading of it", () => {
+    const { edges, problemTotal } = buildFlow(pair(["a", "b"]), m([
+      { source: "a", destination: "b", failRatio: 0.05 },
+      { source: "a", destination: "b", failRatio: 0.4 },
+    ]));
+
+    expect(edges).toHaveLength(1);
+    expect(problemTotal).toBe(1);
+    expect(edges[0].data).toMatchObject({ failLabel: "40.0%" });
+    expect(edges[0].className).toContain("failing");
+  });
+
+  /* `${source}->${destination}` is only injective while no name contains the
+     arrow: "a->b"→"c" and "a"→"b->c" are both "a->b->c". */
+  it("keeps the edge id injective when a node name contains the arrow", () => {
+    const { edges } = buildFlow(pair(["a->b", "c", "a", "b->c"]), m([
+      { source: "a->b", destination: "c", failRatio: 0.5 },
+      { source: "a", destination: "b->c", failRatio: 0.4 },
+    ]));
+
+    expect(edges).toHaveLength(2);
+    expect(new Set(edges.map((e) => e.id)).size).toBe(2);
+  });
+
+  it("leaves an ordinary pair's id in the shape it always had", () => {
+    expect(buildFlow(topo, matrix).edges[0].id).toBe("n1->n2");
+  });
+
+  /* Same gate the grid reads its figures through: an edge labelled "NaN%" or
+     "Infinity%" is worse than no edge at all. */
+  it("refuses a severity that is not a finite number rather than labelling it Infinity", () => {
+    const raw = JSON.parse('[{"source":"a","destination":"b","failRatio":1e999}]') as Matrix["cells"];
+    const { edges, problemTotal } = buildFlow(pair(["a", "b"]), m(raw));
+
+    expect(edges).toEqual([]);
+    expect(problemTotal).toBe(0);
+  });
+
+  it("refuses a severity that arrived as a string", () => {
+    const { edges } = buildFlow(pair(["a", "b"]), m([
+      { source: "a", destination: "b", failRatio: "0.5" },
+    ] as never));
+
+    expect(edges).toEqual([]);
+  });
+
+  it("steps over a null cell instead of dereferencing it", () => {
+    const { edges } = buildFlow(pair(["a", "b"]), m([
+      null,
+      { source: "a", destination: "b", failRatio: 0.3 },
+    ] as never));
+
+    expect(edges).toHaveLength(1);
+  });
+
+  it("colours a node from a loss ratio over 100%, which is a claim rather than a corruption", () => {
+    const { nodes } = buildFlow(pair(["a", "b"]), m([
+      { source: "a", destination: "b", failRatio: null, lossRatio: 1.5 },
+    ]));
+
+    expect(nodes.find((n) => n.id === "a")?.className).toContain("failing");
+  });
+});
+
+describe("mapNodes — names that do not sort themselves", () => {
+  const of = (...names: string[]) =>
+    mapNodes({ nodes: names.map((name) => ({ name, zone: "z", ready: true })), agents: [], timestamp: "t" })
+      .nodes.map((n) => n.name);
+
+  it("reads a run of numbers as numbers, however long they get", () => {
+    expect(of("m100", "m10", "m2", "m1")).toEqual(["m1", "m2", "m10", "m100"]);
+  });
+
+  it("does not let case decide the order", () => {
+    expect(of("M3", "m1", "m2")).toEqual(["m1", "m2", "M3"]);
+  });
+
+  it("orders bare numbers and non-Latin names without falling over", () => {
+    expect(of("10", "2", "узел-10", "узел-2")).toEqual(["2", "10", "узел-2", "узел-10"]);
+  });
+});
+
+/* ── a stamp the controller mangled ────────────────────────────────────────
+ *
+ * `new Date` answers an Invalid Date for anything it cannot read rather than
+ * throwing, and toLocaleString prints that verbatim: the header read "as of
+ * Invalid Date" for one bad field on an otherwise perfectly good map.
+ */
+describe("TopologyPage — an asOf the console cannot read", () => {
+  afterEach(() => {
+    cleanup();
+    vi.unstubAllGlobals();
+    onlineManager.setOnline(true);
+    localStorage.removeItem(LOCALE_STORAGE_KEY);
+  });
+
+  const renderWith = (asOf: unknown) => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((url: string) => {
+        const href = String(url);
+        if (href.startsWith("/api/v1/topology")) {
+          return Promise.resolve(
+            json({ nodes: [{ name: "n1", zone: "z", ready: true }], agents: [], timestamp: "t", asOf }),
+          );
+        }
+        return Promise.resolve(json({}));
+      }),
+    );
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    return render(
+      <QueryClientProvider client={qc}>
+        <ThemeProvider><TopologyPage /></ThemeProvider>
+      </QueryClientProvider>,
+    );
+  };
+
+  it("falls back to the Live sentence rather than printing Invalid Date", async () => {
+    renderWith("not-a-date");
+    expect(await screen.findByText(/^Live zone\/node map\./)).toBeInTheDocument();
+    expect(document.body.textContent).not.toMatch(/Invalid Date/);
+  });
+
+  it("says the same for a stamp that is not even a string", async () => {
+    renderWith(12345);
+    expect(await screen.findByText(/^Live zone\/node map\./)).toBeInTheDocument();
+    expect(document.body.textContent).not.toMatch(/Invalid Date|NaN/);
+  });
+
+  it("still quotes a stamp it CAN read", async () => {
+    renderWith("2026-08-01T12:00:00Z");
+    expect(await screen.findByText(/^Zone\/node map as of /)).toBeInTheDocument();
+  });
+});
+
+describe("buildFlow — a fleet far bigger than the picture", () => {
+  it("keeps every id unique and every box inside its own lane at 120 nodes", () => {
+    const names = Array.from({ length: 120 }, (_, i) => `worker-${String(i).padStart(3, "0")}`);
+    const big: Topology = {
+      nodes: names.map((name, i) => ({ name, zone: `z${i % 3}`, ready: true })),
+      agents: [],
+      timestamp: "t",
+    };
+    /* Every ordered pair a problem, which is 14 280 cells — far past the cap,
+       and the shape that used to make the caption count paths twice. */
+    const cells = names.flatMap((s) =>
+      names.filter((d) => d !== s).slice(0, 3).map((d) => ({ source: s, destination: d, failRatio: 0.5 })),
+    );
+    const { nodes, edges, problemTotal } = buildFlow(big, {
+      protocol: "tcp", plane: "pod", nodes: names, cells, timestamp: "t",
+    });
+
+    const boxes = nodes.filter((n) => n.type === "topoNode");
+    expect(boxes).toHaveLength(120);
+    expect(new Set(nodes.map((n) => n.id)).size).toBe(nodes.length);
+    expect(new Set(edges.map((e) => e.id)).size).toBe(edges.length);
+    expect(edges).toHaveLength(10); // EDGE_CAP; the rest are counted, not drawn
+    expect(problemTotal).toBe(360);
+    expect(boxes.every((n) => n.parentId?.startsWith("zone:") && n.extent === "parent")).toBe(true);
+  });
+});
+
+/*
+ * The map, the grid and the cards print ONE number.
+ *
+ * The edge label rounded to whole percent while every other surface prints one decimal, so a path
+ * measured at 9.6% was labelled "10%" and spoken as "10%" by its aria-label — while the edge was
+ * drawn degraded and the legend two lines above read "Failing · ≥ 10%". It also collapsed 1.0%, 1.4%
+ * and 1.9% into one indistinguishable "1%".
+ */
+describe("edge label precision", () => {
+  it("prints the same one-decimal ratio the grid and the cards print", () => {
+    const nearTopo: Topology = {
+      nodes: [
+        { name: "a", zone: "z", ready: true },
+        { name: "b", zone: "z", ready: true },
+      ],
+      agents: [],
+      timestamp: "t",
+    };
+    const nearMatrix: Matrix = {
+      protocol: "tcp",
+      plane: "pod",
+      nodes: ["a", "b"],
+      cells: [{ source: "a", destination: "b", failRatio: 0.096 }],
+      timestamp: "t",
+    };
+
+    const { edges } = buildFlow(nearTopo, nearMatrix);
+    expect(edges[0].data).toMatchObject({ failLabel: "9.6%" });
+    // The class and the legend both say sub-10%; the label must not say 10%.
+    expect(edges[0].className).toContain("degraded");
+    expect(edges[0].ariaLabel).toContain("9.6%");
   });
 });

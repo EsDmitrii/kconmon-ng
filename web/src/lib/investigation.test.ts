@@ -10,12 +10,8 @@ import {
   DEFAULT_CAUSE_WINDOW_SECONDS,
   DEFAULT_THRESHOLDS,
   mergeTimeline,
-  pageOfIndex,
   rankCauses,
   thresholdCrossings,
-  TIMELINE_DEFAULT_PAGE_SIZE,
-  TIMELINE_PAGE_SIZES,
-  timelineSlice,
   type TimelineEntry,
   type TimelineKind,
 } from "./investigation";
@@ -512,114 +508,10 @@ describe("rankCauses", () => {
   });
 });
 
-/* the timeline's client-side pagination Arithmetic only. */
+/* The client-side pagination moved to lib/pagination.ts when the owner made
+   pages the product default for every list; its arithmetic is pinned in
+   lib/pagination.test.ts. */
 
-describe("TIMELINE_PAGE_SIZES / TIMELINE_DEFAULT_PAGE_SIZE", () => {
-  it("offers exactly the three sizes the owner asked for, ascending", () => {
-    expect([...TIMELINE_PAGE_SIZES]).toEqual([10, 50, 100]);
-  });
-
-  it("defaults to the middle one", () => {
-    expect(TIMELINE_DEFAULT_PAGE_SIZE).toBe(50);
-    expect(TIMELINE_PAGE_SIZES).toContain(TIMELINE_DEFAULT_PAGE_SIZE);
-  });
-});
-
-describe("timelineSlice", () => {
-  it("cuts the first page at [0, size)", () => {
-    expect(timelineSlice(137, 1, 50)).toEqual({ page: 1, pageCount: 3, start: 0, end: 50 });
-  });
-
-  it("cuts a middle page at exactly one size-worth", () => {
-    expect(timelineSlice(137, 2, 50)).toEqual({ page: 2, pageCount: 3, start: 50, end: 100 });
-  });
-
-  it("stops the LAST page at the total rather than past it", () => {
-    expect(timelineSlice(137, 3, 50)).toEqual({ page: 3, pageCount: 3, start: 100, end: 137 });
-  });
-
-  it("counts an exact multiple as whole pages — never a trailing empty one", () => {
-    expect(timelineSlice(100, 1, 50).pageCount).toBe(2);
-    expect(timelineSlice(100, 2, 50)).toEqual({ page: 2, pageCount: 2, start: 50, end: 100 });
-  });
-
-  it("is ONE page for an empty list — 'Page 1 of 0' is not a thing the reader can be on", () => {
-    expect(timelineSlice(0, 1, 50)).toEqual({ page: 1, pageCount: 1, start: 0, end: 0 });
-  });
-
-  it("clamps a page below the first one", () => {
-    expect(timelineSlice(137, 0, 50).page).toBe(1);
-    expect(timelineSlice(137, -4, 50).page).toBe(1);
-  });
-
-  /* The live-shifting case: the reader sits on page 7, the window's sources
-     re-fetch and the list is suddenly 30 rows long. Clamping to the LAST page
-     shows rows; honouring the stale number shows an empty box under a header
-     that just claimed 30 entries. */
-  it("clamps a page that ran off the end of a list that shrank underneath it", () => {
-    expect(timelineSlice(30, 7, 10)).toEqual({ page: 3, pageCount: 3, start: 20, end: 30 });
-  });
-
-  it("survives a garbage page number instead of slicing with NaN", () => {
-    expect(timelineSlice(137, Number.NaN, 50).page).toBe(1);
-    expect(timelineSlice(137, Number.POSITIVE_INFINITY, 50)).toEqual({ page: 3, pageCount: 3, start: 100, end: 137 });
-  });
-
-  it("falls back to the default size rather than dividing by zero", () => {
-    expect(timelineSlice(137, 1, 0)).toEqual({ page: 1, pageCount: 3, start: 0, end: 50 });
-    expect(timelineSlice(137, 1, Number.NaN).end).toBe(50);
-  });
-
-  it("never returns a slice wider than the size, at any page of any total", () => {
-    for (const total of [0, 1, 9, 10, 11, 49, 50, 51, 99, 100, 101, 137, 1000]) {
-      for (const size of TIMELINE_PAGE_SIZES) {
-        for (let p = 1; p <= Math.max(1, Math.ceil(total / size)); p++) {
-          const s = timelineSlice(total, p, size);
-          expect(s.end - s.start).toBeLessThanOrEqual(size);
-          expect(s.start).toBeGreaterThanOrEqual(0);
-          expect(s.end).toBeLessThanOrEqual(total);
-          expect(s.page).toBe(p);
-        }
-      }
-    }
-  });
-
-  it("walking every page covers the list exactly once, with no gap and no repeat", () => {
-    const total = 137;
-    const seen: number[] = [];
-    const { pageCount } = timelineSlice(total, 1, 50);
-    for (let p = 1; p <= pageCount; p++) {
-      const s = timelineSlice(total, p, 50);
-      for (let i = s.start; i < s.end; i++) seen.push(i);
-    }
-    expect(seen).toEqual(Array.from({ length: total }, (_, i) => i));
-  });
-});
-
-describe("pageOfIndex (the page-size anchor)", () => {
-  it("puts the entry that was first on screen back on screen at the new size", () => {
-    // 10-per-page, page 5 → the first visible row is entry #40. At 50 per page
-    // that row lives on page 1; at 100 it also lives on page 1.
-    expect(pageOfIndex(40, 50)).toBe(1);
-    expect(pageOfIndex(40, 100)).toBe(1);
-    // …and the other direction: row #40 at 10 per page is page 5 again.
-    expect(pageOfIndex(40, 10)).toBe(5);
-  });
-
-  it("is page 1 for the top of the list and for a nonsense index", () => {
-    expect(pageOfIndex(0, 10)).toBe(1);
-    expect(pageOfIndex(-1, 10)).toBe(1);
-    expect(pageOfIndex(Number.NaN, 10)).toBe(1);
-  });
-
-  it("round-trips with timelineSlice: anchoring on a page's own start keeps that page", () => {
-    for (const size of TIMELINE_PAGE_SIZES) {
-      for (let p = 1; p <= 4; p++) {
-        expect(pageOfIndex(timelineSlice(1000, p, size).start, size)).toBe(p);
-      }
-    }
-  });
-});
 
 /* ── QA scope 3 ─────────────────────────────────────────────────────────── */
 

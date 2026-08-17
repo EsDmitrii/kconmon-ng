@@ -201,7 +201,7 @@ export interface paths {
         put?: never;
         /**
          * Cancel a run in flight.
-         * @description Requires runs:create -- starting fleet-wide probe traffic and stopping it are the same operational class. Cancellation is asynchronous: pairs already dispatched still record their outcome, pairs not yet dispatched never dispatch, and the run reaches status `cancelled`. Read the final state from GET /api/v1/runs/{id}. Cancelling a run that already finished, or one another replica started, is a no-op that also answers 204 -- the stuck-run reaper is what eventually finishes a run no replica still holds.
+         * @description Requires runs:create -- starting fleet-wide probe traffic and stopping it are the same operational class. Cancellation is asynchronous: pairs already dispatched still record their outcome, pairs not yet dispatched never dispatch, and the run reaches status `cancelled`. Read the final state from GET /api/v1/runs/{id}. Three outcomes, and only two of them are 204: the run is cancelled here or forwarded over the cross-replica bus (204); the run is already terminal, so there is nothing to cancel (204); or the run belongs to another replica and this console has no cross-replica bus to forward on, in which case it answers 502 with the title `cancel not delivered` and the run keeps going on its owner. A client must branch on that 502 -- it is not a no-op, and the stuck-run reaper only finishes a run whose owner has gone away entirely.
          */
         post: operations["cancelRun"];
         delete?: never;
@@ -222,7 +222,7 @@ export interface paths {
         put?: never;
         /**
          * Create one target.
-         * @description A duplicate name is 422, not 409: it is a rejected field value in an otherwise well-formed body.
+         * @description A duplicate name is 422, not 409: it is a rejected field value in an otherwise well-formed body. So is an `address` that provably resolves outside `config.checkers.external.allowedCidrs` -- no agent in the fleet could ever probe it, so it is refused at the moment it is created rather than left to time out on every check.
          */
         post: operations["createTarget"];
         delete?: never;
@@ -425,6 +425,33 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/mtr/snapshots/{id}/traces": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Resource id (UUID). A malformed id is 404, indistinguishable from an unknown one. */
+                id: components["parameters"]["PathID"];
+            };
+            cookie?: never;
+        };
+        /**
+         * The individual traces that walked one route, newest first.
+         * @description A route row folds every trace that took that path into one entry with a `traceCount`; these are the traces that count was counted over, each with its OWN clock and its own per-hop readings. The route's hop table is the last reading folded into it -- two traces a day apart down the same route are two different sets of RTTs.
+         *
+         *     Scoped to the snapshot's own [firstSeen, lastSeen] window, so the scan is bounded by the thing being asked about. Inside that window a trace is returned only when its RECOMPUTED path identity equals this snapshot's: two routes can interleave in time (a flapping hop alternates between them), and a trace listed under a route it did not walk would be worse than no list. `scanned` reports how many stored traces the window yielded before that filter, so "5 of 147" cannot be misread as loss.
+         *
+         *     Traces live in `check_results` and are subject to the RUN retention sweep, not the path-history one -- a route can outlive the traces behind it, and then this returns an empty list for a non-zero `traceCount`.
+         */
+        get: operations["listPathTraces"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/annotations": {
         parameters: {
             query?: never;
@@ -527,7 +554,7 @@ export interface paths {
         };
         /**
          * One page of declared maintenance windows, newest-starting first.
-         * @description from/to bound the range a window must OVERLAP, not contain: one that opened before the range and is still running inside it is exactly the one that explains what the operator is looking at. Windows are DATA and RENDERING in M6 -- they mark charts and timeline rows; there is no suppression logic, because nothing evaluates alert rules yet.
+         * @description from/to bound the range a window must OVERLAP, not contain: one that opened before the range and is still running inside it is exactly the one that explains what the operator is looking at. Windows are DATA and RENDERING: they mark charts and timeline rows and they SUPPRESS NOTHING. Alert rules ARE evaluated (the console syncs them into a PrometheusRule and pages webhooks on every firing edge) and no code path consults these windows, so declaring one does not silence a page. Correlate them in Alertmanager or in your receiver.
          */
         get: operations["listMaintenanceWindows"];
         put?: never;
@@ -871,6 +898,8 @@ export interface paths {
          * @description Targets, check definitions, check schedules, alert rules, webhooks (WITHOUT secrets) and maintenance windows, in dependency order. DATA IS NOT INCLUDED: no runs, no results, no events, no incidents, no annotations, no MTR snapshots, no k8s events, no audit rows. A bundle is what an operator DECLARED, so it can be declared again somewhere else.
          *
          *     NO SECRET EVER LEAVES THROUGH THIS ROUTE. A webhook exports its name, url, events and enabled flag plus a `hasSecret` boolean; the sealed signing key appears in no field, and there is no query parameter, header or role that changes that.
+         *
+         *     ACCESS CONTROL is carried too, but only for a caller who also holds `rbac:manage`: the `rbac` section lists custom roles and every binding (who holds what, and since when). It is OMITTED rather than emptied for a caller with `settings:write` alone, so "absent" and "none defined" stay different facts. Bindings export and never import -- see POST /api/v1/import.
          *
          *     Observation fields are stripped per collection: a schedule loses lastFiredAt/nextFireAt and lastError/lastErrorAt (scheduler bookkeeping and a failure this console saw), an alert rule loses syncStatus/syncMessage/lastSyncedAt (the reconciler's view of a cluster the destination has never talked to) and a webhook loses lastStatus/lastAttempt/failures (delivery outcomes). Maintenance windows that have already ENDED are omitted -- a closed window is history.
          *
@@ -1314,7 +1343,7 @@ export interface components {
             /** Format: date-time */
             timestamp: string;
             summary: string;
-            /** @description Type-specific payload; see WEBSOCKET.md "Payloads". */
+            /** @description Type-specific payload. Its shape follows the event `type`: a matrix or topology frame carries the same object the matching REST route returns, a run frame carries a RunResult, and a live event carries an Event. */
             details: {
                 [key: string]: unknown;
             };
@@ -1346,6 +1375,8 @@ export interface components {
         };
         MTRDestinationList: {
             destinations: components["schemas"]["MTRDestination"][];
+            /** @description The listing was CUT at `limit`. Pairs are sources x destinations, so a large fleet exceeds any single page: the ones that did not fit are missing from the Explorer entirely and every per-destination snapshot/trace total is short by their counts. The server has always sent this field; it was absent from this schema, so no generated client could read it and the console presented a capped listing as a complete one. */
+            truncated?: boolean;
         };
         /** @description One hop of a stored trace. Only `ip` takes part in the dedupe hash; the rest is the payload of the FIRST trace that took this path. */
         MTRHop: {
@@ -1374,6 +1405,27 @@ export interface components {
             };
             /** Format: date-time */
             resolvedAt: string;
+        };
+        /** @description ONE recorded trace of a route: its own clock, its own outcome and its own per-hop readings. */
+        PathTrace: {
+            /** Format: int64 */
+            id: number;
+            /** Format: date-time */
+            recordedAt: string;
+            success: boolean;
+            /** Format: int64 */
+            durationNs: number;
+            /** @description The agent's own sentence, present only on a failed trace. */
+            error?: string;
+            hops: components["schemas"]["MTRHop"][];
+            /** @description The run this trace was recorded in, so it can be followed back to its diagnostics permalink. Absent once that run has aged out. */
+            runId?: string;
+        };
+        PathTraceList: {
+            traces: components["schemas"]["PathTrace"][];
+            nextCursor: string;
+            /** @description Stored traces the window yielded BEFORE the path filter. Larger than `traces` when another route was interleaved with this one. */
+            scanned: number;
         };
         /** @description One distinct route a pair has been observed taking, with the hop payload of the first trace that took it. */
         PathSnapshot: {
@@ -1506,7 +1558,7 @@ export interface components {
             incidents: components["schemas"]["Incident"][];
             nextCursor: string;
         };
-        /** @description One declared change window. DATA and RENDERING in M6, not suppression logic -- there are no alert rules to suppress yet. */
+        /** @description One declared change window. DATA and RENDERING, never suppression: alert rules are evaluated and paged on, and nothing consults these windows. Declaring one marks the charts and the timeline; it does not silence an alert. */
         MaintenanceWindow: {
             /** Format: uuid */
             id: string;
@@ -1914,9 +1966,16 @@ export interface components {
              * Format: int64
              * @description Optional. Absent or 0 runs the check ONCE per pair (an instant run, the default and the only behaviour before this field existed). Any other value turns it into an interval run: every pair is re-probed on a cadence for this long, each probe kept as its own result sample, and the run stays `running` - cancellable, streaming progress on its `run:{id}` topic - until the duration elapses.
              *     Bounded to 10s..24h; outside that the request is refused with 422 naming both bounds, never silently clamped.
-             *     The cadence is derived, not requested: duration / 500, floored at 5s. That caps ONE PAIR at 500 samples however long the run is, so a 24h run samples roughly every 173s across the whole day rather than filling its quota in the first hour. A run's total sample count is therefore at most pairs x 500.
+             *     Absent sampleIntervalNs, the cadence is DERIVED from this duration: duration / 500, floored at 5s. That caps ONE PAIR at 500 samples however long the run is, so a 24h run samples roughly every 173s across the whole day rather than filling its quota in the first hour. A run's total sample count is therefore at most pairs x 500.
              */
             durationNs?: number;
+            /**
+             * Format: int64
+             * @description Optional. The cadence between one pair's probes, in nanoseconds. Absent or 0 keeps the derived behaviour above, byte-identical to every run made before this field existed.
+             *     Bounded to 1s..durationNs and refused with 422 naming the bound outside it, the same way an out-of-range durationNs is; naming a cadence without a durationNs is refused for the same reason, since an instant run has no cadence to dial.
+             *     A cadence the fan-out cannot KEEP is a different matter and is never refused. Asking an mtr run for 1s is not a mistake in the request, it is a fact about traceroute - a trace walks up to thirty hops in sequence - so the run is planned around it and the response reports requested and effective separately (see sampleIntervalAdjusted). The 500-samples-per-pair cap is the hard ceiling either way and binds the same way, also reported rather than silently applied.
+             */
+            sampleIntervalNs?: number;
         };
         RunCreateResponse: {
             id: string;
@@ -1924,6 +1983,23 @@ export interface components {
             pairTotal: number;
             /** @description Server-chosen topic name; subscribe to what you were told, never a string you built. */
             wsTopic: string;
+            /**
+             * Format: int64
+             * @description The cadence the run will actually keep. Absent on an instant run. A slow check type stretches it past the duration's base cadence, so a caller cannot derive it from durationNs alone. A worst case, not an observation - rounds run back to back, so a healthy run beats it.
+             */
+            plannedSampleIntervalNs?: number;
+            /** @description How many probes ONE pair contributes if every round takes its worst case: a floor, capped at 500. Read it as "at least N per pair". */
+            plannedSamplesPerPair?: number;
+            /**
+             * Format: int64
+             * @description sampleIntervalNs echoed back verbatim; absent when none was sent. Reported apart from plannedSampleIntervalNs on purpose - the two agree only when nothing bound the request.
+             */
+            requestedSampleIntervalNs?: number;
+            /**
+             * @description Why the plan is not the cadence that was asked for. `cap` - the 500-samples-per-pair ceiling widened it. `round` - one round over this fan-out cannot finish that fast, so the plan is one round's floor. Absent when nothing moved, which includes every run that sent no sampleIntervalNs and was not stretched.
+             * @enum {string}
+             */
+            sampleIntervalAdjusted?: "cap" | "round";
         };
         RunSummary: {
             id: string;
@@ -1959,13 +2035,30 @@ export interface components {
             /** @description 0-based probe number within this pair. Always 0 for an instant run; 0..n-1 for an interval run, capped at 499 (500 samples per pair). */
             sampleSeq: number;
         };
-        /** @description One run's summary plus its spec snapshot and per-pair results. */
-        RunDetail: components["schemas"]["RunSummary"] & {
+        /** @description One run's summary plus its spec snapshot and per-pair results. FLAT, not an allOf over RunSummary: that composition was unsatisfiable, because RunSummary is additionalProperties:false and a strict validator applies it to the WHOLE document, so `spec` and `results` made every real response invalid. */
+        RunDetail: {
+            id: string;
+            /** Format: date-time */
+            createdAt: string;
+            /** Format: date-time */
+            startedAt?: string;
+            /** Format: date-time */
+            finishedAt?: string;
+            status: components["schemas"]["RunStatus"];
+            type: string;
+            plane: string;
+            initiatorKind: string;
+            initiatorId: string;
+            pairTotal: number;
+            pairOk: number;
+            pairFailed: number;
             /** @description The run's spec as submitted, snapshotted at creation. */
             spec: {
                 [key: string]: unknown;
             };
             results: components["schemas"]["RunResult"][];
+            /** @description Present and true when the run holds MORE results than this response carries -- the newest 2000 of them. An interval run is bounded at 400 pairs x 500 samples, and this body is re-read every five seconds while the run is alive, so an unbounded read could hand a replica a multi-hundred-megabyte marshal on repeat. When it is true, any aggregate computed from `results` describes the tail, not the run. */
+            resultsTruncated?: boolean;
         };
         RunPage: {
             runs: components["schemas"]["RunSummary"][];
@@ -2169,7 +2262,13 @@ export interface components {
             id: number;
             roleName: string;
             subjectKind: string;
+            /** @description Opaque, and NAMESPACED by the auth mode that minted it. OIDC identities are "oidc:<sub>" -- sub is the only claim OIDC Core 5.7 permits as an identifier, so preferred_username or email here would be a role that follows a reassignable name (Grafana CVE-2023-3128). Local users are bound by their users.id UUID; the prefixes "local:", "header:" and "token:" are reserved for the same purpose. */
             subjectId: string;
+            /**
+             * Format: date-time
+             * @description When the grant was made -- half of reviewing whether it still should stand.
+             */
+            createdAt: string;
         };
         BindingRequest: {
             roleName: string;
@@ -2297,6 +2396,31 @@ export interface components {
             alertRules: components["schemas"]["ExportedAlertRule"][];
             webhooks: components["schemas"]["ExportedWebhook"][];
             maintenanceWindows: components["schemas"]["MaintenanceWindow"][];
+            rbac?: components["schemas"]["ConfigBundleRBAC"];
+        };
+        /**
+         * @description The access-control section. PRESENT ONLY when the caller holds `rbac:manage`: everything else in the bundle needs `settings:write`, and a grant list is strictly more sensitive than a target list -- it names people and says what they can do. Absent and empty are therefore different facts, which is why the field is omitted rather than nulled.
+         *
+         *     Roles are custom roles ONLY. The built-ins (viewer, operator, alert-editor, admin) are compiled in, identical on every build, and a bundle claiming to define one would be claiming to redefine it.
+         *
+         *     Bindings are EXPORTED AND NEVER IMPORTED, on the webhook-secret precedent. A binding names a person in the SOURCE console's identity namespace ("oidc:<sub>", a local user's UUID); replaying it elsewhere either grants that role to whatever the string means there or grants it to nobody, silently. The bundle records who held what; re-granting is a decision, not a restore.
+         */
+        ConfigBundleRBAC: {
+            roles: components["schemas"]["ExportedRole"][];
+            bindings: components["schemas"]["ExportedBinding"][];
+        };
+        ExportedRole: {
+            name: string;
+            permissions: string[];
+        };
+        ExportedBinding: {
+            /** Format: int64 */
+            id: number;
+            roleName: string;
+            subjectKind: string;
+            subjectId: string;
+            /** Format: date-time */
+            createdAt: string;
         };
         /** @description dryRun is a BODY FLAG rather than a query parameter deliberately: the flag and the bundle it applies to are one indivisible statement, and a query parameter dropped by a proxy would turn a preview into an apply. */
         ConfigImportRequest: {
@@ -2329,6 +2453,8 @@ export interface components {
             alertRules: components["schemas"]["ConfigImportCollectionResult"];
             webhooks: components["schemas"]["ConfigImportCollectionResult"];
             maintenanceWindows: components["schemas"]["ConfigImportCollectionResult"];
+            rbacRoles: components["schemas"]["ConfigImportCollectionResult"];
+            rbacBindings: components["schemas"]["ConfigImportCollectionResult"];
         };
     };
     responses: {
@@ -2397,6 +2523,15 @@ export interface components {
         };
         /** @description Well-formed body whose VALUES were rejected -- never a parse failure. */
         UnprocessableEntity: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/problem+json": components["schemas"]["Problem"];
+            };
+        };
+        /** @description Refused by the fixed-window rate limiter (console.rateLimit). The window and its ceiling are operator-configured, so a client should back off rather than assume a fixed delay. */
+        TooManyRequests: {
             headers: {
                 [name: string]: unknown;
             };
@@ -2489,7 +2624,7 @@ export interface operations {
     getTopology: {
         parameters: {
             query?: {
-                /** @description RFC 3339 instant to reconstruct the topology at. Absent or empty is the live passthrough above, byte-for-byte. A value that does not parse, or one in the future, is 400. A value older than the oldest retained event -- or any value when nothing is retained -- is 422, with a detail naming console.database.retentionDays. Requires a database: with console.database.mode unset this parameter alone is 503, while the live route stays available. */
+                /** @description RFC 3339 instant to reconstruct the topology at. Absent or empty is the live passthrough above, byte-for-byte. A value that does not parse, or one in the future, is 400. A value older than the oldest retained event -- or any value when nothing is retained -- is 422, with a detail naming database.retentionDays. Requires a database: with no database configured this parameter alone is 503, while the live route stays available. */
                 at?: string;
             };
             header?: never;
@@ -2705,6 +2840,7 @@ export interface operations {
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
             422: components["responses"]["UnprocessableEntity"];
+            429: components["responses"]["TooManyRequests"];
             502: components["responses"]["BadGateway"];
             503: components["responses"]["Unavailable"];
         };
@@ -3324,6 +3460,39 @@ export interface operations {
             503: components["responses"]["Unavailable"];
         };
     };
+    listPathTraces: {
+        parameters: {
+            query?: {
+                /** @description Page size, clamped into [1,500]. An unparseable value is treated as unset. */
+                limit?: components["parameters"]["Limit"];
+                /** @description Opaque keyset cursor from the previous page's nextCursor. Malformed, or minted by another server, is 400. */
+                cursor?: components["parameters"]["Cursor"];
+            };
+            header?: never;
+            path: {
+                /** @description Resource id (UUID). A malformed id is 404, indistinguishable from an unknown one. */
+                id: components["parameters"]["PathID"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description One page of traces. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PathTraceList"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            502: components["responses"]["BadGateway"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
     listAnnotations: {
         parameters: {
             query?: {
@@ -3705,7 +3874,7 @@ export interface operations {
             403: components["responses"]["Forbidden"];
             422: components["responses"]["UnprocessableEntity"];
             502: components["responses"]["BadGateway"];
-            /** @description No database (console.database.mode) or no encryption key (console.webhooks.encryptionKey). The detail names which. */
+            /** @description No database (database.existingSecret) or no encryption key (console.webhooks.encryptionKey). The detail names which. */
             503: {
                 headers: {
                     [name: string]: unknown;
@@ -3821,7 +3990,7 @@ export interface operations {
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
             502: components["responses"]["BadGateway"];
-            /** @description No database (console.database.mode) or no encryption key (console.webhooks.encryptionKey). The detail names which. */
+            /** @description No database (database.existingSecret) or no encryption key (console.webhooks.encryptionKey). The detail names which. */
             503: {
                 headers: {
                     [name: string]: unknown;
@@ -4580,6 +4749,7 @@ export interface operations {
             400: components["responses"]["BadRequest"];
             401: components["responses"]["Unauthorized"];
             404: components["responses"]["NotFound"];
+            429: components["responses"]["TooManyRequests"];
             500: components["responses"]["InternalError"];
             503: components["responses"]["Unavailable"];
         };

@@ -110,7 +110,11 @@ describe("ExplorePage while live", () => {
     renderPage();
     await waitFor(() => expect(bodies.length).toBeGreaterThan(0));
     const end = Date.parse(bodies[0].end);
-    expect(end).toBeGreaterThanOrEqual(before);
+    /* "Now", floored onto the sample grid: exploreWindow aligns the anchor so
+       the compare panel's two legs share sample instants, which puts the end at
+       most one step behind the wall clock and never ahead of it. The 15s step is
+       the smallest this page ever asks for, so it is the whole slack. */
+    expect(end).toBeGreaterThanOrEqual(before - 15_000);
     expect(end).toBeLessThanOrEqual(Date.now());
   });
 });

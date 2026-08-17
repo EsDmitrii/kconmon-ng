@@ -65,8 +65,21 @@ const en = {
      one", and the place to run one is Diagnostics. */
   "destinations.empty.before": "Nothing traced yet.",
   "destinations.empty.link": "Run an MTR from Diagnostics",
+  /* ui/pager.tsx's nouns for the paged lists on this page. The sources one is
+     the list INSIDE a card, which pages on its own once a destination has been
+     traced from more than a screenful of nodes. */
+  "destinations.subject": "destinations",
+  "destinations.sources.subject": "sources",
   "destinations.empty.after": "— its path lands here.",
   "destinations.from": "from {node}",
+  /* Both figures, in one string, so the separator between them is TEXT and not
+     a CSS gap. A shut card and a source row make the same claim in the same
+     shape: how many distinct routes, over how many traces. */
+  "destinations.counts": "{paths} · {traces}",
+  /* The card's SPOKEN name. Punctuated, because a name computed from the card's
+     own two spans arrives as one welded token and a decorative separator cannot
+     mend it — aria-hidden text is excluded from the name. */
+  "destinations.card.aria": "{destination}: {paths}, {traces}",
   "paths.one": "{count} path",
   "paths.few": "{count} paths",
   "paths.many": "{count} paths",
@@ -80,14 +93,32 @@ const en = {
      three panes stack and the destinations pane is ABOVE this one. */
   "history.noPair": "Pick a source to see its path history.",
   "history.empty": "No path recorded for this pair yet.",
+  /* A shared "Open in MTR Explorer" link for a pair path history has never seen.
+     The generic list said nothing about the pair that was asked for. */
+  "history.linkEmpty": "No path recorded yet for {source} → {destination}.",
+  /* The button that OPENS the comparison; {count} is how many of the two are ticked. */
+  "history.compareOpen": "Compare ({count}/2)",
   "history.compareHint": "Tick two paths to diff them — a third pick replaces the earlier of the two.",
   "history.list.aria": "Paths",
+  "history.subject": "paths",
   "history.compare.aria": "Compare path {hash}",
   "history.path.aria": "Path {hash}",
+  /* The badge used to say only this, beside two hashes — that something moved,
+     and nothing about what. It survives as the fallback for a first path with
+     nothing to compare against; the four below are the answer. */
   "history.changed": "path changed",
+  "history.changed.moved": "hop {hop}: {from} → {to}",
+  "history.changed.added": "hop {hop} added: {to}",
+  "history.changed.removed": "hop {hop} gone: {from}",
+  "history.changed.several": "{count} hops changed",
   "history.span": "{from} → {to} · {traces}",
   "history.loadOlder": "Load older",
   "history.loadingOlder": "Loading older…",
+  /* The END of the list, said out loud. A permanently disabled "Load older" reads as a broken
+     button, not as "there is nothing older" — and the count is what answers the question the
+     reader actually has: the sidebar counts TRACES, this list shows distinct ROUTES, and a pair
+     with hundreds of traces can honestly have six of them. */
+  "history.allShown": "{paths} · {traces} · nothing older is retained",
   "hops.one": "{count} hop",
   "hops.few": "{count} hops",
   "hops.many": "{count} hops",
@@ -98,6 +129,9 @@ const en = {
   "detail.error": "This path is unavailable",
   "diff.title": "Path diff",
   "diff.empty": "Both paths must still be loaded to diff them.",
+  /* The one input the alignment has nothing to say about. Drawing an empty
+     table under a legend answers the reader with blank space. */
+  "diff.noHops": "Neither path recorded a single hop, so there is nothing to line up.",
 
   /* ── the Runner ────────────────────────────────────────────────────────── */
   "runner.aria": "Run a trace",
@@ -113,10 +147,34 @@ const en = {
      dict/diagnostics.ts, which is where the same option lives for that form. */
   "runner.duration.instantLabel": "Instant",
   "runner.duration.instant": "One trace per pair, right now.",
+  /* ── the duration caption ──────────────────────────────────────────────────
+     These four keys sit under one prefix because pages/diagnostics.tsx's
+     cadenceCaption builds all of them, from ONE mirror of the server's planner.
+     They replaced a single "runner.duration.interval" that quoted the BASE
+     cadence — duration/500, floored at 5s — for the one check type that cannot
+     keep it: a 5m run over ten pairs advertised «раз в 5 с» here while the run
+     permalink said 3m and the fleet did neither.
+
+     `.interval` can only be reached by a non-mtr type, which this pane has
+     none of; it exists so the shared builder has the branch it expects, and so
+     that nailing the pane to a different type later cannot silently produce a
+     missing key. */
+  "runner.duration.caption.interval":
+    "Each pair is re-probed every {interval} for {label}, about {samples} samples per pair — cancellable throughout.",
   /* An interval MTR is the most direct way to catch a route that flaps — the
-     one thing a single instant trace cannot see. */
-  "runner.duration.interval":
-    "Each pair is re-traced every {interval} for {label}, about {samples} traces per pair — cancellable throughout.",
+     one thing a single instant trace cannot see. A trace walks up to 30 hops in
+     sequence, so the cadence is one ROUND, not the base 5s. */
+  "runner.duration.caption.interval.mtr":
+    "An MTR trace takes up to {budget} per pair, so a {label} run re-traces every pair every {interval} — " +
+    "about {samples} traces per pair, cancellable throughout.",
+  "runner.duration.caption.adjusted.cap":
+    "Every {requested} would be more than 500 traces for one pair, which is the ceiling, so this run cannot go faster than every {interval}.",
+  "runner.duration.caption.adjusted.round":
+    "Every {requested} is faster than one round of traces over this many pairs can finish, so this run cannot go faster than every {interval}.",
+
+  "runner.sampleInterval": "Trace interval",
+  "runner.sampleInterval.aria": "Trace interval",
+  "runner.sampleInterval.auto": "Auto",
 
   "runner.destination": "Destination",
   "runner.destination.aria": "Destination",
@@ -179,8 +237,12 @@ export const mtrDict: Dictionary<MTRKey> = defineDict(en, {
   "destinations.error": "История путей недоступна",
   "destinations.empty.before": "Пока ничего не трассировали.",
   "destinations.empty.link": "Запустите MTR из Диагностики",
+  "destinations.subject": "Назначения",
+  "destinations.sources.subject": "Источники",
   "destinations.empty.after": "(путь появится здесь).",
   "destinations.from": "от {node}",
+  "destinations.counts": "{paths} · {traces}",
+  "destinations.card.aria": "{destination}: {paths}, {traces}",
   "paths.one": "{count} путь",
   "paths.few": "{count} пути",
   "paths.many": "{count} путей",
@@ -191,14 +253,22 @@ export const mtrDict: Dictionary<MTRKey> = defineDict(en, {
   "history.title": "История путей",
   "history.noPair": "Выберите источник, чтобы увидеть историю его путей.",
   "history.empty": "Для этой пары путей пока не записано.",
+  "history.linkEmpty": "Для пары {source} → {destination} путей пока не записано.",
   "history.compareHint": "Отметьте два пути, чтобы сравнить. Третья отметка вытеснит более раннюю из двух.",
+  "history.compareOpen": "Сравнить ({count}/2)",
   "history.list.aria": "Пути",
+  "history.subject": "Пути",
   "history.compare.aria": "Сравнить путь {hash}",
   "history.path.aria": "Путь {hash}",
   "history.changed": "путь изменился",
+  "history.changed.moved": "хоп {hop}: {from} → {to}",
+  "history.changed.added": "добавлен хоп {hop}: {to}",
+  "history.changed.removed": "пропал хоп {hop}: {from}",
+  "history.changed.several": "изменилось хопов: {count}",
   "history.span": "{from} → {to} · {traces}",
   "history.loadOlder": "Загрузить старые",
   "history.loadingOlder": "Загружаем старые…",
+  "history.allShown": "{paths} · {traces} · старее ничего не хранится",
   "hops.one": "{count} хоп",
   "hops.few": "{count} хопа",
   "hops.many": "{count} хопов",
@@ -208,6 +278,7 @@ export const mtrDict: Dictionary<MTRKey> = defineDict(en, {
   "detail.error": "Этот путь недоступен",
   "diff.title": "Разница путей",
   "diff.empty": "Чтобы сравнить, оба пути должны быть загружены.",
+  "diff.noHops": "Ни в одном из путей не записано ни одного хопа, сопоставлять нечего.",
 
   "runner.aria": "Запустить трассировку",
   "runner.title": "Запустить MTR",
@@ -219,9 +290,22 @@ export const mtrDict: Dictionary<MTRKey> = defineDict(en, {
   "runner.duration.aria": "Длительность",
   "runner.duration.instantLabel": "Мгновенно",
   "runner.duration.instant": "По одной трассировке на пару, прямо сейчас.",
-  "runner.duration.interval":
-    "Каждая пара трассируется заново раз в {interval} на протяжении {label}, это примерно {samples} трассировок " +
+  /* «раз в {interval}» — период словом, а не сокращением: «раз в 5 с» читается как предлог «с»
+     и ломает фразу ровно на том слове, ради которого она написана. */
+  "runner.duration.caption.interval":
+    "Каждая пара зондируется заново раз в {interval} на протяжении {label}, это примерно {samples} проб " +
     "на пару. Отменить запуск можно в любой момент.",
+  "runner.duration.caption.interval.mtr":
+    "Трассировка MTR занимает до {budget} на пару, поэтому за {label} каждая пара трассируется заново " +
+    "раз в {interval}, это примерно {samples} трассировок на пару. Отменить запуск можно в любой момент.",
+  "runner.duration.caption.adjusted.cap":
+    "Раз в {requested} — это больше 500 трассировок на пару, а это потолок, так что чаще чем раз в {interval} этот запуск не пойдёт.",
+  "runner.duration.caption.adjusted.round":
+    "Раз в {requested} — быстрее, чем успевает пройти круг трассировок по такому числу пар, так что чаще чем раз в {interval} этот запуск не пойдёт.",
+
+  "runner.sampleInterval": "Период трассировки",
+  "runner.sampleInterval.aria": "Период трассировки",
+  "runner.sampleInterval.auto": "Авто",
 
   "runner.destination": "Назначение",
   "runner.destination.aria": "Назначение",

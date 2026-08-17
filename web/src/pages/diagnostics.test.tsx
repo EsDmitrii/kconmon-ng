@@ -933,9 +933,11 @@ describe("DiagnosticsPage duration selector", () => {
     );
 
     fireEvent.click(screen.getByRole("radio", { name: "24h" }));
-    // 86400s / 500 = 172.8s -> "3m", capped at 500 samples.
+    /* 86400s / 500 = 172.8s -> "173s", capped at 500 samples. Said in SECONDS, not
+       rounded up to "3m": the caption reads the same formatter the run permalink's
+       cadence tile does, so the two cannot quote different numbers for one run. */
     await waitFor(() =>
-      expect(screen.getByText(/probed every 3m for 24h — about 500 samples per pair/i)).toBeInTheDocument(),
+      expect(screen.getByText(/probed every 173s for 24h — about 500 samples per pair/i)).toBeInTheDocument(),
     );
   });
 
@@ -970,20 +972,203 @@ describe("DiagnosticsPage — Russian", () => {
     // sample count — the same warning the English gives, at the same strength.
     fireEvent.click(within(duration).getByRole("radio", { name: "1m" }));
     const caption = await screen.findByText(/Каждая пара зондируется раз в/);
-    /* The cadence is a rendered SPAN and follows the interface language: «5 с», not "5s". The
-       {label} beside it stays "1m" — that is the selector's own range token, not prose. */
-    expect(caption.textContent).toMatch(/раз в 5 с /);
+    /* The cadence is a rendered SPAN and follows the interface language. In PROSE it is spelled
+       out — «раз в 5 секунд», never «раз в 5 с», where a bare «с» is read as the preposition and
+       the sentence breaks on the one word it exists to say. The {label} beside it stays "1m":
+       that is the selector's own range token, not prose. */
+    expect(caption.textContent).toMatch(/раз в 5 секунд /);
+    expect(caption.textContent).not.toMatch(/раз в 5 с[^ек]/);
     expect(caption.textContent).not.toMatch(/раз в 5s/);
     expect(caption.textContent).toMatch(/на протяжении 1m/);
     expect(caption.textContent).toMatch(/проб на пару/);
     expect(caption.textContent).toMatch(/остаётся отменяемым/);
 
-    // 24h widens the cadence to 172.8s, and the widened span localises too: «3 мин».
+    // 24h widens the cadence to 172.8s, and the widened span localises too: «173 секунды».
     fireEvent.click(within(duration).getByRole("radio", { name: "24h" }));
-    await waitFor(() => expect(screen.getByText(/раз в 3 мин /)).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText(/раз в 173 секунды /)).toBeInTheDocument());
 
     // Two nodes → two pairs → «~2 пары», the few form a two-form language
     // would render as «~2 пар».
     expect(screen.getByText("~2 пары")).toBeInTheDocument();
+  });
+});
+
+/* ── the owner's rule: every list on every page is paged ────────────────── */
+
+describe("the run history is PAGED", () => {
+  const runRows = (n: number) =>
+    Array.from({ length: n }, (_, i) => ({
+      id: `run-${String(i).padStart(3, "0")}`,
+      createdAt: "2026-01-01T00:00:00Z",
+      status: "succeeded",
+      type: "tcp",
+      plane: "pod",
+      initiatorKind: "user",
+      initiatorId: "u1",
+      pairTotal: 2,
+      pairOk: 2,
+      pairFailed: 0,
+    }));
+
+  it("shows one page-worth and says how much of the history that is", async () => {
+    renderPage({ nodes: ["a", "b"], runs: runRows(120) });
+
+    expect(await screen.findByRole("link", { name: "run-000" })).toBeInTheDocument();
+    expect(screen.getByTestId("pager-showing")).toHaveTextContent("Showing 10 of 120 runs");
+    expect(screen.queryByRole("link", { name: "run-060" })).not.toBeInTheDocument();
+  });
+
+  it("reaches the older runs, newest-first order intact", async () => {
+    renderPage({ nodes: ["a", "b"], runs: runRows(120) });
+    expect(await screen.findByRole("link", { name: "run-000" })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Next page" }));
+    expect(screen.getByRole("link", { name: "run-010" })).toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "run-009" })).not.toBeInTheDocument();
+    expect(screen.getByTestId("pager-page")).toHaveTextContent("Page 2 of 12");
+  });
+
+  it("leaves a short history without a pager to operate", async () => {
+    renderPage({ nodes: ["a", "b"], runs: runRows(4) });
+    expect(await screen.findByRole("link", { name: "run-000" })).toBeInTheDocument();
+    expect(screen.queryByTestId("pager")).not.toBeInTheDocument();
+  });
+});
+
+/* ── the sample-interval control ───────────────────────────────────────────
+   The cadence used to be underivable by anyone and un-dialable by everyone:
+   checks.EffectiveSampleInterval's own doc said the base cadence "is not
+   something an operator can dial", and three surfaces each reported a
+   different number for it. These cover the control that closed that, and the
+   one sentence it now earns. */
+describe("DiagnosticsPage sample interval", () => {
+  it("offers no cadence control at all for an instant run", async () => {
+    renderPage({ nodes: ["a", "b"] });
+    await screen.findByRole("radio", { name: "Instant" });
+    // An instant run has no cadence, and the server refuses a body that names one.
+    expect(screen.queryByTestId("sample-interval")).not.toBeInTheDocument();
+  });
+
+  it("offers Auto plus every preset that FITS the run, and nothing longer", async () => {
+    renderPage({ nodes: ["a", "b"] });
+    await screen.findByRole("radio", { name: "Instant" });
+
+    fireEvent.click(screen.getByRole("radio", { name: "1m" }));
+    const control = await screen.findByRole("radiogroup", { name: "Sample interval" });
+    for (const label of ["Auto", "1s", "5s", "15s", "30s", "1m"]) {
+      expect(within(control).getByRole("radio", { name: label })).toBeInTheDocument();
+    }
+    // A cadence longer than the run is a 422; the form does not lead an operator into one.
+    expect(within(control).queryByRole("radio", { name: "5m" })).not.toBeInTheDocument();
+    expect(within(control).queryByRole("radio", { name: "15m" })).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("radio", { name: "1h" }));
+    await waitFor(() =>
+      expect(
+        within(screen.getByRole("radiogroup", { name: "Sample interval" })).getByRole("radio", { name: "15m" }),
+      ).toBeInTheDocument(),
+    );
+  });
+
+  /* One submit per render: a successful create navigates to the run permalink and the submit guard
+     stays closed behind it, which is the form's own contract (hooks/use-submit-guard.ts). */
+  async function submitWith(interval?: string): Promise<Record<string, unknown>> {
+    const bodies: unknown[] = [];
+    const capture = (body: unknown) => {
+      bodies.push(body);
+      return json({ id: "run-x", status: "pending", pairTotal: 2, wsTopic: "run:run-x" }, { status: 202 });
+    };
+    renderPage({ permissions: OPERATOR, nodes: ["a", "b"], onCreate: capture });
+
+    const duration = await screen.findByRole("radiogroup", { name: "Duration" });
+    fireEvent.click(within(duration).getByRole("radio", { name: "5m" }));
+    if (interval) {
+      const control = await screen.findByRole("radiogroup", { name: "Sample interval" });
+      fireEvent.click(within(control).getByRole("radio", { name: interval }));
+    }
+    fireEvent.click(screen.getByRole("button", { name: /start run/i }));
+    await waitFor(() => expect(bodies).toHaveLength(1));
+    return bodies[0] as Record<string, unknown>;
+  }
+
+  it("posts nothing on Auto: an untouched control must send the body it always sent", async () => {
+    expect(await submitWith()).not.toHaveProperty("sampleIntervalNs");
+  });
+
+  it("posts the picked cadence alongside the duration", async () => {
+    expect(await submitWith("15s")).toMatchObject({
+      durationNs: 300_000_000_000,
+      sampleIntervalNs: 15_000_000_000,
+    });
+  });
+
+  it("falls back to Auto when shortening the run puts the picked cadence out of range", async () => {
+    const bodies: unknown[] = [];
+    const capture = (body: unknown) => {
+      bodies.push(body);
+      return json({ id: "run-x", status: "pending", pairTotal: 2, wsTopic: "run:run-x" }, { status: 202 });
+    };
+    renderPage({ permissions: OPERATOR, nodes: ["a", "b"], onCreate: capture });
+
+    const duration = await screen.findByRole("radiogroup", { name: "Duration" });
+    fireEvent.click(within(duration).getByRole("radio", { name: "15m" }));
+    const control = await screen.findByRole("radiogroup", { name: "Sample interval" });
+    fireEvent.click(within(control).getByRole("radio", { name: "5m" }));
+    // 5m no longer fits inside a 1m run, and a control that still LOOKED chosen would post a 422.
+    fireEvent.click(within(duration).getByRole("radio", { name: "1m" }));
+    fireEvent.click(screen.getByRole("button", { name: /start run/i }));
+
+    await waitFor(() => expect(bodies).toHaveLength(1));
+    expect(bodies[0]).not.toHaveProperty("sampleIntervalNs");
+  });
+
+  it("says what the picked cadence will actually do, and leads with the adjustment when it cannot", async () => {
+    renderPage({ nodes: ["a", "b"] });
+    await screen.findByRole("radio", { name: "Instant" });
+
+    fireEvent.click(screen.getByRole("radio", { name: "5m" }));
+    fireEvent.click(await screen.findByRole("radio", { name: "1s" }));
+    // tcp answers in milliseconds, so 1s is kept verbatim and nothing is explained away.
+    await waitFor(() =>
+      expect(screen.getByText(/probed every 1s for 5m — about 300 samples per pair/i)).toBeInTheDocument(),
+    );
+    expect(screen.queryByText(/cannot go faster/i)).not.toBeInTheDocument();
+
+    // MTR cannot keep it: the caption LEADS with that, then says what will happen.
+    fireEvent.click(screen.getByRole("radio", { name: "MTR" }));
+    const caption = await screen.findByText(/Every 1s is faster than one round/i);
+    expect(caption.textContent).toMatch(/cannot go faster than every 90s/i);
+    expect(caption.textContent).toMatch(/traces every 90s/i);
+  });
+
+  it("names the 500-sample ceiling when that is what bound the request", async () => {
+    renderPage({ nodes: ["a", "b"] });
+    await screen.findByRole("radio", { name: "Instant" });
+
+    fireEvent.click(screen.getByRole("radio", { name: "24h" }));
+    fireEvent.click(await screen.findByRole("radio", { name: "1s" }));
+    // 1s over 24h is 86 400 samples for one pair; the ceiling widens it to 24h/500.
+    const caption = await screen.findByText(/more than 500 samples for one pair/i);
+    expect(caption.textContent).toMatch(/cannot go faster than every 173s/i);
+  });
+
+  it("names the control and its adjustment in Russian", async () => {
+    renderPage({ locale: "ru", permissions: OPERATOR });
+    await screen.findByRole("heading", { name: "Диагностика" });
+
+    const duration = screen.getByRole("radiogroup", { name: "Длительность" });
+    fireEvent.click(within(duration).getByRole("radio", { name: "5m" }));
+
+    const control = await screen.findByRole("radiogroup", { name: "Период опроса" });
+    expect(within(control).getByRole("radio", { name: "Авто" })).toBeInTheDocument();
+    fireEvent.click(within(control).getByRole("radio", { name: "1s" }));
+
+    // The unit is a WORD in prose: «раз в 1 секунду» would read wrong, so one drops the numeral.
+    const caption = await screen.findByText(/Каждая пара зондируется раз в секунду/);
+    expect(caption.textContent).not.toMatch(/раз в 1 с/);
+
+    fireEvent.click(within(screen.getByRole("radiogroup", { name: "Тип проверки" })).getByRole("radio", { name: "MTR" }));
+    const adjusted = await screen.findByText(/Раз в секунду — быстрее, чем успевает пройти один круг/);
+    expect(adjusted.textContent).toMatch(/чаще чем раз в 90 секунд этот запуск не пойдёт/);
   });
 });

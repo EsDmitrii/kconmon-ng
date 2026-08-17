@@ -125,3 +125,66 @@ describe("MatrixPage engaged at t", () => {
     expect(screen.getByText("unknown metric")).toBeInTheDocument();
   });
 });
+
+/* ── the two URL keys, abused ───────────────────────────────────────────────
+ *
+ * QA scope 4: whatever a shared link says, the page must open on something it
+ * can actually answer for, and the address bar must not go on claiming what the
+ * page is not showing. `?at=` is lib/timemachine's (RFC 3339, strictly) and
+ * `?protocol=` is this page's.
+ */
+describe("MatrixPage — a link whose parameters do not mean anything", () => {
+  /** A LIVE body: every case below is one the console must refuse to engage on,
+   *  so what has to arrive is the ordinary /api/v1/matrix answer. */
+  const openAt = (search: string) => {
+    window.history.pushState({}, "", `/matrix${search}`);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((url: string) =>
+        Promise.resolve(
+          String(url).includes("/api/v1/matrix")
+            ? json({
+                protocol: "tcp", plane: "pod", nodes: ["a", "b"],
+                cells: [{ source: "a", destination: "b", failRatio: 0.5 }],
+                timestamp: "t",
+              })
+            : json({ version: "1.7.0" }),
+        ),
+      ),
+    );
+    renderPage();
+  };
+
+  it.each([
+    ["?at=yesterday", "an English word"],
+    ["?at=2026-13-45T99:99:99Z", "a date that does not exist"],
+    ["?at=1785276000", "a unix stamp"],
+    ["?at=", "an empty value"],
+    ["?at=%00", "a NUL"],
+  ])("stays Live for %s (%s), printing no Invalid Date", async (search) => {
+    openAt(search);
+    // The Live sentence, not the "as of {at}" one — and never a mangled stamp.
+    expect(await screen.findByText(/^Live N×N node connectivity/)).toBeInTheDocument();
+    expect(document.body.textContent).not.toMatch(/Invalid Date|NaN/);
+  });
+
+  it("degrades a protocol nothing probes and corrects the address bar it came in", async () => {
+    openAt("?protocol=SCTP&at=nonsense");
+    await screen.findByRole("table");
+
+    // The URL is what an operator copies and shares: it must not keep claiming
+    // a protocol the page silently replaced.
+    expect(new URLSearchParams(window.location.search).get("protocol")).toBe("tcp");
+    expect(screen.getByRole("radio", { name: "TCP" })).toBeChecked();
+    // ?at= is not this page's to rewrite, and the unreadable one left it Live.
+    expect(screen.getByText(/^Live N×N node connectivity/)).toBeInTheDocument();
+  });
+
+  it("takes the first of a repeated protocol and collapses the duplicate away", async () => {
+    openAt("?protocol=zzz&protocol=udp");
+    await screen.findByRole("table");
+
+    expect(window.location.search).toBe("?protocol=tcp");
+    expect(screen.getByRole("radio", { name: "TCP" })).toBeChecked();
+  });
+});

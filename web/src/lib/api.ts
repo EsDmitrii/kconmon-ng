@@ -31,6 +31,7 @@ import type {
   Me,
   PathSnapshot,
   PathSnapshotPage,
+  PathTracePage,
   PathSnapshotQuery,
   Problem,
   Projection,
@@ -131,8 +132,16 @@ export function goTo(path: string): void {
 // redirectToLogin sends the browser to /login with the current location preserved as ?returnTo=.
 function redirectToLogin(): void {
   if (window.location.pathname === LOGIN_PATH) return;
-  const returnTo = encodeURIComponent(window.location.pathname + window.location.search);
-  navigate(`${LOGIN_PATH}?returnTo=${returnTo}`);
+  const target = window.location.pathname + window.location.search;
+  /* The root needs no parameter: it is where pages/login.tsx sends the reader
+     when there is none, so "?returnTo=%2F" only asks for the default in a
+     longer string (owner report). Anything else — including the root WITH a
+     query, which is a different place — still travels. */
+  if (target === "/") {
+    navigate(LOGIN_PATH);
+    return;
+  }
+  navigate(`${LOGIN_PATH}?returnTo=${encodeURIComponent(target)}`);
 }
 
 /**
@@ -152,15 +161,68 @@ async function apiFetch(input: string, init: RequestInit = {}): Promise<Response
   return resp;
 }
 
-async function handle<T>(resp: Response): Promise<T> {
-  if (resp.ok) return (await resp.json()) as T;
-  const ct = resp.headers.get("Content-Type") ?? "";
-  if (ct.includes("problem+json")) throw new ApiError((await resp.json()) as Problem);
-  // PromQL upstream errors come back as Prometheus's own envelope with 4xx.
-  if (ct.includes("json")) {
-    const body = (await resp.json()) as PromResult;
-    if (body.status === "error") return body as T;
+/**
+ * PROBLEM_TYPE_UNREADABLE marks a Problem this CLIENT invented because the
+ * server's body could not be read at all — a proxy's HTML page under a JSON
+ * content type, a connection cut mid-body, an empty 500.
+ *
+ * It exists so a page can tell the two apart. This console's rule is that the
+ * server's own sentence wins over any wording of ours, and that rule is only
+ * true of a sentence the server actually sent: printing `error.message` for one
+ * of these would put the transport's wording in front of an operator, naming a
+ * mechanism nobody can act on. Pages check `isServerSentence` and fall back to
+ * their own dictionary line — which is also the only way the text is
+ * translated at all, since nothing in this module is.
+ */
+export const PROBLEM_TYPE_UNREADABLE = "urn:kconmon-ng:client:unreadable-body";
+
+const UNREADABLE_BODY = "the server's answer could not be read";
+
+function unreadable(status: number): Problem {
+  return { type: PROBLEM_TYPE_UNREADABLE, title: UNREADABLE_BODY, status };
+}
+
+/**
+ * isServerSentence answers "did the SERVER write this?" — true for a
+ * problem+json (or a status line) that carries the server's own words, false
+ * for anything this module had to invent, and false for a network-level
+ * rejection, which is not an ApiError at all.
+ */
+export function isServerSentence(err: unknown): err is ApiError {
+  return err instanceof ApiError && err.problem.type !== PROBLEM_TYPE_UNREADABLE;
+}
+
+/** readJSON is `resp.json()` with the parser's exception folded away: a body
+ *  that is not the JSON its Content-Type claims answers `undefined` instead of
+ *  throwing, so the STATUS — the only fact worth reporting about an ingress
+ *  serving an HTML error page under application/json — survives. */
+async function readJSON(resp: Response): Promise<unknown | undefined> {
+  try {
+    return await resp.json();
+  } catch {
+    return undefined;
   }
+}
+
+async function handle<T>(resp: Response): Promise<T> {
+  if (resp.ok) {
+    const body = await readJSON(resp);
+    // A 200 whose body was cut in half is still a failed read, and every caller
+    // in this app catches ApiError — handing them a bare SyntaxError makes the
+    // parser's wording the operator's error message.
+    if (body === undefined) throw new ApiError(unreadable(resp.status));
+    return body as T;
+  }
+  const ct = resp.headers.get("Content-Type") ?? "";
+  if (ct.includes("problem+json")) {
+    const problem = (await readJSON(resp)) as Problem | undefined;
+    if (problem !== undefined) throw new ApiError(problem);
+  } else if (ct.includes("json")) {
+    // PromQL upstream errors come back as Prometheus's own envelope with 4xx.
+    const body = (await readJSON(resp)) as PromResult | undefined;
+    if (body?.status === "error") return body as T;
+  }
+  if (resp.statusText === "") throw new ApiError(unreadable(resp.status));
   throw new ApiError({ type: "about:blank", title: resp.statusText, status: resp.status });
 }
 
@@ -170,7 +232,11 @@ async function handle<T>(resp: Response): Promise<T> {
 async function handleVoid(resp: Response): Promise<void> {
   if (resp.ok) return;
   const ct = resp.headers.get("Content-Type") ?? "";
-  if (ct.includes("problem+json")) throw new ApiError((await resp.json()) as Problem);
+  if (ct.includes("problem+json")) {
+    const problem = (await readJSON(resp)) as Problem | undefined;
+    if (problem !== undefined) throw new ApiError(problem);
+  }
+  if (resp.statusText === "") throw new ApiError(unreadable(resp.status));
   throw new ApiError({ type: "about:blank", title: resp.statusText, status: resp.status });
 }
 
@@ -232,7 +298,15 @@ export function getEvents(q: EventQuery = {}): Promise<EventPage> {
   if (q.limit !== undefined) qs.set("limit", String(q.limit));
   if (q.cursor) qs.set("cursor", q.cursor);
   const suffix = qs.toString();
-  return apiFetch(`/api/v1/events${suffix ? `?${suffix}` : ""}`).then((r) => handle<EventPage>(r));
+  return (
+    apiFetch(`/api/v1/events${suffix ? `?${suffix}` : ""}`)
+      .then((r) => handle<EventPage>(r))
+      // Same nil-slice normalization getTopology explains. It matters more here
+      // than anywhere: pages/live.tsx feeds `events` straight into pushEvents,
+      // which reads .length on it, and a null nextCursor is never "" — so the
+      // feed's own "nothing older" check would never fire again.
+      .then((p) => ({ ...p, events: p.events ?? [], nextCursor: p.nextCursor ?? "" }))
+  );
 }
 
 export function getMatrix(protocol: Protocol, plane = "pod"): Promise<Matrix> {
@@ -300,6 +374,66 @@ export function getRuns(q: RunQuery = {}): Promise<RunPage> {
  * targets, check definitions, schedules All ten functions below ride the same apiFetch (credentials
  * + CSRF header on every mutation) and the same handle<T>/handleVoid pair everything above uses.
  */
+
+/*
+ * collectPages follows a keyset cursor to the END of a listing.
+ *
+ * Every "manage" surface in this console renders what it believes is the whole inventory — targets,
+ * check definitions, schedules, alert rules — and every one of them asked for ONE page and then
+ * paginated it client-side. The server's default page is 100 rows plus a nextCursor, so a fleet with
+ * 122 targets showed 100 of them and the pager's caption said «Showing 100 of 100 · Page 1 of 1»:
+ * not a truncation the reader could see, an assertion that there was nothing else.
+ *
+ * maxPages is a backstop, not a page size: it bounds a pathological loop (a server that keeps
+ * handing out cursors) rather than the inventory. When it trips, `truncated` says so and the caller
+ * shows it, which is the one thing the old behaviour never did.
+ */
+const MAX_COLLECT_PAGES = 50;
+
+export async function collectPages<P, T>(
+  fetchPage: (cursor: string | undefined) => Promise<P>,
+  rowsOf: (page: P) => T[] | undefined,
+  cursorOf: (page: P) => string | undefined,
+): Promise<{ items: T[]; truncated: boolean }> {
+  const items: T[] = [];
+  let cursor: string | undefined;
+  for (let i = 0; i < MAX_COLLECT_PAGES; i++) {
+    const page = await fetchPage(cursor);
+    items.push(...(rowsOf(page) ?? []));
+    cursor = cursorOf(page) || undefined;
+    if (!cursor) return { items, truncated: false };
+  }
+  return { items, truncated: true };
+}
+
+/** listAllTargets is listTargets to exhaustion; see collectPages. */
+export function listAllTargets(q: TargetQuery = {}): Promise<{ items: Target[]; truncated: boolean }> {
+  return collectPages(
+    (cursor) => listTargets({ ...q, cursor }),
+    (page) => page.targets,
+    (page) => page.nextCursor,
+  );
+}
+
+/** listAllChecks is listChecks to exhaustion; see collectPages. */
+export function listAllChecks(
+  q: CheckDefinitionQuery = {},
+): Promise<{ items: CheckDefinition[]; truncated: boolean }> {
+  return collectPages(
+    (cursor) => listChecks({ ...q, cursor }),
+    (page) => page.definitions,
+    (page) => page.nextCursor,
+  );
+}
+
+/** listAllSchedules is listSchedules to exhaustion; see collectPages. */
+export function listAllSchedules(q: ScheduleQuery = {}): Promise<{ items: Schedule[]; truncated: boolean }> {
+  return collectPages(
+    (cursor) => listSchedules({ ...q, cursor }),
+    (page) => page.schedules,
+    (page) => page.nextCursor,
+  );
+}
 
 // listTargets is GET /api/v1/targets: one page of external probe targets,
 // newest first, behind the same opaque keyset cursor getRuns/getEvents use.
@@ -435,10 +569,22 @@ export function deleteSchedule(id: string): Promise<void> {
  * the permission card on the /mtr page therefore exists for hand-rolled roles.
  */
 
-// getMTRDestinations is GET /api/v1/mtr/destinations: every (source, destination) pair path history
-// knows about.
+/**
+ * getMTRDestinations is GET /api/v1/mtr/destinations: the (source, destination) pairs path history
+ * knows about.
+ *
+ * The limit is EXPLICIT and it is the server's maximum. The endpoint is bounded (pairs are
+ * sources x destinations, so a large fleet is a large listing) and the call used to send no limit
+ * at all, taking the 100-row default: on a stand with 101 traced pairs one pair vanished from the
+ * Explorer entirely — its path history unreachable from the UI — and every aggregate count under
+ * the destination it belonged to was quietly short. The response carries `truncated`, which callers
+ * must surface rather than drop.
+ */
+export const MTR_DESTINATIONS_LIMIT = 500;
+
 export function getMTRDestinations(): Promise<MTRDestinationList> {
-  return apiFetch("/api/v1/mtr/destinations").then((r) => handle<MTRDestinationList>(r));
+  const qs = new URLSearchParams({ limit: String(MTR_DESTINATIONS_LIMIT) });
+  return apiFetch(`/api/v1/mtr/destinations?${qs}`).then((r) => handle<MTRDestinationList>(r));
 }
 
 // getMTRSnapshots is GET /api/v1/mtr/snapshots: one page of the DISTINCT
@@ -457,6 +603,24 @@ export function getMTRSnapshots(q: PathSnapshotQuery): Promise<PathSnapshotPage>
 export function getMTRSnapshot(id: string, enrich = false): Promise<PathSnapshot> {
   const suffix = enrich ? "?enrich=true" : "";
   return apiFetch(`/api/v1/mtr/snapshots/${encodeURIComponent(id)}${suffix}`).then((r) => handle<PathSnapshot>(r));
+}
+
+/**
+ * listPathTraces is GET /api/v1/mtr/snapshots/{id}/traces: the INDIVIDUAL traces that walked one
+ * route, newest first.
+ *
+ * The route row folds them into a single `traceCount`; this is the way back to them, each with its
+ * own clock and its own per-hop readings. The server bounds the scan by the route's own window and
+ * keeps only the traces whose recomputed path identity matches it.
+ */
+export function listPathTraces(id: string, q: { limit?: number; cursor?: string } = {}): Promise<PathTracePage> {
+  const qs = new URLSearchParams();
+  if (q.limit !== undefined) qs.set("limit", String(q.limit));
+  if (q.cursor) qs.set("cursor", q.cursor);
+  const suffix = qs.toString() ? `?${qs}` : "";
+  return apiFetch(`/api/v1/mtr/snapshots/${encodeURIComponent(id)}/traces${suffix}`).then((r) =>
+    handle<PathTracePage>(r),
+  );
 }
 
 /* Reading needs annotations:read, which EVERY built-in role holds; creating and deleting need annotations:write. */
@@ -526,7 +690,9 @@ export function getIncidents(q: IncidentQuery = {}): Promise<IncidentPage> {
   if (q.limit !== undefined) qs.set("limit", String(q.limit));
   if (q.cursor) qs.set("cursor", q.cursor);
   const suffix = qs.toString();
-  return apiFetch(`/api/v1/incidents${suffix ? `?${suffix}` : ""}`).then((r) => handle<IncidentPage>(r));
+  return apiFetch(`/api/v1/incidents${suffix ? `?${suffix}` : ""}`)
+    .then((r) => handle<IncidentPage>(r))
+    .then((p) => ({ ...p, incidents: p.incidents ?? [], nextCursor: p.nextCursor ?? "" }));
 }
 
 // getIncident is GET /api/v1/incidents/{id} — the permalink's own read
@@ -813,7 +979,20 @@ import type { AlertList } from "./types";
  * listAlerts is GET /api/v1/alerts: what Prometheus is firing RIGHT NOW; NOT an error and NOT a
  * 503: "nothing is firing" and "nothing is evaluating" are two different sentences the Overview
  * card must render.
+ *
+ * `managedOnly=true` is not a default anyone may drop: this console shows the
+ * alerts it MANAGES and no others. kconmon-ng is not an aggregator of a
+ * cluster's whole firing state — a kube-prometheus-stack backdrop of TargetDown,
+ * etcdMembersDown and Watchdog belongs in Alertmanager and in Grafana, and here
+ * it only buries the rows about the fleet this console probes.
+ *
+ * It is asked for HERE rather than per surface because this is the frontend's one
+ * alert fetcher, and the ROUTE does the filtering (internal/console/httpapi/
+ * alertrules.go's decodePromAlerts), so a foreign alert never crosses the wire
+ * at all. The HTTP API keeps serving both sets — the parameter is documented and
+ * an API is a machine interface, not a product surface; the choice of what to
+ * SHOW is this console's, and it is spelled once, here.
  */
 export function listAlerts(): Promise<AlertList> {
-  return apiFetch("/api/v1/alerts").then((r) => handle<AlertList>(r));
+  return apiFetch("/api/v1/alerts?managedOnly=true").then((r) => handle<AlertList>(r));
 }

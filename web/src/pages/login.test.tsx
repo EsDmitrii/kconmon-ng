@@ -63,6 +63,31 @@ describe("LoginPage", () => {
     expect(qc.getQueryState(["me"])?.isInvalidated).toBe(true);
   });
 
+  /* The other half of lib/api.ts's "no ?returnTo= for the root": with no
+     parameter to read, the sign-in must land on / rather than nowhere. */
+  it("lands on / after a sign-in reached with no returnTo at all", async () => {
+    window.history.pushState({}, "", "/login");
+    const navigateSpy = vi.fn();
+    setNavigateForTest(navigateSpy);
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(null, { status: 204 })));
+    renderPage("local");
+
+    fireEvent.change(screen.getByLabelText(/username/i), { target: { value: "ada" } });
+    fireEvent.change(screen.getByLabelText(/password/i), { target: { value: "secret" } });
+    fireEvent.click(screen.getByRole("button", { name: /sign in/i }));
+
+    await waitFor(() => expect(navigateSpy).toHaveBeenCalledWith("/"));
+  });
+
+  it("sends the SSO link home too when nothing asked for anywhere else", () => {
+    window.history.pushState({}, "", "/login");
+    renderPage("oidc");
+    expect(screen.getByRole("link", { name: /sign in with sso/i })).toHaveAttribute(
+      "href",
+      "/api/v1/auth/oidc/start?returnTo=%2F",
+    );
+  });
+
   it("a failed submit shows an inline error and does not navigate", async () => {
     const navigateSpy = vi.fn();
     setNavigateForTest(navigateSpy);

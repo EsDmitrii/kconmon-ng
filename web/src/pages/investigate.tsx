@@ -13,6 +13,7 @@ import { DateTimePicker } from "@/components/ui/datetime-picker";
 import { Segmented } from "@/components/ui/segmented";
 import { useAuth } from "@/hooks/use-auth";
 import { useDatabaseAvailable } from "@/hooks/use-capabilities";
+import { useConfirmStep, useKeyedConfirmStep } from "@/hooks/use-confirm-step";
 import { useSubmitGuard } from "@/hooks/use-submit-guard";
 import { useTopology } from "@/hooks/use-topology";
 import { mergeAnnotations } from "@/lib/annotations";
@@ -39,9 +40,10 @@ import {
   promqlQueryRange,
 } from "@/lib/api";
 import { stampClock, stampFull, useLocale, useT, type Locale, type Translate } from "@/lib/i18n";
-/* Counts live in the centre pane, not here, so this page needs no countForm —
-   components/investigation-timeline.tsx picks the plural forms it renders. */
-import { investigateDict, type InvestigateKey } from "@/lib/i18n/dict/investigate";
+/* The centre pane picks the plural forms of the counts it renders; countForm is
+   here for the ONE count this page owns — how many of our own alerts the scope
+   kept off the timeline, which is a source note and therefore the page's. */
+import { countForm, investigateDict, type InvestigateKey } from "@/lib/i18n/dict/investigate";
 import { investigationSourcesDict, type InvestigationSourcesKey } from "@/lib/i18n/dict/investigation-sources";
 import { subscribeToLocation } from "@/lib/location";
 import { endSentence } from "@/lib/utils";
@@ -62,7 +64,6 @@ import {
   PAIR_SEPARATOR,
   PIN_NOTE_MAX,
   RANGE_PRESETS,
-  alertEntries,
   annotationEntries,
   auditEntries,
   buildExportPayload,
@@ -91,6 +92,7 @@ import {
   scopeIncompleteReason,
   scopeNodeOptions,
   scopeZoneOptions,
+  scopedAlertEntries,
   scopesToQuery,
   validAt,
   type InvestigationParams,
@@ -98,7 +100,7 @@ import {
   type RangePreset,
   type ScopeKind,
 } from "@/lib/investigation-sources";
-import { useTimeContext, useWriteGuard, useWritesDisabled } from "@/lib/timemachine";
+import { withAtParam, useTimeContext, useWriteGuard, useWritesDisabled } from "@/lib/timemachine";
 import type { Incident, IncidentStatus, K8sEvent, MaintenanceWindow, PathSnapshot, PinnedRef } from "@/lib/types";
 import { buildRunRequest, CONTROL_CLASS } from "@/pages/diagnostics";
 
@@ -286,6 +288,23 @@ function hydrateInvestigation(search: string, now: Date, at: Date | null, t: Tra
   };
 }
 
+/**
+ * readIncidentParam is the ONE reader of `?incident=`, and it is the reader
+ * because an EMPTY value is not an id (QA scope 4).
+ *
+ * `?incident=` — the shape a link builder produces from an undefined id, and the
+ * shape left behind by hand-deleting one — used to put the page into incident
+ * mode for the id "": it fired `GET /api/v1/incidents/`, took the 404 as "that
+ * incident was deleted", and rendered a not-found card whose sentence named
+ * nothing at all («No incident with the id  — it was most likely deleted»).
+ * Worse, the parameter's mere presence made correctURL bow out, so the four
+ * scope parameters beside it went uncorrected and unreported too.
+ */
+function readIncidentParam(search: string): string | null {
+  const raw = new URLSearchParams(search).get("incident");
+  return raw === null || raw.trim() === "" ? null : raw;
+}
+
 /** writeIncidentParam is the other direction: the id REPLACES the four scope parameters. */
 function writeIncidentParam(id: string): string {
   const url = new URL(window.location.href);
@@ -299,7 +318,7 @@ const INPUT_CLASS =
   "h-8 w-full rounded-md bg-surface-2 px-2 text-sm text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring";
 
 const TEXTAREA_CLASS =
-  "w-full rounded-md bg-surface-2 px-2 py-1.5 text-sm text-foreground placeholder:text-muted-foreground/70 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring";
+  "w-full rounded-md bg-surface-2 px-2 py-1.5 text-sm text-foreground placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring";
 
 /** fmtStamp is the incident strip's stamp, through lib/i18n's shared helper so
  *  the opened/resolved line, the save form's window and the bars below all draw
@@ -450,8 +469,15 @@ function IncidentStrip({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
   const [copyNote, setCopyNote] = useState<string>();
-  /* An incident is somebody's written record of an outage — the notes, the pinned findings. */
-  const [confirmingDelete, setConfirmingDelete] = useState(false);
+  /* An incident is somebody's written record of an outage — the notes, the pinned findings.
+     Two presses, and the keyboard kept whole across the swap — hooks/use-confirm-step. */
+  const {
+    confirming: confirmingDelete,
+    confirmRef,
+    triggerRef,
+    ask: askDelete,
+    reset: resetDelete,
+  } = useConfirmStep();
   const copyTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
   const resolved = incident.status === "resolved";
 
@@ -512,9 +538,9 @@ function IncidentStrip({
     } catch (err) {
       setError(queryErrorMessage(err, t("incident.deleteFailed")));
       setBusy(false);
-      setConfirmingDelete(false);
+      resetDelete();
     }
-  }, [incident.id, onDeleted, t]);
+  }, [incident.id, onDeleted, resetDelete, t]);
 
   return (
     <Card asChild className="border-l-4 border-l-primary p-5">
@@ -557,7 +583,12 @@ function IncidentStrip({
             {canWrite ? (
               confirmingDelete ? (
                 <>
+                  {/* Spoken as well as drawn — the controls swap under the reader. */}
+                  <span role="status" className="sr-only">
+                    {t("incident.confirmDelete.aria", { title: incident.title })}
+                  </span>
                   <Button
+                    ref={confirmRef}
                     type="button"
                     size="sm"
                     variant="outline"
@@ -569,19 +600,20 @@ function IncidentStrip({
                   >
                     {t("incident.confirmDelete")}
                   </Button>
-                  <Button type="button" size="sm" variant="ghost" onClick={() => setConfirmingDelete(false)}>
+                  <Button type="button" size="sm" variant="ghost" onClick={resetDelete}>
                     {t("incident.cancel")}
                   </Button>
                 </>
               ) : (
                 <Button
+                  ref={triggerRef}
                   type="button"
                   size="sm"
                   variant="ghost"
                   {...guard}
                   disabled={writesDisabled}
                   aria-label={t("incident.delete.aria", { title: incident.title })}
-                  onClick={() => setConfirmingDelete(true)}
+                  onClick={askDelete}
                 >
                   {t("incident.delete")}
                 </Button>
@@ -687,8 +719,9 @@ function PinnedFindings({
   const t = useT(investigateDict);
   /* Which row is asking "are you sure?", by pinKey rather than by index — the
      list is re-keyed by every save, and an index would move the confirm onto a
-     different finding under the operator's cursor. */
-  const [confirming, setConfirming] = useState<string | null>(null);
+     different finding under the operator's cursor. The hook is what carries
+     focus across the swap, so the keyboard does not land back on <body>. */
+  const { confirming, confirmRef, triggerRef, ask, reset } = useKeyedConfirmStep();
 
   return (
     <Card asChild className="p-5">
@@ -734,31 +767,37 @@ function PinnedFindings({
                         pinning is meant to be cheap to change your mind about. */}
                     {(p.note ?? "") !== "" && confirming === pinKey(p) ? (
                       <>
+                        {/* Spoken as well as drawn — the row swaps its controls under the reader. */}
+                        <span role="status" className="sr-only">
+                          {t("pinned.discardAndUnpin.aria", { kind: p.kind, id: p.id })}
+                        </span>
                         <Button
+                          ref={confirmRef}
                           type="button"
                           size="sm"
                           variant="outline"
                           disabled={writesDisabled || busy}
                           aria-label={t("pinned.discardAndUnpin.aria", { kind: p.kind, id: p.id })}
                           onClick={() => {
-                            setConfirming(null);
+                            reset();
                             onRemove(i);
                           }}
                         >
                           {t("pinned.discardAndUnpin")}
                         </Button>
-                        <Button type="button" size="sm" variant="ghost" onClick={() => setConfirming(null)}>
+                        <Button type="button" size="sm" variant="ghost" onClick={reset}>
                           {t("pinned.cancel")}
                         </Button>
                       </>
                     ) : (
                       <Button
+                        ref={triggerRef}
                         type="button"
                         size="sm"
                         variant="ghost"
                         disabled={writesDisabled || busy}
                         aria-label={t("pinned.unpin.aria", { kind: p.kind, id: p.id })}
-                        onClick={() => ((p.note ?? "") === "" ? onRemove(i) : setConfirming(pinKey(p)))}
+                        onClick={() => ((p.note ?? "") === "" ? onRemove(i) : ask(pinKey(p)))}
                       >
                         {t("pinned.unpin")}
                       </Button>
@@ -800,6 +839,22 @@ function PinnedFindings({
   );
 }
 
+/**
+ * Select is the scope pickers' one control, and it CARRIES A VALUE THE OPTIONS DO
+ * NOT HAVE rather than dropping it (QA scope 4).
+ *
+ * A select whose `value` matches no option renders blank — and every reason to
+ * arrive here with one is ordinary: a permalink written last month, an incident
+ * saved before a node was drained, a `?scope=` typed by hand, a `targets:read`
+ * this subject does not have (which empties the list entirely). The page went on
+ * investigating that scope, and said so in the headline beside the title, while
+ * the picker under it showed nothing — so the two halves of the form disagreed,
+ * and pressing Investigate committed the name the reader could not see.
+ *
+ * The option is drawn instead, MARKED: the picker names what is committed, and
+ * the mark says the fleet has no such object today, which is itself a finding on
+ * an investigation page. Choosing anything else drops it, exactly as it should.
+ */
 function Select({
   label,
   value,
@@ -811,6 +866,15 @@ function Select({
   options: string[];
   onChange: (v: string) => void;
 }) {
+  const t = useT(investigateDict);
+  const orphan = value !== "" && !options.includes(value);
+  /* The MARK is a claim about the fleet, so it waits for a list to have been
+     loaded. An empty list is "not asked yet" (topology in flight) or "not
+     allowed to ask" (no targets:read, which has its own note under the form) —
+     neither of those is evidence that the object is gone, and marking on them
+     would print «node-a — not in the current topology» about a node that is
+     right there, for as long as the first fetch takes. */
+  const missing = orphan && options.length > 0;
   return (
     <label className="flex flex-col gap-1 text-[13px]">
       <span className="text-muted-foreground">{label}</span>
@@ -818,9 +882,17 @@ function Select({
         aria-label={label}
         value={value}
         onChange={(e) => onChange(e.target.value)}
-        className={`${CONTROL_CLASS} min-w-[10rem]`}
+        /* max-w as well as min-w: a <select>'s intrinsic width is its WIDEST option, and a scope
+           comes off the wire — the stand carries one at 250 characters. Without a cap the control
+           measured ~1950px and `main` (overflow-auto) scrolled the whole page sideways. */
+        className={`${CONTROL_CLASS} min-w-[10rem] max-w-[20rem]`}
       >
         <option value="">—</option>
+        {orphan ? (
+          /* The name is the URL's or the incident's own bytes — data, with or
+             without the translated mark after it. */
+          <option value={value}>{missing ? t("form.option.missing", { value }) : value}</option>
+        ) : null}
         {options.map((o) => (
           <option key={o} value={o}>
             {o}
@@ -851,7 +923,6 @@ export function InvestigatePage() {
      through the same gate the form commits through (QA scope 3, finding #2). */
   const [hydrated] = useState<Hydrated>(() => hydrateInvestigation(window.location.search, new Date(), at, ts));
   const [params, setParams] = useState<InvestigationParams>(hydrated.params);
-  const [cursorAt, setCursorAt] = useState<Date | null>(null);
   const [runError, setRunError] = useState<string>();
   const [runStarted, setRunStarted] = useState<string>();
   /* Why the last commit was refused, and whether it moved an edge — both are
@@ -866,7 +937,7 @@ export function InvestigatePage() {
      scope parameters, and is thereafter owned by this state: saving sets it,
      applying the form clears it. */
   const [incidentId, setIncidentId] = useState<string | null>(
-    () => new URLSearchParams(window.location.search).get("incident"),
+    () => readIncidentParam(window.location.search),
   );
   /* The id of a permalink that names an incident the server does not have —
      usually one somebody deleted (QA scope 3, finding #3). Held separately from
@@ -923,9 +994,8 @@ export function InvestigatePage() {
         const search = window.location.search;
         if (search === appliedSearchRef.current) return;
         appliedSearchRef.current = search;
-        const qs = new URLSearchParams(search);
         /* An incident id in the new URL takes over exactly as it does at mount; its absence LEAVES incident mode. */
-        const nextIncident = qs.get("incident");
+        const nextIncident = readIncidentParam(search);
         if (nextIncident !== incidentIdRef.current) hydratedRef.current = null;
         setIncidentId(nextIncident);
         setMissingIncidentId(null);
@@ -943,7 +1013,6 @@ export function InvestigatePage() {
         setPreset(presetForSpan(next.params.from, next.params.to));
         setCustomFrom(next.params.from);
         setCustomTo(next.params.to);
-        setCursorAt(null);
         setSaveOpen(false);
         setCommitError(next.error);
         setClamped(next.clamped);
@@ -957,7 +1026,7 @@ export function InvestigatePage() {
      in the state initializer above: warning and rewriting history are side
      effects, and a render is not where those belong. */
   useEffect(() => {
-    correctURL(hydrated, new URLSearchParams(window.location.search).get("incident"), appliedSearchRef);
+    correctURL(hydrated, readIncidentParam(window.location.search), appliedSearchRef);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [hydrated]);
 
@@ -1003,7 +1072,7 @@ export function InvestigatePage() {
     setClamped(commit.ok);
     setCommitError(commit.ok ? undefined : commit.reason);
     /* An `?incident=` link is the row's, not the URL's — see correctURL. */
-    if (new URLSearchParams(window.location.search).get("incident") === null) {
+    if (readIncidentParam(window.location.search) === null) {
       writeParamsApplied(next, appliedSearchRef, true);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1075,7 +1144,6 @@ export function InvestigatePage() {
     setPreset(presetForSpan(next.from, next.to));
     setCustomFrom(next.from);
     setCustomTo(next.to);
-    setCursorAt(null);
   }, [incident, targetsSettled, targetNames]);
 
   /* The pinned list is server-owned: every write replaces it wholesale and the
@@ -1303,6 +1371,14 @@ export function InvestigatePage() {
     enabled: ready && canAlerts && promConfigured && !engaged,
   });
   const firingAlerts = useMemo(() => alertsQuery.data?.alerts ?? [], [alertsQuery.data]);
+  /* OURS, narrowed to the scope the way runs are. A foreign alert produces
+     nothing here and lib/api.ts does not even ask for one — see
+     lib/investigation-sources.ts's alertIsOurs for why the rule id is the
+     ownership discriminator and the node labels are not. */
+  const scopedAlerts = useMemo(
+    () => scopedAlertEntries(firingAlerts, params.from, params.to, scope, ts),
+    [firingAlerts, params.from, params.to, scope, ts],
+  );
 
   /* ── assembly ── */
   const entries = useMemo(
@@ -1322,7 +1398,7 @@ export function InvestigatePage() {
            (finding #6) — they used to be bare English literals under a «порог»
            badge. */
         thresholdCrossings(samples, DEFAULT_THRESHOLDS, ts),
-        alertEntries(firingAlerts, params.from, params.to, ts),
+        scopedAlerts.entries,
       ),
     [
       eventsQuery.data,
@@ -1333,7 +1409,7 @@ export function InvestigatePage() {
       k8sQuery.data,
       windows,
       samples,
-      firingAlerts,
+      scopedAlerts,
       params.from,
       params.to,
       ts,
@@ -1455,6 +1531,14 @@ export function InvestigatePage() {
     if (dbResolved && !dbAvailable) {
       out.push({ id: "database", text: t("source.database") });
     }
+    /* Every permission line waits for GET /auth/me, the same way the database line waits for the
+       capability probe. `can()` is false for a permission the caller HAS until that request lands,
+       so an admin opening this page was shown eight definitive sentences saying they were missing
+       everything — and then, a moment later, the timeline they said could not be built. A claim
+       about what somebody may not do is not a thing to say before knowing. */
+    if (!authResolved) {
+      return out;
+    }
     if (!canEvents) {
       out.push({ id: "events", text: t("source.events") });
     }
@@ -1499,6 +1583,17 @@ export function InvestigatePage() {
       out.push({ id: "alerts-config", text: t("source.alertsConfig") });
     } else {
       out.push({ id: "alerts-now", text: t("source.alertsNow") });
+      /* Scope narrowing is the one way an alert this console owns can be firing
+         and have no row, so it is counted and named rather than left to be
+         noticed by its absence. */
+      if (scopedAlerts.hiddenByScope > 0) {
+        out.push({
+          id: "alerts-scope-hidden",
+          text: t(`source.alertsScopeHidden.${countForm(locale, scopedAlerts.hiddenByScope)}` as InvestigateKey, {
+            count: scopedAlerts.hiddenByScope,
+          }),
+        });
+      }
     }
 
     /*
@@ -1520,6 +1615,7 @@ export function InvestigatePage() {
     return out;
   }, [
     t,
+    authResolved,
     dbResolved,
     dbAvailable,
     canEvents,
@@ -1534,9 +1630,24 @@ export function InvestigatePage() {
     mtrMode,
     engaged,
     failedSources,
+    scopedAlerts,
+    locale,
   ]);
 
+  /**
+   * `!ready` FIRST (QA scope 4).
+   *
+   * Every source below is gated on `ready` — auth and the database capability
+   * both resolved — so until that lands react-query holds eleven DISABLED
+   * queries, none of which is "loading". The pane read that as a settled fetch
+   * over an empty result and rendered its verdict on it: «0 записей в этом
+   * интервале» over "nothing happened in this window", for a page that had not
+   * yet asked a single question. It is the exact failure the whole partial /
+   * all-failed apparatus below exists to prevent, arriving one round trip before
+   * any of that apparatus can see it.
+   */
   const loading =
+    !ready ||
     eventsQuery.isLoading ||
     auditQuery.isLoading ||
     annotationsQuery.isLoading ||
@@ -1614,7 +1725,6 @@ export function InvestigatePage() {
       setCustomFrom(commit.from);
       setCustomTo(commit.to);
     }
-    setCursorAt(null);
     /* Leaving incident mode: see writeParams' own comment. hydratedRef is left
        alone deliberately — re-entering the SAME incident later must hydrate
        again, and clearing the id is what makes the next mount do that. */
@@ -1721,6 +1831,7 @@ export function InvestigatePage() {
 
   return (
     <PageShell
+      timeMachine
       title={t("title")}
       description={t("description")}
       actions={
@@ -1879,7 +1990,7 @@ export function InvestigatePage() {
             ) : null}
 
             <a
-              href="/explore"
+              href={withAtParam("/explore")}
               className="inline-flex h-8 items-center rounded-md border border-border-strong px-3 text-[13px] hover:bg-accent hover:text-accent-foreground"
             >
               {t("actions.compare")}
@@ -1951,7 +2062,7 @@ export function InvestigatePage() {
             <p role="status" className="mt-2 text-xs text-muted-foreground">
               {/* Two keys around the run-id link: the id is data. */}
               {t("actions.runStarted.before")}{" "}
-              <a href={`/diagnostics/runs/${runStarted}`} className="text-primary hover:underline">
+              <a href={withAtParam(`/diagnostics/runs/${runStarted}`)} className="text-primary hover:underline">
                 {runStarted}
               </a>{" "}
               {t("actions.runStarted.after")}
@@ -2068,8 +2179,9 @@ export function InvestigatePage() {
           notes={notes}
           loading={loading}
           allFailed={allFailed}
-          cursorAt={cursorAt}
-          onCursor={setCursorAt}
+          /* The claim below the rows needs a question to have been put — see the
+             pane's own `asked`. */
+          asked={askedSources.length > 0}
           pinning={pinning}
           /* The same identity the source queries are keyed on, so the pane's
              page resets exactly when the rows it is paging over are refetched
@@ -2091,7 +2203,6 @@ export function InvestigatePage() {
             /* Without this the chip printed a figure for two evaluations that
                never came back (finding #1). */
             deltaError={deltaQuery.error as Error | null}
-            cursorAt={cursorAt}
             windows={windows}
             annotations={annotations}
             promConfigured={promConfigured}

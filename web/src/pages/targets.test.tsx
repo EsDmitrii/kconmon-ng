@@ -560,7 +560,7 @@ describe("TargetsPage — schedules tab", () => {
 
     await openTab(/schedules/i);
     const rows = within(await screen.findByRole("list", { name: /schedules/i })).getAllByRole("listitem");
-    expect(rows[0]).toHaveTextContent(`next ${new Date("2026-01-02T00:00:00Z").toLocaleString()}`);
+    expect(rows[0]).toHaveTextContent(`next ${new Date("2026-01-02T00:00:00Z").toLocaleString(undefined, { hour12: false })}`);
     expect(rows[1]).toHaveTextContent("next —");
     expect(rows[1]).toHaveTextContent("continuous");
   });

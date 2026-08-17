@@ -162,6 +162,31 @@ describe("toSeriesOption", () => {
     expect(option.animation).toBe(false);
   });
 
+  /* The 24h and the 6h pick drew the SAME axis on a Prometheus holding six
+     hours, so the range buttons looked like they only redrew the curves (owner
+     report). The axis is the span that was asked for; the data covers what it
+     covers, and the empty part is the answer. */
+  it("pins the axis to the window it was given, not to the data it received", () => {
+    const start = new Date(1699913600000); // a day before the samples above
+    const end = new Date(1700000030000);
+    const option = toSeriesOption(tcpP95, matrixResult, false, { start, end });
+    const xAxis = option.xAxis as echarts.XAXisComponentOption;
+
+    expect(xAxis.min).toBe(start.getTime());
+    expect(xAxis.max).toBe(end.getTime());
+    // The samples are untouched — pinning the axis moves no data.
+    expect((option.series as echarts.LineSeriesOption[])[0].data).toEqual([
+      [1700000000000, 0.215],
+      [1700000030000, 0.3],
+    ]);
+  });
+
+  it("leaves the axis to ECharts when no window is given, so other callers are unchanged", () => {
+    const xAxis = toSeriesOption(tcpP95, matrixResult, false).xAxis as echarts.XAXisComponentOption;
+    expect(xAxis.min).toBeUndefined();
+    expect(xAxis.max).toBeUndefined();
+  });
+
   it("formats seconds-unit values as ms on the y axis", () => {
     const option = toSeriesOption(tcpP95, matrixResult, false);
     const yAxis = option.yAxis as echarts.YAXisComponentOption;

@@ -7,6 +7,7 @@ import { PageShell } from "@/components/page-shell";
 import { RecentChanges } from "@/components/recent-changes";
 import { Badge, type BadgeProps } from "@/components/ui/badge";
 import { Card } from "@/components/ui/card";
+import { Pager, usePager } from "@/components/ui/pager";
 import { Segmented } from "@/components/ui/segmented";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useMatrix } from "@/hooks/use-matrix";
@@ -19,7 +20,7 @@ import { DEGRADED_AT, FAILING_AT, isMeasured, severityRatio } from "@/lib/matrix
 /* The ?protocol= reader and writer live on pages/matrix.tsx — one URL key, one
    spelling, imported the way target-card.tsx imports fmtIntervalNs. */
 import { degradedProtocolParam, readProtocolFromLocation, writeProtocol } from "@/pages/matrix";
-import { useTimeContext } from "@/lib/timemachine";
+import { withAtParam, useTimeContext } from "@/lib/timemachine";
 import { PROTOCOLS, type MatrixCell, type Protocol, type RunDetail } from "@/lib/types";
 import { cn, runsAtOrBefore } from "@/lib/utils";
 
@@ -128,10 +129,13 @@ function BreakdownTable({ nodeName, cells }: { nodeName: string; cells: MatrixCe
   const t = useT(cardsDict);
   const outbound = cells.filter((c) => c.source === nodeName && c.destination !== nodeName);
   const showLoss = outbound.some((c) => c.lossRatio !== undefined);
+  /* One row per peer: on a big cluster that is every other node. */
+  const pager = usePager(outbound, { resetKey: nodeName });
   if (outbound.length === 0) {
     return <p className="px-4 py-10 text-center text-xs text-muted-foreground">{t("node.breakdown.empty")}</p>;
   }
   return (
+    <>
     <div className="overflow-x-auto">
       <table className="w-full text-sm">
         <caption className="sr-only">{t("node.breakdown.caption", { name: nodeName })}</caption>
@@ -155,13 +159,13 @@ function BreakdownTable({ nodeName, cells }: { nodeName: string; cells: MatrixCe
           </tr>
         </thead>
         <tbody className="divide-y divide-border">
-          {outbound.map((c) => (
+          {pager.visible.map((c) => (
             <tr key={c.destination}>
               {/* The destination was the other dead end on this card: the row
                   named a pair and led nowhere (QA scope 2, finding #14). */}
               <td className="max-w-[16rem] py-3 pl-4 pr-4">
                 <a
-                  href={`/pairs/${encodeURIComponent(nodeName)}/${encodeURIComponent(c.destination)}`}
+                  href={withAtParam(`/pairs/${encodeURIComponent(nodeName)}/${encodeURIComponent(c.destination)}`)}
                   title={c.destination}
                   className="block truncate rounded text-primary hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                 >
@@ -198,6 +202,8 @@ function BreakdownTable({ nodeName, cells }: { nodeName: string; cells: MatrixCe
         </tbody>
       </table>
     </div>
+    <Pager pager={pager} subject={t("node.breakdown.subject")} />
+    </>
   );
 }
 
@@ -333,6 +339,7 @@ function DiagnosticsTab({ nodeName }: { nodeName: string }) {
   const { locale } = useLocale();
   const { runs, isLoading, error } = useNodeDiagnostics(nodeName);
   const { at } = useTimeContext();
+  const runsPager = usePager(runs, { resetKey: nodeName });
 
   return (
     <Card asChild className="overflow-hidden p-0">
@@ -374,12 +381,13 @@ function DiagnosticsTab({ nodeName }: { nodeName: string }) {
         ) : null}
 
         {runs.length > 0 ? (
+          <>
           <ul className="divide-y divide-border">
-            {runs.map((r) => {
+            {runsPager.visible.map((r) => {
               const touching = r.results.filter((res) => res.sourceNode === nodeName || res.destinationNode === nodeName);
               return (
                 <li key={r.id} className="flex flex-wrap items-center gap-3 px-4 py-3 text-sm">
-                  <a href={`/diagnostics/runs/${r.id}`} className="font-medium text-primary hover:underline">
+                  <a href={withAtParam(`/diagnostics/runs/${r.id}`)} className="font-medium text-primary hover:underline">
                     {r.id}
                   </a>
                   {/* status and type are the run's OWN stored values, in a
@@ -391,7 +399,7 @@ function DiagnosticsTab({ nodeName }: { nodeName: string }) {
                   <span className="nums ml-auto text-xs text-muted-foreground">
                     {t("node.runs.pairs", {
                       count: touching.length,
-                      word: t(pluralKey(touching.length, "count.pairs.one", "count.pairs.few", "count.pairs.many")),
+                      word: t(pluralKey(touching.length, "count.pairs.one", "count.pairs.few", "count.pairs.many", locale)),
                     })}
                   </span>
                   <span className="text-xs text-muted-foreground">{fmtTime(r.createdAt, locale)}</span>
@@ -399,6 +407,8 @@ function DiagnosticsTab({ nodeName }: { nodeName: string }) {
               );
             })}
           </ul>
+          <Pager pager={runsPager} subject={t("node.runs.subject")} />
+          </>
         ) : null}
       </section>
     </Card>
@@ -451,6 +461,7 @@ function NotFound({ nodeName }: { nodeName: string }) {
   const t = useT(cardsDict);
   return (
     <PageShell
+      timeMachine
       title={t("node.title")}
       description={nodeName ? t("node.notFound.withName", { name: nodeName }) : t("node.notFound.bare")}
     >
@@ -491,7 +502,11 @@ export function NodeCardPage() {
    * Zone falls back to the AGENT's own copy; the agent carries the zone it registered with, so the
    * field has an answer.
    */
-  const zone = node?.zone ?? agent?.zone;
+  /* `||`, not `??`: the topology API sends an UNLABELLED node's zone as an empty STRING, not as an
+     absent field, so `??` never reached the agent fallback and the identity card rendered the "Zone"
+     label with nothing under it -- indistinguishable from a cell still loading, where its three
+     siblings print an em dash. */
+  const zone = node?.zone || agent?.zone || undefined;
   const cells = matrix.data?.cells ?? [];
   const health = nodeHealth(node?.ready, cells, nodeName);
   const loadingIdentity = (topo.isLoading && !topo.data) || (matrix.isLoading && !matrix.data);
@@ -499,6 +514,7 @@ export function NodeCardPage() {
 
   return (
     <PageShell
+      timeMachine
       title={nodeName}
       /*
        * The card's whole body — identity from useTopology, health from useMatrix, both already

@@ -10,6 +10,8 @@ import {
   pickerDropDirection,
   toDateInputValue,
   toTimeInputValue,
+  pickerAlignSide,
+  POPOVER_WIDTH_PX,
 } from "@/components/ui/datetime-picker";
 
 /* The whole suite runs on a frozen clock: "future days are disabled" and
@@ -711,5 +713,35 @@ describe("DateTimePicker — a future draft says so (#11)", () => {
     fireEvent.change(screen.getAllByLabelText("Date")[0], { target: { value: "2026-09-01" } });
 
     expect(screen.queryByTestId("future-hint")).toBeNull();
+  });
+});
+
+/*
+The trigger now lives in the page header, at the RIGHT edge of the actions row. A popover anchored
+to its left edge ran off the viewport there: the calendar was cut off and the whole page grew a
+horizontal scrollbar (owner report). The side is decided the same way the drop direction is, and by
+the same kind of pure function — so it can be pinned without a layout engine.
+*/
+describe("pickerAlignSide", () => {
+  it("hangs from the LEFT when the popover fits to the right of the trigger", () => {
+    expect(pickerAlignSide(POPOVER_WIDTH_PX, 0)).toBe("left");
+    expect(pickerAlignSide(POPOVER_WIDTH_PX + 500, 40)).toBe("left");
+  });
+
+  it("hangs from the RIGHT when it does not fit but the space to the left does", () => {
+    expect(pickerAlignSide(40, POPOVER_WIDTH_PX)).toBe("right");
+    expect(pickerAlignSide(0, POPOVER_WIDTH_PX + 200)).toBe("right");
+  });
+
+  /* Neither side fits: LEFT is the default and the tie-break, exactly as "down"
+     is vertically. A narrow viewport gets a popover that starts on screen. */
+  it("falls back to the left when neither side has room", () => {
+    expect(pickerAlignSide(10, 10)).toBe("left");
+    expect(pickerAlignSide(0, 0)).toBe("left");
+  });
+
+  it("survives a viewport it cannot measure", () => {
+    expect(pickerAlignSide(Number.NaN, 999)).toBe("left");
+    expect(pickerAlignSide(999, Number.NaN)).toBe("left");
   });
 });
