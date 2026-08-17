@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -119,7 +120,7 @@ func newLoginRateLimitServer(t *testing.T, rl config.RateLimitConfig, kv cache.K
 	}}}
 	ts := newRateLimitServer(t, "local", rl, kv, Deps{
 		Users:         users,
-		Sessions:      authn.NewSessionStore(cache.NewInProcessKV(), time.Hour),
+		Sessions:      authn.NewSessionStore(cache.NewInProcessKV(), time.Hour, 0),
 		Authenticator: fakeAuthenticator{err: authn.ErrNoCredentials, mode: "local"},
 	})
 	return ts, users
@@ -235,7 +236,9 @@ func TestRateLimitKeysNamespaceEachLimit(t *testing.T) {
 	if got, want := loginUserRateLimitKey("alice"), "rl:login:u:alice"; got != want {
 		t.Errorf("loginUserRateLimitKey = %q, want %q", got, want)
 	}
-	if got, want := loginIPRateLimitKey("203.0.113.7:1234"), "rl:login:ip:203.0.113.7"; got != want {
+	// The key takes a resolved client ADDRESS now (ratelimit.go's clientIP does the host/port and
+	// trusted-proxy work before this), so the port never reaches it.
+	if got, want := loginIPRateLimitKey("203.0.113.7"), "rl:login:ip:203.0.113.7"; got != want {
 		t.Errorf("loginIPRateLimitKey = %q, want %q", got, want)
 	}
 }
@@ -388,22 +391,26 @@ func TestAuthLoginUsernameAndIPCountedIndependently(t *testing.T) {
 		}
 	})
 
+	/* The address budget is loginIPBurstFactor times the username one, deliberately: one address is
+	   not one person behind an Ingress or a NAT, and at a shared budget a handful of bogus attempts
+	   locked out every user of the console. It still catches a spray — it is just a wide net. */
 	t.Run("hot IP locks out that IP whatever username it sprays", func(t *testing.T) {
 		kv := cache.NewInProcessKV()
 		t.Cleanup(kv.Close)
 		ts, _ := newLoginRateLimitServer(t, config.RateLimitConfig{LoginPerMinute: 3}, kv)
 
-		// Three DIFFERENT usernames from one source: every username counter
-		// sits at 1, but the IP counter is at 3.
-		for i := range 3 {
+		// Different usernames from one source: every username counter sits at 1, and the address
+		// counter climbs to its own, larger ceiling.
+		spray := 3 * loginIPBurstFactor
+		for i := range spray {
 			body := fmt.Sprintf(`{"username":"sprayed-%d","password":"x"}`, i)
 			if w := postLoginFrom(t, ts.srv, "198.51.100.13:3333", body); w.Code == http.StatusTooManyRequests {
 				t.Fatalf("spray %d was refused too early", i)
 			}
 		}
 		if w := postLoginFrom(t, ts.srv, "198.51.100.13:3333", `{"username":"sprayed-9","password":"x"}`); w.Code != http.StatusTooManyRequests {
-			t.Fatalf("fourth username from the same IP = %d, want 429 -- the per-IP counter is what "+
-				"catches a username spray", w.Code)
+			t.Fatalf("attempt %d from the same IP = %d, want 429 -- the per-IP counter is what "+
+				"catches a username spray", spray+1, w.Code)
 		}
 		// The same fresh username from a different IP still gets through.
 		if w := postLoginFrom(t, ts.srv, "198.51.100.77:3333", `{"username":"sprayed-9","password":"x"}`); w.Code == http.StatusTooManyRequests {
@@ -459,5 +466,60 @@ func TestAuthLoginLimitDisabledByZero(t *testing.T) {
 	}
 	if got := testutil.ToFloat64(ts.m.RateLimited.WithLabelValues("login")); got != 0 {
 		t.Errorf("RateLimited(login) = %v, want 0", got)
+	}
+}
+
+/* ── one address is not one person ───────────────────────────────────────── */
+
+/*
+ * Behind the chart's own Ingress every request arrives from the ingress-controller pod, so a
+ * per-address counter at the per-username budget meant a handful of bogus attempts a minute locked
+ * out every user of the console — correct password included, no credentials required to do it.
+ */
+func TestLoginIPBudgetDoesNotLockOutOtherUsersBehindOneProxy(t *testing.T) {
+	kv := cache.NewInProcessKV()
+	t.Cleanup(kv.Close)
+	ts, _ := newLoginRateLimitServer(t, config.RateLimitConfig{LoginPerMinute: 5}, kv)
+
+	// An attacker burns their OWN username's budget, from the shared address.
+	for range 6 {
+		postLoginFrom(t, ts.srv, "10.42.0.9:5555", `{"username":"attacker","password":"x"}`)
+	}
+	// A real user, same address (the ingress pod), first attempt of the minute.
+	if w := postLoginFrom(t, ts.srv, "10.42.0.9:5555", `{"username":"alice","password":"x"}`); w.Code == http.StatusTooManyRequests {
+		t.Fatal("a real user was locked out by another account's attempts from the same proxy address")
+	}
+}
+
+// clientIP believes a forwarding header ONLY from a proxy the operator named, and then only the
+// rightmost hop that is not itself a trusted proxy — a client can prepend anything it likes.
+func TestClientIPTrustsAForwardingHeaderOnlyFromATrustedProxy(t *testing.T) {
+	trusted := parseCIDRs([]string{"10.42.0.0/16"})
+
+	cases := []struct {
+		name       string
+		remoteAddr string
+		xff        string
+		trusted    []*net.IPNet
+		want       string
+	}{
+		{"no trusted proxies configured: the header is ignored entirely", "10.42.0.9:5555", "203.0.113.7", nil, "10.42.0.9"},
+		{"untrusted peer: its own address, whatever it claims", "198.51.100.4:1111", "203.0.113.7", trusted, "198.51.100.4"},
+		{"trusted peer: the rightmost untrusted hop", "10.42.0.9:5555", "203.0.113.7, 198.51.100.4", trusted, "198.51.100.4"},
+		{"trusted peer, spoofed prefix: still the rightmost untrusted hop", "10.42.0.9:5555", "1.2.3.4, 203.0.113.7", trusted, "203.0.113.7"},
+		{"trusted peer, all hops trusted: the nearest one", "10.42.0.9:5555", "10.42.0.3", trusted, "10.42.0.9"},
+		{"trusted peer, no header at all", "10.42.0.9:5555", "", trusted, "10.42.0.9"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			r := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/api/v1/auth/login", nil)
+			r.RemoteAddr = c.remoteAddr
+			if c.xff != "" {
+				r.Header.Set("X-Forwarded-For", c.xff)
+			}
+			if got := clientIP(r, c.trusted); got != c.want {
+				t.Errorf("clientIP = %q, want %q", got, c.want)
+			}
+		})
 	}
 }

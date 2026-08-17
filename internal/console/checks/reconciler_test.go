@@ -554,3 +554,37 @@ func keysOf(m map[string][]controllerclient.ExternalCheckSpec) []string {
 	}
 	return out
 }
+
+/* ── the memo is about a REMOTE state, so it expires ─────────────────────── */
+
+/*
+ * The controller keeps its assignments in memory. A restart (rolling update, OOM kill, node drain —
+ * the chart runs one replica by default) or a leadership move leaves the new process with none:
+ * every agent re-subscribes, is handed an EMPTY assignment, and stops probing. With an
+ * equality-only skip this reconciler said "unchanged" forever after, so continuous external checks
+ * stayed dead until something else happened to alter the desired state. A periodic full resync is
+ * what repairs it, and the PUT is a whole-state replace, so re-sending costs nothing but a request.
+ */
+func TestReconcilerResendsTheDesiredStatePeriodically(t *testing.T) {
+	h := newReconcileHarness(t)
+	h.addContinuous("def-1", "tcp", "one-per-zone")
+
+	h.recon.Tick(context.Background())
+	h.recon.Tick(context.Background())
+	if len(h.ctrl.puts) != 1 {
+		t.Fatalf("PUTs = %d, want 1 while the memo is fresh", len(h.ctrl.puts))
+	}
+
+	// The controller has restarted and lost everything; nothing about the DESIRED state changed, so
+	// only the age of the last push can trigger the repair.
+	h.recon.SetLastPushedAt(time.Now().Add(-checks.ExternalResyncInterval - time.Second))
+	h.recon.Tick(context.Background())
+
+	if len(h.ctrl.puts) != 2 {
+		t.Fatalf("PUTs = %d, want a second one once the resync interval has passed", len(h.ctrl.puts))
+	}
+	// And it is the same desired state, re-asserted rather than recomputed into something else.
+	if len(h.ctrl.puts[1]) != len(h.ctrl.puts[0]) {
+		t.Errorf("resync PUT covered %d agents, want the same %d as the first", len(h.ctrl.puts[1]), len(h.ctrl.puts[0]))
+	}
+}

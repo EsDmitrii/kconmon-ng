@@ -63,9 +63,18 @@ const (
 	// drainBudget is how long Close waits for in-flight deliveries.
 	drainBudget = 5 * time.Second
 
-	// maxConcurrent is the worker pool bound; deliveries are one goroutine each, admitted by a
-	// semaphore of this size.
+	// maxConcurrent bounds the deliveries making an HTTP ATTEMPT at the same moment. A token is held
+	// across one POST, never across the sleeps between rungs -- see deliver.
 	maxConcurrent = 8
+
+	/* maxPending bounds how many deliveries may be IN FLIGHT, ladder and all.
+	   It exists because the two limits are different questions. maxConcurrent used to answer both:
+	   a token was held for the whole ladder, so eight endpoints pointed at a black hole held all
+	   eight tokens for the ladder's ~5.5 minutes while failing instantly, and the ninth endpoint --
+	   healthy, subscribed, and the one that mattered -- was refused at enqueue and never retried,
+	   while the API answered 201. Sleeping deliveries cost a goroutine and a slot here; they no
+	   longer cost the pool. */
+	maxPending = 1024
 
 	// responseDrainLimit is how much of a response body is read before it is discarded; the body is
 	// NEVER inspected, logged or stored.
@@ -105,9 +114,10 @@ type Dispatcher struct {
 
 	client *http.Client
 
-	// sem is the worker-pool bound (maxConcurrent). A token is held for the
-	// WHOLE delivery, ladder included.
+	// sem bounds concurrent HTTP attempts (maxConcurrent); held around ONE attempt.
 	sem chan struct{}
+	// pending bounds admitted deliveries (maxPending); held for the whole ladder, sleeps included.
+	pending chan struct{}
 	// inflight covers every delivery goroutine, and is what Close's drain
 	// budget waits on.
 	inflight sync.WaitGroup
@@ -163,6 +173,7 @@ func New(key []byte, st Store, m *metrics.Metrics) (*Dispatcher, error) {
 		// one budget is how a timeout ends up being neither of them.
 		client:      &http.Client{},
 		sem:         make(chan struct{}, maxConcurrent),
+		pending:     make(chan struct{}, maxPending),
 		baseCtx:     base,
 		cancelBase:  cancelBase,
 		retryCtx:    retry,
@@ -418,18 +429,36 @@ func (d *Dispatcher) DispatchTest(ctx context.Context, id string) error {
 // with a default branch instead of a plain send.
 func (d *Dispatcher) enqueue(j job) bool { //nolint:gocritic // hugeParam: job is passed by value so a worker owns its own copy
 	select {
-	case d.sem <- struct{}{}:
+	case d.pending <- struct{}{}:
 	default:
 		return false
 	}
 	d.inflight.Add(1)
 	go func() {
 		defer func() {
-			<-d.sem
+			<-d.pending
 			d.inflight.Done()
 		}()
 		d.deliver(j)
 	}()
+	return true
+}
+
+/*
+ * withAttemptSlot runs fn holding one maxConcurrent token, WAITING for it rather than dropping.
+ *
+ * The wait is bounded by maxPending upstream: admission is refused before this queue can grow
+ * without limit. Returns false when the dispatcher is shutting down, which is the same terminal
+ * condition the sleep between rungs reports.
+ */
+func (d *Dispatcher) withAttemptSlot(fn func()) bool {
+	select {
+	case d.sem <- struct{}{}:
+	case <-d.retryCtx.Done():
+		return false
+	}
+	defer func() { <-d.sem }()
+	fn()
 	return true
 }
 
@@ -450,31 +479,52 @@ func (d *Dispatcher) deliver(j job) { //nolint:gocritic // hugeParam: the worker
 				"webhook", j.id, "event", j.event, "attempt", i+1) //nolint:gosec // G706: structured slog fields, not string-built log injection
 			break
 		}
-		status, ok := d.attempt(&j)
+		/* The pool token is taken HERE, around the POST, and released before the next sleep. Holding
+		   it across the ladder is what let a handful of dead endpoints starve every live one. */
+		var (
+			status   string
+			ok       bool
+			terminal bool
+		)
+		if !d.withAttemptSlot(func() { status, ok, terminal = d.attempt(&j) }) {
+			slog.Warn("webhooks: abandoning a delivery, the dispatcher is shutting down",
+				"webhook", j.id, "event", j.event, "attempt", i+1) //nolint:gosec // G706: structured slog fields, not string-built log injection
+			break
+		}
 		if ok {
 			// failures RESET on success: the column means CONSECUTIVE
 			// failures, so one 2xx ends the streak whatever preceded it.
-			d.record(j.id, resultOK, statusOK, 0)
+			// A delivery that went through resets the consecutive-failure count.
+			d.record(j.id, resultOK, statusOK, true)
 			return
 		}
 		lastStatus = status
+		if terminal {
+			// Nothing about this failure can change by trying again — an unreadable secret is the
+			// case — so the remaining rungs are skipped rather than spent as no-ops.
+			break
+		}
 	}
-	d.record(j.id, resultFailed, lastStatus, j.failures+1)
+	/* The counter is incremented BY THE ROW, not from j.failures: that snapshot was taken when this
+	   delivery was enqueued, and a delivery holds its job through the whole retry ladder while other
+	   deliveries for the same endpoint come and go. Passing a computed value made three consecutive
+	   failures read as one. */
+	d.record(j.id, resultFailed, lastStatus, false)
 }
 
 // statusOK is what a delivered endpoint's last_status reads.
 const statusOK = "ok"
 
 // attempt performs ONE POST and classifies it; the returned string is the last_status class on
-// failure -- a CLASS.
-func (d *Dispatcher) attempt(j *job) (string, bool) {
+// failure -- a CLASS. The third value says the failure is TERMINAL: retrying cannot change it.
+func (d *Dispatcher) attempt(j *job) (status string, ok, terminal bool) {
 	secret, err := d.Open(j.secretEnc)
 	if err != nil {
-		// The row was sealed under a different key (or corrupted); terminal and un-retryable, but it
-		// still runs the ladder -- costing three no-op cycles.
+		// The row was sealed under a different key (or corrupted). Terminal: the ladder used to be
+		// run out anyway, three no-op cycles holding a pool slot each.
 		slog.Error("webhooks: endpoint secret could not be decrypted",
 			"webhook", j.id, "error", err) //nolint:gosec // G706: structured slog fields, not string-built log injection
-		return "failed: secret unreadable (rotated encryption key?)", false
+		return "failed: secret unreadable (rotated encryption key?)", false, true
 	}
 	sig := sign(secret, j.body)
 	// secret goes out of scope here; it is never logged, never stored, and
@@ -485,7 +535,8 @@ func (d *Dispatcher) attempt(j *job) (string, bool) {
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, j.url, bytes.NewReader(j.body))
 	if err != nil {
-		return "failed: invalid endpoint url", false
+		// A URL that cannot be turned into a request will not become one on the next rung either.
+		return "failed: invalid endpoint url", false, true
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("User-Agent", "kconmon-ng-console")
@@ -496,10 +547,10 @@ func (d *Dispatcher) attempt(j *job) (string, bool) {
 		// The error is CLASSIFIED, not echoed: a transport error carries the
 		// URL, and last_status is served to the UI.
 		if ctx.Err() != nil {
-			return "failed: timeout after " + attemptTimeout.String(), false
+			return "failed: timeout after " + attemptTimeout.String(), false, false
 		}
 		slog.Warn("webhooks: delivery attempt failed", "webhook", j.id, "event", j.event, "error", err) //nolint:gosec // G706: structured slog fields, not string-built log injection
-		return "failed: connection error", false
+		return "failed: connection error", false, false
 	}
 	defer func() {
 		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, responseDrainLimit))
@@ -507,20 +558,20 @@ func (d *Dispatcher) attempt(j *job) (string, bool) {
 	}()
 
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-		return statusOK, true
+		return statusOK, true, false
 	}
-	return fmt.Sprintf("failed: HTTP %d", resp.StatusCode), false
+	return fmt.Sprintf("failed: HTTP %d", resp.StatusCode), false, false
 }
 
 // record writes the terminal outcome: one metric increment and one endpoint-row
 // update. A failed write is warned and dropped -- the delivery already
 // happened, and there is nothing useful to retry.
-func (d *Dispatcher) record(id, result, lastStatus string, failures int32) {
+func (d *Dispatcher) record(id, result, lastStatus string, reset bool) {
 	d.m.WebhookDeliveries.WithLabelValues(result).Inc()
 
 	ctx, cancel := context.WithTimeout(d.baseCtx, storeWriteTimeout)
 	defer cancel()
-	if err := d.store.UpdateWebhookDelivery(ctx, id, lastStatus, d.now().UTC(), failures); err != nil {
+	if err := d.store.UpdateWebhookDelivery(ctx, id, lastStatus, d.now().UTC(), reset); err != nil {
 		slog.Warn("webhooks: recording a delivery outcome failed",
 			"webhook", id, "error", err) //nolint:gosec // G706: structured slog fields, not string-built log injection
 	}

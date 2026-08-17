@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
+	"unicode"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgtype"
@@ -92,6 +94,18 @@ func (in *AnnotationInput) Validate() error {
 	}
 	if in.Text == "" {
 		return errors.New("store: annotation: text must not be empty")
+	}
+	/* NO CONTROL CHARACTERS. PostgreSQL cannot store a NUL in text (SQLSTATE 22021) and the driver
+	   refuses it, and the handler above turns any store error that is not a validation error into
+	   502 "annotations unavailable" — so one byte in the body reported the annotation subsystem as
+	   down. Refusing it here makes it what it is: a rejected value, with the same 422 the length and
+	   ordering rules produce. Every text FILTER in this package is already guarded the same way
+	   (httpapi.rejectControlChars); this is the write side of it. */
+	if idx := strings.IndexFunc(in.Text, unicode.IsControl); idx >= 0 {
+		return fmt.Errorf("store: annotation: text contains a control character at byte %d", idx)
+	}
+	if idx := strings.IndexFunc(in.Scope, unicode.IsControl); idx >= 0 {
+		return fmt.Errorf("store: annotation: scope contains a control character at byte %d", idx)
 	}
 	if len(in.Text) > annotationTextMaxLen {
 		return fmt.Errorf("store: annotation: text is %d bytes, limit is %d", len(in.Text), annotationTextMaxLen)
@@ -236,8 +250,9 @@ func (db *DB) ListAnnotations(ctx context.Context, f AnnotationFilter) (Annotati
 // sweep; exposed for the same testability reason as DeleteRunsBefore.
 func (db *DB) DeleteAnnotationsBefore(ctx context.Context, before time.Time, limit int32) (int64, error) {
 	n, err := gen.New(db.pool).DeleteAnnotationsBefore(ctx, gen.DeleteAnnotationsBeforeParams{
-		StartAt: before,
-		Limit:   limit,
+		// The span's END: an annotation still in effect is not old. See the query.
+		EndAt: pgtype.Timestamptz{Time: before, Valid: true},
+		Limit: limit,
 	})
 	if err != nil {
 		return 0, fmt.Errorf("store: delete annotations before: %w", err)

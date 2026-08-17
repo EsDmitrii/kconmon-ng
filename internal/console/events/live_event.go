@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
+	"strings"
 	"time"
 
 	pb "github.com/EsDmitrii/kconmon-ng/api/proto"
@@ -187,7 +189,25 @@ func ToLiveEvent(ev *pb.Event) (LiveEvent, error) {
 }
 
 // pairScope renders the "<src>→<dst>" scope every non-topology event uses.
-func pairScope(src, dst string) string { return src + "→" + dst }
+func pairScope(src, dst string) string { return src + PairArrow + dst }
+
+// PairArrow is U+2192, the ONE separator a pair scope is written with. Mirrored by
+// web/src/lib/utils.ts PAIR_ARROW.
+const PairArrow = "→"
+
+// pairSeparator is every separator a keyboard CAN produce, plus the arrow itself, each with any
+// surrounding whitespace collapsed into it. Whitespace ALONE is deliberately not a separator: a
+// scope is not always a hostname, and reading a bare space as an arrow would cut a legitimate name
+// in half. A hyphen not followed by ">" is left alone, which keeps "edge-gw-01" one name. Mirrored
+// by web/src/lib/utils.ts TYPEABLE_SEPARATOR.
+var pairSeparator = regexp.MustCompile(`\s*(?:→|-+>|=+>|>)\s*`)
+
+// NormalizePairScope rewrites whatever an operator typed into the canonical pair scope, so a direct
+// API consumer that sends "a->b" gets the same rows as one that sends "a→b". A single name comes
+// back trimmed and otherwise untouched. Mirrors web/src/lib/utils.ts normalizePairInput.
+func NormalizePairScope(raw string) string {
+	return pairSeparator.ReplaceAllString(strings.TrimSpace(raw), PairArrow)
+}
 
 // topologySummary keeps the node name out of the sentence when the controller
 // did not attribute the change to one node.

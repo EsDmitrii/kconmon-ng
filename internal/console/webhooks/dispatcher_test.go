@@ -52,10 +52,14 @@ type fakeStore struct {
 
 	updates []delivery
 	updated chan struct{}
+
+	// failures mirrors the real column: the row owns the count, and the UPDATE derives the new value
+	// from it.
+	failures map[string]int32
 }
 
 func newFakeStore() *fakeStore {
-	return &fakeStore{hooks: map[string]store.Webhook{}, updated: make(chan struct{}, 64)}
+	return &fakeStore{hooks: map[string]store.Webhook{}, updated: make(chan struct{}, 64), failures: map[string]int32{}}
 }
 
 // add stores one endpoint whose secret is sealed with sealer, which is how a
@@ -67,12 +71,17 @@ func (f *fakeStore) add(t *testing.T, sealer *Dispatcher, url string, events []s
 		t.Fatalf("seal: %v", err)
 	}
 	f.mu.Lock()
+	// The seeded row IS the counter's starting point, exactly as the column is.
+	if f.failures == nil {
+		f.failures = map[string]int32{}
+	}
 	defer f.mu.Unlock()
 	h := store.Webhook{
 		ID: uuid.NewString(), Name: "hook", URL: url, Events: events,
 		SecretEnc: sealed, Enabled: enabled, Failures: failures, CreatedAt: time.Now().UTC(),
 	}
 	f.hooks[h.ID] = h
+	f.failures[h.ID] = failures
 	f.order = append(f.order, h.ID)
 	return h.ID
 }
@@ -103,10 +112,20 @@ func (f *fakeStore) GetWebhook(_ context.Context, id string) (store.Webhook, err
 	return h, nil
 }
 
-func (f *fakeStore) UpdateWebhookDelivery(_ context.Context, id, lastStatus string, _ time.Time, failures int32) error {
+/*
+The double mirrors the real UPDATE: the counter is derived from the ROW, never from a number the
+caller computed. It used to take the count as an argument, which is what let the dispatcher's
+enqueue-time snapshot look correct in tests while overlapping deliveries lost updates in production.
+*/
+func (f *fakeStore) UpdateWebhookDelivery(_ context.Context, id, lastStatus string, _ time.Time, reset bool) error {
 	f.mu.Lock()
 	if f.updateErr == nil {
-		f.updates = append(f.updates, delivery{id: id, lastStatus: lastStatus, failures: failures})
+		if reset {
+			f.failures[id] = 0
+		} else {
+			f.failures[id]++
+		}
+		f.updates = append(f.updates, delivery{id: id, lastStatus: lastStatus, failures: f.failures[id]})
 	}
 	err := f.updateErr
 	f.mu.Unlock()
@@ -271,6 +290,10 @@ func testIncident() store.Incident {
 
 // --- crypto -----------------------------------------------------------------
 
+// minContainmentCheckBytes is the shortest plaintext worth searching a ciphertext for: at n bytes a
+// chance match costs roughly len(sealed)/256^n, which is negligible from 8 and a coin flip below 2.
+const minContainmentCheckBytes = 8
+
 // The round trip is the whole reason both directions live in one package: a
 // value httpapi sealed is a value the dispatcher can sign with, and nothing
 // else in the process can do either half.
@@ -282,8 +305,11 @@ func TestSealOpenRoundTrip(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Seal(%d bytes): %v", len(plain), err)
 		}
-		if bytes.Contains(sealed, []byte(plain)) && plain != "" {
-			t.Errorf("sealed value contains the plaintext -- it is not encrypted")
+		// Only asked of a plaintext long enough for the answer to mean something. A one-byte
+		// plaintext is found inside a 29-byte random ciphertext about 11% of the time by chance
+		// alone, which made this a ~10% flake rather than a test of anything.
+		if len(plain) >= minContainmentCheckBytes && bytes.Contains(sealed, []byte(plain)) {
+			t.Errorf("sealed value contains the %d-byte plaintext -- it is not encrypted", len(plain))
 		}
 		opened, err := d.Open(sealed)
 		if err != nil {
@@ -933,10 +959,11 @@ func TestSaturatedPoolDropsTheDeliveryAndCountsItFailed(t *testing.T) {
 	d, m, _ := newTestDispatcher(t, st)
 	st.add(t, d, rec.srv.URL, []string{store.WebhookEventIncidentCreated}, true, 0)
 
-	// Occupy every worker slot, which is what an endpoint stuck inside its
-	// five-minute ladder does to the pool.
-	for range maxConcurrent {
-		d.sem <- struct{}{}
+	/* Occupy every ADMISSION slot. Saturation is maxPending now, not maxConcurrent: a delivery
+	   sleeping between rungs holds a pending slot but no pool token, which is what keeps a handful of
+	   dead endpoints from starving a live one. */
+	for range maxPending {
+		d.pending <- struct{}{}
 	}
 
 	done := make(chan struct{})
@@ -956,8 +983,8 @@ func TestSaturatedPoolDropsTheDeliveryAndCountsItFailed(t *testing.T) {
 	if n := len(rec.received()); n != 0 {
 		t.Errorf("receiver saw %d requests, want 0", n)
 	}
-	for range maxConcurrent {
-		<-d.sem
+	for range maxPending {
+		<-d.pending
 	}
 }
 
@@ -969,8 +996,8 @@ func TestDispatchTestOnASaturatedPoolErrorsWithoutCountingAFailure(t *testing.T)
 	st := newFakeStore()
 	d, m, _ := newTestDispatcher(t, st)
 	id := st.add(t, d, rec.srv.URL, []string{store.WebhookEventIncidentCreated}, true, 0)
-	for range maxConcurrent {
-		d.sem <- struct{}{}
+	for range maxPending {
+		d.pending <- struct{}{}
 	}
 
 	if err := d.DispatchTest(context.Background(), id); err == nil {
@@ -979,8 +1006,8 @@ func TestDispatchTestOnASaturatedPoolErrorsWithoutCountingAFailure(t *testing.T)
 	if n := deliveryCount(t, m, resultFailed); n != 0 {
 		t.Errorf("WebhookDeliveries(failed) = %v, want 0 -- the caller already learned synchronously", n)
 	}
-	for range maxConcurrent {
-		<-d.sem
+	for range maxPending {
+		<-d.pending
 	}
 }
 
@@ -1199,4 +1226,51 @@ func TestRunReturnsOnContextCancellation(t *testing.T) {
 	}
 	// Idempotent: the deferred Close from newTestDispatcher must not panic.
 	d.Close()
+}
+
+/* ── QA round 5: slow endpoints must not starve healthy ones ──────────────── */
+
+/*
+ * Nine endpoints subscribed to one event, eight of them pointed at a black hole. The pool token used
+ * to be held for the WHOLE ladder — ~5.5 minutes of sleeping — so the eight dead endpoints owned
+ * every slot and the ninth, healthy one was refused at enqueue, dropped, never retried, while the
+ * API answered 201. The token is now held around one POST.
+ */
+func TestSlowEndpointsDoNotStarveAHealthyOne(t *testing.T) {
+	dead := newReceiver(t, http.StatusInternalServerError)
+	live := newReceiver(t, http.StatusOK)
+	st := newFakeStore()
+	d, _, _ := newTestDispatcher(t, st)
+
+	for range maxConcurrent {
+		st.add(t, d, dead.srv.URL, []string{store.WebhookEventIncidentCreated}, true, 0)
+	}
+	st.add(t, d, live.srv.URL, []string{store.WebhookEventIncidentCreated}, true, 0)
+
+	d.Notify(context.Background(), store.WebhookEventIncidentCreated, testIncident())
+
+	deadline := time.Now().Add(5 * time.Second)
+	for len(live.received()) == 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if n := len(live.received()); n == 0 {
+		t.Error("the healthy endpoint received nothing: its delivery was dropped by endpoints that were only sleeping")
+	}
+}
+
+// An unreadable secret cannot become readable on the next rung, so the ladder ends after the first
+// attempt instead of spending three cycles on a no-op.
+func TestUndecryptableSecretIsTerminal(t *testing.T) {
+	st := newFakeStore()
+	d, _, _ := newTestDispatcher(t, st)
+
+	j := job{id: "hook-1", url: "http://127.0.0.1:1", secretEnc: []byte("not-a-sealed-secret"),
+		body: []byte("{}"), event: store.WebhookEventIncidentCreated, attempts: retryLadder}
+	_, ok, terminal := d.attempt(&j)
+	if ok {
+		t.Fatal("attempt with an unreadable secret reported success")
+	}
+	if !terminal {
+		t.Error("an unreadable secret is not terminal, so the delivery runs the whole retry ladder as no-ops")
+	}
 }

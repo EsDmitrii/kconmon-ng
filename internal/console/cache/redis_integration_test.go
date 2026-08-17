@@ -12,21 +12,22 @@ import (
 	"github.com/EsDmitrii/kconmon-ng/internal/console/cache"
 )
 
-// TestValkeyBusPublishSubscribeRoundtrip requires a real Valkey/Redis server.
+// TestRedisBusPublishSubscribeRoundtrip requires a real Valkey/Redis server.
 // Run: docker run --rm -d -p 6379:6379 valkey/valkey:8-alpine
-// Then: VALKEY_TEST_ADDR=127.0.0.1:6379 go test -tags=integration ./internal/console/cache/... -run TestValkeyBus -v
-func TestValkeyBusPublishSubscribeRoundtrip(t *testing.T) {
-	addr := os.Getenv("VALKEY_TEST_ADDR")
+// Then: REDIS_TEST_ADDR=127.0.0.1:6379 go test -tags=integration ./internal/console/cache/... -run TestRedisBus -v
+func TestRedisBusPublishSubscribeRoundtrip(t *testing.T) {
+	addr := os.Getenv("REDIS_TEST_ADDR")
 	if addr == "" {
-		t.Skip("VALKEY_TEST_ADDR not set; see docker command in this test's comment")
+		t.Skip("REDIS_TEST_ADDR not set; see docker command in this test's comment")
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	bus, err := cache.NewValkeyBus(ctx, addr, 5*time.Second)
+	// No credentials in the DSN: an unauthenticated local server is what this test dials.
+	bus, err := cache.NewRedisBus(ctx, "redis://"+addr, 5*time.Second)
 	if err != nil {
-		t.Fatalf("NewValkeyBus: %v", err)
+		t.Fatalf("NewRedisBus: %v", err)
 	}
 	defer bus.Close()
 

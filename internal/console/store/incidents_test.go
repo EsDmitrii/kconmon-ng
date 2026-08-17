@@ -291,13 +291,13 @@ func TestIncidentStatusInvariantHoldsOnUpdateToo(t *testing.T) {
 	at := time.Now().UTC()
 	id := "3f1d1a2f-6f8e-4a3a-9a0e-7f3f9d0f1c22"
 
-	if _, err := db.UpdateIncidentStatus(ctx, id, IncidentStatusOpen, &at); err == nil {
+	if _, _, err := db.UpdateIncidentStatus(ctx, id, IncidentStatusOpen, &at); err == nil {
 		t.Error("UpdateIncidentStatus(open, resolvedAt) = nil, want the reopen to have to clear resolved_at")
 	}
-	if _, err := db.UpdateIncidentStatus(ctx, id, IncidentStatusResolved, nil); err == nil {
+	if _, _, err := db.UpdateIncidentStatus(ctx, id, IncidentStatusResolved, nil); err == nil {
 		t.Error("UpdateIncidentStatus(resolved, nil) = nil, want a resolution to carry its time")
 	}
-	if _, err := db.UpdateIncidentStatus(ctx, id, "closed", nil); err == nil {
+	if _, _, err := db.UpdateIncidentStatus(ctx, id, "closed", nil); err == nil {
 		t.Error("UpdateIncidentStatus(closed) = nil, want the closed status set to reject it")
 	}
 }
@@ -322,7 +322,7 @@ func TestIncidentMalformedIDIsNotFoundWithoutTouchingPgx(t *testing.T) {
 			if _, err := db.UpdateIncidentPinned(ctx, id, nil); !errors.Is(err, ErrNotFound) {
 				t.Errorf("UpdateIncidentPinned(%q) err = %v, want ErrNotFound", id, err)
 			}
-			if _, err := db.UpdateIncidentStatus(ctx, id, IncidentStatusResolved, &at); !errors.Is(err, ErrNotFound) {
+			if _, _, err := db.UpdateIncidentStatus(ctx, id, IncidentStatusResolved, &at); !errors.Is(err, ErrNotFound) {
 				t.Errorf("UpdateIncidentStatus(%q) err = %v, want ErrNotFound", id, err)
 			}
 		})

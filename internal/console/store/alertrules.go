@@ -258,8 +258,17 @@ func validateJSONObject(field string, raw json.RawMessage) error {
 	if len(trimmed) == 0 || bytes.Equal(trimmed, jsonNull) {
 		return nil
 	}
+	// Same bound as validateJSON's, for the same reason: labels, annotations and params are read
+	// back and re-marshalled by every listing, every export and every reconcile pass.
+	if len(trimmed) > jsonFieldMaxBytes {
+		return fmt.Errorf("%s is %d bytes, limit is %d", field, len(trimmed), jsonFieldMaxBytes)
+	}
 	if !json.Valid(trimmed) {
 		return fmt.Errorf("%s must be valid JSON", field)
+	}
+	// Same reason as validateJSON's: a NUL is valid JSON and invalid jsonb.
+	if err := validateNoJSONNUL(field, trimmed); err != nil {
+		return err
 	}
 	if trimmed[0] != '{' {
 		return fmt.Errorf("%s must be a JSON object, not an array or a scalar", field)

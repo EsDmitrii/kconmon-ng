@@ -235,3 +235,55 @@ func TestHandleVersionNoCapabilitiesWhenDisabled(t *testing.T) {
 		t.Errorf("expected no capabilities, got %v", body.Capabilities)
 	}
 }
+
+// TestTopologyEndpointLeaderGate closes the other half of the split-brain fix: a standby holds no
+// agents, so answering 200 with an empty snapshot would make the Console's topology page a coin
+// flip between the leader's view and nothing at all.
+func TestTopologyEndpointLeaderGate(t *testing.T) {
+	tests := []struct {
+		name     string
+		enabled  bool
+		isLeader func() bool
+		want     int
+	}{
+		{"non-leader is refused", true, func() bool { return false }, http.StatusServiceUnavailable},
+		{"leader serves", true, func() bool { return true }, http.StatusOK},
+		{"no leader election serves", false, nil, http.StatusOK},
+		{"missing callback is refused", true, nil, http.StatusServiceUnavailable},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			reg := NewRegistry(30 * time.Second)
+			reg.Register(model.AgentInfo{ID: "agent-1", NodeName: "node-1"})
+			srv := NewHTTPServer(reg, nil, prometheus.NewRegistry(), nil)
+			srv.SetLeaderGate(tc.enabled, tc.isLeader)
+
+			req := httptest.NewRequestWithContext(context.Background(),
+				http.MethodGet, "/api/v1/topology", http.NoBody)
+			rec := httptest.NewRecorder()
+			srv.Handler().ServeHTTP(rec, req)
+
+			if rec.Code != tc.want {
+				t.Fatalf("status = %d, want %d", rec.Code, tc.want)
+			}
+		})
+	}
+}
+
+// TestTopologyEndpointUngatedByDefault pins that a handler nobody gated still serves, so the
+// existing constructions keep their behaviour.
+func TestTopologyEndpointUngatedByDefault(t *testing.T) {
+	reg := NewRegistry(30 * time.Second)
+	reg.Register(model.AgentInfo{ID: "agent-1", NodeName: "node-1"})
+	srv := NewHTTPServer(reg, nil, prometheus.NewRegistry(), nil)
+
+	req := httptest.NewRequestWithContext(context.Background(),
+		http.MethodGet, "/api/v1/topology", http.NoBody)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+}

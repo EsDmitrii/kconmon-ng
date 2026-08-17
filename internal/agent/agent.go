@@ -90,8 +90,9 @@ func New(cfg *config.Config) (*Agent, error) {
 			Allowlist: allowlist,
 			// The system resolver: external destinations are named in cluster
 			// DNS terms like everything else the agent probes.
-			Resolver: net.DefaultResolver,
-			Timeout:  cfg.Checkers.External.Timeout,
+			Resolver:   net.DefaultResolver,
+			Timeout:    cfg.Checkers.External.Timeout,
+			MaxTargets: cfg.Checkers.External.MaxTargets,
 		}
 		slog.Info("external destination checks enabled",
 			"allowedCidrs", len(cfg.Checkers.External.AllowedCIDRs),
@@ -145,9 +146,10 @@ func New(cfg *config.Config) (*Agent, error) {
 		httpTargets := make([]checker.HTTPCheckTarget, 0, len(cfg.Checkers.HTTP.Targets))
 		for _, t := range cfg.Checkers.HTTP.Targets {
 			ht := checker.HTTPCheckTarget{
-				URL:          t.URL,
-				Method:       t.Method,
-				ExpectStatus: t.ExpectStatus,
+				URL:                t.URL,
+				Method:             t.Method,
+				ExpectStatus:       t.ExpectStatus,
+				InsecureSkipVerify: t.InsecureSkipVerify,
 			}
 			if t.BodyPattern != "" {
 				re, err := regexp.Compile(t.BodyPattern)
@@ -231,7 +233,7 @@ func (a *Agent) Run(ctx context.Context) error {
 	backoff := 1 * time.Second
 	maxBackoff := 15 * time.Second
 	for {
-		peers, resolvedZone, err = grpcClient.Register(ctx, a.info, a.cfg.HTTPPort)
+		peers, resolvedZone, err = grpcClient.Register(ctx, a.registrationInfo(), a.cfg.HTTPPort)
 		if err == nil {
 			break
 		}
@@ -240,6 +242,13 @@ func (a *Agent) Run(ctx context.Context) error {
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-time.After(backoff):
+		}
+		// Redial only when this connection refused us, so the next attempt is load-balanced again: a
+		// standby rejects registration, and retrying on the same connection would keep landing on it.
+		if shouldRedial(err) {
+			if rerr := grpcClient.Reconnect(); rerr != nil {
+				slog.Warn("redialling the controller failed", "error", rerr)
+			}
 		}
 		backoff = min(backoff*2, maxBackoff)
 	}
@@ -254,14 +263,16 @@ func (a *Agent) Run(ctx context.Context) error {
 	}
 
 	a.scheduler.UpdatePeers(peers)
+	a.syncPeerMetrics()
 	a.scheduler.Pause()
 
 	peerWatchReady := make(chan struct{}, 1)
 	reregisterCh := make(chan struct{}, 1)
 
 	grpcClient.OnPeersUpdate(func(targets []checker.Target) {
-		a.metrics.ResetPeerGauges()
+		a.forgetDepartedPeers(targets)
 		a.scheduler.UpdatePeers(targets)
+		a.syncPeerMetrics()
 		a.scheduler.Resume()
 		select {
 		case peerWatchReady <- struct{}{}:
@@ -310,19 +321,27 @@ func (a *Agent) Run(ctx context.Context) error {
 				return
 			case <-time.After(wait + jitter):
 			}
-			newPeers, newZone, regErr := grpcClient.Register(ctx, a.info, a.cfg.HTTPPort)
+			newPeers, newZone, regErr := grpcClient.Register(ctx, a.registrationInfo(), a.cfg.HTTPPort)
 			if regErr == nil {
 				if z := resolveZone(a.envZone, newZone); z != a.info.Zone {
 					slog.Info("adopted zone from controller on re-registration", "zone", z)
 					a.info.Zone = z
 					a.scheduler.SetSourceZone(z)
 				}
-				a.metrics.ResetPeerGauges()
+				a.forgetDepartedPeers(newPeers)
 				a.scheduler.UpdatePeers(newPeers)
+				a.syncPeerMetrics()
 				slog.Info("re-registered with controller after reconnect")
 				return
 			}
 			slog.Warn("re-registration failed, retrying", "error", regErr, "backoff", wait+jitter)
+			// Same reason as the first registration: only a fresh connection can reach the leader
+			// after a failover moved it to another pod.
+			if shouldRedial(regErr) {
+				if rerr := grpcClient.Reconnect(); rerr != nil {
+					slog.Warn("redialling the controller failed", "error", rerr)
+				}
+			}
 			wait = min(wait*2, maxWait)
 		}
 	}
@@ -406,6 +425,17 @@ func (a *Agent) Run(ctx context.Context) error {
 		errCh <- httpSrv.ListenAndServe()
 	}()
 
+	// The metrics listener, on its own port: see internal/metrics/listener.go.
+	metricsSrv := metrics.NewListener(
+		fmt.Sprintf(":%d", a.cfg.MetricsPort),
+		metrics.NewListenerHandler(a.promReg, a.httpServer.Ready),
+	)
+
+	go func() {
+		slog.Info("metrics server listening", "port", a.cfg.MetricsPort)
+		errCh <- metricsSrv.ListenAndServe()
+	}()
+
 	go a.scheduler.Run(ctx)
 
 	select {
@@ -459,6 +489,12 @@ func (a *Agent) applyExternalAssignment(assignment *pb.ExternalCheckAssignment) 
 		spec, err := checker.ParseExternalSpec(&in)
 		if err != nil {
 			dropped++
+			/* And it is COUNTED, not only logged. A definition every agent refuses is invisible
+			   otherwise: the Console lists it as enabled, the controller keeps pushing it, and the
+			   only trace is a WARN in one pod's log that repeats every assignment. The counter is
+			   what an operator can alert on and what makes "this check has never produced a result"
+			   answerable without reading agent logs. */
+			a.metrics.ExternalSpecsRejected.WithLabelValues(a.info.NodeName, s.GetCheckType()).Inc()
 			// definitionId and checkType are controller-side identifiers; the
 			// target address stays out of the message for the same reason the
 			// on-demand refusal path keeps it out (see approveExternalTarget).
@@ -472,8 +508,84 @@ func (a *Agent) applyExternalAssignment(assignment *pb.ExternalCheckAssignment) 
 		parsed = append(parsed, spec)
 	}
 
+	/* checkers.external.maxTargets, ENFORCED. It was parsed, defaulted to 100, validated and logged
+	   at boot, and then consulted by nothing: the controller's assignment was applied whole, however
+	   long it was, so the documented per-agent ceiling bounded nothing at all. Truncation is loud —
+	   an operator who set a ceiling needs to know it bit, and which end was dropped. */
+	overflow := 0
+	if limit := a.external.MaxTargets; limit > 0 && len(parsed) > limit {
+		overflow = len(parsed) - limit
+		parsed = parsed[:limit]
+	}
+
+	/* Targets that left the assignment lose their gauges HERE, which is the only event that knows
+	   they left. Nothing used to do this: the external gauges were cleared only as collateral damage
+	   from a peer update, so a target the controller had stopped assigning went on reporting its last
+	   packet-loss reading for as long as the peer list held still — an alert firing on a check that
+	   no longer runs. Truncated targets count as departed for the same reason: they are not probed. */
+	a.retireDepartedExternalTargets(parsed)
+
 	a.externalChecker.SetSpecs(parsed)
+	if overflow > 0 {
+		slog.Warn("external check assignment exceeds checkers.external.maxTargets; the tail is not probed",
+			"applied", len(parsed), "dropped", overflow, "maxTargets", a.external.MaxTargets)
+	}
 	slog.Info("external check assignment applied", "targets", len(parsed), "dropped", dropped)
+}
+
+/*
+retireDepartedExternalTargets drops the gauges of targets the incoming assignment no longer names.
+
+Counts() is the applied set, read under the checker's own lock, and it is read BEFORE SetSpecs
+swaps it — so the difference against next is exactly what left. A name is retired only when it is
+absent from the whole incoming list: the same target may be assigned under two check types (a host
+probe and a URL probe share the `target` label and differ in `target_kind`), and one of them ending
+must not blank the other.
+*/
+func (a *Agent) retireDepartedExternalTargets(next []checker.ExternalSpec) {
+	if a.externalChecker == nil {
+		return
+	}
+	applied := a.externalChecker.Counts()
+	if len(applied) == 0 {
+		return
+	}
+	/* Retired per CHECK, not per target NAME.
+	   The gauges are keyed by (target, target_kind, check_type), so a name-keyed sweep retired
+	   nothing as long as ANY check still named the target: deleting the icmp check on a target that
+	   also carries an http one left its packet-loss gauge serving its last value forever, and since
+	   a failed icmp probe pins that value at 1, an operator who deleted a check BECAUSE it was
+	   failing froze 100% loss on the target permanently. The name-level sweep stays for the case it
+	   is right for -- every check on a name gone -- because it also clears series whose check_type
+	   this build no longer produces. */
+	keepName := make(map[string]struct{}, len(next))
+	keepCheck := make(map[[2]string]struct{}, len(next))
+	for i := range next {
+		keepName[next[i].Name] = struct{}{}
+		keepCheck[[2]string{next[i].Name, string(next[i].Type)}] = struct{}{}
+	}
+	seenName := make(map[string]struct{}, len(applied))
+	seenCheck := make(map[[2]string]struct{}, len(applied))
+	for i := range applied {
+		name := applied[i].Name
+		checkType := string(applied[i].Type)
+		if _, ok := keepName[name]; !ok {
+			if _, dup := seenName[name]; !dup {
+				seenName[name] = struct{}{}
+				a.metrics.ForgetExternalTarget(name)
+			}
+			continue
+		}
+		key := [2]string{name, checkType}
+		if _, ok := keepCheck[key]; ok {
+			continue
+		}
+		if _, dup := seenCheck[key]; dup {
+			continue
+		}
+		seenCheck[key] = struct{}{}
+		a.metrics.ForgetExternalCheck(name, externalTargetKind(applied[i].Type), checkType)
+	}
 }
 
 // deregisterer is the narrow slice of the gRPC client used at shutdown, kept as
@@ -493,6 +605,30 @@ func (a *Agent) gracefulDeregister(d deregisterer) {
 	}
 }
 
+/*
+registrationInfo is what this agent ASSERTS about itself, which is not the same as what it currently
+believes.
+
+The zone it carries is the CONFIGURED one (agent.zone) and nothing else — empty when there is none.
+a.info.Zone holds the effective zone, which after the first registration is usually the one the
+controller resolved from the node's failure-domain label and this agent then adopted. Sending that
+back turned an answer into a claim: the registry only consults its ZoneResolver when the agent
+supplies no zone, so from the second registration onward the agent's stale copy won. Relabel a node
+and the informer corrects the registry (UpdateZone), the agent re-registers minutes later with the
+zone it adopted before the change, and the topology is wrong again — permanently, because every
+subsequent re-registration re-asserts it. Cross-zone matrix views, zone-scoped alerts and the
+per-zone dashboards all read that field.
+
+Asserting only what an operator configured keeps the registry's rule true: an explicit zone wins, an
+absent one is resolved from the node, and the node's label stays authoritative for as long as nobody
+overrides it.
+*/
+func (a *Agent) registrationInfo() model.AgentInfo {
+	info := a.info
+	info.Zone = a.envZone
+	return info
+}
+
 // resolveZone decides the agent's effective zone: an explicit env-provided
 // zone always wins; otherwise the controller-resolved zone is adopted.
 func resolveZone(envZone, resolvedZone string) string {
@@ -502,7 +638,67 @@ func resolveZone(envZone, resolvedZone string) string {
 	return resolvedZone
 }
 
-func NewResultHandler(m *metrics.PrometheusMetrics, source checker.Target) ResultHandler {
+// syncPeerMetrics re-initializes the per-pair result series after a peer list change.
+/*
+forgetDepartedPeers retires the gauges of peers that are in the CURRENT list and not in the next
+one, and touches nothing else.
+
+The peer list is replaced wholesale on every update, so the departures are the difference between
+the two. Anything still present keeps its readings: a gauge is only repopulated by the next probe of
+that pair, and blanking a live peer's loss ratio for a check interval is a gap in the series alerts
+evaluate, appearing once per pod event — a rolling DaemonSet restart is one per node.
+*/
+func (a *Agent) forgetDepartedPeers(next []checker.Target) {
+	current := a.scheduler.Peers()
+	if len(current) == 0 {
+		return
+	}
+	keep := make(map[string]struct{}, len(next))
+	for i := range next {
+		keep[next[i].NodeName] = struct{}{}
+	}
+	for i := range current {
+		if _, ok := keep[current[i].NodeName]; !ok {
+			a.metrics.ForgetPeer(current[i].NodeName)
+		}
+	}
+}
+
+func (a *Agent) syncPeerMetrics() {
+	source := checker.Target{NodeName: a.info.NodeName, Zone: a.info.Zone}
+	preinitPeerResults(a.metrics, source, a.scheduler.Peers(), a.checkers)
+}
+
+// resultOutcomes is the closed set of values the "result" label takes on a peer probe counter.
+var resultOutcomes = [...]string{"success", "fail"}
+
+// preinitPeerResults creates both outcome series for every peer of every enabled peer-probing
+// checker. Without it a pair that has never failed has no result="fail" series at all, and the
+// console matrix renders null where it should render 0.
+func preinitPeerResults(
+	m *metrics.PrometheusMetrics,
+	source checker.Target, //nolint:gocritic // hugeParam: Target is passed by value throughout this package
+	peers []checker.Target,
+	enabled map[model.CheckType]checker.Checker,
+) {
+	for checkType := range enabled {
+		counter := m.PeerResultCounter(string(checkType))
+		if counter == nil {
+			continue
+		}
+		for _, peer := range peers {
+			for _, outcome := range resultOutcomes {
+				// Add(0) creates the series without recording an observation, and repeating it on
+				// every peer update is a no-op.
+				counter.WithLabelValues(
+					source.NodeName, peer.NodeName, source.Zone, peer.Zone, outcome,
+				).Add(0)
+			}
+		}
+	}
+}
+
+func NewResultHandler(m *metrics.PrometheusMetrics, source checker.Target) ResultHandler { //nolint:gocritic // hugeParam: Target is a VALUE by design -- a checker must not be able to mutate the caller's copy, and one 80-byte copy per probe is nothing next to the probe itself
 	return func(result model.CheckResult) {
 		labels := []string{result.Source, result.Destination, result.SourceZone, result.DestZone}
 		resultStr := "success"
@@ -521,8 +717,13 @@ func NewResultHandler(m *metrics.PrometheusMetrics, source checker.Target) Resul
 
 		case model.CheckUDP:
 			if d, ok := result.Details.(*UDPDetails); ok {
-				m.UDPRtt.WithLabelValues(labels...).Observe(d.MeanRTT.Seconds())
-				m.UDPJitter.WithLabelValues(labels...).Set(d.Jitter.Seconds())
+				/* Only what was MEASURED. A probe that lost every packet leaves MeanRTT and Jitter at
+				   zero, and observing those pulled the RTT quantiles and the jitter gauge DOWN during
+				   an outage — the ICMP branch below has always guarded this; UDP did not. */
+				if d.PacketsRecv > 0 {
+					m.UDPRtt.WithLabelValues(labels...).Observe(d.MeanRTT.Seconds())
+					m.UDPJitter.WithLabelValues(labels...).Set(d.Jitter.Seconds())
+				}
 				m.UDPLossRatio.WithLabelValues(labels...).Set(d.LossRatio)
 			}
 			m.UDPResults.WithLabelValues(resultLabels...).Inc()
@@ -560,13 +761,35 @@ func NewResultHandler(m *metrics.PrometheusMetrics, source checker.Target) Resul
 			if details, ok := result.Details.([]HTTPDetails); ok {
 				for _, d := range details {
 					urlLabels := []string{d.URL, source.NodeName, result.SourceZone}
-					m.HTTPDNSDuration.WithLabelValues(urlLabels...).Observe(d.DNSTime.Seconds())
-					m.HTTPConnectDuration.WithLabelValues(urlLabels...).Observe(d.ConnectTime.Seconds())
-					m.HTTPTLSDuration.WithLabelValues(urlLabels...).Observe(d.TLSTime.Seconds())
-					m.HTTPTTFBDuration.WithLabelValues(urlLabels...).Observe(d.TTFBTime.Seconds())
+					/* A phase is observed only if it RAN. httptrace fires no TLS callback for a
+					   plain-http target and no DNS callback for an IP literal, so those durations
+					   stay zero — and one 0 s sample per check, forever, is a handshake that never
+					   happened drawn as an instant one. */
+					if d.DNSTimed {
+						m.HTTPDNSDuration.WithLabelValues(urlLabels...).Observe(d.DNSTime.Seconds())
+					}
+					if d.ConnectTime > 0 {
+						m.HTTPConnectDuration.WithLabelValues(urlLabels...).Observe(d.ConnectTime.Seconds())
+					}
+					if d.TLSTimed {
+						m.HTTPTLSDuration.WithLabelValues(urlLabels...).Observe(d.TLSTime.Seconds())
+					}
+					if d.TTFBTimed {
+						m.HTTPTTFBDuration.WithLabelValues(urlLabels...).Observe(d.TTFBTime.Seconds())
+					}
 					m.HTTPTotalDuration.WithLabelValues(urlLabels...).Observe(d.TotalTime.Seconds())
 					r := "success"
-					if d.StatusCode == 0 || d.StatusCode >= 400 || d.BodyMismatch {
+					/* StatusMismatch is the CHECKER's verdict on expectStatus. Re-deriving the
+					   outcome from the status code alone counted a target that expected 204 and got
+					   200 as a success — in the very counter an expectStatus alert reads. */
+					/* And the same applies the other way. `d.StatusCode >= 400` also overrode the
+					   checker for a target that ASKED for a 4xx: expectStatus: 401 is a normal way
+					   to check that an auth gate is up, and the checker returns Success there while
+					   this counter recorded fail — the two halves of one probe disagreeing, with the
+					   alert reading the half that is wrong. StatusMismatch is the checker's verdict
+					   for both the expectStatus and the no-expectStatus case; a 0 means no response
+					   at all. */
+					if d.StatusCode == 0 || d.BodyMismatch || d.StatusMismatch {
 						r = "fail"
 					}
 					m.HTTPResults.WithLabelValues(d.URL, d.Method, fmt.Sprintf("%d", d.StatusCode), source.NodeName, result.SourceZone, r).Inc()
@@ -583,8 +806,31 @@ func NewResultHandler(m *metrics.PrometheusMetrics, source checker.Target) Resul
 		case model.CheckMTR:
 			m.MTRTriggered.WithLabelValues(labels...).Inc()
 			if details, ok := result.Details.(*MTRDetails); ok {
-				m.MTRHops.WithLabelValues(labels...).Set(float64(len(details.Hops)))
+				/* The hop COUNT is a path length, and a trace that never reached its destination has
+				   no path length to publish — it has maxHops silent entries. Publishing that as
+				   kconmon_ng_mtr_hops said a two-hop pod-to-pod route was thirty hops long.
+
+				   But SKIPPING the write was not the answer either: the hop-RTT series below are
+				   deleted on every trace, so an unreached trace left a stale gauge from an older,
+				   successful one — "3 hops" describing a path that no longer exists — standing next
+				   to no hop RTTs at all. Absence is absence here too: the gauge goes when the trace
+				   that would justify it did not arrive. */
+				if details.Reached {
+					m.MTRHops.WithLabelValues(labels...).Set(float64(len(details.Hops)))
+				} else {
+					m.MTRHops.DeleteLabelValues(labels...)
+				}
+				/* The PREVIOUS trace's hops go first. The gauge is keyed by hop_ip, so a route
+				   change left both the old path and the new one live and current — see
+				   ForgetPeerTrace. */
+				m.ForgetPeerTrace(result.Source, result.Destination)
 				for _, hop := range details.Hops {
+					/* A hop that did not answer has no round trip to publish. It used to be exported
+					   with the tracer's read deadline as its value, under hop_ip="*", so the series
+					   said every silent router replies in exactly one second. Absence is absence. */
+					if hop.IP == "" || hop.IP == "*" || hop.RTT <= 0 {
+						continue
+					}
 					m.MTRHopRTT.WithLabelValues(
 						result.Source, result.Destination,
 						fmt.Sprintf("%d", hop.Number), hop.IP,
@@ -608,6 +854,17 @@ func externalTargetKind(t model.CheckType) string {
 // probe never reached the network: it is neither a success nor a failure.
 func recordExternalDetail(m *metrics.PrometheusMetrics, node, zone string, d *ExternalDetails) {
 	kind := externalTargetKind(d.CheckType)
+	checkType := string(d.CheckType)
+
+	/* A probe that was abandoned before it touched the network is not a result.
+	   The shutdown path fills one of these for every target still waiting on the concurrency
+	   semaphore when the sweep's context dies, and recording it observed a 0 s sample into the
+	   duration histogram (dragging every p50/p95 panel down on each rolling update), incremented a
+	   counter whose Help says "results that reached the network", and -- for icmp -- published 100%
+	   packet loss for a probe that sent no packets. */
+	if d.NotRun {
+		return
+	}
 
 	if d.Denied {
 		reason := d.DenyReason
@@ -616,27 +873,50 @@ func recordExternalDetail(m *metrics.PrometheusMetrics, node, zone string, d *Ex
 			// set rather than mint an empty label value.
 			reason = model.ExternalDenyCIDR
 		}
-		m.ExternalDenied.WithLabelValues(node, zone, d.Name, kind, string(reason)).Inc()
+		m.ExternalDenied.WithLabelValues(node, zone, d.Name, kind, checkType, string(reason)).Inc()
+		/* And its GAUGES go, because they describe a probe that no longer happens. A target whose
+		   address starts resolving into a denied range (a DNS change, a CIDR dropped from
+		   allowedCidrs) is refused before it reaches the network from then on, and nothing wrote
+		   these series again — so the last packet-loss ratio and the last HTTP status code before
+		   the denial stayed on the dashboard as current readings, indefinitely. A denial is not a
+		   measurement; the honest answer is no series, next to the denial counter that IS climbing. */
+		m.ForgetExternalCheck(d.Name, kind, checkType)
 		return
 	}
 
-	m.ExternalDuration.WithLabelValues(node, zone, d.Name, kind).Observe(d.Duration.Seconds())
+	m.ExternalDuration.WithLabelValues(node, zone, d.Name, kind, checkType).Observe(d.Duration.Seconds())
 
-	// RTT and loss ratio exist only for icmp; observing a zero for a tcp probe
-	// would report a measurement that was never taken.
+	/* RTT and loss ratio exist only for icmp; observing a zero for a tcp probe would report a
+	   measurement that was never taken.
+
+	   The RTT is observed ONLY on success, exactly as the peer ICMP branch above does. A probe that
+	   got no reply has no round trip, and the checker fills RTT with the elapsed read deadline in
+	   that case — so a failing external target used to feed its own timeout into the latency
+	   histogram once per probe, and every p95/p99 panel and latency SLO on the target jumped to the
+	   timeout value during the outage instead of going blank. The outage is the thing the check
+	   exists to show; a fabricated latency hides it behind a plausible number.
+
+	   The loss gauge takes the opposite rule: a failed probe that produced no usable ratio is 100%
+	   loss, not the zero value of a struct nobody filled in. */
 	if d.CheckType == model.CheckICMP {
-		m.ExternalRtt.WithLabelValues(node, zone, d.Name, kind).Observe(d.RTT.Seconds())
-		m.ExternalPacketLoss.WithLabelValues(node, zone, d.Name, kind).Set(d.LossRatio)
+		if d.Success {
+			m.ExternalRtt.WithLabelValues(node, zone, d.Name, kind, checkType).Observe(d.RTT.Seconds())
+		}
+		loss := d.LossRatio
+		if !d.Success && loss == 0 {
+			loss = 1
+		}
+		m.ExternalPacketLoss.WithLabelValues(node, zone, d.Name, kind, checkType).Set(loss)
 	}
 	if d.CheckType == model.CheckHTTP {
-		m.ExternalHTTPStatusCode.WithLabelValues(node, zone, d.Name, kind).Set(float64(d.StatusCode))
+		m.ExternalHTTPStatusCode.WithLabelValues(node, zone, d.Name, kind, checkType).Set(float64(d.StatusCode))
 	}
 
 	r := "success"
 	if !d.Success {
 		r = "fail"
 	}
-	m.ExternalResults.WithLabelValues(node, zone, d.Name, kind, r).Inc()
+	m.ExternalResults.WithLabelValues(node, zone, d.Name, kind, checkType, r).Inc()
 }
 
 type TCPDetails = model.TCPDetails

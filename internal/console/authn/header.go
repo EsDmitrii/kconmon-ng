@@ -53,6 +53,13 @@ func (h *headerAuthenticator) Authenticate(r *http.Request) (authz.Subject, erro
 	if user == "" {
 		return authz.Subject{}, ErrNoCredentials
 	}
+	// A proxy asserts a username; it does not get to assert an identity from another auth mode's
+	// namespace (identity.go). A header saying "oidc:<someone's sub>" would otherwise resolve every
+	// binding that OIDC subject holds, on a deployment that has since switched modes and still has
+	// the old rows.
+	if reservedIdentity(user) {
+		return authz.Subject{}, ErrNoCredentials
+	}
 
 	return authz.Subject{
 		Kind:        authz.SubjectUser,

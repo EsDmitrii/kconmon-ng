@@ -14,6 +14,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 
+	"github.com/EsDmitrii/kconmon-ng/internal/console/events"
 	"github.com/EsDmitrii/kconmon-ng/internal/console/store"
 )
 
@@ -168,7 +169,13 @@ func (s *Server) handleIncidentsList(w http.ResponseWriter, r *http.Request) {
 
 	var scope *string
 	if q.Has("scope") {
-		v := q.Get("scope")
+		// A control char here (a NUL above all) would 502 out of the text column;
+		// it is client input, so it is a 400 before the query is built.
+		if rejectControlChars(w, "scope", q.Get("scope")) {
+			return
+		}
+		// Normalized so a scope filter matches whichever arrow form the window was written with.
+		v := events.NormalizePairScope(q.Get("scope"))
 		scope = &v
 	}
 
@@ -210,16 +217,20 @@ func (s *Server) handleIncidentsCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req incidentRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeProblem(w, http.StatusBadRequest, "invalid request",
-			`an incident body must be JSON with "title" and "fromAt" (RFC3339), `+
-				`plus optional "toAt", "scope", "notes" and "pinned"`)
+	// Deliberately LENIENT (no DisallowUnknownFields): client-owned state
+	// (createdBy, status) is IGNORED, not rejected -- the server sets the
+	// authenticated subject and opens the incident itself
+	// (TestIncidentsCreateRecordsTheSubjectAndIgnoresClientState).
+	// STRICT, as the schema says: a misspelled optional field must be refused, not dropped.
+	if !decodeMutationBody(w, r, &req,
+		`an incident body must be JSON with "title" and "fromAt" (RFC3339), `+
+			`plus optional "toAt", "scope", "notes" and "pinned"`) {
 		return
 	}
 
 	subject, _ := SubjectFrom(r.Context())
 	in := store.IncidentInput{
-		Title: req.Title, Scope: req.Scope, FromAt: req.FromAt, ToAt: req.ToAt,
+		Title: req.Title, Scope: events.NormalizePairScope(req.Scope), FromAt: req.FromAt, ToAt: req.ToAt,
 		Status: store.IncidentStatusOpen, Notes: req.Notes, Pinned: req.Pinned,
 		CreatedBy: annotationAuthor(subject),
 	}
@@ -234,9 +245,14 @@ func (s *Server) handleIncidentsCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Notified AFTER the row exists and BEFORE the 201 is written: the database is the source of
-	// truth.
-	s.notifyIncident(r.Context(), store.WebhookEventIncidentCreated, &inc)
+	/* Notified AFTER the row exists and BEFORE the 201 is written: the database is the source of
+	   truth.
+
+	   WithoutCancel, because the notification is owed by the COMMIT, not by the client still being
+	   there to hear about it. On the request context, a closed tab or a proxy read timeout made the
+	   dispatcher's own endpoint listing fail with "context canceled" — the incident existed and
+	   incident.created was never delivered, never retried, and nothing anywhere reconciles it. */
+	s.notifyIncident(context.WithoutCancel(r.Context()), store.WebhookEventIncidentCreated, &inc)
 
 	w.Header().Set("Location", "/api/v1/incidents/"+inc.ID)
 	writeJSONStatus(w, http.StatusCreated, incidentResponseFrom(&inc))
@@ -304,31 +320,64 @@ func (s *Server) handleIncidentsUpdate(w http.ResponseWriter, r *http.Request) {
 		} else {
 			lifecycleEvent = store.WebhookEventIncidentReopened
 		}
-		current, err = s.incidents.UpdateIncidentStatus(r.Context(), id, *req.Status, resolvedAt)
-		if err != nil {
-			writeIncidentStoreError(w, id, err)
+		updated, moved, updateErr := s.incidents.UpdateIncidentStatus(r.Context(), id, *req.Status, resolvedAt)
+		if updateErr != nil {
+			writeIncidentStoreError(w, id, updateErr)
 			return
 		}
-	}
-	if req.Notes != nil {
-		current, err = s.incidents.UpdateIncidentNotes(r.Context(), id, *req.Notes)
-		if err != nil {
-			writeIncidentStoreError(w, id, err)
-			return
+		current = updated
+		if !moved {
+			/* Somebody else made this transition between our read and our write. The row is already
+			   where the caller wanted it — so this is a success — but the announcement belongs to
+			   whoever performed the move: receivers have no idempotency key to fold two identical
+			   resolutions by, and the payload's `at` differs per delivery. */
+			lifecycleEvent = ""
 		}
 	}
-	if req.Pinned != nil {
-		current, err = s.incidents.UpdateIncidentPinned(r.Context(), id, *req.Pinned)
-		if err != nil {
-			writeIncidentStoreError(w, id, err)
-			return
+	/* The lifecycle delivery is owed the moment the STATUS write commits, so a later field's failure
+	   must not cancel it. These are three untransacted store calls: notes failing on a pool blip
+	   after the status write left the row resolved, the handler returning 502, and the retry finding
+	   *req.Status == current.Status — so lifecycleEvent stayed empty and the incident.resolved
+	   webhook was never sent, on that request or on any request afterwards. The transition happened
+	   and is durable; the notification follows it, not the rest of the patch.
+
+	   Deferred rather than sent inline so it still carries the FINAL row when the remaining writes
+	   do succeed, which is what a receiver wants to read. */
+	notified := false
+	notify := func() {
+		if lifecycleEvent != "" && !notified {
+			notified = true
+			// WithoutCancel for the same reason as the create path above.
+			s.notifyIncident(context.WithoutCancel(r.Context()), lifecycleEvent, &current)
 		}
 	}
 
-	// Notified after EVERY named field has been applied, and with the FINAL row.
-	if lifecycleEvent != "" {
-		s.notifyIncident(r.Context(), lifecycleEvent, &current)
+	/* Assigned into a TEMPORARY and promoted only on success. `current, err = …` is a tuple
+	   assignment: it overwrites current with the store's zero Incident before err is ever tested, so
+	   the deferred notify below shipped an incident with no id, no title and an empty status — a
+	   receiver was told that a nameless incident had been resolved. The lost notification this
+	   deferral fixes is a smaller harm than a false one. */
+	if req.Notes != nil {
+		updated, uerr := s.incidents.UpdateIncidentNotes(r.Context(), id, *req.Notes)
+		if uerr != nil {
+			notify()
+			writeIncidentStoreError(w, id, uerr)
+			return
+		}
+		current = updated
 	}
+	if req.Pinned != nil {
+		updated, uerr := s.incidents.UpdateIncidentPinned(r.Context(), id, *req.Pinned)
+		if uerr != nil {
+			notify()
+			writeIncidentStoreError(w, id, uerr)
+			return
+		}
+		current = updated
+	}
+
+	// Notified after EVERY named field has been applied, and with the FINAL row.
+	notify()
 
 	writeJSON(w, incidentResponseFrom(&current))
 }
@@ -336,9 +385,10 @@ func (s *Server) handleIncidentsUpdate(w http.ResponseWriter, r *http.Request) {
 // decodeIncidentPatch reads and validates a PATCH body in full before the caller writes anything.
 func decodeIncidentPatch(w http.ResponseWriter, r *http.Request) (incidentPatchRequest, bool) {
 	var req incidentPatchRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeProblem(w, http.StatusBadRequest, "invalid request",
-			`an incident patch body must be JSON with any subset of "status", "notes" and "pinned"`)
+	/* STRICT, and it matters most here: every field is optional, so a typo decodes to "no field
+	   given" and the patch below answers 422 "nothing to change" for a request that named one. */
+	if !decodeMutationBody(w, r, &req,
+		`an incident patch body must be JSON with any subset of "status", "notes" and "pinned"`) {
 		return incidentPatchRequest{}, false
 	}
 	if req.Status == nil && req.Notes == nil && req.Pinned == nil {

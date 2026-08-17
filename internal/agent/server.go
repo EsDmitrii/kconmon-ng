@@ -38,6 +38,11 @@ func (s *HTTPServer) SetReady(ready bool) {
 	s.ready.Store(ready)
 }
 
+// Ready is the readiness this component reports; the metrics listener shares it (metrics.NewListenerHandler).
+func (s *HTTPServer) Ready() bool {
+	return s.ready.Load()
+}
+
 func (s *HTTPServer) handleHealthz(w http.ResponseWriter, _ *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte("ok"))

@@ -160,9 +160,10 @@ var routeTable = map[string]routeRule{
 	"DELETE /api/v1/schedules/{id}": {permission: authz.PermSchedulesWrite},
 
 	// MTR path history is TELEMETRY, not configuration, so mtr:read reaches VIEWER.
-	"GET /api/v1/mtr/destinations":   {permission: authz.PermMTRRead},
-	"GET /api/v1/mtr/snapshots":      {permission: authz.PermMTRRead},
-	"GET /api/v1/mtr/snapshots/{id}": {permission: authz.PermMTRRead},
+	"GET /api/v1/mtr/destinations":          {permission: authz.PermMTRRead},
+	"GET /api/v1/mtr/snapshots":             {permission: authz.PermMTRRead},
+	"GET /api/v1/mtr/snapshots/{id}/traces": {permission: authz.PermMTRRead},
+	"GET /api/v1/mtr/snapshots/{id}":        {permission: authz.PermMTRRead},
 
 	// Annotations split read from write.
 	"GET /api/v1/annotations":         {permission: authz.PermAnnotationsRead},
@@ -289,13 +290,20 @@ func (s *Server) resolveRoles(ctx context.Context, subject authz.Subject) authz.
 		roles, err := s.roles.RolesFor(ctx, subject)
 		switch {
 		case err != nil:
-			slog.Warn("httpapi: resolve roles failed, degrading to auth.defaultRole",
+			/* Fail CLOSED. An unreadable role store is not evidence that this subject holds
+			   auth.defaultRole -- it is no evidence at all, and handing out the default role on a
+			   database blip grants permissions the subject may not have. No roles means every
+			   permission check refuses, which is the honest answer to "we cannot tell". */
+			slog.Error("httpapi: resolve roles failed, refusing rather than granting the default role",
 				"subject_kind", subject.Kind, "error", err)
+			subject.Roles = nil
+			return subject
 		case len(roles) > 0:
 			subject.Roles = roles
 			return subject
 		}
 	}
+	// No role store, or a subject the store knows nothing about: the configured default.
 	subject.Roles = s.defaultRoles()
 	return subject
 }
@@ -325,6 +333,11 @@ func (s *Server) authorize(next http.Handler) http.Handler {
 
 		if !rule.public {
 			if subject.Kind == "" {
+				/* A refused credential is a security event and left no trace: metrics counted it,
+				   the audit log did not, so a token-guessing or brute-force attempt was invisible
+				   to the one surface an operator investigates with. The subject is empty by
+				   definition here — what is worth recording is the route and the outcome. */
+				s.recordAudit(r, subject, auditOutcomeDenied, nil)
 				write401(w)
 				return
 			}
@@ -347,7 +360,8 @@ func (s *Server) authorize(next http.Handler) http.Handler {
 			return
 		}
 
-		if s.audit != nil && isMutatingMethod(r.Method) {
+		// Mutations, plus the privileged READS: see auditedReads.
+		if s.audit != nil && (isMutatingMethod(r.Method) || s.isAuditedRead(r)) {
 			s.auditMutation(w, r, subject, next)
 			return
 		}
@@ -406,8 +420,17 @@ func (s *Server) csrfOK(r *http.Request, subject authz.Subject) bool { //nolint:
 	case authz.SubjectToken, "":
 		return true
 	case authz.SubjectAnonymous:
+		/* Anonymous mode has no token to double-submit, but it is NOT unprotected.
+		   The exemption used to be unconditional, and anonymous.role may be operator or admin, so
+		   any page an operator's browser happened to visit could POST into a console that was
+		   deliberately kept off the internet: a CORS simple request (text/plain body, no custom
+		   header) triggers no preflight, so the browser sent it and the console executed it. The
+		   attacker never sees the response, but the write lands — targets, check definitions, alert
+		   rules, RBAC roles, API tokens. Origin/Sec-Fetch-Site is the check that fits: a browser
+		   always sends them cross-site, and a non-browser client (curl, a script) sends neither and
+		   is unaffected. */
 		if s.cfg.Auth.Mode == "anonymous" {
-			return true
+			return sameOriginRequest(r)
 		}
 	case authz.SubjectUser:
 		// Falls through to the double-submit pair check below.

@@ -57,9 +57,32 @@ func (h *Hub) ServeWS(w http.ResponseWriter, r *http.Request) {
 	h.ServeWSAuthorized(w, r, nil)
 }
 
+/*
+ * ConnOptions are the per-connection gates: who may subscribe to what, and for how long that answer
+ * stays good.
+ *
+ * Revalidate exists because authorization used to be evaluated exactly ONCE, at upgrade. Revoking a
+ * token, deleting a role binding or ending a session did nothing to an already-open socket: it kept
+ * streaming topology snapshots, matrix snapshots and every live event for as long as the browser
+ * stayed open, and none of those reads produced an audit row either.
+ */
+type ConnOptions struct {
+	// Authorize gates each subscribe. nil admits every topic on the hub's static allowlist.
+	Authorize TopicAuthorizer
+	/* Revalidate re-asks whether this connection may still exist. Called on the ping tick — the
+	   heartbeat the connection already pays for — and a non-nil error closes the socket. nil means
+	   the upgrade's answer stands for the life of the connection. */
+	Revalidate func() error
+}
+
 // ServeWSAuthorized upgrades one HTTP request to the multiplexed WebSocket protocol and runs its
 // two pumps; it is what lets ONE hub serve two sockets with different topic sets.
 func (h *Hub) ServeWSAuthorized(w http.ResponseWriter, r *http.Request, authorize TopicAuthorizer) {
+	h.ServeWSWithOptions(w, r, ConnOptions{Authorize: authorize})
+}
+
+// ServeWSWithOptions is ServeWSAuthorized plus the periodic re-authorization; see ConnOptions.
+func (h *Hub) ServeWSWithOptions(w http.ResponseWriter, r *http.Request, opts ConnOptions) {
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		// Upgrade has already written the HTTP error response (400 for a
@@ -69,12 +92,12 @@ func (h *Hub) ServeWSAuthorized(w http.ResponseWriter, r *http.Request, authoriz
 		return
 	}
 
-	c := h.register(authorize)
+	c := h.register(opts.Authorize)
 	slog.Debug("websocket client connected", "clients", h.ClientCount())
 
 	// Teardown is symmetric in both directions; that also covers register refusing a client on an
 	// already-stopped hub.
-	go h.writePump(c, conn)
+	go h.writePump(c, conn, opts.Revalidate)
 	h.readPump(c, conn)
 
 	h.unregister(c)
@@ -116,7 +139,7 @@ func (h *Hub) readPump(c *client, conn *websocket.Conn) {
 // writePump is the only goroutine that ever writes to conn (gorilla permits one
 // concurrent writer). It closes the socket on the way out, which is what unblocks
 // the read pump.
-func (h *Hub) writePump(c *client, conn *websocket.Conn) {
+func (h *Hub) writePump(c *client, conn *websocket.Conn, revalidate func() error) {
 	ticker := time.NewTicker(pingPeriod)
 	defer func() {
 		ticker.Stop()
@@ -134,6 +157,20 @@ func (h *Hub) writePump(c *client, conn *websocket.Conn) {
 				return
 			}
 		case <-ticker.C:
+			/* The credential is re-checked on the heartbeat this connection already pays for. A
+			   revoked token or a deleted binding ends the socket here rather than at the browser's
+			   convenience. */
+			if revalidate != nil {
+				if err := revalidate(); err != nil {
+					slog.Info("websocket closed: authorization no longer holds", "error", err)
+					_ = conn.WriteControl(
+						websocket.CloseMessage,
+						websocket.FormatCloseMessage(websocket.ClosePolicyViolation, "authorization revoked"),
+						time.Now().Add(writeWait),
+					)
+					return
+				}
+			}
 			if err := conn.SetWriteDeadline(time.Now().Add(writeWait)); err != nil {
 				return
 			}

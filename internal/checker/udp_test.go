@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/binary"
 	"net"
+	"strings"
 	"testing"
 	"time"
 
@@ -95,6 +96,32 @@ func TestUDPCheckerNoServer(t *testing.T) {
 	}
 }
 
+/*
+An external target with no port is an error, not a probe against the agent's own echo port.
+
+c.port is where a PEER agent listens; on an external host it is whatever happens to be on 9090 —
+someone else's service, or nothing. The check reported a clean 100% loss naming the operator's
+destination while the packets went somewhere nobody asked about, which is worse than no answer: it
+reads as a real network fault. The agent refuses this earlier (internal/agent/tasks.go), so nothing
+in-tree gets here; the checker refuses too, because it is the layer that owns the port decision.
+*/
+func TestUDPCheckerRefusesAnExternalTargetWithNoPort(t *testing.T) {
+	// A live echo server on the checker's OWN port: if the fallback came back, the probe would
+	// succeed against it and the loss ratio would look healthy.
+	port, cleanup := startUDPEchoServer(t)
+	defer cleanup()
+
+	c := NewUDPChecker(200*time.Millisecond, 3, port)
+	result := c.Check(context.Background(), Target{PodIP: "127.0.0.1", External: true})
+
+	if result.Success {
+		t.Fatal("a portless external UDP target probed something: the checker fell back to its own echo port")
+	}
+	if !strings.Contains(result.Error, "port") {
+		t.Errorf("error does not name the missing port: %q", result.Error)
+	}
+}
+
 func TestUDPCheckerContextCancel(t *testing.T) {
 	port, cleanup := startUDPEchoServer(t)
 	defer cleanup()
@@ -176,5 +203,72 @@ func TestParseUDPPacket(t *testing.T) {
 				t.Errorf("ParseUDPPacket() seq = %d, want %d", seq, tt.wantSeq)
 			}
 		})
+	}
+}
+
+/* ── one late reply used to cost the whole probe ─────────────────────────── */
+
+/*
+ * The reader did exactly one Read per packet. A reply that arrived just after that packet's deadline
+ * stayed queued in the socket, so the NEXT iteration read the PREVIOUS packet's reply, the sequence
+ * never matched again, and a pair where every datagram was delivered reported 100% loss —
+ * `LossRatio = 1.0`, `Success = false`, straight into the loss gauge and the matrix. One ordinary
+ * latency spike past checkers.udp.timeout was the whole trigger.
+ */
+func TestUDPCheckerSurvivesOneLateReply(t *testing.T) {
+	lc := net.ListenConfig{}
+	conn, err := lc.ListenPacket(context.Background(), "udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = conn.Close() }()
+	port := conn.LocalAddr().(*net.UDPAddr).Port
+
+	// An echo server that holds the FIRST reply past the checker's deadline and answers the rest at
+	// once — the shape of a single spike.
+	const timeout = 150 * time.Millisecond
+	done := make(chan struct{})
+	go func() {
+		buf := make([]byte, 1024)
+		first := true
+		for {
+			select {
+			case <-done:
+				return
+			default:
+			}
+			_ = conn.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
+			n, addr, err := conn.ReadFrom(buf)
+			if err != nil {
+				continue
+			}
+			if n < 4 {
+				continue
+			}
+			resp := make([]byte, 4)
+			copy(resp, buf[:4])
+			if first {
+				first = false
+				time.Sleep(timeout + 50*time.Millisecond)
+			}
+			_, _ = conn.WriteTo(resp, addr)
+		}
+	}()
+	defer close(done)
+
+	c := NewUDPChecker(timeout, 5, port)
+	result := c.Check(context.Background(), Target{PodIP: "127.0.0.1"})
+
+	details, ok := result.Details.(*model.UDPDetails)
+	if !ok {
+		t.Fatalf("details = %T, want *model.UDPDetails", result.Details)
+	}
+	// The first packet is honestly lost — it did not answer in time. Everything after it must not be.
+	if details.PacketsRecv < 4 {
+		t.Errorf("received %d of %d after ONE late reply, want the remaining packets counted (loss %.2f)",
+			details.PacketsRecv, details.PacketsSent, details.LossRatio)
+	}
+	if details.LossRatio > 0.25 {
+		t.Errorf("lossRatio = %.2f after one late reply, want at most the one packet's worth", details.LossRatio)
 	}
 }

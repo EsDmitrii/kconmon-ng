@@ -15,12 +15,13 @@ import (
 	"github.com/EsDmitrii/kconmon-ng/internal/console/store/gen"
 )
 
-// The RetentionDeleted "table" labels for the nine tables this sweep prunes; this is a closed set
+// The RetentionDeleted "table" labels for the tables this sweep prunes; this is a closed set
 // enforced only by this file's own usage.
 const (
 	tableTopologyEvents = "topology_events"
 	tableAuditLog       = "audit_log"
 	tableCheckRuns      = "check_runs"
+	tableCheckResults   = "check_results"
 	tableMTRSnapshots   = "mtr_path_snapshots"
 	tableMTREnrichment  = "mtr_hop_enrichment"
 	tableAnnotations    = "annotations"
@@ -145,6 +146,17 @@ func (p *Pruner) PruneOnce(ctx context.Context) (map[string]int64, error) {
 			},
 		},
 		{
+			/* The CHILDREN first, and in batches of their own: deleting a run cascades to every
+			   sample it owns, so a batch counted in runs was unbounded in rows. See the query. */
+			table: tableCheckResults,
+			del: func(ctx context.Context, limit int32) (int64, error) {
+				return q.DeleteResultsForRunsBefore(ctx, gen.DeleteResultsForRunsBeforeParams{
+					CreatedAt: cutoff,
+					Limit:     limit,
+				})
+			},
+		},
+		{
 			table: tableCheckRuns,
 			del: func(ctx context.Context, limit int32) (int64, error) {
 				return q.DeleteRunsBefore(ctx, gen.DeleteRunsBeforeParams{
@@ -175,8 +187,8 @@ func (p *Pruner) PruneOnce(ctx context.Context) (map[string]int64, error) {
 			table: tableAnnotations,
 			del: func(ctx context.Context, limit int32) (int64, error) {
 				return q.DeleteAnnotationsBefore(ctx, gen.DeleteAnnotationsBeforeParams{
-					StartAt: cutoff,
-					Limit:   limit,
+					EndAt: pgtype.Timestamptz{Time: cutoff, Valid: true},
+					Limit: limit,
 				})
 			},
 		},

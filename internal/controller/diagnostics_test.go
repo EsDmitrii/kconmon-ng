@@ -764,3 +764,45 @@ type dispatcherFunc func(context.Context, string, *pb.TaskRequest) (*pb.TaskResu
 func (f dispatcherFunc) Dispatch(ctx context.Context, agentID string, req *pb.TaskRequest) (*pb.TaskResult, error) {
 	return f(ctx, agentID, req)
 }
+
+// TestDiagnosticsBodyNeverEmpty is the other end of the mass-MTR regression: the handler returned
+// the agent's DetailsJson verbatim, so an agent that refused a task (empty payload) produced a 200
+// with a zero-byte body and every JSON client reported "unexpected end of JSON input" instead of
+// the refusal's reason.
+func TestDiagnosticsBodyNeverEmpty(t *testing.T) {
+	tests := []struct {
+		name string
+		res  *pb.TaskResult
+		want string
+	}{
+		{
+			name: "agent payload is returned verbatim",
+			res:  &pb.TaskResult{DetailsJson: []byte(`{"type":"mtr","success":true}`)},
+			want: `{"type":"mtr","success":true}`,
+		},
+		{
+			name: "a refusal without a payload still decodes",
+			res:  &pb.TaskResult{Success: false, Error: "agent busy: too many concurrent diagnostic tasks"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			body := diagnosticsBody(tc.res)
+			if len(body) == 0 {
+				t.Fatal("diagnosticsBody returned no bytes; the Console cannot decode an empty 200")
+			}
+			if tc.want != "" && string(body) != tc.want {
+				t.Fatalf("body = %s, want %s", body, tc.want)
+			}
+
+			var decoded model.CheckResult
+			if err := json.Unmarshal(body, &decoded); err != nil {
+				t.Fatalf("body does not decode as a CheckResult: %v", err)
+			}
+			if tc.res.GetError() != "" && decoded.Error != tc.res.GetError() {
+				t.Errorf("Error = %q, want the agent's reason %q", decoded.Error, tc.res.GetError())
+			}
+		})
+	}
+}

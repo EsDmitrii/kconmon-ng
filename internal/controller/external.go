@@ -35,13 +35,17 @@ type ExternalCheckManager struct {
 	// assignments holds only the SPECS per agent, never a timestamp: the timestamp is stamped per
 	// send.
 	assignments map[string][]*pb.ExternalCheckSpec
-	subscribers map[string]chan *pb.ExternalCheckAssignment
+	/* A SET of streams per agent id; see TaskManager.subscribers for why one-per-id was wrong. The
+	   short version: the id comes off the wire, so a second subscriber under an existing id took
+	   over that agent's assignment feed and, on disconnect, removed the id entirely — the real
+	   agent then never received another assignment while looking perfectly healthy. */
+	subscribers map[string]map[chan *pb.ExternalCheckAssignment]struct{}
 }
 
 func NewExternalCheckManager() *ExternalCheckManager {
 	return &ExternalCheckManager{
 		assignments: make(map[string][]*pb.ExternalCheckSpec),
-		subscribers: make(map[string]chan *pb.ExternalCheckAssignment),
+		subscribers: make(map[string]map[chan *pb.ExternalCheckAssignment]struct{}),
 	}
 }
 
@@ -52,20 +56,38 @@ func (m *ExternalCheckManager) Subscribe(agentID string) (updates <-chan *pb.Ext
 	ch := make(chan *pb.ExternalCheckAssignment, externalSubscriberBuffer)
 
 	m.mu.Lock()
-	m.subscribers[agentID] = ch
+	if m.subscribers[agentID] == nil {
+		m.subscribers[agentID] = make(map[chan *pb.ExternalCheckAssignment]struct{}, 1)
+	}
+	m.subscribers[agentID][ch] = struct{}{}
 	m.mu.Unlock()
 
 	var once sync.Once
 	cleanup = func() {
 		once.Do(func() {
 			m.mu.Lock()
-			if cur, ok := m.subscribers[agentID]; ok && cur == ch {
-				delete(m.subscribers, agentID)
+			if set, ok := m.subscribers[agentID]; ok {
+				delete(set, ch)
+				if len(set) == 0 {
+					delete(m.subscribers, agentID)
+				}
 			}
 			m.mu.Unlock()
 		})
 	}
 	return ch, cleanup
+}
+
+// subscriberChans flattens one agent's stream set for a fan-out performed outside the mutex.
+func subscriberChans(set map[chan *pb.ExternalCheckAssignment]struct{}) []chan *pb.ExternalCheckAssignment {
+	if len(set) == 0 {
+		return nil
+	}
+	out := make([]chan *pb.ExternalCheckAssignment, 0, len(set))
+	for ch := range set {
+		out = append(out, ch)
+	}
+	return out
 }
 
 // Assignment returns the agent's CURRENT complete assignment, freshly stamped; an agent with
@@ -83,7 +105,8 @@ func (m *ExternalCheckManager) Apply(desired map[string][]*pb.ExternalCheckSpec)
 	type push struct {
 		agentID string
 		specs   []*pb.ExternalCheckSpec
-		ch      chan *pb.ExternalCheckAssignment
+		// Every stream open for this id, not "the" stream: see Subscribe.
+		chans []chan *pb.ExternalCheckAssignment
 	}
 
 	// Collect the sends under the mutex, perform them after releasing it.
@@ -98,35 +121,69 @@ func (m *ExternalCheckManager) Apply(desired map[string][]*pb.ExternalCheckSpec)
 			continue
 		}
 		m.assignments[agentID] = specs
-		pushes = append(pushes, push{agentID: agentID, specs: specs, ch: m.subscribers[agentID]})
+		pushes = append(pushes, push{agentID: agentID, specs: specs, chans: subscriberChans(m.subscribers[agentID])})
 	}
 	for agentID := range m.assignments {
 		if len(desired[agentID]) > 0 {
 			continue
 		}
 		delete(m.assignments, agentID)
-		pushes = append(pushes, push{agentID: agentID, ch: m.subscribers[agentID]})
+		pushes = append(pushes, push{agentID: agentID, chans: subscriberChans(m.subscribers[agentID])})
 	}
 	m.mu.Unlock()
 
 	for i := range pushes {
 		changed++
-		if pushes[i].ch == nil {
+		if len(pushes[i].chans) == 0 {
 			// No open stream: the agent picks the new state up on its initial
 			// send when it (re)subscribes.
 			continue
 		}
-		// Non-blocking: a subscriber whose stream died mid-push must never
-		// stall the fan-out to the others. A dropped assignment is corrected by
-		// the next change or by the Console's reconcile ticker.
-		select {
-		case pushes[i].ch <- newAssignment(pushes[i].specs):
-		default:
-			slog.Warn("dropping external-check assignment, subscriber channel full", "agent", pushes[i].agentID)
+		// Non-blocking: a subscriber whose stream died mid-push must never stall the fan-out to
+		// the others.
+		queued := false
+		for _, ch := range pushes[i].chans {
+			select {
+			case ch <- newAssignment(pushes[i].specs):
+				queued = true
+			default:
+			}
+		}
+		if !queued {
+			/* FORGET what we recorded for this agent, or the drop is permanent.
+			   m.assignments was written before the push, so the console's periodic resync — which
+			   re-PUTs the identical desired state — matched sameSpecs and skipped the very agent
+			   that never received the message. The comment here used to name that resync as the
+			   recovery path; it was not one. Clearing the entry makes the next Apply see a
+			   difference and push again. */
+			m.mu.Lock()
+			delete(m.assignments, pushes[i].agentID)
+			m.mu.Unlock()
+			slog.Warn("external-check assignment could not be queued; it will be re-pushed",
+				"agent", pushes[i].agentID)
 		}
 	}
 
 	return changed
+}
+
+/*
+Reset drops every stored assignment, leaving the subscribers in place.
+
+It is what a replica does when it STOPS being the leader. The assignment map is a leader's decision
+about the fleet, and a demoted replica that keeps it goes on reporting agents in
+controller_external_assignments that it no longer assigns anything to, and answers a re-subscribing
+agent's initial Assignment() with a plan only the real leader may make. The agent registry is reset
+for exactly this reason (Controller.SetLeader); this is the other half of the same state.
+
+The SUBSCRIBERS are deliberately untouched: those are live gRPC streams owned by their own handlers,
+which end themselves on their own leader checks. Tearing them down here would race those handlers
+for no gain.
+*/
+func (m *ExternalCheckManager) Reset() {
+	m.mu.Lock()
+	m.assignments = make(map[string][]*pb.ExternalCheckSpec)
+	m.mu.Unlock()
 }
 
 // AssignedCount reports the number of agents with a NON-EMPTY assignment. It

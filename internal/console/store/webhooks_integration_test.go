@@ -191,9 +191,15 @@ func TestUpdateWebhookDeliveryLeavesConfigurationAlone(t *testing.T) {
 		t.Fatalf("CreateWebhook: %v", err)
 	}
 
+	/* THREE failed deliveries, recorded independently — the shape that used to lose updates. Each
+	   call increments whatever the ROW holds; the dispatcher no longer passes a count, so two
+	   overlapping deliveries can no longer write the same enqueue-time snapshot back over each
+	   other. */
 	attempt := time.Now().UTC().Truncate(time.Microsecond)
-	if err := db.UpdateWebhookDelivery(ctx, created.ID, "502 Bad Gateway", attempt, 3); err != nil {
-		t.Fatalf("UpdateWebhookDelivery: %v", err)
+	for i := range 3 {
+		if err := db.UpdateWebhookDelivery(ctx, created.ID, "502 Bad Gateway", attempt, false); err != nil {
+			t.Fatalf("UpdateWebhookDelivery %d: %v", i, err)
+		}
 	}
 
 	got, err := db.GetWebhook(ctx, created.ID)
@@ -203,6 +209,7 @@ func TestUpdateWebhookDeliveryLeavesConfigurationAlone(t *testing.T) {
 	if got.LastStatus != "502 Bad Gateway" || got.Failures != 3 {
 		t.Errorf("delivery outcome = (%q, %d), want (\"502 Bad Gateway\", 3)", got.LastStatus, got.Failures)
 	}
+
 	if got.LastAttempt == nil || !got.LastAttempt.Equal(attempt) {
 		t.Errorf("LastAttempt = %v, want %v", got.LastAttempt, attempt)
 	}
@@ -226,9 +233,9 @@ func TestUpdateWebhookDeliveryLeavesConfigurationAlone(t *testing.T) {
 		t.Errorf("UpdateWebhook cleared LastAttempt: %v, want %v", updated.LastAttempt, attempt)
 	}
 
-	// A success then zeroes the streak -- failures is SET, not incremented.
+	// A success then zeroes the streak.
 	ok := attempt.Add(time.Minute)
-	if err := db.UpdateWebhookDelivery(ctx, created.ID, "200 OK", ok, 0); err != nil {
+	if err := db.UpdateWebhookDelivery(ctx, created.ID, "200 OK", ok, true); err != nil {
 		t.Fatalf("UpdateWebhookDelivery(ok): %v", err)
 	}
 	got, err = db.GetWebhook(ctx, created.ID)
@@ -237,6 +244,15 @@ func TestUpdateWebhookDeliveryLeavesConfigurationAlone(t *testing.T) {
 	}
 	if got.Failures != 0 || got.LastStatus != "200 OK" {
 		t.Errorf("after a success: failures=%d status=%q, want 0 / \"200 OK\"", got.Failures, got.LastStatus)
+	}
+
+	/* And the count resumes FROM THE ROW rather than from anything a caller computed: one failure
+	   after the reset is 1, not the 3 a stale enqueue-time snapshot would have written back. */
+	if err := db.UpdateWebhookDelivery(ctx, created.ID, "502 Bad Gateway", ok, false); err != nil {
+		t.Fatalf("UpdateWebhookDelivery(after reset): %v", err)
+	}
+	if after, gerr := db.GetWebhook(ctx, created.ID); gerr != nil || after.Failures != 1 {
+		t.Errorf("failures after reset+1 = %d (err %v), want 1", after.Failures, gerr)
 	}
 }
 
@@ -300,7 +316,7 @@ func TestGetWebhookUnknownIDIsNotFound(t *testing.T) {
 	if _, err := db.UpdateWebhook(ctx, id, webhookInput("ops-slack")); !errors.Is(err, store.ErrNotFound) {
 		t.Errorf("UpdateWebhook(unknown) = %v, want ErrNotFound", err)
 	}
-	if err := db.UpdateWebhookDelivery(ctx, id, "200", time.Now(), 0); !errors.Is(err, store.ErrNotFound) {
+	if err := db.UpdateWebhookDelivery(ctx, id, "200", time.Now(), true); !errors.Is(err, store.ErrNotFound) {
 		t.Errorf("UpdateWebhookDelivery(unknown) = %v, want ErrNotFound", err)
 	}
 }

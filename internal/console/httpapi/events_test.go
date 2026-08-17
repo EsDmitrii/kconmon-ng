@@ -4,12 +4,14 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"net/url"
 	"reflect"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/EsDmitrii/kconmon-ng/internal/console/config"
+	"github.com/EsDmitrii/kconmon-ng/internal/console/events"
 	"github.com/EsDmitrii/kconmon-ng/internal/console/httpapi"
 	"github.com/EsDmitrii/kconmon-ng/internal/console/metrics"
 	"github.com/EsDmitrii/kconmon-ng/internal/console/store"
@@ -161,12 +163,25 @@ func TestEventsValidation400s(t *testing.T) {
 		{"unparseable from", "/api/v1/events?from=not-a-time"},
 		{"unparseable to", "/api/v1/events?to=not-a-time"},
 		{"malformed cursor", "/api/v1/events?cursor=abc123"},
+		// A NUL (%00) in a scope-family param reaches the Postgres text column and
+		// comes back a 502; it is client input and must be a 400 at the boundary,
+		// before the lister is ever consulted.
+		{"NUL in scope", "/api/v1/events?scope=a%00b"},
+		{"NUL in scopeNode", "/api/v1/events?scopeNode=a%00b"},
+		{"control char in scope", "/api/v1/events?scope=a%01b"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			rec := do(t, srv, http.MethodGet, tc.target, "")
 			if rec.Code != http.StatusBadRequest {
 				t.Fatalf("status %d, want 400: %s", rec.Code, rec.Body)
+			}
+			if tc.name == "NUL in scope" && srv != nil {
+				// The lister must not have been reached: a control char is refused
+				// before the filter is built, never mapped from a driver 502.
+				if lister.gotFilter.Scope != "" {
+					t.Errorf("lister was called despite the 400: %+v", lister.gotFilter)
+				}
 			}
 			if ct := rec.Header().Get("Content-Type"); ct != "application/problem+json" {
 				t.Errorf("Content-Type = %q, want application/problem+json", ct)
@@ -218,5 +233,43 @@ func TestEventsRouteRecordedWithBoundedCardinality(t *testing.T) {
 	body := rec.Body.String()
 	if !strings.Contains(body, "kconmon_ng_console_http_requests_total{") || !strings.Contains(body, `path="/api/v1/events"`) {
 		t.Errorf("metrics missing bounded-cardinality path=/api/v1/events label:\n%s", body)
+	}
+}
+
+// TestEventsScopeAcceptsTypedArrows is the honest-contract regression: the console normalizes the
+// arrow client-side, but a direct API consumer sending "a->b" used to get 200 and an empty list
+// because the column stores U+2192 and the filter compared literally.
+func TestEventsScopeAcceptsTypedArrows(t *testing.T) {
+	canonical := "node-a" + events.PairArrow + "node-b"
+
+	for _, typed := range []string{"node-a->node-b", "node-a-->node-b", "node-a=>node-b", "node-a>node-b",
+		"node-a -> node-b", "node-a → node-b", "  node-a->node-b  ", canonical} {
+		t.Run(typed, func(t *testing.T) {
+			lister := &fakeEventLister{page: store.EventPage{}}
+			srv := newEventsServer(t, lister)
+
+			rec := do(t, srv, http.MethodGet, "/api/v1/events?scope="+url.QueryEscape(typed), "")
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body)
+			}
+			if lister.gotFilter.Scope != canonical {
+				t.Errorf("store filter scope = %q, want the canonical %q", lister.gotFilter.Scope, canonical)
+			}
+		})
+	}
+}
+
+// TestEventsScopeLeavesASingleNameAlone guards the other half of the rule: a node name is not a
+// pair, and substring-free equality matching over one name must keep working.
+func TestEventsScopeLeavesASingleNameAlone(t *testing.T) {
+	lister := &fakeEventLister{page: store.EventPage{}}
+	srv := newEventsServer(t, lister)
+
+	rec := do(t, srv, http.MethodGet, "/api/v1/events?scope="+url.QueryEscape("edge-gw-01"), "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body)
+	}
+	if lister.gotFilter.Scope != "edge-gw-01" {
+		t.Errorf("store filter scope = %q, want edge-gw-01 unchanged", lister.gotFilter.Scope)
 	}
 }

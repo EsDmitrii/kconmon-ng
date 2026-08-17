@@ -71,6 +71,27 @@ func TestHeaderAuthenticateEmptyUserHeaderFromTrustedProxyIsNoCredentials(t *tes
 	}
 }
 
+// A trusted proxy asserts a USERNAME. It does not get to assert an identity minted by another auth
+// mode: "oidc:<sub>" through this header, on a deployment that switched away from OIDC and still
+// has the old bindings, would hand the caller everything that subject held (authn/identity.go).
+func TestHeaderAuthenticateRefusesAReservedIdentityNamespace(t *testing.T) {
+	t.Parallel()
+	for _, user := range []string{"oidc:user-sub-1", "local:0a5f", "token:0a5f", "header:svc"} {
+		t.Run(user, func(t *testing.T) {
+			t.Parallel()
+			a := newHeaderFixture(t, ",")
+
+			r := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/", nil)
+			r.RemoteAddr = "10.0.0.1:1"
+			r.Header.Set("X-Remote-User", user)
+
+			if _, err := a.Authenticate(r); !errors.Is(err, authn.ErrNoCredentials) {
+				t.Fatalf("Authenticate with X-Remote-User=%q = %v, want ErrNoCredentials", user, err)
+			}
+		})
+	}
+}
+
 func TestHeaderAuthenticateCustomDelimiter(t *testing.T) {
 	t.Parallel()
 	a := newHeaderFixture(t, "|")

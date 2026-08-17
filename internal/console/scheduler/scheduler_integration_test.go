@@ -224,7 +224,7 @@ func TestReaperFinishesAStuckRunUnderTheLock(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	run, err := db.CreateRun(ctx, uuid.NewString(), "tcp", "pod", []byte(`{}`), "user", "u1", 1)
+	run, err := db.CreateRun(ctx, uuid.NewString(), "tcp", "pod", []byte(`{}`), "user", "u1", 1, time.Now().Add(time.Hour))
 	if err != nil {
 		t.Fatalf("CreateRun: %v", err)
 	}
@@ -239,7 +239,7 @@ func TestReaperFinishesAStuckRunUnderTheLock(t *testing.T) {
 		t.Fatalf("connect: %v", err)
 	}
 	defer pool.Close()
-	if _, err = pool.Exec(ctx, `UPDATE check_runs SET created_at = now() - interval '4 hours' WHERE id = $1`, run.ID); err != nil {
+	if _, err = pool.Exec(ctx, `UPDATE check_runs SET created_at = now() - interval '4 hours' , deadline_at = now() - interval '1 hour' WHERE id = $1`, run.ID); err != nil {
 		t.Fatalf("back-date run: %v", err)
 	}
 

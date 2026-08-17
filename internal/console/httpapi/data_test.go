@@ -85,6 +85,41 @@ func TestTopologyProxy(t *testing.T) {
 	}
 }
 
+// TestTopologyNullSlicesBecomeEmptyArrays pins the nil-slice fix: a controller
+// that answered {"nodes":null,"agents":null} (Go marshals a nil slice as null)
+// must reach the console as [], because the frontend indexes into both. An empty
+// topology is [], never absent.
+func TestTopologyNullSlicesBecomeEmptyArrays(t *testing.T) {
+	ctrl := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/topology" {
+			http.NotFound(w, r)
+			return
+		}
+		_, _ = w.Write([]byte(`{"nodes":null,"agents":null,"timestamp":"2026-01-01T00:00:00Z"}`))
+	}))
+	defer ctrl.Close()
+
+	rec := do(t, newDataServer(t, ctrl.URL, ""), http.MethodGet, "/api/v1/topology", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body)
+	}
+	body := rec.Body.String()
+	if strings.Contains(body, `"nodes":null`) || strings.Contains(body, `"agents":null`) {
+		t.Fatalf("nil slice leaked as null: %s", body)
+	}
+	if !strings.Contains(body, `"nodes":[]`) || !strings.Contains(body, `"agents":[]`) {
+		t.Fatalf("empty topology must be []: %s", body)
+	}
+	// And the decoded shape is a real, non-nil empty slice.
+	var topo controllerclient.Topology
+	if err := json.Unmarshal(rec.Body.Bytes(), &topo); err != nil {
+		t.Fatalf("bad body: %s (%v)", rec.Body, err)
+	}
+	if topo.Nodes == nil || topo.Agents == nil {
+		t.Fatalf("nodes/agents must decode non-nil: %+v", topo)
+	}
+}
+
 func TestTopologyNotConfigured503(t *testing.T) {
 	rec := do(t, newDataServer(t, "", ""), http.MethodGet, "/api/v1/topology", "")
 	if rec.Code != http.StatusServiceUnavailable {

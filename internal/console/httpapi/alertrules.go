@@ -15,6 +15,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 
 	"github.com/EsDmitrii/kconmon-ng/internal/console/alerting"
+	"github.com/EsDmitrii/kconmon-ng/internal/console/authz"
 	"github.com/EsDmitrii/kconmon-ng/internal/console/promql"
 	"github.com/EsDmitrii/kconmon-ng/internal/console/promrules"
 	"github.com/EsDmitrii/kconmon-ng/internal/console/store"
@@ -281,12 +282,12 @@ func writeAlertRuleStoreError(w http.ResponseWriter, name, id string, err error)
 // decodeTargetRequest's distinction.
 func decodeAlertRuleRequest(w http.ResponseWriter, r *http.Request) (alertRuleRequest, bool) {
 	var req alertRuleRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeProblem(w, http.StatusBadRequest, "invalid request",
+	if err := strictJSONDecoder(r.Body).Decode(&req); err != nil {
+		writeProblem(w, http.StatusBadRequest, "invalid request", unknownFieldDetail(err,
 			`an alert rule body must be JSON with "name", "kind" (one of pair-loss, zone-latency, `+
 				`dns-failures, http-ttfb, agent-missing, external-target-down, raw), "params" (an object, `+
 				`closed per kind), "severity" (info|warning|critical), "forNs" (nanoseconds), optional `+
-				`"labels"/"annotations" objects and an optional "enabled"`)
+				`"labels"/"annotations" objects and an optional "enabled"`))
 		return alertRuleRequest{}, false
 	}
 	return req, true
@@ -568,9 +569,9 @@ func (s *Server) handleAlertRulesImport(w http.ResponseWriter, r *http.Request) 
 	}
 
 	var req alertRuleImportRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeProblem(w, http.StatusBadRequest, "invalid request",
-			`an import body must be JSON with "name", the name of a PrometheusRule object in the console's namespace`)
+	if err := strictJSONDecoder(r.Body).Decode(&req); err != nil {
+		writeProblem(w, http.StatusBadRequest, "invalid request", unknownFieldDetail(err,
+			`an import body must be JSON with "name", the name of a PrometheusRule object in the console's namespace`))
 		return
 	}
 	// A blank name is a rejected field VALUE rather than a 404: answering "no
@@ -834,6 +835,37 @@ func mustMarshalStringMap(m map[string]string) json.RawMessage {
 func (s *Server) handleAlertRulesPreview(w http.ResponseWriter, r *http.Request) {
 	req, ok := decodeAlertRuleRequest(w, r)
 	if !ok {
+		return
+	}
+	/* kind=raw carries the caller's OWN PromQL, and running it here is the same act POST
+	   /api/v1/promql/query gates on promql:query. Without this, a role holding alerts:read alone —
+	   which the RBAC editor offers as a ready-made least-privilege set — had an arbitrary-PromQL
+	   oracle: `{__name__=~".+"}` enumerates every metric and label in Prometheus, and a failed query
+	   returns Prometheus' own error text. The templated kinds stay on alerts:read: their expression
+	   is built from a closed set of parameters this console wrote itself.
+
+	   An AND, not routeRule.anyOf: the route table's permission admits the request, this narrows the
+	   one body shape that needs more. */
+	subject, _ := SubjectFrom(r.Context())
+	if req.Kind == string(store.AlertRuleKindRaw) {
+		if s.policy == nil || !s.policy.Can(subject, authz.PermPromQLQuery) {
+			writeProblem(w, http.StatusForbidden, "forbidden",
+				"previewing a raw PromQL rule runs that query: it needs "+string(authz.PermPromQLQuery)+" as well as "+string(authz.PermAlertsRead))
+			return
+		}
+	}
+	/* And the same BUDGET — for EVERY kind, which the raw-only version was not.
+	   Holding promql:query is required above because that path runs the caller's own PromQL; the
+	   permission and the rate limit are two halves of one control, but they answer different
+	   questions. The permission asks whose query this is; the budget asks what it costs Prometheus,
+	   and a templated zone-latency preview (a histogram_quantile over a 5m rate, grouped three ways)
+	   is at least as expensive as the raw `up` the budget was written for. With the counter inside
+	   the raw branch, a caller holding nothing but alerts:read could post templated previews in a
+	   loop and hammer the operator's Prometheus through this route with no cap at all — while the
+	   comment claimed the budget was "the caller's total against Prometheus".
+	   It shares the promql counter rather than keeping its own, so that claim is now true. */
+	if !s.rateLimitAllow(r.Context(), rateLimitPromQL, s.cfg.RateLimit.PromQLPerMinute, promqlRateLimitKey(subject)) {
+		writeRateLimited(w, promqlRateLimitDetail)
 		return
 	}
 	expr, ok := s.renderAlertRule(w, &req)

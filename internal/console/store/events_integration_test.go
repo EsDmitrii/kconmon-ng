@@ -9,9 +9,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/EsDmitrii/kconmon-ng/internal/console/metrics"
@@ -211,6 +213,109 @@ func TestListEventsFiltersByScopeNode(t *testing.T) {
 	want := map[int64]string{1: "a", 2: "a→b", 3: "c→a"}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("ListEvents(ScopeNode=a): got %v, want %v", got, want)
+	}
+}
+
+/*
+The pair-aware filter is a UNION ALL of two arms now, and a UNION ALL can return a row twice.
+
+A NON-pair scope has scope_left = scope_right = the scope itself, so "a" matches both arms; a
+self-pair "a→a" does too. The second arm excludes what the first already returned, and this asserts
+it — the map-keyed assertion in TestListEventsFiltersByScopeNode would silently collapse a duplicate.
+*/
+func TestListEventsScopeNodeReturnsEachEventOnce(t *testing.T) {
+	db := newEventStoreDB(t)
+	m := newTestMetrics()
+	es := store.NewEventStore(db, m)
+	ctx := context.Background()
+
+	base := time.Date(2026, 8, 5, 12, 0, 0, 0, time.UTC)
+	mustInsert(t, ctx, es, rec(1, base, "topology_changed", "a"))                    // both sides are "a"
+	mustInsert(t, ctx, es, rec(2, base.Add(time.Second), "check_observed", "a→a"))   // ... and so are these
+	mustInsert(t, ctx, es, rec(3, base.Add(2*time.Second), "check_observed", "a→b")) // one side
+	mustInsert(t, ctx, es, rec(4, base.Add(3*time.Second), "check_observed", "b→a")) // the other
+
+	page, err := es.ListEvents(ctx, store.EventFilter{ScopeNode: "a"})
+	if err != nil {
+		t.Fatalf("ListEvents: %v", err)
+	}
+	seen := map[int64]int{}
+	for _, e := range page.Events {
+		seen[e.EventSeq]++
+	}
+	for seq, n := range seen {
+		if n != 1 {
+			t.Errorf("event_seq %d came back %d times: the two UNION arms overlap", seq, n)
+		}
+	}
+	if len(page.Events) != 4 {
+		t.Errorf("got %d events, want the 4 seeded (all of them name node a)", len(page.Events))
+	}
+}
+
+/*
+And the whole reason the filter was rewritten: it has to be answered by an index.
+
+The old shape was three ORed predicates, one of them `scope LIKE '%→' || $node`. A leading wildcard
+is unindexable, and one such arm makes PostgreSQL walk the time index and filter every row — the
+LIMIT bounds the response, not the work. The sharp case is a scope with FEW or NO events: a drained
+node, a typo, a stale permalink. Splitting the scope into indexed columns was not enough on its own,
+because under `ORDER BY event_time DESC LIMIT n` the planner still preferred the time index; the
+UNION ALL is what gives each arm its own ordered index scan.
+*/
+func TestListEventsByScopeNodeUsesTheScopeSideIndexes(t *testing.T) {
+	db := newEventStoreDB(t)
+	m := newTestMetrics()
+	es := store.NewEventStore(db, m)
+	ctx := context.Background()
+
+	// Enough rows, spread over enough scopes, that a full scan is plainly the wrong plan.
+	base := time.Date(2026, 8, 5, 12, 0, 0, 0, time.UTC)
+	for i := range 5000 {
+		scope := fmt.Sprintf("node-%d→node-%d", i%200, (i+7)%200)
+		mustInsert(t, ctx, es, rec(int64(i+1), base.Add(time.Duration(i)*time.Second), "check_observed", scope))
+	}
+
+	pool, err := pgxpool.New(ctx, testDSN(t))
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer pool.Close()
+	conn, err := pool.Acquire(ctx)
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	defer conn.Release()
+	if _, err := conn.Exec(ctx, "ANALYZE topology_events"); err != nil {
+		t.Fatalf("ANALYZE: %v", err)
+	}
+
+	sql := generatedSQL(t, "gen/topology_events.sql.go", "listTopologyEventsByScopeNode")
+	rows, qerr := conn.Query(ctx, "EXPLAIN\n"+sql, int32(50), "node-does-not-exist", nil, nil, nil, nil, nil)
+	if qerr != nil {
+		t.Fatalf("EXPLAIN: %v", qerr)
+	}
+	defer rows.Close()
+	var plan strings.Builder
+	for rows.Next() {
+		var line string
+		if err := rows.Scan(&line); err != nil {
+			t.Fatalf("EXPLAIN scan: %v", err)
+		}
+		plan.WriteString(line)
+		plan.WriteString("\n")
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("EXPLAIN rows: %v", err)
+	}
+
+	for _, idx := range []string{"topology_events_scope_left_time_idx", "topology_events_scope_right_time_idx"} {
+		if !strings.Contains(plan.String(), idx) {
+			t.Errorf("the pair-aware filter does not use %s; plan was:\n%s", idx, plan.String())
+		}
+	}
+	if strings.Contains(plan.String(), "topology_events_time_idx") {
+		t.Errorf("the pair-aware filter fell back to walking the time index and filtering; plan was:\n%s", plan.String())
 	}
 }
 

@@ -98,9 +98,19 @@ func (f *fakeRoleAdmin) DeleteBinding(_ context.Context, id int64) error {
 // and the given RoleAdmin (nil is a legal, deliberate 503 case).
 func newRBACTestServer(t *testing.T, roleAdmin RoleAdmin) *Server {
 	t.Helper()
+	return newRBACTestServerWithAudit(t, roleAdmin, nil)
+}
+
+// newRBACTestServerWithAudit is newRBACTestServer with somewhere for the audit trail to land.
+func newRBACTestServerWithAudit(t *testing.T, roleAdmin RoleAdmin, audit Auditor) *Server {
+	t.Helper()
 	policy := authz.NewPolicy(map[string][]authz.Permission{"tester": {authz.PermRBACManage}})
 	authr := fakeAuthenticator{subject: authz.Subject{Kind: authz.SubjectUser, ID: "u1"}}
-	return newAuthzServer(t, authr, policy, Deps{Roles: fakeRoleResolver{roles: []string{"tester"}}, RBAC: roleAdmin})
+	deps := Deps{Roles: fakeRoleResolver{roles: []string{"tester"}}, RBAC: roleAdmin}
+	if audit != nil {
+		deps.Audit = audit
+	}
+	return newAuthzServer(t, authr, policy, deps)
 }
 
 func TestRBACPermissionsListsAllPermissionsWithoutAStore(t *testing.T) {
@@ -181,6 +191,52 @@ func TestRBACRolesCreateAndList(t *testing.T) {
 	}
 	if len(body.Roles) != 1 || body.Roles[0].Name != "custom-1" {
 		t.Fatalf("roles = %+v, want one role named custom-1", body.Roles)
+	}
+}
+
+/*
+A permission list is a SET, and the stored row has to be one too.
+
+Nothing bounded the array a role could carry: every element only had to name a known permission,
+and repeats were kept verbatim. One POST inside the 16 MiB body limit therefore stored a
+multi-million-element text[] that every GET /api/v1/rbac/roles, every export, and every authz
+snapshot rebuild had to materialize from then on. The client asked for a set; it gets that set back,
+and the row is capped at len(authz.AllPermissions) by construction.
+*/
+func TestRBACRolesCreateStoresEachPermissionOnce(t *testing.T) {
+	admin := newFakeRoleAdmin()
+	s := newRBACTestServer(t, admin)
+
+	// The shape that did the damage: one valid permission, repeated.
+	repeated := make([]string, 0, 5000)
+	for range 5000 {
+		repeated = append(repeated, `"topology:read"`)
+	}
+	body := `{"name":"custom-1","permissions":[` + strings.Join(repeated, ",") + `,"matrix:read"]}`
+
+	w := doRequest(t, s, http.MethodPost, "/api/v1/rbac/roles", strings.NewReader(body), mutateWithCSRF)
+	if w.Code != http.StatusOK {
+		t.Fatalf("create status %d: %s", w.Code, w.Body)
+	}
+
+	// What the STORE was handed, not what the response happened to echo.
+	stored, err := admin.ListRoles(context.Background())
+	if err != nil {
+		t.Fatalf("list roles: %v", err)
+	}
+	if len(stored) != 1 {
+		t.Fatalf("stored %d roles, want 1", len(stored))
+	}
+	got := stored[0].Permissions
+	want := []string{"topology:read", "matrix:read"}
+	if len(got) != len(want) {
+		t.Fatalf("stored %d permissions, want %d (%v): the repeats went into the row verbatim",
+			len(got), len(want), want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("permission %d = %q, want %q (first-seen order)", i, got[i], want[i])
+		}
 	}
 }
 
@@ -285,5 +341,106 @@ func TestRBACRolesListStoreErrorReturns502(t *testing.T) {
 	}
 	if strings.Contains(w.Body.String(), "secret") {
 		t.Errorf("driver error text leaked into response: %s", w.Body)
+	}
+}
+
+/* ── what the audit log says about a grant and a revocation ──────────────── */
+
+// A binding IS the grant. Its creation is already described by the request body, but a DELETE
+// carries no body at all: before the handler read the row first, the audit trail for revoking
+// someone's admin said "binding 1 was deleted" and the row that would have explained it was gone.
+func TestRBACBindingDeleteAuditNamesTheRoleAndSubjectItRevoked(t *testing.T) {
+	fs := &fakeAuditStore{}
+	roleAdmin := newFakeRoleAdmin()
+	binding, err := roleAdmin.CreateBinding(context.Background(), "admin", "group", "platform-sre")
+	if err != nil {
+		t.Fatalf("seed binding: %v", err)
+	}
+	s := newRBACTestServerWithAudit(t, roleAdmin, fs)
+
+	w := doRequest(t, s, http.MethodDelete, "/api/v1/rbac/bindings/"+strconv.FormatInt(binding.ID, 10), nil, mutateWithCSRF)
+	if w.Code != http.StatusNoContent {
+		t.Fatalf("status %d, want 204: %s", w.Code, w.Body)
+	}
+
+	entries := waitForOneAuditEntry(t, fs)
+	detail := string(entries[0].Detail)
+	for _, want := range []string{`"roleName":"admin"`, `"subjectKind":"group"`, `"subjectId":"platform-sre"`} {
+		if !strings.Contains(detail, want) {
+			t.Errorf("audit detail = %s, want it to carry %s", detail, want)
+		}
+	}
+}
+
+func TestRBACBindingCreateAuditCarriesTheNewBindingID(t *testing.T) {
+	fs := &fakeAuditStore{}
+	roleAdmin := newFakeRoleAdmin()
+	s := newRBACTestServerWithAudit(t, roleAdmin, fs)
+
+	body := `{"roleName":"admin","subjectKind":"user","subjectId":"oidc:user-sub-1"}`
+	w := doRequest(t, s, http.MethodPost, "/api/v1/rbac/bindings", strings.NewReader(body), mutateWithCSRF)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status %d, want 200: %s", w.Code, w.Body)
+	}
+
+	entries := waitForOneAuditEntry(t, fs)
+	detail := string(entries[0].Detail)
+	// The id is the handle the eventual revocation will be recorded under; without it the two
+	// halves of a grant's life cannot be joined up.
+	if !strings.Contains(detail, `"bindingId":1`) {
+		t.Errorf("audit detail = %s, want the created binding's id", detail)
+	}
+	if !strings.Contains(detail, `"subjectId":"oidc:user-sub-1"`) {
+		t.Errorf("audit detail = %s, want the request's own subjectId preserved", detail)
+	}
+}
+
+// createdAt is what makes a binding list reviewable — "who holds admin, and since when".
+func TestRBACBindingsListCarriesCreatedAt(t *testing.T) {
+	roleAdmin := newFakeRoleAdmin()
+	if _, err := roleAdmin.CreateBinding(context.Background(), "admin", "user", "oidc:user-sub-1"); err != nil {
+		t.Fatalf("seed binding: %v", err)
+	}
+	s := newRBACTestServer(t, roleAdmin)
+
+	w := doRequest(t, s, http.MethodGet, "/api/v1/rbac/bindings", nil, nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status %d, want 200: %s", w.Code, w.Body)
+	}
+	var body struct {
+		Bindings []struct {
+			CreatedAt time.Time `json:"createdAt"`
+		} `json:"bindings"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(body.Bindings) != 1 {
+		t.Fatalf("bindings = %d, want 1", len(body.Bindings))
+	}
+	if body.Bindings[0].CreatedAt.IsZero() {
+		t.Error("createdAt is zero — the column is stored and must be handed out")
+	}
+}
+
+/*
+ * A role whose name carries "/" can never be deleted.
+ *
+ * The name IS the delete route's path segment: /api/v1/rbac/roles/team/ops carries an extra segment
+ * and matches no route, and the percent-encoded spelling routes on RawPath so the store is handed
+ * the still-escaped "team%2Fops". The row was permanent -- listed, exported, rendered on the RBAC
+ * page, removable only by direct SQL -- and if it carried rbac:manage it could only be neutralised.
+ */
+func TestRBACRolesCreateRejectsASlashInTheName(t *testing.T) {
+	s := newRBACTestServer(t, newFakeRoleAdmin())
+	w := doRequest(t, s, http.MethodPost, "/api/v1/rbac/roles",
+		strings.NewReader(`{"name":"team/ops","permissions":[]}`), mutateWithCSRF)
+	if w.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("create role named \"team/ops\" = %d, want 422: %s", w.Code, w.Body)
+	}
+
+	list := doRequest(t, s, http.MethodGet, "/api/v1/rbac/roles", nil, nil)
+	if strings.Contains(list.Body.String(), "team/ops") {
+		t.Errorf("the refused role was stored anyway: %s", list.Body)
 	}
 }

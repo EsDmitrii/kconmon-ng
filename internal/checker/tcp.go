@@ -36,7 +36,7 @@ func (c *TCPChecker) Name() model.CheckType {
 	return model.CheckTCP
 }
 
-func (c *TCPChecker) Check(ctx context.Context, target Target) model.CheckResult {
+func (c *TCPChecker) Check(ctx context.Context, target Target) model.CheckResult { //nolint:gocritic // hugeParam: Target is a VALUE by design -- a checker must not be able to mutate the caller's copy, and one 80-byte copy per probe is nothing next to the probe itself
 	result := model.CheckResult{
 		Type:      model.CheckTCP,
 		Timestamp: time.Now(),
@@ -55,6 +55,15 @@ func (c *TCPChecker) Check(ctx context.Context, target Target) model.CheckResult
 		return result
 	}
 	_ = conn.Close()
+
+	// An external destination is not a kconmon agent: there is no /readyz behind that port, so the
+	// connect IS the check. Asking anyway turned an open port into a reported failure.
+	if target.External {
+		result.Success = true
+		result.Duration = connectDuration
+		result.Details = &model.TCPDetails{ConnectTime: connectDuration, TotalTime: connectDuration}
+		return result
+	}
 
 	url := fmt.Sprintf("http://%s/readyz", addr)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, http.NoBody)

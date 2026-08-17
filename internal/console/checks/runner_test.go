@@ -157,6 +157,10 @@ type recordedMsg struct {
 
 func newRecordingBus() *recordingBus { return &recordingBus{} }
 
+// CrossReplica is true: this double stands in for the shared bus, which is the only configuration
+// where forwarding a cancel to another replica means anything.
+func (b *recordingBus) CrossReplica() bool { return true }
+
 func (b *recordingBus) Publish(_ context.Context, topic string, msg cache.Message) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -558,8 +562,8 @@ func TestGetWithMemoryStoreRingEviction(t *testing.T) {
 	var ids []string
 	for i := 0; i < 51; i++ {
 		id := fmt.Sprintf("run-%02d", i)
-		if _, err := mem.CreateRun(ctx, id, "tcp", "pod", json.RawMessage(`{}`), "user", "u1", 1); err != nil {
-			t.Fatalf("CreateRun(%d): %v", i, err)
+		if _, err := mem.CreateRun(ctx, id, "tcp", "pod", json.RawMessage(`{}`), "user", "u1", 1, time.Now().Add(time.Hour)); err != nil {
+			t.Fatalf("CreateRun(%d, time.Now().Add(time.Hour)): %v", i, err)
 		}
 		ids = append(ids, id)
 	}
@@ -621,7 +625,7 @@ func TestGetResultsReturnsPerPairRows(t *testing.T) {
 	}
 	waitForTerminal(t, mem, id)
 
-	results, err := runner.GetResults(context.Background(), id)
+	results, _, err := runner.GetResults(context.Background(), id)
 	if err != nil {
 		t.Fatalf("GetResults: %v", err)
 	}
@@ -645,7 +649,7 @@ func TestGetResultsUnknownRunReturnsEmpty(t *testing.T) {
 	mem := checks.NewMemoryStore()
 	runner := checks.NewRunner(nil, nil, nil, mem, testMetrics(t))
 
-	results, err := runner.GetResults(context.Background(), "does-not-exist")
+	results, _, err := runner.GetResults(context.Background(), "does-not-exist")
 	if err != nil {
 		t.Fatalf("GetResults: %v", err)
 	}

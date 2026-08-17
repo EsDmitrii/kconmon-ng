@@ -20,7 +20,7 @@ func TestGetRunMalformedIDIsNotFoundWithoutTouchingPgx(t *testing.T) {
 			}
 		})
 		t.Run("GetRunResults/"+id, func(t *testing.T) {
-			_, err := db.GetRunResults(ctx, id)
+			_, _, err := db.GetRunResults(ctx, id)
 			if !errors.Is(err, ErrNotFound) {
 				t.Fatalf("GetRunResults(%q) err = %v, want ErrNotFound", id, err)
 			}

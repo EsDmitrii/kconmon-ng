@@ -49,13 +49,38 @@ func HashPassword(plain string) (string, error) {
 	), nil
 }
 
+/*
+verifySlots bounds how many argon2id verifications run AT ONCE in this process.
+
+Each one allocates the m parameter out of the stored hash — 64 MiB for anything this build wrote —
+and holds it for the whole derivation. Nothing bounded the number in flight: POST /api/v1/auth/login
+is unauthenticated, its per-source-IP budget is loginPerMinute x 20 (100/min at the shipped default,
+and an Ingress makes the whole cluster one address), and every one of those requests reached
+VerifyPassword directly. A hundred concurrent verifications is 6.4 GiB against a console whose chart
+default limit is a few hundred MiB: the process is OOM-killed by unauthenticated traffic, which is
+cheaper for the attacker than for anyone else.
+
+The cap makes the memory bounded and the queue the thing that grows, and a queued request is still
+bounded by the handler's own context. It is deliberately small: the work is CPU- and memory-bound, so
+letting more in does not make logins faster, it only makes the peak higher.
+*/
+var verifySlots = make(chan struct{}, verifyConcurrency)
+
+// verifyConcurrency x argonMemoryKiB is the ceiling this package can put under memory pressure.
+const verifyConcurrency = 4
+
 // VerifyPassword reports whether plain hashes to phc; the argon2id parameters (m, t, p) and salt
 // are read out of phc itself.
+//
+// It BLOCKS while more than verifyConcurrency verifications are already running; see verifySlots.
 func VerifyPassword(phc, plain string) (ok bool, err error) {
 	params, err := parsePHC(phc)
 	if err != nil {
 		return false, err
 	}
+
+	verifySlots <- struct{}{}
+	defer func() { <-verifySlots }()
 
 	//nolint:gosec // params.hash's length is attacker-independent (it comes from a stored hash, not user input); truncation to uint32 cannot overflow a real argon2 key length
 	got := argon2.IDKey([]byte(plain), params.salt, params.iterations, params.memory, params.parallelism, uint32(len(params.hash)))

@@ -669,6 +669,111 @@ func TestGRPCServerShutdownConcurrentWithPublishers(t *testing.T) {
 	wg.Wait()
 }
 
+// TestGRPCServerRejectsAgentRPCsFromNonLeader pins the second half of the split-brain fix: a
+// standby that a Service round-robin still hands an agent to must refuse it, or it plans a probe
+// mesh over its own island of agents.
+func TestGRPCServerRejectsAgentRPCsFromNonLeader(t *testing.T) {
+	reg := NewRegistry(30 * time.Second)
+	m := metrics.NewPrometheusMetrics("test", prometheus.NewRegistry())
+	srv := NewGRPCServer(reg, m, true, func() bool { return false }, false)
+
+	ctx := context.Background()
+	tests := []struct {
+		name string
+		call func() error
+	}{
+		{"Register", func() error {
+			_, err := srv.Register(ctx, &pb.RegisterRequest{Agent: &pb.AgentMeta{Id: "agent-1"}})
+			return err
+		}},
+		{"WatchPeers", func() error {
+			return srv.WatchPeers(&pb.WatchPeersRequest{AgentId: "agent-1"}, newFakePeerStream(ctx))
+		}},
+		{"WatchTasks", func() error {
+			return srv.WatchTasks(&pb.WatchTasksRequest{AgentId: "agent-1"}, newFakeTaskStream(ctx))
+		}},
+		{"WatchExternalChecks", func() error {
+			return srv.WatchExternalChecks(
+				&pb.WatchExternalChecksRequest{AgentId: "agent-1"}, newFakeExternalStream(ctx))
+		}},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.call()
+			st, ok := grpcstatus.FromError(err)
+			if !ok || st.Code() != codes.Unavailable {
+				t.Fatalf("%s on a non-leader returned %v, want codes.Unavailable", tc.name, err)
+			}
+		})
+	}
+
+	if reg.Count() != 0 {
+		t.Errorf("a non-leader registered %d agents, want 0", reg.Count())
+	}
+}
+
+// TestGRPCServerServesAgentRPCsWithoutLeaderElection is the single-replica guard: with election off
+// nothing is gated and Register behaves exactly as it did before.
+func TestGRPCServerServesAgentRPCsWithoutLeaderElection(t *testing.T) {
+	srv, reg := newTestGRPCServer()
+
+	resp, err := srv.Register(context.Background(), &pb.RegisterRequest{
+		Agent: &pb.AgentMeta{Id: "agent-1", NodeName: "node-1", PodIp: "10.0.0.1"},
+	})
+	if err != nil {
+		t.Fatalf("Register with leader election off returned error: %v", err)
+	}
+	if resp.GetAgentId() != "agent-1" {
+		t.Errorf("Register returned agent id %q, want agent-1", resp.GetAgentId())
+	}
+	if reg.Count() != 1 {
+		t.Errorf("registry holds %d agents, want 1", reg.Count())
+	}
+}
+
+// TestGRPCServerWatchPeersStopsAfterDemotion mirrors the WatchEvents demotion contract: kube-proxy
+// leaves established connections alone, so a demoted replica has to end the stream itself for the
+// agent's reconnect loop to move it to the new leader.
+func TestGRPCServerWatchPeersStopsAfterDemotion(t *testing.T) {
+	reg := NewRegistry(30 * time.Second)
+	m := metrics.NewPrometheusMetrics("test", prometheus.NewRegistry())
+
+	var leader atomic.Bool
+	leader.Store(true)
+	srv := NewGRPCServer(reg, m, true, leader.Load, false)
+	srv.leaderCheckInterval = 5 * time.Millisecond
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	stream := newFakePeerStream(ctx)
+
+	done := make(chan error, 1)
+	go func() { done <- srv.WatchPeers(&pb.WatchPeersRequest{AgentId: "agent-1"}, stream) }()
+
+	select {
+	case <-stream.sent:
+	case <-time.After(2 * time.Second):
+		t.Fatal("WatchPeers never sent the initial FULL_SYNC")
+	}
+
+	leader.Store(false)
+
+	select {
+	case err := <-done:
+		st, ok := grpcstatus.FromError(err)
+		if !ok || st.Code() != codes.Unavailable {
+			t.Fatalf("WatchPeers returned %v after demotion, want codes.Unavailable", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("WatchPeers kept streaming peers after the replica lost leadership")
+	}
+
+	if got := testutil.ToFloat64(m.ControllerGRPCConnections.WithLabelValues()); got != 0 {
+		t.Errorf("grpc connections gauge = %v after demotion, want 0", got)
+	}
+}
+
 // waitForEventSubscriber blocks until a WatchEvents stream has registered.
 func waitForEventSubscriber(t *testing.T, srv *GRPCServer) {
 	t.Helper()
@@ -679,5 +784,149 @@ func waitForEventSubscriber(t *testing.T, srv *GRPCServer) {
 			t.Fatal("WatchEvents never registered a subscriber")
 		case <-time.After(5 * time.Millisecond):
 		}
+	}
+}
+
+/* ── QA round 5: a dropped peer update is a DESYNC, not a lost message ────── */
+
+/*
+ * Every PeerUpdate is a FULL_SYNC the agent applies by wholesale replacement, so one that never
+ * arrives is not a missed increment — it is a probe mesh that stays wrong until something else
+ * changes. Nothing else did: the stream stayed healthy so the agent never re-subscribed, heartbeats
+ * kept succeeding so it never re-registered, and there is no periodic resync on either side. The
+ * stream now ends, and the agent's reconnect is the resync.
+ */
+func TestBroadcastPeerUpdateEndsTheStreamOnBackpressure(t *testing.T) {
+	srv, reg := newTestGRPCServer()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// A stream that never drains: Send blocks on an unbuffered channel nobody reads.
+	stream := &fakePeerStream{ctx: ctx, sent: make(chan *pb.PeerUpdate)}
+	done := make(chan error, 1)
+	go func() { done <- srv.WatchPeers(&pb.WatchPeersRequest{AgentId: "agent-1"}, stream) }()
+
+	// Wait for the subscription, then fill its mailbox past peerWatcherBuffer.
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		srv.mu.RLock()
+		_, ok := srv.watchers["agent-1"]
+		srv.mu.RUnlock()
+		if ok {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("WatchPeers never registered its watcher")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	agents := []model.AgentInfo{{ID: "agent-2", NodeName: "node-2", PodIP: "10.0.0.2"}}
+	for i := 0; i < peerWatcherBuffer+4; i++ {
+		srv.BroadcastPeerUpdate(agents)
+	}
+
+	// Drain the blocked Send so the handler can reach its select and see the desync signal.
+	go func() {
+		for range stream.sent { //nolint:revive // draining
+		}
+	}()
+
+	select {
+	case err := <-done:
+		if grpcstatus.Code(err) != codes.Unavailable {
+			t.Errorf("WatchPeers returned %v, want codes.Unavailable so the agent resubscribes", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("WatchPeers kept the stream open after dropping a peer update")
+	}
+	_ = reg
+}
+
+/* ── QA round 5: an agent must say who and where it is ───────────────────── */
+
+func TestRegisterRejectsIncompleteAgentMeta(t *testing.T) {
+	srv, reg := newTestGRPCServer()
+
+	cases := []struct {
+		name string
+		meta *pb.AgentMeta
+	}{
+		{"no metadata at all", nil},
+		{"no id", &pb.AgentMeta{NodeName: "node-1", PodIp: "10.0.0.1"}},
+		{"no node", &pb.AgentMeta{Id: "agent-1", PodIp: "10.0.0.1"}},
+		{"no pod IP", &pb.AgentMeta{Id: "agent-1", NodeName: "node-1"}},
+		{"pod IP is not an IP", &pb.AgentMeta{Id: "agent-1", NodeName: "node-1", PodIp: "not-an-ip"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := srv.Register(context.Background(), &pb.RegisterRequest{Agent: tc.meta})
+			if grpcstatus.Code(err) != codes.InvalidArgument {
+				t.Fatalf("Register(%s) = %v, want codes.InvalidArgument", tc.name, err)
+			}
+		})
+	}
+	// Nothing reached the registry, so nothing was broadcast to the fleet as a peer.
+	if reg.Count() != 0 {
+		t.Errorf("registry holds %d agents after %d rejected registrations", reg.Count(), len(cases))
+	}
+}
+
+// blockingPeerStream never accepts a Send, which is what an HTTP/2 flow-control window looks like
+// once a subscriber stops reading while keeping the connection alive.
+type blockingPeerStream struct {
+	grpc.ServerStream
+	ctx     context.Context
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (f *blockingPeerStream) Context() context.Context { return f.ctx }
+
+func (f *blockingPeerStream) Send(*pb.PeerUpdate) error {
+	f.once.Do(func() { close(f.entered) })
+	<-f.release
+	return nil
+}
+
+/*
+ * A subscriber that stops reading must be torn down, not parked forever.
+ *
+ * stream.Send blocks on the stream's flow-control window, and a goroutine parked inside it never
+ * reaches its select again: it could not see w.desynced, the leadership check or s.stopCh.
+ * BroadcastPeerUpdate went on logging "ending the stream so the agent resyncs" for every topology
+ * change and ended nothing, while the connection gauge and the goroutine were held until the
+ * client's TCP finally died.
+ */
+func TestWatchPeersEndsAStreamThatIsNotBeingRead(t *testing.T) {
+	srv, _ := newTestGRPCServer()
+	srv.leaderCheckInterval = time.Hour // not the mechanism under test
+
+	stream := &blockingPeerStream{
+		ctx:     t.Context(),
+		entered: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	defer close(stream.release)
+
+	done := make(chan error, 1)
+	go func() { done <- srv.WatchPeers(&pb.WatchPeersRequest{AgentId: "agent-1"}, stream) }()
+
+	select {
+	case <-stream.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("WatchPeers never attempted its initial send")
+	}
+
+	// Shutting the controller down must reach a handler blocked in Send.
+	close(srv.stopCh)
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Error("WatchPeers returned nil; a blocked stream must end with an error the agent reconnects on")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("WatchPeers stayed parked in Send through shutdown: the goroutine and its connection slot are held indefinitely")
 	}
 }

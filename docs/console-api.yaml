@@ -15,7 +15,7 @@
 #
 # Out of scope by design: /healthz, /readyz, /metrics (probe and scrape
 # endpoints, never part of the JSON API) and GET /ws (a WebSocket protocol,
-# documented in docs/console/architecture/WEBSOCKET.md).
+# a WebSocket protocol whose frames are described on GET /ws below).
 #
 # Conventions repo-wide: durations are integer NANOSECONDS, list endpoints
 # page with an opaque keyset cursor plus a `limit` clamped into [1,500]
@@ -127,8 +127,8 @@ paths:
             the live passthrough above, byte-for-byte. A value that does not
             parse, or one in the future, is 400. A value older than the oldest
             retained event -- or any value when nothing is retained -- is 422,
-            with a detail naming console.database.retentionDays. Requires a
-            database: with console.database.mode unset this parameter alone is
+            with a detail naming database.retentionDays. Requires a
+            database: with no database configured this parameter alone is
             503, while the live route stays available.
           schema:
             type: string
@@ -381,6 +381,8 @@ paths:
             schema:
               $ref: "#/components/schemas/RunCreateRequest"
       responses:
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
         "202":
           description: Run accepted and started.
           headers:
@@ -445,10 +447,14 @@ paths:
         it are the same operational class. Cancellation is asynchronous: pairs
         already dispatched still record their outcome, pairs not yet dispatched
         never dispatch, and the run reaches status `cancelled`. Read the final
-        state from GET /api/v1/runs/{id}. Cancelling a run that already
-        finished, or one another replica started, is a no-op that also answers
-        204 -- the stuck-run reaper is what eventually finishes a run no
-        replica still holds.
+        state from GET /api/v1/runs/{id}. Three outcomes, and only two of them
+        are 204: the run is cancelled here or forwarded over the cross-replica
+        bus (204); the run is already terminal, so there is nothing to cancel
+        (204); or the run belongs to another replica and this console has no
+        cross-replica bus to forward on, in which case it answers 502 with the
+        title `cancel not delivered` and the run keeps going on its owner. A
+        client must branch on that 502 -- it is not a no-op, and the stuck-run
+        reaper only finishes a run whose owner has gone away entirely.
       responses:
         "204":
           description: Cancellation accepted (or the run was already terminal).
@@ -498,7 +504,10 @@ paths:
       summary: Create one target.
       description: >-
         A duplicate name is 422, not 409: it is a rejected field value in an
-        otherwise well-formed body.
+        otherwise well-formed body. So is an `address` that provably resolves
+        outside `config.checkers.external.allowedCidrs` -- no agent in the fleet
+        could ever probe it, so it is refused at the moment it is created rather
+        than left to time out on every check.
       requestBody:
         required: true
         content:
@@ -1043,6 +1052,54 @@ paths:
         "503":
           $ref: "#/components/responses/Unavailable"
 
+  /api/v1/mtr/snapshots/{id}/traces:
+    parameters:
+      - $ref: "#/components/parameters/PathID"
+    get:
+      operationId: listPathTraces
+      tags: [observability]
+      summary: The individual traces that walked one route, newest first.
+      description: >-
+        A route row folds every trace that took that path into one entry with a
+        `traceCount`; these are the traces that count was counted over, each
+        with its OWN clock and its own per-hop readings. The route's hop table
+        is the last reading folded into it -- two traces a day apart down the
+        same route are two different sets of RTTs.
+
+
+        Scoped to the snapshot's own [firstSeen, lastSeen] window, so the scan
+        is bounded by the thing being asked about. Inside that window a trace is
+        returned only when its RECOMPUTED path identity equals this snapshot's:
+        two routes can interleave in time (a flapping hop alternates between
+        them), and a trace listed under a route it did not walk would be worse
+        than no list. `scanned` reports how many stored traces the window
+        yielded before that filter, so "5 of 147" cannot be misread as loss.
+
+
+        Traces live in `check_results` and are subject to the RUN retention
+        sweep, not the path-history one -- a route can outlive the traces behind
+        it, and then this returns an empty list for a non-zero `traceCount`.
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Cursor"
+      responses:
+        "200":
+          description: One page of traces.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PathTraceList"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "502":
+          $ref: "#/components/responses/BadGateway"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
   /api/v1/annotations:
     get:
       operationId: listAnnotations
@@ -1347,8 +1404,11 @@ paths:
         from/to bound the range a window must OVERLAP, not contain: one that
         opened before the range and is still running inside it is exactly the
         one that explains what the operator is looking at. Windows are DATA and
-        RENDERING in M6 -- they mark charts and timeline rows; there is no
-        suppression logic, because nothing evaluates alert rules yet.
+        RENDERING: they mark charts and timeline rows and they SUPPRESS NOTHING.
+        Alert rules ARE evaluated (the console syncs them into a PrometheusRule
+        and pages webhooks on every firing edge) and no code path consults these
+        windows, so declaring one does not silence a page. Correlate them in
+        Alertmanager or in your receiver.
       parameters:
         - name: scope
           in: query
@@ -1519,7 +1579,7 @@ paths:
           $ref: "#/components/responses/BadGateway"
         "503":
           description: >-
-            No database (console.database.mode) or no encryption key
+            No database (database.existingSecret) or no encryption key
             (console.webhooks.encryptionKey). The detail names which.
           content:
             application/problem+json:
@@ -1643,7 +1703,7 @@ paths:
           $ref: "#/components/responses/BadGateway"
         "503":
           description: >-
-            No database (console.database.mode) or no encryption key
+            No database (database.existingSecret) or no encryption key
             (console.webhooks.encryptionKey). The detail names which.
           content:
             application/problem+json:
@@ -2229,6 +2289,14 @@ paths:
         header or role that changes that.
 
 
+        ACCESS CONTROL is carried too, but only for a caller who also holds
+        `rbac:manage`: the `rbac` section lists custom roles and every binding
+        (who holds what, and since when). It is OMITTED rather than emptied for
+        a caller with `settings:write` alone, so "absent" and "none defined"
+        stay different facts. Bindings export and never import -- see
+        POST /api/v1/import.
+
+
         Observation fields are stripped per collection: a schedule loses
         lastFiredAt/nextFireAt and lastError/lastErrorAt (scheduler
         bookkeeping and a failure this console saw), an alert rule loses
@@ -2653,6 +2721,8 @@ paths:
             schema:
               $ref: "#/components/schemas/LoginRequest"
       responses:
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
         "204":
           description: Logged in; session and CSRF cookies set.
           headers:
@@ -2766,7 +2836,7 @@ components:
     sessionCookie:
       type: apiKey
       in: cookie
-      name: kconmon_session
+      name: __Host-kconmon_session
       description: >-
         Session cookie from the local or OIDC login flow. Mutations
         additionally require the double-submit CSRF pair: echo the non-HttpOnly
@@ -2856,6 +2926,14 @@ components:
             $ref: "#/components/schemas/Problem"
     UnprocessableEntity:
       description: Well-formed body whose VALUES were rejected -- never a parse failure.
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+    TooManyRequests:
+      description: >-
+        Refused by the fixed-window rate limiter (console.rateLimit). The window and its ceiling are
+        operator-configured, so a client should back off rather than assume a fixed delay.
       content:
         application/problem+json:
           schema:
@@ -3174,7 +3252,11 @@ components:
           type: string
         details:
           type: object
-          description: Type-specific payload; see WEBSOCKET.md "Payloads".
+          description: >-
+            Type-specific payload. Its shape follows the event `type`: a matrix or
+            topology frame carries the same object the matching REST route
+            returns, a run frame carries a RunResult, and a live event carries an
+            Event.
           additionalProperties: true
       additionalProperties: false
 
@@ -3225,6 +3307,16 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/MTRDestination"
+        truncated:
+          type: boolean
+          description: >-
+            The listing was CUT at `limit`. Pairs are sources x destinations, so
+            a large fleet exceeds any single page: the ones that did not fit are
+            missing from the Explorer entirely and every per-destination
+            snapshot/trace total is short by their counts. The server has always
+            sent this field; it was absent from this schema, so no generated
+            client could read it and the console presented a capped listing as a
+            complete one.
       additionalProperties: false
 
     MTRHop:
@@ -3274,6 +3366,55 @@ components:
         resolvedAt:
           type: string
           format: date-time
+      additionalProperties: false
+
+    PathTrace:
+      type: object
+      description: >-
+        ONE recorded trace of a route: its own clock, its own outcome and its
+        own per-hop readings.
+      required: [id, recordedAt, success, durationNs, hops]
+      properties:
+        id:
+          type: integer
+          format: int64
+        recordedAt:
+          type: string
+          format: date-time
+        success:
+          type: boolean
+        durationNs:
+          type: integer
+          format: int64
+        error:
+          type: string
+          description: The agent's own sentence, present only on a failed trace.
+        hops:
+          type: array
+          items:
+            $ref: "#/components/schemas/MTRHop"
+        runId:
+          type: string
+          description: >-
+            The run this trace was recorded in, so it can be followed back to
+            its diagnostics permalink. Absent once that run has aged out.
+      additionalProperties: false
+
+    PathTraceList:
+      type: object
+      required: [traces, nextCursor, scanned]
+      properties:
+        traces:
+          type: array
+          items:
+            $ref: "#/components/schemas/PathTrace"
+        nextCursor:
+          type: string
+        scanned:
+          type: integer
+          description: >-
+            Stored traces the window yielded BEFORE the path filter. Larger than
+            `traces` when another route was interleaved with this one.
       additionalProperties: false
 
     PathSnapshot:
@@ -3553,8 +3694,10 @@ components:
     MaintenanceWindow:
       type: object
       description: >-
-        One declared change window. DATA and RENDERING in M6, not suppression
-        logic -- there are no alert rules to suppress yet.
+        One declared change window. DATA and RENDERING, never suppression: alert
+        rules are evaluated and paged on, and nothing consults these windows.
+        Declaring one marks the charts and the timeline; it does not silence an
+        alert.
       required: [id, scope, startAt, endAt, reason, createdBy, createdAt]
       properties:
         id:
@@ -4426,11 +4569,32 @@ components:
             Bounded to 10s..24h; outside that the request is refused with 422
             naming both bounds, never silently clamped.
 
-            The cadence is derived, not requested: duration / 500, floored at
-            5s. That caps ONE PAIR at 500 samples however long the run is, so a
-            24h run samples roughly every 173s across the whole day rather than
-            filling its quota in the first hour. A run's total sample count is
-            therefore at most pairs x 500.
+            Absent sampleIntervalNs, the cadence is DERIVED from this duration:
+            duration / 500, floored at 5s. That caps ONE PAIR at 500 samples
+            however long the run is, so a 24h run samples roughly every 173s
+            across the whole day rather than filling its quota in the first
+            hour. A run's total sample count is therefore at most pairs x 500.
+        sampleIntervalNs:
+          type: integer
+          format: int64
+          minimum: 1000000000
+          description: >-
+            Optional. The cadence between one pair's probes, in nanoseconds.
+            Absent or 0 keeps the derived behaviour above, byte-identical to
+            every run made before this field existed.
+
+            Bounded to 1s..durationNs and refused with 422 naming the bound
+            outside it, the same way an out-of-range durationNs is; naming a
+            cadence without a durationNs is refused for the same reason, since
+            an instant run has no cadence to dial.
+
+            A cadence the fan-out cannot KEEP is a different matter and is never
+            refused. Asking an mtr run for 1s is not a mistake in the request,
+            it is a fact about traceroute - a trace walks up to thirty hops in
+            sequence - so the run is planned around it and the response reports
+            requested and effective separately (see sampleIntervalAdjusted).
+            The 500-samples-per-pair cap is the hard ceiling either way and
+            binds the same way, also reported rather than silently applied.
       additionalProperties: false
 
     RunCreateResponse:
@@ -4446,6 +4610,35 @@ components:
         wsTopic:
           type: string
           description: Server-chosen topic name; subscribe to what you were told, never a string you built.
+        plannedSampleIntervalNs:
+          type: integer
+          format: int64
+          description: >-
+            The cadence the run will actually keep. Absent on an instant run.
+            A slow check type stretches it past the duration's base cadence, so
+            a caller cannot derive it from durationNs alone. A worst case, not
+            an observation - rounds run back to back, so a healthy run beats it.
+        plannedSamplesPerPair:
+          type: integer
+          description: >-
+            How many probes ONE pair contributes if every round takes its worst
+            case: a floor, capped at 500. Read it as "at least N per pair".
+        requestedSampleIntervalNs:
+          type: integer
+          format: int64
+          description: >-
+            sampleIntervalNs echoed back verbatim; absent when none was sent.
+            Reported apart from plannedSampleIntervalNs on purpose - the two
+            agree only when nothing bound the request.
+        sampleIntervalAdjusted:
+          type: string
+          enum: [cap, round]
+          description: >-
+            Why the plan is not the cadence that was asked for. `cap` - the
+            500-samples-per-pair ceiling widened it. `round` - one round over
+            this fan-out cannot finish that fast, so the plan is one round's
+            floor. Absent when nothing moved, which includes every run that
+            sent no sampleIntervalNs and was not stretched.
       additionalProperties: false
 
     RunSummary:
@@ -4516,20 +4709,60 @@ components:
       additionalProperties: false
 
     RunDetail:
-      description: One run's summary plus its spec snapshot and per-pair results.
-      allOf:
-        - $ref: "#/components/schemas/RunSummary"
-        - type: object
-          required: [spec, results]
-          properties:
-            spec:
-              type: object
-              description: The run's spec as submitted, snapshotted at creation.
-              additionalProperties: true
-            results:
-              type: array
-              items:
-                $ref: "#/components/schemas/RunResult"
+      description: >-
+        One run's summary plus its spec snapshot and per-pair results. FLAT, not an allOf over
+        RunSummary: that composition was unsatisfiable, because RunSummary is
+        additionalProperties:false and a strict validator applies it to the WHOLE document, so
+        `spec` and `results` made every real response invalid.
+      type: object
+      required:
+        [id, createdAt, status, type, plane, initiatorKind, initiatorId, pairTotal, pairOk, pairFailed, spec, results]
+      properties:
+        id:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+        startedAt:
+          type: string
+          format: date-time
+        finishedAt:
+          type: string
+          format: date-time
+        status:
+          $ref: "#/components/schemas/RunStatus"
+        type:
+          type: string
+        plane:
+          type: string
+        initiatorKind:
+          type: string
+        initiatorId:
+          type: string
+        pairTotal:
+          type: integer
+        pairOk:
+          type: integer
+        pairFailed:
+          type: integer
+        spec:
+          type: object
+          description: The run's spec as submitted, snapshotted at creation.
+          additionalProperties: true
+        results:
+          type: array
+          items:
+            $ref: "#/components/schemas/RunResult"
+        resultsTruncated:
+          type: boolean
+          description: >-
+            Present and true when the run holds MORE results than this response
+            carries -- the newest 2000 of them. An interval run is bounded at
+            400 pairs x 500 samples, and this body is re-read every five seconds
+            while the run is alive, so an unbounded read could hand a replica a
+            multi-hundred-megabyte marshal on repeat. When it is true, any
+            aggregate computed from `results` describes the tail, not the run.
+      additionalProperties: false
 
     RunPage:
       type: object
@@ -4945,7 +5178,7 @@ components:
 
     Binding:
       type: object
-      required: [id, roleName, subjectKind, subjectId]
+      required: [id, roleName, subjectKind, subjectId, createdAt]
       properties:
         id:
           type: integer
@@ -4956,6 +5189,16 @@ components:
           type: string
         subjectId:
           type: string
+          description: >-
+            Opaque, and NAMESPACED by the auth mode that minted it. OIDC identities are
+            "oidc:<sub>" -- sub is the only claim OIDC Core 5.7 permits as an identifier, so
+            preferred_username or email here would be a role that follows a reassignable name
+            (Grafana CVE-2023-3128). Local users are bound by their users.id UUID; the prefixes
+            "local:", "header:" and "token:" are reserved for the same purpose.
+        createdAt:
+          type: string
+          format: date-time
+          description: When the grant was made -- half of reviewing whether it still should stand.
       additionalProperties: false
 
     BindingRequest:
@@ -5255,6 +5498,71 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/MaintenanceWindow"
+        rbac:
+          $ref: "#/components/schemas/ConfigBundleRBAC"
+      additionalProperties: false
+
+    ConfigBundleRBAC:
+      type: object
+      description: >-
+        The access-control section. PRESENT ONLY when the caller holds
+        `rbac:manage`: everything else in the bundle needs `settings:write`, and
+        a grant list is strictly more sensitive than a target list -- it names
+        people and says what they can do. Absent and empty are therefore
+        different facts, which is why the field is omitted rather than nulled.
+
+
+        Roles are custom roles ONLY. The built-ins (viewer, operator,
+        alert-editor, admin) are compiled in, identical on every build, and a
+        bundle claiming to define one would be claiming to redefine it.
+
+
+        Bindings are EXPORTED AND NEVER IMPORTED, on the webhook-secret
+        precedent. A binding names a person in the SOURCE console's identity
+        namespace ("oidc:<sub>", a local user's UUID); replaying it elsewhere
+        either grants that role to whatever the string means there or grants it
+        to nobody, silently. The bundle records who held what; re-granting is a
+        decision, not a restore.
+      required: [roles, bindings]
+      properties:
+        roles:
+          type: array
+          items:
+            $ref: "#/components/schemas/ExportedRole"
+        bindings:
+          type: array
+          items:
+            $ref: "#/components/schemas/ExportedBinding"
+      additionalProperties: false
+
+    ExportedRole:
+      type: object
+      required: [name, permissions]
+      properties:
+        name:
+          type: string
+        permissions:
+          type: array
+          items:
+            type: string
+      additionalProperties: false
+
+    ExportedBinding:
+      type: object
+      required: [id, roleName, subjectKind, subjectId, createdAt]
+      properties:
+        id:
+          type: integer
+          format: int64
+        roleName:
+          type: string
+        subjectKind:
+          type: string
+        subjectId:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
       additionalProperties: false
 
     ConfigImportRequest:
@@ -5326,6 +5634,8 @@ components:
         - alertRules
         - webhooks
         - maintenanceWindows
+        - rbacRoles
+        - rbacBindings
       properties:
         dryRun:
           type: boolean
@@ -5340,5 +5650,9 @@ components:
         webhooks:
           $ref: "#/components/schemas/ConfigImportCollectionResult"
         maintenanceWindows:
+          $ref: "#/components/schemas/ConfigImportCollectionResult"
+        rbacRoles:
+          $ref: "#/components/schemas/ConfigImportCollectionResult"
+        rbacBindings:
           $ref: "#/components/schemas/ConfigImportCollectionResult"
       additionalProperties: false

@@ -28,6 +28,18 @@ WHERE id = $1;
 DELETE FROM annotations WHERE id = $1;
 
 -- name: DeleteAnnotationsBefore :execrows
--- Retention by start_at: an annotation is pinned to the moment it describes.
+-- Retention by the END of the span, not its start.
+--
+-- `start_at < cutoff` deleted an annotation that is STILL IN EFFECT: a span opened 100 days ago and
+-- running right now was judged by when it began, so a 90-day retention silently removed the note
+-- explaining what an operator is looking at. ListAnnotations selects by overlap
+-- (coalesce(end_at, start_at)), and maintenance_windows' own sweep already prunes by end_at and
+-- documents the rule; this is the same rule, applied where it was missing.
 DELETE FROM annotations
-WHERE id IN (SELECT a.id FROM annotations a WHERE a.start_at < $1 ORDER BY a.start_at LIMIT $2);
+WHERE id IN (
+    SELECT a.id
+    FROM annotations a
+    WHERE coalesce(a.end_at, a.start_at) < $1
+    ORDER BY coalesce(a.end_at, a.start_at)
+    LIMIT $2
+);

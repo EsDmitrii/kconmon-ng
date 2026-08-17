@@ -2,7 +2,6 @@ package httpapi
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -144,11 +143,11 @@ func writeWebhookStoreError(w http.ResponseWriter, name, id string, err error) {
 // the callers.
 func decodeWebhookRequest(w http.ResponseWriter, r *http.Request) (webhookRequest, bool) {
 	var req webhookRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeProblem(w, http.StatusBadRequest, "invalid request",
+	if err := strictJSONDecoder(r.Body).Decode(&req); err != nil {
+		writeProblem(w, http.StatusBadRequest, "invalid request", unknownFieldDetail(err,
 			`a webhook body must be JSON with "name", "url" (http/https), "events" `+
 				`(a subset of incident.created, incident.resolved, incident.reopened), `+
-				`an optional "enabled", and a write-only "secret"`)
+				`an optional "enabled", and a write-only "secret"`))
 		return webhookRequest{}, false
 	}
 	if req.Secret != nil && *req.Secret == "" {

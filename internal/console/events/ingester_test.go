@@ -1100,6 +1100,10 @@ type failingBus struct {
 	attempts atomic.Int64
 }
 
+// CrossReplica mirrors the real Redis bus this double stands in for: the failure it injects is a
+// publish failure, not an absence of reach.
+func (b *failingBus) CrossReplica() bool { return true }
+
 func (b *failingBus) Publish(context.Context, string, cache.Message) error {
 	b.attempts.Add(1)
 	return b.err

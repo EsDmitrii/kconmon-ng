@@ -6,7 +6,10 @@ import (
 	"log/slog"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
+
+	"github.com/google/uuid"
 
 	"github.com/EsDmitrii/kconmon-ng/internal/console/cache"
 	"github.com/EsDmitrii/kconmon-ng/internal/console/events"
@@ -36,6 +39,10 @@ const (
 	// reapDelay is how long a CLOSED ephemeral topic keeps serving replay before its subscription, seq
 	// counter and ring are freed.
 	reapDelay = 5 * time.Minute
+
+	// sweepBatch bounds how many ephemeral topics ONE liveness sweep asks the store about; a backlog
+	// is worked through over several ticks rather than in one long pass.
+	sweepBatch = 32
 
 	// reapInterval is how often Hub.Run checks for ephemeral topics past
 	// reapDelay. It runs inside Run's own select loop (a time.Ticker), not a
@@ -90,6 +97,26 @@ type Hub struct {
 	bus     cache.Bus
 	metrics *metrics.Metrics
 	dedupe  *idSet
+	/* epoch identifies THIS process's numbering. Sequence numbers are per-hub and start at 1, so a
+	   cursor only means something against the hub that issued it — see Envelope.Epoch. */
+	epoch string
+	/* openEphemeral is asked to open a run:{id} topic this replica does not know about. A run's
+	   topic used to be opened only on the replica that served the POST, while the browser's socket
+	   lands on whichever replica the Service picks: with the chart's default of two console
+	   replicas, about half of all run permalinks subscribed to a topic that did not exist there and
+	   were answered "unknown topic". The frames are on the bus either way; what was missing was
+	   somebody on this replica listening. nil leaves the old behaviour. */
+	openEphemeral func(ctx context.Context, topic string) bool
+
+	/* liveEphemeral answers "is this ephemeral topic's run still going?" for the reaper. Only the
+	   replica that OWNS a run closes its topic, and it does so hub-locally, so a topic opened by
+	   openEphemeral on any other replica has no other way to reach a closed state. See
+	   SetEphemeralLiveness. nil means the reaper behaves exactly as it did. */
+	liveEphemeral func(topic string) bool
+
+	// sweeping keeps one liveness sweep in flight at a time; it is not guarded by h.mu because the
+	// sweep itself takes and releases that lock.
+	sweeping atomic.Bool
 
 	mu        sync.Mutex
 	closed    bool // set once Run has shut the hub down; one-way — a Hub is per-process and cannot be restarted after Run returns
@@ -106,6 +133,7 @@ func NewHub(bus cache.Bus, m *metrics.Metrics) *Hub {
 	return &Hub{
 		bus:       bus,
 		metrics:   m,
+		epoch:     uuid.NewString(),
 		dedupe:    newIDSet(dedupeCacheSize),
 		clients:   make(map[*client]struct{}),
 		seq:       make(map[string]uint64),
@@ -115,7 +143,7 @@ func NewHub(bus cache.Bus, m *metrics.Metrics) *Hub {
 }
 
 // Run subscribes to the bus's live topic; both bus implementations shed load by dropping messages
-// BEFORE they reach this loop (InProcessBus when the hub's subscriber channel is full, ValkeyBus
+// BEFORE they reach this loop (InProcessBus when the hub's subscriber channel is full, RedisBus
 // under Valkey's own client-output limits).
 func (h *Hub) Run(ctx context.Context) {
 	msgs, unsubscribe := h.bus.Subscribe(TopicLive)
@@ -136,6 +164,9 @@ func (h *Hub) Run(ctx context.Context) {
 			h.fanOutLive(msg)
 		case <-reapTicker.C:
 			h.reapExpiredTopics()
+			// Off the loop: the liveness predicate reads the run store, and a slow one must not stop
+			// this hub relaying events. See sweepEphemeralLiveness.
+			go h.sweepEphemeralLiveness()
 		}
 	}
 }
@@ -174,8 +205,8 @@ func (h *Hub) Broadcast(topic, msgType string, data json.RawMessage) {
 		}
 	}
 	h.seq[topic]++
-	env := Envelope{Topic: topic, Type: msgType, Seq: h.seq[topic], Data: data}
-	h.appendRingLocked(env)
+	env := Envelope{Topic: topic, Type: msgType, Seq: h.seq[topic], Epoch: h.epoch, Data: data}
+	h.appendRingLocked(&env)
 	targets := make([]*client, 0, len(h.clients))
 	for c := range h.clients {
 		if c.topics[topic] {
@@ -185,7 +216,7 @@ func (h *Hub) Broadcast(topic, msgType string, data json.RawMessage) {
 	h.mu.Unlock()
 
 	for _, c := range targets {
-		h.deliver(c, env)
+		h.deliver(c, &env)
 	}
 }
 
@@ -261,7 +292,7 @@ func (h *Hub) closeAllClients() {
 func (h *Hub) handleClientMessage(c *client, msg ClientMessage) {
 	switch msg.Action {
 	case ActionSubscribe:
-		if !h.topicAllowed(msg.Topic) {
+		if !h.topicAllowed(msg.Topic) && !h.openOnDemand(msg.Topic) {
 			h.sendError(c, msg.Topic, "unknown topic; subscribable topics are "+
 				"live, topology, matrix:tcp:pod, matrix:udp:pod, matrix:icmp:pod")
 			return
@@ -272,8 +303,9 @@ func (h *Hub) handleClientMessage(c *client, msg ClientMessage) {
 			h.sendError(c, msg.Topic, detail)
 			return
 		}
-		for _, env := range h.subscribe(c, msg.Topic, msg.LastSeq) {
-			h.deliver(c, env)
+		replay := h.subscribe(c, msg.Topic, msg.LastSeq, msg.Epoch)
+		for i := range replay {
+			h.deliverReplay(c, &replay[i])
 		}
 	case ActionUnsubscribe:
 		h.unsubscribe(c, msg.Topic)
@@ -284,11 +316,21 @@ func (h *Hub) handleClientMessage(c *client, msg ClientMessage) {
 
 // subscribe registers c for topic and returns the replay frames it missed, both under one lock;
 // per-topic Seq is the authoritative ORDER — not a licence to drop.
-func (h *Hub) subscribe(c *client, topic string, lastSeq uint64) []Envelope {
+//
+// The cursor is honoured only when it came from THIS hub (epoch). A cursor from another replica is
+// not a smaller number in the same series, it is a number in a different series — comparing them
+// replayed nothing at all and lost the whole gap without a word.
+func (h *Hub) subscribe(c *client, topic string, lastSeq uint64, epoch string) []Envelope {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
 	c.topics[topic] = true
+	/* A cursor carrying ANOTHER hub's epoch is not a smaller number in this series, so it is
+	   discarded and the whole ring replays. An EMPTY epoch is a client that predates the field: its
+	   cursor is honoured as before, which is what it has always been given. */
+	if epoch != "" && epoch != h.epoch {
+		lastSeq = 0
+	}
 	ring := h.rings[topic]
 	replay := make([]Envelope, 0, len(ring))
 	for _, env := range ring {
@@ -298,6 +340,71 @@ func (h *Hub) subscribe(c *client, topic string, lastSeq uint64) []Envelope {
 	}
 	return replay
 }
+
+/*
+ * openOnDemand tries to open a run:{id} topic this replica has not seen, reporting whether it may
+ * now be subscribed.
+ *
+ * A run's topic was opened only where its POST landed, and the browser's socket is an independent
+ * connection that lands wherever the Service sends it: with two console replicas, about half of all
+ * run permalinks asked for a topic that did not exist on their replica and were told "unknown
+ * topic", so the page showed no progress at all until it finished. The frames were on the bus the
+ * whole time — this replica simply was not listening.
+ *
+ * The opener is the RUNNER's: it decides whether the id names a real run before the hub opens
+ * anything, so an unknown id is still an error rather than an open topic that never speaks.
+ */
+func (h *Hub) openOnDemand(topic string) bool {
+	if !IsRunTopic(topic) {
+		return false
+	}
+	h.mu.Lock()
+	open := h.openEphemeral
+	h.mu.Unlock()
+	if open == nil {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), openOnDemandTimeout)
+	defer cancel()
+	return open(ctx, topic)
+}
+
+// openOnDemandTimeout bounds the store lookup + subscribe that opening a topic on demand performs;
+// it runs on the read pump, which must not park.
+const openOnDemandTimeout = 3 * time.Second
+
+// SetEphemeralOpener installs the callback that opens a run:{id} topic this replica has not seen;
+// see Hub.openEphemeral. Call before serving.
+func (h *Hub) SetEphemeralOpener(open func(ctx context.Context, topic string) bool) {
+	h.mu.Lock()
+	h.openEphemeral = open
+	h.mu.Unlock()
+}
+
+/*
+SetEphemeralLiveness installs the "is this topic's run still going?" predicate the reaper needs.
+
+Every reclaim path in this file — reapExpiredTopics and evictOldestClosedLocked — acts only on
+CLOSED entries, and an entry is closed by CloseTopicWithFinal, which the run's OWNING replica calls
+locally when the run ends. A topic opened here by the on-demand opener (a browser whose socket landed
+on the replica that did not serve the run's POST — with two replicas, about half of all run
+permalinks) therefore had nothing to close it: the owner's close is hub-local and never crosses the
+bus, so the entry, its ring, its seq counter and its bus subscription goroutine stayed alive for the
+process's lifetime. maxEphemeralTopics is 256, and once 256 such entries accumulate OpenTopic
+refuses every new topic — that replica stops serving live run progress entirely, and nothing about
+it is visible except runs whose pages never move.
+
+The predicate closes those entries from the outside, so the ordinary closed → reapDelay → free path
+takes over. Call before serving; nil leaves the reaper as it was.
+*/
+func (h *Hub) SetEphemeralLiveness(live func(topic string) bool) {
+	h.mu.Lock()
+	h.liveEphemeral = live
+	h.mu.Unlock()
+}
+
+// Epoch identifies this hub's sequence numbering; exported for tests and for the handshake.
+func (h *Hub) Epoch() string { return h.epoch }
 
 func (h *Hub) unsubscribe(c *client, topic string) {
 	h.mu.Lock()
@@ -443,6 +550,54 @@ func (h *Hub) reapExpiredTopics() {
 	}
 }
 
+/*
+sweepEphemeralLiveness closes the ephemeral topics whose runs have ended, so the reclaim path above
+can free them.
+
+An entry only ever reaches `closed` through CloseTopicWithFinal, which the run's OWNING replica
+calls locally. A topic this replica opened on demand (for a browser whose socket landed here rather
+than on the owner) therefore never closes on its own and is invisible to both reclaim paths — a
+permanent leak, and at maxEphemeralTopics of them this replica stops opening run topics at all.
+
+It runs in a goroutine of its OWN, not on Hub.Run's select loop, and that is the point: the
+predicate reads the run store, one topic at a time, with a 3s timeout each. On the loop, a slow
+database turned a sweep of 256 topics into up to twelve minutes during which the hub relayed no live
+events at all and its bus subscription backed up — a reclaim path taking down the thing it serves.
+Off the loop it costs nothing that matters, and sweepBatch bounds one pass so a backlog is worked
+through over several ticks instead of in one long run.
+
+sweeping keeps ticks from piling up on a store slower than the tick interval: a sweep still running
+when the next tick fires simply skips that tick.
+*/
+func (h *Hub) sweepEphemeralLiveness() {
+	if !h.sweeping.CompareAndSwap(false, true) {
+		return
+	}
+	defer h.sweeping.Store(false)
+
+	h.mu.Lock()
+	live := h.liveEphemeral
+	var candidates []string
+	if live != nil {
+		for topic, et := range h.ephemeral {
+			if !et.closed {
+				candidates = append(candidates, topic)
+				if len(candidates) == sweepBatch {
+					break
+				}
+			}
+		}
+	}
+	h.mu.Unlock()
+
+	for _, topic := range candidates {
+		// markClosed takes h.mu itself and is a no-op for anything closed in the meantime.
+		if !live(topic) {
+			h.markClosed(topic)
+		}
+	}
+}
+
 // evictOldestClosedLocked frees one registry slot by reaping the closed topic with the earliest
 // CloseTopic call; reports whether an eviction happened.
 func (h *Hub) evictOldestClosedLocked() bool {
@@ -483,9 +638,9 @@ func (h *Hub) reapTopicLocked(topic string) {
 
 // appendRingLocked records env in its topic's ring, trimming to the topic's
 // bound. Caller holds h.mu.
-func (h *Hub) appendRingLocked(env Envelope) {
+func (h *Hub) appendRingLocked(env *Envelope) {
 	ring := h.rings[env.Topic]
-	ring = append(ring, env)
+	ring = append(ring, *env)
 	if size := ringSize(env.Topic); len(ring) > size {
 		ring = ring[len(ring)-size:]
 	}
@@ -505,13 +660,39 @@ func ringSize(topic string) int {
 
 // deliver hands env to one client, or drops the client if its buffer is full; only the STATIC
 // allowlist is counted here.
-func (h *Hub) deliver(c *client, env Envelope) {
+func (h *Hub) deliver(c *client, env *Envelope) {
 	select {
-	case c.send <- env:
+	case c.send <- *env:
 		if _, ok := allowedTopics[env.Topic]; ok {
 			h.metrics.WSMessagesSent.WithLabelValues(env.Topic).Inc()
 		}
 	default:
+		h.dropSlowClient(c)
+	}
+}
+
+// replayDeliverTimeout bounds ONE replay frame's handover to a client that is not draining. It is
+// generous next to a write pump doing its job and finite next to a socket that has stopped.
+const replayDeliverTimeout = 5 * time.Second
+
+/*
+ * deliverReplay hands one REPLAY frame to c, waiting rather than dropping the client.
+ *
+ * Replay is the hub answering a subscribe, not the hub falling behind: a subscribe pushed the whole
+ * matching ring into a 256-slot channel from the read pump, faster than the write pump drains it, so
+ * two subscribes to a full `live` ring on one connection overflowed the buffer and the hub closed
+ * the socket — logging the client as slow for having asked a legal question. A client's own replay
+ * must not count against the slow-client rule.
+ */
+func (h *Hub) deliverReplay(c *client, env *Envelope) {
+	timer := time.NewTimer(replayDeliverTimeout)
+	defer timer.Stop()
+	select {
+	case c.send <- *env:
+	case <-c.done:
+	case <-timer.C:
+		// It really is not reading: this is the slow-client case, and it is judged on TIME rather
+		// than on the depth of a queue the hub itself filled.
 		h.dropSlowClient(c)
 	}
 }
@@ -538,7 +719,7 @@ func (h *Hub) sendError(c *client, topic, detail string) {
 	if err != nil { // unreachable: the payload is one plain string
 		data = json.RawMessage(`{"error":"internal error"}`)
 	}
-	h.deliver(c, Envelope{Topic: topic, Type: TypeError, Data: data})
+	h.deliver(c, &Envelope{Topic: topic, Type: TypeError, Data: data})
 }
 
 // quote renders s for an error message without pulling in fmt.

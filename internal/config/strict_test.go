@@ -129,10 +129,19 @@ func TestValuesLocalConfigIsValid(t *testing.T) {
 	}
 }
 
-// extractConfigMapConfig pulls the "config.yaml: |" block out of the rendered
-// helm manifest and returns its dedented content.
+/*
+ * extractConfigMapConfig pulls the AGENT/CONTROLLER "config.yaml: |" block out of the rendered helm
+ * manifest and returns its dedented content.
+ *
+ * The console renders a config.yaml of its own (a different struct: auth, prometheus, database…),
+ * and this test validates the SHARED one against config.Config. It used to take whichever came
+ * first, which was a property of template ordering — regrouping templates/ into per-component
+ * directories moved the console's ahead of it and the test started validating the wrong document.
+ * The source document is now chosen by name, which is what it always meant.
+ */
 func extractConfigMapConfig(t *testing.T, manifest string) string {
 	t.Helper()
+	manifest = sharedConfigMapDoc(t, manifest)
 	lines := strings.Split(manifest, "\n")
 	blockRe := regexp.MustCompile(`^(\s*)config\.yaml:\s*\|`)
 
@@ -158,5 +167,23 @@ func extractConfigMapConfig(t *testing.T, manifest string) string {
 	}
 
 	t.Fatalf("could not find config.yaml block in rendered manifest")
+	return ""
+}
+
+// sharedConfigMapDoc returns the manifest document holding the agent/controller ConfigMap: the one
+// whose name does NOT end in -console.
+func sharedConfigMapDoc(t *testing.T, manifest string) string {
+	t.Helper()
+	nameRe := regexp.MustCompile(`(?m)^  name:\s*(\S+)`)
+	for _, doc := range strings.Split(manifest, "\n---\n") {
+		if !strings.Contains(doc, "kind: ConfigMap") || !strings.Contains(doc, "config.yaml:") {
+			continue
+		}
+		m := nameRe.FindStringSubmatch(doc)
+		if m != nil && !strings.HasSuffix(m[1], "-console") {
+			return doc
+		}
+	}
+	t.Fatalf("no agent/controller ConfigMap in the rendered manifest")
 	return ""
 }

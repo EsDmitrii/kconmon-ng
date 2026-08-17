@@ -399,7 +399,7 @@ func TestValidateRejectsBadURLs(t *testing.T) {
 	}
 }
 
-func TestLoadControllerGRPCAddrAndValkeyDefaults(t *testing.T) {
+func TestLoadControllerGRPCAddrAndRedisDefaults(t *testing.T) {
 	cfg, err := Load("/nonexistent/config.yaml")
 	if err != nil {
 		t.Fatalf("Load defaults: %v", err)
@@ -407,17 +407,17 @@ func TestLoadControllerGRPCAddrAndValkeyDefaults(t *testing.T) {
 	if cfg.Controller.GRPCAddr != "" {
 		t.Errorf("controller.grpcAddr must default empty, got %q", cfg.Controller.GRPCAddr)
 	}
-	if cfg.Valkey.Address != "" {
-		t.Errorf("valkey.address must default empty, got %q", cfg.Valkey.Address)
+	if cfg.Redis.DSN != "" || cfg.Redis.DSNFile != "" {
+		t.Errorf("redis must default to no DSN, got %+v", cfg.Redis)
 	}
-	if cfg.Valkey.DialTimeout != 5*time.Second {
-		t.Errorf("valkey.dialTimeout default: got %v", cfg.Valkey.DialTimeout)
+	if cfg.Redis.DialTimeout != 5*time.Second {
+		t.Errorf("redis.dialTimeout default: got %v", cfg.Redis.DialTimeout)
 	}
 }
 
-func TestLoadValkeyAddress(t *testing.T) {
+func TestLoadRedisDSN(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "config.yaml")
-	y := "valkey:\n  address: \"kconmon-ng-console-valkey:6379\"\n  dialTimeout: 2s\n" +
+	y := "redis:\n  dsn: \"redis://kconmon-ng-console-valkey:6379\"\n  dialTimeout: 2s\n" +
 		"controller:\n  grpcAddr: \"kconmon-ng-controller:9090\"\n"
 	if err := os.WriteFile(p, []byte(y), 0o600); err != nil {
 		t.Fatal(err)
@@ -426,18 +426,18 @@ func TestLoadValkeyAddress(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if cfg.Valkey.Address != "kconmon-ng-console-valkey:6379" || cfg.Valkey.DialTimeout != 2*time.Second {
-		t.Errorf("valkey config not applied: %+v", cfg.Valkey)
+	if cfg.Redis.DSN != "redis://kconmon-ng-console-valkey:6379" || cfg.Redis.DialTimeout != 2*time.Second {
+		t.Errorf("redis config not applied: %+v", cfg.Redis)
 	}
 	if cfg.Controller.GRPCAddr != "kconmon-ng-controller:9090" {
 		t.Errorf("controller.grpcAddr not applied: %q", cfg.Controller.GRPCAddr)
 	}
 }
 
-func TestValidateRejectsBadValkeyAddress(t *testing.T) {
+func TestValidateRejectsBadRedisConfig(t *testing.T) {
 	for _, tc := range []struct{ name, yaml string }{
-		{"missing port", "valkey:\n  address: \"not-a-host-port\"\n"},
-		{"nonpositive dialTimeout", "valkey:\n  address: \"v:6379\"\n  dialTimeout: 0s\n"},
+		{"nonpositive dialTimeout", "redis:\n  dsn: \"redis://v:6379\"\n  dialTimeout: 0s\n"},
+		{"both dsn and dsnFile", "redis:\n  dsn: \"redis://v:6379\"\n  dsnFile: /etc/x\n"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			p := filepath.Join(t.TempDir(), "config.yaml")
@@ -1318,51 +1318,51 @@ func TestResolveEncryptionKeyFilePrecedenceAndErrors(t *testing.T) {
 // requires a password (bitnami's subchart enables requirepass by default), so
 // the config has to be able to carry one -- from a FILE, exactly like the DSN.
 
-func TestValkeyResolvePasswordReadsTheFile(t *testing.T) {
+func TestRedisResolveDSNReadsTheFile(t *testing.T) {
 	dir := t.TempDir()
-	f := filepath.Join(dir, "valkey-password")
-	if err := os.WriteFile(f, []byte("s3cr3t\n"), 0o600); err != nil {
+	f := filepath.Join(dir, "redis-dsn")
+	if err := os.WriteFile(f, []byte("redis://:s3cr3t@valkey:6379\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	v := ValkeyConfig{Address: "valkey:6379", PasswordFile: f}
-	got, err := v.ResolvePassword()
+	v := RedisConfig{DSNFile: f}
+	got, err := v.ResolveDSN()
 	if err != nil {
-		t.Fatalf("ResolvePassword: %v", err)
+		t.Fatalf("ResolveDSN: %v", err)
 	}
-	if got != "s3cr3t" {
-		t.Errorf("password = %q, want %q (trailing newline must be trimmed)", got, "s3cr3t")
+	if got != "redis://:s3cr3t@valkey:6379" {
+		t.Errorf("dsn = %q (trailing newline must be trimmed)", got)
 	}
 }
 
-func TestValkeyResolvePasswordEmptyWithoutAFile(t *testing.T) {
-	v := ValkeyConfig{Address: "valkey:6379"}
-	got, err := v.ResolvePassword()
+func TestRedisResolveDSNEmptyWithoutAFile(t *testing.T) {
+	v := RedisConfig{}
+	got, err := v.ResolveDSN()
 	if err != nil || got != "" {
-		t.Errorf("no passwordFile must mean no password, got %q err %v", got, err)
+		t.Errorf("no dsn and no dsnFile must mean the in-process bus, got %q err %v", got, err)
 	}
 }
 
-func TestValkeyResolvePasswordUnreadableFileIsAnError(t *testing.T) {
-	v := ValkeyConfig{Address: "valkey:6379", PasswordFile: filepath.Join(t.TempDir(), "nope")}
-	if _, err := v.ResolvePassword(); err == nil {
-		t.Error("an unreadable passwordFile must be an error, not a silent empty password")
+func TestRedisResolveDSNUnreadableFileIsAnError(t *testing.T) {
+	v := RedisConfig{DSNFile: filepath.Join(t.TempDir(), "nope")}
+	if _, err := v.ResolveDSN(); err == nil {
+		t.Error("an unreadable dsnFile must be an error, not a silent fallback to the in-process bus")
 	}
 }
 
-func TestValkeyInlinePasswordIsRejected(t *testing.T) {
-	v := ValkeyConfig{Address: "valkey:6379", Password: "inline", PasswordFile: "/x"}
+func TestRedisInlineDSNAndFileTogetherAreRejected(t *testing.T) {
+	v := RedisConfig{DSN: "redis://v:6379", DSNFile: "/x"}
 	if err := v.validate(); err == nil {
-		t.Error("password and passwordFile together must be rejected, like dsn/dsnFile")
+		t.Error("dsn and dsnFile together must be rejected, exactly like the database's pair")
 	}
 }
 
-func TestValkeyPasswordFileParsesFromYAML(t *testing.T) {
+func TestRedisDSNFileParsesFromYAML(t *testing.T) {
 	// The console rejects unknown fields, so the key has to exist in the struct.
 	var c Config
-	if err := yaml.Unmarshal([]byte("valkey:\n  address: v:6379\n  passwordFile: /etc/p\n"), &c); err != nil {
-		t.Fatalf("valkey.passwordFile must be a known field: %v", err)
+	if err := yaml.Unmarshal([]byte("redis:\n  dsnFile: /etc/p\n"), &c); err != nil {
+		t.Fatalf("redis.dsnFile must be a known field: %v", err)
 	}
-	if c.Valkey.PasswordFile != "/etc/p" {
-		t.Errorf("passwordFile = %q", c.Valkey.PasswordFile)
+	if c.Redis.DSNFile != "/etc/p" {
+		t.Errorf("dsnFile = %q", c.Redis.DSNFile)
 	}
 }

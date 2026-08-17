@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -26,7 +27,9 @@ import (
 var ErrInUse = errors.New("store: in use")
 
 // foreignKeyViolationCode is PostgreSQL's SQLSTATE for a
-// foreign_key_violation, the counterpart to uniqueViolationCode (auth.go).
+// foreign_key_violation, the counterpart to uniqueViolationCode (auth.go). PostgreSQL raises it for
+// BOTH directions of a referential constraint -- the INSERT/UPDATE that names a missing parent and
+// the ON DELETE RESTRICT that still has children -- which the targets integration suite pins.
 const foreignKeyViolationCode = "23503"
 
 // wrapForeignKeyViolation turns a foreign-key PgError into sentinel, leaving every other error
@@ -128,7 +131,7 @@ func (in *TargetInput) Validate() error {
 	if err := validateTargetAddress(in.Kind, in.Address); err != nil {
 		return fmt.Errorf("store: target: %w", err)
 	}
-	if err := validateJSON("labels", in.Labels); err != nil {
+	if err := validateStringMap("labels", in.Labels); err != nil {
 		return fmt.Errorf("store: target: %w", err)
 	}
 	return nil
@@ -175,6 +178,25 @@ func validateHostAddress(field, address string) error {
 
 // validateName applies the shared name rule targets and check_definitions
 // both carry.
+/*
+validateNoControlChars refuses a control character in a free-text field.
+
+PostgreSQL cannot store a NUL in a text column (SQLSTATE 22021) and the driver refuses the whole
+statement, so one byte in a request body came back as a driver error — and the handlers map any
+store error that is not a validation error to 502 "<subsystem> unavailable". A client's own input
+therefore told the operator that maintenance windows, incidents or webhooks were DOWN. Every text
+FILTER in httpapi is already guarded this way (rejectControlChars); this is the write side, and it
+belongs here so every caller of a Validate gets it, not only the HTTP one.
+
+Nothing legitimate carries one: these are names, titles, reasons and URLs.
+*/
+func validateNoControlChars(field, v string) error {
+	if idx := strings.IndexFunc(v, unicode.IsControl); idx >= 0 {
+		return fmt.Errorf("%s contains a control character at byte %d", field, idx)
+	}
+	return nil
+}
+
 func validateName(name string) error {
 	if name == "" {
 		return errors.New("name must not be empty")
@@ -209,6 +231,7 @@ func (db *DB) CreateTarget(ctx context.Context, in TargetInput) (Target, error) 
 	if err != nil {
 		return Target{}, fmt.Errorf("store: create target: %w", err)
 	}
+	start := time.Now()
 	t, err := gen.New(db.pool).CreateTarget(ctx, gen.CreateTargetParams{
 		ID:      tid,
 		Name:    in.Name,
@@ -216,6 +239,7 @@ func (db *DB) CreateTarget(ctx context.Context, in TargetInput) (Target, error) 
 		Address: in.Address,
 		Labels:  orEmptyJSON(in.Labels),
 	})
+	db.observe(queryCreateTarget, start, queryResult(err))
 	if err != nil {
 		return Target{}, fmt.Errorf("store: create target: %w", wrapUniqueViolation(err))
 	}
@@ -230,6 +254,7 @@ func (db *DB) UpdateTarget(ctx context.Context, id string, in TargetInput) (Targ
 	if err != nil {
 		return Target{}, fmt.Errorf("store: update target: %w", err)
 	}
+	start := time.Now()
 	t, err := gen.New(db.pool).UpdateTarget(ctx, gen.UpdateTargetParams{
 		ID:      tid,
 		Name:    in.Name,
@@ -237,6 +262,7 @@ func (db *DB) UpdateTarget(ctx context.Context, id string, in TargetInput) (Targ
 		Address: in.Address,
 		Labels:  orEmptyJSON(in.Labels),
 	})
+	db.observe(queryUpdateTarget, start, queryResult(err))
 	if err != nil {
 		return Target{}, fmt.Errorf("store: update target: %w", wrapUniqueViolation(wrapNoRows(err)))
 	}
@@ -248,7 +274,9 @@ func (db *DB) DeleteTarget(ctx context.Context, id string) error {
 	if err != nil {
 		return fmt.Errorf("store: delete target: %w", err)
 	}
+	start := time.Now()
 	rows, err := gen.New(db.pool).DeleteTarget(ctx, tid)
+	db.observe(queryDeleteTarget, start, queryResult(err))
 	if err != nil {
 		return fmt.Errorf("store: delete target: %w", wrapForeignKeyViolation(err, ErrInUse))
 	}
@@ -263,7 +291,9 @@ func (db *DB) GetTarget(ctx context.Context, id string) (Target, error) {
 	if err != nil {
 		return Target{}, fmt.Errorf("store: get target: %w", err)
 	}
+	start := time.Now()
 	t, err := gen.New(db.pool).GetTarget(ctx, tid)
+	db.observe(queryGetTarget, start, queryResult(err))
 	if err != nil {
 		return Target{}, fmt.Errorf("store: get target: %w", wrapNoRows(err))
 	}
@@ -283,12 +313,14 @@ func (db *DB) ListTargets(ctx context.Context, f TargetFilter) (TargetPage, erro
 		kind = pgtype.Text{String: f.Kind, Valid: true}
 	}
 
+	start := time.Now()
 	rows, err := gen.New(db.pool).ListTargets(ctx, gen.ListTargetsParams{
 		Kind:    kind,
 		CurTime: curTime,
 		CurID:   curID,
 		Lim:     int32(limit), //nolint:gosec // limit is clamped to [1,500] above
 	})
+	db.observe(queryListTargets, start, queryResult(err))
 	if err != nil {
 		return TargetPage{}, fmt.Errorf("store: list targets: %w", err)
 	}
@@ -522,6 +554,7 @@ func (db *DB) CreateDefinition(ctx context.Context, in DefinitionInput) (Definit
 	if err != nil {
 		return Definition{}, fmt.Errorf("store: create definition: %w", err)
 	}
+	start := time.Now()
 	d, err := gen.New(db.pool).CreateDefinition(ctx, gen.CreateDefinitionParams{
 		ID:                  did,
 		Name:                in.Name,
@@ -534,6 +567,7 @@ func (db *DB) CreateDefinition(ctx context.Context, in DefinitionInput) (Definit
 		Params:              orEmptyJSON(in.Params),
 		Enabled:             in.Enabled,
 	})
+	db.observe(queryCreateDefinition, start, queryResult(err))
 	if err != nil {
 		return Definition{}, fmt.Errorf("store: create definition: %w",
 			wrapUniqueViolation(wrapForeignKeyViolation(err, ErrNotFound)))
@@ -553,6 +587,7 @@ func (db *DB) UpdateDefinition(ctx context.Context, id string, in DefinitionInpu
 	if err != nil {
 		return Definition{}, fmt.Errorf("store: update definition: %w", err)
 	}
+	start := time.Now()
 	d, err := gen.New(db.pool).UpdateDefinition(ctx, gen.UpdateDefinitionParams{
 		ID:                  did,
 		Name:                in.Name,
@@ -565,6 +600,7 @@ func (db *DB) UpdateDefinition(ctx context.Context, id string, in DefinitionInpu
 		Params:              orEmptyJSON(in.Params),
 		Enabled:             in.Enabled,
 	})
+	db.observe(queryUpdateDefinition, start, queryResult(err))
 	if err != nil {
 		return Definition{}, fmt.Errorf("store: update definition: %w",
 			wrapUniqueViolation(wrapForeignKeyViolation(wrapNoRows(err), ErrNotFound)))
@@ -577,7 +613,9 @@ func (db *DB) DeleteDefinition(ctx context.Context, id string) error {
 	if err != nil {
 		return fmt.Errorf("store: delete definition: %w", err)
 	}
+	start := time.Now()
 	rows, err := gen.New(db.pool).DeleteDefinition(ctx, did)
+	db.observe(queryDeleteDefinition, start, queryResult(err))
 	if err != nil {
 		return fmt.Errorf("store: delete definition: %w", err)
 	}
@@ -592,7 +630,9 @@ func (db *DB) GetDefinition(ctx context.Context, id string) (Definition, error) 
 	if err != nil {
 		return Definition{}, fmt.Errorf("store: get definition: %w", err)
 	}
+	start := time.Now()
 	d, err := gen.New(db.pool).GetDefinition(ctx, did)
+	db.observe(queryGetDefinition, start, queryResult(err))
 	if err != nil {
 		return Definition{}, fmt.Errorf("store: get definition: %w", wrapNoRows(err))
 	}
@@ -617,6 +657,7 @@ func (db *DB) ListDefinitions(ctx context.Context, f DefinitionFilter) (Definiti
 		enabled = pgtype.Bool{Bool: *f.Enabled, Valid: true}
 	}
 
+	start := time.Now()
 	rows, err := gen.New(db.pool).ListDefinitions(ctx, gen.ListDefinitionsParams{
 		TargetID: targetID,
 		Enabled:  enabled,
@@ -624,6 +665,7 @@ func (db *DB) ListDefinitions(ctx context.Context, f DefinitionFilter) (Definiti
 		CurID:    curID,
 		Lim:      int32(limit), //nolint:gosec // limit is clamped to [1,500] above
 	})
+	db.observe(queryListDefinitions, start, queryResult(err))
 	if err != nil {
 		return DefinitionPage{}, fmt.Errorf("store: list definitions: %w", err)
 	}
@@ -784,6 +826,7 @@ func (db *DB) CreateSchedule(ctx context.Context, in ScheduleInput) (Schedule, e
 	if err != nil {
 		return Schedule{}, fmt.Errorf("store: create schedule: %w", err)
 	}
+	start := time.Now()
 	s, err := gen.New(db.pool).CreateSchedule(ctx, gen.CreateScheduleParams{
 		ID:           sid,
 		DefinitionID: defID,
@@ -793,6 +836,7 @@ func (db *DB) CreateSchedule(ctx context.Context, in ScheduleInput) (Schedule, e
 		Enabled:      in.Enabled,
 		NextFireAt:   timestamptzFromPtr(in.NextFireAt),
 	})
+	db.observe(queryCreateSchedule, start, queryResult(err))
 	if err != nil {
 		return Schedule{}, fmt.Errorf("store: create schedule: %w", wrapForeignKeyViolation(err, ErrNotFound))
 	}
@@ -807,6 +851,7 @@ func (db *DB) UpdateSchedule(ctx context.Context, id string, in ScheduleInput) (
 	if err != nil {
 		return Schedule{}, fmt.Errorf("store: update schedule: %w", err)
 	}
+	start := time.Now()
 	s, err := gen.New(db.pool).UpdateSchedule(ctx, gen.UpdateScheduleParams{
 		ID:         sid,
 		Kind:       in.Kind,
@@ -815,6 +860,7 @@ func (db *DB) UpdateSchedule(ctx context.Context, id string, in ScheduleInput) (
 		Enabled:    in.Enabled,
 		NextFireAt: timestamptzFromPtr(in.NextFireAt),
 	})
+	db.observe(queryUpdateSchedule, start, queryResult(err))
 	if err != nil {
 		return Schedule{}, fmt.Errorf("store: update schedule: %w", wrapNoRows(err))
 	}
@@ -826,7 +872,9 @@ func (db *DB) DeleteSchedule(ctx context.Context, id string) error {
 	if err != nil {
 		return fmt.Errorf("store: delete schedule: %w", err)
 	}
+	start := time.Now()
 	rows, err := gen.New(db.pool).DeleteSchedule(ctx, sid)
+	db.observe(queryDeleteSchedule, start, queryResult(err))
 	if err != nil {
 		return fmt.Errorf("store: delete schedule: %w", err)
 	}
@@ -864,12 +912,14 @@ func (db *DB) MarkScheduleFired(
 	if err != nil {
 		return fmt.Errorf("store: mark schedule fired: %w", err)
 	}
+	start := time.Now()
 	rows, err := gen.New(db.pool).MarkScheduleFired(ctx, gen.MarkScheduleFiredParams{
 		ID:          sid,
 		LastFiredAt: pgtype.Timestamptz{Time: firedAt, Valid: true},
 		NextFireAt:  timestamptzFromPtr(nextFireAt),
 		LastError:   truncateScheduleError(lastError),
 	})
+	db.observe(queryMarkScheduleFired, start, queryResult(err))
 	if err != nil {
 		return fmt.Errorf("store: mark schedule fired: %w", err)
 	}
@@ -887,10 +937,12 @@ func (db *DB) MarkScheduleSkipped(ctx context.Context, id string, nextFireAt *ti
 	if err != nil {
 		return fmt.Errorf("store: mark schedule skipped: %w", err)
 	}
+	start := time.Now()
 	rows, err := gen.New(db.pool).MarkScheduleSkipped(ctx, gen.MarkScheduleSkippedParams{
 		ID:         sid,
 		NextFireAt: timestamptzFromPtr(nextFireAt),
 	})
+	db.observe(queryMarkScheduleSkipped, start, queryResult(err))
 	if err != nil {
 		return fmt.Errorf("store: mark schedule skipped: %w", err)
 	}
@@ -905,7 +957,9 @@ func (db *DB) GetSchedule(ctx context.Context, id string) (Schedule, error) {
 	if err != nil {
 		return Schedule{}, fmt.Errorf("store: get schedule: %w", err)
 	}
+	start := time.Now()
 	s, err := gen.New(db.pool).GetSchedule(ctx, sid)
+	db.observe(queryGetSchedule, start, queryResult(err))
 	if err != nil {
 		return Schedule{}, fmt.Errorf("store: get schedule: %w", wrapNoRows(err))
 	}
@@ -925,12 +979,14 @@ func (db *DB) ListSchedules(ctx context.Context, f ScheduleFilter) (SchedulePage
 		return SchedulePage{}, fmt.Errorf("store: list schedules: %w", err)
 	}
 
+	start := time.Now()
 	rows, err := gen.New(db.pool).ListSchedules(ctx, gen.ListSchedulesParams{
 		DefinitionID: defID,
 		CurTime:      curTime,
 		CurID:        curID,
 		Lim:          int32(limit), //nolint:gosec // limit is clamped to [1,500] above
 	})
+	db.observe(queryListSchedules, start, queryResult(err))
 	if err != nil {
 		return SchedulePage{}, fmt.Errorf("store: list schedules: %w", err)
 	}
@@ -952,10 +1008,12 @@ func (db *DB) ListSchedules(ctx context.Context, f ScheduleFilter) (SchedulePage
 // ListDueSchedules is the scheduler's due poll. limit == 0 means the default
 // of 100 rows; any other value is clamped into [1,500].
 func (db *DB) ListDueSchedules(ctx context.Context, due time.Time, limit int) ([]Schedule, error) {
+	start := time.Now()
 	rows, err := gen.New(db.pool).ListDueSchedules(ctx, gen.ListDueSchedulesParams{
 		Due: due,
 		Lim: int32(clampLimit(limit)), //nolint:gosec // clampLimit bounds this to [1,500]
 	})
+	db.observe(queryListDueSchedules, start, queryResult(err))
 	if err != nil {
 		return nil, fmt.Errorf("store: list due schedules: %w", err)
 	}
@@ -1024,12 +1082,102 @@ var jsonNull = []byte("null")
 // validateJSON rejects a JSONB payload Postgres would refuse, naming the
 // field so the caller learns which one it was. An empty or nil payload is
 // fine: orEmptyJSON turns it into {} before it reaches the driver.
+/*
+ * validateStringMap is validateJSON plus the VALUE type, for `labels`.
+ *
+ * The published schema says `additionalProperties: {type: string}` and the store accepted anything:
+ * a label whose value was an object, an array or a number went into the column and came back out to
+ * every consumer that reasonably expects a string — a metric label, a filter, a rendered chip. The
+ * lengths are bounded for the same reason a target's name is: these are display text and,
+ * downstream, potential label values.
+ */
+func validateStringMap(field string, raw json.RawMessage) error {
+	if err := validateJSON(field, raw); err != nil {
+		return err
+	}
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, jsonNull) {
+		return nil
+	}
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(trimmed, &m); err != nil {
+		return fmt.Errorf("%s must be a JSON object of strings", field)
+	}
+	for k, v := range m {
+		if k == "" || len(k) > labelKeyMaxLen {
+			return fmt.Errorf("%s: key %q is %d bytes, limit is 1..%d", field, k, len(k), labelKeyMaxLen)
+		}
+		var str string
+		if err := json.Unmarshal(v, &str); err != nil {
+			return fmt.Errorf("%s: value of %q must be a string", field, k)
+		}
+		if len(str) > labelValueMaxLen {
+			return fmt.Errorf("%s: value of %q is %d bytes, limit is %d", field, k, len(str), labelValueMaxLen)
+		}
+	}
+	return nil
+}
+
+// The bounds validateStringMap enforces; label text is display text and, downstream, a candidate
+// metric label value.
+const (
+	labelKeyMaxLen   = 63
+	labelValueMaxLen = 253
+
+	// jsonFieldMaxBytes bounds one JSONB column's payload; see validateJSON.
+	jsonFieldMaxBytes = 16 * 1024
+)
+
+/*
+validateNoJSONNUL refuses a NUL anywhere inside a JSONB payload.
+
+PostgreSQL rejects a NUL in a jsonb value (SQLSTATE 22P05) and the driver fails the statement, so
+one escaped \u0000 in a target's labels, a definition's params, an alert rule's annotations or an
+incident's notes came back as 502 "<subsystem> unavailable" — a client's own input reported as an
+outage. Every one of those routes had size and shape validation already; this is the byte that shape
+validation cannot see, because \u0000 IS valid JSON.
+
+The escape is the only reachable form: a literal NUL byte cannot appear in valid JSON, and
+json.Valid has already run above.
+*/
+func validateNoJSONNUL(field string, raw json.RawMessage) error {
+	if bytes.Contains(bytes.ToLower(raw), []byte(`\u0000`)) {
+		return fmt.Errorf("%s must not contain a NUL character", field)
+	}
+	return nil
+}
+
 func validateJSON(field string, raw json.RawMessage) error {
 	if len(raw) == 0 {
 		return nil
 	}
+	/* A SIZE BOUND, like every other field this package stores.
+
+	   Nothing limited a JSONB column's payload. The only ceiling was the HTTP body limit, so one
+	   write could store megabytes of params on a check definition — and that row is then re-read and
+	   re-marshalled by every GET /api/v1/checks, every GET /api/v1/export, the scheduler's spec
+	   resolution and the definitions page, forever. A params object is a handful of typed knobs
+	   (a port, a method, an expected status); 16 KiB is orders of magnitude above any real one and
+	   still small enough that a thousand definitions is megabytes rather than gigabytes. */
+	if len(raw) > jsonFieldMaxBytes {
+		return fmt.Errorf("%s is %d bytes, limit is %d", field, len(raw), jsonFieldMaxBytes)
+	}
 	if !json.Valid(raw) {
 		return fmt.Errorf("%s must be valid JSON", field)
+	}
+	if err := validateNoJSONNUL(field, raw); err != nil {
+		return err
+	}
+	/* An OBJECT, which is what the schema declares and what every consumer indexes into: an array
+	   or a scalar is legal JSON, went into the JSONB column happily, and then read back as
+	   something no caller can use. `null` stays legal -- orEmptyJSON folds it into {} before the
+	   driver sees it. */
+	trimmed := bytes.TrimSpace(raw)
+	if bytes.Equal(trimmed, jsonNull) {
+		return nil
+	}
+	if trimmed[0] != '{' {
+		return fmt.Errorf("%s must be a JSON object, not an array or a scalar", field)
 	}
 	return nil
 }

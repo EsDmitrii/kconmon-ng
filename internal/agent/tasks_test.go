@@ -539,6 +539,48 @@ func TestExternalAllowedUsesExplicitPortAndTCPDefault(t *testing.T) {
 	}
 }
 
+/*
+An external UDP diagnostic is refused, because it is a measurement this build cannot make.
+
+The UDP checker counts a packet as received only when the reply's first four bytes are the sequence
+number it sent — the kconmon probe server's protocol. Against anything that is not another agent
+every packet is "lost", so the result was a confident 100% loss that describes the protocol rather
+than the network, and an operator reading it would go looking for a link fault that is not there.
+The CONTINUOUS external path has always refused UDP for this reason; the on-demand path listed it.
+
+The refusal has to say why, and no checker may run.
+*/
+func TestExternalUDPIsRefusedBecauseItCannotMeasureAnythingThere(t *testing.T) {
+	fc := &fakeChecker{name: model.CheckUDP, result: model.CheckResult{Success: true}}
+	ex := newExternalExecutor(t, &stubResolver{}, []string{"10.0.0.0/8"}, nil, fc)
+
+	for _, req := range []*pb.TaskRequest{
+		externalReq("noport", "udp", "10.0.0.9"),
+		externalReq("embedded", "udp", "10.0.0.9:5353"),
+	} {
+		res := ex.executeOne(context.Background(), req)
+		if res.GetSuccess() {
+			t.Fatalf("an external UDP probe must be refused, got a result: %+v", res)
+		}
+		if !strings.Contains(res.GetError(), "udp") {
+			t.Errorf("refusal does not name udp: %s", res.GetError())
+		}
+		if !strings.Contains(res.GetError(), "echo") {
+			t.Errorf("refusal does not say WHY udp cannot work there: %s", res.GetError())
+		}
+	}
+	if fc.callCount() != 0 {
+		t.Errorf("checker ran %d times for an external UDP target", fc.callCount())
+	}
+
+	// ICMP against the same destination still runs: the refusal is about UDP, not about external.
+	icmp := &fakeChecker{name: model.CheckICMP, result: model.CheckResult{Success: true}}
+	ex2 := newExternalExecutor(t, &stubResolver{}, []string{"10.0.0.0/8"}, nil, icmp)
+	if res := ex2.executeOne(context.Background(), externalReq("ping", "icmp", "10.0.0.9")); !res.GetSuccess() {
+		t.Fatalf("external icmp must still run: %q", res.GetError())
+	}
+}
+
 func TestExternalOutOfRangePortIsRefused(t *testing.T) {
 	fc := &fakeChecker{name: model.CheckTCP, result: model.CheckResult{Success: true}}
 	ex := newExternalExecutor(t, &stubResolver{}, []string{"10.0.0.0/8"}, nil, fc)
@@ -710,4 +752,82 @@ func TestExternalExplicitPortFieldWinsOverEmbeddedPort(t *testing.T) {
 	if got := fake.lastTgt; got.Port != 443 || got.PodIP != "127.0.0.9" {
 		t.Errorf("dialled %s:%d, want 127.0.0.9:443 (explicit field wins)", got.PodIP, got.Port)
 	}
+}
+
+// TestErrorResultCarriesADecodableCheckResult is the mass-MTR regression: a refused task reported
+// an empty DetailsJson, the controller returned it verbatim as a 200 body, and the Console recorded
+// "decode result: unexpected end of JSON input" instead of the reason the agent gave.
+func TestErrorResultCarriesADecodableCheckResult(t *testing.T) {
+	e := NewTaskExecutor(nil, nil, checker.Target{NodeName: "node-1", Zone: "zone-a"}, 8080, nil, 1, ExternalPolicy{})
+
+	res := e.errorResult(&pb.TaskRequest{
+		TaskId:    "task-1",
+		CheckType: "mtr",
+		Target:    &pb.AgentMeta{NodeName: "node-2", Zone: "zone-b"},
+	}, errors.New("agent busy: too many concurrent diagnostic tasks"))
+
+	if len(res.GetDetailsJson()) == 0 {
+		t.Fatal("a refusal carried no payload; the Console cannot decode an empty 200 body")
+	}
+
+	var decoded model.CheckResult
+	if err := json.Unmarshal(res.GetDetailsJson(), &decoded); err != nil {
+		t.Fatalf("DetailsJson does not decode as a CheckResult: %v", err)
+	}
+	if decoded.Success {
+		t.Error("a refusal decoded as a success")
+	}
+	if decoded.Error != "agent busy: too many concurrent diagnostic tasks" {
+		t.Errorf("Error = %q, want the agent's own reason", decoded.Error)
+	}
+	if decoded.Type != model.CheckMTR {
+		t.Errorf("Type = %q, want mtr", decoded.Type)
+	}
+	if decoded.Source != "node-1" || decoded.Destination != "node-2" {
+		t.Errorf("pair = %s->%s, want node-1->node-2", decoded.Source, decoded.Destination)
+	}
+}
+
+// TestSaturatedExecutorReportsAnHonestResult covers the path that produced 685 of the run's 1274
+// rows: nine outbound MTR pairs against a semaphore of four.
+func TestSaturatedExecutorReportsAnHonestResult(t *testing.T) {
+	rep := &recordingReporter{}
+	e := NewTaskExecutor(nil, nil, checker.Target{NodeName: "node-1"}, 8080, rep, 1, ExternalPolicy{})
+
+	// Fill the only slot, then offer a second task.
+	e.sem <- struct{}{}
+	defer func() { <-e.sem }()
+
+	e.Handle(context.Background(), &pb.TaskRequest{TaskId: "task-2", CheckType: "mtr"})
+
+	got := rep.results()
+	if len(got) != 1 {
+		t.Fatalf("reported %d results, want 1", len(got))
+	}
+	var decoded model.CheckResult
+	if err := json.Unmarshal(got[0].GetDetailsJson(), &decoded); err != nil {
+		t.Fatalf("a saturation refusal is not decodable: %v", err)
+	}
+	if !strings.Contains(decoded.Error, "agent busy") {
+		t.Errorf("error = %q, want it to name the saturation", decoded.Error)
+	}
+}
+
+// recordingReporter captures the TaskResults an executor reports.
+type recordingReporter struct {
+	mu   sync.Mutex
+	seen []*pb.TaskResult
+}
+
+func (r *recordingReporter) ReportTaskResult(_ context.Context, res *pb.TaskResult) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.seen = append(r.seen, res)
+	return nil
+}
+
+func (r *recordingReporter) results() []*pb.TaskResult {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]*pb.TaskResult(nil), r.seen...)
 }

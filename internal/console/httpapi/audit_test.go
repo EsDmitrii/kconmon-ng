@@ -1,8 +1,10 @@
 package httpapi
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 	"sync"
@@ -11,6 +13,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus/testutil"
 
+	"github.com/EsDmitrii/kconmon-ng/internal/console/authn"
 	"github.com/EsDmitrii/kconmon-ng/internal/console/authz"
 	"github.com/EsDmitrii/kconmon-ng/internal/console/store"
 )
@@ -22,9 +25,15 @@ type fakeAuditStore struct {
 	mu      sync.Mutex
 	entries []store.AuditEntry
 	nextID  int64
+	// block, when non-nil, holds the drain goroutine inside InsertAuditEntry so a test can observe
+	// the buffer under pressure rather than racing it.
+	block chan struct{}
 }
 
 func (f *fakeAuditStore) InsertAuditEntry(_ context.Context, subjectKind, subjectID, action, resource, outcome, remoteAddr string, detail json.RawMessage) (store.AuditEntry, error) {
+	if f.block != nil {
+		<-f.block
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.nextID++
@@ -219,7 +228,8 @@ func TestAuditDeniedGETIsAudited(t *testing.T) {
 }
 
 // TestAuditSuccessfulGETIsNotAudited is the brief's third failing test:
-// a successful GET is not audited (volume).
+// a successful GET is not audited (volume). The privileged reads named in auditedReads are the
+// exception — see TestAuditExportIsAudited.
 func TestAuditSuccessfulGETIsNotAudited(t *testing.T) {
 	fs := &fakeAuditStore{}
 	s := newAuditTestServer(t, fs, []authz.Permission{authz.PermAuditRead}, Deps{})
@@ -324,5 +334,295 @@ func TestAuditFullBufferDropsAndCounts(t *testing.T) {
 	after := testutil.ToFloat64(s.metrics.AuditDropped.WithLabelValues())
 	if after <= before {
 		t.Errorf("AuditDropped counter did not increase (before=%v after=%v) -- buffer overflow was not counted", before, after)
+	}
+}
+
+/*
+A caller must not be able to erase its own audit row, and %00 was how.
+
+auditResource copied the path parameter verbatim into audit_log.resource; PostgreSQL cannot store a
+NUL in text, so the INSERT failed and the drain logged a warning. The sharp case is a DENIED probe
+of a sensitive route — middleware_auth records denials through the same function — so exactly the
+rows auditSensitiveRoute promises are never dropped were the ones a caller could delete at will.
+
+Two layers now: the path never carries a control character past the door (rejectControlPath), and if
+one ever reaches here it is substituted rather than allowed to make the row unstorable.
+*/
+func TestAuditResourceCannotBeMadeUnstorable(t *testing.T) {
+	for _, tc := range []struct{ name, in, want string }{
+		{"clean", "role-a", "role-a"},
+		{"nul", "role\x00a", "role\uFFFDa"},
+		{"newline", "role\na", "role\uFFFDa"},
+	} {
+		if got := sanitizeAuditText(tc.in); got != tc.want {
+			t.Errorf("%s: sanitizeAuditText(%q) = %q, want %q", tc.name, tc.in, got, tc.want)
+		}
+	}
+}
+
+/*
+And the request never gets that far: a control character in the PATH is a 400 at the door.
+
+Before this, DELETE /api/v1/rbac/roles/x%00 was served as 502 "rbac unavailable" — a client's own
+input reported as an outage of the RBAC backend, with an ERROR log line to match — and its audit row
+vanished. The same shape applied to tokens, targets, checks, schedules, incidents and maintenance.
+*/
+func TestControlCharacterInThePathIs400(t *testing.T) {
+	s := newRBACTestServer(t, newFakeRoleAdmin())
+	/* PERCENT-ENCODED, which is how it travels: net/http decodes %00 into a literal NUL in
+	   URL.Path, and that is exactly the byte the guard is there to catch. A raw control byte cannot
+	   even be put in a request target — net/url refuses to parse it — so the encoded form is not a
+	   convenience here, it is the only reachable shape. */
+	for _, path := range []string{
+		"/api/v1/rbac/roles/role%00a",
+		"/api/v1/tokens/11111111-1111-1111-1111-111111111111%00",
+		"/api/v1/rbac/roles/role%0Aa",
+	} {
+		w := doRequest(t, s, http.MethodDelete, path, nil, mutateWithCSRF)
+		if w.Code != http.StatusBadRequest {
+			t.Errorf("DELETE %q = %d, want 400 (got body %s)", path, w.Code, w.Body)
+		}
+	}
+	// A clean path is untouched.
+	w := doRequest(t, s, http.MethodDelete, "/api/v1/rbac/roles/does-not-exist", nil, mutateWithCSRF)
+	if w.Code != http.StatusNotFound {
+		t.Errorf("a clean path = %d, want 404", w.Code)
+	}
+}
+
+/*
+boundAuditValue sliced the DECODED string with a bound taken from the ENCODED length.
+
+A body value made of escapes shrinks by up to 6x when decoded, so it passed the size check and then
+sliced a much shorter string at an index past its end: a panic, on the audit path, reachable by an
+unauthenticated request (the login route is audited).
+*/
+func TestBoundAuditValueSurvivesAnEscapeHeavyValue(t *testing.T) {
+	// ~5 KB encoded, ~830 characters decoded: exactly the mismatch.
+	encoded, err := json.Marshal(strings.Repeat("A", 830))
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	escaped := []byte(`"` + strings.Repeat(`\u0041`, 830) + `"`)
+	if len(escaped) <= auditValueMaxBytes {
+		t.Fatalf("setup: escaped value is %d bytes, needs to exceed auditValueMaxBytes (%d)",
+			len(escaped), auditValueMaxBytes)
+	}
+
+	got := boundAuditValue(json.RawMessage(escaped))
+	var s string
+	if err := json.Unmarshal(got, &s); err != nil {
+		t.Fatalf("result is not a JSON string: %v (%s)", err, got)
+	}
+	if len(s) == 0 {
+		t.Error("the whole value was dropped")
+	}
+	// And the ordinary case still truncates.
+	_ = encoded
+	long, _ := json.Marshal(strings.Repeat("B", auditValueMaxBytes*2))
+	out := boundAuditValue(long)
+	if len(out) > auditValueMaxBytes {
+		t.Errorf("a genuinely long value was not truncated: %d bytes", len(out))
+	}
+}
+
+/* ── who yields when the audit buffer is full ────────────────────────────── */
+
+/*
+ * A credential-less 401 is the cheapest row in the system to produce: no database, no crypto, and
+ * every non-public route enqueues one. Nothing rate-limits those routes, so a flood of them kept the
+ * 64-slot buffer full and an admin's DELETE of a role binding — the most sensitive operation in the
+ * console — was dropped in the same instant, leaving a warning line that carries neither the subject
+ * nor the resource. Those rows yield the second half of the buffer instead.
+ */
+func TestUnauthenticatedDenialsYieldTheAuditBufferToRealMutations(t *testing.T) {
+	audit := &fakeAuditStore{block: make(chan struct{})}
+	authr := fakeAuthenticator{err: authn.ErrNoCredentials, mode: "local"}
+	s := newAuthzServer(t, authr, authz.NewPolicy(nil), Deps{Audit: audit})
+
+	/* Enough credential-less denials to overrun the buffer several times over; the drain is blocked,
+	   so nothing leaves it. One row is in flight inside the blocked Insert, which is why the check
+	   below allows for it. */
+	for range auditBufferSize * 3 {
+		doRequest(t, s, http.MethodGet, "/api/v1/topology", nil, nil)
+	}
+
+	if got := len(s.auditCh); got > auditBufferSize/2 {
+		t.Fatalf("audit buffer holds %d of %d after a denial flood, want at most half left standing",
+			got, auditBufferSize)
+	}
+	close(audit.block)
+}
+
+/* ── QA round 5: the highest-value READ left no trace ─────────────────────── */
+
+/*
+ * GET /api/v1/export hands the caller every probe address, every webhook URL, every alert
+ * expression, and — for a caller holding rbac:manage — the whole role map, in one file. Auditing was
+ * keyed on the HTTP verb, so a stolen token could take all of it and the log an operator
+ * investigates with showed nothing at all.
+ */
+func TestAuditExportIsAudited(t *testing.T) {
+	fs := &fakeAuditStore{}
+	s := newAuditTestServer(t, fs, []authz.Permission{authz.PermSettingsWrite}, Deps{})
+
+	w := doRequest(t, s, http.MethodGet, "/api/v1/export", nil, nil)
+	if w.Code != http.StatusOK && w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("GET /api/v1/export = %d: %s", w.Code, w.Body)
+	}
+
+	entries := waitForOneAuditEntry(t, fs)
+	if entries[0].Action != "GET /api/v1/export" {
+		t.Errorf("action = %q, want GET /api/v1/export", entries[0].Action)
+	}
+}
+
+/* ── QA round 5: a denial flood must not evict the rows that matter ───────── */
+
+/*
+ * The first cut of the yield rule keyed on `subject.Kind == ""`, which exempted every credentialed
+ * subject — and in anonymous mode, where Kind is "anonymous", exempted everyone. A denial now yields
+ * on what the ROW is, and a denial on a sensitive route keeps the full buffer.
+ */
+func TestAuditDenialsYieldRegardlessOfSubjectKind(t *testing.T) {
+	for _, kind := range []authz.SubjectKind{"", authz.SubjectAnonymous, authz.SubjectToken, authz.SubjectUser} {
+		t.Run(string(kind)+"/ordinary route yields", func(t *testing.T) {
+			if !auditYields(auditOutcomeDenied, "/api/v1/topology") {
+				t.Error("an ordinary denial does not yield the buffer half")
+			}
+		})
+	}
+	if auditYields(auditOutcomeDenied, "/api/v1/rbac/roles") {
+		t.Error("a denied RBAC attempt yields the buffer; those are the rows an investigation needs")
+	}
+	if auditYields(auditOutcomeAllowed, "/api/v1/topology") {
+		t.Error("an ALLOWED row yields; only denials may")
+	}
+}
+
+// auditYields mirrors recordAudit's drop condition for a half-full buffer.
+func auditYields(outcome, pattern string) bool {
+	return outcome == auditOutcomeDenied && !auditSensitiveRoute(pattern)
+}
+
+/* ── QA round 5: a caller must not be able to delete their own audit row ──── */
+
+/*
+ * PostgreSQL rejects a NUL inside jsonb (22P05), and the detail is copied out of the request body.
+ * Appending the escape to an allow-listed field therefore made the row unwritable and the action
+ * left no trace at all.
+ */
+func TestAuditDetailStripsNULEscapes(t *testing.T) {
+	body := []byte(`{"name":"webhook\u0000","url":"https://example.test"}`)
+	detail := auditDetailFor("POST /api/v1/webhooks", body)
+
+	if bytes.Contains(bytes.ToLower(detail), []byte(`\u0000`)) {
+		t.Fatalf("detail still carries a NUL escape, so the row cannot be inserted: %s", detail)
+	}
+	// The rest of the value survives: this is a sanitisation, not a drop.
+	if !bytes.Contains(detail, []byte(`"webhook"`)) {
+		t.Errorf("detail = %s, want the name preserved with the escape removed", detail)
+	}
+}
+
+/*
+ * The audit row must describe the mutation that actually happened.
+ *
+ * encoding/json resolves a body key to a struct field case-INSENSITIVELY and keeps the LAST match,
+ * so a handler decoding {"name":"benign","Name":"real"} acts on "real". The audit path used a
+ * case-sensitive map index and recorded "benign": one request, two different names, and the only
+ * record of a privileged action named an object that was never created.
+ */
+func TestAuditDetailFollowsGoJSONFieldMatching(t *testing.T) {
+	body := []byte(`{"name":"benign","permissions":[],"Name":"real","Permissions":["rbac:manage"]}`)
+	detail := auditDetailFor("POST /api/v1/rbac/roles", body)
+
+	var got map[string]any
+	if err := json.Unmarshal(detail, &got); err != nil {
+		t.Fatalf("detail is not JSON: %s", detail)
+	}
+	if got["name"] != "real" {
+		t.Errorf("detail name = %v, want the value the handler decoded (%q); detail = %s", got["name"], "real", detail)
+	}
+	perms, _ := got["permissions"].([]any)
+	if len(perms) != 1 || perms[0] != "rbac:manage" {
+		t.Errorf("detail permissions = %v, want the value the handler decoded; detail = %s", got["permissions"], detail)
+	}
+}
+
+/*
+ * A value whose literal characters spell a NUL escape is not a NUL.
+ *
+ * Deleting the six-byte sequence out of the RAW JSON matched one byte late inside an escaped
+ * backslash and left a dangling backslash -- invalid JSON, so the whole detail was dropped and the
+ * caller got to erase the record of their own action.
+ */
+func TestAuditDetailSurvivesAnEscapedBackslashBeforeU0000(t *testing.T) {
+	body := []byte(`{"name":"` + `\\u0000` + `","url":"https://example.test"}`)
+	detail := auditDetailFor("POST /api/v1/webhooks", body)
+
+	var got map[string]any
+	if err := json.Unmarshal(detail, &got); err != nil {
+		t.Fatalf("detail is not JSON, so the row is unwritable: %s", detail)
+	}
+	if got["name"] != `\u0000` {
+		t.Errorf("detail name = %q, want the literal text preserved; detail = %s", got["name"], detail)
+	}
+}
+
+/*
+ * A wide body must not become a wide slice.
+ *
+ * The audit middleware buffers the request body BEFORE authentication on public routes, so one
+ * unauthenticated 16 MiB POST /api/v1/auth/login whose body repeats "username" a million times built
+ * a million-element slice -- roughly 13x the body in live heap -- and OOM-killed the console pod.
+ * The map this replaced collapsed duplicates to one entry; the slice has to keep only what it needs.
+ */
+func TestAuditDetailIgnoresNonAllowListedMembers(t *testing.T) {
+	var b strings.Builder
+	b.WriteString(`{"username":"real"`)
+	for i := range 5000 {
+		fmt.Fprintf(&b, `,"pad%d":"x"`, i)
+	}
+	b.WriteString("}")
+
+	// Past the member bound the body is not described at all, rather than described expensively.
+	detail := auditDetailFor("POST /api/v1/auth/login", []byte(b.String()))
+	if !bytes.Equal(detail, emptyDetail) {
+		t.Errorf("a body with 5000 members produced %s, want the empty detail", detail)
+	}
+
+	// Under the bound only the allow-listed member is retained.
+	fields, err := orderedJSONFields([]byte(`{"a":1,"username":"real","b":2,"c":3}`), []string{"username"})
+	if err != nil {
+		t.Fatalf("orderedJSONFields: %v", err)
+	}
+	if len(fields) != 1 || fields[0].key != "username" {
+		t.Errorf("fields = %+v, want only the allow-listed member", fields)
+	}
+}
+
+/*
+ * A number that does not fit a float64 must not smuggle a NUL past the scrub.
+ *
+ * encoding/json parses every JSON number into a float64, so a value carrying 1e999 failed to decode
+ * and the error path returned the value UNCHANGED -- escape and all. PostgreSQL then refused the
+ * jsonb and dropped the whole row, handing the caller back exactly the choice the scrub removes.
+ */
+func TestAuditDetailScrubsNULsBesideAnUnrepresentableNumber(t *testing.T) {
+	body := []byte(`{"name":"x","permissions":[1e999,"a` + `\u0000` + `"]}`)
+	detail := auditDetailFor("POST /api/v1/rbac/roles", body)
+
+	if bytes.Contains(bytes.ToLower(detail), []byte(`\u0000`)) {
+		t.Fatalf("detail still carries a NUL escape, so the row cannot be inserted: %s", detail)
+	}
+}
+
+// And a large integer keeps its digits: json.Number never round-trips through a float64.
+func TestAuditDetailPreservesALargeIntegerExactly(t *testing.T) {
+	body := []byte(`{"name":"x","permissions":[12345678901234567890]}`)
+	detail := auditDetailFor("POST /api/v1/rbac/roles", body)
+	if !bytes.Contains(detail, []byte("12345678901234567890")) {
+		t.Errorf("detail = %s, want the integer recorded verbatim", detail)
 	}
 }

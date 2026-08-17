@@ -16,6 +16,7 @@ import (
 	"github.com/EsDmitrii/kconmon-ng/internal/metrics"
 	"github.com/EsDmitrii/kconmon-ng/internal/model"
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	dto "github.com/prometheus/client_model/go"
 )
 
@@ -404,9 +405,9 @@ func TestResultHandlerExternalPerCheckTypeFamilies(t *testing.T) {
 
 	text := exposition(t, reg)
 	for _, want := range []string{
-		"kconmon_ng_external_rtt_seconds{source_node=node-a,source_zone=zone-a,target=ping-host,target_kind=host,}",
-		"kconmon_ng_external_packet_loss_ratio{source_node=node-a,source_zone=zone-a,target=ping-host,target_kind=host,}",
-		"kconmon_ng_external_http_status_code{source_node=node-a,source_zone=zone-a,target=portal,target_kind=url,}",
+		"kconmon_ng_external_rtt_seconds{check_type=icmp,source_node=node-a,source_zone=zone-a,target=ping-host,target_kind=host,}",
+		"kconmon_ng_external_packet_loss_ratio{check_type=icmp,source_node=node-a,source_zone=zone-a,target=ping-host,target_kind=host,}",
+		"kconmon_ng_external_http_status_code{check_type=http,source_node=node-a,source_zone=zone-a,target=portal,target_kind=url,}",
 	} {
 		if !strings.Contains(text, want) {
 			t.Errorf("missing series %s in:\n%s", want, text)
@@ -632,5 +633,149 @@ func TestResultHandlerICMPUnreachableTargetReportsTotalLoss(t *testing.T) {
 	}
 	if got != 1 {
 		t.Errorf("unreachable peer read loss %v, want 1.0 (checker error: %s)", got, res.Error)
+	}
+}
+
+// TestPreinitPeerResultsCoversEveryEnabledPeerChecker is the null-vs-zero regression: a pair that
+// has never failed had no `result="fail"` series at all, so the console matrix rendered null. TCP
+// only looked initialized because every pair had genuinely failed at some point.
+/*
+A re-registration must not re-assert a zone this agent merely ADOPTED.
+
+The registry consults its ZoneResolver only when the agent supplies no zone, so an agent that echoes
+back the zone it learned last time wins over the node's own failure-domain label. Relabel the node,
+the informer corrects the registry, and the next re-registration puts the stale value back — for
+good, because every registration after that re-asserts it. Cross-zone matrix views and zone-scoped
+alerts read that field.
+
+What the agent asserts is what an operator CONFIGURED, and nothing else.
+*/
+func TestRegistrationAssertsOnlyTheConfiguredZone(t *testing.T) {
+	// No agent.zone: the agent has adopted "zone-from-node" from a previous registration.
+	adopted := &Agent{envZone: "", info: model.AgentInfo{ID: "a1", NodeName: "node-a", Zone: "zone-from-node"}}
+	if got := adopted.registrationInfo().Zone; got != "" {
+		t.Errorf("registration zone = %q, want empty: an adopted zone must not be re-asserted, "+
+			"or it overrides the node label the controller resolved it from", got)
+	}
+	// Everything else about the agent still travels.
+	if got := adopted.registrationInfo().NodeName; got != "node-a" {
+		t.Errorf("registration nodeName = %q, want node-a", got)
+	}
+	// And the agent's own effective zone is untouched — it is what labels its metrics.
+	if adopted.info.Zone != "zone-from-node" {
+		t.Errorf("registrationInfo mutated the agent's effective zone: %q", adopted.info.Zone)
+	}
+
+	// WITH agent.zone: the override is an assertion, and it travels.
+	configured := &Agent{envZone: "zone-override", info: model.AgentInfo{ID: "a2", NodeName: "node-b", Zone: "zone-override"}}
+	if got := configured.registrationInfo().Zone; got != "zone-override" {
+		t.Errorf("registration zone = %q, want the configured zone-override", got)
+	}
+}
+
+func TestPreinitPeerResultsCoversEveryEnabledPeerChecker(t *testing.T) {
+	m := metrics.NewPrometheusMetrics("test_preinit", prometheus.NewRegistry())
+	source := checker.Target{NodeName: "node-1", Zone: "zone-a"}
+	peers := []checker.Target{
+		{NodeName: "node-2", Zone: "zone-a"},
+		{NodeName: "node-3", Zone: "zone-b"},
+		{NodeName: "node-4", Zone: "zone-b"},
+	}
+	enabled := map[model.CheckType]checker.Checker{
+		model.CheckTCP: nil,
+		model.CheckUDP: nil,
+	}
+
+	preinitPeerResults(m, source, peers, enabled)
+
+	// Three peers, two outcomes each.
+	if got := testutil.CollectAndCount(m.TCPResults); got != 6 {
+		t.Errorf("tcp_results_total series = %d, want 6", got)
+	}
+	if got := testutil.CollectAndCount(m.UDPResults); got != 6 {
+		t.Errorf("udp_results_total series = %d, want 6; UDP must be initialized exactly like TCP", got)
+	}
+	if got := testutil.CollectAndCount(m.ICMPResults); got != 0 {
+		t.Errorf("icmp_results_total series = %d, want 0 when the icmp checker is disabled", got)
+	}
+}
+
+// TestPreinitPeerResultsStartsAtZeroAndDoesNotDoubleCount pins that initialization is not an
+// observation: the series must exist reading 0, and repeating it must not move a counter.
+func TestPreinitPeerResultsStartsAtZeroAndDoesNotDoubleCount(t *testing.T) {
+	m := metrics.NewPrometheusMetrics("test_preinit_zero", prometheus.NewRegistry())
+	source := checker.Target{NodeName: "node-1", Zone: "zone-a"}
+	peers := []checker.Target{{NodeName: "node-2", Zone: "zone-a"}}
+	enabled := map[model.CheckType]checker.Checker{model.CheckUDP: nil}
+
+	preinitPeerResults(m, source, peers, enabled)
+
+	failCounter := m.UDPResults.WithLabelValues("node-1", "node-2", "zone-a", "zone-a", "fail")
+	if got := testutil.ToFloat64(failCounter); got != 0 {
+		t.Fatalf("preinitialized fail counter = %v, want 0", got)
+	}
+
+	failCounter.Inc()
+	preinitPeerResults(m, source, peers, enabled)
+	if got := testutil.ToFloat64(failCounter); got != 1 {
+		t.Errorf("fail counter = %v after a re-preinit, want 1; initialization must be idempotent", got)
+	}
+}
+
+/*
+ * Two checks on ONE target must not share a series.
+ *
+ * target_kind is derived from the check type and everything that is not http collapses to "host", so
+ * an icmp check and a tcp check on the same target wrote the same series: their successes and
+ * failures were averaged together, and the ExternalChecksFailing rule -- which sums by exactly those
+ * labels -- stayed quiet while one of them failed every probe, diluted by the other.
+ */
+func TestResultHandlerExternalSeparatesChecksOnTheSameTarget(t *testing.T) {
+	reg, handle := newTestRegistry(t)
+	handle(model.CheckResult{
+		Type: model.CheckExternal, Source: "node-a", SourceZone: "zone-a", Success: false,
+		Details: []model.ExternalDetails{
+			{Name: "edge", CheckType: model.CheckICMP, Success: true, Duration: 4 * time.Millisecond},
+			{Name: "edge", CheckType: model.CheckTCP, Success: false, Duration: 9 * time.Millisecond},
+		},
+	})
+
+	text := exposition(t, reg)
+	for _, want := range []string{
+		`kconmon_ng_external_results_total{check_type=icmp,result=success,source_node=node-a,source_zone=zone-a,target=edge,target_kind=host,}`,
+		`kconmon_ng_external_results_total{check_type=tcp,result=fail,source_node=node-a,source_zone=zone-a,target=edge,target_kind=host,}`,
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("missing series %s in:\n%s", want, text)
+		}
+	}
+}
+
+/*
+ * A probe abandoned before it touched the network is not a result.
+ *
+ * Shutdown fills one of these for every target still waiting on the concurrency semaphore. Recording
+ * it observed a 0 s sample into the duration histogram, incremented a counter whose Help says
+ * "results that reached the network", and published 100% packet loss for an icmp probe that sent no
+ * packets -- once per target, on every rolling update.
+ */
+func TestResultHandlerExternalIgnoresAProbeThatNeverRan(t *testing.T) {
+	reg, handle := newTestRegistry(t)
+	handle(model.CheckResult{
+		Type: model.CheckExternal, Source: "node-a", SourceZone: "zone-a", Success: false,
+		Details: []model.ExternalDetails{
+			{Name: "edge", CheckType: model.CheckICMP, NotRun: true, Error: "external probe cancelled"},
+		},
+	})
+
+	text := exposition(t, reg)
+	for _, unwanted := range []string{
+		"kconmon_ng_external_results_total",
+		"kconmon_ng_external_duration_seconds",
+		"kconmon_ng_external_packet_loss_ratio",
+	} {
+		if strings.Contains(text, unwanted) {
+			t.Errorf("%s was written for a probe that never reached the network:\n%s", unwanted, text)
+		}
 	}
 }

@@ -173,8 +173,13 @@ func New(prefix string, reg prometheus.Registerer) *Metrics {
 		}, []string{"result"}),
 		RetentionDeleted: f.NewCounterVec(prometheus.CounterOpts{
 			Name: ns + "_retention_deleted_total",
-			Help: "Rows deleted by the retention pruner, by table (topology_events, audit_log, check_runs, " +
-				"mtr_path_snapshots, mtr_hop_enrichment, annotations).",
+			// The label set is prune.go's sweep table list, in its order. check_results and k8s_events
+			// were missing from this sentence, and check_results is by far the largest table the
+			// console keeps — an alert written from this help text watched everything except the
+			// sweep most likely to fall behind.
+			Help: "Rows deleted by the retention pruner, by table (topology_events, audit_log, " +
+				"check_results, check_runs, mtr_path_snapshots, mtr_hop_enrichment, annotations, " +
+				"k8s_events, incidents, maintenance_windows).",
 		}, []string{"table"}),
 		AuthRequests: f.NewCounterVec(prometheus.CounterOpts{
 			Name: ns + "_auth_requests_total",

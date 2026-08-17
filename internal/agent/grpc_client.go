@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"sync"
 	"time"
 
 	pb "github.com/EsDmitrii/kconmon-ng/api/proto"
@@ -18,8 +19,15 @@ import (
 )
 
 type GRPCClient struct {
-	conn             *grpc.ClientConn
-	client           pb.AgentRegistryClient
+	address string
+
+	// mu guards conn and client, which Reconnect swaps under the watch goroutines.
+	// mu guards conn and client, which Reconnect swaps under the watch goroutines, and agentID,
+	// which reregister() rewrites from two goroutines while the streams read it.
+	mu     sync.RWMutex
+	conn   *grpc.ClientConn
+	client pb.AgentRegistryClient
+
 	agentID          string
 	onPeers          func([]checker.Target)
 	onNeedReregister func()
@@ -28,6 +36,19 @@ type GRPCClient struct {
 }
 
 func NewGRPCClient(address string) (*GRPCClient, error) {
+	conn, err := dialController(address)
+	if err != nil {
+		return nil, err
+	}
+
+	return &GRPCClient{
+		address: address,
+		conn:    conn,
+		client:  pb.NewAgentRegistryClient(conn),
+	}, nil
+}
+
+func dialController(address string) (*grpc.ClientConn, error) {
 	conn, err := grpc.NewClient(address,
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 		grpc.WithKeepaliveParams(keepalive.ClientParameters{
@@ -39,11 +60,54 @@ func NewGRPCClient(address string) (*GRPCClient, error) {
 	if err != nil {
 		return nil, fmt.Errorf("connecting to controller: %w", err)
 	}
+	return conn, nil
+}
 
-	return &GRPCClient{
-		conn:   conn,
-		client: pb.NewAgentRegistryClient(conn),
-	}, nil
+// Reconnect drops the transport and dials the controller again. The controller Service is a
+// ClusterIP, so only a fresh connection is load-balanced anew: retrying on the existing one keeps
+// the agent pinned to the replica that just refused it for not being the leader.
+func (c *GRPCClient) Reconnect() error {
+	conn, err := dialController(c.address)
+	if err != nil {
+		return err
+	}
+
+	c.mu.Lock()
+	old := c.conn
+	c.conn = conn
+	c.client = pb.NewAgentRegistryClient(conn)
+	c.mu.Unlock()
+
+	if old != nil {
+		_ = old.Close()
+	}
+	return nil
+}
+
+// shouldRedial reports whether err means this connection cannot serve us. A standby answering "not
+// the leader" and a dead transport both surface as Unavailable, and a fresh connection through the
+// Service fixes both. Every other error leaves the connection alone: redialling would strand any
+// in-flight diagnostic task, whose result must go back to the replica that dispatched it.
+func shouldRedial(err error) bool {
+	if err == nil {
+		return false
+	}
+	st, ok := grpcstatus.FromError(err)
+	return ok && st.Code() == codes.Unavailable
+}
+
+// stub returns the current registry stub; Reconnect may swap it between calls.
+func (c *GRPCClient) stub() pb.AgentRegistryClient {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.client
+}
+
+// id returns the agent ID the controller last assigned, read under the same lock reregister writes it.
+func (c *GRPCClient) id() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.agentID
 }
 
 func (c *GRPCClient) OnPeersUpdate(fn func([]checker.Target)) {
@@ -70,7 +134,7 @@ func (c *GRPCClient) OnExternalAssignment(fn func(*pb.ExternalCheckAssignment)) 
 // Register registers the agent and returns the peer list plus the zone the
 // controller resolved for this agent (empty if the controller has no zone).
 func (c *GRPCClient) Register(ctx context.Context, info model.AgentInfo, httpPort int) ([]checker.Target, string, error) { //nolint:gocritic // hugeParam: AgentInfo is passed by value intentionally
-	resp, err := c.client.Register(ctx, &pb.RegisterRequest{
+	resp, err := c.stub().Register(ctx, &pb.RegisterRequest{
 		Agent: &pb.AgentMeta{
 			Id:       info.ID,
 			NodeName: info.NodeName,
@@ -87,7 +151,9 @@ func (c *GRPCClient) Register(ctx context.Context, info model.AgentInfo, httpPor
 		return nil, "", fmt.Errorf("registering agent: %w", err)
 	}
 
+	c.mu.Lock()
 	c.agentID = resp.GetAgentId()
+	c.mu.Unlock()
 	return protoToTargets(resp.GetPeers(), httpPort), resp.GetAgent().GetZone(), nil
 }
 
@@ -95,7 +161,7 @@ func (c *GRPCClient) Register(ctx context.Context, info model.AgentInfo, httpPor
 // stop probing its pod IP the moment it starts shutting down instead of waiting
 // for TTL eviction. Best-effort: callers should not block shutdown on the error.
 func (c *GRPCClient) Deregister(ctx context.Context) error {
-	_, err := c.client.Deregister(ctx, &pb.DeregisterRequest{AgentId: c.agentID})
+	_, err := c.stub().Deregister(ctx, &pb.DeregisterRequest{AgentId: c.id()})
 	if err != nil {
 		return fmt.Errorf("deregistering agent: %w", err)
 	}
@@ -109,8 +175,8 @@ func (c *GRPCClient) StartHeartbeat(ctx context.Context, interval time.Duration)
 	for {
 		select {
 		case <-ticker.C:
-			_, err := c.client.Heartbeat(ctx, &pb.HeartbeatRequest{
-				AgentId:   c.agentID,
+			_, err := c.stub().Heartbeat(ctx, &pb.HeartbeatRequest{
+				AgentId:   c.id(),
 				Timestamp: timestamppb.Now(),
 			})
 			if err != nil {
@@ -131,8 +197,8 @@ func (c *GRPCClient) StartHeartbeat(ctx context.Context, interval time.Duration)
 }
 
 func (c *GRPCClient) WatchPeers(ctx context.Context, httpPort int) error {
-	stream, err := c.client.WatchPeers(ctx, &pb.WatchPeersRequest{
-		AgentId: c.agentID,
+	stream, err := c.stub().WatchPeers(ctx, &pb.WatchPeersRequest{
+		AgentId: c.id(),
 	})
 	if err != nil {
 		return fmt.Errorf("watching peers: %w", err)
@@ -157,8 +223,8 @@ func (c *GRPCClient) WatchPeers(ctx context.Context, httpPort int) error {
 // the OnTask handler for each task received. It mirrors WatchPeers: it returns
 // on the first stream error so the caller's reconnect loop can re-subscribe.
 func (c *GRPCClient) WatchTasks(ctx context.Context) error {
-	stream, err := c.client.WatchTasks(ctx, &pb.WatchTasksRequest{
-		AgentId: c.agentID,
+	stream, err := c.stub().WatchTasks(ctx, &pb.WatchTasksRequest{
+		AgentId: c.id(),
 	})
 	if err != nil {
 		return fmt.Errorf("watching tasks: %w", err)
@@ -187,8 +253,8 @@ func (c *GRPCClient) WatchTasks(ctx context.Context) error {
 // and invokes the OnExternalAssignment handler for each assignment; the controller sends the
 // agent's CURRENT assignment immediately on subscribe (an empty one when it has none).
 func (c *GRPCClient) WatchExternalChecks(ctx context.Context) error {
-	stream, err := c.client.WatchExternalChecks(ctx, &pb.WatchExternalChecksRequest{
-		AgentId: c.agentID,
+	stream, err := c.stub().WatchExternalChecks(ctx, &pb.WatchExternalChecksRequest{
+		AgentId: c.id(),
 	})
 	if err != nil {
 		return fmt.Errorf("watching external checks: %w", err)
@@ -210,15 +276,19 @@ func (c *GRPCClient) WatchExternalChecks(ctx context.Context) error {
 
 // ReportTaskResult sends a completed task result back to the controller.
 func (c *GRPCClient) ReportTaskResult(ctx context.Context, res *pb.TaskResult) error {
-	if _, err := c.client.ReportTaskResult(ctx, res); err != nil {
+	if _, err := c.stub().ReportTaskResult(ctx, res); err != nil {
 		return fmt.Errorf("reporting task result: %w", err)
 	}
 	return nil
 }
 
 func (c *GRPCClient) Close() error {
-	if c.conn != nil {
-		return c.conn.Close()
+	c.mu.RLock()
+	conn := c.conn
+	c.mu.RUnlock()
+
+	if conn != nil {
+		return conn.Close()
 	}
 	return nil
 }

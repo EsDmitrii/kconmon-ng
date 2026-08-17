@@ -2,7 +2,10 @@ package controller
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"log/slog"
+	"net"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -26,8 +29,23 @@ type GRPCServer struct {
 	taskMgr     *TaskManager
 	externalMgr *ExternalCheckManager
 
-	mu       sync.RWMutex
-	watchers map[string]chan *pb.PeerUpdate
+	mu sync.RWMutex
+	/* A SET of peer-update streams per agent id, not one per id.
+
+	   The id on a WatchPeers request is client-supplied and nothing authenticates the gRPC surface,
+	   so with one entry per id the map was last-writer-wins: a second subscriber under an existing
+	   agent's id displaced that agent's mailbox, the agent's own stream goroutine stayed parked on a
+	   channel that would never be written to again, and its peer list froze — it kept probing pods
+	   that had left the fleet and never learned of new ones, while heartbeats, the connection gauge
+	   and registered==expected all read healthy and nothing was logged. When the second subscriber
+	   disconnected, its deferred cleanup owned the mapped entry and deleted the id outright, so the
+	   real agent stayed deaf even after it left.
+
+	   A set cannot be displaced: a stream removes only its OWN watcher, and a broadcast reaches all
+	   of them. It does not authenticate anything — that is the NetworkPolicy's job, and the shared
+	   policy admits the gRPC port from agent pods of this release only — but no caller can take an
+	   agent's subscription away from it. */
+	watchers map[string]map[*peerWatcher]struct{}
 
 	leaderElection bool
 	isLeader       func() bool
@@ -62,7 +80,7 @@ func NewGRPCServer(
 		metrics:             m,
 		taskMgr:             NewTaskManager(),
 		externalMgr:         NewExternalCheckManager(),
-		watchers:            make(map[string]chan *pb.PeerUpdate),
+		watchers:            make(map[string]map[*peerWatcher]struct{}),
 		leaderElection:      leaderElection,
 		isLeader:            isLeader,
 		eventsEnabled:       eventsEnabled,
@@ -101,8 +119,22 @@ func (s *GRPCServer) RegisterService(srv *grpc.Server) {
 	}
 }
 
+// Register accepts an agent into the registry; leader-only when leader election is enabled, or the
+// Service round-robin would split the agents across replicas and each would plan its own mesh.
 func (s *GRPCServer) Register(_ context.Context, req *pb.RegisterRequest) (*pb.RegisterResponse, error) {
+	if s.lostLeadership() {
+		return nil, status.Error(codes.Unavailable, "not the leader")
+	}
+
 	agentMeta := req.GetAgent()
+	/* An agent is only an agent if it says WHO and WHERE it is.
+	   Nothing checked: GetAgent() is nil-safe, so an empty RegisterRequest produced AgentInfo{} —
+	   stored under the key "" and broadcast to the whole fleet as a peer, which every agent then
+	   turned into a probe against PodIP "" forever. It is not only reachable adversarially: an agent
+	   started without the downward-API env registers exactly this. */
+	if err := validateAgentMeta(agentMeta); err != nil {
+		return nil, status.Error(codes.InvalidArgument, err.Error())
+	}
 
 	info := model.AgentInfo{
 		ID:       agentMeta.GetId(),
@@ -133,6 +165,27 @@ func (s *GRPCServer) Register(_ context.Context, req *pb.RegisterRequest) (*pb.R
 	}, nil
 }
 
+// validateAgentMeta rejects a registration that cannot describe a probe target. The PodIP has to
+// PARSE: a peer with a malformed address is a checker target that can never connect, published to
+// every other agent in the fleet.
+func validateAgentMeta(m *pb.AgentMeta) error {
+	switch {
+	case m == nil:
+		return errors.New("register: no agent metadata")
+	case m.GetId() == "":
+		return errors.New("register: agent id is empty")
+	case m.GetNodeName() == "":
+		return errors.New("register: node name is empty")
+	case m.GetPodIp() == "":
+		return errors.New("register: pod IP is empty")
+	case net.ParseIP(m.GetPodIp()) == nil:
+		return fmt.Errorf("register: pod IP %q is not an IP address", m.GetPodIp())
+	}
+	return nil
+}
+
+// Heartbeat is deliberately not leader-gated: a non-leader holds no agents, so the lookup below
+// already answers NotFound, which is the code that drives the agent's re-registration.
 func (s *GRPCServer) Heartbeat(_ context.Context, req *pb.HeartbeatRequest) (*emptypb.Empty, error) {
 	if !s.registry.Heartbeat(req.GetAgentId()) {
 		slog.Warn("heartbeat from unknown agent", "id", req.GetAgentId())
@@ -150,21 +203,38 @@ func (s *GRPCServer) Deregister(_ context.Context, req *pb.DeregisterRequest) (*
 	return &emptypb.Empty{}, nil
 }
 
+// WatchPeers server-streams an agent's peer list, which is the probe plan; leader-only when leader
+// election is enabled.
 func (s *GRPCServer) WatchPeers(req *pb.WatchPeersRequest, stream pb.AgentRegistry_WatchPeersServer) error {
+	if s.lostLeadership() {
+		return status.Error(codes.Unavailable, "not the leader")
+	}
+
 	agentID := req.GetAgentId()
 
-	ch := make(chan *pb.PeerUpdate, 16)
+	w := &peerWatcher{ch: make(chan *pb.PeerUpdate, peerWatcherBuffer), desynced: make(chan struct{})}
 	s.mu.Lock()
-	s.watchers[agentID] = ch
+	if s.watchers[agentID] == nil {
+		s.watchers[agentID] = make(map[*peerWatcher]struct{}, 1)
+	}
+	s.watchers[agentID][w] = struct{}{}
 	s.metrics.ControllerGRPCConnections.WithLabelValues().Inc()
 	s.mu.Unlock()
 
 	defer func() {
 		s.mu.Lock()
-		delete(s.watchers, agentID)
+		// Only this handler's own watcher, never the id: a reconnecting agent (or any other caller)
+		// may hold another stream under the same id, and removing the id would unsubscribe it —
+		// that agent's peer list would then freeze with nothing said anywhere.
+		if set, ok := s.watchers[agentID]; ok {
+			delete(set, w)
+			if len(set) == 0 {
+				delete(s.watchers, agentID)
+			}
+		}
 		s.metrics.ControllerGRPCConnections.WithLabelValues().Dec()
 		s.mu.Unlock()
-		close(ch)
+		close(w.ch)
 	}()
 
 	peers := s.registry.GetPeers(agentID)
@@ -172,7 +242,9 @@ func (s *GRPCServer) WatchPeers(req *pb.WatchPeersRequest, stream pb.AgentRegist
 	for i := range peers {
 		pbPeers = append(pbPeers, agentInfoToProto(peers[i]))
 	}
-	if err := stream.Send(&pb.PeerUpdate{
+	// Through the same bounded write as every later update: the FIRST send is the one a subscriber
+	// that never reads blocks on.
+	if err := s.sendPeerUpdate(stream, w, &pb.PeerUpdate{
 		Type:      pb.PeerUpdate_FULL_SYNC,
 		Peers:     pbPeers,
 		Timestamp: timestamppb.Now(),
@@ -180,14 +252,32 @@ func (s *GRPCServer) WatchPeers(req *pb.WatchPeersRequest, stream pb.AgentRegist
 		return err
 	}
 
+	// kube-proxy leaves established connections alone, so a demoted replica has to end the stream
+	// itself for the agent's reconnect loop to move it to the new leader.
+	leaderCheck := time.NewTicker(s.leaderCheckInterval)
+	defer leaderCheck.Stop()
+
 	for {
 		select {
-		case update, ok := <-ch:
+		case update, ok := <-w.ch:
 			if !ok {
 				return nil
 			}
-			if err := stream.Send(update); err != nil {
+			if err := s.sendPeerUpdate(stream, w, update); err != nil {
 				return err
+			}
+		case <-w.desynced:
+			/* A peer update could not be queued for this stream, so what it holds is no longer what
+			   the registry holds — and every update is a FULL_SYNC applied by wholesale replacement,
+			   so the loss is not self-correcting. Ending the stream is the recovery: the agent's
+			   reconnect loop re-subscribes and the first thing WatchPeers sends is a fresh
+			   FULL_SYNC. Dropping the message instead left an agent probing a mesh that no longer
+			   existed, indefinitely — the stream stayed healthy, heartbeats kept succeeding, and
+			   nothing anywhere resynced it. */
+			return status.Error(codes.Unavailable, "peer update dropped: resubscribe for a full sync")
+		case <-leaderCheck.C:
+			if s.lostLeadership() {
+				return status.Error(codes.Unavailable, "leadership lost")
 			}
 		case <-s.stopCh:
 			return status.Error(codes.Unavailable, "controller shutting down")
@@ -197,10 +287,57 @@ func (s *GRPCServer) WatchPeers(req *pb.WatchPeersRequest, stream pb.AgentRegist
 	}
 }
 
+/*
+sendPeerUpdate performs ONE stream.Send with a bound on how long it may block.
+
+stream.Send parks on the HTTP/2 stream's flow-control window, so a subscriber that stops reading
+while keeping the connection alive froze the handler goroutine inside it — and a goroutine parked in
+Send is a goroutine that will never reach its select again. It could not observe w.desynced, could
+not observe the leadership check, and could not observe s.stopCh: BroadcastPeerUpdate went on filling
+its 16-deep mailbox, logged "ending the stream so the agent resyncs" on every topology change after
+that, and ended nothing. The connection gauge and the goroutine were held until the client's TCP
+died, which for a frozen pod can be a very long time.
+
+A Send that cannot make progress inside peerSendTimeout is treated as the subscriber being gone: the
+handler returns, which closes the stream, which unblocks the goroutine below (it writes to a buffered
+channel and exits). Only one Send is ever in flight, so this does not violate the one-writer rule.
+*/
+func (s *GRPCServer) sendPeerUpdate(
+	stream pb.AgentRegistry_WatchPeersServer, w *peerWatcher, update *pb.PeerUpdate,
+) error {
+	done := make(chan error, 1)
+	go func() { done <- stream.Send(update) }()
+
+	timer := time.NewTimer(peerSendTimeout)
+	defer timer.Stop()
+
+	select {
+	case err := <-done:
+		return err
+	case <-timer.C:
+		return status.Error(codes.Unavailable,
+			"peer update could not be written: the subscriber is not reading its stream")
+	case <-w.desynced:
+		return status.Error(codes.Unavailable, "peer update dropped: resubscribe for a full sync")
+	case <-s.stopCh:
+		return status.Error(codes.Unavailable, "controller shutting down")
+	case <-stream.Context().Done():
+		return stream.Context().Err()
+	}
+}
+
+// peerSendTimeout bounds ONE write to a peer-update subscriber. It is generous next to a healthy
+// agent's read loop (microseconds) and short next to the interval at which topology changes arrive.
+const peerSendTimeout = 10 * time.Second
+
 // WatchTasks server-streams on-demand diagnostic tasks to an agent. It mirrors
 // the WatchPeers lifecycle: register a subscription, count the connection, and
 // clean up on stream close. Task fan-out is owned by the TaskManager.
 func (s *GRPCServer) WatchTasks(req *pb.WatchTasksRequest, stream pb.AgentRegistry_WatchTasksServer) error {
+	if s.lostLeadership() {
+		return status.Error(codes.Unavailable, "not the leader")
+	}
+
 	agentID := req.GetAgentId()
 
 	tasks, cleanup := s.taskMgr.Subscribe(agentID)
@@ -210,6 +347,13 @@ func (s *GRPCServer) WatchTasks(req *pb.WatchTasksRequest, stream pb.AgentRegist
 		cleanup()
 		s.metrics.ControllerGRPCConnections.WithLabelValues().Dec()
 	}()
+
+	/* The same demotion check WatchPeers and WatchEvents carry. Without it a replica demoted while
+	   it stayed alive kept serving task subscriptions forever: its subscriber map and the connection
+	   gauges kept counting agents it no longer owns, and a client that does not tear the whole
+	   ClientConn down stayed pinned to the wrong replica. */
+	leaderCheck := time.NewTicker(s.leaderCheckInterval)
+	defer leaderCheck.Stop()
 
 	for {
 		select {
@@ -221,6 +365,10 @@ func (s *GRPCServer) WatchTasks(req *pb.WatchTasksRequest, stream pb.AgentRegist
 			}
 			if err := stream.Send(task); err != nil {
 				return err
+			}
+		case <-leaderCheck.C:
+			if s.lostLeadership() {
+				return status.Error(codes.Unavailable, "leadership lost")
 			}
 		case <-s.stopCh:
 			return status.Error(codes.Unavailable, "controller shutting down")
@@ -236,6 +384,10 @@ func (s *GRPCServer) WatchExternalChecks(
 	req *pb.WatchExternalChecksRequest,
 	stream pb.AgentRegistry_WatchExternalChecksServer,
 ) error {
+	if s.lostLeadership() {
+		return status.Error(codes.Unavailable, "not the leader")
+	}
+
 	agentID := req.GetAgentId()
 
 	updates, cleanup := s.externalMgr.Subscribe(agentID)
@@ -252,6 +404,10 @@ func (s *GRPCServer) WatchExternalChecks(
 		return err
 	}
 
+	// See WatchTasks: a demoted replica has to end its own streams.
+	leaderCheck := time.NewTicker(s.leaderCheckInterval)
+	defer leaderCheck.Stop()
+
 	for {
 		select {
 		// The ExternalCheckManager never closes the subscription channel (see Subscribe), so this branch
@@ -262,6 +418,10 @@ func (s *GRPCServer) WatchExternalChecks(
 			}
 			if err := stream.Send(assignment); err != nil {
 				return err
+			}
+		case <-leaderCheck.C:
+			if s.lostLeadership() {
+				return status.Error(codes.Unavailable, "leadership lost")
 			}
 		case <-s.stopCh:
 			return status.Error(codes.Unavailable, "controller shutting down")
@@ -381,11 +541,33 @@ func eventType(ev *pb.Event) string {
 	}
 }
 
+/*
+ * peerWatcher is ONE WatchPeers stream's mailbox, plus the signal that it fell behind.
+ *
+ * The buffer is not a queue to be trimmed: every PeerUpdate is a FULL_SYNC that the agent applies by
+ * wholesale replacement, so a dropped one is not a missed increment, it is a permanently wrong probe
+ * mesh. When the mailbox is full the stream is marked desynced and torn down, and the agent's
+ * reconnect gets it a fresh full sync.
+ */
+type peerWatcher struct {
+	ch       chan *pb.PeerUpdate
+	desynced chan struct{}
+	once     sync.Once
+}
+
+// peerWatcherBuffer is how many topology changes one stream may fall behind before the stream is
+// declared desynced. A DaemonSet rollout on a large fleet is the burst this has to absorb.
+const peerWatcherBuffer = 16
+
+func (w *peerWatcher) markDesynced() {
+	w.once.Do(func() { close(w.desynced) })
+}
+
 func (s *GRPCServer) BroadcastPeerUpdate(agents []model.AgentInfo) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	for watcherID, ch := range s.watchers {
+	for watcherID, set := range s.watchers {
 		filtered := make([]*pb.AgentMeta, 0, len(agents))
 		for i := range agents {
 			if agents[i].ID != watcherID {
@@ -393,17 +575,25 @@ func (s *GRPCServer) BroadcastPeerUpdate(agents []model.AgentInfo) {
 			}
 		}
 
-		update := &pb.PeerUpdate{
-			Type:      pb.PeerUpdate_FULL_SYNC,
-			Peers:     filtered,
-			Timestamp: timestamppb.New(time.Now()),
-		}
+		// Every stream open for this id. The peer list is identical for all of them, so the update
+		// is built once and each watcher gets its own send.
+		for w := range set {
+			update := &pb.PeerUpdate{
+				Type:      pb.PeerUpdate_FULL_SYNC,
+				Peers:     filtered,
+				Timestamp: timestamppb.New(time.Now()),
+			}
 
-		select {
-		case ch <- update:
-			s.metrics.ControllerPeerUpdates.WithLabelValues().Inc()
-		default:
-			slog.Warn("dropping peer update, channel full", "agent", watcherID)
+			select {
+			case w.ch <- update:
+				s.metrics.ControllerPeerUpdates.WithLabelValues().Inc()
+			default:
+				// Not a drop: a desync. See peerWatcher.
+				// Marked, not ended: the stream's own handler is what observes this and returns.
+				slog.Warn("peer update could not be queued; marking the stream desynced so the agent resubscribes",
+					"agent", watcherID, "buffer", peerWatcherBuffer)
+				w.markDesynced()
+			}
 		}
 	}
 }

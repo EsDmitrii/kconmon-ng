@@ -9,6 +9,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
+
+	"github.com/EsDmitrii/kconmon-ng/internal/console/cache"
+
 	"github.com/EsDmitrii/kconmon-ng/internal/console/checks"
 	"github.com/EsDmitrii/kconmon-ng/internal/console/controllerclient"
 	"github.com/EsDmitrii/kconmon-ng/internal/console/store"
@@ -65,8 +69,9 @@ func newCancelRunner(t *testing.T, ctrl *gatedCtrl) (*checks.Runner, *checks.Mem
 	return checks.NewRunner(ctrl, hub, bus, mem, testMetrics(t)), mem
 }
 
-// The arithmetic is deterministic, not a race: 20 pairs; that pins exactly 8 blocked pairs, 4
-// completed, and 8 (dst-12..dst-19) never dispatched.
+// The arithmetic is deterministic, not a race: 20 pairs from ONE source, so the per-source gate
+// (maxPerSourceConcurrency, 2) is what bounds the window, not maxConcurrency. That pins exactly 2
+// blocked pairs, 4 completed, and the remaining 14 never dispatched.
 func TestCancelMidRunKeepsCompletedResultsAndStopsDispatching(t *testing.T) {
 	ctrl := newGatedCtrl("dst-00", "dst-01", "dst-02", "dst-03")
 	runner, mem := newCancelRunner(t, ctrl)
@@ -81,7 +86,7 @@ func TestCancelMidRunKeepsCompletedResultsAndStopsDispatching(t *testing.T) {
 		t.Fatalf("Start: %v", err)
 	}
 
-	ctrl.awaitBlocked(t, 8)
+	ctrl.awaitBlocked(t, 2)
 
 	if cerr := runner.Cancel(context.Background(), id); cerr != nil {
 		t.Fatalf("Cancel: %v", cerr)
@@ -92,8 +97,8 @@ func TestCancelMidRunKeepsCompletedResultsAndStopsDispatching(t *testing.T) {
 		t.Fatalf("run.Status = %q, want cancelled", run.Status)
 	}
 
-	if calls := ctrl.calls.Load(); calls != 12 {
-		t.Errorf("Diagnose calls = %d, want exactly 12 (8 blocked + 4 fast; the remaining 8 pairs must never dispatch)", calls)
+	if calls := ctrl.calls.Load(); calls != 6 {
+		t.Errorf("Diagnose calls = %d, want exactly 6 (2 blocked + 4 fast; the remaining 14 pairs must never dispatch)", calls)
 	}
 	// Nothing may dispatch after the run is terminal either.
 	settled := ctrl.calls.Load()
@@ -102,7 +107,7 @@ func TestCancelMidRunKeepsCompletedResultsAndStopsDispatching(t *testing.T) {
 		t.Errorf("Diagnose calls grew from %d to %d after the run finished", settled, after)
 	}
 
-	results, err := runner.GetResults(context.Background(), id)
+	results, _, err := runner.GetResults(context.Background(), id)
 	if err != nil {
 		t.Fatalf("GetResults: %v", err)
 	}
@@ -115,8 +120,8 @@ func TestCancelMidRunKeepsCompletedResultsAndStopsDispatching(t *testing.T) {
 	if ok != 4 {
 		t.Errorf("successful results = %d, want 4 (already-completed pairs must survive the cancel intact)", ok)
 	}
-	if len(results) != 12 {
-		t.Errorf("persisted results = %d, want 12 (every dispatched pair records an outcome, cancelled or not)", len(results))
+	if len(results) != 6 {
+		t.Errorf("persisted results = %d, want 6 (every dispatched pair records an outcome, cancelled or not)", len(results))
 	}
 	if run.PairTotal != 20 {
 		t.Errorf("run.PairTotal = %d, want 20 (the planned total is not rewritten by a cancel)", run.PairTotal)
@@ -214,7 +219,7 @@ func TestCancelTwiceIsIdempotent(t *testing.T) {
 func TestMemoryStoreFinishRunAcceptsCancelled(t *testing.T) {
 	m := checks.NewMemoryStore()
 	ctx := context.Background()
-	if _, err := m.CreateRun(ctx, "c1", "tcp", "pod", json.RawMessage(`{}`), "user", "u1", 3); err != nil {
+	if _, err := m.CreateRun(ctx, "c1", "tcp", "pod", json.RawMessage(`{}`), "user", "u1", 3, time.Now().Add(time.Hour)); err != nil {
 		t.Fatalf("CreateRun: %v", err)
 	}
 	if err := m.FinishRun(ctx, "c1", "cancelled", 0, 0); !errors.Is(err, store.ErrWrongState) {
@@ -235,5 +240,85 @@ func TestMemoryStoreFinishRunAcceptsCancelled(t *testing.T) {
 	}
 	if run.PairOK != 1 || run.PairFailed != 2 {
 		t.Errorf("pair counts = ok:%d failed:%d, want ok:1 failed:2 (a cancel keeps whatever landed)", run.PairOK, run.PairFailed)
+	}
+}
+
+// localOnlyBus is a bus that cannot reach another process -- the shape newBus falls back to when
+// redis is unreachable at startup, while the deployment still runs two replicas.
+type localOnlyBus struct{ *recordingBus }
+
+func (localOnlyBus) CrossReplica() bool { return false }
+
+/*
+ * A run this replica does not own must not get an accepted, permanently silent subscription.
+ *
+ * Cancel already refuses when it cannot reach the owning replica. OpenRunTopic did not: it confirmed
+ * the run was live in the STORE and opened the topic anyway, so the browser's subscribe was ACKed on
+ * a topic nothing in this process ever publishes to -- and the page, whose liveness test is
+ * "subscribed and connected", kept showing "Live: realtime is up" while nothing arrived.
+ */
+func TestOpenRunTopicRefusesWithoutACrossReplicaBus(t *testing.T) {
+	bus := localOnlyBus{recordingBus: newRecordingBus()}
+	hub := ws.NewHub(bus, testMetrics(t))
+	mem := checks.NewMemoryStore()
+	runner := checks.NewRunner(newGatedCtrl(), hub, bus, mem, testMetrics(t))
+
+	// A run that is live in the store but owned by another replica.
+	id := uuid.NewString()
+	if _, err := mem.CreateRun(context.Background(), id, "tcp", "pod", nil, "user", "u1", 1,
+		time.Now().Add(time.Minute)); err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+
+	if runner.OpenRunTopic(context.Background(), "run:"+id) {
+		t.Error("OpenRunTopic accepted a topic this process can never publish to; the socket would be silent while the page claims it is live")
+	}
+}
+
+/*
+ * Cancelling a run must not tear down its own progress relay.
+ *
+ * The hub topic was opened on runCtx, so a cancel killed the relay while execute() was still
+ * publishing the run's terminal frames: the bus accepted them, TopicSeq could never catch up, and
+ * every cancelled run burned the full relay wait before logging a WARN blaming the bus for dropping
+ * frames it had in fact delivered.
+ */
+func TestCancelledRunFinishesWithoutWaitingOutTheRelay(t *testing.T) {
+	ctrl := newGatedCtrl("dst-00", "dst-01")
+	// A bus that actually DELIVERS: the recording double's Subscribe hands back a closed channel, so
+	// no relay ever runs on it and the effect under test would be invisible.
+	bus := cache.NewInProcessBus()
+	hub := ws.NewHub(bus, testMetrics(t))
+	hubCtx, stopHub := context.WithCancel(context.Background())
+	defer stopHub()
+	go hub.Run(hubCtx)
+	mem := checks.NewMemoryStore()
+	runner := checks.NewRunner(ctrl, hub, bus, mem, testMetrics(t))
+
+	spec := checks.Spec{Sources: []string{"n1"}, Destinations: []string{"dst-00", "dst-01", "dst-02", "dst-03"},
+		Type: "tcp", Plane: "pod", Timeout: 5 * time.Second}
+	id, err := runner.Start(context.Background(), spec, testInitiator())
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	topic := ws.RunTopic(id)
+	ctrl.awaitBlocked(t, 2)
+
+	before := hub.TopicSeq(topic)
+	if cerr := runner.Cancel(context.Background(), id); cerr != nil {
+		t.Fatalf("Cancel: %v", cerr)
+	}
+	run := waitForTerminal(t, mem, id)
+	if run.Status != "cancelled" {
+		t.Fatalf("run.Status = %q, want cancelled", run.Status)
+	}
+
+	/* The relay must still have been alive through the cancel. Opening the topic on runCtx tore it
+	   down with the run, so the terminal frames execute() kept publishing were accepted by the bus
+	   and never relayed -- TopicSeq froze, and waitForRelay ran to its full timeout blaming the bus
+	   for frames it had delivered. */
+	if seq := hub.TopicSeq(topic); seq <= before {
+		t.Errorf("hub.TopicSeq(%q) = %d, unchanged from %d across the cancel: the topic's relay died "+
+			"with runCtx, so the terminal frames were published and never relayed", topic, seq, before)
 	}
 }

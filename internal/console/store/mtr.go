@@ -41,18 +41,40 @@ type PathHop struct {
 }
 
 // HashPath is the content hash that decides whether a trace describes a route the pair has already
-// taken; it reads ONLY the hop IPs, in order: - not RTTs, which jitter on every single trace.
+// taken; it reads ONLY the responding hop IPs, in order: not RTTs, which jitter on every trace, and
+// not silent "*" hops, which flap independently of the route and would otherwise read as a change.
 func HashPath(hops []PathHop) string {
-	if len(hops) == 0 {
-		return ""
-	}
 	h := sha256.New()
+	wrote := false
 	for i := range hops {
-		if i > 0 {
+		if strings.TrimSpace(hops[i].IP) == "" || hops[i].IP == "*" {
+			continue
+		}
+		if wrote {
 			h.Write([]byte(hopSep))
 		}
 		h.Write([]byte(hops[i].IP))
+		wrote = true
 	}
+	if !wrote {
+		return ""
+	}
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+// silentPathToken is hashed for a trace where NO hop answered: a sentinel, not an address, so it
+// cannot collide with a real route -- HashPath only ever hashes hop IPs, and no IP list spells this.
+const silentPathToken = "\x00kconmon-ng:no-hop-answered" //nolint:gosec // G101: a hash sentinel, not a credential
+
+// HashSilentPath is the identity of "the trace ran and nothing on the way answered".
+//
+// Such a trace has no route to name, but it is still a trace: the probe left, the destination was
+// reached or not, and the pair has a history. Giving it ONE stable identity keeps every all-silent
+// trace to a destination folded into a single row instead of inserting one per probe, and keeps it
+// distinct from every route that does have responders.
+func HashSilentPath() string {
+	h := sha256.New()
+	h.Write([]byte(silentPathToken))
 	return hex.EncodeToString(h.Sum(nil))
 }
 
@@ -135,16 +157,22 @@ var _ PathSnapshotStore = (*DB)(nil)
 
 // PathSnapshotReader is the read seam: httpapi's MTR routes (Task 4).
 type PathSnapshotReader interface {
-	// ListMTRDestinations returns every pair path history knows about,
-	// most-recently-traced first. Unpaged: the row count is pairs, not
-	// traces.
-	ListMTRDestinations(ctx context.Context) ([]MTRDestination, error)
+	/* ListMTRDestinations returns the pairs path history knows about, most-recently-traced first,
+	   BOUNDED by limit (clamped like every other listing here).
+	   It used to be unpaged, on the reasoning that "the row count is pairs, not traces" — but pairs
+	   are sources x destinations, so a hundred nodes is ten thousand rows aggregated over the whole
+	   snapshot table, materialised here and marshalled by the handler, on demand, for any caller
+	   holding mtr:read. */
+	ListMTRDestinations(ctx context.Context, limit int) ([]MTRDestination, error)
 	// ListPathSnapshots pages a pair's route history newest-first, same keyset cursor shape as
 	// ListTargets.
 	ListPathSnapshots(ctx context.Context, f SnapshotFilter) (SnapshotPage, error)
 	// GetPathSnapshot returns ErrNotFound when id does not name a snapshot --
 	// including when it is not a UUID at all (GetRun's pre-check reasoning).
 	GetPathSnapshot(ctx context.Context, id string) (PathSnapshot, error)
+	// ListPathTraces pages the INDIVIDUAL traces recorded for a pair inside a window, newest first.
+	// A route row's trace_count is a count of these; this is how a reader gets back to them.
+	ListPathTraces(ctx context.Context, f TraceFilter) (TracePage, error)
 }
 
 var _ PathSnapshotReader = (*DB)(nil)
@@ -172,8 +200,12 @@ func (in *PathSnapshotInput) Validate() error {
 	if in.SeenAt.IsZero() {
 		return errors.New("store: path snapshot: seen at must not be zero")
 	}
-	// The hash is derived, then compared rather than merely accepted.
+	// The hash is derived, then compared rather than merely accepted. A trace where no hop answered
+	// hashes to nothing, and takes the one reserved silent identity instead (HashSilentPath).
 	want := HashPath(in.Hops)
+	if want == "" {
+		want = HashSilentPath()
+	}
 	switch in.PathHash {
 	case "":
 		in.PathHash = want
@@ -255,9 +287,9 @@ func (db *DB) UpsertPathSnapshot(ctx context.Context, in PathSnapshotInput) (Pat
 	return snap, row.Inserted, nil
 }
 
-func (db *DB) ListMTRDestinations(ctx context.Context) ([]MTRDestination, error) {
+func (db *DB) ListMTRDestinations(ctx context.Context, limit int) ([]MTRDestination, error) {
 	start := time.Now()
-	rows, err := gen.New(db.pool).ListMTRDestinations(ctx)
+	rows, err := gen.New(db.pool).ListMTRDestinations(ctx, int32(clampLimit(limit))) //nolint:gosec // clampLimit bounds this to maxLimit
 	db.observe(queryListMTRDestinations, start, queryResult(err))
 	if err != nil {
 		return nil, fmt.Errorf("store: list mtr destinations: %w", err)
@@ -313,10 +345,81 @@ func (db *DB) ListPathSnapshots(ctx context.Context, f SnapshotFilter) (Snapshot
 	var nextCursor string
 	if len(rows) == limit {
 		last := snaps[len(snaps)-1]
-		nextCursor = EncodeUUIDCursor(last.LastSeen, last.ID)
+		// FirstSeen, matching the query's own ORDER BY: a cursor over last_seen walks a key that
+		// every repeat trace moves, and rows fall through the gap. See ListPathSnapshots.
+		nextCursor = EncodeUUIDCursor(last.FirstSeen, last.ID)
 	}
 
 	return SnapshotPage{Snapshots: snaps, NextCursor: nextCursor}, nil
+}
+
+// TraceFilter scopes ListPathTraces: one pair, one time window, one page.
+type TraceFilter struct {
+	SourceNode  string
+	Destination string
+	// From and To are the ROUTE's own window (a snapshot's first_seen/last_seen), so the scan is
+	// bounded by the thing being asked about rather than by the whole results table.
+	From   time.Time
+	To     time.Time
+	Limit  int
+	Cursor string
+}
+
+// TracePage is ListPathTraces' keyset page. The rows are RunResult — the same shape the run
+// permalink already serves — because that is literally what they are: check_results rows, read by
+// pair and window instead of by run. Hops are not a field: the caller reads them out of Result with
+// checks.TraceFromResult, which is also what decides which route a trace belongs to.
+type TracePage struct {
+	Traces     []RunResult
+	NextCursor string
+}
+
+// ListPathTraces reads the individual traces recorded for one pair inside one window, newest first.
+//
+// This is what makes a route row's "147 traces" more than a number: the path history folds every
+// trace that walked a path into one row, and until this existed there was no way back to the traces
+// themselves. Filtering by PATH is the caller's job (the hash lives inside the JSONB payload), so
+// this returns everything in the window and the handler keeps what matches.
+func (db *DB) ListPathTraces(ctx context.Context, f TraceFilter) (TracePage, error) { //nolint:gocritic // hugeParam: mirrors SnapshotFilter's value semantics above
+	limit := clampLimit(f.Limit)
+
+	curTime, curID, ok, err := DecodeCursor(f.Cursor)
+	if err != nil {
+		return TracePage{}, fmt.Errorf("store: list path traces: %w", err)
+	}
+	var cur pgtype.Timestamptz
+	var curIDArg pgtype.Int8
+	if ok {
+		cur = pgtype.Timestamptz{Time: curTime, Valid: true}
+		curIDArg = pgtype.Int8{Int64: curID, Valid: true}
+	}
+
+	start := time.Now()
+	rows, err := gen.New(db.pool).ListPathTraces(ctx, gen.ListPathTracesParams{
+		SourceNode:  f.SourceNode,
+		Destination: f.Destination,
+		FromTime:    f.From,
+		ToTime:      f.To,
+		CurTime:     cur,
+		CurID:       curIDArg,
+		Lim:         int32(limit), //nolint:gosec // limit is clamped to [1,500] above
+	})
+	db.observe(queryListPathTraces, start, queryResult(err))
+	if err != nil {
+		return TracePage{}, fmt.Errorf("store: list path traces: %w", err)
+	}
+
+	traces := make([]RunResult, len(rows))
+	for i := range rows {
+		traces[i] = runResultFromRow(&rows[i])
+	}
+
+	var nextCursor string
+	if len(rows) == limit {
+		last := traces[len(traces)-1]
+		nextCursor = EncodeCursor(last.RecordedAt, last.ID)
+	}
+	return TracePage{Traces: traces, NextCursor: nextCursor}, nil
 }
 
 // GetPathSnapshot applies GetRun's UUID pre-check for the same reason and with the same ErrNotFound

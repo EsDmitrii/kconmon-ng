@@ -10,18 +10,27 @@ import (
 // Envelope is every server→client frame. Mirrored by hand as WsEnvelope in
 // web/src/lib/ws.ts (repo convention: no codegen).
 type Envelope struct {
-	Topic string          `json:"topic"`
-	Type  string          `json:"type"`
-	Seq   uint64          `json:"seq"`
+	Topic string `json:"topic"`
+	Type  string `json:"type"`
+	Seq   uint64 `json:"seq"`
+	/* Epoch identifies the HUB that numbered this Seq.
+	   Every replica counts its topics from 1 in its own process, so a cursor is only meaningful
+	   against the hub that issued it: a tab holding cursor N from replica A that reconnected onto
+	   replica B (a rollout, an eviction, a load-balancer reshuffle) asked B to replay "everything
+	   after N", B's counter was below N, and B replayed nothing at all — every event from the gap
+	   silently lost, while the feed looked alive because new broadcasts arrive regardless of seq. */
+	Epoch string          `json:"epoch,omitempty"`
 	Data  json.RawMessage `json:"data"`
 }
 
 // ClientMessage is every client→server frame. Mirrored by hand as ClientMessage
 // in web/src/lib/ws.ts.
 type ClientMessage struct {
-	Action  string `json:"action"`
-	Topic   string `json:"topic"`
+	Action string `json:"action"`
+	Topic  string `json:"topic"`
+	// LastSeq is honoured only when Epoch matches the hub's own; see Envelope.Epoch.
 	LastSeq uint64 `json:"lastSeq,omitempty"`
+	Epoch   string `json:"epoch,omitempty"`
 }
 
 const (
@@ -60,6 +69,15 @@ func RunTopic(runID string) string { return runTopicPrefix + runID }
 // class an authorizer has to be able to name (a runs:read-only subject may watch its own run and
 // nothing else -- httpapi.wsTopicAuthorizer).
 func IsRunTopic(topic string) bool { return strings.HasPrefix(topic, runTopicPrefix) }
+
+// RunIDFromTopic is RunTopic's inverse: the id inside a run topic, and whether topic was one.
+func RunIDFromTopic(topic string) (string, bool) {
+	if !IsRunTopic(topic) {
+		return "", false
+	}
+	id := strings.TrimPrefix(topic, runTopicPrefix)
+	return id, id != ""
+}
 
 // allowedTopics is the static allowlist.
 var allowedTopics = map[string]struct{}{

@@ -25,7 +25,7 @@ func (c *ICMPChecker) Name() model.CheckType {
 	return model.CheckICMP
 }
 
-func (c *ICMPChecker) Check(ctx context.Context, target Target) model.CheckResult {
+func (c *ICMPChecker) Check(ctx context.Context, target Target) model.CheckResult { //nolint:gocritic // hugeParam: Target is a VALUE by design -- a checker must not be able to mutate the caller's copy, and one 80-byte copy per probe is nothing next to the probe itself
 	result := model.CheckResult{
 		Type:      model.CheckICMP,
 		Timestamp: time.Now(),

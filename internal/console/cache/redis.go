@@ -3,9 +3,11 @@ package cache
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
+	"net/url"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -17,40 +19,44 @@ import (
 // DATA.md §5.3's events:* convention.
 const valkeyChannelPrefix = "events:"
 
-// ValkeyBus is a Bus backed by a real Valkey/Redis server via rueidis.
-type ValkeyBus struct {
+// RedisBus is a Bus backed by a real Redis-compatible server (Valkey, Redis, …) via rueidis.
+type RedisBus struct {
 	client rueidis.Client
 	local  *InProcessBus
 	cancel context.CancelFunc
 	closed atomic.Bool
 }
 
-// compile-time proof ValkeyBus satisfies the frozen Bus seam.
-var _ Bus = (*ValkeyBus)(nil)
+// compile-time proof RedisBus satisfies the frozen Bus seam.
+var _ Bus = (*RedisBus)(nil)
 
-// NewValkeyBus dials address (host:port) and starts the background receive loop; construction
+// NewRedisBus dials the DSN and starts the background receive loop; construction
 // itself only fails on the initial dial (a malformed address or completely unreachable host at
 // startup). An empty password means no AUTH.
-func NewValkeyBus(ctx context.Context, address string, dialTimeout time.Duration, password string) (*ValkeyBus, error) {
-	client, err := rueidis.NewClient(rueidis.ClientOption{
-		InitAddress:       []string{address},
-		Dialer:            net.Dialer{Timeout: dialTimeout},
-		ForceSingleClient: true, // a single bundled/external Valkey instance, never a cluster, in M2
-		// Empty password means no AUTH, which is what an unauthenticated bundled Valkey wants.
-		Password: password,
-	})
+func NewRedisBus(ctx context.Context, dsn string, dialTimeout time.Duration) (*RedisBus, error) {
+	/* The DSN says everything: host, port, username, password, database number, and TLS through the
+	   scheme (rediss:// / valkeys://). rueidis parses the form the servers' own documentation uses,
+	   so a managed endpoint's connection string can be pasted in as-is. */
+	opt, err := rueidis.ParseURL(dsn)
 	if err != nil {
-		return nil, fmt.Errorf("valkey connect %s: %w", address, err)
+		// The DSN carries a credential and must never reach a log line, so the error is CLASSIFIED.
+		return nil, fmt.Errorf("redis: dsn is not a valid redis:// URL: %w", redactDSNError(err))
+	}
+	opt.Dialer = net.Dialer{Timeout: dialTimeout}
+	opt.ForceSingleClient = true // one server, never a cluster
+	client, err := rueidis.NewClient(opt)
+	if err != nil {
+		return nil, fmt.Errorf("redis connect: %w", err)
 	}
 
 	runCtx, cancel := context.WithCancel(ctx)
-	b := &ValkeyBus{client: client, local: NewInProcessBus(), cancel: cancel}
+	b := &RedisBus{client: client, local: NewInProcessBus(), cancel: cancel}
 	go b.receiveLoop(runCtx)
 	return b, nil
 }
 
 // receiveLoop keeps a PSUBSCRIBE on "events:*" alive, exiting only when ctx is cancelled.
-func (b *ValkeyBus) receiveLoop(ctx context.Context) {
+func (b *RedisBus) receiveLoop(ctx context.Context) {
 	const (
 		minBackoff = time.Second
 		maxBackoff = 15 * time.Second
@@ -104,8 +110,12 @@ func (b *ValkeyBus) receiveLoop(ctx context.Context) {
 	}
 }
 
+// CrossReplica is true: a PUBLISH reaches every console subscribed to the channel, which is what
+// makes cross-replica forwarding (a run cancel, for one) meaningful.
+func (b *RedisBus) CrossReplica() bool { return true }
+
 // Publish sends msg to the Valkey channel "events:"+topic.
-func (b *ValkeyBus) Publish(ctx context.Context, topic string, msg Message) error {
+func (b *RedisBus) Publish(ctx context.Context, topic string, msg Message) error {
 	data, err := json.Marshal(msg)
 	if err != nil {
 		return fmt.Errorf("marshal message for topic %s: %w", topic, err)
@@ -116,15 +126,30 @@ func (b *ValkeyBus) Publish(ctx context.Context, topic string, msg Message) erro
 
 // Subscribe registers a local subscriber, fed by receiveLoop. Delegates
 // entirely to the embedded InProcessBus.
-func (b *ValkeyBus) Subscribe(topic string) (msgs <-chan Message, unsubscribe func()) {
+func (b *RedisBus) Subscribe(topic string) (msgs <-chan Message, unsubscribe func()) {
 	return b.local.Subscribe(topic)
 }
 
 // Close stops the receive loop and releases the underlying rueidis client.
 // Idempotent.
-func (b *ValkeyBus) Close() {
+func (b *RedisBus) Close() {
 	if b.closed.CompareAndSwap(false, true) {
 		b.cancel()
 		b.client.Close()
 	}
+}
+
+/*
+ * redactDSNError strips a URL out of a parse error.
+ *
+ * url.Parse embeds the input in its error text, and this input is a credential: an unparseable DSN
+ * would otherwise put the password into the console's own startup log, where it outlives the
+ * mistake that produced it.
+ */
+func redactDSNError(err error) error {
+	var uerr *url.Error
+	if errors.As(err, &uerr) {
+		return fmt.Errorf("%s: %w", uerr.Op, uerr.Err)
+	}
+	return err
 }

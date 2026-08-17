@@ -97,7 +97,11 @@ type WebhookStore interface {
 	// including when it is not a UUID at all.
 	DeleteWebhook(ctx context.Context, id string) error
 	// UpdateWebhookDelivery records one terminal delivery outcome.
-	UpdateWebhookDelivery(ctx context.Context, id, lastStatus string, lastAttempt time.Time, failures int32) error
+	/* reset true zeroes the consecutive-failure counter (the delivery succeeded); false increments
+	   whatever the ROW holds. The count is never passed in: the caller's copy is a snapshot taken
+	   when the delivery was enqueued, and overlapping deliveries for one endpoint each wrote the
+	   same stale base back — see the query's own comment. */
+	UpdateWebhookDelivery(ctx context.Context, id, lastStatus string, lastAttempt time.Time, reset bool) error
 }
 
 var _ WebhookStore = (*DB)(nil)
@@ -117,6 +121,12 @@ var _ WebhookReader = (*DB)(nil)
 
 // Validate reports whether in is a well-formed endpoint.
 func (in *WebhookInput) Validate() error {
+	// See validateNoControlChars: a NUL here came back as 502 "webhooks unavailable".
+	for _, f := range [][2]string{{"name", in.Name}, {"url", in.URL}} {
+		if err := validateNoControlChars(f[0], f[1]); err != nil {
+			return fmt.Errorf("store: webhook: %w", err)
+		}
+	}
 	if in.Name == "" {
 		return errors.New("store: webhook: name must not be empty")
 	}
@@ -260,13 +270,10 @@ func (db *DB) UpdateWebhook(ctx context.Context, id string, in WebhookInput) (We
 	return webhookFromRow(&row), nil
 }
 
-func (db *DB) UpdateWebhookDelivery(ctx context.Context, id, lastStatus string, lastAttempt time.Time, failures int32) error {
+func (db *DB) UpdateWebhookDelivery(ctx context.Context, id, lastStatus string, lastAttempt time.Time, reset bool) error {
 	if len(lastStatus) > webhookLastStatusMaxLen {
 		return fmt.Errorf("store: webhook: last status is %d bytes, limit is %d",
 			len(lastStatus), webhookLastStatusMaxLen)
-	}
-	if failures < 0 {
-		return fmt.Errorf("store: webhook: failures %d must not be negative", failures)
 	}
 	wid, err := parseUUID(id)
 	if err != nil {
@@ -284,7 +291,7 @@ func (db *DB) UpdateWebhookDelivery(ctx context.Context, id, lastStatus string, 
 		ID:          wid,
 		LastStatus:  lastStatus,
 		LastAttempt: attempt,
-		Failures:    failures,
+		Reset:       reset,
 	})
 	db.observe(queryUpdateWebhookDelivery, start, queryResult(err))
 	if err != nil {

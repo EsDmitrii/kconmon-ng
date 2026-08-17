@@ -194,6 +194,7 @@ type exportFixture struct {
 	alertRules  *fakeAlertRuleStore
 	webhooks    *fakeWebhookStore
 	maintenance *fakeMaintenanceStore
+	rbac        *fakeRoleAdmin
 }
 
 // newExportServer wires a Server at the given BUILT-IN role with every config seam behind a fake;
@@ -208,6 +209,7 @@ func newExportServer(t *testing.T, role string) exportFixture {
 		alertRules:  newFakeAlertRuleStore(),
 		webhooks:    newFakeWebhookStore(),
 		maintenance: newFakeMaintenanceStore(),
+		rbac:        newFakeRoleAdmin(),
 	}
 	authr := fakeAuthenticator{subject: authz.Subject{Kind: authz.SubjectUser, ID: "u1"}}
 	fx.server = newAuthzServer(t, authr, authz.NewPolicy(nil), Deps{
@@ -218,6 +220,7 @@ func newExportServer(t *testing.T, role string) exportFixture {
 		AlertRules:  fx.alertRules,
 		Webhooks:    fx.webhooks,
 		Maintenance: fx.maintenance,
+		RBAC:        fx.rbac,
 	})
 	return fx
 }
@@ -909,5 +912,334 @@ func TestImportWritesOneAuditRowWithCountsAndNoItemNames(t *testing.T) {
 	}
 	if fmt.Sprint(counts["created"]) != "1" {
 		t.Errorf("audit detail targets.created = %v, want 1: %s", counts["created"], detail)
+	}
+}
+
+/* ── the bundle's access-control section ─────────────────────────────────── */
+
+// seedRBAC gives a fixture one custom role and one grant to carry.
+func seedRBAC(t *testing.T, fx *exportFixture) {
+	t.Helper()
+	if _, err := fx.rbac.UpsertRole(context.Background(), "path-reader", []string{string(authz.PermMTRRead)}); err != nil {
+		t.Fatalf("seed role: %v", err)
+	}
+	if _, err := fx.rbac.CreateBinding(context.Background(), "path-reader", "user", "oidc:user-sub-1"); err != nil {
+		t.Fatalf("seed binding: %v", err)
+	}
+}
+
+func TestExportCarriesRolesAndBindingsForAnAdmin(t *testing.T) {
+	fx := newExportServer(t, "admin")
+	seedRBAC(t, &fx)
+
+	bundle := doExport(t, &fx)
+	if bundle.RBAC == nil {
+		t.Fatal("bundle carries no rbac section; admin holds rbac:manage and should see it")
+	}
+	if len(bundle.RBAC.Roles) != 1 || bundle.RBAC.Roles[0].Name != "path-reader" {
+		t.Errorf("roles = %+v, want the one custom role", bundle.RBAC.Roles)
+	}
+	if len(bundle.RBAC.Bindings) != 1 || bundle.RBAC.Bindings[0].SubjectID != "oidc:user-sub-1" {
+		t.Errorf("bindings = %+v, want the one grant, namespaced identity intact", bundle.RBAC.Bindings)
+	}
+	if bundle.RBAC.Bindings[0].CreatedAt.IsZero() {
+		t.Error("a grant's createdAt is half of reviewing it and must survive the export")
+	}
+}
+
+// A BUILT-IN role is not a bundle's to define: Policy.Reload ignores a row named "admin", so
+// exporting one would put a line in the file that means nothing where it lands.
+func TestExportOmitsBuiltinRolesFromTheBundle(t *testing.T) {
+	fx := newExportServer(t, "admin")
+	if _, err := fx.rbac.UpsertRole(context.Background(), "admin", []string{string(authz.PermMTRRead)}); err != nil {
+		t.Fatalf("seed role: %v", err)
+	}
+
+	bundle := doExport(t, &fx)
+	if bundle.RBAC == nil {
+		t.Fatal("bundle carries no rbac section")
+	}
+	for _, role := range bundle.RBAC.Roles {
+		if role.Name == "admin" {
+			t.Errorf("bundle carries the built-in role %q", role.Name)
+		}
+	}
+}
+
+// The privilege check that makes the section safe to add at all: settings:write is not rbac:manage,
+// and a custom role holding only the former must not read the access map through the export route.
+func TestExportOmitsRBACForACallerWithoutRBACManage(t *testing.T) {
+	checks := newFakeChecksStore()
+	fx := exportFixture{
+		targets:     &linkedTargetService{fakeTargetService: newFakeTargetService(), checks: checks},
+		checks:      checks,
+		alertRules:  newFakeAlertRuleStore(),
+		webhooks:    newFakeWebhookStore(),
+		maintenance: newFakeMaintenanceStore(),
+		rbac:        newFakeRoleAdmin(),
+	}
+	// A custom role with settings:write and NOTHING else — exactly the caller this guard is for.
+	policy := authz.NewPolicy(map[string][]authz.Permission{"config-copier": {authz.PermSettingsWrite}})
+	authr := fakeAuthenticator{subject: authz.Subject{Kind: authz.SubjectUser, ID: "u1"}}
+	fx.server = newAuthzServer(t, authr, policy, Deps{
+		Roles:       fakeRoleResolver{roles: []string{"config-copier"}},
+		Targets:     fx.targets,
+		Definitions: fx.checks,
+		Schedules:   fx.checks,
+		AlertRules:  fx.alertRules,
+		Webhooks:    fx.webhooks,
+		Maintenance: fx.maintenance,
+		RBAC:        fx.rbac,
+	})
+	seedRBAC(t, &fx)
+
+	bundle := doExport(t, &fx)
+	if bundle.RBAC != nil {
+		t.Errorf("bundle carried rbac to a settings:write-only caller: %+v", bundle.RBAC)
+	}
+	// The rest of the bundle is still theirs to take.
+	if bundle.Version != exportBundleVersion {
+		t.Errorf("version = %d, want the bundle to be served all the same", bundle.Version)
+	}
+}
+
+/*
+A bundle may reference a row this console ALREADY has, even when its own section is EMPTY.
+
+The identity mappings that make that work are built by reading the table — a read, needing no
+permission — but they lived at the tail of importTargets/importDefinitions, so an empty section (or
+one the caller may not write) skipped them and the NEXT section rejected every reference with
+"neither in the bundle nor in this console". That sentence was false, and docs/console-api.yaml
+promises the opposite in so many words.
+*/
+func TestImportResolvesReferencesToRowsAlreadyHereWithAnEmptyTargetsSection(t *testing.T) {
+	/* The re-import shape: a bundle exported from THIS console, with the targets section removed —
+	   which is also what a caller who may not write targets sees, since that section is skipped.
+	   The definitions still name target ids this console holds, so every reference is resolvable. */
+	srv := newExportServer(t, "admin")
+	seedFullConfig(t, &srv)
+	bundle := doExport(t, &srv)
+	if len(bundle.CheckDefinitions) == 0 || bundle.CheckDefinitions[0].DestinationTargetID == "" {
+		t.Fatal("fixture carries no definition with a target reference; the test cannot prove anything")
+	}
+	wantTargetID := bundle.CheckDefinitions[0].DestinationTargetID
+
+	bundle.Targets = nil
+
+	code, res := doImport(t, &srv, importRequest{Bundle: &bundle})
+	if code != http.StatusOK {
+		t.Fatalf("import = %d, want 200", code)
+	}
+	for _, e := range res.CheckDefinitions.Errors {
+		t.Errorf("definition %q rejected: %s", e.Name, e.Reason)
+	}
+	if res.CheckDefinitions.Updated == 0 && res.CheckDefinitions.Created == 0 {
+		t.Fatal("no definition was applied: a reference to a target this console already holds was " +
+			"reported as existing nowhere")
+	}
+
+	after := doExport(t, &srv)
+	if got := after.CheckDefinitions[0].DestinationTargetID; got != wantTargetID {
+		t.Errorf("definition destinationTargetId = %q, want the unchanged %q", got, wantTargetID)
+	}
+}
+
+/*
+And the same for SCHEDULES, whose references are check definitions rather than targets: a bundle
+whose checkDefinitions section is empty still names definitions this console holds.
+*/
+func TestImportResolvesScheduleReferencesWithAnEmptyDefinitionsSection(t *testing.T) {
+	srv := newExportServer(t, "admin")
+	seedFullConfig(t, &srv)
+	bundle := doExport(t, &srv)
+	if len(bundle.CheckSchedules) == 0 {
+		t.Fatal("fixture carries no schedule; the test cannot prove anything")
+	}
+
+	bundle.CheckDefinitions = nil
+
+	code, res := doImport(t, &srv, importRequest{Bundle: &bundle})
+	if code != http.StatusOK {
+		t.Fatalf("import = %d, want 200", code)
+	}
+	for _, e := range res.CheckSchedules.Errors {
+		t.Errorf("schedule %q rejected: %s", e.Name, e.Reason)
+	}
+}
+
+func TestImportAppliesCustomRolesAndNeverBindings(t *testing.T) {
+	src := newExportServer(t, "admin")
+	seedRBAC(t, &src)
+	bundle := doExport(t, &src)
+
+	dst := newExportServer(t, "admin")
+	code, res := doImport(t, &dst, importRequest{Bundle: &bundle})
+	if code != http.StatusOK {
+		t.Fatalf("import = %d, want 200", code)
+	}
+	if res.RBACRoles.Created != 1 {
+		t.Errorf("rbacRoles = %+v, want one created role", res.RBACRoles)
+	}
+	roles, err := dst.rbac.ListRoles(context.Background())
+	if err != nil {
+		t.Fatalf("list roles: %v", err)
+	}
+	if len(roles) != 1 || roles[0].Name != "path-reader" {
+		t.Errorf("destination roles = %+v, want the imported one", roles)
+	}
+
+	// The binding is reported, explained, and NOT applied. Replaying a grant would hand a role to
+	// whatever "oidc:user-sub-1" happens to mean on this console.
+	if res.RBACBindings.Skipped != 1 || res.RBACBindings.Created != 0 {
+		t.Errorf("rbacBindings = %+v, want the grant skipped rather than replayed", res.RBACBindings)
+	}
+	if len(res.RBACBindings.Warnings) != 1 || !strings.Contains(res.RBACBindings.Warnings[0].Reason, "not imported by design") {
+		t.Errorf("warnings = %+v, want the skip explained", res.RBACBindings.Warnings)
+	}
+	bindings, err := dst.rbac.ListBindings(context.Background())
+	if err != nil {
+		t.Fatalf("list bindings: %v", err)
+	}
+	if len(bindings) != 0 {
+		t.Errorf("destination bindings = %+v, want NONE created by an import", bindings)
+	}
+}
+
+func TestImportRefusesTheRBACSectionWithoutRBACManage(t *testing.T) {
+	src := newExportServer(t, "admin")
+	seedRBAC(t, &src)
+	bundle := doExport(t, &src)
+
+	checks := newFakeChecksStore()
+	dst := exportFixture{
+		targets:     &linkedTargetService{fakeTargetService: newFakeTargetService(), checks: checks},
+		checks:      checks,
+		alertRules:  newFakeAlertRuleStore(),
+		webhooks:    newFakeWebhookStore(),
+		maintenance: newFakeMaintenanceStore(),
+		rbac:        newFakeRoleAdmin(),
+	}
+	policy := authz.NewPolicy(map[string][]authz.Permission{"config-copier": {authz.PermSettingsWrite}})
+	authr := fakeAuthenticator{subject: authz.Subject{Kind: authz.SubjectUser, ID: "u1"}}
+	dst.server = newAuthzServer(t, authr, policy, Deps{
+		Roles:       fakeRoleResolver{roles: []string{"config-copier"}},
+		Targets:     dst.targets,
+		Definitions: dst.checks,
+		Schedules:   dst.checks,
+		AlertRules:  dst.alertRules,
+		Webhooks:    dst.webhooks,
+		Maintenance: dst.maintenance,
+		RBAC:        dst.rbac,
+	})
+
+	code, res := doImport(t, &dst, importRequest{Bundle: &bundle})
+	if code != http.StatusOK {
+		t.Fatalf("import = %d, want 200 — the rest of the bundle is legitimately theirs", code)
+	}
+	if res.RBACRoles.Created != 0 || res.RBACRoles.Skipped != 1 {
+		t.Errorf("rbacRoles = %+v, want the section skipped, not applied", res.RBACRoles)
+	}
+	roles, err := dst.rbac.ListRoles(context.Background())
+	if err != nil {
+		t.Fatalf("list roles: %v", err)
+	}
+	if len(roles) != 0 {
+		// A bundle could otherwise mint a role carrying rbac:manage through a settings:write route.
+		t.Errorf("destination roles = %+v, want NONE written by a caller without rbac:manage", roles)
+	}
+}
+
+func TestImportRejectsARoleCarryingAnUnknownPermission(t *testing.T) {
+	fx := newExportServer(t, "admin")
+	bundle := doExport(t, &fx)
+	bundle.RBAC = &exportRBAC{
+		Roles:    []exportRole{{Name: "from-the-future", Permissions: []string{"quantum:entangle"}}},
+		Bindings: []exportBinding{},
+	}
+
+	code, res := doImport(t, &fx, importRequest{Bundle: &bundle})
+	if code != http.StatusOK {
+		t.Fatalf("import = %d, want 200", code)
+	}
+	if len(res.RBACRoles.Errors) != 1 || !strings.Contains(res.RBACRoles.Errors[0].Reason, "unknown permission") {
+		t.Errorf("errors = %+v, want the unknown permission named", res.RBACRoles.Errors)
+	}
+	roles, err := fx.rbac.ListRoles(context.Background())
+	if err != nil {
+		t.Fatalf("list roles: %v", err)
+	}
+	if len(roles) != 0 {
+		t.Errorf("roles = %+v, want the role refused rather than stored granting a string nothing checks", roles)
+	}
+}
+
+// An import may MINT A CUSTOM ROLE, including one carrying rbac:manage. Before the two counters were
+// allow-listed, that request's audit row read as six all-zero collections — "this import changed
+// nothing" — while the access map moved; creating the same role through POST /api/v1/rbac/roles has
+// always been audited, so this was the quieter path to it.
+func TestImportAuditRowCarriesTheRBACCounts(t *testing.T) {
+	audit := &fakeAuditStore{}
+	authr := fakeAuthenticator{subject: authz.Subject{Kind: authz.SubjectUser, ID: "u1"}}
+	checks := newFakeChecksStore()
+	s := newAuthzServer(t, authr, authz.NewPolicy(nil), Deps{
+		Roles:       fakeRoleResolver{roles: []string{"admin"}},
+		Audit:       audit,
+		Targets:     newFakeTargetService(),
+		Definitions: checks,
+		Schedules:   checks,
+		AlertRules:  newFakeAlertRuleStore(),
+		Webhooks:    newFakeWebhookStore(),
+		Maintenance: newFakeMaintenanceStore(),
+		RBAC:        newFakeRoleAdmin(),
+	})
+
+	body := `{"dryRun":false,"bundle":{"version":1,"rbac":{"roles":[{"name":"ops-plus","permissions":["rbac:manage"]}],"bindings":[]}}}`
+	w := doRequest(t, s, http.MethodPost, "/api/v1/import", strings.NewReader(body), mutateWithCSRF)
+	if w.Code != http.StatusOK {
+		t.Fatalf("import = %d, want 200: %s", w.Code, w.Body)
+	}
+
+	entries := waitForOneAuditEntry(t, audit)
+	detail := string(entries[0].Detail)
+	if !strings.Contains(detail, `"rbacRoles"`) || !strings.Contains(detail, `"created":1`) {
+		t.Errorf("audit detail = %s, want the rbacRoles counts", detail)
+	}
+	// Counts only, the rule every other key here follows: the role's NAME and its permissions stay
+	// out of the audit row.
+	for _, banned := range []string{"ops-plus", "rbac:manage"} {
+		if strings.Contains(detail, banned) {
+			t.Errorf("audit detail = %s, must not carry %q", detail, banned)
+		}
+	}
+}
+
+/*
+ * A bundle does not get to plant a target the direct route refuses.
+ *
+ * POST /api/v1/targets answers 422 for an address outside the fleet's allowedCidrs, because no agent
+ * could ever probe it and every check against it would time out with no explanation. importTargets
+ * went straight to the store, so the identical target inside a bundle was created silently -- and the
+ * update branch could re-point an existing endpoint at one.
+ */
+func TestImportRefusesATargetOutsideTheProbeAllowlist(t *testing.T) {
+	fx := newExportServer(t, "admin")
+	// The list the Console would have learned from the controller, seeded directly: the cache is
+	// what targetOutsideAllowlist reads, and the controller client is a concrete type.
+	fx.server.allowlistMu.Lock()
+	fx.server.allowlist = prefixList(t, "8.8.8.8/32")
+	fx.server.allowlist.fetched = time.Now()
+	fx.server.allowlistMu.Unlock()
+
+	body := `{"bundle":{"version":1,"targets":[{"id":"11111111-1111-1111-1111-111111111111",` +
+		`"name":"outside","kind":"host","address":"9.9.9.9"}]}}`
+	w := doRequest(t, fx.server, http.MethodPost, "/api/v1/import", strings.NewReader(body), mutateWithCSRF)
+	if w.Code != http.StatusOK {
+		t.Fatalf("import = %d, want 200 (per-item errors, not a request failure): %s", w.Code, w.Body)
+	}
+	if !strings.Contains(w.Body.String(), "outside the addresses this fleet") {
+		t.Fatalf("import result does not refuse the unreachable target: %s", w.Body)
+	}
+	if strings.Contains(w.Body.String(), `"created":1`) {
+		t.Errorf("the target was created anyway: %s", w.Body)
 	}
 }

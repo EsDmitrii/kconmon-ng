@@ -50,7 +50,7 @@ func newLocalFixture(t *testing.T, users map[string]store.User) (authn.Authentic
 	t.Helper()
 	kv := cache.NewInProcessKV()
 	t.Cleanup(kv.Close)
-	sessions := authn.NewSessionStore(kv, time.Hour)
+	sessions := authn.NewSessionStore(kv, time.Hour, 0)
 	a := authn.NewLocal(&fakeUserStore{users: users}, sessions, localCookieName)
 	return a, sessions
 }

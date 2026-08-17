@@ -2,6 +2,7 @@ package checker
 
 import (
 	"context"
+	"net"
 	"testing"
 	"time"
 
@@ -70,5 +71,37 @@ func TestDNSCheckerTimeoutPropagated(t *testing.T) {
 	c := NewDNSChecker([]string{"localhost"}, nil, customTimeout)
 	if c.timeout != customTimeout {
 		t.Errorf("expected timeout %v, got %v", customTimeout, c.timeout)
+	}
+}
+
+/* ── the configured timeout has to bound the lookup ──────────────────────── */
+
+/*
+ * checkers.dns.timeout used to be applied to exactly one thing: the UDP dial on the explicit-resolver
+ * path, which is connectionless and returns immediately. On the default path it was not applied at
+ * all, so the real bound was /etc/resolv.conf — with kubelet's ndots:5 and three search domains,
+ * about forty seconds for a check configured to give up after one.
+ */
+func TestDNSCheckerHonoursItsOwnTimeout(t *testing.T) {
+	// A resolver that never answers: the only thing that can end this lookup is the checker's bound.
+	blocked := &net.Resolver{
+		PreferGo: true,
+		Dial: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			<-ctx.Done()
+			return nil, ctx.Err()
+		},
+	}
+
+	c := &DNSChecker{hosts: []string{"nowhere.invalid"}, timeout: 200 * time.Millisecond}
+
+	start := time.Now()
+	_, err := c.lookupHost(context.Background(), "nowhere.invalid", "test", blocked)
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("lookup against a resolver that never answers returned no error")
+	}
+	if elapsed > 2*time.Second {
+		t.Errorf("lookup took %s against a 200ms timeout — the bound is not being applied", elapsed)
 	}
 }

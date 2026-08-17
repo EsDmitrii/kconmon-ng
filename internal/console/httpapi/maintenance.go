@@ -1,7 +1,6 @@
 package httpapi
 
 import (
-	"encoding/json"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -11,6 +10,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 
+	"github.com/EsDmitrii/kconmon-ng/internal/console/events"
 	"github.com/EsDmitrii/kconmon-ng/internal/console/store"
 )
 
@@ -122,7 +122,13 @@ func (s *Server) handleMaintenanceList(w http.ResponseWriter, r *http.Request) {
 
 	var scope *string
 	if q.Has("scope") {
-		v := q.Get("scope")
+		// A control char here (a NUL above all) would 502 out of the text column;
+		// it is client input, so it is a 400 before the query is built.
+		if rejectControlChars(w, "scope", q.Get("scope")) {
+			return
+		}
+		// Normalized so a scope filter matches whichever arrow form the window was written with.
+		v := events.NormalizePairScope(q.Get("scope"))
 		scope = &v
 	}
 
@@ -165,16 +171,15 @@ func (s *Server) handleMaintenanceCreate(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	var req maintenanceRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeProblem(w, http.StatusBadRequest, "invalid request",
-			`a maintenance window body must be JSON with "startAt" and "endAt" (RFC3339) and "reason", `+
-				`plus an optional "scope"`)
+	if !decodeMutationBody(w, r, &req,
+		`a maintenance window body must be JSON with "startAt" and "endAt" (RFC3339) and "reason", `+
+			`plus an optional "scope"`) {
 		return
 	}
 
 	subject, _ := SubjectFrom(r.Context())
 	in := store.MaintenanceInput{
-		Scope: req.Scope, StartAt: req.StartAt, EndAt: req.EndAt, Reason: req.Reason,
+		Scope: events.NormalizePairScope(req.Scope), StartAt: req.StartAt, EndAt: req.EndAt, Reason: req.Reason,
 		CreatedBy: annotationAuthor(subject),
 	}
 	if err := in.Validate(); err != nil {

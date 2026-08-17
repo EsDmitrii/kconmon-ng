@@ -18,7 +18,7 @@ func TestMemoryStoreCreateGetRoundTrip(t *testing.T) {
 	m := checks.NewMemoryStore()
 	ctx := context.Background()
 
-	run, err := m.CreateRun(ctx, "run-1", "tcp", "pod", json.RawMessage(`{"type":"tcp"}`), "user", "u1", 3)
+	run, err := m.CreateRun(ctx, "run-1", "tcp", "pod", json.RawMessage(`{"type":"tcp"}`), "user", "u1", 3, time.Now().Add(time.Hour))
 	if err != nil {
 		t.Fatalf("CreateRun: %v", err)
 	}
@@ -38,10 +38,10 @@ func TestMemoryStoreCreateGetRoundTrip(t *testing.T) {
 func TestMemoryStoreCreateRunDuplicateIDIsAlreadyExists(t *testing.T) {
 	m := checks.NewMemoryStore()
 	ctx := context.Background()
-	if _, err := m.CreateRun(ctx, "dup", "tcp", "pod", json.RawMessage(`{}`), "user", "u1", 1); err != nil {
+	if _, err := m.CreateRun(ctx, "dup", "tcp", "pod", json.RawMessage(`{}`), "user", "u1", 1, time.Now().Add(time.Hour)); err != nil {
 		t.Fatalf("CreateRun: %v", err)
 	}
-	if _, err := m.CreateRun(ctx, "dup", "tcp", "pod", json.RawMessage(`{}`), "user", "u1", 1); !errors.Is(err, store.ErrAlreadyExists) {
+	if _, err := m.CreateRun(ctx, "dup", "tcp", "pod", json.RawMessage(`{}`), "user", "u1", 1, time.Now().Add(time.Hour)); !errors.Is(err, store.ErrAlreadyExists) {
 		t.Fatalf("err = %v, want ErrAlreadyExists", err)
 	}
 }
@@ -53,10 +53,61 @@ func TestMemoryStoreGetUnknownRunIsNotFound(t *testing.T) {
 	}
 }
 
+/*
+A run that never reached "running" still has to be able to reach a terminal status.
+
+FinishRun's UPDATE requires status='running' — correct for finishing a run that started, and exactly
+wrong for the abandon path, which runs BECAUSE MarkRunStarted failed. The row was still 'pending',
+FinishRun matched nothing, the caller swallowed the ErrWrongState as "already terminal", and the run
+sat at 'pending' forever: the detail page kept saying it was about to start, and the stuck-run
+reaper reaps by deadline against 'running', so it never came back either.
+*/
+func TestMemoryStoreAbandonRunFinishesAPendingRun(t *testing.T) {
+	ctx := context.Background()
+	m := checks.NewMemoryStore()
+	if _, err := m.CreateRun(ctx, "r1", "tcp", "pod", json.RawMessage(`{}`), "user", "u1", 1,
+		time.Now().Add(time.Hour)); err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+
+	// The state the abandon path finds: created, never started.
+	run, err := m.GetRun(ctx, "r1")
+	if err != nil || run.Status != "pending" {
+		t.Fatalf("setup: run = %+v, err = %v, want status=pending", run, err)
+	}
+
+	// FinishRun cannot do it -- which is the whole reason AbandonRun exists.
+	if ferr := m.FinishRun(ctx, "r1", "failed", 0, 0); !errors.Is(ferr, store.ErrWrongState) {
+		t.Fatalf("FinishRun on a pending run = %v, want ErrWrongState", ferr)
+	}
+
+	if aerr := m.AbandonRun(ctx, "r1", "failed"); aerr != nil {
+		t.Fatalf("AbandonRun: %v", aerr)
+	}
+	run, err = m.GetRun(ctx, "r1")
+	if err != nil {
+		t.Fatalf("GetRun: %v", err)
+	}
+	if run.Status != "failed" {
+		t.Errorf("status = %q, want failed: the run is stuck at pending forever", run.Status)
+	}
+	if run.FinishedAt == nil {
+		t.Error("FinishedAt is nil: the run reads as still going")
+	}
+
+	// Idempotent: a run that finished on its own already satisfies "must not stay pending".
+	if aerr := m.AbandonRun(ctx, "r1", "cancelled"); aerr != nil {
+		t.Errorf("AbandonRun on a terminal run = %v, want nil", aerr)
+	}
+	if run, _ := m.GetRun(ctx, "r1"); run.Status != "failed" {
+		t.Errorf("status = %q after a second abandon, want the original failed", run.Status)
+	}
+}
+
 func TestMemoryStoreMarkRunStartedLifecycle(t *testing.T) {
 	m := checks.NewMemoryStore()
 	ctx := context.Background()
-	if _, err := m.CreateRun(ctx, "r1", "tcp", "pod", json.RawMessage(`{}`), "user", "u1", 1); err != nil {
+	if _, err := m.CreateRun(ctx, "r1", "tcp", "pod", json.RawMessage(`{}`), "user", "u1", 1, time.Now().Add(time.Hour)); err != nil {
 		t.Fatalf("CreateRun: %v", err)
 	}
 
@@ -82,7 +133,7 @@ func TestMemoryStoreMarkRunStartedLifecycle(t *testing.T) {
 func TestMemoryStoreFinishRunLifecycle(t *testing.T) {
 	m := checks.NewMemoryStore()
 	ctx := context.Background()
-	if _, err := m.CreateRun(ctx, "r1", "tcp", "pod", json.RawMessage(`{}`), "user", "u1", 2); err != nil {
+	if _, err := m.CreateRun(ctx, "r1", "tcp", "pod", json.RawMessage(`{}`), "user", "u1", 2, time.Now().Add(time.Hour)); err != nil {
 		t.Fatalf("CreateRun: %v", err)
 	}
 
@@ -117,7 +168,7 @@ func TestMemoryStoreFinishRunLifecycle(t *testing.T) {
 func TestMemoryStoreUpsertRunResultOverwritesOnRetriedPair(t *testing.T) {
 	m := checks.NewMemoryStore()
 	ctx := context.Background()
-	if _, err := m.CreateRun(ctx, "r1", "tcp", "pod", json.RawMessage(`{}`), "user", "u1", 1); err != nil {
+	if _, err := m.CreateRun(ctx, "r1", "tcp", "pod", json.RawMessage(`{}`), "user", "u1", 1, time.Now().Add(time.Hour)); err != nil {
 		t.Fatalf("CreateRun: %v", err)
 	}
 
@@ -131,7 +182,7 @@ func TestMemoryStoreUpsertRunResultOverwritesOnRetriedPair(t *testing.T) {
 		t.Fatalf("UpsertRunResult (retry): %v", err)
 	}
 
-	results, err := m.GetRunResults(ctx, "r1")
+	results, _, err := m.GetRunResults(ctx, "r1")
 	if err != nil {
 		t.Fatalf("GetRunResults: %v", err)
 	}
@@ -153,7 +204,7 @@ func TestMemoryStoreUpsertRunResultUnknownRunIsNotFound(t *testing.T) {
 
 func TestMemoryStoreGetRunResultsUnknownRunIsEmptyNotError(t *testing.T) {
 	m := checks.NewMemoryStore()
-	results, err := m.GetRunResults(context.Background(), "never-existed")
+	results, _, err := m.GetRunResults(context.Background(), "never-existed")
 	if err != nil {
 		t.Fatalf("GetRunResults: %v", err)
 	}
@@ -169,8 +220,8 @@ func TestMemoryStoreRingEvictsOldestAt51(t *testing.T) {
 	var ids []string
 	for i := 0; i < 51; i++ {
 		id := fmt.Sprintf("run-%02d", i)
-		if _, err := m.CreateRun(ctx, id, "tcp", "pod", json.RawMessage(`{}`), "user", "u1", 1); err != nil {
-			t.Fatalf("CreateRun(%d): %v", i, err)
+		if _, err := m.CreateRun(ctx, id, "tcp", "pod", json.RawMessage(`{}`), "user", "u1", 1, time.Now().Add(time.Hour)); err != nil {
+			t.Fatalf("CreateRun(%d, time.Now().Add(time.Hour)): %v", i, err)
 		}
 		ids = append(ids, id)
 	}
@@ -194,13 +245,13 @@ func TestMemoryStoreListRunsFiltersAndOrdersNewestFirst(t *testing.T) {
 	m := checks.NewMemoryStore()
 	ctx := context.Background()
 
-	if _, err := m.CreateRun(ctx, "r1", "tcp", "pod", json.RawMessage(`{}`), "user", "u1", 1); err != nil {
+	if _, err := m.CreateRun(ctx, "r1", "tcp", "pod", json.RawMessage(`{}`), "user", "u1", 1, time.Now().Add(time.Hour)); err != nil {
 		t.Fatalf("CreateRun: %v", err)
 	}
-	if _, err := m.CreateRun(ctx, "r2", "udp", "pod", json.RawMessage(`{}`), "user", "u1", 1); err != nil {
+	if _, err := m.CreateRun(ctx, "r2", "udp", "pod", json.RawMessage(`{}`), "user", "u1", 1, time.Now().Add(time.Hour)); err != nil {
 		t.Fatalf("CreateRun: %v", err)
 	}
-	if _, err := m.CreateRun(ctx, "r3", "tcp", "pod", json.RawMessage(`{}`), "user", "u1", 1); err != nil {
+	if _, err := m.CreateRun(ctx, "r3", "tcp", "pod", json.RawMessage(`{}`), "user", "u1", 1, time.Now().Add(time.Hour)); err != nil {
 		t.Fatalf("CreateRun: %v", err)
 	}
 
@@ -219,8 +270,8 @@ func TestMemoryStoreListRunsLimitClampMirrorsStoreClampLimit(t *testing.T) {
 	ctx := context.Background()
 	for i := 0; i < 60; i++ {
 		id := fmt.Sprintf("run-%03d", i)
-		if _, err := m.CreateRun(ctx, id, "tcp", "pod", json.RawMessage(`{}`), "user", "u1", 1); err != nil {
-			t.Fatalf("CreateRun(%d): %v", i, err)
+		if _, err := m.CreateRun(ctx, id, "tcp", "pod", json.RawMessage(`{}`), "user", "u1", 1, time.Now().Add(time.Hour)); err != nil {
+			t.Fatalf("CreateRun(%d, time.Now().Add(time.Hour)): %v", i, err)
 		}
 	}
 
@@ -254,8 +305,8 @@ func TestMemoryStoreListRunsNextCursorMatchesLimitLikeDB(t *testing.T) {
 	ctx := context.Background()
 	for i := 0; i < 3; i++ {
 		id := uuid.NewString()
-		if _, err := m.CreateRun(ctx, id, "tcp", "pod", json.RawMessage(`{}`), "user", "u1", 1); err != nil {
-			t.Fatalf("CreateRun(%d): %v", i, err)
+		if _, err := m.CreateRun(ctx, id, "tcp", "pod", json.RawMessage(`{}`), "user", "u1", 1, time.Now().Add(time.Hour)); err != nil {
+			t.Fatalf("CreateRun(%d, time.Now().Add(time.Hour)): %v", i, err)
 		}
 	}
 
@@ -280,7 +331,7 @@ func TestMemoryStoreListRunsNextCursorMatchesLimitLikeDB(t *testing.T) {
 func TestMemoryStoreListRunsCursorNotFoundIsEmptyPageNotRestart(t *testing.T) {
 	m := checks.NewMemoryStore()
 	ctx := context.Background()
-	if _, err := m.CreateRun(ctx, "only-run", "tcp", "pod", json.RawMessage(`{}`), "user", "u1", 1); err != nil {
+	if _, err := m.CreateRun(ctx, "only-run", "tcp", "pod", json.RawMessage(`{}`), "user", "u1", 1, time.Now().Add(time.Hour)); err != nil {
 		t.Fatalf("CreateRun: %v", err)
 	}
 

@@ -47,7 +47,7 @@ func TestRegistryAgentWithoutCapabilities(t *testing.T) {
 	srv, reg := newTestGRPCServer()
 
 	if _, err := srv.Register(context.Background(), &pb.RegisterRequest{
-		Agent: &pb.AgentMeta{Id: "agent-old", NodeName: "node-old"},
+		Agent: &pb.AgentMeta{Id: "agent-old", NodeName: "node-old", PodIp: "10.0.0.9"},
 	}); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
@@ -501,5 +501,55 @@ func TestTopologyChangeWithNoSubjectsStillEmitsTheRefetchSignal(t *testing.T) {
 	}
 	if evs[0].GetReason() != "something_new" || evs[0].GetNodeName() != "" || evs[0].GetAgentId() != "" {
 		t.Errorf("unattributed event = %+v", evs[0])
+	}
+}
+
+/* ── the ORDER of the peer broadcasts ────────────────────────────────────── */
+
+/*
+ * Every peer update is sent as a FULL_SYNC and applied by wholesale replacement, so the LAST
+ * publication wins outright. The mutators used to snapshot under the lock and publish outside it,
+ * which left the order to the scheduler: two agents registering at the same instant — a DaemonSet
+ * rollout, a two-node scale-up — could publish {A,B} first and {A} second, and the fleet was then
+ * left believing in A alone until the next change or the TTL sweep.
+ */
+func TestRegistryPublishesSnapshotsInMutationOrder(t *testing.T) {
+	r := NewRegistry(time.Minute)
+
+	var mu sync.Mutex
+	var sizes []int
+	r.OnChange(func(agents []model.AgentInfo, _ TopologyChange) {
+		mu.Lock()
+		sizes = append(sizes, len(agents))
+		mu.Unlock()
+	})
+
+	const agents = 24
+	var wg sync.WaitGroup
+	for i := range agents {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			r.Register(model.AgentInfo{ID: fmt.Sprintf("a-%d", i), NodeName: fmt.Sprintf("n-%d", i), Zone: "z"})
+		}()
+	}
+	wg.Wait()
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(sizes) != agents {
+		t.Fatalf("published %d snapshots, want one per registration (%d)", len(sizes), agents)
+	}
+	// Each snapshot is at least as large as the one before it: registrations only ever add, so a
+	// smaller one arriving later is a publication that overtook a newer state.
+	for i := 1; i < len(sizes); i++ {
+		if sizes[i] < sizes[i-1] {
+			t.Fatalf("snapshot %d carried %d agents after one carrying %d — a stale FULL_SYNC won: %v",
+				i, sizes[i], sizes[i-1], sizes)
+		}
+	}
+	// And the last word is the whole fleet.
+	if sizes[len(sizes)-1] != agents {
+		t.Errorf("last published snapshot has %d agents, want %d", sizes[len(sizes)-1], agents)
 	}
 }

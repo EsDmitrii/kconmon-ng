@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -272,8 +273,9 @@ func TestDiagnoseRetries503ThenErrUnavailable(t *testing.T) {
 	if !errors.Is(err, controllerclient.ErrUnavailable) {
 		t.Fatalf("expected ErrUnavailable, got %v", err)
 	}
-	if calls.Load() != 3 {
-		t.Errorf("expected 3 attempts, got %d", calls.Load())
+	// Every attempt redials, so the ladder is 6 independent draws at the Service (see maxAttempts).
+	if calls.Load() != 6 {
+		t.Errorf("expected 6 attempts, got %d", calls.Load())
 	}
 }
 
@@ -540,5 +542,113 @@ func TestPutExternalChecksUnexpectedStatus(t *testing.T) {
 	_, err := c.PutExternalChecks(context.Background(), externalSpecs())
 	if err == nil || !strings.Contains(err.Error(), "unexpected status 500") {
 		t.Errorf("err = %v, want an unexpected status 500 error", err)
+	}
+}
+
+// connIDKey tags every accepted connection so a handler can answer per-CONNECTION rather than
+// per-request, which is what a ClusterIP does: kube-proxy picks a backend when the TCP connection
+// is opened and every request on it lands on that same pod.
+type connIDKeyType struct{}
+
+// clusterIPPair is a fake controller Service in front of a standby and a leader. The FIRST
+// connection is the standby (503 "not the leader"); every later connection is the leader.
+type clusterIPPair struct {
+	srv      *http.Server
+	url      string
+	conns    atomic.Int64
+	standby  atomic.Int64
+	leader   atomic.Int64
+	listener net.Listener
+}
+
+func newClusterIPPair(t *testing.T, leaderBody string, leaderStatus int) *clusterIPPair {
+	t.Helper()
+
+	lc := net.ListenConfig{}
+	lis, err := lc.Listen(context.Background(), "tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+
+	p := &clusterIPPair{listener: lis, url: "http://" + lis.Addr().String()}
+	p.srv = &http.Server{
+		ReadHeaderTimeout: 5 * time.Second,
+		ConnContext: func(ctx context.Context, _ net.Conn) context.Context {
+			return context.WithValue(ctx, connIDKeyType{}, p.conns.Add(1))
+		},
+		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			id, _ := r.Context().Value(connIDKeyType{}).(int64)
+			if id == 1 {
+				p.standby.Add(1)
+				http.Error(w, "not the leader", http.StatusServiceUnavailable)
+				return
+			}
+			p.leader.Add(1)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(leaderStatus)
+			_, _ = w.Write([]byte(leaderBody))
+		}),
+	}
+
+	go func() { _ = p.srv.Serve(lis) }()
+	t.Cleanup(func() { _ = p.srv.Close() })
+	return p
+}
+
+// TestTopologyRedialsPastAPinnedStandby is the live regression: the 503 retry ladder reused the
+// pooled keep-alive connection, so all attempts landed on the same non-leader pod.
+func TestTopologyRedialsPastAPinnedStandby(t *testing.T) {
+	p := newClusterIPPair(t, topoJSON(), http.StatusOK)
+
+	c := controllerclient.New(p.url, 5*time.Second)
+	topo, err := c.Topology(context.Background())
+	if err != nil {
+		t.Fatalf("Topology never got past the standby: %v", err)
+	}
+	if len(topo.Nodes) != 2 {
+		t.Fatalf("unexpected topology: %+v", topo)
+	}
+	if p.conns.Load() < 2 {
+		t.Errorf("server saw %d connections; the retry reused the connection pinned to the standby",
+			p.conns.Load())
+	}
+}
+
+// TestDiagnoseRedialsPastAPinnedStandby covers the path the stand actually failed on:
+// "controller diagnose after 3 attempts: controller unavailable" on every MTR pair.
+func TestDiagnoseRedialsPastAPinnedStandby(t *testing.T) {
+	p := newClusterIPPair(t, `{"success":true}`, http.StatusOK)
+
+	c := controllerclient.New(p.url, 5*time.Second)
+	raw, err := c.Diagnose(context.Background(), controllerclient.DiagnoseRequest{
+		Source: "node-1", Destination: "node-2", Type: "mtr",
+	}, 5*time.Second)
+	if err != nil {
+		t.Fatalf("Diagnose never got past the standby: %v", err)
+	}
+	if !strings.Contains(string(raw), "success") {
+		t.Errorf("unexpected body %s", raw)
+	}
+	if p.conns.Load() < 2 {
+		t.Errorf("server saw %d connections; diagnose retried on the pinned standby connection",
+			p.conns.Load())
+	}
+}
+
+// TestPutExternalChecksRedialsPastAPinnedStandby covers the third retry ladder on the same client.
+func TestPutExternalChecksRedialsPastAPinnedStandby(t *testing.T) {
+	p := newClusterIPPair(t, `{"agents":1,"changed":1,"unknown":[]}`, http.StatusOK)
+
+	c := controllerclient.New(p.url, 5*time.Second)
+	out, err := c.PutExternalChecks(context.Background(), externalSpecs())
+	if err != nil {
+		t.Fatalf("PutExternalChecks never got past the standby: %v", err)
+	}
+	if out.Agents != 1 {
+		t.Errorf("unexpected result %+v", out)
+	}
+	if p.conns.Load() < 2 {
+		t.Errorf("server saw %d connections; the PUT retried on the pinned standby connection",
+			p.conns.Load())
 	}
 }

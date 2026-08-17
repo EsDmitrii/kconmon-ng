@@ -12,45 +12,45 @@ import (
 	"github.com/EsDmitrii/kconmon-ng/internal/console/cache"
 )
 
-// newIntegrationKV dials the VALKEY_TEST_ADDR server and returns a ValkeyKV
+// newIntegrationKV dials the REDIS_TEST_ADDR server and returns a RedisKV
 // on it, skipping the test when the address is unset. Same setup every test
 // in this file did inline before IncrWithTTL added three more of them.
-func newIntegrationKV(t *testing.T) *cache.ValkeyKV {
+func newIntegrationKV(t *testing.T) *cache.RedisKV {
 	t.Helper()
-	addr := os.Getenv("VALKEY_TEST_ADDR")
+	addr := os.Getenv("REDIS_TEST_ADDR")
 	if addr == "" {
-		t.Skip("VALKEY_TEST_ADDR not set; see docker command in TestValkeyKVSetGetDeleteRoundtrip")
+		t.Skip("REDIS_TEST_ADDR not set; see docker command in TestRedisKVSetGetDeleteRoundtrip")
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 
-	bus, err := cache.NewValkeyBus(ctx, addr, 5*time.Second)
+	bus, err := cache.NewRedisBus(ctx, "redis://"+addr, 5*time.Second)
 	if err != nil {
-		t.Fatalf("NewValkeyBus: %v", err)
+		t.Fatalf("NewRedisBus: %v", err)
 	}
 	t.Cleanup(bus.Close)
-	return cache.NewValkeyKVFromBus(bus)
+	return cache.NewRedisKVFromBus(bus)
 }
 
-// TestValkeyKVSetGetDeleteRoundtrip requires a real Valkey/Redis server.
+// TestRedisKVSetGetDeleteRoundtrip requires a real Valkey/Redis server.
 // Run: docker run --rm -d -p 6379:6379 valkey/valkey:8-alpine
-// Then: VALKEY_TEST_ADDR=127.0.0.1:6379 go test -tags=integration ./internal/console/cache/... -run TestValkeyKV -v
-func TestValkeyKVSetGetDeleteRoundtrip(t *testing.T) {
-	addr := os.Getenv("VALKEY_TEST_ADDR")
+// Then: REDIS_TEST_ADDR=127.0.0.1:6379 go test -tags=integration ./internal/console/cache/... -run TestRedisKV -v
+func TestRedisKVSetGetDeleteRoundtrip(t *testing.T) {
+	addr := os.Getenv("REDIS_TEST_ADDR")
 	if addr == "" {
-		t.Skip("VALKEY_TEST_ADDR not set; see docker command in this test's comment")
+		t.Skip("REDIS_TEST_ADDR not set; see docker command in this test's comment")
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	bus, err := cache.NewValkeyBus(ctx, addr, 5*time.Second)
+	bus, err := cache.NewRedisBus(ctx, "redis://"+addr, 5*time.Second)
 	if err != nil {
-		t.Fatalf("NewValkeyBus: %v", err)
+		t.Fatalf("NewRedisBus: %v", err)
 	}
 	defer bus.Close()
 
-	kv := cache.NewValkeyKVFromBus(bus)
+	kv := cache.NewRedisKVFromBus(bus)
 	key := "sess:integration-test"
 	t.Cleanup(func() { _ = kv.Delete(context.Background(), key) })
 
@@ -82,24 +82,24 @@ func TestValkeyKVSetGetDeleteRoundtrip(t *testing.T) {
 	}
 }
 
-// TestValkeyKVTTLExpiry requires a real Valkey/Redis server; see the docker
+// TestRedisKVTTLExpiry requires a real Valkey/Redis server; see the docker
 // command above.
-func TestValkeyKVTTLExpiry(t *testing.T) {
-	addr := os.Getenv("VALKEY_TEST_ADDR")
+func TestRedisKVTTLExpiry(t *testing.T) {
+	addr := os.Getenv("REDIS_TEST_ADDR")
 	if addr == "" {
-		t.Skip("VALKEY_TEST_ADDR not set; see docker command in TestValkeyKVSetGetDeleteRoundtrip")
+		t.Skip("REDIS_TEST_ADDR not set; see docker command in TestRedisKVSetGetDeleteRoundtrip")
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	bus, err := cache.NewValkeyBus(ctx, addr, 5*time.Second)
+	bus, err := cache.NewRedisBus(ctx, "redis://"+addr, 5*time.Second)
 	if err != nil {
-		t.Fatalf("NewValkeyBus: %v", err)
+		t.Fatalf("NewRedisBus: %v", err)
 	}
 	defer bus.Close()
 
-	kv := cache.NewValkeyKVFromBus(bus)
+	kv := cache.NewRedisKVFromBus(bus)
 	key := "sess:integration-ttl-test"
 	t.Cleanup(func() { _ = kv.Delete(context.Background(), key) })
 
@@ -120,10 +120,10 @@ func TestValkeyKVTTLExpiry(t *testing.T) {
 
 // --- IncrWithTTL: the fixed-window primitive (M4 Task 8) ------------------
 
-// TestValkeyKVIncrWithTTLCountsOneToNWithinTheWindow requires a real
+// TestRedisKVIncrWithTTLCountsOneToNWithinTheWindow requires a real
 // Valkey/Redis server; see the docker command in
-// TestValkeyKVSetGetDeleteRoundtrip.
-func TestValkeyKVIncrWithTTLCountsOneToNWithinTheWindow(t *testing.T) {
+// TestRedisKVSetGetDeleteRoundtrip.
+func TestRedisKVIncrWithTTLCountsOneToNWithinTheWindow(t *testing.T) {
 	kv := newIntegrationKV(t)
 	ctx := context.Background()
 	key := "rl:integration-window"
@@ -143,10 +143,10 @@ func TestValkeyKVIncrWithTTLCountsOneToNWithinTheWindow(t *testing.T) {
 	}
 }
 
-// TestValkeyKVIncrWithTTLDoesNotExtendTheWindow pins the PEXPIRE ... NX
+// TestRedisKVIncrWithTTLDoesNotExtendTheWindow pins the PEXPIRE ... NX
 // half of the primitive against a real server: the TTL is set by the first
 // hit of a window and NEVER re-armed by the ones that follow it.
-func TestValkeyKVIncrWithTTLDoesNotExtendTheWindow(t *testing.T) {
+func TestRedisKVIncrWithTTLDoesNotExtendTheWindow(t *testing.T) {
 	kv := newIntegrationKV(t)
 	ctx := context.Background()
 	key := "rl:integration-fixed"
@@ -175,9 +175,9 @@ func TestValkeyKVIncrWithTTLDoesNotExtendTheWindow(t *testing.T) {
 	}
 }
 
-// TestValkeyKVIncrWithTTLConcurrentFirstHitsNeverLeaveAKeyTTLLess is the race the doc comment
+// TestRedisKVIncrWithTTLConcurrentFirstHitsNeverLeaveAKeyTTLLess is the race the doc comment
 // reasons about.
-func TestValkeyKVIncrWithTTLConcurrentFirstHitsNeverLeaveAKeyTTLLess(t *testing.T) {
+func TestRedisKVIncrWithTTLConcurrentFirstHitsNeverLeaveAKeyTTLLess(t *testing.T) {
 	kv := newIntegrationKV(t)
 	ctx := context.Background()
 	key := "rl:integration-race"

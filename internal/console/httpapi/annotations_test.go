@@ -211,7 +211,7 @@ func TestAnnotationsOperatorCreatesAndDeletes(t *testing.T) {
 func TestAnnotationsCreateRecordsTheSubject(t *testing.T) {
 	st := newFakeAnnotationStore()
 	s := newM5TestServer(t, "operator", Deps{Annotations: st})
-	body := `{"startAt":"2026-08-07T10:00:00Z","text":"note","createdBy":"somebody-else"}`
+	body := `{"startAt":"2026-08-07T10:00:00Z","text":"note"}`
 	w := doRequest(t, s, http.MethodPost, "/api/v1/annotations", strings.NewReader(body), mutateWithCSRF)
 	if w.Code != http.StatusCreated {
 		t.Fatalf("status %d, want 201: %s", w.Code, w.Body)

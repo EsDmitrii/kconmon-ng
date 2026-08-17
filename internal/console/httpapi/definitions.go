@@ -128,12 +128,23 @@ type definitionRequest struct {
 // JSON at all is a 400 (malformed request).
 func decodeDefinitionRequest(w http.ResponseWriter, r *http.Request) (store.DefinitionInput, bool) {
 	var req definitionRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeProblem(w, http.StatusBadRequest, "invalid request",
+	if err := strictJSONDecoder(r.Body).Decode(&req); err != nil {
+		writeProblem(w, http.StatusBadRequest, "invalid request", unknownFieldDetail(err,
 			`body must be JSON with "name", "sourceSelection" (all|per-zone|one-per-zone), `+
 				`"destinationKind" (node|target|adhoc), "checkType" (tcp|udp|icmp|dns|http|mtr), "plane", `+
-				`an optional "params" object and an optional "enabled" flag`)
+				`an optional "params" object and an optional "enabled" flag`))
 		return store.DefinitionInput{}, false
+	}
+	/* A destinationTargetId that is not a UUID is a CLIENT error, and it used to reach the store as
+	   one — where pgx refused the parse and the handler reported 502 "check definitions unavailable",
+	   i.e. a typo in one field presented as an outage of the whole subsystem. Same pre-check runs.go
+	   and the list route already make. */
+	if req.DestinationTargetID != "" {
+		if _, err := uuid.Parse(req.DestinationTargetID); err != nil {
+			writeProblem(w, http.StatusUnprocessableEntity, "invalid check definition",
+				"destinationTargetId must be a UUID naming a saved target")
+			return store.DefinitionInput{}, false
+		}
 	}
 	in := store.DefinitionInput{
 		Name: req.Name, SourceSelection: req.SourceSelection,
@@ -310,6 +321,19 @@ func (s *Server) handleChecksUpdate(w http.ResponseWriter, r *http.Request) {
 
 	def, err := s.definitions.UpdateDefinition(r.Context(), id, in)
 	if err != nil {
+		/* TWO different things arrive here as ErrNotFound, and telling them apart matters.
+		   The store folds "no such definition row" and "the destination target FK does not resolve"
+		   into one sentinel, so a body naming a target that does not exist answered 404 "no check
+		   definition with that id" — about a definition that is sitting right there, untouched. The
+		   operator was told their check had disappeared when the real problem was one field of their
+		   own body. The create path has always distinguished the two; this re-read is what lets the
+		   update path do the same, and it only runs on the error branch. */
+		if errors.Is(err, store.ErrNotFound) {
+			if _, gerr := s.definitions.GetDefinition(r.Context(), id); gerr == nil {
+				writeDefinitionCreateError(w, &in, err)
+				return
+			}
+		}
 		writeDefinitionStoreError(w, in.Name, id, err)
 		return
 	}

@@ -26,8 +26,21 @@ RETURNING id, name, url, events, secret_enc, enabled, last_status, last_attempt,
 
 -- name: UpdateWebhookDelivery :execrows
 -- The dispatcher's write-back after a terminal delivery outcome.
+--
+-- The counter is derived FROM THE ROW, not from a number the caller computed. It used to be
+-- `failures = $4`, with the dispatcher passing its own snapshot + 1 — and that snapshot is taken at
+-- ENQUEUE time (fanOut reads every endpoint once and copies the count into each job), while a
+-- delivery holds its job through a 0s/30s/5m retry ladder, up to ~5.7 minutes. With the alert poll
+-- running every 10-30s, several deliveries for one endpoint overlap constantly, and each wrote the
+-- same stale base back: three consecutive failures recorded as one. The consecutive-failure count is
+-- what an operator reads to decide an endpoint is dead, so undercounting it is the direction that
+-- matters.
+--
+-- `reset` true zeroes it (a delivery succeeded); false increments whatever the row currently holds.
 UPDATE webhooks
-SET last_status = $2, last_attempt = $3, failures = $4
+SET last_status  = $2,
+    last_attempt = $3,
+    failures     = CASE WHEN sqlc.arg('reset')::boolean THEN 0 ELSE failures + 1 END
 WHERE id = $1;
 
 -- name: DeleteWebhook :execrows

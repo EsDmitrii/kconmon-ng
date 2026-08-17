@@ -10,8 +10,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"strconv"
+	"syscall"
 	"time"
 )
 
@@ -29,12 +31,23 @@ var (
 	// ErrExternalUnsupported is the controller's 501: the SOURCE agent does not advertise the
 	// "external-checks" capability.
 	ErrExternalUnsupported = errors.New("agent does not support external destinations") // controller 501
+	// ErrResultLost is the failure with no status at all: the controller accepted the POST and then
+	// closed the connection without writing a response. The check itself may well have SUCCEEDED on
+	// the agent -- what failed is the delivery -- so this is deliberately not ErrCheckTimeout, and
+	// deliberately not retried: the probe already ran, and re-running a multi-minute trace to chase
+	// a transport fault would cost the same minutes again.
+	ErrResultLost = errors.New("controller closed the connection before answering")
 )
 
 const (
-	maxAttempts    = 3
-	initialBackoff = 200 * time.Millisecond
-	maxBodyBytes   = 4 << 20 // topology snapshots are small; 4 MiB is generous
+	// Each 503 retry redials, so an attempt is an independent draw among the controller replicas:
+	// missing the leader R-1 times out of R has probability ((R-1)/R)^N, and 6 attempts keep a
+	// two-replica deployment under 2%.
+	maxAttempts = 6
+	// A 503 means "wrong replica", not "overloaded", so the wait only has to outlast the redial.
+	initialBackoff  = 200 * time.Millisecond
+	maxRetryBackoff = time.Second
+	maxBodyBytes    = 4 << 20 // topology snapshots are small; 4 MiB is generous
 
 	// diagnosticsTimeoutCap mirrors internal/controller/diagnostics.go's maxDiagnosticsTimeout; the
 	// controller silently clamps ?timeout= server-side.
@@ -72,6 +85,10 @@ type Version struct {
 	Version      string   `json:"version"`
 	Commit       string   `json:"commit"`
 	Capabilities []string `json:"capabilities"`
+	/* The CIDRs the fleet's agents will actually probe. Empty when the external checker is off, or
+	   when the controller predates the field — in both cases the Console cannot claim a target is
+	   unreachable, so it says nothing rather than guessing. */
+	ExternalAllowedCIDRs []string `json:"externalAllowedCidrs"`
 }
 
 // HasCapability reports whether name is present in Capabilities. Safe to call
@@ -91,6 +108,24 @@ type Client struct {
 	base   string
 	hc     *http.Client
 	diagHC *http.Client
+	// tr is the transport both clients share, owned by this Client so dropping its pooled
+	// connections cannot disturb anything else in the process.
+	tr *http.Transport
+}
+
+// newTransport clones the default transport so this Client owns its own connection pool.
+func newTransport() *http.Transport {
+	if def, ok := http.DefaultTransport.(*http.Transport); ok {
+		return def.Clone()
+	}
+	return &http.Transport{}
+}
+
+// redial drops the pooled connection before a 503 retry. The controller Service is a ClusterIP:
+// kube-proxy binds a TCP connection to one replica for its whole life, so retrying on the
+// keep-alive connection that just answered "not the leader" only ever reaches that same standby.
+func (c *Client) redial() {
+	c.tr.CloseIdleConnections()
 }
 
 // New returns a client for baseURL (no trailing slash) with a per-request timeout for
@@ -101,7 +136,13 @@ type Client struct {
 // to diagnosticsTimeoutCap, 120s) -- an http.Client.Timeout applies to the whole round trip
 // regardless of the context deadline passed alongside it, so the shorter of the two always wins.
 func New(baseURL string, timeout time.Duration) *Client {
-	return &Client{base: baseURL, hc: &http.Client{Timeout: timeout}, diagHC: &http.Client{}}
+	tr := newTransport()
+	return &Client{
+		base:   baseURL,
+		hc:     &http.Client{Timeout: timeout, Transport: tr},
+		diagHC: &http.Client{Transport: tr},
+		tr:     tr,
+	}
 }
 
 // Topology fetches the live topology snapshot, retrying 503 (non-leader).
@@ -158,17 +199,20 @@ func (c *Client) Diagnose(ctx context.Context, req DiagnoseRequest, timeout time
 
 	backoff := initialBackoff
 	for attempt := 1; ; attempt++ {
+		start := time.Now()
 		data, status, err := c.tryDiagnose(ctx, body, timeout)
+		elapsed := time.Since(start)
 		switch {
 		case err == nil && status == http.StatusOK:
 			return data, nil
 		case status == http.StatusServiceUnavailable && attempt < maxAttempts:
+			c.redial()
 			select {
 			case <-ctx.Done():
 				return nil, ctx.Err()
 			case <-time.After(backoff):
 			}
-			backoff *= 2
+			backoff = min(backoff*2, maxRetryBackoff)
 		case status == http.StatusServiceUnavailable:
 			return nil, fmt.Errorf("controller diagnose after %d attempts: %w", attempt, ErrUnavailable)
 		case status == http.StatusBadRequest:
@@ -182,11 +226,40 @@ func (c *Client) Diagnose(ctx context.Context, req DiagnoseRequest, timeout time
 		case status == http.StatusNotImplemented:
 			return nil, fmt.Errorf("controller diagnose: %w: %s", ErrExternalUnsupported, bytes.TrimSpace(data))
 		case err != nil:
-			return nil, fmt.Errorf("controller diagnose: %w", err)
+			return nil, diagnoseTransportError(err, timeout, elapsed)
 		default:
 			return nil, fmt.Errorf("controller diagnose: unexpected status %d", status)
 		}
 	}
+}
+
+// diagnoseTransportError explains a dispatch that produced no HTTP status at all. `Post
+// "http://.../api/v1/diagnostics?timeout=110": EOF` is what the Console used to record in a run, and
+// it names neither what happened nor which layer did it; an operator reading that has no way to tell
+// a dead controller from an answer that was thrown away on the way back.
+func diagnoseTransportError(err error, timeout, elapsed time.Duration) error {
+	switch {
+	case errors.Is(err, context.DeadlineExceeded), errors.Is(err, context.Canceled):
+		return fmt.Errorf("controller diagnose: %w: the console stopped waiting after %s for a %s dispatch "+
+			"(cut on the console side, the check may still be running): %w",
+			ErrCheckTimeout, elapsed.Round(time.Millisecond), timeout, err)
+	case connectionDroppedEarly(err):
+		return fmt.Errorf("controller diagnose: %w: the controller closed the connection after %s "+
+			"without answering a %s dispatch; the check may have completed on the agent and its result is lost "+
+			"(cut by the controller HTTP server, not by the check): %w",
+			ErrResultLost, elapsed.Round(time.Millisecond), timeout, err)
+	default:
+		return fmt.Errorf("controller diagnose: %w", err)
+	}
+}
+
+// connectionDroppedEarly reports whether err is a connection that died mid-request rather than a
+// refused dial or a DNS failure: an accepted request whose response never arrived.
+func connectionDroppedEarly(err error) bool {
+	return errors.Is(err, io.EOF) ||
+		errors.Is(err, io.ErrUnexpectedEOF) ||
+		errors.Is(err, net.ErrClosed) ||
+		errors.Is(err, syscall.ECONNRESET)
 }
 
 // tryDiagnose issues one POST /api/v1/diagnostics attempt and returns the response body (capped to
@@ -272,12 +345,13 @@ func (c *Client) PutExternalChecks(ctx context.Context, agents map[string][]Exte
 			}
 			return &out, nil
 		case status == http.StatusServiceUnavailable && attempt < maxAttempts:
+			c.redial()
 			select {
 			case <-ctx.Done():
 				return nil, ctx.Err()
 			case <-time.After(backoff):
 			}
-			backoff *= 2
+			backoff = min(backoff*2, maxRetryBackoff)
 		case status == http.StatusServiceUnavailable:
 			return nil, fmt.Errorf("controller external-checks after %d attempts: %w", attempt, ErrUnavailable)
 		case status == http.StatusBadRequest:
@@ -320,12 +394,13 @@ func (c *Client) getJSON(ctx context.Context, path string, out any) error {
 		case err == nil && status == http.StatusOK:
 			return nil
 		case status == http.StatusServiceUnavailable && attempt < maxAttempts:
+			c.redial()
 			select {
 			case <-ctx.Done():
 				return ctx.Err()
 			case <-time.After(backoff):
 			}
-			backoff *= 2
+			backoff = min(backoff*2, maxRetryBackoff)
 		case status == http.StatusServiceUnavailable:
 			return fmt.Errorf("controller %s after %d attempts: %w", path, attempt, ErrUnavailable)
 		case err != nil:

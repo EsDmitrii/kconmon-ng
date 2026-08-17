@@ -170,6 +170,14 @@ func doRequest(t *testing.T, s *Server, method, target string, body io.Reader, m
 	return w
 }
 
+// withOIDCState attaches the state cookie handleOIDCStart set, which the callback now requires:
+// the state must belong to the browser that STARTED the flow, not merely be one the console minted.
+func withOIDCState(state string) func(*http.Request) {
+	return func(r *http.Request) {
+		r.AddCookie(&http.Cookie{Name: oidcStateCookieName, Value: state})
+	}
+}
+
 // TestAnonymousDefaultServesEveryM1M2Route is the Phase B degraded-state guarantee.
 func TestAnonymousDefaultServesEveryM1M2Route(t *testing.T) {
 	s := newTestServer(t) // anonymous/viewer default, no Authenticator/Policy override
@@ -333,8 +341,12 @@ func TestUnauthenticatedNonAnonymousModeReturns401(t *testing.T) {
 	}
 }
 
-// TestRoleResolverErrorDegradesToDefaultRoleNot500 is the explicit case.
-func TestRoleResolverErrorDegradesToDefaultRoleNot500(t *testing.T) {
+/*
+An unreadable role store is not evidence that the subject holds auth.defaultRole -- it is no evidence
+at all. This used to degrade to the default role, so a database blip GRANTED permissions rather than
+withholding them. It now fails closed: 403, and never a 500 (an outage is not a bug in the request).
+*/
+func TestRoleResolverErrorRefusesRatherThanGrantingTheDefaultRole(t *testing.T) {
 	cfg := authTestConfig("local")
 	cfg.Auth.DefaultRole = "viewer"
 	reg := prometheus.NewRegistry()
@@ -349,10 +361,10 @@ func TestRoleResolverErrorDegradesToDefaultRoleNot500(t *testing.T) {
 
 	w := doRequest(t, s, http.MethodGet, "/api/v1/topology", nil, nil)
 	if w.Code == http.StatusInternalServerError {
-		t.Fatalf("RolesFor error surfaced as 500, want a graceful degrade to auth.defaultRole")
+		t.Fatalf("RolesFor error surfaced as 500; an unreachable role store is not a bad request")
 	}
-	if w.Code == http.StatusUnauthorized || w.Code == http.StatusForbidden {
-		t.Errorf("RolesFor error should degrade to auth.defaultRole=viewer (holds topology:read), got %d; body=%s",
+	if w.Code != http.StatusForbidden {
+		t.Errorf("RolesFor error = %d, want 403: no roles resolved means no permission held; body=%s",
 			w.Code, w.Body.String())
 	}
 }
@@ -558,22 +570,31 @@ func TestWSRunsReadOnlyIsRefusedTheFleetWideTopics(t *testing.T) {
 		_ = resp.Body.Close()
 	}
 
-	for _, topic := range []string{ws.TopicLive, ws.TopicTopology, ws.MatrixTopic("tcp")} {
-		if writeErr := conn.WriteJSON(ws.ClientMessage{Action: ws.ActionSubscribe, Topic: topic}); writeErr != nil {
-			t.Fatalf("subscribe %s: %v", topic, writeErr)
+	// Each topic names the permission IT requires, not one blanket permission: the
+	// socket asks the same question the REST route serving the same bytes asks.
+	for _, tc := range []struct {
+		topic string
+		want  authz.Permission
+	}{
+		{ws.TopicLive, authz.PermEventsRead},
+		{ws.TopicTopology, authz.PermTopologyRead},
+		{ws.MatrixTopic("tcp"), authz.PermMatrixRead},
+	} {
+		if writeErr := conn.WriteJSON(ws.ClientMessage{Action: ws.ActionSubscribe, Topic: tc.topic}); writeErr != nil {
+			t.Fatalf("subscribe %s: %v", tc.topic, writeErr)
 		}
 		if deadlineErr := conn.SetReadDeadline(time.Now().Add(5 * time.Second)); deadlineErr != nil {
 			t.Fatalf("set read deadline: %v", deadlineErr)
 		}
 		var env ws.Envelope
 		if readErr := conn.ReadJSON(&env); readErr != nil {
-			t.Fatalf("read the refusal for %s: %v", topic, readErr)
+			t.Fatalf("read the refusal for %s: %v", tc.topic, readErr)
 		}
 		if env.Type != ws.TypeError {
-			t.Fatalf("subscribe to %s on a runs:read-only socket: envelope = %+v, want an error frame", topic, env)
+			t.Fatalf("subscribe to %s on a runs:read-only socket: envelope = %+v, want an error frame", tc.topic, env)
 		}
-		if !strings.Contains(string(env.Data), string(authz.PermEventsRead)) {
-			t.Errorf("refusal for %s = %s, want it to name the missing permission %q", topic, env.Data, authz.PermEventsRead)
+		if !strings.Contains(string(env.Data), string(tc.want)) {
+			t.Errorf("refusal for %s = %s, want it to name the missing permission %q", tc.topic, env.Data, tc.want)
 		}
 	}
 
@@ -740,7 +761,7 @@ func TestAuthLoginLocalModeSetsSessionAndCSRFCookies(t *testing.T) {
 	users := fakeUserStore{users: map[string]store.User{
 		"alice": {ID: "u-1", Username: "alice", PasswordHash: hash, DisplayName: "Alice"},
 	}}
-	sessions := authn.NewSessionStore(cache.NewInProcessKV(), time.Hour)
+	sessions := authn.NewSessionStore(cache.NewInProcessKV(), time.Hour, 0)
 
 	cfg := authTestConfig("local")
 	reg := prometheus.NewRegistry()
@@ -792,7 +813,7 @@ func TestAuthLoginWrongPasswordReturns401(t *testing.T) {
 	users := fakeUserStore{users: map[string]store.User{
 		"alice": {ID: "u-1", Username: "alice", PasswordHash: hash},
 	}}
-	sessions := authn.NewSessionStore(cache.NewInProcessKV(), time.Hour)
+	sessions := authn.NewSessionStore(cache.NewInProcessKV(), time.Hour, 0)
 
 	cfg := authTestConfig("local")
 	reg := prometheus.NewRegistry()
@@ -811,7 +832,7 @@ func TestAuthLoginWrongPasswordReturns401(t *testing.T) {
 
 func TestAuthLoginUnknownUsernameReturns401(t *testing.T) {
 	users := fakeUserStore{users: map[string]store.User{}}
-	sessions := authn.NewSessionStore(cache.NewInProcessKV(), time.Hour)
+	sessions := authn.NewSessionStore(cache.NewInProcessKV(), time.Hour, 0)
 
 	cfg := authTestConfig("local")
 	reg := prometheus.NewRegistry()
@@ -829,7 +850,7 @@ func TestAuthLoginUnknownUsernameReturns401(t *testing.T) {
 }
 
 func TestAuthLogoutDeletesSessionAndClearsCookies(t *testing.T) {
-	sessions := authn.NewSessionStore(cache.NewInProcessKV(), time.Hour)
+	sessions := authn.NewSessionStore(cache.NewInProcessKV(), time.Hour, 0)
 	id, err := sessions.Create(context.Background(), authn.Session{Username: "alice"})
 	if err != nil {
 		t.Fatal(err)
@@ -985,7 +1006,7 @@ func TestAuthLoginFailurePathsReturnIdenticalResponses(t *testing.T) {
 		"alice":   {ID: "u-1", Username: "alice", PasswordHash: knownHash},
 		"deleted": {ID: "u-2", Username: "deleted", PasswordHash: disabledHash, Disabled: true},
 	}}
-	sessions := authn.NewSessionStore(cache.NewInProcessKV(), time.Hour)
+	sessions := authn.NewSessionStore(cache.NewInProcessKV(), time.Hour, 0)
 
 	newServer := func(t *testing.T) *Server {
 		t.Helper()
@@ -1043,7 +1064,7 @@ func TestOIDCCallbackSuccessSetsSessionAndCSRFCookiesAndRedirects(t *testing.T) 
 	flow := fakeOIDCFlow{sessionID: "sess-abc-123", returnTo: "/post-login/dashboard"}
 	s := NewServer(Deps{Config: cfg, Metrics: m, PromRegistry: reg, UI: ui, OIDC: flow})
 
-	w := doRequest(t, s, http.MethodGet, config.OIDCCallbackPath+"?state=s&code=c", nil, nil)
+	w := doRequest(t, s, http.MethodGet, config.OIDCCallbackPath+"?state=s&code=c", nil, withOIDCState("s"))
 	if w.Code != http.StatusFound {
 		t.Fatalf("oidc callback success = %d, want 302; body=%s", w.Code, w.Body.String())
 	}
@@ -1111,7 +1132,7 @@ func TestCSRFMintFailureOnLoginAbortsSessionAndReturns500(t *testing.T) {
 		"alice": {ID: "u-1", Username: "alice", PasswordHash: hash},
 	}}
 	kv := &spyKV{KV: cache.NewInProcessKV()}
-	sessions := authn.NewSessionStore(kv, time.Hour)
+	sessions := authn.NewSessionStore(kv, time.Hour, 0)
 
 	cfg := authTestConfig("local")
 	reg := prometheus.NewRegistry()
@@ -1155,7 +1176,7 @@ func TestCSRFMintFailureOnLoginAbortsSessionAndReturns500(t *testing.T) {
 // here is a REAL one, pre-created directly against the same SessionStore the server is wired with
 // (standing in for what s.oidc.Callback would have just created).
 func TestCSRFMintFailureOnOIDCCallbackAbortsSessionAndReturns500(t *testing.T) {
-	sessions := authn.NewSessionStore(cache.NewInProcessKV(), time.Hour)
+	sessions := authn.NewSessionStore(cache.NewInProcessKV(), time.Hour, 0)
 	sessionID, err := sessions.Create(context.Background(), authn.Session{Username: "alice"})
 	if err != nil {
 		t.Fatal(err)
@@ -1171,7 +1192,7 @@ func TestCSRFMintFailureOnOIDCCallbackAbortsSessionAndReturns500(t *testing.T) {
 	logs := captureLogs(t)
 	withFailingCSRFRand(t)
 
-	w := doRequest(t, s, http.MethodGet, config.OIDCCallbackPath+"?state=s&code=c", nil, nil)
+	w := doRequest(t, s, http.MethodGet, config.OIDCCallbackPath+"?state=s&code=c", nil, withOIDCState("s"))
 	if w.Code != http.StatusInternalServerError {
 		t.Fatalf("oidc callback with csrf mint failure = %d, want 500; body=%s", w.Code, w.Body.String())
 	}
@@ -1263,5 +1284,132 @@ func TestAnonymousModeDoesNotIncrementAuthRequests(t *testing.T) {
 
 	if got := testutil.ToFloat64(m.AuthRequests.WithLabelValues("anonymous", "ok")); got != 0 {
 		t.Errorf("AuthRequests(anonymous, ok) = %v after 3 requests, want 0", got)
+	}
+}
+
+/** newLocalAuthServer wires a local-mode server with one known user, for the login-shape cases. */
+func newLocalAuthServer(t *testing.T) *Server {
+	t.Helper()
+	hash, err := authn.HashPassword("correct horse battery staple")
+	if err != nil {
+		t.Fatal(err)
+	}
+	users := fakeUserStore{users: map[string]store.User{
+		"alice": {ID: "u-1", Username: "alice", PasswordHash: hash, DisplayName: "Alice"},
+	}}
+	cfg := authTestConfig("local")
+	reg := prometheus.NewRegistry()
+	return NewServer(Deps{
+		Config: cfg, Metrics: metrics.New(cfg.MetricsPrefix, reg), PromRegistry: reg,
+		UI:            http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte("spa")) }),
+		Users:         users,
+		Sessions:      authn.NewSessionStore(cache.NewInProcessKV(), time.Hour, 0),
+		Authenticator: fakeAuthenticator{err: authn.ErrNoCredentials, mode: "local"},
+	})
+}
+
+/* ── the login is a state change on the victim's browser ─────────────────── */
+
+/*
+ * The route is public, so authorize applies no CSRF gate to it. Without a same-origin proof,
+ * evil.example could post a cross-site form (enctype=text/plain, whose body parses as this JSON) and
+ * the 204's Set-Cookie would replace the victim's session with the ATTACKER's: everything the victim
+ * then wrote went into the attacker's account, and everything they read came out of it.
+ */
+func TestLoginRefusesACrossOriginPost(t *testing.T) {
+	s := newLocalAuthServer(t)
+
+	body := `{"username":"alice","password":"correct horse battery staple"}`
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/api/v1/auth/login", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Origin", "https://evil.example")
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("cross-origin login = %d, want 403: %s", rec.Code, rec.Body)
+	}
+	if len(rec.Result().Cookies()) != 0 {
+		t.Errorf("cross-origin login set cookies: %+v", rec.Result().Cookies())
+	}
+}
+
+func TestLoginRefusesAFormContentType(t *testing.T) {
+	s := newLocalAuthServer(t)
+
+	// A browser form can only ever send one of three content types, and none of them is JSON — so
+	// requiring JSON is what closes the enctype=text/plain vector on its own.
+	body := `{"username":"alice","password":"correct horse battery staple"}`
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/api/v1/auth/login", strings.NewReader(body))
+	req.Header.Set("Content-Type", "text/plain;charset=UTF-8")
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnsupportedMediaType {
+		t.Fatalf("text/plain login = %d, want 415: %s", rec.Code, rec.Body)
+	}
+}
+
+// A same-origin browser post, and a non-browser client that sends no Origin at all, both pass.
+func TestLoginAcceptsSameOriginAndOriginlessClients(t *testing.T) {
+	for _, name := range []string{"same-origin", "no origin header"} {
+		t.Run(name, func(t *testing.T) {
+			s := newLocalAuthServer(t)
+			body := `{"username":"alice","password":"correct horse battery staple"}`
+			req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/api/v1/auth/login", strings.NewReader(body))
+			req.Header.Set("Content-Type", "application/json")
+			if name == "same-origin" {
+				req.Header.Set("Origin", "http://"+req.Host)
+			}
+			rec := httptest.NewRecorder()
+			s.Handler().ServeHTTP(rec, req)
+
+			if rec.Code == http.StatusForbidden || rec.Code == http.StatusUnsupportedMediaType {
+				t.Fatalf("login = %d, want it admitted to the credential check: %s", rec.Code, rec.Body)
+			}
+		})
+	}
+}
+
+/*
+ * Anonymous mode is not a licence for cross-site writes.
+ *
+ * The CSRF exemption for anonymous mode was unconditional, and anonymous.role may be operator or
+ * admin. A CORS *simple* request (text/plain body, no custom header) triggers no preflight, so any
+ * page an operator's browser visited could POST into a console that was deliberately kept off the
+ * internet. The attacker never reads the response; the write still lands.
+ */
+func TestAnonymousModeRefusesCrossSiteMutations(t *testing.T) {
+	cfg := &config.Config{HTTPPort: 8080, LogLevel: "info", LogFormat: "json", MetricsPrefix: "kconmon_ng",
+		Auth: config.AuthConfig{Mode: "anonymous", Anonymous: config.AnonymousConfig{Role: "admin"}}}
+	reg := prometheus.NewRegistry()
+	ui := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte("ok")) })
+	s := NewServer(Deps{Config: cfg, Metrics: metrics.New(cfg.MetricsPrefix, reg), PromRegistry: reg, UI: ui,
+		Authenticator: authn.NewAnonymous("admin")})
+
+	newReq := func() *http.Request {
+		r := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/api/v1/rbac/roles",
+			strings.NewReader(`{"name":"csrf-role","permissions":[]}`))
+		r.Header.Set("Content-Type", "application/json")
+		return r
+	}
+
+	// A browser cross-site request: refused before it reaches a handler.
+	cross := newReq()
+	cross.Header.Set("Origin", "https://attacker.example")
+	cross.Header.Set("Sec-Fetch-Site", "cross-site")
+	w := httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, cross)
+	if w.Code != http.StatusForbidden || !strings.Contains(w.Body.String(), "CSRF") {
+		t.Errorf("cross-site POST = %d, want 403 from the CSRF gate; body=%s", w.Code, w.Body.String())
+	}
+
+	// A non-browser client sends neither header and is never stopped by the CSRF gate. (This fixture
+	// wires no roleAdmin, so the write itself fails downstream -- the point is which refusal it is.)
+	plain := newReq()
+	w = httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, plain)
+	if strings.Contains(w.Body.String(), "CSRF") {
+		t.Errorf("header-less POST was refused by the CSRF gate; a script that sends no Origin must pass it: %s", w.Body.String())
 	}
 }

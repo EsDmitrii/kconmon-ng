@@ -54,7 +54,7 @@ func newStore(t *testing.T, ttl time.Duration) (*authn.SessionStore, *cache.InPr
 	t.Helper()
 	kv := cache.NewInProcessKV()
 	t.Cleanup(kv.Close)
-	return authn.NewSessionStore(kv, ttl), kv
+	return authn.NewSessionStore(kv, ttl, 0), kv
 }
 
 func TestSessionStoreCreateIDShapeAndUniqueness(t *testing.T) {
@@ -192,7 +192,7 @@ func TestSessionStoreCorruptedValueIsMissNotPanic(t *testing.T) {
 
 	kv := cache.NewInProcessKV()
 	t.Cleanup(kv.Close)
-	store := authn.NewSessionStore(kv, time.Minute)
+	store := authn.NewSessionStore(kv, time.Minute, 0)
 
 	const id = "corrupted-id"
 	if err := kv.Set(context.Background(), "sess:"+id, []byte("not json"), time.Minute); err != nil {
@@ -246,9 +246,13 @@ func TestSessionStoreRefreshUnknownIDIsNotFound(t *testing.T) {
 	}
 }
 
-func TestSessionStoreRefreshSlidesExpiry(t *testing.T) {
+func TestSessionStoreRefreshSlidesIdleNotTheAbsoluteDeadline(t *testing.T) {
 	t.Parallel()
-	store, _ := newStore(t, 50*time.Millisecond)
+	// Refresh used to push ExpiresAt itself, which made the absolute lifetime unbounded for any
+	// session that kept being used — the very thing the two-bound policy exists to prevent.
+	kv := cache.NewInProcessKV()
+	t.Cleanup(kv.Close)
+	store := authn.NewSessionStore(kv, time.Hour, 50*time.Millisecond)
 
 	id, err := store.Create(context.Background(), authn.Session{Username: "alice"})
 	if err != nil {
@@ -265,16 +269,107 @@ func TestSessionStoreRefreshSlidesExpiry(t *testing.T) {
 		t.Fatalf("Refresh: %v", refreshErr)
 	}
 
-	// Without the refresh, the original 50ms ttl would have expired by now.
+	// Without the refresh the 50ms idle window would have closed by now.
 	time.Sleep(30 * time.Millisecond)
 	after, ok, err := store.Get(context.Background(), id)
 	if err != nil {
 		t.Fatalf("Get after refresh: %v", err)
 	}
 	if !ok {
-		t.Fatal("expected the session to still be alive after Refresh slid its TTL forward")
+		t.Fatal("expected the session to still be alive after Refresh slid its idle deadline")
 	}
-	if !after.ExpiresAt.After(before.ExpiresAt) {
-		t.Errorf("expected ExpiresAt to move forward: before=%v after=%v", before.ExpiresAt, after.ExpiresAt)
+	if !after.LastSeenAt.After(before.LastSeenAt) {
+		t.Errorf("expected LastSeenAt to move forward: before=%v after=%v", before.LastSeenAt, after.LastSeenAt)
+	}
+	if !after.ExpiresAt.Equal(before.ExpiresAt) {
+		t.Errorf("Refresh moved the ABSOLUTE deadline: before=%v after=%v", before.ExpiresAt, after.ExpiresAt)
+	}
+}
+
+// TestSessionIdleTimeoutRefusesAndPurges is the owner's finding: before this there was no idle
+// bound at all, so a session stayed usable for its whole absolute lifetime no matter how long it
+// had gone untouched.
+func TestSessionIdleTimeoutRefusesAndPurges(t *testing.T) {
+	kv := cache.NewInProcessKV()
+	store := authn.NewSessionStore(kv, 12*time.Hour, 50*time.Millisecond)
+
+	id, err := store.Create(context.Background(), authn.Session{Username: "admin"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	if _, ok, gerr := store.Get(context.Background(), id); gerr != nil || !ok {
+		t.Fatalf("a fresh session must resolve: ok=%v err=%v", ok, gerr)
+	}
+
+	time.Sleep(80 * time.Millisecond)
+
+	sess, ok, err := store.Get(context.Background(), id)
+	if err != nil {
+		t.Fatalf("Get after the idle window: %v", err)
+	}
+	if ok {
+		t.Fatalf("an idle session still resolved: %+v", sess)
+	}
+	// Purged, not merely refused: the key still had absolute lifetime left on it.
+	if _, found, kerr := kv.Get(context.Background(), "sess:"+id); kerr != nil || found {
+		t.Errorf("the expired session was left in the store (found=%v, err=%v)", found, kerr)
+	}
+}
+
+// TestSessionIdleDeadlineSlidesOnUse pins the sliding half: a session in continuous use must not be
+// logged out by the idle bound.
+func TestSessionIdleDeadlineSlidesOnUse(t *testing.T) {
+	store := authn.NewSessionStore(cache.NewInProcessKV(), 12*time.Hour, 100*time.Millisecond)
+
+	id, err := store.Create(context.Background(), authn.Session{Username: "admin"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	// Five uses spread over more than one idle window; each slides the deadline.
+	for i := range 5 {
+		time.Sleep(40 * time.Millisecond)
+		if _, ok, gerr := store.Get(context.Background(), id); gerr != nil || !ok {
+			t.Fatalf("use %d: a session in continuous use expired (ok=%v err=%v)", i, ok, gerr)
+		}
+	}
+}
+
+// TestSessionAbsoluteLifetimeIsNeverExtended is the cap the sliding must respect: use does not buy
+// more than the lifetime the session was issued with.
+func TestSessionAbsoluteLifetimeIsNeverExtended(t *testing.T) {
+	store := authn.NewSessionStore(cache.NewInProcessKV(), 120*time.Millisecond, 60*time.Millisecond)
+
+	id, err := store.Create(context.Background(), authn.Session{Username: "admin"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	// Kept warm across the whole absolute window, so only the absolute bound can end it.
+	deadline := time.Now().Add(200 * time.Millisecond)
+	var lastOK bool
+	for time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+		_, lastOK, _ = store.Get(context.Background(), id)
+	}
+	if lastOK {
+		t.Error("a continuously used session outlived its absolute lifetime")
+	}
+}
+
+// TestSessionIdleTimeoutOffLeavesTTLTheOnlyBound keeps existing installs' behaviour available.
+func TestSessionIdleTimeoutOffLeavesTTLTheOnlyBound(t *testing.T) {
+	store := authn.NewSessionStore(cache.NewInProcessKV(), time.Hour, 0)
+
+	id, err := store.Create(context.Background(), authn.Session{Username: "admin"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	time.Sleep(60 * time.Millisecond)
+
+	if _, ok, gerr := store.Get(context.Background(), id); gerr != nil || !ok {
+		t.Fatalf("with the idle check off the session must still resolve: ok=%v err=%v", ok, gerr)
 	}
 }

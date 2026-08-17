@@ -22,6 +22,10 @@ import (
 // the search, so the next person does not repeat.
 const defaultContinuousInterval = 30 * time.Second
 
+// externalResyncInterval is how often the desired state is re-PUT even when nothing about it has
+// changed; see leaderTick's skip.
+const externalResyncInterval = 2 * time.Minute
+
 // defaultContinuousTimeout is the per-probe timeout pushed alongside the interval; it is
 // deliberately a small fraction of the interval so a hung probe cannot overlap.
 const defaultContinuousTimeout = 5 * time.Second
@@ -118,6 +122,8 @@ type Reconciler struct {
 	interval time.Duration
 	lockKey  int64
 
+	// lastPushedAt is when that PUT happened; see externalResyncInterval.
+	lastPushedAt time.Time
 	// lastPushed is the JSON fingerprint of the desired state this replica most recently PUT
 	// successfully; the controller's own change detection (ExternalCheckManager.Apply) absorbs.
 	lastPushed []byte
@@ -127,7 +133,20 @@ type Reconciler struct {
 }
 
 // NewReconciler returns a Reconciler. Run is what starts it.
+/*
+ * ReconcilerLockKey is this loop's OWN advisory key.
+ *
+ * main.go handed it the scheduler's key, so the two loops — which do unrelated work on the same
+ * tick interval — took turns on one lock: every pass of one was a skipped pass of the other, at half
+ * the cadence each was configured for. It is crc32.Checksum([]byte("kconmon-ng.checks.Reconciler"),
+ * crc32.MakeTable(crc32.IEEE)).
+ */
+const ReconcilerLockKey int64 = 3318800038
+
 func NewReconciler(d ReconcilerDeps) *Reconciler { //nolint:gocritic // hugeParam: ReconcilerDeps mirrors scheduler.Deps' value semantics -- a named-field composition root, built once at boot
+	if d.LockKey == 0 {
+		d.LockKey = ReconcilerLockKey
+	}
 	return &Reconciler{
 		lock:        d.Lock,
 		store:       d.Store,
@@ -183,7 +202,16 @@ func (r *Reconciler) leaderTick(ctx context.Context) error {
 		return fmt.Errorf("checks: reconcile: encode desired state: %w", err)
 	}
 
-	if r.lastPushed != nil && bytes.Equal(r.lastPushed, fingerprint) {
+	/* The fingerprint skip is a local memo about a REMOTE state, so it is bounded in time as well as
+	   by equality. The controller holds its assignments in memory: a restart (a rolling update, an
+	   OOM kill, a node drain — the chart runs one replica by default) or a leadership move leaves the
+	   new process with none, every agent re-subscribes and is sent an EMPTY assignment, and this
+	   reconciler said "unchanged" forever after. Continuous external checks then stopped, silently,
+	   until something else happened to alter the desired state.
+	   A periodic full resync is the standard answer and the cheap one: the PUT replaces the whole
+	   assignment state, so re-sending it is idempotent, and one small request every few minutes is
+	   nothing beside what it repairs. */
+	if r.lastPushed != nil && bytes.Equal(r.lastPushed, fingerprint) && time.Since(r.lastPushedAt) < externalResyncInterval {
 		r.m.ExternalSeriesProjected.WithLabelValues().Set(float64(series))
 		r.m.ExternalReconciles.WithLabelValues(reconcileUnchanged).Inc()
 		return nil
@@ -197,6 +225,7 @@ func (r *Reconciler) leaderTick(ctx context.Context) error {
 	}
 
 	r.lastPushed = fingerprint
+	r.lastPushedAt = time.Now()
 	r.m.ExternalSeriesProjected.WithLabelValues().Set(float64(series))
 	r.m.ExternalReconciles.WithLabelValues(reconcilePushed).Inc()
 	slog.Info("checks: pushed continuous external-check assignment",

@@ -36,7 +36,12 @@ func (f *fakeTokenStore) CreateToken(_ context.Context, name string, hash []byte
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.nextN++
-	id := fmt.Sprintf("tok-%d", f.nextN)
+	/* A real token id is a UUID -- api_tokens.id is `UUID PRIMARY KEY DEFAULT gen_random_uuid()`.
+	   This double used to mint "tok-N", which is a shape the store can never produce, and that
+	   leniency hid a defect: the delete handler now rejects a malformed id with 404 instead of
+	   handing it to the store and reporting the parse failure as 502 "tokens unavailable". A fake
+	   that accepts ids the database would refuse cannot exercise that. */
+	id := fmt.Sprintf("00000000-0000-4000-8000-%012d", f.nextN)
 	tok := store.Token{ID: id, Name: name, Owner: owner, ExpiresAt: expiresAt, CreatedAt: time.Now()}
 	f.tokens[id] = tok
 	f.hashes[hex.EncodeToString(hash)] = id

@@ -86,6 +86,12 @@ var _ MaintenanceReader = (*DB)(nil)
 
 // Validate reports whether in is a well-formed window.
 func (in *MaintenanceInput) Validate() error {
+	// See validateNoControlChars: a NUL here came back as 502 "maintenance windows unavailable".
+	for _, f := range [][2]string{{"scope", in.Scope}, {"reason", in.Reason}, {"created by", in.CreatedBy}} {
+		if err := validateNoControlChars(f[0], f[1]); err != nil {
+			return fmt.Errorf("store: maintenance window: %w", err)
+		}
+	}
 	if in.StartAt.IsZero() {
 		return errors.New("store: maintenance window: start at must not be zero")
 	}

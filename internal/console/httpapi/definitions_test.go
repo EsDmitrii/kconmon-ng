@@ -82,6 +82,11 @@ func (f *fakeChecksStore) UpdateDefinition(_ context.Context, id string, in stor
 	if !ok {
 		return store.Definition{}, store.ErrNotFound
 	}
+	// The real store folds an unresolved destination FK into ErrNotFound too, exactly as the create
+	// path above does; a fake that skipped it made the handler look like it distinguished them.
+	if in.DestinationTargetID != "" && !f.targets[in.DestinationTargetID] {
+		return store.Definition{}, store.ErrNotFound
+	}
 	if other, taken := f.defNames[in.Name]; taken && other != id {
 		return store.Definition{}, store.ErrAlreadyExists
 	}
@@ -702,13 +707,17 @@ func TestAuditDetailAllowlistIsPinned(t *testing.T) {
 }
 
 // TestAuditResultAllowlistIsPinned is TestAuditDetailAllowlistIsPinned for the second; same
-// default-deny posture, same conscious-widening guard: every key here must name a COUNT.
+// default-deny posture, same conscious-widening guard. A key here names either a COUNT (import) or
+// the identity of the RBAC row the request acted on — never anything a body carried unexamined.
 func TestAuditResultAllowlistIsPinned(t *testing.T) {
 	want := map[string][]string{
+		"POST /api/v1/rbac/bindings":        {"bindingId"},
+		"DELETE /api/v1/rbac/bindings/{id}": {"bindingId", "roleName", "subjectKind", "subjectId"},
 		"POST /api/v1/import": {
 			"dryRun",
 			"targets", "checkDefinitions", "checkSchedules",
 			"alertRules", "webhooks", "maintenanceWindows",
+			"rbacRoles", "rbacBindings",
 		},
 	}
 	assertAllowlistPinned(t, "auditResultAllowlist", auditResultAllowlist, want)
@@ -766,5 +775,44 @@ func TestChecksListFiltersAndBadInputs(t *testing.T) {
 	w = doRequest(t, s, http.MethodGet, "/api/v1/checks?targetId=not-a-uuid", nil, nil)
 	if w.Code != http.StatusBadRequest {
 		t.Errorf("garbage targetId = %d, want 400 (M4 Task 4 fix pass: a typo is never a 502)", w.Code)
+	}
+}
+
+/*
+ * A body naming a target that does not exist is a 422 about the BODY, not a 404 about the check.
+ *
+ * The store folds "no such definition row" and "the destination target FK does not resolve" into one
+ * ErrNotFound, so the update path answered 404 "no check definition with that id" for a definition
+ * sitting untouched in the table -- telling the operator their check had vanished when the real
+ * problem was one field they had just typed.
+ */
+func TestChecksUpdateWithAnUnknownTargetIs422NotAMissingDefinition(t *testing.T) {
+	st := newFakeChecksStore()
+	known := uuid.NewString()
+	st.targets[known] = true
+	s := newOperatorChecksServer(t, st, nil)
+
+	created := doRequest(t, s, http.MethodPost, "/api/v1/checks",
+		strings.NewReader(fmt.Sprintf(`{"name":"edge-tcp","sourceSelection":"all","destinationKind":"target",`+
+			`"destinationTargetId":%q,"checkType":"tcp","plane":"pod"}`, known)), mutateWithCSRF)
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create = %d: %s", created.Code, created.Body)
+	}
+	var def struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(created.Body.Bytes(), &def); err != nil {
+		t.Fatalf("decode created definition: %v", err)
+	}
+
+	missing := uuid.NewString()
+	w := doRequest(t, s, http.MethodPut, "/api/v1/checks/"+def.ID,
+		strings.NewReader(fmt.Sprintf(`{"name":"edge-tcp","sourceSelection":"all","destinationKind":"target",`+
+			`"destinationTargetId":%q,"checkType":"tcp","plane":"pod"}`, missing)), mutateWithCSRF)
+	if w.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("update with an unknown destination target = %d, want 422: %s", w.Code, w.Body)
+	}
+	if !strings.Contains(w.Body.String(), "names no target") {
+		t.Errorf("body does not name the real problem: %s", w.Body)
 	}
 }

@@ -127,8 +127,11 @@ type IncidentPage struct {
 // while several people look at it.
 type IncidentStore interface {
 	CreateIncident(ctx context.Context, in IncidentInput) (Incident, error)
-	// UpdateIncidentStatus moves an incident between open and resolved.
-	UpdateIncidentStatus(ctx context.Context, id, status string, resolvedAt *time.Time) (Incident, error)
+	/* UpdateIncidentStatus moves an incident between open and resolved.
+	   The bool is whether THIS call performed the transition: false means the incident was already in
+	   that status (a racing writer got there first), and the returned Incident is the current row. It
+	   is what keeps one resolution from being announced N times. */
+	UpdateIncidentStatus(ctx context.Context, id, status string, resolvedAt *time.Time) (Incident, bool, error)
 	UpdateIncidentNotes(ctx context.Context, id, notes string) (Incident, error)
 	UpdateIncidentPinned(ctx context.Context, id string, pinned json.RawMessage) (Incident, error)
 	// DeleteIncident returns ErrNotFound when id does not name an incident,
@@ -149,6 +152,12 @@ var _ IncidentReader = (*DB)(nil)
 
 // Validate reports whether in is a well-formed incident.
 func (in *IncidentInput) Validate() error {
+	// See validateNoControlChars: a NUL here came back as 502 "incidents unavailable".
+	for _, f := range [][2]string{{"title", in.Title}, {"scope", in.Scope}, {"notes", in.Notes}} {
+		if err := validateNoControlChars(f[0], f[1]); err != nil {
+			return fmt.Errorf("store: incident: %w", err)
+		}
+	}
 	if in.Title == "" {
 		return errors.New("store: incident: title must not be empty")
 	}
@@ -377,13 +386,13 @@ func (db *DB) ListIncidents(ctx context.Context, f IncidentFilter) (IncidentPage
 
 // UpdateIncidentStatus resolves or reopens an incident. See IncidentStore for
 // why resolvedAt is not a separate call.
-func (db *DB) UpdateIncidentStatus(ctx context.Context, id, status string, resolvedAt *time.Time) (Incident, error) {
+func (db *DB) UpdateIncidentStatus(ctx context.Context, id, status string, resolvedAt *time.Time) (Incident, bool, error) {
 	if err := validateIncidentStatus(status, resolvedAt); err != nil {
-		return Incident{}, err
+		return Incident{}, false, err
 	}
 	iid, err := parseUUID(id)
 	if err != nil {
-		return Incident{}, fmt.Errorf("store: update incident status: %w: %w", ErrNotFound, err)
+		return Incident{}, false, fmt.Errorf("store: update incident status: %w: %w", ErrNotFound, err)
 	}
 	start := time.Now()
 	row, err := gen.New(db.pool).UpdateIncidentStatus(ctx, gen.UpdateIncidentStatusParams{
@@ -392,10 +401,20 @@ func (db *DB) UpdateIncidentStatus(ctx context.Context, id, status string, resol
 		ResolvedAt: timestamptzFromPtr(resolvedAt),
 	})
 	db.observe(queryUpdateIncidentStatus, start, queryResult(wrapNoRows(err)))
-	if err != nil {
-		return Incident{}, fmt.Errorf("store: update incident status: %w", wrapNoRows(err))
+	if err == nil {
+		return incidentFromRow(&row), true, nil
 	}
-	return incidentFromRow(&row), nil
+	/* No rows is AMBIGUOUS on its own: either the id does not exist, or the incident is already in
+	   this status. The read tells them apart, and an already-transitioned incident is a success with
+	   nothing to announce. */
+	if errors.Is(wrapNoRows(err), ErrNotFound) {
+		current, getErr := db.GetIncident(ctx, id)
+		if getErr == nil {
+			return current, false, nil
+		}
+		return Incident{}, false, fmt.Errorf("store: update incident status: %w", getErr)
+	}
+	return Incident{}, false, fmt.Errorf("store: update incident status: %w", wrapNoRows(err))
 }
 
 // UpdateIncidentNotes replaces the incident's Markdown notes.
