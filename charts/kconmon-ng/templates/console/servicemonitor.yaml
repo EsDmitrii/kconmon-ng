@@ -1,0 +1,23 @@
+{{- /* The console publishes its own metric family (query latency, retention sweeps, auth outcomes,
+       webhook delivery) and had no ServiceMonitor at all, so serviceMonitor.enabled collected the
+       agent and the controller and silently nothing from here. */}}
+{{- if and .Values.console.enabled .Values.serviceMonitor.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "kconmon-ng.console.fullname" . }}
+  labels:
+    {{- include "kconmon-ng.labels" . | nindent 4 }}
+    app.kubernetes.io/component: console
+spec:
+  selector:
+    matchLabels:
+      {{- include "kconmon-ng.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: console
+  endpoints:
+    # The metrics port, not the API port: the two were the same until the API port stopped being
+    # something a scrape rule may open. See the console NetworkPolicy.
+    - port: metrics
+      path: /metrics
+      interval: {{ .Values.serviceMonitor.interval }}
+{{- end }}

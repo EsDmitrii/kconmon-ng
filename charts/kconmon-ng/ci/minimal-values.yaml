@@ -1,18 +1,17 @@
 ---
-# Minimal values for chart testing
 controller:
   replicaCount: 1
   resources:
     limits:
       cpu: 100m
       memory: 64Mi
-
+  pdb:
+    enabled: false
 agent:
   resources:
     limits:
       cpu: 100m
       memory: 64Mi
-
 config:
   checkers:
     tcp:
@@ -25,15 +24,9 @@ config:
       enabled: false
     http:
       enabled: false
-
 serviceMonitor:
   enabled: false
-
 prometheusRule:
   enabled: false
-
 networkPolicy:
-  enabled: false
-
-pdb:
   enabled: false

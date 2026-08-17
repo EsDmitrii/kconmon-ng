@@ -17,21 +17,9 @@ home: https://github.com/EsDmitrii/kconmon-ng
 sources:
   - https://github.com/EsDmitrii/kconmon-ng
 
-# Optional subcharts for the product's OWN stack. Both are OFF by default, and
-# the monitoring stack stays external — this chart consumes Prometheus, it does
-# not install it. Helm puts subchart values under the ALIAS key, so they are
-# configured from the top-level `cnpg-operator:` and `valkey:` blocks.
-dependencies:
-  - name: cloudnative-pg
-    alias: cnpg-operator
-    version: 0.29.0
-    repository: https://cloudnative-pg.github.io/charts
-    condition: cnpg-operator.enabled
-  - name: valkey
-    version: 0.11.0
-    repository: oci://ghcr.io/valkey-io/valkey-helm
-    condition: valkey.enabled
-
+# NO dependencies, deliberately: the chart consumes PostgreSQL, a Redis-compatible bus and
+# Prometheus, and installs none of them. Bring your own; the README carries the exact CNPG and
+# valkey-helm setups this chart is tested against.
 annotations:
   artifacthub.io/license: Apache-2.0
   artifacthub.io/links: |
@@ -39,342 +27,57 @@ annotations:
       url: https://github.com/EsDmitrii/kconmon-ng
     - name: Documentation
       url: https://github.com/EsDmitrii/kconmon-ng#readme
+  # artifacthub.io/changes is PER VERSION: Artifact Hub renders it as the changelog OF the release it
+  # is attached to, not as the project's history. It had accumulated every entry since 1.x, so an
+  # operator evaluating 2.0.0 read that `prometheusRule.rules` was "DEPRECATED but still honoured ...
+  # so existing installs are unaffected" and that the chart shipped optional CNPG and Valkey
+  # subcharts — statements 2.0.0 contradicts, and the first of them describes a key it now rejects
+  # outright. What follows is 2.0.0 and nothing else.
   artifacthub.io/changes: |
-    - kind: fixed
-      description: >-
-        appVersion is 2.0.0, and every config key the chart added is gated on the resolved console
-        image tag — a pinned older image no longer receives keys it would reject at startup
-    - kind: fixed
-      description: >-
-        serviceAccount.create=false no longer strips serviceAccountName from the agent and controller;
-        RBAC moved to its own rbac.create knob and binds to the resolved ServiceAccount name
-    - kind: added
-      description: >-
-        console.valkey.existingSecret/existingSecretKey plus a managed secret sibling, and
-        valkey.passwordFile in the console config — mode=dependency/external can finally AUTH
-    - kind: added
-      description: >-
-        NetworkPolicy gained the rules the checkers actually need — ICMP (a protocol rule with no
-        ports), external/http/resolver egress, geoipupdate egress — and the apiserver rule is an
-        ipBlock everywhere (a namespaceSelector matches pods, never the apiserver)
-    - kind: added
-      description: >-
-        restricted-PSS defaults on every workload (runAsNonRoot, drop ALL, seccomp RuntimeDefault,
-        read-only root where possible) and automountServiceAccountToken false where no API call is made
-    - kind: fixed
-      description: >-
-        geoip.mode defaults to derived, so a 1.x upgrade with enrichment keeps working; disabled no
-        longer leaks fake /geoip paths past the binary's own guard; geoipupdate is a native sidecar
-    - kind: fixed
-      description: >-
-        Agent-side config guards (httpPort==grpcPort, empty dns.hosts, http/external without targets),
-        dashboards follow config.metricsPrefix, controller PDB gates on replicaCount > 1,
-        checksum/secret rolls the console on a managed-Secret change, and alerting.namespace fails fast
-    - kind: added
-      description: >-
-        GeoLite2 databases now keep themselves current — console.mtr.enrichment.geoip.mode=auto (the
-        new default) runs MaxMind's own geoipupdate image as a sidecar into an emptyDir at /geoip.
-        mode=volume keeps the bring-your-own-files path for airgapped installs, mode=disabled turns
-        the sources off
-    - kind: added
-      description: >-
-        The console reloads a refreshed mmdb WITHOUT a restart: the enrichment reader re-stats both
-        files every geoip.reloadInterval and swaps the reopened database in under a lock, so no
-        in-flight lookup can read a closed mmap. A half-written download is retried on the next tick
-    - kind: added
-      description: >-
-        dashboards.enabled renders dashboards/*.json as ConfigMaps carrying the grafana_dashboard
-        sidecar label, with namespace/folder/label knobs — the chart shipped them but installed nothing
-    - kind: added
-      description: >-
-        NOTES.txt now names what THIS release left undecided (no scrape, no alerts, no dashboards,
-        empty console.prometheus.url, anonymous auth, no database, valkey off with replicas > 1)
     - kind: changed
       description: >-
-        BREAKING — every existingSecretKey default is now component-scoped and unique, so one shared
-        Secret can hold the whole stack's credentials: dsn -> console-database-dsn, password ->
-        console-local-admin-password, clientSecret -> console-oidc-client-secret, encryptionKey ->
-        console-webhooks-encryption-key. Set existingSecretKey explicitly to keep the old names
+        BREAKING — the chart installs no infrastructure. PostgreSQL and the Redis-compatible bus were
+        subcharts and modes; they are now two top-level blocks, database and redis, each taking one
+        Secret that holds a DSN. Run whatever you already run
+    - kind: removed
+      description: >-
+        console.database.*, console.valkey.*, database.mode, database.cnpg.*, redis.mode,
+        redis.address, the valkey and cnpg-operator subcharts, console.networkPolicy.valkeyEgress
+        and valkeyIngressFrom — every one of them fails the render with the key to use instead
+    - kind: removed
+      description: >-
+        prometheusRule.rules, console.controller.grpcAddr, console.webhooks.encryptionKeySecret and
+        pdb.* are removed rather than deprecated: each fails the render naming its replacement,
+        because a rename that keeps accepting the old name leaves two names for one setting
     - kind: changed
       description: >-
-        Naming unified on existingSecret/existingSecretKey chart-wide. Renamed with a deprecation
-        shim (old key honoured alone, both set fails fast): backup.credentialsSecret ->
-        backup.existingSecret, webhooks.encryptionKeySecret.{name,key} ->
-        webhooks.{existingSecret,existingSecretKey}, controller.grpcAddr -> controller.grpcAddress
-    - kind: changed
-      description: >-
-        Chart-managed Secrets now take SEMANTIC fields instead of a free-form stringData map —
-        secret.dsn, secret.password, secret.clientSecret, secret.encryptionKey and
-        secret.{accessKeyId,secretAccessKey}, following bitnami/postgresql, bitnami/valkey and grafana
-    - kind: changed
-      description: >-
-        values.yaml regrouped into eight numbered sections (naming, shared config, agent, controller,
-        console, observability, kubernetes, dependencies); key order is render-neutral and proven so
-    - kind: added
-      description: >-
-        deprecated-keys-values.yaml chart-test profile that renders byte-identically to its new-name twin
-    - kind: added
-      description: >-
-        Optional subcharts for the product's own stack — cloudnative-pg 0.29.0 (alias
-        `cnpg-operator`) and the OFFICIAL valkey-io/valkey-helm 0.11.0 (`valkey`), both OFF
-        by default and pinned in a committed Chart.lock.
-        The monitoring stack stays EXTERNAL: this chart consumes Prometheus, never installs it
-    - kind: added
-      description: >-
-        console.valkey.mode=dependency — a fourth mode pointing the console at the Valkey subchart's
-        primary Service; bundled stays the default and is unchanged
-    - kind: changed
-      description: >-
-        A fresh clone now needs `helm dependency build charts/kconmon-ng` before lint/template/package;
-        the Makefile targets, CI, e2e and the release workflow all run it
-    - kind: added
-      description: >-
-        dependencies-values.yaml chart-test profile with both subcharts enabled. Installing the CNPG
-        operator and the Cluster CR in ONE release is documented as unsupported (templates/crds plus
-        an async webhook race) — the README gives the two-step flow instead
-    - kind: added
-      description: >-
-        Chart-managed Secrets — every existingSecret consumer gained a sibling secret block
-        {create,name,annotations,labels,<field>}, so the chart can render the Secret itself
-        instead of only referencing one. OFF by default; existingSecret is unchanged
-    - kind: added
-      description: >-
-        Secret field values are rendered VERBATIM, so ${vault:...} placeholders and the injector
-        annotations that resolve them (Vault webhook, External Secrets, SOPS) survive templating
-    - kind: added
-      description: >-
-        Covers console.database (dsn), console.auth.local (password), console.auth.oidc
-        (clientSecret), console.webhooks (encryptionKey) and console.database.cnpg.backup
-        (accessKeyId/secretAccessKey)
-    - kind: added
-      description: >-
-        Fail-fast guards — existingSecret together with secret.create names the conflict, and an
-        empty required field names the field; the chart writes only the keys it reads
-    - kind: added
-      description: >-
-        console-managed-secrets-values.yaml chart-test profile covering the create path end to end
-    - kind: changed
-      description: >-
-        The seven built-in alert rules moved OUT of values.yaml and into the chart
-        (templates/_rules.tpl). Rendering is byte-identical; values.yaml now exposes only knobs
-    - kind: added
-      description: >-
-        Per-rule knobs prometheusRule.<alertName>.{enabled,threshold,for,severity} for
-        udpLossHigh, tcpChecksFailing, pairWentSilent, dnsChecksFailing, externalChecksFailing,
-        kconmonAgentsMissing and kconmonControllerDown — each toggles and tunes one rule.
-        A threshold accepts a number (0.25) or a string ("0.25"), because helm --set types only
-        integers, booleans and null, and renders identically either way
-    - kind: added
-      description: >-
-        prometheusRule.additionalRules — user rules appended verbatim, with no metric-prefix
-        rewriting, so they can be written against any prefix
-    - kind: changed
-      description: >-
-        prometheusRule.rules is DEPRECATED but still honoured: a non-empty list replaces every
-        built-in rule and keeps the pre-1.12 expr prefix rewrite, so existing installs are unaffected
-    - kind: changed
-      description: >-
-        Built-in rule expressions print config.metricsPrefix directly instead of being rewritten with
-        replace "kconmon_ng"; the rewrite survives only on the deprecated prometheusRule.rules path
-    - kind: changed
-      description: >-
-        values.yaml and every chart template lost their comment essays; the reasoning now lives
-        in the chart README
-    - kind: added
-      description: >-
-        PairWentSilent alert — the seventh built-in rule, and the only one that fires on ABSENCE:
-        a pair that was probed within the last hour and has then reported nothing for ~15m total
-        (a 5m detection window plus `for: 10m`). The ratio rules cannot see this, because a silent
-        pair is 0/0 and produces no sample at all
-    - kind: added
-      description: >-
-        Alerting (M7) — the console MANAGES Prometheus alert rules and Prometheus EVALUATES them:
-        /alerting builds a rule from six typed templates or raw PromQL, and the reconciler
-        server-side-applies every enabled one into ONE PrometheusRule object
-    - kind: added
-      description: >-
-        console.alerting.{enabled,namespace,syncInterval,bundleName} — OFF by default; enabling it
-        renders a NAMESPACED Role for monitoring.coreos.com/prometheusrules (get,list,watch,create,
-        update,patch — never delete) on the console-only ServiceAccount
-    - kind: added
-      description: >-
-        Foreign rules — PrometheusRule objects the console did not write are listed read-only, and
-        POST /api/v1/alert-rules/import COPIES one into a builder rule; the foreign object is never
-        mutated, so both copies then evaluate until you remove one
-    - kind: added
-      description: >-
-        alert.fired and alert.resolved webhooks with their own payload family, plus
-        console.webhooks.alertPollInterval (30s) — which is also the resolution granularity of every
-        alert.resolved delivery
-    - kind: added
-      description: >-
-        Two new permissions — alerts:read reaches every role and alerts:manage stops at operator,
-        admin and the alert-editor built-in, bringing the total to 25
-    - kind: added
-      description: >-
-        Versioned config export/import (bundle v1, admin-only, dry-run first) and a Settings page
-        carrying it alongside webhook CRUD and read-only deployment info
-    - kind: added
-      description: >-
-        Command palette (Ctrl/Cmd+K) over navigation, actions and Time Machine, and firing alerts on
-        Overview plus an alert row on the Investigate timeline
-    - kind: added
-      description: >-
-        console-alerting-values.yaml chart-test profile — the fullest console: alerting, a database,
-        the webhook encryption key and a non-default alertPollInterval
-    - kind: fixed
-      description: >-
-        Topology events now carry {reason,nodeName,agentId,zone} from all four emission sites, so
-        Time Machine folds a real node set instead of an unattributed one
-    - kind: fixed
-      description: >-
-        values.schema.json closes 44 chart-owned levels with additionalProperties:false and adds the
-        nameOverride/fullnameOverride and agent.nodeSelector/affinity keys the templates always used
-    - kind: fixed
-      description: >-
-        A null console.database.cnpg override (or a null sub-block) no longer crashes rendering
-    - kind: added
-      description: >-
-        Investigation Mode (M6) — /investigate merges eight timeline sources client-side and ranks
-        candidate causes by documented proximity heuristics (INVESTIGATION.md is the authority)
-    - kind: added
-      description: >-
-        Incidents — save an investigation, pin findings, resolve or reopen it; the permalink
-        /investigate?incident={id} rehydrates scope and range, and Overview gained an open-incidents card
-    - kind: added
-      description: >-
-        Maintenance windows — CRUD plus markArea rendering on every scoped chart and a timeline row;
-        M6 renders them, it does not suppress anything (there is no alert engine until M7)
-    - kind: added
-      description: >-
-        Outbound webhooks — incident lifecycle POSTs signed with X-Kconmon-Signature (HMAC-SHA256),
-        3 attempts at 0s/30s/5m with jitter, per-endpoint event filter and last-outcome columns
-    - kind: added
-      description: >-
-        console.webhooks.encryptionKeySecret — the AES-256-GCM key that encrypts each endpoint's signing
-        secret at rest, mounted as a file next to the DSN; keyless leaves create and test answering 503
-    - kind: added
-      description: >-
-        Kubernetes event capture — console.kubernetesContext.{enabled,namespace,resyncInterval}, OFF by
-        default, filtered to nodes in the fleet topology and pods in one namespace
-    - kind: added
-      description: >-
-        A console-only ServiceAccount plus its own ClusterRole (events/nodes/pods get,list,watch),
-        rendered ONLY with kubernetesContext.enabled — the agent/controller grant is never widened
-    - kind: added
-      description: >-
-        console.networkPolicy.kubeAPIEgress — apiserver egress for the event reader, rendered under the
-        same kubernetesContext.enabled gate (a NetworkPolicy is only the cluster-side half of the gate)
-    - kind: added
-      description: >-
-        Five new permissions — incidents:read and maintenance:read reach every role, their :write pair
-        stops at operator and admin, and webhooks:manage is admin-ONLY (credential-adjacent)
-    - kind: added
-      description: >-
-        kconmon_ng_console_k8s_events_total and _webhook_deliveries_total, plus three new table values
-        on _retention_deleted_total (webhooks are deliberately NOT a retention table)
-    - kind: added
-      description: >-
-        console-investigation-values.yaml chart-test profile covering kubernetesContext and the webhook
-        encryption-key mount
-    - kind: added
-      description: >-
-        MTR path history (M5) — every pair's distinct routes deduped by a content hash into
-        mtr_path_snapshots, behind GET /api/v1/mtr/destinations|snapshots and a three-pane /mtr Explorer
-    - kind: added
-      description: >-
-        Hop enrichment — console.mtr.enrichment.* (rDNS plus optional MaxMind mmdb files from an
-        operator-supplied volume mounted at /geoip); OFF by default, every source gating independently
-    - kind: added
-      description: >-
-        Time Machine — ?at= is one global time context every read surface resolves through, and
-        GET /api/v1/topology?at= rebuilds the node set by folding persisted topology_changed events
-    - kind: added
-      description: >-
-        Annotations — create/list/delete notes pinned to a moment or a span, drawn on Explore and
-        object-card charts and inline in the Live feed
-    - kind: added
-      description: >-
-        Three new permissions — mtr:read and annotations:read reach viewer (telemetry, not configuration),
-        while annotations:write stops at operator and admin
-    - kind: added
-      description: >-
-        kconmon_ng_console_mtr_snapshots_total, _enrichment_cache_total and _enrichment_lookups_total,
-        plus three new table values on _retention_deleted_total
-    - kind: added
-      description: >-
-        console-mtr-values.yaml chart-test profile covering hop enrichment and the mmdb volume
-    - kind: added
-      description: >-
-        External targets, saved checks and schedules (M4) — CRUD /api/v1/targets|checks|schedules
-        backed by PostgreSQL; requires console.database.mode=cnpg|external
-    - kind: added
-      description: >-
-        Agent external checkers — config.checkers.external.enabled with a mandatory allowedCidrs
-        allowlist (plus deniedCidrs, maxTargets, timeout); OFF by default
-    - kind: added
-      description: >-
-        Continuous external checks — the controller streams per-agent assignments and the console
-        reconciles them from continuous schedules on the scheduler's advisory lock
-    - kind: added
-      description: >-
-        Console schedule loop and stuck-run reaper — console.scheduler.enabled (OFF by default),
-        console.scheduler.tickInterval, PostgreSQL advisory lock for cross-replica singleton ticks
-    - kind: added
-      description: >-
-        Console request rate limits — console.rateLimit.runsPerMinute and
-        console.rateLimit.loginPerMinute; 0 disables a limit, and a Valkey outage fails OPEN
-    - kind: added
-      description: >-
-        POST /api/v1/runs/{id}/cancel — cooperative cancellation of an in-flight diagnostics run
-    - kind: added
-      description: >-
-        Hand-authored OpenAPI spec (docs/console-api.yaml) with generated TypeScript types and a
-        test that walks the router so an undocumented route cannot land
-    - kind: added
-      description: >-
-        kconmon_ng_external_* agent metrics, controller external-assignment gauges, the
-        ExternalChecksFailing alert rule and an external-checks dashboard row
-    - kind: added
-      description: >-
-        console-targets-values.yaml chart-test profile covering targets, scheduler and rate limits
-    - kind: added
-      description: >-
-        Console persistence (M3) — console.database.mode=cnpg|external|disabled,
-        PostgreSQL via CloudNativePG, event history, run history
-    - kind: added
-      description: >-
-        Console authentication and RBAC (M3) — console.auth.mode=anonymous|local|header|oidc,
-        built-in and custom roles, audit log, API tokens (PATs)
-    - kind: added
-      description: >-
-        Diagnostics runner — on-demand run fan-out with persisted history, permalinks,
-        and a live run:{id} WebSocket topic with REST-polling fallback
-    - kind: added
-      description: Object cards (Node, Pair) with a "Recent changes" event rail
-    - kind: added
-      description: NetworkPolicy opens console<->database (CNPG or external) and console->OIDC IdP on both sides
-    - kind: added
-      description: Console realtime (M2) — controller.events.enabled, console.valkey.mode, WebSocket /ws, Live page
-    - kind: added
-      description: Bundled ephemeral Valkey for cross-replica console fan-out (no PVC by design, ADR-002)
-    - kind: added
-      description: NetworkPolicy opens console->controller gRPC and console->Valkey on both sides
-    - kind: added
-      description: Optional Console web UI (console.enabled, off by default) — M0 foundation
-    - kind: fixed
-      description: ICMP checker sets net.ipv4.ping_group_range so ping sockets work on all runtimes
-    - kind: added
-      description: new agent.podSecurityContext value opens net.ipv4.ping_group_range for the ICMP checker
-    - kind: fixed
-      description: values.schema.json http target field expectedStatus -> expectStatus to match the checker
-    - kind: added
-      description: kubectl-kconmon plugin for on-demand topology and connectivity checks (install via krew)
-    - kind: added
-      description: On-demand diagnostics API — POST /api/v1/diagnostics runs a one-shot check (leader only)
-    - kind: fixed
-      description: Graceful agent deregistration on SIGTERM — peers drop a restarting pod at once, not after TTL
+        BREAKING — the existingSecretKey defaults changed (database `dsn` to `console-database-dsn`,
+        and the three console secrets likewise). Set the key explicitly to keep 1.x behaviour; a
+        default cannot be migrated automatically without guessing
     - kind: security
-      description: go1.26.4 toolchain plus grpc/x-net/otel bumps clear the previous CVE findings
+      description: >-
+        /metrics moved to config.metricsPort (9091) on a listener of its own, for the agent, the
+        controller and the console alike. The scrape NetworkPolicy opens that port only: letting a
+        scraper in must not mean handing its whole namespace the component's unauthenticated API
     - kind: security
-      description: govulncheck CI job and weekly Dependabot updates for gomod, github-actions and docker
+      description: >-
+        networkPolicy.prometheusPodLabels narrows the scrape rule to the scraper's own pods, and the
+        console policy honours it too
+    - kind: security
+      description: >-
+        networkPolicy.kubeAPIEgress lands on the CONTROLLER alone; it used to be spliced into the
+        shared policy, which also selects the agent DaemonSet — the most network-exposed component
+        in the release, which has no apiserver client at all
+    - kind: added
+      description: >-
+        controller.pdb.* (was pdb.*, which only ever rendered the controller's budget) and
+        console.pdb.* alongside it
+    - kind: changed
+      description: >-
+        prometheusRule.additionalRules is spliced verbatim, so a recording rule or keep_firing_for
+        survives; the built-ins are still rendered field by field, because the per-rule knobs rewrite
+        them
+    - kind: changed
+      description: >-
+        values.yaml is nine numbered sections, with database and redis at the top level ahead of the
+        components that consume them

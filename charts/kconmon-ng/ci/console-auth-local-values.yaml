@@ -1,49 +1,17 @@
 ---
-# Console + auth.mode=local values for chart testing (M3 carry: the auth
-# profile that existed until now covered oidc ONLY, so the local-mode render
-# path — the bootstrap-admin Secret projection and the auth.local block in the
-# rendered config.yaml — was never exercised by any profile).
-#
-# This is the MINIMAL set of values that makes local mode render, and every
-# entry below is load-bearing:
-#
-#   - database.mode != disabled is REQUIRED (templates/console/configmap.yaml
-#     fails otherwise: users, tokens and the audit log live in PostgreSQL).
-#     external rather than cnpg to keep the profile installable-shaped without
-#     the CNPG CRDs, exactly like console-auth-values.yaml and
-#     console-investigation-values.yaml.
-#   - valkey.mode != disabled is REQUIRED at replicas > 1 (same file: local
-#     sessions live in Valkey, and the in-process KV has no cross-replica
-#     visibility, so a browser load-balanced elsewhere would be logged out at
-#     random). replicas stays at the chart default of 2 on purpose — the
-#     multi-replica case is the one with a guard to trip.
-#   - auth.local.existingSecret is REQUIRED once bootstrapAdmin is set
-#     (_helpers.tpl consoleLocalAdminSecretName): a bootstrapAdmin with no
-#     Secret behind it would render a bootstrapAdminPasswordFile that nothing
-#     mounts.
-#
-# Both Secret names are DUMMIES that nothing creates, the same posture as
-# console-auth-values.yaml's console-db-dummy: a ci profile is rendered and
-# linted, never installed, and the chart only ever references a Secret by name.
+redis:
+  existingSecret: kconmon-console-redis
+database:
+  existingSecret: console-db-dummy
 console:
   enabled: true
   replicas: 2
-  valkey:
-    mode: bundled
-  database:
-    mode: external
-    existingSecret: console-db-dummy
   auth:
     mode: local
     local:
       bootstrapAdmin: admin
       existingSecret: console-local-admin-dummy
-      # Non-default on purpose, so the value is proven to reach the projected
-      # Secret volume's items[] rather than merely matching the chart default.
       existingSecretKey: bootstrapPassword
-    # A role granted to any authenticated subject no role_binding matches. Empty
-    # is the default (such a subject can do nothing until an admin binds it);
-    # setting it here is what renders the auth.defaultRole line at all.
     defaultRole: viewer
   prometheus:
     url: http://prometheus-operated.monitoring:9090

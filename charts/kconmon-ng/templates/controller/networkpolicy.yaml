@@ -1,0 +1,46 @@
+{{- if .Values.networkPolicy.enabled }}
+{{- /*
+The controller's OWN egress to the Kubernetes apiserver.
+
+It used to live in the shared policy, which selects every component except the console — the agent
+DaemonSet included. The default there rendered `ipBlock: 0.0.0.0/0` on 443 and 6443, so the most
+network-exposed component in the deployment, the one that runs on every node and takes packets from
+the whole cluster, was handed clean unrestricted egress to the internet. The agent has no apiserver
+client at all: its Pod sets automountServiceAccountToken: false and says so in a comment.
+
+The controller is the only apiserver client (the node informer and, with leader election on, the
+Lease). NetworkPolicies are additive, so this policy grants that egress and nothing else; the shared
+policy still governs everything else the controller does.
+
+kubernetes.default.svc is a ClusterIP with no Pod behind it, so a namespaceSelector matches nothing
+here — it has to be an ipBlock. networkPolicy.kubeAPIEgress overrides the default for operators who
+can name their apiserver endpoint, which is the tighter and preferable form.
+*/}}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ printf "%s-apiserver" (include "kconmon-ng.controller.fullname" . | trunc 53 | trimSuffix "-") | trunc 63 | trimSuffix "-" }}
+  labels:
+    {{- include "kconmon-ng.labels" . | nindent 4 }}
+    app.kubernetes.io/component: controller
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "kconmon-ng.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: controller
+  policyTypes:
+    - Egress
+  egress:
+    {{- with .Values.networkPolicy.kubeAPIEgress }}
+    {{- toYaml . | nindent 4 }}
+    {{- else }}
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+      ports:
+        - protocol: TCP
+          port: 443
+        - protocol: TCP
+          port: 6443
+    {{- end }}
+{{- end }}

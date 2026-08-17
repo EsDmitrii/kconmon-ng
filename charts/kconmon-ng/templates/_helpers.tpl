@@ -52,88 +52,73 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end }}
 {{- end }}
 
+{{/*
+Component names, TRUNCATED SO THE SUFFIX SURVIVES.
+
+`fullname` is capped at 63 and the templates used to append "-agent"/"-controller" to it, so a
+release name of ~52 characters produced a Service name of 69-74 — and a Service name is a DNS-1035
+label, hard-capped at 63 by the API server. The install failed at apply time on a name the chart had
+already decided to use. Truncating the BASE keeps the component word, which is the half that carries
+meaning; truncating the whole string would leave "…-controll".
+*/}}
+{{- define "kconmon-ng.agent.fullname" -}}
+{{- printf "%s-agent" (include "kconmon-ng.fullname" . | trunc 57 | trimSuffix "-") | trunc 63 | trimSuffix "-" }}
+{{- end }}
+
+{{- define "kconmon-ng.controller.fullname" -}}
+{{- printf "%s-controller" (include "kconmon-ng.fullname" . | trunc 52 | trimSuffix "-") | trunc 63 | trimSuffix "-" }}
+{{- end }}
+
 {{/* Console fully qualified name. */}}
 {{- define "kconmon-ng.console.fullname" -}}
-{{- printf "%s-console" (include "kconmon-ng.fullname" .) | trunc 63 | trimSuffix "-" }}
+{{- printf "%s-console" (include "kconmon-ng.fullname" . | trunc 55 | trimSuffix "-") | trunc 63 | trimSuffix "-" }}
 {{- end }}
 
-{{/* Bundled Valkey fully qualified name. */}}
-{{- define "kconmon-ng.console.valkeyFullname" -}}
-{{- printf "%s-valkey" (include "kconmon-ng.console.fullname" . | trunc 56 | trimSuffix "-") | trunc 63 | trimSuffix "-" }}
+{{/* Non-empty when the console has a database: a DSN Secret referenced or chart-created. There is
+     no mode any more — the chart does not install PostgreSQL, it dials the one you configured. */}}
+{{- define "kconmon-ng.console.hasDatabase" -}}
+{{- $db := .Values.database | default dict -}}
+{{- if or $db.existingSecret (dig "secret" "create" false $db) -}}true{{- end -}}
 {{- end }}
 
-{{/* Service of the Valkey subchart (console.valkey.mode=dependency). */}}
-{{- define "kconmon-ng.console.valkeyDependencyFullname" -}}
-{{- $vk := .Values.valkey | default dict -}}
-{{- $vk.fullnameOverride | default (printf "%s-valkey" .Release.Name) | trunc 63 | trimSuffix "-" -}}
+{{/* Non-empty when the console has a Redis-compatible bus: a DSN Secret referenced or chart-created.
+     Empty means the in-process bus, which is single-replica only — the configmap guards enforce it.
+     Bring your own server; the chart installs nothing here. */}}
+{{- define "kconmon-ng.console.hasRedis" -}}
+{{- $r := .Values.redis | default dict -}}
+{{- if or $r.existingSecret (dig "secret" "create" false $r) -}}true{{- end -}}
 {{- end }}
 
-{{/* Port the Valkey subchart's Service listens on. */}}
-{{- define "kconmon-ng.console.valkeyDependencyPort" -}}
-{{- dig "service" "port" 6379 (.Values.valkey | default dict) -}}
+{{/* Name of the Redis DSN Secret: an existing one or a chart-created one; empty means no bus. */}}
+{{- define "kconmon-ng.console.redisSecretName" -}}
+{{- $r := .Values.redis -}}
+{{- include "kconmon-ng.secretRef" (dict "existing" $r.existingSecret "secret" $r.secret "path" "redis" "default" (include "kconmon-ng.console.secretName" (dict "ctx" . "suffix" "redis-dsn"))) -}}
 {{- end }}
 
-{{/* Valkey address for the console config; empty (disabled) means the in-process bus. */}}
-{{- define "kconmon-ng.console.valkeyAddress" -}}
-{{- $v := .Values.console.valkey -}}
-{{- if eq $v.mode "bundled" -}}
-{{- printf "%s:%d" (include "kconmon-ng.console.valkeyFullname" .) (int $v.port) -}}
-{{- else if eq $v.mode "dependency" -}}
-{{- if not (dig "enabled" false (.Values.valkey | default dict)) -}}
-{{- fail "console.valkey.mode=dependency requires valkey.enabled=true (the Valkey subchart is not being installed)" -}}
-{{- end -}}
-{{- /* The subchart's ACL auth is off by default; when it IS on the console needs the same password or every publish dies with NOAUTH. */ -}}
-{{- if and (dig "auth" "enabled" false (.Values.valkey | default dict)) (not (include "kconmon-ng.console.valkeySecretName" .)) -}}
-{{- fail "console.valkey.mode=dependency with valkey.auth.enabled=true needs the console to hold the same password: point valkey.auth.usersExistingSecret and console.valkey.existingSecret at ONE Secret, with console.valkey.existingSecretKey set to the ACL username (the subchart keys passwords by username, so the default user means key \"default\")" -}}
-{{- end -}}
-{{- printf "%s:%d" (include "kconmon-ng.console.valkeyDependencyFullname" .) (int (include "kconmon-ng.console.valkeyDependencyPort" .)) -}}
-{{- else if eq $v.mode "external" -}}
-{{- if not $v.address -}}
-{{- fail "console.valkey.mode=external requires console.valkey.address (host:port)" -}}
-{{- end -}}
-{{- $v.address -}}
-{{- end -}}
-{{- end }}
+{{/* Port the console's Prometheus egress rule opens, read out of console.prometheus.url the way the
+     Valkey one reads its address: an explicit :port wins, otherwise the scheme's own default. The
+     rule used to hardcode 9090, so a Thanos on 10902 or an https endpoint on 443 was configured
+     correctly and then blocked by the policy — every matrix, Explore and PromQL page timing out
+     against a URL that was right.
 
-{{/* Port the Valkey egress rule opens: the dialled one, so mode=external reads it out of the address. */}}
-{{- define "kconmon-ng.console.valkeyEgressPort" -}}
-{{- $v := .Values.console.valkey -}}
-{{- $port := "" -}}
-{{- if eq $v.mode "dependency" -}}
-{{- $port = include "kconmon-ng.console.valkeyDependencyPort" . -}}
-{{- else if eq $v.mode "external" -}}
-{{- $last := last (splitList ":" $v.address) -}}
+     BOTH schemes have a default: https is 443 and http is 80. Only https was handled, so
+     `http://prometheus.internal` — a Prometheus or Thanos behind an in-cluster ingress — fell through
+     to the 9090 fallback and was blocked in exactly the way this helper exists to prevent. 9090 is
+     kept for a URL with no scheme at all, where there is nothing to derive from. */}}
+{{- define "kconmon-ng.console.prometheusEgressPort" -}}
+{{- $url := .Values.console.prometheus.url | default "" -}}
+{{- $rest := $url | replace "https://" "" | replace "http://" "" -}}
+{{- $hostport := first (splitList "/" $rest) -}}
+{{- $last := last (splitList ":" $hostport) -}}
 {{- if regexMatch "^[0-9]+$" $last -}}
-{{- $port = $last -}}
-{{- end -}}
-{{- end -}}
-{{- if $port -}}
-{{- $port -}}
+{{- $last -}}
+{{- else if hasPrefix "https://" $url -}}
+443
+{{- else if hasPrefix "http://" $url -}}
+80
 {{- else -}}
-{{- $v.port | int64 -}}
+9090
 {{- end -}}
-{{- end }}
-
-{{/* CNPG Cluster name; capped at 60 so CNPG's "<cluster>-N" instance label still fits 63. */}}
-{{- define "kconmon-ng.console.databaseClusterName" -}}
-{{- printf "%s-db" (include "kconmon-ng.console.fullname" . | trunc 57 | trimSuffix "-") | trunc 60 | trimSuffix "-" }}
-{{- end }}
-
-{{/* Resolve a renamed value: the new key wins, the deprecated one is honoured alone, both set fails, and a new key still equal to .newDefault counts as unset. */}}
-{{- define "kconmon-ng.renamed" -}}
-{{- $old := .old -}}
-{{- $new := .new -}}
-{{- $oldSet := and (not (kindIs "invalid" $old)) (ne (printf "%v" $old) "") -}}
-{{- $newSet := and (not (kindIs "invalid" $new)) (ne (printf "%v" $new) "") -}}
-{{- if and $newSet (hasKey . "newDefault") -}}
-{{- if eq (printf "%v" $new) (printf "%v" .newDefault) -}}
-{{- $newSet = false -}}
-{{- end -}}
-{{- end -}}
-{{- if and $oldSet $newSet -}}
-{{- fail (printf "%s is deprecated and %s is also set — remove the deprecated key" .oldPath .newPath) -}}
-{{- end -}}
-{{- if $newSet -}}{{- $new -}}{{- else if $oldSet -}}{{- $old -}}{{- else -}}{{- $new -}}{{- end -}}
 {{- end }}
 
 {{/* Resolve a Secret reference: an existing one, a chart-created one, or empty. */}}
@@ -154,27 +139,15 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- printf "%s-%s" (include "kconmon-ng.console.fullname" .ctx | trunc 50 | trimSuffix "-") .suffix | trunc 63 | trimSuffix "-" -}}
 {{- end }}
 
-{{/* Name of the DSN Secret: CNPG's generated <cluster>-app, an existing one, or a chart-created one. */}}
+{{/* Name of the DSN Secret: an existing one or a chart-created one; empty means no database. */}}
 {{- define "kconmon-ng.console.databaseSecretName" -}}
-{{- $db := .Values.console.database -}}
-{{- if eq $db.mode "cnpg" -}}
-{{- printf "%s-app" (include "kconmon-ng.console.databaseClusterName" .) -}}
-{{- else if eq $db.mode "external" -}}
-{{- $n := include "kconmon-ng.secretRef" (dict "existing" $db.existingSecret "secret" $db.secret "path" "console.database" "default" (include "kconmon-ng.console.secretName" (dict "ctx" . "suffix" "dsn"))) -}}
-{{- if not $n -}}
-{{- fail "console.database.mode=external requires console.database.existingSecret (a Secret holding a full postgres:// DSN) or console.database.secret.create=true" -}}
-{{- end -}}
-{{- $n -}}
-{{- end -}}
+{{- $db := .Values.database -}}
+{{- include "kconmon-ng.secretRef" (dict "existing" $db.existingSecret "secret" $db.secret "path" "database" "default" (include "kconmon-ng.console.secretName" (dict "ctx" . "suffix" "dsn"))) -}}
 {{- end }}
 
-{{/* Key inside the DSN Secret: CNPG writes "uri". */}}
+{{/* Key inside the DSN Secret. */}}
 {{- define "kconmon-ng.console.databaseSecretKey" -}}
-{{- if eq .Values.console.database.mode "cnpg" -}}
-uri
-{{- else -}}
-{{- .Values.console.database.existingSecretKey -}}
-{{- end -}}
+{{- .Values.database.existingSecretKey -}}
 {{- end }}
 
 {{/* Bootstrap-admin password Secret; only required when a bootstrapAdmin is set. */}}
@@ -197,10 +170,10 @@ uri
 {{- $n -}}
 {{- end }}
 
-{{/* Key inside the webhook Secret; the deprecated encryptionKeySecret.key still wins when alone. */}}
+{{/* Key inside the webhook Secret. */}}
 {{- define "kconmon-ng.console.webhooksKeyName" -}}
 {{- $w := .Values.console.webhooks -}}
-{{- $k := include "kconmon-ng.renamed" (dict "old" (dig "encryptionKeySecret" "key" nil $w) "new" $w.existingSecretKey "newDefault" "console-webhooks-encryption-key" "oldPath" "console.webhooks.encryptionKeySecret.key" "newPath" "console.webhooks.existingSecretKey") -}}
+{{- $k := $w.existingSecretKey -}}
 {{- if not $k -}}
 {{- fail "console.webhooks.existingSecretKey is empty (it names the key holding the base64 AES-256-GCM key)" -}}
 {{- end -}}
@@ -210,7 +183,7 @@ uri
 {{/* Webhook encryption-key Secret, or empty for the supported keyless state. */}}
 {{- define "kconmon-ng.console.webhooksKeySecretName" -}}
 {{- $w := .Values.console.webhooks -}}
-{{- $existing := include "kconmon-ng.renamed" (dict "old" (dig "encryptionKeySecret" "name" nil $w) "new" $w.existingSecret "oldPath" "console.webhooks.encryptionKeySecret.name" "newPath" "console.webhooks.existingSecret") -}}
+{{- $existing := $w.existingSecret -}}
 {{- $n := include "kconmon-ng.secretRef" (dict "existing" $existing "secret" $w.secret "path" "console.webhooks" "default" (include "kconmon-ng.console.secretName" (dict "ctx" . "suffix" "webhooks-key"))) -}}
 {{- if $n -}}
 {{- $_ := include "kconmon-ng.console.webhooksKeyName" . -}}
@@ -220,7 +193,7 @@ uri
 
 {{/* Whether the console gets the projected secrets volume: a database or a webhook key. */}}
 {{- define "kconmon-ng.console.secretsVolumeEnabled" -}}
-{{- if or (ne .Values.console.database.mode "disabled") (include "kconmon-ng.console.webhooksKeySecretName" .) (include "kconmon-ng.console.valkeySecretName" .) -}}
+{{- if or (include "kconmon-ng.console.hasDatabase" .) (include "kconmon-ng.console.webhooksKeySecretName" .) (include "kconmon-ng.console.hasRedis" .) -}}
 true
 {{- end -}}
 {{- end }}
@@ -232,10 +205,26 @@ true
 {{- end -}}
 {{- end }}
 
-{{/* Console-only ServiceAccount name, never the shared agent/controller one. */}}
+{{/*
+Console-only ServiceAccount name, never the shared agent/controller one.
+
+That was the CLAIM and not the behaviour: with serviceAccount.create=false the console fell back to
+serviceAccount.name — the very account the controller Deployment and the agent DaemonSet mount — so
+the console's cluster-wide events ClusterRoleBinding and its PrometheusRule write permissions were
+granted to every agent pod in the fleet. An agent is the most exposed component there is: it holds
+the token, and the console's RBAC came with it.
+
+console.serviceAccount.name is the way to bring your own without sharing. With create=false, no
+console name given, and a console feature that needs a Kubernetes identity, the chart refuses to
+render rather than quietly widening the agent's RBAC.
+*/}}
 {{- define "kconmon-ng.console.serviceAccountName" -}}
 {{- if .Values.serviceAccount.create -}}
 {{- include "kconmon-ng.console.fullname" . -}}
+{{- else if .Values.console.serviceAccount.name -}}
+{{- .Values.console.serviceAccount.name -}}
+{{- else if include "kconmon-ng.console.k8sIdentity" . -}}
+{{- fail "serviceAccount.create is false and a console Kubernetes feature is enabled (console.kubernetesContext.enabled or console.alerting.enabled), but console.serviceAccount.name is empty: the console would fall back to serviceAccount.name, which the agent DaemonSet and the controller also mount — granting the console's cluster-wide events read and its PrometheusRule write to every agent pod. Set console.serviceAccount.name to an account you manage for the console alone." -}}
 {{- else -}}
 {{- default "default" .Values.serviceAccount.name -}}
 {{- end -}}
@@ -244,7 +233,7 @@ true
 {{/* Console -> controller gRPC target; controllerService already carries the port. */}}
 {{- define "kconmon-ng.console.controllerGRPCAddr" -}}
 {{- $c := .Values.console.controller -}}
-{{- $addr := include "kconmon-ng.renamed" (dict "old" $c.grpcAddr "new" $c.grpcAddress "oldPath" "console.controller.grpcAddr" "newPath" "console.controller.grpcAddress") -}}
+{{- $addr := $c.grpcAddress -}}
 {{- if $addr -}}
 {{- $addr -}}
 {{- else if .Values.controller.events.enabled -}}
@@ -252,16 +241,6 @@ true
 {{- end -}}
 {{- end }}
 
-{{/* CNPG backup object-store credentials Secret: an existing one or a chart-created one. */}}
-{{- define "kconmon-ng.console.backupSecretName" -}}
-{{- $b := (.Values.console.database.cnpg | default dict).backup | default dict -}}
-{{- $existing := include "kconmon-ng.renamed" (dict "old" $b.credentialsSecret "new" $b.existingSecret "oldPath" "console.database.cnpg.backup.credentialsSecret" "newPath" "console.database.cnpg.backup.existingSecret") -}}
-{{- $n := include "kconmon-ng.secretRef" (dict "existing" $existing "secret" $b.secret "path" "console.database.cnpg.backup" "default" (include "kconmon-ng.console.secretName" (dict "ctx" . "suffix" "backup-creds"))) -}}
-{{- if not $n -}}
-{{- fail "console.database.cnpg.backup.enabled requires console.database.cnpg.backup.existingSecret or console.database.cnpg.backup.secret.create=true" -}}
-{{- end -}}
-{{- $n -}}
-{{- end }}
 
 {{/* Resolved geoip file paths: explicit overrides win, otherwise they follow the edition IDs. */}}
 {{- define "kconmon-ng.console.geoipPath" -}}
@@ -274,12 +253,27 @@ true
 {{- end -}}
 {{- end }}
 
-{{/* Whether the geoip sources are live at all (enrichment on and a mode that provides files). */}}
+{{/* Whether the geoip sources are live at all (enrichment on and a mode that provides files).
+
+     mode=auto with editions this chart cannot map to a path — a commercial subscriber asking for
+     GeoIP2-City and GeoIP2-ISP rather than the GeoLite2 pair — used to resolve to NOTHING here: no
+     sidecar, no volume, empty asnPath/cityPath, and geoip enrichment silently off behind a mode that
+     says otherwise. It fails the render instead, naming the three knobs that can fix it. */}}
 {{- define "kconmon-ng.console.geoipEnabled" -}}
 {{- $e := .Values.console.mtr.enrichment -}}
 {{- if ne (include "kconmon-ng.console.geoipMode" .) "disabled" -}}
-{{- if or (include "kconmon-ng.console.geoipPath" (dict "ctx" . "edition" "GeoLite2-ASN" "override" $e.geoip.asnPath)) (include "kconmon-ng.console.geoipPath" (dict "ctx" . "edition" "GeoLite2-City" "override" $e.geoip.cityPath)) -}}
+{{- $asn := include "kconmon-ng.console.geoipPath" (dict "ctx" . "edition" "GeoLite2-ASN" "override" $e.geoip.asnPath) -}}
+{{- $city := include "kconmon-ng.console.geoipPath" (dict "ctx" . "edition" "GeoLite2-City" "override" $e.geoip.cityPath) -}}
+{{- if or $asn $city -}}
 true
+{{- else -}}
+{{- /* The SAME refusal under mode=volume. It used to fire for auto only, so the identical state —
+       enrichment on, a mode that promises files, and no path the chart can derive — was a loud
+       failure one way and silence the other: a volume-mode console mounted the operator's PVC,
+       rendered empty asnPath/cityPath, and ran with hop enrichment off behind a mode that says it is
+       on. Nothing in the release, the config or the UI said which of the two it was. The mode is
+       named in the message so the operator knows which knob they set. */}}
+{{- fail (printf "console.mtr.enrichment.geoip.mode=%s but no database path can be derived: the chart maps only GeoLite2-ASN and GeoLite2-City to default paths, and console.mtr.enrichment.geoip.editions names neither. Add one of those editions, or point console.mtr.enrichment.geoip.asnPath / .cityPath at the files you supply" (include "kconmon-ng.console.geoipMode" .)) -}}
 {{- end -}}
 {{- end -}}
 {{- end }}
@@ -327,10 +321,4 @@ volume
 disabled
 {{- end -}}
 {{- end -}}
-{{- end }}
-
-{{/* Valkey password Secret, or empty when the target needs no AUTH. */}}
-{{- define "kconmon-ng.console.valkeySecretName" -}}
-{{- $v := .Values.console.valkey -}}
-{{- include "kconmon-ng.secretRef" (dict "existing" $v.existingSecret "secret" $v.secret "path" "console.valkey" "default" (include "kconmon-ng.console.secretName" (dict "ctx" . "suffix" "valkey"))) -}}
 {{- end }}

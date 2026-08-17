@@ -1,49 +1,24 @@
 ---
-# Console + MTR hop-enrichment values for chart testing (M5 surface: the
-# console.mtr.enrichment block in the rendered config.yaml, and the mmdb volume
-# and volumeMount it implies on the console Deployment). The seven existing
-# profiles are left untouched so the M2 realtime, M3 persistence, M3 auth and M4
-# targets regressions stay covered on their own; this one adds exactly the
-# render paths M5 introduced.
-#
-# Deliberately the ONLY profile that turns console.mtr.enrichment on, because it
-# is the only render whose console config.yaml differs from chart 1.6.0's:
-# everywhere else the mtr: block must stay absent, and a diff between this
-# profile and the others is what shows that.
-#
-# Both enrichment sources are on at once on purpose. They gate independently in
-# the binary, so a profile that enabled only one would leave the other's render
-# path unexercised — and geoip is the half that also drags a volume, a
-# volumeMount and a render-time fail guard behind it.
+redis:
+  existingSecret: kconmon-console-redis
+database:
+  existingSecret: kconmon-console-db
 controller:
   events:
     enabled: true
 console:
   enabled: true
   replicas: 2
-  valkey:
-    mode: bundled
-  # Required by enrichment below: mtr_hop_enrichment is the TTL cache, and
-  # mtr_path_snapshots is what there would be anything to enrich in.
-  database:
-    mode: cnpg
   mtr:
     enrichment:
       enabled: true
       rdns:
         enabled: true
-        # Non-default on purpose, so the value is proven to reach the rendered
-        # config rather than merely matching the binary's own default.
         timeoutMs: 250
       geoip:
-        # The airgapped path: files supplied by us, no sidecar, no MaxMind account.
         mode: volume
         asnPath: /geoip/GeoLite2-ASN.mmdb
         cityPath: /geoip/GeoLite2-City.mmdb
-        # A PVC rather than a ConfigMap: GeoLite2 files run to ~10 MB, past what
-        # many clusters accept in a ConfigMap, so the profile exercises the
-        # source an operator is actually likely to use. The claim is not
-        # rendered by this chart — the passthrough is opaque by design.
         volume:
           persistentVolumeClaim:
             claimName: kconmon-ng-geoip

@@ -2,8 +2,8 @@ kconmon-ng {{ .Chart.AppVersion }} installed as "{{ .Release.Name }}" in namespa
 
 An agent now runs on every node and probes its peers. Watch them register:
 
-  kubectl -n {{ .Release.Namespace }} rollout status ds/{{ include "kconmon-ng.fullname" . }}-agent
-  kubectl -n {{ .Release.Namespace }} logs deploy/{{ include "kconmon-ng.fullname" . }}-controller | grep registered
+  kubectl -n {{ .Release.Namespace }} rollout status ds/{{ include "kconmon-ng.agent.fullname" . }}
+  kubectl -n {{ .Release.Namespace }} logs deploy/{{ include "kconmon-ng.controller.fullname" . }} | grep registered
 
 {{- $todo := list }}
 {{- if not .Values.serviceMonitor.enabled }}
@@ -19,13 +19,13 @@ An agent now runs on every node and probes its peers. Watch them register:
 {{- $todo = append $todo "console.prometheus.url — EMPTY, so every Console data page (matrix, Explore, PromQL) answers 503. Point it at your Prometheus, e.g. http://prometheus-operated.monitoring:9090." }}
 {{- end }}
 {{- if and .Values.console.enabled (eq .Values.console.auth.mode "anonymous") }}
-{{- $todo = append $todo "console.auth.mode — anonymous: every visitor gets the viewer role and the UI shows a permanent warning. Use local, header or oidc for a real deployment." }}
+{{- $todo = append $todo (printf "console.auth.mode — anonymous: every visitor gets the %s role and the UI shows a permanent warning. Use local, header or oidc for a real deployment." .Values.console.auth.anonymous.role) }}
 {{- end }}
-{{- if and .Values.console.enabled (eq .Values.console.database.mode "disabled") }}
-{{- $todo = append $todo "console.database.mode — disabled: no event history, no incidents, no saved checks, no local/oidc auth. Set cnpg or external to keep data." }}
+{{- if and .Values.console.enabled (not (include "kconmon-ng.console.hasDatabase" .)) }}
+{{- $todo = append $todo "database — none configured: no event history, no incidents, no saved checks, no local/oidc auth. Point database.existingSecret at a postgres:// DSN to keep data." }}
 {{- end }}
-{{- if and .Values.console.enabled (gt (int .Values.console.replicas) 1) (eq .Values.console.valkey.mode "disabled") }}
-{{- $todo = append $todo "console.valkey.mode — disabled with replicas > 1: browsers on other replicas will not see live events. Use bundled, dependency or external." }}
+{{- if and .Values.console.enabled (gt (int .Values.console.replicas) 1) (not (include "kconmon-ng.console.hasRedis" .)) }}
+{{- $todo = append $todo "redis — none configured with replicas > 1: browsers on other replicas will not see live events. Point redis.existingSecret at a Secret holding a redis:// DSN." }}
 {{- end }}
 {{- if and .Values.console.enabled .Values.console.mtr.enrichment.enabled (eq .Values.console.mtr.enrichment.geoip.mode "disabled") (not .Values.console.mtr.enrichment.rdns.enabled) }}
 {{- $todo = append $todo "console.mtr.enrichment — on with every source off; hop rows will stay bare." }}
@@ -33,8 +33,11 @@ An agent now runs on every node and probes its peers. Watch them register:
 {{- if and .Values.console.enabled (not (include "kconmon-ng.console.webhooksKeySecretName" .)) }}
 {{- $todo = append $todo "console.webhooks — no encryption key, so creating or testing a webhook endpoint answers 503 (every other webhook route works)." }}
 {{- end }}
-{{- if and .Values.console.enabled (eq .Values.console.auth.mode "anonymous") (not .Values.console.ingress.enabled) .Values.networkPolicy.enabled }}
-{{- $todo = append $todo "console exposure — anonymous auth and the NetworkPolicy allows console ingress from ANY namespace; restrict it or move off anonymous." }}
+{{- /* Only while the ingress rule really is open. With console.networkPolicy.ingressFrom set, the
+       policy admits exactly the peers it names, and telling the operator otherwise sent them to
+       narrow something they had already narrowed. */}}
+{{- if and .Values.console.enabled (eq .Values.console.auth.mode "anonymous") (not .Values.console.ingress.enabled) .Values.networkPolicy.enabled (not .Values.console.networkPolicy.ingressFrom) }}
+{{- $todo = append $todo "console exposure — anonymous auth and the NetworkPolicy admits console ingress from ANY namespace; narrow it with console.networkPolicy.ingressFrom or move off anonymous." }}
 {{- end }}
 {{- if not .Values.controller.leaderElection }}
 {{- $todo = append $todo "controller.leaderElection=false — zone labels and the KconmonAgentsMissing / KconmonControllerDown alerts are inactive." }}

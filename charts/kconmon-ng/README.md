@@ -17,26 +17,32 @@ default. The project README has the full tour:
 - Helm 4 (Helm ≥3.14 also works; the chart ships as an OCI artifact)
 - Optional: Prometheus Operator, if you want the `ServiceMonitor` and
   `PrometheusRule` resources (`serviceMonitor.enabled` / `prometheusRule.enabled`)
-- The agent Pods request the `NET_RAW` capability (for ICMP / raw sockets used by
-  the ICMP checker and MTR)
+- The agent Pods request NO capabilities. ICMP and MTR run on the unprivileged
+  ICMP socket; `NET_RAW` used to be requested and never reached the effective set
+  of a non-root container with `allowPrivilegeEscalation: false`, so it bought
+  nothing and cost the `restricted` PSS profile
 - The ICMP checker opens an unprivileged ICMP "ping" socket, which the kernel
   gates on `net.ipv4.ping_group_range`. Some container runtimes leave this at the
   closed default (`1 0`), so the chart sets the (safe) sysctl via
-  `agent.podSecurityContext`. Set `agent.podSecurityContext: {}` to opt out.
+  `agent.podSecurityContext`. Set `agent.pingGroupRange: false` to drop just that
+  sysctl — `agent.podSecurityContext: null` also works but takes
+  `runAsNonRoot`, `runAsUser: 65532` and `seccompProfile: RuntimeDefault` with
+  it, which is exactly the set a namespace enforcing restricted PSS requires, so
+  the DaemonSet is then rejected at admission.
 
 ## Installing
 
 The chart is published as an OCI artifact on GHCR.
 
 ```bash
-helm install kconmon-ng oci://ghcr.io/esdmitrii/charts/kconmon-ng --version 1.9.0
+helm install kconmon-ng oci://ghcr.io/esdmitrii/charts/kconmon-ng --version 2.0.0
 ```
 
 With the Prometheus Operator objects, which is what most installs want:
 
 ```bash
 helm upgrade --install kconmon-ng oci://ghcr.io/esdmitrii/charts/kconmon-ng \
-  --version 1.9.0 \
+  --version 2.0.0 \
   --set serviceMonitor.enabled=true \
   --set prometheusRule.enabled=true
 ```
@@ -45,14 +51,23 @@ With custom values:
 
 ```bash
 helm install kconmon-ng oci://ghcr.io/esdmitrii/charts/kconmon-ng \
-  --version 1.9.0 -f values.yaml
+  --version 2.0.0 -f values.yaml
 ```
+
+### Multi-node kind/minikube needs a real local provisioner
+
+The default `standard` StorageClass on minikube (`minikube-hostpath`) binds
+immediately and creates the backing directory only on the control plane, with no
+node affinity — a database Pod scheduled on a worker then dies in `initdb` with
+`Permission denied`. Install a `WaitForFirstConsumer` provisioner (`minikube
+addons enable storage-provisioner-rancher`, or local-path on kind) and point
+your database chart's `storageClass` at it.
 
 ### Upgrading
 
 ```bash
 helm upgrade kconmon-ng oci://ghcr.io/esdmitrii/charts/kconmon-ng \
-  --version 1.9.0 -f values.yaml
+  --version 2.0.0 -f values.yaml
 ```
 
 ### Uninstalling
@@ -62,6 +77,20 @@ helm uninstall kconmon-ng
 ```
 
 ## Values
+
+`values.yaml` is laid out in nine sections, and the first thing worth knowing is
+what is NOT under `console:` — the stack it runs on is configured on its own:
+
+| Block | What it is |
+| --- | --- |
+| `database:` | PostgreSQL: the Secret holding its `postgres://` DSN, plus pool/retention settings |
+| `redis:` | The session/rate-limit/pub-sub server: the Secret holding its `redis://` DSN |
+| `console:` | The Console workload itself — auth, features, ingress, resources |
+| `agent:` / `controller:` | The two always-on workloads |
+
+So "bring your own PostgreSQL" is `database.existingSecret`, not a Console
+setting, and any Redis-compatible server is `redis.existingSecret` — the Console
+never had an opinion about either, and the chart installs neither.
 
 The table below lists the most relevant parameters. See
 [`values.yaml`](values.yaml) for the complete set.
@@ -73,8 +102,9 @@ The table below lists the most relevant parameters. See
 | `controller.resources` | requests `50m`/`64Mi`, limits `200m`/`128Mi` | Controller resource requests/limits |
 | `agent.tolerations` | `[{operator: Exists}]` | Agent DaemonSet tolerations (default: run on all nodes) |
 | `agent.resources` | requests `50m`/`64Mi`, limits `200m`/`128Mi` | Agent resource requests/limits |
-| `agent.securityContext` | `{capabilities: {add: [NET_RAW]}}` | Agent container securityContext (NET_RAW for ICMP/MTR raw sockets) |
-| `agent.podSecurityContext` | `{sysctls: [{name: net.ipv4.ping_group_range, value: "0 2147483647"}]}` | Agent Pod securityContext; opens `ping_group_range` so the ICMP checker can open ping sockets. Set to `{}` to opt out |
+| `agent.securityContext` | `{allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: {drop: [ALL]}}` | Agent container securityContext; add `NET_RAW` yourself only if you also make it effective |
+| `agent.podSecurityContext` | `{runAsNonRoot: true, runAsUser: 65532, seccompProfile: {type: RuntimeDefault}, sysctls: [{name: net.ipv4.ping_group_range, value: "0 2147483647"}]}` | Agent Pod securityContext. `null` deletes the WHOLE sub-tree, restricted-PSS keys included; to drop only the sysctl use `agent.pingGroupRange: false` |
+| `agent.pingGroupRange` | `true` | Render the `net.ipv4.ping_group_range` sysctl. Set `false` on a runtime that already opens it, or where the sysctl is not allowed, without losing the restricted-PSS keys |
 | `config.metricsPrefix` | `kconmon_ng` | Prefix for all exported Prometheus metrics |
 | `config.checkers.tcp.enabled` | `true` | Enable TCP checker (interval `5s`, timeout `1s`) |
 | `config.checkers.udp.enabled` | `true` | Enable UDP checker (interval `5s`, timeout `250ms`, `packets: 5`) |
@@ -86,13 +116,13 @@ The table below lists the most relevant parameters. See
 | `prometheusRule.<alertName>` | all enabled | Per-rule `enabled` / `threshold` / `for` / `severity` |
 | `prometheusRule.additionalRules` | `[]` | Extra rules appended to the group verbatim |
 | `networkPolicy.enabled` | `false` | Create a `NetworkPolicy` (set `networkPolicy.prometheusNamespace` to allow scraping) |
-| `pdb.enabled` | `true` | Create a `PodDisruptionBudget` (`pdb.minAvailable: 1`) |
+| `controller.pdb.enabled` | `true` | PodDisruptionBudget for the controller — rendered ONLY at `controller.replicaCount > 1` |
 
 ## Console (optional)
 
 An optional web UI Deployment, off by default (`console.enabled: false`).
 Read-only pages (topology, matrix, PromQL) work with no extra setup; setting
-`console.database.mode` (PostgreSQL, via CloudNativePG or an external DSN)
+`database.existingSecret` (any PostgreSQL, by DSN)
 and `console.auth.mode` (`anonymous | local | header | oidc`) adds durable
 event/run history, authentication, RBAC and an on-demand diagnostics runner.
 Every knob is documented inline in this chart's `values.yaml`, and the HTTP
@@ -102,12 +132,15 @@ API is specified in
 | Key | Default | Description |
 | --- | --- | --- |
 | `console.enabled` | `false` | Deploy the Console |
-| `console.replicas` | `2` | Console replica count (stateless; realtime fan-out needs `console.valkey.mode` set for `replicas > 1`) |
+| `console.replicas` | `1` | Console replica count. More than 1 REQUIRES `redis.existingSecret`: sessions, the rate-limit counters and the realtime fan-out live there, and the chart refuses the combination rather than silently multiplying every rate limit by the replica count |
 | `console.auth.mode` | `anonymous` | `anonymous \| local \| header \| oidc` |
-| `console.database.mode` | `disabled` | `disabled \| cnpg \| external` — PostgreSQL persistence |
+| `console.auth.session.ttl` | `12h` | Absolute session lifetime, counted from login and never extended |
+| `console.auth.session.idleTimeout` | `1h` | Session is refused and purged after this much inactivity; slides forward on every request, never past `ttl`. `0` disables it |
+| `database.existingSecret` | `""` | Secret holding a `postgres://` DSN; empty means an in-memory console |
+| `redis.existingSecret` | `""` | Secret holding a `redis://` DSN; empty means the in-process bus (`console.replicas: 1`) |
 | `console.kubernetesContext.enabled` | `false` | Capture core/v1 Events into the Investigate timeline; renders a console-only ServiceAccount and a `ClusterRole` for events |
 | `console.alerting.enabled` | `false` | Manage Prometheus alert rules from the Console; renders a **namespaced** `Role` for `monitoring.coreos.com/prometheusrules` and applies one `PrometheusRule` object (`console.alerting.bundleName`). Needs a database and the Prometheus Operator CRD |
-| `console.webhooks.encryptionKeySecret.name` | `""` | Secret holding the AES-256-GCM key that encrypts webhook signing secrets at rest; empty leaves webhook create/test answering 503 |
+| `console.webhooks.existingSecret` | `""` | Secret holding the AES-256-GCM key that encrypts webhook signing secrets at rest; empty leaves webhook create/test answering 503 |
 | `<consumer>.secret.create` | `false` | Let the chart render the Secret instead of referencing one ([Chart-managed Secrets](#chart-managed-secrets)) |
 
 ## Metrics
@@ -284,17 +317,17 @@ can already see everywhere.
 Built-in rule expressions print `config.metricsPrefix` directly, so a custom
 prefix renders correctly with no rewriting. Annotations deliberately do not name
 metrics, since prose is not rewritten either. The Grafana dashboards in
-`dashboards/` are imported as plain JSON with `kconmon_ng_` written out
-literally and nothing rewrites them, so a non-default prefix means editing that
-JSON by hand.
+`dashboards/` are rewritten AT RENDER TIME: `dashboards.enabled` substitutes
+`kconmon_ng_` for `<config.metricsPrefix>_` in every panel, so the shipped JSON
+must keep the literal `kconmon_ng_` prefix and must NOT be hand-edited — this
+paragraph used to say the opposite and sent operators off to edit that JSON by
+hand, and a fork of it would then trip `make dashboards-check`.
 
-### Migrating from `prometheusRule.rules`
+### `prometheusRule.rules` is removed
 
-The pre-1.12 shape — a full list of rule objects in `prometheusRule.rules` — is
-deprecated but still works. A non-empty list **replaces every built-in rule**
-and keeps the old behaviour, including the `replace "kconmon_ng" <prefix>`
-rewrite of each `expr`, so metric names in it must stay written with the literal
-`kconmon_ng` prefix. `additionalRules` is appended either way.
+The pre-1.12 shape — a full list of rule objects — **replaced every built-in
+rule** and silently discarded the per-rule knobs beside it. 2.0.0 removes it, and
+a values file that still sets it fails the render with this paragraph's advice.
 
 To migrate: drop the entries that are just the built-ins, move genuinely custom
 rules to `additionalRules` (rewriting their metric names to your real prefix),
@@ -308,147 +341,93 @@ here, from the chart, edited in Git. The latter lets operators build rules in
 the Console UI, stores them in PostgreSQL and reconciles them into a *separate*,
 console-owned `PrometheusRule` object. Run both, either, or neither.
 
-## Optional dependencies
+## The stack around it: bring your own
 
-The chart can install the pieces of **its own stack** — the PostgreSQL operator
-and the Valkey the Console uses for cross-replica fan-out. Both are **off by
-default**, so an install that does not ask for them renders exactly as before.
+The chart installs the **monitor** — agent, controller, console — and nothing
+else. PostgreSQL, a Redis-compatible bus and Prometheus are infrastructure this
+chart *consumes*: a cluster has one of each, shared by everything in it, and a
+product chart is the wrong owner for them. There are no subcharts and no
+`helm dependency` step.
 
-**The monitoring stack stays external.** Prometheus Operator and Grafana are
-infrastructure this chart *consumes*, never installs: `serviceMonitor` and
-`prometheusRule` produce objects for an operator you already run, and the
-dashboards under `dashboards/` are JSON you import. A cluster has one monitoring
-stack shared by everything in it, and a product chart is the wrong owner for it.
+Each is one connection string:
 
-| Subchart | Values key | Version | Default |
-| --- | --- | --- | --- |
-| [`cloudnative-pg`](https://github.com/cloudnative-pg/charts) | `cnpg-operator` | `0.29.0` | off |
-| [`valkey`](https://github.com/valkey-io/valkey-helm) (official) | `valkey` | `0.11.0` | off |
+| What | How you configure it | Empty means |
+| --- | --- | --- |
+| PostgreSQL | `database.existingSecret` → a Secret holding a `postgres://` DSN | in-memory console: no history, no incidents, no local/oidc auth |
+| Redis-compatible bus | `redis.existingSecret` → a Secret holding a `redis://` DSN | in-process bus, and `console.replicas` must be 1 |
+| Prometheus | `console.prometheus.url` | the matrix, Explore and PromQL pages answer 503 |
 
-Versions are pinned in `Chart.lock`, which is committed; the fetched `charts/*.tgz`
-are not. A fresh clone needs `helm dependency build charts/kconmon-ng` before
-`helm lint`/`template`/`package` (the `Makefile` targets and CI do this).
+So any provider works: CloudNativePG, Percona, Zalando, RDS, Cloud SQL, a plain
+StatefulSet; Valkey, Redis, a sentinel-fronted pair, ElastiCache. The DSN carries
+the host, the credentials, the database number and TLS (`rediss://`,
+`postgres://…?sslmode=verify-full`), so the chart never has to model any of it.
 
-### Helm puts subchart values at the top level
+### The stack this chart is tested against
 
-This trips everyone once: a subchart is configured under a **top-level key named
-after the dependency alias**, not nested under the feature it belongs to. So the
-operator is `cnpg-operator:` at the root of your values file — *not*
-`console.database.cnpg.operator`. Everything under that key goes to the subchart
-verbatim, so the whole upstream values surface is available:
+Nothing here is required — it is what CI and the maintainer's own cluster run,
+written down so "it works on our stack" is a checkable claim rather than a
+promise:
+
+**PostgreSQL — [CloudNativePG](https://cloudnative-pg.io/).** Install the
+operator once per cluster, then a `Cluster` per application:
 
 ```yaml
-cnpg-operator:
-  enabled: true          # read by this chart's dependency condition
-  replicaCount: 1        # everything else is upstream cloudnative-pg values
-  monitoring:
-    podMonitorEnabled: true
-
-valkey:
-  enabled: true
-  architecture: standalone
-
-console:
-  valkey:
-    mode: dependency     # points the console at the subchart's primary Service
-  database:
-    mode: cnpg
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: kconmon-db
+spec:
+  instances: 2
+  storage:
+    size: 10Gi
 ```
 
-`console.database.cnpg.*` still describes the **Cluster CR** this chart renders;
-`cnpg-operator.*` describes the **operator** that reconciles it. Two different
-things, deliberately two different keys.
+CNPG publishes the DSN itself, in a Secret named `<cluster>-app` under the key
+`uri` — point the chart straight at it:
 
-### CNPG: operator and database in one release — the honest answer
+```yaml
+database:
+  existingSecret: kconmon-db-app
+  existingSecretKey: uri
+```
 
-**Use two steps.** Install the operator first, let it become ready, then turn the
-database on:
+**Bus — [valkey-helm](https://github.com/valkey-io/valkey-helm)** (the official
+Valkey chart). A single instance is plenty; nothing on this bus is durable, so
+persistence can stay off:
+
+```yaml
+# values for the valkey chart, installed as its own release
+fullnameOverride: kconmon-valkey
+replica:
+  enabled: false
+auth:
+  enabled: true
+  usersExistingSecret: kconmon-redis-credentials
+  aclUsers:
+    default:
+      permissions: "~* &* +@all"
+      passwordKey: password
+metrics:
+  enabled: true
+  serviceMonitor:
+    enabled: true
+```
+
+Then give the console a DSN pointing at it:
 
 ```bash
-# 1. operator only
-helm upgrade --install kconmon-ng oci://ghcr.io/esdmitrii/charts/kconmon-ng \
-  --set cnpg-operator.enabled=true --wait
-
-# 2. now the Cluster CR
-helm upgrade --install kconmon-ng oci://ghcr.io/esdmitrii/charts/kconmon-ng \
-  --set cnpg-operator.enabled=true \
-  --set console.enabled=true --set console.database.mode=cnpg
+kubectl create secret generic kconmon-redis-dsn \
+  --from-literal=console-redis-dsn="redis://default:$PASSWORD@kconmon-valkey:6379"
 ```
-
-A single-shot install of both is **not supported**, for two independent reasons,
-and neither is a bug this chart can fix:
-
-1. The `cloudnative-pg` chart ships its CRDs in `templates/crds/` (gated by
-   `crds.create`), not in Helm's special top-level `crds/` directory. Only the
-   latter is guaranteed to be applied before Helm resolves the REST mappings for
-   the rest of the release, so a `Cluster` CR in the same release can fail with
-   `no matches for kind "Cluster"`.
-2. Even with the CRDs in place, CNPG registers validating and mutating webhooks
-   pointing at the operator Service. Creating a `Cluster` before the operator
-   Pod is ready fails on a webhook dial error. Nothing about resource ordering
-   fixes an async readiness race.
-
-If the operator is already in the cluster — the common case — leave
-`cnpg-operator.enabled=false` and set `console.database.mode=cnpg`: that is the
-pre-existing behavior and a single install works.
-
-### Valkey: four modes
-
-| `console.valkey.mode` | What runs | Use when |
-| --- | --- | --- |
-| `disabled` (default) | in-process bus | `console.replicas: 1` |
-| `bundled` | one ephemeral `valkey/valkey` Deployment this chart renders | you want a small cross-replica bus and nothing else |
-| `dependency` | the official `valkey` subchart (`valkey.enabled=true`) | you want replication, ACL auth, TLS, metrics |
-| `external` | nothing; you supply `address` | Valkey already exists |
-
-**Authentication.** `dependency` and `external` both carry a password:
-`console.valkey.existingSecret` / `existingSecretKey` (or the managed `secret:`
-block) mounts it and the console AUTHs with it. For the subchart, point *both*
-sides at one Secret — `valkey.auth.existingSecret` +
-`valkey.auth.existingSecretPasswordKey` and `console.valkey.existingSecret` —
-or set `valkey.auth.enabled=false` for an unauthenticated in-cluster bus. The
-chart refuses the combination that cannot work (subchart auth on, console
-without a password) rather than letting every publish fail with `NOAUTH`.
-
-`bundled` stays the default path and is unchanged — it was **not** migrated onto
-the subchart. Two reasons. It is a 12-line ephemeral Deployment pinned to the
-official upstream `valkey/valkey:9-alpine` image (BSD), which is the right size
-for a pub/sub bus that ADR-002 requires to lose zero durable data on a flush;
-replacing it would also change the rendered objects for every existing user.
-
-The `dependency` path uses the **official** chart from the Valkey project
-(`valkey-io/valkey-helm`, published at
-`oci://ghcr.io/valkey-io/valkey-helm/valkey`). It runs the upstream
-`docker.io/valkey/valkey` image tagged from its own appVersion, ships
-restricted-PSS container defaults (`runAsNonRoot`, `readOnlyRootFilesystem`,
-`drop: [ALL]`, seccomp `RuntimeDefault`) and carries a `values.schema.json`.
-Bitnami's chart was **not** used: since the 2025 move to Bitnami Secure Images
-its free images are the legacy generation with `image.tag: latest` as the chart
-default, and a moving tag is not something to depend on.
-
-Its auth is **ACL-based and off by default**, which suits an in-cluster bus
-reachable only through the console's NetworkPolicy. To turn it on, point both
-sides at one Secret — the subchart keys passwords by *username*, so the ACL
-`default` user means key `default`:
 
 ```yaml
-valkey:
-  enabled: true
-  auth:
-    enabled: true
-    usersExistingSecret: valkey-acl
-    aclUsers:
-      default:
-        permissions: "~* &* +@all"
-console:
-  valkey:
-    mode: dependency
-    existingSecret: valkey-acl
-    existingSecretKey: default     # the ACL username
+redis:
+  existingSecret: kconmon-redis-dsn
 ```
 
-Configuring the subchart's auth while leaving the console without a password
-fails the render rather than letting every publish die with `NOAUTH`.
+**Prometheus — [kube-prometheus-stack](https://github.com/prometheus-community/helm-charts).**
+`serviceMonitor.enabled` and `prometheusRule.enabled` render objects for its
+operator; `console.prometheus.url` points the data pages at the server.
 
 ## Batteries: what the chart sets up for you
 
@@ -456,16 +435,16 @@ fails the render rather than letting every publish die with `NOAUTH`.
 | --- | --- | --- |
 | Grafana dashboards | `dashboards.enabled=true` renders them as ConfigMaps with the `grafana_dashboard` sidecar label | none, if you run the Grafana sidecar |
 | GeoLite2 databases | `console.mtr.enrichment.geoip.mode=auto` runs the official `maxmind/geoipupdate` sidecar | supply MaxMind credentials once |
-| PostgreSQL operator | `cnpg-operator.enabled=true` (subchart) | two-step install, see above |
-| Valkey | `console.valkey.mode=bundled` (default) or the `valkey` subchart | none |
+| PostgreSQL | yours, by DSN (`database.existingSecret`) | run one — CNPG, Percona, RDS… |
+| Redis-compatible bus | yours, by DSN (`redis.existingSecret`) | run one — Valkey, Redis, ElastiCache… |
 | Secrets | `existingSecret`, or `secret.create` with an injector | none |
-| Pod hardening | restricted-PSS defaults (runAsNonRoot, drop ALL, seccomp RuntimeDefault, read-only root) | the **agent** needs `NET_RAW` for ICMP/MTR, so it needs a `baseline` namespace or a PSS exemption |
+| Pod hardening | restricted-PSS defaults for every component, agent included (runAsNonRoot, drop ALL, seccomp RuntimeDefault, read-only root) | none — `net.ipv4.ping_group_range` is a kubelet safe sysctl. If you re-add `NET_RAW` to `agent.securityContext`, the agent needs a `privileged` namespace or a PSS exemption — `baseline` refuses an added capability too, and the DaemonSet is then rejected at admission with nothing in the release marked unhealthy |
 | Prometheus / Grafana themselves | **not installed** — external infrastructure | you run them |
 
 ### GeoLite2 databases keep themselves current
 
 Hop enrichment needs MaxMind's GeoLite2 ASN and City databases. With
-`mode: auto` — the default when enrichment is on — the chart runs MaxMind's own
+`mode: auto` — which you must set; enrichment ships with `mode: ""` — the chart runs MaxMind's own
 `geoipupdate` image as a sidecar on the Console Pod. It downloads both editions
 into an `emptyDir` mounted at `/geoip` and re-downloads every
 `updateIntervalHours`. No files to stage, no versions to carry by hand.
@@ -511,14 +490,14 @@ Paths default to `/geoip/<edition>.mmdb` from `geoip.editions`; set `asnPath` /
 | Grafana dashboards were repo JSON nothing installed — while alert annotations told operators to open them | **fixed** — `dashboards.enabled` |
 | GeoLite2 files had to be staged by hand, forever | **fixed** — `geoipupdate` sidecar + hot reload |
 | No `NOTES.txt`: nothing told a fresh operator what was still unconfigured | **fixed** — post-install checklist naming only what *this* release left undecided |
-| CNPG operator assumed pre-installed | **fixed** — optional subchart |
-| Valkey had no managed option beyond the bundled Deployment | **fixed** — `valkey` subchart as a fourth mode |
+| CNPG operator assumed pre-installed | **by design** — the chart installs no infrastructure; the README documents the stack it is tested against |
+| Valkey had no managed option beyond a hand-rolled Deployment | **by design** — bring any Redis-compatible server by DSN; the README documents the tested one |
 | Secrets all had to pre-exist | **fixed** — `secret.create` with semantic fields |
 | Secret key defaults collided in a shared Secret | **fixed** — component-scoped key names |
 | `console.prometheus.url` empty ⇒ silent 503 pages | **partly fixed** — `NOTES.txt` calls it out by name at install time. Not auto-detected: a cluster can hold several Prometheis and guessing wrong points the Console at someone else's data |
 | Webhook encryption key must be supplied | **justified manual** — auto-generating with `randAlphaNum` + `lookup` looks convenient and is a data-loss trap: `lookup` returns empty during `helm template`, `--dry-run` and any upgrade run without cluster access, so the key silently rotates and every stored webhook secret becomes undecryptable. Keyless is already a supported, documented state |
 | Prometheus Operator / Grafana not installed | **justified manual** — a cluster has one monitoring stack, shared by everything; a product chart is the wrong owner |
-| CNPG operator + database in one release | **justified manual** — two independent causes documented above; the chart does not pretend otherwise |
+| CNPG operator + database in one release | **not this chart's problem any more** — install your database however you install infrastructure, then hand the chart its DSN |
 | `dashboards/` duplicated into the chart (Helm cannot read outside the chart dir) | **guarded** — `make dashboards-check` and a CI step fail on drift |
 
 ## Chart-managed Secrets
@@ -567,21 +546,22 @@ for a full profile.
 
 | Consumer | Existing Secret | Key (`existingSecretKey` default) | Create block field |
 | --- | --- | --- | --- |
-| PostgreSQL DSN (`mode: external`) | `console.database.existingSecret` | `console-database-dsn` | `console.database.secret.dsn` |
+| PostgreSQL DSN | `database.existingSecret` | `console-database-dsn` | `database.secret.dsn` |
+| Redis-compatible DSN | `redis.existingSecret` | `console-redis-dsn` | `redis.secret.dsn` |
 | Local bootstrap admin | `console.auth.local.existingSecret` | `console-local-admin-password` | `console.auth.local.secret.password` |
 | OIDC client secret | `console.auth.oidc.existingSecret` | `console-oidc-client-secret` | `console.auth.oidc.secret.clientSecret` |
 | Webhook encryption key | `console.webhooks.existingSecret` | `console-webhooks-encryption-key` | `console.webhooks.secret.encryptionKey` |
-| CNPG backup credentials | `console.database.cnpg.backup.existingSecret` | `ACCESS_KEY_ID` + `ACCESS_SECRET_KEY` (fixed by CNPG) | `…backup.secret.accessKeyId` / `.secretAccessKey` |
+| MaxMind credentials | `console.mtr.enrichment.geoip.existingSecret` | `console-maxmind-account-id` / `console-maxmind-license-key` (`…geoip.accountIdKey` / `…licenseKeyKey`) | `console.mtr.enrichment.geoip.secret.{accountId,licenseKey}` |
 
 The key defaults are **component-scoped on purpose**, so one shared Secret can
 carry the whole stack's credentials without two components fighting over a
 generic `password` or `dsn`. Override `existingSecretKey` to anything you like;
 whatever you set is both the key the console reads and the key the create path
-writes. CNPG's two backup keys are the exception — the operator fixes those
-names, so the chart cannot rename them.
+writes.
 
-`console.database.mode: cnpg` is not in this table: CNPG generates the DSN
-Secret itself (`<cluster>-app`, key `uri`) and the chart only reads it.
+A database that publishes its own DSN Secret needs no create path at all: point
+`existingSecret`/`existingSecretKey` at it (CNPG's is `<cluster>-app`, key
+`uri`).
 
 ### Rules
 
@@ -598,50 +578,65 @@ Secret itself (`<cluster>-app`, key `uri`) and the chart only reads it.
 
 ## Upgrading to 2.0.0
 
-One breaking change, plus renames that keep working.
+**No old key is silently honoured.** Every key listed below fails the render with
+a message naming its replacement — see
+[`templates/_migrations.tpl`](templates/_migrations.tpl). That is the point: a
+rename that keeps quietly accepting the old name leaves two names for one setting
+in every template, and an operator whose values file still carries the old one
+never learns it moved. A rename is only safe when the old name fails.
+
+### The chart installs no infrastructure any more
+
+PostgreSQL and the Redis-compatible bus were subcharts and modes; they are now
+two DSNs. Run whatever you already run — CNPG, Percona, RDS, Valkey, a sentinel
+quorum, ElastiCache — and hand the chart a Secret holding the URL. See
+[The stack around it: bring your own](#the-stack-around-it-bring-your-own) for
+the stack this is tested against.
+
+| Removed | Replacement |
+| --- | --- |
+| `console.database.*` | top-level `database.*` |
+| `console.valkey.*` | top-level `redis.*` |
+| `database.mode`, `database.cnpg.*` | `database.existingSecret` → a `postgres://` DSN |
+| `redis.mode`, `redis.address`, the separate password Secret | `redis.existingSecret` → a `redis://` DSN |
+| the `valkey` and `cnpg-operator` subcharts | install them yourself |
+| `console.networkPolicy.valkeyEgress` | `console.networkPolicy.redisEgress` |
+| `console.networkPolicy.valkeyIngressFrom` | write it where your bus is installed |
+| `networkPolicy.cnpgOperatorNamespace`, `…PodLabels` | write it where your database is installed |
+
+### Renamed or removed elsewhere
+
+| Removed | Replacement |
+| --- | --- |
+| `console.webhooks.encryptionKeySecret.{name,key}` | `console.webhooks.existingSecret` / `existingSecretKey` |
+| `console.controller.grpcAddr` | `console.controller.grpcAddress` |
+| `pdb.*` | `controller.pdb.*` — it only ever rendered the controller's budget |
+| `prometheusRule.rules` | per-rule knobs + `prometheusRule.additionalRules` |
 
 ### Breaking: `existingSecretKey` defaults changed
 
 If you rely on a **default** key name inside an existing Secret, set it
-explicitly to keep the old value — or rename the key in your Secret.
+explicitly to keep the old value — or rename the key in your Secret. This one
+cannot fail loudly: the chart cannot tell a value you set deliberately from the
+default it shipped, so a silent coalesce would guess. It is a major bump instead.
 
 | Values key | Old default | New default |
 | --- | --- | --- |
-| `console.database.existingSecretKey` | `dsn` | `console-database-dsn` |
+| `database.existingSecretKey` | `dsn` | `console-database-dsn` |
 | `console.auth.local.existingSecretKey` | `password` | `console-local-admin-password` |
 | `console.auth.oidc.existingSecretKey` | `clientSecret` | `console-oidc-client-secret` |
 | `console.webhooks.existingSecretKey` | `encryptionKey` | `console-webhooks-encryption-key` |
 
 ```yaml
 # keep 1.x behaviour verbatim
+database:
+  existingSecretKey: dsn
 console:
-  database: {existingSecretKey: dsn}
   auth:
     local: {existingSecretKey: password}
     oidc: {existingSecretKey: clientSecret}
   webhooks: {existingSecretKey: encryptionKey}
 ```
-
-A default cannot be migrated automatically: the chart cannot tell a value you
-set deliberately from the default it shipped, so a silent coalesce would guess.
-It is a major bump instead.
-
-### Renamed, with the old key still honoured
-
-Naming is unified on `existingSecret` / `existingSecretKey` everywhere. The
-deprecated key keeps working **when it is the only one set**; setting both fails
-the render naming the conflict.
-
-| Deprecated | Use instead |
-| --- | --- |
-| `console.database.cnpg.backup.credentialsSecret` | `console.database.cnpg.backup.existingSecret` |
-| `console.webhooks.encryptionKeySecret.name` | `console.webhooks.existingSecret` |
-| `console.webhooks.encryptionKeySecret.key` | `console.webhooks.existingSecretKey` |
-| `console.controller.grpcAddr` | `console.controller.grpcAddress` |
-| `prometheusRule.rules` | per-rule knobs + `prometheusRule.additionalRules` |
-
-[`ci/deprecated-keys-values.yaml`](ci/deprecated-keys-values.yaml) renders
-byte-identically to its new-name twin, and CI keeps it that way.
 
 **Deliberately not renamed.** `controller.replicaCount` and `console.replicas`
 still differ: both are idiomatic Helm, and a key with a non-empty chart default
@@ -652,11 +647,16 @@ every `timeout:` next to it. `url` versus `address` tracks a real difference (a
 URL versus `host:port`). The `grpcAddr` key inside the *rendered console config
 file* is the application's own schema, not a chart value, and is unchanged.
 
-### GeoIP now defaults to the automated path
+### GeoIP gained an automated path, opt-in
 
-`console.mtr.enrichment.geoip.mode` is new and defaults to `auto`, which runs
-the `geoipupdate` sidecar. If you were mounting your own mmdb files with
-`geoip.volume`, set `mode: volume` to keep exactly the old behaviour:
+`console.mtr.enrichment.geoip.mode` is new and defaults to **empty**, which
+means: `volume` when a volume or an explicit path is supplied, and `disabled`
+otherwise. An upgrade therefore changes nothing on its own — no `geoipupdate`
+sidecar appears, no MaxMind egress is needed, and hop enrichment that was off
+stays off. Ask for the sidecar explicitly with `mode: auto` plus MaxMind
+credentials. If you were mounting your own mmdb files with `geoip.volume`, you
+can set `mode: volume` to say so out loud; leaving it empty keeps exactly the
+old behaviour:
 
 ```yaml
 console:
@@ -673,24 +673,26 @@ off.
 
 ### values.yaml was regrouped
 
-The file is now eight numbered sections — naming, shared config, agent,
-controller, console (core, database, auth, valkey, webhooks, alerting, extras,
-plumbing), observability, kubernetes, dependencies. YAML key order does not
+The file is now nine numbered sections: naming, shared config, database, redis,
+agent, controller, console, observability, kubernetes. The two infrastructure
+blocks sit at the top level ahead of the components that consume them, rather
+than nested under `console:` — you configure a database whether or not the
+console is on, and `console.database.*` said otherwise. YAML key order does not
 affect rendering, and CI proves it: every profile renders byte-identically
 across the move.
 
 ## Chart internals worth knowing
 
-- **CNPG ordering.** `console.database.mode=cnpg` renders a CNPG `Cluster` CR
-  but does *not* install the operator; `helm install` fails with "no matches for
-  kind Cluster" until the operator's CRDs exist.
 - **Null overrides delete defaults.** Naming a block with nothing under it
-  (`cnpg:`, `storage:`) merges a null over the chart default and removes the
-  sub-tree. The chart fails with an actionable message for the two blocks it
-  cannot guess (`cnpg.instances`, `cnpg.storage.size`).
-- **Secrets are referenced by name only.** The chart never templates, generates
-  or reads credential material; the DSN, bootstrap password, OIDC client secret
-  and webhook encryption key all ride one projected volume mounted at
+  (`secret:`, `resources:`) merges a null over the chart default and removes the
+  sub-tree.
+- **Secrets are referenced by name by default.** The chart never GENERATES or
+  reads credential material, and `existingSecret` is the recommended path. The
+  `secret.create` blocks are the exception: they template a Secret from the
+  values you supply, which is meant for an injector's placeholders
+  (`${vault:...}`) rather than for literals — a literal in `values.yaml` is a
+  credential in your release history. The DSN, bootstrap password, OIDC client
+  secret and webhook encryption key all ride one projected volume mounted at
   `/etc/kconmon-ng-console-secrets` — a sibling of the config mount, because a
   mountpoint cannot be created inside an already-mounted read-only volume. All
   four are read once at boot, so rotating one is an operator-initiated restart.
@@ -699,19 +701,106 @@ across the move.
   `console.alerting.enabled` (rule reconciler) render a console-only
   ServiceAccount, `POD_NAMESPACE`, the apiserver egress rule and the matching
   grant — a cluster-scoped `ClusterRole` for events, a *namespaced* `Role` for
-  `prometheusrules` with no `delete` verb. The agent/controller grant is never
+  `prometheusrules` whose verbs are exactly the calls the client makes
+  (`get`, `list`, `create`, `patch`, `delete`): server-side apply needs `patch`
+  plus `create`, and `delete` is what removes the bundle when the last rule is
+  disabled. There is no `update` (apply never falls back to read-modify-write)
+  and no `watch` (the reconciler polls). The agent/controller grant is never
   widened.
+- **The console's own ingress rule is open by default, and that is a choice.**
+  Nothing inside the release dials the console, so the only legitimate caller is
+  whatever fronts the UI — an ingress controller, a `NodePort`, a
+  `LoadBalancer` — whose namespace, labels or source CIDR the chart cannot know.
+
+  One caller IS inside the release: with `serviceMonitor.enabled`, Prometheus
+  scrapes the console's own `/metrics`. That gets its own ingress rule, and the
+  rule renders **only when `networkPolicy.prometheusNamespace` is set** —
+  `/metrics` has a listener of its own on `config.metricsPort`, and the rule
+  opens that port only: a rule on the API port would admit everything else in
+  the scraper's namespace to the whole API, quietly undoing the narrowing
+  `ingressFrom` exists to express. So if you narrow `ingressFrom`,
+  set `networkPolicy.prometheusNamespace` alongside it, or the console's own
+  metrics go dark (`up{job="…-console"} = 0`) while everything else keeps
+  working. Restricting by default would mean a silent,
+  total UI outage on upgrade for every existing install, so the default stays
+  open and `console.networkPolicy.ingressFrom` narrows it:
+
+  ```yaml
+  console:
+    networkPolicy:
+      ingressFrom:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ingress-nginx
+  ```
+
+  Set it. `kubectl port-forward` does **not** traverse NetworkPolicy — the
+  kubelet attaches to the pod's network namespace directly — so restricting this
+  cannot lock you out of the UI for debugging. Note the console's real
+  authentication boundary is `console.auth.mode`, which is `anonymous` unless
+  you change it; this rule is defence in depth, not the lock.
 - **Optional config blocks are emitted only when enabled.** Both config files
   are parsed with unknown fields rejected, so an unconditional key would
   crashloop an older image while a Deployment or DaemonSet rolls.
+- **NetworkPolicy v1 cannot say "ICMP".** `ports[].protocol` accepts only
+  `TCP`, `UDP` and `SCTP`; anything else is rejected by the API server. An ICMP
+  allowance can therefore only be written as a peer rule with **no `ports`
+  section**, which allows every protocol to (or from) that peer. Agent-to-agent
+  ICMP and MTR get such a rule on **both** halves — egress *and* ingress, since
+  a policy that opens only one direction drops the probes just as dead — and
+  both stay narrow because the peer is a `podSelector`, not a CIDR.
+- **Every probe rule is a matched pair.** The TCP checker dials the *peer's*
+  `config.httpPort` (and then `GET /readyz` on it), the UDP probe server listens
+  on `config.grpcPort`; both appear in one egress rule and one identical ingress
+  rule. Note that `config.httpPort` ingress from the console is its own rule:
+  the Prometheus scrape rule only covers console-to-controller traffic while
+  `networkPolicy.prometheusNamespace` is empty, which is exactly the kind of
+  accident that works in CI and fails on a real cluster.
+- **The external checker has no default egress rule, on purpose.** Its targets
+  are operator-chosen and take `tcp`/`udp`/`icmp`/`mtr` on any port, so the only
+  default the chart could render is a ports-less rule to `0.0.0.0/0` — which is
+  allow-everything egress and not something to hand out silently.
+  `config.checkers.external.enabled` together with `networkPolicy.enabled` and
+  an empty `networkPolicy.externalEgress` therefore **fails the render** with a
+  message naming the key. Set it to the rules your targets need, scoped to the
+  same range as `config.checkers.external.allowedCidrs`:
+
+  ```yaml
+  networkPolicy:
+    externalEgress:            # a list of whole egress rules, spliced in verbatim
+      - to:
+          - ipBlock:
+              cidr: 10.0.0.0/8 # no ports: key, so ICMP and MTR pass too
+  ```
+
+  Ask for the old permissive shape explicitly with
+  `[{to: [{ipBlock: {cidr: 0.0.0.0/0}}]}]` if that is really what you want.
+- **Your database's own policies are yours.** The chart renders egress from the
+  *console* to whatever `database.existingSecret` points at, and nothing else —
+  it installs no database and writes no policy for one. If your PostgreSQL is a
+  CNPG Cluster, the operator still needs its own rule to reach the instance
+  manager on `8000` (without one the Cluster hangs on `Instance Status
+  Extraction Error`), and that rule belongs with the Cluster, in whatever
+  installs it. Same for a Percona cluster, a sentinel quorum, or anything else
+  you run: this chart's business ends at the DSN.
+- **The apiserver rules assume your CNI matches pre-DNAT.** Both
+  `networkPolicy.kubeAPIEgress` and `console.networkPolicy.kubeAPIEgress`
+  default to TCP `443`/`6443` to `0.0.0.0/0`, which matches the `kubernetes`
+  *Service* ClusterIP. Policy engines that evaluate the post-DNAT **endpoint**
+  (Calico among them) see the real backend port instead, and that is often
+  neither — minikube's is `8443`. Check with `kubectl get endpointslices -n
+  default -l kubernetes.io/service-name=kubernetes` and, if it differs, put the
+  real address and port in the knob. The symptom is a clean `dial tcp
+  10.96.0.1:443: i/o timeout` from the controller's Lease renewal or the
+  console's alert-rule sync.
 - **NetworkPolicy is only the cluster-side gate.** For any destination outside
   the cluster (an external Valkey or PostgreSQL, an OIDC IdP, a control plane),
   the destination's own firewall — iptables/nftables, a cloud security group —
   must be opened separately. Egress allowed here and still refused on the wire
   almost always means that layer was missed.
-- **The bundled Valkey is deliberately ephemeral.** No PVC, no writable data
-  dir: per ADR-002 a flush must lose zero durable data, so losing the instance
-  on a Pod restart is a liveness event, never a data-loss one.
+- **Nothing in the bus is durable.** Sessions, rate-limit counters and pub/sub only: losing the
+  instance on a Pod restart is a liveness event, never a data-loss one — which is why the subchart's
+  persistence can stay off.
 
 ## Links
 

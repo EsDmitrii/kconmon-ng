@@ -1,59 +1,22 @@
 ---
-# The FULLEST console profile (M7 surface: the PrometheusRule reconciler and
-# the alert-transition webhook watcher). It exists to render the three things
-# no other profile can produce:
-#
-#   - console.alerting.enabled renders the `alerting:` config block, a
-#     NAMESPACED Role + RoleBinding for monitoring.coreos.com/prometheusrules
-#     (templates/rbac.yaml — a Role, not a third ClusterRole, SECURITY.md
-#     §10.3), and it reaches the console-only ServiceAccount,
-#     serviceAccountName, POD_NAMESPACE and the apiserver egress rule through
-#     kconmon-ng.console.k8sIdentity WITHOUT kubernetesContext being on. That
-#     last part is the point: console-investigation-values.yaml proves the
-#     identity renders under the M6 flag, and this profile proves the M7 flag
-#     reaches the same four places on its own.
-#   - console.webhooks.alertPollInterval renders only where BOTH the encryption
-#     key and alerting are present, which is only here.
-#
-# Alerting needs a database (the rules are rows in alert_rules; without one the
-# console skips the reconciler rather than applying an empty bundle over live
-# rules), so database.mode=external with a dummy Secret — the same shape
-# console-investigation-values.yaml uses, and for the same reason: it keeps the
-# profile installable-shaped without requiring the CNPG CRDs.
-#
-# Both Secret names below are DUMMIES that nothing creates. A ci profile is
-# rendered and linted, never installed, and the chart only ever references a
-# Secret by name. A real install needs `openssl rand -base64 32` in a Secret
-# under the webhook key, and it needs the Prometheus Operator's PrometheusRule
-# CRD present — the chart cannot check for either.
+redis:
+  existingSecret: kconmon-console-redis
+database:
+  existingSecret: console-db-dummy
 controller:
   events:
     enabled: true
 console:
   enabled: true
   replicas: 2
-  valkey:
-    mode: bundled
-  database:
-    mode: external
-    existingSecret: console-db-dummy
   alerting:
     enabled: true
-    # Left empty on purpose: the empty value is the interesting one, because it
-    # is what makes the console read POD_NAMESPACE, and POD_NAMESPACE is only
-    # set when this render is correct. It also matches the Role's namespace,
-    # which is the only namespace the grant can reach.
-    namespace: ""
+    namespace: ''
     syncInterval: 30s
     bundleName: kconmon-ng-console-rules
   webhooks:
-    encryptionKeySecret:
-      name: console-webhooks-key-dummy
-      key: encryptionKey
-    # Deliberately NOT the 30s default: a rendered value equal to the default
-    # would prove nothing about the line being reachable from Helm at all,
-    # which is the whole reason this key exists (it was unreachable until this
-    # release).
+    existingSecret: kconmon-webhook-key
+    existingSecretKey: console-webhooks-encryption-key
     alertPollInterval: 15s
   prometheus:
     url: http://prometheus-operated.monitoring:9090

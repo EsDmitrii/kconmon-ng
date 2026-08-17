@@ -1,5 +1,6 @@
 ---
-# Full production values for chart testing
+redis:
+  existingSecret: kconmon-console-redis
 controller:
   replicaCount: 3
   leaderElection: true
@@ -21,9 +22,11 @@ controller:
               matchLabels:
                 app.kubernetes.io/component: controller
             topologyKey: kubernetes.io/hostname
-
+  pdb:
+    enabled: true
+    minAvailable: 2
 agent:
-  zone: "us-east-1a"
+  zone: us-east-1a
   resources:
     limits:
       cpu: 300m
@@ -31,7 +34,6 @@ agent:
     requests:
       cpu: 100m
       memory: 96Mi
-
 config:
   metricsPrefix: kconmon_ng
   logLevel: debug
@@ -47,20 +49,16 @@ config:
       hosts:
         - kubernetes.default.svc.cluster.local
         - kube-dns.kube-system.svc.cluster.local
-
 serviceMonitor:
   enabled: true
   interval: 10s
-
 prometheusRule:
   enabled: true
   udpLossHigh:
-    # Quoted on purpose: this is the type `helm --set threshold=0.25` produces.
-    threshold: "0.25"
+    threshold: '0.25'
     for: 3m
     severity: critical
   tcpChecksFailing:
-    # Bare float: the other accepted type, must render identically.
     threshold: 0.075
   externalChecksFailing:
     enabled: false
@@ -72,15 +70,9 @@ prometheusRule:
         severity: none
       annotations:
         summary: chart-test rule appended through prometheusRule.additionalRules
-
 networkPolicy:
   enabled: true
   prometheusNamespace: monitoring
-
-pdb:
-  enabled: true
-  minAvailable: 2
-
 console:
   enabled: true
   replicas: 2
@@ -88,6 +80,3 @@ console:
     mode: anonymous
     anonymous:
       role: viewer
-  valkey:
-    mode: external
-    address: valkey.data.svc.cluster.local:6379
