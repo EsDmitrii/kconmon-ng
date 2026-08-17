@@ -1,7 +1,6 @@
 package httpapi
 
 import (
-	"encoding/json"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -12,6 +11,8 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/EsDmitrii/kconmon-ng/internal/console/authz"
+
+	"github.com/EsDmitrii/kconmon-ng/internal/console/events"
 	"github.com/EsDmitrii/kconmon-ng/internal/console/store"
 )
 
@@ -118,7 +119,13 @@ func (s *Server) handleAnnotationsList(w http.ResponseWriter, r *http.Request) {
 
 	var scope *string
 	if q.Has("scope") {
-		v := q.Get("scope")
+		// A control char here (a NUL above all) would 502 out of the text column;
+		// it is client input, so it is a 400 before the query is built.
+		if rejectControlChars(w, "scope", q.Get("scope")) {
+			return
+		}
+		// Normalized so a scope filter matches whichever arrow form the annotation was written with.
+		v := events.NormalizePairScope(q.Get("scope"))
 		scope = &v
 	}
 
@@ -159,15 +166,20 @@ func (s *Server) handleAnnotationsCreate(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	var req annotationRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeProblem(w, http.StatusBadRequest, "invalid request",
-			`an annotation body must be JSON with "startAt" (RFC3339) and "text", plus optional "endAt" and "scope"`)
+	// Deliberately LENIENT (no DisallowUnknownFields): a client-supplied
+	// created_by is IGNORED, not rejected -- the server stamps the authenticated
+	// subject so attribution cannot be forged (TestAnnotationsCreateRecordsTheSubject).
+	/* STRICT: the schema is additionalProperties:false, so a misspelled field must be REFUSED
+	   rather than silently dropped -- "endsAt" for "endAt" would have written an open-ended
+	   annotation the operator did not ask for. */
+	if !decodeMutationBody(w, r, &req,
+		`an annotation body must be JSON with "startAt" (RFC3339) and "text", plus optional "endAt" and "scope"`) {
 		return
 	}
 
 	subject, _ := SubjectFrom(r.Context())
 	in := store.AnnotationInput{
-		StartAt: req.StartAt, EndAt: req.EndAt, Scope: req.Scope, Text: req.Text,
+		StartAt: req.StartAt, EndAt: req.EndAt, Scope: events.NormalizePairScope(req.Scope), Text: req.Text,
 		CreatedBy: annotationAuthor(subject),
 	}
 	if err := in.Validate(); err != nil {

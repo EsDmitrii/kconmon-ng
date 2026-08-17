@@ -19,6 +19,12 @@ import (
 const (
 	defaultDiagnosticsTimeout = 60 * time.Second
 	maxDiagnosticsTimeout     = 120 * time.Second
+
+	// diagnosticsWriteGrace is the slack this handler adds on top of the negotiated dispatch timeout
+	// when it arms the connection's write deadline. The dispatch may return at the very last moment
+	// of its budget, and the response still has to be marshalled and pushed onto the wire after
+	// that; the grace is that tail, not extra dispatch time.
+	diagnosticsWriteGrace = 10 * time.Second
 )
 
 const (
@@ -89,6 +95,8 @@ type DiagnosticsHandler struct {
 	leaderElection bool
 	isLeader       func() bool
 	events         EventPublisher
+	// now is the clock the write deadline is computed against; overridden in tests.
+	now func() time.Time
 }
 
 func NewDiagnosticsHandler(
@@ -106,6 +114,7 @@ func NewDiagnosticsHandler(
 		leaderElection: leaderElection,
 		isLeader:       isLeader,
 		events:         events,
+		now:            time.Now,
 	}
 }
 
@@ -207,6 +216,13 @@ func (h *DiagnosticsHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	timeout := h.resolveTimeout(r)
+	// The connection's write deadline was armed with the server-wide controllerHTTPWriteTimeout when
+	// this request was read, and that budget is sized for endpoints answering in milliseconds. This
+	// one waits for a real probe -- an MTR trace with 30 silent TTLs takes ~30s -- so it must own the
+	// deadline for the response it negotiated, or a finished trace is written into a dead socket and
+	// the caller sees nothing but EOF.
+	h.extendWriteDeadline(w, timeout)
+
 	ctx, cancel := context.WithTimeout(r.Context(), timeout)
 	defer cancel()
 
@@ -233,7 +249,6 @@ func (h *DiagnosticsHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	h.count(req.Type, "ok")
 	h.publishObserved(task.GetTaskId(), req.Type, plane, req.Source, destName, res.GetDetailsJson())
 	w.Header().Set("Content-Type", "application/json")
 	// nosniff pins the declared JSON type so no browser will ever interpret
@@ -242,9 +257,60 @@ func (h *DiagnosticsHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	// details_json is the agent's serialized model.CheckResult; return it
 	// verbatim so the CLI sees exactly what the agent produced.
-	if _, err := w.Write(res.GetDetailsJson()); err != nil { //nolint:gosec // G705: JSON response with nosniff, never rendered as HTML
+	if err := h.deliver(w, diagnosticsBody(res)); err != nil {
+		// The check RAN. Nothing downstream will ever see it: the Console records an MTR snapshot
+		// from this response body and from nothing else, and there is no store on this side to park
+		// it in. Say so loudly rather than let a completed trace disappear.
+		h.count(req.Type, "undelivered")
+		h.publishProgress(task.GetTaskId(), req.Type, req.Source, destName, "undelivered")
+		slog.Error("diagnostic completed but its result could not be delivered to the caller",
+			"taskId", task.GetTaskId(), "checkType", req.Type, "source", req.Source,
+			"destination", destName, "timeout", timeout, "error", err)
 		return
 	}
+	h.count(req.Type, "ok")
+}
+
+// extendWriteDeadline gives the response the same budget the dispatch negotiated, plus the tail
+// needed to write it. A ResponseWriter that cannot carry a deadline (httptest's recorder, a
+// middleware that does not unwrap) is not an error: there is no connection to bound.
+func (h *DiagnosticsHandler) extendWriteDeadline(w http.ResponseWriter, timeout time.Duration) {
+	err := http.NewResponseController(w).SetWriteDeadline(h.now().Add(timeout + diagnosticsWriteGrace))
+	if err != nil && !errors.Is(err, http.ErrNotSupported) {
+		slog.Warn("could not extend the diagnostics write deadline; a slow dispatch may be cut short",
+			"timeout", timeout, "error", err)
+	}
+}
+
+// deliver writes body and forces it onto the wire, so a response the connection never accepted is an
+// error here instead of a silent loss: without the flush the bytes sit in net/http's buffer and the
+// write error surfaces after this handler has already returned, where nobody reads it.
+func (h *DiagnosticsHandler) deliver(w http.ResponseWriter, body []byte) error {
+	if _, err := w.Write(body); err != nil { //nolint:gosec // G705: JSON response with nosniff, never rendered as HTML
+		return err
+	}
+	if err := http.NewResponseController(w).Flush(); err != nil && !errors.Is(err, http.ErrNotSupported) {
+		return err
+	}
+	return nil
+}
+
+// diagnosticsBody returns the bytes to answer a successful dispatch with. An agent that reported no
+// payload at all would otherwise make this a 200 with an empty body, which every JSON client reads
+// as "unexpected end of JSON input" instead of the reason the agent actually gave.
+func diagnosticsBody(res *pb.TaskResult) []byte {
+	if len(res.GetDetailsJson()) > 0 {
+		return res.GetDetailsJson()
+	}
+	body, err := json.Marshal(model.CheckResult{
+		Success:   res.GetSuccess(),
+		Error:     res.GetError(),
+		Timestamp: res.GetTimestamp().AsTime(),
+	})
+	if err != nil {
+		return []byte(`{"success":false,"error":"agent reported no result payload"}`)
+	}
+	return body
 }
 
 // resolveTimeout returns the dispatch timeout: the ?timeout= query value in
@@ -259,11 +325,15 @@ func (h *DiagnosticsHandler) resolveTimeout(r *http.Request) time.Duration {
 	if err != nil || secs <= 0 {
 		return defaultDiagnosticsTimeout
 	}
-	timeout := time.Duration(secs) * time.Second
-	if timeout > maxDiagnosticsTimeout {
+	/* CLAMPED IN SECONDS, before the multiply. time.Duration is int64 nanoseconds, so anything past
+	   ~9.2e9 seconds overflows: ?timeout=9300000000 produced a large NEGATIVE Duration, sailed past
+	   the `> maxDiagnosticsTimeout` check below, and the request was served with an already-expired
+	   context — the client got a dropped connection and an empty reply instead of the documented
+	   clamp. Comparing the integer first cannot overflow. */
+	if int64(secs) > int64(maxDiagnosticsTimeout/time.Second) {
 		return maxDiagnosticsTimeout
 	}
-	return timeout
+	return time.Duration(secs) * time.Second
 }
 
 func (h *DiagnosticsHandler) count(checkType, result string) {

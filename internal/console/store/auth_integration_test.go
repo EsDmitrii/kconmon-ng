@@ -292,7 +292,7 @@ func TestListBindingsForSubjectResolvesUserAndGroupInOneCall(t *testing.T) {
 		t.Fatalf("CreateBinding(unrelated group): %v", err)
 	}
 
-	got, err := db.ListBindingsForSubject(ctx, "alice", []string{"sre-team", "another-group"})
+	got, err := db.ListBindingsForSubject(ctx, "user", "alice", []string{"sre-team", "another-group"})
 	if err != nil {
 		t.Fatalf("ListBindingsForSubject: %v", err)
 	}
@@ -311,12 +311,23 @@ func TestListBindingsForSubjectResolvesUserAndGroupInOneCall(t *testing.T) {
 	}
 
 	// A subject with no group memberships gets only its own bindings.
-	onlyUser, err := db.ListBindingsForSubject(ctx, "alice", nil)
+	onlyUser, err := db.ListBindingsForSubject(ctx, "user", "alice", nil)
 	if err != nil {
 		t.Fatalf("ListBindingsForSubject(no groups): %v", err)
 	}
 	if len(onlyUser) != 1 || onlyUser[0].RoleName != "operator" {
 		t.Errorf("ListBindingsForSubject(no groups): got %+v, want just the operator binding", onlyUser)
+	}
+
+	/* And the caller's KIND is part of the match, not decoration. A token whose id happens to equal a
+	   user's binding subject used to resolve that user's role through the 'user' branch — the RBAC
+	   API refuses to CREATE a 'token' binding, so this was the way in. */
+	asToken, err := db.ListBindingsForSubject(ctx, "token", "alice", nil)
+	if err != nil {
+		t.Fatalf("ListBindingsForSubject(token kind): %v", err)
+	}
+	if len(asToken) != 0 {
+		t.Errorf("ListBindingsForSubject(token kind): got %+v, want none — a token must not inherit a user binding", asToken)
 	}
 
 	if err := db.DeleteBinding(ctx, userBinding.ID); err != nil {

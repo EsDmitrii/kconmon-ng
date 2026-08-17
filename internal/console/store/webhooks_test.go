@@ -207,7 +207,7 @@ func TestWebhookMalformedIDIsNotFoundWithoutTouchingPgx(t *testing.T) {
 			if _, err := db.UpdateWebhook(ctx, id, validWebhookInput()); !errors.Is(err, ErrNotFound) {
 				t.Errorf("UpdateWebhook(%q) err = %v, want ErrNotFound", id, err)
 			}
-			if err := db.UpdateWebhookDelivery(ctx, id, "200", time.Now(), 0); !errors.Is(err, ErrNotFound) {
+			if err := db.UpdateWebhookDelivery(ctx, id, "200", time.Now(), true); !errors.Is(err, ErrNotFound) {
 				t.Errorf("UpdateWebhookDelivery(%q) err = %v, want ErrNotFound", id, err)
 			}
 		})
@@ -237,7 +237,7 @@ func TestUpdateWebhookDeliveryBoundsItsInputs(t *testing.T) {
 	ctx := context.Background()
 	id := "3f1d1a2f-6f8e-4a3a-9a0e-7f3f9d0f1c22"
 
-	err := db.UpdateWebhookDelivery(ctx, id, strings.Repeat("s", webhookLastStatusMaxLen+1), time.Now(), 0)
+	err := db.UpdateWebhookDelivery(ctx, id, strings.Repeat("s", webhookLastStatusMaxLen+1), time.Now(), true)
 	if err == nil {
 		t.Error("UpdateWebhookDelivery(over-long status) = nil, want the bound to reject it")
 	}
@@ -245,10 +245,10 @@ func TestUpdateWebhookDeliveryBoundsItsInputs(t *testing.T) {
 		t.Errorf("UpdateWebhookDelivery reported %v, want a length error rather than a miss", err)
 	}
 
-	err = db.UpdateWebhookDelivery(ctx, id, "200", time.Now(), -1)
-	if err == nil {
-		t.Error("UpdateWebhookDelivery(failures=-1) = nil, want a validation error")
-	}
+	/* The negative-count guard is GONE because the count itself is gone from the signature: the
+	   UPDATE derives it from the row (`failures + 1`, or 0 on reset), so a caller cannot supply one
+	   at all — valid or otherwise. That is what stopped overlapping deliveries writing the same
+	   enqueue-time snapshot back over each other. */
 }
 
 // TestCreateWebhookValidatesBeforeTouchingPgx asserts validation runs before

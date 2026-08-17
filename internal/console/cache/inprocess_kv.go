@@ -30,7 +30,7 @@ type InProcessKV struct {
 	stopOnce sync.Once
 }
 
-// compile-time proof InProcessKV is a drop-in for ValkeyKV.
+// compile-time proof InProcessKV is a drop-in for RedisKV.
 var _ KV = (*InProcessKV)(nil)
 
 // NewInProcessKV returns a ready-to-use in-memory KV and starts its background sweeper goroutine.

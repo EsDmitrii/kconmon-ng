@@ -28,13 +28,19 @@ type fakeMTRStore struct {
 	order []string // snapshot ids, oldest first, so listing order is stable
 	enr   map[string]store.Enrichment
 
+	// traces are the individual check_results rows behind the routes, keyed by nothing: the store
+	// filters by pair and window, and the handler filters by path.
+	traces []store.RunResult
+
 	lastFilter store.SnapshotFilter
+	lastTraces store.TraceFilter
 	lastIPs    []string
 
-	destsErr error
-	listErr  error
-	getErr   error
-	enrErr   error
+	destsErr  error
+	listErr   error
+	getErr    error
+	enrErr    error
+	tracesErr error
 }
 
 func newFakeMTRStore() *fakeMTRStore {
@@ -44,7 +50,27 @@ func newFakeMTRStore() *fakeMTRStore {
 	}
 }
 
-func (f *fakeMTRStore) ListMTRDestinations(context.Context) ([]store.MTRDestination, error) {
+func (f *fakeMTRStore) ListPathTraces(_ context.Context, filter store.TraceFilter) (store.TracePage, error) { //nolint:gocritic // hugeParam: mirrors the real signature
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.lastTraces = filter
+	if f.tracesErr != nil {
+		return store.TracePage{}, f.tracesErr
+	}
+	out := make([]store.RunResult, 0, len(f.traces))
+	for i := range f.traces {
+		t := f.traces[i]
+		// The window is the real query's, applied here so a test can prove the handler passed the
+		// snapshot's own bounds rather than the whole table.
+		if t.RecordedAt.Before(filter.From) || t.RecordedAt.After(filter.To) {
+			continue
+		}
+		out = append(out, t)
+	}
+	return store.TracePage{Traces: out}, nil
+}
+
+func (f *fakeMTRStore) ListMTRDestinations(context.Context, int) ([]store.MTRDestination, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.destsErr != nil {
@@ -621,5 +647,165 @@ func TestMTRSnapshotGetEnrichFallsBackToTheCacheWhenNoResolverIsWired(t *testing
 	}
 	if got.Enrichment["10.0.0.1"].RDNS != "cache.example." {
 		t.Errorf("enrichment[10.0.0.1] = %+v, want the cached row served through the fallback", got.Enrichment["10.0.0.1"])
+	}
+}
+
+/* ── the traces behind a route ───────────────────────────────────────────── */
+
+/*
+ * The owner, at a route row reading "147 traces": «а как их посмотреть???». The path history folds
+ * every trace that walked one path into a single row, and the hop table it shows is the LAST reading
+ * folded into it. The traces themselves were in check_results the whole time, each with its own
+ * clock and its own RTTs, and nothing in the console led to them.
+ */
+
+// mtrTrace builds a stored check_results row carrying an mtr payload with the given hops.
+func mtrTrace(id int64, at time.Time, hops []store.PathHop) store.RunResult {
+	type hop struct {
+		Number    int     `json:"number"`
+		IP        string  `json:"ip"`
+		Hostname  string  `json:"hostname,omitempty"`
+		RTT       int64   `json:"rtt"`
+		LossRatio float64 `json:"lossRatio"`
+	}
+	payload := struct {
+		Type    string `json:"type"`
+		Details struct {
+			Hops []hop `json:"hops"`
+		} `json:"details"`
+	}{Type: "mtr"}
+	for i := range hops {
+		payload.Details.Hops = append(payload.Details.Hops, hop{
+			Number: hops[i].Number, IP: hops[i].IP, Hostname: hops[i].Hostname,
+			RTT: hops[i].RTTNs, LossRatio: hops[i].LossRatio,
+		})
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		panic(err)
+	}
+	return store.RunResult{
+		ID: id, RunID: uuid.NewString(), SourceNode: "node-a", DestinationNode: "node-b",
+		Success: true, DurationNs: 2_000_000, Result: raw, RecordedAt: at,
+	}
+}
+
+func TestMTRSnapshotTracesReturnsTheTracesThatWalkedThatRoute(t *testing.T) {
+	st := newFakeMTRStore()
+	hops := []store.PathHop{{Number: 1, IP: "10.0.0.1", RTTNs: 1_000_000}}
+	base := time.Date(2026, 8, 11, 14, 20, 0, 0, time.UTC)
+	id := st.addSnapshot("node-a", "node-b", hops, base)
+	snap := st.snaps[id]
+	snap.FirstSeen = base.Add(-time.Minute)
+	snap.LastSeen = base.Add(time.Minute)
+	snap.TraceCount = 3
+	st.snaps[id] = snap
+	st.traces = []store.RunResult{
+		mtrTrace(3, base.Add(30*time.Second), hops),
+		mtrTrace(2, base, hops),
+		mtrTrace(1, base.Add(-30*time.Second), hops),
+	}
+
+	s := newM5TestServer(t, "viewer", Deps{MTR: st})
+	w := doRequest(t, s, http.MethodGet, "/api/v1/mtr/snapshots/"+id+"/traces", nil, nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status %d, want 200: %s", w.Code, w.Body)
+	}
+	var body mtrTracesResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v (%s)", err, w.Body)
+	}
+	if len(body.Traces) != 3 {
+		t.Fatalf("traces = %d, want 3: %s", len(body.Traces), w.Body)
+	}
+	// Each trace carries its OWN clock — that is the whole point of listing them.
+	if !body.Traces[0].RecordedAt.Equal(base.Add(30 * time.Second)) {
+		t.Errorf("first trace recordedAt = %v, want the newest", body.Traces[0].RecordedAt)
+	}
+	if len(body.Traces[0].Hops) == 0 || !strings.Contains(string(body.Traces[0].Hops), "10.0.0.1") {
+		t.Errorf("trace hops = %s, want the trace's own hop list", body.Traces[0].Hops)
+	}
+	/* The window handed to the store is the SNAPSHOT's, not the whole table's — with a small grace
+	   on the leading edge for routes stored before the projection started stamping them with the
+	   result row's own clock, whose first trace is otherwise a few hundred microseconds outside
+	   their own window. */
+	if !st.lastTraces.From.Equal(snap.FirstSeen.Add(-traceWindowGrace)) || !st.lastTraces.To.Equal(snap.LastSeen) {
+		t.Errorf("filter window = %v..%v, want the snapshot's own %v..%v (less the grace)",
+			st.lastTraces.From, st.lastTraces.To, snap.FirstSeen, snap.LastSeen)
+	}
+}
+
+// Two routes can interleave in time — a flapping hop alternates between them — so the window alone
+// is not the answer. A trace listed under a route it did not walk would be a confident lie.
+func TestMTRSnapshotTracesExcludesTracesOfAnotherRouteInTheSameWindow(t *testing.T) {
+	st := newFakeMTRStore()
+	mine := []store.PathHop{{Number: 1, IP: "10.0.0.1", RTTNs: 1_000_000}}
+	theirs := []store.PathHop{{Number: 1, IP: "10.0.0.9", RTTNs: 1_000_000}}
+	base := time.Date(2026, 8, 11, 14, 20, 0, 0, time.UTC)
+	id := st.addSnapshot("node-a", "node-b", mine, base)
+	snap := st.snaps[id]
+	snap.FirstSeen, snap.LastSeen = base.Add(-time.Minute), base.Add(time.Minute)
+	st.snaps[id] = snap
+	st.traces = []store.RunResult{
+		mtrTrace(2, base, theirs),
+		mtrTrace(1, base.Add(-10*time.Second), mine),
+	}
+
+	s := newM5TestServer(t, "viewer", Deps{MTR: st})
+	w := doRequest(t, s, http.MethodGet, "/api/v1/mtr/snapshots/"+id+"/traces", nil, nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status %d, want 200: %s", w.Code, w.Body)
+	}
+	var body mtrTracesResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(body.Traces) != 1 || !strings.Contains(string(body.Traces[0].Hops), "10.0.0.1") {
+		t.Fatalf("traces = %s, want only the one that walked THIS route", w.Body)
+	}
+	// And the reader is told the window held more, so "1 of 2" cannot read as loss.
+	if body.Scanned != 2 {
+		t.Errorf("scanned = %d, want 2 — the count before the path filter", body.Scanned)
+	}
+}
+
+func TestMTRSnapshotTracesUnknownSnapshotIs404(t *testing.T) {
+	s := newM5TestServer(t, "viewer", Deps{MTR: newFakeMTRStore()})
+	for _, id := range []string{uuid.NewString(), "not-a-uuid"} {
+		w := doRequest(t, s, http.MethodGet, "/api/v1/mtr/snapshots/"+id+"/traces", nil, nil)
+		if w.Code != http.StatusNotFound {
+			t.Errorf("GET traces for %q = %d, want 404: %s", id, w.Code, w.Body)
+		}
+	}
+}
+
+func TestMTRSnapshotTracesStoreFailureReturns502(t *testing.T) {
+	st := newFakeMTRStore()
+	id := st.addSnapshot("node-a", "node-b", []store.PathHop{{Number: 1, IP: "10.0.0.1"}}, time.Now())
+	st.tracesErr = errors.New("pq: connection reset, dsn=postgres://secret")
+
+	s := newM5TestServer(t, "viewer", Deps{MTR: st})
+	w := doRequest(t, s, http.MethodGet, "/api/v1/mtr/snapshots/"+id+"/traces", nil, nil)
+	if w.Code != http.StatusBadGateway {
+		t.Fatalf("status %d, want 502: %s", w.Code, w.Body)
+	}
+	if strings.Contains(w.Body.String(), "secret") {
+		t.Errorf("driver error leaked: %s", w.Body)
+	}
+}
+
+// A route can outlive the traces behind it: they live in check_results and age out with the RUN
+// sweep, not the path-history one. An empty list for a non-zero traceCount is the honest answer.
+func TestMTRSnapshotTracesEmptyIsAnArray(t *testing.T) {
+	st := newFakeMTRStore()
+	id := st.addSnapshot("node-a", "node-b", []store.PathHop{{Number: 1, IP: "10.0.0.1"}}, time.Now())
+
+	s := newM5TestServer(t, "viewer", Deps{MTR: st})
+	w := doRequest(t, s, http.MethodGet, "/api/v1/mtr/snapshots/"+id+"/traces", nil, nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status %d, want 200: %s", w.Code, w.Body)
+	}
+	if !strings.Contains(w.Body.String(), `"traces":[]`) {
+		t.Errorf("body = %s, want an empty ARRAY", w.Body)
 	}
 }

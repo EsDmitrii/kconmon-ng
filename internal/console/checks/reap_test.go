@@ -10,15 +10,26 @@ import (
 	"github.com/EsDmitrii/kconmon-ng/internal/console/store"
 )
 
+/*
+The reaper is judged PER ROW now: each run gets its own declared duration plus one worst round
+
+	over its own fan-out plus the flat slack. These two budgets are the extremes — one that allows a
+	run nothing, and one that allows it an hour — which is how a test names the intent it wants
+	without reconstructing the arithmetic.
+*/
+var (
+	reapEverything = store.ReapBudget{PerSourceConcurrency: 1, PerPairTimeout: 0, Slack: 0}
+)
+
 // mustCreateRunning creates a run in the MemoryStore and advances it to
 // "running", returning the created row (whose CreatedAt the reaper cutoffs
 // below are expressed relative to).
 func mustCreateRunning(t *testing.T, m *checks.MemoryStore, id string) store.Run {
 	t.Helper()
 	ctx := context.Background()
-	run, err := m.CreateRun(ctx, id, "tcp", "pod", json.RawMessage(`{}`), "user", "u1", 1)
+	run, err := m.CreateRun(ctx, id, "tcp", "pod", json.RawMessage(`{}`), "user", "u1", 1, time.Now().Add(time.Hour))
 	if err != nil {
-		t.Fatalf("CreateRun(%s): %v", id, err)
+		t.Fatalf("CreateRun(%s, time.Now().Add(time.Hour)): %v", id, err)
 	}
 	if err := m.MarkRunStarted(ctx, id); err != nil {
 		t.Fatalf("MarkRunStarted(%s): %v", id, err)
@@ -34,9 +45,12 @@ func TestMemoryStoreReapStuckRunsFinishesOnlyOldRunningRuns(t *testing.T) {
 	time.Sleep(2 * time.Millisecond)
 	healthy := mustCreateRunning(t, m, "healthy")
 
-	// Cutoff strictly between the two creations: created_at < cutoff selects
-	// the older run only.
-	n, err := m.ReapStuckRuns(ctx, healthy.CreatedAt, 100)
+	/* A budget that allows a run just over the age of the younger one: the older is past its
+	   allowance, the younger is not. */
+	n, err := m.ReapStuckRuns(ctx, store.ReapBudget{
+		PerSourceConcurrency: 1,
+		Slack:                time.Since(healthy.CreatedAt) + time.Millisecond,
+	}, 100)
 	if err != nil {
 		t.Fatalf("ReapStuckRuns: %v", err)
 	}
@@ -67,29 +81,32 @@ func TestMemoryStoreReapStuckRunsFinishesOnlyOldRunningRuns(t *testing.T) {
 	}
 }
 
-// The reaper touches "running" rows ONLY: a pending run that never started,
-// and a run that already reached a terminal status, are both left alone no
-// matter how old they are.
-func TestMemoryStoreReapStuckRunsIgnoresPendingAndTerminalRuns(t *testing.T) {
+/*
+The reaper touches runs that are MID-FLIGHT: 'running' and 'pending' both, since a replica that
+
+	died between CreateRun and MarkRunStarted leaves the latter behind and nothing else ever finishes
+	it. A run that already reached a terminal status is left alone however old it is.
+*/
+func TestMemoryStoreReapStuckRunsTakesPendingAndLeavesTerminalRuns(t *testing.T) {
 	m := checks.NewMemoryStore()
 	ctx := context.Background()
 
-	if _, err := m.CreateRun(ctx, "pending", "tcp", "pod", json.RawMessage(`{}`), "user", "u1", 1); err != nil {
-		t.Fatalf("CreateRun(pending): %v", err)
+	if _, err := m.CreateRun(ctx, "pending", "tcp", "pod", json.RawMessage(`{}`), "user", "u1", 1, time.Now().Add(time.Hour)); err != nil {
+		t.Fatalf("CreateRun(pending, time.Now().Add(time.Hour)): %v", err)
 	}
 	mustCreateRunning(t, m, "done")
 	if err := m.FinishRun(ctx, "done", "succeeded", 1, 0); err != nil {
 		t.Fatalf("FinishRun: %v", err)
 	}
 
-	n, err := m.ReapStuckRuns(ctx, time.Now().UTC().Add(time.Hour), 100)
+	n, err := m.ReapStuckRuns(ctx, reapEverything, 100)
 	if err != nil {
 		t.Fatalf("ReapStuckRuns: %v", err)
 	}
-	if n != 0 {
-		t.Fatalf("reaped %d runs, want 0", n)
+	if n != 1 {
+		t.Fatalf("reaped %d runs, want 1 (the orphaned pending run)", n)
 	}
-	for _, tc := range []struct{ id, want string }{{"pending", "pending"}, {"done", "succeeded"}} {
+	for _, tc := range []struct{ id, want string }{{"pending", "cancelled"}, {"done", "succeeded"}} {
 		run, err := m.GetRun(ctx, tc.id)
 		if err != nil {
 			t.Fatalf("GetRun(%s): %v", tc.id, err)
@@ -105,7 +122,7 @@ func TestMemoryStoreReapStuckRunsHonoursLimit(t *testing.T) {
 	for i := 0; i < 5; i++ {
 		mustCreateRunning(t, m, string(rune('a'+i)))
 	}
-	n, err := m.ReapStuckRuns(context.Background(), time.Now().UTC().Add(time.Hour), 2)
+	n, err := m.ReapStuckRuns(context.Background(), reapEverything, 2)
 	if err != nil {
 		t.Fatalf("ReapStuckRuns: %v", err)
 	}
@@ -119,13 +136,13 @@ func TestMemoryStoreReapStuckRunsHonoursLimit(t *testing.T) {
 // stay "running", plus slack) is asserted without waiting hours for a real one.
 type cutoffRecordingStore struct {
 	*checks.MemoryStore
-	gotBefore time.Time
+	gotBudget store.ReapBudget
 	gotLimit  int32
 	reaped    int64
 }
 
-func (s *cutoffRecordingStore) ReapStuckRuns(_ context.Context, before time.Time, limit int32) (int64, error) {
-	s.gotBefore = before
+func (s *cutoffRecordingStore) ReapStuckRuns(_ context.Context, budget store.ReapBudget, limit int32) (int64, error) { //nolint:gocritic // hugeParam: mirrors the seam
+	s.gotBudget = budget
 	s.gotLimit = limit
 	return s.reaped, nil
 }
@@ -145,13 +162,13 @@ func TestRunnerReapStuckRunsUsesAConservativePastCutoff(t *testing.T) {
 		t.Errorf("ReapStuckRuns returned %d, want the store's own count (3) passed through", n)
 	}
 
-	// A run started right now must not be reapable: the cutoff has to sit at
-	// least the maximum possible run deadline in the past. That ceiling is
-	// ceil(400/8) = 50 batches x 120s + 30s slack = 6030s.
-	const maxRunDeadline = 6030 * time.Second
-	if age := before.Sub(st.gotBefore); age < maxRunDeadline {
-		t.Errorf("cutoff is only %s in the past, want at least %s (the longest a run can legitimately run)", age, maxRunDeadline)
+	/* The budget must cover what a live run is actually given: one worst batch per pair at the
+	   per-pair ceiling, over the per-source gate that paces it. A budget narrower than that would
+	   reap runs that are still working. */
+	if st.gotBudget.PerSourceConcurrency <= 0 || st.gotBudget.PerPairTimeout <= 0 || st.gotBudget.Slack <= 0 {
+		t.Errorf("budget = %+v, want every term positive", st.gotBudget)
 	}
+	_ = before
 	if st.gotLimit <= 0 {
 		t.Errorf("limit = %d, want a positive default when the caller passes 0", st.gotLimit)
 	}

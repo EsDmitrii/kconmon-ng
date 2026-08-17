@@ -61,8 +61,24 @@ func (s *Server) handleTopology(w http.ResponseWriter, r *http.Request) {
 			writeProblem(w, http.StatusBadGateway, "controller unavailable", "no controller leader answered after retries")
 			return
 		}
-		writeProblem(w, http.StatusBadGateway, "controller error", err.Error())
+		/* LOGGED, not forwarded. err.Error() on a transport failure is a *url.Error carrying the
+		   controller's in-cluster URL and its resolved pod IP, and under auth.mode=anonymous that
+		   body reaches anyone who can reach the console. handleAlerts and serveHistoricalTopology in
+		   this same file already answer with a fixed sentence. */
+		slog.Error("controller topology failed", "error", err) //nolint:gosec // G706: structured slog fields
+		writeProblem(w, http.StatusBadGateway, "controller error", "the controller did not answer")
 		return
+	}
+	// A controller that answered {"nodes":null} (Go marshals a nil slice as null)
+	// must not reach the console as null: the frontend indexes into nodes/agents
+	// the same way the historical path (serveHistoricalTopology) already guards
+	// with make(). nil-slice accident, NOT a semantic null -- an empty topology is
+	// [], never absent.
+	if topo.Nodes == nil {
+		topo.Nodes = []controllerclient.Node{}
+	}
+	if topo.Agents == nil {
+		topo.Agents = []controllerclient.Agent{}
 	}
 	writeJSON(w, topo)
 }
@@ -154,7 +170,9 @@ func (s *Server) handleMatrix(w http.ResponseWriter, r *http.Request) {
 			writeProblem(w, http.StatusBadRequest, "unsupported protocol", "protocol must be one of tcp|udp|icmp")
 			return
 		}
-		writeProblem(w, http.StatusBadGateway, "matrix computation failed", err.Error())
+		// Same reason as handleTopology's: the error text names Prometheus' URL and its address.
+		slog.Error("matrix computation failed", "error", err) //nolint:gosec // G706: structured slog fields
+		writeProblem(w, http.StatusBadGateway, "matrix computation failed", "prometheus did not answer")
 		return
 	}
 	writeJSON(w, m)
@@ -172,10 +190,24 @@ type promQLRangeRequest struct {
 	Step  int64     `json:"step"` // nanoseconds, per API.md duration convention
 }
 
+// promqlRateLimitDetail is what a throttled PromQL caller is told; it names the knob, the way the
+// runs limit does.
+const promqlRateLimitDetail = "too many PromQL queries " +
+	"(limit: console.rateLimit.promqlPerMinute per subject per minute)"
+
 func (s *Server) handlePromQLQuery(w http.ResponseWriter, r *http.Request) {
 	if s.prom == nil {
 		writeProblem(w, http.StatusServiceUnavailable, "prometheus not configured",
 			"set prometheus.url in the console config (Helm: console.prometheus.url)")
+		return
+	}
+	/* Rate limited BEFORE the query leaves for Prometheus: this route forwards ARBITRARY PromQL to
+	   the cluster's monitoring stack, promql:query belongs to the viewer role, and the chart's demo
+	   default makes every visitor a viewer. One wide range query is a great deal of upstream work,
+	   and nothing bounded how many a caller could ask for. */
+	subject, _ := SubjectFrom(r.Context())
+	if !s.rateLimitAllow(r.Context(), rateLimitPromQL, s.cfg.RateLimit.PromQLPerMinute, promqlRateLimitKey(subject)) {
+		writeRateLimited(w, promqlRateLimitDetail)
 		return
 	}
 	var req promQLQueryRequest
@@ -195,6 +227,15 @@ func (s *Server) handlePromQLQueryRange(w http.ResponseWriter, r *http.Request) 
 	if s.prom == nil {
 		writeProblem(w, http.StatusServiceUnavailable, "prometheus not configured",
 			"set prometheus.url in the console config (Helm: console.prometheus.url)")
+		return
+	}
+	/* Rate limited BEFORE the query leaves for Prometheus: this route forwards ARBITRARY PromQL to
+	   the cluster's monitoring stack, promql:query belongs to the viewer role, and the chart's demo
+	   default makes every visitor a viewer. One wide range query is a great deal of upstream work,
+	   and nothing bounded how many a caller could ask for. */
+	subject, _ := SubjectFrom(r.Context())
+	if !s.rateLimitAllow(r.Context(), rateLimitPromQL, s.cfg.RateLimit.PromQLPerMinute, promqlRateLimitKey(subject)) {
+		writeRateLimited(w, promqlRateLimitDetail)
 		return
 	}
 	var req promQLRangeRequest
@@ -230,6 +271,9 @@ func (s *Server) writePromResult(w http.ResponseWriter, raw json.RawMessage, err
 			_, _ = w.Write(ue.Body) //nolint:gosec // G705: Prometheus JSON error envelope, served as application/json with nosniff, never rendered as HTML
 			return
 		}
-		writeProblem(w, http.StatusBadGateway, "prometheus error", err.Error())
+		// Prometheus' OWN envelope is forwarded above (that is the point of the branch); this branch
+		// is a transport failure, whose text names the upstream URL and address.
+		slog.Error("prometheus request failed", "error", err) //nolint:gosec // G706: structured slog fields
+		writeProblem(w, http.StatusBadGateway, "prometheus error", "prometheus did not answer")
 	}
 }

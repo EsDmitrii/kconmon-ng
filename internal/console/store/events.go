@@ -29,6 +29,41 @@ const (
 // gen.Queries method names this package actually calls; never widen either set with per-call data
 // (table names, row counts, user or run IDs).
 const (
+	/* checks.go and targets.go were the two files whose queries produced NO series at all --
+	   29 of the package's 99, including UpsertRunResult, which is the highest-volume write in
+	   the system (one row per pair per sample of every run). The metric's own help says it
+	   counts "queries issued by the store package", so a latency panel or a slow-query alert
+	   built from that sentence watched everything except the busiest writer. */
+	queryAbandonRun                 = "AbandonRun"
+	queryCountActiveRunsByInitiator = "CountActiveRunsByInitiator"
+	queryCreateDefinition           = "CreateDefinition"
+	queryCreateRun                  = "CreateRun"
+	queryCreateSchedule             = "CreateSchedule"
+	queryCreateTarget               = "CreateTarget"
+	queryDeleteDefinition           = "DeleteDefinition"
+	queryDeleteRunsBefore           = "DeleteRunsBefore"
+	queryDeleteSchedule             = "DeleteSchedule"
+	queryDeleteTarget               = "DeleteTarget"
+	queryFinishRun                  = "FinishRun"
+	queryGetDefinition              = "GetDefinition"
+	queryGetRun                     = "GetRun"
+	queryGetRunResults              = "GetRunResults"
+	queryGetSchedule                = "GetSchedule"
+	queryGetTarget                  = "GetTarget"
+	queryListDefinitions            = "ListDefinitions"
+	queryListDueSchedules           = "ListDueSchedules"
+	queryListRuns                   = "ListRuns"
+	queryListSchedules              = "ListSchedules"
+	queryListTargets                = "ListTargets"
+	queryMarkRunStarted             = "MarkRunStarted"
+	queryMarkScheduleFired          = "MarkScheduleFired"
+	queryMarkScheduleSkipped        = "MarkScheduleSkipped"
+	queryReapStuckRuns              = "ReapStuckRuns"
+	queryUpdateDefinition           = "UpdateDefinition"
+	queryUpdateSchedule             = "UpdateSchedule"
+	queryUpdateTarget               = "UpdateTarget"
+	queryUpsertRunResult            = "UpsertRunResult"
+
 	queryInsertTopologyEvent       = "InsertTopologyEvent"
 	queryListTopologyEvents        = "ListTopologyEvents"
 	queryOldestTopologyEventTime   = "OldestTopologyEventTime"
@@ -65,6 +100,7 @@ const (
 	queryUpsertPathSnapshot  = "UpsertPathSnapshot"
 	queryListMTRDestinations = "ListMTRDestinations"
 	queryListPathSnapshots   = "ListPathSnapshots"
+	queryListPathTraces      = "ListPathTraces"
 	queryGetPathSnapshot     = "GetPathSnapshot"
 	queryGetEnrichment       = "GetEnrichment"
 	queryPutEnrichment       = "PutEnrichment"
@@ -227,14 +263,6 @@ func (s *eventStore) ListEvents(ctx context.Context, f EventFilter) (EventPage, 
 		scope = pgtype.Text{String: f.Scope, Valid: true}
 	}
 
-	// Passed RAW: the escaping the LIKE branches need happens inside the query
-	// (see topology_events.sql), because the same param also feeds the equality
-	// branch, where an escaped name would match nothing.
-	var scopeNode pgtype.Text
-	if f.ScopeNode != "" {
-		scopeNode = pgtype.Text{String: f.ScopeNode, Valid: true}
-	}
-
 	var fromTime, toTime pgtype.Timestamptz
 	if !f.From.IsZero() {
 		fromTime = pgtype.Timestamptz{Time: f.From, Valid: true}
@@ -243,17 +271,56 @@ func (s *eventStore) ListEvents(ctx context.Context, f EventFilter) (EventPage, 
 		toTime = pgtype.Timestamptz{Time: f.To, Valid: true}
 	}
 
+	/* TWO QUERIES, chosen by whether the caller asked the pair-aware question.
+
+	   The pair-aware filter cannot live as an OR inside the general listing: a disjunction under
+	   `ORDER BY event_time DESC LIMIT n` makes PostgreSQL walk the time index and filter, which on a
+	   scope with few or no events reads the whole table. ListTopologyEventsByScopeNode is the same
+	   filter written as a UNION ALL of two index-ordered arms — see its comment for the measurement. */
 	start := time.Now()
-	rows, err := s.q.ListTopologyEvents(ctx, gen.ListTopologyEventsParams{
-		Types:     types,
-		Scope:     scope,
-		ScopeNode: scopeNode,
-		FromTime:  fromTime,
-		ToTime:    toTime,
-		CurTime:   curTime,
-		CurID:     curID,
-		Lim:       int32(limit), //nolint:gosec // limit is clamped to [1,500] above
-	})
+	var (
+		rows []eventRow
+		err  error
+	)
+	if f.ScopeNode != "" {
+		var byNode []gen.ListTopologyEventsByScopeNodeRow
+		byNode, err = s.q.ListTopologyEventsByScopeNode(ctx, gen.ListTopologyEventsByScopeNodeParams{
+			ScopeNode: f.ScopeNode,
+			Types:     types,
+			FromTime:  fromTime,
+			ToTime:    toTime,
+			CurTime:   curTime,
+			CurID:     curID,
+			Lim:       int32(limit), //nolint:gosec // limit is clamped to [1,500] above
+		})
+		rows = make([]eventRow, len(byNode))
+		for i := range byNode {
+			rows[i] = eventRow{
+				ID: byNode[i].ID, EventSeq: byNode[i].EventSeq, EventTime: byNode[i].EventTime,
+				Type: byNode[i].Type, Severity: byNode[i].Severity, Scope: byNode[i].Scope,
+				Summary: byNode[i].Summary, Details: byNode[i].Details,
+			}
+		}
+	} else {
+		var general []gen.ListTopologyEventsRow
+		general, err = s.q.ListTopologyEvents(ctx, gen.ListTopologyEventsParams{
+			Types:    types,
+			Scope:    scope,
+			FromTime: fromTime,
+			ToTime:   toTime,
+			CurTime:  curTime,
+			CurID:    curID,
+			Lim:      int32(limit), //nolint:gosec // limit is clamped to [1,500] above
+		})
+		rows = make([]eventRow, len(general))
+		for i := range general {
+			rows[i] = eventRow{
+				ID: general[i].ID, EventSeq: general[i].EventSeq, EventTime: general[i].EventTime,
+				Type: general[i].Type, Severity: general[i].Severity, Scope: general[i].Scope,
+				Summary: general[i].Summary, Details: general[i].Details,
+			}
+		}
+	}
 	if err != nil {
 		s.observe(queryListTopologyEvents, start, resultError)
 		return EventPage{}, fmt.Errorf("store: list events: %w", err)
@@ -281,6 +348,19 @@ func (s *eventStore) ListEvents(ctx context.Context, f EventFilter) (EventPage, 
 	}
 
 	return EventPage{Events: events, NextCursor: nextCursor}, nil
+}
+
+// eventRow is the shape both listing queries project onto, so the paging and mapping below is
+// written once. sqlc mints a distinct row type per query even when the SELECT list is identical.
+type eventRow struct {
+	ID        int64
+	EventSeq  int64
+	EventTime time.Time
+	Type      string
+	Severity  string
+	Scope     string
+	Summary   string
+	Details   json.RawMessage
 }
 
 // topology-at-t WHAT A topology_changed EVENT ACTUALLY CARRIES, and therefore what this fold can

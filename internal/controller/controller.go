@@ -36,13 +36,37 @@ func (c *Controller) IsLeader() bool {
 	return c.leader.Load()
 }
 
-// SetLeader updates the leadership state and the controller_leader gauge.
+// SetLeader updates the leadership state and the controller_leader gauge. Demotion also drops the
+// registry: agents accepted while leading belong to the new leader now, and a stale copy would keep
+// this replica planning a second probe mesh over them.
 func (c *Controller) SetLeader(leader bool) {
-	c.leader.Store(leader)
+	was := c.leader.Swap(leader)
 	if leader {
 		c.metrics.ControllerLeader.WithLabelValues().Set(1)
 	} else {
 		c.metrics.ControllerLeader.WithLabelValues().Set(0)
+	}
+	if was && !leader {
+		/* QUIETLY: the subscribers of this registry are the streams still attached to a replica that
+		   has just stopped being the leader, and telling them "every agent deregistered" made every
+		   one of them wipe its peer gauges and resume probing an empty mesh. They are ended by their
+		   own leader checks; the new leader's FULL_SYNC is what replaces their plan. */
+		c.registry.ResetQuiet()
+		// The gauge belongs to this replica's own view, and it now holds nothing. It used to be
+		// zeroed as a side effect of the notification ResetQuiet deliberately does not send.
+		c.metrics.ControllerRegisteredAgents.WithLabelValues().Set(0)
+		/* And the EXTERNAL assignment, which is the same kind of state and was left behind.
+
+		   A demoted replica kept the assignment map it held as leader, so
+		   controller_external_assignments went on reporting agents it no longer assigns anything to,
+		   and Assignment() answered a re-subscribing agent with a plan only the real leader may
+		   decide. Losing the lease without a restart is ordinary — a renewal glitch, a takeover, a
+		   scale 2→1→2 that lands the sole replica back here — and the registry was already reset for
+		   exactly this reason; the external half was simply missed. */
+		if c.grpcServer != nil {
+			c.grpcServer.ExternalCheckManager().Reset()
+		}
+		c.metrics.ControllerExternalAssignments.WithLabelValues().Set(0)
 	}
 }
 
@@ -63,6 +87,10 @@ func New(cfg *config.Config) *Controller {
 
 	c.grpcServer = NewGRPCServer(registry, m, cfg.Controller.LeaderElection, c.IsLeader, cfg.Controller.Events.Enabled)
 	c.httpServer = NewHTTPServer(registry, nil, promReg, capabilitiesFor(cfg))
+	// Only when the checker is on: an allowlist nobody probes by is not a promise.
+	if cfg.Checkers.External.Enabled {
+		c.httpServer.SetExternalAllowedCIDRs(cfg.Checkers.External.AllowedCIDRs)
+	}
 
 	// The events are about the change itself, and a single event cannot name several agents.
 	registry.OnChange(func(agents []model.AgentInfo, change TopologyChange) {
@@ -73,9 +101,11 @@ func New(cfg *config.Config) *Controller {
 		}
 	})
 
-	// No leader-election loop is wired yet; default to leader so behavior is
-	// unchanged. SetLeader also syncs the controller_leader gauge to 1.
-	c.SetLeader(true)
+	// With election off this replica is the only brain; with it on, leadership arrives from the
+	// Lease loop started in Run. Either way the controller_leader gauge is published from the start.
+	c.SetLeader(!cfg.Controller.LeaderElection)
+
+	c.httpServer.SetLeaderGate(cfg.Controller.LeaderElection, c.IsLeader)
 
 	c.httpServer.SetDiagnosticsHandler(NewDiagnosticsHandler(
 		registry,
@@ -129,22 +159,32 @@ func (c *Controller) Run(ctx context.Context) error {
 		errCh <- grpcSrv.Serve(grpcLis)
 	}()
 
-	httpSrv := &http.Server{
-		Addr:         fmt.Sprintf(":%d", c.cfg.HTTPPort),
-		Handler:      c.httpServer.Handler(),
-		ReadTimeout:  10 * time.Second,
-		WriteTimeout: 10 * time.Second,
-	}
+	httpSrv := newControllerHTTPServer(fmt.Sprintf(":%d", c.cfg.HTTPPort), c.httpServer.Handler())
 
 	go func() {
 		slog.Info("HTTP server listening", "port", c.cfg.HTTPPort)
 		errCh <- httpSrv.ListenAndServe()
 	}()
 
+	/* The METRICS listener, on a port of its own. The chart's scrape rule opens THIS one, so letting
+	   a scraper in no longer lets its whole namespace reach the unauthenticated API above. */
+	metricsSrv := metrics.NewListener(
+		fmt.Sprintf(":%d", c.cfg.MetricsPort),
+		metrics.NewListenerHandler(c.promReg, c.httpServer.Ready),
+	)
+
+	go func() {
+		slog.Info("metrics server listening", "port", c.cfg.MetricsPort)
+		errCh <- metricsSrv.ListenAndServe()
+	}()
+
 	if c.cfg.Controller.LeaderElection {
 		clientset, err := buildInClusterClientset()
 		if err != nil {
-			slog.Warn("in-cluster k8s client unavailable, NodeWatcher disabled", "error", err)
+			// No apiserver, so no lease to contend for: this process is the only brain it can see.
+			slog.Warn("in-cluster k8s client unavailable, NodeWatcher and leader election disabled",
+				"error", err)
+			c.SetLeader(true)
 		} else {
 			nw := NewNodeWatcherWithContext(ctx, clientset, c.cfg.FailureDomainLabel)
 			c.httpServer.SetNodeWatcher(nw)
@@ -155,6 +195,15 @@ func (c *Controller) Run(ctx context.Context) error {
 			nw.OnZoneChange(c.registry.UpdateZone)
 			c.metrics.ControllerExpectedAgents.WithLabelValues().Set(float64(nw.SchedulableNodeCount()))
 			slog.Info("NodeWatcher started", "failureDomainLabel", c.cfg.FailureDomainLabel)
+
+			opts := electionOptionsFor(clientset)
+			if opts.namespace == "" {
+				// Without a namespace there is no lease to contend for; lead rather than stall.
+				slog.Error("cannot determine the lease namespace, assuming leadership")
+				c.SetLeader(true)
+			} else {
+				go c.runLeaderElection(ctx, opts)
+			}
 		}
 	}
 
@@ -187,9 +236,36 @@ func (c *Controller) Run(ctx context.Context) error {
 
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
+		_ = metricsSrv.Shutdown(shutdownCtx)
 		return httpSrv.Shutdown(shutdownCtx)
 	case err := <-errCh:
 		return err
+	}
+}
+
+// The controller's HTTP budget. Every endpoint on this server answers in milliseconds -- /metrics,
+// /healthz, /readyz, topology, version, external-checks -- so the write budget stays short.
+//
+// POST /api/v1/diagnostics is the one exception: it waits for an agent to finish a real probe and
+// negotiates its own deadline per request (?timeout=, up to maxDiagnosticsTimeout). Go arms the
+// connection's write deadline when it READS the request, so a 30s MTR trace used to write into a
+// connection whose deadline had expired 20s earlier: the response was dropped, the connection torn
+// down, and the caller got a bare EOF with nothing logged here. That endpoint therefore extends its
+// OWN write deadline (DiagnosticsHandler.ServeHTTP) instead of this constant being raised for
+// everything.
+const (
+	controllerHTTPReadTimeout  = 10 * time.Second
+	controllerHTTPWriteTimeout = 10 * time.Second
+)
+
+// newControllerHTTPServer builds the controller's HTTP server. Named so tests can pin the budget
+// above against the diagnostics endpoint's own, much longer, negotiated deadline.
+func newControllerHTTPServer(addr string, h http.Handler) *http.Server {
+	return &http.Server{
+		Addr:         addr,
+		Handler:      h,
+		ReadTimeout:  controllerHTTPReadTimeout,
+		WriteTimeout: controllerHTTPWriteTimeout,
 	}
 }
 

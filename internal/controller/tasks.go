@@ -18,14 +18,28 @@ var ErrAgentNotSubscribed = errors.New("agent has no active task subscription")
 // correlates the asynchronous ReportTaskResult callback back to the waiting Dispatch caller;
 // callers must never hold the mutex while sending on a channel or blocking.
 type TaskManager struct {
-	mu          sync.Mutex
-	subscribers map[string]chan *pb.TaskRequest
+	mu sync.Mutex
+	/* A SET of streams per agent id, not one stream per agent id.
+
+	   The agent id on a WatchTasks request is whatever the client sent, and this channel is what a
+	   diagnostic dispatch is delivered on. With one entry per id the map was last-writer-wins: a
+	   second caller subscribing under an existing agent's id took delivery of that agent's tasks,
+	   and when it disconnected its cleanup — which owned the mapped entry — removed the id
+	   altogether, so every later dispatch to a healthy, connected agent answered 404 "source agent
+	   has no active diagnostics stream". Nothing was logged on either side and the agent still
+	   counted as registered.
+
+	   A set cannot be displaced: a subscriber only ever removes its OWN channel, and Dispatch
+	   delivers to all of them. This does not authenticate the channel — the gRPC surface has no
+	   authentication at all, which is a deployment-level decision the NetworkPolicy expresses — but
+	   it does mean no caller can take a subscription away from the agent that owns it. */
+	subscribers map[string]map[chan *pb.TaskRequest]struct{}
 	pending     map[string]chan *pb.TaskResult
 }
 
 func NewTaskManager() *TaskManager {
 	return &TaskManager{
-		subscribers: make(map[string]chan *pb.TaskRequest),
+		subscribers: make(map[string]map[chan *pb.TaskRequest]struct{}),
 		pending:     make(map[string]chan *pb.TaskResult),
 	}
 }
@@ -37,15 +51,22 @@ func (tm *TaskManager) Subscribe(agentID string) (tasks <-chan *pb.TaskRequest, 
 	ch := make(chan *pb.TaskRequest, 16)
 
 	tm.mu.Lock()
-	tm.subscribers[agentID] = ch
+	if tm.subscribers[agentID] == nil {
+		tm.subscribers[agentID] = make(map[chan *pb.TaskRequest]struct{}, 1)
+	}
+
+	tm.subscribers[agentID][ch] = struct{}{}
 	tm.mu.Unlock()
 
 	var once sync.Once
 	cleanup = func() {
 		once.Do(func() {
 			tm.mu.Lock()
-			if cur, ok := tm.subscribers[agentID]; ok && cur == ch {
-				delete(tm.subscribers, agentID)
+			if set, ok := tm.subscribers[agentID]; ok {
+				delete(set, ch)
+				if len(set) == 0 {
+					delete(tm.subscribers, agentID)
+				}
 			}
 			tm.mu.Unlock()
 		})
@@ -65,10 +86,14 @@ func (tm *TaskManager) Dispatch(ctx context.Context, agentID string, req *pb.Tas
 	resultCh := make(chan *pb.TaskResult, 1)
 
 	tm.mu.Lock()
-	sub, ok := tm.subscribers[agentID]
-	if !ok {
+	set := tm.subscribers[agentID]
+	if len(set) == 0 {
 		tm.mu.Unlock()
 		return nil, ErrAgentNotSubscribed
+	}
+	subs := make([]chan *pb.TaskRequest, 0, len(set))
+	for ch := range set {
+		subs = append(subs, ch)
 	}
 	tm.pending[taskID] = resultCh
 	tm.mu.Unlock()
@@ -81,10 +106,23 @@ func (tm *TaskManager) Dispatch(ctx context.Context, agentID string, req *pb.Tas
 
 	// Enqueue the task on the agent's buffered channel. Respect context so a
 	// slow/full subscriber cannot block the caller past its deadline.
-	select {
-	case sub <- req:
-	case <-ctx.Done():
-		return nil, ctx.Err()
+	/* Every stream open for this agent id gets the task, and the first agent to answer wins the
+	   pending slot. Normally there is exactly one; a reconnect overlaps two for a moment, and the
+	   dying one simply never answers. Sending to ALL of them rather than to "the" subscriber is
+	   what makes a second subscriber unable to intercept the dispatch. */
+	sent := false
+	for _, sub := range subs {
+		select {
+		case sub <- req:
+			sent = true
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		default:
+			// A full buffer on one stream must not cost the others their copy.
+		}
+	}
+	if !sent {
+		return nil, ErrAgentNotSubscribed
 	}
 
 	select {
@@ -106,7 +144,9 @@ func (tm *TaskManager) Report(res *pb.TaskResult) {
 	tm.mu.Unlock()
 
 	if !ok {
-		slog.Debug("dropping task result for unknown task", "taskId", taskID)
+		// With several replicas this is the shape of a result that came back over a connection the
+		// Service routed to a replica that never dispatched the task; its dispatcher will time out.
+		slog.Warn("dropping task result for unknown task", "taskId", taskID)
 		return
 	}
 

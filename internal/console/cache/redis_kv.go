@@ -8,23 +8,23 @@ import (
 	"github.com/redis/rueidis"
 )
 
-// ValkeyKV is a KV backed by a real Valkey/Redis server via rueidis.
-type ValkeyKV struct {
+// RedisKV is a KV backed by a real Redis-compatible server via rueidis.
+type RedisKV struct {
 	client rueidis.Client
 }
 
-// compile-time proof ValkeyKV satisfies KV.
-var _ KV = (*ValkeyKV)(nil)
+// compile-time proof RedisKV satisfies KV.
+var _ KV = (*RedisKV)(nil)
 
-// NewValkeyKVFromBus builds a ValkeyKV around vb's already-open rueidis client.
-func NewValkeyKVFromBus(vb *ValkeyBus) *ValkeyKV {
-	return &ValkeyKV{client: vb.client}
+// NewRedisKVFromBus builds a RedisKV around vb's already-open rueidis client.
+func NewRedisKVFromBus(vb *RedisBus) *RedisKV {
+	return &RedisKV{client: vb.client}
 }
 
 // Get reports (nil, false, nil) on a miss, mapping rueidis's nil reply
 // (key absent or expired — Valkey enforces the PX ttl itself) to that same
 // miss shape KV promises, never surfacing it as an error.
-func (kv *ValkeyKV) Get(ctx context.Context, key string) (val []byte, ok bool, err error) {
+func (kv *RedisKV) Get(ctx context.Context, key string) (val []byte, ok bool, err error) {
 	cmd := kv.client.B().Get().Key(key).Build()
 	resp := kv.client.Do(ctx, cmd)
 	if respErr := resp.Error(); respErr != nil {
@@ -41,7 +41,7 @@ func (kv *ValkeyKV) Get(ctx context.Context, key string) (val []byte, ok bool, e
 }
 
 // Set writes val under key with a PX expiry of ttl.
-func (kv *ValkeyKV) Set(ctx context.Context, key string, val []byte, ttl time.Duration) error {
+func (kv *RedisKV) Set(ctx context.Context, key string, val []byte, ttl time.Duration) error {
 	cmd := kv.client.B().Set().Key(key).Value(rueidis.BinaryString(val)).Px(ttl).Build()
 	if err := kv.client.Do(ctx, cmd).Error(); err != nil {
 		return fmt.Errorf("valkey kv set %s: %w", key, err)
@@ -51,7 +51,7 @@ func (kv *ValkeyKV) Set(ctx context.Context, key string, val []byte, ttl time.Du
 
 // IncrWithTTL is INCR followed by PEXPIRE; letting EVERY call issue PEXPIRE NX moves the condition
 // into the server.
-func (kv *ValkeyKV) IncrWithTTL(ctx context.Context, key string, ttl time.Duration) (int64, error) {
+func (kv *RedisKV) IncrWithTTL(ctx context.Context, key string, ttl time.Duration) (int64, error) {
 	resps := kv.client.DoMulti(ctx,
 		kv.client.B().Incr().Key(key).Build(),
 		kv.client.B().Pexpire().Key(key).Milliseconds(ttl.Milliseconds()).Nx().Build(),
@@ -70,7 +70,7 @@ func (kv *ValkeyKV) IncrWithTTL(ctx context.Context, key string, ttl time.Durati
 
 // Delete removes key. DEL on an absent key returns a count of 0 rather than
 // an error in Valkey, so this is idempotent without any extra handling.
-func (kv *ValkeyKV) Delete(ctx context.Context, key string) error {
+func (kv *RedisKV) Delete(ctx context.Context, key string) error {
 	cmd := kv.client.B().Del().Key(key).Build()
 	if err := kv.client.Do(ctx, cmd).Error(); err != nil {
 		return fmt.Errorf("valkey kv delete %s: %w", key, err)

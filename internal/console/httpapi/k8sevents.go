@@ -102,6 +102,11 @@ func (s *Server) handleK8sEvents(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// A NUL here is fatal to pgx and used to surface as 502 "kubernetes events unavailable".
+	if rejectControlChars(w, "name", q.Get("name")) {
+		return
+	}
+
 	page, err := s.k8sEvents.ListK8sEvents(r.Context(), store.K8sEventFilter{
 		Name:   q.Get("name"),
 		Kind:   kind,

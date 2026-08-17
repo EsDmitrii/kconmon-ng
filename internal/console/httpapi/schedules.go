@@ -1,7 +1,6 @@
 package httpapi
 
 import (
-	"encoding/json"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -92,10 +91,10 @@ type scheduleRequest struct {
 // applied.
 func decodeScheduleRequest(w http.ResponseWriter, r *http.Request, defID string) (store.ScheduleInput, bool) {
 	var req scheduleRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeProblem(w, http.StatusBadRequest, "invalid request",
+	if err := strictJSONDecoder(r.Body).Decode(&req); err != nil {
+		writeProblem(w, http.StatusBadRequest, "invalid request", unknownFieldDetail(err,
 			`body must be JSON with "definitionId", "kind" ("once", "interval" or "continuous"), `+
-				`"intervalNs" in nanoseconds for kind interval, "runAt" for kind once, and an optional "enabled" flag`)
+				`"intervalNs" in nanoseconds for kind interval, "runAt" for kind once, and an optional "enabled" flag`))
 		return store.ScheduleInput{}, false
 	}
 	if req.Kind == "cron" {

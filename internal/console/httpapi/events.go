@@ -64,9 +64,17 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// scope and scopeNode answer different questions about the same column.
-	scope := q.Get("scope")
-	scopeNode := q.Get("scopeNode")
+	// A NUL (or any control char) in a scope-family param would travel to the
+	// Postgres text column and come back a 502; it is client input, so it is
+	// refused here as a 400 before the query is ever built.
+	if rejectControlChars(w, "scope", q.Get("scope")) || rejectControlChars(w, "scopeNode", q.Get("scopeNode")) {
+		return
+	}
+
+	// scope and scopeNode answer different questions about the same column. Both are normalized so a
+	// direct consumer typing "a->b" gets the rows the console's own arrow would have matched.
+	scope := events.NormalizePairScope(q.Get("scope"))
+	scopeNode := events.NormalizePairScope(q.Get("scopeNode"))
 	if scope != "" && scopeNode != "" {
 		writeProblem(w, http.StatusUnprocessableEntity, "conflicting scope filters",
 			"scope and scopeNode are mutually exclusive: scope matches the event's scope exactly, "+

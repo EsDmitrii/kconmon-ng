@@ -12,9 +12,11 @@ import (
 	"net/http"
 	"runtime/debug"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode"
 
 	appconfig "github.com/EsDmitrii/kconmon-ng/internal/config"
 	"github.com/EsDmitrii/kconmon-ng/internal/console/authn"
@@ -25,6 +27,7 @@ import (
 	"github.com/EsDmitrii/kconmon-ng/internal/console/metrics"
 	"github.com/EsDmitrii/kconmon-ng/internal/console/promql"
 	"github.com/EsDmitrii/kconmon-ng/internal/console/ws"
+	metricslistener "github.com/EsDmitrii/kconmon-ng/internal/metrics"
 	"github.com/go-chi/chi/v5"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -50,15 +53,22 @@ var _ OIDCFlow = (*authn.OIDCAuthenticator)(nil)
 
 // Server serves the Console HTTP surface.
 type Server struct {
-	cfg      *config.Config
-	metrics  *metrics.Metrics
-	router   chi.Router
-	ready    atomic.Bool
-	ctrl     *controllerclient.Client
-	prom     *promql.Client
-	hub      *ws.Hub
-	realtime RealtimeStatus
-	events   EventLister
+	cfg *config.Config
+	/* The trusted-proxy networks, parsed once at construction: the ONLY place this package believes
+	   a forwarding header (ratelimit.go's clientIP). Empty by default, and then r.RemoteAddr is the
+	   whole truth. */
+	trustedProxies []*net.IPNet
+	metrics        *metrics.Metrics
+	router         chi.Router
+	ready          atomic.Bool
+	ctrl           *controllerclient.Client
+	/* The agent-side external allowlist, cached from the controller; see targets_reachable.go. */
+	allowlistMu sync.Mutex
+	allowlist   externalAllowlist
+	prom        *promql.Client
+	hub         *ws.Hub
+	realtime    RealtimeStatus
+	events      EventLister
 
 	// Auth. authenticator and policy are never nil (NewServer defaults both); roles, sessions, users
 	// and oidc may all be nil.
@@ -120,8 +130,16 @@ type Server struct {
 	// the resolver satisfies the read-only interface deliberately.
 	enricher EnrichmentReader
 
+	// promReg backs both /metrics endpoints: the one on the API router and the one on the metrics
+	// listener Run starts.
+	promReg *prometheus.Registry
+
 	// kv is the short-TTL key/value store the fixed-window rate limiter counts in (ratelimit.go).
 	kv cache.KV
+
+	// kvBus is the pub/sub side of the same server; the ONLY thing this package publishes on it is
+	// the RBAC-change kick (see RBACChangedTopic). nil is the single-replica case and a no-op.
+	kvBus cache.Bus
 
 	// rateLimitWarnOnce keeps a KV outage to ONE warning per process; every request during the outage
 	// increments RateLimitFailOpen (that is the alertable signal).
@@ -223,6 +241,9 @@ type Deps struct {
 	// Enricher swaps the cache-only hop enrichment read for a resolving one.
 	Enricher EnrichmentReader
 
+	// Bus carries the RBAC-change kick to the other replicas; nil is a no-op (see RBACChangedTopic).
+	Bus cache.Bus
+
 	// KV backs the fixed-window rate limiter (ratelimit.go); in production this is the very same
 	// cache.KV cmd/console builds for Sessions and the OIDC state stash.
 	KV cache.KV
@@ -250,8 +271,9 @@ func NewServer(d Deps) *Server { //nolint:gocritic // hugeParam: Deps is the pin
 	}
 
 	s := &Server{
-		cfg: d.Config, metrics: d.Metrics, ctrl: d.Controller, prom: d.Prometheus,
-		hub: d.Hub, realtime: d.Realtime, events: d.Events,
+		cfg: d.Config, trustedProxies: parseCIDRs(d.Config.Auth.Header.TrustedProxyCIDRs),
+		metrics: d.Metrics, ctrl: d.Controller, prom: d.Prometheus,
+		hub: d.Hub, realtime: d.Realtime, events: d.Events, promReg: d.PromRegistry, kvBus: d.Bus,
 		authenticator: authenticator, policy: policy, roles: d.Roles, sessions: d.Sessions,
 		users: d.Users, oidc: d.OIDC,
 		audit: d.Audit, roleAdmin: d.RBAC, tokens: d.Tokens,
@@ -288,7 +310,7 @@ func NewServer(d Deps) *Server { //nolint:gocritic // hugeParam: Deps is the pin
 	r := chi.NewRouter()
 	// Order is load-bearing. instrument stays OUTERMOST so a panic-born 500 is still counted with its
 	// route pattern (the recoverer writes the status through instrument's own statusRecorder).
-	r.Use(s.instrument, s.recoverer)
+	r.Use(s.instrument, s.recoverer, limitBody, rejectControlPath)
 
 	// Never authenticated: kubelet probes and the Prometheus scrape would fail every pod if these
 	// required credentials.
@@ -341,6 +363,7 @@ func NewServer(d Deps) *Server { //nolint:gocritic // hugeParam: Deps is the pin
 		api.Get("/api/v1/mtr/destinations", s.handleMTRDestinations)
 		api.Get("/api/v1/mtr/snapshots", s.handleMTRSnapshots)
 		api.Get("/api/v1/mtr/snapshots/{id}", s.handleMTRSnapshotGet)
+		api.Get("/api/v1/mtr/snapshots/{id}/traces", s.handleMTRSnapshotTraces)
 
 		// Annotations are create/list/delete and deliberately have no update:
 		// an annotation is a mark, not a document (M5 Decision 10).
@@ -444,6 +467,14 @@ func (s *Server) Run(ctx context.Context) error {
 	srv := &http.Server{
 		Handler:           s.router,
 		ReadHeaderTimeout: 10 * time.Second,
+		/* IdleTimeout bounds a KEPT-ALIVE connection between requests. Without it a client could
+		   hold a connection open forever having asked for nothing, and n such connections cost n
+		   goroutines and n sockets with no request to show for them.
+		   There is deliberately no ReadTimeout: it would apply to /ws as well and would tear down
+		   every WebSocket at the deadline. The body phase is bounded per request instead — see
+		   limitBody, which arms a read deadline for EVERY request; handleWS clears it once the
+		   router, not the client's headers, has established that the request is the upgrade. */
+		IdleTimeout: 120 * time.Second,
 	}
 	var lc net.ListenConfig
 	ln, err := lc.Listen(ctx, "tcp", ":"+strconv.Itoa(s.cfg.HTTPPort))
@@ -451,16 +482,39 @@ func (s *Server) Run(ctx context.Context) error {
 		return fmt.Errorf("listen on :%d: %w", s.cfg.HTTPPort, err)
 	}
 
-	errCh := make(chan error, 1)
+	/* The METRICS listener, on a port of its own.
+
+	   /metrics is still served on the API port for anyone scraping it directly, but nothing in the
+	   chart opens that port to a scraper any more: a NetworkPolicy cannot say "this port, but only
+	   these paths", so a scrape rule on the API port handed the console's whole API to everything
+	   sharing the scraper's namespace — precisely undoing the narrowing
+	   console.networkPolicy.ingressFrom exists to express. Same split, same reasoning and the same
+	   helper as the agent and the controller — internal/metrics, imported as metricslistener because
+	   this package's own `metrics` is the console's metric set. */
+	metricsSrv := metricslistener.NewListener(
+		fmt.Sprintf(":%d", s.cfg.MetricsPort),
+		metricslistener.NewListenerHandler(s.promReg, s.ready.Load),
+	)
+	metricsLn, err := lc.Listen(ctx, "tcp", fmt.Sprintf(":%d", s.cfg.MetricsPort))
+	if err != nil {
+		return fmt.Errorf("listen on :%d: %w", s.cfg.MetricsPort, err)
+	}
+
+	errCh := make(chan error, 2)
 	go func() {
 		slog.Info("console http server listening", "addr", ln.Addr().String())
 		errCh <- srv.Serve(ln)
+	}()
+	go func() {
+		slog.Info("console metrics listening", "addr", metricsLn.Addr().String())
+		errCh <- metricsSrv.Serve(metricsLn)
 	}()
 
 	select {
 	case <-ctx.Done():
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
+		_ = metricsSrv.Shutdown(shutdownCtx)
 		err := srv.Shutdown(shutdownCtx)
 		// Shutdown has already drained the in-flight requests, so nothing new
 		// can be enqueued by the time this runs -- whatever is still in the
@@ -515,8 +569,22 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 			"this console instance has no websocket hub wired")
 		return
 	}
+	/* The router has now decided this really is /ws, so the body-phase deadline limitBody arms for
+	   every request comes off. Doing it here rather than in the middleware is the point: the
+	   middleware cannot tell an upgrade from a request that merely claims to be one. */
+	clearBodyReadDeadline(w)
+
 	subject, _ := SubjectFrom(r.Context())
-	s.hub.ServeWSAuthorized(w, r, s.wsTopicAuthorizer(subject))
+	// One cell, shared by the topic gate and the revalidator, so both answer from the SAME, current
+	// roles rather than from two copies of the upgrade-time snapshot.
+	current := &atomic.Pointer[authz.Subject]{}
+	current.Store(&subject)
+	s.hub.ServeWSWithOptions(w, r, ws.ConnOptions{
+		Authorize: s.wsTopicAuthorizer(current),
+		/* The upgrade's answer does not stand forever: a revoked token or a deleted role binding
+		   used to leave the socket streaming until the browser closed it. See wsRevalidator. */
+		Revalidate: s.wsRevalidator(r, current),
+	})
 }
 
 // authLoginPath returns the endpoint the frontend should navigate to (GET, full-page navigation for
@@ -588,6 +656,91 @@ func (r *panicRecorder) Write(b []byte) (int, error) {
 }
 
 func (r *panicRecorder) Unwrap() http.ResponseWriter { return r.ResponseWriter }
+
+/*
+maxRequestBodyBytes caps every request body the console will read.
+
+encoding/json buffers the whole top-level value before it unmarshals, so the field schema decides
+nothing about memory: one ~200 MB POST to any route -- including the PUBLIC login route, which
+decodes before it checks a credential -- took the pod past its 256Mi limit and the kubelet killed it,
+along with every in-flight request and every WebSocket session on that replica. Repeatable at will,
+which makes it a crash loop rather than an incident.
+
+16 MiB is far above any real import (the largest legitimate body is a rules/targets export) and far
+below the container's limit. The socket already caps a frame at 4 KiB and the PromQL proxy caps a
+RESPONSE at 8 MiB; this is the request side of the same idea.
+*/
+const maxRequestBodyBytes = 16 << 20
+
+// bodyReadTimeout bounds the BODY phase of one request. Generous next to any real client and finite
+// next to a client that sends its headers and then stops.
+const bodyReadTimeout = 30 * time.Second
+
+/*
+ * limitBody makes an oversized body an ERROR the decoder reports rather than memory the process
+ * commits: http.MaxBytesReader fails the read at the ceiling, so every handler's existing decode
+ * error path turns it into a 400 without knowing this exists.
+ *
+ * It also bounds the body in TIME. ReadHeaderTimeout is satisfied the moment the headers land, and
+ * MaxBytesReader bounds size but not duration, so a client that announced a Content-Length and then
+ * sent nothing parked a handler goroutine for as long as it liked. A server-wide ReadTimeout cannot
+ * be used here because it would also apply to /ws and cut every WebSocket at the deadline; the
+ * deadline is therefore set per request, and skipped for upgrades.
+ */
+func limitBody(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Body != nil {
+			r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodyBytes)
+		}
+		/* UNCONDITIONAL. The deadline used to be skipped for anything that LOOKED like a protocol
+		   upgrade, and "looked like" meant two request headers — so `Connection: upgrade` on a plain
+		   POST to a public route removed the only bound on the body phase. There is no ReadTimeout on
+		   the server (it would cut every WebSocket), and IdleTimeout only covers a connection between
+		   requests, so such a request held its goroutine and its socket for as long as the client
+		   cared to keep the connection open, with no credentials and a couple of hundred bytes each.
+
+		   The real upgrade clears this deadline itself, from inside handleWS, once the ROUTER has
+		   decided the request is /ws. That decision is the server's; a header is the client's.
+
+		   Best effort: a ResponseWriter that cannot set deadlines (httptest's, a wrapper) simply
+		   leaves the phase unbounded, exactly as before. */
+		_ = http.NewResponseController(w).SetReadDeadline(time.Now().Add(bodyReadTimeout))
+		next.ServeHTTP(w, r)
+	})
+}
+
+/*
+rejectControlPath refuses a request whose PATH carries a control character, before routing.
+
+net/http hands the handler a percent-DECODED URL.Path, so `%00` in a URL arrives as a literal NUL
+byte in a path parameter — and PostgreSQL cannot store one in a text column. Every route that put a
+path parameter anywhere near the database therefore answered 502 "<subsystem> unavailable" for it:
+DELETE /api/v1/rbac/roles/{name}, DELETE /api/v1/tokens/{id} and their siblings told the operator
+their RBAC store or token store was DOWN, and wrote an ERROR log line, in response to a client's own
+typo-shaped input. The audit row for the same request was lost outright (auditResource).
+
+One check at the door instead of eleven downstream. A control character in a path is never
+legitimate — these are UUIDs and names — so 400 is the whole answer, and it is given before any
+handler, any store call or any authorization decision runs.
+
+Query parameters have had this guard for a while (rejectControlChars); this is the path's.
+*/
+func rejectControlPath(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.IndexFunc(r.URL.Path, unicode.IsControl) >= 0 {
+			writeProblem(w, http.StatusBadRequest, "invalid path",
+				"the request path contains a control character")
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// clearBodyReadDeadline lifts the deadline limitBody armed. Only the WebSocket handler calls it, and
+// only after the router has routed the request there: an upgrade's whole point is to stay open.
+func clearBodyReadDeadline(w http.ResponseWriter) {
+	_ = http.NewResponseController(w).SetReadDeadline(time.Time{})
+}
 
 // recoverer turns a panic from any inner middleware or handler into a 500 problem+json AND one
 // audit row with outcome "error"; the subject comes from the holder authenticate fills in, not from

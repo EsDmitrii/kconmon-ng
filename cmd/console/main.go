@@ -99,7 +99,7 @@ type roleResolver struct {
 }
 
 func (r roleResolver) RolesFor(ctx context.Context, s authz.Subject) ([]string, error) { //nolint:gocritic // hugeParam: authz.Subject is a value type by design, matching httpapi.RoleResolver's signature verbatim
-	bindings, err := r.db.ListBindingsForSubject(ctx, s.ID, s.Groups)
+	bindings, err := r.db.ListBindingsForSubject(ctx, string(s.Kind), s.ID, s.Groups)
 	if err != nil {
 		return nil, err
 	}
@@ -205,12 +205,12 @@ func main() {
 
 	// Built from the SAME bus newBus already dialled -- never a second Valkey connection.
 	var kv cache.KV
-	if vb, ok := bus.(*cache.ValkeyBus); ok {
-		kv = cache.NewValkeyKVFromBus(vb)
+	if vb, ok := bus.(*cache.RedisBus); ok {
+		kv = cache.NewRedisKVFromBus(vb)
 	} else {
 		kv = cache.NewInProcessKV()
 	}
-	sessions := authn.NewSessionStore(kv, cfg.Auth.Session.TTL)
+	sessions := authn.NewSessionStore(kv, cfg.Auth.Session.TTL, cfg.Auth.Session.IdleTimeout)
 
 	// authenticator is built per cfg.Auth.Mode; the default case below is unreachable through
 	// config.Load (Config.Validate already restricts Mode to anonymous|local|header|oidc) but is
@@ -239,6 +239,7 @@ func main() {
 			os.Exit(1)
 		}
 		authenticator, oidcDep = oidcAuth, oidcAuth
+		reportLegacyOIDCBindings(bgCtx, db)
 	default:
 		// Unreachable through config.Load (the validator rejects unknown modes), so reaching it means
 		// validation was bypassed.
@@ -366,6 +367,15 @@ func main() {
 			runStore = checks.NewMemoryStore()
 		}
 		runner = checks.NewRunner(ctrl, hub, bus, runStore, m)
+		/* A run's topic is opened where its POST landed; the browser's socket lands wherever the
+		   Service sends it. Letting the hub open the topic on demand — after the runner confirms the
+		   id names a live run — is what makes a run permalink work on either replica. */
+		hub.SetEphemeralOpener(runner.OpenRunTopic)
+		/* And the other end of that lifetime. A topic opened on demand has no owner HERE to close
+		   it — the owning replica's close is hub-local — so without a liveness predicate the entry,
+		   its ring and its bus subscription are never reclaimed, and after maxEphemeralTopics run
+		   permalinks land on the wrong replica that replica stops opening run topics at all. */
+		hub.SetEphemeralLiveness(runner.RunTopicLive)
 	}
 	var runnerDep httpapi.RunService
 	if runner != nil {
@@ -456,6 +466,7 @@ func main() {
 			Client:     ruleClient,
 			Store:      db,
 			Renderer:   alerting.NewRenderer(cfg.MetricsPrefix),
+			Lock:       db,
 			BundleName: cfg.Alerting.BundleName,
 			Interval:   cfg.Alerting.SyncInterval,
 		})
@@ -533,7 +544,7 @@ func main() {
 		// The SAME kv SessionStore and the OIDC state stash ride on, so the
 		// rate limiter is cluster-wide exactly when Valkey is (and
 		// per-replica, weaker but never stronger, when it is not).
-		KV: kv,
+		KV: kv, Bus: bus,
 	})
 
 	var wg sync.WaitGroup
@@ -563,7 +574,7 @@ func main() {
 		// Unlike the pruner, this one runs whatever retention is set to: the
 		// pool gauge describes the pool, not the retention policy.
 		spawn("store-pool-stats", store.NewPoolStatsPoller(db, m).Run)
-		spawn("rbac-policy-refresh", func(ctx context.Context) { refreshCustomRoles(ctx, db, policy) })
+		spawn("rbac-policy-refresh", func(ctx context.Context) { refreshCustomRoles(ctx, db, policy, bus) })
 	}
 	if dispatcher != nil {
 		// Dispatcher.Run only waits for cancellation and then drains.
@@ -575,9 +586,29 @@ func main() {
 		spawn("alert-webhook-watcher", alertWatcher.Run)
 	}
 	if ruleReconciler != nil {
-		// Every replica runs it: the apply is idempotent SSA of identical bytes, so there is no advisory
-		// lock here and deliberately so.
+		/* Every replica runs the LOOP, and each PASS serialises on promrules.LockKey — one of the three
+		   advisory keys this process takes (the scheduler's own, the external-check reconciler's, and
+		   this one). The comment used to say there was no lock here, which sent anyone debugging a
+		   missing sync to the wrong replica's logs: the others say "another console replica holds the
+		   alert rule lock, skipping this pass" and are behaving correctly. */
 		spawn("prometheus-rule-sync", ruleReconciler.Run)
+	}
+
+	/* The stuck-run reaper, spawned on its OWN and not behind the scheduler's opt-in.
+	   It used to live inside the schedule pass, which is off by default — so on the shipped
+	   configuration nothing ever force-finished a run whose replica died mid-flight, while
+	   POST /api/v1/runs/{id}/cancel answered 204 saying the reaper would deal with it. Finishing an
+	   orphan is the runner keeping its own table honest, not a feature to enable. */
+	if runner != nil && db != nil {
+		spawn("stuck-run-reaper", func(ctx context.Context) { runner.ReapLoop(ctx, 0) })
+	}
+
+	/* Cancellation crosses replicas over the bus. A run belongs to the replica whose Start built its
+	   context, the Service load balances, and with the chart's default of two console replicas a
+	   POST /runs/{id}/cancel had even odds of landing on the replica that holds nothing — where it
+	   used to answer 204 and do nothing at all. */
+	if runner != nil {
+		spawn("run-cancel-watch", func(ctx context.Context) { _ = runner.WatchCancellations(ctx) })
 	}
 
 	// The schedule loop is opt-in (console.scheduler.enabled, default false) and needs BOTH a
@@ -595,10 +626,13 @@ func main() {
 			Lock: db, Store: db, Runner: runner, Topology: ctrl,
 			Metrics: m, Interval: cfg.Scheduler.TickInterval,
 		}).Run)
-		// The continuous external-check reconciler rides the SAME gate.
+		/* The continuous external-check reconciler rides the same SWITCH, but not the same LOCK: it
+		   used to be handed scheduler.LockKey, so two loops doing unrelated work on the same tick
+		   took turns on one advisory key and each ran at half its configured cadence. Its own key is
+		   checks.ReconcilerLockKey (the default when none is given). */
 		spawn("external-check-reconciler", checks.NewReconciler(checks.ReconcilerDeps{
 			Lock: db, Store: db, Topology: ctrl, Controller: ctrl,
-			Metrics: m, Interval: cfg.Scheduler.TickInterval, LockKey: scheduler.LockKey,
+			Metrics: m, Interval: cfg.Scheduler.TickInterval,
 		}).Run)
 		slog.Info("schedule loop enabled", "tickInterval", cfg.Scheduler.TickInterval)
 	}
@@ -638,14 +672,30 @@ func main() {
 
 	runErr := srv.Run(rootCtx)
 
-	// It covers ONLY the components spawned above (hub.Run, ingester, pushers, relay).
-	slog.Info("http server stopped, draining realtime pipeline")
-	stopBackground()
+	slog.Info("http server stopped, finishing in-flight runs")
+	/* RUNS FIRST, then the realtime pipeline they publish onto.
+	   This used to be the other way round, and the hub was gone by the time the runs finished: every
+	   cancelled run's execute() waited on a relay counter for a topic closeAllClients had already
+	   reaped, so TopicSeq answered 0, the target was unreachable by construction, and each run spun
+	   the full 2 s relay timeout before logging a WARN blaming the bus for dropping frames that had
+	   all been delivered. Every rolling update produced that false alarm and spent a fifth of the
+	   10 s finish budget busy-waiting. In this order the terminal run.finished frame also reaches a
+	   client that is still attached, which is what it is for. */
 	if runner != nil {
+		/* CANCEL first, then wait. Waiting without cancelling was dead time: a run's context is
+		   derived from Background with its own deadline, so nothing about shutdown reached it, and
+		   anything longer than the budget below could not finish inside it. The process then exited
+		   mid-run and left the row in 'running' for the reaper to correct tens of minutes later — on
+		   every rolling update. Cancelled runs reach their own FinishRun with status 'cancelled' and
+		   real counters, which is what the budget is for. */
+		runner.CancelAll()
 		waitCtx, waitCancel := context.WithTimeout(context.Background(), 10*time.Second)
 		runner.Wait(waitCtx)
 		waitCancel()
 	}
+	// It covers ONLY the components spawned above (hub.Run, ingester, pushers, relay).
+	slog.Info("draining realtime pipeline")
+	stopBackground()
 	wg.Wait()
 	closeBus()
 	// The in-process KV runs its own TTL-sweep goroutine; the Valkey-backed
@@ -702,8 +752,13 @@ func bootstrapLocalAdmin(ctx context.Context, db *store.DB, cfg config.LocalConf
 		os.Exit(1)
 	}
 	if count > 0 {
-		// The table is populated, so no user is created.
-		reconcileBootstrapAdminBinding(ctx, db, cfg.BootstrapAdmin)
+		/* The table is populated: nothing is created and NOTHING IS REPAIRED. There used to be a
+		   reconcile here that re-created the bootstrap admin's binding whenever it was missing, and
+		   it could not tell a half-finished first boot from a deliberate revocation — so demoting
+		   the shared bootstrap account survived exactly until the next pod restart, and the re-grant
+		   went straight to the store, past the audit middleware. The half-finished case is now
+		   impossible instead: CreateBootstrapAdmin writes the user and the binding in one
+		   transaction. */
 		slog.Debug("users table already populated — skipping local-mode admin bootstrap", //nolint:gosec // G706: bootstrapAdmin is an operator-configured username, structured slog field
 			"bootstrapAdmin", cfg.BootstrapAdmin)
 		return
@@ -720,7 +775,7 @@ func bootstrapLocalAdmin(ctx context.Context, db *store.DB, cfg config.LocalConf
 		os.Exit(1)
 	}
 
-	user, err := db.CreateUser(ctx, cfg.BootstrapAdmin, hash, cfg.BootstrapAdmin)
+	_, err = db.CreateBootstrapAdmin(ctx, cfg.BootstrapAdmin, hash, cfg.BootstrapAdmin, bootstrapLocalAdminRole)
 	if err != nil {
 		if errors.Is(err, store.ErrAlreadyExists) {
 			// Another replica's boot won the CountUsers==0 race against the
@@ -732,42 +787,49 @@ func bootstrapLocalAdmin(ctx context.Context, db *store.DB, cfg config.LocalConf
 		slog.Error("failed to create bootstrap admin user", "error", err)
 		os.Exit(1)
 	}
-	if _, err := db.CreateBinding(ctx, bootstrapLocalAdminRole, "user", user.ID); err != nil {
-		slog.Error("failed to bind bootstrap admin to the admin role", "error", err)
-		os.Exit(1)
-	}
 
 	slog.Warn("bootstrap admin user created on first start — change its password immediately", //nolint:gosec // G706: bootstrapAdmin is an operator-configured username, structured slog field, never the password
 		"username", cfg.BootstrapAdmin)
 }
 
-// reconcileBootstrapAdminBinding re-creates the bootstrap admin's admin-role binding when the user
-// row exists but the binding does not (a crash between CreateUser and CreateBinding on a previous
-// boot).
-func reconcileBootstrapAdminBinding(ctx context.Context, db *store.DB, username string) {
-	user, err := db.GetUserByUsername(ctx, username)
-	if err != nil {
-		if !errors.Is(err, store.ErrNotFound) {
-			slog.Warn("bootstrap admin binding reconcile: lookup failed", "error", err)
-		}
+// reportLegacyOIDCBindings names, at boot, every user binding that OIDC mode can no longer resolve.
+//
+// Identity used to be the configured username claim and is now "oidc:"+sub (authn/identity.go), so a
+// deployment that predates the change still has rows saying subject_id = "alice". Those rows now
+// grant NOTHING, which is the correct direction to fail — but silently granting nothing is how an
+// admin locks themselves out and cannot tell why.
+//
+// This is deliberately a REPORT and not a migration. Rewriting "alice" to "oidc:<sub>" means
+// trusting a username claim to say who "alice" was, and trusting that claim is the whole reason the
+// scheme changed; an IdP that lets a leaver's username be reassigned would hand their roles to
+// whoever takes it (Grafana's CVE-2023-3128). The operator remaps the rows against their own IdP,
+// once, with the sub values in front of them.
+func reportLegacyOIDCBindings(ctx context.Context, db *store.DB) {
+	if db == nil {
 		return
 	}
-	bindings, err := db.ListBindingsForSubject(ctx, user.ID, nil)
+	bindings, err := db.ListBindings(ctx)
 	if err != nil {
-		slog.Warn("bootstrap admin binding reconcile: list bindings failed", "error", err)
+		slog.Warn("could not check role bindings for the oidc identity migration", "error", err)
 		return
 	}
+	stale := make([]string, 0, len(bindings))
 	for i := range bindings {
-		if bindings[i].RoleName == bootstrapLocalAdminRole {
-			return // binding present — nothing to repair
+		if bindings[i].SubjectKind != "user" {
+			// Group bindings are unaffected: a group is named by the groups claim, and always was.
+			continue
 		}
+		if strings.HasPrefix(bindings[i].SubjectID, authn.IdentityPrefixOIDC) {
+			continue
+		}
+		stale = append(stale, bindings[i].RoleName+"="+bindings[i].SubjectID)
 	}
-	if _, err := db.CreateBinding(ctx, bootstrapLocalAdminRole, "user", user.ID); err != nil && !errors.Is(err, store.ErrAlreadyExists) {
-		slog.Warn("bootstrap admin binding reconcile: create binding failed", "error", err)
+	if len(stale) == 0 {
 		return
 	}
-	slog.Warn("bootstrap admin role binding was missing and has been re-created", //nolint:gosec // G706: operator-configured username, structured slog field
-		"username", username)
+	slog.Warn("role bindings that predate sub-based OIDC identity resolve to nothing and must be remapped to \"oidc:<sub>\"", //nolint:gosec // G706: role names and binding subjects are operator-created config, structured slog fields
+		"count", len(stale),
+		"bindings", strings.Join(stale, " "))
 }
 
 // loadCustomRoles reads every custom (database-defined) role and reshapes it into the
@@ -790,45 +852,77 @@ func loadCustomRoles(ctx context.Context, db *store.DB) (map[string][]authz.Perm
 
 // refreshCustomRoles runs loadCustomRoles every rbacPolicyRefreshInterval and applies the result to
 // policy via Reload.
-func refreshCustomRoles(ctx context.Context, db *store.DB, policy *authz.Policy) {
+func refreshCustomRoles(ctx context.Context, db *store.DB, policy *authz.Policy, bus cache.Bus) {
 	ticker := time.NewTicker(rbacPolicyRefreshInterval)
 	defer ticker.Stop()
+
+	/* And a KICK, because the ticker alone is a window in which the console enforces permissions it
+	   has already been told to stop enforcing.
+
+	   POST /api/v1/rbac/roles returns 200 with the new permission set, and until the next tick every
+	   request is still authorized against the old one: up to a minute of a revoked permission still
+	   working, and of a granted one still 403ing, with the API and the UI both showing the new state.
+	   For a revocation that is the wrong direction to be wrong in.
+
+	   The kick travels on the bus, so it reaches EVERY replica rather than only the one that served
+	   the write. Without a cross-replica bus this degrades to the ticker on the other replicas, which
+	   is what it was everywhere before — and the chart now refuses more than one replica without a
+	   bus anyway. */
+	var kicks <-chan cache.Message
+	if bus != nil {
+		msgs, unsubscribe := bus.Subscribe(httpapi.RBACChangedTopic)
+		defer unsubscribe()
+		kicks = msgs
+	}
+
+	reload := func(reason string) {
+		custom, err := loadCustomRoles(ctx, db)
+		if err != nil {
+			slog.Warn("failed to refresh custom RBAC roles — policy left unchanged",
+				"reason", reason, "error", err)
+			return
+		}
+		policy.Reload(custom)
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			custom, err := loadCustomRoles(ctx, db)
-			if err != nil {
-				slog.Warn("failed to refresh custom RBAC roles — policy left unchanged", "error", err)
+			reload("tick")
+		case _, ok := <-kicks:
+			if !ok {
+				kicks = nil
 				continue
 			}
-			policy.Reload(custom)
+			reload("rbac write")
 		}
 	}
 }
 
 // newBus selects the pub/sub backend the realtime pipeline runs on and returns a close func for it;
-// an empty address — or a Valkey that cannot be dialled at startup.
+// no DSN — or a server that cannot be dialled at startup — falls back to the in-process bus.
 func newBus(ctx context.Context, cfg *config.Config) (bus cache.Bus, closeBus func(), err error) {
-	if cfg.Valkey.Address == "" {
-		slog.Info("valkey.address not set — using the in-process bus (realtime fan-out is single-replica only)")
-		return cache.NewInProcessBus(), func() {}, nil
-	}
-
 	// A file error is NOT the dial fallback below: an unreadable Secret is a broken mount.
-	password, err := cfg.Valkey.ResolvePassword()
+	dsn, err := cfg.Redis.ResolveDSN()
 	if err != nil {
 		return nil, nil, err
 	}
-	vb, err := cache.NewValkeyBus(ctx, cfg.Valkey.Address, cfg.Valkey.DialTimeout, password)
-	if err != nil {
-		slog.Warn("valkey unreachable at startup — falling back to the in-process bus; "+ //nolint:gosec // G706: address comes from the local config file, structured slog field
-			"realtime fan-out is single-replica only until the console is restarted",
-			"address", cfg.Valkey.Address, "error", err)
+	if dsn == "" {
+		slog.Info("redis.dsn not set — using the in-process bus (realtime fan-out is single-replica only)")
 		return cache.NewInProcessBus(), func() {}, nil
 	}
 
-	slog.Info("valkey pub/sub enabled", "address", cfg.Valkey.Address) //nolint:gosec // G706: address comes from the local config file, structured slog field
+	vb, err := cache.NewRedisBus(ctx, dsn, cfg.Redis.DialTimeout)
+	if err != nil {
+		// The DSN carries a password, so it is NEVER logged; the error from the client is classified
+		// by rueidis and carries the host only.
+		slog.Warn("redis unreachable at startup — falling back to the in-process bus; "+
+			"realtime fan-out is single-replica only until the console is restarted", "error", err)
+		return cache.NewInProcessBus(), func() {}, nil
+	}
+
+	slog.Info("redis pub/sub enabled")
 	return vb, vb.Close, nil
 }

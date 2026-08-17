@@ -97,10 +97,11 @@ func TestProjectMTRSnapshotBuildsInputFromStoredResult(t *testing.T) {
 	}
 }
 
-// TestProjectMTRSnapshotDropsUnreachableHopsPreservingNumbering pins the one normalization decision
-// the projector makes; a hop that never answered carries no address ("*" from
-// internal/checker/mtr.go, or "" from any other producer) and cannot be part of a route's identity.
-func TestProjectMTRSnapshotDropsUnreachableHopsPreservingNumbering(t *testing.T) {
+// TestProjectMTRSnapshotKeepsSilentHopsForDisplay pins the normalization decision: EVERY hop is
+// kept, a silent one ("*" from internal/checker/mtr.go, or "" from any other producer) normalized to
+// "*", because two silent hops before the answer are the network path, not a one-hop link. Identity
+// still ignores them (see the hash-stability test below).
+func TestProjectMTRSnapshotKeepsSilentHopsForDisplay(t *testing.T) {
 	raw := mtrResultJSON(
 		hop(1, "10.0.0.254", 500000, 0) + "," +
 			hop(2, "10.0.1.1", 900000, 0) + "," +
@@ -118,16 +119,43 @@ func TestProjectMTRSnapshotDropsUnreachableHopsPreservingNumbering(t *testing.T)
 		gotNumbers[i] = in.Hops[i].Number
 		gotIPs[i] = in.Hops[i].IP
 	}
-	wantNumbers := []int{1, 2, 5}
-	wantIPs := []string{"10.0.0.254", "10.0.1.1", "10.0.0.2"}
+	wantNumbers := []int{1, 2, 3, 4, 5}
+	wantIPs := []string{"10.0.0.254", "10.0.1.1", "*", "*", "10.0.0.2"}
+	if len(gotNumbers) != len(wantNumbers) {
+		t.Fatalf("hops = %v %v, want %v %v (every hop kept, silent ones as \"*\")", gotNumbers, gotIPs, wantNumbers, wantIPs)
+	}
 	for i := range wantNumbers {
-		if i >= len(gotNumbers) || gotNumbers[i] != wantNumbers[i] || gotIPs[i] != wantIPs[i] {
-			t.Fatalf("hops = %v %v, want numbers %v ips %v (silent hops dropped, survivors NOT renumbered)",
-				gotNumbers, gotIPs, wantNumbers, wantIPs)
+		if gotNumbers[i] != wantNumbers[i] || gotIPs[i] != wantIPs[i] {
+			t.Fatalf("hops = %v %v, want numbers %v ips %v", gotNumbers, gotIPs, wantNumbers, wantIPs)
 		}
 	}
-	if len(gotNumbers) != len(wantNumbers) {
-		t.Fatalf("hops = %v, want exactly %v", gotNumbers, wantNumbers)
+}
+
+// TestProjectMTRSnapshotRecordsAnAllSilentTrace: a trace whose every TTL was silent still happened,
+// and a destination whose every trace is silent must not vanish from path history. It gets the one
+// reserved silent identity, so repeats fold into a single row.
+func TestProjectMTRSnapshotRecordsAnAllSilentTrace(t *testing.T) {
+	raw := mtrResultJSON(hop(1, "*", 0, 1) + "," + hop(2, "*", 0, 1) + "," + hop(3, "", 0, 1))
+	in, ok := checks.ProjectMTRSnapshot(mtrSpec(), mtrPair("node-a", "node-b"), raw, projectedAt, testRunID)
+	if !ok {
+		t.Fatal("ProjectMTRSnapshot dropped an all-silent trace; the probe ran and the pair has a history")
+	}
+	if in.PathHash != store.HashSilentPath() {
+		t.Errorf("PathHash = %q, want the reserved silent identity", in.PathHash)
+	}
+	if len(in.Hops) != 3 {
+		t.Errorf("hops = %d, want all 3 kept so the strip reads honestly", len(in.Hops))
+	}
+	// A second silent trace is the SAME row, not a new one per probe.
+	again, _ := checks.ProjectMTRSnapshot(mtrSpec(), mtrPair("node-a", "node-b"), raw, projectedAt, testRunID)
+	if again.PathHash != in.PathHash {
+		t.Errorf("two silent traces hashed differently: %q vs %q", in.PathHash, again.PathHash)
+	}
+	// And it is not the identity of any route that DID answer.
+	answered := mtrResultJSON(hop(1, "*", 0, 1) + "," + hop(2, "10.0.0.2", 1000, 0))
+	answered2, _ := checks.ProjectMTRSnapshot(mtrSpec(), mtrPair("node-a", "node-b"), answered, projectedAt, testRunID)
+	if answered2.PathHash == in.PathHash {
+		t.Error("a route with a responder shares the silent identity")
 	}
 }
 
@@ -225,18 +253,6 @@ func TestProjectMTRSnapshotRejects(t *testing.T) {
 			spec: mtrSpec(),
 			raw:  mtrResultJSON(""),
 			why:  "a hopless trace has no path to identify",
-		},
-		{
-			name: "every hop silent",
-			spec: mtrSpec(),
-			raw:  mtrResultJSON(hop(1, "*", 0, 1) + "," + hop(2, "*", 0, 1)),
-			why:  "normalization drops them all, leaving nothing to hash",
-		},
-		{
-			name: "hop addresses are whitespace only",
-			spec: mtrSpec(),
-			raw:  mtrResultJSON(hop(1, "   ", 0, 1)),
-			why:  "a blank address is no address",
 		},
 	}
 	for _, tc := range tests {
@@ -381,6 +397,34 @@ func runMTRPair(t *testing.T, runner *checks.Runner, st *recordingSnapshotStore,
 	return id
 }
 
+// A route's window is what everything reading BACK from it uses: the trace list behind a route row,
+// and the run permalink asking which route a probe walked. Stamping the projection with the clock at
+// the projection call rather than with the result row's own recorded_at put first_seen a few hundred
+// microseconds AFTER the very trace that created the route — so that trace fell outside its own
+// route's window. It cost exactly one trace per route, every route.
+func TestRunnerStampsThePathWithTheResultRowsOwnClock(t *testing.T) {
+	body := mtrResultJSON(hop(1, "10.0.0.254", 500000, 0))
+	runner, st, _ := mtrRunner(t, body, nil)
+
+	id := runMTRPair(t, runner, st, "mtr")
+
+	calls := st.recorded()
+	if len(calls) != 1 {
+		t.Fatalf("UpsertPathSnapshot called %d times, want 1", len(calls))
+	}
+	results, _, err := st.GetRunResults(context.Background(), id)
+	if err != nil {
+		t.Fatalf("GetRunResults: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("run results = %d, want 1", len(results))
+	}
+	if !calls[0].SeenAt.Equal(results[0].RecordedAt) {
+		t.Errorf("snapshot SeenAt = %v, want the result row's own RecordedAt %v — a route may not begin after its first trace",
+			calls[0].SeenAt, results[0].RecordedAt)
+	}
+}
+
 // TestRunnerProjectsMTRResultIntoPathHistory is the hook's happy path.
 func TestRunnerProjectsMTRResultIntoPathHistory(t *testing.T) {
 	body := mtrResultJSON(hop(1, "10.0.0.254", 500000, 0) + "," + hop(2, "10.0.0.2", 2000000, 0))
@@ -454,7 +498,7 @@ func TestRunnerSnapshotFailureDoesNotFailThePair(t *testing.T) {
 	if run.PairOK != 1 || run.PairFailed != 0 {
 		t.Errorf("pair counts = ok:%d failed:%d, want ok:1 failed:0", run.PairOK, run.PairFailed)
 	}
-	results, err := runner.GetResults(context.Background(), id)
+	results, _, err := runner.GetResults(context.Background(), id)
 	if err != nil {
 		t.Fatalf("GetResults: %v", err)
 	}

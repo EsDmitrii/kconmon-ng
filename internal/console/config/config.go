@@ -27,7 +27,18 @@ const OIDCCallbackPath = "/api/v1/auth/oidc/callback"
 // Config is the Console runtime configuration. auth.mode selects one of
 // anonymous, local, header, or oidc (SECURITY.md §10.1).
 type Config struct {
-	HTTPPort      int        `yaml:"httpPort"`
+	HTTPPort int `yaml:"httpPort"`
+	/* MetricsPort carries /metrics and the health endpoints on a listener of their OWN.
+
+	   httpPort serves the whole Console API and the SPA. /metrics used to ride there too, which
+	   meant a NetworkPolicy rule admitting a scraper admitted it to the API as well: the rule cannot
+	   name a single pod (a scraper is whatever the operator runs), so on a real cluster the
+	   monitoring namespace also holds Grafana, node-exporter, kube-state-metrics and the operator,
+	   and every one of them landed inside whatever console.networkPolicy.ingressFrom was narrowed
+	   to. Letting a scraper in and letting a caller reach the API are two different decisions, and
+	   two ports is the only shape a NetworkPolicy can express. The agent and controller made the
+	   same split -- see internal/metrics/listener.go, which this reuses. */
+	MetricsPort   int        `yaml:"metricsPort"`
 	LogLevel      string     `yaml:"logLevel"`
 	LogFormat     string     `yaml:"logFormat"`
 	MetricsPrefix string     `yaml:"metricsPrefix"`
@@ -35,7 +46,7 @@ type Config struct {
 
 	Controller ControllerConfig `yaml:"controller"`
 	Prometheus PrometheusConfig `yaml:"prometheus"`
-	Valkey     ValkeyConfig     `yaml:"valkey"`
+	Redis      RedisConfig      `yaml:"redis"`
 	Database   DatabaseConfig   `yaml:"database"`
 	RateLimit  RateLimitConfig  `yaml:"rateLimit"`
 	Scheduler  SchedulerConfig  `yaml:"scheduler"`
@@ -337,9 +348,18 @@ type RateLimitConfig struct {
 	// 10): a diagnostics run fans out to up to 400 agent pairs, so an
 	// unbounded caller is a controller-load amplifier.
 	RunsPerMinute int `yaml:"runsPerMinute"`
-	// LoginPerMinute caps POST /api/v1/auth/login per USERNAME and, counted independently, per SOURCE
-	// IP per minute (default 5).
+	// LoginPerMinute caps POST /api/v1/auth/login per USERNAME per minute (default 5). The per-SOURCE
+	// IP budget is counted independently and is loginIPBurstFactor times this, because behind an
+	// Ingress one address is the whole cluster -- see handleAuthLogin for the reasoning.
 	LoginPerMinute int `yaml:"loginPerMinute"`
+	/* PromQLPerMinute caps the PromQL proxy per SUBJECT per minute (default 60).
+	   /api/v1/promql/query[_range] forwards arbitrary PromQL to the cluster's Prometheus, and
+	   promql:query belongs to the VIEWER role — which, on the chart's demo default of
+	   auth.mode=anonymous, is everybody who can reach the console. One range query over a wide window
+	   is many series and much work upstream; nothing bounded how many of them a caller could ask
+	   for. Monitoring is the thing this console exists to watch, and it must not be the thing it
+	   knocks over. */
+	PromQLPerMinute int `yaml:"promqlPerMinute"`
 }
 
 // validate enforces rateLimit.* invariants; zero is legal (that limit is off).
@@ -349,6 +369,9 @@ func (rl *RateLimitConfig) validate() error {
 	}
 	if rl.LoginPerMinute < 0 {
 		return fmt.Errorf("rateLimit.loginPerMinute must be >= 0 (0 disables the limit), got %d", rl.LoginPerMinute)
+	}
+	if rl.PromQLPerMinute < 0 {
+		return fmt.Errorf("rateLimit.promqlPerMinute must be >= 0 (0 disables the limit), got %d", rl.PromQLPerMinute)
 	}
 	return nil
 }
@@ -361,38 +384,44 @@ type ControllerConfig struct {
 	GRPCAddr string        `yaml:"grpcAddr"` // e.g. kconmon-ng-controller:9090; empty = realtime disabled (M1 polling only)
 }
 
-// ValkeyConfig configures the console's Valkey pub/sub client (internal/console/cache).
-// An empty Address disables Valkey: the console falls back to an in-process
-// bus (single-replica only; see ADR-002).
-type ValkeyConfig struct {
-	Address     string        `yaml:"address"`     // host:port; empty = disabled (in-process fallback)
-	DialTimeout time.Duration `yaml:"dialTimeout"` // default 5s
-	// Password is here for completeness and local development ONLY; the chart never templates it.
-	Password string `yaml:"password"`
-	// PasswordFile holds the password in a mounted Secret, the same posture as database.dsnFile.
-	// A Valkey that requires AUTH is the norm, not the exception: the bitnami subchart turns
-	// requirepass on by default, and every managed Valkey does too.
-	PasswordFile string `yaml:"passwordFile"` // WINS over Password when set
+/*
+ * RedisConfig configures the console's Redis-compatible bus (internal/console/cache): sessions,
+ * rate-limit counters and cross-replica pub/sub.
+ *
+ * ONE DSN, exactly like the database, and for the same reason: an address plus a password file plus
+ * a TLS flag is three settings that have to agree, and the server already has a URL form that says
+ * all of it at once. `redis://`, `rediss://` (TLS), `valkey://`, `valkeys://` and `unix://` are all
+ * understood, with the password, the username and the database number in their usual places —
+ * whatever server is on the other end, it is described the way its own documentation describes it.
+ *
+ * Empty disables the bus: the console falls back to an in-process one, which is single-replica only.
+ */
+type RedisConfig struct {
+	// DSN is here for local development ONLY; the chart never templates a credential into config.
+	DSN string `yaml:"dsn"`
+	// DSNFile holds the DSN in a mounted Secret, the same posture as database.dsnFile.
+	DSNFile     string        `yaml:"dsnFile"` // WINS over DSN when set
+	DialTimeout time.Duration `yaml:"dialTimeout"`
 }
 
-// ResolvePassword returns the effective Valkey password: PasswordFile's trimmed contents when set,
-// otherwise Password. Empty means no AUTH. Called once at boot, never per request.
-func (v *ValkeyConfig) ResolvePassword() (string, error) {
-	if v.PasswordFile == "" {
-		return v.Password, nil
+// ResolveDSN returns the effective Redis DSN: DSNFile's trimmed contents when set, otherwise DSN.
+// An empty return means the in-process bus. Called once at boot, never per request.
+func (v *RedisConfig) ResolveDSN() (string, error) {
+	if v.DSNFile == "" {
+		return v.DSN, nil
 	}
-	data, err := os.ReadFile(v.PasswordFile) //nolint:gosec // path comes from operator config, not user input
+	data, err := os.ReadFile(v.DSNFile) //nolint:gosec // path comes from operator config, not user input
 	if err != nil {
-		return "", fmt.Errorf("read valkey.passwordFile %q: %w", v.PasswordFile, err)
+		return "", fmt.Errorf("read redis.dsnFile %q: %w", v.DSNFile, err)
 	}
 	return strings.TrimSpace(string(data)), nil
 }
 
 // validate mirrors database.dsn/dsnFile: naming both is a mistake worth reporting, not a precedence
 // puzzle for the reader.
-func (v *ValkeyConfig) validate() error {
-	if v.Password != "" && v.PasswordFile != "" {
-		return errors.New("set either valkey.password or valkey.passwordFile, not both")
+func (v *RedisConfig) validate() error {
+	if v.DSN != "" && v.DSNFile != "" {
+		return errors.New("set either redis.dsn or redis.dsnFile, not both")
 	}
 	return nil
 }
@@ -458,23 +487,34 @@ type OIDCConfig struct {
 	ClientID         string   `yaml:"clientID"`
 	ClientSecretFile string   `yaml:"clientSecretFile"`
 	RedirectURL      string   `yaml:"redirectURL"`
-	Scopes           []string `yaml:"scopes"`        // default [openid, profile, email, groups]
-	UsernameClaim    string   `yaml:"usernameClaim"` // default preferred_username
-	GroupsClaim      string   `yaml:"groupsClaim"`   // default groups
+	Scopes           []string `yaml:"scopes"` // default [openid, profile, email, groups]
+	// UsernameClaim picks the DISPLAY name only — the label in the header menu. NOT the audit log:
+	// that records the identity (authz.Subject.ID), which is "oidc:"+sub.
+	// It does NOT decide identity: RBAC binds to "oidc:"+sub, because sub is the one claim OIDC
+	// Core §5.7 guarantees stable and unique, and preferred_username/email are explicitly forbidden
+	// as identifiers (authn/identity.go). Changing this renames a person; it never re-points their
+	// roles.
+	UsernameClaim string `yaml:"usernameClaim"` // default preferred_username
+	GroupsClaim   string `yaml:"groupsClaim"`   // default groups
 }
 
 // SessionConfig configures the session cookie used by every non-anonymous
 // mode. __Host-prefixed cookie names require Secure=true (browsers reject
 // __Host- cookies without it).
 type SessionConfig struct {
-	TTL        time.Duration `yaml:"ttl"`        // default 12h
-	CookieName string        `yaml:"cookieName"` // default __Host-kconmon_session
-	Secure     bool          `yaml:"secure"`     // default true; false ONLY for local http:// development
+	// TTL is the ABSOLUTE lifetime, counted from login and never extended.
+	TTL time.Duration `yaml:"ttl"` // default 12h
+	// IdleTimeout is how long a session may go unused before it is refused and purged; it slides
+	// forward on every request but never past TTL. Zero disables it, leaving TTL the only bound.
+	IdleTimeout time.Duration `yaml:"idleTimeout"` // default 1h
+	CookieName  string        `yaml:"cookieName"`  // default __Host-kconmon_session
+	Secure      bool          `yaml:"secure"`      // default true; false ONLY for local http:// development
 }
 
 func defaults() *Config {
 	return &Config{
 		HTTPPort:      8080,
+		MetricsPort:   9091,
 		LogLevel:      "info",
 		LogFormat:     "json",
 		MetricsPrefix: "kconmon_ng",
@@ -492,16 +532,17 @@ func defaults() *Config {
 				GroupsClaim:   "groups",
 			},
 			Session: SessionConfig{
-				TTL:        12 * time.Hour,
-				CookieName: "__Host-kconmon_session",
-				Secure:     true,
+				TTL:         12 * time.Hour,
+				IdleTimeout: time.Hour,
+				CookieName:  "__Host-kconmon_session",
+				Secure:      true,
 			},
 		},
 		Controller: ControllerConfig{Timeout: 10 * time.Second},
 		Prometheus: PrometheusConfig{QueryTimeout: 30 * time.Second, MaxRange: 24 * time.Hour, MaxResponseBytes: 8 << 20},
-		Valkey:     ValkeyConfig{DialTimeout: 5 * time.Second},
+		Redis:      RedisConfig{DialTimeout: 5 * time.Second},
 		Database:   DatabaseConfig{MaxConns: 10, ConnectTimeout: 10 * time.Second, MigrateOnStart: true, RetentionDays: 90},
-		RateLimit:  RateLimitConfig{RunsPerMinute: 10, LoginPerMinute: 5},
+		RateLimit:  RateLimitConfig{RunsPerMinute: 10, LoginPerMinute: 5, PromQLPerMinute: 60},
 		// enabled stays false (see SchedulerConfig); the interval is still
 		// defaulted so switching the loop on is a one-line change.
 		Scheduler: SchedulerConfig{TickInterval: 5 * time.Second},
@@ -612,6 +653,17 @@ func (c *Config) validateAuth() error {
 	if c.Auth.Session.TTL <= 0 {
 		return fmt.Errorf("auth.session.ttl must be positive, got %v", c.Auth.Session.TTL)
 	}
+	// An idle window longer than the absolute lifetime can never fire; refused rather than silently
+	// ignored, because it reads like idle expiry is configured when it is not.
+	if c.Auth.Session.IdleTimeout < 0 {
+		return fmt.Errorf("auth.session.idleTimeout must not be negative, got %v (0 disables it)",
+			c.Auth.Session.IdleTimeout)
+	}
+	if c.Auth.Session.IdleTimeout > c.Auth.Session.TTL {
+		return fmt.Errorf("auth.session.idleTimeout (%v) must not exceed auth.session.ttl (%v): "+
+			"a session cannot go idle for longer than it is allowed to live",
+			c.Auth.Session.IdleTimeout, c.Auth.Session.TTL)
+	}
 	if strings.HasPrefix(c.Auth.Session.CookieName, "__Host-") && !c.Auth.Session.Secure {
 		return fmt.Errorf("auth.session.cookieName %q uses the __Host- prefix, which requires "+
 			"auth.session.secure=true (browsers reject __Host- cookies without Secure)", c.Auth.Session.CookieName)
@@ -692,6 +744,14 @@ func (c *Config) Validate() error {
 	if c.HTTPPort < 1 || c.HTTPPort > 65535 {
 		return fmt.Errorf("httpPort must be 1-65535, got %d", c.HTTPPort)
 	}
+	if c.MetricsPort < 1 || c.MetricsPort > 65535 {
+		return fmt.Errorf("metricsPort must be 1-65535, got %d", c.MetricsPort)
+	}
+	// The whole point is that they are DIFFERENT listeners; sharing a port would silently restore
+	// the coupling this split exists to break.
+	if c.MetricsPort == c.HTTPPort {
+		return fmt.Errorf("metricsPort must differ from httpPort, both are %d", c.MetricsPort)
+	}
 	switch c.LogLevel {
 	case "debug", "info", "warn", "error":
 	default:
@@ -724,15 +784,10 @@ func (c *Config) Validate() error {
 	// Controller.GRPCAddr is deliberately unvalidated beyond being a plain string:
 	// like Controller.URL it is operator config, and an unreachable address just
 	// fails to dial at runtime (surfaced by the ingester's reconnect-loop logs).
-	if c.Valkey.Address != "" {
-		if _, _, err := net.SplitHostPort(c.Valkey.Address); err != nil {
-			return fmt.Errorf("valkey.address must be host:port, got %q: %w", c.Valkey.Address, err)
-		}
+	if c.Redis.DialTimeout <= 0 {
+		return fmt.Errorf("redis.dialTimeout must be positive, got %v", c.Redis.DialTimeout)
 	}
-	if c.Valkey.DialTimeout <= 0 {
-		return fmt.Errorf("valkey.dialTimeout must be positive, got %v", c.Valkey.DialTimeout)
-	}
-	if err := c.Valkey.validate(); err != nil {
+	if err := c.Redis.validate(); err != nil {
 		return err
 	}
 	if err := c.Database.validate(); err != nil {

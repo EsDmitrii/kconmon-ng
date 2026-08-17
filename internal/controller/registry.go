@@ -57,9 +57,20 @@ func (c TopologyChange) Events() []*pb.TopologyChanged {
 }
 
 type Registry struct {
-	mu           sync.RWMutex
-	agents       map[string]*registeredAgent
-	ttl          time.Duration
+	mu     sync.RWMutex
+	agents map[string]*registeredAgent
+	ttl    time.Duration
+	/* notifyMu ORDERS the publications, which r.mu alone did not.
+	   Each mutator snapshots under r.mu and then published outside it, so two agents registering at
+	   the same instant — a DaemonSet rollout, a two-node scale-up — could publish in either order:
+	   goroutine A snapshots {A}, B snapshots {A,B}, and nothing stopped B's notify from running
+	   first. Every peer update is sent as a FULL_SYNC and applied by wholesale replacement, so the
+	   LAST word won: the fleet could be left believing in {A} alone, with B invisible to every other
+	   agent until the next change or the TTL sweep.
+	   ALWAYS taken BEFORE r.mu and held until the callbacks return. The other order deadlocks:
+	   notifyChange itself reads the callback list under r.mu.RLock, so a goroutine holding r.mu and
+	   waiting for notifyMu would be waiting on a goroutine holding notifyMu and waiting for r.mu. */
+	notifyMu     sync.Mutex
 	onChange     []func(agents []model.AgentInfo, change TopologyChange)
 	zoneResolver ZoneResolver
 }
@@ -88,6 +99,10 @@ func (r *Registry) SetZoneResolver(zr ZoneResolver) {
 // provides no zone, the zone is enriched from the node's failure-domain label
 // via the configured ZoneResolver (an explicit zone is never overridden).
 func (r *Registry) Register(info model.AgentInfo) model.AgentInfo { //nolint:gocritic // hugeParam: public API uses value semantics intentionally
+	/* notifyMu BEFORE r.mu, always in that order, and held across the publication: it is what makes
+	   the ORDER of the FULL_SYNC broadcasts match the order of the mutations. */
+	r.notifyMu.Lock()
+	defer r.notifyMu.Unlock()
 	r.mu.Lock()
 	now := time.Now()
 	info.JoinedAt = now
@@ -116,6 +131,10 @@ func (r *Registry) Register(info model.AgentInfo) model.AgentInfo { //nolint:goc
 // were changed, broadcasts a peer update to subscribers. Agents that resolve
 // their zone at registration time will keep the new value on re-registration.
 func (r *Registry) UpdateZone(nodeName, zone string) {
+	/* notifyMu BEFORE r.mu, always in that order, and held across the publication: it is what makes
+	   the ORDER of the FULL_SYNC broadcasts match the order of the mutations. */
+	r.notifyMu.Lock()
+	defer r.notifyMu.Unlock()
 	r.mu.Lock()
 	var subjects []TopologySubject
 	for _, agent := range r.agents {
@@ -143,6 +162,9 @@ func (r *Registry) UpdateZone(nodeName, zone string) {
 }
 
 func (r *Registry) Deregister(agentID string) {
+	// notifyMu BEFORE r.mu, always; see the field.
+	r.notifyMu.Lock()
+	defer r.notifyMu.Unlock()
 	r.mu.Lock()
 	// The placement is read BEFORE the delete: after it, nothing in this
 	// process knows which node the agent was on, and an unattributed departure
@@ -163,6 +185,54 @@ func (r *Registry) Deregister(agentID string) {
 			Subjects: []TopologySubject{subject},
 		})
 	}
+}
+
+/*
+ * ResetQuiet drops every registered agent WITHOUT notifying subscribers.
+ *
+ * This is the demotion path. Reset's notification goes to the streams still attached to THIS
+ * replica — the agents and consoles that have not yet noticed the leadership change — and it says
+ * "every agent deregistered": each attached agent applied peers=[] wholesale, wiped its peer gauges
+ * and resumed probing nothing until its own leader check finally ended the stream, while the
+ * replica published one false agent_deregistered event per agent into the console's timeline. A
+ * replica that is no longer the leader has nothing to announce about a fleet it no longer owns.
+ */
+func (r *Registry) ResetQuiet() {
+	r.notifyMu.Lock()
+	defer r.notifyMu.Unlock()
+	r.mu.Lock()
+	count := len(r.agents)
+	r.agents = make(map[string]*registeredAgent)
+	r.mu.Unlock()
+
+	if count > 0 {
+		slog.Info("registry cleared after losing leadership", "agents", count)
+	}
+}
+
+// Reset drops every registered agent and notifies subscribers as if each had deregistered.
+func (r *Registry) Reset() {
+	// notifyMu BEFORE r.mu, always; see the field.
+	r.notifyMu.Lock()
+	defer r.notifyMu.Unlock()
+	r.mu.Lock()
+	subjects := make([]TopologySubject, 0, len(r.agents))
+	for id, agent := range r.agents {
+		subjects = append(subjects, TopologySubject{
+			AgentID: id, NodeName: agent.info.NodeName, Zone: agent.info.Zone,
+		})
+	}
+	r.agents = make(map[string]*registeredAgent)
+	snapshot := r.snapshotLocked()
+	r.mu.Unlock()
+
+	if len(subjects) == 0 {
+		return
+	}
+
+	slog.Info("registry cleared after losing leadership", "agents", len(subjects))
+	sortSubjects(subjects)
+	r.notifyChange(snapshot, TopologyChange{Reason: reasonAgentDeregistered, Subjects: subjects})
 }
 
 func (r *Registry) Heartbeat(agentID string) bool {
@@ -226,6 +296,9 @@ func (r *Registry) GetByNodeName(nodeName string) (model.AgentInfo, bool) {
 }
 
 func (r *Registry) EvictStale() int {
+	// notifyMu BEFORE r.mu, always; see the field.
+	r.notifyMu.Lock()
+	defer r.notifyMu.Unlock()
 	r.mu.Lock()
 	evicted := 0
 	cutoff := time.Now().Add(-r.ttl)

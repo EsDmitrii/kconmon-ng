@@ -12,6 +12,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 
+	"github.com/EsDmitrii/kconmon-ng/internal/console/checks"
 	"github.com/EsDmitrii/kconmon-ng/internal/console/store"
 )
 
@@ -93,10 +94,14 @@ type mtrDestinationResponse struct {
 	LastSeen      time.Time `json:"lastSeen"`
 }
 
-// mtrDestinationsResponse envelopes the (unpaged) pair list; an envelope rather than a bare array,
-// matching every other list body in this API (targets/checks/schedules/tokens).
+// mtrDestinationsResponse envelopes the pair list; an envelope rather than a bare array, matching
+// every other list body in this API (targets/checks/schedules/tokens).
 type mtrDestinationsResponse struct {
 	Destinations []mtrDestinationResponse `json:"destinations"`
+	// True when the page filled the limit, i.e. there are more pairs than this body carries. The
+	// listing is bounded now (see the handler), and a bounded list that does not say so reads as a
+	// complete one.
+	Truncated bool `json:"truncated,omitempty"`
 }
 
 // mtrSnapshotResponse is one persisted route on the wire; hops is passed through as raw JSON, never
@@ -167,14 +172,21 @@ func snapshotIDFrom(w http.ResponseWriter, r *http.Request) (string, bool) {
 	return id, true
 }
 
-// handleMTRDestinations serves every (source, destination) pair path history
-// knows about, most-recently-traced first. Unpaged on purpose: the row count
-// is PAIRS, not traces.
+/*
+ * handleMTRDestinations serves the (source, destination) pairs path history knows about,
+ * most-recently-traced first, BOUNDED by ?limit= (clamped like every other listing here).
+ *
+ * It used to be unpaged, on the reasoning that the row count is "pairs, not traces". Pairs are
+ * sources x destinations: a hundred-node fleet is ten thousand rows, hash-aggregated over the whole
+ * snapshot table on every request, materialised in the store and marshalled here — repeatable at
+ * will by any caller holding mtr:read.
+ */
 func (s *Server) handleMTRDestinations(w http.ResponseWriter, r *http.Request) {
 	if s.mtrUnavailable(w) {
 		return
 	}
-	dests, err := s.mtr.ListMTRDestinations(r.Context())
+	limit := clampPageLimit(parsePageLimit(r.URL.Query().Get("limit")))
+	dests, err := s.mtr.ListMTRDestinations(r.Context(), limit)
 	if err != nil {
 		// Logged, never surfaced: the driver error can carry a DSN or other
 		// upstream detail that has no business in an HTTP response body.
@@ -190,7 +202,9 @@ func (s *Server) handleMTRDestinations(w http.ResponseWriter, r *http.Request) {
 			FirstSeen: dests[i].FirstSeen, LastSeen: dests[i].LastSeen,
 		})
 	}
-	writeJSON(w, mtrDestinationsResponse{Destinations: out})
+	/* truncated says the listing was CUT, so the console can say so rather than presenting a page as
+	   the whole fleet — the same contract GET /api/v1/runs/{id} uses for its results. */
+	writeJSON(w, mtrDestinationsResponse{Destinations: out, Truncated: len(out) == limit})
 }
 
 // handleMTRSnapshots serves one pair's route history; BOTH source and destination are required.
@@ -205,6 +219,11 @@ func (s *Server) handleMTRSnapshots(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, http.StatusUnprocessableEntity, "invalid filter",
 			"both source and destination are required: an unfiltered snapshot listing has no bound "+
 				"(list the pairs with GET /api/v1/mtr/destinations first)")
+		return
+	}
+	// Both land in Postgres text columns; a control character there is the caller's malformed
+	// input, not a store outage, and the branch below would have called it a 502.
+	if rejectControlChars(w, "source", source) || rejectControlChars(w, "destination", destination) {
 		return
 	}
 
@@ -265,6 +284,123 @@ func (s *Server) handleMTRSnapshotGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, mtrSnapshotDetailResponse{mtrSnapshotResponse: body, Enrichment: s.enrichHops(r.Context(), &snap)})
+}
+
+/* ── the traces behind a route ───────────────────────────────────────────── */
+
+// traceWindowGrace widens the leading edge of a route's window; see its use below.
+const traceWindowGrace = 5 * time.Second
+
+// mtrTraceResponse is ONE recorded trace of a route.
+//
+// It carries what the route row cannot: this trace's own clock and its own per-hop readings. A route
+// is an identity — the sequence of addresses — and its hop table is the LAST reading folded into it;
+// two traces a day apart down the same route are two different sets of RTTs, and until this existed
+// the console said "147 traces" with no way to see any of them (owner report).
+type mtrTraceResponse struct {
+	ID         int64           `json:"id"`
+	RecordedAt time.Time       `json:"recordedAt"`
+	Success    bool            `json:"success"`
+	DurationNs int64           `json:"durationNs"`
+	Error      string          `json:"error,omitempty"`
+	Hops       json.RawMessage `json:"hops"`
+	// RunID names the run this trace was recorded in, so a trace can be followed back to the
+	// diagnostics permalink it came from. Empty for a trace whose run has aged out.
+	RunID string `json:"runId,omitempty"`
+}
+
+type mtrTracesResponse struct {
+	Traces     []mtrTraceResponse `json:"traces"`
+	NextCursor string             `json:"nextCursor"`
+	// Scanned is how many stored traces the window yielded before the path filter; Traces is what
+	// survived it. The two differ when a route was interleaved with another one, and saying so is
+	// what keeps "5 of 147" from reading as data loss.
+	Scanned int `json:"scanned"`
+}
+
+// handleMTRSnapshotTraces serves the individual traces that walked ONE route.
+//
+// The window is the snapshot's own [firstSeen, lastSeen], so the scan is bounded by the thing being
+// asked about. Inside it, a trace is kept only when its recomputed path identity equals this
+// snapshot's — two routes can interleave in time (a flapping hop alternates between them), and a
+// trace listed under a route it did not walk would be a worse answer than no list at all.
+func (s *Server) handleMTRSnapshotTraces(w http.ResponseWriter, r *http.Request) {
+	if s.mtrUnavailable(w) {
+		return
+	}
+	id, ok := snapshotIDFrom(w, r)
+	if !ok {
+		return
+	}
+
+	snap, err := s.mtr.GetPathSnapshot(r.Context(), id)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			writeProblem(w, http.StatusNotFound, "path snapshot not found", "no path snapshot with that id")
+			return
+		}
+		slog.Error("get path snapshot failed", "snapshot", id, "error", err) //nolint:gosec // G706: structured slog fields
+		writeProblem(w, http.StatusBadGateway, "MTR path history unavailable", "failed to query the path snapshot")
+		return
+	}
+
+	q := r.URL.Query()
+	/* Validated with the codec ListPathTraces actually decodes (DecodeCursor — a bigint id, not the
+	   UUID one the snapshot listing hands out), and validated HERE so a malformed cursor is the
+	   client's 400. Without it the store's decode error became a 502 saying MTR path history was
+	   unavailable: a 5xx the client will retry forever, over a database that is perfectly fine. */
+	if cursor := q.Get("cursor"); cursor != "" {
+		if _, _, _, decodeErr := store.DecodeCursor(cursor); decodeErr != nil {
+			writeProblem(w, http.StatusBadRequest, "invalid cursor", "cursor is malformed or does not match this server")
+			return
+		}
+	}
+	page, err := s.mtr.ListPathTraces(r.Context(), store.TraceFilter{
+		SourceNode:  snap.SourceNode,
+		Destination: snap.Destination,
+		/* The grace on the leading edge is for ROUTES ALREADY STORED. The projection now stamps a
+		   route with its result row's own recorded_at (checks/runner.go), but rows written before
+		   that used the clock at the projection call — a few hundred microseconds later than the
+		   trace that created them, which put that trace outside its own route's window and cost
+		   exactly one trace per route. It cannot pull in a stranger: a snapshot is unique per
+		   (pair, path_hash), so every trace carrying this hash belongs to this row, and the path
+		   filter below still decides. */
+		From:   snap.FirstSeen.Add(-traceWindowGrace),
+		To:     snap.LastSeen,
+		Limit:  clampPageLimit(parsePageLimit(q.Get("limit"))),
+		Cursor: q.Get("cursor"),
+	})
+	if err != nil {
+		slog.Error("list path traces failed", "snapshot", id, "error", err) //nolint:gosec // G706: structured slog fields
+		writeProblem(w, http.StatusBadGateway, "MTR path history unavailable", "failed to query the traces")
+		return
+	}
+
+	out := make([]mtrTraceResponse, 0, len(page.Traces))
+	for i := range page.Traces {
+		trace := &page.Traces[i]
+		hops, hash, decoded := checks.TraceFromResult(trace.Result)
+		if !decoded || hash != snap.PathHash {
+			continue
+		}
+		encoded, err := json.Marshal(hops)
+		if err != nil {
+			// A payload that decoded but will not re-encode is a bug, not a client error; skip the
+			// row rather than failing the page it is one of.
+			slog.Warn("encode trace hops failed", "snapshot", id, "trace", trace.ID, "error", err) //nolint:gosec // G706: structured slog fields
+			continue
+		}
+		out = append(out, mtrTraceResponse{
+			ID:         trace.ID,
+			RecordedAt: trace.RecordedAt,
+			Success:    trace.Success,
+			DurationNs: trace.DurationNs,
+			Error:      trace.Error,
+			Hops:       encoded,
+			RunID:      trace.RunID,
+		})
+	}
+	writeJSON(w, mtrTracesResponse{Traces: out, NextCursor: page.NextCursor, Scanned: len(page.Traces)})
 }
 
 // Both are EnrichmentReader, so the handler below is byte-identical either way and the resolver

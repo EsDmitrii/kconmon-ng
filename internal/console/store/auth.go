@@ -200,6 +200,49 @@ func (db *DB) CreateUser(ctx context.Context, username, passwordHash, displayNam
 	return userFromRow(&u), nil
 }
 
+// CreateBootstrapAdmin creates the local bootstrap user AND its admin binding in ONE transaction.
+//
+// The two used to be separate statements with a repair loop behind them: every boot looked for the
+// binding and re-created it when it was missing, because a crash between the two would otherwise
+// leave an account nobody could use. That repair could not tell a half-finished bootstrap from a
+// DELIBERATE revocation, so demoting the shared bootstrap account survived exactly until the next
+// pod restart — a rollout, an OOM kill, a node drain — and the re-grant went straight to the store,
+// bypassing the audit middleware entirely. The audit log said the binding was deleted and nothing
+// after it; the binding list said admin.
+//
+// A transaction removes the question. There is no partial state to repair, so nothing has to guess
+// what a missing binding means, and a revocation stays revoked.
+func (db *DB) CreateBootstrapAdmin(ctx context.Context, username, passwordHash, displayName, role string) (User, error) {
+	start := time.Now()
+	tx, err := db.pool.Begin(ctx)
+	if err != nil {
+		db.observe(queryCreateUser, start, queryResult(err))
+		return User{}, fmt.Errorf("store: create bootstrap admin: begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }() // no-op once Commit has run
+
+	q := gen.New(tx)
+	u, err := q.CreateUser(ctx, gen.CreateUserParams{
+		Username: username, PasswordHash: passwordHash, DisplayName: displayName,
+	})
+	if err != nil {
+		db.observe(queryCreateUser, start, queryResult(wrapUniqueViolation(err)))
+		return User{}, fmt.Errorf("store: create bootstrap admin: %w", wrapUniqueViolation(err))
+	}
+	if _, err := q.CreateBinding(ctx, gen.CreateBindingParams{
+		RoleName: role, SubjectKind: "user", SubjectID: u.ID.String(),
+	}); err != nil {
+		db.observe(queryCreateBinding, start, queryResult(wrapUniqueViolation(err)))
+		return User{}, fmt.Errorf("store: create bootstrap admin binding: %w", wrapUniqueViolation(err))
+	}
+	if err := tx.Commit(ctx); err != nil {
+		db.observe(queryCreateUser, start, queryResult(err))
+		return User{}, fmt.Errorf("store: create bootstrap admin: commit: %w", err)
+	}
+	db.observe(queryCreateUser, start, queryResult(nil))
+	return userFromRow(&u), nil
+}
+
 func (db *DB) UpdateUserPassword(ctx context.Context, id, passwordHash string) error {
 	uid, err := parseUUID(id)
 	if err != nil {
@@ -294,7 +337,7 @@ type RoleStore interface {
 
 	// ListBindingsForSubject resolves every binding for userID and for every group in groups in ONE
 	// round trip.
-	ListBindingsForSubject(ctx context.Context, userID string, groups []string) ([]RoleBinding, error)
+	ListBindingsForSubject(ctx context.Context, callerKind, subjectID string, groups []string) ([]RoleBinding, error)
 	// ListBindings returns every role binding; added after landed: neither need can be answered by
 	// ListBindingsForSubject.
 	ListBindings(ctx context.Context) ([]RoleBinding, error)
@@ -358,11 +401,15 @@ func (db *DB) DeleteRole(ctx context.Context, name string) error {
 	return nil
 }
 
-func (db *DB) ListBindingsForSubject(ctx context.Context, userID string, groups []string) ([]RoleBinding, error) {
+// ListBindingsForSubject resolves one subject's roles. callerKind is the subject's OWN kind: a
+// binding only ever applies to a subject of the kind it was written for, or an API token whose UUID
+// happened to appear in a 'user' binding would inherit that role.
+func (db *DB) ListBindingsForSubject(ctx context.Context, callerKind, subjectID string, groups []string) ([]RoleBinding, error) {
 	start := time.Now()
 	rows, err := gen.New(db.pool).ListBindingsForSubject(ctx, gen.ListBindingsForSubjectParams{
-		UserID: userID,
-		Groups: groups,
+		CallerKind: callerKind,
+		UserID:     subjectID,
+		Groups:     groups,
 	})
 	db.observe(queryListBindingsForSubject, start, queryResult(err))
 	if err != nil {

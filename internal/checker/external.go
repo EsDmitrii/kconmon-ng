@@ -228,7 +228,7 @@ func (c *ExternalChecker) Counts() []ExternalCount {
 
 // Check probes every assigned target whose own interval has elapsed and reports one ExternalDetails
 // per probed target.
-func (c *ExternalChecker) Check(ctx context.Context, _ Target) model.CheckResult {
+func (c *ExternalChecker) Check(ctx context.Context, _ Target) model.CheckResult { //nolint:gocritic // hugeParam: Target is a VALUE by design -- a checker must not be able to mutate the caller's copy, and one 80-byte copy per probe is nothing next to the probe itself
 	result := model.CheckResult{
 		Type:      CheckExternal,
 		Timestamp: time.Now(),
@@ -255,6 +255,7 @@ func (c *ExternalChecker) Check(ctx context.Context, _ Target) model.CheckResult
 					Name:         specs[i].Name,
 					CheckType:    specs[i].Type,
 					Error:        "external probe cancelled",
+					NotRun:       true,
 				}
 				return
 			}

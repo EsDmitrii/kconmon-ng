@@ -34,7 +34,7 @@ type Scheduler struct {
 	mtrChecker *checker.MTRChecker
 }
 
-func NewScheduler(source checker.Target, handler ResultHandler) *Scheduler {
+func NewScheduler(source checker.Target, handler ResultHandler) *Scheduler { //nolint:gocritic // hugeParam: Target is a VALUE by design -- a checker must not be able to mutate the caller's copy, and one 80-byte copy per probe is nothing next to the probe itself
 	return &Scheduler{
 		configs: make(map[model.CheckType]SchedulerConfig),
 		handler: handler,
@@ -124,6 +124,14 @@ func (s *Scheduler) UpdatePeers(peers []checker.Target) {
 		filtered = append(filtered, p)
 	}
 	s.peers = filtered
+}
+
+// Peers returns a copy of the peer list actually probed, which is the registered set minus this
+// agent itself.
+func (s *Scheduler) Peers() []checker.Target {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return append([]checker.Target(nil), s.peers...)
 }
 
 func (s *Scheduler) Run(ctx context.Context) {
@@ -230,7 +238,12 @@ func (s *Scheduler) runCheckerOnce(ctx context.Context, c checker.Checker) {
 	}
 }
 
-func (s *Scheduler) triggerMTR(ctx context.Context, peer checker.Target, failedResult *model.CheckResult) {
+// mtrTraceBudget is the whole trace's ceiling, on top of the tracer's own per-hop timeout: 30 hops
+// that each wait out a second is half a minute of tracing, and a reverse lookup per answering hop on
+// top of that. A trace that has not finished inside this is not going to say anything useful.
+const mtrTraceBudget = 90 * time.Second
+
+func (s *Scheduler) triggerMTR(ctx context.Context, peer checker.Target, failedResult *model.CheckResult) { //nolint:gocritic // hugeParam: Target is a VALUE by design -- a checker must not be able to mutate the caller's copy, and one 80-byte copy per probe is nothing next to the probe itself
 	s.mu.RLock()
 	mtr := s.mtrChecker
 	s.mu.RUnlock()
@@ -255,13 +268,27 @@ func (s *Scheduler) triggerMTR(ctx context.Context, peer checker.Target, failedR
 		"destination", peer.NodeName,
 	)
 
-	mtrResult := mtr.Check(ctx, peer)
-	mtrResult.Source = s.source.NodeName
-	mtrResult.SourceZone = s.sourceZone()
-	mtrResult.Destination = peer.NodeName
-	mtrResult.DestZone = peer.Zone
+	/* In its OWN goroutine, because a trace is slow by construction and this is the peer-probe loop.
+	   maxHops x the tracer's timeout is thirty seconds to an unreachable peer, plus an unbounded
+	   reverse lookup per answering hop — and it ran inline, in the checker's goroutine, between one
+	   peer and the next. During an outage, which is exactly when traces fire, every remaining peer's
+	   probe waited behind them: the fleet stopped measuring at the moment the measurements mattered.
+	   The cooldown (TryAcquire above) is what bounds how many can be in flight, and it is already
+	   held for this pair — Release is the trace's own responsibility either way.
+	   context.WithoutCancel: a trace that has started is finished and reported. The round it was
+	   triggered from may end at any moment, and a half-written trace is worse than a slow one. */
+	go func() {
+		traceCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), mtrTraceBudget)
+		defer cancel()
 
-	if s.handler != nil {
-		s.handler(mtrResult)
-	}
+		mtrResult := mtr.Check(traceCtx, peer)
+		mtrResult.Source = s.source.NodeName
+		mtrResult.SourceZone = s.sourceZone()
+		mtrResult.Destination = peer.NodeName
+		mtrResult.DestZone = peer.Zone
+
+		if s.handler != nil {
+			s.handler(mtrResult)
+		}
+	}()
 }

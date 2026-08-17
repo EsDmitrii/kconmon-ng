@@ -67,8 +67,10 @@ func expectNoEnvelope(t *testing.T, c *client) {
 	}
 }
 
+// subscribeClient resumes from lastSeq against THIS hub's epoch — a cursor without one is a cursor
+// from another replica, and the hub deliberately ignores it (see Envelope.Epoch).
 func subscribeClient(h *Hub, c *client, topic string, lastSeq uint64) {
-	h.handleClientMessage(c, ClientMessage{Action: ActionSubscribe, Topic: topic, LastSeq: lastSeq})
+	h.handleClientMessage(c, ClientMessage{Action: ActionSubscribe, Topic: topic, LastSeq: lastSeq, Epoch: h.Epoch()})
 }
 
 func liveEventBytes(t *testing.T, id string, seq uint64) json.RawMessage {
@@ -1232,6 +1234,68 @@ func TestCloseTopicWithFinalOrdersFinalFrameStrictlyBeforeClosed(t *testing.T) {
 
 // reapTopicLocked must clear the reaped topic out of every currently subscribed client's c.topics
 // map.
+/*
+A topic opened for a run this replica does NOT own has to be reclaimable, and only the liveness
+predicate can reclaim it.
+
+Every path that frees an ephemeral topic acts on `closed`, and an entry becomes closed only through
+CloseTopicWithFinal — which the run's OWNING replica calls, hub-locally, on its own hub. A browser
+whose socket lands on the other replica opens the topic here through the on-demand opener, and
+nothing here ever closes it: with two replicas that is about half of all run permalinks, and at
+maxEphemeralTopics of them OpenTopic starts refusing everything, so this replica serves no live run
+progress at all.
+*/
+func TestReaperClosesAnEphemeralTopicWhoseRunHasEnded(t *testing.T) {
+	h, _ := newTestHub(t, newCountingBus())
+	const liveTopic, deadTopic = "run:live", "run:ended"
+
+	if !h.OpenTopic(context.Background(), liveTopic) || !h.OpenTopic(context.Background(), deadTopic) {
+		t.Fatal("setup: OpenTopic refused")
+	}
+	if got := h.OpenTopicCount(); got != 2 {
+		t.Fatalf("setup: OpenTopicCount = %d, want 2", got)
+	}
+
+	// Neither topic was ever closed — exactly the state a non-owning replica is left in.
+	h.SetEphemeralLiveness(func(topic string) bool { return topic == liveTopic })
+
+	// The sweep closes the ended one (it runs off Hub.Run's loop now — see sweepEphemeralLiveness);
+	// the reapDelay grace still applies before it is freed.
+	h.sweepEphemeralLiveness()
+	h.mu.Lock()
+	deadClosed := h.ephemeral[deadTopic] != nil && h.ephemeral[deadTopic].closed
+	liveClosed := h.ephemeral[liveTopic] != nil && h.ephemeral[liveTopic].closed
+	h.mu.Unlock()
+	if !deadClosed {
+		t.Error("the topic whose run has ended is still open: it can never be reaped")
+	}
+	if liveClosed {
+		t.Error("the topic whose run is still going was closed: live progress would stop mid-run")
+	}
+
+	// Past the grace window it is actually freed, and the live one is untouched.
+	h.mu.Lock()
+	if et := h.ephemeral[deadTopic]; et != nil {
+		et.closedAt = time.Now().Add(-reapDelay - time.Second)
+	}
+	h.mu.Unlock()
+	h.reapExpiredTopics()
+
+	if got := h.OpenTopicCount(); got != 1 {
+		t.Errorf("OpenTopicCount after reap = %d, want 1 (the live topic only)", got)
+	}
+	h.mu.Lock()
+	_, deadPresent := h.ephemeral[deadTopic]
+	_, livePresent := h.ephemeral[liveTopic]
+	h.mu.Unlock()
+	if deadPresent {
+		t.Error("the ended run's topic was not freed")
+	}
+	if !livePresent {
+		t.Error("the live run's topic was freed out from under it")
+	}
+}
+
 func TestReapTopicLockedClearsTopicFromSubscribedClientsTopicsMap(t *testing.T) {
 	h, _ := newTestHub(t, cache.NewInProcessBus())
 	topic := RunTopic("reap-clears-client")
@@ -1263,5 +1327,48 @@ func TestReapTopicLockedClearsTopicFromSubscribedClientsTopicsMap(t *testing.T) 
 	h.mu.Unlock()
 	if stillSubscribed {
 		t.Error("reap left the topic in the client's topics map -- a long-lived connection would accumulate dead entries")
+	}
+}
+
+/* ── QA round 5b: a cursor only means something against the hub that issued it ── */
+
+/*
+ * Every replica numbers its topics from 1 in its own process. A tab holding cursor N from replica A
+ * that reconnects onto replica B used to ask B to replay "everything after N"; B's counter was
+ * below N, so B replayed NOTHING and the whole disconnect gap was lost silently — the feed still
+ * looked alive, because new broadcasts are delivered regardless of seq.
+ */
+func TestSubscribeIgnoresACursorFromAnotherHub(t *testing.T) {
+	h, _ := newTestHub(t, cache.NewInProcessBus())
+	for i := 1; i <= 5; i++ {
+		h.Broadcast(TopicLive, TypeEvent, json.RawMessage(`{"i":`+strconv.Itoa(i)+`}`))
+	}
+
+	c := h.register(nil)
+	defer h.unregister(c)
+	// A cursor of 3 carrying ANOTHER hub's epoch: not a smaller number in this series.
+	h.handleClientMessage(c, ClientMessage{
+		Action: ActionSubscribe, Topic: TopicLive, LastSeq: 3, Epoch: "some-other-replica",
+	})
+
+	for _, wantSeq := range []uint64{1, 2, 3, 4, 5} {
+		if got := nextEnvelope(t, c); got.Seq != wantSeq {
+			t.Fatalf("replayed seq %d, want %d — a foreign cursor must replay the whole ring", got.Seq, wantSeq)
+		}
+	}
+	expectNoEnvelope(t, c)
+}
+
+// Every envelope carries the epoch, so a client can tell whose numbering it holds.
+func TestEnvelopesCarryTheHubEpoch(t *testing.T) {
+	h, _ := newTestHub(t, cache.NewInProcessBus())
+	c := h.register(nil)
+	defer h.unregister(c)
+	subscribeClient(h, c, TopicLive, 0)
+	h.Broadcast(TopicLive, TypeEvent, json.RawMessage(`{"i":1}`))
+
+	got := nextEnvelope(t, c)
+	if got.Epoch == "" || got.Epoch != h.Epoch() {
+		t.Errorf("envelope epoch = %q, want the hub's own %q", got.Epoch, h.Epoch())
 	}
 }

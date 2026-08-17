@@ -3,6 +3,8 @@ package scheduler
 import (
 	"context"
 	"errors"
+	"fmt"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -79,9 +81,16 @@ func newFakeStore() *fakeStore {
 	}
 }
 
-// ListDueSchedules mirrors the real query's predicate (enabled AND
-// next_fire_at <= due, soonest first) closely enough that a scheduler bug
-// cannot hide behind a lenient fake.
+/*
+ListDueSchedules mirrors the real query's predicate (enabled AND next_fire_at <= due, soonest
+first) closely enough that a scheduler bug cannot hide behind a lenient fake.
+
+The sort is load-bearing, not decoration. The doc comment claimed "soonest first" while the body
+ranged over a map and broke at the limit, so the fake picked its 100 rows in whatever order Go's
+map iteration felt like — and the one failure mode `ORDER BY next_fire_at LIMIT 100` has, a row
+whose next_fire_at is stuck in the past crowding out everything merely due now, was the exact
+failure the fake could not express.
+*/
 func (f *fakeStore) ListDueSchedules(_ context.Context, due time.Time, limit int) ([]store.Schedule, error) {
 	if f.listErr != nil {
 		return nil, f.listErr
@@ -92,9 +101,16 @@ func (f *fakeStore) ListDueSchedules(_ context.Context, due time.Time, limit int
 			continue
 		}
 		out = append(out, s)
-		if len(out) == limit {
-			break
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].NextFireAt.Equal(*out[j].NextFireAt) {
+			// A tiebreak the real index does not promise, so that a test's own expectation is stable.
+			return out[i].ID < out[j].ID
 		}
+		return out[i].NextFireAt.Before(*out[j].NextFireAt)
+	})
+	if limit > 0 && len(out) > limit {
+		out = out[:limit]
 	}
 	return out, nil
 }
@@ -160,11 +176,35 @@ type fakeRunner struct {
 	reaped    int64
 	reapErr   error
 	reapCalls int
+	activeErr error
+}
+
+/*
+The store-backed overrun guard, in the double's own terms: a run is mid-flight when the double
+
+	holds one for this initiator that has not reached a terminal status. Returning an error is how a
+	test exercises the memory fallback.
+*/
+func (f *fakeRunner) ActiveForInitiator(_ context.Context, _, initiatorID string) (bool, error) {
+	if f.activeErr != nil {
+		return false, f.activeErr
+	}
+	for _, call := range f.started {
+		if call.initiator.ID != initiatorID {
+			continue
+		}
+		run, ok := f.runs[call.runID]
+		if ok && (run.Status == "pending" || run.Status == "running") {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 type startCall struct {
 	spec      checks.Spec
 	initiator authz.Subject
+	runID     string
 }
 
 func newFakeRunner() *fakeRunner { return &fakeRunner{runs: map[string]checks.Run{}} }
@@ -173,9 +213,9 @@ func (f *fakeRunner) Start(_ context.Context, spec checks.Spec, initiator authz.
 	if f.startErr != nil {
 		return "", f.startErr
 	}
-	f.started = append(f.started, startCall{spec: spec, initiator: initiator})
 	f.nextID++
 	id := "00000000-0000-4000-8000-00000000000" + string(rune('0'+f.nextID))
+	f.started = append(f.started, startCall{spec: spec, initiator: initiator, runID: id})
 	f.runs[id] = checks.Run{ID: id, Status: "running"}
 	return id, nil
 }
@@ -480,15 +520,21 @@ func TestOverrunSkipsAndAdvancesWithoutQueueing(t *testing.T) {
 	if got := h.counter(h.m.SchedulerSkipped, skipOverrun); got != 2 {
 		t.Errorf("SchedulerSkipped{overrun} = %v, want 2", got)
 	}
-	// Each skipped occurrence still advanced the cadence -- that is what
-	// stops a backlog accumulating.
-	if len(h.store.marks) != 3 {
-		t.Fatalf("MarkScheduleFired called %d times, want 3 (one per occurrence, fired or skipped)", len(h.store.marks))
+	/* ONE fire, and two SKIPS. An overrun produced no run, so it must not stamp last_fired_at: the
+	   schedule's own column used to report it firing on cadence while it had produced nothing — and
+	   during an orphaned-run window that column is the only signal an operator has. */
+	if len(h.store.marks) != 1 {
+		t.Fatalf("MarkScheduleFired called %d times, want 1 (only the occurrence that actually ran)", len(h.store.marks))
 	}
-	for i, mark := range h.store.marks[1:] {
+	// Each skipped occurrence still advanced the cadence -- that is what stops a backlog
+	// accumulating.
+	if len(h.store.skips) != 2 {
+		t.Fatalf("MarkScheduleSkipped called %d times, want 2 (one per skipped occurrence)", len(h.store.skips))
+	}
+	for i, skip := range h.store.skips {
 		want := fixedNow.Add(oneMinute)
-		if mark.next == nil || !mark.next.Equal(want) {
-			t.Errorf("skipped occurrence %d nextFireAt = %v, want %v", i, mark.next, want)
+		if skip.next == nil || !skip.next.Equal(want) {
+			t.Errorf("skipped occurrence %d nextFireAt = %v, want %v", i, skip.next, want)
 		}
 	}
 }
@@ -967,5 +1013,195 @@ func TestScheduleErrorText(t *testing.T) {
 				t.Errorf("scheduleErrorText = %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+/* ── the overrun guard has to survive a replica change ───────────────────── */
+
+/*
+ * previousRunActive used to consult a map in the FIRING replica's memory. The advisory lock rotates
+ * tick by tick, so with the chart's default of two console replicas the replica holding the next
+ * tick was routinely not the one that had fired — and, with no memory of the run, it fired the same
+ * schedule again. Two overlapping runs of one check, doubling the fan-out exactly when the first was
+ * already slow enough to still be going.
+ */
+func TestSchedulerDoesNotOverlapRunsAcrossReplicas(t *testing.T) {
+	h := newHarness(t, true)
+	h.seedDefinition()
+	h.seedSchedule(kindInterval, int64(oneMinute))
+
+	h.s.Tick(context.Background())
+	if len(h.runner.started) != 1 {
+		t.Fatalf("first tick started %d runs, want 1", len(h.runner.started))
+	}
+
+	/* A SECOND replica over the same store and the same runner, with no memory of what the first
+	   did. If the guard lived in memory, this one would fire the schedule again. */
+	replicaB := New(Deps{
+		Lock: h.lock, Store: h.store, Runner: h.runner, Topology: h.topo,
+		Metrics: h.m, Interval: time.Second,
+	})
+	replicaB.now = func() time.Time { return fixedNow }
+	past := fixedNow.Add(-time.Second)
+	sched := h.store.schedules[schedID]
+	sched.NextFireAt = &past
+	h.store.schedules[schedID] = sched
+
+	replicaB.Tick(context.Background())
+
+	if len(h.runner.started) != 1 {
+		t.Fatalf("a second replica started another run while the first was still going: %d runs total",
+			len(h.runner.started))
+	}
+}
+
+/*
+A kind='once' occurrence must survive a failed START, not only a skip.
+
+startErr means no run was created — an unreachable controller, an unresolvable topology, a store
+that refused the row. That case went to MarkScheduleFired with the nil next_fire_at nextFireAt
+returns for `once`, so the occurrence was retired for good AND last_fired_at was stamped with a fire
+that never happened: the operator's one-shot check silently gone, the row claiming it had run.
+*/
+func TestOnceScheduleSurvivesAFailedStart(t *testing.T) {
+	h := newHarness(t, true)
+	h.seedDefinition()
+	h.seedSchedule(kindOnce, 0)
+	h.runner.startErr = errors.New("controller unavailable")
+
+	h.s.Tick(context.Background())
+
+	if len(h.store.marks) != 0 {
+		t.Errorf("a start that failed was written down as a FIRE: %+v", h.store.marks)
+	}
+	if len(h.store.skips) != 1 {
+		t.Fatalf("MarkScheduleSkipped called %d times, want 1 (the occurrence is still owed)", len(h.store.skips))
+	}
+	next := h.store.skips[0].next
+	if next == nil {
+		t.Fatal("the once occurrence was retired by a start failure: next_fire_at was cleared")
+	}
+	if want := fixedNow.Add(onceSkipRetry); !next.Equal(want) {
+		t.Errorf("retry at %v, want %v", next, want)
+	}
+
+	// The controller comes back, and the occurrence still runs.
+	h.runner.startErr = nil
+	h.s.now = func() time.Time { return fixedNow.Add(onceSkipRetry) }
+	h.s.Tick(context.Background())
+	if len(h.runner.started) != 1 {
+		t.Errorf("the once occurrence did not run after the failure cleared (started %d)", len(h.runner.started))
+	}
+}
+
+/* ── QA round 5b: a kind='once' occurrence must survive a skip ────────────── */
+
+/*
+ * nextFireAt returns nil for kind='once', and the skip path used to write that nil straight into
+ * next_fire_at — which removed the row from the due index for good. Re-enabling the definition did
+ * not bring it back: the schedule kept enabled=true, last_fired_at=null and last_error="", so
+ * nothing in the API or the UI said the occurrence had been dropped.
+ */
+func TestOnceScheduleSurvivesADisabledDefinition(t *testing.T) {
+	h := newHarness(t, true)
+	h.seedDefinition()
+	h.seedSchedule(kindOnce, 0)
+
+	// The definition is switched off before its moment arrives.
+	def := h.store.definitions[defID]
+	def.Enabled = false
+	h.store.definitions[defID] = def
+
+	h.s.Tick(context.Background())
+
+	if len(h.runner.started) != 0 {
+		t.Fatalf("a disabled definition started %d runs", len(h.runner.started))
+	}
+	if len(h.store.marks) != 0 {
+		t.Errorf("a skipped occurrence was written down as a fire")
+	}
+	if len(h.store.skips) != 1 {
+		t.Fatalf("MarkScheduleSkipped called %d times, want 1", len(h.store.skips))
+	}
+	next := h.store.skips[0].next
+	if next == nil {
+		t.Fatalf("the once occurrence was retired: MarkScheduleSkipped(nil) removes it from the due index for good")
+	}
+	/* Non-nil is only half of it. Left in the PAST the row is due on every tick from here on, and
+	   `ORDER BY next_fire_at LIMIT 100` sorts it ahead of everything merely due now -- see
+	   TestSkippedOnceOccurrencesDoNotStarveTheDueWindow. */
+	if want := fixedNow.Add(onceSkipRetry); !next.Equal(want) {
+		t.Errorf("skipped once occurrence retries at %v, want %v", next, want)
+	}
+	due, err := h.store.ListDueSchedules(context.Background(), fixedNow, dueLimit)
+	if err != nil {
+		t.Fatalf("ListDueSchedules: %v", err)
+	}
+	if len(due) != 0 {
+		t.Errorf("the skipped once occurrence is still due at the very moment it was skipped (%d rows): it never leaves the due window", len(due))
+	}
+
+	// Switched back on, and the retry moment arrives: the occurrence is still owed.
+	def.Enabled = true
+	h.store.definitions[defID] = def
+	later := fixedNow.Add(onceSkipRetry)
+	h.s.now = func() time.Time { return later }
+
+	h.s.Tick(context.Background())
+	if len(h.runner.started) != 1 {
+		t.Errorf("the once occurrence did not run after its definition was re-enabled (started %d)", len(h.runner.started))
+	}
+}
+
+/*
+The starvation the retry exists to prevent, at the size that produces it.
+
+A skip reason can outlive the tick that saw it: a definition switched off stays off until a human
+switches it back on. Every one of its once-schedules used to keep next_fire_at pinned in the past,
+and the due query is `ORDER BY next_fire_at LIMIT 100` -- so at dueLimit of them the window is full
+of rows that will be skipped again, and a schedule that is genuinely due now never reaches fireOne.
+The schedules all still read enabled=true with no last_error, so nothing in the API says why the
+fleet went quiet.
+*/
+func TestSkippedOnceOccurrencesDoNotStarveTheDueWindow(t *testing.T) {
+	h := newHarness(t, true)
+
+	// dueLimit once-occurrences, each on a definition that was switched off before its moment.
+	long := fixedNow.Add(-time.Hour)
+	for i := range dueLimit {
+		id := fmt.Sprintf("00000000-0000-0000-0000-%012d", i)
+		h.store.definitions[id] = store.Definition{
+			ID: id, Name: fmt.Sprintf("off-%d", i), SourceSelection: "all",
+			DestinationKind: "adhoc", DestinationAddress: "10.0.0.1:53",
+			CheckType: "tcp", Plane: "pod", Enabled: false,
+		}
+		h.store.schedules[id] = store.Schedule{
+			ID: id, DefinitionID: id, Kind: kindOnce, Enabled: true, NextFireAt: &long,
+		}
+	}
+
+	// And one live interval schedule, due a second ago -- later than all of the above, so the
+	// ordering puts it exactly one row past the end of the window.
+	h.seedDefinition()
+	h.seedSchedule(kindInterval, int64(oneMinute))
+
+	h.s.Tick(context.Background())
+
+	if len(h.store.skips) != dueLimit {
+		t.Errorf("first tick recorded %d skips, want %d: an occurrence whose row is never written stays pinned in the past",
+			len(h.store.skips), dueLimit)
+	}
+	if len(h.runner.started) != 0 {
+		t.Fatalf("the live schedule fired on the first tick; this test cannot show starvation if the window was never full")
+	}
+
+	// One tick later, the skipped occurrences have moved out of the window and the live schedule
+	// gets its turn. Without the retry they are still pinned at -1h and it never does.
+	h.s.now = func() time.Time { return fixedNow.Add(time.Second) }
+	h.s.Tick(context.Background())
+
+	if len(h.runner.started) != 1 {
+		t.Errorf("the live schedule never fired (started %d runs): %d skipped once-occurrences hold the due window permanently",
+			len(h.runner.started), dueLimit)
 	}
 }

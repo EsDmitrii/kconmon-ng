@@ -222,14 +222,17 @@ func (a *OIDCAuthenticator) Callback(ctx context.Context, state, code string) (s
 		return "", "", fmt.Errorf("authn: oidc: decode id token claims: %w", claimsErr)
 	}
 
-	username := claimString(claims, a.usernameClaim)
-	if username == "" {
-		// A subject with no stable id is unusable.
-		username = idToken.Subject
+	// sub, and ONLY sub. It used to fall back the other way — the configured username claim first,
+	// sub only if that was missing — which made a mutable, reassignable string the key an RBAC
+	// binding hangs off (identity.go; OIDC Core §5.7). A login that cannot produce a sub is refused
+	// rather than quietly keyed on something weaker.
+	if idToken.Subject == "" {
+		return "", "", fmt.Errorf("%w: id token carries no sub claim", ErrInvalid)
 	}
-	if username == "" {
-		return "", "", fmt.Errorf("%w: id token carries no usable subject identifier", ErrInvalid)
+	if reservedIdentity(idToken.Subject) {
+		return "", "", fmt.Errorf("%w: id token sub claims a reserved identity namespace", ErrInvalid)
 	}
+	identity := IdentityPrefixOIDC + idToken.Subject
 
 	accessExpiry := token.Expiry
 	if accessExpiry.IsZero() && token.RefreshToken != "" {
@@ -239,8 +242,8 @@ func (a *OIDCAuthenticator) Callback(ctx context.Context, state, code string) (s
 	}
 
 	id, err := a.sessions.Create(ctx, Session{
-		Username:     username,
-		DisplayName:  username,
+		Username:     identity,
+		DisplayName:  a.displayName(claims, idToken.Subject),
 		Groups:       claimGroups(claims, a.groupsClaim),
 		RefreshToken: token.RefreshToken,
 		AccessExpiry: accessExpiry,
@@ -250,6 +253,23 @@ func (a *OIDCAuthenticator) Callback(ctx context.Context, state, code string) (s
 	}
 
 	return id, st.ReturnTo, nil
+}
+
+// displayName is what a HUMAN reading the audit log or the header menu sees, and it is deliberately
+// the opposite trade from the identity above: the friendliest claim available, in the order a person
+// would recognise themselves — the configured username claim, then name, then email — falling back
+// to the sub the identity is already keyed on. None of it is load-bearing: nothing authorizes on a
+// display name, so a claim changing here changes a label and nothing else.
+func (a *OIDCAuthenticator) displayName(claims map[string]any, sub string) string {
+	for _, claim := range []string{a.usernameClaim, "name", "email"} {
+		if claim == "" {
+			continue
+		}
+		if v := claimString(claims, claim); v != "" {
+			return v
+		}
+	}
+	return sub
 }
 
 // Authenticate resolves the session cookie into a Subject, refreshing the
@@ -268,18 +288,77 @@ func (a *OIDCAuthenticator) Authenticate(r *http.Request) (authz.Subject, error)
 		return authz.Subject{}, ErrNoCredentials
 	}
 
+	/* A session minted before identity became "oidc:"+sub carries a bare username, and Valkey keeps
+	   it across the upgrade for the rest of its 12h TTL. Honouring it would keep the LEGACY bindings
+	   granting — precisely what the boot warning tells the operator has stopped happening — and it
+	   can never match the refresh path's subject check, so its groups would freeze too. It is not an
+	   identity this build can resolve, so it ends here: the session is dropped and the browser is
+	   sent back through the IdP, which mints the same person under their sub. */
+	if !strings.HasPrefix(sess.Username, IdentityPrefixOIDC) {
+		if delErr := a.sessions.Delete(r.Context(), sess.ID); delErr != nil {
+			slog.Warn("authn: oidc: delete pre-upgrade session", "error", delErr)
+		}
+		return authz.Subject{}, ErrExpired
+	}
+
 	sess, err = a.maybeRefresh(r.Context(), sess)
 	if err != nil {
 		return authz.Subject{}, err
 	}
 
-	// ID carries the resolved username claim here, not a users.id UUID (authz.go's Subject.ID doc).
+	// ID is "oidc:"+sub (identity.go), not a users.id UUID (authz.go's Subject.ID doc).
 	return authz.Subject{
 		Kind:        authz.SubjectUser,
 		ID:          sess.Username,
 		DisplayName: sess.DisplayName,
 		Groups:      sess.Groups,
 	}, nil
+}
+
+// adoptRefreshedClaims re-reads group membership from the id_token a refresh returned.
+//
+// Without this a session's groups were whatever the IdP said at LOGIN and stayed that way for the
+// session's whole life: revoke someone's group at the IdP and the console kept honouring the group
+// bindings until they happened to log out. Refresh is the moment the IdP re-states who this is, so
+// it is the moment to believe it.
+//
+// Everything here is best-effort ON PURPOSE. A provider that returns no id_token on refresh (many
+// do not) or one that fails verification leaves the session exactly as it was rather than dropping
+// the caller to no groups at all — an empty group list is a silent, total deauthorization, and
+// inventing one out of a missing optional field would be worse than the staleness it fixes. The
+// SUBJECT is never adopted from here: a refresh that came back for a different sub is not this
+// session, and the session is dropped rather than re-pointed.
+func (a *OIDCAuthenticator) adoptRefreshedClaims(ctx context.Context, sess *Session, refreshed *oauth2.Token) {
+	rawIDToken, ok := refreshed.Extra("id_token").(string)
+	if !ok || rawIDToken == "" {
+		return
+	}
+	idToken, err := a.verifier.Verify(ctx, rawIDToken)
+	if err != nil {
+		slog.Warn("authn: oidc: refreshed id token failed verification; keeping the session's existing groups", "error", err)
+		return
+	}
+	/* An id_token with NO sub cannot be shown to belong to this session, and the login path already
+	   refuses one outright; adopting claims from it here would be the same trust through a side door. */
+	if idToken.Subject == "" || IdentityPrefixOIDC+idToken.Subject != sess.Username {
+		slog.Warn("authn: oidc: refreshed id token does not identify this session; keeping its existing groups")
+		return
+	}
+	var claims map[string]any
+	if err := idToken.Claims(&claims); err != nil {
+		return
+	}
+	/* PRESENT, not merely truthy. A refresh id_token is often minimal — sub, iss, aud, exp and
+	   nothing else — and reading an ABSENT groups claim as "no groups" would deauthorize the session
+	   completely on a token that said nothing about groups at all. An explicit empty array is a
+	   different statement and IS adopted: that is the IdP revoking membership. */
+	if _, present := claims[a.groupsClaim]; !present {
+		return
+	}
+	sess.Groups = claimGroups(claims, a.groupsClaim)
+	if name := a.displayName(claims, idToken.Subject); name != "" {
+		sess.DisplayName = name
+	}
 }
 
 // maybeRefresh is the server-side, lazy refresh SECURITY.md requires.
@@ -327,6 +406,7 @@ func (a *OIDCAuthenticator) maybeRefresh(ctx context.Context, sess Session) (Ses
 
 	current.RefreshToken = refreshed.RefreshToken
 	current.AccessExpiry = refreshed.Expiry
+	a.adoptRefreshedClaims(ctx, &current, refreshed)
 	if current.AccessExpiry.IsZero() && current.RefreshToken != "" {
 		// Same guard as Callback's: an IdP omitting expires_in on the
 		// REFRESH response would otherwise persist a zero AccessExpiry and

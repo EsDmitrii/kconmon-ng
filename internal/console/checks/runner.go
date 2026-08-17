@@ -50,7 +50,14 @@ const defaultReapLimit = 100
 // runDeadline rather than hardcoded so it cannot drift out of step with the bound Start actually
 // applies.
 func maxRunLifetime() time.Duration {
-	return runDeadline(maxPairs, maxPerPairTimeout, MaxRunDuration) + reapSlack
+	/* The WORST shape, not the average one: maxPairs pairs all from a single source, which is the
+	   arrangement the per-source gate serialises hardest and therefore the longest a legitimate run
+	   can take. Anything shorter here would have the reaper cancelling runs that are still working. */
+	worst := make([]Pair, maxPairs)
+	for i := range worst {
+		worst[i] = Pair{Source: "one-source"}
+	}
+	return runDeadline(worst, maxPerPairTimeout, MaxRunDuration) + reapSlack
 }
 
 // Store is the persistence seam Runner needs; satisfied by *store.DB when database.mode is enabled.
@@ -138,6 +145,11 @@ func (r *Runner) Start(ctx context.Context, spec Spec, initiator authz.Subject) 
 	if err := ValidateDuration(spec.Duration); err != nil {
 		return "", err
 	}
+	// Range, not feasibility: a cadence outside [1s, duration] has no plan to be adjusted to, while
+	// one this fan-out merely cannot keep is stretched below and reported. See ValidateSampleInterval.
+	if err := ValidateSampleInterval(spec.RequestedSampleInterval, spec.Duration); err != nil {
+		return "", err
+	}
 	nodes, err := r.resolveNodes(ctx, spec.Sources, spec.Destinations, spec.TypedDestinations)
 	if err != nil {
 		return "", err
@@ -151,23 +163,51 @@ func (r *Runner) Start(ctx context.Context, spec Spec, initiator authz.Subject) 
 		spec.Plane = "pod"
 	}
 
+	// The cadence is re-planned, never refused: a check type slower than the cadence it was given
+	// stretches the interval instead of making the run impossible. That was true when the base
+	// cadence could only be derived from the duration, and it stays true now that an operator can
+	// name one -- an unkeepable request is a fact about traceroute, not a mistake in the request.
+	// Snapshotted into the spec, with the reason, so the UI reads the plan the server actually made
+	// rather than re-deriving one from the duration alone.
+	perPairTimeout := clampTimeoutFor(spec.Type, spec.Timeout)
+	cadence := PlanCadence(&spec, pairs, perPairTimeout)
+	rounds := cadence.SamplesPerPair
+	if spec.Duration > 0 {
+		// Only an interval run has a cadence to describe, and an instant run's spec snapshot is
+		// pinned byte-for-byte by TestSpecSnapshotForNodeOnlyRunIsM3Identical.
+		spec.PlannedSampleIntervalNs = cadence.Interval.Nanoseconds()
+		spec.PlannedSamplesPerPair = rounds
+		// Empty unless something moved, so a run that got exactly what it asked for stores nothing
+		// extra and the permalink has nothing to explain away.
+		spec.SampleIntervalAdjusted = cadence.Adjusted
+	}
+
 	specJSON, err := json.Marshal(spec)
 	if err != nil {
 		return "", fmt.Errorf("checks: start: encode spec: %w", err)
 	}
 
 	id := uuid.NewString()
-	run, err := r.store.CreateRun(ctx, id, spec.Type, spec.Plane, specJSON, string(initiator.Kind), initiator.ID, int32(len(pairs))) //nolint:gosec // len(pairs) <= maxPairs (400)
+	// The budget FIRST, so the row can carry the same instant the context does; see store.CreateRun.
+	budget := runDeadline(pairs, perPairTimeout, spec.Duration)
+	deadlineAt := time.Now().Add(budget)
+	run, err := r.store.CreateRun(ctx, id, spec.Type, spec.Plane, specJSON, string(initiator.Kind), initiator.ID, int32(len(pairs)), deadlineAt) //nolint:gosec // len(pairs) <= maxPairs (400)
 	if err != nil {
 		return "", fmt.Errorf("checks: start: create run: %w", err)
 	}
 
-	perPairTimeout := clampTimeout(spec.Timeout)
-	runCtx, cancel := context.WithTimeout(context.Background(), runDeadline(len(pairs), perPairTimeout, spec.Duration))
+	runCtx, cancel := context.WithTimeout(context.Background(), budget)
 
-	// ctx here MUST be runCtx, not the caller's ctx.
+	/* The topic outlives the run's CANCELLATION, and execute's CloseTopicWithFinal is its only
+	   closer -- the same contract OpenRunTopic and RunTopicLive already assume.
+	   It used to be opened on runCtx, so cancelling a run tore the hub's relay down underneath it:
+	   the terminal progress frames execute still publishes were accepted by the bus but no longer
+	   relayed, TopicSeq could never reach framesPublished, and every cancelled run spun the full
+	   relayWaitTimeout before logging a WARN blaming the bus for dropping frames it had delivered.
+	   That is precisely the false alarm the shutdown reorder was meant to remove, arriving by a
+	   second route -- and on an operator's explicit cancel, not only at shutdown. */
 	topic := ws.RunTopic(run.ID)
-	topicOpen := r.hub.OpenTopic(runCtx, topic)
+	topicOpen := r.hub.OpenTopic(context.WithoutCancel(runCtx), topic)
 
 	// Add happens here, before the goroutine below is scheduled -- not as execute's own first
 	// statement.
@@ -177,51 +217,298 @@ func (r *Runner) Start(ctx context.Context, spec Spec, initiator authz.Subject) 
 	go func() {
 		defer r.activeRuns.Done()
 		defer r.activeCount.Add(-1)
-		r.execute(runCtx, cancel, run.ID, pairs, &spec, perPairTimeout, plannedRounds(spec.Duration), SampleInterval(spec.Duration), topicOpen)
+		// The BASE cadence paces the loop, not the stretched estimate: a round slower than it simply
+		// starts the next one immediately, and a fast one is held to the cadence. With an operator's
+		// own interval that base IS their request (capped), which is the whole point of the control.
+		r.execute(runCtx, cancel, run.ID, pairs, &spec, perPairTimeout, rounds, cadence.Base, topicOpen)
 	}()
 
 	return run.ID, nil
 }
 
+// CancelTopic is the bus topic a cancel request travels on. It is NOT a WebSocket topic: the hub
+// never subscribes to it, only the runners do.
+const CancelTopic = "run-cancel"
+
+// cancelRequest is the whole payload: which run, and nothing else.
+type cancelRequest struct {
+	RunID string `json:"runId"`
+}
+
 // Cancel stops the run named by runID; it cancels that run's own context: pairs already dispatched
 // still record their outcome (each result write runs on a context.WithoutCancel-derived context of
 // its own -- see terminalOpTimeout).
+//
+// A run belongs to ONE replica — the one whose Start built its context — and the Service load
+// balances, so with the chart's default of two console replicas a cancel had about even odds of
+// landing on the replica that holds nothing. That call used to read the row, log "leaving it to the
+// stuck-run reaper" and return nil, and the handler answered 204: the operator was told the run was
+// cancelled while it kept fanning out to the fleet, and the reaper it deferred to only acts after a
+// cutoff measured in tens of minutes. So a miss is now FORWARDED on the bus every replica already
+// subscribes to, and the replica that owns the run cancels it.
 func (r *Runner) Cancel(ctx context.Context, runID string) error {
-	if v, ok := r.runControls.Load(runID); ok {
-		ctl, _ := v.(*runControl)
-		// Set the flag BEFORE cancelling: execute reads it after wg.Wait()
-		// returns, and cancelling first would let a single-pair run finish
-		// and read the flag before it was written.
-		ctl.cancelled.Store(true)
-		ctl.cancel()
+	if r.cancelLocal(runID) {
 		return nil
 	}
 
 	// Not in flight here. Only the store can tell "already finished" (nil)
 	// apart from "no such run" (ErrNotFound) apart from "someone else's"
-	// (nil, logged).
+	// (forwarded below).
 	run, err := r.store.GetRun(ctx, runID)
 	if err != nil {
 		return fmt.Errorf("checks: cancel: %w", err)
 	}
-	if run.Status == "pending" || run.Status == "running" {
-		slog.Warn("checks: cancel: run is not in flight in this process; leaving it to the stuck-run reaper",
-			"run", runID, "status", run.Status)
+	if run.Status != "pending" && run.Status != "running" {
+		return nil // already terminal: nothing to cancel, and nothing to forward
 	}
+	/* A bus that cannot reach another process is not a forwarding path, and saying so is the
+	   difference between an honest 502 and a silent lie.
+
+	   The guard used to be `bus == nil` alone. It is nil only when the console was built without
+	   one; the far more common degraded shape is a NON-nil in-process bus, which is what newBus
+	   falls back to when redis is unreachable at startup — silently, while the deployment still runs
+	   two replicas. Publishing there returns nil unconditionally, so this function reported success,
+	   logged "cancel forwarded to the replica that owns the run", and the handler answered 204 to an
+	   operator watching a runaway run keep dispatching for its full duration. */
+	if r.bus == nil || !r.bus.CrossReplica() {
+		slog.Warn("checks: cancel: the run is not in flight in this process and this console has no "+
+			"cross-replica bus to forward on — the run continues on the replica that owns it",
+			"run", runID, "status", run.Status)
+		return ErrCancelUnreachable
+	}
+	payload, err := json.Marshal(cancelRequest{RunID: runID})
+	if err != nil {
+		return fmt.Errorf("checks: cancel: encode request: %w", err)
+	}
+	if err := r.bus.Publish(ctx, CancelTopic, cache.Message{Type: "run.cancel", Data: payload}); err != nil {
+		return fmt.Errorf("checks: cancel: forward to the owning replica: %w", err)
+	}
+	slog.Info("checks: cancel forwarded to the replica that owns the run", "run", runID)
 	return nil
 }
 
-// ReapStuckRuns force-finishes runs left in status "running" long past any deadline Start could
-// have given them; the cutoff is this package's business, not the caller's.
+// cancelLocal cancels the run if THIS process owns it, reporting whether it did.
+func (r *Runner) cancelLocal(runID string) bool {
+	v, ok := r.runControls.Load(runID)
+	if !ok {
+		return false
+	}
+	ctl, _ := v.(*runControl)
+	// Set the flag BEFORE cancelling: execute reads it after wg.Wait() returns, and cancelling
+	// first would let a single-pair run finish and read the flag before it was written.
+	ctl.cancelled.Store(true)
+	ctl.cancel()
+	return true
+}
+
+// WatchCancellations applies cancel requests published by other replicas. Runs until ctx is done;
+// a no-op when there is no bus.
+func (r *Runner) WatchCancellations(ctx context.Context) error {
+	if r.bus == nil {
+		<-ctx.Done()
+		return nil
+	}
+	msgs, unsubscribe := r.bus.Subscribe(CancelTopic)
+	defer unsubscribe()
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case msg, ok := <-msgs:
+			if !ok {
+				return nil
+			}
+			var req cancelRequest
+			if err := json.Unmarshal(msg.Data, &req); err != nil || req.RunID == "" {
+				slog.Warn("checks: undecodable cancel request on the bus", "error", err)
+				continue
+			}
+			// Every replica receives it; only the owner has anything to do.
+			if r.cancelLocal(req.RunID) {
+				slog.Info("checks: cancelled a run on request from another replica", "run", req.RunID)
+			}
+		}
+	}
+}
+
+/*
+ * CancelAll cancels every run this process is executing, and is the SHUTDOWN path.
+ *
+ * On SIGTERM the process used to stop the HTTP server and then block in Wait for runs whose
+ * contexts it deliberately never cancelled: anything longer than the wait budget could not finish,
+ * so the wait was dead time and the process exited mid-run, leaving rows in 'running' with
+ * pair_ok/pair_failed at 0 — for the reaper to correct, tens of minutes later, on every rolling
+ * update. The cancel funcs were in hand the whole time.
+ */
+func (r *Runner) CancelAll() int {
+	cancelled := 0
+	r.runControls.Range(func(key, _ any) bool {
+		id, _ := key.(string)
+		if r.cancelLocal(id) {
+			cancelled++
+		}
+		return true
+	})
+	if cancelled > 0 {
+		slog.Info("checks: cancelling in-flight runs for shutdown", "runs", cancelled)
+	}
+	return cancelled
+}
+
+/*
+ * OpenRunTopic opens a run:{id} topic on THIS replica, if the id names a run that is still going.
+ *
+ * It is the hub's on-demand opener (Hub.SetEphemeralOpener). The run itself belongs to whichever
+ * replica served its POST, and only that replica called OpenTopic — so a browser whose socket landed
+ * on the other one asked for a topic that did not exist there and was told "unknown topic", with no
+ * progress on the page until the run was over. The frames travel on the bus, so any replica can
+ * carry them; what was missing was somebody here subscribing.
+ *
+ * A terminal run is refused: its frames are finished, the run detail comes from REST, and opening a
+ * topic that will never speak again would just leak a subscription.
+ */
+func (r *Runner) OpenRunTopic(ctx context.Context, topic string) bool {
+	runID, ok := ws.RunIDFromTopic(topic)
+	if !ok {
+		return false
+	}
+	run, err := r.store.GetRun(ctx, runID)
+	if err != nil {
+		return false
+	}
+	if run.Status != "pending" && run.Status != "running" {
+		return false
+	}
+	/* And the SAME reachability guard Cancel applies, for the same reason.
+	   The run is live in the store but not in this process, so its frames are published on the
+	   replica that owns it. Without a cross-replica bus nothing in THIS process will ever publish to
+	   that topic — so accepting the subscribe handed the browser a socket that is connected, silent
+	   and permanently empty, while the page's own liveness test ("subscribed and connected") kept the
+	   "Live — realtime is up" badge on. Refusing it makes the hub answer "unknown topic", which is
+	   what the page's polling fallback and its honest "Delayed data" badge key off. The owning
+	   replica still opens the topic in execute(), so nothing is lost where the frames actually are. */
+	if r.bus == nil || !r.bus.CrossReplica() {
+		return false
+	}
+	// The topic's lifetime is the RUN's, not this call's. On the OWNING replica execute() closes it;
+	// here there is no owner to do that, which is what RunTopicLive is for.
+	return r.hub.OpenTopic(context.WithoutCancel(ctx), topic)
+}
+
+/*
+RunTopicLive reports whether a run:{id} topic still has a run behind it. It is the hub's reaper
+predicate (Hub.SetEphemeralLiveness).
+
+A topic opened by OpenRunTopic belongs to a run this process does not own, so nothing here ever
+calls CloseTopicWithFinal for it — the owner's close is hub-local. Without this the entry stayed
+open forever and neither reclaim path in the hub would touch it; 256 of them (one per run permalink
+opened on the wrong replica) and this replica stops serving live run progress altogether.
+
+A topic whose id does not parse is not live: nothing can ever publish to it.
+
+A STORE ERROR is a different answer, and reading it as "the run is over" was wrong in the direction
+that costs something. A pool exhaustion, a reset connection or a statement timeout would have torn
+down the topic of a run that is still going — the browser watching it stops receiving frames
+mid-run, with the run itself unaffected and nothing on the page saying why. A run that has genuinely
+ended is reclaimed on the next sweep; a live one that was reaped is not recoverable. So an error
+means "leave it alone".
+*/
+func (r *Runner) RunTopicLive(topic string) bool {
+	runID, ok := ws.RunIDFromTopic(topic)
+	if !ok {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), runTopicLivenessTimeout)
+	defer cancel()
+	run, err := r.store.GetRun(ctx, runID)
+	switch {
+	case errors.Is(err, store.ErrNotFound):
+		// The run is gone from the table (retention, or an id that never existed): nothing will ever
+		// publish here again.
+		return false
+	case err != nil:
+		// Could not tell. Keep it.
+		slog.Warn("checks: could not check whether a run topic is still live; keeping the topic",
+			"run", runID, "error", err) //nolint:gosec // G706: structured slog fields, not string-built log injection
+		return true
+	}
+	return run.Status == "pending" || run.Status == "running"
+}
+
+// runTopicLivenessTimeout bounds the reaper's store read; it runs on the hub's select loop, which
+// must not park.
+const runTopicLivenessTimeout = 3 * time.Second
+
+// ReapLoop drives ReapStuckRuns on a ticker until ctx is done.
+//
+// It is its OWN loop, and not part of the schedule pass, because the two answer to different things.
+// Reaping used to live inside scheduler.leaderTick, which is spawned only when
+// console.scheduler.enabled is set — and that is off by default. So on the shipped configuration
+// nothing ever reaped: a run whose replica died stayed 'running' forever, POST /runs/{id}/cancel
+// answered 204 for it while logging "leaving it to the stuck-run reaper", and the reaper did not
+// exist. Finishing an orphaned run is not a feature an operator opts into; it is the runner keeping
+// its own table honest.
+//
+// It needs no lock of its own: ReapStuckRuns is a single idempotent statement, and two replicas
+// running it at the same moment either finish the same rows once or find nothing left.
+func (r *Runner) ReapLoop(ctx context.Context, every time.Duration) {
+	if every <= 0 {
+		every = defaultReapInterval
+	}
+	ticker := time.NewTicker(every)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			n, err := r.ReapStuckRuns(ctx, 0)
+			if n > 0 {
+				r.metrics.RunsReaped.WithLabelValues().Add(float64(n))
+				slog.Warn("checks: force-finished stuck runs", "runs", n)
+			}
+			if err != nil && ctx.Err() == nil {
+				slog.Warn("checks: reap stuck runs failed", "error", err)
+			}
+		}
+	}
+}
+
+// defaultReapInterval is how often ReapLoop looks; a stuck run is already past its own deadline by
+// the time it qualifies, so minutes rather than seconds is the right cadence.
+const defaultReapInterval = time.Minute
+
+// ReapStuckRuns force-finishes runs abandoned mid-flight; the budget is this package's business,
+// not the caller's.
+//
+// It is a BUDGET rather than an instant because a single cutoff has to be the worst run this build
+// accepts — 400 pairs from one source over 24 hours, better than thirty hours — and an orphaned
+// five-minute run then sat reporting "0 of 1 ok" for a day and a half. Each row is judged against
+// its own declared duration and fan-out instead; these three numbers are the same ones runDeadline
+// gives a live run, so the reaper and the runner agree about what "too long" means.
 func (r *Runner) ReapStuckRuns(ctx context.Context, limit int32) (int64, error) {
 	if limit <= 0 {
 		limit = defaultReapLimit
 	}
-	n, err := r.store.ReapStuckRuns(ctx, time.Now().UTC().Add(-maxRunLifetime()), limit)
+	n, err := r.store.ReapStuckRuns(ctx, store.ReapBudget{
+		PerSourceConcurrency: maxPerSourceConcurrency,
+		PerPairTimeout:       maxPerPairTimeout,
+		Slack:                runDeadlineSlack + reapSlack,
+	}, limit)
 	if err != nil {
 		return 0, fmt.Errorf("checks: reap stuck runs: %w", err)
 	}
 	return n, nil
+}
+
+// ActiveForInitiator reports whether this initiator has a run mid-flight anywhere in the fleet --
+// the replica-independent form of the scheduler's overrun guard.
+func (r *Runner) ActiveForInitiator(ctx context.Context, initiatorKind, initiatorID string) (bool, error) {
+	n, err := r.store.ActiveRunsByInitiator(ctx, initiatorKind, initiatorID)
+	if err != nil {
+		return false, fmt.Errorf("checks: active runs for %s/%s: %w", initiatorKind, initiatorID, err)
+	}
+	return n > 0, nil
 }
 
 // Get returns one run by id.
@@ -235,8 +522,9 @@ func (r *Runner) List(ctx context.Context, f ListFilter) (RunPage, error) {
 }
 
 // GetResults returns one run's per-pair results, in insertion order -- the httpapi seam for GET
-// /api/v1/runs/{id}.
-func (r *Runner) GetResults(ctx context.Context, runID string) ([]store.RunResult, error) {
+// /api/v1/runs/{id}. `truncated` is true when the run holds more rows than one read may carry
+// (store.RunResultsCap); the page says so rather than presenting a tail as the whole run.
+func (r *Runner) GetResults(ctx context.Context, runID string) (results []store.RunResult, truncated bool, err error) {
 	return r.store.GetRunResults(ctx, runID)
 }
 
@@ -286,32 +574,19 @@ func (r *Runner) resolveNodes(ctx context.Context, sources, destinations []strin
 
 // runDeadline computes the run's overall execution ceiling; adding one round's worth rather than
 // multiplying is deliberate.
-func runDeadline(pairCount int, perPairTimeout, duration time.Duration) time.Duration {
-	batches := (pairCount + maxConcurrency - 1) / maxConcurrency
-	if batches < 1 {
-		batches = 1
-	}
-	oneRound := time.Duration(batches)*perPairTimeout + runDeadlineSlack
+func runDeadline(pairs []Pair, perPairTimeout, duration time.Duration) time.Duration {
+	/* roundFloor, not a batch count derived from maxConcurrency alone. The dispatch loop gates every
+	   pair TWICE — the run-wide window and the per-source one — and for a run with a single source
+	   the per-source gate is the slower of the two by a factor of four. Twelve MTR pairs from one
+	   node need six sequential batches, not two, so the context this deadline builds expired
+	   mid-flight: dispatch stopped, the reaper later marked the run cancelled, and the pairs that
+	   never ran left no result at all. roundFloor is the same arithmetic the planner already uses
+	   to decide the cadence, so the deadline and the plan now agree. */
+	oneRound := roundFloor(pairs, perPairTimeout) + runDeadlineSlack
 	if duration > 0 {
 		return duration + oneRound
 	}
 	return oneRound
-}
-
-// plannedRounds is how many times an interval run intends to probe each pair: the duration divided
-// by the sampling cadence.
-func plannedRounds(d time.Duration) int {
-	if d <= 0 {
-		return 1
-	}
-	n := int(d / SampleInterval(d))
-	if n < 1 {
-		n = 1
-	}
-	if n > MaxSamplesPerPair {
-		n = MaxSamplesPerPair
-	}
-	return n
 }
 
 // execute runs the bounded-concurrency fan-out to completion: MarkRunStarted; runs on runCtx
@@ -333,10 +608,30 @@ func (r *Runner) execute(runCtx context.Context, cancel context.CancelFunc, runI
 
 	// MarkRunStarted deliberately does NOT run on runCtx.
 	startedCtx, startedCancel := context.WithTimeout(context.WithoutCancel(runCtx), terminalOpTimeout)
-	if err := r.store.MarkRunStarted(startedCtx, runID); err != nil {
-		slog.Error("checks: mark run started failed", "run", runID, "error", err)
-	}
+	startErr := r.store.MarkRunStarted(startedCtx, runID)
 	startedCancel()
+	if startErr != nil {
+		/* The row never left "pending", so finishing it later would be a write against a state
+		   machine that never advanced -- and the run would sit on the page forever, claiming to be
+		   about to start. Fail it now, while there is still something to say about why. */
+		slog.Error("checks: mark run started failed, abandoning the run", "run", runID, "error", startErr)
+		failCtx, failCancel := context.WithTimeout(context.WithoutCancel(runCtx), terminalOpTimeout)
+		/* AbandonRun, not FinishRun. FinishRun's UPDATE requires status='running', and the row is
+		   still 'pending' precisely because MarkRunStarted is what failed — so it matched nothing,
+		   returned ErrWrongState, and the branch below swallowed that as "already terminal". The run
+		   stayed 'pending' forever: the detail page kept saying it was about to start, and the
+		   stuck-run reaper reaps by deadline against 'running', so it never came back either. */
+		if ferr := r.store.AbandonRun(failCtx, runID, "failed"); ferr != nil {
+			slog.Error("checks: marking the abandoned run failed too", "run", runID, "error", ferr)
+		}
+		failCancel()
+		/* And the topic goes with it. The run is over before it began; leaving the topic open would
+		   hold its ring, its seq counter and its bus subscription for the process's lifetime, and
+		   any browser on the permalink would wait for frames that will never come. */
+		r.hub.CloseTopicWithFinal(ws.RunTopic(runID), "run.finished",
+			json.RawMessage(`{"status":"failed"}`))
+		return
+	}
 
 	var completed atomic.Int32
 	outcomes := newPairOutcomes()
@@ -345,28 +640,37 @@ func (r *Runner) execute(runCtx context.Context, cancel context.CancelFunc, runI
 	if rounds < 1 {
 		rounds = 1
 	}
-	// Total counts PROBES, not pairs, so the browser's progress bar means the same thing for both
-	// kinds of run.
-	total := len(pairs) * rounds
+	// A duration run runs for the WALL CLOCK the operator asked for. Rounds repeat until it elapses;
+	// the planned count is only an estimate and must never end the run early, which it did while the
+	// loop counted rounds instead of watching the clock.
+	deadline := started.Add(spec.Duration)
 
-	for round := 0; round < rounds; round++ {
+	for round := 0; ; round++ {
+		// Total counts PROBES, not pairs, so the browser's progress bar means the same thing for
+		// both kinds of run. It widens rather than lies: fast rounds outrun the estimate.
+		total := len(pairs) * max(rounds, round+1)
 		r.dispatchRound(runCtx, topic, runID, pairs, spec, perPairTimeout, round, total, &completed, outcomes)
-		if round+1 >= rounds || runCtx.Err() != nil {
-			break
-		}
-		// Sleep to the NEXT ROUND BOUNDARY measured from the run's start, not for a fixed interval after
-		// the round finished.
-		next := started.Add(time.Duration(round+1) * interval)
-		wait := time.Until(next)
-		if wait <= 0 {
-			continue
-		}
-		timer := time.NewTimer(wait)
-		select {
-		case <-runCtx.Done():
-			timer.Stop()
-		case <-timer.C:
-			continue
+
+		switch {
+		case runCtx.Err() != nil:
+			// Cancelled, or the run's own ceiling fired.
+		case spec.Duration <= 0:
+			// An instant run is exactly one round.
+		case round+1 >= MaxSamplesPerPair:
+			// The documented upper bound on samples per pair is the one true cap.
+		case !time.Now().Before(deadline):
+			// The requested duration has elapsed. A round that overran it still finished, which is
+			// the honest end for a run whose rounds are slower than the time it was given.
+		default:
+			// Sleep to the NEXT ROUND BOUNDARY measured from the run's start, not for a fixed
+			// interval after the round finished. A round slower than the cadence finds the boundary
+			// already past and starts again immediately, which is what lets fast traces densify.
+			// Waiting past the deadline would spend the operator's duration asleep and then run one
+			// more round after it had already elapsed, so a boundary beyond it ends the run instead.
+			next := started.Add(time.Duration(round+1) * interval)
+			if !next.After(deadline) && r.waitForNextRound(runCtx, next) {
+				continue
+			}
 		}
 		break
 	}
@@ -412,6 +716,24 @@ func (r *Runner) execute(runCtx context.Context, cancel context.CancelFunc, runI
 			r.waitForRelay(topic, v.(*atomic.Uint64).Load())
 		}
 		r.hub.CloseTopicWithFinal(topic, ws.TypeEvent, finalData)
+	}
+}
+
+// waitForNextRound sleeps until the next round boundary, reporting false when the run ended while
+// waiting. A boundary already in the past does not sleep at all.
+func (r *Runner) waitForNextRound(runCtx context.Context, next time.Time) bool {
+	wait := time.Until(next)
+	if wait <= 0 {
+		return runCtx.Err() == nil
+	}
+
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+	select {
+	case <-runCtx.Done():
+		return false
+	case <-timer.C:
+		return true
 	}
 }
 
@@ -473,25 +795,97 @@ func (r *Runner) dispatchRound(
 	round, total int, completed *atomic.Int32, outcomes *pairOutcomes,
 ) {
 	sem := make(chan struct{}, maxConcurrency)
+	sources := newSourceGate()
 	var wg sync.WaitGroup
+
+	// Interleaved so the bounded window spreads across agents; Plan emits pairs source-major, which
+	// would otherwise aim the whole window at one agent at a time.
+	order := interleaveBySource(pairs)
 
 dispatch:
 	// Iterated by index, and each goroutine handed &pairs[i].
-	for i := range pairs {
+	for _, i := range order {
 		// A cancelled (or expired) run must not dispatch anything further.
 		select {
 		case <-runCtx.Done():
 			break dispatch
 		case sem <- struct{}{}:
 		}
+		// The capacity that actually bounds a run lives on the agent, not here: it runs at most
+		// maxConcurrentTasks on-demand checks and refuses the rest outright.
+		if !sources.acquire(runCtx, pairs[i].Source) {
+			<-sem
+			break dispatch
+		}
 		wg.Add(1)
 		go func(pair *Pair) {
 			defer wg.Done()
-			defer func() { <-sem }()
+			defer func() { sources.release(pair.Source); <-sem }()
 			r.runOneRecovered(runCtx, topic, runID, pair, spec, perPairTimeout, round, total, completed, outcomes)
 		}(&pairs[i])
 	}
 	wg.Wait()
+}
+
+// sourceGate bounds how many pairs are in flight against ONE source agent at a time.
+type sourceGate struct {
+	mu    sync.Mutex
+	slots map[string]chan struct{}
+}
+
+func newSourceGate() *sourceGate {
+	return &sourceGate{slots: make(map[string]chan struct{})}
+}
+
+// acquire blocks until this source has a free slot; false means the run ended while waiting.
+func (g *sourceGate) acquire(ctx context.Context, source string) bool {
+	g.mu.Lock()
+	slot, ok := g.slots[source]
+	if !ok {
+		slot = make(chan struct{}, maxPerSourceConcurrency)
+		g.slots[source] = slot
+	}
+	g.mu.Unlock()
+
+	select {
+	case slot <- struct{}{}:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
+func (g *sourceGate) release(source string) {
+	g.mu.Lock()
+	slot := g.slots[source]
+	g.mu.Unlock()
+	if slot != nil {
+		<-slot
+	}
+}
+
+// interleaveBySource returns pair indices ordered round-robin across sources, so consecutive
+// dispatches land on different agents.
+func interleaveBySource(pairs []Pair) []int {
+	bySource := make(map[string][]int)
+	order := make([]string, 0, len(pairs))
+	for i := range pairs {
+		src := pairs[i].Source
+		if _, seen := bySource[src]; !seen {
+			order = append(order, src)
+		}
+		bySource[src] = append(bySource[src], i)
+	}
+
+	out := make([]int, 0, len(pairs))
+	for round := 0; len(out) < len(pairs); round++ {
+		for _, src := range order {
+			if idx := bySource[src]; round < len(idx) {
+				out = append(out, idx[round])
+			}
+		}
+	}
+	return out
 }
 
 // runOneRecovered wraps runOne with a panic recovery.
@@ -550,15 +944,23 @@ func (r *Runner) runOne(
 	if len(resultJSON) == 0 {
 		resultJSON = json.RawMessage(`{}`)
 	}
-	if _, err := r.store.UpsertRunResult(resultCtx, store.RunResultInput{
+	row, err := r.store.UpsertRunResult(resultCtx, store.RunResultInput{
 		RunID: runID, SourceNode: pair.Source, DestinationNode: pair.Destination.Label(),
 		Success: outcome.success, DurationNs: outcome.durationNs, Error: outcome.errStr, Result: resultJSON,
 		SampleSeq: int32(round), //nolint:gosec // round < MaxSamplesPerPair (500)
-	}); err != nil {
+	})
+	if err != nil {
 		slog.Error("checks: upsert run result failed", "run", runID, "error", err)
 	} else {
-		// Path history is projected only once the result row it describes is durable.
-		r.projectMTRSnapshot(ctx, runID, pair, spec, outcome.resultJSON)
+		/* Path history is projected only once the result row it describes is durable — and it is
+		   stamped with THAT ROW'S OWN recorded_at rather than with the clock at this line.
+		   time.Now() here is a few hundred microseconds later than the row's now(), which sounds
+		   harmless and is not: a route's first_seen then lands AFTER the very trace that created
+		   it, so that trace falls outside [first_seen, last_seen] — the window everything reading
+		   back from a route uses. It cost exactly one trace per route in the trace list, and it is
+		   why the tick that CREATED a route was the one tick told "no recorded route covers this
+		   probe" on the run permalink. */
+		r.projectMTRSnapshot(ctx, runID, pair, spec, outcome.resultJSON, row.RecordedAt)
 	}
 	resultCancel()
 
@@ -572,8 +974,8 @@ func (r *Runner) runOne(
 
 // projectMTRSnapshot records one finished mtr pair's trace in path history; it is a PROJECTION and
 // never an authority.
-func (r *Runner) projectMTRSnapshot(ctx context.Context, runID string, pair *Pair, spec *Spec, resultJSON json.RawMessage) {
-	in, ok := ProjectMTRSnapshot(spec, pair, resultJSON, time.Now().UTC(), runID)
+func (r *Runner) projectMTRSnapshot(ctx context.Context, runID string, pair *Pair, spec *Spec, resultJSON json.RawMessage, recordedAt time.Time) {
+	in, ok := ProjectMTRSnapshot(spec, pair, resultJSON, recordedAt.UTC(), runID)
 	if !ok {
 		return
 	}

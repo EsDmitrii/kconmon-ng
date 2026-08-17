@@ -19,14 +19,20 @@ type HTTPServer struct {
 	diagHandler     atomic.Pointer[DiagnosticsHandler]
 	externalHandler atomic.Pointer[ExternalChecksHandler]
 	capabilities    []string
+	/* The CIDRs an agent will actually probe (config.checkers.external.allowedCidrs). Published
+	   because the Console cannot otherwise know them -- they live in the AGENT's config, not the
+	   Console's -- and a target outside them can never be reached, which is worth saying at the
+	   moment it is created rather than as a timeout later. */
+	externalAllowedCIDRs []string
 }
 
 func NewHTTPServer(registry *Registry, nodeWatcher *NodeWatcher, promReg *prometheus.Registry, capabilities []string) *HTTPServer {
 	s := &HTTPServer{
-		mux:          http.NewServeMux(),
-		registry:     registry,
-		promReg:      promReg,
-		capabilities: capabilities,
+		mux:                  http.NewServeMux(),
+		registry:             registry,
+		promReg:              promReg,
+		capabilities:         capabilities,
+		externalAllowedCIDRs: []string{},
 	}
 	// A nil slice would marshal as JSON null; an empty one keeps the field an
 	// array the Console can iterate unconditionally.
@@ -45,6 +51,12 @@ func NewHTTPServer(registry *Registry, nodeWatcher *NodeWatcher, promReg *promet
 	s.mux.HandleFunc("PUT /api/v1/external-checks", s.handleExternalChecks)
 
 	return s
+}
+
+// SetLeaderGate makes GET /api/v1/topology leader-only, matching the diagnostics and
+// external-check routes.
+func (s *HTTPServer) SetLeaderGate(enabled bool, isLeader func() bool) {
+	s.topologyHandler.SetLeaderGate(enabled, isLeader)
 }
 
 // SetNodeWatcher injects a NodeWatcher into the topology handler.
@@ -92,6 +104,11 @@ func (s *HTTPServer) SetReady(ready bool) {
 	s.ready.Store(ready)
 }
 
+// Ready is the readiness this component reports; the metrics listener shares it (metrics.NewListenerHandler).
+func (s *HTTPServer) Ready() bool {
+	return s.ready.Load()
+}
+
 func (s *HTTPServer) handleHealthz(w http.ResponseWriter, _ *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte("ok"))
@@ -107,11 +124,21 @@ func (s *HTTPServer) handleReadyz(w http.ResponseWriter, _ *http.Request) {
 	_, _ = w.Write([]byte("ok"))
 }
 
+// SetExternalAllowedCIDRs publishes the agent-side allowlist on GET /api/v1/version. A setter
+// rather than a constructor argument, matching how the diagnostics and external handlers are wired.
+func (s *HTTPServer) SetExternalAllowedCIDRs(cidrs []string) {
+	if cidrs == nil {
+		cidrs = []string{}
+	}
+	s.externalAllowedCIDRs = cidrs
+}
+
 func (s *HTTPServer) handleVersion(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{
-		"version":      config.Version,
-		"commit":       config.Commit,
-		"capabilities": s.capabilities,
+		"version":              config.Version,
+		"commit":               config.Commit,
+		"capabilities":         s.capabilities,
+		"externalAllowedCidrs": s.externalAllowedCIDRs,
 	})
 }

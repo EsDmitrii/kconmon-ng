@@ -45,11 +45,18 @@ RETURNING name, permissions, created_at;
 DELETE FROM roles WHERE name = $1;
 
 -- name: ListBindingsForSubject :many
--- One round trip per request: resolves both the user's own bindings and every group binding for the
--- caller's group membership in a single query.
+-- One round trip per request: resolves both the caller's own bindings and every group binding for
+-- their group membership in a single query.
+--
+-- caller_kind is load-bearing, not decoration. Without it the user branch matched on the ID ALONE,
+-- so a 'user' binding whose subject_id happened to be an API token's UUID handed that token the
+-- role: the RBAC API refuses to CREATE a 'token' binding, but the same effect was reachable through
+-- 'user'. A subject only ever resolves bindings of its own kind.
 SELECT id, role_name, subject_kind, subject_id, created_at
 FROM role_bindings
-WHERE (subject_kind = 'user' AND subject_id = sqlc.arg('user_id')::text)
+WHERE (sqlc.arg('caller_kind')::text = 'user'
+       AND subject_kind = 'user'
+       AND subject_id = sqlc.arg('user_id')::text)
    OR (subject_kind = 'group' AND subject_id = ANY(sqlc.arg('groups')::text[]))
 ORDER BY role_name;
 

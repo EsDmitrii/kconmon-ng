@@ -165,14 +165,21 @@ func (f *fakeWebhookStore) UpdateWebhook(_ context.Context, id string, in store.
 	return hook, nil
 }
 
-func (f *fakeWebhookStore) UpdateWebhookDelivery(_ context.Context, id, lastStatus string, lastAttempt time.Time, failures int32) error {
+// The counter is derived from the ROW, mirroring the real UPDATE: reset zeroes it, otherwise it
+// increments what the row already holds.
+func (f *fakeWebhookStore) UpdateWebhookDelivery(_ context.Context, id, lastStatus string, lastAttempt time.Time, reset bool) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	hook, ok := f.hooks[id]
 	if !ok {
 		return store.ErrNotFound
 	}
-	hook.LastStatus, hook.LastAttempt, hook.Failures = lastStatus, &lastAttempt, failures
+	if reset {
+		hook.Failures = 0
+	} else {
+		hook.Failures++
+	}
+	hook.LastStatus, hook.LastAttempt = lastStatus, &lastAttempt
 	f.hooks[id] = hook
 	return nil
 }

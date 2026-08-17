@@ -97,9 +97,9 @@ type targetRequest struct {
 // 400 (malformed request).
 func decodeTargetRequest(w http.ResponseWriter, r *http.Request) (store.TargetInput, bool) {
 	var req targetRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeProblem(w, http.StatusBadRequest, "invalid request",
-			`body must be JSON with "name", "kind" ("host" or "url"), "address", and an optional "labels" object`)
+	if err := strictJSONDecoder(r.Body).Decode(&req); err != nil {
+		writeProblem(w, http.StatusBadRequest, "invalid request", unknownFieldDetail(err,
+			`body must be JSON with "name", "kind" ("host" or "url"), "address", and an optional "labels" object`))
 		return store.TargetInput{}, false
 	}
 	in := store.TargetInput{Name: req.Name, Kind: req.Kind, Address: req.Address, Labels: req.Labels}
@@ -166,6 +166,17 @@ func (s *Server) handleTargetsList(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	/* A NUL here is fatal to pgx and used to surface as 502 "targets unavailable"; and a kind that
+	   is not one of the two the schema knows can only ever match nothing, so it is a 400 rather than
+	   an empty page that reads as "you have no targets". */
+	if rejectControlChars(w, "kind", q.Get("kind")) {
+		return
+	}
+	if kind := q.Get("kind"); kind != "" && kind != "host" && kind != "url" {
+		writeProblem(w, http.StatusBadRequest, "invalid kind", `kind must be "host" or "url"`)
+		return
+	}
+
 	page, err := s.targets.ListTargets(r.Context(), store.TargetFilter{
 		Kind:   q.Get("kind"),
 		Cursor: cursor,
@@ -222,6 +233,10 @@ func (s *Server) handleTargetsCreate(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	// Refused here rather than discovered as a timeout on every later probe.
+	if s.refuseUnreachableTarget(w, r, in.Address) {
+		return
+	}
 
 	target, err := s.targets.CreateTarget(r.Context(), in)
 	if err != nil {
@@ -265,6 +280,10 @@ func (s *Server) handleTargetsUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 	in, ok := decodeTargetRequest(w, r)
 	if !ok {
+		return
+	}
+	// An edit can move a reachable target out of the allowlist just as a create can.
+	if s.refuseUnreachableTarget(w, r, in.Address) {
 		return
 	}
 

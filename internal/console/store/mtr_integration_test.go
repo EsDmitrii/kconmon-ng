@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -238,7 +239,7 @@ func TestUpsertPathSnapshotRunIDSurvivesTheRunsPrune(t *testing.T) {
 	ctx := context.Background()
 
 	runID := uuid.NewString()
-	if _, err := db.CreateRun(ctx, runID, "mtr", "pod", json.RawMessage(`{}`), "user", "admin", 1); err != nil {
+	if _, err := db.CreateRun(ctx, runID, "mtr", "pod", json.RawMessage(`{}`), "user", "admin", 1, time.Now().Add(time.Hour)); err != nil {
 		t.Fatalf("CreateRun: %v", err)
 	}
 
@@ -343,7 +344,7 @@ func TestListMTRDestinationsAggregatesPerPair(t *testing.T) {
 		t.Fatalf("seed node-b: %v", err)
 	}
 
-	dests, err := db.ListMTRDestinations(ctx)
+	dests, err := db.ListMTRDestinations(ctx, 0)
 	if err != nil {
 		t.Fatalf("ListMTRDestinations: %v", err)
 	}
@@ -375,7 +376,7 @@ func TestListMTRDestinationsAggregatesPerPair(t *testing.T) {
 func TestListMTRDestinationsEmptyIsAnEmptySlice(t *testing.T) {
 	db, _ := newMTRDB(t)
 
-	dests, err := db.ListMTRDestinations(context.Background())
+	dests, err := db.ListMTRDestinations(context.Background(), 0)
 	if err != nil {
 		t.Fatalf("ListMTRDestinations on an empty table: %v", err)
 	}
@@ -549,7 +550,7 @@ FROM generate_series(1, $1::int) AS g`, snapshotIdxSeedRows); err != nil {
 
 	// --- half one: the shipped call moves the index's scan counter ---------
 
-	before := idxScans(t, ctx, conn, "mtr_snapshots_pair_seen_idx")
+	before := idxScans(t, ctx, conn, "mtr_snapshots_pair_first_seen_idx")
 
 	page, err := db.ListPathSnapshots(ctx, store.SnapshotFilter{
 		SourceNode:  "node-7",
@@ -562,10 +563,12 @@ FROM generate_series(1, $1::int) AS g`, snapshotIdxSeedRows); err != nil {
 	if len(page.Snapshots) != 50 {
 		t.Fatalf("ListPathSnapshots returned %d rows, want 50", len(page.Snapshots))
 	}
+	/* Ordered by FIRST_seen, which is the key the cursor pages by: last_seen moves under a keyset
+	   walk (every repeat trace bumps it) and rows fall through the gap. */
 	for i := 1; i < len(page.Snapshots); i++ {
-		if page.Snapshots[i-1].LastSeen.Before(page.Snapshots[i].LastSeen) {
+		if page.Snapshots[i-1].FirstSeen.Before(page.Snapshots[i].FirstSeen) {
 			t.Fatalf("row %d is newer than row %d: %v < %v", i, i-1,
-				page.Snapshots[i-1].LastSeen, page.Snapshots[i].LastSeen)
+				page.Snapshots[i-1].FirstSeen, page.Snapshots[i].FirstSeen)
 		}
 	}
 
@@ -574,12 +577,12 @@ FROM generate_series(1, $1::int) AS g`, snapshotIdxSeedRows); err != nil {
 	deadline := time.Now().Add(30 * time.Second)
 	var after int64
 	for {
-		after = idxScans(t, ctx, conn, "mtr_snapshots_pair_seen_idx")
+		after = idxScans(t, ctx, conn, "mtr_snapshots_pair_first_seen_idx")
 		if after > before {
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("mtr_snapshots_pair_seen_idx idx_scan stayed at %d after ListPathSnapshots "+
+			t.Fatalf("mtr_snapshots_pair_first_seen_idx idx_scan stayed at %d after ListPathSnapshots "+
 				"(was %d before): the shipped query is not being answered by the index", after, before)
 		}
 		time.Sleep(300 * time.Millisecond)
@@ -614,12 +617,132 @@ FROM generate_series(1, $1::int) AS g`, snapshotIdxSeedRows); err != nil {
 		t.Fatalf("EXPLAIN rows: %v", err)
 	}
 
-	if !strings.Contains(plan.String(), "mtr_snapshots_pair_seen_idx") {
-		t.Errorf("the pair browse does not use mtr_snapshots_pair_seen_idx; plan was:\n%s", plan.String())
+	if !strings.Contains(plan.String(), "mtr_snapshots_pair_first_seen_idx") {
+		t.Errorf("the pair browse does not use mtr_snapshots_pair_first_seen_idx; plan was:\n%s", plan.String())
 	}
 	if strings.Contains(plan.String(), "Sort") {
 		t.Errorf("the pair browse sorts instead of reading ORDER BY last_seen DESC, id DESC out of "+
-			"mtr_snapshots_pair_seen_idx; plan was:\n%s", plan.String())
+			"mtr_snapshots_pair_first_seen_idx; plan was:\n%s", plan.String())
+	}
+}
+
+/*
+The retention sweep has to be answered by an index too, and for a long time nothing could.
+
+DeletePathSnapshotsBefore filters on last_seen alone. The pair-browse indexes lead with source_node
+and the FK index is on run_id, so PostgreSQL had no choice but to scan the whole snapshot table and
+sort it — per batch, inside the pruner's advisory lock. The visible symptom is not an error: the
+sweep just never gets far enough down the backlog, and rows older than the retention window stay.
+*/
+func TestDeletePathSnapshotsBeforeUsesTheLastSeenIndex(t *testing.T) {
+	db, dsn := newMTRDB(t)
+	ctx := context.Background()
+
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer pool.Close()
+
+	conn, err := pool.Acquire(ctx)
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	defer conn.Release()
+
+	// Spread over an hour so a cutoff can sit in the middle of the range; a planner handed rows that
+	// all match will reasonably prefer a scan whatever indexes exist.
+	if _, err = conn.Exec(ctx, `
+INSERT INTO mtr_path_snapshots (
+    id, source_node, destination, path_hash, hop_count, hops, first_seen, last_seen, trace_count
+)
+SELECT gen_random_uuid(),
+       'node-' || (g % 200)::text,
+       'edge-gw',
+       md5(g::text) || md5((g + 1)::text),
+       2,
+       '[{"number":1,"ip":"10.0.0.1","rttNs":1000000,"lossRatio":0}]'::jsonb,
+       now() - make_interval(secs => $1::int - g),
+       now() - make_interval(secs => $1::int - g),
+       1
+FROM generate_series(1, $1::int) AS g`, snapshotIdxSeedRows); err != nil {
+		t.Fatalf("seed %d snapshots: %v", snapshotIdxSeedRows, err)
+	}
+	if _, err = conn.Exec(ctx, "ANALYZE mtr_path_snapshots"); err != nil {
+		t.Fatalf("ANALYZE: %v", err)
+	}
+
+	// --- half one: the shipped call deletes what it should and moves the counter ---
+
+	before := idxScans(t, ctx, conn, "mtr_path_snapshots_last_seen_idx")
+
+	// The oldest tenth of the seeded range.
+	cutoff := time.Now().Add(-time.Duration(snapshotIdxSeedRows-snapshotIdxSeedRows/10) * time.Second)
+	deleted, err := db.DeletePathSnapshotsBefore(ctx, cutoff, 500)
+	if err != nil {
+		t.Fatalf("DeletePathSnapshotsBefore: %v", err)
+	}
+	if deleted != 500 {
+		t.Fatalf("deleted %d rows, want the 500 batch limit", deleted)
+	}
+
+	deadline := time.Now().Add(30 * time.Second)
+	var after int64
+	for {
+		after = idxScans(t, ctx, conn, "mtr_path_snapshots_last_seen_idx")
+		if after > before {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("mtr_path_snapshots_last_seen_idx idx_scan stayed at %d after the sweep (was %d): "+
+				"the retention delete is scanning the table instead", after, before)
+		}
+		time.Sleep(300 * time.Millisecond)
+		if _, err = db.GetPathSnapshot(ctx, "0f1d1a2f-6f8e-4a3a-9a0e-7f3f9d0f1c22"); !errors.Is(err, store.ErrNotFound) {
+			t.Fatalf("stats-flush nudge: GetPathSnapshot err = %v, want ErrNotFound", err)
+		}
+	}
+
+	// --- half two: the plan names the index and carries no sort ------------
+
+	sql := generatedSQL(t, "gen/mtr.sql.go", "deletePathSnapshotsBefore")
+	if !strings.Contains(sql, "mtr_path_snapshots") {
+		t.Fatalf("extracted SQL does not look like the retention delete:\n%s", sql)
+	}
+
+	rows, err := conn.Query(ctx, "EXPLAIN\n"+sql, cutoff, int32(500))
+	if err != nil {
+		t.Fatalf("EXPLAIN: %v", err)
+	}
+	defer rows.Close()
+
+	var plan strings.Builder
+	for rows.Next() {
+		var line string
+		if err := rows.Scan(&line); err != nil {
+			t.Fatalf("EXPLAIN scan: %v", err)
+		}
+		plan.WriteString(line)
+		plan.WriteString("\n")
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("EXPLAIN rows: %v", err)
+	}
+
+	if !strings.Contains(plan.String(), "mtr_path_snapshots_last_seen_idx") {
+		t.Errorf("the retention sweep does not use mtr_path_snapshots_last_seen_idx; plan was:\n%s", plan.String())
+	}
+	/* No Sort is the assertion that matters. Without the index the batch subquery has to read every
+	   row older than the cutoff and sort it to find the LIMIT's worth — the whole backlog, per batch.
+	   With it the ORDER BY comes out of the index and the Limit stops early.
+
+	   Nothing here asserts the absence of a Seq Scan: the OUTER `id IN (...)` was checked against a
+	   500k-row table and plans as a Nested Loop over the primary key. The seq scan it picks on this
+	   test's 20k rows is the planner correctly deciding a small table is cheaper to scan than to
+	   probe, not a defect — and the same `id IN (subquery)` shape is what every other retention
+	   delete in queries/ uses. */
+	if strings.Contains(plan.String(), "Sort") {
+		t.Errorf("the retention batch sorts instead of reading last_seen order out of the index; plan was:\n%s", plan.String())
 	}
 }
 
@@ -816,5 +939,77 @@ func TestDeleteEnrichmentBeforeUsesResolvedAt(t *testing.T) {
 	}
 	if _, ok := got["10.0.0.2"]; !ok {
 		t.Error("the fresh cache row was swept")
+	}
+}
+
+/* ── Swarm finding: a cursor over a MUTABLE key drops rows ────────────────── */
+
+/*
+ * The listing pages on first_seen because last_seen moves: every repeat trace bumps it
+ * (UpsertPathSnapshot's ON CONFLICT). Under the old (last_seen, id) cursor a route sitting just
+ * below page 1's boundary, re-traced before the reader pressed "Load older", jumped ABOVE the cursor
+ * and was excluded from page 2 — a row that existed in the table and appeared on no page at all.
+ *
+ * This walks the real pages with a real re-trace in between.
+ */
+func TestListPathSnapshotsKeepsEveryRouteAcrossARetrace(t *testing.T) {
+	ctx := t.Context()
+	db, _ := newMTRDB(t)
+
+	const pairSource, pairDest = "node-keyset", "edge-keyset"
+	base := time.Now().UTC().Add(-24 * time.Hour).Truncate(time.Second)
+
+	// Six routes, each first seen a minute apart and last seen in the SAME order.
+	ids := make([]string, 0, 6)
+	for i := range 6 {
+		at := base.Add(time.Duration(i) * time.Minute)
+		snap, _, err := db.UpsertPathSnapshot(ctx, store.PathSnapshotInput{
+			SourceNode: pairSource, Destination: pairDest,
+			Hops:   []store.PathHop{{Number: 1, IP: fmt.Sprintf("10.0.0.%d", i+1)}},
+			SeenAt: at,
+		})
+		if err != nil {
+			t.Fatalf("UpsertPathSnapshot %d: %v", i, err)
+		}
+		ids = append(ids, snap.ID)
+	}
+
+	// Page one: the three newest routes.
+	first, err := db.ListPathSnapshots(ctx, store.SnapshotFilter{SourceNode: pairSource, Destination: pairDest, Limit: 3})
+	if err != nil {
+		t.Fatalf("ListPathSnapshots page 1: %v", err)
+	}
+	if len(first.Snapshots) != 3 || first.NextCursor == "" {
+		t.Fatalf("page 1 = %d rows, cursor %q", len(first.Snapshots), first.NextCursor)
+	}
+
+	/* The route the reader has NOT seen yet is traced again, which moves its last_seen to the top of
+	   the pair. Nothing about which page it belongs to may change. */
+	if _, _, err := db.UpsertPathSnapshot(ctx, store.PathSnapshotInput{
+		SourceNode: pairSource, Destination: pairDest,
+		Hops:   []store.PathHop{{Number: 1, IP: "10.0.0.3"}},
+		SeenAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("re-trace: %v", err)
+	}
+
+	second, err := db.ListPathSnapshots(ctx, store.SnapshotFilter{
+		SourceNode: pairSource, Destination: pairDest, Limit: 3, Cursor: first.NextCursor,
+	})
+	if err != nil {
+		t.Fatalf("ListPathSnapshots page 2: %v", err)
+	}
+
+	seen := make(map[string]bool, 6)
+	for _, s := range append(append([]store.PathSnapshot{}, first.Snapshots...), second.Snapshots...) {
+		if seen[s.ID] {
+			t.Errorf("route %s was handed out twice", s.ID)
+		}
+		seen[s.ID] = true
+	}
+	for i, id := range ids {
+		if !seen[id] {
+			t.Errorf("route %d (%s) appears on NEITHER page — the re-trace moved it past the cursor", i, id)
+		}
 	}
 }

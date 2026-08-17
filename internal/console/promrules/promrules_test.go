@@ -1,9 +1,12 @@
 package promrules
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"log/slog"
 	"strings"
 	"sync"
 	"testing"
@@ -144,6 +147,30 @@ func bundleObject(t *testing.T, expr string) *unstructured.Unstructured {
 	}}
 }
 
+// renderedBundle builds the object a PREVIOUS process would have left in the cluster for these rule
+// ids, using the real renderer -- so its per-rule entries carry RuleIDLabel and hash to exactly what
+// this process renders for the same unchanged rows. The quarantine's restart seed reads that.
+func renderedBundle(t *testing.T, ids ...string) *unstructured.Unstructured {
+	t.Helper()
+	rules := make([]alerting.Rule, 0, len(ids))
+	for _, id := range ids {
+		r := row(id, "rule-"+id)
+		params, err := decodeObject("params", r.Params)
+		if err != nil {
+			t.Fatalf("decode params: %v", err)
+		}
+		rules = append(rules, alerting.Rule{
+			ID: r.ID, Name: r.Name, Kind: r.Kind, Params: params,
+			Severity: r.Severity, ForNS: r.ForNs, Enabled: true,
+		})
+	}
+	obj, err := alerting.NewRenderer("kconmon_ng").RenderBundle(rules, testNamespace, testBundleName)
+	if err != nil {
+		t.Fatalf("render bundle: %v", err)
+	}
+	return obj
+}
+
 func foreignObject(name string, labels map[string]any) *unstructured.Unstructured {
 	meta := map[string]any{"name": name, "namespace": testNamespace}
 	if labels != nil {
@@ -196,6 +223,14 @@ type fakeStore struct {
 	writeErr error
 	writes   []statusWrite
 	lists    int
+}
+
+// reset drops the recorded status writes, so a test can assert what ONE pass wrote after an earlier
+// pass has already run.
+func (f *fakeStore) reset() {
+	f.mu.Lock()
+	f.writes = nil
+	f.mu.Unlock()
 }
 
 func (f *fakeStore) ListAlertRules(_ context.Context, enabledOnly bool) ([]store.AlertRule, error) {
@@ -255,6 +290,11 @@ var frozen = time.Date(2026, 8, 8, 12, 0, 0, 0, time.UTC)
 
 func newReconciler(t *testing.T, dyn dynamic.Interface, st Store) *Reconciler {
 	t.Helper()
+	return newReconcilerWithLock(t, dyn, st, nil)
+}
+
+func newReconcilerWithLock(t *testing.T, dyn dynamic.Interface, st Store, lock Locker) *Reconciler {
+	t.Helper()
 	client, err := NewClient(dyn, testNamespace)
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
@@ -265,6 +305,7 @@ func newReconciler(t *testing.T, dyn dynamic.Interface, st Store) *Reconciler {
 		Renderer:   alerting.NewRenderer("kconmon_ng"),
 		BundleName: testBundleName,
 		Interval:   time.Hour,
+		Lock:       lock,
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -417,23 +458,182 @@ func TestReconcileAppliesAndMarksSynced(t *testing.T) {
 // TestReconcileWithNoEnabledRulesStillAsserts: an operator who disabled
 // everything must end up with an EMPTY bundle in the cluster, not with
 // yesterday's rules still evaluating.
-func TestReconcileWithNoEnabledRulesStillAsserts(t *testing.T) {
-	c := newAppliableFake(t)
+// TestReconcileWithNoEnabledRulesDeletesTheBundle is the live blocker: an empty rule set rendered
+// `groups: []`, which the prometheus-operator admission webhook rejects ("Cannot unmarshal rules
+// from spec"), so the apply failed forever and the deleted rule kept evaluating in Prometheus.
+func TestReconcileWithNoEnabledRulesDeletesTheBundle(t *testing.T) {
+	c := newAppliableFake(t, bundleObject(t, "vector(1)"))
 	st := &fakeStore{}
 	r := newReconciler(t, c, st)
+
 	if err := r.Reconcile(context.Background()); err != nil {
 		t.Fatalf("Reconcile: %v", err)
 	}
-	live, err := c.Resource(GVR).Namespace(testNamespace).Get(context.Background(), testBundleName, metav1.GetOptions{})
-	if err != nil {
-		t.Fatalf("the bundle was not asserted: %v", err)
-	}
-	groups, _, _ := unstructured.NestedSlice(live.Object, "spec", "groups")
-	if len(groups) != 0 {
-		t.Errorf("spec.groups = %d entries, want 0", len(groups))
+
+	_, err := c.Resource(GVR).Namespace(testNamespace).Get(context.Background(), testBundleName, metav1.GetOptions{})
+	if !apierrors.IsNotFound(err) {
+		t.Fatalf("the bundle survived an empty rule set (err = %v); Prometheus keeps evaluating it", err)
 	}
 	if n := len(st.snapshot()); n != 0 {
 		t.Errorf("status writes = %d, want 0 (there is no rule to write one onto)", n)
+	}
+}
+
+// TestReconcileWithNoEnabledRulesToleratesAnAbsentBundle keeps the steady state quiet: once the
+// object is gone, every later empty pass must be a no-op rather than an error.
+func TestReconcileWithNoEnabledRulesToleratesAnAbsentBundle(t *testing.T) {
+	r := newReconciler(t, newAppliableFake(t), &fakeStore{})
+
+	for i := range 2 {
+		if err := r.Reconcile(context.Background()); err != nil {
+			t.Fatalf("Reconcile pass %d on an absent bundle: %v", i, err)
+		}
+	}
+}
+
+// TestReconcileRecreatesTheBundleAfterAnEmptyPass proves the delete is not a one-way door.
+func TestReconcileRecreatesTheBundleAfterAnEmptyPass(t *testing.T) {
+	c := newAppliableFake(t)
+	st := &fakeStore{}
+	r := newReconciler(t, c, st)
+
+	if err := r.Reconcile(context.Background()); err != nil {
+		t.Fatalf("empty Reconcile: %v", err)
+	}
+
+	st.rules = []store.AlertRule{row("11111111-1111-1111-1111-111111111111", "PairLossHigh")}
+	if err := r.Reconcile(context.Background()); err != nil {
+		t.Fatalf("Reconcile after the rule came back: %v", err)
+	}
+
+	live, err := c.Resource(GVR).Namespace(testNamespace).Get(context.Background(), testBundleName, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("the bundle was not recreated: %v", err)
+	}
+	groups, _, _ := unstructured.NestedSlice(live.Object, "spec", "groups")
+	if len(groups) != 1 {
+		t.Errorf("spec.groups = %d entries, want 1", len(groups))
+	}
+}
+
+// fakeLocker stands in for store.DB's pg_try_advisory_lock; (false, nil) is "another replica holds
+// it", the same contract the scheduler's Locker documents.
+type fakeLocker struct {
+	locked bool
+	err    error
+	calls  int
+	key    int64
+}
+
+func (f *fakeLocker) WithAdvisoryLock(
+	ctx context.Context, key int64, fn func(context.Context) error,
+) (bool, error) {
+	f.calls++
+	f.key = key
+	switch {
+	case f.err != nil:
+		return false, f.err
+	case !f.locked:
+		return false, nil
+	}
+	return true, fn(ctx)
+}
+
+// TestReconcileSkipsWhileAnotherReplicaHoldsTheLock is the doubled-writes finding: both console
+// replicas ran the loop and applied the same object on every pass.
+func TestReconcileSkipsWhileAnotherReplicaHoldsTheLock(t *testing.T) {
+	c := newAppliableFake(t)
+	st := &fakeStore{rules: []store.AlertRule{row("11111111-1111-1111-1111-111111111111", "PairLossHigh")}}
+	lock := &fakeLocker{locked: false}
+	r := newReconcilerWithLock(t, c, st, lock)
+
+	if err := r.Reconcile(context.Background()); err != nil {
+		t.Fatalf("a standby pass must not be an error: %v", err)
+	}
+
+	if lock.calls != 1 {
+		t.Errorf("advisory lock attempts = %d, want 1", lock.calls)
+	}
+	if lock.key != LockKey {
+		t.Errorf("locked on key %d, want the package's LockKey %d", lock.key, LockKey)
+	}
+	if st.listCount() != 0 {
+		t.Errorf("a standby read the rules %d times, want 0", st.listCount())
+	}
+	if _, err := c.Resource(GVR).Namespace(testNamespace).Get(
+		context.Background(), testBundleName, metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+		t.Error("a standby wrote the bundle; the loop must be single-writer")
+	}
+}
+
+// TestReconcileHoldsTheLockWhileWriting is the leader's half of the same contract.
+func TestReconcileHoldsTheLockWhileWriting(t *testing.T) {
+	c := newAppliableFake(t)
+	st := &fakeStore{rules: []store.AlertRule{row("11111111-1111-1111-1111-111111111111", "PairLossHigh")}}
+	lock := &fakeLocker{locked: true}
+	r := newReconcilerWithLock(t, c, st, lock)
+
+	if err := r.Reconcile(context.Background()); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if lock.calls != 1 {
+		t.Errorf("advisory lock attempts = %d, want 1", lock.calls)
+	}
+	if _, err := c.Resource(GVR).Namespace(testNamespace).Get(
+		context.Background(), testBundleName, metav1.GetOptions{}); err != nil {
+		t.Fatalf("the leader did not write the bundle: %v", err)
+	}
+}
+
+// TestReconcileWithoutALockerStillRuns keeps the single-replica and no-database wirings working:
+// an unset Locker means nothing to coordinate with.
+func TestReconcileWithoutALockerStillRuns(t *testing.T) {
+	c := newAppliableFake(t)
+	st := &fakeStore{rules: []store.AlertRule{row("11111111-1111-1111-1111-111111111111", "PairLossHigh")}}
+	r := newReconciler(t, c, st)
+
+	if err := r.Reconcile(context.Background()); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if _, err := c.Resource(GVR).Namespace(testNamespace).Get(
+		context.Background(), testBundleName, metav1.GetOptions{}); err != nil {
+		t.Fatalf("an unlocked reconciler did not write the bundle: %v", err)
+	}
+}
+
+// TestSetStatusStaysQuietForADeletedRule covers the log noise: a rule deleted between the list and
+// the status write is the normal outcome of a delete, not a failure worth a warning.
+func TestSetStatusStaysQuietForADeletedRule(t *testing.T) {
+	tests := []struct {
+		name      string
+		statusErr error
+		wantWarn  bool
+	}{
+		{"deleted mid-pass", fmt.Errorf("store: update alert rule sync status: %w", store.ErrNotFound), false},
+		{"real failure", errors.New("connection refused"), true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			restore := slog.Default()
+			slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+			defer slog.SetDefault(restore)
+
+			st := &fakeStore{
+				rules:    []store.AlertRule{row("11111111-1111-1111-1111-111111111111", "PairLossHigh")},
+				writeErr: tc.statusErr,
+			}
+			r := newReconciler(t, newAppliableFake(t), st)
+			if err := r.Reconcile(context.Background()); err != nil {
+				t.Fatalf("Reconcile: %v", err)
+			}
+
+			logged := strings.Contains(buf.String(), "could not record an alert rule sync outcome")
+			if logged != tc.wantWarn {
+				t.Errorf("warned = %v, want %v; log was %q", logged, tc.wantWarn, buf.String())
+			}
+		})
 	}
 }
 
@@ -637,6 +837,190 @@ func TestReconcileMarksEveryRuleWithTheCauseClass(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+/*
+One rule the cluster refuses must not take the whole bundle with it.
+
+Nothing validates PromQL on the way in, so a kind='raw' rule with an unparseable expression is
+accepted by the API and lands in the bundle; the admission webhook then rejects the OBJECT. Every
+rule used to be stamped `error` with a message naming none of them, and — the sharp part — the
+console-managed alert set froze: deleting or disabling a rule answered 204 while Prometheus went on
+evaluating it, because no apply ever reached the cluster again.
+
+The rule added since the last accepted apply is quarantined and the rest go back out.
+*/
+func TestReconcileQuarantinesTheRuleTheClusterRefused(t *testing.T) {
+	c := newAppliableFake(t)
+	st := &fakeStore{rules: []store.AlertRule{row("id-1", "One"), row("id-2", "Two")}}
+	r := newReconciler(t, c, st)
+	ctx := context.Background()
+
+	// A first pass that the cluster accepts: this is what establishes the fallback set.
+	if err := r.Reconcile(ctx); err != nil {
+		t.Fatalf("first Reconcile: %v", err)
+	}
+	for _, w := range st.snapshot() {
+		if w.Status != store.AlertSyncStatusSynced {
+			t.Fatalf("setup: %s = %q, want synced", w.ID, w.Status)
+		}
+	}
+	st.reset()
+
+	/* Now a third rule arrives and the cluster refuses the object. The reactor fails only while the
+	   bundle still carries id-3, so the retry without it succeeds — which is exactly how a webhook
+	   rejecting one bad expression behaves. */
+	st.rules = append(st.rules, row("id-3", "Three"))
+	c.PrependReactor("patch", GVR.Resource, func(action k8stesting.Action) (bool, runtime.Object, error) {
+		patch, ok := action.(k8stesting.PatchAction)
+		if ok && strings.Contains(string(patch.GetPatch()), "Three") {
+			return true, nil, apierrors.NewInvalid(
+				schema.GroupKind{Group: GVR.Group, Kind: "PrometheusRule"}, testBundleName, nil)
+		}
+		return false, nil, nil
+	})
+
+	if err := r.Reconcile(ctx); err != nil {
+		t.Fatalf("Reconcile after quarantine should succeed: %v", err)
+	}
+
+	got := map[string]string{}
+	for _, w := range st.snapshot() {
+		got[w.ID] = w.Status
+	}
+	if got["id-3"] != store.AlertSyncStatusError {
+		t.Errorf("id-3 (the refused rule) = %q, want error", got["id-3"])
+	}
+	for _, id := range []string{"id-1", "id-2"} {
+		if got[id] != store.AlertSyncStatusSynced {
+			t.Errorf("%s = %q, want synced: a rule the cluster never objected to was marked broken", id, got[id])
+		}
+	}
+
+	// And the quarantined rule's message says what happened to IT, not a generic bundle failure.
+	for _, w := range st.snapshot() {
+		if w.ID == "id-3" && !strings.Contains(w.Message, "refused by the cluster") {
+			t.Errorf("id-3 message does not say the cluster refused this rule: %s", w.Message)
+		}
+	}
+}
+
+/*
+And the quarantine has to survive a RESTART, which is when it is needed most.
+
+lastApplied is per-process. A console that starts with a rule the cluster already refuses never gets
+a successful apply, so it never populates lastApplied, so the quarantine guard is never true — one
+bad expression froze the whole bundle exactly as it did before the quarantine existed, and disabling
+or deleting a rule answered 2xx while Prometheus kept evaluating the stale set. Reproduced on the
+stand by restarting both console replicas.
+
+The accepted id set is on the live object all along (RuleIDsAnnotation), and reconcileLocked already
+reads that object.
+*/
+func TestQuarantineSurvivesARestartBySeedingFromTheLiveBundle(t *testing.T) {
+	// The cluster already holds a bundle carrying id-1 and id-2 — the state a previous process left.
+	live := renderedBundle(t, "id-1", "id-2")
+	c := newAppliableFake(t, live)
+
+	// A FRESH reconciler: lastApplied is nil, exactly as after a restart.
+	st := &fakeStore{rules: []store.AlertRule{row("id-1", "rule-id-1"), row("id-2", "rule-id-2"), row("id-3", "Three")}}
+	r := newReconciler(t, c, st)
+	if r.lastApplied != nil {
+		t.Fatal("setup: a fresh reconciler must start with no fallback set")
+	}
+
+	// The cluster refuses any object carrying id-3's rule.
+	c.PrependReactor("patch", GVR.Resource, func(action k8stesting.Action) (bool, runtime.Object, error) {
+		patch, ok := action.(k8stesting.PatchAction)
+		if ok && strings.Contains(string(patch.GetPatch()), "Three") {
+			return true, nil, apierrors.NewInvalid(
+				schema.GroupKind{Group: GVR.Group, Kind: "PrometheusRule"}, testBundleName, nil)
+		}
+		return false, nil, nil
+	})
+
+	if err := r.Reconcile(context.Background()); err != nil {
+		t.Fatalf("the very first pass after a restart should quarantine, not fail: %v", err)
+	}
+
+	got := map[string]string{}
+	for _, w := range st.snapshot() {
+		got[w.ID] = w.Status
+	}
+	if got["id-3"] != store.AlertSyncStatusError {
+		t.Errorf("id-3 (the refused rule) = %q, want error", got["id-3"])
+	}
+	for _, id := range []string{"id-1", "id-2"} {
+		if got[id] != store.AlertSyncStatusSynced {
+			t.Errorf("%s = %q, want synced: the bundle froze because the fallback set was empty after a restart", id, got[id])
+		}
+	}
+}
+
+/*
+A rule created AFTER a refused one must still reach the cluster.
+
+The quarantine excluded everything not in lastApplied and then set lastApplied to exactly what
+survived — so a rule written today was quarantined alongside a broken rule written last week, and
+carried a message saying the cluster had refused it, which the cluster had never been asked. The
+operator had no way to tell "your rule is broken" from "someone else's rule is broken".
+*/
+func TestQuarantineAdmitsAGoodRuleWrittenAfterABadOne(t *testing.T) {
+	c := newAppliableFake(t)
+	st := &fakeStore{rules: []store.AlertRule{row("id-1", "One"), row("id-2", "Two")}}
+	r := newReconciler(t, c, st)
+	ctx := context.Background()
+
+	// A first accepted pass establishes the fallback set.
+	if err := r.Reconcile(ctx); err != nil {
+		t.Fatalf("first Reconcile: %v", err)
+	}
+	st.reset()
+
+	// The cluster refuses any object carrying "Bad", and nothing else.
+	c.PrependReactor("patch", GVR.Resource, func(action k8stesting.Action) (bool, runtime.Object, error) {
+		patch, ok := action.(k8stesting.PatchAction)
+		if ok && strings.Contains(string(patch.GetPatch()), "Bad") {
+			return true, nil, apierrors.NewInvalid(
+				schema.GroupKind{Group: GVR.Group, Kind: "PrometheusRule"}, testBundleName, nil)
+		}
+		return false, nil, nil
+	})
+
+	// The broken rule lands first, then a perfectly good one after it.
+	st.rules = append(st.rules, row("id-bad", "Bad"), row("id-new", "Fine"))
+
+	if err := r.Reconcile(ctx); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+
+	got := map[string]string{}
+	for _, w := range st.snapshot() {
+		got[w.ID] = w.Status
+	}
+	if got["id-bad"] != store.AlertSyncStatusError {
+		t.Errorf("id-bad = %q, want error", got["id-bad"])
+	}
+	if got["id-new"] != store.AlertSyncStatusSynced {
+		t.Errorf("id-new = %q, want synced: a good rule written after a broken one was quarantined with it",
+			got["id-new"])
+	}
+	for _, id := range []string{"id-1", "id-2"} {
+		if got[id] != store.AlertSyncStatusSynced {
+			t.Errorf("%s = %q, want synced", id, got[id])
+		}
+	}
+
+	// And it STAYS in: the next pass must not quarantine it again.
+	st.reset()
+	if err := r.Reconcile(ctx); err != nil {
+		t.Fatalf("second Reconcile: %v", err)
+	}
+	for _, w := range st.snapshot() {
+		if w.ID == "id-new" && w.Status != store.AlertSyncStatusSynced {
+			t.Errorf("id-new = %q on the next pass, want synced", w.Status)
+		}
 	}
 }
 
@@ -1009,4 +1393,179 @@ func TestLogLimiterAdmitsOncePerWindow(t *testing.T) {
 // this file stops compiling, which is the point.
 func TestStoreSeamIsSatisfiedByTheRealStore(t *testing.T) {
 	var _ Store = (*store.DB)(nil)
+}
+
+/*
+An EDIT that breaks a deployed rule must be quarantined like a new bad rule.
+
+The fallback set was ids only, and an edit keeps its id: the "retry with the last applied set" put
+the broken expression straight back, the retry object was byte-identical to the one just refused,
+nothing was quarantined, and every rule was stamped with the generic API-rejected message naming
+none of them. Prometheus then went on evaluating the stale bundle while the API answered 2xx for
+every later change.
+*/
+func TestQuarantineCatchesAnEditToAnAlreadyDeployedRule(t *testing.T) {
+	ctx := context.Background()
+	c := newAppliableFake(t)
+	st := &fakeStore{rules: []store.AlertRule{row("id-1", "One"), row("id-2", "Two")}}
+	r := newReconciler(t, c, st)
+
+	// A clean first pass: both rules are deployed and remembered with their content.
+	if err := r.Reconcile(ctx); err != nil {
+		t.Fatalf("first Reconcile: %v", err)
+	}
+
+	// Now id-2 is EDITED into something the cluster refuses. Its id does not change.
+	st.mu.Lock()
+	st.rules[1].Params = json.RawMessage(`{"protocol":"udp","thresholdPercent":99}`)
+	st.mu.Unlock()
+	c.PrependReactor("patch", GVR.Resource, func(action k8stesting.Action) (bool, runtime.Object, error) {
+		patch, ok := action.(k8stesting.PatchAction)
+		if ok && strings.Contains(string(patch.GetPatch()), "99") {
+			return true, nil, apierrors.NewInvalid(
+				schema.GroupKind{Group: GVR.Group, Kind: "PrometheusRule"}, testBundleName, nil)
+		}
+		return false, nil, nil
+	})
+
+	if err := r.Reconcile(ctx); err != nil {
+		t.Fatalf("the edit should be quarantined, not fail the whole pass: %v", err)
+	}
+
+	got := map[string]string{}
+	msgs := map[string]string{}
+	for _, w := range st.snapshot() {
+		got[w.ID] = w.Status
+		msgs[w.ID] = w.Message
+	}
+	if got["id-2"] != store.AlertSyncStatusError {
+		t.Errorf("id-2 (the edited rule) = %q, want error", got["id-2"])
+	}
+	if !strings.Contains(msgs["id-2"], "refused by the cluster") {
+		t.Errorf("id-2 message does not name this rule as the refused one: %s", msgs["id-2"])
+	}
+	if got["id-1"] != store.AlertSyncStatusSynced {
+		t.Errorf("id-1 = %q, want synced: an untouched rule must not be taken down by its neighbour's edit", got["id-1"])
+	}
+}
+
+/*
+A fallback set DISJOINT from the current rules must still offer each rule to the cluster.
+
+retryWithLastApplied used to short-circuit when nothing in the current set was in lastApplied: it
+deleted the bundle, stamped every rule "the cluster refused it" -- about a cluster that had never
+been shown it -- and latched lastApplied to the empty non-nil map, which made every later pass
+compute the same empty fallback. One bad rule in the table therefore made every OTHER rule
+permanently undeployable, with no log line at all.
+*/
+func TestQuarantineProbesEvenWhenTheFallbackSetIsDisjoint(t *testing.T) {
+	ctx := context.Background()
+	c := newAppliableFake(t)
+	st := &fakeStore{rules: []store.AlertRule{row("old-1", "Old")}}
+	r := newReconciler(t, c, st)
+	if err := r.Reconcile(ctx); err != nil {
+		t.Fatalf("first Reconcile: %v", err)
+	}
+
+	// The operator replaces the rule set wholesale; one of the new rules is bad.
+	st.mu.Lock()
+	st.rules = []store.AlertRule{row("new-1", "Good"), row("new-2", "Bad")}
+	st.mu.Unlock()
+	c.PrependReactor("patch", GVR.Resource, func(action k8stesting.Action) (bool, runtime.Object, error) {
+		patch, ok := action.(k8stesting.PatchAction)
+		if ok && strings.Contains(string(patch.GetPatch()), "Bad") {
+			return true, nil, apierrors.NewInvalid(
+				schema.GroupKind{Group: GVR.Group, Kind: "PrometheusRule"}, testBundleName, nil)
+		}
+		return false, nil, nil
+	})
+
+	if err := r.Reconcile(ctx); err != nil {
+		t.Fatalf("a disjoint fallback set should probe, not fail: %v", err)
+	}
+
+	got := map[string]string{}
+	for _, w := range st.snapshot() {
+		got[w.ID] = w.Status
+	}
+	if got["new-1"] != store.AlertSyncStatusSynced {
+		t.Errorf("new-1 = %q, want synced: it was never offered to the cluster", got["new-1"])
+	}
+	if got["new-2"] != store.AlertSyncStatusError {
+		t.Errorf("new-2 = %q, want error", got["new-2"])
+	}
+	// And the state must not be absorbing: the good rule is now the fallback set.
+	if _, ok := r.lastApplied["new-1"]; !ok {
+		t.Errorf("lastApplied = %v, want the accepted rule remembered so the next pass has a fallback", r.lastApplied)
+	}
+}
+
+/*
+ * A pass that PROVED nothing must leave the live bundle alone.
+ *
+ * Two mistakes have been made here in opposite directions. Deleting whenever the accepted set was
+ * empty took a healthy live bundle down over a pass where the probe loop had not run. Removing the
+ * delete altogether then left disabled rules evaluating in Prometheus forever. What separates the
+ * two is whether every suspect was actually offered to the cluster: a pass that deferred probes
+ * (here, more suspects than quarantineProbeLimit) has proved nothing and must change nothing.
+ */
+func TestQuarantineKeepsTheLiveBundleWhenProbesWereDeferred(t *testing.T) {
+	ctx := context.Background()
+	live := renderedBundle(t, "old-1")
+	c := newAppliableFake(t, live)
+
+	// More suspects than the probe budget, so some are deferred rather than offered.
+	rules := make([]store.AlertRule, 0, 12)
+	for i := range 12 {
+		rules = append(rules, row(fmt.Sprintf("new-%02d", i), fmt.Sprintf("Bad%02d", i)))
+	}
+	st := &fakeStore{rules: rules}
+	r := newReconciler(t, c, st)
+
+	c.PrependReactor("patch", GVR.Resource, func(k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, apierrors.NewInvalid(
+			schema.GroupKind{Group: GVR.Group, Kind: "PrometheusRule"}, testBundleName, nil)
+	})
+	deleted := false
+	c.PrependReactor("delete", GVR.Resource, func(k8stesting.Action) (bool, runtime.Object, error) {
+		deleted = true
+		return false, nil, nil
+	})
+
+	_ = r.Reconcile(ctx)
+
+	if deleted {
+		t.Error("the live bundle was deleted over a pass that could not offer every rule; its remaining rules stopped evaluating")
+	}
+}
+
+/*
+ * And a pass that DID offer every rule, and had every one refused, must take the object away.
+ *
+ * Otherwise an operator who disables every healthy rule while one broken rule sits in the table
+ * leaves the last accepted bundle frozen in the cluster: Prometheus goes on evaluating and firing
+ * rules the console reports as disabled, and every API call to change that answers 2xx.
+ */
+func TestQuarantineDeletesTheBundleWhenEveryRuleWasOfferedAndRefused(t *testing.T) {
+	ctx := context.Background()
+	live := renderedBundle(t, "old-1")
+	c := newAppliableFake(t, live)
+	st := &fakeStore{rules: []store.AlertRule{row("new-1", "Bad")}}
+	r := newReconciler(t, c, st)
+
+	c.PrependReactor("patch", GVR.Resource, func(k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, apierrors.NewInvalid(
+			schema.GroupKind{Group: GVR.Group, Kind: "PrometheusRule"}, testBundleName, nil)
+	})
+	deleted := false
+	c.PrependReactor("delete", GVR.Resource, func(k8stesting.Action) (bool, runtime.Object, error) {
+		deleted = true
+		return false, nil, nil
+	})
+
+	_ = r.Reconcile(ctx)
+
+	if !deleted {
+		t.Error("the bundle survived a pass in which every rule was offered and refused: the cluster still evaluates rules this console no longer deploys")
+	}
 }

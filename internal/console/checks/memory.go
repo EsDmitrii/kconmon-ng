@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"sync"
 	"time"
 
@@ -72,7 +73,7 @@ var (
 
 // CreateRun persists a new run in status "pending". A colliding id returns
 // store.ErrAlreadyExists, matching *store.DB's CreateRun contract.
-func (m *MemoryStore) CreateRun(_ context.Context, id, checkType, plane string, spec json.RawMessage, initiatorKind, initiatorID string, pairTotal int32) (store.Run, error) {
+func (m *MemoryStore) CreateRun(_ context.Context, id, checkType, plane string, spec json.RawMessage, initiatorKind, initiatorID string, pairTotal int32, deadlineAt time.Time) (store.Run, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -140,9 +141,33 @@ func (m *MemoryStore) FinishRun(_ context.Context, id, status string, pairOK, pa
 	return nil
 }
 
+/*
+AbandonRun writes a terminal status onto a run that is still "pending" OR "running", mirroring
+*store.DB's own UPDATE. A run that is already terminal is not an error: the caller is asking for
+"must not stay pending", and one that finished on its own satisfies that.
+*/
+func (m *MemoryStore) AbandonRun(_ context.Context, id, status string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	entry, ok := m.runs[id]
+	if !ok {
+		return fmt.Errorf("checks: memory store: abandon run: %w", store.ErrNotFound)
+	}
+	if entry.run.Status != "pending" && entry.run.Status != "running" {
+		return nil
+	}
+	now := time.Now().UTC()
+	entry.run.Status = status
+	entry.run.FinishedAt = &now
+	entry.run.PairOK = 0
+	entry.run.PairFailed = 0
+	return nil
+}
+
 // ReapStuckRuns force-finishes up to limit runs left "running" with CreatedAt strictly before
 // before; it exists here for the reason every other method on this type does.
-func (m *MemoryStore) ReapStuckRuns(_ context.Context, before time.Time, limit int32) (int64, error) {
+func (m *MemoryStore) ReapStuckRuns(_ context.Context, budget store.ReapBudget, limit int32) (int64, error) { //nolint:gocritic // hugeParam: mirrors *store.DB's own signature
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -153,8 +178,14 @@ func (m *MemoryStore) ReapStuckRuns(_ context.Context, before time.Time, limit i
 			break
 		}
 		entry := m.runs[id]
-		// status "running" is half the predicate: age alone is never enough.
-		if entry.run.Status != "running" || !entry.run.CreatedAt.Before(before) {
+		/* Mid-flight is 'running' OR 'pending': a replica that died between CreateRun and
+		   MarkRunStarted leaves the latter, and nothing else ever finishes it. A terminal run is
+		   never touched however old it is. */
+		if entry.run.Status != "running" && entry.run.Status != "pending" {
+			continue
+		}
+		// The row's OWN allowance, the same shape the SQL computes.
+		if now.Before(entry.run.CreatedAt.Add(reapAllowance(&entry.run, budget))) {
 			continue
 		}
 		entry.run.Status = "cancelled"
@@ -162,6 +193,22 @@ func (m *MemoryStore) ReapStuckRuns(_ context.Context, before time.Time, limit i
 		reaped++
 	}
 	return reaped, nil
+}
+
+// reapAllowance is how long this run may legitimately take: its declared duration, plus one worst
+// round over its own fan-out, plus the flat margin.
+func reapAllowance(run *store.Run, budget store.ReapBudget) time.Duration { //nolint:gocritic // hugeParam: see the caller
+	var spec struct {
+		Duration time.Duration `json:"Duration"`
+	}
+	_ = json.Unmarshal(run.Spec, &spec)
+
+	pairs := float64(run.PairTotal)
+	if pairs < 1 {
+		pairs = 1
+	}
+	batches := math.Ceil(pairs / math.Max(budget.PerSourceConcurrency, 1))
+	return spec.Duration + time.Duration(batches)*budget.PerPairTimeout + budget.Slack
 }
 
 // UpsertRunResult inserts one (run, source, destination) result, or -- on a
@@ -335,17 +382,41 @@ func clampListRunsLimit(limit int) int {
 	}
 }
 
-// GetRunResults returns every result row for id, ordered by insertion,
-// matching *store.DB's "no rows is not itself a failure" contract: an id
-// naming no run returns an empty, non-nil slice rather than an error.
-func (m *MemoryStore) GetRunResults(_ context.Context, id string) ([]store.RunResult, error) {
+// ActiveRunsByInitiator counts this initiator's mid-flight runs, matching *store.DB's own contract.
+func (m *MemoryStore) ActiveRunsByInitiator(_ context.Context, initiatorKind, initiatorID string) (int64, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var n int64
+	for _, id := range m.order {
+		run := m.runs[id].run
+		if run.InitiatorKind != initiatorKind || run.InitiatorID != initiatorID {
+			continue
+		}
+		if run.Status == "pending" || run.Status == "running" {
+			n++
+		}
+	}
+	return n, nil
+}
+
+// GetRunResults returns the run's result rows in insertion order, bounded to the newest
+// store.RunResultsCap of them exactly as the database does, matching *store.DB's "no rows is not
+// itself a failure" contract: an id naming no run returns an empty, non-nil slice rather than an
+// error.
+func (m *MemoryStore) GetRunResults(_ context.Context, id string) ([]store.RunResult, bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	entry, ok := m.runs[id]
 	if !ok {
-		return []store.RunResult{}, nil
+		return []store.RunResult{}, false, nil
 	}
-	out := make([]store.RunResult, len(entry.results))
-	copy(out, entry.results)
-	return out, nil
+	rows := entry.results
+	truncated := len(rows) > store.RunResultsCap
+	if truncated {
+		// The NEWEST cap, same as the query: a bounded read of a long run keeps its end.
+		rows = rows[len(rows)-store.RunResultsCap:]
+	}
+	out := make([]store.RunResult, len(rows))
+	copy(out, rows)
+	return out, truncated, nil
 }

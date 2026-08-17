@@ -370,3 +370,48 @@ func TestToLiveEventLeavesMicrosecondAlignedTimestampsAlone(t *testing.T) {
 		t.Errorf("ID = %q, want %q", live.ID, want)
 	}
 }
+
+// TestNormalizePairScopeMirrorsTheClient pins the Go normalizer against web/src/lib/utils.ts
+// normalizePairInput: the API contract must accept every form the console's own scope box does, or
+// a direct consumer sending "a->b" gets 200 and an empty list.
+func TestNormalizePairScopeMirrorsTheClient(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"canonical arrow is untouched", "node-a→node-b", "node-a→node-b"},
+		{"ascii arrow", "node-a->node-b", "node-a→node-b"},
+		{"long ascii arrow", "node-a-->node-b", "node-a→node-b"},
+		{"fat arrow", "node-a=>node-b", "node-a→node-b"},
+		{"long fat arrow", "node-a==>node-b", "node-a→node-b"},
+		{"bare gt", "node-a>node-b", "node-a→node-b"},
+		{"spaces around the arrow collapse", "node-a -> node-b", "node-a→node-b"},
+		{"spaces around the canonical arrow collapse", "node-a → node-b", "node-a→node-b"},
+		{"outer whitespace is trimmed", "  node-a->node-b  ", "node-a→node-b"},
+		{"half written pair", "->node-b", "→node-b"},
+		{"a single name is untouched", "edge-gw-01", "edge-gw-01"},
+		{"a name with spaces stays one name", "ns/pod a&b", "ns/pod a&b"},
+		{"a hyphen without gt stays a hyphen", "node-a-node-b", "node-a-node-b"},
+		{"empty stays empty", "", ""},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := events.NormalizePairScope(tc.in); got != tc.want {
+				t.Errorf("NormalizePairScope(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestNormalizePairScopeMatchesEmittedScopes closes the loop: what the normalizer produces must
+// equal what pairScope writes into the column the filter compares against.
+func TestNormalizePairScopeMatchesEmittedScopes(t *testing.T) {
+	emitted := events.PairScope("node-a", "node-b")
+	for _, typed := range []string{"node-a->node-b", "node-a → node-b", "node-a=>node-b"} {
+		if got := events.NormalizePairScope(typed); got != emitted {
+			t.Errorf("NormalizePairScope(%q) = %q, want the emitted scope %q", typed, got, emitted)
+		}
+	}
+}

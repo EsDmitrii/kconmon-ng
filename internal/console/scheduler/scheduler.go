@@ -26,6 +26,25 @@ const LockKey int64 = 2111970501
 // for as long as it runs.
 const dueLimit = 100
 
+/*
+onceSkipRetry is how far forward a SKIPPED kind='once' schedule pushes its cadence.
+
+	A once-schedule has no next occurrence -- nextFireAt returns nil for it -- so the skip path used
+	to leave its row alone entirely, on the reasoning that writing nil would clear next_fire_at and
+	retire the occurrence permanently. Leaving it alone retires the whole LOOP instead: ListDueSchedules
+	is `WHERE enabled AND next_fire_at <= now ORDER BY next_fire_at LIMIT 100`, and a row whose
+	next_fire_at is stuck in the past sorts ahead of every schedule that is merely due now. A skip
+	reason can outlive the tick that saw it -- a disabled definition stays disabled until someone
+	re-enables it -- so those rows accumulate at the head of the ordering, and at 100 of them nothing
+	else in the fleet ever fires again while the schedules themselves still read as enabled.
+
+	Pushing the cadence forward keeps the occurrence pending (next_fire_at stays non-NULL, so it comes
+	back when the block clears) and takes the row out of the due window in between, which is what the
+	ordering needs. The interval is minutes, not the tick's seconds: a skip that resolves does so on
+	human time -- someone re-enables a definition, or a long run finishes.
+*/
+const onceSkipRetry = time.Minute
+
 // The schedule kinds this loop knows; 'cron' is a later milestone and would arrive here as an
 // unrecognized kind -- see fireOne.
 const (
@@ -74,6 +93,8 @@ type Store interface {
 // Runner is the diagnostics runner seam.
 type Runner interface {
 	Start(ctx context.Context, spec checks.Spec, initiator authz.Subject) (string, error) //nolint:gocritic // Spec is a value type by design (checks.Runner.Start)
+	// ActiveForInitiator is the overrun guard's replica-independent question; see previousRunActive.
+	ActiveForInitiator(ctx context.Context, initiatorKind, initiatorID string) (bool, error)
 	Get(ctx context.Context, runID string) (checks.Run, error)
 	ReapStuckRuns(ctx context.Context, limit int32) (int64, error)
 }
@@ -215,17 +236,52 @@ func (s *Scheduler) fireOne(ctx context.Context, sched *store.Schedule, now time
 		return nil
 	}
 
-	paused, startErr := s.startFor(ctx, sched, topo)
+	skipped, startErr := s.startFor(ctx, sched, topo)
 	next := nextFireAt(sched, now)
 
-	// A schedule whose DEFINITION is disabled produced nothing, so stamping last_fired_at would
-	// report a run that never happened; only the cadence moves, so it resumes on its own the
-	// moment the definition is switched back on.
-	if paused {
+	/* A skip produced NO RUN, so stamping last_fired_at would report one that never happened. Both
+	   skips take this path now: a disabled definition, and an overrun.
+
+	   The overrun skip used to go the fired way, and that was the worst possible moment for it — an
+	   overrun means the previous run is still in flight (or its replica died holding the row), so the
+	   schedule's own column reported it firing on cadence while it had produced nothing for minutes.
+	   During an orphan window that column is the only signal an operator has.
+
+	   A kind='once' schedule is the exception: nextFireAt returns nil for it, and writing that here
+	   would clear next_fire_at and retire the occurrence permanently — re-enabling the definition
+	   would not bring it back, and nothing in the API or the UI would say it had been dropped. It
+	   retries instead, onceSkipRetry from now: the occurrence stays pending, and the row leaves the
+	   due window in between rather than parking at the head of it forever. */
+	if skipped {
+		if sched.Kind == kindOnce {
+			retryAt := now.Add(onceSkipRetry)
+			next = &retryAt
+		}
 		if markErr := s.store.MarkScheduleSkipped(ctx, sched.ID, next); markErr != nil {
 			return fmt.Errorf("scheduler: mark schedule %s skipped: %w", sched.ID, markErr)
 		}
 		return nil
+	}
+
+	/* A START THAT FAILED did not fire either, and for a kind='once' schedule that distinction is
+	   the difference between a retry and a silent loss.
+
+	   startErr means no run was created — the controller was unreachable, the topology could not be
+	   resolved, the store refused the row. This path used to hand that case to MarkScheduleFired
+	   with nextFireAt=nil (nil is what nextFireAt returns for `once`), which cleared next_fire_at and
+	   retired the occurrence for good, while stamping last_fired_at with a fire that never happened.
+	   The operator's one-shot check was gone, the row said it had run, and last_error was the only
+	   trace — on a schedule nothing would look at again.
+
+	   It retries instead, on the same cadence a skip uses: the occurrence is still owed, and the
+	   reason it failed is usually transient. last_fired_at stays where it is, because nothing fired.
+	   An INTERVAL schedule already had its next occurrence and is unaffected either way. */
+	if startErr != nil && sched.Kind == kindOnce {
+		retryAt := now.Add(onceSkipRetry)
+		if markErr := s.store.MarkScheduleSkipped(ctx, sched.ID, &retryAt); markErr != nil {
+			return errors.Join(startErr, fmt.Errorf("scheduler: mark schedule %s for retry: %w", sched.ID, markErr))
+		}
+		return startErr
 	}
 
 	lastError := ""
@@ -245,10 +301,10 @@ func scheduleErrorText(scheduleID string, err error) string {
 }
 
 // startFor decides whether sched should actually produce a run right now, and starts it if so. It
-// reports paused=true only for the one skip the caller must record differently -- a disabled
-// DEFINITION -- so that occurrence is not written down as a fire. A nil error means "handled":
+// reports skipped=true for EITHER skip -- a disabled definition or an overrun -- because neither
+// produced a run and the caller must not write either down as a fire. A nil error means "handled":
 // fired, or deliberately skipped with its reason counted.
-func (s *Scheduler) startFor(ctx context.Context, sched *store.Schedule, topo *topologyCache) (paused bool, err error) {
+func (s *Scheduler) startFor(ctx context.Context, sched *store.Schedule, topo *topologyCache) (skipped bool, err error) {
 	def, err := s.store.GetDefinition(ctx, sched.DefinitionID)
 	if err != nil {
 		return false, fmt.Errorf("scheduler: schedule %s: get definition %s: %w", sched.ID, sched.DefinitionID, err)
@@ -266,7 +322,7 @@ func (s *Scheduler) startFor(ctx context.Context, sched *store.Schedule, topo *t
 		s.m.SchedulerSkipped.WithLabelValues(skipOverrun).Inc()
 		slog.Info("scheduler: skipping due schedule, its previous run is still in flight",
 			"schedule", sched.ID, "definition", def.ID)
-		return false, nil
+		return true, nil
 	}
 
 	spec, err := s.specFor(ctx, &def, topo)
@@ -286,9 +342,24 @@ func (s *Scheduler) startFor(ctx context.Context, sched *store.Schedule, topo *t
 	return false, nil
 }
 
-// previousRunActive reports whether the run this replica last started for scheduleID has not
-// reached a terminal status yet; failing OPEN here is the deliberate direction.
+// previousRunActive reports whether a run for scheduleID is still mid-flight; failing OPEN here is
+// the deliberate direction.
+//
+// It ASKS THE STORE rather than this replica's memory. The advisory lock rotates tick by tick, so
+// with the chart's default of two console replicas the replica that fired a run was routinely not
+// the one holding the next tick — and the other had no memory of it, so it fired the same schedule
+// again. Two overlapping runs of the same check, doubling the fan-out at exactly the moment the
+// first one was already slow enough to still be going.
+//
+// The in-memory map stays as the fast path and as the fallback when the store cannot answer.
 func (s *Scheduler) previousRunActive(ctx context.Context, scheduleID string) bool {
+	if active, err := s.runner.ActiveForInitiator(ctx, initiatorKind, scheduleID); err == nil {
+		if !active {
+			delete(s.lastRun, scheduleID)
+		}
+		return active
+	}
+
 	runID, ok := s.lastRun[scheduleID]
 	if !ok {
 		return false
@@ -305,9 +376,12 @@ func (s *Scheduler) previousRunActive(ctx context.Context, scheduleID string) bo
 	return false
 }
 
-// reap drives checks.Runner.ReapStuckRuns, which force-finishes run rows left "running" long past
-// any deadline Start could have given them; it runs HERE, under the same per-tick advisory lock as
-// the schedule pass.
+// reap drives checks.Runner.ReapStuckRuns from the schedule pass.
+//
+// It is no longer the ONLY caller: cmd/console spawns checks.Runner.ReapLoop unconditionally,
+// because reaping an orphaned run must not depend on the schedule loop being enabled (it is off by
+// default). This stays because a tick that has just fired runs is the cheapest moment to notice the
+// ones that never finished, and the statement is idempotent either way.
 func (s *Scheduler) reap(ctx context.Context) error {
 	n, err := s.runner.ReapStuckRuns(ctx, 0)
 	if n > 0 {

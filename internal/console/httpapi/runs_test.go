@@ -21,6 +21,7 @@ import (
 	"github.com/EsDmitrii/kconmon-ng/internal/console/metrics"
 	"github.com/EsDmitrii/kconmon-ng/internal/console/store"
 	"github.com/EsDmitrii/kconmon-ng/internal/console/ws"
+	"github.com/google/uuid"
 )
 
 // fakeRunner is a RunService test double: an in-memory map of runs.
@@ -69,10 +70,16 @@ func (f *fakeRunner) Get(_ context.Context, runID string) (checks.Run, error) {
 	return run, nil
 }
 
-func (f *fakeRunner) GetResults(_ context.Context, runID string) ([]store.RunResult, error) {
+func (f *fakeRunner) GetResults(_ context.Context, runID string) ([]store.RunResult, bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return f.results[runID], nil
+	rows := f.results[runID]
+	// The same bound the store applies, so a test that seeds a long run sees what the API would.
+	truncated := len(rows) > store.RunResultsCap
+	if truncated {
+		rows = rows[len(rows)-store.RunResultsCap:]
+	}
+	return rows, truncated, nil
 }
 
 func (f *fakeRunner) List(_ context.Context, _ checks.ListFilter) (checks.RunPage, error) { //nolint:gocritic // hugeParam: test double mirrors the real signature
@@ -785,5 +792,34 @@ func TestRunsCreateInvalidDestinationFromPlannerIs400(t *testing.T) {
 	w := doRequest(t, s, http.MethodPost, "/api/v1/runs", strings.NewReader(body), mutateWithCSRF)
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400: %s", w.Code, w.Body)
+	}
+}
+
+/*
+ * uuid.Parse accepts more spellings than the canonical one — uppercase, hyphenless 32-hex,
+ * urn:uuid: — and the raw string used to be handed straight on. Runner.Cancel looks a run up in a
+ * map keyed by the canonical form, so the lookup missed, the "not in flight here, leaving it to the
+ * reaper" branch was taken, and the handler answered 204: the operator was told the run was
+ * cancelled while it went on fanning out.
+ */
+func TestRunIDIsCanonicalisedBeforeItIsUsed(t *testing.T) {
+	canonical := uuid.NewString()
+	runner := newFakeRunner()
+	runner.runs[canonical] = checks.Run{ID: canonical, Status: "running"}
+	s := newRunsTestServer(t, runner, "operator")
+
+	for _, spelling := range []string{
+		strings.ToUpper(canonical),
+		strings.ReplaceAll(canonical, "-", ""),
+		"urn:uuid:" + canonical,
+	} {
+		runner.cancelled = nil
+		w := doRequest(t, s, http.MethodPost, "/api/v1/runs/"+spelling+"/cancel", nil, mutateWithCSRF)
+		if w.Code != http.StatusNoContent {
+			t.Fatalf("cancel %q = %d, want 204: %s", spelling, w.Code, w.Body)
+		}
+		if len(runner.cancelled) != 1 || runner.cancelled[0] != canonical {
+			t.Errorf("cancel %q reached the runner as %v, want the canonical %q", spelling, runner.cancelled, canonical)
+		}
 	}
 }

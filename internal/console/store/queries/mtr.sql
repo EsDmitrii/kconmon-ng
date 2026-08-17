@@ -18,7 +18,12 @@ RETURNING id, source_node, destination, path_hash, hop_count, hops,
           (xmax = 0) AS inserted;
 
 -- name: ListMTRDestinations :many
--- The MTR Explorer's left pane: every (source, destination) pair path history knows about.
+-- The MTR Explorer's left pane: the (source, destination) pairs path history knows about.
+--
+-- BOUNDED. The row count here is pairs — sources x destinations — not "a handful, like the webhook
+-- list": a hundred nodes is ten thousand rows, aggregated over the whole snapshot table on every
+-- request, materialised in the store and marshalled by the handler, for any caller holding
+-- mtr:read. The limit is the caller's, and the handler caps it.
 SELECT source_node,
        destination,
        count(*)::bigint AS snapshot_count,
@@ -27,18 +32,59 @@ SELECT source_node,
        max(last_seen)::timestamptz AS last_seen
 FROM mtr_path_snapshots
 GROUP BY source_node, destination
-ORDER BY max(last_seen) DESC, source_node, destination;
+ORDER BY max(last_seen) DESC, source_node, destination
+LIMIT sqlc.arg('lim');
 
 -- name: ListPathSnapshots :many
--- The pair's route history.
+-- The pair's route history, newest ROUTE first.
+--
+-- Ordered and paged on first_seen, which never changes after the insert — not on last_seen, which
+-- every repeat trace bumps (UpsertPathSnapshot's ON CONFLICT). A keyset cursor over a mutable sort
+-- key drops rows: the reader takes page 1 (the routes with the largest last_seen), a route sitting
+-- just below the cursor is re-traced before they press "Load older", its last_seen jumps ABOVE the
+-- cursor, and page 2's predicate excludes it — from a page it was never on. The route then exists
+-- in the database and nowhere in the console, with nothing on screen admitting a row went missing.
+-- mergeSnapshots on the client was written for the mirror case (a row handed out twice); it cannot
+-- invent one that was never sent.
+--
+-- "When this route first appeared" is also the spine the changes timeline already positions its
+-- markers on, so the list and the strip now agree on what "older" means. last_seen stays on every
+-- row, which is where "most recently traced" is read.
 SELECT id, source_node, destination, path_hash, hop_count, hops,
        first_seen, last_seen, trace_count, run_id
 FROM mtr_path_snapshots
 WHERE (sqlc.narg('source_node')::text IS NULL OR source_node = sqlc.narg('source_node')::text)
   AND (sqlc.narg('destination')::text IS NULL OR destination = sqlc.narg('destination')::text)
   AND (sqlc.narg('cur_time')::timestamptz IS NULL OR
-       (last_seen, id) < (sqlc.narg('cur_time')::timestamptz, sqlc.narg('cur_id')::uuid))
-ORDER BY last_seen DESC, id DESC
+       (first_seen, id) < (sqlc.narg('cur_time')::timestamptz, sqlc.narg('cur_id')::uuid))
+ORDER BY first_seen DESC, id DESC
+LIMIT sqlc.arg('lim');
+
+-- name: ListPathTraces :many
+-- The INDIVIDUAL traces behind a route row. mtr_path_snapshots folds every trace that walked one
+-- path into a single row with a trace_count; these are the rows that count was counted over, still
+-- carrying their own clock and their own per-hop readings.
+--
+-- Bounded by the snapshot's own [first_seen, last_seen] window by the caller, and paged: a route
+-- that held for a day can have thousands. The path IDENTITY is not checked here — result is JSONB
+-- and the hash is computed in Go (checks.TraceFromResult) exactly as the projector computed it —
+-- so the caller filters what this returns.
+SELECT r.id, r.run_id, r.source_node, r.destination_node, r.success, r.duration_ns, r.error,
+       r.result, r.recorded_at, r.sample_seq
+FROM check_results r
+    JOIN check_runs run ON run.id = r.run_id
+-- MTR rows ONLY. check_results holds every check type under the same (source, destination), so a TCP
+-- or ICMP check running between the same pair in the same window used to consume the LIMIT and the
+-- handler then dropped those rows in Go — whole pages came back empty and the operator paged blindly
+-- through a route the console said had N traces.
+WHERE run.check_type = 'mtr'
+  AND r.source_node = sqlc.arg('source_node')::text
+  AND r.destination_node = sqlc.arg('destination')::text
+  AND r.recorded_at >= sqlc.arg('from_time')::timestamptz
+  AND r.recorded_at <= sqlc.arg('to_time')::timestamptz
+  AND (sqlc.narg('cur_time')::timestamptz IS NULL OR
+       (r.recorded_at, r.id) < (sqlc.narg('cur_time')::timestamptz, sqlc.narg('cur_id')::bigint))
+ORDER BY r.recorded_at DESC, r.id DESC
 LIMIT sqlc.arg('lim');
 
 -- name: GetPathSnapshot :one

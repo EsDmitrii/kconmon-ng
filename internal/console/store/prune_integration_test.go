@@ -148,11 +148,11 @@ func TestPruneOnceSweepsEveryTable(t *testing.T) {
 	// the expired run is aged with one direct UPDATE -- the store API has no
 	// way to backdate a run, and inventing one for a test would be worse.
 	oldRun := uuid.NewString()
-	if _, err := db.CreateRun(ctx, oldRun, "mtr", "pod", json.RawMessage(`{}`), "user", "admin", 1); err != nil {
-		t.Fatalf("CreateRun(old): %v", err)
+	if _, err := db.CreateRun(ctx, oldRun, "mtr", "pod", json.RawMessage(`{}`), "user", "admin", 1, time.Now().Add(time.Hour)); err != nil {
+		t.Fatalf("CreateRun(old, time.Now().Add(time.Hour)): %v", err)
 	}
-	if _, err := db.CreateRun(ctx, uuid.NewString(), "mtr", "pod", json.RawMessage(`{}`), "user", "admin", 1); err != nil {
-		t.Fatalf("CreateRun(new): %v", err)
+	if _, err := db.CreateRun(ctx, uuid.NewString(), "mtr", "pod", json.RawMessage(`{}`), "user", "admin", 1, time.Now().Add(time.Hour)); err != nil {
+		t.Fatalf("CreateRun(new, time.Now().Add(time.Hour)): %v", err)
 	}
 	pool, poolErr := pgxpool.New(ctx, dsn)
 	if poolErr != nil {
@@ -223,7 +223,7 @@ func TestPruneOnceSweepsEveryTable(t *testing.T) {
 			t.Fatalf("CreateIncident(%d): %v", i, err)
 		}
 		if tc.resolvedAt != nil {
-			if _, err := db.UpdateIncidentStatus(ctx, created.ID,
+			if _, _, err := db.UpdateIncidentStatus(ctx, created.ID,
 				store.IncidentStatusResolved, tc.resolvedAt); err != nil {
 				t.Fatalf("resolve %s: %v", tc.title, err)
 			}
@@ -307,8 +307,13 @@ func TestPruneOnceSweepsEveryTable(t *testing.T) {
 	if _, ok := deleted["alert_rules"]; ok {
 		t.Error("PruneOnce reported an alert_rules entry: that table has no sweep and must not gain one")
 	}
-	if len(deleted) != 9 {
-		t.Errorf("PruneOnce reported %d tables, want 9: %v", len(deleted), deleted)
+	/* check_results has a sweep OF ITS OWN, ahead of check_runs: a batch counted in runs was
+	   unbounded in the rows it cascaded (one interval run owns up to 200 000 samples). */
+	if _, ok := deleted["check_results"]; !ok {
+		t.Error("PruneOnce reported no entry for check_results: the cascade is unbounded again")
+	}
+	if len(deleted) != 10 {
+		t.Errorf("PruneOnce reported %d tables, want 10: %v", len(deleted), deleted)
 	}
 
 	// The survivors, read back through the store rather than counted in SQL.

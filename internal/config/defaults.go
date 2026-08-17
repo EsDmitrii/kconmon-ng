@@ -7,6 +7,7 @@ func DefaultConfig() *Config {
 		Mode:               "",
 		MetricsPrefix:      "kconmon_ng",
 		HTTPPort:           8080,
+		MetricsPort:        9091,
 		GRPCPort:           9090,
 		LogLevel:           "info",
 		LogFormat:          "json",

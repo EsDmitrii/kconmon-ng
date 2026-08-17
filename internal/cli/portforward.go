@@ -99,18 +99,48 @@ func (k *kubeConnector) findControllerPod(ctx context.Context, clientset kuberne
 	if err != nil {
 		return nil, fmt.Errorf("listing controller pods: %w", err)
 	}
+	running := make([]*corev1.Pod, 0, len(pods.Items))
 	for i := range pods.Items {
 		p := &pods.Items[i]
 		if p.Status.Phase == corev1.PodRunning && p.DeletionTimestamp == nil {
-			return p, nil
+			running = append(running, p)
 		}
 	}
 
-	where := "any namespace"
-	if ns != "" {
-		where = "namespace " + ns
+	if len(running) == 0 {
+		where := "any namespace"
+		if ns != "" {
+			where = "namespace " + ns
+		}
+		return nil, fmt.Errorf("no running kconmon-ng controller pod found in %s (selector %q)", where, controllerLabelSelector)
 	}
-	return nil, fmt.Errorf("no running kconmon-ng controller pod found in %s (selector %q)", where, controllerLabelSelector)
+
+	if leader := leaseHolder(ctx, clientset, ns, running); leader != nil {
+		return leader, nil
+	}
+	return running[0], nil
+}
+
+// leaseHolder returns the running controller pod named by a controller Lease. Only the leader
+// answers topology and diagnostics; a standby returns 503, which this CLI does not retry. A missing
+// or unreadable Lease is not an error: single-replica installs run without leader election.
+func leaseHolder(ctx context.Context, clientset kubernetes.Interface, ns string, running []*corev1.Pod) *corev1.Pod {
+	leases, err := clientset.CoordinationV1().Leases(ns).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return nil
+	}
+	for i := range leases.Items {
+		holder := leases.Items[i].Spec.HolderIdentity
+		if holder == nil {
+			continue
+		}
+		for _, p := range running {
+			if p.Name == *holder && p.Namespace == leases.Items[i].Namespace {
+				return p
+			}
+		}
+	}
+	return nil
 }
 
 func startPortForward(ctx context.Context, cfg *rest.Config, clientset kubernetes.Interface, pod *corev1.Pod) (*Connection, error) {

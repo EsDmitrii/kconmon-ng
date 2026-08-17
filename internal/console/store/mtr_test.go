@@ -18,6 +18,24 @@ func hopsAB() []PathHop {
 	}
 }
 
+// TestHashPathIgnoresSilentHops: a "*" or empty hop is not part of a route's identity, so a trace
+// with silent hops wedged among the responders hashes identically to one with only the responders.
+func TestHashPathIgnoresSilentHops(t *testing.T) {
+	responders := HashPath(hopsAB())
+	withSilent := HashPath([]PathHop{
+		{Number: 1, IP: "*"},
+		{Number: 2, IP: "10.0.0.1", Hostname: "gw-a", RTTNs: 1_000_000, LossRatio: 0},
+		{Number: 3, IP: " "},
+		{Number: 4, IP: "10.0.0.2", Hostname: "gw-b", RTTNs: 2_000_000, LossRatio: 0.5},
+	})
+	if responders != withSilent {
+		t.Errorf("silent hops changed the path hash: %q vs %q", responders, withSilent)
+	}
+	if got := HashPath([]PathHop{{Number: 1, IP: "*"}, {Number: 2, IP: ""}}); got != "" {
+		t.Errorf("an all-silent trace hashed to %q, want empty", got)
+	}
+}
+
 // TestHashPathIsStable is the dedupe key's first requirement: the same ordered IP list always
 // hashes to the same value.
 func TestHashPathIsStable(t *testing.T) {

@@ -218,6 +218,12 @@ func (r *Resolver) reloadOne(source, path string, cur **maxminddb.Reader, mod *t
 // skip the whole miss path: with no live source every "resolution" would be an
 // empty row, and caching those would let the TTL protect a lie for a day.
 func (r *Resolver) hasLiveSource() bool {
+	/* Under the read lock, because reloadOne REPLACES r.asn and r.city under the write lock when the
+	   geoipupdate sidecar drops a new database in — two goroutines, an unsynchronised pointer write
+	   and read, and no happens-before between them. It is called on every enrichment request, so the
+	   race is as wide as the traffic. */
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	return r.rdns != nil || r.asn != nil || r.city != nil
 }
 
@@ -531,5 +537,8 @@ func (r *Resolver) countLookup(source, result string) {
 // String reports the enabled sources, for cmd/console's boot log. It names
 // switches, never data.
 func (r *Resolver) String() string {
+	// Same reason hasLiveSource takes it: the reload swaps these pointers under the write lock.
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	return fmt.Sprintf("enrich.Resolver{rdns:%t asn:%t city:%t ttl:%v}", r.rdns != nil, r.asn != nil, r.city != nil, r.ttl)
 }

@@ -37,6 +37,9 @@ type Session struct {
 	Groups      []string  `json:"groups"`
 	IssuedAt    time.Time `json:"issuedAt"`
 	ExpiresAt   time.Time `json:"expiresAt"`
+	// LastSeenAt is when a request last used this session; it is what the idle timeout measures
+	// from. Zero on a session issued before the field existed, which reads as IssuedAt.
+	LastSeenAt time.Time `json:"lastSeenAt,omitempty"`
 
 	// OIDC only; never leaves the server.
 	RefreshToken string    `json:"refreshToken,omitempty"` //nolint:gosec // not a hardcoded credential; gosec's G117 name heuristic flags any field named *Token
@@ -45,14 +48,42 @@ type Session struct {
 
 // SessionStore persists Sessions in a cache.KV.
 type SessionStore struct {
-	kv  cache.KV
-	ttl time.Duration
+	kv   cache.KV
+	ttl  time.Duration
+	idle time.Duration
 }
 
-// NewSessionStore returns a SessionStore backed by kv, issuing sessions with
-// lifetime ttl.
-func NewSessionStore(kv cache.KV, ttl time.Duration) *SessionStore {
-	return &SessionStore{kv: kv, ttl: ttl}
+// NewSessionStore returns a SessionStore backed by kv. ttl is the ABSOLUTE lifetime, counted from
+// login and never extended; idle is how long a session may go unused before it is refused, sliding
+// forward on every request but never past the absolute deadline. A non-positive idle disables the
+// idle check and leaves ttl the only bound.
+func NewSessionStore(kv cache.KV, ttl, idle time.Duration) *SessionStore {
+	return &SessionStore{kv: kv, ttl: ttl, idle: idle}
+}
+
+// touchInterval is how stale LastSeenAt may get before a request writes it back. Sliding on every
+// request would put a KV write on every authenticated call for no extra safety; a tenth of the idle
+// window keeps the deadline accurate to within that tenth.
+func (s *SessionStore) touchInterval() time.Duration {
+	return s.idle / 10
+}
+
+// errSessionExpired is loadFresh's reason for refusing a session that WAS there, which is what tells
+// Get to purge the key rather than leave a dead record behind.
+// It wraps ErrSessionNotFound so Refresh keeps its documented contract for callers that only ask
+// "is this session gone".
+var errSessionExpired = fmt.Errorf("authn: session expired: %w", ErrSessionNotFound)
+
+// idleDeadline is when this session goes stale, or the zero time when the idle check is off.
+func (s *SessionStore) idleDeadline(sess *Session) time.Time {
+	if s.idle <= 0 {
+		return time.Time{}
+	}
+	from := sess.LastSeenAt
+	if from.IsZero() {
+		from = sess.IssuedAt
+	}
+	return from.Add(s.idle)
 }
 
 func sessionKey(id string) string {
@@ -71,6 +102,7 @@ func (s *SessionStore) Create(ctx context.Context, sess Session) (id string, err
 
 	sess.ID = id
 	sess.IssuedAt = time.Now()
+	sess.LastSeenAt = sess.IssuedAt
 	if sess.ExpiresAt.IsZero() {
 		sess.ExpiresAt = sess.IssuedAt.Add(s.ttl)
 	}
@@ -106,10 +138,25 @@ func newSessionID() (string, error) {
 func (s *SessionStore) Get(ctx context.Context, id string) (Session, bool, error) {
 	sess, err := s.loadFresh(ctx, id)
 	if err != nil {
+		if errors.Is(err, errSessionExpired) {
+			// Purge rather than wait for the KV TTL: an idle-expired session still has absolute
+			// lifetime left on its key, and leaving it there keeps a usable-looking record around.
+			if delErr := s.Delete(ctx, id); delErr != nil {
+				slog.Warn("authn: could not purge an expired session", "error", delErr)
+			}
+			return Session{}, false, nil
+		}
 		if errors.Is(err, ErrSessionNotFound) {
 			return Session{}, false, nil
 		}
 		return Session{}, false, fmt.Errorf("authn: get session: %w", err)
+	}
+
+	// This request IS the activity the idle timeout measures, so the deadline slides here.
+	if s.idle > 0 && time.Since(sess.LastSeenAt) >= s.touchInterval() {
+		if err := s.Refresh(ctx, id); err != nil && !errors.Is(err, ErrSessionNotFound) {
+			slog.Warn("authn: could not slide a session's idle deadline", "error", err)
+		}
 	}
 	return sess, true, nil
 }
@@ -122,20 +169,27 @@ func (s *SessionStore) Delete(ctx context.Context, id string) error {
 	return nil
 }
 
-// Refresh slides id's expiry forward by ttl from now.
+// Refresh slides id's IDLE deadline to now. The absolute ExpiresAt is never moved: a session that
+// keeps being used still ends at the absolute lifetime it was issued with, which is the whole point
+// of having two bounds instead of one.
 func (s *SessionStore) Refresh(ctx context.Context, id string) error {
 	sess, err := s.loadFresh(ctx, id)
 	if err != nil {
 		return fmt.Errorf("authn: refresh session: %w", err)
 	}
 
-	sess.ExpiresAt = time.Now().Add(s.ttl)
+	sess.LastSeenAt = time.Now()
 	data, err := json.Marshal(sess) //nolint:gosec // G117: same server-side session record as Create; never leaves the KV store
 	if err != nil {
 		return fmt.Errorf("authn: refresh session: marshal: %w", err)
 	}
 
-	if err := s.kv.Set(ctx, sessionKey(id), data, s.ttl); err != nil {
+	// The key never outlives the absolute deadline, so an abandoned session disappears on its own.
+	kvTTL := time.Until(sess.ExpiresAt)
+	if kvTTL < time.Second {
+		kvTTL = time.Second
+	}
+	if err := s.kv.Set(ctx, sessionKey(id), data, kvTTL); err != nil {
 		return fmt.Errorf("authn: refresh session: %w", err)
 	}
 	return nil
@@ -157,8 +211,12 @@ func (s *SessionStore) loadFresh(ctx context.Context, id string) (Session, error
 		return Session{}, ErrSessionNotFound
 	}
 
-	if !sess.ExpiresAt.IsZero() && time.Now().After(sess.ExpiresAt) {
-		return Session{}, ErrSessionNotFound
+	now := time.Now()
+	if !sess.ExpiresAt.IsZero() && now.After(sess.ExpiresAt) {
+		return Session{}, errSessionExpired
+	}
+	if deadline := s.idleDeadline(&sess); !deadline.IsZero() && now.After(deadline) {
+		return Session{}, errSessionExpired
 	}
 
 	return sess, nil

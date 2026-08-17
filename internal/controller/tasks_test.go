@@ -149,6 +149,69 @@ func TestTaskManagerSubscribeCleanup(t *testing.T) {
 	}
 }
 
+/*
+A second subscriber under an existing agent's id cannot take that agent's tasks away from it.
+
+The agent id on a WatchTasks request is whatever the client sent, and this registry used to hold one
+channel per id — last-writer-wins. A second subscriber therefore received the first's dispatches,
+and its cleanup, owning the mapped entry, removed the id outright: every later dispatch to a
+connected, healthy agent answered ErrAgentNotSubscribed, which the HTTP layer turns into
+404 "source agent has no active diagnostics stream". Nothing was logged and the agent still counted
+as registered.
+*/
+func TestTaskManagerSecondSubscriberCannotDisplaceTheFirst(t *testing.T) {
+	tm := NewTaskManager()
+
+	victim, victimCleanup := tm.Subscribe("agent-1")
+	defer victimCleanup()
+
+	// A second stream arrives under the same id.
+	intruder, intruderCleanup := tm.Subscribe("agent-1")
+
+	// The original still receives dispatches.
+	go func() {
+		select {
+		case req := <-victim:
+			tm.Report(&pb.TaskResult{TaskId: req.GetTaskId(), Success: true})
+		case <-time.After(2 * time.Second):
+		}
+	}()
+	// Drain the second stream so its buffer cannot mask the first's delivery.
+	go func() {
+		select {
+		case <-intruder:
+		case <-time.After(2 * time.Second):
+		}
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	res, err := tm.Dispatch(ctx, "agent-1", &pb.TaskRequest{CheckType: "icmp"})
+	if err != nil {
+		t.Fatalf("Dispatch while a second subscriber holds the same id: %v", err)
+	}
+	if !res.GetSuccess() {
+		t.Error("the agent's own result did not come back")
+	}
+
+	// And when the second stream ends, the original is still subscribed.
+	intruderCleanup()
+	if n := tm.SubscriberCount(); n != 1 {
+		t.Fatalf("SubscriberCount after the second stream left = %d, want 1", n)
+	}
+
+	go func() {
+		select {
+		case req := <-victim:
+			tm.Report(&pb.TaskResult{TaskId: req.GetTaskId(), Success: true})
+		case <-time.After(2 * time.Second):
+		}
+	}()
+	if _, err := tm.Dispatch(ctx, "agent-1", &pb.TaskRequest{CheckType: "icmp"}); err != nil {
+		t.Fatalf("the agent lost its subscription when an unrelated stream disconnected: %v", err)
+	}
+}
+
 func TestTaskManagerReportUnknownTaskNoBlock(t *testing.T) {
 	tm := NewTaskManager()
 	// Reporting a result for a task nobody is waiting on must not panic or block.

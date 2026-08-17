@@ -3,6 +3,7 @@ package checks
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -113,9 +114,14 @@ func TestMaxRunLifetimeCoversTheLongestAcceptedDuration(t *testing.T) {
 	if got <= MaxRunDuration {
 		t.Fatalf("maxRunLifetime() = %s, want > MaxRunDuration (%s) -- the reaper would kill live interval runs", got, MaxRunDuration)
 	}
-	// And it must clear the deadline Start actually hands the worst case, with
-	// the reap slack still on top.
-	worst := runDeadline(maxPairs, maxPerPairTimeout, MaxRunDuration)
+	/* And it must clear the deadline Start actually hands the worst case, with the reap slack still
+	   on top. The worst case is maxPairs pairs from ONE source: the per-source gate serialises those
+	   hardest, and it is the gate runDeadline used to ignore. */
+	worstPairs := make([]Pair, maxPairs)
+	for i := range worstPairs {
+		worstPairs[i] = Pair{Source: "one-source"}
+	}
+	worst := runDeadline(worstPairs, maxPerPairTimeout, MaxRunDuration)
 	if got < worst+reapSlack {
 		t.Errorf("maxRunLifetime() = %s, want at least %s (worst-case deadline + reapSlack)", got, worst+reapSlack)
 	}
@@ -143,11 +149,13 @@ func TestSampleIntervalAndPlannedRoundsRespectTheCap(t *testing.T) {
 			if got := SampleInterval(tc.duration); got != tc.wantInterval {
 				t.Errorf("SampleInterval(%s) = %s, want %s", tc.duration, got, tc.wantInterval)
 			}
-			if got := plannedRounds(tc.duration); got != tc.wantRounds {
-				t.Errorf("plannedRounds(%s) = %d, want %d", tc.duration, got, tc.wantRounds)
+			// The base cadence governs whenever the check type is faster than it, which is every
+			// type but mtr; PlannedSamplesPerPair is then the old plannedRounds exactly.
+			if got := PlannedSamplesPerPair(tc.duration, SampleInterval(tc.duration)); got != tc.wantRounds {
+				t.Errorf("PlannedSamplesPerPair(%s) = %d, want %d", tc.duration, got, tc.wantRounds)
 			}
-			if got := plannedRounds(tc.duration); got > MaxSamplesPerPair {
-				t.Errorf("plannedRounds(%s) = %d exceeds the documented cap %d", tc.duration, got, MaxSamplesPerPair)
+			if got := PlannedSamplesPerPair(tc.duration, SampleInterval(tc.duration)); got > MaxSamplesPerPair {
+				t.Errorf("PlannedSamplesPerPair(%s) = %d exceeds the documented cap %d", tc.duration, got, MaxSamplesPerPair)
 			}
 		})
 	}
@@ -181,7 +189,9 @@ func TestExecuteIntervalRunKeepsEverySampleAndReProbes(t *testing.T) {
 
 	spec := Spec{
 		Sources: []string{"n1"}, Destinations: []string{"n2", "n3"},
-		Type: "tcp", Plane: "pod", Timeout: 1 * time.Second, Duration: time.Minute,
+		// Three 50ms boundaries fit before 130ms elapses, which is how a wall-clock run says
+		// "three rounds": the count is no longer a cap the loop stops on.
+		Type: "tcp", Plane: "pod", Timeout: 1 * time.Second, Duration: 130 * time.Millisecond,
 	}
 	pairs := []Pair{
 		{Source: "n1", Destination: NodeDestination("n2")},
@@ -191,20 +201,20 @@ func TestExecuteIntervalRunKeepsEverySampleAndReProbes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal spec: %v", err)
 	}
-	run, err := st.CreateRun(context.Background(), uuid.NewString(), spec.Type, spec.Plane, specJSON, "user", "u1", int32(len(pairs)))
+	run, err := st.CreateRun(context.Background(), uuid.NewString(), spec.Type, spec.Plane, specJSON, "user", "u1", int32(len(pairs)), time.Now().Add(time.Hour))
 	if err != nil {
 		t.Fatalf("CreateRun: %v", err)
 	}
 
 	runCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	const rounds = 3
-	r.execute(runCtx, cancel, run.ID, pairs, &spec, 1*time.Second, rounds, 20*time.Millisecond, false)
+	r.execute(runCtx, cancel, run.ID, pairs, &spec, 1*time.Second, rounds, 50*time.Millisecond, false)
 
 	// 2 pairs x 3 rounds.
 	if got := ctrl.calls.Load(); got != 6 {
 		t.Errorf("Diagnose calls = %d, want 6 (2 pairs x 3 rounds)", got)
 	}
-	results, err := st.GetRunResults(context.Background(), run.ID)
+	results, _, err := st.GetRunResults(context.Background(), run.ID)
 	if err != nil {
 		t.Fatalf("GetRunResults: %v", err)
 	}
@@ -287,7 +297,7 @@ func TestExecuteIntervalRunCountsPairsByTheirLatestSample(t *testing.T) {
 
 	spec := Spec{
 		Sources: []string{"n1"}, Destinations: []string{"n2", "n3"},
-		Type: "tcp", Plane: "pod", Timeout: time.Second, Duration: time.Minute,
+		Type: "tcp", Plane: "pod", Timeout: time.Second, Duration: 130 * time.Millisecond,
 	}
 	pairs := []Pair{
 		{Source: "n1", Destination: NodeDestination("n2")},
@@ -297,13 +307,13 @@ func TestExecuteIntervalRunCountsPairsByTheirLatestSample(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal spec: %v", err)
 	}
-	run, err := st.CreateRun(context.Background(), uuid.NewString(), spec.Type, spec.Plane, specJSON, "user", "u1", int32(len(pairs)))
+	run, err := st.CreateRun(context.Background(), uuid.NewString(), spec.Type, spec.Plane, specJSON, "user", "u1", int32(len(pairs)), time.Now().Add(time.Hour))
 	if err != nil {
 		t.Fatalf("CreateRun: %v", err)
 	}
 
 	runCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	r.execute(runCtx, cancel, run.ID, pairs, &spec, time.Second, rounds, 20*time.Millisecond, false)
+	r.execute(runCtx, cancel, run.ID, pairs, &spec, time.Second, rounds, 50*time.Millisecond, false)
 
 	final, err := st.GetRun(context.Background(), run.ID)
 	if err != nil {
@@ -331,15 +341,15 @@ func TestExecuteInstantRunStillWritesOneSampleZeroPerPair(t *testing.T) {
 	spec := Spec{Sources: []string{"n1"}, Destinations: []string{"n2"}, Type: "tcp", Plane: "pod", Timeout: time.Second}
 	pairs := []Pair{{Source: "n1", Destination: NodeDestination("n2")}}
 	specJSON, _ := json.Marshal(spec) //nolint:errcheck // fixed spec always marshals
-	run, err := st.CreateRun(context.Background(), uuid.NewString(), spec.Type, spec.Plane, specJSON, "user", "u1", 1)
+	run, err := st.CreateRun(context.Background(), uuid.NewString(), spec.Type, spec.Plane, specJSON, "user", "u1", 1, time.Now().Add(time.Hour))
 	if err != nil {
 		t.Fatalf("CreateRun: %v", err)
 	}
 
 	runCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	r.execute(runCtx, cancel, run.ID, pairs, &spec, time.Second, plannedRounds(0), SampleInterval(0), false)
+	r.execute(runCtx, cancel, run.ID, pairs, &spec, time.Second, PlannedSamplesPerPair(0, 0), SampleInterval(0), false)
 
-	results, err := st.GetRunResults(context.Background(), run.ID)
+	results, _, err := st.GetRunResults(context.Background(), run.ID)
 	if err != nil {
 		t.Fatalf("GetRunResults: %v", err)
 	}
@@ -373,7 +383,7 @@ func TestExecuteIntervalRunCancelStopsTheRoundLoop(t *testing.T) {
 	}
 	pairs := []Pair{{Source: "n1", Destination: NodeDestination("n2")}}
 	specJSON, _ := json.Marshal(spec) //nolint:errcheck // fixed spec always marshals
-	run, err := st.CreateRun(context.Background(), uuid.NewString(), spec.Type, spec.Plane, specJSON, "user", "u1", 1)
+	run, err := st.CreateRun(context.Background(), uuid.NewString(), spec.Type, spec.Plane, specJSON, "user", "u1", 1, time.Now().Add(time.Hour))
 	if err != nil {
 		t.Fatalf("CreateRun: %v", err)
 	}
@@ -437,7 +447,7 @@ func TestExecuteProjectsMTRSnapshotOnAContextOutlivingTheRun(t *testing.T) {
 	}
 	// Start mints one with uuid.NewString, so a placeholder here would test a shape production never
 	// produces.
-	run, err := st.CreateRun(context.Background(), uuid.NewString(), spec.Type, spec.Plane, specJSON, "user", "u1", int32(len(pairs)))
+	run, err := st.CreateRun(context.Background(), uuid.NewString(), spec.Type, spec.Plane, specJSON, "user", "u1", int32(len(pairs)), time.Now().Add(time.Hour))
 	if err != nil {
 		t.Fatalf("CreateRun: %v", err)
 	}
@@ -473,7 +483,7 @@ func TestExecuteFinishesRunAfterRunCtxDeadlineFiresMidDispatch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal spec: %v", err)
 	}
-	run, err := st.CreateRun(context.Background(), "run-i1", spec.Type, spec.Plane, specJSON, "user", "u1", int32(len(pairs)))
+	run, err := st.CreateRun(context.Background(), "run-i1", spec.Type, spec.Plane, specJSON, "user", "u1", int32(len(pairs)), time.Now().Add(time.Hour))
 	if err != nil {
 		t.Fatalf("CreateRun: %v", err)
 	}
@@ -524,7 +534,7 @@ func TestRunOneRecoveredSurvivesAPanicAndRecordsTheirPairFailed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal spec: %v", err)
 	}
-	run, err := st.CreateRun(context.Background(), "run-c", spec.Type, spec.Plane, specJSON, "user", "u1", int32(len(pairs)))
+	run, err := st.CreateRun(context.Background(), "run-c", spec.Type, spec.Plane, specJSON, "user", "u1", int32(len(pairs)), time.Now().Add(time.Hour))
 	if err != nil {
 		t.Fatalf("CreateRun: %v", err)
 	}
@@ -545,5 +555,38 @@ func TestRunOneRecoveredSurvivesAPanicAndRecordsTheirPairFailed(t *testing.T) {
 	}
 	if got.PairOK != 1 || got.PairFailed != 1 {
 		t.Errorf("run pair counts = ok:%d failed:%d, want ok:1 failed:1", got.PairOK, got.PairFailed)
+	}
+}
+
+/* ── the deadline has to cover the gate that actually paces the run ──────── */
+
+/*
+ * dispatchRound gates every pair twice: the run-wide window (maxConcurrency) and the per-source one
+ * (maxPerSourceConcurrency, four times narrower). runDeadline counted only the first, so a run whose
+ * pairs all leave the SAME node was given a context a quarter as long as the work needs: dispatch
+ * stopped mid-flight at the deadline, the reaper later marked the run cancelled, and the pairs that
+ * never ran left no result at all — a diagnostics run that answered less than it was asked.
+ */
+func TestRunDeadlineCoversASingleSourceFanOut(t *testing.T) {
+	const perPair = 90 * time.Second
+	pairs := make([]Pair, 12)
+	for i := range pairs {
+		pairs[i] = Pair{Source: "node-a", Destination: NodeDestination(fmt.Sprintf("node-%d", i))}
+	}
+
+	got := runDeadline(pairs, perPair, 0)
+	// Twelve pairs, one source, two at a time: six sequential batches.
+	want := 6*perPair + runDeadlineSlack
+	if got != want {
+		t.Errorf("runDeadline for 12 pairs from one source = %s, want %s (the per-source gate paces it)", got, want)
+	}
+
+	// Spread across sources the run-wide window governs instead, and the deadline is shorter.
+	spread := make([]Pair, 12)
+	for i := range spread {
+		spread[i] = Pair{Source: fmt.Sprintf("node-%d", i), Destination: NodeDestination("node-x")}
+	}
+	if got := runDeadline(spread, perPair, 0); got >= want {
+		t.Errorf("runDeadline for 12 pairs from 12 sources = %s, want less than the single-source %s", got, want)
 	}
 }

@@ -120,7 +120,7 @@ func TestIncidentLifecycle(t *testing.T) {
 
 	// Resolve, then reopen.
 	resolvedAt := time.Now().UTC().Truncate(time.Microsecond)
-	resolved, err := db.UpdateIncidentStatus(ctx, created.ID, store.IncidentStatusResolved, &resolvedAt)
+	resolved, _, err := db.UpdateIncidentStatus(ctx, created.ID, store.IncidentStatusResolved, &resolvedAt)
 	if err != nil {
 		t.Fatalf("UpdateIncidentStatus(resolved): %v", err)
 	}
@@ -131,7 +131,7 @@ func TestIncidentLifecycle(t *testing.T) {
 		t.Errorf("ResolvedAt = %v, want %v", resolved.ResolvedAt, resolvedAt)
 	}
 
-	reopened, err := db.UpdateIncidentStatus(ctx, created.ID, store.IncidentStatusOpen, nil)
+	reopened, _, err := db.UpdateIncidentStatus(ctx, created.ID, store.IncidentStatusOpen, nil)
 	if err != nil {
 		t.Fatalf("UpdateIncidentStatus(reopen): %v", err)
 	}
@@ -264,7 +264,7 @@ func TestListIncidentsStatusAndScopeFilters(t *testing.T) {
 		}
 		if i == 1 {
 			at := now
-			if _, err := db.UpdateIncidentStatus(ctx, created.ID, store.IncidentStatusResolved, &at); err != nil {
+			if _, _, err := db.UpdateIncidentStatus(ctx, created.ID, store.IncidentStatusResolved, &at); err != nil {
 				t.Fatalf("resolve seed %d: %v", i, err)
 			}
 		}
@@ -423,7 +423,7 @@ func TestGetIncidentUnknownIDIsNotFound(t *testing.T) {
 	if _, err := db.UpdateIncidentPinned(ctx, id, nil); !errors.Is(err, store.ErrNotFound) {
 		t.Errorf("UpdateIncidentPinned(unknown) = %v, want ErrNotFound", err)
 	}
-	if _, err := db.UpdateIncidentStatus(ctx, id, store.IncidentStatusResolved, &at); !errors.Is(err, store.ErrNotFound) {
+	if _, _, err := db.UpdateIncidentStatus(ctx, id, store.IncidentStatusResolved, &at); !errors.Is(err, store.ErrNotFound) {
 		t.Errorf("UpdateIncidentStatus(unknown) = %v, want ErrNotFound", err)
 	}
 }
@@ -442,7 +442,7 @@ func TestDeleteIncidentsBeforeNeverPrunesAnOpenIncident(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateIncident(resolved-long-ago): %v", err)
 	}
-	if _, err := db.UpdateIncidentStatus(ctx, resolvedOld.ID, store.IncidentStatusResolved, &ancient); err != nil {
+	if _, _, err := db.UpdateIncidentStatus(ctx, resolvedOld.ID, store.IncidentStatusResolved, &ancient); err != nil {
 		t.Fatalf("resolve resolved-long-ago: %v", err)
 	}
 
@@ -450,7 +450,7 @@ func TestDeleteIncidentsBeforeNeverPrunesAnOpenIncident(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateIncident(resolved-recently): %v", err)
 	}
-	if _, err := db.UpdateIncidentStatus(ctx, resolvedNew.ID, store.IncidentStatusResolved, &recent); err != nil {
+	if _, _, err := db.UpdateIncidentStatus(ctx, resolvedNew.ID, store.IncidentStatusResolved, &recent); err != nil {
 		t.Fatalf("resolve resolved-recently: %v", err)
 	}
 

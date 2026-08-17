@@ -4,13 +4,14 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/google/uuid"
 
 	"github.com/EsDmitrii/kconmon-ng/internal/console/authn"
 	"github.com/EsDmitrii/kconmon-ng/internal/console/authz"
@@ -105,14 +106,40 @@ func ownerFor(subject authz.Subject) string { //nolint:gocritic // Subject is a 
 	return "system"
 }
 
+// tokenNameMaxLen bounds a token name, mirroring store.nameMaxLen (the CHECK targets and check
+// definitions carry). The name is display text — see the check in handleTokensCreate.
+const tokenNameMaxLen = 63
+
 // handleTokensCreate mints a new API token; MUST use authn.HashTokenSecret + authn.EncodeToken.
 func (s *Server) handleTokensCreate(w http.ResponseWriter, r *http.Request) {
 	if s.tokensUnavailable(w) {
 		return
 	}
 	var req tokenCreateRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Name == "" {
-		writeProblem(w, http.StatusBadRequest, "invalid request", `body must be JSON with a non-empty "name"`)
+	const bodyShape = `body must be JSON with a non-empty "name"`
+	if err := strictJSONDecoder(r.Body).Decode(&req); err != nil {
+		writeProblem(w, http.StatusBadRequest, "invalid request", unknownFieldDetail(err, bodyShape))
+		return
+	}
+	if req.Name == "" {
+		writeProblem(w, http.StatusBadRequest, "invalid request", bodyShape)
+		return
+	}
+	/* A BOUND on the name, because the name is printed.
+	   Nothing limited it before, and a 4 000-character token name is stored, listed, and rendered
+	   into every row of /settings and into the label of that row's Revoke button — one such name
+	   widened the page to ~950 000 pixels and left the whole console scrolling sideways. The limit
+	   matches the one targets and check definitions carry, so every name in this API is bounded by
+	   the same number. */
+	/* And no control characters, like every other name in this API. A NUL reached CreateToken,
+	   PostgreSQL refused the row, and the handler answered 502 "tokens unavailable" — after the
+	   secret had already been generated, so a refused request still burned a credential. */
+	if rejectControlChars(w, "name", req.Name) {
+		return
+	}
+	if len(req.Name) > tokenNameMaxLen {
+		writeProblem(w, http.StatusUnprocessableEntity, "invalid token",
+			fmt.Sprintf("token: name is %d bytes, limit is %d", len(req.Name), tokenNameMaxLen))
 		return
 	}
 	// An expiry already in the past mints a credential that can never authenticate, so the
@@ -193,7 +220,16 @@ func (s *Server) handleTokensDelete(w http.ResponseWriter, r *http.Request) {
 	if s.tokensUnavailable(w) {
 		return
 	}
+	/* A MALFORMED id is a 404, not an outage report. The path parameter went to the store raw, the
+	   UUID parse failed there and came back as a plain error, and this handler mapped every non
+	   ErrNotFound error to 502 "tokens unavailable — failed to read token": a typo told the operator
+	   the token store was down and wrote an ERROR log line for it. Every sibling resource validates
+	   the id first. */
 	id := chi.URLParam(r, "id")
+	if _, perr := uuid.Parse(id); perr != nil {
+		writeProblem(w, http.StatusNotFound, "not found", "no token with that id")
+		return
+	}
 
 	tok, err := s.tokens.GetTokenByID(r.Context(), id)
 	switch {

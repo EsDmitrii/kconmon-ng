@@ -60,6 +60,7 @@ type fakeIDP struct {
 	pendingCode      string
 	pendingChallenge string
 	claims           map[string]any
+	refreshClaims    map[string]any
 	refreshToken     string
 	failRefresh      bool
 
@@ -103,6 +104,14 @@ func (f *fakeIDP) setClaims(claims map[string]any) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.claims = claims
+}
+
+// setRefreshClaims makes the refresh grant return an id_token of its own, which a real provider is
+// free to do and which is the only way a long-lived session ever hears that its groups changed.
+func (f *fakeIDP) setRefreshClaims(claims map[string]any) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.refreshClaims = claims
 }
 
 func (f *fakeIDP) setFailRefresh(fail bool) {
@@ -235,7 +244,7 @@ func (f *fakeIDP) serveAuthCodeGrant(w http.ResponseWriter, r *http.Request) {
 
 func (f *fakeIDP) serveRefreshGrant(w http.ResponseWriter, r *http.Request) {
 	f.mu.Lock()
-	fail, want := f.failRefresh, f.refreshToken
+	fail, want, claims := f.failRefresh, f.refreshToken, f.refreshClaims
 	f.mu.Unlock()
 
 	got := r.FormValue("refresh_token")
@@ -245,11 +254,22 @@ func (f *fakeIDP) serveRefreshGrant(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Deliberately no "refresh_token" key in the response.
-	writeTokenJSON(w, map[string]any{
+	body := map[string]any{
 		"access_token": "refreshed-access-token",
 		"token_type":   "Bearer",
 		"expires_in":   3600,
-	})
+	}
+	// An id_token on the refresh response is OPTIONAL, so it is opt-in here: the default path stays
+	// the provider that returns none, which is the common one.
+	if claims != nil {
+		idToken, err := signRS256(f.key, testKeyID, claims)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		body["id_token"] = idToken
+	}
+	writeTokenJSON(w, body)
 }
 
 func writeTokenJSON(w http.ResponseWriter, body map[string]any) {
@@ -299,7 +319,7 @@ func newOIDCFixtureWithCookieName(t *testing.T, idp *fakeIDP, cookieName string)
 	t.Helper()
 	kv := cache.NewInProcessKV()
 	t.Cleanup(kv.Close)
-	sessions := authn.NewSessionStore(kv, time.Hour)
+	sessions := authn.NewSessionStore(kv, time.Hour, 0)
 
 	cfg := config.OIDCConfig{
 		Issuer:        idp.issuer(),
@@ -428,9 +448,11 @@ func TestOIDCFullRoundTripAuthenticatesAndYieldsExpectedSubject(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Authenticate: %v", err)
 	}
+	// The ID is the SUB, namespaced — not "alice". preferred_username is a display concern and a
+	// reassignable one (OIDC Core §5.7); an RBAC binding may not hang off it.
 	want := authz.Subject{
 		Kind:        authz.SubjectUser,
-		ID:          "alice",
+		ID:          "oidc:user-sub-1",
 		DisplayName: "alice",
 		Groups:      []string{"admins", "sre"},
 	}
@@ -650,13 +672,293 @@ func TestOIDCCallbackGroupsClaimNonArrayNonStringYieldsNilGroups(t *testing.T) {
 	}
 }
 
+/* ── the identity a binding hangs off ────────────────────────────────────── */
+
+/*
+ * OIDC Core §5.7 says email and preferred_username MUST NOT be used as unique identifiers, and
+ * Grafana's CVE-2023-3128 (CVSS 9.4) is what ignoring that costs: identity keyed on a reassignable
+ * claim means taking a leaver's address inherits their roles. The console keys on sub, namespaced,
+ * and the tests below are the ones that would go red if anyone reintroduced the friendlier claim.
+ */
+
+func TestOIDCCallbackRefusesAnIDTokenWithNoSub(t *testing.T) {
+	t.Parallel()
+	idp := newFakeIDP(t)
+	a, _, _ := newOIDCFixture(t, idp)
+
+	claims := idp.defaultClaims()
+	delete(claims, "sub")
+	// preferred_username is still there, and used to be enough. It is not any more: a login that
+	// cannot produce a stable identifier is refused rather than keyed on a mutable one.
+	idp.setClaims(claims)
+
+	state, code := authorizeAndRedirect(t, a)
+	_, _, err := a.Callback(context.Background(), state, code)
+	if !errors.Is(err, authn.ErrInvalid) {
+		t.Errorf("expected ErrInvalid for an id token with no sub, got: %v", err)
+	}
+}
+
+func TestOIDCCallbackRefusesASubInsideAReservedNamespace(t *testing.T) {
+	t.Parallel()
+	for _, sub := range []string{"local:0a5f", "oidc:someone-else", "token:0a5f", "header:svc"} {
+		t.Run(sub, func(t *testing.T) {
+			t.Parallel()
+			idp := newFakeIDP(t)
+			a, _, _ := newOIDCFixture(t, idp)
+
+			claims := idp.defaultClaims()
+			claims["sub"] = sub
+			idp.setClaims(claims)
+
+			state, code := authorizeAndRedirect(t, a)
+			// An issuer minting sub = "local:<uuid>" would otherwise be handed every binding that
+			// local user holds — the prefix scheme turned inside out.
+			if _, _, err := a.Callback(context.Background(), state, code); !errors.Is(err, authn.ErrInvalid) {
+				t.Errorf("expected ErrInvalid for sub %q, got: %v", sub, err)
+			}
+		})
+	}
+}
+
+func TestOIDCCallbackDisplayNameFallsBackFromUsernameToNameToEmailToSub(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name  string
+		strip []string
+		want  string
+	}{
+		{name: "preferred_username wins", strip: nil, want: "alice"},
+		{name: "then name", strip: []string{"preferred_username"}, want: "Alice Liddell"},
+		{name: "then email", strip: []string{"preferred_username", "name"}, want: "alice@example.test"},
+		{name: "and finally the sub itself", strip: []string{"preferred_username", "name", "email"}, want: "user-sub-1"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			idp := newFakeIDP(t)
+			a, _, _ := newOIDCFixture(t, idp)
+
+			claims := idp.defaultClaims()
+			claims["name"] = "Alice Liddell"
+			claims["email"] = "alice@example.test"
+			for _, key := range tc.strip {
+				delete(claims, key)
+			}
+			idp.setClaims(claims)
+
+			state, code := authorizeAndRedirect(t, a)
+			sessionID, _, err := a.Callback(context.Background(), state, code)
+			if err != nil {
+				t.Fatalf("Callback: %v", err)
+			}
+			subject, err := a.Authenticate(cookieRequest(sessionID))
+			if err != nil {
+				t.Fatalf("Authenticate: %v", err)
+			}
+			if subject.DisplayName != tc.want {
+				t.Errorf("DisplayName = %q, want %q", subject.DisplayName, tc.want)
+			}
+			// Whatever the label ends up being, the ID never moves.
+			if subject.ID != "oidc:user-sub-1" {
+				t.Errorf("subject.ID = %q, want %q", subject.ID, "oidc:user-sub-1")
+			}
+		})
+	}
+}
+
+/* ── group membership across a refresh ───────────────────────────────────── */
+
+func TestOIDCRefreshAdoptsTheGroupsTheIdPNowReports(t *testing.T) {
+	t.Parallel()
+	idp := newFakeIDP(t)
+	a, sessions, _ := newOIDCFixture(t, idp)
+
+	// The IdP drops this person from admins. Until the refresh path re-read the id_token, the
+	// console kept honouring every admins binding for the rest of the session's life.
+	demoted := idp.defaultClaims()
+	demoted["groups"] = []string{"sre"}
+	idp.setRefreshClaims(demoted)
+
+	id, err := sessions.Create(context.Background(), authn.Session{
+		Username:     "oidc:user-sub-1",
+		DisplayName:  "alice",
+		Groups:       []string{"admins", "sre"},
+		RefreshToken: "initial-refresh-token",
+		AccessExpiry: time.Now().Add(30 * time.Second), // inside the refresh margin
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	subject, err := a.Authenticate(cookieRequest(id))
+	if err != nil {
+		t.Fatalf("Authenticate: %v", err)
+	}
+	if got := strings.Join(subject.Groups, ","); got != "sre" {
+		t.Errorf("subject.Groups = %v, want [sre] — the refresh must adopt the IdP's current membership", subject.Groups)
+	}
+}
+
+func TestOIDCRefreshWithoutAnIDTokenKeepsTheGroupsItHad(t *testing.T) {
+	t.Parallel()
+	idp := newFakeIDP(t)
+	a, sessions, _ := newOIDCFixture(t, idp)
+
+	// No setRefreshClaims: the fake IdP returns no id_token on refresh, which is what most
+	// providers do. Reading that as "no groups" would be a silent, total deauthorization.
+	id, err := sessions.Create(context.Background(), authn.Session{
+		Username:     "oidc:user-sub-1",
+		DisplayName:  "alice",
+		Groups:       []string{"admins", "sre"},
+		RefreshToken: "initial-refresh-token",
+		AccessExpiry: time.Now().Add(30 * time.Second),
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	subject, err := a.Authenticate(cookieRequest(id))
+	if err != nil {
+		t.Fatalf("Authenticate: %v", err)
+	}
+	if got := strings.Join(subject.Groups, ","); got != "admins,sre" {
+		t.Errorf("subject.Groups = %v, want the session's own [admins sre]", subject.Groups)
+	}
+}
+
+func TestOIDCRefreshForADifferentSubjectIsNotAdopted(t *testing.T) {
+	t.Parallel()
+	idp := newFakeIDP(t)
+	a, sessions, _ := newOIDCFixture(t, idp)
+
+	// A token endpoint answering with someone ELSE's id_token is not this session being updated;
+	// it is a session being re-pointed, and the groups it carries are not this person's.
+	other := idp.defaultClaims()
+	other["sub"] = "user-sub-2"
+	other["groups"] = []string{"platform-admins"}
+	idp.setRefreshClaims(other)
+
+	id, err := sessions.Create(context.Background(), authn.Session{
+		Username:     "oidc:user-sub-1",
+		DisplayName:  "alice",
+		Groups:       []string{"sre"},
+		RefreshToken: "initial-refresh-token",
+		AccessExpiry: time.Now().Add(30 * time.Second),
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	subject, err := a.Authenticate(cookieRequest(id))
+	if err != nil {
+		t.Fatalf("Authenticate: %v", err)
+	}
+	if got := strings.Join(subject.Groups, ","); got != "sre" {
+		t.Errorf("subject.Groups = %v, want [sre] — another subject's claims must not be adopted", subject.Groups)
+	}
+	if subject.ID != "oidc:user-sub-1" {
+		t.Errorf("subject.ID = %q, want it unchanged", subject.ID)
+	}
+}
+
+// Sessions outlive a deployment: they live in Valkey with a 12h TTL and nothing revalidates their
+// shape at boot. One minted before identity became "oidc:"+sub carries a bare username, and
+// honouring it would keep the LEGACY bindings granting for the rest of that TTL — exactly what the
+// console tells the operator at boot has stopped happening.
+func TestOIDCAuthenticateRefusesAPreUpgradeSessionAndDropsIt(t *testing.T) {
+	t.Parallel()
+	idp := newFakeIDP(t)
+	a, sessions, _ := newOIDCFixture(t, idp)
+
+	id, err := sessions.Create(context.Background(), authn.Session{
+		Username:    "alice", // the pre-upgrade shape: the username claim, unprefixed
+		DisplayName: "alice",
+		Groups:      []string{"admins"},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	if _, err := a.Authenticate(cookieRequest(id)); !errors.Is(err, authn.ErrExpired) {
+		t.Fatalf("Authenticate with a pre-upgrade session = %v, want ErrExpired", err)
+	}
+	// And it is GONE, so the next request cannot be answered from it either.
+	if _, ok, err := sessions.Get(context.Background(), id); err != nil || ok {
+		t.Errorf("session still present after refusal: ok=%v err=%v", ok, err)
+	}
+}
+
+func TestOIDCRefreshKeepsGroupsWhenTheRefreshedTokenOmitsTheClaim(t *testing.T) {
+	t.Parallel()
+	idp := newFakeIDP(t)
+	a, sessions, _ := newOIDCFixture(t, idp)
+
+	/* A refresh id_token is often MINIMAL — sub, iss, aud, exp and nothing else. Reading an absent
+	   groups claim as "no groups" would deauthorize the session completely on a token that said
+	   nothing about groups at all. */
+	minimal := idp.defaultClaims()
+	delete(minimal, "groups")
+	idp.setRefreshClaims(minimal)
+
+	id, err := sessions.Create(context.Background(), authn.Session{
+		Username:     "oidc:user-sub-1",
+		DisplayName:  "alice",
+		Groups:       []string{"admins", "sre"},
+		RefreshToken: "initial-refresh-token",
+		AccessExpiry: time.Now().Add(30 * time.Second),
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	subject, err := a.Authenticate(cookieRequest(id))
+	if err != nil {
+		t.Fatalf("Authenticate: %v", err)
+	}
+	if got := strings.Join(subject.Groups, ","); got != "admins,sre" {
+		t.Errorf("subject.Groups = %v, want them untouched by a token that never mentioned groups", subject.Groups)
+	}
+}
+
+func TestOIDCRefreshAdoptsAnEXPLICITLYEmptyGroupsClaim(t *testing.T) {
+	t.Parallel()
+	idp := newFakeIDP(t)
+	a, sessions, _ := newOIDCFixture(t, idp)
+
+	// "groups": [] is a STATEMENT — the IdP saying this person is in none — and it is adopted, unlike
+	// the absent claim above.
+	revoked := idp.defaultClaims()
+	revoked["groups"] = []string{}
+	idp.setRefreshClaims(revoked)
+
+	id, err := sessions.Create(context.Background(), authn.Session{
+		Username:     "oidc:user-sub-1",
+		DisplayName:  "alice",
+		Groups:       []string{"admins"},
+		RefreshToken: "initial-refresh-token",
+		AccessExpiry: time.Now().Add(30 * time.Second),
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	subject, err := a.Authenticate(cookieRequest(id))
+	if err != nil {
+		t.Fatalf("Authenticate: %v", err)
+	}
+	if len(subject.Groups) != 0 {
+		t.Errorf("subject.Groups = %v, want empty — the IdP said so explicitly", subject.Groups)
+	}
+}
+
 func TestOIDCAuthenticateRefreshesNearExpirySessionExactlyOnce(t *testing.T) {
 	t.Parallel()
 	idp := newFakeIDP(t)
 	a, sessions, _ := newOIDCFixture(t, idp)
 
 	id, err := sessions.Create(context.Background(), authn.Session{
-		Username:     "alice",
+		Username:     "oidc:user-sub-1",
 		DisplayName:  "alice",
 		RefreshToken: "initial-refresh-token",
 		AccessExpiry: time.Now().Add(30 * time.Second), // within accessTokenRefreshMargin
@@ -669,8 +971,8 @@ func TestOIDCAuthenticateRefreshesNearExpirySessionExactlyOnce(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Authenticate: %v", err)
 	}
-	if subject.ID != "alice" {
-		t.Errorf("subject.ID = %q, want %q", subject.ID, "alice")
+	if subject.ID != "oidc:user-sub-1" {
+		t.Errorf("subject.ID = %q, want %q", subject.ID, "oidc:user-sub-1")
 	}
 	if got := idp.tokenRequests.Load(); got != 1 {
 		t.Errorf("expected exactly one token request for the refresh, got %d", got)
@@ -708,7 +1010,7 @@ func TestOIDCAuthenticateConcurrentRefreshesSingleFlight(t *testing.T) {
 	a, sessions, _ := newOIDCFixture(t, idp)
 
 	id, err := sessions.Create(context.Background(), authn.Session{
-		Username:     "alice",
+		Username:     "oidc:user-sub-1",
 		DisplayName:  "alice",
 		RefreshToken: "initial-refresh-token",
 		AccessExpiry: time.Now().Add(30 * time.Second), // within accessTokenRefreshMargin
@@ -762,7 +1064,7 @@ func TestOIDCAuthenticateInvalidatesSessionWhenRefreshFails(t *testing.T) {
 	a, sessions, _ := newOIDCFixture(t, idp)
 
 	id, err := sessions.Create(context.Background(), authn.Session{
-		Username:     "alice",
+		Username:     "oidc:user-sub-1",
 		DisplayName:  "alice",
 		RefreshToken: "initial-refresh-token",
 		AccessExpiry: time.Now().Add(30 * time.Second),

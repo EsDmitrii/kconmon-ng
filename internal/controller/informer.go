@@ -131,7 +131,13 @@ func (nw *NodeWatcher) onNodeEvent(obj interface{}) {
 	slog.Debug("node updated", "name", node.Name, "zone", info.Zone, "ready", info.Ready,
 		"schedulable", !node.Spec.Unschedulable)
 
-	zoneChanged := info.Zone != "" && (!existed || prev.Zone != info.Zone)
+	/* A zone that was REMOVED is a change like any other.
+	   The old guard (`info.Zone != "" && ...`) skipped the notification when a node's
+	   topology.kubernetes.io/zone label was deleted or renamed away, so every agent on that node kept
+	   the old zone in the registry — served by GET /api/v1/topology and shipped to the whole fleet in
+	   AgentMeta.zone, which made peers classify probes as cross-zone against a zone that no longer
+	   exists. Registry.UpdateZone already handles "" correctly. */
+	zoneChanged := (!existed && info.Zone != "") || (existed && prev.Zone != info.Zone)
 
 	nw.notifyCount()
 	if zoneChanged {

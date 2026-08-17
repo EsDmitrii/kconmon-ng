@@ -17,13 +17,18 @@ type InProcessBus struct {
 	next int
 }
 
-// compile-time proof InProcessBus is a drop-in for the ValkeyBus (Task 8).
+// compile-time proof InProcessBus is a drop-in for the RedisBus (Task 8).
 var _ Bus = (*InProcessBus)(nil)
 
 // NewInProcessBus returns a ready-to-use in-memory Bus.
 func NewInProcessBus() *InProcessBus {
 	return &InProcessBus{subs: make(map[string]map[int]chan Message)}
 }
+
+// CrossReplica is false, and that is the whole point of this type: everything it delivers stays in
+// this process. A caller that needs another replica to act must check this rather than assume a
+// non-nil Bus can reach one.
+func (b *InProcessBus) CrossReplica() bool { return false }
 
 // Publish never blocks: a subscriber whose buffer is full has a message
 // dropped for it (logged), rather than stalling the publisher.

@@ -27,9 +27,16 @@ LIMIT sqlc.arg('lim');
 -- name: UpdateIncidentStatus :one
 -- One of THREE narrow updates, deliberately not one full replace; an incident evolves while several
 -- people look.
+--
+-- The transition is ATOMIC: `status <> $2` makes the write itself the arbiter of who moved the
+-- incident. The handler used to read the row, compare in Go, and write — so two operators (or two
+-- tabs, or a client retrying after a timeout) resolving the same incident each saw "open", each
+-- wrote "resolved", and each fired incident.resolved at every receiver, with no idempotency key to
+-- fold them by. No rows means somebody else got there first, and there is nothing to announce.
 UPDATE incidents
 SET status = $2, resolved_at = $3
 WHERE id = $1
+  AND status <> $2
 RETURNING id, title, scope, from_at, to_at, status, notes, pinned, created_by, created_at, resolved_at;
 
 -- name: UpdateIncidentNotes :one

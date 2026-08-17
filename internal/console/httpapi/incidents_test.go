@@ -106,19 +106,24 @@ func (f *fakeIncidentStore) ListIncidents(_ context.Context, filter store.Incide
 	return store.IncidentPage{Incidents: out}, nil
 }
 
-func (f *fakeIncidentStore) UpdateIncidentStatus(_ context.Context, id, status string, resolvedAt *time.Time) (store.Incident, error) {
+func (f *fakeIncidentStore) UpdateIncidentStatus(_ context.Context, id, status string, resolvedAt *time.Time) (store.Incident, bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.statusErr != nil {
-		return store.Incident{}, f.statusErr
+		return store.Incident{}, false, f.statusErr
 	}
 	inc, ok := f.incidents[id]
 	if !ok {
-		return store.Incident{}, store.ErrNotFound
+		return store.Incident{}, false, store.ErrNotFound
+	}
+	// The real store's transition is conditional (`status <> $2`), and the bool is whether THIS call
+	// performed it; already-there is a success with nothing to announce.
+	if inc.Status == status {
+		return inc, false, nil
 	}
 	inc.Status, inc.ResolvedAt = status, resolvedAt
 	f.incidents[id] = inc
-	return inc, nil
+	return inc, true, nil
 }
 
 func (f *fakeIncidentStore) UpdateIncidentNotes(_ context.Context, id, notes string) (store.Incident, error) {
@@ -302,8 +307,11 @@ func TestIncidentsOperatorAndAdminWriteTheFullCycle(t *testing.T) {
 func TestIncidentsCreateRecordsTheSubjectAndIgnoresClientState(t *testing.T) {
 	st := newFakeIncidentStore()
 	s := newM5TestServer(t, "operator", Deps{Incidents: st})
-	body := `{"title":"t","fromAt":"2026-08-07T10:00:00Z","createdBy":"somebody-else",` +
-		`"status":"resolved","resolvedAt":"2026-08-07T11:00:00Z"}`
+	/* The state fields a client cannot set are now REFUSED by name rather than
+	   silently ignored: the request schema is additionalProperties:false, and a
+	   client that sends "status" on create has misunderstood the route. The
+	   refusal itself is the case below; here the body is the legal one. */
+	body := `{"title":"t","fromAt":"2026-08-07T10:00:00Z"}`
 	w := doRequest(t, s, http.MethodPost, "/api/v1/incidents", strings.NewReader(body), mutateWithCSRF)
 	if w.Code != http.StatusCreated {
 		t.Fatalf("status %d, want 201: %s", w.Code, w.Body)
@@ -356,7 +364,7 @@ func TestIncidentsListFiltersAndBadInputs(t *testing.T) {
 	st := newFakeIncidentStore()
 	st.seed("open one", "node-a", time.Now().UTC())
 	resolved := st.seed("resolved one", "node-b", time.Now().UTC())
-	if _, err := st.UpdateIncidentStatus(context.Background(), resolved,
+	if _, _, err := st.UpdateIncidentStatus(context.Background(), resolved,
 		store.IncidentStatusResolved, ptrTo(time.Now().UTC())); err != nil {
 		t.Fatalf("seed resolve: %v", err)
 	}
@@ -579,7 +587,11 @@ func TestIncidentsPatchValidation(t *testing.T) {
 		{"invalid status", `{"status":"on-fire"}`, http.StatusUnprocessableEntity},
 		{"empty status", `{"status":""}`, http.StatusUnprocessableEntity},
 		{"no fields at all", `{}`, http.StatusUnprocessableEntity},
-		{"unknown fields only", `{"title":"renamed"}`, http.StatusUnprocessableEntity},
+		/* A patch whose only field is unknown is now REFUSED by name (400) rather than
+		   reported as "you named nothing" (422): every field here is optional, so a typo
+		   used to decode to an empty patch and the reader was told the opposite of what
+		   they did. */
+		{"unknown fields only", `{"title":"renamed"}`, http.StatusBadRequest},
 		{
 			"notes over 16384 bytes",
 			fmt.Sprintf(`{"notes":%q}`, strings.Repeat("n", 16385)),
@@ -843,5 +855,71 @@ func TestIncidentRoutesWorkWithoutANotifier(t *testing.T) {
 	if w := doRequest(t, s, http.MethodPatch, "/api/v1/incidents/"+id,
 		strings.NewReader(`{"status":"resolved"}`), mutateWithCSRF); w.Code != http.StatusOK {
 		t.Errorf("PATCH without a notifier = %d, want 200: %s", w.Code, w.Body)
+	}
+}
+
+/*
+The other half of the same rule: a body field the schema does not declare is refused BY NAME. It
+used to be dropped in silence, so a client that thought it was opening a resolved incident, or
+stamping its own author, was told nothing at all.
+*/
+func TestIncidentsCreateRefusesServerOwnedFieldsByName(t *testing.T) {
+	for _, body := range []string{
+		`{"title":"t","fromAt":"2026-08-07T10:00:00Z","status":"resolved"}`,
+		`{"title":"t","fromAt":"2026-08-07T10:00:00Z","createdBy":"somebody-else"}`,
+	} {
+		st := newFakeIncidentStore()
+		s := newM5TestServer(t, "operator", Deps{Incidents: st})
+		w := doRequest(t, s, http.MethodPost, "/api/v1/incidents", strings.NewReader(body), mutateWithCSRF)
+		if w.Code != http.StatusBadRequest {
+			t.Errorf("POST %s = %d, want 400: %s", body, w.Code, w.Body)
+		}
+		if len(st.incidents) != 0 {
+			t.Errorf("POST %s created an incident anyway", body)
+		}
+	}
+}
+
+/*
+ * A resolve that commits and a notes write that then fails leave the row RESOLVED. The lifecycle
+ * delivery is owed by that transition, and cancelling it on the later failure lost it forever: the
+ * caller retries the identical PATCH, the status guard sees the row is already resolved, and the
+ * incident.resolved webhook is never sent — not on the retry, not by anything else.
+ */
+func TestIncidentResolveNotifiesEvenWhenALaterFieldFails(t *testing.T) {
+	st := newFakeIncidentStore()
+	notifier := &fakeIncidentNotifier{}
+	s := newM5TestServer(t, "operator", Deps{Incidents: st, IncidentNotifier: notifier})
+
+	body := `{"title":"loss spike","scope":"node-a","fromAt":"2026-08-08T12:00:00Z"}`
+	w := doRequest(t, s, http.MethodPost, "/api/v1/incidents", strings.NewReader(body), mutateWithCSRF)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("POST = %d: %s", w.Code, w.Body)
+	}
+	var created incidentResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &created); err != nil {
+		t.Fatal(err)
+	}
+
+	st.notesErr = errors.New("pool exhausted")
+	w = doRequest(t, s, http.MethodPatch, "/api/v1/incidents/"+created.ID,
+		strings.NewReader(`{"status":"resolved","notes":"root cause: switch"}`), mutateWithCSRF)
+	if w.Code != http.StatusBadGateway {
+		t.Fatalf("PATCH = %d, want 502 (the notes write failed): %s", w.Code, w.Body)
+	}
+
+	got := notifier.notified()
+	events := make([]string, 0, len(got))
+	for _, n := range got {
+		events = append(events, n.event)
+	}
+	if len(events) != 2 || events[1] != store.WebhookEventIncidentResolved {
+		t.Fatalf("notifier saw %v, want the created event followed by %q", events, store.WebhookEventIncidentResolved)
+	}
+	/* And it carries the INCIDENT, not a zero value. `current, err = …` overwrote current with the
+	   store's zero Incident before the error was tested, so the delivery named an incident with no
+	   id and an empty status: a receiver told that nothing had been resolved. */
+	if got[1].id != created.ID {
+		t.Errorf("resolved notification carried id %q, want %q", got[1].id, created.ID)
 	}
 }

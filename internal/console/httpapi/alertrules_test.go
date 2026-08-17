@@ -18,6 +18,7 @@ import (
 
 	"github.com/EsDmitrii/kconmon-ng/internal/console/alerting"
 	"github.com/EsDmitrii/kconmon-ng/internal/console/authz"
+	"github.com/EsDmitrii/kconmon-ng/internal/console/cache"
 	"github.com/EsDmitrii/kconmon-ng/internal/console/promql"
 	"github.com/EsDmitrii/kconmon-ng/internal/console/promrules"
 	"github.com/EsDmitrii/kconmon-ng/internal/console/store"
@@ -1403,7 +1404,9 @@ func TestAlertRuleAuditDetailIsNameOnly(t *testing.T) {
 // resource needs most.
 func TestAlertRulePreviewAuditDetailIsAlwaysEmpty(t *testing.T) {
 	audit := &fakeAuditStore{}
-	s := newAuditTestServer(t, audit, []authz.Permission{authz.PermAlertsRead},
+	// promql:query as well: previewing a RAW rule runs the caller's own PromQL, so it is gated on
+	// the same permission the query endpoint is (see handleAlertRulesPreview).
+	s := newAuditTestServer(t, audit, []authz.Permission{authz.PermAlertsRead, authz.PermPromQLQuery},
 		Deps{AlertRules: newFakeAlertRuleStore(), Prometheus: newFakePrometheus(t, promVector(1))})
 
 	body := `{"name":"Draft","kind":"raw","severity":"warning",` +
@@ -1418,5 +1421,79 @@ func TestAlertRulePreviewAuditDetailIsAlwaysEmpty(t *testing.T) {
 	}
 	if entry.Action != "POST /api/v1/alert-rules/preview" {
 		t.Errorf("action = %q, want the preview route pattern", entry.Action)
+	}
+}
+
+/** newPermsServer wires a server whose subject holds EXACTLY the given permissions. */
+func newPermsServer(t *testing.T, perms []authz.Permission, extra Deps) *Server { //nolint:gocritic // hugeParam: test helper
+	t.Helper()
+	policy := authz.NewPolicy(map[string][]authz.Permission{"exact": perms})
+	authr := fakeAuthenticator{subject: authz.Subject{Kind: authz.SubjectUser, ID: "u1"}}
+	extra.Roles = fakeRoleResolver{roles: []string{"exact"}}
+	return newAuthzServer(t, authr, policy, extra)
+}
+
+/* ── the raw preview is a PromQL execution ───────────────────────────────── */
+
+/*
+ * kind=raw carries the caller's OWN expression and this endpoint runs it. A role holding alerts:read
+ * alone — which the RBAC editor offers as a ready-made least-privilege set — therefore had an
+ * arbitrary-PromQL oracle it is refused at POST /api/v1/promql/query: `{__name__=~".+"}` enumerates
+ * every metric and label in Prometheus, and a failed query hands back Prometheus' own error text.
+ */
+func TestAlertRuleRawPreviewNeedsPromQLQueryToo(t *testing.T) {
+	reader := newPermsServer(t, []authz.Permission{authz.PermAlertsRead},
+		Deps{AlertRules: newFakeAlertRuleStore(), Prometheus: newFakePrometheus(t, promVector(1))})
+
+	raw := `{"name":"Draft","kind":"raw","severity":"warning","params":{"expr":"{__name__=~\".+\"}"}}`
+	w := doRequest(t, reader, http.MethodPost, "/api/v1/alert-rules/preview", strings.NewReader(raw), mutateWithCSRF)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("raw preview with alerts:read alone = %d, want 403: %s", w.Code, w.Body)
+	}
+	if !strings.Contains(w.Body.String(), string(authz.PermPromQLQuery)) {
+		t.Errorf("body = %s, want it to name the permission that is missing", w.Body)
+	}
+
+	// A TEMPLATED kind stays on alerts:read: its expression is built from a closed parameter set
+	// this console wrote itself, so previewing it asks nothing the caller could not already ask.
+	templated := validAlertRuleBody
+	w = doRequest(t, reader, http.MethodPost, "/api/v1/alert-rules/preview", strings.NewReader(templated), mutateWithCSRF)
+	if w.Code != http.StatusOK {
+		t.Fatalf("templated preview with alerts:read = %d, want 200: %s", w.Code, w.Body)
+	}
+
+	// And with both permissions the raw preview runs.
+	full := newPermsServer(t, []authz.Permission{authz.PermAlertsRead, authz.PermPromQLQuery},
+		Deps{AlertRules: newFakeAlertRuleStore(), Prometheus: newFakePrometheus(t, promVector(1))})
+	w = doRequest(t, full, http.MethodPost, "/api/v1/alert-rules/preview", strings.NewReader(raw), mutateWithCSRF)
+	if w.Code != http.StatusOK {
+		t.Fatalf("raw preview with both permissions = %d, want 200: %s", w.Code, w.Body)
+	}
+}
+
+/*
+ * The Prometheus budget covers EVERY preview kind, not just raw.
+ *
+ * The rate limit sat inside the `kind == raw` branch while the query ran for every kind, so a caller
+ * holding nothing but alerts:read could post templated previews in a loop -- each one a
+ * histogram_quantile over a 5m rate, grouped three ways -- straight at the operator's Prometheus with
+ * no cap, under a comment claiming the budget was "the caller's total against Prometheus".
+ */
+func TestAlertRulePreviewSpendsThePromQLBudgetForTemplatedKindsToo(t *testing.T) {
+	s := newM5TestServer(t, "viewer", Deps{
+		AlertRules: newFakeAlertRuleStore(), Prometheus: newFakePrometheus(t, promVector(1)),
+		KV: cache.NewInProcessKV(),
+	})
+	s.cfg.RateLimit.PromQLPerMinute = 1
+
+	first := doRequest(t, s, http.MethodPost, "/api/v1/alert-rules/preview",
+		strings.NewReader(validAlertRuleBody), mutateWithCSRF)
+	if first.Code != http.StatusOK {
+		t.Fatalf("first preview = %d, want 200: %s", first.Code, first.Body)
+	}
+	second := doRequest(t, s, http.MethodPost, "/api/v1/alert-rules/preview",
+		strings.NewReader(validAlertRuleBody), mutateWithCSRF)
+	if second.Code != http.StatusTooManyRequests {
+		t.Fatalf("second templated preview = %d, want 429: the budget must bound every kind", second.Code)
 	}
 }

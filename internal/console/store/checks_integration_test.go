@@ -43,7 +43,7 @@ func newChecksDB(t *testing.T) (*store.DB, string) {
 func mustCreateRun(t *testing.T, ctx context.Context, db *store.DB, pairTotal int32) store.Run {
 	t.Helper()
 	id := uuid.NewString()
-	run, err := db.CreateRun(ctx, id, "ping", "pod", json.RawMessage(`{"source":"a"}`), "user", "u-1", pairTotal)
+	run, err := db.CreateRun(ctx, id, "ping", "pod", json.RawMessage(`{"source":"a"}`), "user", "u-1", pairTotal, time.Now().Add(time.Hour))
 	if err != nil {
 		t.Fatalf("CreateRun: %v", err)
 	}
@@ -105,7 +105,7 @@ func TestCreateRunThenMarkStartedThenUpsertResultsThenFinish(t *testing.T) {
 		}
 	}
 
-	results, err := db.GetRunResults(ctx, run.ID)
+	results, _, err := db.GetRunResults(ctx, run.ID)
 	if err != nil {
 		t.Fatalf("GetRunResults: %v", err)
 	}
@@ -171,7 +171,7 @@ func TestUpsertRunResultTwiceForSamePairOverwrites(t *testing.T) {
 		t.Errorf("second UpsertRunResult: got %+v, want the newer values", second)
 	}
 
-	results, err := db.GetRunResults(ctx, run.ID)
+	results, _, err := db.GetRunResults(ctx, run.ID)
 	if err != nil {
 		t.Fatalf("GetRunResults: %v", err)
 	}
@@ -313,13 +313,13 @@ func TestCreateRunDuplicateIDReturnsErrAlreadyExists(t *testing.T) {
 	ctx := context.Background()
 
 	id := uuid.NewString()
-	if _, err := db.CreateRun(ctx, id, "ping", "pod", json.RawMessage(`{}`), "user", "u-1", 1); err != nil {
+	if _, err := db.CreateRun(ctx, id, "ping", "pod", json.RawMessage(`{}`), "user", "u-1", 1, time.Now().Add(time.Hour)); err != nil {
 		t.Fatalf("first CreateRun: %v", err)
 	}
 
-	_, err := db.CreateRun(ctx, id, "ping", "pod", json.RawMessage(`{}`), "user", "u-1", 1)
+	_, err := db.CreateRun(ctx, id, "ping", "pod", json.RawMessage(`{}`), "user", "u-1", 1, time.Now().Add(time.Hour))
 	if !errors.Is(err, store.ErrAlreadyExists) {
-		t.Fatalf("second CreateRun(same id): err = %v, want it to wrap store.ErrAlreadyExists", err)
+		t.Fatalf("second CreateRun(same id, time.Now().Add(time.Hour)): err = %v, want it to wrap store.ErrAlreadyExists", err)
 	}
 }
 
@@ -330,7 +330,7 @@ func TestListRunsFiltersByCheckTypeAndStatus(t *testing.T) {
 	ctx := context.Background()
 
 	mkRun := func(checkType string, finish string) {
-		r, err := db.CreateRun(ctx, uuid.NewString(), checkType, "pod", json.RawMessage(`{}`), "user", "u-1", 1)
+		r, err := db.CreateRun(ctx, uuid.NewString(), checkType, "pod", json.RawMessage(`{}`), "user", "u-1", 1, time.Now().Add(time.Hour))
 		if err != nil {
 			t.Fatalf("CreateRun: %v", err)
 		}
@@ -364,7 +364,7 @@ func TestListRunsPagesWithoutDuplicatesOrGaps(t *testing.T) {
 
 	const total = 250
 	for i := 0; i < total; i++ {
-		if _, err := db.CreateRun(ctx, uuid.NewString(), "ping", "pod", json.RawMessage(`{}`), "user", "u-1", 1); err != nil {
+		if _, err := db.CreateRun(ctx, uuid.NewString(), "ping", "pod", json.RawMessage(`{}`), "user", "u-1", 1, time.Now().Add(time.Hour)); err != nil {
 			t.Fatalf("CreateRun: %v", err)
 		}
 	}
@@ -564,21 +564,25 @@ func TestReapStuckRunsForceFinishesOnlyOldRunningRuns(t *testing.T) {
 	}
 	defer pool.Close()
 	for _, id := range []string{stuck.ID, pending.ID, finished.ID} {
-		if _, err := pool.Exec(ctx, `UPDATE check_runs SET created_at = now() - interval '3 hours' WHERE id = $1`, id); err != nil {
+		if _, err := pool.Exec(ctx, `UPDATE check_runs SET created_at = now() - interval '3 hours' , deadline_at = now() - interval '1 hour' WHERE id = $1`, id); err != nil {
 			t.Fatalf("backdate %s: %v", id, err)
 		}
 	}
 
-	n, err := db.ReapStuckRuns(ctx, time.Now().UTC().Add(-2*time.Hour), 100)
+	/* A budget that allows a run one hour on top of its own (absent) duration: the three backdated
+	   rows are three hours old, the healthy one is seconds old. 'pending' is IN scope — a replica
+	   that died between CreateRun and MarkRunStarted leaves one behind and nothing else finishes it. */
+	budget := store.ReapBudget{PerSourceConcurrency: 1, PerPairTimeout: 0, Slack: time.Hour}
+	n, err := db.ReapStuckRuns(ctx, budget, 100)
 	if err != nil {
 		t.Fatalf("ReapStuckRuns: %v", err)
 	}
-	if n != 1 {
-		t.Fatalf("ReapStuckRuns reaped %d rows, want 1", n)
+	if n != 2 {
+		t.Fatalf("ReapStuckRuns reaped %d rows, want 2 (the stuck run and the orphaned pending one)", n)
 	}
 
 	want := map[string]string{
-		stuck.ID: "cancelled", healthy.ID: "running", pending.ID: "pending", finished.ID: "succeeded",
+		stuck.ID: "cancelled", healthy.ID: "running", pending.ID: "cancelled", finished.ID: "succeeded",
 	}
 	for id, wantStatus := range want {
 		got, err := db.GetRun(ctx, id)
@@ -599,7 +603,7 @@ func TestReapStuckRunsForceFinishesOnlyOldRunningRuns(t *testing.T) {
 	}
 
 	// Idempotent: a second sweep finds nothing left to reap.
-	again, err := db.ReapStuckRuns(ctx, time.Now().UTC().Add(-2*time.Hour), 100)
+	again, err := db.ReapStuckRuns(ctx, budget, 100)
 	if err != nil {
 		t.Fatalf("second ReapStuckRuns: %v", err)
 	}
@@ -626,12 +630,12 @@ func TestReapStuckRunsHonoursLimit(t *testing.T) {
 		if err := db.MarkRunStarted(ctx, run.ID); err != nil {
 			t.Fatalf("MarkRunStarted: %v", err)
 		}
-		if _, err := pool.Exec(ctx, `UPDATE check_runs SET created_at = now() - interval '3 hours' WHERE id = $1`, run.ID); err != nil {
+		if _, err := pool.Exec(ctx, `UPDATE check_runs SET created_at = now() - interval '3 hours' , deadline_at = now() - interval '1 hour' WHERE id = $1`, run.ID); err != nil {
 			t.Fatalf("backdate: %v", err)
 		}
 	}
 
-	n, err := db.ReapStuckRuns(ctx, time.Now().UTC().Add(-2*time.Hour), 2)
+	n, err := db.ReapStuckRuns(ctx, store.ReapBudget{PerSourceConcurrency: 1, Slack: time.Hour}, 2)
 	if err != nil {
 		t.Fatalf("ReapStuckRuns: %v", err)
 	}

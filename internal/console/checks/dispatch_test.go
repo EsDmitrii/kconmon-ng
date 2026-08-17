@@ -152,7 +152,7 @@ func TestExternalPairPersistsLabelNotAddress(t *testing.T) {
 	}
 	waitForTerminal(t, mem, id)
 
-	results, err := runner.GetResults(context.Background(), id)
+	results, _, err := runner.GetResults(context.Background(), id)
 	if err != nil {
 		t.Fatalf("GetResults: %v", err)
 	}

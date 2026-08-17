@@ -26,10 +26,17 @@ var (
 )
 
 type Config struct {
-	Mode               string              `yaml:"mode"`
-	MetricsPrefix      string              `yaml:"metricsPrefix"`
-	HTTPPort           int                 `yaml:"httpPort"`
-	GRPCPort           int                 `yaml:"grpcPort"`
+	Mode          string `yaml:"mode"`
+	MetricsPrefix string `yaml:"metricsPrefix"`
+	HTTPPort      int    `yaml:"httpPort"`
+	GRPCPort      int    `yaml:"grpcPort"`
+	/* MetricsPort carries /metrics (and the health endpoints) on a listener of its OWN.
+	   The controller's httpPort serves its whole API — GET /api/v1/topology, POST
+	   /api/v1/diagnostics, PUT /api/v1/external-checks — and none of those authenticate anything, so
+	   a firewall rule that lets a scraper reach the metrics reached the fleet's control plane with
+	   it. Two listeners make "let Prometheus in" and "let this caller drive the fleet" two different
+	   decisions, which is the only way a NetworkPolicy can express one without the other. */
+	MetricsPort        int                 `yaml:"metricsPort"`
 	LogLevel           string              `yaml:"logLevel"`
 	LogFormat          string              `yaml:"logFormat"`
 	FailureDomainLabel string              `yaml:"failureDomainLabel"`
@@ -88,6 +95,16 @@ type HTTPTarget struct {
 	Method       string `yaml:"method,omitempty"`
 	ExpectStatus int    `yaml:"expectStatus,omitempty"`
 	BodyPattern  string `yaml:"bodyPattern,omitempty"`
+	/* InsecureSkipVerify turns certificate verification OFF for THIS target, and defaults to off --
+	   meaning verification is on.
+
+	   The checker used to skip verification unconditionally, for every target, with no knob and no
+	   mention outside a code comment: an https target whose certificate had expired, was issued for
+	   another hostname or came from an interceptor still handshaked, still answered 200, and still
+	   counted as a success. A check an operator added to watch an internal endpoint could not fail on
+	   any TLS condition at all. The external HTTP checker has always taken the opposite default, so
+	   the two halves of the same product disagreed about what "healthy https" means. */
+	InsecureSkipVerify bool `yaml:"insecureSkipVerify,omitempty"`
 }
 
 type MTRCheckerConfig struct {
@@ -269,6 +286,13 @@ func (l *Loader) loadFromEnv(cfg *Config) {
 	}
 }
 
+/*
+minAgentTTL is two agent heartbeats. The agent beats every 5s (agent.StartHeartbeat's caller), and
+
+	a TTL under two of those evicts agents that are answering perfectly well.
+*/
+const minAgentTTL = 10 * time.Second
+
 func (l *Loader) validate(cfg *Config) error {
 	if cfg.HTTPPort < 1 || cfg.HTTPPort > 65535 {
 		return fmt.Errorf("httpPort must be between 1 and 65535, got %d", cfg.HTTPPort)
@@ -276,8 +300,14 @@ func (l *Loader) validate(cfg *Config) error {
 	if cfg.GRPCPort < 1 || cfg.GRPCPort > 65535 {
 		return fmt.Errorf("grpcPort must be between 1 and 65535, got %d", cfg.GRPCPort)
 	}
+	if cfg.MetricsPort < 1 || cfg.MetricsPort > 65535 {
+		return fmt.Errorf("metricsPort must be between 1 and 65535, got %d", cfg.MetricsPort)
+	}
 	if cfg.HTTPPort == cfg.GRPCPort {
 		return fmt.Errorf("httpPort and grpcPort must be different")
+	}
+	if cfg.MetricsPort == cfg.HTTPPort || cfg.MetricsPort == cfg.GRPCPort {
+		return fmt.Errorf("metricsPort must differ from httpPort and grpcPort (got %d)", cfg.MetricsPort)
 	}
 
 	validLevels := map[string]bool{"debug": true, "info": true, "warn": true, "error": true}
@@ -288,6 +318,19 @@ func (l *Loader) validate(cfg *Config) error {
 	validFormats := map[string]bool{"json": true, "text": true}
 	if !validFormats[strings.ToLower(cfg.LogFormat)] {
 		return fmt.Errorf("logFormat must be one of json, text; got %q", cfg.LogFormat)
+	}
+
+	/* The TTL becomes a ticker PERIOD (agentTtl/2 in controller.Run), and time.NewTicker panics on a
+	   non-positive one. An operator disabling TTL eviction with "0s" got CrashLoopBackOff and a raw
+	   Go stack trace — after the gRPC listener was up and the pod had reported ready — instead of a
+	   configuration error naming the field. A TTL below two heartbeats is refused for a different
+	   reason: it evicts the whole fleet on every sweep. */
+	if cfg.Controller.AgentTTL <= 0 {
+		return fmt.Errorf("controller.agentTtl must be > 0, got %v", cfg.Controller.AgentTTL)
+	}
+	if cfg.Controller.AgentTTL < minAgentTTL {
+		return fmt.Errorf("controller.agentTtl (%v) must be at least %v — two agent heartbeats — "+
+			"or the sweep evicts the whole fleet between beats", cfg.Controller.AgentTTL, minAgentTTL)
 	}
 
 	if cfg.Checkers.UDP.Packets < 1 {
@@ -414,11 +457,17 @@ func validateDNS(dns DNSCheckerConfig) error {
 		if strings.TrimSpace(r) == "" {
 			return fmt.Errorf("dns.resolvers[%d] must not be empty", i)
 		}
-		// Accept either "host" or "host:port".
-		if strings.Contains(r, ":") {
+		/* Accept "host", "host:port", and a BARE IPv6 address.
+
+		   The bare IPv6 case used to be refused: every colon sent the entry through SplitHostPort,
+		   which errors on "2001:4860:4860::8888" — so a plain IPv6 resolver, written the way it is
+		   written everywhere else, failed startup with "is not a valid host or host:port". The
+		   checker joins the port on for this spelling (checker.resolverDialAddr), same as for a
+		   bare IPv4. */
+		if strings.Contains(r, ":") && net.ParseIP(r) == nil {
 			host, port, err := net.SplitHostPort(r)
 			if err != nil {
-				return fmt.Errorf("dns.resolvers[%d] %q is not a valid host or host:port: %w", i, r, err)
+				return fmt.Errorf("dns.resolvers[%d] %q is not a valid host, host:port or IP address: %w", i, r, err)
 			}
 			if host == "" {
 				return fmt.Errorf("dns.resolvers[%d] %q has an empty host", i, r)

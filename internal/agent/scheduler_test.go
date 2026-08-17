@@ -310,6 +310,20 @@ func TestTriggerMTRStillFiresForPeerFailures(t *testing.T) {
 
 	s.triggerMTR(context.Background(), peer, &failed)
 
+	/* The trace runs in its OWN goroutine now — inline, it stalled the whole peer-probe loop for up
+	   to thirty seconds during an outage, which is exactly when traces fire and exactly when the
+	   fleet must not stop measuring. So the result is awaited rather than read synchronously. */
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		mu.Lock()
+		done := len(results) > 0
+		mu.Unlock()
+		if done || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+
 	mu.Lock()
 	defer mu.Unlock()
 	if len(results) != 1 || results[0].Type != model.CheckMTR {

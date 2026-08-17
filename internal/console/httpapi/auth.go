@@ -3,6 +3,7 @@ package httpapi
 import (
 	"context"
 	"crypto/rand"
+	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -171,6 +172,29 @@ type authLoginRequest struct {
 
 // handleAuthLogin verifies username/password against s.users (argon2id, via authn.VerifyPassword)
 // and mints a session.
+// sameOriginRequest reports whether this request came from the console's own origin.
+//
+// It is ws/conn.go's checkOrigin, deliberately identical: an ABSENT Origin passes, because a
+// non-browser client (curl, a script, an agent) never sends one and this is a browser-CSRF defence,
+// not an authentication step. A PRESENT Origin must match the Host the request was addressed to.
+//
+// Sec-Fetch-Site is honoured when the browser sent it, which is stricter and cheaper: "same-origin"
+// passes, anything else (cross-site, same-site, none) is refused before the Origin is even parsed.
+func sameOriginRequest(r *http.Request) bool {
+	if site := r.Header.Get("Sec-Fetch-Site"); site != "" {
+		return strings.EqualFold(site, "same-origin")
+	}
+	origin := r.Header.Get("Origin")
+	if origin == "" {
+		return true
+	}
+	u, err := url.Parse(origin)
+	if err != nil {
+		return false
+	}
+	return strings.EqualFold(u.Host, r.Host)
+}
+
 func (s *Server) handleAuthLogin(w http.ResponseWriter, r *http.Request) {
 	if s.cfg.Auth.Mode != "local" {
 		writeProblem(w, http.StatusNotFound, "not found", "")
@@ -183,16 +207,43 @@ func (s *Server) handleAuthLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	/* SAME-ORIGIN, and it is not belt-and-braces: this route is public, so authorize applies no CSRF
+	   gate to it, and a login is a state change on the victim's browser. evil.example can post a
+	   cross-site form with enctype=text/plain whose body parses as this JSON, and the 204's
+	   Set-Cookie then replaces the victim's session with the ATTACKER's: everything the victim goes
+	   on to write — annotations, incidents, maintenance windows — is written into the attacker's
+	   account, and everything they read is read from it. The socket's own upgrade already refuses a
+	   cross-origin request this way (ws/conn.go's checkOrigin); the shape is copied verbatim, an
+	   ABSENT Origin included, since a non-browser client never sends one. */
+	if !sameOriginRequest(r) {
+		writeProblem(w, http.StatusForbidden, "cross-origin login refused",
+			"a login must come from this console's own origin")
+		return
+	}
+	/* And the enctype=text/plain form vector needs a content type it cannot set: a browser form can
+	   only send text/plain, multipart/form-data or urlencoded, never application/json. */
+	if ct := r.Header.Get("Content-Type"); ct != "" && !strings.HasPrefix(ct, "application/json") {
+		writeProblem(w, http.StatusUnsupportedMediaType, "unsupported media type",
+			"a login body must be sent as application/json")
+		return
+	}
+
 	var req authLoginRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Username == "" || req.Password == "" {
 		writeProblem(w, http.StatusBadRequest, "invalid request", `body must be JSON with non-empty "username" and "password"`)
 		return
 	}
 
-	// Username and source IP are counted INDEPENDENTLY against the same limit (rateLimitAllow
-	// increments both, always).
-	if !s.rateLimitAllow(r.Context(), rateLimitLogin, s.cfg.RateLimit.LoginPerMinute,
-		loginUserRateLimitKey(req.Username), loginIPRateLimitKey(r.RemoteAddr)) {
+	/* Two counters, two BUDGETS, and that is the fix rather than a nicety. Behind the chart's own
+	   Ingress every request in the world arrives from the ingress-controller pod, so one address is
+	   not one person: at a shared budget, six bogus attempts a minute locked out every user of the
+	   console, correct password included, with no credentials needed to do it. The per-username
+	   counter stays narrow (it is what protects an account); the per-address one is a wide net for a
+	   single host hammering many usernames, and it counts the address the trusted-proxy
+	   configuration says is really the client. */
+	if !s.rateLimitAllow(r.Context(), rateLimitLogin, s.cfg.RateLimit.LoginPerMinute, loginUserRateLimitKey(req.Username)) ||
+		!s.rateLimitAllow(r.Context(), rateLimitLogin, s.cfg.RateLimit.LoginPerMinute*loginIPBurstFactor,
+			loginIPRateLimitKey(clientIP(r, s.trustedProxies))) {
 		writeRateLimited(w, loginRateLimitDetail)
 		return
 	}
@@ -274,6 +325,9 @@ func (s *Server) handleAuthLogout(w http.ResponseWriter, r *http.Request) {
 // browser back to when the caller specifies no ?returnTo=.
 const oidcDefaultReturnTo = "/"
 
+// oidcMaxReturnToBytes caps the caller-controlled string the state stash carries.
+const oidcMaxReturnToBytes = 2048
+
 // isSafeReturnTo mirrors authn.OIDCAuthenticator.AuthorizeURL's own same-origin-relative-path check
 // (oidc.go's unexported isSafeReturnTo of the same name and behavior) so handleOIDCStart can
 // validate returnTo BEFORE calling AuthorizeURL; duplicated rather than exported from authn (I-4
@@ -292,6 +346,58 @@ func isSafeReturnTo(returnTo string) bool {
 	return u.Scheme == "" && u.Host == ""
 }
 
+/*
+oidcStateCookie binds the CSRF state to the browser that STARTED the flow (RFC 6749 section 10.12).
+
+Without it the callback accepts a state from ANY user agent: an attacker runs the flow to the point
+of holding a valid state+code pair, then makes the victim's browser follow the callback URL, and the
+victim is silently signed in as the attacker -- login CSRF. Everything the victim then records lands
+in the attacker's account.
+
+Path is the OIDC endpoints only, so the cookie never rides on an ordinary API call, and it is
+cleared on the way out whatever the outcome.
+*/
+const oidcStateCookieName = "kconmon_oidc_state"
+
+// Mirrors authn's own state TTL.
+const oidcStateCookieMaxAge = 300
+
+const oidcCookiePath = "/api/v1/auth/oidc"
+
+func (s *Server) setOIDCStateCookie(w http.ResponseWriter, state string) {
+	http.SetCookie(w, &http.Cookie{ //nolint:gosec // G124: HttpOnly+SameSite are set; Secure is config-driven, as for the session cookie
+		Name:     oidcStateCookieName,
+		Value:    state,
+		Path:     oidcCookiePath,
+		HttpOnly: true,
+		Secure:   s.cfg.Auth.Session.Secure,
+		SameSite: http.SameSiteLaxMode,
+		MaxAge:   oidcStateCookieMaxAge,
+	})
+}
+
+func (s *Server) clearOIDCStateCookie(w http.ResponseWriter) {
+	http.SetCookie(w, &http.Cookie{ //nolint:gosec // G124: same attributes as the setter, expired
+		Name:     oidcStateCookieName,
+		Value:    "",
+		Path:     oidcCookiePath,
+		HttpOnly: true,
+		Secure:   s.cfg.Auth.Session.Secure,
+		SameSite: http.SameSiteLaxMode,
+		MaxAge:   -1,
+	})
+}
+
+// stateFromAuthorizeURL reads back the state AuthorizeURL minted. Read from the URL rather than
+// returned separately so the authn seam stays the narrow OIDCFlow interface it was built as.
+func stateFromAuthorizeURL(authURL string) string {
+	u, err := url.Parse(authURL)
+	if err != nil {
+		return ""
+	}
+	return u.Query().Get("state")
+}
+
 // handleOIDCStart redirects to the IdP's authorization endpoint. auth.mode=oidc only; 404
 // otherwise.
 func (s *Server) handleOIDCStart(w http.ResponseWriter, r *http.Request) {
@@ -307,12 +413,27 @@ func (s *Server) handleOIDCStart(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, http.StatusBadRequest, "invalid oidc start request", "returnTo must be a same-origin relative path")
 		return
 	}
+	/* The route is PUBLIC and unrate-limited, and every call stashes this string in the KV for the
+	   state's lifetime. Uncapped, one unauthenticated request could park most of net/http's header
+	   budget there; a path this console can actually route is far shorter than the cap. */
+	if len(returnTo) > oidcMaxReturnToBytes {
+		writeProblem(w, http.StatusBadRequest, "invalid oidc start request",
+			fmt.Sprintf("returnTo must be at most %d bytes", oidcMaxReturnToBytes))
+		return
+	}
 	authURL, err := s.oidc.AuthorizeURL(r.Context(), returnTo)
 	if err != nil {
 		slog.Error("httpapi: oidc authorize url failed", "error", err)
 		writeProblem(w, http.StatusInternalServerError, "oidc start failed", "")
 		return
 	}
+	state := stateFromAuthorizeURL(authURL)
+	if state == "" {
+		slog.Error("httpapi: oidc authorize url carried no state")
+		writeProblem(w, http.StatusInternalServerError, "oidc start failed", "")
+		return
+	}
+	s.setOIDCStateCookie(w, state)
 	//nolint:gosec // G710: authURL is built by AuthorizeURL from the operator-configured IdP endpoint; the only caller input (returnTo) was validated by isSafeReturnTo above and only rides inside the state stash
 	http.Redirect(w, r, authURL, http.StatusFound)
 }
@@ -326,6 +447,20 @@ func (s *Server) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 
 	state := r.URL.Query().Get("state")
 	code := r.URL.Query().Get("code")
+
+	/* The state has to belong to THIS browser, not merely be a state the console minted. Compared in
+	   constant time and consumed either way, so a failed attempt cannot be retried against the same
+	   cookie. */
+	bound, cookieErr := r.Cookie(oidcStateCookieName)
+	s.clearOIDCStateCookie(w)
+	if cookieErr != nil || bound.Value == "" || state == "" ||
+		subtle.ConstantTimeCompare([]byte(bound.Value), []byte(state)) != 1 {
+		slog.Warn("httpapi: oidc callback state did not come from this browser")
+		s.metrics.AuthRequests.WithLabelValues("oidc", "invalid").Inc()
+		write401(w)
+		return
+	}
+
 	sessionID, returnTo, err := s.oidc.Callback(r.Context(), state, code)
 	if err != nil {
 		slog.Warn("httpapi: oidc callback failed", "error", err)
