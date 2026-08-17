@@ -63,22 +63,20 @@ data:
         issuer: {{ .Values.console.auth.oidc.issuer | quote }}
         clientID: {{ .Values.console.auth.oidc.clientID | quote }}
         clientSecretFile: "/etc/kconmon-ng-console-secrets/oidc-client-secret"
-        {{- /* The console REFUSES to start on a redirectURL that does not end with the callback path
-               (internal/console/config: it is the route the SPA's OIDC flow returns to, not a page).
-               Without this guard `helm template` and `helm lint` both passed and the pod went
-               straight into CrashLoopBackOff on a fresh OIDC install -- and the chart's own CI values
-               file shipped exactly such a URL. */}}
-        {{- /* Checked WHOLE, not just its suffix: the empty default and a scheme-less value both slid
-               past a suffix-only test and produced the same CrashLoopBackOff the guard exists to
-               prevent. The console requires an absolute http(s) URL ending in the callback path.
-               The SCHEME alone is case-insensitive, matching url.Parse, which lowercases it before
-               the console compares -- a case-sensitive test refused HTTPS:// installs that run fine
-               today. The PATH stays case-sensitive because the console's own suffix check is. */}}
-        {{- $redirect := .Values.console.auth.oidc.redirectURL }}
-        {{- if eq .Values.console.auth.mode "oidc" }}
-        {{- if not (regexMatch "^(?i:https?)://[^[:space:]]+/api/v1/auth/oidc/callback$" ($redirect | toString)) }}
+        {{- /* PARSED the way the console parses it, not matched with a regular expression.
+               internal/console/config validates this with url.Parse plus a suffix test, and the pod
+               exits(1) on a value that fails either -- CrashLoopBackOff on a fresh OIDC install,
+               which `helm template` and `helm lint` both called green, and which the chart's own CI
+               values file used to ship. A regex is not a URL parser: the first cut of this guard
+               refused HTTPS:// (schemes are case-insensitive and url.Parse lowercases them) while
+               still blessing values like "a^b.example.com" that url.Parse rejects. urlParse gives
+               the same three answers the console reads, so the two agree by construction. The
+               SUFFIX is tested against the whole string, exactly as the console does -- that is why
+               a query string fails here too. */}}
+        {{- $redirect := .Values.console.auth.oidc.redirectURL | toString }}
+        {{- $u := urlParse $redirect }}
+        {{- if or (not (has $u.scheme (list "http" "https"))) (eq $u.host "") (not (hasSuffix "/api/v1/auth/oidc/callback" $redirect)) }}
         {{- fail (printf "console.auth.oidc.redirectURL must be an absolute http(s) URL ending with /api/v1/auth/oidc/callback (got %q) -- the console refuses to start otherwise. Register that exact URL with your IdP." $redirect) }}
-        {{- end }}
         {{- end }}
         redirectURL: {{ $redirect | quote }}
         scopes:
