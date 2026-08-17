@@ -234,8 +234,66 @@ jobs:
 
       - name: Lint chart
         run: |
+          set -e
           helm lint charts/kconmon-ng
           for f in charts/kconmon-ng/ci/*.yaml; do
             echo "--- Linting with $f"
             helm lint charts/kconmon-ng -f "$f"
+          done
+
+      # RENDERING is the gate, not linting. `helm lint` reports a template `fail` at INFO level and
+      # exits 0, so a shipped ci profile that cannot render at all passed this job — and one did:
+      # console-auth-header-values.yaml stopped rendering when the console.replicas invariant landed,
+      # and nothing said so. The loop above also had no `set -e`, so a lint that DID fail was ignored
+      # from the second profile onward.
+      # A DUPLICATE KEY renders fine in Helm and hard-fails yaml.v3 — kustomize, Flux's
+      # kustomize-controller, an Argo CD kustomize source. The chart shipped `protocol: TCP` twice in
+      # the agent and controller Services and every one of those pipelines broke on the DEFAULT
+      # render, with helm lint and helm template both green. Strict parsing is the only thing that
+      # sees it.
+      - name: Rendered manifests parse under strict YAML
+        run: |
+          set -e
+          python3 - <<'PY'
+          import subprocess, sys, yaml
+
+          # PyYAML's SafeLoader silently keeps the LAST occurrence of a repeated mapping key, so
+          # safe_load_all alone sees nothing -- which is exactly the defect class this step exists
+          # for. yaml.v3 (kustomize, Flux, Argo CD) hard-fails on it, so the loader has to as well.
+          class StrictLoader(yaml.SafeLoader):
+              pass
+
+          def _no_duplicate_keys(loader, node, deep=False):
+              seen = set()
+              for key_node, _ in node.value:
+                  key = loader.construct_object(key_node, deep=deep)
+                  if key in seen:
+                      raise yaml.YAMLError(f"duplicate key {key!r} at {key_node.start_mark}")
+                  seen.add(key)
+              return yaml.SafeLoader.construct_mapping(loader, node, deep)
+
+          StrictLoader.add_constructor(
+              yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, _no_duplicate_keys)
+
+          profiles = [None] + sorted(__import__("glob").glob("charts/kconmon-ng/ci/*.yaml"))
+          for prof in profiles:
+              cmd = ["helm", "template", "kconmon-ng", "charts/kconmon-ng"]
+              if prof:
+                  cmd += ["-f", prof]
+              out = subprocess.run(cmd, capture_output=True, text=True, check=True).stdout
+              try:
+                  list(yaml.load_all(out, Loader=StrictLoader))
+              except yaml.YAMLError as e:
+                  print(f"strict YAML parse failed for {prof or 'defaults'}: {e}", file=sys.stderr)
+                  sys.exit(1)
+              print(f"ok: {prof or 'defaults'}")
+          PY
+
+      - name: Template chart with every ci profile
+        run: |
+          set -e
+          helm template kconmon-ng charts/kconmon-ng >/dev/null
+          for f in charts/kconmon-ng/ci/*.yaml; do
+            echo "--- Templating with $f"
+            helm template kconmon-ng charts/kconmon-ng -f "$f" >/dev/null
           done
