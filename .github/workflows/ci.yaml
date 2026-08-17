@@ -221,7 +221,7 @@ jobs:
       - name: Set up Helm
         uses: azure/setup-helm@v5
         with:
-          version: v4.2.3
+          version: v4.2.4
 
       - name: values.schema.json has no duplicate keys
         run: python3 hack/schema-lint.py charts/kconmon-ng/values.schema.json
