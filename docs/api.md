@@ -18,9 +18,10 @@ Both binaries expose a small HTTP API next to their Prometheus metrics.
 | `/healthz`         | GET    | Liveness probe — always `200 ok`                                         |
 | `/readyz`          | GET    | Readiness probe — `503` until gRPC server is bound                       |
 | `/metrics`         | GET    | Prometheus metrics                                                       |
-| `/api/v1/topology`    | GET  | JSON snapshot of all registered agents and cluster nodes with zone info |
-| `/api/v1/version`     | GET  | `{"version":"…","commit":"…"}`                                          |
+| `/api/v1/topology`    | GET  | JSON snapshot of all registered agents and cluster nodes with zone info (leader only) |
+| `/api/v1/version`     | GET  | `{"version":"…","commit":"…","capabilities":["events"],"externalAllowedCidrs":["10.0.0.0/8"]}` — `capabilities` advertises what this build serves (the console feature-detects on it) and `externalAllowedCidrs` is the agent-side allowlist, empty when the external checker is off |
 | `/api/v1/diagnostics` | POST | Run a one-shot connectivity check between two nodes (leader only)        |
+| `/api/v1/external-checks` | PUT  | Replace the fleet's external-check set (leader only)                     |
 
 Example topology response:
 
@@ -70,6 +71,14 @@ Request body:
 An optional `?timeout=<seconds>` query parameter caps the dispatch wait. It
 defaults to `60` and is capped at `120`; invalid values fall back to `60`.
 
+The negotiated timeout also governs the **response**: this endpoint extends its
+own connection write deadline to cover it. Every other route on the controller's
+HTTP server keeps the short server-wide 10s write budget, which is why an `mtr`
+trace that spends 30s on silent TTLs still gets its answer delivered here and
+nowhere else. A client must therefore be prepared to wait the full negotiated
+timeout for the first response byte, and must not impose a shorter whole-request
+timeout of its own.
+
 **External destinations (v1.6.0).** With `destinationKind=external` the
 destination is not resolved against the agent registry: `destinationAddress`
 carries the address and `destination`, when present, only names it. The name —
@@ -87,7 +96,8 @@ Two gates apply and both are the agent's, not the controller's:
   mysteriously.
 - The source agent's own `checkers.external` allowlist decides whether the
   probe happens. The controller does not consult it and cannot override it —
-  see the Console's SECURITY.md §10.2.1 for why that split exists.
+  the split exists because the socket carries the same bytes the REST routes do and must ask the
+  same permission.
 
 Status codes:
 
@@ -103,6 +113,50 @@ Status codes:
 
 A `200` only means the check *ran* — inspect `success` to see whether it passed.
 Durations are serialized as integer nanoseconds (Go `time.Duration`).
+
+#### Duration runs and the effective cadence
+
+A duration run re-probes each pair on a cadence derived from the duration
+(`duration / 500`, floored at 5s). That base cadence is not a field an operator
+can set, so a check type too slow to keep it is **re-planned, never refused**:
+the effective interval is the base cadence stretched to one round's floor.
+
+Only `mtr` stretches. A traceroute walks up to 30 hops in sequence and is
+budgeted at 90s per pair; every other type answers in milliseconds and its
+per-pair timeout only bounds a probe that has already failed, so planning around
+it would slow healthy runs down for nothing. One round's floor also counts the
+fan-out — 90 mtr pairs are 12 batches of 90s — so a large run can stretch past
+its own duration and settle at a single honest pass.
+
+A duration run runs for the wall clock it asked for. Rounds repeat until the
+duration elapses: the next round starts when the previous one finishes, but no
+more often than the base cadence. A round slower than the remaining time is not
+cut short — it finishes and the run ends there — so a duration shorter than one
+round is one honest pass. `MaxSamplesPerPair` (500) is the true upper bound on
+rounds.
+
+`plannedSampleIntervalNs` and `plannedSamplesPerPair` are returned on
+`POST /api/v1/runs` and snapshotted onto the run's `spec` (both omitted for
+instant runs). They are a worst-case **floor**, not a target: read
+`plannedSamplesPerPair` as "at least N per pair, more when probes run fast".
+A 90-pair mtr run planned at one sample will happily take twenty if each round
+completes in seconds.
+
+Nothing is refused for cadence reasons: every shape yields at least one sample
+per pair. A run is still rejected `422` for a spec that cannot expand at all
+(`too many pairs`, `no pairs to check`, `run duration out of range`).
+
+#### Controller failover during a run
+
+A Console diagnostics run in flight when the controller leader changes loses the
+pairs dispatched into the takeover window. The new leader starts with an empty
+agent registry and agents re-register over the following seconds (roughly 15s
+end to end: lease acquisition plus the agents' own reconnect backoff), so pairs
+dispatched in that window come back as `503`, `404` or a dispatch timeout
+depending on how far they got. Those pairs are recorded as failed with the
+reason the controller gave, the run reaches a terminal status normally, and its
+summary is honestly partial rather than silently short. There is no repair path
+and none is wanted: re-run it once the topology page shows every node again.
 
 Example — ICMP (`{"source":"node-1","destination":"node-2","type":"icmp"}`):
 

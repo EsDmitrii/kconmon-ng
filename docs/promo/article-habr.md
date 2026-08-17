@@ -274,9 +274,10 @@ server-side apply в **один** объект `PrometheusRule`. Цель при
 
 Что понадобится: Kubernetes 1.31+ (CI гоняется на 1.36), Helm 4 (чарт публикуется
 как OCI-артефакт, Helm ≥3.14 тоже работает) и Prometheus Operator, если хочется
-`ServiceMonitor` и правила алертинга из коробки. Агенту нужна capability `NET_RAW`
-для ICMP и MTR. Чарт её добавляет сам, вместе с нужным sysctl и RBAC на node watch
-для контроллера.
+`ServiceMonitor` и правила алертинга из коробки. Никаких дополнительных capability
+агенту не нужно: ICMP и MTR ходят через непривилегированный ICMP-сокет, который
+открывает sysctl `net.ipv4.ping_group_range`. Его чарт и выставляет — он в списке
+безопасных у kubelet, — плюс RBAC на node watch для контроллера.
 
 ```bash
 helm upgrade --install kconmon-ng oci://ghcr.io/esdmitrii/charts/kconmon-ng \
@@ -313,7 +314,7 @@ kubectl port-forward svc/kconmon-ng-console 8081:8080
 
 На <http://localhost:8081> вы получите read-only страницы под анонимным viewer.
 Дальше всё включается по одному флагу. Истории, авторизации, инцидентам и правилам
-алертинга нужен `console.database.mode=cnpg` или `external`. Realtime-пуш живёт на
+алертинга нужен `database.existingSecret` или `external`. Realtime-пуш живёт на
 `controller.events.enabled=true`. Алертингу, кроме `console.alerting.enabled=true`,
 понадобится ещё CRD `PrometheusRule` от Prometheus Operator. Каждая ручка описана
 прямо в `charts/kconmon-ng/values.yaml`.
@@ -331,8 +332,10 @@ admission. Оператор CloudNativePG и официальный чарт Val
 самой MaxMind, а консоль перечитывает оба файла и переоткрывает тот, что
 изменился, так что свежая база подхватывается без рестарта. Дашборды
 раскладываются ConfigMap'ами с меткой `grafana_dashboard` для сайдкара, поды
-едут на дефолтах restricted-PSS, и единственное исключение это агент: ему нужен
-`NET_RAW` под ICMP и MTR, а значит namespace на `baseline` или явное исключение.
+едут на дефолтах restricted-PSS — агент в том числе. Он дропает `ALL` наравне со
+всеми: ICMP и MTR работают через непривилегированный ICMP-сокет, который открывает
+sysctl `net.ipv4.ping_group_range`, а тот у kubelet в списке безопасных. Namespace
+на `restricted` принимает DaemonSet как есть.
 
 ## Метрики и PromQL
 

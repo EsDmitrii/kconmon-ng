@@ -1,6 +1,8 @@
 ---
 # Two Secrets are created by hack/local-test.sh BEFORE `helm upgrade -i` and referenced BY NAME below.
 controller:
+  pdb:
+    enabled: false
   replicaCount: 1
   leaderElection: true
   # The controller's domain-event stream.
@@ -84,11 +86,15 @@ serviceMonitor:
 prometheusRule:
   enabled: true
 
-pdb:
-  enabled: false
 
 serviceAccount:
   create: true
+
+# The stack the console runs on, outside the console block.
+database:
+  # hack/postgres-local.yaml: a single-Pod PostgreSQL whose Secret holds the DSN.
+  existingSecret: kconmon-local-postgres
+  existingSecretKey: dsn
 
 console:
   enabled: true
@@ -103,11 +109,6 @@ console:
     mode: anonymous
     anonymous:
       role: admin
-  # External database against hack/postgres-local.yaml.
-  database:
-    mode: external
-    existingSecret: kconmon-local-postgres
-    existingSecretKey: dsn
   # The release is named `monitoring` in the `monitoring` namespace.
   prometheus:
     url: http://monitoring-kube-prometheus-prometheus.monitoring.svc.cluster.local:9090
@@ -120,6 +121,5 @@ console:
   # AES-256-GCM key sealing each webhook endpoint's HMAC secret at rest; created by the script from `openssl rand
   # -base64 32` and named here.
   webhooks:
-    encryptionKeySecret:
-      name: kconmon-local-webhooks-key
-      key: encryptionKey
+    existingSecret: kconmon-local-webhooks-key
+    existingSecretKey: encryptionKey

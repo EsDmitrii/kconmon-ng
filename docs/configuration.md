@@ -42,11 +42,12 @@ checkers:
   icmp:
     enabled: true
     interval: 5s
-    timeout: 1s # requires NET_RAW capability
+    timeout: 1s # unprivileged ICMP socket; see the ping_group_range sysctl the chart sets
 
   dns:
     enabled: true
     interval: 5s
+    timeout: 5s
     hosts:
       - kubernetes.default.svc.cluster.local
     resolvers: [] # empty = system resolver; add IPs for explicit upstream DNS
@@ -60,23 +61,34 @@ checkers:
         method: GET # default GET
         expectStatus: 200 # 0 = any 2xx/3xx
         bodyPattern: "" # optional Go regexp matched against response body
+        insecureSkipVerify: false # certificates are VERIFIED; set true per target for a self-signed endpoint
 
   mtr:
     cooldown: 60s # minimum interval between traces for the same (src, dst) pair
     maxHops: 30 # max TTL / hop count (1–64)
 
-observability:
-  otel:
+  # Probes to destinations that are not fleet peers. Off by default: the agent
+  # refuses every external destination until allowedCidrs names one, and the
+  # cluster still has to let the packet out (networkPolicy.externalEgress).
+  external:
     enabled: false
-    endpoint: "" # OTLP gRPC endpoint, e.g. otel-collector:4317
+    allowedCidrs: [] # e.g. ["8.8.8.8/32"]; empty means no external destination is probeable
+    deniedCidrs: [] # subtracted from allowedCidrs
+    maxTargets: 100
+    timeout: 10s
 ```
+
+> `observability.otel.*` used to be documented here. The keys parse and are then
+> read by nothing — no tracer is created and no span is exported — so they have
+> been removed from this reference rather than left as a knob that silently does
+> nothing. The same goes for `KCONMON_NG_MODE`: the value lands in `cfg.Mode`
+> and is never consulted.
 
 ## Environment variable overrides
 
 | Variable                          | Config field             |
 | --------------------------------- | ------------------------ |
 | `KCONMON_NG_CONFIG`               | path to config file      |
-| `KCONMON_NG_MODE`                 | `mode`                   |
 | `KCONMON_NG_METRICS_PREFIX`       | `metricsPrefix`          |
 | `KCONMON_NG_LOG_LEVEL`            | `logLevel`               |
 | `KCONMON_NG_LOG_FORMAT`           | `logFormat`              |
@@ -99,9 +111,11 @@ controller:
 agent:
   tolerations:
     - operator: Exists # schedule on ALL nodes, including control-plane and tainted nodes
+  # No added capabilities: ICMP and MTR use the unprivileged ICMP socket that the chart's
+  # net.ipv4.ping_group_range sysctl opens.
   securityContext:
     capabilities:
-      add: [NET_RAW] # required for ICMP and MTR
+      drop: [ALL]
 
 config:
   checkers:
@@ -127,9 +141,10 @@ networkPolicy:
   enabled: true # restrict ingress/egress to required paths only
   prometheusNamespace: monitoring
 
-pdb:
-  enabled: true # prevent controller eviction during node drain
-  minAvailable: 1
+controller:
+  pdb:
+    enabled: true # prevent controller eviction during node drain; rendered only at replicaCount > 1
+    minAvailable: 1
 
 serviceAccount:
   create: true # creates ClusterRole with nodes get/list/watch
@@ -153,50 +168,50 @@ and the secret-mount layout — lives in the
 `charts/kconmon-ng/values.yaml`; this section stays a summary.
 
 ```yaml
+# The stack the Console runs on lives OUTSIDE the console block, and the chart installs none of it:
+# run PostgreSQL and a Redis-compatible server however you already run infrastructure, then hand the
+# chart one connection string for each.
+database:
+  existingSecret: "" # Secret holding a postgres:// DSN; empty = in-memory (no history, no auth)
+  existingSecretKey: console-database-dsn
+
+redis:
+  existingSecret: "" # Secret holding a redis:// DSN; empty = in-process bus (console.replicas: 1)
+  existingSecretKey: console-redis-dsn
+  dialTimeout: 5s
+
 controller:
   events:
     enabled: true # controller side of realtime; see the note below
 
 console:
   enabled: false # default; the rest of this block is ignored while it is false
-  replicas: 2
+  # 1 by default. More than 1 REQUIRES redis.existingSecret — sessions, the rate-limit counters and
+  # the realtime fan-out live there, and the chart refuses the combination rather than silently
+  # multiplying every rate limit by the replica count.
+  replicas: 1
   controller:
     url: "" # empty = derive from this release's controller Service
     timeout: 10s
     # gRPC address of the controller's EventStream; empty = derive from the release's Service.
-    grpcAddr: ""
+    grpcAddress: ""
   prometheus:
     url: "" # REQUIRED for the matrix/Explore/PromQL pages; empty = those APIs 503
     queryTimeout: 30s
     maxRange: 24h # max query_range window
     maxResponseBytes: 8388608 # 8 MiB
-  # Valkey pub/sub, used only to fan events across Console replicas.
-  valkey:
-    mode: disabled # bundled | external | disabled
-    address: "" # host:port; REQUIRED for mode=external, ignored otherwise
-    dialTimeout: 5s
-    port: 6379 # bundled: listen port and the address the console dials
-    image: # bundled only
-      repository: valkey/valkey
-      tag: 8-alpine
-      pullPolicy: IfNotPresent
-    resources: # bundled only
-      limits: { cpu: 200m, memory: 128Mi }
-      requests: { cpu: 50m, memory: 64Mi }
   networkPolicy:
-    # Egress rules for console -> external Valkey; empty renders a permissive default.
-    valkeyEgress: []
-  # PostgreSQL persistence; mode=disabled means no history and no local/oidc auth.
-  database:
-    mode: disabled # cnpg | external | disabled
-    existingSecret: "" # mode=external only; must hold a full postgres:// DSN
-    existingSecretKey: dsn
-  # Authentication (SECURITY.md §10.1); anonymous is the default and RBAC still applies.
+    # Egress rules for console -> external Redis; empty renders a permissive default.
+    redisEgress: []
+  # Authentication; anonymous is the default and RBAC still applies.
   auth:
     mode: anonymous # anonymous | local | header | oidc
     anonymous:
       role: viewer
-    defaultRole: "" # role for an authenticated subject with no binding; empty = none (403)
+    # Role for an authenticated subject with no binding; empty = none (403).
+    # ONE OF THE BUILT-INS: viewer | operator | alert-editor | admin. A custom role name is refused
+    # by the console at startup — this field is not resolved against the RBAC table.
+    defaultRole: ""
     # local/oidc require a database; header requires a non-empty trustedProxyCIDRs.
 ```
 
@@ -210,20 +225,18 @@ rendered controller config entirely, so a pre-M2 image (which would reject the
 unknown key at startup) keeps rolling safely; enabling it is what commits the
 fleet to an M2+ image.
 
-Setting `console.controller.grpcAddr` explicitly points the Console at a
+Setting `console.controller.grpcAddress` explicitly points the Console at a
 controller elsewhere. The chart still renders only a **same-namespace** egress
 rule to this release's controller, so a target in another namespace or cluster
 needs your own NetworkPolicy on **both** the egress and the ingress side, plus
 any host firewall — there is no `grpcEgress` override list.
 
-The bundled Valkey (`mode: bundled`) is a single-replica Deployment with **no
-PersistentVolumeClaim**: per ADR-002 it holds nothing durable, so losing it on a
-restart is a liveness event, never data loss. With `mode: disabled` the Console
-falls back to an in-process bus, which has no cross-replica fan-out — so
-realtime plus `console.replicas > 1` plus no Valkey is a misconfiguration the
-chart **refuses to render**, with a message naming the fix. The check keys on the
+`redis.existingSecret` points the Console at any Redis-compatible server by DSN (`redis://`,
+`rediss://`, `valkey://`, `unix://`); the chart installs none. Left empty, the Console falls back to
+an in-process bus with no cross-replica fan-out — so realtime plus `console.replicas > 1` plus no
+bus is a misconfiguration the chart **refuses to render**, with a message naming the fix. The check keys on the
 resolved gRPC address rather than on `controller.events.enabled`, because an
-explicit `grpcAddr` dials with events off too.
+explicit `grpcAddress` dials with events off too.
 
 The Console serves `GET /ws` (one multiplexed WebSocket per browser tab) at the
 top level of `console.service.port`, alongside its `/api/v1/*` REST endpoints. An
@@ -234,21 +247,63 @@ upgrade refused and the UI silently falls back to 15s polling. A proxy that
 strips `Origin` entirely still upgrades: an absent header is allowed, since
 non-browser clients never send one.
 
-`console.database.mode=cnpg` renders a CloudNativePG `Cluster` CR but this
-chart does **not** install the CNPG operator or its CRDs — `helm install`
-fails outright with a clear "no matches for kind Cluster" error if they are
-not already present. Every console secret (the database DSN, the local-mode
+`database.existingSecret` names a Secret holding a `postgres://` DSN — the chart installs no
+database and does not care which one answers (CloudNativePG, Percona, RDS, a plain StatefulSet); the
+chart README documents the stack it is tested against. Every console secret (the database DSN, the local-mode
 bootstrap admin password, the OIDC client secret) mounts as a file under one
 directory, `/etc/kconmon-ng-console-secrets/`, group-readable
 (`console.podSecurityContext.fsGroup`, default matching the distroless
-nonroot gid); rotating one is an operator-initiated restart, since the
-Deployment rolls on ConfigMap changes only. `auth.mode=local|oidc` requires
-`database.mode` to be `cnpg` or `external`, and — with `console.replicas > 1`
-— `console.valkey.mode` to be `bundled` or `external` (sessions live in
-Valkey/PostgreSQL, not the single-replica in-process fallback); the chart
+nonroot gid); rotating an EXISTING Secret (`existingSecret`) is an
+operator-initiated restart, because the Deployment's annotations checksum the
+config and the chart-MANAGED Secret, not a Secret the chart only references; a
+chart-managed one (`secret.create`) therefore rolls the Deployment by itself. `auth.mode=local|oidc` requires
+`database.existingSecret` to be set, and — with `console.replicas > 1`
+— `redis.existingSecret` to be set (sessions live in
+Redis/PostgreSQL, not the single-replica in-process fallback); the chart
 refuses to render otherwise, with a message naming the fix. The
 [chart README](../charts/kconmon-ng/README.md) carries every validation rule
 and the auth-mode/RBAC/audit detail.
+
+In `auth.mode=oidc` a person's identity is `oidc:<sub>` and nothing else. `sub`
+is the only claim OIDC Core §5.7 permits as an identifier — `preferred_username`
+and `email` are explicitly forbidden as one, because an IdP may reassign them,
+which is how Grafana's CVE-2023-3128 (CVSS 9.4) let a leaver's address inherit
+their roles. `console.auth.oidc.usernameClaim` therefore decides only the DISPLAY
+name (falling back to `name`, then `email`, then the sub itself) — the label in
+the header menu, not an identity. The audit log is keyed on the identity and
+records `oidc:<sub>`, so a display name never appears there at all; changing
+this claim renames a person in the UI and moves nothing else. A login
+whose ID token carries no `sub` is refused, as is one whose `sub` sits inside a
+reserved namespace (`oidc:`, `local:`, `header:`, `token:`) — an issuer minting
+`sub = "local:<uuid>"` would otherwise be handed that local user's bindings.
+
+Group membership is re-read on every token refresh, so removing someone from a
+group at the IdP takes effect within the access token's lifetime rather than at
+their next login. A provider that returns no `id_token` on refresh (most do not)
+leaves the session's groups as they were: an empty group list is a silent, total
+deauthorization, and inventing one out of a missing optional field would be worse
+than the staleness.
+
+Bindings created before this scheme name a username (`alice`) and now resolve to
+nothing, which is the correct direction to fail but an invisible one. At boot in
+`oidc` mode the console logs a WARN naming every user binding that is not
+`oidc:`-prefixed, with its role, so they can be remapped against the IdP's own
+sub values. This is a report rather than an automatic rewrite on purpose:
+rewriting `alice` to `oidc:<sub>` means trusting the username claim to say who
+`alice` was, and not trusting that claim is the entire reason the scheme changed.
+
+A session is bounded twice. `console.auth.session.ttl` (default 12h) is the
+ABSOLUTE lifetime: it is counted from login and is never extended, so a session
+ends 12h after sign-in no matter how busy it was. `console.auth.session.idleTimeout`
+(default 1h) is the second bound: a session unused for that long is refused with
+`401` and purged from Valkey on the next attempt to use it. The idle deadline
+slides forward as the session is used — but never past the absolute one, which is
+the whole reason there are two numbers rather than one. Setting `idleTimeout: 0`
+disables the idle bound and leaves `ttl` alone in charge, which is exactly how
+every release before this one behaved. The session cookie's `Max-Age` is the
+absolute lifetime, so a browser may still hold a cookie the server has already
+stopped honouring; that is the ordinary case behind a mid-session `401`, and the
+console routes it to the login page.
 
 ## Zone auto-discovery
 

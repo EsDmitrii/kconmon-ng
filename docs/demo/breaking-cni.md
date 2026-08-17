@@ -36,39 +36,32 @@ kubectl port-forward -n monitoring svc/monitoring-kube-prometheus-prometheus 909
 kubectl port-forward -n monitoring svc/monitoring-grafana 3000:80   # admin/admin
 ```
 
-### Optional: bring up the Console too
+### The Console is already up
 
-Everything below works without it, and the Console section near the end of this
-walkthrough needs it. It is a second Deployment in the same release:
+`hack/local-test.sh up` brings the Console up with the rest of the release
+(`hack/values-local.yaml` sets `console.enabled: true`, `auth.mode=anonymous`
+with the **admin** role, the local PostgreSQL fixture and the webhook
+encryption key). There is nothing to install here — just reach it:
 
 ```bash
-kubectl create secret generic console-webhook-key \
-  --from-literal=encryptionKey="$(openssl rand -base64 32)"
-
-helm upgrade -i kconmon-ng ./charts/kconmon-ng \
-  -f hack/values-local.yaml \
-  --set-string agent.image.tag=local \
-  --set-string controller.image.tag=local \
-  --set console.enabled=true \
-  --set console.replicas=1 \
-  --set console.valkey.mode=bundled \
-  --set console.database.mode=cnpg \
-  --set controller.events.enabled=true \
-  --set console.prometheus.url=http://monitoring-kube-prometheus-prometheus.monitoring:9090 \
-  --set console.alerting.enabled=true \
-  --set console.webhooks.encryptionKeySecret.name=console-webhook-key \
-  --wait --timeout 5m
-
 kubectl port-forward svc/kconmon-ng-console 8081:8080
 ```
 
+Do NOT re-run `helm upgrade` with `--set-string *.image.tag=local`: the helper
+builds a unique tag per run (`local-<timestamp>`, so minikube's image cache
+cannot serve stale code), and pinning the literal tag `local` points the
+Deployments at an image that was never built — every pod then sits in
+`ErrImageNeverPull` and the stand the helper just gave you is gone. If you do
+need to change a value, use `--reuse-values` and set only that value.
+
 Four things that flag matters for, so nothing below is a surprise:
 
-- **`console.database.mode=cnpg` needs the CloudNativePG operator** in the
-  cluster. Without a database the Console still serves topology, matrix and
+- **`database.existingSecret` needs a Secret holding a `postgres://` DSN** and
+  nothing else — the chart stopped installing PostgreSQL in 2.0.0, so any
+  reachable server does: RDS, a StatefulSet, a CloudNativePG cluster you run
+  yourself. Without a database the Console still serves topology, matrix and
   Explore — but incidents, saved alert rules and the audit log all answer `503`,
   and the alerting reconciler is skipped rather than running against nothing.
-  Use `external` with your own PostgreSQL if you prefer.
 - **`console.alerting.enabled=true` needs the `PrometheusRule` CRD**, which
   kube-prometheus-stack installs. It also renders a namespaced `Role` letting
   the Console write exactly that one resource, in this namespace.
@@ -82,15 +75,10 @@ Four things that flag matters for, so nothing below is a surprise:
   Console's webhooks are dispatched by the Console itself off Prometheus' alert
   state, not by Alertmanager.
 
-Default auth is anonymous-viewer, which is read-only. For the alert-rule step
-you need write permissions:
-
-```bash
-helm upgrade -i kconmon-ng ./charts/kconmon-ng --reuse-values \
-  --set console.auth.anonymous.role=admin
-```
-
-That is a demo shortcut on a disposable cluster, not a deployment pattern.
+This stand already runs anonymous-**admin** (`hack/values-local.yaml`), so the
+alert-rule step below needs no permission change. That is a demo shortcut on a
+disposable cluster, not a deployment pattern: the chart's own default is
+anonymous-viewer, and a real deployment uses `local`, `header` or `oidc`.
 
 ### Topology used in this run
 

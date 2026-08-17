@@ -150,7 +150,7 @@ kubectl create secret generic kconmon-local-webhooks-key \
 ```
 
 `hack/postgres-local.yaml` is a plain Deployment on an `emptyDir`, deliberately not a CloudNativePG
-`Cluster`: `console.database.mode=cnpg` needs the CNPG operator's CRDs to already exist and the chart
+`Cluster`: `database.existingSecret` needs the CNPG operator's CRDs to already exist and the chart
 does not install the operator, so a local stand would have to run a second operator just to hand the
 console a database. `mode=external` drives the identical code path. Both the credentials and the
 storage are throwaway — do not copy either into anything real.
@@ -536,7 +536,7 @@ minikube delete -p kconmon-test
 
 **Console API answers 503**
 - `/api/v1/alert-rules`, `/api/v1/webhooks`, `/api/v1/targets` and friends are database-backed. A 503
-  there means `console.database.mode` is not set or the DSN does not resolve
+  there means `database.existingSecret` is not set or the DSN does not resolve
 - `/matrix` and the PromQL pages 503 when `console.prometheus.url` is empty or unreachable — the
   Service name is `monitoring-kube-prometheus-prometheus` in namespace `monitoring`, which is derived
   from the Helm release name `monitoring`. Install the stack under a different name and this value

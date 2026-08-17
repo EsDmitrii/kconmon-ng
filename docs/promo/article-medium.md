@@ -320,9 +320,10 @@ kubectl krew install --manifest-url \
 
 Kubernetes 1.31+ (CI runs against 1.36), Helm 4 (the chart ships as an OCI
 artifact; Helm ≥3.14 also works), and the Prometheus Operator if you want the
-bundled `ServiceMonitor` and alert rules. The agent needs `NET_RAW` for ICMP and
-MTR; the chart sets that up, along with the sysctl the ICMP checker needs and
-RBAC for the controller's node watch.
+bundled `ServiceMonitor` and alert rules. The agent needs no added capabilities:
+ICMP and MTR ride the unprivileged ICMP socket that `net.ipv4.ping_group_range`
+opens, and the chart sets that sysctl — a kubelet safe one — along with RBAC for
+the controller's node watch.
 
 ```bash
 helm upgrade --install kconmon-ng oci://ghcr.io/esdmitrii/charts/kconmon-ng \
@@ -370,7 +371,7 @@ kubectl port-forward svc/kconmon-ng-console 8081:8080
 
 That gets you the read-only pages as an anonymous viewer on
 <http://localhost:8081>. The rest is opt-in, one flag at a time: history, auth,
-incidents and alert rules need `console.database.mode=cnpg` or `external`;
+incidents and alert rules need `database.existingSecret`;
 realtime push needs `controller.events.enabled=true`; alerting needs
 `console.alerting.enabled=true` plus the Prometheus Operator's `PrometheusRule`
 CRD. Every knob is documented inline in `charts/kconmon-ng/values.yaml`.
@@ -388,8 +389,10 @@ needs staging: `geoip.mode=auto` runs MaxMind's own `geoipupdate` image as a
 sidecar, and the console re-stats the two files and reopens whichever changed,
 so a refreshed database is picked up without a restart. Dashboards render as
 ConfigMaps with the `grafana_dashboard` sidecar label, and the pods carry
-restricted-PSS defaults. The one exception is the agent: it needs `NET_RAW` for
-ICMP and MTR, and therefore a `baseline` namespace or an explicit exemption.
+restricted-PSS defaults — the agent included. It drops `ALL` capabilities like
+everything else: ICMP and MTR use the unprivileged ICMP socket that the
+`net.ipv4.ping_group_range` sysctl opens, and that sysctl is on the kubelet's
+safe list, so a `restricted` namespace takes the DaemonSet as it ships.
 
 ## Watching it catch something
 

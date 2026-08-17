@@ -100,8 +100,11 @@ loss, failing TCP, DNS and external checks, a pair that went silent, plus two
 that watch the monitor itself — `KconmonAgentsMissing` and
 `KconmonControllerDown`. A kconmon-ng that goes quiet pages you instead of
 looking healthy. Each rule toggles and tunes through
-`prometheusRule.<alertName>.{enabled,threshold,for,severity}`. Every metric,
-label and rule is in [docs/metrics.md](docs/metrics.md).
+`prometheusRule.<alertName>.{enabled,threshold,for,severity}`. The agent, controller and
+alerting metrics, their labels and every rule are in
+[docs/metrics.md](docs/metrics.md); the console's own families (its HTTP,
+websocket, audit, rate-limit and retention counters) are exported under the same
+prefix and documented by their HELP strings on `/metrics`.
 
 ### The Console
 
@@ -192,7 +195,7 @@ Install it via krew from a release manifest, until it lands in the krew index:
 
 ```bash
 kubectl krew install --manifest-url \
-  https://github.com/EsDmitrii/kconmon-ng/releases/download/v1.4.0/kconmon.yaml
+  https://github.com/EsDmitrii/kconmon-ng/releases/download/v2.0.0/kconmon.yaml
 ```
 
 ## Quickstart
@@ -200,8 +203,10 @@ kubectl krew install --manifest-url \
 Kubernetes 1.31+ (CI runs against 1.36), Helm 4 (the chart ships as an OCI
 artifact; Helm ≥3.14 also works), and the
 Prometheus Operator if you want the bundled `ServiceMonitor` and alert rules. The
-agent needs `NET_RAW` for ICMP and MTR; the chart sets that up, along with the
-sysctl the ICMP checker needs and RBAC for the controller's node watch.
+agent needs no added capabilities: ICMP and MTR ride the unprivileged ICMP
+socket that the `net.ipv4.ping_group_range` sysctl opens, and the chart sets that
+sysctl — a kubelet safe one — along with RBAC for the controller's node watch.
+Every component drops `ALL` capabilities and passes restricted PSS unchanged.
 
 ```bash
 helm upgrade --install kconmon-ng oci://ghcr.io/esdmitrii/charts/kconmon-ng \
@@ -250,7 +255,7 @@ kubectl port-forward svc/kconmon-ng-console 8081:8080
 
 That gets you the read-only pages as an anonymous viewer on
 <http://localhost:8081>. The rest is opt-in, one flag at a time: history, auth,
-incidents and alert rules need `console.database.mode=cnpg` or `external`;
+incidents and alert rules need `database.existingSecret`;
 realtime push needs `controller.events.enabled=true`; alerting needs
 `console.alerting.enabled=true` and the Prometheus Operator's `PrometheusRule`
 CRD. Every knob is documented inline in
