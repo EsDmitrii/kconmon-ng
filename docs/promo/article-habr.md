@@ -61,8 +61,8 @@ readiness неизвестен. Девять пар из девяноста с �
   нодами через Kubernetes informer, отдаёт топологию по gRPC-стриму и умеет leader
   election для HA (`controller.leaderElection: true`).
 - **Agent** (DaemonSet) получает от контроллера живой список пиров по gRPC. Никакого
-  поллинга: контроллер сам пушит full sync при подключении и инкрементальные
-  апдейты, когда топология поехала. Дальше агент гоняет между собой и всеми пирами
+  поллинга: контроллер сам пушит полный снапшот пиров при подключении и заново при
+  каждом изменении топологии. Дальше агент гоняет между собой и всеми пирами
   пять типов проверок: **TCP, UDP, ICMP, DNS, HTTP**.
 
 ```
@@ -158,7 +158,8 @@ PostgreSQL.
 
 ### 2. Расследование: что было вокруг излома
 
-Клик по ячейке ведёт на `/investigate`, скоуп и окно уже зашиты в URL. Страница
+Кнопка расследования прямо в ячейке ведёт на `/investigate`, скоуп и окно уже
+зашиты в URL. Страница
 сводит девять источников таймлайна вокруг этого скоупа: события топологии, события
 Kubernetes, записи аудита, изменения MTR-путей, запуски диагностики, окна работ,
 аннотации, вычисленные пересечения порогов и горящие алерты.
@@ -317,7 +318,7 @@ kubectl port-forward svc/kconmon-ng-console 8081:8080
 
 На <http://localhost:8081> вы получите read-only страницы под анонимным viewer.
 Дальше всё включается по одному флагу. Истории, авторизации, инцидентам и правилам
-алертинга нужен `database.existingSecret` или `external`. Realtime-пуш живёт на
+алертинга нужен `database.existingSecret` с PostgreSQL DSN. Realtime-пуш живёт на
 `controller.events.enabled=true`. Алертингу, кроме `console.alerting.enabled=true`,
 понадобится ещё CRD `PrometheusRule` от Prometheus Operator. Каждая ручка описана
 прямо в `charts/kconmon-ng/values.yaml`.
@@ -411,15 +412,18 @@ kconmon_ng_mtr_hop_rtt_seconds{source_node="node-1", destination_node="node-2"}
   for: 5m
 - alert: ExternalChecksFailing
   expr: >-
-    sum by (source_node, source_zone, target, target_kind)
+    sum by (source_node, source_zone, target, target_kind, check_type)
     (rate(kconmon_ng_external_results_total{result="fail"}[5m]))
     /
-    sum by (source_node, source_zone, target, target_kind)
+    sum by (source_node, source_zone, target, target_kind, check_type)
     (rate(kconmon_ng_external_results_total[5m]))
     > 0.1
   for: 5m
 - alert: KconmonAgentsMissing
-  expr: kconmon_ng_controller_expected_agents - kconmon_ng_controller_registered_agents > 0
+  expr: >-
+    (kconmon_ng_controller_expected_agents
+    - kconmon_ng_controller_registered_agents > 0)
+    and (kconmon_ng_controller_leader == 1)
   for: 10m
 - alert: KconmonControllerDown
   expr: absent(kconmon_ng_controller_leader == 1)
@@ -574,10 +578,10 @@ kube-prometheus-stack, консолью, PostgreSQL и проверкой round-
 - Всё, что добавляет консоль, по умолчанию выключено либо read-only-additive.
   Апгрейд релиза без изменения values рендерит те же манифесты.
 
-Про тесты, раз уж речь о доверии к цифрам: во фронтенде 2099 тестов в 81 файле, 29
+Про тесты, раз уж речь о доверии к цифрам: во фронтенде 3593 теста в 120 файлах, 29
 Go-пакетов несут тесты, и CI гоняет их с race-детектором на каждый PR, вместе с
-линтом, кросс-компиляцией и helm-lint по набору CI-профилей values. Тег `v*`
-публикует образы и чарт в GHCR и запускает e2e.
+линтом и helm-lint по набору CI-профилей values. Тег `v*` кросс-компилирует
+бинарники, публикует образы и чарт в GHCR и запускает e2e.
 
 ## Что дальше
 

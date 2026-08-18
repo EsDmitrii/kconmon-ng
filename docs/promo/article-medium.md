@@ -72,7 +72,7 @@ Two workloads. One controller Deployment, one agent per node.
 
 Agents register with the controller over gRPC and receive a live-updated peer
 list. There is no polling and no per-agent configuration: the controller pushes
-a full sync on connect and incremental updates whenever topology changes. It
+a full peer snapshot on connect and again on every topology change. It
 also reads each node's zone label at registration, so every metric carries
 `source_zone` and `destination_zone` without anyone writing zones down by hand.
 
@@ -140,8 +140,8 @@ doing rather than pretending to be live.
 
 ### 2. Investigate: what happened around the break
 
-Clicking a cell takes you to `/investigate` with the scope and window already in
-the URL. The page merges nine timeline sources around that scope: topology
+Each cell carries an investigate control that takes you to `/investigate` with
+the scope and window already in the URL. The page merges nine timeline sources around that scope: topology
 events, Kubernetes events, audit writes, MTR path changes, diagnostic runs,
 maintenance windows, annotations, derived threshold crossings and firing alerts.
 
@@ -435,10 +435,10 @@ Some things I would want to know if I were reading someone else's post:
   moving part. kconmon-ng trades that simplicity for protocol depth and per-hop
   diagnostics.
 
-On testing: the frontend is at 2099 tests across 81 files, and 29 Go packages
-carry tests that CI runs with the race detector on every PR, alongside lint,
-cross-compile and a chart lint against the CI value sets. A `v*` tag publishes
-images and the chart to GHCR and runs e2e.
+On testing: the frontend is at 3593 tests across 120 files, and 29 Go packages
+carry tests that CI runs with the race detector on every PR, alongside lint and
+a chart lint against the CI value sets. A `v*` tag cross-compiles the binaries,
+publishes images and the chart to GHCR and runs e2e.
 
 ## What is next
 
