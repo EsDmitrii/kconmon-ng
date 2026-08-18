@@ -39,6 +39,10 @@ data:
       anonymous:
         role: {{ .Values.console.auth.anonymous.role | quote }}
       defaultRole: {{ .Values.console.auth.defaultRole | quote }}
+      {{- with .Values.console.auth.groupRoles }}
+      groupRoles:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       {{- if eq .Values.console.auth.mode "local" }}
       local:
         bootstrapAdmin: {{ .Values.console.auth.local.bootstrapAdmin | quote }}

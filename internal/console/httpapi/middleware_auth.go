@@ -286,26 +286,75 @@ func (s *Server) resolveRoles(ctx context.Context, subject authz.Subject) authz.
 	if subject.Kind == authz.SubjectAnonymous {
 		return subject
 	}
+	/* The DECLARATIVE grant first, and it does not depend on the database.
+	   auth.groupRoles maps a group the provider asserted onto a role this console grants, so an
+	   install can hand out roles at deploy time instead of needing a first admin to exist before
+	   anyone can be made one. Because it is read from config and the claim, it also survives a
+	   database outage -- an operator keeps the access their identity provider says they have while
+	   the store is unreachable, which is the one moment they are most likely to need the console. */
+	fromGroups := s.rolesFromGroups(subject.Groups)
+
 	if s.roles != nil {
 		roles, err := s.roles.RolesFor(ctx, subject)
 		switch {
 		case err != nil:
-			/* Fail CLOSED. An unreadable role store is not evidence that this subject holds
-			   auth.defaultRole -- it is no evidence at all, and handing out the default role on a
-			   database blip grants permissions the subject may not have. No roles means every
-			   permission check refuses, which is the honest answer to "we cannot tell". */
-			slog.Error("httpapi: resolve roles failed, refusing rather than granting the default role",
-				"subject_kind", subject.Kind, "error", err)
-			subject.Roles = nil
+			/* Fail CLOSED on the STORE's half. An unreadable role store is not evidence that this
+			   subject holds auth.defaultRole -- it is no evidence at all, and handing out the
+			   default role on a database blip grants permissions the subject may not have. The
+			   config-derived roles above stand, because nothing about them was in doubt. */
+			slog.Error("httpapi: resolve roles failed, keeping only the roles auth.groupRoles grants",
+				"subject_kind", subject.Kind, "groupRoles", len(fromGroups), "error", err)
+			subject.Roles = fromGroups
 			return subject
-		case len(roles) > 0:
-			subject.Roles = roles
+		case len(roles) > 0 || len(fromGroups) > 0:
+			// The UNION: a binding made by hand adds to what the provider's groups already grant.
+			subject.Roles = mergeRoles(fromGroups, roles)
 			return subject
 		}
+	} else if len(fromGroups) > 0 {
+		subject.Roles = fromGroups
+		return subject
 	}
-	// No role store, or a subject the store knows nothing about: the configured default.
+	// No role store, no group mapping, or a subject neither knows: the configured default.
 	subject.Roles = s.defaultRoles()
 	return subject
+}
+
+// rolesFromGroups resolves auth.groupRoles for the groups this subject arrived with, in the order
+// the mapping's groups were asserted; a group with no mapping contributes nothing.
+func (s *Server) rolesFromGroups(groups []string) []string {
+	if len(s.cfg.Auth.GroupRoles) == 0 || len(groups) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(groups))
+	for _, g := range groups {
+		if role, ok := s.cfg.Auth.GroupRoles[g]; ok {
+			out = append(out, role)
+		}
+	}
+	return dedupeRoles(out)
+}
+
+// mergeRoles concatenates two role lists without duplicates, keeping first-seen order so a log line
+// or an audit row reads the same way twice.
+func mergeRoles(a, b []string) []string {
+	return dedupeRoles(append(append(make([]string, 0, len(a)+len(b)), a...), b...))
+}
+
+func dedupeRoles(in []string) []string {
+	if len(in) < 2 {
+		return in
+	}
+	seen := make(map[string]struct{}, len(in))
+	out := in[:0:0]
+	for _, r := range in {
+		if _, dup := seen[r]; dup {
+			continue
+		}
+		seen[r] = struct{}{}
+		out = append(out, r)
+	}
+	return out
 }
 
 // defaultRoles is the config-derived fallback resolveRoles uses when no role_bindings resolution is

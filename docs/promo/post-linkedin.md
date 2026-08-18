@@ -24,8 +24,8 @@ the first post.
 A while back I posted about kconmon-ng, a small tool I wrote because "the
 network is fine" is not a measurement. [link to the previous post]
 
-Back then it was agents, a controller and Grafana dashboards. Since then it grew
-a console, and the project reached its last planned milestone. Here is what
+Back then it was agents, a controller and Grafana dashboards. Since then the
+project grew an entire console and hit its last planned milestone. Here is what
 actually changed:
 
 → **An N×N matrix of every ordered node pair.** One cell per pair per protocol,

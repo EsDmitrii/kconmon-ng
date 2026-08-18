@@ -172,9 +172,11 @@ from the stored row, so the link cannot drift away from the incident it names.
 
 ### 3. Time Machine: what it looked like at 02:14
 
-Put `?at=` with an RFC 3339 timestamp on any URL and every read surface resolves
-through that instant instead of now. Topology is folded from stored events,
-PromQL is evaluated at `t`, and the Live feed becomes scrollback.
+Every postmortem has the same annoying gap: by the time you write it, the
+dashboards have moved on. Put `?at=` with an RFC 3339 timestamp on any URL and
+every read surface resolves through that instant instead of now. Topology is
+folded from stored events, PromQL is evaluated at `t`, and the Live feed
+becomes scrollback.
 
 Every mutating control is disabled behind a banner while it is engaged. You
 cannot change the fleet from inside the past.
@@ -322,8 +324,8 @@ Kubernetes 1.31+ (CI runs against 1.36), Helm 4 (the chart ships as an OCI
 artifact; Helm ≥3.14 also works), and the Prometheus Operator if you want the
 bundled `ServiceMonitor` and alert rules. The agent needs no added capabilities:
 ICMP and MTR ride the unprivileged ICMP socket that `net.ipv4.ping_group_range`
-opens, and the chart sets that sysctl — a kubelet safe one — along with RBAC for
-the controller's node watch.
+opens, and the chart sets that sysctl (it is on the kubelet safe list) along
+with RBAC for the controller's node watch.
 
 ```bash
 helm upgrade --install kconmon-ng oci://ghcr.io/esdmitrii/charts/kconmon-ng \
@@ -380,20 +382,24 @@ CRD. Every knob is documented inline in `charts/kconmon-ng/values.yaml`.
 
 Chart 2.0.0 is mostly about the steps you used to do by hand. Every credential
 the chart consumes can still come from an `existingSecret` you own, or from a
-`secret:` block the chart renders for you, and field values are written
-verbatim, so a `${vault:...}` placeholder passes through byte-for-byte and an
-injector resolves it at admission. The chart installs no datastore of its own:
-point `database.existingSecret` at a Secret holding a `postgres://` DSN and
-`redis.existingSecret` at one holding a `redis://` DSN, and whatever you already
-run answers — RDS, a StatefulSet, a CloudNativePG cluster of your own. GeoLite2 no longer
-needs staging: `geoip.mode=auto` runs MaxMind's own `geoipupdate` image as a
-sidecar, and the console re-stats the two files and reopens whichever changed,
-so a refreshed database is picked up without a restart. Dashboards render as
-ConfigMaps with the `grafana_dashboard` sidecar label, and the pods carry
-restricted-PSS defaults — the agent included. It drops `ALL` capabilities like
-everything else: ICMP and MTR use the unprivileged ICMP socket that the
-`net.ipv4.ping_group_range` sysctl opens, and that sysctl is on the kubelet's
-safe list, so a `restricted` namespace takes the DaemonSet as it ships.
+`secret:` block the chart renders for you. Field values are written verbatim,
+so a `${vault:...}` placeholder passes through byte-for-byte and an injector
+resolves it at admission.
+
+The chart installs no datastore of its own. Point `database.existingSecret` at
+a Secret holding a `postgres://` DSN and `redis.existingSecret` at one holding
+a `redis://` DSN, and whatever you already run answers: RDS, a StatefulSet, a
+CloudNativePG cluster of your own. GeoLite2 no longer needs staging.
+`geoip.mode=auto` runs MaxMind's own `geoipupdate` image as a sidecar, and the
+console re-stats the two files and reopens whichever changed, so a refreshed
+database is picked up without a restart.
+
+Dashboards render as ConfigMaps with the `grafana_dashboard` sidecar label, and
+the pods carry restricted-PSS defaults, the agent included. It drops `ALL`
+capabilities like everything else: ICMP and MTR use the unprivileged ICMP
+socket that the `net.ipv4.ping_group_range` sysctl opens, and that sysctl is on
+the kubelet's safe list, so a `restricted` namespace takes the DaemonSet as it
+ships.
 
 ## Watching it catch something
 
@@ -437,7 +443,7 @@ images and the chart to GHCR and runs e2e.
 ## What is next
 
 v1.9.0 was the last planned console milestone, so the console is feature-complete
-as designed rather than half-built. What I want next is other people's clusters
+as designed rather than half-built. What do I want next? Other people's clusters
 finding the things mine did not: bigger fleets, weirder CNIs, IPv6-heavy
 setups.
 

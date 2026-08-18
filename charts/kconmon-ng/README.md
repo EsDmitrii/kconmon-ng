@@ -134,6 +134,7 @@ API is specified in
 | `console.enabled` | `false` | Deploy the Console |
 | `console.replicas` | `1` | Console replica count. More than 1 REQUIRES `redis.existingSecret`: sessions, the rate-limit counters and the realtime fan-out live there, and the chart refuses the combination rather than silently multiplying every rate limit by the replica count |
 | `console.auth.mode` | `anonymous` | `anonymous \| local \| header \| oidc` |
+| `console.auth.groupRoles` | `{}` | Group the identity provider asserts → role this console grants. The union with API-made bindings; a group absent from the map grants nothing. What makes an oidc/header install usable from a cold database |
 | `console.auth.session.ttl` | `12h` | Absolute session lifetime, counted from login and never extended |
 | `console.auth.session.idleTimeout` | `1h` | Session is refused and purged after this much inactivity; slides forward on every request, never past `ttl`. `0` disables it |
 | `database.existingSecret` | `""` | Secret holding a `postgres://` DSN; empty means an in-memory console |
