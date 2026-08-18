@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
   CELL_GAP,
+  elideForHeaders,
   COLUMN_WIDTH,
+  heightBudget,
   LABEL_MIN_WIDTH,
   LABEL_WIDTH,
   MAX_ZOOM,
@@ -243,5 +245,83 @@ describe("fitScale bounds BOTH axes", () => {
 
   it("returns the floor when nothing fits either way", () => {
     expect(fitScale(60, 300, 200)).toBe(MIN_ZOOM);
+  });
+});
+
+/*
+ * The grid opened at half size on a screen with room to spare.
+ *
+ * The viewport is `max-h-[...] min-h-64`, so its clientHeight is the height its CONTENT made. A
+ * fresh render measured the 256px min, fitScale decided a seven-node grid did not fit, dropped to
+ * 50%, and the smaller grid then kept the box at 256px -- a loop with no way out, on every fleet.
+ */
+describe("heightBudget", () => {
+  it("takes the max-height over a content-driven clientHeight", () => {
+    // 256 = the min-h-64 a fresh viewport reports; 640 = the resolved max-h.
+    expect(heightBudget(256, 640)).toBe(640);
+  });
+
+  it("keeps clientHeight when the box is already taller than its max", () => {
+    expect(heightBudget(800, 640)).toBe(800);
+  });
+
+  it("falls back to clientHeight where there is no usable max-height", () => {
+    // getComputedStyle().maxHeight is "" in jsdom and "none" in a browser without one; both parse
+    // to NaN, and a NaN budget must not become a NaN scale.
+    expect(heightBudget(256, Number.NaN)).toBe(256);
+    expect(heightBudget(256, 0)).toBe(256);
+  });
+
+  it("is zero when nothing has been measured yet, which fitScale reads as do-not-guess", () => {
+    expect(heightBudget(0, Number.NaN)).toBe(0);
+  });
+});
+
+/*
+ * A seven-node fleet on a normal screen belongs at 100%.
+ *
+ * This is the arithmetic the loop above got wrong: with the real budget the answer was always 1.
+ */
+describe("fitScale with a real viewport", () => {
+  it("keeps a seven-node grid at full size when the box has room", () => {
+    expect(fitScale(7, 1000, heightBudget(256, 640))).toBe(1);
+  });
+
+  it("still shrinks when the box genuinely cannot hold the grid", () => {
+    expect(fitScale(7, 1000, heightBudget(256, 260))).toBeLessThan(1);
+  });
+});
+
+/*
+ * Zooming in must give the names back.
+ *
+ * The shared-prefix elision is right while a column is narrower than the names and wrong the moment
+ * it is not: at 125% a 180px label column holds "adm-kuber-01" with room over, and dropping the
+ * prefix there left the axis reading "…01" -- a number where a name belongs.
+ */
+describe("elideForHeaders", () => {
+  const fleet = ["adm-kuber-01", "adm-kuber-02", "adm-kuber-07"];
+
+  it("keeps the whole name when the box holds it", () => {
+    expect(elideForHeaders(fleet, "adm-kuber-", 180, 11)).toBe("");
+  });
+
+  it("elides when the box does not", () => {
+    // A column at 50%: gridMetrics gives 48px and the 9px type floor. Nothing of that name fits.
+    expect(elideForHeaders(fleet, "adm-kuber-", 48, 9)).toBe("adm-kuber-");
+  });
+
+  it("gives the name back as the grid grows", () => {
+    // The same axis at 125%: 120px column, 14px type -- and the whole name is drawn.
+    expect(elideForHeaders(fleet, "adm-kuber-", 120, 14)).toBe("");
+  });
+
+  it("decides on the LONGEST name, so one axis reads one way", () => {
+    const mixed = ["adm-kuber-01", "adm-kuber-worker-frankfurt-12"];
+    expect(elideForHeaders(mixed, "adm-kuber-", 180, 11)).toBe("adm-kuber-");
+  });
+
+  it("has nothing to elide without a shared prefix", () => {
+    expect(elideForHeaders(fleet, "", 40, 11)).toBe("");
   });
 });

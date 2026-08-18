@@ -196,3 +196,69 @@ export function gridMetrics(scale: number): GridMetrics {
     },
   };
 }
+
+/* ── how much text a header box holds ───────────────────────────────────── */
+
+/**
+ * AVERAGE_GLYPH_EM is how wide one character of a node name runs, as a fraction of the font size.
+ *
+ * Node names are lowercase latin, digits and separators in the UI's sans face, which averages a
+ * little over half an em; 0.62 is that with margin, so the estimate errs toward eliding a name that
+ * would just barely have fitted rather than toward promising one that then clips. The alternative --
+ * measuring the real glyphs -- means a canvas or a layout pass per header per zoom step, for an
+ * answer that only decides between two spellings of the same name.
+ */
+const AVERAGE_GLYPH_EM = 0.62;
+
+/** HEADER_PADDING is the px-1 either side of the label, which is not available to text. */
+const HEADER_PADDING = 8;
+
+/**
+ * fitsHeader reports whether `text` is drawn whole in a header box `boxWidth` wide at `fontSize`.
+ *
+ * It is what makes the shared-prefix elision CONDITIONAL. The elision drops a prefix every node
+ * shares, which is right when a column is narrower than the names and wrong the moment it is not:
+ * zoomed in, a 180px label column holds "adm-kuber-01" with room over, and dropping the prefix there
+ * left an axis reading "…01" — a number where a name belongs, with no way to get the name back
+ * except hovering. Deciding per box means the grid shows as much of the name as it can hold.
+ */
+export function fitsHeader(text: string, boxWidth: number, fontSize: number): boolean {
+  if (!Number.isFinite(boxWidth) || !Number.isFinite(fontSize) || fontSize <= 0) return false;
+  const usable = boxWidth - HEADER_PADDING;
+  if (usable <= 0) return false;
+  return text.length * fontSize * AVERAGE_GLYPH_EM <= usable;
+}
+
+/**
+ * elideForHeaders answers "should this axis drop the shared prefix?" for a whole set of names.
+ *
+ * ONE answer per axis, not per name: a column reading "adm-kuber-01" next to one reading "…07" is
+ * harder to scan than either spelling used consistently. The longest name decides, because that is
+ * the one that would clip.
+ */
+export function elideForHeaders(
+  names: readonly string[],
+  prefix: string,
+  boxWidth: number,
+  fontSize: number,
+): string {
+  if (!prefix) return "";
+  const longest = names.reduce((max, n) => (n.length > max.length ? n : max), "");
+  return fitsHeader(longest, boxWidth, fontSize) ? "" : prefix;
+}
+
+/**
+ * heightBudget is the vertical space the grid may fit into.
+ *
+ * The viewport is `max-h-[...] min-h-64`, so its clientHeight is the height its CONTENT produced,
+ * floored by the min -- and feeding that back into fitScale is circular. A fresh render measured the
+ * 256px min, decided a seven-node grid did not fit, dropped to 50%, and the smaller grid then kept
+ * the box at 256px: every fleet opened at half size on a screen with room to spare. The resolved
+ * max-height is the space actually available, and clientHeight only wins where there is no max or
+ * the box is already taller.
+ */
+export function heightBudget(clientHeight: number, maxHeight: number): number {
+  const client = Number.isFinite(clientHeight) && clientHeight > 0 ? clientHeight : 0;
+  if (!Number.isFinite(maxHeight) || maxHeight <= 0) return client;
+  return Math.max(client, maxHeight);
+}

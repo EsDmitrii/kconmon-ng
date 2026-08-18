@@ -26,7 +26,9 @@ import {
   MAX_ZOOM,
   MIN_ZOOM,
   cellDensity,
+  elideForHeaders,
   fitScale,
+  heightBudget,
   gridMetrics,
   gridWidth,
   zoomStep,
@@ -521,6 +523,18 @@ export function MatrixPage() {
   const scaleRef = useRef(scale);
   scaleRef.current = scale;
 
+  /* The elision is decided PER AXIS and PER SCALE: the two boxes are different widths and carry
+     different type sizes, so a name can fit the row labels and not the column headers. Zooming in
+     therefore gives the names back instead of leaving the axis reading "…01". */
+  const columnElide = useMemo(
+    () => elideForHeaders(nodes, namePrefix, gridMetrics(scale).columnWidth, gridMetrics(scale).fontLabel),
+    [nodes, namePrefix, scale],
+  );
+  const labelElide = useMemo(
+    () => elideForHeaders(nodes, namePrefix, gridMetrics(scale).labelWidth, gridMetrics(scale).fontLabel),
+    [nodes, namePrefix, scale],
+  );
+
   const vars = useMemo(
     () => ({ ...gridMetrics(scale).vars, "--m-grid-w": `${gridWidth(nodeCount, scale)}px` }) as CSSProperties,
     [scale, nodeCount],
@@ -532,7 +546,14 @@ export function MatrixPage() {
     if (!el) return;
     const measure = () => {
       setAvailable(el.clientWidth);
-      setAvailableHeight(el.clientHeight);
+      /* The height BUDGET, not the height the content happens to have made.
+         The viewport is `max-h-[...] min-h-64`, so clientHeight is what the grid already drew,
+         bounded below by the min — and feeding that back into fitScale is circular: a fresh render
+         measures the 256px min, decides a seven-node grid does not fit, drops to 50%, and the
+         smaller grid keeps the box at 256px forever. Every fleet opened at half size on a screen
+         with room to spare. The resolved max-height is the space actually available; clientHeight
+         only wins when it is larger (no max, or a taller box). */
+      setAvailableHeight(heightBudget(el.clientHeight, Number.parseFloat(getComputedStyle(el).maxHeight)));
     };
     measure();
     /* jsdom has no ResizeObserver, and neither does an old browser; the one
@@ -679,9 +700,11 @@ export function MatrixPage() {
               </div>
             </div>
 
-            {namePrefix ? (
+            {/* Only while an axis IS eliding: at a scale where both boxes hold the whole name the
+                note described something the grid was no longer doing. */}
+            {columnElide || labelElide ? (
               <p className="px-1 pb-1 text-xs text-muted-foreground">
-                {t("grid.prefix", { prefix: namePrefix })}
+                {t("grid.prefix", { prefix: columnElide || labelElide })}
               </p>
             ) : null}
 
@@ -708,7 +731,7 @@ export function MatrixPage() {
                     </th>
                     {nodes.map((n) => (
                       <th key={n} className={cn(HEADER_CELL, "top-0 w-[var(--m-col-w)]")} scope="col">
-                        <NodeLabel name={n} width="column" elide={namePrefix} />
+                        <NodeLabel name={n} width="column" elide={columnElide} />
                       </th>
                     ))}
                   </tr>
@@ -720,7 +743,7 @@ export function MatrixPage() {
                         {/* The ROW axis carries the same prefix as the column axis, and at a narrow
                             viewport the label column is 88px — every row read "kconmon-prod-…".
                             Same elision, same note above the grid. */}
-                        <NodeLabel name={src} width="label" elide={namePrefix} />
+                        <NodeLabel name={src} width="label" elide={labelElide} />
                       </th>
                       {nodes.map((dst) => (
                         <GridCell

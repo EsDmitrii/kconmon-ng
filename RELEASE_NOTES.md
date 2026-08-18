@@ -1,3 +1,24 @@
+## kconmon-ng v2.0.2
+
+### Fixed
+
+- **The matrix no longer opens at half size.** The grid measured the height its
+  own content had produced and fed that back into the fit, so a fresh render
+  saw the container's 256px minimum, decided the grid did not fit, shrank to
+  50%, and the smaller grid then held the box at 256px — a loop with no way out.
+  It measures the space available instead, and a seven-node fleet opens at 100%.
+- **Zooming in gives the node names back.** The shared prefix every node name
+  begins with is dropped to buy column width, which is right while the column is
+  narrower than the names and wrong the moment it is not: at 125% a label column
+  holds `adm-kuber-01` with room over and still read `…01`. The elision is now
+  decided per axis at the current scale, and the note above the grid appears only
+  while an axis is actually eliding.
+
+### Added
+
+- **A favicon.** The console had none, so every tab showed the browser's blank
+  square; it now wears the mark it wears in its own sidebar.
+
 ## kconmon-ng v2.0.1
 
 > Fixes a hole in 2.0.0: `auth.mode=oidc` and `auth.mode=header` shipped with no
