@@ -1,5 +1,5 @@
 ---
-# E2E PostgreSQL fixture for console.database.mode=external; installing the operator here and waiting for its CRDs
+# E2E PostgreSQL fixture behind database.existingSecret; installing the CNPG operator here and waiting for its CRDs
 # would add minutes and a whole new failure mode to e2e for ZERO additional coverage of kconmon-ng's own code.
 apiVersion: v1
 kind: Secret
@@ -7,8 +7,8 @@ metadata:
   name: kconmon-e2e-postgres
 type: Opaque
 stringData:
-  # console.database.existingSecretKey default is "dsn" -- console-values.yaml relies on that default rather than
-  # overriding it.
+  # The chart's database.existingSecretKey default is "console-database-dsn"; console-values.yaml overrides it to
+  # this key.
   dsn: postgres://kconmon:kconmon@kconmon-e2e-postgres:5432/kconmon?sslmode=disable
 ---
 apiVersion: apps/v1

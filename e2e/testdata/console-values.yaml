@@ -8,6 +8,13 @@ controller:
   events:
     enabled: true
 
+# The Postgres fixture from e2e/testdata/postgres.yaml; its Secret carries the DSN under "dsn", so the non-default key
+# is named explicitly. No redis on purpose: one console replica runs the in-process bus, exactly the single-replica
+# shape the chart permits without a shared bus.
+database:
+  existingSecret: kconmon-e2e-postgres
+  existingSecretKey: dsn
+
 console:
   enabled: true
   replicas: 1
@@ -15,12 +22,6 @@ console:
     mode: anonymous
     anonymous:
       role: admin
-  valkey:
-    mode: bundled
-  database:
-    mode: external
-    existingSecret: kconmon-e2e-postgres
-    existingSecretKey: dsn
   # TestConsoleRuns, the runs the schedule loop's own dispatches are not counted for (they never traverse the HTTP
   # handler).
   rateLimit:
@@ -43,6 +44,5 @@ console:
   # rand -base64 32` right before the install. Named, never inlined: the chart
   # has no value that would take the key itself, on purpose.
   webhooks:
-    encryptionKeySecret:
-      name: kconmon-e2e-webhooks-key
-      key: encryptionKey
+    existingSecret: kconmon-e2e-webhooks-key
+    existingSecretKey: encryptionKey

@@ -150,9 +150,9 @@ kubectl create secret generic kconmon-local-webhooks-key \
 ```
 
 `hack/postgres-local.yaml` is a plain Deployment on an `emptyDir`, deliberately not a CloudNativePG
-`Cluster`: `database.existingSecret` needs the CNPG operator's CRDs to already exist and the chart
-does not install the operator, so a local stand would have to run a second operator just to hand the
-console a database. `mode=external` drives the identical code path. Both the credentials and the
+`Cluster`: a `Cluster` needs the CNPG operator's CRDs to already exist and the chart does not
+install the operator, so a local stand would have to run a second operator just to hand the console
+a database. A plain postgres behind `database.existingSecret` drives the identical code path. Both the credentials and the
 storage are throwaway — do not copy either into anything real.
 
 Regenerating the webhook key **rotates** it: any webhook secret already stored under the previous key
