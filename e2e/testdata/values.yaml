@@ -3,6 +3,9 @@
 controller:
   replicaCount: 1
   leaderElection: false
+  # Inert at replicaCount 1 (the chart only renders it above that), kept explicit.
+  pdb:
+    enabled: false
 
 agent:
   resources:
@@ -44,6 +47,3 @@ config:
         - "169.254.169.254/32"
       maxTargets: 100
       timeout: 10s
-
-pdb:
-  enabled: false
