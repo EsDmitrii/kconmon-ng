@@ -281,6 +281,16 @@ console:
     # Role for an authenticated subject no binding matches; empty means none.
     # One of the built-ins: viewer | operator | alert-editor | admin.
     defaultRole: ""
+    # Map a GROUP the identity provider asserts onto a role this console grants -- the declarative
+    # half of RBAC, and the one that makes an oidc or header install usable from a cold database.
+    # Roles resolve as the union of these and any binding made through the API; what is granted here
+    # cannot be revoked through the API, which is the point. A group absent from this map grants
+    # nothing, so the map is an allow-list. Values may be a built-in (viewer|operator|alert-editor|
+    # admin) or the name of a custom role you created.
+    #   groupRoles:
+    #     platform-oncall: admin
+    #     everyone: viewer
+    groupRoles: {}
     anonymous:
       # Fixed role for every anonymous request. Same four built-ins as defaultRole.
       role: viewer

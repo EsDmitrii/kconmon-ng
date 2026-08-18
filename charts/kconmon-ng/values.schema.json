@@ -586,6 +586,14 @@
                   "type": "boolean"
                 }
               }
+            },
+            "groupRoles": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "string",
+                "minLength": 1
+              },
+              "description": "Group asserted by the identity provider -> role this console grants. Union with API-made bindings; a group absent from the map grants nothing."
             }
           }
         },

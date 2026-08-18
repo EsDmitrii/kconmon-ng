@@ -1,3 +1,38 @@
+## kconmon-ng v2.0.1
+
+> Fixes a hole in 2.0.0: `auth.mode=oidc` and `auth.mode=header` shipped with no
+> way to grant anybody a role. Both modes worked, and neither was usable.
+
+### Fixed
+
+- **An OIDC or header install can grant roles at deploy time.** Role bindings
+  live in the database and are created through an API that already requires
+  `rbac:manage`, so a fresh install had nobody able to make the first binding;
+  the only alternative was `auth.defaultRole`, which is one role for every
+  authenticated subject. The way out that 2.0.0 left was to bring the console up
+  in local mode, log in, create a binding by hand and only then switch — a
+  workaround, published as if it were a procedure.
+
+  `console.auth.groupRoles` maps a group the identity provider asserts onto a
+  role this console grants, in the values file:
+
+  ```yaml
+  console:
+    auth:
+      groupRoles:
+        platform-oncall: admin
+        everyone: viewer
+  ```
+
+  Roles resolve as the union of that map and any binding made through the API, so
+  a grant by hand still adds to what the provider's groups carry. A group absent
+  from the map grants nothing. What the map grants cannot be revoked through the
+  API — that is what makes it declarative.
+- **A role store outage no longer costs an operator their access.** The store's
+  half still fails closed, because an unreadable database is no evidence a
+  subject holds anything; a grant that came from the claim and the config was
+  never in doubt, and an outage is when the console is most needed.
+
 ## kconmon-ng v2.0.0
 
 > A chart that installs monitoring and nothing else, a console that survives more

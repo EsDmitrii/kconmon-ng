@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -1412,4 +1413,98 @@ func TestAnonymousModeRefusesCrossSiteMutations(t *testing.T) {
 	if strings.Contains(w.Body.String(), "CSRF") {
 		t.Errorf("header-less POST was refused by the CSRF gate; a script that sends no Origin must pass it: %s", w.Body.String())
 	}
+}
+
+/*
+ * auth.groupRoles is the DECLARATIVE grant, and it is what makes an OIDC install usable from cold.
+ *
+ * Before it there were two ways to hold a role and neither worked at deploy time: a row in
+ * role_bindings, created through an API that already needs rbac:manage, and auth.defaultRole, which
+ * is one role for every authenticated subject. A fresh database therefore had nobody able to make
+ * the first binding, and the documented way out was to bring the console up in local mode, log in,
+ * create the binding by hand and only then switch to oidc.
+ */
+func TestGroupRolesGrantFromTheClaimWithNoBindingInTheDatabase(t *testing.T) {
+	cfg := authTestConfig("oidc")
+	cfg.Auth.GroupRoles = map[string]string{"kconmon_admin": "admin", "kconmon_viewer": "viewer"}
+	reg := prometheus.NewRegistry()
+	authr := fakeAuthenticator{subject: authz.Subject{
+		Kind: authz.SubjectUser, ID: "oidc:abc", Groups: []string{"unmapped", "kconmon_admin"},
+	}}
+	ui := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte("spa")) })
+	s := NewServer(Deps{
+		Config: cfg, Metrics: metrics.New(cfg.MetricsPrefix, reg), PromRegistry: reg, UI: ui,
+		Authenticator: authr, Policy: authz.NewPolicy(nil),
+	})
+
+	got := s.resolveRoles(context.Background(), authr.subject)
+	if !slices.Contains(got.Roles, "admin") {
+		t.Errorf("roles = %v, want admin from the kconmon_admin group", got.Roles)
+	}
+	// A group with no mapping contributes nothing -- the map is an allow-list, not a passthrough.
+	if slices.Contains(got.Roles, "unmapped") {
+		t.Errorf("roles = %v, want no role for a group the mapping does not name", got.Roles)
+	}
+}
+
+/*
+ * And it survives an unreadable role store.
+ *
+ * The store's half still fails CLOSED -- an unreadable database is no evidence a subject holds
+ * anything -- but a grant that came from the claim and the config was never in doubt, and a database
+ * outage is the moment an operator is most likely to need the console.
+ */
+func TestGroupRolesSurviveARoleStoreOutage(t *testing.T) {
+	cfg := authTestConfig("oidc")
+	cfg.Auth.GroupRoles = map[string]string{"kconmon_admin": "admin"}
+	cfg.Auth.DefaultRole = "viewer"
+	reg := prometheus.NewRegistry()
+	authr := fakeAuthenticator{subject: authz.Subject{
+		Kind: authz.SubjectUser, ID: "oidc:abc", Groups: []string{"kconmon_admin"},
+	}}
+	ui := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte("spa")) })
+	s := NewServer(Deps{
+		Config: cfg, Metrics: metrics.New(cfg.MetricsPrefix, reg), PromRegistry: reg, UI: ui,
+		Authenticator: authr, Policy: authz.NewPolicy(nil),
+		Roles: failingRoleResolver{},
+	})
+
+	got := s.resolveRoles(context.Background(), authr.subject)
+	if !slices.Contains(got.Roles, "admin") {
+		t.Errorf("roles = %v, want the config-derived admin to survive the outage", got.Roles)
+	}
+	// The DEFAULT role must not be handed out on a store error; that is the fail-closed half.
+	if slices.Contains(got.Roles, "viewer") {
+		t.Errorf("roles = %v, want no defaultRole on a store error", got.Roles)
+	}
+}
+
+// The union: a binding made by hand adds to what the provider's groups already grant.
+func TestGroupRolesUnionWithDatabaseBindings(t *testing.T) {
+	cfg := authTestConfig("oidc")
+	cfg.Auth.GroupRoles = map[string]string{"kconmon_viewer": "viewer"}
+	reg := prometheus.NewRegistry()
+	authr := fakeAuthenticator{subject: authz.Subject{
+		Kind: authz.SubjectUser, ID: "oidc:abc", Groups: []string{"kconmon_viewer"},
+	}}
+	ui := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte("spa")) })
+	s := NewServer(Deps{
+		Config: cfg, Metrics: metrics.New(cfg.MetricsPrefix, reg), PromRegistry: reg, UI: ui,
+		Authenticator: authr, Policy: authz.NewPolicy(nil),
+		Roles: fakeRoleResolver{roles: []string{"alert-editor"}},
+	})
+
+	got := s.resolveRoles(context.Background(), authr.subject)
+	for _, want := range []string{"viewer", "alert-editor"} {
+		if !slices.Contains(got.Roles, want) {
+			t.Errorf("roles = %v, want %q: the two sources are a union, not a replacement", got.Roles, want)
+		}
+	}
+}
+
+// failingRoleResolver stands in for an unreachable database.
+type failingRoleResolver struct{}
+
+func (failingRoleResolver) RolesFor(context.Context, authz.Subject) ([]string, error) { //nolint:gocritic // Subject is a value type by design
+	return nil, errors.New("role store unreachable")
 }

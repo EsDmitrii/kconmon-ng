@@ -212,6 +212,12 @@ console:
     # ONE OF THE BUILT-INS: viewer | operator | alert-editor | admin. A custom role name is refused
     # by the console at startup — this field is not resolved against the RBAC table.
     defaultRole: ""
+    # Map a GROUP the identity provider asserts onto a role this console grants. This is what makes
+    # an oidc or header install usable from a cold database: role_bindings are created through an
+    # API that already needs rbac:manage, so without it nobody could make the first binding.
+    # Roles resolve as the UNION of this map and the bindings; a group absent from the map grants
+    # nothing, and a value may be a built-in or the name of a custom role.
+    groupRoles: {}
     # local/oidc require a database; header requires a non-empty trustedProxyCIDRs.
 ```
 

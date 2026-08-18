@@ -456,6 +456,19 @@ type AuthConfig struct {
 	OIDC        OIDCConfig      `yaml:"oidc"`
 	Session     SessionConfig   `yaml:"session"`
 	DefaultRole string          `yaml:"defaultRole"` // role for an authenticated subject with no binding; empty = none (403)
+	/* GroupRoles maps a GROUP the identity provider asserts to a role this console grants.
+
+	   It is the declarative half of RBAC, and without it an OIDC or header install had no way to
+	   grant anything at deploy time: role_bindings live in the database and are created through an
+	   API that already needs rbac:manage, so a cold start left nobody able to make the first
+	   binding, and defaultRole -- one role for every authenticated subject -- was the only
+	   alternative. The bootstrap dance that followed (bring the console up in local mode, log in,
+	   create a binding, switch to oidc) is what this replaces.
+
+	   Roles resolve as the UNION of these and the database bindings, so an admin can still grant
+	   extra roles by hand; what comes from here cannot be revoked through the API, which is the
+	   point of a declarative grant. */
+	GroupRoles map[string]string `yaml:"groupRoles"`
 }
 
 // AnonymousConfig configures the fixed role used in anonymous mode.
@@ -648,6 +661,19 @@ func (c *Config) validateAuth() error {
 	if c.Auth.DefaultRole != "" && !authz.IsBuiltinRole(c.Auth.DefaultRole) {
 		return fmt.Errorf("auth.defaultRole must be a known built-in role (viewer|operator|alert-editor|admin), got %q",
 			c.Auth.DefaultRole)
+	}
+
+	/* A mapping to nothing is a typo, not a grant, and it would fail SILENTLY: the group resolves to
+	   an empty role name, the policy knows no such role, and the person logs in with no permissions
+	   and no message. A CUSTOM role name is allowed through -- those live in the database and cannot
+	   be checked at boot -- so the bound is "not empty", not "must be built in". */
+	for group, role := range c.Auth.GroupRoles {
+		if strings.TrimSpace(group) == "" {
+			return fmt.Errorf("auth.groupRoles has an empty group key (role %q)", role)
+		}
+		if strings.TrimSpace(role) == "" {
+			return fmt.Errorf("auth.groupRoles[%q] must name a role, got an empty value", group)
+		}
 	}
 
 	if c.Auth.Session.TTL <= 0 {
