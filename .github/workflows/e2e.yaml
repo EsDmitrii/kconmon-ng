@@ -79,7 +79,11 @@ jobs:
           # pair has to move together -- the node image alone is half an upgrade.
           version: v0.32.0
           node_image: kindest/node:v1.36.1
-          config_file: kind-config.yaml
+          # , not : the action has no such input, and GitHub drops an unknown one
+          # silently -- so the three-node config below was never applied and every run got kind's
+          # default single-node cluster. A one-node fleet has no pairs to check, which is why the runs
+          # and schedule tests failed and the MTR one skipped itself.
+          config: kind-config.yaml
 
       - name: Set up Docker Buildx
         if: ${{ steps.meta.outputs.skip != 'true' }}

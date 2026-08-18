@@ -814,21 +814,32 @@ func TestConsoleExternalCheckDenied(t *testing.T) {
 	base := consoleBaseURL(t)
 	agentBase := agentBaseURL(t)
 
-	targetName := uniqueName("e2e-deny")
-	targetID := createTarget(t, base, map[string]any{
-		"name":    targetName,
+	/* The console REFUSES to store a target it can prove no agent may probe, so the stored-target
+	   route cannot reach the agent's allowlist at all any more. That refusal is asserted here rather
+	   than worked around -- it is the first half of the same decision. */
+	status, _, body := mustRequest(t, http.MethodPost, base+"/api/v1/targets", map[string]any{
+		"name":    uniqueName("e2e-deny-refused"),
 		"kind":    "host",
 		"address": deniedTargetAddr(),
 	})
+	if status != http.StatusUnprocessableEntity {
+		t.Fatalf("expected POST /api/v1/targets outside allowedCidrs to be refused 422, got %d: %s", status, body)
+	}
 
+	/* The agent's own denial is reached through an ADHOC definition, which carries its address
+	   inline and is not gated by the target route's reachability guard -- the shape a target whose
+	   name starts resolving into a denied range takes, and the reason this in-process check exists
+	   at all. The name on the metric is the DEFINITION's, which is what the reconciler puts on the
+	   wire for an adhoc destination. */
+	targetName := uniqueName("e2e-denydef")
 	defID := createDefinition(t, base, map[string]any{
-		"name":                uniqueName("e2e-denydef"),
-		"sourceSelection":     "all",
-		"destinationKind":     "target",
-		"destinationTargetId": targetID,
-		"checkType":           "tcp",
-		"plane":               "pod",
-		"enabled":             true,
+		"name":               targetName,
+		"sourceSelection":    "all",
+		"destinationKind":    "adhoc",
+		"destinationAddress": deniedTargetAddr(),
+		"checkType":          "tcp",
+		"plane":              "pod",
+		"enabled":            true,
 	})
 
 	createSchedule(t, base, map[string]any{
@@ -3399,7 +3410,9 @@ func assertWebhookSkipWarning(t *testing.T, res *importCollection, name, what st
 	t.Helper()
 	for _, w := range res.Warnings {
 		if w.Name == name {
-			if !strings.Contains(w.Reason, "without secret") {
+			// The phrasing has been rewritten once already; what matters is that the reason names the
+			// secret as the thing that is missing.
+			if !strings.Contains(w.Reason, "secret") {
 				t.Errorf("expected the %s webhook warning for %q to name the missing secret, got %q",
 					what, name, w.Reason)
 			}
