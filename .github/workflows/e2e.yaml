@@ -72,6 +72,12 @@ jobs:
         uses: helm/kind-action@v1
         with:
           cluster_name: kconmon-ng-e2e
+          # PINNED alongside the node image, not left to the action's default.
+          # `kind load` reads the node's containerd config to patch it, and the images published with
+          # kind v0.32.0 write config version 4, which older CLIs refuse: "unknown containerd config
+          # version: 4 (supported versions: 2 and 3)". The action still defaults to v0.31.0, so the
+          # pair has to move together -- the node image alone is half an upgrade.
+          version: v0.32.0
           node_image: kindest/node:v1.36.1
           config_file: kind-config.yaml
 
