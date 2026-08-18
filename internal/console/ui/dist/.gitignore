@@ -1,5 +1,10 @@
-# Vite build output is generated; only the placeholder index.html is tracked so
-# `go build`/`go test` compile the embed without requiring a node build.
+# Vite build output is generated; only the two hand-written placeholders are tracked so
+# `go build`/`go test` compile and serve the embed without requiring a node build.
+#
+# favicon.svg is authored in web/public/ and copied here verbatim by the build -- it is not
+# generated, which is why tracking it does not track a build artifact. Keep the two in sync; the
+# test in favicon_test.go serves this copy, and web/index.html references it by the same path.
 *
 !.gitignore
 !index.html
+!favicon.svg
