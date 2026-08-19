@@ -1,3 +1,17 @@
+## kconmon-ng v2.0.3
+
+### Fixed
+
+- **A config change restarts the pods that read it.** The agent and the
+  controller share one ConfigMap and read it once at startup, and a mounted
+  ConfigMap changes under a running process without telling it — so
+  `controller.events.enabled: true` applied to a live release updated the object
+  and left the controller on the old file. It went on advertising no
+  capabilities, the Console's realtime ingester retried against a stream that was
+  configured but never started, and nothing anywhere reported an error: the Live
+  page was simply empty. Both workloads now carry `checksum/config`, so a values
+  change rolls them; a change the ConfigMap does not carry still does not.
+
 ## kconmon-ng v2.0.2
 
 ### Fixed

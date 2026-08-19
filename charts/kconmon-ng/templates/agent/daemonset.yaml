@@ -17,7 +17,14 @@ spec:
       maxUnavailable: 1
   template:
     metadata:
-      {{- $annotations := dict }}
+      {{- /* The CONFIG's fingerprint, so a values change restarts the pod that reads it.
+             The agent and the controller share kconmon-ng-config and read it ONCE at startup, and a
+             mounted ConfigMap changes under a running process without telling it. Helm updated the
+             object and left the pods on the old file: `controller.events.enabled: true` was applied
+             and the controller went on advertising no capabilities, so the Console's realtime
+             ingester retried forever against a stream that was configured but not running -- with no
+             error anywhere, because nothing was wrong except the generation of one file. */}}
+      {{- $annotations := dict "checksum/config" (include (print $.Template.BasePath "/shared/configmap.yaml") . | sha256sum) }}
       {{- if .Values.agent.zone }}
       {{- $_ := set $annotations "kconmon-ng.zone" .Values.agent.zone }}
       {{- end }}
@@ -26,12 +33,10 @@ spec:
       {{- $_ := set $annotations $k $v }}
       {{- end }}
       {{- end }}
-      {{- if $annotations }}
       annotations:
         {{- range $k, $v := $annotations }}
         {{ $k }}: {{ $v | quote }}
         {{- end }}
-      {{- end }}
       labels:
         {{- include "kconmon-ng.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: agent
