@@ -22,6 +22,10 @@ spec:
       app.kubernetes.io/component: controller
   template:
     metadata:
+      annotations:
+        {{- /* See the agent DaemonSet: the shared config is read once at startup, so without this a
+               values change updates the ConfigMap and leaves every pod running the old file. */}}
+        checksum/config: {{ include (print $.Template.BasePath "/shared/configmap.yaml") . | sha256sum }}
       labels:
         {{- include "kconmon-ng.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: controller

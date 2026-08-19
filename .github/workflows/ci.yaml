@@ -289,6 +289,41 @@ jobs:
               print(f"ok: {prof or 'defaults'}")
           PY
 
+      # A config change must RESTART the pods that read it. The agent and the controller read the
+      # shared ConfigMap once at startup, and a mounted ConfigMap changes under a running process
+      # without telling it: `controller.events.enabled: true` was applied to a live release and the
+      # controller went on advertising no capabilities, so the Console's realtime ingester retried
+      # forever against a stream that was configured but never started -- silently, because nothing
+      # was broken except the generation of one file. The checksum annotation is what turns a values
+      # change into a rollout, and it must also NOT move when the config did not.
+      - name: A config change rolls the pods that read it
+        run: |
+          set -e
+          python3 - <<'PY'
+          import re, subprocess, sys
+
+          def checksums(*extra):
+              out = subprocess.run(["helm", "template", "charts/kconmon-ng", *extra],
+                                   capture_output=True, text=True, check=True).stdout
+              return re.findall(r'checksum/config:\s*"?([0-9a-f]{64})"?', out)
+
+          base = checksums()
+          if len(base) < 2:
+              sys.exit(f"::error::expected the agent and the controller to carry checksum/config, found {len(base)}")
+          if len(set(base)) != 1:
+              sys.exit("::error::the two workloads hash the same ConfigMap and must agree")
+
+          changed = checksums("--set", "controller.events.enabled=true")
+          if changed[0] == base[0]:
+              sys.exit("::error::a config change left checksum/config untouched; the pods would keep the old file")
+
+          unrelated = checksums("--set", "controller.replicaCount=2")
+          if unrelated[0] != base[0]:
+              sys.exit("::error::checksum/config moved for a change the ConfigMap does not carry; "
+                       "that is a needless restart")
+          print("ok: the checksum follows the config and nothing else")
+          PY
+
       - name: Template chart with every ci profile
         run: |
           set -e
