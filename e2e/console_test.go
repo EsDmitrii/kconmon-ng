@@ -1094,32 +1094,32 @@ func runMTR(t *testing.T, base, source, destination string) string {
 	return created.ID
 }
 
-// silentHopIP is internal/console/checks/mtrproject.go's silentHop predicate,
-// spelled once more here so the skip branch below tests the SAME thing the
-// projector rejects on rather than an approximation of it.
+// silentHopIP is a TTL that did not answer, as internal/console/checks/mtrproject.go
+// normalizes it: the checker writes "*", any other producer may write "", and the
+// projector stores both as "*". It counts them for the evidence line below; it is
+// NOT a rejection predicate, because a silent hop is kept.
 func silentHopIP(ip string) bool {
 	trimmed := strings.TrimSpace(ip)
 	return trimmed == "" || trimmed == "*"
 }
 
-// allSilentTrace reports whether the run carried at least one trace and every
-// hop of every trace was silent -- the exact input for which
-// ProjectMTRSnapshot returns false and writes no snapshot.
-func allSilentTrace(detail *mtrRunDetail) bool {
-	traced := false
+// hoplessTrace reports whether the run produced results and not one of them
+// recorded a hop -- the only trace ProjectMTRSnapshot still refuses.
+//
+// An ALL-SILENT trace is not that case: the projector records it under the one
+// reserved silent identity, precisely so a destination that eats ICMP
+// TTL-exceeded keeps a history instead of vanishing from MTR Explorer. A trace
+// with no hops at all never walked a path, so there is nothing to record.
+func hoplessTrace(detail *mtrRunDetail) bool {
+	if len(detail.Results) == 0 {
+		return false
+	}
 	for i := range detail.Results {
-		hops := detail.Results[i].Result.Details.Hops
-		if len(hops) == 0 {
-			continue
-		}
-		traced = true
-		for _, hop := range hops {
-			if !silentHopIP(hop.IP) {
-				return false
-			}
+		if len(detail.Results[i].Result.Details.Hops) > 0 {
+			return false
 		}
 	}
-	return traced
+	return true
 }
 
 // mtrRunEvidence renders what a run's pairs actually reported, hop addresses
@@ -1150,13 +1150,13 @@ func endUnprojected(t *testing.T, base, runID, source, destination string) {
 		t.Fatalf("no path-history row appeared for %s -> %s after run %s, and the run itself could not be read",
 			source, destination, runID)
 	}
-	if allSilentTrace(&detail) {
-		t.Skipf("traceroute inside this kind cluster answered no TTL for %s -> %s: every hop is silent, "+
-			"and internal/console/checks/mtrproject.go rejects an all-silent trace by design (no snapshot, "+
-			"not an error). Environment limitation, not a console defect -- evidence: %s",
+	if hoplessTrace(&detail) {
+		t.Skipf("traceroute inside this kind cluster recorded no hop at all for %s -> %s, so there is no "+
+			"path to project (internal/console/checks/mtrproject.go returns false for a hopless trace). "+
+			"Environment limitation, not a console defect -- evidence: %s",
 			source, destination, mtrRunEvidence(&detail))
 	}
-	t.Fatalf("no path-history row appeared for %s -> %s within %s, and the run's trace was NOT all-silent, "+
+	t.Fatalf("no path-history row appeared for %s -> %s within %s, and the run's trace DID record hops, "+
 		"so the projector should have written one: %s",
 		source, destination, mtrProjectionBudget, mtrRunEvidence(&detail))
 }
@@ -1186,11 +1186,23 @@ func assertSnapshotInvariants(t *testing.T, snaps []pathSnapshot, source, destin
 		if len(snap.Hops) == 0 {
 			t.Errorf("expected snapshot %s to carry hops (the store refuses a hopless route)", snap.ID)
 		}
+		/* A silent hop is KEPT: "*" at TTL 1 and 2 before the answer at TTL 3 is the network path --
+		   two layers that did not answer, not a one-hop link. What must never survive is an
+		   UNNORMALIZED one: normalizeHops writes "*" for a TTL that did not answer, so an empty
+		   address means the payload reached the store without going through it. */
+		silent := 0
 		for _, hop := range snap.Hops {
-			if silentHopIP(hop.IP) {
-				t.Errorf("expected normalizeHops to drop silent hops, snapshot %s kept hop %d %q",
-					snap.ID, hop.Number, hop.IP)
+			if strings.TrimSpace(hop.IP) == "" {
+				t.Errorf("snapshot %s hop %d carries an empty address; normalizeHops stores a silent hop as %q",
+					snap.ID, hop.Number, "*")
 			}
+			if silentHopIP(hop.IP) {
+				silent++
+			}
+		}
+		if silent > 0 {
+			t.Logf("snapshot %s keeps %d of %d hops silent; path identity %s ignores them, so a flapping "+
+				"%q does not read as a route change", snap.ID, silent, len(snap.Hops), snap.PathHash, "*")
 		}
 		if snap.TraceCount < 1 {
 			t.Errorf("expected snapshot %s to have been produced by at least one trace, got %d",

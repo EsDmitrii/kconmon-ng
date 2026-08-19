@@ -292,6 +292,11 @@ jobs:
           KCONMON_DENIED_TARGET_ADDR: 203.0.113.10:80
 
       # The console skips the reconciler when there is no database -- alert rules live in PostgreSQL.
+      #
+      # Chart 2.x has no console.database.mode: the database is on exactly when a DSN Secret is named,
+      # so CLEARING database.existingSecret is what turns it off. The old --set named a key the chart
+      # does not read, helm accepted it, and the console kept its database -- every degraded-mode
+      # assertion then failed against a fully-functional console.
       - name: Reinstall console with database disabled
         if: ${{ steps.meta.outputs.skip != 'true' }}
         run: |
@@ -307,7 +312,7 @@ jobs:
             --set console.image.repository=kconmon-ng-console \
             --set console.image.tag=test \
             --set console.image.pullPolicy=Never \
-            --set console.database.mode=disabled \
+            --set database.existingSecret= \
             --wait \
             --timeout 5m
 
