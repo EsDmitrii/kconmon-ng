@@ -226,6 +226,11 @@ jobs:
       - name: values.schema.json has no duplicate keys
         run: python3 hack/schema-lint.py charts/kconmon-ng/values.schema.json
 
+      # A --set path the chart stopped reading is accepted by helm and changes nothing; see the
+      # script's header for the run it silently hollowed out.
+      - name: Every value CI sets is a value the chart defines
+        run: python3 hack/values-keys-lint.py
+
       - name: Dashboards in sync with the chart copy
         run: diff -r dashboards charts/kconmon-ng/dashboards
 
