@@ -17,7 +17,7 @@
     "@codemirror/lint": "^6.8.4",
     "@codemirror/state": "^6.5.1",
     "@codemirror/view": "^6.36.2",
-    "@prometheus-io/codemirror-promql": "^0.313.0",
+    "@prometheus-io/codemirror-promql": "^0.314.0",
     "@tanstack/react-query": "^5.62.8",
     "@tanstack/react-router": "^1.95.0",
     "@tanstack/react-virtual": "^3.14.9",
