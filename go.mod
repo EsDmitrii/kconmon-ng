@@ -2,7 +2,7 @@ module github.com/EsDmitrii/kconmon-ng
 
 go 1.26.0
 
-toolchain go1.26.6
+toolchain go1.27.0
 
 require (
 	github.com/coreos/go-oidc/v3 v3.20.0
