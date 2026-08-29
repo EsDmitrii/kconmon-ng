@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/EsDmitrii/kconmon-ng/internal/config"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 )
@@ -257,5 +258,42 @@ func TestNewPrometheusMetricsEventGauges(t *testing.T) {
 	}
 	if got := testutil.ToFloat64(m.ControllerEventsPublished.WithLabelValues("topology_changed")); got != 1 {
 		t.Errorf("ControllerEventsPublished = %v, want 1", got)
+	}
+}
+
+// Mirrors the console's kconmon_ng_console_build_info: same labels, value fixed
+// at 1, populated at construction so both binaries expose it without wiring.
+func TestNewPrometheusMetricsBuildInfo(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	NewPrometheusMetrics("kconmon_ng", reg)
+
+	families, err := reg.Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var found bool
+	for _, f := range families {
+		if f.GetName() != "kconmon_ng_build_info" {
+			continue
+		}
+		found = true
+		if len(f.GetMetric()) != 1 {
+			t.Fatalf("build_info has %d series, want exactly 1", len(f.GetMetric()))
+		}
+		s := f.GetMetric()[0]
+		if got := s.GetGauge().GetValue(); got != 1 {
+			t.Errorf("build_info value = %v, want 1", got)
+		}
+		labels := map[string]string{}
+		for _, lp := range s.GetLabel() {
+			labels[lp.GetName()] = lp.GetValue()
+		}
+		if labels["version"] != config.Version || labels["commit"] != config.Commit {
+			t.Errorf("build_info labels = %v, want version=%q commit=%q", labels, config.Version, config.Commit)
+		}
+	}
+	if !found {
+		t.Error("kconmon_ng_build_info not found in gathered families")
 	}
 }
