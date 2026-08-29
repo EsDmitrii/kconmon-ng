@@ -106,6 +106,13 @@ alerting metrics, their labels and every rule are in
 websocket, audit, rate-limit and retention counters) are exported under the same
 prefix and documented by their HELP strings on `/metrics`.
 
+Per-pair, per-protocol measurement has a price, and you should see it before
+your Prometheus does: each directed pair keeps roughly 70 active series, and
+pairs grow as N×(N−1) — about 690k series at 100 nodes. 50–100 nodes is the
+production-proven envelope. The arithmetic, what each checker costs and the
+levers that exist today are in
+[docs/metrics.md](docs/metrics.md#scaling-and-cardinality).
+
 ### The Console
 
 An optional web UI, **off by default**, deployed by the same chart. It reads the
@@ -195,10 +202,15 @@ Install it via krew from a release manifest, until it lands in the krew index:
 
 ```bash
 kubectl krew install --manifest-url \
-  https://github.com/EsDmitrii/kconmon-ng/releases/download/v2.0.0/kconmon.yaml
+  https://github.com/EsDmitrii/kconmon-ng/releases/latest/download/kconmon.yaml
 ```
 
 ## Quickstart
+
+No cluster at hand? `make local-up` brings up Minikube with Prometheus, Grafana
+and kconmon-ng in one command, and
+[docs/demo/breaking-cni.md](docs/demo/breaking-cni.md) then breaks the network
+on purpose so you can watch the tool catch it.
 
 Kubernetes 1.31+ (CI runs against 1.36), Helm 4 (the chart ships as an OCI
 artifact; Helm ≥3.14 also works), and the
@@ -210,10 +222,12 @@ Every component drops `ALL` capabilities and passes restricted PSS unchanged.
 
 ```bash
 helm upgrade --install kconmon-ng oci://ghcr.io/esdmitrii/charts/kconmon-ng \
-  --version 2.0.0 \
   --set serviceMonitor.enabled=true \
   --set prometheusRule.enabled=true
 ```
+
+The examples track the latest published chart; pass `--version` if you need a
+pinned, reproducible install.
 
 Expect one controller pod plus one agent per node:
 
@@ -240,13 +254,42 @@ for f in dashboards/*.json; do
 done
 ```
 
+### No Prometheus Operator?
+
+Skip `serviceMonitor.enabled` and add one scrape job instead. The agent and the
+controller both expose a dedicated `metrics` port (`config.metricsPort`, 9091 by
+default) on their Services — separate from the unauthenticated API port on
+purpose — so a single endpoints-role job covers the whole fleet:
+
+```yaml
+scrape_configs:
+  - job_name: kconmon-ng
+    kubernetes_sd_configs:
+      - role: endpoints
+        namespaces:
+          names: [default] # the namespace kconmon-ng is installed into
+    relabel_configs:
+      - source_labels: [__meta_kubernetes_service_label_app_kubernetes_io_name]
+        regex: kconmon-ng
+        action: keep
+      - source_labels: [__meta_kubernetes_endpoint_port_name]
+        regex: metrics
+        action: keep
+      - source_labels: [__meta_kubernetes_pod_node_name]
+        target_label: node
+```
+
+The bundled alert rules are plain PromQL: if `PrometheusRule` is not an option
+either, lift them from
+[docs/metrics.md](docs/metrics.md#default-alerting-rules) into your own
+`rule_files`.
+
 ### Turn on the Console
 
 It is a flag on the same release. Nothing else in the chart changes:
 
 ```bash
 helm upgrade --install kconmon-ng oci://ghcr.io/esdmitrii/charts/kconmon-ng \
-  --version 2.0.0 \
   --set console.enabled=true \
   --set console.prometheus.url=http://prometheus-operated.monitoring:9090
 
@@ -272,6 +315,50 @@ and HTTP in three other places at once and see each failure isolated to its own
 pair and protocol. The last part runs the same break through the Console:
 correlate it on `/investigate`, save it as an incident, and declare an alert rule
 that fires a webhook when the pair loses packets again.
+
+## How it compares
+
+The name is inherited, so credit first:
+[kconmon](https://github.com/Stono/kconmon) by Karl Stoney established this
+exact shape — per-node agents, a controller handing out peer lists, per-pair
+Prometheus metrics enriched with zones. It is written in Node.js and was
+archived in June 2026. kconmon-ng is a ground-up Go implementation of the same
+idea, not a fork — no code is shared — extended with ICMP, reactive MTR tracing
+and the Console.
+
+| | kconmon-ng | [kconmon](https://github.com/Stono/kconmon) | [goldpinger](https://github.com/bloomberg/goldpinger) | [kubenurse](https://github.com/postfinance/kubenurse) |
+|---|---|---|---|---|
+| Status | active | archived (June 2026) | active | active |
+| Language | Go | Node.js | Go | Go |
+| Architecture | agent DaemonSet + controller; peer list pushed over gRPC | agent DaemonSet + controller; peers fetched every 5s | one DaemonSet; every pod queries the Kubernetes API for peers | one DaemonSet |
+| Node-to-node probes | TCP, UDP and ICMP on every ordered pair, per protocol | TCP (HTTP GET), UDP | HTTP between pods; UDP optional, off by default | HTTP between neighbours |
+| Other checks | DNS, HTTP(S) URLs, external targets behind an agent-side CIDR allowlist | DNS | DNS; TCP/HTTP(S) to external targets | API server (direct and via DNS), ingress, service |
+| On probe failure | reactive MTR trace, per-hop path history | — | — | — |
+| Zone awareness | `source_zone`/`destination_zone` on every peer metric | zone labels on metrics | — | — |
+| Behaviour at scale | full N×N mesh; sparse mesh is roadmap | full N×N mesh | full mesh | caps neighbour checks at 10 nodes by default |
+| UI | optional Console: matrix, topology, incidents, Time Machine, alert rule editor | — (sample Grafana dashboard) | built-in connectivity graph | — (Grafana dashboard provided) |
+
+The table states what each project's README claims as of August 2026; a `—`
+means the README does not claim the feature, not that a flag or fork cannot add
+it. Reach for **goldpinger** when an HTTP-level "can pods see each other" graph
+with a tiny footprint is enough, for **kubenurse** when the question is the path
+through ingress, service and API server rather than raw node-to-node transport,
+and for **kconmon-ng** when you need per-protocol pair evidence — the
+UDP-but-not-TCP class of failure — with the bad hop already traced.
+
+## Scope: agents outside the cluster
+
+Asked often enough to answer here: can the agent run on a bare host — a VM
+outside the cluster, an on-prem box — and join the mesh? Not yet.
+[docs/external-agents.md](docs/external-agents.md) states the honest status. In
+short: the agent binary already has no Kubernetes dependency — identity,
+address and zone come from environment variables, and the controller validates
+a plain IP — but the agent ↔ controller gRPC channel is plaintext and
+unauthenticated by design, safe only inside the cluster boundary, and there is
+no host packaging. Do not expose the controller's gRPC port to work around
+that: anyone who can reach it can register agents and steer the probe mesh.
+Trusted registration through a separate TLS gateway plus deb/rpm packaging is
+the external-agents milestone on the roadmap.
 
 ## Reference
 

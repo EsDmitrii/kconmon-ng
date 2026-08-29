@@ -1,5 +1,8 @@
 blank_issues_enabled: false
 contact_links:
+  - name: Security vulnerability
+    url: https://github.com/EsDmitrii/kconmon-ng/security/advisories/new
+    about: Report privately via GitHub security advisories — see SECURITY.md. Please do not open a public issue.
   - name: Question / Discussion
     url: https://github.com/EsDmitrii/kconmon-ng/discussions
     about: Ask questions or start a discussion

@@ -369,6 +369,73 @@ node that is gone for good belongs to `KconmonAgentsMissing`. The full
 reasoning, including why a rollout does not page anyone, is in the chart
 README's "Alerting rules" section.
 
+## Scaling and cardinality
+
+Per-pair, per-protocol measurement is the point of the tool, and it is also the
+bill. This is the honest arithmetic, so nobody discovers it from a Prometheus
+that stopped fitting in memory.
+
+### What one pair costs
+
+Every directed pair keeps these peer-labelled families
+(`internal/metrics/prometheus.go`; each histogram uses the same 13-bucket
+scale):
+
+| Families | Kind | Series per directed pair |
+| --- | --- | --- |
+| `tcp_connect_duration_seconds`, `tcp_total_duration_seconds`, `udp_rtt_seconds`, `icmp_rtt_seconds` | 4 histograms | 64 — each is 13 buckets + `+Inf` + `_sum` + `_count` = 16 |
+| `udp_jitter_seconds`, `udp_packet_loss_ratio`, `icmp_packet_loss_ratio` | 3 gauges | 3 |
+| `tcp_results_total`, `udp_results_total`, `icmp_results_total` | 3 counters | 3, split further by `result` |
+
+Call it **~70 active series per directed pair** with the default checkers on.
+Pairs are ordered — node A probes B *and* B probes A — so N nodes make N×(N−1)
+directed pairs:
+
+| Nodes | Directed pairs | Active series at ~70/pair |
+| --- | --- | --- |
+| 10 | 90 | ~6.3k |
+| 50 | 2,450 | ~170k |
+| 100 | 9,900 | ~690k |
+
+The MTR families (`mtr_triggered_total`, `mtr_hops`, `mtr_hop_rtt_seconds`)
+appear for a pair only after a failed probe triggered a trace. DNS and HTTP
+scale differently — hosts × resolvers × nodes and URLs × nodes, linear in N —
+and are negligible next to the mesh.
+
+### The proven envelope
+
+**50–100 nodes is the production-proven envelope.** At 100 nodes, budget ~0.7M
+active series for kconmon-ng alone and size Prometheus accordingly. Above that
+the quadratic growth is unforgiving — 300 nodes is ~6.3M series — and nothing
+at that scale has been validated: reducing per-pair cost and probing a sparse
+mesh instead of the full N×N are roadmap work, not a config flag today. Do not
+plan a 1000-node deployment on these defaults.
+
+### Levers that exist today
+
+- **Disable checkers you do not need** (`config.checkers.<type>.enabled`).
+  Each protocol takes its whole per-pair family with it: TCP off saves ~33
+  series/pair (it owns two of the four histograms), UDP off ~19, ICMP off ~18.
+- **Drop histogram buckets you will never query.** The four histograms are 64
+  of the ~70; if a family is only ever used through `_sum`/`_count` or the
+  gauges, dropping its `_bucket` series costs you quantiles on that family and
+  nothing else. Plain Prometheus:
+
+  ```yaml
+  metric_relabel_configs:
+    - source_labels: [__name__]
+      regex: kconmon_ng_(tcp_connect|tcp_total)_duration_seconds_bucket
+      action: drop
+  ```
+
+  The chart's `ServiceMonitor` does not expose `metricRelabelings` yet, so with
+  the Prometheus Operator this currently means bringing your own
+  `ServiceMonitor` in place of `serviceMonitor.enabled`.
+- **A longer scrape interval** (`serviceMonitor.interval`) cuts sample ingest
+  and query cost, **not** series count — head cardinality stays the same.
+- **Shorter retention or downsampling** on the backend bounds history cost;
+  it does nothing for active series.
+
 ## Self-monitoring
 
 kconmon-ng monitors itself so that degradation of the monitor raises an alert
