@@ -27,23 +27,23 @@ const en = {
   /* ── sidebar navigation, keyed by SURFACE rather than by path so the key
         reads at the call site. NAV_KEYS below is the path→key map. ────────── */
   "nav.overview": "Overview",
-  "nav.live": "Live",
-  "nav.investigate": "Investigate",
+  "nav.live": "Events",
+  "nav.investigate": "Incidents",
   "nav.matrix": "Matrix",
   "nav.topology": "Topology",
-  "nav.mtr": "MTR",
-  "nav.diagnostics": "Diagnostics",
-  "nav.targets": "Targets & Schedules",
-  "nav.explore": "Explore",
+  "nav.mtr": "Routes · MTR",
+  "nav.diagnostics": "Run checks",
+  "nav.targets": "Scheduled checks",
+  "nav.explore": "Metrics",
   "nav.alerting": "Alerting",
-  "nav.console": "Console",
+  "nav.console": "PromQL",
   "nav.settings": "Settings",
 
   /* Sidebar group headers. Rendered uppercase by CSS (tracking-[0.1em]), so
      these stay in sentence case and Russian keeps its own capitalisation. */
-  "nav.group.monitor": "Monitor",
+  "nav.group.watch": "Watch",
   "nav.group.investigate": "Investigate",
-  "nav.group.manage": "Manage",
+  "nav.group.configure": "Configure",
 
   "sidebar.footer": "Network connectivity console",
   /* The footer's <kbd> tooltip. {keys} is the palette hotkey as this OS spells
@@ -93,33 +93,29 @@ const en = {
 export type ChromeKey = keyof typeof en;
 
 /**
- * "Live" carries two different meanings in this chrome and they are two
- * different Russian words on purpose: the NAV item is a real-time event feed
- * («Онлайн»), while the Time Machine's "Live" is the PRESENT MOMENT you left
- * and return to («реальное время»). One word for both would make "Return to
- * Live" read as a link to the events page.
- *
- * "Explore" is «Метрики», not a literal «Исследование»: «Расследование» is
- * already Investigate, and the page is curated metrics plus A/B compare, so
- * the honest noun beats the calque.
+ * M3-8 renamed the pages so no label fights another surface: the event feed is
+ * Events/«События» (freeing "Live" for the Time Machine's present moment), the
+ * /investigate PAGE is Incidents/«Инциденты» while the GROUP header keeps
+ * Investigate/«Расследование», and /explore is the honest Metrics/«Метрики».
+ * MTR and PromQL are tool names and read the same in both languages.
  */
 export const chromeDict: Dictionary<ChromeKey> = defineDict(en, {
   "nav.overview": "Обзор",
-  "nav.live": "Онлайн",
-  "nav.investigate": "Расследование",
+  "nav.live": "События",
+  "nav.investigate": "Инциденты",
   "nav.matrix": "Матрица",
   "nav.topology": "Топология",
-  "nav.mtr": "MTR",
-  "nav.diagnostics": "Диагностика",
-  "nav.targets": "Цели и расписания",
+  "nav.mtr": "Маршруты · MTR",
+  "nav.diagnostics": "Проверки вручную",
+  "nav.targets": "Плановые проверки",
   "nav.explore": "Метрики",
   "nav.alerting": "Оповещения",
-  "nav.console": "Консоль",
+  "nav.console": "PromQL",
   "nav.settings": "Настройки",
 
-  "nav.group.monitor": "Мониторинг",
+  "nav.group.watch": "Наблюдение",
   "nav.group.investigate": "Расследование",
-  "nav.group.manage": "Управление",
+  "nav.group.configure": "Настройка",
 
   "sidebar.footer": "Консоль сетевой связности",
   "sidebar.palette.hint": "{keys} — поиск и команды",

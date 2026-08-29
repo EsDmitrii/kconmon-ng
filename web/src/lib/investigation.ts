@@ -30,6 +30,9 @@ export interface TimelineEntry {
   title: string;
   /** Optional second line: the numbers behind the headline. */
   detail?: string;
+  /** Tooltip (title attribute) for the detail line — the machine identity a
+   *  human-readable detail replaced, e.g. the raw audit subjectKind:subjectId. */
+  detailTitle?: string;
   /** Deep-link target AND the dedupe identity. Two entries carrying the same
    *  (kind, id) are the same fact seen twice, whatever else differs. */
   ref?: { kind: TimelineKind; id: string };

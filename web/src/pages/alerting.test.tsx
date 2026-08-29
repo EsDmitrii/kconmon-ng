@@ -110,6 +110,10 @@ function renderPage(
     rule?: string;
     /** The rows GET /api/v1/targets answers, for the external-target-down builder's target select. */
     targets?: { name: string }[];
+    /** The rows GET /api/v1/maintenance answers (M3-14: the section moved here from Settings). */
+    maintenance?: unknown[];
+    /** Replaces the 200 the maintenance list would otherwise answer with. */
+    maintenanceResponse?: () => Response;
   } = {},
 ) {
   const {
@@ -124,8 +128,11 @@ function renderPage(
     engaged = false,
     rule,
     targets = [],
+    maintenance = [],
+    maintenanceResponse,
   } = opts;
   const rows = [...rules];
+  const windows = [...maintenance] as Record<string, unknown>[];
   const calls: Call[] = [];
 
   const fetchMock = vi.fn((url: string, init?: RequestInit) => {
@@ -180,6 +187,15 @@ function renderPage(
     }
     if (href.startsWith("/api/v1/targets")) {
       return Promise.resolve(json({ targets, nextCursor: "" }));
+    }
+    if (href.startsWith("/api/v1/maintenance/") && method === "DELETE") {
+      const id = decodeURIComponent(href.slice("/api/v1/maintenance/".length));
+      const at = windows.findIndex((w) => (w as { id: string }).id === id);
+      if (at >= 0) windows.splice(at, 1);
+      return Promise.resolve(new Response(null, { status: 204 }));
+    }
+    if (href.startsWith("/api/v1/maintenance")) {
+      return Promise.resolve(maintenanceResponse ? maintenanceResponse() : json({ windows, nextCursor: "" }));
     }
     return Promise.resolve(json({}));
   });
@@ -1313,5 +1329,119 @@ describe("the managed rules list is PAGED", () => {
     expect(screen.getByText("Rule010")).toBeInTheDocument();
     expect(screen.getByTestId("pager-showing")).toHaveTextContent("Showing 10 of 70 rules");
     expect(screen.getByTestId("pager-page")).toHaveTextContent("Page 2 of 7");
+  });
+});
+
+/* ── maintenance windows (M3-14: relocated from Settings) ───────────────── */
+
+/**
+ * The section is a RELOCATION: same endpoint, same unbounded no-range read,
+ * same shared row, same maintenance:write gate. These tests are the Settings
+ * ones moved with it, plus the one property the move created — the section
+ * stands on its own permission, not on the page's alerts:read floor.
+ */
+
+function windowRow(over: Record<string, unknown> = {}) {
+  return {
+    id: "m-1",
+    scope: "node-a",
+    startAt: "2030-01-01T10:00:00Z",
+    endAt: "2030-01-01T12:00:00Z",
+    reason: "switch firmware upgrade",
+    createdBy: "user:ada",
+    createdAt: "2026-08-08T00:00:00Z",
+    ...over,
+  };
+}
+
+const MAINTAINER = [...ALERT_EDITOR, "maintenance:write"];
+
+describe("maintenance windows section", () => {
+  it("is gated on maintenance:WRITE and asks for nothing without it", async () => {
+    const { calls } = renderPage({ maintenance: [windowRow()] });
+    await screen.findByRole("heading", { name: "Alert rules" });
+    expect(screen.queryByRole("heading", { name: "Maintenance windows" })).not.toBeInTheDocument();
+    expect(calls.filter((c) => c.url.startsWith("/api/v1/maintenance"))).toEqual([]);
+  });
+
+  it("renders for maintenance:write even without alerts:read — a window is not an alert rule", async () => {
+    renderPage({ permissions: ["maintenance:write"], maintenance: [windowRow()] });
+    expect(await screen.findByRole("heading", { name: "Maintenance windows" })).toBeInTheDocument();
+    // The alerts gate still stands for the rest of the page.
+    expect(screen.getByText("Requires the alerts:read permission")).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Alert rules" })).not.toBeInTheDocument();
+  });
+
+  it("asks for EVERY window — no from, no to, no scope, and it PAGES", async () => {
+    const { calls } = renderPage({ permissions: MAINTAINER, maintenance: [windowRow()] });
+    await screen.findByRole("heading", { name: "Maintenance windows" });
+    const asked = calls.filter((c) => c.url.startsWith("/api/v1/maintenance"));
+    expect(asked).toHaveLength(1);
+    /* A RANGE would hide the future windows this list exists to surface, and a
+       scope would hide everybody else's; the API pages at 100 regardless, so
+       the cursor is followed rather than the tail silently dropped. */
+    expect(asked[0].url).toBe("/api/v1/maintenance?limit=100");
+  });
+
+  it("lists a window whose whole span is in the FUTURE — the one the bars cannot show", async () => {
+    renderPage({ permissions: MAINTAINER, maintenance: [windowRow()] });
+    const list = await screen.findByRole("list", { name: "All maintenance windows" });
+    expect(list).toHaveTextContent("switch firmware upgrade");
+    expect(list).toHaveTextContent("node-a");
+  });
+
+  it("says so plainly when nothing has ever been declared", async () => {
+    renderPage({ permissions: MAINTAINER });
+    expect(await screen.findByText(/No maintenance windows have been declared/i)).toBeInTheDocument();
+  });
+
+  it("deletes behind the confirm idiom — one click arms, the second sends DELETE", async () => {
+    const { calls } = renderPage({ permissions: MAINTAINER, maintenance: [windowRow()] });
+    fireEvent.click(await screen.findByRole("button", { name: /^Delete maintenance window: switch firmware upgrade$/ }));
+    expect(calls.filter((c) => c.method === "DELETE")).toEqual([]);
+
+    fireEvent.click(screen.getByRole("button", { name: /^Confirm delete maintenance window: switch firmware upgrade$/ }));
+    await waitFor(() =>
+      expect(calls.filter((c) => c.method === "DELETE").map((c) => c.url)).toEqual(["/api/v1/maintenance/m-1"]),
+    );
+    await waitFor(() => expect(screen.queryByText("switch firmware upgrade")).toBeNull());
+  });
+
+  it("renders the blurb's Investigate/Explore links inside the sentence, no leftovers", async () => {
+    renderPage({ permissions: MAINTAINER });
+    const para = await screen.findByText(/Declaring a window still happens next to the chart it explains/);
+    const links = within(para).getAllByRole("link");
+    expect(links.map((l) => l.textContent)).toEqual(["Incidents", "Metrics"]);
+    expect(links.map((l) => l.getAttribute("href"))).toEqual(["/investigate", "/explore"]);
+    expect(para.textContent).not.toMatch(/[{}]/);
+    expect(para.textContent).not.toContain("on  or ");
+  });
+
+  it("names the section that failed when the server refuses wordlessly", async () => {
+    renderPage({ permissions: MAINTAINER, maintenanceResponse: () => problem(503, "", "") });
+    await waitFor(() => expect(screen.getAllByRole("alert").length).toBeGreaterThan(0));
+    expect(
+      screen.getAllByRole("alert").some((a) => a.textContent?.includes("Maintenance windows are unavailable")),
+    ).toBe(true);
+  });
+
+  /* The hostile rows from pages/settings.hostile.test.tsx, moved with the section. */
+  it.each([
+    ["an inverted window", windowRow({ startAt: "2030-01-02T00:00:00Z", endAt: "2030-01-01T00:00:00Z" })],
+    ["a window with unparseable stamps", windowRow({ startAt: "soon", endAt: "later" })],
+    ["a window with markup in its reason", windowRow({ reason: "<script>alert(1)</script>" })],
+    ["a window with a ten-thousand-character reason", windowRow({ reason: "d".repeat(10_000) })],
+  ])("lists %s without breaking the page", async (_name, w) => {
+    renderPage({ permissions: MAINTAINER, maintenance: [w] });
+    expect(await screen.findByRole("list", { name: "All maintenance windows" })).toBeInTheDocument();
+    expect(document.body.textContent).not.toContain("Invalid Date");
+    expect(document.body.textContent).not.toContain("NaN");
+  });
+
+  it("pages a thousand windows instead of rendering a thousand rows", async () => {
+    const many = Array.from({ length: 1_000 }, (_, i) => windowRow({ id: `m-${i}`, reason: `w${i}` }));
+    renderPage({ permissions: MAINTAINER, maintenance: many });
+    const list = await screen.findByRole("list", { name: "All maintenance windows" });
+    expect(within(list).getAllByRole("listitem").length).toBeLessThan(100);
   });
 });

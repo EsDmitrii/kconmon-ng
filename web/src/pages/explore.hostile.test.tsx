@@ -169,7 +169,7 @@ describe("a Prometheus that is answering badly", () => {
       stubFetch(answer);
       renderPage();
 
-      await waitFor(() => expect(screen.getByRole("heading", { name: "Explore" })).toBeInTheDocument());
+      await waitFor(() => expect(screen.getByRole("heading", { name: "Metrics" })).toBeInTheDocument());
       // The range picker is still a range picker; nothing escaped render.
       expect(screen.getByRole("radio", { name: "24h" })).toBeInTheDocument();
       expect(document.body.textContent ?? "").not.toContain("NaN");
@@ -297,7 +297,7 @@ describe("a hand-edited ?at= cannot break the page", () => {
 
       await waitFor(() => expect(bodies.length).toBeGreaterThan(0));
       expect(document.body.textContent ?? "").not.toContain("Invalid Date");
-      expect(screen.getByRole("heading", { name: "Explore" })).toBeInTheDocument();
+      expect(screen.getByRole("heading", { name: "Metrics" })).toBeInTheDocument();
     });
   }
 });
@@ -346,7 +346,7 @@ describe("somebody else's text on the page", () => {
 
     // The charts are a different fact from the annotations, and they still draw.
     await waitFor(() => expect(screen.getAllByTestId("echart").length).toBeGreaterThan(0));
-    expect(screen.getByRole("heading", { name: "Explore" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Metrics" })).toBeInTheDocument();
   });
 });
 

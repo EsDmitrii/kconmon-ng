@@ -654,7 +654,7 @@ describe("LivePage — one toolbar slot (#13)", () => {
    *  controls moved under the operator when the mode changed. */
   function toolbarSitsBesideTheHeading(): boolean {
     const toolbar = screen.getByTestId("live-toolbar");
-    const headingBlock = screen.getByRole("heading", { name: "Live" }).parentElement;
+    const headingBlock = screen.getByRole("heading", { name: "Events" }).parentElement;
     return headingBlock?.nextElementSibling?.contains(toolbar) ?? false;
   }
 
@@ -730,7 +730,7 @@ describe("LivePage — ru", () => {
       </QueryClientProvider>,
     );
 
-    expect(screen.getByRole("heading", { name: "Онлайн", level: 1 })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "События", level: 1 })).toBeInTheDocument();
     expect(screen.getByText("Ждём события")).toBeInTheDocument();
     expect(screen.getByText(/лента не сломана, её просто не кормят/)).toBeInTheDocument();
   });

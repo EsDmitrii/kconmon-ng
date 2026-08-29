@@ -118,7 +118,7 @@ describe("TestAnonymousModeRendersExactlyLikeM2", () => {
     expect(await screen.findByRole("status")).toHaveTextContent(/anonymous mode/i);
     // Sidebar: nav items present, unaffected by auth.
     expect(screen.getByRole("link", { name: /overview/i })).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: /live/i })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /events/i })).toBeInTheDocument();
     // No user menu — the M2 static footer text is what shows instead.
     expect(screen.queryByRole("menu")).not.toBeInTheDocument();
     expect(screen.getByText(/network connectivity console/i)).toBeInTheDocument();

@@ -447,7 +447,7 @@ describe("in Russian", () => {
     await renderPalette({ locale: "ru" });
     pressK();
     expect(optionTitles()).toContain("Матрица");
-    expect(optionTitles()).toContain("Цели и расписания");
+    expect(optionTitles()).toContain("Плановые проверки");
     expect(optionTitles()).not.toContain("Matrix");
   });
 

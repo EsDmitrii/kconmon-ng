@@ -960,7 +960,7 @@ describe("DiagnosticsPage — Russian", () => {
   it("renders the duration selector and its honesty caption in Russian", async () => {
     renderPage({ locale: "ru", permissions: OPERATOR });
 
-    expect(await screen.findByRole("heading", { name: "Диагностика" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "Проверки вручную" })).toBeInTheDocument();
 
     // The duration control: its own name, its Instant option, and the caption
     // that says what Instant actually does.
@@ -1154,7 +1154,7 @@ describe("DiagnosticsPage sample interval", () => {
 
   it("names the control and its adjustment in Russian", async () => {
     renderPage({ locale: "ru", permissions: OPERATOR });
-    await screen.findByRole("heading", { name: "Диагностика" });
+    await screen.findByRole("heading", { name: "Проверки вручную" });
 
     const duration = screen.getByRole("radiogroup", { name: "Длительность" });
     fireEvent.click(within(duration).getByRole("radio", { name: "5m" }));

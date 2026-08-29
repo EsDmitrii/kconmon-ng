@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { resetNavigateForTest, setNavigateForTest } from "@/lib/api";
 import { LOCALE_STORAGE_KEY, LocaleProvider } from "@/lib/i18n";
@@ -103,16 +103,14 @@ function renderPage(
     permissions?: string[];
     webhooks?: unknown[];
     tokens?: unknown[];
-    maintenance?: unknown[];
     /** Answers ANY request whose URL matches, before the default mock does. */
     intercept?: (method: string, url: string, body: unknown) => Response | undefined;
     locale?: "en" | "ru";
   } = {},
 ) {
-  const { permissions = ADMIN, webhooks = [], tokens = [], maintenance = [], intercept, locale } = opts;
+  const { permissions = ADMIN, webhooks = [], tokens = [], intercept, locale } = opts;
   const rows = [...webhooks] as Record<string, unknown>[];
   const tokenRows = [...tokens] as Record<string, unknown>[];
-  const windows = [...maintenance] as Record<string, unknown>[];
   const calls: Call[] = [];
 
   const fetchMock = vi.fn((url: string, init?: RequestInit) => {
@@ -146,10 +144,6 @@ function renderPage(
       }
       if (method === "DELETE") return Promise.resolve(new Response(null, { status: 204 }));
       return Promise.resolve(json({ tokens: tokenRows }));
-    }
-    if (href.startsWith("/api/v1/maintenance")) {
-      if (method === "DELETE") return Promise.resolve(new Response(null, { status: 204 }));
-      return Promise.resolve(json({ windows, nextCursor: "" }));
     }
     if (href.startsWith("/api/v1/webhooks")) {
       if (method === "POST") {
@@ -259,7 +253,6 @@ describe("a failure the server did not put into words", () => {
 
   it.each([
     ["webhooks", "/api/v1/webhooks", "webhooks.unavailable"],
-    ["maintenance", "/api/v1/maintenance", "maintenance.unavailable"],
   ])("does the same for the %s list", async (_name, prefix, key) => {
     renderPage({ intercept: (m, url) => (url.startsWith(prefix) && m === "GET" ? problem(503, "") : undefined) });
     await waitFor(() => expect(screen.getAllByRole("alert").length).toBeGreaterThan(0));
@@ -287,7 +280,6 @@ describe("a failure the server did not put into words", () => {
   it.each([
     ["tokens", "/api/v1/tokens"],
     ["webhooks", "/api/v1/webhooks"],
-    ["maintenance", "/api/v1/maintenance"],
   ])("says something readable when a gateway answers for the %s endpoint in HTML", async (_name, prefix) => {
     renderPage({ intercept: (m, url) => (url.startsWith(prefix) && m === "GET" ? opaque(502) : undefined) });
     await waitFor(() => expect(screen.getAllByRole("alert").length).toBeGreaterThan(0));
@@ -552,49 +544,8 @@ describe("the token section under abuse", () => {
   });
 });
 
-/* ── maintenance windows ────────────────────────────────────────────────── */
-
-describe("maintenance windows that make no sense", () => {
-  const window_ = (over: Record<string, unknown> = {}) => ({
-    id: "m-1",
-    scope: "cluster",
-    from: "2026-08-01T00:00:00Z",
-    to: "2026-08-02T00:00:00Z",
-    description: "planned",
-    createdAt: "2026-07-01T00:00:00Z",
-    ...over,
-  });
-
-  it.each([
-    ["an inverted window (to before from)", window_({ from: "2026-08-02T00:00:00Z", to: "2026-08-01T00:00:00Z" })],
-    ["a zero-length window", window_({ from: "2026-08-01T00:00:00Z", to: "2026-08-01T00:00:00Z" })],
-    ["a window entirely in the past", window_({ from: "2020-01-01T00:00:00Z", to: "2020-01-02T00:00:00Z" })],
-    ["a window entirely in the future", window_({ from: "2099-01-01T00:00:00Z", to: "2099-01-02T00:00:00Z" })],
-    ["a window with unparseable stamps", window_({ from: "soon", to: "later" })],
-    ["a window with a ten-thousand-character description", window_({ description: "d".repeat(10_000) })],
-    ["a window with markup in its description", window_({ description: "<script>alert(1)</script>" })],
-    ["a window with an empty description", window_({ description: "" })],
-    ["a window with a null description", window_({ description: null })],
-  ])("lists %s without breaking the page", async (_name, w) => {
-    renderPage({ maintenance: [w] });
-    // The list renders, the section keeps its heading, nothing throws.
-    expect(await screen.findByRole("list", { name: en("maintenance.listAria") })).toBeInTheDocument();
-    expectAlertsSpeak();
-  });
-
-  it("does not print NaN or Invalid Date for stamps it cannot parse", async () => {
-    renderPage({ maintenance: [window_({ from: "soon", to: "later" })] });
-    await screen.findByRole("list", { name: en("maintenance.listAria") });
-    expectNoGarbage();
-  });
-
-  it("pages a thousand windows instead of rendering a thousand rows", async () => {
-    const many = Array.from({ length: 1_000 }, (_, i) => window_({ id: `m-${i}`, description: `w${i}` }));
-    renderPage({ maintenance: many });
-    const list = await screen.findByRole("list", { name: en("maintenance.listAria") });
-    expect(within(list).getAllByRole("listitem").length).toBeLessThan(100);
-  });
-});
+/* The maintenance-windows section moved to pages/alerting.tsx (M3-14); its
+   hostile rows moved into pages/alerting.test.tsx with it. */
 
 /* ── bundles ────────────────────────────────────────────────────────────── */
 

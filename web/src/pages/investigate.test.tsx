@@ -654,6 +654,39 @@ describe("auditDetailLine (finding #18)", () => {
     };
     expect(auditDetailLine(row)).toBe("user:ada · targets · denied · name=api-gw");
   });
+
+  it("prefers subjectDisplay over the raw subjectKind:subjectId (M3-5)", () => {
+    const row: AuditEntry = {
+      id: 9,
+      at: FROM,
+      subjectKind: "user",
+      subjectId: "oidc:6f616b42-0ed8-571e-823f-ee4aca6b7ce9",
+      subjectDisplay: "d.esin@group-ib.com",
+      action: "POST /api/v1/targets",
+      resource: "targets",
+      outcome: "allowed",
+      remoteAddr: "",
+      detail: {},
+    };
+    expect(auditDetailLine(row)).toBe("d.esin@group-ib.com · targets · allowed");
+    expect(auditDetailLine(row)).not.toContain("oidc");
+  });
+
+  it("falls back to the raw subject on rows captured before subjectDisplay existed", () => {
+    const row = {
+      id: 10,
+      at: FROM,
+      subjectKind: "user",
+      subjectId: "ada",
+      subjectDisplay: "",
+      action: "POST /api/v1/targets",
+      resource: "targets",
+      outcome: "allowed",
+      remoteAddr: "",
+      detail: {},
+    } as AuditEntry;
+    expect(auditDetailLine(row)).toBe("user:ada · targets · allowed");
+  });
 });
 
 describe("scopeFilterValue", () => {
@@ -782,6 +815,26 @@ describe("auditEntries", () => {
       new Date(TO),
     );
     expect(entry.severity).toBe("warn");
+  });
+
+  it("keeps the raw subject reachable as the detail tooltip when a display name replaced it (M3-5)", () => {
+    const [entry] = auditEntries(
+      [{ id: 4, at: "2026-08-08T00:30:00Z", subjectKind: "user", subjectId: "oidc:6f616b42", subjectDisplay: "d.esin@group-ib.com", action: "POST /api/v1/targets", resource: "targets", outcome: "allowed", remoteAddr: "", detail: {} }],
+      new Date(FROM),
+      new Date(TO),
+    );
+    expect(entry.detail).toContain("d.esin@group-ib.com");
+    expect(entry.detailTitle).toBe("user:oidc:6f616b42");
+  });
+
+  it("carries no tooltip when the raw subject is already the visible line", () => {
+    const [entry] = auditEntries(
+      [{ id: 5, at: "2026-08-08T00:30:00Z", subjectKind: "user", subjectId: "ada", action: "POST /api/v1/targets", resource: "targets", outcome: "allowed", remoteAddr: "", detail: {} }],
+      new Date(FROM),
+      new Date(TO),
+    );
+    expect(entry.detail).toContain("user:ada");
+    expect(entry.detailTitle).toBeUndefined();
   });
 });
 
@@ -2685,7 +2738,7 @@ describe("InvestigatePage — Russian", () => {
   it("renders its chrome, an honesty caption and the pager in Russian", async () => {
     renderPage({ locale: "ru", events: HOUR_OF_EVENTS });
 
-    expect(await screen.findByRole("heading", { name: "Расследование" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "Инциденты" })).toBeInTheDocument();
 
     // The pager: 61 entries over seven pages at the default size of ten.
     await waitFor(() => expect(screen.getAllByTestId("timeline-row")).toHaveLength(10));

@@ -205,6 +205,17 @@ function kw(key: PaletteKey): string[] {
   return [en(key), ru(key)];
 }
 
+/* M3-8 renamed several pages; the labels they used to wear stay in the search
+   corpus (both languages), because operators' muscle memory keeps typing them. */
+const LEGACY_NAV_KEYWORDS: Readonly<Record<string, string>> = {
+  "/live": "live онлайн",
+  "/investigate": "investigate расследование",
+  "/explore": "explore",
+  "/console": "console консоль",
+  "/diagnostics": "diagnostics диагностика",
+  "/targets": "targets schedules цели и расписания",
+};
+
 function navCommands(): Command[] {
   return NAV_ITEMS.map((item) => {
     /*
@@ -213,13 +224,14 @@ function navCommands(): Command[] {
      */
     const labelKey = NAV_KEYS[item.path];
     const descKey = NAV_DESC_KEYS[item.path];
+    const legacy = LEGACY_NAV_KEYWORDS[item.path];
     return {
       id: `nav:${item.path}`,
       title: item.label,
       titleRu: labelKey ? chromeDict.ru[labelKey] : undefined,
       group: "Navigation" as const,
       /* nav.ts's own description is the keyword text. */
-      keywords: descKey ? [item.description, ru(descKey), item.path] : [item.description, item.path],
+      keywords: [item.description, ...(descKey ? [ru(descKey)] : []), ...(legacy ? [legacy] : []), item.path],
       perform: (ctx: CommandContext) => ctx.navigate(item.path),
     };
   });

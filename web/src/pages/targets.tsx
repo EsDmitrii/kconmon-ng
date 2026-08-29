@@ -708,7 +708,11 @@ function TargetsTab({ canWrite }: { canWrite: boolean }) {
               then rendered "nothing here yet" for a list nobody managed to read. */}
           {query.isPending ? <ListSkeleton /> : null}
           {query.isSuccess && targets.length === 0 ? (
-            <EmptyRow>{t("targets.empty")}</EmptyRow>
+            <EmptyRow>
+              {t("targets.empty")}
+              {/* The CTA names the New target button, so it renders only when that button does. */}
+              {canWrite ? <span className="mt-1 block">{t("targets.empty.cta")}</span> : null}
+            </EmptyRow>
           ) : null}
           {targets.length > 0 ? (
             <>
@@ -1232,7 +1236,11 @@ function DefinitionsTab({ canRead, canWrite }: { canRead: boolean; canWrite: boo
               then rendered "nothing here yet" for a list nobody managed to read. */}
           {query.isPending ? <ListSkeleton /> : null}
           {query.isSuccess && definitions.length === 0 ? (
-            <EmptyRow>{t("definitions.empty")}</EmptyRow>
+            <EmptyRow>
+              {t("definitions.empty")}
+              {/* The CTA names the New definition button, so it renders only when that button does. */}
+              {canWrite ? <span className="mt-1 block">{t("definitions.empty.cta")}</span> : null}
+            </EmptyRow>
           ) : null}
           {definitions.length > 0 ? (
             <>
@@ -1928,7 +1936,11 @@ function SchedulesTab({ canRead, canWrite }: { canRead: boolean; canWrite: boole
               then rendered "nothing here yet" for a list nobody managed to read. */}
           {query.isPending ? <ListSkeleton /> : null}
           {query.isSuccess && schedules.length === 0 ? (
-            <EmptyRow>{t("schedules.empty")}</EmptyRow>
+            <EmptyRow>
+              {t("schedules.empty")}
+              {/* The CTA names the New schedule button, so it renders only when that button does. */}
+              {canWrite ? <span className="mt-1 block">{t("schedules.empty.cta")}</span> : null}
+            </EmptyRow>
           ) : null}
           {schedules.length > 0 ? (
             <>

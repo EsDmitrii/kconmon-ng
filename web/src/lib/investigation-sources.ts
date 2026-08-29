@@ -674,8 +674,16 @@ export function auditDetailLine(row: AuditEntry): string {
   const kv = Object.entries(row.detail ?? {})
     .map(([k, v]) => `${k}=${typeof v === "string" ? v : JSON.stringify(v)}`)
     .join(" ");
-  const subject = str(row.subjectKind) === "" && str(row.subjectId) === "" ? "" : `${str(row.subjectKind)}:${str(row.subjectId)}`;
+  /* subjectDisplay wins over the raw kind:id (M3-5); rows written before the
+     field existed fall back to the old string, and rawAuditSubject keeps the
+     id reachable as the row's tooltip. */
+  const subject = str(row.subjectDisplay) !== "" ? str(row.subjectDisplay) : rawAuditSubject(row);
   return [subject, str(row.resource), str(row.outcome), kv].filter((s) => s !== "").join(" · ");
+}
+
+/** rawAuditSubject is the machine identity, "user:oidc:<uuid>"; "" when the row carries none. */
+function rawAuditSubject(row: AuditEntry): string {
+  return str(row.subjectKind) === "" && str(row.subjectId) === "" ? "" : `${str(row.subjectKind)}:${str(row.subjectId)}`;
 }
 
 /**
@@ -720,6 +728,8 @@ export function auditEntries(rows: AuditEntry[], from: Date, to: Date): Timeline
       severity: row.outcome === "denied" ? "warn" : row.outcome === "error" ? "error" : "info",
       title: str(row.action) || DASH,
       detail: auditDetailLine(row),
+      /* Only when a display name hides the raw subject does the tooltip carry it. */
+      detailTitle: str(row.subjectDisplay) !== "" && rawAuditSubject(row) !== "" ? rawAuditSubject(row) : undefined,
       /* The row STAYS in the timeline — the badge already says "audit" out loud
          — and is only kept out of the cause candidates (finding #8). */
       readOnly: isReadOnlyAudit(row.action),

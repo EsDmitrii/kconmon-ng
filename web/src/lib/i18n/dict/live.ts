@@ -19,12 +19,12 @@ import type { LiveEventSeverity, LiveEventType } from "@/lib/types";
  *     below are ours, for the paths where the server said nothing usable.
  *   - console.database.retentionDays, MTR, WebSocket, Prometheus.
  *
- * "Live" is the page, so its title is «Онлайн» — chrome.ts's word, and NOT the
- * Time Machine's «реальное время», which is the moment you return to.
+ * The page is Events/«События» since M3-8 — chrome.ts's word, and NOT the
+ * Time Machine's Live/«реальное время», which is the moment you return to.
  */
 
 const en = {
-  "title": "Live",
+  "title": "Events",
   /* {cap} is LIVE_RING_CAP, {at} the engaged instant (toLocaleString, the
      VIEWER's locale — see lib/i18n's module doc). The engaged sentence names
      the "Load older" button, so both move together if either is reworded. */
@@ -138,7 +138,7 @@ export type LiveKey = keyof typeof en;
  * and placeholder — because the filter and the column are the same field.
  */
 export const liveDict: Dictionary<LiveKey> = defineDict(en, {
-  "title": "Онлайн",
+  "title": "События",
   "description.live":
     "События контроллера приходят по WebSocket, новые сверху. Браузер держит последние {cap}, а всё, что старше, уже забота Prometheus.",
   "description.engaged":

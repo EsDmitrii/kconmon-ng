@@ -26,7 +26,7 @@ import { defineDict, type Dictionary } from "@/lib/i18n";
  */
 
 const en = {
-  "title": "Diagnostics",
+  "title": "Run checks",
   /* Joins the two address examples in the ad-hoc destination placeholder. */
   "adhoc.or": "or",
   "description": "Run on-demand checks against the mesh, and browse run history.",
@@ -149,8 +149,8 @@ const en = {
   "definition.name": "Definition name",
   "definition.save": "Save as definition",
   "definition.hint":
-    "Saved enabled and probing from all agents — a definition has no per-node source list. Edit it on Targets & " +
-    "Schedules.",
+    "Saved enabled and probing from all agents — a definition has no per-node source list. Edit it on Scheduled " +
+    "checks.",
   "definition.nameRequired": "a definition needs a name",
   "definition.saveFailed": "Failed to save the definition",
   "definition.saved": "Saved definition “{name}”",
@@ -198,7 +198,7 @@ export type DiagnosticsKey = keyof typeof en;
 
 export const diagnosticsDict: Dictionary<DiagnosticsKey> = defineDict(en, {
   "adhoc.or": "или",
-  "title": "Диагностика",
+  "title": "Проверки вручную",
   "description": "Запуск проверок по требованию и история запусков.",
   "description.at":
     "Запуск проверок по требованию. История обрезана по {at}, запуски, начатые позже, сюда не попадут.",
@@ -285,7 +285,7 @@ export const diagnosticsDict: Dictionary<DiagnosticsKey> = defineDict(en, {
   "definition.save": "Сохранить как определение",
   "definition.hint":
     "Сохраняется включённым и зондирует со всех агентов: списка узлов-источников у определения нет. " +
-    "Править его на странице «Цели и расписания».",
+    "Править его на странице «Плановые проверки».",
   "definition.nameRequired": "определению нужно имя",
   "definition.saveFailed": "Не удалось сохранить определение",
   "definition.saved": "Определение «{name}» сохранено",

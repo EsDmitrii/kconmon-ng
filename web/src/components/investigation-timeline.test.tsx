@@ -416,6 +416,48 @@ describe("InvestigationTimeline — hover highlights ONE row", () => {
   });
 });
 
+/* ── M3-5: the raw audit subject survives as a tooltip ─────────────────────
+   The visible detail line prefers the human-readable subjectDisplay; the raw
+   subjectKind:subjectId the operator may need to paste into a query stays one
+   hover away, never lost. */
+describe("InvestigationTimeline — detail tooltip", () => {
+  it("puts detailTitle on the detail line as its title attribute", () => {
+    renderTimeline({
+      entries: [
+        {
+          at: new Date(T0),
+          kind: "audit",
+          severity: "info",
+          title: "POST /api/v1/targets",
+          detail: "d.esin@group-ib.com · targets · allowed",
+          detailTitle: "user:oidc:6f616b42",
+          ref: { kind: "audit", id: "a-1" },
+        },
+      ],
+    });
+    expect(screen.getByText("d.esin@group-ib.com · targets · allowed")).toHaveAttribute(
+      "title",
+      "user:oidc:6f616b42",
+    );
+  });
+
+  it("adds no title attribute when there is nothing hidden to reveal", () => {
+    renderTimeline({
+      entries: [
+        {
+          at: new Date(T0),
+          kind: "audit",
+          severity: "info",
+          title: "POST /api/v1/targets",
+          detail: "user:ada · targets · allowed",
+          ref: { kind: "audit", id: "a-2" },
+        },
+      ],
+    });
+    expect(screen.getByText("user:ada · targets · allowed")).not.toHaveAttribute("title");
+  });
+});
+
 /* ── the Russian is wired ────────────────────────────────────────────────────
    ONE smoke pin. Every case above renders with no <LocaleProvider>, which
    lib/i18n defines as English, so none of them moved. This one proves the

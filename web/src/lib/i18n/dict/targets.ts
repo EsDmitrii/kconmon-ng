@@ -35,7 +35,7 @@ import { DEFAULT_LOCALE, type Locale, defineDict, type Dictionary } from "@/lib/
 
 const en = {
   /* ── page chrome ───────────────────────────────────────────────────────── */
-  "title": "Targets & Schedules",
+  "title": "Scheduled checks",
   "description": "External probe targets, the check definitions that point at them, and their schedules.",
   "tabs.aria": "Section",
   "tab.targets": "Targets",
@@ -57,7 +57,13 @@ const en = {
   "targets.listAria": "Targets",
   /* ui/pager.tsx's noun for this list. */
   "targets.subject": "targets",
-  "targets.empty": "No targets yet. External checks probe what is listed here.",
+  /* Each *.empty teaches in dict/mtr.ts destinations.empty.*'s three-part
+     shape: what the object is, what appears once one exists, and a CTA naming
+     the create button — the .cta key renders only beside that button. */
+  "targets.empty":
+    "No targets yet. A target names a host or URL outside the fleet, and external checks probe what is listed " +
+    "here. Point a definition at one, and its results land in run history and metrics.",
+  "targets.empty.cta": "Create the first one with the New target button above.",
   "targets.unavailable": "Targets are unavailable",
   "targets.gate.write":
     "The list below is complete and current — creating, editing and deleting targets is what needs the extra " +
@@ -86,7 +92,11 @@ const en = {
   "definitions.heading": "Check definitions",
   "definitions.listAria": "Check definitions",
   "definitions.subject": "definitions",
-  "definitions.empty": "No check definitions yet.",
+  "definitions.empty":
+    "No check definitions yet. A definition says what the fleet probes: a check type, which agents send, and " +
+    "where the probes go — a target or the nodes themselves. Give one a schedule, and its results land in run " +
+    "history and metrics.",
+  "definitions.empty.cta": "Create one with the New definition button above.",
   "definitions.unavailable": "Check definitions are unavailable",
   "definitions.gate.read":
     "Check definitions say what the fleet probes and how often. Reading them is granted to the operator and admin " +
@@ -145,7 +155,12 @@ const en = {
   "schedules.heading": "Schedules",
   "schedules.listAria": "Schedules",
   "schedules.subject": "schedules",
-  "schedules.empty": "No schedules yet.",
+  /* "never fires on its own" is the scheduler's contract, not a guess: the
+     loop fires only schedule rows, and agents get only continuous ones. */
+  "schedules.empty":
+    "No schedules yet. A schedule is the cadence that fires a check definition: once, at an interval, or " +
+    "continuously on the agents. A definition without a schedule never fires on its own.",
+  "schedules.empty.cta": "Create one with the New schedule button above.",
   "schedules.unavailable": "Schedules are unavailable",
   "schedules.schedulerOff":
     "These schedules will not fire: the scheduler loop is disabled on this install " +
@@ -216,7 +231,7 @@ const en = {
 export type TargetsKey = keyof typeof en;
 
 export const targetsDict: Dictionary<TargetsKey> = defineDict(en, {
-  "title": "Цели и расписания",
+  "title": "Плановые проверки",
   "description": "Внешние цели зондирования, определения проверок, которые на них указывают, и их расписания.",
   "tabs.aria": "Раздел",
   "tab.targets": "Цели",
@@ -235,7 +250,10 @@ export const targetsDict: Dictionary<TargetsKey> = defineDict(en, {
   "targets.heading": "Цели",
   "targets.listAria": "Цели",
   "targets.subject": "Цели",
-  "targets.empty": "Целей пока нет. Внешние проверки зондируют то, что перечислено здесь.",
+  "targets.empty":
+    "Целей пока нет. Цель — это хост или URL за пределами флота; внешние проверки зондируют то, что перечислено " +
+    "здесь. Наведите на цель определение — и результаты пойдут в историю запусков и в метрики.",
+  "targets.empty.cta": "Создайте первую кнопкой «Новая цель» выше.",
   "targets.unavailable": "Цели недоступны",
   "targets.gate.write":
     "Список ниже полон и актуален. Дополнительное право нужно только на то, чтобы создавать, изменять и удалять " +
@@ -260,7 +278,10 @@ export const targetsDict: Dictionary<TargetsKey> = defineDict(en, {
   "definitions.heading": "Определения проверок",
   "definitions.listAria": "Определения проверок",
   "definitions.subject": "Проверки",
-  "definitions.empty": "Определений проверок пока нет.",
+  "definitions.empty":
+    "Определений проверок пока нет. Определение описывает проверку: её тип, какие агенты зондируют и куда — " +
+    "на цель или на сами узлы. Дайте ему расписание — и результаты пойдут в историю запусков и в метрики.",
+  "definitions.empty.cta": "Создайте первое кнопкой «Новое определение» выше.",
   "definitions.unavailable": "Определения проверок недоступны",
   "definitions.gate.read":
     "Определения проверок описывают, что и как часто зондирует флот. Читать их могут роли operator и admin.",
@@ -312,7 +333,10 @@ export const targetsDict: Dictionary<TargetsKey> = defineDict(en, {
   "schedules.heading": "Расписания",
   "schedules.listAria": "Расписания",
   "schedules.subject": "Расписания",
-  "schedules.empty": "Расписаний пока нет.",
+  "schedules.empty":
+    "Расписаний пока нет. Расписание — это ритм, по которому срабатывает определение: однократно, с интервалом " +
+    "или непрерывно на агентах. Определение без расписания само не срабатывает никогда.",
+  "schedules.empty.cta": "Создайте первое кнопкой «Новое расписание» выше.",
   "schedules.unavailable": "Расписания недоступны",
   "schedules.schedulerOff":
     "Эти расписания не сработают: цикл планировщика на этой инсталляции выключен " +

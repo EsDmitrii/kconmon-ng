@@ -100,9 +100,9 @@ const en = {
   "navDesc.diagnostics": "Run checks and run history.",
   "navDesc.targets": "External targets, definitions, schedules.",
   "navDesc.explore": "Curated metrics and A/B compare.",
-  "navDesc.alerting": "Rule list and builder.",
+  "navDesc.alerting": "Rule list, builder, maintenance windows.",
   "navDesc.console": "PromQL dev-tools.",
-  "navDesc.settings": "Auth, RBAC, retention, maintenance, webhooks, export/import.",
+  "navDesc.settings": "Language, API tokens, webhooks, config export/import, about.",
 } as const;
 
 export type PaletteKey = keyof typeof en;
@@ -150,9 +150,9 @@ export const paletteDict: Dictionary<PaletteKey> = defineDict(en, {
   "navDesc.diagnostics": "Запуск проверок и история запусков.",
   "navDesc.targets": "Внешние цели, определения проверок, расписания.",
   "navDesc.explore": "Подобранные метрики и сравнение A/B.",
-  "navDesc.alerting": "Список правил и конструктор.",
+  "navDesc.alerting": "Список правил, конструктор, окна работ.",
   "navDesc.console": "Инструменты PromQL.",
-  "navDesc.settings": "Аутентификация, RBAC, хранение, окна работ, вебхуки, экспорт/импорт.",
+  "navDesc.settings": "Язык, токены API, вебхуки, экспорт/импорт конфигурации, об этой консоли.",
 });
 
 /**

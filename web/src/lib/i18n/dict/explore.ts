@@ -18,7 +18,7 @@ import { defineDict, type Dictionary } from "@/lib/i18n";
  */
 
 const en = {
-  "title": "Explore",
+  "title": "Metrics",
   /* Two descriptions, not one with an optional tail: the Time Machine one
      states a different fact (where the window ENDS), and {at} is the viewer's
      own toLocaleString stamp computed by the page. */

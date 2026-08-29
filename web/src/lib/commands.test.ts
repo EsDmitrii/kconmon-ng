@@ -400,6 +400,31 @@ describe("the registry speaks both languages", () => {
   });
 });
 
+describe("renamed nav entries still answer to their old names (M3-8)", () => {
+  /* Operators' muscle memory keeps typing the pre-rename labels, so each old
+     name stays in the entry's keyword corpus — in both languages. */
+  const CASES: [query: string, id: string][] = [
+    ["live", "nav:/live"],
+    ["онлайн", "nav:/live"],
+    ["investigate", "nav:/investigate"],
+    ["расследование", "nav:/investigate"],
+    ["explore", "nav:/explore"],
+    ["console", "nav:/console"],
+    ["консоль", "nav:/console"],
+    ["diagnostics", "nav:/diagnostics"],
+    ["диагностика", "nav:/diagnostics"],
+    ["targets", "nav:/targets"],
+    ["schedules", "nav:/targets"],
+  ];
+
+  it("finds every renamed page by the label it used to wear", () => {
+    const registry = buildRegistry(ctx());
+    for (const [query, id] of CASES) {
+      expect(searchCommands(query, registry).map((c) => c.id), query).toContain(id);
+    }
+  });
+});
+
 describe("GROUP_KEYS", () => {
   it("names every group exactly once, so no section can render untranslated", () => {
     expect(Object.keys(GROUP_KEYS).sort()).toEqual(["Actions", "Navigation", "View"]);

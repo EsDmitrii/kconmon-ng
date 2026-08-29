@@ -34,7 +34,7 @@ import { defineDict, type Dictionary } from "@/lib/i18n";
  */
 
 const en = {
-  "title": "Investigate",
+  "title": "Incidents",
   "description":
     "One window over one scope: every source the console can read, merged into a timeline, with the correlation rules written down rather than guessed at.",
 
@@ -372,11 +372,11 @@ const en = {
 export type InvestigateKey = keyof typeof en;
 
 /**
- * «Расследование», per dict/chrome.ts's nav — and it is why Explore is
- * «Метрики» rather than «Исследование». One word per concept, everywhere.
+ * The PAGE is «Инциденты» (M3-8, per dict/chrome.ts's nav) while the sidebar
+ * GROUP keeps «Расследование» — one word per concept, everywhere.
  */
 export const investigateDict: Dictionary<InvestigateKey> = defineDict(en, {
-  "title": "Расследование",
+  "title": "Инциденты",
   "description":
     "Один интервал, одна область. Все источники, до которых консоль дотягивается, сведены в общую ленту, а правила корреляции не угадываются, а прописаны.",
 

@@ -122,16 +122,16 @@ describe("sidebar", () => {
     await screen.findByRole("navigation");
     for (const name of [
       "Overview",
-      "Live",
-      "Investigate",
+      "Events",
+      "Incidents",
       "Matrix",
       "Topology",
-      "MTR",
-      "Diagnostics",
-      "Targets & Schedules",
-      "Explore",
+      "Routes · MTR",
+      "Run checks",
+      "Scheduled checks",
+      "Metrics",
       "Alerting",
-      "Console",
+      "PromQL",
       "Settings",
     ]) {
       expect(navLink(name)).toBeInTheDocument();
@@ -143,31 +143,31 @@ describe("sidebar", () => {
     await screen.findByRole("navigation");
     for (const name of [
       "Обзор",
-      "Онлайн",
-      "Расследование",
+      "События",
+      "Инциденты",
       "Матрица",
       "Топология",
-      "Диагностика",
-      "Цели и расписания",
+      "Проверки вручную",
+      "Плановые проверки",
       "Метрики",
       "Оповещения",
-      "Консоль",
       "Настройки",
     ]) {
       expect(navLink(name)).toBeInTheDocument();
     }
-    // MTR is a tool name, not prose: it reads the same in both languages.
-    expect(navLink("MTR")).toBeInTheDocument();
+    // MTR and PromQL are tool names, not prose: they read the same in both languages.
+    expect(navLink("Маршруты · MTR")).toBeInTheDocument();
+    expect(navLink("PromQL")).toBeInTheDocument();
   });
 
   it("translates the group headers", async () => {
     renderShell({ locale: "ru" });
     const sidebar = await screen.findByRole("navigation");
-    expect(within(sidebar).getByText("Мониторинг")).toBeInTheDocument();
-    expect(within(sidebar).getByText("Управление")).toBeInTheDocument();
-    // "Расследование" is both a group header and a nav link, deliberately —
-    // the English chrome says "Investigate" twice in the same two places.
-    expect(within(sidebar).getAllByText("Расследование")).toHaveLength(2);
+    expect(within(sidebar).getByText("Наблюдение")).toBeInTheDocument();
+    expect(within(sidebar).getByText("Настройка")).toBeInTheDocument();
+    // Since M3-8 the page under this group is «Инциденты», so the group header
+    // is the only «Расследование» left in the sidebar.
+    expect(within(sidebar).getAllByText("Расследование")).toHaveLength(1);
   });
 
   it("translates the footer line", async () => {

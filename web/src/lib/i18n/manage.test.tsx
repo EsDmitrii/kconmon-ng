@@ -125,6 +125,8 @@ describe("/targets in Russian", () => {
     renderRu(<TargetsPage />);
     expect(await screen.findByRole("heading", { name: targetsDict.ru["targets.heading"] })).toBeInTheDocument();
     await waitFor(() => expect(screen.getByText(targetsDict.ru["targets.empty"])).toBeInTheDocument());
+    // The teaching empty state's CTA is its own node, beside the body.
+    expect(screen.getByText(targetsDict.ru["targets.empty.cta"])).toBeInTheDocument();
   });
 
   it("translates the create button", async () => {
@@ -139,12 +141,21 @@ describe("/alerting in Russian", () => {
     expect(await screen.findByRole("heading", { name: alertingDict.ru["title"] })).toBeInTheDocument();
   });
 
-  it("translates both section headings and both empty states", async () => {
+  it("translates the section headings and empty states — the maintenance list included (M3-14)", async () => {
     renderRu(<AlertingPage />);
     expect(await screen.findByRole("heading", { name: alertingDict.ru["rules.heading"] })).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: alertingDict.ru["foreign.heading"] })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: alertingDict.ru["maintenance.heading"] })).toBeInTheDocument();
     await waitFor(() => expect(screen.getByText(alertingDict.ru["rules.empty"])).toBeInTheDocument());
     expect(screen.getByText(alertingDict.ru["foreign.empty"])).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByText(alertingDict.ru["maintenance.empty"])).toBeInTheDocument());
+  });
+
+  it("renders the maintenance blurb's links in Russian words, both anchors intact", async () => {
+    renderRu(<AlertingPage />);
+    const investigate = await screen.findByRole("link", { name: alertingDict.ru["link.investigate"] });
+    expect(investigate).toHaveAttribute("href", "/investigate");
+    expect(screen.getByRole("link", { name: alertingDict.ru["link.explore"] })).toHaveAttribute("href", "/explore");
   });
 
   it("translates the builder's own labels once it is open", async () => {
@@ -186,16 +197,16 @@ describe("/settings in Russian", () => {
     expect(screen.getByRole("radio", { name: "Русский" })).toBeInTheDocument();
   });
 
-  it("translates the four gated sections' headings and their empty states", async () => {
+  /* The maintenance list moved to /alerting (M3-14) — its Russian strings are
+     asserted in that page's describe above. */
+  it("translates the three gated sections' headings and their empty states", async () => {
     renderRu(<SettingsPage />);
     expect(await screen.findByRole("heading", { name: settingsDict.ru["tokens.heading"] })).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: settingsDict.ru["webhooks.heading"] })).toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: settingsDict.ru["maintenance.heading"] })).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: settingsDict.ru["bundle.heading"] })).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: settingsDict.ru["about.heading"] })).toBeInTheDocument();
     await waitFor(() => expect(screen.getByText(settingsDict.ru["webhooks.empty"])).toBeInTheDocument());
     expect(screen.getByText(settingsDict.ru["tokens.empty"])).toBeInTheDocument();
-    expect(screen.getByText(settingsDict.ru["maintenance.empty"])).toBeInTheDocument();
   });
 
   /* The tokens section arrived last and is the one most likely to ship half
@@ -209,15 +220,18 @@ describe("/settings in Russian", () => {
     expect(screen.getByText(settingsDict.ru["tokens.blurb"])).toBeInTheDocument();
   });
 
-  it("renders a sentence with LINKS in it without gluing fragments — both anchors, Russian words", async () => {
+  it("renders a sentence with LINKS in it without gluing fragments — all three anchors, Russian words", async () => {
     renderRu(<SettingsPage />);
+    // Once each, in About's closing paragraph (the maintenance blurb moved to /alerting).
     const investigate = await screen.findAllByRole("link", { name: settingsDict.ru["link.investigate"] });
     const explore = screen.getAllByRole("link", { name: settingsDict.ru["link.explore"] });
-    // Twice each: the maintenance blurb and About's closing paragraph.
-    expect(investigate).toHaveLength(2);
-    expect(explore).toHaveLength(2);
+    const alerting = screen.getAllByRole("link", { name: settingsDict.ru["link.alerting"] });
+    expect(investigate).toHaveLength(1);
+    expect(explore).toHaveLength(1);
+    expect(alerting).toHaveLength(1);
     expect(investigate[0]).toHaveAttribute("href", "/investigate");
     expect(explore[0]).toHaveAttribute("href", "/explore");
+    expect(alerting[0]).toHaveAttribute("href", "/alerting");
   });
 
   it("keeps webhook EVENT ids in the wire values the payload carries", async () => {
