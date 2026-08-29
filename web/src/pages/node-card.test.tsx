@@ -273,6 +273,17 @@ describe("NodeCardPage — the per-destination breakdown", () => {
     expect(screen.queryByText("no data")).toBeNull();
   });
 
+  /* M4-3: identifiers and figures wear the data face; the table is the shared
+     dense primitive rather than per-page padding arithmetic. */
+  it("sets destinations and figures in mono-data (M4)", async () => {
+    renderPage("/nodes/node-a");
+    const link = await screen.findByRole("link", { name: "node-b" });
+    expect(link.className).toContain("mono-data");
+    const fail = screen.getByText("2.0%").closest("td");
+    expect(fail?.className).toContain("mono-data");
+    expect(fail?.className).toContain("text-right");
+  });
+
   it("keeps 'no data' for a destination nothing measured", async () => {
     const unprobed = {
       protocol: "tcp",

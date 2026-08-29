@@ -20,6 +20,15 @@ import (
 	dto "github.com/prometheus/client_model/go"
 )
 
+// testNewConfig is DefaultConfig plus a resolvable advertise address: New now
+// fails hard when it cannot determine one (no config, no pod env, no
+// controller route), which is the M6-1 contract, not an accident.
+func testNewConfig() *config.Config {
+	cfg := config.DefaultConfig()
+	cfg.Agent.AdvertiseAddress = "127.0.0.1"
+	return cfg
+}
+
 type mockDeregisterer struct {
 	called    bool
 	gotCtx    context.Context
@@ -99,7 +108,7 @@ func TestAgentCapabilitiesGatedOnExternalEnabled(t *testing.T) {
 // A default-configured agent advertises nothing: opting in is the operator's
 // deliberate act, never a build-time default.
 func TestNewAgentDefaultConfigAdvertisesNoExternalCapability(t *testing.T) {
-	a, err := New(config.DefaultConfig())
+	a, err := New(testNewConfig())
 	if err != nil {
 		t.Fatalf("New with default config failed: %v", err)
 	}
@@ -114,7 +123,7 @@ func TestNewAgentDefaultConfigAdvertisesNoExternalCapability(t *testing.T) {
 // Enabling the feature builds the enforcing allowlist at startup, so a
 // misconfiguration cannot wait until the first probe to surface.
 func TestNewAgentExternalEnabledBuildsAllowlistAndFailsOnBadCIDR(t *testing.T) {
-	cfg := config.DefaultConfig()
+	cfg := testNewConfig()
 	cfg.Checkers.External.Enabled = true
 	cfg.Checkers.External.AllowedCIDRs = []string{"10.0.0.0/8"}
 
@@ -129,7 +138,7 @@ func TestNewAgentExternalEnabledBuildsAllowlistAndFailsOnBadCIDR(t *testing.T) {
 		t.Errorf("an opted-in agent must advertise external-checks, got %v", a.info.Capabilities)
 	}
 
-	bad := config.DefaultConfig()
+	bad := testNewConfig()
 	bad.Checkers.External.Enabled = true
 	bad.Checkers.External.AllowedCIDRs = []string{"not-a-cidr"}
 	if _, badErr := New(bad); badErr == nil {
@@ -140,13 +149,13 @@ func TestNewAgentExternalEnabledBuildsAllowlistAndFailsOnBadCIDR(t *testing.T) {
 // The continuous external checker exists only for an opted-in agent: that is
 // what decides whether it subscribes to WatchExternalChecks at all.
 func TestNewAgentExternalCheckerGatedOnEnabled(t *testing.T) {
-	if a, err := New(config.DefaultConfig()); err != nil {
+	if a, err := New(testNewConfig()); err != nil {
 		t.Fatalf("New with default config failed: %v", err)
 	} else if a.externalChecker != nil {
 		t.Error("an opted-out agent must not build a continuous external checker")
 	}
 
-	cfg := config.DefaultConfig()
+	cfg := testNewConfig()
 	cfg.Checkers.External.Enabled = true
 	cfg.Checkers.External.AllowedCIDRs = []string{"10.0.0.0/8"}
 	a, err := New(cfg)
@@ -164,7 +173,7 @@ func TestNewAgentExternalCheckerGatedOnEnabled(t *testing.T) {
 // One malformed spec must not take the rest of the assignment down with it, and
 // check types the controller already rejects must be refused here too.
 func TestApplyExternalAssignmentDropsInvalidSpecsAndKeepsTheRest(t *testing.T) {
-	cfg := config.DefaultConfig()
+	cfg := testNewConfig()
 	cfg.Checkers.External.Enabled = true
 	cfg.Checkers.External.AllowedCIDRs = []string{"10.0.0.0/8"}
 	a, err := New(cfg)
@@ -652,7 +661,7 @@ What the agent asserts is what an operator CONFIGURED, and nothing else.
 */
 func TestRegistrationAssertsOnlyTheConfiguredZone(t *testing.T) {
 	// No agent.zone: the agent has adopted "zone-from-node" from a previous registration.
-	adopted := &Agent{envZone: "", info: model.AgentInfo{ID: "a1", NodeName: "node-a", Zone: "zone-from-node"}}
+	adopted := &Agent{configuredZone: "", info: model.AgentInfo{ID: "a1", NodeName: "node-a", Zone: "zone-from-node"}}
 	if got := adopted.registrationInfo().Zone; got != "" {
 		t.Errorf("registration zone = %q, want empty: an adopted zone must not be re-asserted, "+
 			"or it overrides the node label the controller resolved it from", got)
@@ -667,7 +676,7 @@ func TestRegistrationAssertsOnlyTheConfiguredZone(t *testing.T) {
 	}
 
 	// WITH agent.zone: the override is an assertion, and it travels.
-	configured := &Agent{envZone: "zone-override", info: model.AgentInfo{ID: "a2", NodeName: "node-b", Zone: "zone-override"}}
+	configured := &Agent{configuredZone: "zone-override", info: model.AgentInfo{ID: "a2", NodeName: "node-b", Zone: "zone-override"}}
 	if got := configured.registrationInfo().Zone; got != "zone-override" {
 		t.Errorf("registration zone = %q, want the configured zone-override", got)
 	}
@@ -777,5 +786,242 @@ func TestResultHandlerExternalIgnoresAProbeThatNeverRan(t *testing.T) {
 		if strings.Contains(text, unwanted) {
 			t.Errorf("%s was written for a probe that never reached the network:\n%s", unwanted, text)
 		}
+	}
+}
+
+// zoneHistSampleCount reads the total observation count of one zone histogram family, summed over
+// its series; -1 means the family is not exposed at all.
+func zoneHistSampleCount(t *testing.T, reg *prometheus.Registry, name string) int {
+	t.Helper()
+	families, err := reg.Gather()
+	if err != nil {
+		t.Fatalf("gathering registry: %v", err)
+	}
+	for _, f := range families {
+		if f.GetName() != name {
+			continue
+		}
+		total := 0
+		for _, mtr := range f.GetMetric() {
+			total += int(mtr.GetHistogram().GetSampleCount()) //nolint:gosec // test data, tiny counts
+		}
+		return total
+	}
+	return -1
+}
+
+// newZoneTestHandler is newTestRegistry with the metrics struct exposed, so zone counters can be
+// read back directly.
+func newZoneTestHandler(t *testing.T, sourceZone string) (*prometheus.Registry, *metrics.PrometheusMetrics, ResultHandler) {
+	t.Helper()
+	reg := prometheus.NewRegistry()
+	m := metrics.NewPrometheusMetrics("kconmon_ng", reg)
+	return reg, m, NewResultHandler(m, checker.Target{NodeName: "node-a", Zone: sourceZone})
+}
+
+// One TCP probe writes TWICE: the per-pair family and the zone family, same buckets, same outcome.
+func TestResultHandlerTCPWritesZoneFamily(t *testing.T) {
+	reg, m, handle := newZoneTestHandler(t, "zone-a")
+	handle(model.CheckResult{
+		Type: model.CheckTCP, Source: "node-a", Destination: "node-b",
+		SourceZone: "zone-a", DestZone: "zone-b", Success: true,
+		Details: &model.TCPDetails{ConnectTime: time.Millisecond, TotalTime: 2 * time.Millisecond},
+	})
+	handle(model.CheckResult{
+		Type: model.CheckTCP, Source: "node-a", Destination: "node-c",
+		SourceZone: "zone-a", DestZone: "zone-b", Success: false,
+	})
+
+	if got := zoneHistSampleCount(t, reg, "kconmon_ng_zone_tcp_connect_seconds"); got != 1 {
+		t.Errorf("zone tcp connect observations = %d, want 1 (the failed probe has no timings)", got)
+	}
+	if got := zoneHistSampleCount(t, reg, "kconmon_ng_zone_tcp_total_seconds"); got != 1 {
+		t.Errorf("zone tcp total observations = %d, want 1", got)
+	}
+	// Two pairs, one zone pair: the zone counter aggregates what the per-pair counters split.
+	if got := testutil.ToFloat64(m.ZoneTCPResults.WithLabelValues("zone-a", "zone-b", "success")); got != 1 {
+		t.Errorf("zone tcp success = %v, want 1", got)
+	}
+	if got := testutil.ToFloat64(m.ZoneTCPResults.WithLabelValues("zone-a", "zone-b", "fail")); got != 1 {
+		t.Errorf("zone tcp fail = %v, want 1", got)
+	}
+	// The per-pair family still gets its write: the zone family is a second write, not a move.
+	if got := testutil.ToFloat64(m.TCPResults.WithLabelValues("node-a", "node-b", "zone-a", "zone-b", "success")); got != 1 {
+		t.Errorf("per-pair tcp success = %v, want 1", got)
+	}
+}
+
+/*
+Zone UDP loss is COUNTERS, never a ratio gauge: sum(rate(received))/sum(rate(sent)) weights every
+probe by its packets, while averaging per-pair ratio gauges weights every pair equally — one dead
+pair among ten healthy ones reads 9% loss regardless of traffic. The roadmap declined the gauge.
+*/
+func TestResultHandlerZoneUDPPacketCounters(t *testing.T) {
+	reg, m, handle := newZoneTestHandler(t, "zone-a")
+
+	// Total blackout: 5 sent, nothing back, no RTT was measured so none may be observed.
+	handle(model.CheckResult{
+		Type: model.CheckUDP, Source: "node-a", Destination: "node-b",
+		SourceZone: "zone-a", DestZone: "zone-b", Success: false,
+		Details: &model.UDPDetails{PacketsSent: 5, PacketsRecv: 0, LossRatio: 1},
+	})
+	if got := zoneHistSampleCount(t, reg, "kconmon_ng_zone_udp_rtt_seconds"); got != -1 {
+		t.Errorf("a probe with zero replies observed %d zone RTT samples, want none", got)
+	}
+
+	// Partial loss: counters accumulate the real packet counts.
+	handle(model.CheckResult{
+		Type: model.CheckUDP, Source: "node-a", Destination: "node-b",
+		SourceZone: "zone-a", DestZone: "zone-b", Success: true,
+		Details: &model.UDPDetails{PacketsSent: 5, PacketsRecv: 3, LossRatio: 0.4, MeanRTT: time.Millisecond},
+	})
+
+	if got := testutil.ToFloat64(m.ZoneUDPPacketsSent.WithLabelValues("zone-a", "zone-b")); got != 10 {
+		t.Errorf("zone udp packets sent = %v, want 10", got)
+	}
+	if got := testutil.ToFloat64(m.ZoneUDPPacketsReceived.WithLabelValues("zone-a", "zone-b")); got != 3 {
+		t.Errorf("zone udp packets received = %v, want 3", got)
+	}
+	if got := zoneHistSampleCount(t, reg, "kconmon_ng_zone_udp_rtt_seconds"); got != 1 {
+		t.Errorf("zone udp rtt observations = %d, want 1", got)
+	}
+	if got := testutil.ToFloat64(m.ZoneUDPResults.WithLabelValues("zone-a", "zone-b", "fail")); got != 1 {
+		t.Errorf("zone udp fail = %v, want 1", got)
+	}
+	if strings.Contains(exposition(t, reg), "zone_udp_packet_loss_ratio") {
+		t.Error("a zone loss ratio gauge exists; loss must be derivable from counters only")
+	}
+}
+
+/*
+ICMPDetails carries no packet counts, but the checker sends exactly ONE echo per probe and attaches
+Details only after the request went on the wire — so sent/received are derivable per result:
+Details present = 1 sent, success = 1 received. A probe that died before the write (bad IP, listen
+or marshal error) put nothing on the wire and counts nothing.
+*/
+func TestResultHandlerZoneICMPPacketsSingleEcho(t *testing.T) {
+	reg, m, handle := newZoneTestHandler(t, "zone-a")
+
+	// Echo out, reply back.
+	handle(model.CheckResult{
+		Type: model.CheckICMP, Source: "node-a", Destination: "node-b",
+		SourceZone: "zone-a", DestZone: "zone-b", Success: true,
+		Details: &model.ICMPDetails{RTT: 2 * time.Millisecond, LossRatio: 0},
+	})
+	// Echo out, read deadline hit: sent, not received, and the timeout is NOT an RTT.
+	handle(model.CheckResult{
+		Type: model.CheckICMP, Source: "node-a", Destination: "node-b",
+		SourceZone: "zone-a", DestZone: "zone-b", Success: false,
+		Error:   "ICMP read: i/o timeout",
+		Details: &model.ICMPDetails{RTT: 2 * time.Second, LossRatio: 1},
+	})
+	// Died before the write: no Details, nothing on the wire, nothing counted.
+	handle(model.CheckResult{
+		Type: model.CheckICMP, Source: "node-a", Destination: "node-b",
+		SourceZone: "zone-a", DestZone: "zone-b", Success: false,
+		Error: "ICMP write: sendto: network is unreachable",
+	})
+
+	if got := testutil.ToFloat64(m.ZoneICMPPacketsSent.WithLabelValues("zone-a", "zone-b")); got != 2 {
+		t.Errorf("zone icmp packets sent = %v, want 2", got)
+	}
+	if got := testutil.ToFloat64(m.ZoneICMPPacketsReceived.WithLabelValues("zone-a", "zone-b")); got != 1 {
+		t.Errorf("zone icmp packets received = %v, want 1", got)
+	}
+	if got := zoneHistSampleCount(t, reg, "kconmon_ng_zone_icmp_rtt_seconds"); got != 1 {
+		t.Errorf("zone icmp rtt observations = %d, want 1: only the answered echo has a round trip", got)
+	}
+	// All three probes are results, whatever happened to their packets.
+	if got := testutil.ToFloat64(m.ZoneICMPResults.WithLabelValues("zone-a", "zone-b", "fail")); got != 2 {
+		t.Errorf("zone icmp fail = %v, want 2", got)
+	}
+	if got := testutil.ToFloat64(m.ZoneICMPResults.WithLabelValues("zone-a", "zone-b", "success")); got != 1 {
+		t.Errorf("zone icmp success = %v, want 1", got)
+	}
+}
+
+// An agent without a zone labels its per-pair series with source_zone="" — the zone family mirrors
+// that verbatim rather than minting a placeholder the per-pair family does not use.
+func TestResultHandlerZoneFamilyKeepsEmptyZoneVerbatim(t *testing.T) {
+	_, m, handle := newZoneTestHandler(t, "")
+	handle(model.CheckResult{
+		Type: model.CheckTCP, Source: "node-a", Destination: "node-b",
+		SourceZone: "", DestZone: "", Success: true,
+	})
+	if got := testutil.ToFloat64(m.ZoneTCPResults.WithLabelValues("", "", "success")); got != 1 {
+		t.Errorf("zone tcp success with empty zones = %v, want 1", got)
+	}
+	if got := testutil.ToFloat64(m.TCPResults.WithLabelValues("node-a", "node-b", "", "", "success")); got != 1 {
+		t.Errorf("per-pair tcp success with empty zones = %v, want 1", got)
+	}
+}
+
+// Zone series are keyed per zone PAIR, not per peer: three peers in two zones preinitialize two
+// zone pairs, each with both outcomes and — for the loss-capable types — both packet counters at 0.
+func TestPreinitZoneResultsCreatesSeriesPerZonePair(t *testing.T) {
+	m := metrics.NewPrometheusMetrics("test_zone_preinit", prometheus.NewRegistry())
+	source := checker.Target{NodeName: "node-1", Zone: "zone-a"}
+	peers := []checker.Target{
+		{NodeName: "node-2", Zone: "zone-a"},
+		{NodeName: "node-3", Zone: "zone-b"},
+		{NodeName: "node-4", Zone: "zone-b"},
+	}
+	enabled := map[model.CheckType]checker.Checker{
+		model.CheckTCP:  nil,
+		model.CheckUDP:  nil,
+		model.CheckICMP: nil,
+	}
+
+	preinitZoneResults(m, source, peers, enabled)
+
+	// Two destination zones × two outcomes.
+	for name, vec := range map[string]*prometheus.CounterVec{
+		"zone_tcp_results_total":  m.ZoneTCPResults,
+		"zone_udp_results_total":  m.ZoneUDPResults,
+		"zone_icmp_results_total": m.ZoneICMPResults,
+	} {
+		if got := testutil.CollectAndCount(vec); got != 4 {
+			t.Errorf("%s series = %d, want 4 (2 zone pairs x 2 outcomes)", name, got)
+		}
+	}
+	// Packet counters per zone pair, reading 0 — so loss expressions return data from scrape one.
+	for name, vec := range map[string]*prometheus.CounterVec{
+		"zone_udp_packets_sent_total":      m.ZoneUDPPacketsSent,
+		"zone_udp_packets_received_total":  m.ZoneUDPPacketsReceived,
+		"zone_icmp_packets_sent_total":     m.ZoneICMPPacketsSent,
+		"zone_icmp_packets_received_total": m.ZoneICMPPacketsReceived,
+	} {
+		if got := testutil.CollectAndCount(vec); got != 2 {
+			t.Errorf("%s series = %d, want 2 zone pairs", name, got)
+		}
+	}
+	if got := testutil.ToFloat64(m.ZoneUDPPacketsSent.WithLabelValues("zone-a", "zone-b")); got != 0 {
+		t.Errorf("preinitialized packets sent = %v, want 0", got)
+	}
+
+	// Idempotent: preinit is not an observation and repeating it moves nothing.
+	m.ZoneUDPResults.WithLabelValues("zone-a", "zone-b", "fail").Inc()
+	m.ZoneICMPPacketsSent.WithLabelValues("zone-a", "zone-b").Inc()
+	preinitZoneResults(m, source, peers, enabled)
+	if got := testutil.ToFloat64(m.ZoneUDPResults.WithLabelValues("zone-a", "zone-b", "fail")); got != 1 {
+		t.Errorf("zone fail counter = %v after re-preinit, want 1", got)
+	}
+	if got := testutil.ToFloat64(m.ZoneICMPPacketsSent.WithLabelValues("zone-a", "zone-b")); got != 1 {
+		t.Errorf("zone packets sent = %v after re-preinit, want 1", got)
+	}
+}
+
+// A checker with no zone counters (dns, http) must not panic the preinit and must create nothing.
+func TestPreinitZoneResultsIgnoresNonPeerCheckers(t *testing.T) {
+	m := metrics.NewPrometheusMetrics("test_zone_preinit_skip", prometheus.NewRegistry())
+	source := checker.Target{NodeName: "node-1", Zone: "zone-a"}
+	peers := []checker.Target{{NodeName: "node-2", Zone: "zone-b"}}
+	enabled := map[model.CheckType]checker.Checker{
+		model.CheckDNS:  nil,
+		model.CheckHTTP: nil,
+	}
+	preinitZoneResults(m, source, peers, enabled)
+	if got := testutil.CollectAndCount(m.ZoneTCPResults); got != 0 {
+		t.Errorf("dns/http preinit created %d zone tcp series", got)
 	}
 }

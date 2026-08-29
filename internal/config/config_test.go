@@ -550,3 +550,100 @@ func TestExternalEnabledWithOnlyDeniedCIDRsIsError(t *testing.T) {
 		t.Error("deniedCidrs alone must not satisfy the enabled path")
 	}
 }
+
+// The agent identity block defaults to all-empty: in-cluster the Downward API
+// env fills it, and an empty block must keep today's behavior byte-identical.
+func TestDefaultConfigAgentIdentityIsEmpty(t *testing.T) {
+	cfg := DefaultConfig()
+	if cfg.Agent.NodeName != "" || cfg.Agent.AdvertiseAddress != "" || cfg.Agent.Zone != "" {
+		t.Errorf("default agent identity must be empty, got %+v", cfg.Agent)
+	}
+}
+
+func TestLoadAgentIdentityFromFile(t *testing.T) {
+	content := `
+agent:
+  nodeName: edge-host-1
+  advertiseAddress: 198.51.100.7
+  zone: dc-east
+`
+	loader := NewLoader(writeConfig(t, content))
+	if err := loader.Load(); err != nil {
+		t.Fatal(err)
+	}
+	cfg := loader.Get()
+	if cfg.Agent.NodeName != "edge-host-1" {
+		t.Errorf("agent.nodeName = %q, want edge-host-1", cfg.Agent.NodeName)
+	}
+	if cfg.Agent.AdvertiseAddress != "198.51.100.7" {
+		t.Errorf("agent.advertiseAddress = %q, want 198.51.100.7", cfg.Agent.AdvertiseAddress)
+	}
+	if cfg.Agent.Zone != "dc-east" {
+		t.Errorf("agent.zone = %q, want dc-east", cfg.Agent.Zone)
+	}
+}
+
+// Env beats file for the whole identity block, mirroring every other override:
+// this is what lets the chart's Downward API env fill nodeName/zone while the
+// same ConfigMap is mounted on every node.
+func TestAgentIdentityEnvOverrides(t *testing.T) {
+	t.Setenv("KCONMON_NG_NODE_NAME", "env-node")
+	t.Setenv("KCONMON_NG_ADVERTISE_ADDRESS", "192.0.2.33")
+	t.Setenv("KCONMON_NG_ZONE", "env-zone")
+
+	content := `
+agent:
+  nodeName: file-node
+  advertiseAddress: 198.51.100.7
+  zone: file-zone
+`
+	loader := NewLoader(writeConfig(t, content))
+	if err := loader.Load(); err != nil {
+		t.Fatal(err)
+	}
+	cfg := loader.Get()
+	if cfg.Agent.NodeName != "env-node" {
+		t.Errorf("agent.nodeName = %q, want env override env-node", cfg.Agent.NodeName)
+	}
+	if cfg.Agent.AdvertiseAddress != "192.0.2.33" {
+		t.Errorf("agent.advertiseAddress = %q, want env override 192.0.2.33", cfg.Agent.AdvertiseAddress)
+	}
+	if cfg.Agent.Zone != "env-zone" {
+		t.Errorf("agent.zone = %q, want env override env-zone", cfg.Agent.Zone)
+	}
+}
+
+// agent.advertiseAddress is published to every peer as a probe target and the
+// controller refuses anything net.ParseIP refuses (validateAgentMeta), so a
+// hostname or host:port must fail at startup, not at registration.
+func TestAgentAdvertiseAddressMustBeAnIPLiteral(t *testing.T) {
+	tests := []struct {
+		name    string
+		address string
+		wantErr bool
+	}{
+		{"empty is allowed and means autodetect", "", false},
+		{"IPv4 literal", "10.1.2.3", false},
+		{"IPv6 literal", "2001:db8::7", false},
+		{"hostname refused", "edge-host-1.example.com", true},
+		{"host:port refused", "10.1.2.3:8080", true},
+		{"garbage refused", "not-an-ip", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := DefaultConfig()
+			cfg.Agent.AdvertiseAddress = tt.address
+			loader := NewLoader("")
+			err := loader.validate(cfg)
+			if tt.wantErr && err == nil {
+				t.Errorf("advertiseAddress %q must be rejected", tt.address)
+			}
+			if !tt.wantErr && err != nil {
+				t.Errorf("advertiseAddress %q must be accepted, got %v", tt.address, err)
+			}
+			if tt.wantErr && err != nil && !strings.Contains(err.Error(), "advertiseAddress") {
+				t.Errorf("error should name the offending key, got: %v", err)
+			}
+		})
+	}
+}

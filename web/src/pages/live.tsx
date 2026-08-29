@@ -261,7 +261,7 @@ function EventRow({ event }: { event: LiveEvent }) {
   const { locale } = useLocale();
   return (
     <>
-      <span className="nums w-24 shrink-0 text-xs text-muted-foreground">{fmtEventStamp(event.timestamp, localeTag(locale))}</span>
+      <span className="mono-data w-32 shrink-0 text-muted-foreground">{fmtEventStamp(event.timestamp, localeTag(locale))}</span>
       <span className="w-[5.25rem] shrink-0">
         <SeverityBadge severity={event.severity} />
       </span>
@@ -274,7 +274,7 @@ function EventRow({ event }: { event: LiveEvent }) {
       <span title={event.summary} className="min-w-0 flex-1 truncate text-sm">
         {event.summary}
       </span>
-      <span className="hidden w-52 shrink-0 truncate text-xs text-muted-foreground md:block">{event.scope}</span>
+      <span className="mono-data hidden w-52 shrink-0 truncate text-muted-foreground md:block">{event.scope}</span>
     </>
   );
 }
@@ -288,7 +288,7 @@ function AnnotationFeedRow({ annotation }: { annotation: Annotation }) {
   const { locale } = useLocale();
   return (
     <>
-      <span className="nums w-24 shrink-0 text-xs text-muted-foreground">{fmtEventStamp(annotation.startAt, localeTag(locale))}</span>
+      <span className="mono-data w-32 shrink-0 text-muted-foreground">{fmtEventStamp(annotation.startAt, localeTag(locale))}</span>
       <span className="w-[5.25rem] shrink-0">
         <Badge variant="neutral" dot>
           {t("note.badge")}
@@ -302,7 +302,7 @@ function AnnotationFeedRow({ annotation }: { annotation: Annotation }) {
       {annotation.endAt ? (
         <span className="shrink-0 text-xs text-muted-foreground">{t("note.span")}</span>
       ) : null}
-      <span className="hidden w-52 shrink-0 truncate text-xs text-muted-foreground md:block">
+      <span className="mono-data hidden w-52 shrink-0 truncate text-muted-foreground md:block">
         {annotation.createdBy}
       </span>
     </>
@@ -665,8 +665,10 @@ export function LivePage() {
 
   return (
     <PageShell
+      variant="tool"
       timeMachine
       title={t("title")}
+      help={{ body: t("help.body"), slug: "events" }}
       description={
         at
           ? /* Inside a translated sentence, so the stamp takes that sentence's
@@ -786,7 +788,10 @@ export function LivePage() {
         </Card>
       ) : null}
 
-      <Card className="overflow-hidden p-0">
+      {/* The working surface, unboxed: the shell's "tool" variant runs the feed
+          to the edges, so the card that used to frame it is gone and the filter
+          bar reads as the slim toolbar it is (M4-5). */}
+      <div>
         <div className="flex flex-wrap items-center gap-x-4 gap-y-2 border-b border-border px-4 py-3">
           <label className="relative flex items-center">
             <span className="sr-only">{t("filters.scope.label")}</span>
@@ -877,7 +882,7 @@ export function LivePage() {
           aria-hidden="true"
           className="flex items-center gap-4 border-b border-border px-4 py-2 text-[11px] font-medium text-muted-foreground"
         >
-          <span className="w-24 shrink-0">{t("col.time")}</span>
+          <span className="w-32 shrink-0">{t("col.time")}</span>
           <span className="w-[5.25rem] shrink-0">{t("col.severity")}</span>
           <span className="min-w-0 flex-1">{t("col.summary")}</span>
           <span className="hidden w-52 shrink-0 md:block">{t("col.scope")}</span>
@@ -947,7 +952,7 @@ export function LivePage() {
             </ul>
           </div>
         ) : null}
-      </Card>
+      </div>
     </PageShell>
   );
 }

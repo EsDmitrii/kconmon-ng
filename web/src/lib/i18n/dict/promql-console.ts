@@ -24,6 +24,12 @@ const en = {
   "description": "Run ad-hoc PromQL against the same Prometheus the rest of the console reads from.",
   "description.at":
     "Ad-hoc PromQL as of {at} — instant queries are evaluated at that instant, and a range ends there.",
+  /* The "?" by the title (M7-5); the docs page is docs/console/promql. */
+  "help.body":
+    "An ad-hoc PromQL editor against the same Prometheus the rest of the console reads from, through the guarded proxy with its timeout, range and response-size caps. " +
+    "Instant and Range modes; in Range mode the step is yours to control. " +
+    "Results render as a table, a chart, or the raw JSON answer. " +
+    "Cmd/Ctrl+Enter runs the query, and the last query is remembered in this browser.",
 
   /* ── the toolbar ───────────────────────────────────────────────────────── */
   "mode.aria": "Query mode",
@@ -100,6 +106,11 @@ export const promqlConsoleDict: Dictionary<PromQLConsoleKey> = defineDict(en, {
   "description": "Произвольный PromQL к тому же Prometheus, из которого читает вся консоль.",
   "description.at":
     "Произвольный PromQL на момент {at}: мгновенные запросы считаются в него, а диапазон им заканчивается.",
+  "help.body":
+    "Редактор произвольного PromQL к тому же Prometheus, из которого читает вся консоль, — через защищённый прокси с его лимитами на время, диапазон и размер ответа. " +
+    "Режимы «Мгновенный» и «Диапазон»; в диапазоне шаг выбираете сами. " +
+    "Результат — таблица, график или сырой ответ JSON. " +
+    "Cmd/Ctrl+Enter запускает запрос, а последний запрос запоминается в этом браузере.",
 
   "mode.aria": "Режим запроса",
   "mode.instant": "Мгновенный",

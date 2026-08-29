@@ -123,7 +123,7 @@ function TimelineRow({
           the 6h preset any time the operator looks between 00:00 and 06:00), so a clock alone made
           newest-first rows across midnight read as out of order — 23:50 sitting under 00:10. The
           column carries the day when there is one to carry. */}
-      <span className="nums w-28 shrink-0 text-xs text-muted-foreground">{stampShort(entry.at, locale)}</span>
+      <span className="mono-data w-28 shrink-0 text-muted-foreground">{stampShort(entry.at, locale)}</span>
       <Badge variant={SEVERITY_VARIANT[entry.severity]}>{t(KIND_KEY[entry.kind])}</Badge>
       <span className="min-w-0 flex-1 break-words">{entry.title}</span>
       {ref && pinning ? (
@@ -150,7 +150,7 @@ function TimelineRow({
         </button>
       ) : null}
       {/* detailTitle keeps the machine identity a readable detail replaced (raw audit subject) one hover away. */}
-      {entry.detail ? <span className="w-full text-xs text-muted-foreground" title={entry.detailTitle}>{entry.detail}</span> : null}
+      {entry.detail ? <span className="w-full text-xs" title={entry.detailTitle}>{entry.detail}</span> : null}
     </li>
   );
 }
@@ -272,7 +272,7 @@ export function InvestigationTimeline({
       <section aria-label={t("timeline.aria")}>
         <div className="border-b border-border px-4 py-3">
           <div className="flex items-baseline justify-between gap-3">
-            <h3 className="text-sm font-semibold">{t("timeline.title")}</h3>
+            <h3 className="type-section">{t("timeline.title")}</h3>
             {/* The WINDOW's count, never the page's (see the file header), and
                 it is rendered at ZERO too (QA scope 3, finding #15). A count
                 that disappears when it reaches nought leaves the reader to work
@@ -281,7 +281,7 @@ export function InvestigationTimeline({
                 words. Suppressed only while the first fetch is still out, where
                 the number would be a claim rather than a count. */}
             {loading && entries.length === 0 ? null : (
-              <span data-testid="timeline-count" className="nums text-[11px] text-muted-foreground">
+              <span data-testid="timeline-count" className="nums type-meta">
                 {t(`timeline.entries.${countForm(locale, entries.length)}` as InvestigateKey, {
                   count: entries.length,
                 })}

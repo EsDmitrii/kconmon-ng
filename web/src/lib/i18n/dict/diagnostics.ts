@@ -32,6 +32,12 @@ const en = {
   "description": "Run on-demand checks against the mesh, and browse run history.",
   "description.at":
     "Run on-demand checks against the mesh. History is cut to {at} — runs started later are not listed.",
+  /* The "?" by the title (M7-5); the docs page is docs/console/run-checks. */
+  "help.body":
+    "On-demand diagnostics: a run form on top, run history underneath. " +
+    "A run picks a check type — tcp, udp, icmp, dns, http or mtr — a duration from an instant probe to 24h, and its sources and destinations: nodes, a saved target, or an ad-hoc address. " +
+    "For interval runs the caption spells out the plan before you start, and a run stays cancellable throughout. " +
+    "Starting a run needs the runs:create permission; the history stays readable without it.",
 
   /* ── the node pickers (shared with /mtr's Runner) ──────────────────────── */
   "nodes.all": "All nodes ({count})",
@@ -202,6 +208,11 @@ export const diagnosticsDict: Dictionary<DiagnosticsKey> = defineDict(en, {
   "description": "Запуск проверок по требованию и история запусков.",
   "description.at":
     "Запуск проверок по требованию. История обрезана по {at}, запуски, начатые позже, сюда не попадут.",
+  "help.body":
+    "Диагностика по требованию: сверху форма запуска, ниже история. " +
+    "Запуск выбирает тип проверки — tcp, udp, icmp, dns, http или mtr, — длительность от мгновенной пробы до 24 ч и свои источники и назначения: узлы, сохранённую цель или произвольный адрес. " +
+    "Для интервальных запусков подпись заранее проговаривает план, а сам запуск можно отменить в любой момент. " +
+    "Чтобы запускать, нужно право runs:create; история читается и без него.",
 
   "nodes.all": "Все узлы ({count})",
   "nodes.empty": "Контроллер пока не сообщил ни одного узла.",

@@ -131,6 +131,84 @@
             }
           }
         },
+        "externalGateway": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "port": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 65535
+            },
+            "service": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "type": {
+                  "type": "string",
+                  "enum": [
+                    "NodePort",
+                    "LoadBalancer"
+                  ],
+                  "description": "No ClusterIP: an external agent cannot reach one."
+                },
+                "annotations": {
+                  "type": "object",
+                  "additionalProperties": {
+                    "type": "string"
+                  }
+                },
+                "nodePort": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 65535,
+                  "description": "0 lets the apiserver pick; the valid range is the apiserver's --service-node-port-range, which the chart cannot know."
+                },
+                "externalTrafficPolicy": {
+                  "type": "string",
+                  "enum": [
+                    "",
+                    "Cluster",
+                    "Local"
+                  ]
+                },
+                "loadBalancerSourceRanges": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              }
+            },
+            "tls": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "secretName": {
+                  "type": "string"
+                },
+                "clientCaKey": {
+                  "type": "string"
+                }
+              }
+            },
+            "bootstrapToken": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "secretName": {
+                  "type": "string"
+                },
+                "key": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
         "image": {
           "type": "object",
           "additionalProperties": false,
@@ -222,6 +300,20 @@
       "properties": {
         "zone": {
           "type": "string"
+        },
+        "metrics": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "detail": {
+              "description": "Scrape-time cardinality valve on the agent ServiceMonitor. full keeps everything (~70 series per directed pair); counters-only drops the four per-pair histograms (~10/pair left); zone-only drops every per-pair series (~0/pair, zone family plus the linear DNS/HTTP/external families remain). Anything but full requires serviceMonitor.enabled.",
+              "enum": [
+                "full",
+                "counters-only",
+                "zone-only"
+              ]
+            }
+          }
         },
         "podAnnotations": {
           "type": "object",
@@ -1483,6 +1575,12 @@
         "externalChecksFailing": {
           "$ref": "#/$defs/thresholdAlert"
         },
+        "zoneChecksFailing": {
+          "$ref": "#/$defs/thresholdAlert"
+        },
+        "zoneLossHigh": {
+          "$ref": "#/$defs/thresholdAlert"
+        },
         "kconmonAgentsMissing": {
           "$ref": "#/$defs/alert"
         },
@@ -1518,6 +1616,13 @@
           "items": {
             "type": "object"
           }
+        },
+        "externalAgentCidrs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Plain CIDR strings, not rule objects; each becomes one ipBlock on the gateway port."
         },
         "httpEgress": {
           "type": "array",

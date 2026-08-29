@@ -7,6 +7,7 @@ import { chartColors, seriesColor } from "@/lib/chart-theme";
 import { formatMillis } from "@/lib/curated-metrics";
 import { stampFull, translate, useLocale, useT, type Locale, type Translate } from "@/lib/i18n";
 import { countForm, mtrDetailDict, type MTRDetailKey } from "@/lib/i18n/dict/mtr-detail";
+import { Table, TBody, Td, Th, THead, Tr } from "@/components/ui/table";
 import type { Enrichment, MTRHop, PathSnapshot } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
@@ -366,7 +367,7 @@ export function PathChain({
      route you have to drag to finish reading. */
   return (
     <span
-      className={cn("flex flex-wrap items-center gap-x-1 gap-y-0.5 font-mono text-[11px] leading-snug", className)}
+      className={cn("mono-data flex flex-wrap items-center gap-x-1 gap-y-0.5 leading-snug", className)}
       title={pathChainText(hops)}
     >
       {source ? <span className="text-muted-foreground">{source}</span> : null}
@@ -461,18 +462,18 @@ export function TraceDetail({ snapshot, history }: { snapshot: PathSnapshot; his
       <dl className="flex flex-wrap gap-x-6 gap-y-1 text-xs text-muted-foreground">
         <div>
           <dt className="inline">{t("snapshot.firstSeen")} </dt>
-          <dd className="nums inline text-foreground">{fmtTime(snapshot.firstSeen, locale)}</dd>
+          <dd className="mono-data inline text-foreground">{fmtTime(snapshot.firstSeen, locale)}</dd>
         </div>
         <div>
           <dt className="inline">{t("snapshot.lastSeen")} </dt>
-          <dd className="nums inline text-foreground">{fmtTime(snapshot.lastSeen, locale)}</dd>
+          <dd className="mono-data inline text-foreground">{fmtTime(snapshot.lastSeen, locale)}</dd>
         </div>
         <div>
           <dt className="inline">{t("snapshot.traces")} </dt>
           {/* The em dash this table already uses for a figure that did not
               arrive; React renders an absent number as nothing at all, which
               leaves the label standing over empty space. */}
-          <dd className="nums inline text-foreground">
+          <dd className="mono-data inline text-foreground">
             {Number.isFinite(snapshot.traceCount) ? snapshot.traceCount : "—"}
           </dd>
         </div>
@@ -487,7 +488,9 @@ export function TraceDetail({ snapshot, history }: { snapshot: PathSnapshot; his
             `min-w` is the other half: below it the columns would be squeezed
             past reading, so the table stops shrinking and ScrollableX above
             takes over with the sideways affordance it exists for. */}
-        <table aria-label={t("table.aria")} className="w-full min-w-[32rem] table-fixed text-sm">
+        {/* `bare`: ScrollableX above owns the scroll container (it measures its
+            own overflow), so the primitive must not add a second one. */}
+        <Table bare variant="dense" aria-label={t("table.aria")} className="min-w-[32rem] table-fixed">
           {/* ── the column contract ────────────────────────────────────────
               Everything here is a FIXED-shape field except the name: an address
               is at most an IPv6, an RTT is a small number of milliseconds, a
@@ -505,29 +508,21 @@ export function TraceDetail({ snapshot, history }: { snapshot: PathSnapshot; his
             <col data-col="rtt" className="w-[5.5rem]" />
             <col data-col="loss" className="w-[3.75rem]" />
           </colgroup>
-          <thead>
-            <tr className="border-b border-border text-xs text-muted-foreground">
-              <th scope="col" className="py-2">
+          <THead>
+            <Tr>
+              <Th>
                 <span className="sr-only">{t("table.expand")}</span>
-              </th>
-              <th scope="col" className="py-2 pr-3 text-left font-medium">
-                #
-              </th>
-              <th scope="col" className="py-2 pr-3 text-left font-medium">
-                {t("table.address")}
-              </th>
-              <th scope="col" className="py-2 pr-3 text-left font-medium">
-                {t("table.hostname")}
-              </th>
-              <th scope="col" className="py-2 pr-3 text-right font-medium">
+              </Th>
+              <Th className="pr-3">#</Th>
+              <Th className="pr-3">{t("table.address")}</Th>
+              <Th className="pr-3">{t("table.hostname")}</Th>
+              <Th numeric className="pr-3">
                 {t("table.rtt")}
-              </th>
-              <th scope="col" className="py-2 text-right font-medium">
-                {t("table.loss")}
-              </th>
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-border">
+              </Th>
+              <Th numeric>{t("table.loss")}</Th>
+            </Tr>
+          </THead>
+          <TBody>
             {hops.map((h, i) => (
               <HopRows
                 key={i}
@@ -540,8 +535,8 @@ export function TraceDetail({ snapshot, history }: { snapshot: PathSnapshot; his
                 onToggleTrend={history ? () => toggle(setTrendHop, trendHop, i) : undefined}
               />
             ))}
-          </tbody>
-        </table>
+          </TBody>
+        </Table>
       </ScrollableX>
 
       {history && trendHop !== null ? (
@@ -577,8 +572,8 @@ function HopRows({
 
   return (
     <>
-      <tr>
-        <td className="py-2 align-top">
+      <Tr>
+        <Td className="align-top">
           {placeholder ? null : (
             <button
               type="button"
@@ -598,14 +593,14 @@ function HopRows({
               />
             </button>
           )}
-        </td>
-        <td className="nums py-2 pr-3 align-top text-muted-foreground">{hop.number}</td>
+        </Td>
+        <Td className="mono-data pr-3 align-top text-muted-foreground">{hop.number}</Td>
         {/* An address that never arrived reads as the same star the chain draws
             for it, rather than as an empty cell with nothing in it. */}
         {/* `break-all` because the column is fixed now: an IPv6 is 39 characters
             of unbreakable token and wrapping it onto a second line is the only
             answer that neither clips it nor widens the column. */}
-        <td className="py-2 pr-3 align-top font-mono text-xs break-all">{placeholder ? "*" : hop.ip}</td>
+        <Td className="mono-data pr-3 align-top break-all">{placeholder ? "*" : hop.ip}</Td>
         {/* The flexible column, and NO truncation: this cell used to carry a
             hard 14rem cap that cut `10-244-4-21.kconmon-kconmon-ng-…` mid-token
             with room to spare beside it. A long name WRAPS inside its column
@@ -613,12 +608,12 @@ function HopRows({
             fixed layout above makes safe: it can no longer push anything out.
             The title stays regardless, so the whole value is one hover away
             even where the column really is narrow. */}
-        <td className="py-2 pr-3 align-top text-xs text-muted-foreground">
+        <Td className="mono-data pr-3 align-top text-muted-foreground">
           <span className="block break-all" title={hop.hostname || undefined}>
             {hop.hostname || "—"}
           </span>
-        </td>
-        <td className="nums py-2 pr-3 text-right align-top">
+        </Td>
+        <Td numeric className="pr-3 align-top">
           {/* The RTT cell IS the trend affordance (Decision 13): the number the
               reader is looking at is the one the chart puts in time. Without a
               loaded history there is nothing to plot, so it stays plain text
@@ -647,15 +642,15 @@ function HopRows({
           ) : (
             fmtRttNs(hop.rttNs)
           )}
-        </td>
-        <td className={cn("nums py-2 text-right align-top", LOSS_CLASS[tier])}>{fmtLossPct(hop.lossRatio)}</td>
-      </tr>
+        </Td>
+        <Td numeric className={cn("align-top", LOSS_CLASS[tier])}>{fmtLossPct(hop.lossRatio)}</Td>
+      </Tr>
       {expanded && !placeholder ? (
-        <tr>
-          <td id={detailId} colSpan={6} className="bg-surface-2/40 px-2 py-3">
+        <Tr>
+          <Td id={detailId} colSpan={6} className="bg-surface-2/40 px-2 py-3">
             <EnrichmentDetail entry={enrichment} />
-          </td>
-        </tr>
+          </Td>
+        </Tr>
       ) : null}
     </>
   );

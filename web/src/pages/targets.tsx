@@ -6,7 +6,9 @@ import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Pager, usePager } from "@/components/ui/pager";
 import { DateTimePicker } from "@/components/ui/datetime-picker";
+import { Input, Textarea } from "@/components/ui/input";
 import { Segmented } from "@/components/ui/segmented";
+import { Select } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useAuth } from "@/hooks/use-auth";
 import { useDatabaseAvailable } from "@/hooks/use-capabilities";
@@ -263,13 +265,6 @@ export function formatLabels(labels: Record<string, string> | undefined): string
 
 /* ── small form primitives ──────────────────────────────────────────────── */
 
-function fieldClasses(invalid: boolean): string {
-  return cn(
-    "h-9 rounded-md border bg-transparent px-3 text-[13px]",
-    invalid ? "border-health-bad" : "border-border-strong",
-  );
-}
-
 function TextField({
   label,
   value,
@@ -300,14 +295,9 @@ function TextField({
         {label}
       </label>
       {textarea ? (
-        <textarea
-          {...shared}
-          rows={3}
-          onChange={(e) => onChange(e.target.value)}
-          className={cn(fieldClasses(!!error), "h-auto py-2 font-mono")}
-        />
+        <Textarea {...shared} rows={3} onChange={(e) => onChange(e.target.value)} className="font-mono" />
       ) : (
-        <input {...shared} onChange={(e) => onChange(e.target.value)} className={fieldClasses(!!error)} />
+        <Input {...shared} onChange={(e) => onChange(e.target.value)} />
       )}
       {error ? (
         <span id={errorId} role="alert" className="text-xs leading-relaxed text-health-bad">
@@ -344,21 +334,20 @@ function SelectField<T extends string>({
       <label htmlFor={id} className="text-muted-foreground">
         {label}
       </label>
-      <select
+      <Select
         id={id}
         value={value}
         disabled={disabled}
         aria-invalid={error ? true : undefined}
         aria-describedby={cn(error ? errorId : undefined, hint ? hintId : undefined) || undefined}
         onChange={(e) => onChange(e.target.value as T)}
-        className={cn(fieldClasses(!!error), "disabled:opacity-70")}
       >
         {options.map((o) => (
           <option key={o.value} value={o.value}>
             {o.label}
           </option>
         ))}
-      </select>
+      </Select>
       {hint ? (
         <span id={hintId} className="text-xs leading-relaxed text-muted-foreground">
           {hint}
@@ -487,8 +476,8 @@ function TargetForm({
   return (
     <div ref={panelRef} tabIndex={-1}>
     <Card asChild className="p-6">
-      <form onSubmit={handleSubmit} className="flex flex-col gap-4">
-        <h3 className="text-sm font-semibold">
+      <form onSubmit={handleSubmit} className="flex max-w-2xl flex-col gap-4">
+        <h3 className="type-section">
           {initial ? t("targets.form.edit", { name: initial.name }) : t("targets.form.create")}
         </h3>
         <div className="grid gap-4 sm:grid-cols-2">
@@ -697,7 +686,7 @@ function TargetsTab({ canWrite }: { canWrite: boolean }) {
 
       <Card asChild className="p-6">
         <section>
-          <h2 className="text-sm font-semibold">{t("targets.heading")}</h2>
+          <h2 className="type-section">{t("targets.heading")}</h2>
           {query.isError ? (
             <p role="alert" className="mt-3 text-sm text-health-bad">
               {queryErrorMessage(query.error, t("targets.unavailable"))}
@@ -733,9 +722,11 @@ function TargetsTab({ canWrite }: { canWrite: boolean }) {
                     {t.name}
                   </a>
                   <Badge variant="neutral">{t.kind}</Badge>
-                  <span className="min-w-0 truncate text-xs text-muted-foreground">{t.address}</span>
+                  {/* The address is the row's own data, so it reads in the data
+                      face and in the foreground; the labels stay muted metadata. */}
+                  <span className="mono-data min-w-0 truncate">{t.address}</span>
                   {Object.keys(t.labels).length > 0 ? (
-                    <span className="min-w-0 truncate text-xs text-muted-foreground">{formatLabels(t.labels)}</span>
+                    <span className="mono-data min-w-0 truncate text-muted-foreground">{formatLabels(t.labels)}</span>
                   ) : null}
                   {canWrite ? (
                     <span className="ml-auto flex flex-wrap items-center gap-2">
@@ -953,8 +944,8 @@ function DefinitionForm({
 
   return (
     <Card asChild className="p-6">
-      <form onSubmit={handleSubmit} className="flex flex-col gap-4">
-        <h3 className="text-sm font-semibold">
+      <form onSubmit={handleSubmit} className="flex max-w-2xl flex-col gap-4">
+        <h3 className="type-section">
           {initial ? t("definitions.form.edit", { name: initial.name }) : t("definitions.form.create")}
         </h3>
         <div className="grid gap-4 sm:grid-cols-2">
@@ -1225,7 +1216,7 @@ function DefinitionsTab({ canRead, canWrite }: { canRead: boolean; canWrite: boo
 
       <Card asChild className="p-6">
         <section>
-          <h2 className="text-sm font-semibold">{t("definitions.heading")}</h2>
+          <h2 className="type-section">{t("definitions.heading")}</h2>
           {query.isError ? (
             <p role="alert" className="mt-3 text-sm text-health-bad">
               {queryErrorMessage(query.error, t("definitions.unavailable"))}
@@ -1252,7 +1243,9 @@ function DefinitionsTab({ canRead, canWrite }: { canRead: boolean; canWrite: boo
                       values, shown as they are stored. The PILL beside them is
                       this page describing a boolean, so it translates. */}
                   <span className="text-xs uppercase tracking-wide text-muted-foreground">{d.checkType}</span>
-                  <span className="text-xs text-muted-foreground">
+                  {/* The src→dst pair is the definition's data — the data face,
+                      not a muted caption (M4 iron rule). */}
+                  <span className="mono-data">
                     {d.sourceSelection} → {destinationLabel(d, targets, t)}
                   </span>
                   <Badge variant={d.enabled ? "ok" : "neutral"} dot>
@@ -1584,8 +1577,8 @@ function ScheduleForm({
 
   return (
     <Card asChild className="p-6">
-      <form onSubmit={handleSubmit} className="flex flex-col gap-4">
-        <h3 className="text-sm font-semibold">
+      <form onSubmit={handleSubmit} className="flex max-w-2xl flex-col gap-4">
+        <h3 className="type-section">
           {initial
             ? t("schedules.form.edit", {
                 cadence: cadence(initial, locale, t),
@@ -1925,7 +1918,7 @@ function SchedulesTab({ canRead, canWrite }: { canRead: boolean; canWrite: boole
 
       <Card asChild className="p-6">
         <section>
-          <h2 className="text-sm font-semibold">{t("schedules.heading")}</h2>
+          <h2 className="type-section">{t("schedules.heading")}</h2>
           {query.isError ? (
             <p role="alert" className="mt-3 text-sm text-health-bad">
               {queryErrorMessage(query.error, t("schedules.unavailable"))}
@@ -2124,7 +2117,7 @@ export function TargetsPage() {
   return (
     /* The title is the SAME words the sidebar's nav.targets uses — one surface,
        one name, wherever the operator reads it. */
-    <PageShell title={t("title")} description={t("description")}>
+    <PageShell title={t("title")} help={{ body: t("help.body"), slug: "scheduled-checks" }} description={t("description")}>
       {body}
     </PageShell>
   );

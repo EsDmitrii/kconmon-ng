@@ -158,6 +158,36 @@ archives:
     files:
       - LICENSE
 
+# Bare-host packages for the agent only (external agents dial the controller through the TLS
+# gateway); the controller stays container-only and the kubectl plugin ships via krew.
+nfpms:
+  - id: agent
+    ids: [agent]
+    package_name: kconmon-ng-agent
+    vendor: Dmitrii Esin
+    homepage: https://github.com/EsDmitrii/kconmon-ng
+    maintainer: Dmitrii Esin <esdmitrii@gmail.com>
+    description: |-
+      kconmon-ng external agent.
+      Registers with a kconmon-ng controller over the TLS external gateway and
+      runs TCP/UDP/ICMP/DNS/HTTP/MTR probes against the fleet.
+    license: Apache-2.0
+    formats: [deb, rpm]
+    bindir: /usr/bin
+    contents:
+      - src: packaging/agent/kconmon-ng-agent.service
+        dst: /usr/lib/systemd/system/kconmon-ng-agent.service
+      # Vendor sysctl dir, not /etc: the admin overrides in /etc/sysctl.d without a conffile fight.
+      - src: packaging/agent/sysctl.d/50-kconmon-ng.conf
+        dst: /usr/lib/sysctl.d/50-kconmon-ng.conf
+      # Conffile: dpkg keeps the admin's edits on upgrade, rpm writes .rpmnew next to them.
+      - src: packaging/agent/config.yaml
+        dst: /etc/kconmon-ng/config.yaml
+        type: config|noreplace
+    scripts:
+      postinstall: packaging/scripts/postinstall.sh
+      preremove: packaging/scripts/preremove.sh
+
 checksum:
   name_template: checksums.txt
 

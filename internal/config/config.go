@@ -41,9 +41,55 @@ type Config struct {
 	LogFormat          string              `yaml:"logFormat"`
 	FailureDomainLabel string              `yaml:"failureDomainLabel"`
 	ControllerAddress  string              `yaml:"controllerAddress"`
+	Agent              AgentConfig         `yaml:"agent"`
 	Checkers           CheckersConfig      `yaml:"checkers"`
 	Controller         ControllerConfig    `yaml:"controller"`
 	Observability      ObservabilityConfig `yaml:"observability"`
+}
+
+/*
+AgentConfig is the agent's identity: what it asserts about itself at registration. Every key is
+optional — in-cluster the chart's Downward API env fills the same values, and on a bare host each
+key has a fallback (hostname for nodeName, outbound-interface autodetect for advertiseAddress,
+controller-side zone resolution for zone). Identity is resolved once at startup; a hot-reload of
+this block takes effect on the next agent restart, because a changed identity is a different agent
+to every peer.
+*/
+type AgentConfig struct {
+	// NodeName is the agent's identity in the mesh; empty falls back to os.Hostname().
+	NodeName string `yaml:"nodeName"`
+	// AdvertiseAddress must be an IP LITERAL: the controller publishes it to every peer as a probe
+	// target and rejects anything net.ParseIP refuses (validateAgentMeta). Empty means autodetect.
+	AdvertiseAddress string `yaml:"advertiseAddress"`
+	// Zone is an explicit assertion that always wins; empty lets the controller resolve the zone
+	// from the node's failure-domain label (in-cluster only).
+	Zone string `yaml:"zone"`
+	// TLS switches the controller connection to the external gateway; an empty block keeps the
+	// in-cluster plaintext dial byte-identical.
+	TLS AgentTLSConfig `yaml:"tls"`
+	// BootstrapTokenFile names a file whose content is sent as a bearer token on every RPC. Only
+	// meaningful together with the TLS block: a token over plaintext is a token published to the
+	// network, so validation refuses that combination.
+	BootstrapTokenFile string `yaml:"bootstrapTokenFile"`
+}
+
+// AgentTLSConfig is the agent's side of the external gateway: how to verify the controller and,
+// when the gateway pins identities, how to prove its own.
+type AgentTLSConfig struct {
+	// CAFile verifies the gateway's server certificate; empty falls back to the system pool.
+	CAFile string `yaml:"caFile"`
+	// CertFile/KeyFile present a client certificate; both or neither.
+	CertFile string `yaml:"certFile"`
+	KeyFile  string `yaml:"keyFile"`
+	// ServerName overrides the hostname verified against the server certificate, for fleets that
+	// dial the gateway by IP or through a load balancer.
+	ServerName string `yaml:"serverName"`
+}
+
+// Enabled reports whether the operator configured TLS at all; the zero block means the plaintext
+// in-cluster dial, unchanged.
+func (t AgentTLSConfig) Enabled() bool {
+	return t.CAFile != "" || t.CertFile != "" || t.KeyFile != "" || t.ServerName != ""
 }
 
 type CheckersConfig struct {
@@ -123,9 +169,36 @@ type ExternalCheckerConfig struct {
 }
 
 type ControllerConfig struct {
-	LeaderElection bool          `yaml:"leaderElection"`
-	AgentTTL       time.Duration `yaml:"agentTtl"`
-	Events         EventsConfig  `yaml:"events"`
+	LeaderElection  bool                  `yaml:"leaderElection"`
+	AgentTTL        time.Duration         `yaml:"agentTtl"`
+	Events          EventsConfig          `yaml:"events"`
+	ExternalGateway ExternalGatewayConfig `yaml:"externalGateway"`
+}
+
+/*
+ExternalGatewayConfig is a SECOND gRPC listener for agents outside the cluster: same services, same
+registry, but TLS with a bearer token — because the in-cluster port is guarded by a NetworkPolicy
+and the gateway is guarded by nothing but what is configured here. The in-cluster listener is not
+affected by this block in any way.
+*/
+type ExternalGatewayConfig struct {
+	Enabled bool             `yaml:"enabled"`
+	Port    int              `yaml:"port"`
+	TLS     GatewayTLSConfig `yaml:"tls"`
+	// BootstrapTokenFile names the file holding the shared bearer token every external agent must
+	// present. Required when the gateway is enabled: without it the gateway would trust network
+	// position alone, which is exactly what it exists to not do.
+	BootstrapTokenFile string `yaml:"bootstrapTokenFile"`
+}
+
+// GatewayTLSConfig is the gateway's certificate material. ClientCAFile is the v1 identity story:
+// when set, every caller must present a certificate this CA signed, and the cert's CN/URI SAN is
+// pinned to the agent identity in each request (see internal/controller/authn.go). Token-only mode
+// (no client CA) authenticates fleet membership but cannot tell agents apart.
+type GatewayTLSConfig struct {
+	CertFile     string `yaml:"certFile"`
+	KeyFile      string `yaml:"keyFile"`
+	ClientCAFile string `yaml:"clientCaFile"`
 }
 
 // EventsConfig gates the controller's WatchEvents gRPC stream and the
@@ -284,6 +357,19 @@ func (l *Loader) loadFromEnv(cfg *Config) {
 	if v := os.Getenv("KCONMON_NG_FAILURE_DOMAIN_LABEL"); v != "" {
 		cfg.FailureDomainLabel = v
 	}
+	// The identity block shares its env names with the chart's Downward API injection, so the same
+	// ConfigMap can be mounted fleet-wide while each pod still registers as its own node. Zone used
+	// to be read straight from the env in agent.New; it moved here so precedence (env > file) is
+	// decided in ONE place for the whole block.
+	if v := os.Getenv("KCONMON_NG_NODE_NAME"); v != "" {
+		cfg.Agent.NodeName = v
+	}
+	if v := os.Getenv("KCONMON_NG_ADVERTISE_ADDRESS"); v != "" {
+		cfg.Agent.AdvertiseAddress = v
+	}
+	if v := os.Getenv("KCONMON_NG_ZONE"); v != "" {
+		cfg.Agent.Zone = v
+	}
 }
 
 /*
@@ -318,6 +404,19 @@ func (l *Loader) validate(cfg *Config) error {
 	validFormats := map[string]bool{"json": true, "text": true}
 	if !validFormats[strings.ToLower(cfg.LogFormat)] {
 		return fmt.Errorf("logFormat must be one of json, text; got %q", cfg.LogFormat)
+	}
+
+	// The controller broadcasts this address to every peer as a probe target and refuses anything
+	// net.ParseIP refuses, so a hostname or host:port must fail here, not at registration.
+	if a := cfg.Agent.AdvertiseAddress; a != "" && net.ParseIP(a) == nil {
+		return fmt.Errorf("agent.advertiseAddress %q must be an IP literal (no hostname, no port)", a)
+	}
+
+	if err := validateAgentSecurity(&cfg.Agent); err != nil {
+		return err
+	}
+	if err := validateExternalGateway(cfg); err != nil {
+		return err
 	}
 
 	/* The TTL becomes a ticker PERIOD (agentTtl/2 in controller.Run), and time.NewTicker panics on a
@@ -375,6 +474,46 @@ func (l *Loader) validate(cfg *Config) error {
 		return err
 	}
 
+	return nil
+}
+
+// validateAgentSecurity refuses the security half-configurations that would fail (or leak) only at
+// runtime: a client cert without its key cannot handshake, and a bearer token over the plaintext
+// in-cluster dial is a secret broadcast to anyone on the path.
+func validateAgentSecurity(a *AgentConfig) error {
+	if (a.TLS.CertFile == "") != (a.TLS.KeyFile == "") {
+		return fmt.Errorf("agent.tls.certFile and agent.tls.keyFile must be set together " +
+			"(a client certificate without its key cannot authenticate)")
+	}
+	if a.BootstrapTokenFile != "" && !a.TLS.Enabled() {
+		return fmt.Errorf("agent.bootstrapTokenFile requires the agent.tls block: " +
+			"a bearer token over plaintext gRPC is readable by anyone on the path")
+	}
+	return nil
+}
+
+// validateExternalGateway enforces that an enabled gateway can actually authenticate someone: a TLS
+// server certificate and a bearer token are the floor, the client CA is the optional identity layer.
+func validateExternalGateway(cfg *Config) error {
+	gw := cfg.Controller.ExternalGateway
+	if !gw.Enabled {
+		return nil
+	}
+	if gw.Port < 1 || gw.Port > 65535 {
+		return fmt.Errorf("controller.externalGateway.port must be between 1 and 65535, got %d", gw.Port)
+	}
+	if gw.Port == cfg.HTTPPort || gw.Port == cfg.GRPCPort || gw.Port == cfg.MetricsPort {
+		return fmt.Errorf("controller.externalGateway.port (%d) must differ from httpPort, grpcPort and metricsPort",
+			gw.Port)
+	}
+	if gw.TLS.CertFile == "" || gw.TLS.KeyFile == "" {
+		return fmt.Errorf("controller.externalGateway.tls.certFile and .keyFile are required when the gateway " +
+			"is enabled: the gateway exists to not expose plaintext gRPC outside the cluster")
+	}
+	if gw.BootstrapTokenFile == "" {
+		return fmt.Errorf("controller.externalGateway.bootstrapTokenFile is required when the gateway is " +
+			"enabled: without a token the gateway trusts network position alone")
+	}
 	return nil
 }
 

@@ -134,7 +134,8 @@ func (c *Controller) Run(ctx context.Context) error {
 		"version", config.Version,
 	)
 
-	errCh := make(chan error, 2)
+	// One slot per listener goroutine, so none of them blocks forever on exit.
+	errCh := make(chan error, 4)
 
 	grpcSrv := grpc.NewServer(
 		grpc.KeepaliveParams(keepalive.ServerParameters{
@@ -149,6 +150,22 @@ func (c *Controller) Run(ctx context.Context) error {
 	c.grpcServer.RegisterService(grpcSrv)
 
 	lc := net.ListenConfig{}
+
+	/* The external gateway is a SECOND listener over the SAME service instance: registering
+	   c.grpcServer on both servers is the whole sharing story — registry, watchers and managers are
+	   that struct's fields, so an external agent and an in-cluster one are indistinguishable past
+	   the door. Built before anything starts serving, so a broken certificate or token file fails
+	   startup cleanly instead of after the fleet has already connected. */
+	var gatewaySrv *grpc.Server
+	if gw := c.cfg.Controller.ExternalGateway; gw.Enabled {
+		srv, gwErr := NewExternalGatewayServer(gw)
+		if gwErr != nil {
+			return fmt.Errorf("external gateway: %w", gwErr)
+		}
+		gatewaySrv = srv
+		c.grpcServer.RegisterService(gatewaySrv)
+	}
+
 	grpcLis, err := lc.Listen(ctx, "tcp", fmt.Sprintf(":%d", c.cfg.GRPCPort))
 	if err != nil {
 		return fmt.Errorf("gRPC listen: %w", err)
@@ -158,6 +175,20 @@ func (c *Controller) Run(ctx context.Context) error {
 		slog.Info("gRPC server listening", "port", c.cfg.GRPCPort)
 		errCh <- grpcSrv.Serve(grpcLis)
 	}()
+
+	if gatewaySrv != nil {
+		gwLis, gwErr := lc.Listen(ctx, "tcp", fmt.Sprintf(":%d", c.cfg.Controller.ExternalGateway.Port))
+		if gwErr != nil {
+			return fmt.Errorf("external gateway listen: %w", gwErr)
+		}
+		go func() {
+			slog.Info("external gateway listening",
+				"port", c.cfg.Controller.ExternalGateway.Port,
+				"mTLS", c.cfg.Controller.ExternalGateway.TLS.ClientCAFile != "",
+			)
+			errCh <- gatewaySrv.Serve(gwLis)
+		}()
+	}
 
 	httpSrv := newControllerHTTPServer(fmt.Sprintf(":%d", c.cfg.HTTPPort), c.httpServer.Handler())
 
@@ -233,6 +264,11 @@ func (c *Controller) Run(ctx context.Context) error {
 		// completes, a ready-but-tearing-down replica is observable.
 		c.httpServer.SetReady(false)
 		stopGRPC(grpcSrv, c.grpcServer)
+		if gatewaySrv != nil {
+			// GRPCServer.Shutdown already ran above (idempotent), so gateway streams are ending;
+			// this drains the gateway's own transport within the same bounded budget.
+			stopGRPC(gatewaySrv, c.grpcServer)
+		}
 
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()

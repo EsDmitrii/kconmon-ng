@@ -282,6 +282,18 @@ describe("LivePage", () => {
     expect(rows[1]).toHaveTextContent("first thing");
   });
 
+  /* M4's iron rule: identifiers and stamps in the feed wear the data face. */
+  it("sets the stamp and the scope in mono-data", async () => {
+    renderPage();
+    open();
+    await emit([ev(1)]);
+
+    const row = screen.getAllByRole("listitem")[0];
+    const [stamp] = row.querySelectorAll("span.mono-data");
+    expect(stamp).toBeDefined();
+    expect(screen.getByText("node-a→node-b").className).toMatch(/\bmono-data\b/);
+  });
+
   it("narrows the feed with the type filter", async () => {
     renderPage();
     open();

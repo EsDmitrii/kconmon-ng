@@ -1,0 +1,23 @@
+---
+# Exercises the M6 external gateway at its full-security setting: TLS serving pair plus client-CA
+# identity pinning plus bootstrap token, the external Service carrying the gateway port alone, and
+# the controller-scoped ingress NetworkPolicy from the external agents' CIDRs.
+controller:
+  externalGateway:
+    enabled: true
+    service:
+      type: LoadBalancer
+      annotations:
+        service.beta.kubernetes.io/aws-load-balancer-internal: "false"
+      externalTrafficPolicy: Local
+      loadBalancerSourceRanges:
+        - 203.0.113.0/24
+    tls:
+      secretName: kconmon-ng-gateway-tls
+      clientCaKey: ca.crt
+    bootstrapToken:
+      secretName: kconmon-ng-gateway-token
+networkPolicy:
+  enabled: true
+  externalAgentCidrs:
+    - 203.0.113.0/24

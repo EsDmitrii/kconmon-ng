@@ -171,11 +171,10 @@ the whole duration of a controller outage.
 func TestProbesContinueAcrossControllerDrop(t *testing.T) {
 	// The agent's own meta must pass the controller's validateAgentMeta.
 	// Its pod IP is IPv6 loopback so the IPv4-loopback peer is not filtered
-	// out as self by Scheduler.UpdatePeers.
-	t.Setenv("KCONMON_NG_NODE_NAME", "m2-agent-node")
+	// out as self by Scheduler.UpdatePeers. Node name and zone travel through
+	// the config now (M6-1); only the pod env is still read directly.
 	t.Setenv("KCONMON_NG_POD_NAME", "m2-agent-pod")
 	t.Setenv("KCONMON_NG_POD_IP", "::1")
-	t.Setenv("KCONMON_NG_ZONE", "")
 
 	var lc net.ListenConfig
 	lis, err := lc.Listen(context.Background(), "tcp", "127.0.0.1:0")
@@ -194,6 +193,7 @@ func TestProbesContinueAcrossControllerDrop(t *testing.T) {
 	t.Cleanup(gs.Stop)
 
 	cfg := testRunConfig(t, lis.Addr().String())
+	cfg.Agent.NodeName = "m2-agent-node"
 	cfg.Checkers.UDP.Enabled = true
 	cfg.Checkers.UDP.Interval = 50 * time.Millisecond
 	cfg.Checkers.UDP.Timeout = 250 * time.Millisecond

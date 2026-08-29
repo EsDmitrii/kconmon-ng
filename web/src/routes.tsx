@@ -1,4 +1,4 @@
-import { Fragment, type ReactNode } from "react";
+import { Fragment, useEffect, useRef, type ReactNode } from "react";
 import {
   createRootRoute,
   createRoute,
@@ -57,6 +57,17 @@ export function AppShell({ children }: { children: ReactNode }) {
      page you are already on changes only the query, and that is exactly the
      navigation that used to drop ?at= unseen. */
   const href = useRouterState({ select: (s) => s.location.href });
+  /* PageDown/End scroll the focused element's nearest scrollable ancestor, and
+     only <main> scrolls here — after a nav click that ancestor is the sidebar.
+     Focus <main> on route change; not on first render (the skip link stays the
+     first Tab stop) and not on query-only changes like the ?at= sync. */
+  const mainRef = useRef<HTMLElement>(null);
+  const lastPathname = useRef(pathname);
+  useEffect(() => {
+    if (lastPathname.current === pathname) return;
+    lastPathname.current = pathname;
+    mainRef.current?.focus({ preventScroll: true });
+  }, [pathname]);
   return (
     // TimeMachineProvider wraps the shell rather than sitting up in main.tsx next to
     // QueryClientProvider/ThemeProvider.
@@ -116,7 +127,7 @@ export function AppShell({ children }: { children: ReactNode }) {
               than only scrolling: a <main> is not focusable on its own, and a
               fragment jump to a non-focusable target leaves the keyboard back
               in the sidebar on the next Tab. */}
-          <main id="main-content" tabIndex={-1} className="flex-1 overflow-auto outline-none">
+          <main ref={mainRef} id="main-content" tabIndex={-1} className="flex-1 overflow-auto outline-none">
             <RouteErrorBoundary resetKey={pathname}>{children}</RouteErrorBoundary>
           </main>
         </div>

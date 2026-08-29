@@ -1,0 +1,85 @@
+---
+name: Docs
+
+# Builds the MkDocs site and publishes it through the Pages deployment API
+# (actions/deploy-pages) — no gh-pages branch to generate, protect, or clean
+# up. PRs touching the docs get the strict build as a check and nothing else.
+#
+# First deploy needs Pages enabled once, by hand: repo Settings → Pages →
+# Build and deployment → Source = "GitHub Actions".
+on:
+  push:
+    branches: [main]
+    paths:
+      - "docs/**"
+      - "mkdocs.yml"
+      - "requirements-docs.txt"
+      - ".github/workflows/docs.yaml"
+  pull_request:
+    branches: [main]
+    # Keep identical to the push list above: a PR that can change the deployed
+    # site must run the same strict build the deploy will.
+    paths:
+      - "docs/**"
+      - "mkdocs.yml"
+      - "requirements-docs.txt"
+      - ".github/workflows/docs.yaml"
+  workflow_dispatch:
+
+# Read-only by default; the deploy job below requests exactly the Pages scopes
+# it needs.
+permissions:
+  contents: read
+
+concurrency:
+  group: docs-${{ github.ref }}
+  # Superseded PR builds are safe to kill. An in-flight Pages deployment on
+  # main is not: cancelling mid-deploy leaves a failed run and no retry, so
+  # pushes queue instead.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  build:
+    name: Build site
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: requirements-docs.txt
+
+      - name: Install docs toolchain
+        run: pip install -r requirements-docs.txt
+
+      # --strict turns MkDocs warnings (broken nav entries, bad snippet
+      # paths, link validation) into failures; this is the whole PR gate.
+      - name: Build site
+        run: mkdocs build --strict
+
+      # PRs stop at the strict build; the artifact is deploy plumbing and the
+      # deploy job never runs for them.
+      - name: Upload Pages artifact
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-pages-artifact@v5
+        with:
+          path: site
+
+  deploy:
+    name: Deploy to GitHub Pages
+    needs: build
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write  # create the Pages deployment
+      id-token: write  # OIDC token deploy-pages exchanges to prove the run's identity
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy
+        id: deployment
+        uses: actions/deploy-pages@v5

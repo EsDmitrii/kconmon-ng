@@ -32,6 +32,13 @@ const en = {
     "Controller events pushed over the WebSocket, newest first. The browser holds the most recent {cap}; anything older is Prometheus' job.",
   "description.engaged":
     "Scrollback ending {at}, newest first. The live tail is off while the Time Machine is engaged — \"Load older\" walks back from here.",
+  /* The "?" by the title (M7-5); the docs page is docs/console/events. No
+     numbers here — the ring cap already lives in description.live's {cap}. */
+  "help.body":
+    "The controller's event feed, newest first. " +
+    "Live, the feed is pushed over the WebSocket and the browser holds a ring of the most recent events; anything older is served from event history, which needs the console database. " +
+    "Operator annotations are interleaved at their own timestamps and ignore the event filters. " +
+    "With the Time Machine engaged, the live tail is off and the feed becomes scrollback ending at the viewed instant.",
 
   /* ── toolbar ────────────────────────────────────────────────────────────── */
   "filters.severity": "Severity",
@@ -143,6 +150,11 @@ export const liveDict: Dictionary<LiveKey> = defineDict(en, {
     "События контроллера приходят по WebSocket, новые сверху. Браузер держит последние {cap}, а всё, что старше, уже забота Prometheus.",
   "description.engaged":
     "Прокрутка назад до {at}, новые сверху. Пока включена Машина времени, живой хвост выключен, а «Загрузить старые» уходит вглубь отсюда.",
+  "help.body":
+    "Лента событий контроллера, новые сверху. " +
+    "Вживую события приходят по WebSocket, и браузер держит только кольцо самых свежих; всё, что старше, отдаёт история событий, а ей нужна база данных консоли. " +
+    "Заметки операторов вклиниваются в ленту по своему времени и фильтров событий не слушаются. " +
+    "С включённой Машиной времени живой хвост выключен, и лента становится прокруткой назад от выбранного момента.",
 
   "filters.severity": "Важность",
   "filters.severity.all": "Все",

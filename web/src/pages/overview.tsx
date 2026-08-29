@@ -3,7 +3,9 @@ import { useQuery } from "@tanstack/react-query";
 import { PageShell } from "@/components/page-shell";
 import { Badge } from "@/components/ui/badge";
 import { Card } from "@/components/ui/card";
+import { EmptyState } from "@/components/ui/empty-state";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Table, TBody, Td, Th, THead, Tr } from "@/components/ui/table";
 import { useAuth } from "@/hooks/use-auth";
 import { useDatabaseAvailable } from "@/hooks/use-capabilities";
 import { useMatrix } from "@/hooks/use-matrix";
@@ -117,6 +119,30 @@ export function foldBounds(topo: Topology | undefined, t: T): string | undefined
 }
 
 /**
+ * healthStatement is the page's lead: the summarize() verdict in one sentence.
+ * It says nothing without a scored pair (a health claim needs evidence), and
+ * the healthy claim shrinks to the scored set when the scored/measured gap
+ * exists — "all 90 healthy" off 9 ratios would be the scored-gap lie in words.
+ */
+export function healthStatement(s: OverviewSummary, t: T): { text: string; tone?: Tone } | null {
+  if (s.pairsScored === 0) return null;
+  if (s.pairsFailing > 0) {
+    return {
+      text: t(s.pairsFailing === 1 ? "health.failing.one" : "health.failing.many", { count: s.pairsFailing }),
+      tone: "bad",
+    };
+  }
+  if (s.pairsDegraded > 0) {
+    return {
+      text: t(s.pairsDegraded === 1 ? "health.degraded.one" : "health.degraded.many", { count: s.pairsDegraded }),
+      tone: "warn",
+    };
+  }
+  if (s.pairsScored < s.pairsTotal) return { text: t("health.healthy.scoped", { count: s.pairsScored }) };
+  return { text: t(s.pairsTotal === 1 ? "health.healthy.one" : "health.healthy.many", { count: s.pairsTotal }) };
+}
+
+/**
  * fmtRtt renders nanoseconds as milliseconds, or an em-dash for anything that
  * is not a real measurement.
  *
@@ -133,7 +159,9 @@ function fmtRtt(ns?: number | null): string {
 
 type Tone = "warn" | "bad";
 
-/* A tone only appears when the value itself means trouble, and it arrives on three channels at once — a left rail. */
+/* A tone only appears when the value itself means trouble, and it arrives on three channels at once — a left rail.
+   No Card since M4-6: the tiles sit straight on the page background, so the
+   figures read as the page's own numbers rather than three boxed widgets. */
 function StatTile({
   label,
   value,
@@ -151,7 +179,7 @@ function StatTile({
   toneLabel?: string;
 }) {
   return (
-    <Card className="relative overflow-hidden p-5">
+    <div className="relative pl-4">
       {tone ? (
         <span
           aria-hidden="true"
@@ -185,27 +213,76 @@ function StatTile({
           {note}
         </p>
       ) : null}
-    </Card>
+    </div>
   );
 }
 
-/* Blank Slate: a short sentence saying why the panel is empty plus the next
-   action, never a bare "No data." */
-function BlankSlate({ title, body }: { title: string; body: string }) {
+/* The blank slates render through ui/empty-state — the BlankSlate pattern that
+   used to live here, lifted so every page draws the same slate. */
+
+/** One install step: met or not, its value, and — unmet — the next thing to check. */
+function SetupStep({ met, label, value, fix }: { met: boolean; label: string; value: ReactNode; fix: string }) {
   return (
-    <div className="flex flex-col items-center gap-2 px-6 py-10 text-center">
-      <span
-        aria-hidden="true"
-        className="mb-1 flex size-10 items-center justify-center rounded-full bg-surface-2 text-muted-foreground"
-      >
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" className="size-5">
-          <circle cx="12" cy="12" r="9" />
-          <path d="M9 12h6" strokeLinecap="round" />
-        </svg>
-      </span>
-      <p className="text-sm font-medium">{title}</p>
-      <p className="max-w-sm text-xs leading-relaxed text-muted-foreground">{body}</p>
-    </div>
+    <li data-testid="setup-step" className="flex flex-col gap-1">
+      <div className="flex items-center gap-3">
+        <span
+          aria-hidden="true"
+          className={cn(
+            "flex size-5 shrink-0 items-center justify-center rounded-full",
+            met ? "bg-health-ok-soft text-health-ok" : "bg-surface-2 text-muted-foreground",
+          )}
+        >
+          {met ? (
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" className="size-3">
+              <path d="M5 13l4 4 10-10" strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
+          ) : (
+            <span className="size-1.5 rounded-full bg-current" />
+          )}
+        </span>
+        <span className="text-sm font-medium">{label}</span>
+        <span className={cn("text-sm", met ? "text-foreground" : "text-muted-foreground")}>{value}</span>
+      </div>
+      {!met ? <p className="pl-8 text-xs leading-relaxed text-muted-foreground">{fix}</p> : null}
+    </li>
+  );
+}
+
+/**
+ * SetupProgress is the first-run card (M4-6): Live with zero measured pairs is
+ * an install in progress, and ONE card walking agents → scrape → first round
+ * says more than four separate empty panels. The signals are the ones the page
+ * already holds: useTopology's agent list, useMatrix's series.
+ */
+function SetupProgress({ agents, promScraped }: { agents: number; promScraped: boolean }) {
+  const t = useT(overviewDict);
+  return (
+    <Card asChild className="p-6" data-testid="setup-progress">
+      <section aria-label={t("setup.title")}>
+        <h2 className="type-section">{t("setup.title")}</h2>
+        <ol className="mt-4 flex flex-col gap-3">
+          <SetupStep
+            met={agents > 0}
+            label={t("setup.agents")}
+            value={<span className="mono-data">{agents}</span>}
+            fix={t("setup.agents.fix")}
+          />
+          <SetupStep
+            met={promScraped}
+            label={t("setup.prometheus")}
+            value={t(promScraped ? "setup.yes" : "setup.no")}
+            fix={t("setup.prometheus.fix")}
+          />
+          {/* Inside this card the round has by definition not landed yet. */}
+          <SetupStep
+            met={false}
+            label={t("setup.probes")}
+            value={t("setup.waiting")}
+            fix={t("worstPairs.empty.noData.body")}
+          />
+        </ol>
+      </section>
+    </Card>
   );
 }
 
@@ -221,11 +298,12 @@ function OverviewSkeleton() {
     <div role="status" aria-live="polite" className="flex flex-col gap-6">
       <span className="sr-only">{t("loading")}</span>
       <div className="grid gap-4 sm:grid-cols-3">
+        {/* Bare like the loaded tiles — a boxed skeleton would jump on load. */}
         {[0, 1, 2].map((i) => (
-          <Card key={i} className="p-5">
+          <div key={i} className="pl-4">
             <SkeletonBar className="h-2.5 w-24" />
             <SkeletonBar className="mt-4 h-8 w-20" />
-          </Card>
+          </div>
         ))}
       </div>
       <Card className="p-6">
@@ -337,7 +415,7 @@ function OpenIncidents() {
        column to 479px and the whole main to a 495px horizontal scroll. */
     <Card asChild className="min-w-0 p-6" data-testid="open-incidents-panel">
       <section aria-label={t("incidents.title")}>
-        <h2 className="text-sm font-semibold">{t("incidents.title")}</h2>
+        <h2 className="type-section">{t("incidents.title")}</h2>
 
         {me !== undefined && !canRead ? (
           <PanelNote>{t("incidents.denied")}</PanelNote>
@@ -402,24 +480,32 @@ function OverviewEventRow({ event }: { event: LiveEvent }) {
   const t = useT(overviewDict);
   const { locale } = useLocale();
   return (
-    <li data-testid="overview-event" className="flex items-center gap-3 py-2">
+    <Tr data-testid="overview-event">
       {/* The DAY, not a bare clock. This card is fed with `to = t` when the Time Machine is engaged
           and has no lower bound at all, so its ten newest rows can be days old — and under a heading
           that says "Recent events", beside a banner naming another date, a bare "14:03" reads as
           this afternoon. The two sibling feeds (/live, recent-changes) already print it this way. */}
-      <span className="nums w-24 shrink-0 text-xs text-muted-foreground">
+      <Td className="mono-data whitespace-nowrap pr-3 text-muted-foreground">
         {fmtEventStamp(event.timestamp, localeTag(locale))}
-      </span>
-      <Badge variant={isKnownSeverity(event.severity) ? SEVERITY_VARIANT[event.severity] : "unknown"} dot>
-        {isKnownSeverity(event.severity) ? t(SEVERITY_KEYS[event.severity]) : event.severity}
-      </Badge>
-      <span className="min-w-0 flex-1 truncate text-sm" title={event.summary}>
-        {event.summary}
-      </span>
-      <span className="hidden w-36 shrink-0 truncate text-xs text-muted-foreground sm:block" title={event.scope}>
-        {event.scope}
-      </span>
-    </li>
+      </Td>
+      <Td className="pr-3">
+        <Badge variant={isKnownSeverity(event.severity) ? SEVERITY_VARIANT[event.severity] : "unknown"} dot>
+          {isKnownSeverity(event.severity) ? t(SEVERITY_KEYS[event.severity]) : event.severity}
+        </Badge>
+      </Td>
+      {/* w-full + max-w-0 is the table-cell spelling of min-w-0 flex-1: take
+          the slack, and truncate rather than push the card open. */}
+      <Td className="w-full max-w-0">
+        <span className="block truncate" title={event.summary}>
+          {event.summary}
+        </span>
+      </Td>
+      <Td className="hidden pl-3 sm:table-cell">
+        <span className="mono-data block w-36 truncate text-muted-foreground" title={event.scope}>
+          {event.scope}
+        </span>
+      </Td>
+    </Tr>
   );
 }
 
@@ -448,7 +534,7 @@ function RecentEvents() {
     <Card asChild className="p-6">
       <section aria-label={t("events.title")}>
         <div className="flex flex-wrap items-baseline justify-between gap-2">
-          <h2 className="text-sm font-semibold">{t("events.title")}</h2>
+          <h2 className="type-section">{t("events.title")}</h2>
           <a href={withAtParam("/live")} className="text-xs text-primary hover:underline">
             {t("events.open")}
           </a>
@@ -467,11 +553,13 @@ function RecentEvents() {
              would be claiming the fleet had never done anything by then. */
           <PanelNote>{t(at ? "events.empty.engaged" : "events.empty")}</PanelNote>
         ) : (
-          <ul className="mt-3 flex flex-col divide-y divide-border">
-            {events.map((e) => (
-              <OverviewEventRow key={e.id} event={e} />
-            ))}
-          </ul>
+          <Table variant="dense" containerClassName="mt-3">
+            <TBody>
+              {events.map((e) => (
+                <OverviewEventRow key={e.id} event={e} />
+              ))}
+            </TBody>
+          </Table>
         )}
       </section>
     </Card>
@@ -620,7 +708,7 @@ function FiringAlerts() {
     <Card asChild className="min-w-0 p-6" data-testid="firing-alerts-panel">
       <section aria-label={t("alerts.title")}>
         <div className="flex flex-wrap items-baseline justify-between gap-2">
-          <h2 className="text-sm font-semibold">{t("alerts.title")}</h2>
+          <h2 className="type-section">{t("alerts.title")}</h2>
           {canRead ? (
             <a href={withAtParam("/alerting")} className="text-xs text-primary hover:underline">
               {t("alerts.open")}
@@ -675,36 +763,29 @@ function WorstPairsTable({ pairs }: { pairs: MatrixCell[] }) {
      the matrix grid's own rule for its cell links. */
   const { at } = useTimeContext();
   return (
-    <div className="overflow-x-auto">
-      <table className="w-full text-sm">
-        <caption className="sr-only">{t("table.caption")}</caption>
-        <thead>
-          <tr className="border-b border-border text-left text-[11px] uppercase tracking-[0.07em] text-muted-foreground">
-            {/* "#" is a symbol, not a word — the rank column reads the same in
-                every language, so it stays out of the dictionary. */}
-            <th scope="col" className="w-10 py-3 pr-4 font-semibold">
-              #
-            </th>
-            <th scope="col" className="py-3 pr-6 font-semibold">
-              {t("table.pair")}
-            </th>
-            <th scope="col" className="py-3 pr-6 text-right font-semibold">
-              {t("table.fail")}
-            </th>
-            <th scope="col" className="py-3 pr-6 text-right font-semibold">
-              {t("table.rtt")}
-            </th>
-            <th scope="col" className="py-3 font-semibold">
-              {t("table.status")}
-            </th>
-            {/* The investigate column carries links, not data — named for screen readers only. */}
-            <th scope="col" className="py-3 pl-4">
-              <span className="sr-only">{t("table.investigate")}</span>
-            </th>
-          </tr>
-        </thead>
-        <tbody className="divide-y divide-border">
-          {pairs.map((c, i) => {
+    <Table variant="dense">
+      <caption className="sr-only">{t("table.caption")}</caption>
+      <THead>
+        <Tr>
+          {/* "#" is a symbol, not a word — the rank column reads the same in
+              every language, so it stays out of the dictionary. */}
+          <Th className="w-10 pr-4">#</Th>
+          <Th className="pr-6">{t("table.pair")}</Th>
+          <Th numeric className="pr-6">
+            {t("table.fail")}
+          </Th>
+          <Th numeric className="pr-6">
+            {t("table.rtt")}
+          </Th>
+          <Th>{t("table.status")}</Th>
+          {/* The investigate column carries links, not data — named for screen readers only. */}
+          <Th className="pl-4">
+            <span className="sr-only">{t("table.investigate")}</span>
+          </Th>
+        </Tr>
+      </THead>
+      <TBody>
+        {pairs.map((c, i) => {
             const fail = c.failRatio ?? 0;
             const failing = fail >= 0.1;
             /* Same two links a matrix cell carries: the pair card AT the viewed instant, and an
@@ -717,19 +798,19 @@ function WorstPairsTable({ pairs }: { pairs: MatrixCell[] }) {
               at ?? new Date(),
             );
             return (
-              <tr
+              <Tr
                 /* The rank leads the key: two cells naming the same pair is
                    nonsense the wire can still carry, and two rows under one
                    React key render as one. */
                 key={`${i} ${c.source} ${c.destination}`}
                 className="transition-colors duration-(--dur) ease-(--ease) hover:bg-accent/40"
               >
-                <td className="nums py-4 pr-4 text-xs text-muted-foreground">{i + 1}</td>
-                <td className="max-w-[22rem] py-4 pr-6">
+                <Td className="nums pr-4 text-xs text-muted-foreground">{i + 1}</Td>
+                <Td className="max-w-[22rem] pr-6">
                   <a
                     href={pairHref}
                     data-testid="worst-pair-link"
-                    className="flex items-center gap-2 rounded text-primary hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                    className="mono-data flex items-center gap-2 rounded text-primary hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                   >
                     <span className="truncate" title={c.source}>
                       {c.source}
@@ -741,22 +822,23 @@ function WorstPairsTable({ pairs }: { pairs: MatrixCell[] }) {
                       {c.destination}
                     </span>
                   </a>
-                </td>
-                <td
-                  className={cn(
-                    "nums py-4 pr-6 text-right text-base font-semibold tracking-tight",
-                    failing ? "text-health-bad" : "text-health-warn",
-                  )}
+                </Td>
+                <Td
+                  numeric
+                  className={cn("pr-6 font-semibold tracking-tight", failing ? "text-health-bad" : "text-health-warn")}
                 >
                   {(100 * fail).toFixed(1)}%
-                </td>
-                <td className="nums py-4 pr-6 text-right text-muted-foreground">{fmtRtt(c.rttP95)}</td>
-                <td className="py-4">
+                </Td>
+                {/* The RTT is a value, not a caption — it reads in the foreground. */}
+                <Td numeric className="pr-6">
+                  {fmtRtt(c.rttP95)}
+                </Td>
+                <Td>
                   <Badge variant={failing ? "bad" : "warn"} dot>
                     {t(failing ? "table.status.failing" : "table.status.degraded")}
                   </Badge>
-                </td>
-                <td className="py-4 pl-4 text-right">
+                </Td>
+                <Td className="pl-4 text-right">
                   <a
                     href={investigateHref}
                     data-testid="worst-pair-investigate"
@@ -764,13 +846,12 @@ function WorstPairsTable({ pairs }: { pairs: MatrixCell[] }) {
                   >
                     {t("table.investigate")}
                   </a>
-                </td>
-              </tr>
+                </Td>
+              </Tr>
             );
           })}
-        </tbody>
-      </table>
-    </div>
+      </TBody>
+    </Table>
   );
 }
 
@@ -825,9 +906,13 @@ export function OverviewPage() {
   const noPairs = summary !== undefined && summary.pairsTotal === 0;
   const pairsValue = (n: number) => (noPairs ? "—" : n);
   const pairsNote = noPairs ? t("tiles.pairs.noData") : undefined;
+  const statement = summary ? healthStatement(summary, t) : null;
+  /* Live at zero measured pairs is an install in progress; engaged it is a
+     past instant with no samples, which the engaged slate already explains. */
+  const firstRun = isLive && noPairs;
 
   return (
-    <PageShell timeMachine title={t("title")} description={t(isLive ? "description" : "description.engaged")}>
+    <PageShell timeMachine title={t("title")} help={{ body: t("help.body"), slug: "overview" }} description={t(isLive ? "description" : "description.engaged")}>
       <div className="flex flex-col gap-6">
         {matrix.error || topo.error ? (
           <Card role="alert" className="flex flex-col gap-3 border-l-4 border-l-health-bad bg-health-bad-soft/40 p-5">
@@ -847,6 +932,33 @@ export function OverviewPage() {
 
         {summary ? (
           <>
+            {/* The page LEADS with the verdict in words (M4-6); the tiles below
+                carry the arithmetic. Nothing scored — nothing claimed. */}
+            {statement ? (
+              <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
+                <p
+                  data-testid="health-statement"
+                  className={cn(
+                    "nums text-3xl font-semibold tracking-tight",
+                    statement.tone === "bad" && "text-health-bad",
+                    statement.tone === "warn" && "text-health-warn",
+                  )}
+                >
+                  {statement.text}
+                </p>
+                <Badge variant="neutral">{t("qualifier")}</Badge>
+              </div>
+            ) : null}
+
+            {firstRun ? (
+              <SetupProgress
+                agents={topo.data?.agents.length ?? 0}
+                promScraped={
+                  (matrix.data?.cells.length ?? 0) > 0 || (matrix.data?.nodes.length ?? 0) > 0
+                }
+              />
+            ) : null}
+
             <div className="grid gap-4 sm:grid-cols-3">
               <StatTile
                 label={t("tiles.nodesReady")}
@@ -875,11 +987,13 @@ export function OverviewPage() {
               />
             </div>
 
+            {/* On first run the setup card above IS this panel's answer. */}
+            {firstRun ? null : (
             <Card asChild className="p-6">
               <section>
                 <div className="flex flex-wrap items-baseline justify-between gap-2">
                   <span className="flex flex-wrap items-baseline gap-2">
-                    <h2 className="text-sm font-semibold">{t("worstPairs.title")}</h2>
+                    <h2 className="type-section">{t("worstPairs.title")}</h2>
                     <Badge variant="neutral">{t("qualifier")}</Badge>
                   </span>
                   <p className="nums text-xs text-muted-foreground">
@@ -897,14 +1011,14 @@ export function OverviewPage() {
                 ) : null}
                 {summary.worstPairs.length === 0 ? (
                   summary.pairsTotal === 0 ? (
-                    <BlankSlate
+                    <EmptyState
                       title={t(isLive ? "worstPairs.empty.noData.title" : "worstPairs.empty.noData.title.engaged")}
                       body={t(isLive ? "worstPairs.empty.noData.body" : "worstPairs.empty.noData.body.engaged")}
                     />
                   ) : summary.pairsScored === 0 ? (
                     // Measured, but not RANKABLE: latency arrived and the failure-ratio series did
                     // not.
-                    <BlankSlate
+                    <EmptyState
                       title={t("worstPairs.empty.unscored.title")}
                       body={t(
                         summary.pairsTotal === 1
@@ -914,7 +1028,7 @@ export function OverviewPage() {
                       )}
                     />
                   ) : (
-                    <BlankSlate
+                    <EmptyState
                       title={t("worstPairs.empty.healthy.title")}
                       body={t("worstPairs.empty.healthy.body")}
                     />
@@ -926,6 +1040,7 @@ export function OverviewPage() {
                 )}
               </section>
             </Card>
+            )}
 
             <div className="grid gap-4 sm:grid-cols-2">
               <FiringAlerts />

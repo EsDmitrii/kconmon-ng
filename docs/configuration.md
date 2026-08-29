@@ -20,6 +20,15 @@ failureDomainLabel: topology.kubernetes.io/zone # node label used as zone
 # Agent-only: gRPC address of the controller
 controllerAddress: "" # e.g. kconmon-ng-controller:9090
 
+# Agent-only: what the agent asserts about itself at registration. All keys are
+# optional — in-cluster the Downward API env fills the same values; on a bare
+# host every key has a fallback (see "Agent identity" below). Resolved once at
+# startup: changing this block takes effect on the next agent restart.
+agent:
+  nodeName: "" # empty = the host's hostname
+  advertiseAddress: "" # IP literal peers probe; empty = KCONMON_NG_POD_IP, else autodetect
+  zone: "" # explicit zone; empty lets the controller resolve it from the node label
+
 controller:
   leaderElection: true # enable leader election for HA (requires k8s RBAC)
   agentTtl: 30s # evict agents that miss heartbeats for this duration
@@ -94,10 +103,37 @@ checkers:
 | `KCONMON_NG_LOG_FORMAT`           | `logFormat`              |
 | `KCONMON_NG_CONTROLLER_ADDRESS`   | `controllerAddress`      |
 | `KCONMON_NG_FAILURE_DOMAIN_LABEL` | `failureDomainLabel`     |
-| `KCONMON_NG_NODE_NAME`            | injected by Downward API |
-| `KCONMON_NG_POD_NAME`             | injected by Downward API |
-| `KCONMON_NG_POD_IP`               | injected by Downward API |
-| `KCONMON_NG_ZONE`                 | injected by Downward API (optional zone override) |
+| `KCONMON_NG_NODE_NAME`            | `agent.nodeName` (in-cluster: injected by Downward API) |
+| `KCONMON_NG_ADVERTISE_ADDRESS`    | `agent.advertiseAddress` |
+| `KCONMON_NG_ZONE`                 | `agent.zone` (in-cluster: injected by Downward API) |
+| `KCONMON_NG_POD_NAME`             | injected by Downward API; not a config key |
+| `KCONMON_NG_POD_IP`               | injected by Downward API; not a config key |
+
+## Agent identity
+
+The `agent` block is what an agent asserts about itself when it registers, and
+every key resolves the same way in-cluster and on a bare host:
+
+- **nodeName**: `KCONMON_NG_NODE_NAME` env > `agent.nodeName` > the host's
+  hostname.
+- **advertiseAddress**: `KCONMON_NG_ADVERTISE_ADDRESS` env >
+  `agent.advertiseAddress` > `KCONMON_NG_POD_IP` (the Downward API value
+  in-cluster) > autodetect. The
+  autodetect asks the kernel which source address a datagram to
+  `controllerAddress` would leave from (nothing is sent), so it needs
+  `controllerAddress` to be set and resolvable; multi-homed hosts whose probe
+  traffic should use a different interface must set the address explicitly.
+  Whatever wins must be an **IP literal** — the controller publishes it to
+  every peer as a probe target and rejects hostnames — and a non-IP value
+  fails startup, not registration.
+- **zone**: `KCONMON_NG_ZONE` env > `agent.zone` > controller-side resolution
+  from the node's `failureDomainLabel` (in-cluster only; see
+  [Zone auto-discovery](#zone-auto-discovery)).
+
+An agent started without `KCONMON_NG_POD_NAME` — i.e. outside any Pod — is
+labeled `kconmon-ng.io/external=true` in its registration metadata, so
+consoles and API consumers can tell bare-host agents apart. The controller
+needs no configuration for any of this.
 
 ## Helm values that matter most
 

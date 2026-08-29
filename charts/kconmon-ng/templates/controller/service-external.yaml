@@ -1,0 +1,47 @@
+{{- if .Values.controller.externalGateway.enabled }}
+{{- $gwPort := int .Values.controller.externalGateway.port }}
+{{- if or (lt $gwPort 1) (gt $gwPort 65535) }}
+{{- fail "controller.externalGateway.port must be 1-65535; an upgrade with --reuse-values drops NEW chart defaults, so set the port explicitly" }}
+{{- end }}
+{{- /*
+The externally reachable half of the controller: ONE port, the TLS gateway.
+
+The plaintext gRPC port (config.grpcPort) must never appear here. In-cluster it is guarded by the
+NetworkPolicy and authenticates nothing — network position IS its authentication — so putting it on
+a NodePort/LoadBalancer hands the whole mesh (peer lists, task dispatch, agent registration) to
+anything that can reach the address. Everything crossing this Service authenticates with TLS plus
+the bootstrap token, which is what the gateway listener exists for. The in-cluster ClusterIP
+Service (service.yaml) is untouched.
+*/}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ printf "%s-external" (include "kconmon-ng.controller.fullname" . | trunc 54 | trimSuffix "-") | trunc 63 | trimSuffix "-" }}
+  labels:
+    {{- include "kconmon-ng.labels" . | nindent 4 }}
+    app.kubernetes.io/component: controller
+  {{- with .Values.controller.externalGateway.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.controller.externalGateway.service.type }}
+  {{- with .Values.controller.externalGateway.service.externalTrafficPolicy }}
+  externalTrafficPolicy: {{ . }}
+  {{- end }}
+  {{- with .Values.controller.externalGateway.service.loadBalancerSourceRanges }}
+  loadBalancerSourceRanges:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  selector:
+    {{- include "kconmon-ng.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: controller
+  ports:
+    - name: gateway
+      port: {{ .Values.controller.externalGateway.port }}
+      targetPort: gateway
+      protocol: TCP
+      {{- if and (eq .Values.controller.externalGateway.service.type "NodePort") (gt (int .Values.controller.externalGateway.service.nodePort) 0) }}
+      nodePort: {{ .Values.controller.externalGateway.service.nodePort }}
+      {{- end }}
+{{- end }}

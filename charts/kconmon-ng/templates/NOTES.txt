@@ -42,6 +42,9 @@ An agent now runs on every node and probes its peers. Watch them register:
 {{- if not .Values.controller.leaderElection }}
 {{- $todo = append $todo "controller.leaderElection=false — zone labels and the KconmonAgentsMissing / KconmonControllerDown alerts are inactive." }}
 {{- end }}
+{{- if and .Values.controller.externalGateway.enabled (not .Values.controller.externalGateway.tls.clientCaKey) }}
+{{- $todo = append $todo "controller.externalGateway.tls.clientCaKey — empty, so the gateway runs token-only: fleet membership is authenticated but agents are indistinguishable, and any token holder can impersonate any agent. Point it at the CA key that signs agent client certs to pin identities." }}
+{{- end }}
 {{- if $todo }}
 
 STILL TO DECIDE ({{ len $todo }}):

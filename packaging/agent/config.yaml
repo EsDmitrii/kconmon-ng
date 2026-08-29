@@ -1,0 +1,40 @@
+# kconmon-ng external agent — example configuration.
+# The agent reads /etc/kconmon-ng/config.yaml (override with the KCONMON_NG_CONFIG env var).
+# Fill in controllerAddress and the TLS/token material, then: systemctl enable --now kconmon-ng-agent
+
+# The controller's EXTERNAL GATEWAY (controller.externalGateway.port, 9443 by default) — not the
+# in-cluster gRPC port. The host part is also the name the server certificate is verified against,
+# unless agent.tls.serverName overrides it.
+controllerAddress: gateway.example.com:9443
+
+agent:
+  # Registration identity; defaults to this host's hostname. When the gateway pins client-cert
+  # identities, the certificate CN (or a URI SAN) must equal this name exactly.
+  # nodeName: edge-host-01
+
+  # The IP peers probe this agent on — an IP literal, no hostname, no port. Unset = autodetected
+  # from the route towards controllerAddress; set it when the host is NATed or multi-homed.
+  # advertiseAddress: 203.0.113.10
+
+  # Failure domain reported to the controller (in-cluster agents inherit it from the node label).
+  zone: external
+
+  # TLS towards the gateway. An empty caFile trusts the system pool — set it for a private CA.
+  tls:
+    caFile: /etc/kconmon-ng/ca.crt
+    # Client certificate pair, both or neither. Required when the gateway sets tls.clientCaFile.
+    # certFile: /etc/kconmon-ng/client.crt
+    # keyFile: /etc/kconmon-ng/client.key
+    # Verify the server certificate against this name instead of the dialed host (IP/LB dials).
+    # serverName: kconmon-ng-gw.example.com
+
+  # Same content as the controller's externalGateway.bootstrapTokenFile. Refused without the tls
+  # block — the token never rides plaintext. Keep the file mode 0600, owned by kconmon-ng.
+  bootstrapTokenFile: /etc/kconmon-ng/bootstrap-token
+
+# Peers probe each other on httpPort (TCP) and grpcPort (UDP probes); Prometheus scrapes
+# metricsPort — open those in the host firewall along with ICMP. v1 contract: httpPort and
+# grpcPort must be identical across the whole fleet.
+# httpPort: 8080
+# grpcPort: 9090
+# metricsPort: 9091

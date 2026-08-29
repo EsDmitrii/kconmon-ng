@@ -36,6 +36,12 @@ const en = {
   "description":
     "Console-managed Prometheus alert rules, what the cluster thinks of them, the rules it holds that this " +
     "console does not own, and the maintenance windows that mute these signals.",
+  /* The "?" by the title (M7-5); the docs page is docs/console/alerting. */
+  "help.body":
+    "Console-managed Prometheus alert rules, in three sections: the rules this console owns, the foreign rules it does not, and the maintenance windows that mute these signals. " +
+    "Rules live in the console database, and a reconciler applies them to the cluster as one PrometheusRule object — only when console.alerting.enabled is set in the Helm values. " +
+    "Each rule row carries the reconciler's verdict: synced, drift or error. " +
+    "Reading needs alerts:read; managing rules needs alerts:manage.",
   "loading": "Loading…",
   "permission.requires": "Requires the {permission} permission",
   "cancel": "Cancel",
@@ -264,6 +270,11 @@ export const alertingDict: Dictionary<AlertingKey> = defineDict(en, {
   "description":
     "Правила оповещений Prometheus под управлением консоли, что о них думает кластер, чужие правила рядом, " +
     "которыми консоль не владеет, и окна работ, которые эти сигналы глушат.",
+  "help.body":
+    "Правила оповещений Prometheus под управлением консоли, три раздела: правила самой консоли, чужие правила, которыми она не владеет, и окна работ, которые эти сигналы глушат. " +
+    "Правила лежат в базе консоли, и реконсилер применяет их в кластер одним объектом PrometheusRule — только если в значениях Helm включён console.alerting.enabled. " +
+    "У каждой строки правила — вердикт реконсилера: синхронизировано, расхождение или ошибка. " +
+    "На чтение нужно право alerts:read, на управление правилами — alerts:manage.",
   "loading": "Загрузка…",
   "permission.requires": "Нужно право {permission}",
   "cancel": "Отмена",

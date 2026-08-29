@@ -302,7 +302,7 @@ function Pane({ title, children, embedded }: { title: string; children: ReactNod
   return (
     <Card asChild className="min-w-0 p-5">
       <section aria-label={title}>
-        <h2 className="text-sm font-semibold">{title}</h2>
+        <h2 className="type-section">{title}</h2>
         {children}
       </section>
     </Card>
@@ -382,7 +382,7 @@ function DestinationCard({
               the row is short, so all the shrinking lands on the counts. This
               header had the counts at `shrink-0`, which inverted it: they took
               what they wanted and the name arrived as «kco…» (rev13 acceptance). */}
-          <span className="min-w-0 flex-1 truncate text-sm font-medium" title={group.destination}>
+          <span className="mono-data min-w-0 flex-1 truncate font-medium" title={group.destination}>
             {group.destination}
           </span>
           <span aria-hidden="true" className="shrink-0 text-xs text-muted-foreground">{" · "}</span>
@@ -421,7 +421,10 @@ function DestinationCard({
                       "flex w-full items-baseline justify-between gap-1 rounded-md px-2 py-1.5 text-left text-xs",
                       "transition-colors duration-(--dur) ease-(--ease) hover:bg-accent",
                       "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
-                      active ? "bg-accent font-medium" : "text-muted-foreground",
+                      /* The source name is the row's primary content and reads in
+                         the foreground; only the counts beside it stay muted
+                         (M4-2 muted audit). */
+                      active && "bg-accent font-medium",
                     )}
                   >
                     {/* The NAME wins the width fight (QA scope 4, finding
@@ -703,7 +706,7 @@ function HistoryPane({
   return (
     <Pane title={t("history.title")}>
       {pair ? (
-        <p className="mt-0.5 truncate text-xs text-muted-foreground">
+        <p className="mono-data mt-0.5 truncate text-muted-foreground">
           {pair.source} → {pair.destination}
         </p>
       ) : null}
@@ -813,7 +816,7 @@ function HistoryPane({
                     {/* Says WHAT moved, not that something did. */}
                     {changed[at] ? <Badge variant="warn">{changeText(snapshots, at, t)}</Badge> : null}
                     {/* Secondary now, and still the thing you paste into a ticket. */}
-                    <span className="nums font-mono text-[10px] text-muted-foreground" title={s.pathHash}>
+                    <span className="mono-data text-muted-foreground" title={s.pathHash}>
                       {shortHash(s.pathHash)}
                     </span>
                   </span>
@@ -1079,7 +1082,7 @@ function RunnerPane({ canReadTargets }: { canReadTargets: boolean }) {
     <Card asChild className="p-6">
       <form onSubmit={handleSubmit} aria-label={t("runner.aria")} className="flex max-w-2xl flex-col gap-5">
         <div>
-          <h2 className="text-sm font-semibold">{t("runner.title")}</h2>
+          <h2 className="type-section">{t("runner.title")}</h2>
           <p className="mt-1 max-w-prose text-xs leading-relaxed text-muted-foreground">{t("runner.body")}</p>
         </div>
 
@@ -1405,8 +1408,10 @@ export function MTRPage() {
 
   return (
     <PageShell
+      variant="tool"
       timeMachine
       title={t("title")}
+      help={{ body: t("help.body"), slug: "routes-mtr" }}
       /* {at} lands INSIDE a translated sentence, so it takes that sentence's
          language — lib/i18n's localeTag, same as /diagnostics and /explore. */
       description={at ? t("description.at", { at: at.toLocaleString(localeTag(locale)) }) : t("description")}

@@ -236,7 +236,9 @@ function NodeLabel({ name, width, elide = "" }: { name: string; width: "column" 
         href={withAtParam(`/nodes/${encodeURIComponent(name)}`)}
         aria-label={t("header.node", { node: name })}
         className={cn(
-          "block truncate rounded px-1 hover:text-foreground hover:underline",
+          /* font-mono, not .mono-data: the data face at the size the zoom engine
+             picked — .mono-data pins 13px and would stop labels scaling. */
+          "block truncate rounded px-1 font-mono hover:text-foreground hover:underline",
           "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
           width === "column" ? "max-w-[var(--m-col-w)]" : "max-w-[var(--m-label-w)]",
         )}
@@ -284,9 +286,9 @@ function GridCellImpl({
   const tooltip = (
     <div className="flex min-w-44 flex-col gap-1">
       <div className="flex items-center gap-1.5 font-medium">
-        <span className="truncate">{src}</span>
+        <span className="mono-data truncate">{src}</span>
         <span aria-hidden="true" className="text-muted-foreground">→</span>
-        <span className="truncate">{dst}</span>
+        <span className="mono-data truncate">{dst}</span>
       </div>
       {!measured ? (
         <div className="text-muted-foreground">{t("tooltip.unmeasured")}</div>
@@ -296,13 +298,13 @@ function GridCellImpl({
           {/* "no samples" rather than a dash or a fabricated 0%: the series
               exists and reported nothing, which is a different fact from a
               measured zero and from an unprobed pair. */}
-          <dd className="text-right text-popover-foreground">
+          <dd className="mono-data text-right text-popover-foreground">
             {fail === null ? t("tooltip.noSamples") : fmtRatio(fail)}
           </dd>
           {cell?.rttP95 !== undefined ? (
             <>
               <dt>{t("tooltip.rtt")}</dt>
-              <dd className="text-right text-popover-foreground">{fmtRtt(cell.rttP95)}</dd>
+              <dd className="mono-data text-right text-popover-foreground">{fmtRtt(cell.rttP95)}</dd>
             </>
           ) : null}
           {/* Loss shows whenever the cell carries it. Gating this on
@@ -312,7 +314,7 @@ function GridCellImpl({
           {cell?.lossRatio !== undefined ? (
             <>
               <dt>{t("tooltip.loss")}</dt>
-              <dd className="text-right text-popover-foreground">{fmtRatio(cell.lossRatio)}</dd>
+              <dd className="mono-data text-right text-popover-foreground">{fmtRatio(cell.lossRatio)}</dd>
             </>
           ) : null}
         </dl>
@@ -364,7 +366,7 @@ function GridCellImpl({
             <span className="text-[length:var(--m-font-sub)] text-muted-foreground">—</span>
           ) : fail === null ? (
             <>
-              <span className="nums text-[length:var(--m-font-hero)] font-semibold leading-tight">
+              <span className="nums font-mono text-[length:var(--m-font-hero)] font-semibold leading-tight">
                 {fmtRtt(cell?.rttP95)}
               </span>
               {/* px-1 text-center is the give this line needs and the hero
@@ -376,7 +378,7 @@ function GridCellImpl({
                   instead of being painted over. Dropped entirely once the box
                   is too short for two lines — see cellDensity. */}
               {density === "full" ? (
-                <span className="nums px-1 text-center text-[length:var(--m-font-sub)] leading-tight text-muted-foreground">
+                <span className="nums px-1 text-center font-mono text-[length:var(--m-font-sub)] leading-tight text-muted-foreground">
                   {cell?.lossRatio === undefined
                     ? t("cell.noFailData")
                     : t("cell.loss", { ratio: fmtRatio(cell.lossRatio) })}
@@ -385,11 +387,11 @@ function GridCellImpl({
             </>
           ) : (
             <>
-              <span className="nums text-[length:var(--m-font-hero)] font-semibold leading-tight">
+              <span className="nums font-mono text-[length:var(--m-font-hero)] font-semibold leading-tight">
                 {fmtRatio(fail)}
               </span>
               {density === "full" ? (
-                <span className="nums text-[length:var(--m-font-sub)] leading-tight text-muted-foreground">
+                <span className="nums font-mono text-[length:var(--m-font-sub)] leading-tight text-muted-foreground">
                   {fmtRtt(cell?.rttP95)}
                 </span>
               ) : null}
@@ -576,8 +578,10 @@ export function MatrixPage() {
 
   return (
     <PageShell
+      variant="tool"
       timeMachine
       title={t("title")}
+      help={{ body: t("help.body"), slug: "matrix" }}
       description={
         /* The stamp lands INSIDE a translated sentence, so it takes that
            sentence's language — lib/i18n's localeTag, not the bare default. */
@@ -607,7 +611,9 @@ export function MatrixPage() {
         </Card>
       ) : null}
 
-      <Card className="p-6">
+      {/* No Card around the working surface: the tool variant runs the grid
+          edge to edge, and the shell never supplied a box of its own (M4-5). */}
+      <>
         {/* isPending: a paused retry is pending-but-not-fetching, and drawing nothing at all left
             the card as a heading with no skeleton, no error and no empty note. */}
         {isPending && !data ? <MatrixSkeleton /> : null}
@@ -693,7 +699,7 @@ export function MatrixPage() {
               ref={viewportRef}
               data-testid="matrix-viewport"
               style={vars}
-              className="max-h-[calc(100dvh-26rem)] min-h-64 overflow-auto rounded-md"
+              className="max-h-[calc(100dvh-18rem)] min-h-64 overflow-auto rounded-md"
             >
               {/* table-fixed with an explicit width: the browser stops measuring
                   2 500 cells to decide a column, and the width is the same
@@ -761,7 +767,7 @@ export function MatrixPage() {
             </div>
           </div>
         ) : null}
-      </Card>
+      </>
     </PageShell>
   );
 }

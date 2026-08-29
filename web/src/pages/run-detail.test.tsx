@@ -1189,6 +1189,17 @@ describe("a run with many pairs is PAGED, not truncated", () => {
     expect(showing()[0]).toBe("Showing 10 of 90 pairs");
   });
 
+  /* M4-3: the results table is the dense ui/table variant and its identifiers
+     wear the data face — pinned here so a revert to per-page padding shows. */
+  it("renders the pairs through the dense table primitive, identifiers in mono-data", async () => {
+    renderPage(["events"], runBody({ status: "succeeded", pairTotal: 90, results: manyPairs(90) }));
+    expect(await screen.findByRole("heading", { name: "Pairs" })).toBeInTheDocument();
+
+    const pairCell = screen.getByTitle("node-00").closest("td") as HTMLTableCellElement;
+    expect(pairCell.className).toMatch(/\bmono-data\b/);
+    expect(pairCell.className).toMatch(/\bpy-1\.5\b/);
+  });
+
   it("reaches the pairs a fixed limit used to hide, in the SAME order", async () => {
     renderPage(["events"], runBody({ status: "succeeded", pairTotal: 90, results: manyPairs(90) }));
     expect(await screen.findByRole("heading", { name: "Pairs" })).toBeInTheDocument();

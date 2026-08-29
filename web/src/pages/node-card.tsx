@@ -10,6 +10,7 @@ import { Card } from "@/components/ui/card";
 import { Pager, usePager } from "@/components/ui/pager";
 import { Segmented } from "@/components/ui/segmented";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Table, TBody, Td, Th, THead, Tr } from "@/components/ui/table";
 import { useMatrix } from "@/hooks/use-matrix";
 import { useTopology } from "@/hooks/use-topology";
 import { getRun, getRuns } from "@/lib/api";
@@ -136,72 +137,65 @@ function BreakdownTable({ nodeName, cells }: { nodeName: string; cells: MatrixCe
   }
   return (
     <>
-    <div className="overflow-x-auto">
-      <table className="w-full text-sm">
-        <caption className="sr-only">{t("node.breakdown.caption", { name: nodeName })}</caption>
-        <thead>
-          <tr className="border-b border-border text-left text-[11px] uppercase tracking-[0.07em] text-muted-foreground">
-            <th scope="col" className="py-3 pl-4 pr-4 font-semibold">
-              {t("node.breakdown.destination")}
-            </th>
-            <th scope="col" className="py-3 pr-4 text-right font-semibold">
-              {t("node.breakdown.failRatio")}
-            </th>
-            {showLoss ? (
-              <th scope="col" className="py-3 pr-4 text-right font-semibold">
-                {t("node.breakdown.loss")}
-              </th>
-            ) : null}
-            {/* RTT p95 is a metric's name and reads the same in both. */}
-            <th scope="col" className="py-3 pr-4 text-right font-semibold">
-              {t("node.breakdown.rtt")}
-            </th>
-          </tr>
-        </thead>
-        <tbody className="divide-y divide-border">
-          {pager.visible.map((c) => (
-            <tr key={c.destination}>
-              {/* The destination was the other dead end on this card: the row
-                  named a pair and led nowhere (QA scope 2, finding #14). */}
-              <td className="max-w-[16rem] py-3 pl-4 pr-4">
-                <a
-                  href={withAtParam(`/pairs/${encodeURIComponent(nodeName)}/${encodeURIComponent(c.destination)}`)}
-                  title={c.destination}
-                  className="block truncate rounded text-primary hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                >
-                  {c.destination}
-                </a>
-              </td>
-              <td
-                className={cn(
-                  "nums py-3 pr-4 text-right",
-                  c.failRatio !== null && c.failRatio >= DEGRADED_AT ? "text-health-bad" : "text-muted-foreground",
-                )}
+    <Table variant="dense">
+      <caption className="sr-only">{t("node.breakdown.caption", { name: nodeName })}</caption>
+      <THead>
+        <Tr>
+          <Th className="pl-4 pr-4">{t("node.breakdown.destination")}</Th>
+          <Th numeric className="pr-4">
+            {t("node.breakdown.failRatio")}
+          </Th>
+          {showLoss ? (
+            <Th numeric className="pr-4">
+              {t("node.breakdown.loss")}
+            </Th>
+          ) : null}
+          {/* RTT p95 is a metric's name and reads the same in both. */}
+          <Th numeric className="pr-4">
+            {t("node.breakdown.rtt")}
+          </Th>
+        </Tr>
+      </THead>
+      <TBody>
+        {pager.visible.map((c) => (
+          <Tr key={c.destination}>
+            {/* The destination was the other dead end on this card: the row
+                named a pair and led nowhere (QA scope 2, finding #14). */}
+            <Td className="max-w-[16rem] pl-4 pr-4">
+              <a
+                href={withAtParam(`/pairs/${encodeURIComponent(nodeName)}/${encodeURIComponent(c.destination)}`)}
+                title={c.destination}
+                className="mono-data block truncate rounded text-primary hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
               >
-                {c.failRatio !== null
-                  ? fmtFail(c.failRatio)
-                  : isMeasured(c)
-                    ? t("cell.noFailData")
-                    : t("cell.noData")}
-              </td>
-              {showLoss ? (
-                <td
-                  className={cn(
-                    "nums py-3 pr-4 text-right",
-                    c.lossRatio !== undefined && c.lossRatio >= DEGRADED_AT
-                      ? "text-health-bad"
-                      : "text-muted-foreground",
-                  )}
-                >
-                  {c.lossRatio === undefined ? "—" : fmtFail(c.lossRatio)}
-                </td>
-              ) : null}
-              <td className="nums py-3 pr-4 text-right text-muted-foreground">{fmtRtt(c.rttP95)}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
+                {c.destination}
+              </a>
+            </Td>
+            {/* Values read in the foreground (M4-2); only trouble is tinted. */}
+            <Td
+              numeric
+              className={cn("pr-4", c.failRatio !== null && c.failRatio >= DEGRADED_AT && "text-health-bad")}
+            >
+              {c.failRatio !== null
+                ? fmtFail(c.failRatio)
+                : isMeasured(c)
+                  ? t("cell.noFailData")
+                  : t("cell.noData")}
+            </Td>
+            {showLoss ? (
+              <Td
+                numeric
+                className={cn("pr-4", c.lossRatio !== undefined && c.lossRatio >= DEGRADED_AT && "text-health-bad")}
+              >
+                {c.lossRatio === undefined ? "—" : fmtFail(c.lossRatio)}
+              </Td>
+            ) : null}
+            <Td numeric className="pr-4">
+              {fmtRtt(c.rttP95)}
+            </Td>
+          </Tr>
+        ))}
+      </TBody>
+    </Table>
     <Pager pager={pager} subject={t("node.breakdown.subject")} />
     </>
   );
@@ -233,7 +227,7 @@ function OverviewTab({
   return (
     <div className="flex flex-col gap-5">
       <Card className="p-5">
-        <h3 className="text-sm font-semibold">{t("node.identity")}</h3>
+        <h3 className="type-section">{t("node.identity")}</h3>
         {/* Four em-dashes are the answer to "the topology knows nothing about
             this node". They are NOT the answer to "the topology request
             failed" — that reads as a node that exists and has no identity,
@@ -253,7 +247,8 @@ function OverviewTab({
             </div>
             <div>
               <dt className="text-xs text-muted-foreground">{t("node.identity.agentId")}</dt>
-              <dd className="mt-0.5 truncate" title={agentId}>
+              {/* Machine identifiers wear the data face (M4-1). */}
+              <dd className="mono-data mt-0.5 truncate" title={agentId}>
                 {agentId ?? "—"}
               </dd>
             </div>
@@ -263,7 +258,7 @@ function OverviewTab({
                   podIP as "" rather than as an absent field — so the cell went
                   blank instead of saying it had no answer (QA scope 2, #6). An
                   explicit empty check, because "" IS the absence here. */}
-              <dd className="nums mt-0.5">{podIP === undefined || podIP === "" ? "—" : podIP}</dd>
+              <dd className="mono-data mt-0.5">{podIP === undefined || podIP === "" ? "—" : podIP}</dd>
             </div>
             <div>
               <dt className="text-xs text-muted-foreground">{t("node.identity.ready")}</dt>
@@ -278,7 +273,7 @@ function OverviewTab({
       <Card asChild className="overflow-hidden p-0">
         <section>
           <div className="border-b border-border px-4 py-3">
-            <h3 className="text-sm font-semibold">{t("node.breakdown")}</h3>
+            <h3 className="type-section">{t("node.breakdown")}</h3>
           </div>
           <BreakdownTable nodeName={nodeName} cells={cells} />
         </section>
@@ -345,7 +340,7 @@ function DiagnosticsTab({ nodeName }: { nodeName: string }) {
     <Card asChild className="overflow-hidden p-0">
       <section>
         <div className="border-b border-border px-4 py-3">
-          <h3 className="text-sm font-semibold">{t("node.runs.heading")}</h3>
+          <h3 className="type-section">{t("node.runs.heading")}</h3>
           {/* The engaged half of the same limitation — the endpoint has no time
               filter either, so the page it returns is the newest page NOW and
               the cut to `t` happens here — is a CLAUSE of the same sentence
@@ -387,7 +382,8 @@ function DiagnosticsTab({ nodeName }: { nodeName: string }) {
               const touching = r.results.filter((res) => res.sourceNode === nodeName || res.destinationNode === nodeName);
               return (
                 <li key={r.id} className="flex flex-wrap items-center gap-3 px-4 py-3 text-sm">
-                  <a href={withAtParam(`/diagnostics/runs/${r.id}`)} className="font-medium text-primary hover:underline">
+                  {/* A run id is a machine identifier — the data face (M4-1). */}
+                  <a href={withAtParam(`/diagnostics/runs/${r.id}`)} className="mono-data font-medium text-primary hover:underline">
                     {r.id}
                   </a>
                   {/* status and type are the run's OWN stored values, in a
@@ -443,7 +439,7 @@ function NodeAnnotations({ nodeName }: { nodeName: string }) {
   return (
     <Card asChild className="p-5">
       <section>
-        <h3 className="text-sm font-semibold">{t("node.annotations")}</h3>
+        <h3 className="type-section">{t("node.annotations")}</h3>
         <p className="mt-1 text-xs leading-relaxed text-muted-foreground">{t("node.annotations.blurb")}</p>
         <AnnotationBar scope={nodeName} annotations={annotations} error={error} onChanged={() => void refresh()} />
         <MaintenanceBar

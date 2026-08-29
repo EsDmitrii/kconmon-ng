@@ -46,7 +46,7 @@ import { stampClock, stampFull, useLocale, useT, type Locale, type Translate } f
 import { countForm, investigateDict, type InvestigateKey } from "@/lib/i18n/dict/investigate";
 import { investigationSourcesDict, type InvestigationSourcesKey } from "@/lib/i18n/dict/investigation-sources";
 import { subscribeToLocation } from "@/lib/location";
-import { endSentence } from "@/lib/utils";
+import { cn, endSentence } from "@/lib/utils";
 import {
   CAUSE_WEIGHTS,
   DEFAULT_CAUSE_WINDOW_SECONDS,
@@ -392,14 +392,14 @@ function SaveIncidentForm({
               maintenance bar use, so one window is not rendered three ways on
               one page (QA scope 3, finding #18). */}
           {t("save.scopeLabel")}{" "}
-          <span className="font-medium text-foreground">{scopeText === "" ? t("save.global") : scopeText}</span> ·{" "}
+          <span className={cn("font-medium text-foreground", scopeText !== "" && "mono-data")}>{scopeText === "" ? t("save.global") : scopeText}</span> ·{" "}
           {t("save.window", { from: stampFull(from, locale), to: stampFull(to, locale) })}
         </p>
         {/* The one lossy case, said out loud rather than discovered on reopen:
             the incident scope vocabulary has no zone-pair member, so both wide
             scopes store "" and reopen framed on the whole cluster. */}
         {wide ? (
-          <p className="text-[11px] leading-relaxed text-muted-foreground">{t("save.wideNote")}</p>
+          <p className="type-meta">{t("save.wideNote")}</p>
         ) : null}
         <label className="flex flex-col gap-1 text-[13px]">
           <span className="text-muted-foreground">{t("save.title")}</span>
@@ -546,7 +546,7 @@ function IncidentStrip({
     <Card asChild className="border-l-4 border-l-primary p-5">
       <section aria-label={t("incident.aria")}>
         <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
-          <h2 className="text-sm font-semibold">{incident.title}</h2>
+          <h2 className="type-section">{incident.title}</h2>
           <Badge variant={resolved ? "neutral" : "warn"} dot>
             {resolved ? t("incident.resolved") : t("incident.open")}
           </Badge>
@@ -622,9 +622,9 @@ function IncidentStrip({
           </div>
         </div>
 
-        <p className="mt-2 text-[11px] leading-relaxed text-muted-foreground">
+        <p className="mt-2 type-meta">
           {t("incident.scope.before")}{" "}
-          <span className="font-medium text-foreground">
+          <span className={cn("font-medium text-foreground", incident.scope !== "" && "mono-data")}>
             {incident.scope === "" ? t("incident.scope.global") : incident.scope}
           </span>{" "}
           {t("incident.scope.after")}
@@ -662,7 +662,7 @@ function IncidentStrip({
                 >
                   {t("incident.notes.save")}
                 </Button>
-                <span className="nums text-[11px] text-muted-foreground">
+                <span className="nums type-meta">
                   {notes.length}/{INCIDENT_NOTES_MAX}
                 </span>
               </div>
@@ -726,7 +726,7 @@ function PinnedFindings({
   return (
     <Card asChild className="p-5">
       <section aria-label={t("pinned.aria")}>
-        <h3 className="text-sm font-semibold">{t("pinned.title")}</h3>
+        <h3 className="type-section">{t("pinned.title")}</h3>
         {pinned.length === 0 ? (
           <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
             {t("pinned.empty.lead")} {canWrite ? t("pinned.empty.canWrite") : t("pinned.empty.gated")}{" "}
@@ -744,7 +744,7 @@ function PinnedFindings({
             {pinned.map((p, i) => (
               <li key={pinKey(p)} data-testid="pinned-finding" className="flex flex-wrap items-center gap-2 text-xs">
                 <Badge variant="neutral">{p.kind}</Badge>
-                <span className="nums max-w-[12rem] truncate text-muted-foreground" title={p.id}>
+                <span className="mono-data max-w-[12rem] truncate text-muted-foreground" title={p.id}>
                   {p.id}
                 </span>
                 {canWrite ? (
@@ -813,7 +813,7 @@ function PinnedFindings({
                     operator's own note, when there is one, is the actual answer
                     and is already on the row above this line. */}
                 {presentKeys.has(pinKey(p)) ? null : (
-                  <span data-testid="pin-out-of-window" className="basis-full text-[11px] text-muted-foreground">
+                  <span data-testid="pin-out-of-window" className="basis-full type-meta">
                     {t("pinned.outOfWindow")}
                   </span>
                 )}
@@ -1833,12 +1833,13 @@ export function InvestigatePage() {
     <PageShell
       timeMachine
       title={t("title")}
+      help={{ body: t("help.body"), slug: "incidents" }}
       description={t("description")}
       actions={
         <>
           {/* params.kind is the URL's own vocabulary — a wire value. */}
           <Badge variant="neutral">{params.kind}</Badge>
-          <span className="nums text-sm text-muted-foreground">{scopeHeadline(t, scope)}</span>
+          <span className={cn("text-sm text-muted-foreground", scope.kind !== "cluster" && scope.a !== "" && "mono-data")}>{scopeHeadline(t, scope)}</span>
         </>
       }
     >
@@ -1957,7 +1958,7 @@ export function InvestigatePage() {
               role="status"
               className="mt-3 flex flex-wrap items-baseline gap-x-2 rounded-md bg-surface-2 px-3 py-2"
             >
-              <p className="min-w-0 flex-1 text-[11px] leading-relaxed text-muted-foreground">
+              <p className="min-w-0 flex-1 type-meta">
                 {/* The parameter NAMES are the URL's own vocabulary — data. */}
                 {t("ignored.body", { params: ignoredParams.map((k) => `?${k}`).join(", ") })}
               </p>
@@ -1967,7 +1968,7 @@ export function InvestigatePage() {
             </div>
           ) : null}
 
-          <p className="mt-3 text-[11px] leading-relaxed text-muted-foreground">{t("form.urlNote")}</p>
+          <p className="mt-3 type-meta">{t("form.urlNote")}</p>
         </section>
       </Card>
 
@@ -2057,12 +2058,12 @@ export function InvestigatePage() {
             createLabel={t("actions.createMaintenance")}
           />
 
-          <p className="mt-2 text-[11px] leading-relaxed text-muted-foreground">{t("actions.compareNote")}</p>
+          <p className="mt-2 type-meta">{t("actions.compareNote")}</p>
           {runStarted ? (
             <p role="status" className="mt-2 text-xs text-muted-foreground">
               {/* Two keys around the run-id link: the id is data. */}
               {t("actions.runStarted.before")}{" "}
-              <a href={withAtParam(`/diagnostics/runs/${runStarted}`)} className="text-primary hover:underline">
+              <a href={withAtParam(`/diagnostics/runs/${runStarted}`)} className="mono-data text-primary hover:underline">
                 {runStarted}
               </a>{" "}
               {t("actions.runStarted.after")}
@@ -2212,12 +2213,12 @@ export function InvestigatePage() {
 
           <Card asChild className="p-5">
             <section aria-label={t("causes.aria")}>
-              <h3 className="text-sm font-semibold">{t("causes.title")}</h3>
+              <h3 className="type-section">{t("causes.title")}</h3>
               {onset === null ? (
                 <p className="mt-2 text-xs leading-relaxed text-muted-foreground">{t("causes.noOnset")}</p>
               ) : (
                 <>
-                  <p className="mt-1 text-[11px] text-muted-foreground">
+                  <p className="mt-1 type-meta">
                     {/* The SAME clock the timeline rows and the cursor readout
                         draw — the onset is one of those rows (finding #18). */}
                     {t("causes.onset", {
@@ -2237,12 +2238,12 @@ export function InvestigatePage() {
                         return (
                           <li key={`${c.entry.kind}:${c.entry.ref?.id ?? c.entry.at.getTime()}`} className="text-xs">
                             <div className="flex items-baseline gap-2">
-                              <span className="nums w-10 shrink-0 text-muted-foreground">{c.score.toFixed(2)}</span>
+                              <span className="mono-data w-10 shrink-0 text-muted-foreground">{c.score.toFixed(2)}</span>
                               <span className="min-w-0 flex-1 break-words">{c.entry.title}</span>
                             </div>
                             <div className="mt-1 flex items-center gap-2">
                               <span aria-hidden="true" className="h-1 rounded-full bg-primary" style={{ width: `${width}%` }} />
-                              <span className="text-[11px] text-muted-foreground">
+                              <span className="type-meta">
                                 {t("causes.row", { delta: deltaSeconds, weight: CAUSE_WEIGHTS[c.entry.kind] })}
                               </span>
                             </div>
@@ -2253,7 +2254,7 @@ export function InvestigatePage() {
                   )}
                 </>
               )}
-              <p className="mt-3 text-[11px] leading-relaxed text-muted-foreground">
+              <p className="mt-3 type-meta">
                 {/* Three keys: the link sits inside the sentence. */}
                 {t("causes.method.before")}{" "}
                 {/* The link stays — the weights being readable is the whole
@@ -2278,7 +2279,7 @@ export function InvestigatePage() {
 
           <Card asChild className="p-5">
             <section aria-label={t("notes.aria")}>
-              <h3 className="text-sm font-semibold">{t("notes.title")}</h3>
+              <h3 className="type-section">{t("notes.title")}</h3>
               <AnnotationBar
                 scope={eventScope}
                 /* finding #7 — see the MaintenanceBar above. */

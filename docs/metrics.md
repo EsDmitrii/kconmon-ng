@@ -97,6 +97,49 @@ failure. `reason=cidr` means the resolved address fell outside `allowedCidrs`
 or inside `deniedCidrs`; `resolve` means the name did not resolve; `disabled`
 means a spec arrived while `checkers.external.enabled` was false.
 
+## Agent — Zone aggregates
+
+The zone plane: every peer probe is recorded a second time under only
+`source_zone` and `destination_zone` — "zone" below. Where the per-pair
+families grow as N×(N−1) directed pairs, this family grows as Z² directed
+zone pairs and is what the `agent.metrics.detail: zone-only` scrape mode
+keeps (see [Scaling and cardinality](#scaling-and-cardinality)). Each agent
+exports its own zone view, so queries aggregate with
+`sum by (source_zone, destination_zone)` exactly as they would across nodes.
+
+| Metric                                        | Type      | Labels          | Description                        |
+| --------------------------------------------- | --------- | --------------- | ---------------------------------- |
+| `kconmon_ng_zone_tcp_connect_seconds`         | histogram | zone            | TCP connect phase duration         |
+| `kconmon_ng_zone_tcp_total_seconds`           | histogram | zone            | Total TCP probe RTT                |
+| `kconmon_ng_zone_udp_rtt_seconds`             | histogram | zone            | UDP round-trip time                |
+| `kconmon_ng_zone_icmp_rtt_seconds`            | histogram | zone            | ICMP round-trip time               |
+| `kconmon_ng_zone_tcp_results_total`           | counter   | zone + `result` | Probe outcomes: `success` / `fail` |
+| `kconmon_ng_zone_udp_results_total`           | counter   | zone + `result` | Probe outcomes                     |
+| `kconmon_ng_zone_icmp_results_total`          | counter   | zone + `result` | Probe outcomes                     |
+| `kconmon_ng_zone_udp_packets_sent_total`      | counter   | zone            | UDP probe packets sent             |
+| `kconmon_ng_zone_udp_packets_received_total`  | counter   | zone            | UDP probe packets received back    |
+| `kconmon_ng_zone_icmp_packets_sent_total`     | counter   | zone            | ICMP probe packets sent            |
+| `kconmon_ng_zone_icmp_packets_received_total` | counter   | zone            | ICMP probe packets received back   |
+
+The histograms use the same 13-bucket scale as their per-pair counterparts.
+
+**Loss is counters here, deliberately — there is no zone loss-ratio gauge.**
+Averaging the per-pair `*_packet_loss_ratio` gauges into a zone would weight
+an idle pair the same as a busy one and report a number no packet ever
+experienced. The honest zone loss ratio is packet-weighted:
+
+```promql
+(  sum by (source_zone, destination_zone) (rate(kconmon_ng_zone_udp_packets_sent_total[5m]))
+ - sum by (source_zone, destination_zone) (rate(kconmon_ng_zone_udp_packets_received_total[5m])))
+/  sum by (source_zone, destination_zone) (rate(kconmon_ng_zone_udp_packets_sent_total[5m]))
+```
+
+The family appears only on agents new enough to export it; on older agents
+every query above returns empty rather than wrong, the two zone alerts are
+inert, and the Zone Heatmap dashboard renders empty. MTR deliberately has no
+zone family — a traceroute is evidence about one concrete path, and folding
+hop counts across a zone would describe no path at all.
+
 ## Controller
 
 | Metric                                     | Type    | Description                                |
@@ -324,6 +367,35 @@ possible.
   annotations:
     summary: More than 10% of external checks for a target are failing
 
+- alert: ZoneChecksFailing
+  expr: >-
+    sum by (source_zone, destination_zone)
+    (rate({__name__=~"kconmon_ng_zone_(tcp|udp|icmp)_results_total",result="fail"}[5m]))
+    /
+    sum by (source_zone, destination_zone)
+    (rate({__name__=~"kconmon_ng_zone_(tcp|udp|icmp)_results_total"}[5m])) > 0.05
+  for: 5m
+  labels:
+    severity: warning
+  annotations:
+    summary: More than 5% of all probes between a zone pair are failing
+
+- alert: ZoneLossHigh
+  expr: >-
+    (sum by (source_zone, destination_zone)
+    (rate({__name__=~"kconmon_ng_zone_(udp|icmp)_packets_sent_total"}[5m]))
+    -
+    sum by (source_zone, destination_zone)
+    (rate({__name__=~"kconmon_ng_zone_(udp|icmp)_packets_received_total"}[5m])))
+    /
+    sum by (source_zone, destination_zone)
+    (rate({__name__=~"kconmon_ng_zone_(udp|icmp)_packets_sent_total"}[5m])) > 0.1
+  for: 5m
+  labels:
+    severity: warning
+  annotations:
+    summary: A zone pair is losing more than 10% of its probe packets
+
 - alert: KconmonAgentsMissing
   # Standbys hold no agents by design, so only the lease holder's counts are evidence.
   expr: >-
@@ -345,7 +417,7 @@ possible.
     summary: No active kconmon-ng controller leader
 ```
 
-Seven rules. `expr`/`for`/`severity` above are what the chart renders at its
+Nine rules. `expr`/`for`/`severity` above are what the chart renders at its
 default knob values; the `annotations` are abridged — what ships carries a
 templated `summary` and `description` naming the pair, the zones and the
 measured value.
@@ -404,33 +476,56 @@ and are negligible next to the mesh.
 
 ### The proven envelope
 
-**50–100 nodes is the production-proven envelope.** At 100 nodes, budget ~0.7M
-active series for kconmon-ng alone and size Prometheus accordingly. Above that
-the quadratic growth is unforgiving — 300 nodes is ~6.3M series — and nothing
-at that scale has been validated: reducing per-pair cost and probing a sparse
-mesh instead of the full N×N are roadmap work, not a config flag today. Do not
-plan a 1000-node deployment on these defaults.
+**50–100 nodes is the production-proven envelope at full detail.** At 100
+nodes, budget ~0.7M active series for kconmon-ng alone and size Prometheus
+accordingly. Above that the quadratic growth is unforgiving — 300 nodes is
+~6.3M series. The valve below cuts what Prometheus keeps by an order of
+magnitude by configuration alone; what it cannot change is that the agents
+still *probe* the full N×N mesh, and probing a sparse mesh instead is still
+roadmap work. Do not plan a 1000-node deployment on these defaults.
 
 ### Levers that exist today
 
-- **Disable checkers you do not need** (`config.checkers.<type>.enabled`).
-  Each protocol takes its whole per-pair family with it: TCP off saves ~33
-  series/pair (it owns two of the four histograms), UDP off ~19, ICMP off ~18.
-- **Drop histogram buckets you will never query.** The four histograms are 64
-  of the ~70; if a family is only ever used through `_sum`/`_count` or the
-  gauges, dropping its `_bucket` series costs you quantiles on that family and
-  nothing else. Plain Prometheus:
+- **The zone plane and the valve** (`agent.metrics.detail`). Every peer probe
+  is also recorded into the [zone family](#agent--zone-aggregates), which
+  grows as Z² zone pairs instead of N² node pairs, and the valve decides at
+  scrape time how much of the per-pair detail Prometheus keeps:
+
+  | `agent.metrics.detail` | Per directed pair | What remains |
+  | --- | --- | --- |
+  | `full` (default) | ~70 series | everything |
+  | `counters-only` | ~10 series | drops the four per-pair histograms; gauges and result counters stay, every pair alert keeps firing |
+  | `zone-only` | ~0 series | drops every series naming a `destination_node`; the zone family (~74×Z² series) and the linear DNS/HTTP/external families stay |
+
+  At 100 nodes: ~0.7M series at `full`, ~0.1M at `counters-only`, and
+  practically N-independent at `zone-only`. The valve renders as
+  `metricRelabelings` on the agent `ServiceMonitor`, so it needs
+  `serviceMonitor.enabled` (the chart refuses the combination otherwise).
+  Plain-Prometheus equivalents:
 
   ```yaml
   metric_relabel_configs:
+    # counters-only: drop the four per-pair histograms.
     - source_labels: [__name__]
-      regex: kconmon_ng_(tcp_connect|tcp_total)_duration_seconds_bucket
+      regex: kconmon_ng_(tcp_connect_duration|tcp_total_duration|udp_rtt|icmp_rtt)_seconds_(bucket|sum|count)
       action: drop
+    # zone-only instead: a per-pair series is exactly one naming a destination node.
+    # - source_labels: [destination_node]
+    #   regex: .+
+    #   action: drop
   ```
 
-  The chart's `ServiceMonitor` does not expose `metricRelabelings` yet, so with
-  the Prometheus Operator this currently means bringing your own
-  `ServiceMonitor` in place of `serviceMonitor.enabled`.
+  The zone family exists only on agents new enough to export it — flip
+  `zone-only` on an older fleet and Prometheus goes dark on the mesh, because
+  the per-pair series are dropped with nothing replacing them.
+- **Disable checkers you do not need** (`config.checkers.<type>.enabled`).
+  Each protocol takes its whole per-pair family with it: TCP off saves ~33
+  series/pair (it owns two of the four histograms), UDP off ~19, ICMP off ~18.
+- **Drop only what you never query.** `counters-only` is the broad version of
+  this; for something narrower — one histogram, one protocol — write your own
+  `metric_relabel_configs` as above, or bring your own `ServiceMonitor` in
+  place of `serviceMonitor.enabled`. Dropping a family's `_bucket` series
+  costs you quantiles on that family and nothing else.
 - **A longer scrape interval** (`serviceMonitor.interval`) cuts sample ingest
   and query cost, **not** series count — head cardinality stays the same.
 - **Shorter retention or downsampling** on the backend bounds history cost;

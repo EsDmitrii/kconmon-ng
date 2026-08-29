@@ -1,0 +1,7 @@
+# Docs site toolchain. Install: pip install -r requirements-docs.txt
+# Build: mkdocs build --strict
+mkdocs==1.6.1
+mkdocs-material==9.7.7
+mkdocs-static-i18n==1.3.1
+mkdocs-swagger-ui-tag==0.8.1
+pymdown-extensions==11.0.2

@@ -399,6 +399,19 @@ describe("Console Chart view — the chart AND the listing, at the same time", (
     expect(screen.getByTestId("raw-full-labels")).toHaveTextContent(full);
   });
 
+  /* M4 typography, pinned once: identities and figures wear the data face, and
+     the expanded label dump is primary content the reader ASKED for, so it must
+     not carry the muted caption colour. */
+  it("sets identities and the expanded labels in mono-data, and keeps the dump unmuted", async () => {
+    await runRange(fleetMatrix(2));
+
+    expect(screen.getAllByTestId("raw-identity")[0].className).toContain("mono-data");
+    fireEvent.click(screen.getAllByRole("button", { name: /show all labels/i })[0]);
+    const dump = screen.getByTestId("raw-full-labels");
+    expect(dump.className).toContain("mono-data");
+    expect(dump.className).not.toContain("text-muted-foreground");
+  });
+
   it("pages the listing at ten, like every other list in the console", async () => {
     await runRange(fleetMatrix(86));
 

@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Pager, usePager } from "@/components/ui/pager";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Table, TBody, Td, Th, THead, Tr } from "@/components/ui/table";
 import { useAuth } from "@/hooks/use-auth";
 import { useQuery } from "@tanstack/react-query";
 import { TraceDetail } from "@/components/mtr-hop-table";
@@ -233,7 +234,7 @@ function SampleTimeline({
         return (
           <div key={`${g.source}\0${g.destination}`} className="flex flex-col gap-1">
             <div className="flex items-baseline justify-between gap-3 text-xs">
-              <span className="flex min-w-0 items-center gap-1.5">
+              <span className="mono-data flex min-w-0 items-center gap-1.5">
                 <span className="truncate" title={g.source}>
                   {g.source}
                 </span>
@@ -574,9 +575,9 @@ function PairTrace({
       {probe ? (
         <div data-testid="trace-probe" className="flex flex-wrap items-baseline gap-x-3 gap-y-1 text-xs">
           <span className="font-medium">{t("trace.probe", { seq: probe.sampleSeq })}</span>
-          <span className="nums text-muted-foreground">{fmtTime(probe.recordedAt, locale)}</span>
+          <span className="mono-data text-muted-foreground">{fmtTime(probe.recordedAt, locale)}</span>
           {probe.success ? (
-            <span className="nums text-muted-foreground">{fmtNsCompact(probe.durationNs)}</span>
+            <span className="mono-data text-muted-foreground">{fmtNsCompact(probe.durationNs)}</span>
           ) : (
             <span className="text-health-bad">{probe.error ?? t("timeline.tick.failed")}</span>
           )}
@@ -628,11 +629,11 @@ function PairDetail({ pair }: { pair: RunPairRow }) {
   return (
     <dl className="grid grid-cols-[auto_1fr] gap-x-6 gap-y-1 px-4 py-3 text-xs">
       <dt className="text-muted-foreground">{t("detail.source")}</dt>
-      <dd className="nums font-mono break-all">{pair.source}</dd>
+      <dd className="mono-data break-all">{pair.source}</dd>
       <dt className="text-muted-foreground">{t("detail.destination")}</dt>
-      <dd className="nums font-mono break-all">{pair.destination}</dd>
+      <dd className="mono-data break-all">{pair.destination}</dd>
       <dt className="text-muted-foreground">{t("detail.duration")}</dt>
-      <dd className="nums">{fmtDuration(pair.durationNs)}</dd>
+      <dd className="mono-data">{fmtDuration(pair.durationNs)}</dd>
       <dt className="text-muted-foreground">{t("detail.state")}</dt>
       <dd>{pair.state}</dd>
       {pair.error ? (
@@ -667,29 +668,22 @@ function PairTable({ pairs, isMTR, runId }: { pairs: RunPairRow[]; isMTR: boolea
   }
   return (
     <>
-    <div className="overflow-x-auto">
-      <table className="w-full text-sm">
-        <caption className="sr-only">{t("pairs.caption")}</caption>
-        <thead>
-          <tr className="border-b border-border text-left text-[11px] uppercase tracking-[0.07em] text-muted-foreground">
-            <th scope="col" className="w-8 py-3 pl-4 pr-2 font-semibold">
-              <span className="sr-only">{t("pairs.col.expand")}</span>
-            </th>
-            <th scope="col" className="py-3 pr-4 font-semibold">
-              {t("pairs.col.pair")}
-            </th>
-            <th scope="col" className="py-3 pr-4 font-semibold">
-              {t("pairs.col.state")}
-            </th>
-            <th scope="col" className="py-3 pr-4 text-right font-semibold">
-              {t("pairs.col.duration")}
-            </th>
-            <th scope="col" className="py-3 pr-4 font-semibold">
-              {t("pairs.col.error")}
-            </th>
-          </tr>
-        </thead>
-        <tbody className="divide-y divide-border">
+    <Table variant="dense">
+      <caption className="sr-only">{t("pairs.caption")}</caption>
+      <THead>
+        <Tr>
+          <Th className="w-8 pl-4 pr-2">
+            <span className="sr-only">{t("pairs.col.expand")}</span>
+          </Th>
+          <Th className="pr-4">{t("pairs.col.pair")}</Th>
+          <Th className="pr-4">{t("pairs.col.state")}</Th>
+          <Th numeric className="pr-4">
+            {t("pairs.col.duration")}
+          </Th>
+          <Th className="pr-4">{t("pairs.col.error")}</Th>
+        </Tr>
+      </THead>
+      <TBody>
           {pager.visible.map((row) => {
             /* Both names normalised before anything reads them: a result row
                that lost its sourceNode put the literal word "undefined" into
@@ -701,8 +695,8 @@ function PairTable({ pairs, isMTR, runId }: { pairs: RunPairRow[]; isMTR: boolea
             const detailId = `run-pair-${encodeURIComponent(key)}`;
             return (
             <Fragment key={key}>
-            <tr>
-              <td className="py-3 pl-4 pr-2 align-top">
+            <Tr>
+              <Td className="pl-4 pr-2 align-top">
                 {/* The whole point of the owner's «ничего не кликабельно»: a
                     pair row is where the route lives, and it opened nothing. */}
                 <button
@@ -725,8 +719,8 @@ function PairTable({ pairs, isMTR, runId }: { pairs: RunPairRow[]; isMTR: boolea
                     )}
                   />
                 </button>
-              </td>
-              <td className="max-w-[22rem] py-3 pr-4">
+              </Td>
+              <Td className="mono-data max-w-[22rem] pr-4">
                 <span className="flex items-center gap-2">
                   <span className="truncate" title={p.source}>
                     {p.source}
@@ -738,20 +732,20 @@ function PairTable({ pairs, isMTR, runId }: { pairs: RunPairRow[]; isMTR: boolea
                     {p.destination}
                   </span>
                 </span>
-              </td>
-              <td className="py-3 pr-4">
+              </Td>
+              <Td className="pr-4">
                 <Badge variant={PAIR_VARIANT[p.state] ?? "unknown"} dot>
                   {p.state}
                 </Badge>
-              </td>
-              <td className="nums py-3 pr-4 text-right text-muted-foreground">{fmtDuration(p.durationNs)}</td>
-              <td className={cn("py-3 pr-4 text-xs", p.error ? "text-health-bad" : "text-muted-foreground")}>
+              </Td>
+              <Td numeric className="pr-4">{fmtDuration(p.durationNs)}</Td>
+              <Td className={cn("pr-4 text-xs", p.error ? "text-health-bad" : "text-muted-foreground")}>
                 {p.error ?? "—"}
-              </td>
-            </tr>
+              </Td>
+            </Tr>
             {expanded ? (
-              <tr>
-                <td id={detailId} colSpan={5} className="bg-surface-2/30 p-0">
+              <Tr>
+                <Td id={detailId} colSpan={5} className="bg-surface-2/30 p-0">
                   {/* An MTR's pair row opens onto its ROUTE; anything else opens
                       onto the sample's own facts, which the cells truncate. */}
                   {isMTR ? (
@@ -759,15 +753,14 @@ function PairTable({ pairs, isMTR, runId }: { pairs: RunPairRow[]; isMTR: boolea
                   ) : (
                     <PairDetail pair={p} />
                   )}
-                </td>
-              </tr>
+                </Td>
+              </Tr>
             ) : null}
             </Fragment>
             );
           })}
-        </tbody>
-      </table>
-    </div>
+      </TBody>
+    </Table>
     <Pager pager={pager} subject={t("pairs.subject")} />
     </>
   );
@@ -997,7 +990,7 @@ export function RunDetailPage() {
       <Card asChild className="overflow-hidden p-0">
         <section>
           <div className="border-b border-border px-4 py-3">
-            <h2 className="text-sm font-semibold">{t("pairs.title")}</h2>
+            <h2 className="type-section">{t("pairs.title")}</h2>
             {interval ? <p className="mt-0.5 text-xs text-muted-foreground">{t("pairs.intervalNote")}</p> : null}
           </div>
           {/* runId, not run.id: the pager's reset key is the permalink the
@@ -1011,7 +1004,7 @@ export function RunDetailPage() {
         <Card asChild className="overflow-hidden p-0">
           <section>
             <div className="border-b border-border px-4 py-3">
-              <h2 className="text-sm font-semibold">{t("timeline.title")}</h2>
+              <h2 className="type-section">{t("timeline.title")}</h2>
               <p className="mt-0.5 text-xs text-muted-foreground">{t("timeline.note")}</p>
             </div>
             {sampleGroups.length === 0 ? (

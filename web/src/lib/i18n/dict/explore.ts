@@ -25,6 +25,12 @@ const en = {
   "description": "Curated metric charts across TCP/UDP/ICMP/DNS, recomputed from Prometheus every 30s.",
   "description.at":
     "Curated metric charts across TCP/UDP/ICMP/DNS, ending {at} — the range below is measured back from there.",
+  /* The "?" by the title (M7-5); the docs page is docs/console/metrics. */
+  "help.body":
+    "Five curated charts across TCP/UDP/ICMP/DNS — worst pairs by RTT and packet loss, DNS resolution p95, probe failure rate by protocol — recomputed from Prometheus every 30s. " +
+    "One time range applies to every chart, and the compare panel lays any two metrics side by side. " +
+    "Every query goes through the console's guarded Prometheus proxy; for an exact ad-hoc query there is the PromQL page. " +
+    "With the Time Machine engaged, the window ends at the viewed instant.",
   "range.aria": "Time range",
 
   /* ── a curated card ────────────────────────────────────────────────────── */
@@ -102,6 +108,11 @@ export const exploreDict: Dictionary<ExploreKey> = defineDict(en, {
   "description": "Готовые графики по TCP/UDP/ICMP/DNS, пересчитываются из Prometheus каждые 30 с.",
   "description.at":
     "Готовые графики по TCP/UDP/ICMP/DNS до момента {at}, диапазон ниже отсчитывается назад от него.",
+  "help.body":
+    "Пять готовых графиков по TCP/UDP/ICMP/DNS: худшие пары по RTT и потерям пакетов, p95 разрешения DNS, доля сбоев проб по протоколам; пересчёт из Prometheus каждые 30 с. " +
+    "Один диапазон времени действует на все графики, а панель сравнения кладёт любые две метрики рядом. " +
+    "Все запросы идут через защищённый прокси консоли к Prometheus; для точного произвольного запроса есть страница PromQL. " +
+    "С включённой Машиной времени окно заканчивается на выбранном моменте.",
   "range.aria": "Диапазон времени",
 
   "chart.loading": "Загрузка графика…",

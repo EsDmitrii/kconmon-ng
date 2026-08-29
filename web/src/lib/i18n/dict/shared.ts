@@ -29,6 +29,17 @@ const en = {
      same rule that puts the pager's words here. */
   "modal.close": "Close",
 
+  /* ── components/page-help.tsx ─────────────────────────────────────────────
+     The "?" beside every page title. One component, many mounts — each page
+     supplies the BODY from its own dictionary; the chrome around that body
+     (button label, dialog title, docs link) is worded once here. The button
+     and the dialog share their English on purpose and keep separate keys
+     anyway — one names a control, the other names what opened (the
+     picker.timePanel precedent). */
+  "help.open": "About this page",
+  "help.title": "About this page",
+  "help.learnMore": "Learn more in the docs",
+
   /* ── ui/pager.tsx ──────────────────────────────────────────────────────────
      The one pager every list in the console mounts, so its words live here
      rather than being retyped into a dozen page dictionaries. The Investigate
@@ -160,6 +171,10 @@ export type SharedKey = keyof typeof en;
 
 export const sharedDict: Dictionary<SharedKey> = defineDict(en, {
   "modal.close": "Закрыть",
+
+  "help.open": "Об этой странице",
+  "help.title": "Об этой странице",
+  "help.learnMore": "Подробнее в документации",
   /* «Показано 20 из 90» ставит числа рядом, а существительное — впереди
      («Пары: показано 20 из 90»), и склонять его после числа не приходится. */
   "pager.size": "Строк на странице",

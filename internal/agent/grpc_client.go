@@ -2,24 +2,47 @@ package agent
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"fmt"
 	"log/slog"
+	"os"
+	"strings"
 	"sync"
 	"time"
 
 	pb "github.com/EsDmitrii/kconmon-ng/api/proto"
 	"github.com/EsDmitrii/kconmon-ng/internal/checker"
+	"github.com/EsDmitrii/kconmon-ng/internal/config"
 	"github.com/EsDmitrii/kconmon-ng/internal/model"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/keepalive"
 	grpcstatus "google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
+/*
+ClientSecurity carries FILE PATHS, not parsed material: dialController loads them on every dial, so
+a Reconnect after certificate or token rotation picks the new files up without a restart. The zero
+value is the in-cluster contract — plaintext, no credentials — unchanged.
+*/
+type ClientSecurity struct {
+	TLS       config.AgentTLSConfig
+	TokenFile string
+}
+
+// clientSecurityFromConfig maps the agent config block onto the dialer's inputs; the config loader
+// has already validated the combinations (cert+key together, token only with TLS).
+func clientSecurityFromConfig(cfg *config.Config) ClientSecurity {
+	return ClientSecurity{TLS: cfg.Agent.TLS, TokenFile: cfg.Agent.BootstrapTokenFile}
+}
+
 type GRPCClient struct {
-	address string
+	address  string
+	security ClientSecurity
 
 	// mu guards conn and client, which Reconnect swaps under the watch goroutines.
 	// mu guards conn and client, which Reconnect swaps under the watch goroutines, and agentID,
@@ -35,39 +58,117 @@ type GRPCClient struct {
 	onExternal       func(*pb.ExternalCheckAssignment)
 }
 
-func NewGRPCClient(address string) (*GRPCClient, error) {
-	conn, err := dialController(address)
+func NewGRPCClient(address string, sec ClientSecurity) (*GRPCClient, error) { //nolint:gocritic // hugeParam: value semantics intentional, the client keeps a snapshot
+	conn, err := dialController(address, sec)
 	if err != nil {
 		return nil, err
 	}
 
 	return &GRPCClient{
-		address: address,
-		conn:    conn,
-		client:  pb.NewAgentRegistryClient(conn),
+		address:  address,
+		security: sec,
+		conn:     conn,
+		client:   pb.NewAgentRegistryClient(conn),
 	}, nil
 }
 
-func dialController(address string) (*grpc.ClientConn, error) {
-	conn, err := grpc.NewClient(address,
-		grpc.WithTransportCredentials(insecure.NewCredentials()),
+func dialController(address string, sec ClientSecurity) (*grpc.ClientConn, error) { //nolint:gocritic // hugeParam: value semantics intentional
+	opts := []grpc.DialOption{
 		grpc.WithKeepaliveParams(keepalive.ClientParameters{
 			Time:                10 * time.Second,
 			Timeout:             5 * time.Second,
 			PermitWithoutStream: true,
 		}),
-	)
+	}
+
+	if sec.TLS.Enabled() {
+		tlsCfg, err := buildClientTLS(sec.TLS)
+		if err != nil {
+			return nil, err
+		}
+		opts = append(opts, grpc.WithTransportCredentials(credentials.NewTLS(tlsCfg)))
+	} else {
+		opts = append(opts, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	}
+
+	if sec.TokenFile != "" {
+		token, err := readBootstrapToken(sec.TokenFile)
+		if err != nil {
+			return nil, err
+		}
+		opts = append(opts, grpc.WithPerRPCCredentials(bearerToken{token: token}))
+	}
+
+	conn, err := grpc.NewClient(address, opts...)
 	if err != nil {
 		return nil, fmt.Errorf("connecting to controller: %w", err)
 	}
 	return conn, nil
 }
 
+// buildClientTLS turns the config block into transport TLS towards the controller's external
+// gateway. An empty caFile means the system pool: a gateway behind a publicly-trusted cert needs no
+// extra file on the host.
+func buildClientTLS(t config.AgentTLSConfig) (*tls.Config, error) {
+	tlsCfg := &tls.Config{
+		MinVersion: tls.VersionTLS12,
+		ServerName: t.ServerName,
+	}
+	if t.CAFile != "" {
+		pem, err := os.ReadFile(t.CAFile)
+		if err != nil {
+			return nil, fmt.Errorf("reading agent.tls.caFile: %w", err)
+		}
+		pool := x509.NewCertPool()
+		if !pool.AppendCertsFromPEM(pem) {
+			return nil, fmt.Errorf("agent.tls.caFile %s holds no usable certificates", t.CAFile)
+		}
+		tlsCfg.RootCAs = pool
+	}
+	if t.CertFile != "" {
+		cert, err := tls.LoadX509KeyPair(t.CertFile, t.KeyFile)
+		if err != nil {
+			return nil, fmt.Errorf("loading agent client certificate: %w", err)
+		}
+		tlsCfg.Certificates = []tls.Certificate{cert}
+	}
+	return tlsCfg, nil
+}
+
+// readBootstrapToken loads and trims the shared token; an empty file fails HERE with the file name
+// in the error, instead of as an opaque Unauthenticated from the gateway.
+func readBootstrapToken(path string) (string, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("reading bootstrap token: %w", err)
+	}
+	token := strings.TrimSpace(string(raw))
+	if token == "" {
+		return "", fmt.Errorf("bootstrap token file %s is empty", path)
+	}
+	return token, nil
+}
+
+// bearerToken attaches the bootstrap token to every RPC. RequireTransportSecurity is true on
+// purpose: gRPC then refuses to send the token over a plaintext connection, making "token leaks
+// because someone removed the tls block" a startup error rather than an incident.
+type bearerToken struct {
+	token string
+}
+
+func (b bearerToken) GetRequestMetadata(context.Context, ...string) (map[string]string, error) {
+	return map[string]string{"authorization": "Bearer " + b.token}, nil
+}
+
+func (b bearerToken) RequireTransportSecurity() bool {
+	return true
+}
+
 // Reconnect drops the transport and dials the controller again. The controller Service is a
 // ClusterIP, so only a fresh connection is load-balanced anew: retrying on the existing one keeps
 // the agent pinned to the replica that just refused it for not being the leader.
 func (c *GRPCClient) Reconnect() error {
-	conn, err := dialController(c.address)
+	conn, err := dialController(c.address, c.security)
 	if err != nil {
 		return err
 	}

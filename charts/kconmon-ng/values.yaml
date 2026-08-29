@@ -156,6 +156,22 @@ redis:
 agent:
   # Explicit zone override; empty lets the controller resolve it from the node.
   zone: ""
+  # Scrape-time cardinality valve, rendered as metricRelabelings on the agent ServiceMonitor.
+  # It needs serviceMonitor.enabled and the chart refuses the combination otherwise; without the
+  # operator, copy the equivalent metric_relabel_configs from docs/metrics.md into your own scrape
+  # config. What each mode keeps, per DIRECTED NODE PAIR (N nodes make N*(N-1) of them):
+  #   full          ~70 series/pair — everything the agent exports.
+  #   counters-only ~10 series/pair — drops the four per-pair histograms (64 of the ~70); the
+  #                 loss/jitter gauges and result counters stay, so every pair alert keeps firing.
+  #   zone-only     ~0 series/pair — drops every series naming a destination node (histograms,
+  #                 gauges, counters, MTR). What remains is the zone family (~74 series per
+  #                 DIRECTED ZONE PAIR, so ~74*Z^2 for Z zones) plus the DNS/HTTP/external
+  #                 families, which are linear in node count.
+  # zone-only requires agents new enough to export the zone family, or Prometheus goes dark on the
+  # mesh while the console (which does not scrape) keeps working.
+  metrics:
+    # full | counters-only | zone-only.
+    detail: full
   podAnnotations: {}
   image:
     repository: ghcr.io/esdmitrii/kconmon-ng-agent
@@ -217,6 +233,49 @@ controller:
   events:
     # Domain event stream for the Console's realtime ingester (leader-only).
     enabled: false
+  # SECOND gRPC listener for agents OUTSIDE the cluster: same services and registry, but TLS with a
+  # bearer token — the in-cluster port is guarded by a NetworkPolicy, and whatever reaches a
+  # NodePort/LoadBalancer is guarded by nothing but what is configured here. The in-cluster listener
+  # and its ClusterIP Service are untouched by this block. The controller reads the certificate and
+  # token ONCE at startup — the config hot-reload does not rebuild the listener — so rotating either
+  # Secret's content needs a controller restart (kubectl rollout restart); the chart cannot see into
+  # referenced Secrets and cannot roll the pods for you.
+  externalGateway:
+    enabled: false
+    # Gateway listener; must differ from config.httpPort/grpcPort/metricsPort.
+    port: 9443
+    # The externally reachable Service, rendered only when enabled. It exposes the gateway port
+    # ALONE — never the plaintext in-cluster gRPC port.
+    service:
+      # NodePort | LoadBalancer; no ClusterIP, an external agent cannot reach one.
+      type: LoadBalancer
+      # Cloud-LB knobs (internal LB, static IP) go here.
+      annotations: {}
+      # Fixed port for type NodePort; 0 lets the apiserver pick one.
+      nodePort: 0
+      # Cluster | Local; empty leaves the apiserver default (Cluster). Local preserves the agents'
+      # source addresses — what networkPolicy.externalAgentCidrs matches on — at the cost of only
+      # the nodes running a controller pod answering.
+      externalTrafficPolicy: ""
+      # Provider-enforced source filter for type LoadBalancer; the in-cluster half of the same
+      # decision is networkPolicy.externalAgentCidrs.
+      loadBalancerSourceRanges: []
+    tls:
+      # kubernetes.io/tls Secret holding the gateway's serving pair (tls.crt/tls.key), e.g. one
+      # cert-manager maintains; REQUIRED when enabled.
+      secretName: ""
+      # Key in that SAME Secret holding the CA bundle that signed the agent CLIENT certificates
+      # (conventionally ca.crt). Empty is token-only mode: fleet membership is authenticated but
+      # agents cannot be told apart, so any token holder can impersonate any agent. Set it and the
+      # gateway requires a verified client cert whose CN/URI SAN is pinned to the agent's node name.
+      clientCaKey: ""
+    # Shared bearer token every external agent must present; the controller refuses one shorter
+    # than 16 characters.
+    bootstrapToken:
+      # Secret holding the token; REQUIRED when enabled.
+      secretName: ""
+      # Key inside that Secret.
+      key: token
   image:
     repository: ghcr.io/esdmitrii/kconmon-ng-controller
     # Empty means the chart appVersion.
@@ -617,6 +676,23 @@ prometheusRule:
     threshold: 0.1
     for: 5m
     severity: warning
+  # Failure ratio across TCP+UDP+ICMP between a zone pair. Reads the zone metric family, which
+  # only agents new enough to export it serve — on older agents the rule is silently inert.
+  zoneChecksFailing:
+    enabled: true
+    # Failure ratio, 0.0-1.0.
+    threshold: 0.05
+    for: 5m
+    severity: warning
+  # Packet loss between a zone pair, from the sent/received counters. Lower default than the
+  # per-pair UDPLossHigh: the zone aggregate dilutes any single link by the pair count, so
+  # sustained loss at this level means the fabric, not one node.
+  zoneLossHigh:
+    enabled: true
+    # Loss ratio, 0.0-1.0.
+    threshold: 0.1
+    for: 5m
+    severity: warning
   # Registered agents below the schedulable-node count; needs leaderElection.
   kconmonAgentsMissing:
     enabled: true
@@ -659,6 +735,14 @@ networkPolicy:
   # config.checkers.external.allowedCidrs: that one lets the agent try, this
   # one lets the packet leave.
   externalEgress: []
+  # Source CIDRs of the EXTERNAL agents, opened on the gateway port toward the controller pods.
+  # REQUIRED when controller.externalGateway.enabled is on together with this policy: the shared
+  # policy default-denies controller ingress it does not name, so an empty list would let the chart
+  # render a gateway no packet can reach — and it refuses to do that silently. Mind NAT: through a
+  # NodePort or a LoadBalancer with externalTrafficPolicy: Cluster the source the policy sees is the
+  # NODE's own IP, so either cover the node CIDR here or use externalTrafficPolicy: Local.
+  # [{cidr: 203.0.113.0/24}] shapes are not accepted — plain CIDR strings.
+  externalAgentCidrs: []
   # Empty renders TCP 80/443 to 0.0.0.0/0 when the HTTP checker is on.
   httpEgress: []
   # Egress to DNS resolvers outside the cluster (config.checkers.dns.resolvers).

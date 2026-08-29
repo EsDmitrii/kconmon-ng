@@ -6,8 +6,10 @@ import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Pager, usePager } from "@/components/ui/pager";
 import { DateTimePicker } from "@/components/ui/datetime-picker";
+import { Input } from "@/components/ui/input";
 import { Segmented, type SegmentedOption } from "@/components/ui/segmented";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Table, TBody, Td, Th, THead, Tr } from "@/components/ui/table";
 import { useAuth } from "@/hooks/use-auth";
 import { useConfirmStep } from "@/hooks/use-confirm-step";
 import { useDisclosureFocus } from "@/hooks/use-disclosure-focus";
@@ -79,19 +81,12 @@ function fmtTime(timestamp: string | null | undefined, locale: Locale): string {
   return Number.isNaN(d.getTime()) ? timestamp : stampFull(d, locale);
 }
 
-function fieldClasses(invalid: boolean): string {
-  return cn(
-    "h-9 rounded-md border bg-transparent px-3 text-[13px]",
-    invalid ? "border-health-bad" : "border-border-strong",
-  );
-}
-
 function SectionCard({ id, title, children }: { id?: string; title: string; children: ReactNode }) {
   return (
     <Card asChild className="p-6">
       {/* `id` is the anchor the sidebar's user menu links a deep link at. */}
       <section id={id}>
-        <h2 className="text-sm font-semibold">{title}</h2>
+        <h2 className="type-section">{title}</h2>
         {children}
       </section>
     </Card>
@@ -361,8 +356,8 @@ function WebhookForm({ initial, onDone }: { initial?: Webhook; onDone: () => voi
 
   return (
     <Card asChild className="p-6">
-      <form onSubmit={handleSubmit} className="flex flex-col gap-4">
-        <h3 className="text-sm font-semibold">
+      <form onSubmit={handleSubmit} className="flex max-w-2xl flex-col gap-4">
+        <h3 className="type-section">
           {initial ? t("webhooks.form.edit", { name: initial.name }) : t("webhooks.form.create")}
         </h3>
         <div className="grid gap-4 sm:grid-cols-2">
@@ -375,13 +370,12 @@ function WebhookForm({ initial, onDone }: { initial?: Webhook; onDone: () => voi
               <span className="text-muted-foreground">{t("webhooks.form.name")}</span>
               {/* The two placeholders are sample VALUES — a receiver's name and
                   a receiver's URL — and stay as they are. */}
-              <input
+              <Input
                 value={draft.name}
                 placeholder="pagerduty"
                 aria-invalid={invalid("name") || undefined}
                 aria-describedby={describedBy("name")}
                 onChange={(e) => edit("name", { name: e.target.value })}
-                className={fieldClasses(invalid("name"))}
               />
             </label>
             <FieldError field="name" />
@@ -389,13 +383,12 @@ function WebhookForm({ initial, onDone }: { initial?: Webhook; onDone: () => voi
           <div className="flex flex-col gap-1 text-[13px]">
             <label className="flex flex-col gap-1">
               <span className="text-muted-foreground">{t("webhooks.form.url")}</span>
-              <input
+              <Input
                 value={draft.url}
                 placeholder="https://hooks.example.test/incidents"
                 aria-invalid={invalid("url") || undefined}
                 aria-describedby={describedBy("url")}
                 onChange={(e) => edit("url", { url: e.target.value })}
-                className={fieldClasses(invalid("url"))}
               />
             </label>
             <FieldError field="url" />
@@ -445,14 +438,13 @@ function WebhookForm({ initial, onDone }: { initial?: Webhook; onDone: () => voi
           <label htmlFor={secretId} className="text-muted-foreground">
             {t("webhooks.form.secret")}
           </label>
-          <input
+          <Input
             id={secretId}
             type="password"
             value={draft.secret}
             aria-invalid={invalid("secret") || undefined}
             aria-describedby={invalid("secret") ? `${fieldErrorId("secret")} ${secretId}-help` : `${secretId}-help`}
             onChange={(e) => edit("secret", { secret: e.target.value })}
-            className={fieldClasses(invalid("secret"))}
           />
           <FieldError field="secret" />
           {/* Write-only, in both directions: the API never returns a secret, so
@@ -551,7 +543,8 @@ function WebhookRow({ hook, onEdit }: { hook: Webhook; onEdit: () => void }) {
   return (
     <li className="flex flex-wrap items-center gap-3 py-3 text-sm">
       <span className="font-medium">{hook.name}</span>
-      <span className="truncate text-xs text-muted-foreground">{hook.url}</span>
+      {/* The endpoint URL is an identifier — data face (M4 iron rule). */}
+      <span className="mono-data truncate text-muted-foreground">{hook.url}</span>
       {hook.events.map((event) => (
         <Badge key={event} variant="neutral">
           {event}
@@ -573,7 +566,7 @@ function WebhookRow({ hook, onEdit }: { hook: Webhook; onEdit: () => void }) {
       <span data-testid="last-status" className="text-xs">
         <Badge variant={lastStatusTone(hook.lastStatus)}>{hook.lastStatus === "" ? "—" : hook.lastStatus}</Badge>
       </span>
-      <span className="text-xs text-muted-foreground">{fmtTime(hook.lastAttempt, locale)}</span>
+      <span className="mono-data text-muted-foreground">{fmtTime(hook.lastAttempt, locale)}</span>
       {hook.failures > 0 ? (
         <span className="text-xs text-health-bad">
           {t("webhooks.row.failures", {
@@ -735,10 +728,10 @@ function MintedToken({ minted, onDismiss }: { minted: TokenCreateResponse; onDis
   return (
     <Card asChild className="border-l-4 border-l-health-warn bg-health-warn-soft/40 p-6">
       <section aria-label={t("tokens.secret.aria")}>
-        <h3 className="text-sm font-semibold">{t("tokens.secret.title", { name: minted.name })}</h3>
+        <h3 className="type-section">{t("tokens.secret.title", { name: minted.name })}</h3>
         {/* The server's bytes, selectable and wrapped — never truncated, or the
             one copy an operator gets would be a partial token. */}
-        <p data-testid="minted-token" className="mt-3 break-all rounded-md bg-surface-2 p-3 font-mono text-[13px]">
+        <p data-testid="minted-token" className="mono-data mt-3 break-all rounded-md bg-surface-2 p-3">
           {minted.token}
         </p>
         <div className="mt-3 flex flex-wrap items-center gap-2">
@@ -824,15 +817,15 @@ function TokenForm({ onMinted, onDone }: { onMinted: (minted: TokenCreateRespons
 
   return (
     <Card asChild className="p-6">
-      <form onSubmit={handleSubmit} className="flex flex-col gap-4">
-        <h3 className="text-sm font-semibold">{t("tokens.form.create")}</h3>
+      <form onSubmit={handleSubmit} className="flex max-w-2xl flex-col gap-4">
+        <h3 className="type-section">{t("tokens.form.create")}</h3>
         <div className="grid gap-4 sm:grid-cols-2">
           <div className="flex flex-col gap-1 text-[13px]">
             <label htmlFor={nameId} className="text-muted-foreground">
               {t("tokens.form.name")}
             </label>
             {/* A sample VALUE, not a word — it stays as it is. */}
-            <input
+            <Input
               id={nameId}
               value={name}
               placeholder="ci-pipeline"
@@ -842,7 +835,6 @@ function TokenForm({ onMinted, onDone }: { onMinted: (minted: TokenCreateRespons
               aria-invalid={invalid("name") || undefined}
               aria-describedby={invalid("name") ? `${errorId} ${nameId}-help` : `${nameId}-help`}
               onChange={(e) => setName(e.target.value)}
-              className={fieldClasses(invalid("name"))}
             />
             <span id={`${nameId}-help`} className="text-xs leading-relaxed text-muted-foreground">
               {t("tokens.form.nameHelp")}
@@ -950,21 +942,28 @@ function TokenRow({ token }: { token: Token }) {
           {t(state === "revoked" ? "tokens.revoked" : "tokens.expired")}
         </Badge>
       )}
-      {/* The owner is a SUBJECT ID the server assigned; it prints as it came. */}
+      {/* The owner is a SUBJECT ID the server assigned; it prints as it came —
+          identifiers and stamps wear the data face, the labels stay prose. */}
       <span className="text-xs text-muted-foreground">
-        {t("tokens.col.owner")} {token.owner}
+        {t("tokens.col.owner")} <span className="mono-data">{token.owner}</span>
       </span>
       <span className="text-xs text-muted-foreground">
-        {t("tokens.col.created")} {fmtTime(token.createdAt, locale)}
+        {t("tokens.col.created")} <span className="mono-data">{fmtTime(token.createdAt, locale)}</span>
       </span>
       {/* An absent lastUsedAt means never used, which is a fact worth stating —
           fmtTime's em-dash would have read as "the API did not say". */}
       <span data-testid="token-last-used" className="text-xs text-muted-foreground">
-        {token.lastUsedAt ? `${t("tokens.col.lastUsed")} ${fmtTime(token.lastUsedAt, locale)}` : t("tokens.lastUsed.never")}
+        {token.lastUsedAt ? (
+          <>
+            {t("tokens.col.lastUsed")} <span className="mono-data">{fmtTime(token.lastUsedAt, locale)}</span>
+          </>
+        ) : (
+          t("tokens.lastUsed.never")
+        )}
       </span>
       {token.expiresAt ? (
         <span className="text-xs text-muted-foreground">
-          {t("tokens.col.expires")} {fmtTime(token.expiresAt, locale)}
+          {t("tokens.col.expires")} <span className="mono-data">{fmtTime(token.expiresAt, locale)}</span>
         </span>
       ) : null}
 
@@ -1185,47 +1184,49 @@ function ImportResultTable({ result }: { result: ConfigImportResult }) {
   return (
     <div role="status" className="mt-4">
       <p className="text-sm font-medium">{result.dryRun ? t("bundle.dryRun") : t("bundle.applied")}</p>
-      <div className="mt-2 overflow-x-auto">
-        <table className="w-full text-left text-xs">
-          <thead className="text-muted-foreground">
-            <tr>
-              <th scope="col" className="py-1 pr-4 font-medium">
-                {t("bundle.col.collection")}
-              </th>
-              <th scope="col" className="py-1 pr-4 font-medium">
-                {t("bundle.col.created")}
-              </th>
-              <th scope="col" className="py-1 pr-4 font-medium">
-                {t("bundle.col.updated")}
-              </th>
-              <th scope="col" className="py-1 pr-4 font-medium">
-                {t("bundle.col.skipped")}
-              </th>
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-border">
-            {IMPORT_COLLECTIONS.map(([key, labelKey]) => {
-              const c = result[key];
-              /* A collection the response OMITS is skipped, not rendered as zeroes and never crashed
-                 on. The server leaves a section out when the caller may not see it — the rbac ones
-                 are absent without rbac:manage — and reading .created off undefined took the whole
-                 Settings page down with it, turning "you cannot see this section" into a blank
-                 screen. An absent row says the same thing more honestly than a row of zeroes would. */
-              if (!c) return null;
-              return (
-                <tr key={key} data-testid={`import-row-${key}`}>
-                  <th scope="row" className="py-1.5 pr-4 font-normal">
-                    {t(labelKey)}
-                  </th>
-                  <td className="py-1.5 pr-4 tabular-nums">{c.created}</td>
-                  <td className="py-1.5 pr-4 tabular-nums">{c.updated}</td>
-                  <td className="py-1.5 pr-4 tabular-nums">{c.skipped}</td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
-      </div>
+      <Table variant="dense" containerClassName="mt-2">
+        <THead>
+          <Tr>
+            <Th className="pr-4">{t("bundle.col.collection")}</Th>
+            <Th numeric className="pr-4">
+              {t("bundle.col.created")}
+            </Th>
+            <Th numeric className="pr-4">
+              {t("bundle.col.updated")}
+            </Th>
+            <Th numeric className="pr-4">
+              {t("bundle.col.skipped")}
+            </Th>
+          </Tr>
+        </THead>
+        <TBody>
+          {IMPORT_COLLECTIONS.map(([key, labelKey]) => {
+            const c = result[key];
+            /* A collection the response OMITS is skipped, not rendered as zeroes and never crashed
+               on. The server leaves a section out when the caller may not see it — the rbac ones
+               are absent without rbac:manage — and reading .created off undefined took the whole
+               Settings page down with it, turning "you cannot see this section" into a blank
+               screen. An absent row says the same thing more honestly than a row of zeroes would. */
+            if (!c) return null;
+            return (
+              <Tr key={key} data-testid={`import-row-${key}`}>
+                <Th scope="row" className="pr-4 font-normal">
+                  {t(labelKey)}
+                </Th>
+                <Td numeric className="pr-4">
+                  {c.created}
+                </Td>
+                <Td numeric className="pr-4">
+                  {c.updated}
+                </Td>
+                <Td numeric className="pr-4">
+                  {c.skipped}
+                </Td>
+              </Tr>
+            );
+          })}
+        </TBody>
+      </Table>
       {IMPORT_COLLECTIONS.map(([key, labelKey]) => {
         const c = result[key];
         if (!c) return null;
@@ -1467,12 +1468,12 @@ function AboutSection() {
             which are the honest answer for a locally built binary and must not
             be dressed up as anything else. */}
         <Fact label={t("about.version")}>
-          <span className="font-mono text-[12px]" data-testid="about-version">
+          <span className="mono-data" data-testid="about-version">
             {version?.version ?? "—"}
           </span>
         </Fact>
         <Fact label={t("about.commit")}>
-          <span className="font-mono text-[12px] break-all" data-testid="about-commit">
+          <span className="mono-data break-all" data-testid="about-commit">
             {version?.commit ?? "—"}
           </span>
         </Fact>
@@ -1560,7 +1561,7 @@ export function SettingsPage() {
 
   return (
     /* The title is the same word the sidebar's nav.settings uses. */
-    <PageShell title={t("title")} description={t("description")}>
+    <PageShell title={t("title")} help={{ body: t("help.body"), slug: "settings" }} description={t("description")}>
       {body}
     </PageShell>
   );

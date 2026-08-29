@@ -27,6 +27,11 @@ import { defineDict, type Dictionary } from "@/lib/i18n";
 const en = {
   "title": "Routes · MTR",
   "description": "Every distinct route the fleet's traces have taken, and when each one changed.",
+  /* The "?" by the title (M7-5); the docs page is docs/console/routes-mtr. */
+  "help.body":
+    "Two views: the Explorer browses every distinct route the fleet's traces have taken, the Runner starts new traces. " +
+    "Pick a destination, then a source under it — the path history lists that pair's routes over time with per-hop change summaries, and two ticked routes compare side by side. " +
+    "Path history is a database projection, so the page needs the console database and the mtr:read permission, which every built-in role holds.",
   /* Two descriptions, same shape as /diagnostics and /explore: engaged, the
      subtitle must not keep promising a view of the viewed instant. {at} is the
      page's own localeTag stamp. */
@@ -216,6 +221,10 @@ export type MTRKey = keyof typeof en;
 export const mtrDict: Dictionary<MTRKey> = defineDict(en, {
   "title": "Маршруты · MTR",
   "description": "Все различные маршруты, по которым ходили трассировки флота, и когда каждый из них менялся.",
+  "help.body":
+    "Два вида: «Обзор» листает все различные маршруты, по которым ходили трассировки флота, «Запуск» стартует новые. " +
+    "Выберите назначение, под ним источник — история путей покажет маршруты этой пары во времени со сводками изменений по хопам, а два отмеченных маршрута сравниваются бок о бок. " +
+    "История путей — проекция из базы, поэтому странице нужны база данных консоли и право mtr:read, которое есть у каждой встроенной роли.",
   "description.at":
     "Все различные маршруты, по которым ходили трассировки флота. Обзор ниже не обрезан по {at} — он живой.",
   "explorer.atNote":
