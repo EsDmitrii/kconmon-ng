@@ -115,8 +115,8 @@ describe("LivePage engaged at t", () => {
   it("shows no realtime badge and no unfed-stream warning", async () => {
     renderPage();
     await screen.findByText("event 1");
-    // "Live" also names the page itself (the <h1>), so the badge is looked for
-    // by its own role rather than by that word alone.
+    // The badge is looked for by its own element rather than by the word alone
+    // (the page <h1> was also "Live" before the M3-8 rename to Events).
     expect(screen.queryByText("Live", { selector: "span" })).not.toBeInTheDocument();
     expect(screen.queryByText("Delayed data")).not.toBeInTheDocument();
     expect(screen.queryByText("Connecting…")).not.toBeInTheDocument();

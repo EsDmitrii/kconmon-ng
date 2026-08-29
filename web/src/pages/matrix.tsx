@@ -31,6 +31,7 @@ import {
   heightBudget,
   gridMetrics,
   gridWidth,
+  sharedNamePrefix,
   zoomStep,
   type CellDensity,
 } from "@/lib/matrix-zoom";
@@ -244,29 +245,6 @@ function NodeLabel({ name, width, elide = "" }: { name: string; width: "column" 
       </a>
     </Tooltip>
   );
-}
-
-/**
- * sharedNamePrefix is the prefix every node name begins with, cut back to a separator.
- *
- * Only worth eliding when it actually buys width and leaves something behind: at least four
- * characters shared, and at least two left on the shortest name. Cut at "-" or "." so the remainder
- * reads as a name rather than as a slice through the middle of a word.
- */
-export function sharedNamePrefix(names: readonly string[]): string {
-  if (names.length < 2) return "";
-  let prefix = names[0];
-  for (const name of names.slice(1)) {
-    let i = 0;
-    while (i < prefix.length && i < name.length && prefix[i] === name[i]) i++;
-    prefix = prefix.slice(0, i);
-    if (prefix === "") return "";
-  }
-  const cut = Math.max(prefix.lastIndexOf("-"), prefix.lastIndexOf("."));
-  if (cut < 3) return "";
-  prefix = prefix.slice(0, cut + 1);
-  const shortest = Math.min(...names.map((n) => n.length));
-  return shortest - prefix.length >= 2 ? prefix : "";
 }
 
 function GridCellImpl({

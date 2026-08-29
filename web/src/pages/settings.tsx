@@ -1,5 +1,5 @@
 import { Fragment, useEffect, useId, useRef, useState, type FormEvent, type ReactNode } from "react";
-import { useInfiniteQuery, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { PageShell } from "@/components/page-shell";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -12,7 +12,6 @@ import { useAuth } from "@/hooks/use-auth";
 import { useConfirmStep } from "@/hooks/use-confirm-step";
 import { useDisclosureFocus } from "@/hooks/use-disclosure-focus";
 import { useSubmitGuard } from "@/hooks/use-submit-guard";
-import { MaintenanceRow } from "@/components/maintenance";
 import {
   ApiError,
   createToken,
@@ -22,7 +21,6 @@ import {
   exportConfig,
   getConfig,
   getVersion,
-  getMaintenance,
   importConfig,
   listTokens,
   listWebhooks,
@@ -48,8 +46,9 @@ import type {
 import { CHECKBOX_CLASS, cn } from "@/lib/utils";
 
 /**
- * WHAT IS HERE, and why the nav description promises more than this file delivers; a second create
- * form here would be a second place to get the same thing wrong.
+ * WHAT IS HERE: the language switcher, API tokens, webhook endpoints, configuration export/import,
+ * and About. Maintenance windows are DECLARED on the chart surfaces and MANAGED on /alerting
+ * (M3-14) — a second form for either here would be a second place to get the same thing wrong.
  */
 
 /* ── shared bits ────────────────────────────────────────────────────────── */
@@ -1097,95 +1096,9 @@ function TokensSection() {
   );
 }
 
-/* ── maintenance windows (QA round 3, finding #9) ───────────────────────── */
-
-/**
- * MaintenanceWindowsSection is the ONLY unbounded view of the declared windows in this console —
- * and it has to actually be unbounded.
- *
- * It used to issue one unparameterised GET and paginate client-side over whatever came back. The API
- * answers 100 rows plus a nextCursor, ordered start_at DESC, so with more than 100 declared windows
- * the ones silently missing were the running and the past ones — exactly what an operator opens this
- * page to find — while future windows stayed. The blurb promised every declared window.
- */
-function MaintenanceWindowsSection() {
-  const t = useT(settingsDict);
-  const qc = useQueryClient();
-  const query = useInfiniteQuery({
-    queryKey: ["settings", "maintenance"],
-    queryFn: ({ pageParam }) => getMaintenance({ limit: 100, cursor: pageParam || undefined }),
-    initialPageParam: "",
-    getNextPageParam: (page) => page.nextCursor || undefined,
-  });
-  const windows = query.data?.pages.flatMap((page) => page.windows ?? []) ?? [];
-  const pager = usePager(windows);
-
-  const onChanged = () => {
-    void qc.invalidateQueries({ queryKey: ["settings", "maintenance"] });
-    // The range-bounded lists elsewhere hold the same rows; a delete here must
-    // not leave a card in another tab drawing a band for a window that is gone.
-    void qc.invalidateQueries({ queryKey: ["maintenance"] });
-    void qc.invalidateQueries({ queryKey: ["investigate", "maintenance"] });
-  };
-
-  return (
-    <SectionCard title={t("maintenance.heading")}>
-      <p className="mt-1 max-w-prose text-xs leading-relaxed text-muted-foreground">
-        {withNodes(t("maintenance.blurb"), {
-          investigate: <SurfaceLink to="/investigate">{t("link.investigate")}</SurfaceLink>,
-          explore: <SurfaceLink to="/explore">{t("link.explore")}</SurfaceLink>,
-        })}
-      </p>
-      {query.isError ? (
-        <ErrorLine>{queryErrorMessage(query.error, t("maintenance.unavailable"))}</ErrorLine>
-      ) : null}
-      {/* isPending / isSuccess, the same guard the webhooks list uses: a paused
-          retry is pending-but-not-fetching, and presenting that as "none
-          declared" would be a settled answer nobody gave. */}
-      {query.isPending ? (
-        <div role="status" aria-live="polite" className="mt-4 flex flex-col gap-2">
-          <span className="sr-only">{t("loading")}</span>
-          <Skeleton className="h-10 w-full" />
-        </div>
-      ) : null}
-      {query.isSuccess && windows.length === 0 ? (
-        <p className="px-1 py-10 text-center text-xs text-muted-foreground">{t("maintenance.empty")}</p>
-      ) : null}
-      {windows.length > 0 ? (
-        <>
-        <ul aria-label={t("maintenance.listAria")} className="mt-4 divide-y divide-border">
-          {pager.visible.map((w) => (
-            /* The SHARED row (components/maintenance.tsx): same confirm-delete,
-               same compact stamp, same write guard. canWrite is true by
-               construction — this whole section is behind maintenance:write. */
-            <MaintenanceRow key={w.id} window={w} canWrite onChanged={onChanged} />
-          ))}
-        </ul>
-        <Pager pager={pager} subject={t("maintenance.subject")} className="px-0" />
-        {query.hasNextPage ? (
-          <div className="mt-3 flex items-center gap-3">
-            <Button
-              size="sm"
-              variant="outline"
-              loading={query.isFetchingNextPage}
-              onClick={() => void query.fetchNextPage()}
-            >
-              {t("maintenance.loadMore")}
-            </Button>
-            {/* A failed page is a note BESIDE the button, never the loss of the pages that
-                succeeded — the rule mtr-trace-list.tsx states for the same shape. */}
-            {query.isError ? (
-              <span role="alert" className="text-xs text-health-bad">
-                {queryErrorMessage(query.error, t("maintenance.unavailable"))}
-              </span>
-            ) : null}
-          </div>
-        ) : null}
-        </>
-      ) : null}
-    </SectionCard>
-  );
-}
+/* The maintenance-windows section moved to pages/alerting.tsx (M3-14): a
+   window suppresses and annotates the signals Alerting owns, and Explore
+   already draws its bands. */
 
 /* ── export / import ────────────────────────────────────────────────────── */
 
@@ -1600,6 +1513,7 @@ function AboutSection() {
         {withNodes(t("about.maintenance"), {
           investigate: <SurfaceLink to="/investigate">{t("link.investigate")}</SurfaceLink>,
           explore: <SurfaceLink to="/explore">{t("link.explore")}</SurfaceLink>,
+          alerting: <SurfaceLink to="/alerting">{t("link.alerting")}</SurfaceLink>,
         })}
       </p>
     </SectionCard>
@@ -1615,8 +1529,6 @@ export function SettingsPage() {
   const canTokens = can("tokens:manage");
   const canWebhooks = can("webhooks:manage");
   const canBundle = can("settings:write");
-  /* maintenance:WRITE, not :read — see MaintenanceWindowsSection. */
-  const canMaintenance = can("maintenance:write");
 
   let body: ReactNode;
   if (me === undefined) {
@@ -1631,7 +1543,7 @@ export function SettingsPage() {
       <>
         {/* First, and for everyone — see LanguageSection. */}
         <LanguageSection />
-        {!canTokens && !canWebhooks && !canBundle && !canMaintenance ? (
+        {!canTokens && !canWebhooks && !canBundle ? (
           <Card role="status" className="p-6">
             <p className="text-sm font-medium">{t("nothing.title")}</p>
             <p className="mt-1 max-w-prose text-xs leading-relaxed text-muted-foreground">{t("nothing.body")}</p>
@@ -1640,7 +1552,6 @@ export function SettingsPage() {
         {/* First of the gated sections: the user menu links straight at it. */}
         {canTokens ? <TokensSection /> : null}
         {canWebhooks ? <WebhooksSection /> : null}
-        {canMaintenance ? <MaintenanceWindowsSection /> : null}
         {canBundle ? <ExportImportSection /> : null}
         <AboutSection />
       </>

@@ -1,5 +1,5 @@
-import { useEffect, useId, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { Fragment, useEffect, useId, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
+import { useInfiniteQuery, useQuery, useQueryClient } from "@tanstack/react-query";
 import { PageShell } from "@/components/page-shell";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -9,10 +9,12 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { useAuth } from "@/hooks/use-auth";
 import { useConfirmStep } from "@/hooks/use-confirm-step";
 import { useSubmitGuard } from "@/hooks/use-submit-guard";
+import { MaintenanceRow } from "@/components/maintenance";
 import {
   ApiError,
   createAlertRule,
   deleteAlertRule,
+  getMaintenance,
   importForeignAlertRules,
   listAlertRules,
   listForeignAlertRules,
@@ -26,7 +28,7 @@ import {
 // whether a control EXISTS, this decides whether it is usable right now.
 import { stampFull, translate, useLocale, useT, type Locale, type Translate } from "@/lib/i18n";
 import { alertingDict, pluralKey, type AlertingKey } from "@/lib/i18n/dict/alerting";
-import { useWriteGuard } from "@/lib/timemachine";
+import { useWriteGuard, withAtParam } from "@/lib/timemachine";
 import type {
   AlertRule,
   AlertRuleImportReport,
@@ -87,6 +89,27 @@ function ErrorLine({ testId, children }: { testId?: string; children: ReactNode 
     <p role="alert" data-testid={testId} className="mt-3 text-sm leading-relaxed text-health-bad">
       {children}
     </p>
+  );
+}
+
+/** withNodes renders a translated sentence that contains LINKS — the maintenance
+ *  blurb says "…on Investigate or Explore…" with each name an anchor. The same
+ *  helper pages/settings.tsx keeps, duplicated the way queryErrorMessage is. */
+function withNodes(template: string, nodes: Record<string, ReactNode>): ReactNode[] {
+  return template.split(/(\{\w+\})/).map((chunk, i) => {
+    const name = /^\{(\w+)\}$/.exec(chunk)?.[1];
+    const node = name === undefined ? undefined : nodes[name];
+    return node === undefined ? chunk : <Fragment key={i}>{node}</Fragment>;
+  });
+}
+
+/** SurfaceLink is a plain in-app link that applies withAtParam ITSELF so its
+ *  callers cannot forget — a bare href would silently drop a pinned ?at=. */
+function SurfaceLink({ to, children }: { to: string; children: ReactNode }) {
+  return (
+    <a href={withAtParam(to)} className="text-primary hover:underline">
+      {children}
+    </a>
   );
 }
 
@@ -1826,6 +1849,91 @@ function ForeignSection({ canManage }: { canManage: boolean }) {
   );
 }
 
+/* ── maintenance windows (M3-14: moved here from Settings) ──────────────── */
+
+/**
+ * MaintenanceSection is the ONLY unbounded view of the declared windows in this console — and it
+ * has to actually be unbounded: the API answers 100 rows plus a nextCursor, so the cursor is
+ * followed rather than the past windows silently dropped.
+ *
+ * It lives on THIS page because a window suppresses and annotates exactly the signals the sections
+ * above manage; declaring one still happens next to the chart it explains, and this list is for
+ * finding and removing one. Moved verbatim from pages/settings.tsx.
+ */
+function MaintenanceSection() {
+  const t = useT(alertingDict);
+  const qc = useQueryClient();
+  const query = useInfiniteQuery({
+    queryKey: ["alerting", "maintenance"],
+    queryFn: ({ pageParam }) => getMaintenance({ limit: 100, cursor: pageParam || undefined }),
+    initialPageParam: "",
+    getNextPageParam: (page) => page.nextCursor || undefined,
+  });
+  const windows = query.data?.pages.flatMap((page) => page.windows ?? []) ?? [];
+  const pager = usePager(windows);
+
+  const onChanged = () => {
+    void qc.invalidateQueries({ queryKey: ["alerting", "maintenance"] });
+    // The range-bounded lists elsewhere hold the same rows; a delete here must
+    // not leave a card in another tab drawing a band for a window that is gone.
+    void qc.invalidateQueries({ queryKey: ["maintenance"] });
+    void qc.invalidateQueries({ queryKey: ["investigate", "maintenance"] });
+  };
+
+  return (
+    <SectionCard title={t("maintenance.heading")}>
+      <p className="mt-1 max-w-prose text-xs leading-relaxed text-muted-foreground">
+        {withNodes(t("maintenance.blurb"), {
+          investigate: <SurfaceLink to="/investigate">{t("link.investigate")}</SurfaceLink>,
+          explore: <SurfaceLink to="/explore">{t("link.explore")}</SurfaceLink>,
+        })}
+      </p>
+      {query.isError ? (
+        <ErrorLine>{queryErrorMessage(query.error, t("maintenance.unavailable"))}</ErrorLine>
+      ) : null}
+      {/* isPending / isSuccess, the guard every list on this page uses: a paused
+          retry is pending-but-not-fetching, and presenting that as "none
+          declared" would be a settled answer nobody gave. */}
+      {query.isPending ? <ListSkeleton /> : null}
+      {query.isSuccess && windows.length === 0 ? (
+        <p className="px-1 py-10 text-center text-xs text-muted-foreground">{t("maintenance.empty")}</p>
+      ) : null}
+      {windows.length > 0 ? (
+        <>
+        <ul aria-label={t("maintenance.listAria")} className="mt-4 divide-y divide-border">
+          {pager.visible.map((w) => (
+            /* The SHARED row (components/maintenance.tsx): same confirm-delete,
+               same compact stamp, same write guard. canWrite is true by
+               construction — this whole section is behind maintenance:write. */
+            <MaintenanceRow key={w.id} window={w} canWrite onChanged={onChanged} />
+          ))}
+        </ul>
+        <Pager pager={pager} subject={t("maintenance.subject")} className="px-0" />
+        {query.hasNextPage ? (
+          <div className="mt-3 flex items-center gap-3">
+            <Button
+              size="sm"
+              variant="outline"
+              loading={query.isFetchingNextPage}
+              onClick={() => void query.fetchNextPage()}
+            >
+              {t("maintenance.loadMore")}
+            </Button>
+            {/* A failed page is a note BESIDE the button, never the loss of the
+                pages that succeeded. */}
+            {query.isError ? (
+              <span role="alert" className="text-xs text-health-bad">
+                {queryErrorMessage(query.error, t("maintenance.unavailable"))}
+              </span>
+            ) : null}
+          </div>
+        ) : null}
+        </>
+      ) : null}
+    </SectionCard>
+  );
+}
+
 /* ── page ───────────────────────────────────────────────────────────────── */
 
 /**
@@ -1837,6 +1945,10 @@ export function AlertingPage() {
   const { me, can } = useAuth();
   const canRead = can("alerts:read");
   const canManage = can("alerts:manage");
+  /* maintenance:WRITE, not :read — see MaintenanceSection. Deliberately NOT
+     behind the alerts:read floor: a window is not an alert rule, and the role
+     that could manage windows on /settings must not lose them in the move. */
+  const canMaintenance = can("maintenance:write");
 
   let body: ReactNode;
   if (me === undefined) {
@@ -1846,13 +1958,18 @@ export function AlertingPage() {
         <Skeleton className="h-10 w-full" />
       </Card>
     );
-  } else if (!canRead) {
-    body = <PermissionCard permission="alerts:read">{t("gate.read")}</PermissionCard>;
   } else {
     body = (
       <>
-        <RulesSection canManage={canManage} />
-        <ForeignSection canManage={canManage} />
+        {!canRead ? (
+          <PermissionCard permission="alerts:read">{t("gate.read")}</PermissionCard>
+        ) : (
+          <>
+            <RulesSection canManage={canManage} />
+            <ForeignSection canManage={canManage} />
+          </>
+        )}
+        {canMaintenance ? <MaintenanceSection /> : null}
       </>
     );
   }

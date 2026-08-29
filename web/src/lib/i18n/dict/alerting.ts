@@ -34,8 +34,8 @@ const en = {
   /* ── page chrome ───────────────────────────────────────────────────────── */
   "title": "Alerting",
   "description":
-    "Console-managed Prometheus alert rules, what the cluster thinks of them, and the rules it holds that this " +
-    "console does not own.",
+    "Console-managed Prometheus alert rules, what the cluster thinks of them, the rules it holds that this " +
+    "console does not own, and the maintenance windows that mute these signals.",
   "loading": "Loading…",
   "permission.requires": "Requires the {permission} permission",
   "cancel": "Cancel",
@@ -217,6 +217,28 @@ const en = {
   "foreign.unavailable": "Foreign rules are unavailable",
   "foreign.import": "Import {name}",
   "foreign.importRefused": "The import was refused",
+
+  /* ── maintenance windows ───────────────────────────────────────────────── */
+  /* Moved here from dict/settings.ts with the section (M3-14): a window
+     suppresses and annotates the signals this page owns. The strings came over
+     verbatim. */
+  "maintenance.heading": "Maintenance windows",
+  "maintenance.listAria": "All maintenance windows",
+  "maintenance.subject": "windows",
+  /* {investigate} and {explore} are LINKS the page drops in — one sentence,
+     one key, and the translation decides where the two links sit in it. */
+  "maintenance.blurb":
+    "Every declared window, with no time range — including the ones entirely in the future, which the bars beside " +
+    "the charts cannot show because those are bounded to what the chart plots. Declaring a window still happens " +
+    "next to the chart it explains, on {investigate} or {explore}; this list is for finding and removing one.",
+  "maintenance.empty": "No maintenance windows have been declared.",
+  "maintenance.loadMore": "Load older windows",
+  "maintenance.unavailable": "Maintenance windows are unavailable",
+
+  /* The two surfaces named in the blurb above. The SAME words dict/chrome.ts's
+     sidebar uses — one surface, one name. */
+  "link.investigate": "Incidents",
+  "link.explore": "Metrics",
   "count.groups.one": "group",
   "count.groups.few": "groups",
   "count.groups.many": "groups",
@@ -240,8 +262,8 @@ export type AlertingKey = keyof typeof en;
 export const alertingDict: Dictionary<AlertingKey> = defineDict(en, {
   "title": "Оповещения",
   "description":
-    "Правила оповещений Prometheus под управлением консоли, что о них думает кластер, и чужие правила рядом, " +
-    "которыми консоль не владеет.",
+    "Правила оповещений Prometheus под управлением консоли, что о них думает кластер, чужие правила рядом, " +
+    "которыми консоль не владеет, и окна работ, которые эти сигналы глушат.",
   "loading": "Загрузка…",
   "permission.requires": "Нужно право {permission}",
   "cancel": "Отмена",
@@ -398,6 +420,20 @@ export const alertingDict: Dictionary<AlertingKey> = defineDict(en, {
   "foreign.unavailable": "Чужие правила недоступны",
   "foreign.import": "Импортировать {name}",
   "foreign.importRefused": "Импорт отклонён",
+
+  "maintenance.heading": "Окна работ",
+  "maintenance.listAria": "Все окна работ",
+  "maintenance.subject": "Окна работ",
+  "maintenance.blurb":
+    "Все объявленные окна работ, без отсечки по времени, включая те, что целиком впереди. Полосы под графиками " +
+    "их не покажут: полоса ограничена тем отрезком, который рисует график. Объявляют окно по-прежнему там, где оно " +
+    "что-то объясняет, на {investigate} или {explore}. Этот список нужен для другого: найти окно и убрать.",
+  "maintenance.empty": "Окна работ ещё не объявлялись.",
+  "maintenance.loadMore": "Показать более старые окна",
+  "maintenance.unavailable": "Окна работ недоступны",
+
+  "link.investigate": "Инциденты",
+  "link.explore": "Метрики",
   "count.groups.one": "группа",
   "count.groups.few": "группы",
   "count.groups.many": "групп",

@@ -1,8 +1,9 @@
 import { defineDict, type Dictionary } from "@/lib/i18n";
 
 /**
- * settings — the Settings page: the language switcher, webhook endpoints, the
- * unbounded maintenance-window list, configuration export/import, and About.
+ * settings — the Settings page: the language switcher, API tokens, webhook
+ * endpoints, configuration export/import, and About. (The maintenance-window
+ * list and its strings moved to dict/alerting.ts with the section, M3-14.)
  *
  * The switcher's own section came first, with the i18n foundation, for the
  * obvious reason: the switch has to be translated by the thing it switches, or
@@ -45,9 +46,9 @@ const en = {
   "cancel": "Cancel",
   "nothing.title": "Your role can view none of the console's settings.",
   "nothing.body":
-    "API tokens need tokens:manage, webhook endpoints need webhooks:manage, configuration export/import needs " +
-    "settings:write, and the maintenance-window list needs maintenance:write. The first three are admin-only in " +
-    "the built-in roles. What is below is everything this role can read here.",
+    "API tokens need tokens:manage, webhook endpoints need webhooks:manage, and configuration export/import needs " +
+    "settings:write — all three admin-only in the built-in roles. Maintenance windows are managed on the Alerting " +
+    "page. What is below is everything this role can read here.",
 
   /* ── webhooks ──────────────────────────────────────────────────────────── */
   "webhooks.heading": "Webhooks",
@@ -155,24 +156,11 @@ const en = {
   "tokens.row.purgeFailed": "Failed to delete the token",
   "tokens.row.purgeHint": "This token can no longer authenticate anything. Deleting removes the row for good.",
 
-  /* ── maintenance windows ───────────────────────────────────────────────── */
-  "maintenance.heading": "Maintenance windows",
-  "maintenance.listAria": "All maintenance windows",
-  "maintenance.subject": "windows",
-  /* {investigate} and {explore} are LINKS the page drops in — one sentence,
-     one key, and the translation decides where the two links sit in it. */
-  "maintenance.blurb":
-    "Every declared window, with no time range — including the ones entirely in the future, which the bars beside " +
-    "the charts cannot show because those are bounded to what the chart plots. Declaring a window still happens " +
-    "next to the chart it explains, on {investigate} or {explore}; this list is for finding and removing one.",
-  "maintenance.empty": "No maintenance windows have been declared.",
-  "maintenance.loadMore": "Load older windows",
-  "maintenance.unavailable": "Maintenance windows are unavailable",
-
-  /* The two surfaces named in the sentences above and in About. The SAME
-     words dict/chrome.ts's sidebar uses — one surface, one name. */
-  "link.investigate": "Investigate",
-  "link.explore": "Explore",
+  /* The three surfaces named in About's closing paragraph. The SAME words
+     dict/chrome.ts's sidebar uses — one surface, one name. */
+  "link.investigate": "Incidents",
+  "link.explore": "Metrics",
+  "link.alerting": "Alerting",
 
   /* ── export / import ───────────────────────────────────────────────────── */
   "bundle.heading": "Configuration export / import",
@@ -244,9 +232,9 @@ const en = {
     "Retention: pruning is disabled (console.database.retentionDays: 0) — history is kept until removed by hand.",
   "about.maintenance":
     "Maintenance windows are declared where they explain something — on {investigate} and {explore}, next to the " +
-    "chart they cover — rather than a second time here. The section above lists every declared window with no " +
-    "range, which is the only place a future one can be found and removed. Roles and role bindings are not " +
-    "administered from this console at all; API tokens are, in the section above.",
+    "chart they cover — and the full list, future windows included, is managed on {alerting}, beside the signals " +
+    "a window mutes. Roles and role bindings are not administered from this console at all; API tokens are, in " +
+    "the section above.",
 } as const;
 
 export type SettingsKey = keyof typeof en;
@@ -266,8 +254,8 @@ export const settingsDict: Dictionary<SettingsKey> = defineDict(en, {
   "nothing.title": "Эта роль не видит ни одного раздела настроек.",
   "nothing.body":
     "Токенам API нужно tokens:manage, точкам вебхуков webhooks:manage, экспорту и импорту конфигурации " +
-    "settings:write, списку окон работ maintenance:write. Первые три во встроенных ролях достались только admin. " +
-    "Ниже всё, что эта роль здесь прочитает.",
+    "settings:write — все три во встроенных ролях достались только admin. Окна работ ведутся на странице " +
+    "«Оповещения». Ниже всё, что эта роль здесь прочитает.",
 
   "webhooks.heading": "Вебхуки",
   "webhooks.listAria": "Точки доставки вебхуков",
@@ -365,19 +353,9 @@ export const settingsDict: Dictionary<SettingsKey> = defineDict(en, {
   "tokens.row.purgeFailed": "Не удалось удалить токен",
   "tokens.row.purgeHint": "Этот токен больше ничего не аутентифицирует. Удаление убирает строку насовсем.",
 
-  "maintenance.heading": "Окна работ",
-  "maintenance.listAria": "Все окна работ",
-  "maintenance.subject": "Окна работ",
-  "maintenance.blurb":
-    "Все объявленные окна работ, без отсечки по времени, включая те, что целиком впереди. Полосы под графиками " +
-    "их не покажут: полоса ограничена тем отрезком, который рисует график. Объявляют окно по-прежнему там, где оно " +
-    "что-то объясняет, на {investigate} или {explore}. Этот список нужен для другого: найти окно и убрать.",
-  "maintenance.empty": "Окна работ ещё не объявлялись.",
-  "maintenance.loadMore": "Показать более старые окна",
-  "maintenance.unavailable": "Окна работ недоступны",
-
-  "link.investigate": "Расследование",
+  "link.investigate": "Инциденты",
   "link.explore": "Метрики",
+  "link.alerting": "Оповещения",
 
   "bundle.heading": "Экспорт и импорт конфигурации",
   "bundle.blurb":
@@ -442,9 +420,9 @@ export const settingsDict: Dictionary<SettingsKey> = defineDict(en, {
     "Хранение: очистка выключена (console.database.retentionDays: 0) — история копится, пока её не удалят руками.",
   "about.maintenance":
     "Окна работ объявляют там, где они что-то объясняют: на {investigate} и {explore}, рядом с графиком, который " +
-    "они закрывают. Второй такой формы здесь нет. Раздел выше показывает все объявленные окна без отсечки по " +
-    "времени, и это единственное место, где будущее окно можно найти и убрать. Роли и их привязки из этой консоли " +
-    "не администрируются вообще, а токены API — да, в разделе выше.",
+    "они закрывают. Полный список, включая целиком будущие окна, ведётся на странице {alerting}, рядом с " +
+    "сигналами, которые окно глушит. Роли и их привязки из этой консоли не администрируются вообще, а токены " +
+    "API — да, в разделе выше.",
 });
 
 /**

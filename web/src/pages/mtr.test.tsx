@@ -446,10 +446,10 @@ describe("MTRPage — database.mode=disabled", () => {
 });
 
 describe("MTRPage — no history yet", () => {
-  it("points at Diagnostics instead of pretending the feature is broken, and asks for no snapshots", async () => {
+  it("points at Run checks instead of pretending the feature is broken, and asks for no snapshots", async () => {
     const { snapshotListCalls } = renderPage({ destinations: [] });
 
-    expect(await screen.findByRole("link", { name: /run an MTR from Diagnostics/i })).toHaveAttribute(
+    expect(await screen.findByRole("link", { name: /run an MTR from the Run checks page/i })).toHaveAttribute(
       "href",
       "/diagnostics",
     );
@@ -1524,9 +1524,9 @@ describe("MTRPage — Russian", () => {
     expect(screen.getByRole("region", { name: "История путей" })).toBeInTheDocument();
 
     // The empty state keeps its caveat AND its remedy: nothing has been traced,
-    // and the place to trace something is Diagnostics.
+    // and the place to trace something is the Run checks page.
     expect(await screen.findByText(/Пока ничего не трассировали\./)).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "Запустите MTR из Диагностики" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Запустите MTR со страницы «Проверки вручную»" })).toBeInTheDocument();
   });
 
   it("counts paths and traces with the right Russian plural form", async () => {

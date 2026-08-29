@@ -2,6 +2,7 @@ import type * as echarts from "echarts";
 import { CHART_FALLBACK, chartColors, seriesColor } from "./chart-theme";
 import { NO_VALUE } from "./chart-tooltip";
 import type { Locale } from "./i18n";
+import { sharedNamePrefix } from "./matrix-zoom";
 import type { PromResult } from "./types";
 
 export interface CuratedChart {
@@ -148,25 +149,11 @@ export const SPLIT_COLOR = { dark: CHART_FALLBACK.dark.grid, light: CHART_FALLBA
 /* ── legend elision (M3-6) ──────────────────────────────────────────────── */
 
 /**
- * legendNamePrefix is the prefix every arrow-separated half of every series name shares, cut back
- * to a "-" or "." separator — pages/matrix.tsx's sharedNamePrefix rule applied to legend entries.
- * Re-stated here rather than imported because lib code must not depend on a page module.
+ * legendNamePrefix is matrix-zoom's sharedNamePrefix rule applied to legend entries: the prefix
+ * every arrow-separated half of every series name shares, cut back to a "-" or "." separator.
  */
 export function legendNamePrefix(names: readonly string[]): string {
-  const segments = names.flatMap((n) => n.split("→"));
-  if (segments.length < 2) return "";
-  let prefix = segments[0];
-  for (const s of segments.slice(1)) {
-    let i = 0;
-    while (i < prefix.length && i < s.length && prefix[i] === s[i]) i++;
-    prefix = prefix.slice(0, i);
-    if (prefix === "") return "";
-  }
-  const cut = Math.max(prefix.lastIndexOf("-"), prefix.lastIndexOf("."));
-  if (cut < 3) return "";
-  prefix = prefix.slice(0, cut + 1);
-  const shortest = Math.min(...segments.map((s) => s.length));
-  return shortest - prefix.length >= 2 ? prefix : "";
+  return sharedNamePrefix(names.flatMap((n) => n.split("→")));
 }
 
 /**

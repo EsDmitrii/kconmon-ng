@@ -11,8 +11,8 @@ import { defineDict, type Dictionary } from "@/lib/i18n";
  * kinds — two surfaces, two files, per lib/i18n/README.md.
  *
  * NOT HERE, on purpose:
- *   - "MTR" itself, and every protocol name. The nav calls the page MTR in
- *     both languages (dict/chrome.ts) and so does this one.
+ *   - "MTR" itself, and every protocol name. The nav calls the page
+ *     Routes · MTR / «Маршруты · MTR» (dict/chrome.ts) and so does this one.
  *   - node names, destination names, target names, path hashes (`shortHash`),
  *     hop addresses, and the ad-hoc address placeholder.
  *   - permission strings (`mtr:read`, `runs:create`, `targets:read`), config
@@ -25,7 +25,7 @@ import { defineDict, type Dictionary } from "@/lib/i18n";
  */
 
 const en = {
-  "title": "MTR Explorer",
+  "title": "Routes · MTR",
   "description": "Every distinct route the fleet's traces have taken, and when each one changed.",
   /* Two descriptions, same shape as /diagnostics and /explore: engaged, the
      subtitle must not keep promising a view of the viewed instant. {at} is the
@@ -62,9 +62,9 @@ const en = {
   /* Three keys because a link sits in the middle of the sentence — the one
      case interpolation cannot cover. Path history is a PROJECTION of MTR
      results the console ingested, so "nothing here" means "nobody has run
-     one", and the place to run one is Diagnostics. */
+     one", and the place to run one is the Run checks page. */
   "destinations.empty.before": "Nothing traced yet.",
-  "destinations.empty.link": "Run an MTR from Diagnostics",
+  "destinations.empty.link": "Run an MTR from the Run checks page",
   /* ui/pager.tsx's nouns for the paged lists on this page. The sources one is
      the list INSIDE a card, which pages on its own once a destination has been
      traced from more than a screenful of nodes. */
@@ -139,7 +139,7 @@ const en = {
   "runner.aria": "Run a trace",
   "runner.title": "Run an MTR",
   "runner.body":
-    "The same POST /api/v1/runs the Diagnostics page uses, with the check type fixed to mtr. Every path it " +
+    "The same POST /api/v1/runs the Run checks page uses, with the check type fixed to mtr. Every path it " +
     "produces lands in this page's history.",
 
   "runner.duration": "Duration",
@@ -214,7 +214,7 @@ const en = {
 export type MTRKey = keyof typeof en;
 
 export const mtrDict: Dictionary<MTRKey> = defineDict(en, {
-  "title": "MTR Explorer",
+  "title": "Маршруты · MTR",
   "description": "Все различные маршруты, по которым ходили трассировки флота, и когда каждый из них менялся.",
   "description.at":
     "Все различные маршруты, по которым ходили трассировки флота. Обзор ниже не обрезан по {at} — он живой.",
@@ -238,7 +238,7 @@ export const mtrDict: Dictionary<MTRKey> = defineDict(en, {
   "destinations.title": "Назначения",
   "destinations.error": "История путей недоступна",
   "destinations.empty.before": "Пока ничего не трассировали.",
-  "destinations.empty.link": "Запустите MTR из Диагностики",
+  "destinations.empty.link": "Запустите MTR со страницы «Проверки вручную»",
   "destinations.subject": "Назначения",
   "destinations.sources.subject": "Источники",
   "destinations.empty.after": "(путь появится здесь).",
@@ -285,7 +285,7 @@ export const mtrDict: Dictionary<MTRKey> = defineDict(en, {
   "runner.aria": "Запустить трассировку",
   "runner.title": "Запустить MTR",
   "runner.body":
-    "Тот же POST /api/v1/runs, что и на странице диагностики, только тип проверки жёстко задан как mtr. Каждый " +
+    "Тот же POST /api/v1/runs, что и на странице «Проверки вручную», только тип проверки жёстко задан как mtr. Каждый " +
     "полученный путь попадает в историю этой страницы.",
 
   "runner.duration": "Длительность",

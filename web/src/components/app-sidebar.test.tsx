@@ -1,6 +1,6 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { createMemoryHistory, createRootRoute, createRouter, RouterProvider } from "@tanstack/react-router";
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ThemeProvider } from "@/components/theme-provider";
 import { AppSidebar } from "./app-sidebar";
@@ -50,6 +50,32 @@ function renderSidebar({ anonymous = false }: { anonymous?: boolean } = {}) {
 afterEach(() => {
   cleanup();
   vi.unstubAllGlobals();
+});
+
+describe("AppSidebar — groups and item descriptions (M3-9)", () => {
+  it("headers the three groups Watch / Investigate / Configure", async () => {
+    renderSidebar({ anonymous: true });
+    const nav = await screen.findByRole("navigation");
+    for (const name of ["Watch", "Investigate", "Configure"]) {
+      expect(within(nav).getByText(name)).toBeInTheDocument();
+    }
+  });
+
+  it("shows the ACTIVE item's description as a visible second line, tooltip kept everywhere", async () => {
+    renderSidebar({ anonymous: true });
+    await screen.findByRole("navigation");
+    // The memory history starts at "/", so Overview is the active link. The
+    // second line is aria-hidden (the title attribute already describes the
+    // link), so the accessible NAME stays the bare label.
+    const overview = screen.getByRole("link", { name: "Overview" });
+    expect(
+      within(overview).getByText("Health summary, worst pairs, firing alerts, recent events."),
+    ).toBeInTheDocument();
+    // An inactive item keeps its description as a tooltip only.
+    const events = screen.getByRole("link", { name: "Events" });
+    expect(events).toHaveAttribute("title", "Real-time event feed.");
+    expect(within(events).queryByText("Real-time event feed.")).not.toBeInTheDocument();
+  });
 });
 
 describe("AppSidebar — palette hint", () => {

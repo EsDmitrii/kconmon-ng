@@ -136,8 +136,6 @@ function renderPage(
     onImport?: (body: unknown) => Response;
     exportResponse?: Response;
     engaged?: boolean;
-    /** The rows GET /api/v1/maintenance answers (QA round 3, finding #9). */
-    maintenance?: unknown[];
     /** The rows GET /api/v1/tokens answers (QA round 6, finding #14). */
     tokens?: unknown[];
     /** A refusal standing in for GET /api/v1/tokens' 200. */
@@ -160,7 +158,6 @@ function renderPage(
     onImport,
     exportResponse,
     engaged = false,
-    maintenance = [],
     tokens = [],
     tokensProblem,
     onCreateToken,
@@ -168,7 +165,6 @@ function renderPage(
     versionBody,
   } = opts;
   const rows = [...webhooks] as Record<string, unknown>[];
-  const windows = [...maintenance] as Record<string, unknown>[];
   const tokenRows = [...tokens] as Record<string, unknown>[];
   const calls: Call[] = [];
 
@@ -223,15 +219,6 @@ function renderPage(
         );
       }
       return Promise.resolve(tokensProblem ?? json({ tokens: tokenRows }));
-    }
-    if (href.startsWith("/api/v1/maintenance/") && method === "DELETE") {
-      const id = decodeURIComponent(href.slice("/api/v1/maintenance/".length));
-      const at = windows.findIndex((w) => (w as { id: string }).id === id);
-      if (at >= 0) windows.splice(at, 1);
-      return Promise.resolve(new Response(null, { status: 204 }));
-    }
-    if (href.startsWith("/api/v1/maintenance")) {
-      return Promise.resolve(json({ windows, nextCursor: "" }));
     }
     if (href.startsWith("/api/v1/webhooks")) {
       const override = onWriteWebhook?.(method, body);
@@ -388,14 +375,16 @@ describe("section gating", () => {
     expect(screen.queryByText(/can view none of the console's settings/i)).not.toBeInTheDocument();
   });
 
-  /* An operator holds maintenance:write. */
-  it("operator sees the maintenance list, neither admin section, and About", async () => {
-    renderPage({ permissions: OPERATOR });
-    expect(await screen.findByRole("heading", { name: "Maintenance windows" })).toBeInTheDocument();
+  /* An operator holds maintenance:write — which buys NOTHING here any more:
+     the windows list lives on /alerting now (M3-14). */
+  it("operator sees no gated section and no maintenance request — the list moved to Alerting", async () => {
+    const { resourceCalls } = renderPage({ permissions: OPERATOR });
+    expect(await screen.findByText(/Your role can view none of the console's settings/i)).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Maintenance windows" })).not.toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "Webhooks" })).not.toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "Configuration export / import" })).not.toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "About this console" })).toBeInTheDocument();
-    expect(screen.queryByText(/can view none of the console's settings/i)).not.toBeInTheDocument();
+    expect(resourceCalls()).toEqual([]);
   });
 
   it("viewer sees no section at all — one honest line and About, and ZERO requests", async () => {
@@ -583,7 +572,7 @@ describe("tokens section", () => {
   });
 
   /* Engaged, every write on this page is disabled with ONE reason — the same
-     rule the webhook and maintenance rows already follow. */
+     rule the webhook rows already follow. */
   it("disables every token write while the Time Machine is engaged", async () => {
     renderPage({ tokens: [tokenRow()], engaged: true });
     const revoke = await screen.findByRole("button", { name: "Revoke ci-pipeline" });
@@ -592,65 +581,10 @@ describe("tokens section", () => {
   });
 });
 
-/* ── maintenance windows (QA round 3, finding #9) ───────────────────────── */
-
-function windowRow(over: Record<string, unknown> = {}) {
-  return {
-    id: "m-1",
-    scope: "node-a",
-    startAt: "2030-01-01T10:00:00Z",
-    endAt: "2030-01-01T12:00:00Z",
-    reason: "switch firmware upgrade",
-    createdBy: "user:ada",
-    createdAt: "2026-08-08T00:00:00Z",
-    ...over,
-  };
-}
-
-describe("maintenance windows section", () => {
-  it("is gated on maintenance:WRITE and asks for nothing without it", async () => {
-    const { resourceCalls } = renderPage({ permissions: ["maintenance:read", "settings:write"] });
-    expect(await screen.findByRole("heading", { name: "Configuration export / import" })).toBeInTheDocument();
-    expect(screen.queryByRole("heading", { name: "Maintenance windows" })).not.toBeInTheDocument();
-    expect(resourceCalls().filter((c) => c.url.startsWith("/api/v1/maintenance"))).toEqual([]);
-  });
-
-  it("asks for EVERY window — no from, no to, no scope, and it PAGES", async () => {
-    const { resourceCalls } = renderPage({ permissions: ["maintenance:write"], maintenance: [windowRow()] });
-    await screen.findByRole("heading", { name: "Maintenance windows" });
-    const asked = resourceCalls().filter((c) => c.url.startsWith("/api/v1/maintenance"));
-    expect(asked).toHaveLength(1);
-    /* The whole point of this section: a RANGE would hide the future windows it exists to surface,
-       and a scope would hide everybody else's. The limit is the OTHER half — the API pages at 100
-       whether or not the caller asks, and this section followed no cursor, so past and running
-       windows fell off the end of a list that claimed to be complete. */
-    expect(asked[0].url).toBe("/api/v1/maintenance?limit=100");
-  });
-
-  it("lists a window whose whole span is in the FUTURE — the one the bars cannot show", async () => {
-    renderPage({ permissions: ["maintenance:write"], maintenance: [windowRow()] });
-    const list = await screen.findByRole("list", { name: "All maintenance windows" });
-    expect(list).toHaveTextContent("switch firmware upgrade");
-    expect(list).toHaveTextContent("node-a");
-  });
-
-  it("says so plainly when nothing has ever been declared", async () => {
-    renderPage({ permissions: ["maintenance:write"] });
-    expect(await screen.findByText(/No maintenance windows have been declared/i)).toBeInTheDocument();
-  });
-
-  it("deletes behind the confirm idiom — one click arms, the second sends DELETE", async () => {
-    const { calls } = renderPage({ permissions: ["maintenance:write"], maintenance: [windowRow()] });
-    fireEvent.click(await screen.findByRole("button", { name: /^Delete maintenance window: switch firmware upgrade$/ }));
-    expect(calls.filter((c) => c.method === "DELETE")).toEqual([]);
-
-    fireEvent.click(screen.getByRole("button", { name: /^Confirm delete maintenance window: switch firmware upgrade$/ }));
-    await waitFor(() =>
-      expect(calls.filter((c) => c.method === "DELETE").map((c) => c.url)).toEqual(["/api/v1/maintenance/m-1"]),
-    );
-    await waitFor(() => expect(screen.queryByText("switch firmware upgrade")).toBeNull());
-  });
-});
+/* The maintenance-windows section and its tests moved to pages/alerting.tsx
+   (M3-14): a window suppresses and annotates the signals Alerting owns. The
+   operator case in "section gating" above pins that this page no longer
+   renders the list or asks the endpoint for anything. */
 
 /* ── webhook list ───────────────────────────────────────────────────────── */
 
@@ -1136,9 +1070,11 @@ describe("About this console", () => {
 
   it("links to the maintenance surfaces rather than duplicating them", async () => {
     renderPage();
-    const investigate = await screen.findByRole("link", { name: /Investigate/ });
+    const investigate = await screen.findByRole("link", { name: /Incidents/ });
     expect(investigate).toHaveAttribute("href", "/investigate");
-    expect(screen.getByRole("link", { name: /Explore/ })).toHaveAttribute("href", "/explore");
+    expect(screen.getByRole("link", { name: /Metrics/ })).toHaveAttribute("href", "/explore");
+    /* The list itself lives on Alerting since M3-14; About points there. */
+    expect(screen.getByRole("link", { name: /Alerting/ })).toHaveAttribute("href", "/alerting");
   });
 
   /* Roles and bindings are still nobody's business here; API tokens stopped
@@ -1725,24 +1661,15 @@ describe("the webhook form asks before discarding unsaved work (#23)", () => {
  * their own nodes — not a rendering bug.
  */
 describe("link interpolation in translated sentences (M3-7)", () => {
-  it("renders About's maintenance sentence with real Investigate/Explore links, no leftovers", async () => {
+  /* The maintenance-list blurb's twin of this test moved to pages/alerting.test.tsx with the section. */
+  it("renders About's maintenance sentence with real links, no leftovers", async () => {
     renderPage();
     const para = await screen.findByText(/Maintenance windows are declared where they explain something/);
     const links = within(para).getAllByRole("link");
-    expect(links.map((l) => l.textContent)).toEqual(["Investigate", "Explore"]);
-    expect(links.map((l) => l.getAttribute("href"))).toEqual(["/investigate", "/explore"]);
-    expect(para.textContent).toContain("on Investigate and Explore, next to the chart they cover");
+    expect(links.map((l) => l.textContent)).toEqual(["Incidents", "Metrics", "Alerting"]);
+    expect(links.map((l) => l.getAttribute("href"))).toEqual(["/investigate", "/explore", "/alerting"]);
+    expect(para.textContent).toContain("on Incidents and Metrics, next to the chart they cover");
     expect(para.textContent).not.toMatch(/[{}]/);
     expect(para.textContent).not.toContain("on  and ");
-  });
-
-  it("renders the maintenance-list blurb's links the same way", async () => {
-    /* The section itself is gated on maintenance:write (see MaintenanceWindowsSection). */
-    renderPage({ permissions: [...ADMIN, "maintenance:write"] });
-    const para = await screen.findByText(/Declaring a window still happens next to the chart it explains/);
-    const links = within(para).getAllByRole("link");
-    expect(links.map((l) => l.textContent)).toEqual(["Investigate", "Explore"]);
-    expect(para.textContent).toContain("on Investigate or Explore");
-    expect(para.textContent).not.toMatch(/[{}]/);
   });
 });

@@ -149,7 +149,8 @@ function TimelineRow({
           )}
         </button>
       ) : null}
-      {entry.detail ? <span className="w-full text-xs text-muted-foreground">{entry.detail}</span> : null}
+      {/* detailTitle keeps the machine identity a readable detail replaced (raw audit subject) one hover away. */}
+      {entry.detail ? <span className="w-full text-xs text-muted-foreground" title={entry.detailTitle}>{entry.detail}</span> : null}
     </li>
   );
 }

@@ -5,7 +5,7 @@ import { resetWsClient } from "@/hooks/use-ws-topic";
 import { FakeSocket } from "@/lib/fake-websocket";
 import { LOCALE_STORAGE_KEY, LocaleProvider } from "@/lib/i18n";
 import { parseInvestigationParams } from "@/lib/investigation-sources";
-import { degradedProtocolParam, MatrixPage, readProtocolFromLocation, sharedNamePrefix } from "./matrix";
+import { degradedProtocolParam, MatrixPage, readProtocolFromLocation } from "./matrix";
 
 const matrixBody = {
   protocol: "tcp", plane: "pod", nodes: ["a", "b"],
@@ -1021,28 +1021,9 @@ describe("MatrixPage — node names the grid did not choose", () => {
   });
 });
 
-/* ── QA round 4, finding #21: every column header read the same string ────── */
-
-describe("sharedNamePrefix", () => {
-  it("cuts a real fleet's shared prefix back to a separator", () => {
-    // The minikube stand: cut back to the separator, so what is left still reads as a name.
-    expect(sharedNamePrefix(["kconmon-prod", "kconmon-prod-m02", "kconmon-prod-m03"])).toBe("kconmon-");
-    expect(sharedNamePrefix(["ip-10-0-1-14.eu-west-1", "ip-10-0-2-31.eu-west-1"])).toBe("ip-10-0-");
-  });
-
-  it("elides nothing when there is nothing to gain", () => {
-    expect(sharedNamePrefix([])).toBe("");
-    expect(sharedNamePrefix(["only-one"])).toBe("");
-    expect(sharedNamePrefix(["alpha", "beta"])).toBe("");
-    // Shared, but not up to a separator: cutting mid-word reads worse than the whole name.
-    expect(sharedNamePrefix(["nodeaaa1", "nodeaaa2"])).toBe("");
-  });
-
-  it("keeps the whole name when eliding would leave a stub", () => {
-    // "worker-" is shared, but "worker-a" has one character left after it.
-    expect(sharedNamePrefix(["worker-a", "worker-beta"])).toBe("");
-  });
-});
+/* ── QA round 4, finding #21: every column header read the same string ──────
+   The prefix rule's own unit tests moved with it to lib/matrix-zoom.test.ts;
+   what stays here is the call site — the rendered headers. */
 
 describe("MatrixPage — column headers stay distinguishable", () => {
   it("drops the shared prefix and names it once, keeping the whole name in the tooltip", async () => {

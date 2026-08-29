@@ -328,6 +328,44 @@ describe("TargetsPage — no targets:write", () => {
   });
 });
 
+describe("TargetsPage — teaching empty states", () => {
+  // The three-part shape dict/mtr.ts destinations.empty.* set: what the object
+  // IS, what appears once one exists, and a CTA naming the button that creates
+  // one. The CTA only renders beside the button it points at.
+  it("teaches what a target is and points at the New target button", async () => {
+    renderPage({ targets: [] });
+
+    expect(await screen.findByText(/a target names a host or url outside the fleet/i)).toBeInTheDocument();
+    expect(screen.getByText(/new target button above/i)).toBeInTheDocument();
+  });
+
+  it("omits the CTA for a reader who does not see the button it names", async () => {
+    renderPage({ permissions: ["targets:read", "checks:read"], targets: [] });
+
+    expect(await screen.findByText(/a target names a host or url outside the fleet/i)).toBeInTheDocument();
+    expect(screen.queryByText(/new target button above/i)).not.toBeInTheDocument();
+  });
+
+  it("teaches what a definition is on the definitions tab", async () => {
+    renderPage({ definitions: [] });
+
+    await openTab(/definitions/i);
+    expect(await screen.findByText(/a definition says what the fleet probes/i)).toBeInTheDocument();
+    expect(screen.getByText(/new definition button above/i)).toBeInTheDocument();
+  });
+
+  // The claim is the scheduler's own contract: the loop fires only enabled
+  // schedule rows (ListDueSchedules) and the reconciler pushes only
+  // kind=continuous rows, so a definition with no schedule never runs by itself.
+  it("states that a definition with no schedule never fires, on the schedules tab", async () => {
+    renderPage({ schedules: [] });
+
+    await openTab(/schedules/i);
+    expect(await screen.findByText(/never fires on its own/i)).toBeInTheDocument();
+    expect(screen.getByText(/new schedule button above/i)).toBeInTheDocument();
+  });
+});
+
 describe("TargetsPage — targets CRUD", () => {
   it("creates a target and refetches the list so the new row appears", async () => {
     const { calls } = renderPage({ targets: [] });

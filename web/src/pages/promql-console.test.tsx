@@ -520,7 +520,7 @@ describe("PromQLConsolePage — Russian", () => {
   it("names its controls and keeps the idle/empty distinction in Russian", async () => {
     renderConsole({ locale: "ru" });
 
-    expect(await screen.findByRole("heading", { name: "Консоль" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "PromQL" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Выполнить" })).toBeInTheDocument();
     // JSON is a format name and does NOT move; the other two tabs do.
     expect(screen.getByRole("tab", { name: "Таблица" })).toBeInTheDocument();

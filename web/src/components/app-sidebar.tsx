@@ -49,9 +49,9 @@ const PALETTE_KEYS = IS_MAC ? "⌘K" : "Ctrl+K";
 /* The header is a translation KEY rather than a literal: the group names are
    the one piece of sidebar text with no NavItem behind it to fall back to. */
 const GROUPS: { key: ChromeKey; paths: string[] }[] = [
-  { key: "nav.group.monitor", paths: ["/", "/live", "/matrix", "/topology"] },
+  { key: "nav.group.watch", paths: ["/", "/live", "/matrix", "/topology"] },
   { key: "nav.group.investigate", paths: ["/investigate", "/mtr", "/diagnostics", "/explore", "/console"] },
-  { key: "nav.group.manage", paths: ["/targets", "/alerting", "/settings"] },
+  { key: "nav.group.configure", paths: ["/targets", "/alerting", "/settings"] },
 ];
 
 function groupItems(): { key: ChromeKey; items: NavItem[] }[] {
@@ -83,27 +83,42 @@ function NavLink({ item, onNavigate }: { item: NavItem; onNavigate?: () => void 
      English description — rather than nothing at all. */
   const key = NAV_KEYS[item.path];
   const descKey = NAV_DESC_KEYS[item.path];
+  const desc = descKey ? tDesc(descKey) : item.description;
   return (
     <Link
       to={item.path}
       activeOptions={{ exact: item.path === "/" }}
       onClick={onNavigate}
-      title={descKey ? tDesc(descKey) : item.description}
+      title={desc}
       className={cn(
-        "group flex h-9 items-center gap-2.5 rounded-md px-2.5 text-[13.5px] text-muted-foreground",
+        "group flex min-h-9 items-center gap-2.5 rounded-md px-2.5 py-1.5 text-[13.5px] text-muted-foreground",
         "transition-colors duration-(--dur-fast) ease-(--ease)",
         "hover:bg-accent/60 hover:text-foreground",
         "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
         "[&.active]:bg-surface-2 [&.active]:font-medium [&.active]:text-foreground [&.active]:shadow-card",
       )}
     >
-      {Icon ? (
-        <Icon
-          aria-hidden="true"
-          className="size-4 shrink-0 opacity-70 transition-opacity duration-(--dur-fast) group-hover:opacity-100 group-[.active]:opacity-100 group-[.active]:text-primary"
-        />
-      ) : null}
-      <span className="truncate">{key ? t(key) : item.label}</span>
+      {({ isActive }) => (
+        <>
+          {Icon ? (
+            <Icon
+              aria-hidden="true"
+              className="size-4 shrink-0 opacity-70 transition-opacity duration-(--dur-fast) group-hover:opacity-100 group-[.active]:opacity-100 group-[.active]:text-primary"
+            />
+          ) : null}
+          <span className="min-w-0 flex-1">
+            <span className="block truncate">{key ? t(key) : item.label}</span>
+            {/* The active item's description is visible UI (M3-9), not only a
+                tooltip. aria-hidden because the title attribute above already
+                describes the link — the accessible name stays the bare label. */}
+            {isActive ? (
+              <span aria-hidden="true" className="mt-0.5 block text-[11px] font-normal leading-snug text-muted-foreground">
+                {desc}
+              </span>
+            ) : null}
+          </span>
+        </>
+      )}
     </Link>
   );
 }

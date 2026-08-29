@@ -14,6 +14,7 @@ import {
   gridHeight,
   gridMetrics,
   gridWidth,
+  sharedNamePrefix,
   zoomStep,
   type ZoomStep,
 } from "./matrix-zoom";
@@ -289,6 +290,32 @@ describe("fitScale with a real viewport", () => {
 
   it("still shrinks when the box genuinely cannot hold the grid", () => {
     expect(fitScale(7, 1000, heightBudget(256, 260))).toBeLessThan(1);
+  });
+});
+
+/*
+ * The prefix rule itself, hoisted here from pages/matrix.tsx so the Explore legend
+ * (lib/curated-metrics.ts) shares it instead of re-stating it. The cases are the ones
+ * pages/matrix.test.tsx pinned before the move (QA round 4, finding #21).
+ */
+describe("sharedNamePrefix", () => {
+  it("cuts a real fleet's shared prefix back to a separator", () => {
+    // The minikube stand: cut back to the separator, so what is left still reads as a name.
+    expect(sharedNamePrefix(["kconmon-prod", "kconmon-prod-m02", "kconmon-prod-m03"])).toBe("kconmon-");
+    expect(sharedNamePrefix(["ip-10-0-1-14.eu-west-1", "ip-10-0-2-31.eu-west-1"])).toBe("ip-10-0-");
+  });
+
+  it("elides nothing when there is nothing to gain", () => {
+    expect(sharedNamePrefix([])).toBe("");
+    expect(sharedNamePrefix(["only-one"])).toBe("");
+    expect(sharedNamePrefix(["alpha", "beta"])).toBe("");
+    // Shared, but not up to a separator: cutting mid-word reads worse than the whole name.
+    expect(sharedNamePrefix(["nodeaaa1", "nodeaaa2"])).toBe("");
+  });
+
+  it("keeps the whole name when eliding would leave a stub", () => {
+    // "worker-" is shared, but "worker-a" has one character left after it.
+    expect(sharedNamePrefix(["worker-a", "worker-beta"])).toBe("");
   });
 });
 

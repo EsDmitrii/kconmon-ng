@@ -16,7 +16,7 @@ import { defineDict, type Dictionary } from "@/lib/i18n";
  */
 
 const en = {
-  "title": "Console",
+  "title": "PromQL",
   /* The editor's accessible NAME. CodeMirror's editable surface is a bare contenteditable, so
      without this the page's primary input announced itself as "edit, multi-line" and nothing
      else. */
@@ -95,7 +95,7 @@ const en = {
 export type PromQLConsoleKey = keyof typeof en;
 
 export const promqlConsoleDict: Dictionary<PromQLConsoleKey> = defineDict(en, {
-  "title": "Консоль",
+  "title": "PromQL",
   "editor.aria": "Запрос PromQL",
   "description": "Произвольный PromQL к тому же Prometheus, из которого читает вся консоль.",
   "description.at":
