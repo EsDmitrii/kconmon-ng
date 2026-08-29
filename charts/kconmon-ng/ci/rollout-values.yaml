@@ -1,0 +1,20 @@
+---
+# Exercises the rollout knobs added in 2.1.0: a non-default DaemonSet strategy
+# and a priorityClassName on each of the three workloads.
+agent:
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 10%
+  priorityClassName: system-node-critical
+controller:
+  priorityClassName: system-cluster-critical
+console:
+  enabled: true
+  priorityClassName: system-cluster-critical
+  auth:
+    mode: anonymous
+    anonymous:
+      role: viewer
+  prometheus:
+    url: http://prometheus-operated.monitoring:9090

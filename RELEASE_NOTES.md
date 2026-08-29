@@ -1,3 +1,29 @@
+## kconmon-ng v2.1.0
+
+### Added
+
+- **`agent.updateStrategy` is a value.** The DaemonSet hardcoded
+  `maxUnavailable: 1` — the right default and the wrong ceiling: one node at a
+  time turns a version rollout across a few hundred nodes into hours of
+  half-upgraded fleet. The block passes through verbatim, so
+  `maxUnavailable: 10%` — or `OnDelete` — is now a values change instead of a
+  fork of the template.
+- **`priorityClassName` on every workload.** `agent.priorityClassName`,
+  `controller.priorityClassName` and `console.priorityClassName`; empty by
+  default, and empty renders nothing. The agent is the one worth setting: under
+  node pressure the kubelet evicts lowest priority first, and the first pod
+  gone should not be the one reporting on the node.
+
+### Fixed
+
+- **`helm test` passes restricted-PSS admission.** The connection-test Pod ran
+  curl with no securityContext at all, so a namespace enforcing the restricted
+  Pod Security Standard rejected it at admission — the test failed before it
+  made the one request it exists to make. The container now declares the four
+  fields the profile checks: `runAsNonRoot`, a `RuntimeDefault` seccomp
+  profile, no privilege escalation, all capabilities dropped. The image already
+  runs as uid 100.
+
 ## kconmon-ng v2.0.3
 
 ### Fixed
