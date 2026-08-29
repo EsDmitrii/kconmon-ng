@@ -96,6 +96,14 @@ func shouldRedial(err error) bool {
 	return ok && st.Code() == codes.Unavailable
 }
 
+// isConfigRejection reports whether the controller refused the registration payload itself
+// (InvalidArgument): retrying the same payload can never succeed, so the caller must fail
+// loudly instead of looping behind a "controller not ready" message.
+func isConfigRejection(err error) bool {
+	st, ok := grpcstatus.FromError(err)
+	return ok && st.Code() == codes.InvalidArgument
+}
+
 // stub returns the current registry stub; Reconnect may swap it between calls.
 func (c *GRPCClient) stub() pb.AgentRegistryClient {
 	c.mu.RLock()

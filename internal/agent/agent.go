@@ -228,6 +228,39 @@ func (a *Agent) Run(ctx context.Context) error {
 	a.grpcClient = grpcClient
 	defer func() { _ = grpcClient.Close() }()
 
+	// The health/metrics plane comes up BEFORE the first registration: the chart's
+	// startupProbe polls /healthz with a finite budget, and an agent that stays dark
+	// through a controller outage takes the whole DaemonSet into CrashLoopBackOff.
+	errCh := make(chan error, 2)
+	httpSrv := &http.Server{
+		Addr:         fmt.Sprintf(":%d", a.cfg.HTTPPort),
+		Handler:      a.httpServer.Handler(),
+		ReadTimeout:  10 * time.Second,
+		WriteTimeout: 10 * time.Second,
+	}
+
+	go func() {
+		slog.Info("HTTP server listening", "port", a.cfg.HTTPPort)
+		errCh <- httpSrv.ListenAndServe()
+	}()
+
+	// The metrics listener, on its own port: see internal/metrics/listener.go.
+	metricsSrv := metrics.NewListener(
+		fmt.Sprintf(":%d", a.cfg.MetricsPort),
+		metrics.NewListenerHandler(a.promReg, a.httpServer.Ready),
+	)
+
+	go func() {
+		slog.Info("metrics server listening", "port", a.cfg.MetricsPort)
+		errCh <- metricsSrv.ListenAndServe()
+	}()
+
+	shutdownHTTP := func() error {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		return httpSrv.Shutdown(shutdownCtx)
+	}
+
 	var peers []checker.Target
 	var resolvedZone string
 	backoff := 1 * time.Second
@@ -237,10 +270,20 @@ func (a *Agent) Run(ctx context.Context) error {
 		if err == nil {
 			break
 		}
+		// The payload is built from env/config fixed at startup, so a rejection of the
+		// payload itself can never be retried into success: fail loudly instead of looping.
+		if isConfigRejection(err) {
+			slog.Error("controller rejected the registration payload, fix the agent configuration (downward API env, zone, pod IP)", "error", err)
+			_ = shutdownHTTP()
+			return fmt.Errorf("registration rejected: %w", err)
+		}
 		slog.Warn("controller not ready, retrying", "error", err, "backoff", backoff)
 		select {
 		case <-ctx.Done():
+			_ = shutdownHTTP()
 			return ctx.Err()
+		case serveErr := <-errCh:
+			return serveErr
 		case <-time.After(backoff):
 		}
 		// Redial only when this connection refused us, so the next attempt is load-balanced again: a
@@ -310,8 +353,10 @@ func (a *Agent) Run(ctx context.Context) error {
 
 	go grpcClient.StartHeartbeat(ctx, 5*time.Second)
 
+	// Deliberately NO scheduler.Pause() here: probing keeps running on the last known
+	// peer list, because pausing blinded the whole fleet for the duration of every
+	// controller restart, upgrade, or failover — exactly when measurements matter most.
 	reregister := func() {
-		a.scheduler.Pause()
 		wait := 2 * time.Second
 		maxWait := 30 * time.Second
 		for {
@@ -412,30 +457,6 @@ func (a *Agent) Run(ctx context.Context) error {
 		}
 	}()
 
-	errCh := make(chan error, 1)
-	httpSrv := &http.Server{
-		Addr:         fmt.Sprintf(":%d", a.cfg.HTTPPort),
-		Handler:      a.httpServer.Handler(),
-		ReadTimeout:  10 * time.Second,
-		WriteTimeout: 10 * time.Second,
-	}
-
-	go func() {
-		slog.Info("HTTP server listening", "port", a.cfg.HTTPPort)
-		errCh <- httpSrv.ListenAndServe()
-	}()
-
-	// The metrics listener, on its own port: see internal/metrics/listener.go.
-	metricsSrv := metrics.NewListener(
-		fmt.Sprintf(":%d", a.cfg.MetricsPort),
-		metrics.NewListenerHandler(a.promReg, a.httpServer.Ready),
-	)
-
-	go func() {
-		slog.Info("metrics server listening", "port", a.cfg.MetricsPort)
-		errCh <- metricsSrv.ListenAndServe()
-	}()
-
 	go a.scheduler.Run(ctx)
 
 	select {
@@ -445,6 +466,7 @@ func (a *Agent) Run(ctx context.Context) error {
 		slog.Warn("peer watch not confirmed within 30s, marking ready anyway")
 		a.scheduler.Resume()
 	case <-ctx.Done():
+		_ = shutdownHTTP()
 		return ctx.Err()
 	}
 	a.httpServer.SetReady(true)
@@ -459,9 +481,7 @@ func (a *Agent) Run(ctx context.Context) error {
 		a.scheduler.Pause()
 		a.gracefulDeregister(grpcClient)
 
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		return httpSrv.Shutdown(shutdownCtx)
+		return shutdownHTTP()
 	case err := <-errCh:
 		return err
 	}
