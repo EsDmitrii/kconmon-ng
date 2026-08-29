@@ -99,11 +99,14 @@ The table below lists the most relevant parameters. See
 | `controller.replicaCount` | `1` | Number of controller replicas |
 | `controller.leaderElection` | `true` | Enable leader election between controller replicas |
 | `controller.resources` | requests `50m`/`64Mi`, limits `200m`/`128Mi` | Controller resource requests/limits |
+| `controller.externalGateway.enabled` | `false` | TLS + bootstrap-token gRPC gateway for agents OUTSIDE the cluster, with its own NodePort/LoadBalancer Service exposing the gateway port ALONE (the plaintext in-cluster gRPC port authenticates by network position and never leaves the cluster). Requires `tls.secretName` and `bootstrapToken.secretName`; with `networkPolicy.enabled` also `networkPolicy.externalAgentCidrs`. Rotating the referenced Secrets needs a controller restart |
+| `controller.externalGateway.tls.clientCaKey` | `""` | Key in the TLS Secret holding the CA that signs agent CLIENT certs; setting it pins each cert's CN/URI SAN to the agent's node name. Empty is token-only mode: any token holder can impersonate any agent |
 | `agent.tolerations` | `[{operator: Exists}]` | Agent DaemonSet tolerations (default: run on all nodes) |
 | `agent.resources` | requests `50m`/`64Mi`, limits `200m`/`128Mi` | Agent resource requests/limits |
 | `agent.securityContext` | `{allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: {drop: [ALL]}}` | Agent container securityContext; add `NET_RAW` yourself only if you also make it effective |
 | `agent.podSecurityContext` | `{runAsNonRoot: true, runAsUser: 65532, seccompProfile: {type: RuntimeDefault}, sysctls: [{name: net.ipv4.ping_group_range, value: "0 2147483647"}]}` | Agent Pod securityContext. `null` deletes the WHOLE sub-tree, restricted-PSS keys included; to drop only the sysctl use `agent.pingGroupRange: false` |
 | `agent.pingGroupRange` | `true` | Render the `net.ipv4.ping_group_range` sysctl. Set `false` on a runtime that already opens it, or where the sysctl is not allowed, without losing the restricted-PSS keys |
+| `agent.metrics.detail` | `full` | Scrape-time cardinality valve on the agent ServiceMonitor: `full \| counters-only \| zone-only` (~70 / ~10 / ~0 series per directed pair). Needs `serviceMonitor.enabled`; `zone-only` needs agents that export the zone metric family. Series math in `docs/metrics.md`, "Scaling and cardinality" |
 | `config.metricsPrefix` | `kconmon_ng` | Prefix for all exported Prometheus metrics |
 | `config.checkers.tcp.enabled` | `true` | Enable TCP checker (interval `5s`, timeout `1s`) |
 | `config.checkers.udp.enabled` | `true` | Enable UDP checker (interval `5s`, timeout `250ms`, `packets: 5`) |
@@ -111,7 +114,7 @@ The table below lists the most relevant parameters. See
 | `config.checkers.dns.enabled` | `true` | Enable DNS checker (interval `5s`, timeout `5s`) |
 | `config.checkers.http.enabled` | `false` | Enable HTTP checker (interval `30s`, timeout `5s`) |
 | `serviceMonitor.enabled` | `false` | Create a Prometheus Operator `ServiceMonitor` |
-| `prometheusRule.enabled` | `false` | Create a Prometheus Operator `PrometheusRule` with the seven built-in alerts ([Alerting rules](#alerting-rules)) |
+| `prometheusRule.enabled` | `false` | Create a Prometheus Operator `PrometheusRule` with the nine built-in alerts ([Alerting rules](#alerting-rules)) |
 | `prometheusRule.<alertName>` | all enabled | Per-rule `enabled` / `threshold` / `for` / `severity` |
 | `prometheusRule.additionalRules` | `[]` | Extra rules appended to the group verbatim |
 | `networkPolicy.enabled` | `false` | Create a `NetworkPolicy` (set `networkPolicy.prometheusNamespace` to allow scraping) |
@@ -151,13 +154,14 @@ Selected key metrics:
 - `kconmon_ng_tcp_results_total` — total TCP probe results (labelled by `result`)
 - `kconmon_ng_udp_packet_loss_ratio` — UDP packet loss ratio (0.0–1.0)
 - `kconmon_ng_icmp_packet_loss_ratio` — ICMP packet loss ratio (0.0–1.0)
+- `kconmon_ng_zone_{udp,icmp}_packets_{sent,received}_total` — the zone plane's loss counters; the whole `kconmon_ng_zone_*` family is in `docs/metrics.md`
 - `kconmon_ng_dns_results_total` — total DNS resolution results (labelled by `result`)
 - `kconmon_ng_controller_registered_agents` — agents currently registered with the controller
 - `kconmon_ng_controller_expected_agents` — schedulable nodes expected to run an agent
 
 ## Alerting rules
 
-`prometheusRule.enabled=true` renders one `PrometheusRule` with seven built-in
+`prometheusRule.enabled=true` renders one `PrometheusRule` with nine built-in
 alerts. The rules themselves live in the chart
 ([`templates/_rules.tpl`](templates/_rules.tpl)), not in `values.yaml`: rule
 text, rate windows and label groupings are chart code, and `values.yaml` carries
@@ -170,8 +174,17 @@ only what an operator actually tunes.
 | `PairWentSilent` | a pair probed within the last hour reports **nothing** for ~15m | `prometheusRule.pairWentSilent` | `for` `10m`, `severity` `warning` |
 | `DNSChecksFailing` | DNS **failure ratio** > 5% for 5m | `prometheusRule.dnsChecksFailing` | `threshold` `0.05`, `for` `5m`, `severity` `warning` |
 | `ExternalChecksFailing` | External **failure ratio** > 10% for 5m | `prometheusRule.externalChecksFailing` | `threshold` `0.1`, `for` `5m`, `severity` `warning` |
+| `ZoneChecksFailing` | zone-pair **failure ratio** across TCP+UDP+ICMP > 5% for 5m | `prometheusRule.zoneChecksFailing` | `threshold` `0.05`, `for` `5m`, `severity` `warning` |
+| `ZoneLossHigh` | zone-pair packet loss (from sent/received counters) > 10% for 5m | `prometheusRule.zoneLossHigh` | `threshold` `0.1`, `for` `5m`, `severity` `warning` |
 | `KconmonAgentsMissing` | `expected_agents - registered_agents > 0` for 10m | `prometheusRule.kconmonAgentsMissing` | `for` `10m`, `severity` `warning` |
 | `KconmonControllerDown` | `absent(<prefix>_controller_leader == 1)` for 5m | `prometheusRule.kconmonControllerDown` | `for` `5m`, `severity` `critical` |
+
+The two `Zone*` rules read the zone-level metric family
+(`<prefix>_zone_*`), which only agents new enough to export it serve — on an
+older fleet they are silently inert (their expressions match no series) and
+start working when the agent image is upgraded. They aggregate at the source,
+so they keep firing under every `agent.metrics.detail` scrape mode, including
+`zone-only`.
 
 Every rule takes `enabled` (all `true` by default) alongside the tunables above.
 Setting one to `false` removes exactly that rule and nothing else. A `threshold`
@@ -212,8 +225,8 @@ actually run.
 ### Annotations name the pair
 
 Every rule annotates with the labels its own series carry, so a notification
-names the failing pair, direction and measured value instead of repeating one
-generic sentence per firing series:
+names the failing pair (or zone pair), direction and measured value instead of
+repeating one generic sentence per firing series:
 
 | Rule | Annotation identifies |
 | --- | --- |
@@ -222,6 +235,8 @@ generic sentence per firing series:
 | `PairWentSilent` | source → destination node |
 | `DNSChecksFailing` | source node + zone, queried `host`, `resolver`, failed % |
 | `ExternalChecksFailing` | source node + zone, `target`, `target_kind`, failed % |
+| `ZoneChecksFailing` | source → destination zone, failed % |
+| `ZoneLossHigh` | source → destination zone, loss % |
 | `KconmonAgentsMissing` | controller `instance` and how many agents are missing |
 | `KconmonControllerDown` | nothing to identify; `absent()` has no series labels |
 

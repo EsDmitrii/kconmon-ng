@@ -1,0 +1,19 @@
+---
+# Exercises the 2.2.0 zone plane: the scrape-detail valve at its most aggressive setting, the two
+# zone alerts with retuned knobs, and the dashboard ConfigMaps (the Zone Heatmap now reads the
+# zone family).
+serviceMonitor:
+  enabled: true
+agent:
+  metrics:
+    detail: zone-only
+prometheusRule:
+  enabled: true
+  zoneChecksFailing:
+    threshold: '0.02'
+    severity: critical
+  zoneLossHigh:
+    threshold: 0.25
+    for: 10m
+dashboards:
+  enabled: true

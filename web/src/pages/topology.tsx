@@ -342,7 +342,7 @@ function TopoNode({ data }: NodeProps) {
           the box itself is capped at NODE_MAX_W (index.css) — together they
           keep a 60-character node name inside its zone lane, with the whole
           name on `title`. */}
-      <span className="min-w-0 flex-1 truncate" title={d.label}>
+      <span className="mono-data min-w-0 flex-1 truncate" title={d.label}>
         {d.label}
       </span>
       {/* The health is a WORD as well as a border colour. The colour was the only channel: under
@@ -489,8 +489,10 @@ export function TopologyPage() {
 
   return (
     <PageShell
+      variant="tool"
       timeMachine
       title={t("title")}
+      help={{ body: t("help.body"), slug: "topology" }}
       /* The "as of" copy is keyed on the ENGAGED STATE, not on a successful response. */
       description={
         stamp
@@ -632,68 +634,68 @@ export function TopologyPage() {
             </span>
           </div>
 
-          <Card className="overflow-hidden p-0">
-            <div className="h-[calc(100dvh-19rem)] min-h-[420px]">
-              <ReactFlow
-                nodes={flow.nodes}
-                edges={edges}
-                nodeTypes={NODE_TYPES}
-                colorMode={theme}
-                fitView
-                fitViewOptions={{ padding: 0.15 }}
-                /* This map is a READ-ONLY picture of what the controller reports. */
-                nodesDraggable={false}
-                nodesConnectable={false}
-                elementsSelectable={false}
-                onNodeClick={(_, node) => openNode(node)}
-                /* React Flow makes every node a tab stop and activates none of
-                   them, so the map's only navigation was mouse-only. It exposes
-                   no per-node key handler, but it does stamp `data-id` on the
-                   wrapper that holds the focus — so the focused node is
-                   resolvable from the event itself. */
-                onKeyDown={(event) => {
-                  if (event.key !== "Enter" && event.key !== " ") return;
-                  const wrapper = (event.target as HTMLElement | null)?.closest?.(".react-flow__node");
-                  const id = wrapper?.getAttribute("data-id");
-                  const node = id ? flow.nodes.find((n) => n.id === id) : undefined;
-                  if (!node) return;
-                  event.preventDefault();
-                  openNode(node);
-                }}
-                onEdgeMouseEnter={(_, e) => setHoveredEdge(e.id)}
-                onEdgeMouseLeave={() => setHoveredEdge(null)}
-                /* FOCUS reveals the same label hover does. The failure percentage on an edge existed
-                   only under a pointer, so a keyboard user — and anyone on a touch screen, where
-                   there is no hover at all — could see that a path was bad and never how bad.
-                   React Flow has no onEdgeFocus prop, so the focus is caught where it lands: the
-                   edge's own DOM element carries data-id, exactly as the node handler above uses. */
-                onFocusCapture={(event) => {
-                  const edge = (event.target as HTMLElement | null)?.closest?.(".react-flow__edge");
-                  const id = edge?.getAttribute("data-id");
-                  if (id) setHoveredEdge(id);
-                }}
-                onBlurCapture={(event) => {
-                  if ((event.target as HTMLElement | null)?.closest?.(".react-flow__edge")) {
-                    setHoveredEdge(null);
-                  }
-                }}
-                /* React Flow's built-in a11y strings are English and speak about
-                   dragging a node that is not draggable here. Both node keys are
-                   set on purpose: with keyboard a11y ENABLED the library renders
-                   the `keyboardDisabled` variant, so overriding only `.default`
-                   would change nothing on screen. */
-                ariaLabelConfig={{
-                  "node.a11yDescription.default": t("flow.node.a11y"),
-                  "node.a11yDescription.keyboardDisabled": t("flow.node.a11y"),
-                  "edge.a11yDescription.default": t("flow.edge.a11y"),
-                }}
-                proOptions={{ hideAttribution: true }}
-              >
-                <Background gap={24} size={1.5} />
-                <MapControls />
-              </ReactFlow>
-            </div>
-          </Card>
+          {/* No Card around the map: the tool variant runs the working surface
+              edge to edge (M4-5); the clip keeps the canvas corners tidy. */}
+          <div className="h-[calc(100dvh-14rem)] min-h-[420px] overflow-hidden rounded-md">
+            <ReactFlow
+              nodes={flow.nodes}
+              edges={edges}
+              nodeTypes={NODE_TYPES}
+              colorMode={theme}
+              fitView
+              fitViewOptions={{ padding: 0.15 }}
+              /* This map is a READ-ONLY picture of what the controller reports. */
+              nodesDraggable={false}
+              nodesConnectable={false}
+              elementsSelectable={false}
+              onNodeClick={(_, node) => openNode(node)}
+              /* React Flow makes every node a tab stop and activates none of
+                 them, so the map's only navigation was mouse-only. It exposes
+                 no per-node key handler, but it does stamp `data-id` on the
+                 wrapper that holds the focus — so the focused node is
+                 resolvable from the event itself. */
+              onKeyDown={(event) => {
+                if (event.key !== "Enter" && event.key !== " ") return;
+                const wrapper = (event.target as HTMLElement | null)?.closest?.(".react-flow__node");
+                const id = wrapper?.getAttribute("data-id");
+                const node = id ? flow.nodes.find((n) => n.id === id) : undefined;
+                if (!node) return;
+                event.preventDefault();
+                openNode(node);
+              }}
+              onEdgeMouseEnter={(_, e) => setHoveredEdge(e.id)}
+              onEdgeMouseLeave={() => setHoveredEdge(null)}
+              /* FOCUS reveals the same label hover does. The failure percentage on an edge existed
+                 only under a pointer, so a keyboard user — and anyone on a touch screen, where
+                 there is no hover at all — could see that a path was bad and never how bad.
+                 React Flow has no onEdgeFocus prop, so the focus is caught where it lands: the
+                 edge's own DOM element carries data-id, exactly as the node handler above uses. */
+              onFocusCapture={(event) => {
+                const edge = (event.target as HTMLElement | null)?.closest?.(".react-flow__edge");
+                const id = edge?.getAttribute("data-id");
+                if (id) setHoveredEdge(id);
+              }}
+              onBlurCapture={(event) => {
+                if ((event.target as HTMLElement | null)?.closest?.(".react-flow__edge")) {
+                  setHoveredEdge(null);
+                }
+              }}
+              /* React Flow's built-in a11y strings are English and speak about
+                 dragging a node that is not draggable here. Both node keys are
+                 set on purpose: with keyboard a11y ENABLED the library renders
+                 the `keyboardDisabled` variant, so overriding only `.default`
+                 would change nothing on screen. */
+              ariaLabelConfig={{
+                "node.a11yDescription.default": t("flow.node.a11y"),
+                "node.a11yDescription.keyboardDisabled": t("flow.node.a11y"),
+                "edge.a11yDescription.default": t("flow.edge.a11y"),
+              }}
+              proOptions={{ hideAttribution: true }}
+            >
+              <Background gap={24} size={1.5} />
+              <MapControls />
+            </ReactFlow>
+          </div>
         </div>
       ) : null}
     </PageShell>

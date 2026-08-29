@@ -6,6 +6,9 @@ import { ThemeProvider } from "@/components/theme-provider";
 import { retryUnlessClientError } from "@/lib/api";
 import { LocaleProvider } from "@/lib/i18n";
 import { router } from "@/routes";
+/* Self-hosted fonts (no external hosts — CSP/air-gap): vite bundles the woff2. */
+import "@fontsource-variable/inter";
+import "@fontsource-variable/jetbrains-mono";
 import "./index.css";
 
 const queryClient = new QueryClient({

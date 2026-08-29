@@ -363,16 +363,16 @@ function RawSeriesRow({ row, index }: { row: ChartSeries; index: number }) {
               /* The whole label set is one hover away even before the row is
                   expanded — the affordance the truncated dump never had. */
               title={row.identity.fullText}
-              className="min-w-0 flex-1 truncate font-mono text-xs"
+              className="mono-data min-w-0 flex-1 truncate"
             >
               {row.identity.text}
             </span>
           </span>
         </td>
-        <td className="nums border-b border-border py-2 pr-4 text-right align-top text-muted-foreground">
+        <td className="mono-data border-b border-border py-2 pr-4 text-right align-top text-muted-foreground">
           {row.points}
         </td>
-        <td className="nums border-b border-border py-2 pr-4 text-right align-top">{row.lastValue}</td>
+        <td className="mono-data border-b border-border py-2 pr-4 text-right align-top">{row.lastValue}</td>
       </tr>
       {open ? (
         <tr>
@@ -380,7 +380,7 @@ function RawSeriesRow({ row, index }: { row: ChartSeries; index: number }) {
             <code
               id={fullId}
               data-testid="raw-full-labels"
-              className="block break-all font-mono text-[11px] leading-relaxed text-muted-foreground"
+              className="mono-data block break-all leading-relaxed"
             >
               {row.identity.fullText}
             </code>
@@ -417,7 +417,7 @@ function RawSeriesTable({ series, sharedText }: { series: ChartSeries[]; sharedT
             and repeating them on eighty-six rows is what pushed the two
             characters that differ off the end of every one of them. */}
         {sharedText ? (
-          <code data-testid="raw-shared" className="min-w-0 truncate font-mono text-[11px] text-muted-foreground">
+          <code data-testid="raw-shared" className="mono-data min-w-0 truncate text-muted-foreground">
             {sharedText}
           </code>
         ) : null}
@@ -568,6 +568,7 @@ export function PromQLConsolePage() {
     <PageShell
       timeMachine
       title={t("title")}
+      help={{ body: t("help.body"), slug: "promql" }}
       /* {at} lands INSIDE a translated sentence, so it takes that sentence's
          language — lib/i18n's localeTag. Computed here, never formatted by the
          dictionary (QA scope 2, finding #8). */
@@ -682,7 +683,7 @@ export function PromQLConsolePage() {
                     {pager.visible.map((row, i) => (
                       <tr key={i} className="transition-colors duration-(--dur-fast) hover:bg-accent/40">
                         {row.map((cell, j) => (
-                          <td key={j} className="nums border-b border-border px-4 py-2.5">{cell}</td>
+                          <td key={j} className="mono-data border-b border-border px-4 py-2.5">{cell}</td>
                         ))}
                       </tr>
                     ))}
@@ -722,7 +723,7 @@ export function PromQLConsolePage() {
         {activeTab === "json" ? (
           <ResultPanel tab="json">
             <Card className="overflow-hidden p-0">
-              <pre className="max-h-[32rem] overflow-auto bg-surface-2/50 p-4 font-mono text-xs leading-relaxed">
+              <pre className="mono-data max-h-[32rem] overflow-auto bg-surface-2/50 p-4 leading-relaxed">
                 {rawJson ?? t("json.idle")}
               </pre>
             </Card>
@@ -748,7 +749,7 @@ function ResultPlaceholder({ text }: { text: string }) {
 function LabeledControl({ label, children }: { label: string; children: ReactNode }) {
   return (
     <span className="flex items-center gap-1.5">
-      <span className="text-[10.5px] font-semibold uppercase tracking-[0.08em] text-muted-foreground">
+      <span className="text-[11px] font-medium uppercase tracking-[0.06em] text-muted-foreground">
         {label}
       </span>
       {children}

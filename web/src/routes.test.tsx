@@ -7,7 +7,7 @@ import {
   RouterProvider,
 } from "@tanstack/react-router";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ThemeProvider } from "@/components/theme-provider";
 import { NAV_ITEMS } from "@/nav";
@@ -201,5 +201,45 @@ describe("AppShell keyboard entry", () => {
   it("names its navigation landmark", async () => {
     renderShell();
     expect(await screen.findByRole("navigation", { name: "Main" })).toBeInTheDocument();
+  });
+});
+
+/* ── M4-7: keyboard scrolling must reach the content pane ────────────────── */
+
+/**
+ * Live walkthrough evidence: End/PageDown scrolled the SIDEBAR. The document
+ * never scrolls (the shell div is overflow-hidden; only <main> is a scroller),
+ * and keyboard scroll keys act on the focused element's nearest scrollable
+ * ancestor — after a nav click focus is still on the sidebar link, whose
+ * scrollable ancestor is the sidebar's own overflow-y-auto <nav>. The shell
+ * must hand focus to <main> on every route change so those keys scroll the
+ * page.
+ */
+describe("keyboard scrolling reaches the content pane", () => {
+  it("moves focus to <main> after a navigation, so PageDown/End scroll the page", async () => {
+    renderShell();
+    const link = await screen.findByRole("link", { name: "Events" });
+    // The walkthrough's state: the user reached the sidebar by keyboard, so
+    // focus sits on the link they activate.
+    link.focus();
+    fireEvent.click(link);
+    await waitFor(() => expect(screen.getByRole("main")).toHaveFocus());
+  });
+
+  it("does NOT steal focus on the initial render — Tab still lands on the skip link first", async () => {
+    renderShell();
+    await screen.findByRole("main");
+    expect(document.activeElement).toBe(document.body);
+  });
+
+  it("leaves focus alone when a click does not change the route", async () => {
+    renderShell();
+    // "/" is the initial entry, so Overview navigates nowhere; yanking focus
+    // to <main> on a same-path click (or a query-only change like ?at=) would
+    // fight the element the user is actually on.
+    const link = await screen.findByRole("link", { name: "Overview" });
+    link.focus();
+    fireEvent.click(link);
+    expect(link).toHaveFocus();
   });
 });

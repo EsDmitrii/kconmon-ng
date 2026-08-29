@@ -4,7 +4,9 @@ import { PageShell } from "@/components/page-shell";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
+import { Input, Textarea } from "@/components/ui/input";
 import { Pager, usePager } from "@/components/ui/pager";
+import { Select } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useAuth } from "@/hooks/use-auth";
 import { useConfirmStep } from "@/hooks/use-confirm-step";
@@ -39,7 +41,7 @@ import type {
   AlertSyncStatus,
   ForeignRule,
 } from "@/lib/types";
-import { CHECKBOX_CLASS, cn } from "@/lib/utils";
+import { CHECKBOX_CLASS } from "@/lib/utils";
 
 /** Prometheus evaluates, the console MANAGES; with alerting off this section is the only one that stops working. */
 
@@ -66,18 +68,11 @@ function problemStatus(error: unknown): number | undefined {
   return error instanceof ApiError ? error.problem.status : undefined;
 }
 
-function fieldClasses(invalid: boolean): string {
-  return cn(
-    "h-9 rounded-md border bg-transparent px-3 text-[13px]",
-    invalid ? "border-health-bad" : "border-border-strong",
-  );
-}
-
 function SectionCard({ title, children }: { title: string; children: ReactNode }) {
   return (
     <Card asChild className="p-6">
       <section>
-        <h2 className="text-sm font-semibold">{title}</h2>
+        <h2 className="type-section">{title}</h2>
         {children}
       </section>
     </Card>
@@ -878,7 +873,7 @@ function RuleRow({
           <p className="text-muted-foreground">{t("row.renderedExpr")}</p>
           {/* The SERVER's bytes, not a re-render: renderedExpr is on the row so
               the expression an operator reads is the one the bundle carries. */}
-          <code className="mt-1 block break-all whitespace-pre-wrap font-mono text-[12px]">{rule.renderedExpr}</code>
+          <code className="mono-data mt-1 block break-all whitespace-pre-wrap">{rule.renderedExpr}</code>
           {rule.syncMessage === "" ? null : (
             <p className="mt-2 leading-relaxed text-muted-foreground">{rule.syncMessage}</p>
           )}
@@ -977,19 +972,18 @@ function PairEditor({
               finding #15). The aria-labels have always been right; a sighted
               operator had only the order to go on, and the order is the one
               thing a two-box row does not communicate. */}
-          <input
+          <Input
             aria-label={t("pairs.nameAria", { noun, index: i + 1 })}
             placeholder={t("pairs.namePlaceholder")}
             value={pair.key}
             onChange={(e) => onChange(pairs.map((p, j) => (i === j ? { ...p, key: e.target.value } : p)))}
-            className={fieldClasses(reservedLabelMessage(pair.key.trim()) !== undefined)}
+            invalid={reservedLabelMessage(pair.key.trim()) !== undefined}
           />
-          <input
+          <Input
             aria-label={t("pairs.valueAria", { noun, index: i + 1 })}
             placeholder={t("pairs.valuePlaceholder")}
             value={pair.value}
             onChange={(e) => onChange(pairs.map((p, j) => (i === j ? { ...p, value: e.target.value } : p)))}
-            className={fieldClasses(false)}
           />
           <Button
             type="button"
@@ -1039,7 +1033,7 @@ function PreviewPanel({
       {error ? <ErrorLine>{error}</ErrorLine> : null}
       {preview ? (
         <>
-          <code className="mt-2 block break-all whitespace-pre-wrap font-mono text-[12px]">{preview.expr}</code>
+          <code className="mono-data mt-2 block break-all whitespace-pre-wrap">{preview.expr}</code>
           {preview.error ? (
             <>
               {/* The two halves failed independently. The expression rendered —
@@ -1233,32 +1227,31 @@ function RuleForm({ initial, onDone }: { initial?: AlertRule; onDone: () => void
       <form
         onSubmit={handleSubmit}
         aria-label={initial ? t("form.editAria", { name: initial.name }) : t("form.createAria")}
-        className="flex flex-col gap-4"
+        className="flex max-w-2xl flex-col gap-4"
       >
-        <h3 className="text-sm font-semibold">
+        <h3 className="type-section">
           {initial ? t("form.edit", { name: initial.name }) : t("form.create")}
         </h3>
 
         <div className="grid gap-4 sm:grid-cols-2">
           <Field label={t("form.name")} testId="name" error={errorFor("name")} hint={t("form.nameHint")}>
             {(id, invalid) => (
-              <input
+              <Input
                 id={id}
                 value={draft.name}
                 placeholder="PairLossHigh"
                 onChange={(e) => setDraft((d) => ({ ...d, name: e.target.value }))}
-                className={fieldClasses(invalid)}
+                invalid={invalid}
               />
             )}
           </Field>
 
           <Field label={t("form.kind")} testId="kind">
             {(id) => (
-              <select
+              <Select
                 id={id}
                 value={draft.kind}
                 onChange={(e) => setDraft((d) => ({ ...d, kind: e.target.value as AlertRuleKind }))}
-                className={fieldClasses(false)}
               >
                 {/* The kind is the stored identifier and stays; the blurb after
                     the dash is this page explaining it, and translates. */}
@@ -1267,7 +1260,7 @@ function RuleForm({ initial, onDone }: { initial?: AlertRule; onDone: () => void
                     {kind} — {t(blurbKey)}
                   </option>
                 ))}
-              </select>
+              </Select>
             )}
           </Field>
         </div>
@@ -1289,11 +1282,11 @@ function RuleForm({ initial, onDone }: { initial?: AlertRule; onDone: () => void
             >
               {(id, invalid) =>
                 field.type === "target" && targetsReady ? (
-                  <select
+                  <Select
                     id={id}
                     value={draft.params[field.key] ?? ""}
                     onChange={(e) => setDraft((d) => ({ ...d, params: { ...d.params, [field.key]: e.target.value } }))}
-                    className={fieldClasses(invalid)}
+                    invalid={invalid}
                   >
                     {/* "" is a real, meaningful value here — every external
                         target — so it is named rather than left as an em dash
@@ -1314,13 +1307,13 @@ function RuleForm({ initial, onDone }: { initial?: AlertRule; onDone: () => void
                         {t("form.noSuchTarget", { name: draft.params[field.key] ?? "" })}
                       </option>
                     ) : null}
-                  </select>
+                  </Select>
                 ) : field.type === "enum" ? (
-                  <select
+                  <Select
                     id={id}
                     value={draft.params[field.key] ?? ""}
                     onChange={(e) => setDraft((d) => ({ ...d, params: { ...d.params, [field.key]: e.target.value } }))}
-                    className={fieldClasses(invalid)}
+                    invalid={invalid}
                   >
                     <option value="">{t("form.enumUnset")}</option>
                     {/* The options are the WIRE values (tcp, 0.95). They are
@@ -1330,25 +1323,25 @@ function RuleForm({ initial, onDone }: { initial?: AlertRule; onDone: () => void
                         {option}
                       </option>
                     ))}
-                  </select>
+                  </Select>
                 ) : field.type === "expr" ? (
-                  <textarea
+                  /* PromQL keeps its mono face; the field chrome (border, focus
+                     ring, invalid) now comes from the shared Textarea. */
+                  <Textarea
                     id={id}
                     rows={3}
                     value={draft.params[field.key] ?? ""}
                     onChange={(e) => setDraft((d) => ({ ...d, params: { ...d.params, [field.key]: e.target.value } }))}
-                    className={cn(
-                      "rounded-md border bg-transparent p-3 font-mono text-[12px]",
-                      invalid ? "border-health-bad" : "border-border-strong",
-                    )}
+                    invalid={invalid}
+                    className="p-3 font-mono text-[12px]"
                   />
                 ) : (
-                  <input
+                  <Input
                     id={id}
                     type={field.type === "number" ? "number" : "text"}
                     value={draft.params[field.key] ?? ""}
                     onChange={(e) => setDraft((d) => ({ ...d, params: { ...d.params, [field.key]: e.target.value } }))}
-                    className={fieldClasses(invalid)}
+                    invalid={invalid}
                   />
                 )
               }
@@ -1374,18 +1367,18 @@ function RuleForm({ initial, onDone }: { initial?: AlertRule; onDone: () => void
             hint={t("form.severityHint")}
           >
             {(id, invalid) => (
-              <select
+              <Select
                 id={id}
                 value={draft.severity}
                 onChange={(e) => setDraft((d) => ({ ...d, severity: e.target.value as AlertSeverity }))}
-                className={fieldClasses(invalid)}
+                invalid={invalid}
               >
                 {SEVERITIES.map((s) => (
                   <option key={s} value={s}>
                     {s}
                   </option>
                 ))}
-              </select>
+              </Select>
             )}
           </Field>
 
@@ -1396,12 +1389,12 @@ function RuleForm({ initial, onDone }: { initial?: AlertRule; onDone: () => void
             hint={t("form.forHint")}
           >
             {(id, invalid) => (
-              <input
+              <Input
                 id={id}
                 value={draft.forText}
                 placeholder="5m"
                 onChange={(e) => setDraft((d) => ({ ...d, forText: e.target.value }))}
-                className={fieldClasses(invalid)}
+                invalid={invalid}
               />
             )}
           </Field>
@@ -1685,7 +1678,7 @@ function ImportReport({ report }: { report: AlertRuleImportReport }) {
         ) : (
           <ul className="mt-1 flex flex-col gap-0.5">
             {created.map((name) => (
-              <li key={name} className="font-mono">
+              <li key={name} className="mono-data">
                 {name}
               </li>
             ))}
@@ -1701,7 +1694,7 @@ function ImportReport({ report }: { report: AlertRuleImportReport }) {
           <dl className="mt-1 flex flex-col gap-1">
             {skipped.map((item, i) => (
               <div key={`${item.name}-${i}`} className="flex flex-wrap gap-x-2">
-                <dt className="font-mono">{item.name === "" ? t("import.unnamed") : item.name}</dt>
+                <dt className="mono-data">{item.name === "" ? t("import.unnamed") : item.name}</dt>
                 {/* Verbatim: the server names the entry as the FOREIGN object
                     spells it and says why in one sentence. */}
                 <dd className="text-muted-foreground">{item.reason}</dd>
@@ -1719,7 +1712,7 @@ function ImportReport({ report }: { report: AlertRuleImportReport }) {
           <dl className="mt-1 flex flex-col gap-1">
             {notes.map((item, i) => (
               <div key={`${item.name}-${i}`} className="flex flex-wrap gap-x-2">
-                <dt className="font-mono">{item.name}</dt>
+                <dt className="mono-data">{item.name}</dt>
                 <dd className="text-muted-foreground">{item.note}</dd>
               </div>
             ))}
@@ -1770,7 +1763,7 @@ function ForeignRow({ rule, canManage }: { rule: ForeignRule; canManage: boolean
       </span>
       {/* An object carrying no managed-by label gets an em dash, not a blank:
           "nobody claims this" is a fact, and a blank cell reads as a bug. */}
-      <span data-testid="managed-by" className="text-xs text-muted-foreground">
+      <span data-testid="managed-by" className="mono-data text-muted-foreground">
         {rule.managedBy === "" ? "—" : rule.managedBy}
       </span>
       {canManage ? (
@@ -1976,7 +1969,7 @@ export function AlertingPage() {
 
   return (
     /* The title is the same word the sidebar's nav.alerting uses. */
-    <PageShell title={t("title")} description={t("description")}>
+    <PageShell title={t("title")} help={{ body: t("help.body"), slug: "alerting" }} description={t("description")}>
       {body}
     </PageShell>
   );

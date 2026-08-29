@@ -152,6 +152,77 @@
       (cidr, resolve or disabled) before suspecting the network.
 {{- end }}
 {{- end }}
+{{- with $pr.zoneChecksFailing }}
+{{- if .enabled }}
+{{- $t := float64 .threshold }}
+{{/* One rule across all three protocols: the __name__ union keeps a disabled checker from
+     blanking the ratio, and the schema pins metricsPrefix to [a-z0-9_] so it is regex-safe. */}}
+- alert: ZoneChecksFailing
+  expr: >-
+    sum by (source_zone, destination_zone)
+    (rate({__name__=~"{{ $prefix }}_zone_(tcp|udp|icmp)_results_total",result="fail"}[5m]))
+    /
+    sum by (source_zone, destination_zone)
+    (rate({__name__=~"{{ $prefix }}_zone_(tcp|udp|icmp)_results_total"}[5m]))
+    > {{ $t }}
+  for: {{ .for }}
+  labels:
+    severity: {{ .severity }}
+  annotations:
+    summary: >-
+      Zone checks failing {{`{{ $labels.source_zone }}`}} ->
+      {{`{{ $labels.destination_zone }}`}} at {{`{{ $value | humanizePercentage }}`}} of
+      probes
+    description: >-
+      {{`{{ $value | humanizePercentage }}`}} of all TCP, UDP and ICMP probes from zone
+      {{`{{ $labels.source_zone }}`}} to zone {{`{{ $labels.destination_zone }}`}} failed
+      over the last 5m, above the
+      {{ include "kconmon-ng.prometheusRule.pct" $t }}% threshold. This is the
+      zone-level aggregate, so it keeps firing under the agent.metrics.detail
+      scrape modes that drop per-pair series. Open the "kconmon-ng / Zone
+      Heatmap" Grafana dashboard to see which protocol carries the failures
+      and whether the whole fabric between the zones or only one direction is
+      affected, then the kconmon-ng console Matrix or Investigate page to find
+      the node pairs pulling the ratio up — in zone-only mode the per-pair
+      evidence lives in the console, not in Prometheus.
+{{- end }}
+{{- end }}
+{{- with $pr.zoneLossHigh }}
+{{- if .enabled }}
+{{- $t := float64 .threshold }}
+{{/* Loss is (sent - received) / sent from the zone counters: averaging the per-pair loss-ratio
+     gauges into a zone would weight an idle pair the same as a busy one, so the chart never does. */}}
+- alert: ZoneLossHigh
+  expr: >-
+    (sum by (source_zone, destination_zone)
+    (rate({__name__=~"{{ $prefix }}_zone_(udp|icmp)_packets_sent_total"}[5m]))
+    -
+    sum by (source_zone, destination_zone)
+    (rate({__name__=~"{{ $prefix }}_zone_(udp|icmp)_packets_received_total"}[5m])))
+    /
+    sum by (source_zone, destination_zone)
+    (rate({__name__=~"{{ $prefix }}_zone_(udp|icmp)_packets_sent_total"}[5m]))
+    > {{ $t }}
+  for: {{ .for }}
+  labels:
+    severity: {{ .severity }}
+  annotations:
+    summary: >-
+      Packet loss {{`{{ $labels.source_zone }}`}} -> {{`{{ $labels.destination_zone }}`}}
+      at {{`{{ $value | humanizePercentage }}`}}
+    description: >-
+      UDP and ICMP probes from zone {{`{{ $labels.source_zone }}`}} to zone
+      {{`{{ $labels.destination_zone }}`}} have lost
+      {{`{{ $value | humanizePercentage }}`}} of their packets over the last 5m,
+      above the {{ include "kconmon-ng.prometheusRule.pct" $t }}% threshold.
+      The ratio is packet-weighted across every pair between the zones, so a
+      single broken link is diluted here and belongs to UDPLossHigh; this
+      firing means the fabric between the zones is losing traffic. Open the
+      "kconmon-ng / Zone Heatmap" Grafana dashboard to see whether the loss is
+      one direction or both, then the kconmon-ng console Matrix or Investigate
+      page scoped to these zones for the pair-level picture.
+{{- end }}
+{{- end }}
 {{- with $pr.kconmonAgentsMissing }}
 {{- if .enabled }}
 {{/* Standbys hold no agents by design, so only the lease holder's counts are evidence. */}}

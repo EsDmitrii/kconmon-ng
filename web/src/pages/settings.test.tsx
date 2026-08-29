@@ -433,7 +433,12 @@ describe("tokens section", () => {
     const rows = within(list).getAllByTestId("token-row");
     expect(rows).toHaveLength(2);
     expect(within(rows[0]).getByText("ci-pipeline")).toBeInTheDocument();
-    expect(within(rows[0]).getByText(/owner u1/)).toBeInTheDocument();
+    /* The owner id sits in its own mono-data span (M4 data face) inside the
+       labelled line, so the label and the value are asserted as one sentence
+       and the face is pinned on the value. */
+    const owner = within(rows[0]).getByText("u1");
+    expect(owner.className).toContain("mono-data");
+    expect(owner.parentElement).toHaveTextContent("owner u1");
     expect(within(rows[0]).getByTestId("token-last-used")).toHaveTextContent(
       `last used ${new Date("2026-02-03T04:05:00Z").toLocaleString(undefined, { hour12: false })}`,
     );
@@ -944,6 +949,15 @@ describe("import", () => {
     const targets = await screen.findByTestId("import-row-targets");
     expect(targets).toHaveTextContent("2");
     expect(targets).toHaveTextContent("1");
+
+    /* The ledger is the shared dense table now (M4-3): counts are numeric
+       cells — right-aligned, in the data face. */
+    const cells = within(targets).getAllByRole("cell");
+    expect(cells).toHaveLength(3);
+    for (const cell of cells) {
+      expect(cell.className).toContain("mono-data");
+      expect(cell.className).toContain("text-right");
+    }
 
     // Errors and warnings are the server's own sentences, not a count.
     expect(screen.getByText('definition "edge-tcp" is not in this bundle')).toBeInTheDocument();

@@ -801,3 +801,55 @@ describe("edge label precision", () => {
     expect(edges[0].ariaLabel).toContain("9.6%");
   });
 });
+
+/* ── M4-1/M4-5: the tool surface and the mono data face ──────────────────────
+ *
+ * Class pins, because jsdom lays nothing out: the map must sit straight on the
+ * page (no Card between the shell's column and the working surface) under the
+ * slim tool header, and the node labels — identifiers — must wear mono-data
+ * (.topo-node's own 13px already matches the face's size, so nothing shifts).
+ */
+describe("TopologyPage — the tool surface", () => {
+  afterEach(() => {
+    cleanup();
+    vi.unstubAllGlobals();
+    onlineManager.setOnline(true);
+  });
+
+  const renderDrawn = () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((url: string) => {
+        const href = String(url);
+        if (href.startsWith("/api/v1/topology")) {
+          return Promise.resolve(
+            json({ nodes: [{ name: "n1", zone: "z", ready: true }], agents: [], timestamp: "t" }),
+          );
+        }
+        return Promise.resolve(json({}));
+      }),
+    );
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    return render(
+      <QueryClientProvider client={qc}>
+        <ThemeProvider><TopologyPage /></ThemeProvider>
+      </QueryClientProvider>,
+    );
+  };
+
+  it("draws the map on the page itself: slim tool header, no card around the working surface", async () => {
+    const { container } = renderDrawn();
+    await screen.findByTitle("n1");
+    expect(screen.getByRole("heading", { level: 1 }).className).toContain("text-lg");
+    const pane = container.querySelector(".react-flow");
+    expect(pane).not.toBeNull();
+    expect((pane as HTMLElement).closest(".shadow-card")).toBeNull();
+  });
+
+  it("sets the node labels in the mono data face", async () => {
+    renderDrawn();
+    const label = await screen.findByTitle("n1");
+    expect(label.className).toContain("mono-data");
+    expect(label).toHaveTextContent("n1");
+  });
+});

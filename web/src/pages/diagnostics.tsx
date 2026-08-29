@@ -1131,12 +1131,12 @@ function HistoryList({
     <ul className="mt-4 divide-y divide-border">
       {pager.visible.map((r) => (
         <li key={r.id} className="flex flex-wrap items-center gap-3 py-3 text-sm">
-          <a href={withAtParam(`/diagnostics/runs/${r.id}`)} className="font-medium text-primary hover:underline">
+          <a href={withAtParam(`/diagnostics/runs/${r.id}`)} className="mono-data font-medium text-primary hover:underline">
             {r.id}
           </a>
           <StatusBadge status={r.status || "—"} />
           <span className="text-xs uppercase tracking-wide text-muted-foreground">{r.type || "—"}</span>
-          <span className="nums ml-auto text-xs text-muted-foreground">{okOfTotal(t, r)}</span>
+          <span className="mono-data ml-auto text-muted-foreground">{okOfTotal(t, r)}</span>
           <span className="text-xs text-muted-foreground">{fmtTime(r.createdAt, locale)}</span>
         </li>
       ))}
@@ -1226,6 +1226,7 @@ export function DiagnosticsPage() {
     <PageShell
       timeMachine
       title={t("title")}
+      help={{ body: t("help.body"), slug: "run-checks" }}
       /* {at} lands INSIDE a translated sentence, so it takes that sentence's
          language — lib/i18n's localeTag. Computed here, never formatted by the
          dictionary (QA scope 2, finding #8). */
@@ -1243,7 +1244,7 @@ export function DiagnosticsPage() {
       <Card asChild className="p-6">
         <section>
           <div className="flex flex-wrap items-center justify-between gap-2">
-            <h2 className="text-sm font-semibold">{t("history.title")}</h2>
+            <h2 className="type-section">{t("history.title")}</h2>
             {/* Wired to the SERVER's own ?type=&status= (runs.go's
                 handleRunsList), not to a client-side pass over the loaded
                 pages: filtering in the browser would silently mean "of the

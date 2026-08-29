@@ -1049,3 +1049,36 @@ describe("MatrixPage — column headers stay distinguishable", () => {
     expect(screen.getByText(/drop the shared prefix kconmon-prod\.node-/)).toBeInTheDocument();
   });
 });
+
+/* ── M4-1/M4-5: the tool surface and the mono data face ──────────────────────
+ *
+ * Class pins, because jsdom lays nothing out: the grid must sit straight on the
+ * page (no Card between the shell's column and the working surface) under the
+ * slim tool header, and every identifier/figure must wear the mono face —
+ * font-mono on the zoom-scaled grid text (mono-data would pin 13px and stop the
+ * labels scaling), mono-data in the fixed-size tooltip.
+ */
+describe("MatrixPage — the tool surface", () => {
+  it("draws the grid on the page itself: slim tool header, no card around the working surface", async () => {
+    stubFetch(matrixBody);
+    renderPage();
+    await screen.findByLabelText("a → b: fail 50.0%, RTT p95 2.0ms");
+    expect(screen.getByRole("heading", { level: 1 }).className).toContain("text-lg");
+    expect(screen.getByTestId("matrix-viewport").closest(".shadow-card")).toBeNull();
+  });
+
+  it("sets the axis names and the cell figures in the mono data face", async () => {
+    stubFetch(matrixBody);
+    renderPage();
+    const cell = await screen.findByLabelText("a → b: fail 50.0%, RTT p95 2.0ms");
+    const [hero, sub] = Array.from(cell.querySelectorAll("span"));
+    expect(hero.className).toContain("font-mono");
+    expect(hero.className).toContain("nums");
+    expect(sub.className).toContain("font-mono");
+    const [header] = screen.getAllByRole("link", { name: "Open the card for a" });
+    expect(header.className).toContain("font-mono");
+    // The zoom-scaled sizes stay the zoom engine's, not mono-data's fixed 13px.
+    expect(hero.className).toContain("text-[length:var(--m-font-hero)]");
+    expect(header.className).not.toContain("mono-data");
+  });
+});

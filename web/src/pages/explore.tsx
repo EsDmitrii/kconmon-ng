@@ -243,7 +243,7 @@ function ExploreCard({
   return (
     <Card asChild interactive className="p-5">
       <section>
-        <h2 className="text-sm font-semibold">{chartTitle(chart, locale)}</h2>
+        <h2 className="type-section">{chartTitle(chart, locale)}</h2>
         {error ? (
           <p role="alert" className="mt-3 text-sm text-health-bad">{error.message}</p>
         ) : null}
@@ -442,7 +442,7 @@ function ComparePanel({
     <Card asChild interactive className="p-5">
       <section aria-label={t("compare.title")}>
         <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
-          <h2 className="text-sm font-semibold">{t("compare.title")}</h2>
+          <h2 className="type-section">{t("compare.title")}</h2>
           <CompareSelect label={t("compare.metricA")} value={aId} onChange={setAId}>
             {CURATED_CHARTS.map((c) => (
               <option key={c.id} value={c.id}>
@@ -548,6 +548,7 @@ export function ExplorePage() {
     <PageShell
       timeMachine
       title={t("title")}
+      help={{ body: t("help.body"), slug: "metrics" }}
       /* {at} lands INSIDE a translated sentence, so it takes that sentence's
          language — lib/i18n's localeTag. Computed here and passed in, never
          formatted by the dictionary (QA scope 2, finding #8). */

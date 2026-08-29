@@ -1,0 +1,27 @@
+[Unit]
+Description=kconmon-ng agent (external-agent build)
+Documentation=https://github.com/EsDmitrii/kconmon-ng
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+User=kconmon-ng
+Group=kconmon-ng
+# Same default path the binary uses; kept explicit so the unit documents where config lives.
+Environment=KCONMON_NG_CONFIG=/etc/kconmon-ng/config.yaml
+ExecStart=/usr/bin/kconmon-ng-agent
+# MTR prefers a RAW ICMP socket (internal/checker/mtr.go): the datagram fallback delivers echo
+# replies only, so every intermediate hop reads as silent. CAP_NET_RAW keeps hop tracing working
+# for the unprivileged user; the plain ICMP checker needs ping_group_range instead (sysctl.d file).
+AmbientCapabilities=CAP_NET_RAW
+CapabilityBoundingSet=CAP_NET_RAW
+NoNewPrivileges=yes
+# The agent keeps all state in memory; nothing on disk is written, so the filesystem stays read-only.
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+Restart=always
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target

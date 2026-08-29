@@ -505,3 +505,33 @@ describe("InvestigationTimeline — Russian", () => {
     expect(screen.getByTestId("timeline-count").textContent).toBe("21 запись в этом интервале");
   });
 });
+
+/* ── M4 typography: the data face and the named scale ────────────────────────
+   Pinned once at the component: the timestamp column is data and wears
+   mono-data; the pane heading sits on the named section step; the readable
+   detail line is primary content, so it must NOT carry the muted caption
+   colour (the raw machine identity already lives in the tooltip). */
+describe("InvestigationTimeline — M4 typography", () => {
+  it("puts the stamp in mono-data, the heading on type-section, and leaves the detail unmuted", () => {
+    renderTimeline({
+      entries: [
+        {
+          at: new Date(T0),
+          kind: "audit",
+          severity: "info",
+          title: "POST /api/v1/targets",
+          detail: "ada@example.com · targets · allowed",
+          detailTitle: "user:oidc:6f616b42",
+          ref: { kind: "audit", id: "a-1" },
+        },
+      ],
+    });
+    const row = screen.getByTestId("timeline-row");
+    const stamp = row.querySelector("span");
+    expect(stamp?.className).toContain("mono-data");
+    expect(screen.getByRole("heading", { name: "Timeline" }).className).toContain("type-section");
+    expect(screen.getByText("ada@example.com · targets · allowed").className).not.toContain(
+      "text-muted-foreground",
+    );
+  });
+});

@@ -3,7 +3,16 @@ import { render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { LOCALE_STORAGE_KEY, LocaleProvider, translate, type Translate } from "@/lib/i18n";
 import { overviewDict, type OverviewKey } from "@/lib/i18n/dict/overview";
-import { OverviewPage, fmtAge, foldBounds, nodesTile, sortFiringAlerts, summarize } from "./overview";
+import {
+  OverviewPage,
+  fmtAge,
+  foldBounds,
+  healthStatement,
+  nodesTile,
+  sortFiringAlerts,
+  summarize,
+  type OverviewSummary,
+} from "./overview";
 import type { Alert, Matrix, Topology } from "@/lib/types";
 import { fmtEventStamp, fmtEventTime } from "@/lib/utils";
 
@@ -197,13 +206,19 @@ describe("OverviewPage", () => {
     );
     renderPage();
 
-    await screen.findByText("No probe data in Prometheus yet");
+    // Live at zero measured pairs is the FIRST-RUN state: the setup-progress
+    // card stands where the noData slate used to (M4-6).
+    await screen.findByTestId("setup-progress");
     const notes = screen.getAllByTestId("tile-note");
     expect(notes).toHaveLength(2); // the failing tile and the degraded one
     expect(notes[0]).toHaveTextContent("No pair was measured here, so there is nothing to count.");
-    // Three tiles, and the only counted one is the nodes tile.
+    // Three tiles, and the only counted one is the nodes tile. The "0" pin
+    // moved onto the tile values themselves: the setup card may honestly
+    // print a 0 of its own (agents registered).
     expect(screen.getAllByText("—")).toHaveLength(2);
-    expect(screen.queryByText("0")).toBeNull();
+    const values = screen.getAllByTestId("stat-value");
+    expect(values[1]).toHaveTextContent("—");
+    expect(values[2]).toHaveTextContent("—");
   });
 
   /* ── #7: 9 scored out of 90 measured is not a healthy fleet ───────────── */
@@ -808,5 +823,181 @@ describe("OverviewPage — worst pairs are links (M3-1)", () => {
     const href = links[0].getAttribute("href") ?? "";
     expect(href).toContain("/investigate?kind=pair");
     expect(href).toContain(encodeURIComponent("c→a"));
+  });
+});
+
+/* ── M4-6: the page leads with the health statement in words ────────────── */
+
+describe("healthStatement", () => {
+  const sum = (over: Partial<OverviewSummary>): OverviewSummary => ({
+    totalNodes: 2,
+    readyNodes: 2,
+    pairsTotal: 4,
+    pairsScored: 4,
+    pairsFailing: 0,
+    pairsDegraded: 0,
+    worstPairs: [],
+    ...over,
+  });
+
+  it("leads with the failing count when anything is failing", () => {
+    expect(healthStatement(sum({ pairsFailing: 3, pairsDegraded: 1 }), enT)).toEqual({
+      text: "3 pairs failing",
+      tone: "bad",
+    });
+    expect(healthStatement(sum({ pairsFailing: 1 }), enT)).toEqual({ text: "1 pair failing", tone: "bad" });
+  });
+
+  it("falls to the degraded count when nothing is failing", () => {
+    expect(healthStatement(sum({ pairsDegraded: 2 }), enT)).toEqual({ text: "2 pairs degraded", tone: "warn" });
+  });
+
+  it("says all pairs are healthy only when every measured pair is scored", () => {
+    expect(healthStatement(sum({}), enT)).toEqual({ text: "All 4 pairs healthy" });
+    expect(healthStatement(sum({ pairsTotal: 1, pairsScored: 1 }), enT)).toEqual({
+      text: "The one measured pair is healthy",
+    });
+  });
+
+  /* 9 scored out of 90 measured is not "all 90 healthy" — the claim shrinks to
+     the pairs that actually carry a ratio, the scored-gap line's own rule. */
+  it("scopes the healthy claim to the scored pairs when there is a gap", () => {
+    expect(healthStatement(sum({ pairsScored: 2 }), enT)).toEqual({ text: "All 2 scored pairs healthy" });
+  });
+
+  it("claims nothing without a single scored pair", () => {
+    expect(healthStatement(sum({ pairsTotal: 0, pairsScored: 0 }), enT)).toBeNull();
+    expect(healthStatement(sum({ pairsScored: 0 }), enT)).toBeNull();
+  });
+
+  it("reads in Russian too", () => {
+    expect(healthStatement(sum({ pairsFailing: 3 }), ruT)).toEqual({ text: "Пар со сбоями: 3", tone: "bad" });
+  });
+});
+
+describe("OverviewPage — the health statement (M4-6)", () => {
+  const stub = (body: unknown) =>
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((url: string) => Promise.resolve(String(url).includes("/topology") ? json(topo) : json(body))),
+    );
+
+  it("states the failing count in words, toned bad", async () => {
+    stub(matrix); // 2 failing, 1 degraded
+    renderPage();
+    const st = await screen.findByTestId("health-statement");
+    expect(st).toHaveTextContent("2 pairs failing");
+    expect(st.className).toContain("text-health-bad");
+  });
+
+  it("says all pairs healthy when nothing is failing or degraded", async () => {
+    stub({
+      ...matrix,
+      cells: [
+        { source: "a", destination: "b", failRatio: 0.001 },
+        { source: "a", destination: "c", failRatio: 0 },
+      ],
+    });
+    renderPage();
+    const st = await screen.findByTestId("health-statement");
+    expect(st).toHaveTextContent("All 2 pairs healthy");
+    expect(st.className).not.toContain("text-health-bad");
+  });
+
+  it("renders no statement when nothing was scored", async () => {
+    stub({ ...matrix, cells: [{ source: "a", destination: "b", failRatio: null, rttP95: 2_000_000 }] });
+    renderPage();
+    await screen.findByText("No failure ratio for these pairs");
+    expect(screen.queryByTestId("health-statement")).toBeNull();
+  });
+});
+
+/* ── M4-6: first run — one setup-progress card, not four empty panels ───── */
+
+describe("OverviewPage — first-run setup progress (M4-6)", () => {
+  const emptyMatrix = { ...matrix, nodes: [], cells: [] };
+  const agentsTopo = {
+    nodes: [],
+    agents: [
+      { id: "a-1", nodeName: "a", podIP: "", zone: "z" },
+      { id: "a-2", nodeName: "b", podIP: "", zone: "z" },
+    ],
+    timestamp: "2026-01-01T00:00:00Z",
+  };
+  const stub = (topoBody: unknown, matrixBody: unknown) =>
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((url: string) => Promise.resolve(String(url).includes("/topology") ? json(topoBody) : json(matrixBody))),
+    );
+
+  it("replaces the empty worst-pairs panel with the one setup card", async () => {
+    stub(agentsTopo, emptyMatrix);
+    renderPage();
+
+    expect(await screen.findByTestId("setup-progress")).toBeInTheDocument();
+    expect(screen.queryByText("No probe data in Prometheus yet")).toBeNull();
+    expect(screen.queryByText("Worst pairs")).toBeNull();
+  });
+
+  it("counts the registered agents and leaves the probe round waiting", async () => {
+    stub(agentsTopo, emptyMatrix);
+    renderPage();
+
+    const card = await screen.findByTestId("setup-progress");
+    const steps = within(card).getAllByTestId("setup-step");
+    expect(steps).toHaveLength(3);
+    expect(steps[0]).toHaveTextContent("Agents registered");
+    expect(within(steps[0]).getByText("2")).toBeInTheDocument();
+    expect(steps[1]).toHaveTextContent("Prometheus scraped");
+    expect(steps[2]).toHaveTextContent("First probe round");
+    expect(steps[2]).toHaveTextContent("waiting");
+  });
+
+  it("names the fix under each unmet step", async () => {
+    stub({ nodes: [], agents: [], timestamp: "2026-01-01T00:00:00Z" }, emptyMatrix);
+    renderPage();
+
+    const card = await screen.findByTestId("setup-progress");
+    // No agent, no series: every step is unmet and each says what to check.
+    expect(within(card).getByText(/agent DaemonSet is running/)).toBeInTheDocument();
+    expect(within(card).getByText(/scrapes the agents/)).toBeInTheDocument();
+    // The waiting step reuses the empty slate's own sentence.
+    expect(within(card).getByText(/usually within a minute of the DaemonSet becoming ready/)).toBeInTheDocument();
+  });
+
+  it("marks Prometheus as scraped once any agent series exists", async () => {
+    // A cell nothing measured still proves Prometheus answered with series.
+    stub(agentsTopo, { ...matrix, cells: [{ source: "a", destination: "b", failRatio: null }] });
+    renderPage();
+
+    const card = await screen.findByTestId("setup-progress");
+    const steps = within(card).getAllByTestId("setup-step");
+    expect(steps[1]).toHaveTextContent("yes");
+    expect(within(card).queryByText(/scrapes the agents/)).toBeNull();
+  });
+
+  it("does not appear once anything is measured", async () => {
+    stub(topo, matrix);
+    renderPage();
+    await screen.findByText("Worst pairs");
+    expect(screen.queryByTestId("setup-progress")).toBeNull();
+  });
+});
+
+/* ── M4: the worst-pairs table wears the dense data face ────────────────── */
+
+describe("OverviewPage — table typography (M4)", () => {
+  it("sets identifiers and headings in the named steps: mono-data pairs, type-section heading", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((url: string) => Promise.resolve(String(url).includes("/topology") ? json(topo) : json(matrix))),
+    );
+    renderPage();
+    const links = await screen.findAllByTestId("worst-pair-link");
+    expect(links[0].className).toContain("mono-data");
+    expect(screen.getByRole("heading", { name: "Worst pairs" }).className).toContain("type-section");
+    // The fail% cell is numeric: right-aligned in the data face.
+    const fail = screen.getByText("50.0%").closest("td");
+    expect(fail?.className).toContain("mono-data");
   });
 });

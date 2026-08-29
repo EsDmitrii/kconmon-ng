@@ -1,3 +1,6 @@
+{{- if and (ne .Values.agent.metrics.detail "full") (not .Values.serviceMonitor.enabled) }}
+{{- fail (printf "agent.metrics.detail=%q but serviceMonitor.enabled=false: the valve is rendered as metricRelabelings on this chart's agent ServiceMonitor and nothing else applies it, so the setting would silently drop nothing. Enable serviceMonitor, or keep detail=full and copy the equivalent metric_relabel_configs from docs/metrics.md (\"Scaling and cardinality\") into your own scrape config" .Values.agent.metrics.detail) }}
+{{- end }}
 {{- if .Values.serviceMonitor.enabled }}
 apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor
@@ -15,4 +18,21 @@ spec:
     - port: metrics
       path: /metrics
       interval: {{ .Values.serviceMonitor.interval }}
+      {{- if eq .Values.agent.metrics.detail "counters-only" }}
+      metricRelabelings:
+        # Drop only the four per-pair histograms — 64 of the ~70 series a directed pair costs.
+        # The prefix needs no regex escaping: the schema pins it to [a-z][a-z0-9_]*. The zone
+        # histograms do not match, their names carry "zone_" between prefix and protocol.
+        - sourceLabels: [__name__]
+          regex: {{ printf "%s_(tcp_connect_duration|tcp_total_duration|udp_rtt|icmp_rtt)_seconds_(bucket|sum|count)" .Values.config.metricsPrefix }}
+          action: drop
+      {{- else if eq .Values.agent.metrics.detail "zone-only" }}
+      metricRelabelings:
+        # A per-pair series is exactly one that names a destination node, so matching the label
+        # drops every pair-scoped family at once and survives any metric rename or prefix. The
+        # zone, DNS, HTTP and external families carry no destination_node and pass through.
+        - sourceLabels: [destination_node]
+          regex: .+
+          action: drop
+      {{- end }}
 {{- end }}

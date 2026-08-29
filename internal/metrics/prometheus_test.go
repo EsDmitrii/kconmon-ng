@@ -297,3 +297,142 @@ func TestNewPrometheusMetricsBuildInfo(t *testing.T) {
 		t.Error("kconmon_ng_build_info not found in gathered families")
 	}
 }
+
+/*
+The M5 zone family: exact metric names are part of the design contract — the chart's rules and the
+zone dashboard address them literally, so a rename here silently kills alerts.
+*/
+func TestZoneFamilyRegisteredUnderPrefix(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	m := NewPrometheusMetrics("kconmon_ng", reg)
+
+	zone := []string{"zone-a", "zone-b"}
+	m.ZoneTCPConnect.WithLabelValues(zone...).Observe(0.001)
+	m.ZoneTCPTotal.WithLabelValues(zone...).Observe(0.002)
+	m.ZoneUDPRtt.WithLabelValues(zone...).Observe(0.003)
+	m.ZoneICMPRtt.WithLabelValues(zone...).Observe(0.004)
+	m.ZoneTCPResults.WithLabelValues("zone-a", "zone-b", "success").Inc()
+	m.ZoneUDPResults.WithLabelValues("zone-a", "zone-b", "fail").Inc()
+	m.ZoneICMPResults.WithLabelValues("zone-a", "zone-b", "success").Inc()
+	m.ZoneUDPPacketsSent.WithLabelValues(zone...).Add(5)
+	m.ZoneUDPPacketsReceived.WithLabelValues(zone...).Add(3)
+	m.ZoneICMPPacketsSent.WithLabelValues(zone...).Inc()
+	m.ZoneICMPPacketsReceived.WithLabelValues(zone...).Inc()
+
+	want := []string{
+		"kconmon_ng_zone_tcp_connect_seconds",
+		"kconmon_ng_zone_tcp_total_seconds",
+		"kconmon_ng_zone_udp_rtt_seconds",
+		"kconmon_ng_zone_icmp_rtt_seconds",
+		"kconmon_ng_zone_tcp_results_total",
+		"kconmon_ng_zone_udp_results_total",
+		"kconmon_ng_zone_icmp_results_total",
+		"kconmon_ng_zone_udp_packets_sent_total",
+		"kconmon_ng_zone_udp_packets_received_total",
+		"kconmon_ng_zone_icmp_packets_sent_total",
+		"kconmon_ng_zone_icmp_packets_received_total",
+	}
+	got := gatheredNames(t, reg)
+	for _, name := range want {
+		if !slices.Contains(got, name) {
+			t.Errorf("expected zone metric %s not found in %v", name, got)
+		}
+	}
+}
+
+// The zone histograms must share defaultBuckets with the per-pair family, or a recording of the
+// same probe lands in different buckets depending on which family a panel reads.
+func TestZoneHistogramsUseDefaultBuckets(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	m := NewPrometheusMetrics("kconmon_ng", reg)
+	m.ZoneICMPRtt.WithLabelValues("zone-a", "zone-b").Observe(0.001)
+
+	families, err := reg.Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range families {
+		if f.GetName() != "kconmon_ng_zone_icmp_rtt_seconds" {
+			continue
+		}
+		buckets := f.GetMetric()[0].GetHistogram().GetBucket()
+		if len(buckets) != len(defaultBuckets) {
+			t.Fatalf("zone histogram has %d buckets, want the %d defaultBuckets", len(buckets), len(defaultBuckets))
+		}
+		for i, b := range buckets {
+			if b.GetUpperBound() != defaultBuckets[i] {
+				t.Errorf("bucket %d bound = %v, want %v", i, b.GetUpperBound(), defaultBuckets[i])
+			}
+		}
+		return
+	}
+	t.Fatal("kconmon_ng_zone_icmp_rtt_seconds not gathered")
+}
+
+// ZoneResultCounter mirrors PeerResultCounter: only the pair-probing check types have a zone
+// results counter, and the preinit path relies on nil for everything else.
+func TestZoneResultCounterMapsOnlyPeerCheckTypes(t *testing.T) {
+	m := NewPrometheusMetrics("kconmon_ng", prometheus.NewRegistry())
+	if m.ZoneResultCounter("tcp") != m.ZoneTCPResults {
+		t.Error("tcp must map to ZoneTCPResults")
+	}
+	if m.ZoneResultCounter("udp") != m.ZoneUDPResults {
+		t.Error("udp must map to ZoneUDPResults")
+	}
+	if m.ZoneResultCounter("icmp") != m.ZoneICMPResults {
+		t.Error("icmp must map to ZoneICMPResults")
+	}
+	for _, other := range []string{"dns", "http", "mtr", "external", ""} {
+		if m.ZoneResultCounter(other) != nil {
+			t.Errorf("%q must have no zone results counter", other)
+		}
+	}
+}
+
+// ZonePacketCounters exist only for the check types that count packets; tcp is one connect, not a
+// packet train, and inventing a packet counter for it would fabricate a loss signal.
+func TestZonePacketCountersOnlyForLossCapableTypes(t *testing.T) {
+	m := NewPrometheusMetrics("kconmon_ng", prometheus.NewRegistry())
+	if sent, recv := m.ZonePacketCounters("udp"); sent != m.ZoneUDPPacketsSent || recv != m.ZoneUDPPacketsReceived {
+		t.Error("udp must map to the udp packet counters")
+	}
+	if sent, recv := m.ZonePacketCounters("icmp"); sent != m.ZoneICMPPacketsSent || recv != m.ZoneICMPPacketsReceived {
+		t.Error("icmp must map to the icmp packet counters")
+	}
+	if sent, recv := m.ZonePacketCounters("tcp"); sent != nil || recv != nil {
+		t.Error("tcp must have no packet counters")
+	}
+}
+
+/*
+ForgetPeer retires PAIR series; the zone family survives every peer departure.
+
+Zones outlive peers: a node draining out of zone-b says nothing about zone-a→zone-b as a path, and
+the zone counters are cumulative aggregates that the zone alerts rate() over — deleting them on
+peer churn would reset the very series the alerts watch, once per pod event.
+*/
+func TestForgetPeerLeavesZoneFamilyStanding(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	m := NewPrometheusMetrics("kconmon_ng", reg)
+
+	m.UDPLossRatio.WithLabelValues("node-a", "node-gone", "zone-a", "zone-b").Set(1)
+	m.ZoneUDPPacketsSent.WithLabelValues("zone-a", "zone-b").Add(5)
+	m.ZoneUDPPacketsReceived.WithLabelValues("zone-a", "zone-b").Add(3)
+	m.ZoneUDPResults.WithLabelValues("zone-a", "zone-b", "success").Inc()
+	m.ZoneICMPRtt.WithLabelValues("zone-a", "zone-b").Observe(0.002)
+
+	m.ForgetPeer("node-gone")
+
+	if got := testutil.CollectAndCount(m.UDPLossRatio); got != 0 {
+		t.Errorf("per-pair loss gauge has %d series after the peer left, want 0", got)
+	}
+	if got := testutil.ToFloat64(m.ZoneUDPPacketsSent.WithLabelValues("zone-a", "zone-b")); got != 5 {
+		t.Errorf("zone packets sent = %v after ForgetPeer, want the 5 it accumulated", got)
+	}
+	if got := testutil.ToFloat64(m.ZoneUDPResults.WithLabelValues("zone-a", "zone-b", "success")); got != 1 {
+		t.Errorf("zone results = %v after ForgetPeer, want 1", got)
+	}
+	if got := testutil.CollectAndCount(m.ZoneICMPRtt); got != 1 {
+		t.Errorf("zone icmp rtt has %d series after ForgetPeer, want 1", got)
+	}
+}

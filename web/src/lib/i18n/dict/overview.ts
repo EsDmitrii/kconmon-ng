@@ -29,6 +29,12 @@ const en = {
   /* Engaged, every query on this page has its poll off — promising a 15s
      refresh would describe a page that is deliberately frozen. */
   "description.engaged": "Cluster health at the instant you are viewing. Nothing here refreshes.",
+  /* The "?" by the title (M7-5); the docs page is docs/console/overview. */
+  "help.body":
+    "The landing page: is the fleet healthy right now, and if not, which pairs are the problem? " +
+    "Everything here is qualified as TCP · pod plane — one protocol, one network plane. " +
+    "A health statement in words leads, computed from the pair matrix, over the stat tiles and the worst-pairs table. " +
+    "Live, the page recomputes from Prometheus every 15s; with the Time Machine engaged, nothing refreshes.",
 
   "loading": "Loading overview…",
   /* The three summary panels share one skeleton and one sr-only line. */
@@ -71,6 +77,33 @@ const en = {
      and the nodes tile beside it already answers "nothing measured" with an
      em-dash — the pair tiles now say it the same way. */
   "tiles.pairs.noData": "No pair was measured here, so there is nothing to count.",
+
+  /* ── the health statement (M4-6) ────────────────────────────────────────── */
+  /* The page's lead: the summarize() verdict in words. It only speaks when at
+     least one pair is scored — a health claim needs evidence — and the healthy
+     claim shrinks to the scored set when the scored/measured gap exists. */
+  "health.failing.one": "{count} pair failing",
+  "health.failing.many": "{count} pairs failing",
+  "health.degraded.one": "{count} pair degraded",
+  "health.degraded.many": "{count} pairs degraded",
+  "health.healthy.one": "The one measured pair is healthy",
+  "health.healthy.many": "All {count} pairs healthy",
+  "health.healthy.scoped": "All {count} scored pairs healthy",
+
+  /* ── first-run setup progress (M4-6) ────────────────────────────────────── */
+  /* One card for the install path, replacing the noData slate while Live shows
+     zero measured pairs. Step values are data (a count, yes/no); the fix lines
+     under unmet steps name the next thing to check. */
+  "setup.title": "Setup progress",
+  "setup.agents": "Agents registered",
+  "setup.agents.fix": "No agent has registered with the controller yet — check that the agent DaemonSet is running.",
+  "setup.prometheus": "Prometheus scraped",
+  "setup.prometheus.fix":
+    "Prometheus answered with no agent series yet — check that it scrapes the agents (ServiceMonitor or scrape_config).",
+  "setup.probes": "First probe round",
+  "setup.yes": "yes",
+  "setup.no": "not yet",
+  "setup.waiting": "waiting",
 
   /* ── worst pairs ────────────────────────────────────────────────────────── */
   "worstPairs.title": "Worst pairs",
@@ -187,6 +220,11 @@ export const overviewDict: Dictionary<OverviewKey> = defineDict(en, {
   "title": "Обзор",
   "description": "Здоровье кластера одним взглядом, пересчёт из Prometheus каждые 15 с.",
   "description.engaged": "Здоровье кластера на выбранный момент, без обновления.",
+  "help.body":
+    "Стартовая страница: здоров ли флот прямо сейчас, а если нет — какие пары виноваты. " +
+    "Всё здесь оговорено как TCP · плоскость pod: один протокол, одна сетевая плоскость. " +
+    "Сверху — вердикт о здоровье словами, посчитанный по матрице пар, ниже — плитки сводки и таблица худших пар. " +
+    "Вживую страница пересчитывается из Prometheus каждые 15 с; с включённой Машиной времени ничего не обновляется.",
 
   "loading": "Загрузка обзора…",
   "panel.loading": "Загрузка…",
@@ -211,6 +249,25 @@ export const overviewDict: Dictionary<OverviewKey> = defineDict(en, {
   "tiles.degraded": "Пары с деградацией",
   "tiles.degraded.tone": "Сбой 1–10%",
   "tiles.pairs.noData": "Здесь не измерена ни одна пара, считать нечего.",
+
+  "health.failing.one": "Пар со сбоями: {count}",
+  "health.failing.many": "Пар со сбоями: {count}",
+  "health.degraded.one": "Пар с деградацией: {count}",
+  "health.degraded.many": "Пар с деградацией: {count}",
+  "health.healthy.one": "Единственная измеренная пара здорова",
+  "health.healthy.many": "Все измеренные пары здоровы: {count}",
+  "health.healthy.scoped": "Все оценённые пары здоровы: {count}",
+
+  "setup.title": "Ход установки",
+  "setup.agents": "Агентов зарегистрировано",
+  "setup.agents.fix": "Ни один агент ещё не зарегистрировался у контроллера — проверьте, что DaemonSet агентов запущен.",
+  "setup.prometheus": "Prometheus собрал метрики",
+  "setup.prometheus.fix":
+    "У Prometheus пока нет серий агентов — проверьте, что он собирает их метрики (ServiceMonitor или scrape_config).",
+  "setup.probes": "Первый круг зондирования",
+  "setup.yes": "да",
+  "setup.no": "пока нет",
+  "setup.waiting": "ожидание",
 
   "worstPairs.title": "Худшие пары",
   "worstPairs.measured.one": "Измерено пар: {count}",

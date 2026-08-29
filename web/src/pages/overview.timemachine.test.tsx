@@ -305,10 +305,14 @@ describe("OverviewPage engaged — the empty states drop the live framing (#4)",
     expect(screen.queryByText(/Nothing has happened yet/)).toBeNull();
   });
 
-  it("keeps the live wording while live", async () => {
+  /* Live at zero measured pairs is the first-run state: the setup-progress
+     card leads (M4-6) instead of the engaged slate, and the live event
+     wording stays live. */
+  it("keeps the live framing while live — the setup card, not the engaged slate", async () => {
     renderOverview({ engaged: false, promqlResponse: noSamples });
 
-    expect(await screen.findByText("No probe data in Prometheus yet")).toBeInTheDocument();
+    expect(await screen.findByTestId("setup-progress")).toBeInTheDocument();
+    expect(screen.queryByText("No probe data at this instant")).toBeNull();
     expect(await screen.findByText(/Nothing has happened yet/)).toBeInTheDocument();
   });
 });

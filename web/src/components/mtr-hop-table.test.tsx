@@ -368,6 +368,16 @@ describe("TraceDetail — horizontal overflow", () => {
     expect(screen.queryByRole("note")).not.toBeInTheDocument();
   });
 
+  /* M4-3: the hop table is the dense ui/table primitive rendered BARE —
+     ScrollableX owns the one scroll container, and a second wrapper from the
+     primitive would break the overflow measurement above. */
+  it("keeps exactly one scroll container around the dense table", () => {
+    const { container } = renderDetail(snapshot());
+    expect(container.querySelectorAll(".overflow-x-auto")).toHaveLength(1);
+    const table = container.querySelector("table") as HTMLTableElement;
+    expect(table.className).toMatch(/text-\[13px\]/);
+  });
+
   it("offers the hint once the table really does run past its card", () => {
     const { container } = renderDetail(snapshot());
     const scroller = container.querySelector(".overflow-x-auto") as HTMLElement;

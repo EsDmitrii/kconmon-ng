@@ -7,7 +7,6 @@ import (
 	"math/rand"
 	"net"
 	"net/http"
-	"os"
 	"regexp"
 	"time"
 
@@ -29,15 +28,15 @@ const maxConcurrentTasks = 4
 const capabilityExternalChecks = "external-checks"
 
 type Agent struct {
-	cfg         *config.Config
-	grpcClient  *GRPCClient
-	scheduler   *Scheduler
-	httpServer  *HTTPServer
-	probeServer *ProbeServer
-	metrics     *metrics.PrometheusMetrics
-	promReg     *prometheus.Registry
-	info        model.AgentInfo
-	envZone     string
+	cfg            *config.Config
+	grpcClient     *GRPCClient
+	scheduler      *Scheduler
+	httpServer     *HTTPServer
+	probeServer    *ProbeServer
+	metrics        *metrics.PrometheusMetrics
+	promReg        *prometheus.Registry
+	info           model.AgentInfo
+	configuredZone string
 	// checkers holds the same checker instances registered with the scheduler,
 	// reused by the on-demand task executor. mtrChecker is kept separately since
 	// it is not part of the Checker map (it bypasses the cooldown on demand).
@@ -59,24 +58,13 @@ func New(cfg *config.Config) (*Agent, error) {
 
 	m := metrics.NewPrometheusMetrics(cfg.MetricsPrefix, promReg)
 
-	hostname, _ := os.Hostname()
-	nodeName := os.Getenv("KCONMON_NG_NODE_NAME")
-	podName := os.Getenv("KCONMON_NG_POD_NAME")
-	podIP := os.Getenv("KCONMON_NG_POD_IP")
-	zone := os.Getenv("KCONMON_NG_ZONE")
-
-	if podName == "" {
-		podName = hostname
+	// Identity comes from the config (already env-overridden by the loader) plus
+	// the Downward API pod env, with bare-host fallbacks; see identity.go.
+	info, idErr := resolveIdentity(cfg)
+	if idErr != nil {
+		return nil, fmt.Errorf("resolving agent identity: %w", idErr)
 	}
-
-	info := model.AgentInfo{
-		ID:           fmt.Sprintf("%s-%s", nodeName, podName),
-		NodeName:     nodeName,
-		PodName:      podName,
-		PodIP:        podIP,
-		Zone:         zone,
-		Capabilities: agentCapabilities(cfg),
-	}
+	info.Capabilities = agentCapabilities(cfg)
 
 	// The external-destination gate is built here, not lazily at first probe.
 	external := ExternalPolicy{}
@@ -186,10 +174,12 @@ func New(cfg *config.Config) (*Agent, error) {
 		metrics:     m,
 		promReg:     promReg,
 		info:        info,
-		envZone:     zone,
-		checkers:    checkers,
-		mtrChecker:  mtrChecker,
-		external:    external,
+		// The zone the operator CONFIGURED (agent.zone, env-overridden by the loader) as opposed to
+		// the effective one in info.Zone; registrationInfo explains why only this one is asserted.
+		configuredZone: cfg.Agent.Zone,
+		checkers:       checkers,
+		mtrChecker:     mtrChecker,
+		external:       external,
 
 		externalChecker: externalChecker,
 	}
@@ -221,7 +211,7 @@ func (a *Agent) Run(ctx context.Context) error {
 	}
 	defer func() { _ = a.probeServer.Close() }()
 
-	grpcClient, err := NewGRPCClient(a.cfg.ControllerAddress)
+	grpcClient, err := NewGRPCClient(a.cfg.ControllerAddress, clientSecurityFromConfig(a.cfg))
 	if err != nil {
 		return fmt.Errorf("creating gRPC client: %w", err)
 	}
@@ -299,7 +289,7 @@ func (a *Agent) Run(ctx context.Context) error {
 	// Adopt the controller-resolved zone when no explicit zone was configured.
 	// This happens before the scheduler starts, so all emitted metrics carry
 	// the correct source_zone from the first check.
-	if z := resolveZone(a.envZone, resolvedZone); z != a.info.Zone {
+	if z := resolveZone(a.configuredZone, resolvedZone); z != a.info.Zone {
 		slog.Info("adopted zone from controller", "zone", z)
 		a.info.Zone = z
 		a.scheduler.SetSourceZone(z)
@@ -368,7 +358,7 @@ func (a *Agent) Run(ctx context.Context) error {
 			}
 			newPeers, newZone, regErr := grpcClient.Register(ctx, a.registrationInfo(), a.cfg.HTTPPort)
 			if regErr == nil {
-				if z := resolveZone(a.envZone, newZone); z != a.info.Zone {
+				if z := resolveZone(a.configuredZone, newZone); z != a.info.Zone {
 					slog.Info("adopted zone from controller on re-registration", "zone", z)
 					a.info.Zone = z
 					a.scheduler.SetSourceZone(z)
@@ -652,15 +642,15 @@ overrides it.
 */
 func (a *Agent) registrationInfo() model.AgentInfo {
 	info := a.info
-	info.Zone = a.envZone
+	info.Zone = a.configuredZone
 	return info
 }
 
-// resolveZone decides the agent's effective zone: an explicit env-provided
+// resolveZone decides the agent's effective zone: an explicitly configured
 // zone always wins; otherwise the controller-resolved zone is adopted.
-func resolveZone(envZone, resolvedZone string) string {
-	if envZone != "" {
-		return envZone
+func resolveZone(configuredZone, resolvedZone string) string {
+	if configuredZone != "" {
+		return configuredZone
 	}
 	return resolvedZone
 }
@@ -694,6 +684,7 @@ func (a *Agent) forgetDepartedPeers(next []checker.Target) {
 func (a *Agent) syncPeerMetrics() {
 	source := checker.Target{NodeName: a.info.NodeName, Zone: a.info.Zone}
 	preinitPeerResults(a.metrics, source, a.scheduler.Peers(), a.checkers)
+	preinitZoneResults(a.metrics, source, a.scheduler.Peers(), a.checkers)
 }
 
 // resultOutcomes is the closed set of values the "result" label takes on a peer probe counter.
@@ -725,6 +716,37 @@ func preinitPeerResults(
 	}
 }
 
+// preinitZoneResults creates the zone-family counter series for every zone pair the current peer
+// list implies, so zone alert expressions see data from the first scrape rather than absent series.
+// Keyed per zone PAIR, not per peer, and never cleaned up: zones outlive peers by design.
+func preinitZoneResults(
+	m *metrics.PrometheusMetrics,
+	source checker.Target, //nolint:gocritic // hugeParam: Target is passed by value throughout this package
+	peers []checker.Target,
+	enabled map[model.CheckType]checker.Checker,
+) {
+	destZones := make(map[string]struct{}, len(peers))
+	for i := range peers {
+		destZones[peers[i].Zone] = struct{}{}
+	}
+	for checkType := range enabled {
+		counter := m.ZoneResultCounter(string(checkType))
+		if counter == nil {
+			continue
+		}
+		sent, received := m.ZonePacketCounters(string(checkType))
+		for zone := range destZones {
+			for _, outcome := range resultOutcomes {
+				counter.WithLabelValues(source.Zone, zone, outcome).Add(0)
+			}
+			if sent != nil {
+				sent.WithLabelValues(source.Zone, zone).Add(0)
+				received.WithLabelValues(source.Zone, zone).Add(0)
+			}
+		}
+	}
+}
+
 func NewResultHandler(m *metrics.PrometheusMetrics, source checker.Target) ResultHandler { //nolint:gocritic // hugeParam: Target is a VALUE by design -- a checker must not be able to mutate the caller's copy, and one 80-byte copy per probe is nothing next to the probe itself
 	return func(result model.CheckResult) {
 		labels := []string{result.Source, result.Destination, result.SourceZone, result.DestZone}
@@ -733,14 +755,21 @@ func NewResultHandler(m *metrics.PrometheusMetrics, source checker.Target) Resul
 			resultStr = "fail"
 		}
 		resultLabels := []string{result.Source, result.Destination, result.SourceZone, result.DestZone, resultStr}
+		// The zone family is the SECOND write of the same probe; empty zones stay "" verbatim,
+		// exactly as the per-pair labels above carry them.
+		zoneLabels := []string{result.SourceZone, result.DestZone}
+		zoneResultLabels := []string{result.SourceZone, result.DestZone, resultStr}
 
 		switch result.Type {
 		case model.CheckTCP:
 			if d, ok := result.Details.(*TCPDetails); ok {
 				m.TCPConnectDuration.WithLabelValues(labels...).Observe(d.ConnectTime.Seconds())
 				m.TCPTotalDuration.WithLabelValues(labels...).Observe(d.TotalTime.Seconds())
+				m.ZoneTCPConnect.WithLabelValues(zoneLabels...).Observe(d.ConnectTime.Seconds())
+				m.ZoneTCPTotal.WithLabelValues(zoneLabels...).Observe(d.TotalTime.Seconds())
 			}
 			m.TCPResults.WithLabelValues(resultLabels...).Inc()
+			m.ZoneTCPResults.WithLabelValues(zoneResultLabels...).Inc()
 
 		case model.CheckUDP:
 			if d, ok := result.Details.(*UDPDetails); ok {
@@ -750,10 +779,16 @@ func NewResultHandler(m *metrics.PrometheusMetrics, source checker.Target) Resul
 				if d.PacketsRecv > 0 {
 					m.UDPRtt.WithLabelValues(labels...).Observe(d.MeanRTT.Seconds())
 					m.UDPJitter.WithLabelValues(labels...).Set(d.Jitter.Seconds())
+					m.ZoneUDPRtt.WithLabelValues(zoneLabels...).Observe(d.MeanRTT.Seconds())
 				}
 				m.UDPLossRatio.WithLabelValues(labels...).Set(d.LossRatio)
+				// Zone loss is counters, never an averaged ratio: the real on-the-wire packet
+				// counts keep sum(rate(received))/sum(rate(sent)) weighted by traffic.
+				m.ZoneUDPPacketsSent.WithLabelValues(zoneLabels...).Add(float64(d.PacketsSent))
+				m.ZoneUDPPacketsReceived.WithLabelValues(zoneLabels...).Add(float64(d.PacketsRecv))
 			}
 			m.UDPResults.WithLabelValues(resultLabels...).Inc()
+			m.ZoneUDPResults.WithLabelValues(zoneResultLabels...).Inc()
 
 		case model.CheckICMP:
 			// The loss ratio is a GAUGE, so it keeps serving its last written value on every scrape until
@@ -767,8 +802,20 @@ func NewResultHandler(m *metrics.PrometheusMetrics, source checker.Target) Resul
 			// A probe that got no reply has no round trip, so its duration is the configured timeout.
 			if ok && result.Success {
 				m.ICMPRtt.WithLabelValues(labels...).Observe(d.RTT.Seconds())
+				m.ZoneICMPRtt.WithLabelValues(zoneLabels...).Observe(d.RTT.Seconds())
+			}
+			/* ICMPDetails carries no packet counts, but the checker sends exactly ONE echo per
+			   probe and attaches Details only after the request went on the wire — so Details
+			   present means 1 sent, success means 1 received. A probe that died before the write
+			   (bad IP, listen/marshal error) put nothing on the wire and counts nothing. */
+			if ok {
+				m.ZoneICMPPacketsSent.WithLabelValues(zoneLabels...).Inc()
+				if result.Success {
+					m.ZoneICMPPacketsReceived.WithLabelValues(zoneLabels...).Inc()
+				}
 			}
 			m.ICMPResults.WithLabelValues(resultLabels...).Inc()
+			m.ZoneICMPResults.WithLabelValues(zoneResultLabels...).Inc()
 
 		case model.CheckDNS:
 			if details, ok := result.Details.([]DNSDetails); ok {

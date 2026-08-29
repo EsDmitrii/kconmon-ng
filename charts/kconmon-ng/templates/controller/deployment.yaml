@@ -1,6 +1,17 @@
 {{- if and (gt (int .Values.controller.replicaCount) 1) (not .Values.controller.leaderElection) }}
 {{- fail "controller.replicaCount > 1 with controller.leaderElection=false: every replica accepts registrations through the ClusterIP Service and serves peer lists from its OWN registry, so the agents split into that many disjoint meshes and every cross-partition link goes unprobed -- with no alert, because the leader metric the alerts key on is never published either" }}
 {{- end }}
+{{- if .Values.controller.externalGateway.enabled }}
+{{- /* Both refused at render: an empty secretName renders a volume with no source, and the
+       controller would only report the missing files at startup — a crashloop instead of an error
+       at install time. */}}
+{{- if not .Values.controller.externalGateway.tls.secretName }}
+{{- fail "controller.externalGateway.enabled is true but controller.externalGateway.tls.secretName is empty: the gateway is TLS-only by design (it listens outside the NetworkPolicy perimeter), so name the kubernetes.io/tls Secret holding its serving pair" }}
+{{- end }}
+{{- if not .Values.controller.externalGateway.bootstrapToken.secretName }}
+{{- fail "controller.externalGateway.enabled is true but controller.externalGateway.bootstrapToken.secretName is empty: without the token the gateway would trust network position alone, which is exactly what it exists to not do; name the Secret holding the shared bearer token" }}
+{{- end }}
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -68,6 +79,11 @@ spec:
             - name: grpc
               containerPort: {{ .Values.config.grpcPort }}
               protocol: TCP
+            {{- if .Values.controller.externalGateway.enabled }}
+            - name: gateway
+              containerPort: {{ .Values.controller.externalGateway.port }}
+              protocol: TCP
+            {{- end }}
           env:
             - name: KCONMON_NG_CONFIG
               value: /etc/kconmon-ng/config.yaml
@@ -88,6 +104,17 @@ spec:
             - name: config
               mountPath: /etc/kconmon-ng
               readOnly: true
+            {{- if .Values.controller.externalGateway.enabled }}
+            {{- /* Sibling directories of the config mount, not nested ones: a mountpoint cannot be
+                   created inside a read-only mount. Paths are hardwired into the rendered
+                   config.yaml (templates/shared/configmap.yaml). */}}
+            - name: gateway-tls
+              mountPath: /etc/kconmon-ng-gateway-tls
+              readOnly: true
+            - name: gateway-token
+              mountPath: /etc/kconmon-ng-gateway-token
+              readOnly: true
+            {{- end }}
           startupProbe:
             httpGet:
               path: /healthz
@@ -113,3 +140,15 @@ spec:
         - name: config
           configMap:
             name: {{ include "kconmon-ng.fullname" . }}-config
+        {{- if .Values.controller.externalGateway.enabled }}
+        {{- /* Referenced Secrets, not chart-managed ones: the checksum/config annotation above
+               cannot see their CONTENT, so rotating a cert or the token in place does not roll the
+               pods — and would not help if it did, the gateway reads both once at startup. Rotation
+               is a `kubectl rollout restart` on this Deployment. */}}
+        - name: gateway-tls
+          secret:
+            secretName: {{ .Values.controller.externalGateway.tls.secretName }}
+        - name: gateway-token
+          secret:
+            secretName: {{ .Values.controller.externalGateway.bootstrapToken.secretName }}
+        {{- end }}

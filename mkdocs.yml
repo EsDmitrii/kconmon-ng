@@ -1,0 +1,129 @@
+# kconmon-ng documentation site (MkDocs Material). Build: mkdocs build --strict
+site_name: kconmon-ng
+site_description: >-
+  Kubernetes inter-node connectivity monitoring: per-pair, per-protocol
+  latency, jitter and packet loss, with MTR traces on failure.
+# TODO(M7-6): set the real GitHub Pages URL before the first deploy — needed
+# for canonical URLs and the sitemap.
+# site_url: https://esdmitrii.github.io/kconmon-ng/
+repo_url: https://github.com/EsDmitrii/kconmon-ng
+repo_name: EsDmitrii/kconmon-ng
+edit_uri: edit/main/docs/
+
+docs_dir: docs
+
+# gitignore-style patterns, matched at any depth inside docs/.
+exclude_docs: |
+  .DS_Store
+  .gitkeep
+
+validation:
+  links:
+    # TODO(M7): restore to the default (warn) once the pre-site repo-relative
+    # links in configuration.md (-> ../charts/...) and demo/breaking-cni.md
+    # (-> ../../web/...) are rewritten to point at site pages; until then they
+    # target files outside docs/ and would fail `build --strict`.
+    not_found: info
+
+theme:
+  name: material
+  icon:
+    repo: fontawesome/brands/github
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+  features:
+    - navigation.sections
+    - navigation.top
+    - navigation.footer
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+    - content.tabs.link
+
+plugins:
+  - search
+  - swagger-ui-tag
+  # en-only for now; the suffix layout means Russian pages land later as
+  # page.ru.md next to page.md with no restructuring (mkdocs-static-i18n).
+  - i18n:
+      docs_structure: suffix
+      languages:
+        - locale: en
+          name: English
+          default: true
+          build: true
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.details
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.superfences
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.snippets:
+      # Repo root: lets pages embed files living outside docs/
+      # (charts/kconmon-ng/values.yaml, RELEASE_NOTES.md).
+      base_path: !relative $config_dir
+      check_paths: true
+
+nav:
+  - Home: index.md
+  - Getting started:
+      - Install in 15 minutes: getting-started/install-15-min.md
+      - Enable the console: getting-started/enable-the-console.md
+      - Catch a breakage: getting-started/catch-a-breakage.md
+      - Demo — breaking the CNI: demo/breaking-cni.md
+  - Concepts:
+      - Architecture: concepts/architecture.md
+      - Checks, runs and schedules: concepts/checks-runs-schedules.md
+      - Mesh and planes: concepts/mesh-and-planes.md
+  - Console guide:
+      - Overview: console/overview.md
+      - Events: console/events.md
+      - Matrix: console/matrix.md
+      - Topology: console/topology.md
+      - Incidents: console/incidents.md
+      - Routes (MTR): console/routes-mtr.md
+      - Run checks: console/run-checks.md
+      - Metrics: console/metrics.md
+      - PromQL: console/promql.md
+      - Scheduled checks: console/scheduled-checks.md
+      - Alerting: console/alerting.md
+      - Settings: console/settings.md
+      - Command palette: console/command-palette.md
+      - Time Machine: console/time-machine.md
+      - Pair and node pages: console/pair-and-node-pages.md
+  - Scenarios:
+      - Diagnose a slow pair: scenarios/diagnose-a-slow-pair.md
+      - Set up alerting: scenarios/set-up-alerting.md
+      - External targets: scenarios/external-targets.md
+      - OIDC setup: scenarios/oidc-setup.md
+  - Reference:
+      - Helm values: reference/helm-values.md
+      - Configuration: configuration.md
+      - HTTP API: api.md
+      - Console API: reference/console-api.md
+      - Metrics and alerting: metrics.md
+      - External agents: external-agents.md
+      - Release notes: reference/release-notes.md
+  - FAQ: faq.md

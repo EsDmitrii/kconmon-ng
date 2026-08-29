@@ -2,6 +2,12 @@
 {{- if eq (int .Values.config.httpPort) (int .Values.config.grpcPort) }}
 {{- fail (printf "config.httpPort and config.grpcPort must differ (both are %v): one Pod cannot bind the same port twice" .Values.config.httpPort) }}
 {{- end }}
+{{- if .Values.controller.externalGateway.enabled }}
+{{- $gwPort := int .Values.controller.externalGateway.port }}
+{{- if or (eq $gwPort (int .Values.config.httpPort)) (eq $gwPort (int .Values.config.grpcPort)) (eq $gwPort (int .Values.config.metricsPort)) }}
+{{- fail (printf "controller.externalGateway.port (%d) must differ from config.httpPort, config.grpcPort and config.metricsPort: the controller refuses the collision at startup, so the chart refuses it at render" $gwPort) }}
+{{- end }}
+{{- end }}
 {{- if and .Values.config.checkers.dns.enabled (not .Values.config.checkers.dns.hosts) }}
 {{- fail "config.checkers.dns.enabled is true but config.checkers.dns.hosts is empty: the checker would resolve nothing" }}
 {{- end }}
@@ -34,6 +40,23 @@ data:
       {{- if .Values.controller.events.enabled }}
       events:
         enabled: true
+      {{- end }}
+      {{- /* Emitted only when ON, same reason as events: pre-M6 images reject the key. The file
+             paths must match the Secret mounts in templates/controller/deployment.yaml. */}}
+      {{- with .Values.controller.externalGateway }}
+      {{- if .enabled }}
+      externalGateway:
+        enabled: true
+        port: {{ .port }}
+        tls:
+          certFile: /etc/kconmon-ng-gateway-tls/tls.crt
+          keyFile: /etc/kconmon-ng-gateway-tls/tls.key
+          {{- with .tls.clientCaKey }}
+          clientCaFile: {{ printf "/etc/kconmon-ng-gateway-tls/%s" . | quote }}
+          {{- end }}
+        {{- /* default guards the --reuse-values trap: an upgrade that predates this key would render a nil segment. */}}
+        bootstrapTokenFile: {{ printf "/etc/kconmon-ng-gateway-token/%s" (.bootstrapToken.key | default "token") | quote }}
+      {{- end }}
       {{- end }}
     checkers:
       tcp:

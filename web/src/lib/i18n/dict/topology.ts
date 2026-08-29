@@ -33,6 +33,12 @@ const en = {
     "Live zone/node map. Problem paths (TCP fail ≥ 1%) are drawn worst-first; hover an edge for its failure ratio.",
   "description.engaged":
     "Zone/node map as of {at}, reconstructed from topology events. Problem paths (TCP fail ≥ 1%) are drawn worst-first; hover an edge for its failure ratio.",
+  /* The "?" by the title (M7-5); the docs page is docs/console/topology. */
+  "help.body":
+    "An interactive zone/node map: nodes are grouped into zone lanes, and problem paths (TCP fail ≥ 1%) are drawn as edges, worst first. " +
+    "Node colour uses the same tiers as the Matrix; hovering an edge shows its failure ratio or packet loss. " +
+    "Selecting a node opens its node page. " +
+    "With the Time Machine engaged, the map is reconstructed from topology events at the viewed instant — a different mechanism from the live view, with its own stated edge cases.",
 
   "error.title": "Topology is unavailable",
   "loading": "Loading topology…",
@@ -147,6 +153,11 @@ export const topologyDict: Dictionary<TopologyKey> = defineDict(en, {
     "Живая карта зон и узлов. Проблемные пути (TCP, сбой ≥ 1%) нарисованы худшими вперёд, наведите на ребро и увидите долю сбоев.",
   "description.engaged":
     "Карта зон и узлов на {at}, восстановлена из событий топологии. Проблемные пути (TCP, сбой ≥ 1%) нарисованы худшими вперёд, наведите на ребро и увидите долю сбоев.",
+  "help.body":
+    "Интерактивная карта зон и узлов: узлы сгруппированы в дорожки по зонам, а проблемные пути (TCP, сбой ≥ 1%) нарисованы рёбрами, худшие вперёд. " +
+    "Цвет узла использует те же ступени, что и Матрица; наведение на ребро показывает долю сбоев или потери пакетов. " +
+    "Выбор узла открывает его страницу. " +
+    "С включённой Машиной времени карта восстанавливается из событий топологии на выбранный момент — это другой механизм, чем живой вид, и свои оговорки он называет сам.",
 
   "error.title": "Топология недоступна",
   "loading": "Загрузка топологии…",

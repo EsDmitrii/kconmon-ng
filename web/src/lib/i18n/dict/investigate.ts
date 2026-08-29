@@ -37,6 +37,12 @@ const en = {
   "title": "Incidents",
   "description":
     "One window over one scope: every source the console can read, merged into a timeline, with the correlation rules written down rather than guessed at.",
+  /* The "?" by the title (M7-5); the docs page is docs/console/incidents. */
+  "help.body":
+    "One window over one scope: commit a pair, node, target, zone pair or the whole cluster, and a time range. " +
+    "The timeline merges every source the console can read — fleet and k8s events, audit rows, annotations, maintenance windows, diagnostic runs, MTR path changes, threshold crossings and firing alerts. " +
+    "The correlation rules are written on the page rather than guessed at. " +
+    "Everything lives in the URL, so the view doubles as an incident permalink.",
 
   /* ── the scope vocabulary ──────────────────────────────────────────────── */
   "scope.aria": "Scope kind",
@@ -379,6 +385,11 @@ export const investigateDict: Dictionary<InvestigateKey> = defineDict(en, {
   "title": "Инциденты",
   "description":
     "Один интервал, одна область. Все источники, до которых консоль дотягивается, сведены в общую ленту, а правила корреляции не угадываются, а прописаны.",
+  "help.body":
+    "Один интервал над одной областью: зафиксируйте пару, узел, цель, пару зон или весь кластер и диапазон времени. " +
+    "Лента сводит все источники, до которых консоль дотягивается: события флота и k8s, строки аудита, заметки, окна работ, диагностические запуски, смены маршрутов MTR, пересечения порогов и активные оповещения. " +
+    "Правила корреляции прописаны прямо на странице, а не угадываются. " +
+    "Всё лежит в URL, так что вид заодно служит пермалинком инцидента.",
 
   "scope.aria": "Тип области",
   "scope.label": "Область",

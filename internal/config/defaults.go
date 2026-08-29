@@ -56,6 +56,9 @@ func DefaultConfig() *Config {
 			LeaderElection: true,
 			AgentTTL:       30 * time.Second,
 			Events:         EventsConfig{Enabled: false},
+			// Off by default: enabling the gateway is a deliberate exposure decision, and 9443
+			// only pre-picks a port so values files agree on one.
+			ExternalGateway: ExternalGatewayConfig{Enabled: false, Port: 9443},
 		},
 		Observability: ObservabilityConfig{
 			OTel: OTelConfig{

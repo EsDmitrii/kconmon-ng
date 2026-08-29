@@ -57,7 +57,7 @@ func TestGRPCClientReconnectOpensANewTransport(t *testing.T) {
 	go func() { _ = gs.Serve(lis) }()
 	t.Cleanup(gs.Stop)
 
-	client, err := NewGRPCClient(base.Addr().String())
+	client, err := NewGRPCClient(base.Addr().String(), ClientSecurity{})
 	if err != nil {
 		t.Fatalf("NewGRPCClient: %v", err)
 	}

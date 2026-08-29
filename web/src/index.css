@@ -226,11 +226,23 @@
   --ease-out-soft: var(--ease);
 }
 
+/* Font pair: Inter carries the UI, JetBrains Mono carries data. Self-hosted
+   via @fontsource imports in main.tsx (CSP/air-gap: no external font hosts);
+   the previous system-ui stack stays on as the fallback chain. */
+@theme {
+  --font-sans:
+    "Inter Variable", ui-sans-serif, system-ui, -apple-system, "Segoe UI",
+    Roboto, sans-serif;
+  --font-mono:
+    "JetBrains Mono Variable", ui-monospace, SFMono-Regular, Menlo, Consolas,
+    "Liberation Mono", monospace;
+}
+
 body {
   margin: 0;
   background-color: hsl(var(--background));
   color: hsl(var(--foreground));
-  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  font-family: var(--font-sans);
   /* 15px base: one step up from 14 buys noticeable air in dense tables without
      reflowing any layout. */
   font-size: 15px;
@@ -241,10 +253,48 @@ body {
 }
 
 /* Tabular figures wherever a number is compared against the number above it —
-   ragged digit widths are what makes a metrics table feel unsteady. */
-.nums {
+   ragged digit widths are what makes a metrics table feel unsteady.
+   .mono-data shares the rule instead of restating it. */
+.nums,
+.mono-data {
   font-variant-numeric: tabular-nums;
   font-feature-settings: "tnum";
+}
+
+/* ---------------------------------------------------------------------------
+   Named type scale — four steps plus a data face. Anything set outside these
+   classes is a smell; they override the 15px/1.55 body default per element.
+   --------------------------------------------------------------------------- */
+/* Page title, one per page (matches the size PageShell established). */
+.type-title {
+  font-size: 24px;
+  line-height: 1.25;
+  font-weight: 600;
+  letter-spacing: -0.025em;
+}
+/* Section heading inside a page or card. */
+.type-section {
+  font-size: 16px;
+  line-height: 1.4;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+/* Default reading size for content blocks denser than the 15px body. */
+.type-body {
+  font-size: 14px;
+  line-height: 1.5;
+}
+/* Captions, timestamps, helper text — always muted. */
+.type-meta {
+  font-size: 12px;
+  line-height: 1.4;
+  color: hsl(var(--muted-foreground));
+}
+/* Data face: every identifier and number in a data table (node names,
+   src→dst pairs, IPs, PromQL, hashes, table figures) wears this. */
+.mono-data {
+  font-family: var(--font-mono);
+  font-size: 13px;
 }
 
 /* ---------------------------------------------------------------------------

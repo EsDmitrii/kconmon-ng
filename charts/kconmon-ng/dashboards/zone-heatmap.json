@@ -27,7 +27,7 @@
         "type": "prometheus",
         "uid": "${datasource}"
       },
-      "description": "Rows are the source zone, columns the destination zone. The diagonal is in-zone traffic; anything off-diagonal crossed a zone boundary.",
+      "description": "Rows are the source zone, columns the destination zone. The diagonal is in-zone traffic; anything off-diagonal crossed a zone boundary. Loss is (sent - received) / sent from the zone packet counters, so busy pairs weigh more than idle ones.",
       "gridPos": {
         "h": 9,
         "w": 8,
@@ -110,7 +110,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "avg by (source_zone, destination_zone) (avg_over_time(kconmon_ng_udp_packet_loss_ratio[15m]))",
+          "expr": "(sum by (source_zone, destination_zone) (increase(kconmon_ng_zone_udp_packets_sent_total[15m])) - sum by (source_zone, destination_zone) (increase(kconmon_ng_zone_udp_packets_received_total[15m]))) / sum by (source_zone, destination_zone) (increase(kconmon_ng_zone_udp_packets_sent_total[15m]))",
           "refId": "A",
           "instant": true,
           "range": false,
@@ -217,7 +217,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "histogram_quantile(0.95, sum by (source_zone, destination_zone, le) (rate(kconmon_ng_udp_rtt_seconds_bucket[15m])))",
+          "expr": "histogram_quantile(0.95, sum by (source_zone, destination_zone, le) (rate(kconmon_ng_zone_udp_rtt_seconds_bucket[15m])))",
           "refId": "A",
           "instant": true,
           "range": false,
@@ -324,7 +324,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "histogram_quantile(0.95, sum by (source_zone, destination_zone, le) (rate(kconmon_ng_icmp_rtt_seconds_bucket[15m])))",
+          "expr": "histogram_quantile(0.95, sum by (source_zone, destination_zone, le) (rate(kconmon_ng_zone_icmp_rtt_seconds_bucket[15m])))",
           "refId": "A",
           "instant": true,
           "range": false,
@@ -431,7 +431,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "(sum by (source_zone, destination_zone) (increase(kconmon_ng_tcp_results_total{result=\"fail\"}[15m])) or 0 * sum by (source_zone, destination_zone) (increase(kconmon_ng_tcp_results_total[15m]))) / sum by (source_zone, destination_zone) (increase(kconmon_ng_tcp_results_total[15m]))",
+          "expr": "(sum by (source_zone, destination_zone) (increase(kconmon_ng_zone_tcp_results_total{result=\"fail\"}[15m])) or 0 * sum by (source_zone, destination_zone) (increase(kconmon_ng_zone_tcp_results_total[15m]))) / sum by (source_zone, destination_zone) (increase(kconmon_ng_zone_tcp_results_total[15m]))",
           "refId": "A",
           "instant": true,
           "range": false,
@@ -538,7 +538,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "(sum by (source_zone, destination_zone) (increase(kconmon_ng_udp_results_total{result=\"fail\"}[15m])) or 0 * sum by (source_zone, destination_zone) (increase(kconmon_ng_udp_results_total[15m]))) / sum by (source_zone, destination_zone) (increase(kconmon_ng_udp_results_total[15m]))",
+          "expr": "(sum by (source_zone, destination_zone) (increase(kconmon_ng_zone_udp_results_total{result=\"fail\"}[15m])) or 0 * sum by (source_zone, destination_zone) (increase(kconmon_ng_zone_udp_results_total[15m]))) / sum by (source_zone, destination_zone) (increase(kconmon_ng_zone_udp_results_total[15m]))",
           "refId": "A",
           "instant": true,
           "range": false,
@@ -562,7 +562,7 @@
         "type": "prometheus",
         "uid": "${datasource}"
       },
-      "description": "Where the agents themselves decided a trace was warranted, folded to zone pairs. The `or 0 *` term keeps quiet zone pairs on the matrix as zeros instead of dropping the cell.",
+      "description": "Where the agents themselves decided a trace was warranted, folded to zone pairs. The `or 0 *` term keeps quiet zone pairs on the matrix as zeros instead of dropping the cell. MTR has no zone-level family: this counter is per-pair, so the `agent.metrics.detail: zone-only` scrape mode drops it and every cell reads zero.",
       "gridPos": {
         "h": 9,
         "w": 8,
@@ -644,7 +644,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum by (source_zone, destination_zone) (increase(kconmon_ng_mtr_triggered_total[1h])) or 0 * sum by (source_zone, destination_zone) (kconmon_ng_udp_results_total)",
+          "expr": "sum by (source_zone, destination_zone) (increase(kconmon_ng_mtr_triggered_total[1h])) or 0 * sum by (source_zone, destination_zone) (kconmon_ng_zone_udp_results_total)",
           "refId": "A",
           "instant": true,
           "range": false,
@@ -765,7 +765,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(kconmon_ng_udp_rtt_seconds_bucket[5m]) and on (source_zone, destination_zone) label_replace(count by (source_zone) (kconmon_ng_udp_results_total), \"destination_zone\", \"$1\", \"source_zone\", \"(.*)\")))",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(kconmon_ng_zone_udp_rtt_seconds_bucket[5m]) and on (source_zone, destination_zone) label_replace(count by (source_zone) (kconmon_ng_zone_udp_results_total), \"destination_zone\", \"$1\", \"source_zone\", \"(.*)\")))",
           "refId": "A",
           "instant": false,
           "range": true,
@@ -777,7 +777,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(kconmon_ng_udp_rtt_seconds_bucket[5m]) unless on (source_zone, destination_zone) label_replace(count by (source_zone) (kconmon_ng_udp_results_total), \"destination_zone\", \"$1\", \"source_zone\", \"(.*)\")))",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(kconmon_ng_zone_udp_rtt_seconds_bucket[5m]) unless on (source_zone, destination_zone) label_replace(count by (source_zone) (kconmon_ng_zone_udp_results_total), \"destination_zone\", \"$1\", \"source_zone\", \"(.*)\")))",
           "refId": "B",
           "instant": false,
           "range": true,
@@ -875,7 +875,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "avg(kconmon_ng_udp_packet_loss_ratio and on (source_zone, destination_zone) label_replace(count by (source_zone) (kconmon_ng_udp_results_total), \"destination_zone\", \"$1\", \"source_zone\", \"(.*)\"))",
+          "expr": "(sum(rate(kconmon_ng_zone_udp_packets_sent_total[5m]) and on (source_zone, destination_zone) label_replace(count by (source_zone) (kconmon_ng_zone_udp_results_total), \"destination_zone\", \"$1\", \"source_zone\", \"(.*)\")) - sum(rate(kconmon_ng_zone_udp_packets_received_total[5m]) and on (source_zone, destination_zone) label_replace(count by (source_zone) (kconmon_ng_zone_udp_results_total), \"destination_zone\", \"$1\", \"source_zone\", \"(.*)\"))) / sum(rate(kconmon_ng_zone_udp_packets_sent_total[5m]) and on (source_zone, destination_zone) label_replace(count by (source_zone) (kconmon_ng_zone_udp_results_total), \"destination_zone\", \"$1\", \"source_zone\", \"(.*)\"))",
           "refId": "A",
           "instant": false,
           "range": true,
@@ -887,7 +887,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "avg(kconmon_ng_udp_packet_loss_ratio unless on (source_zone, destination_zone) label_replace(count by (source_zone) (kconmon_ng_udp_results_total), \"destination_zone\", \"$1\", \"source_zone\", \"(.*)\"))",
+          "expr": "(sum(rate(kconmon_ng_zone_udp_packets_sent_total[5m]) unless on (source_zone, destination_zone) label_replace(count by (source_zone) (kconmon_ng_zone_udp_results_total), \"destination_zone\", \"$1\", \"source_zone\", \"(.*)\")) - sum(rate(kconmon_ng_zone_udp_packets_received_total[5m]) unless on (source_zone, destination_zone) label_replace(count by (source_zone) (kconmon_ng_zone_udp_results_total), \"destination_zone\", \"$1\", \"source_zone\", \"(.*)\"))) / sum(rate(kconmon_ng_zone_udp_packets_sent_total[5m]) unless on (source_zone, destination_zone) label_replace(count by (source_zone) (kconmon_ng_zone_udp_results_total), \"destination_zone\", \"$1\", \"source_zone\", \"(.*)\"))",
           "refId": "B",
           "instant": false,
           "range": true,
@@ -985,7 +985,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "(sum(rate(kconmon_ng_udp_results_total{result=\"fail\"}[5m]) and on (source_zone, destination_zone) label_replace(count by (source_zone) (kconmon_ng_udp_results_total), \"destination_zone\", \"$1\", \"source_zone\", \"(.*)\")) or vector(0)) / sum(rate(kconmon_ng_udp_results_total[5m]) and on (source_zone, destination_zone) label_replace(count by (source_zone) (kconmon_ng_udp_results_total), \"destination_zone\", \"$1\", \"source_zone\", \"(.*)\"))",
+          "expr": "(sum(rate(kconmon_ng_zone_udp_results_total{result=\"fail\"}[5m]) and on (source_zone, destination_zone) label_replace(count by (source_zone) (kconmon_ng_zone_udp_results_total), \"destination_zone\", \"$1\", \"source_zone\", \"(.*)\")) or vector(0)) / sum(rate(kconmon_ng_zone_udp_results_total[5m]) and on (source_zone, destination_zone) label_replace(count by (source_zone) (kconmon_ng_zone_udp_results_total), \"destination_zone\", \"$1\", \"source_zone\", \"(.*)\"))",
           "refId": "A",
           "instant": false,
           "range": true,
@@ -997,7 +997,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "(sum(rate(kconmon_ng_udp_results_total{result=\"fail\"}[5m]) unless on (source_zone, destination_zone) label_replace(count by (source_zone) (kconmon_ng_udp_results_total), \"destination_zone\", \"$1\", \"source_zone\", \"(.*)\")) or vector(0)) / sum(rate(kconmon_ng_udp_results_total[5m]) unless on (source_zone, destination_zone) label_replace(count by (source_zone) (kconmon_ng_udp_results_total), \"destination_zone\", \"$1\", \"source_zone\", \"(.*)\"))",
+          "expr": "(sum(rate(kconmon_ng_zone_udp_results_total{result=\"fail\"}[5m]) unless on (source_zone, destination_zone) label_replace(count by (source_zone) (kconmon_ng_zone_udp_results_total), \"destination_zone\", \"$1\", \"source_zone\", \"(.*)\")) or vector(0)) / sum(rate(kconmon_ng_zone_udp_results_total[5m]) unless on (source_zone, destination_zone) label_replace(count by (source_zone) (kconmon_ng_zone_udp_results_total), \"destination_zone\", \"$1\", \"source_zone\", \"(.*)\"))",
           "refId": "B",
           "instant": false,
           "range": true,
@@ -1095,7 +1095,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(kconmon_ng_tcp_connect_duration_seconds_bucket[5m]) and on (source_zone, destination_zone) label_replace(count by (source_zone) (kconmon_ng_udp_results_total), \"destination_zone\", \"$1\", \"source_zone\", \"(.*)\")))",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(kconmon_ng_zone_tcp_connect_seconds_bucket[5m]) and on (source_zone, destination_zone) label_replace(count by (source_zone) (kconmon_ng_zone_udp_results_total), \"destination_zone\", \"$1\", \"source_zone\", \"(.*)\")))",
           "refId": "A",
           "instant": false,
           "range": true,
@@ -1107,7 +1107,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(kconmon_ng_tcp_connect_duration_seconds_bucket[5m]) unless on (source_zone, destination_zone) label_replace(count by (source_zone) (kconmon_ng_udp_results_total), \"destination_zone\", \"$1\", \"source_zone\", \"(.*)\")))",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(kconmon_ng_zone_tcp_connect_seconds_bucket[5m]) unless on (source_zone, destination_zone) label_replace(count by (source_zone) (kconmon_ng_zone_udp_results_total), \"destination_zone\", \"$1\", \"source_zone\", \"(.*)\")))",
           "refId": "B",
           "instant": false,
           "range": true,
@@ -1218,7 +1218,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "(sum by (source_zone, destination_zone) (rate(kconmon_ng_udp_results_total{result=\"fail\"}[5m])) or 0 * sum by (source_zone, destination_zone) (rate(kconmon_ng_udp_results_total[5m]))) / sum by (source_zone, destination_zone) (rate(kconmon_ng_udp_results_total[5m]))",
+          "expr": "(sum by (source_zone, destination_zone) (rate(kconmon_ng_zone_udp_results_total{result=\"fail\"}[5m])) or 0 * sum by (source_zone, destination_zone) (rate(kconmon_ng_zone_udp_results_total[5m]))) / sum by (source_zone, destination_zone) (rate(kconmon_ng_zone_udp_results_total[5m]))",
           "refId": "A",
           "instant": false,
           "range": true,
@@ -1316,7 +1316,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "histogram_quantile(0.95, sum by (source_zone, destination_zone, le) (rate(kconmon_ng_udp_rtt_seconds_bucket[5m])))",
+          "expr": "histogram_quantile(0.95, sum by (source_zone, destination_zone, le) (rate(kconmon_ng_zone_udp_rtt_seconds_bucket[5m])))",
           "refId": "A",
           "instant": false,
           "range": true,
@@ -1330,7 +1330,7 @@
         "type": "prometheus",
         "uid": "${datasource}"
       },
-      "description": "Averaged over every pair in the zone pair, so one broken node is diluted here and obvious on Overview.",
+      "description": "Packet-weighted loss from the zone sent/received counters, so one broken node is diluted here and obvious on Overview.",
       "gridPos": {
         "h": 8,
         "w": 12,
@@ -1414,7 +1414,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "avg by (source_zone, destination_zone) (kconmon_ng_udp_packet_loss_ratio)",
+          "expr": "(sum by (source_zone, destination_zone) (rate(kconmon_ng_zone_udp_packets_sent_total[5m])) - sum by (source_zone, destination_zone) (rate(kconmon_ng_zone_udp_packets_received_total[5m]))) / sum by (source_zone, destination_zone) (rate(kconmon_ng_zone_udp_packets_sent_total[5m]))",
           "refId": "A",
           "instant": false,
           "range": true,
@@ -1491,7 +1491,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "histogram_quantile(0.95, sum by (source_zone, destination_zone, le) (rate(kconmon_ng_udp_rtt_seconds_bucket[15m])))",
+          "expr": "histogram_quantile(0.95, sum by (source_zone, destination_zone, le) (rate(kconmon_ng_zone_udp_rtt_seconds_bucket[15m])))",
           "refId": "A",
           "instant": true,
           "range": false,

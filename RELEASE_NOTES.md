@@ -1,3 +1,81 @@
+## kconmon-ng v2.2.0
+
+> Everything in this release reads the new zone-level metric family
+> (`kconmon_ng_zone_*`), and that family comes from the AGENT, not the chart:
+> agents at appVersion 2.0.3 — the version this chart still pins — do not
+> export it. Until the fleet runs an agent image that does, the two zone
+> alerts are silently inert (their expressions match no series), the Zone
+> Heatmap dashboard renders empty, and `agent.metrics.detail: zone-only`
+> would drop the per-pair series with nothing replacing them — Prometheus
+> goes dark on the mesh while the console keeps working. Upgrade the agent
+> image first, flip the valve second. The appVersion pin is aligned when the
+> app release ships.
+
+### Added
+
+- **`ZoneChecksFailing` and `ZoneLossHigh`.** Two alerts on the zone plane,
+  with the same per-rule knobs as the rest
+  (`prometheusRule.{zoneChecksFailing,zoneLossHigh}.{enabled,threshold,for,severity}`).
+  `ZoneChecksFailing` is the failure ratio of all TCP, UDP and ICMP probes
+  between a zone pair, in one expression — the `__name__` union keeps a
+  disabled checker from blanking the ratio. `ZoneLossHigh` computes loss as
+  `(sent − received) / sent` from the zone packet counters; averaging the
+  per-pair loss-ratio gauges into a zone would weight an idle pair the same
+  as a busy one, so the chart never does. Its default threshold is `0.1`,
+  lower than the per-pair `UDPLossHigh` at `0.5`, because the zone aggregate
+  dilutes any single link by the pair count: sustained loss at that level
+  means the fabric, not one node. Both survive every `agent.metrics.detail`
+  mode — that is the point of alerting on the zone family.
+- **`agent.metrics.detail` — the cardinality valve.** A scrape-time knob
+  rendered as `metricRelabelings` on the agent ServiceMonitor:
+  `full` (default, everything, ~70 series per directed pair),
+  `counters-only` (drops the four per-pair histograms, ~10/pair — every pair
+  alert keeps firing), `zone-only` (drops every series naming a
+  `destination_node`, ~0/pair; the zone family at ~74×Z² series and the
+  linear DNS/HTTP/external families remain). At 100 nodes that is ~0.7M →
+  ~0.1M → practically N-independent, by configuration alone. Setting it
+  without `serviceMonitor.enabled` is refused at render time rather than
+  silently dropping nothing; plain-Prometheus equivalents are in
+  `docs/metrics.md`.
+- **`controller.externalGateway` — the external agent gateway, exposed by the
+  chart.** The controller's second gRPC listener (same services, but TLS with
+  a bootstrap token, for agents OUTSIDE the cluster) gets a values block and
+  three templates. `templates/controller/service-external.yaml` is a
+  NodePort/LoadBalancer Service carrying the gateway port ALONE — the
+  plaintext in-cluster gRPC port authenticates by network position and never
+  appears on it, because a LoadBalancer in front of it would hand the whole
+  mesh to anything that can reach the address. The deployment mounts two
+  referenced Secrets read-only: `tls.secretName` (a `kubernetes.io/tls`
+  serving pair; `tls.clientCaKey` names the CA bundle key in the same Secret
+  and switches on client-cert identity pinning — empty is token-only mode,
+  where any token holder can impersonate any agent, and NOTES.txt says so at
+  install) and `bootstrapToken.{secretName,key}`. With
+  `networkPolicy.enabled`, ingress on the gateway port is opened from
+  `networkPolicy.externalAgentCidrs` toward the controller pods alone, and an
+  empty list is refused at render rather than shipping a gateway no packet
+  can reach; missing Secret names and a port colliding with
+  `config.{httpPort,grpcPort,metricsPort}` are refused the same way. Two
+  operational notes. Rotation: the gateway reads the certificate and token
+  ONCE at startup and the chart cannot checksum content it only references,
+  so rotating either Secret in place needs
+  `kubectl rollout restart deploy/<release>-controller`. Version skew: the
+  `externalGateway` config key is emitted only when enabled, because a
+  controller image at appVersion 2.0.3 rejects the unknown key and
+  crashloops — upgrade the image before flipping the switch, same rule as
+  the zone family above.
+
+### Changed
+
+- **The Zone Heatmap dashboard reads the zone family.** Every panel that
+  aggregated per-pair series into zones at query time now reads the
+  pre-aggregated `kconmon_ng_zone_*` metrics, so the dashboard keeps working
+  in every `agent.metrics.detail` mode and its queries stop scaling with the
+  pair count. Loss panels are packet-weighted from the sent/received counters
+  instead of averaging the per-pair ratio gauges. The one exception is the
+  "MTR traces triggered" panel: MTR has no zone-level family, its counter is
+  per-pair, and in `zone-only` mode that panel reads zero — its description
+  now says so.
+
 ## kconmon-ng v2.1.0
 
 ### Added

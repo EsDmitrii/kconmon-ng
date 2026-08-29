@@ -37,6 +37,11 @@ const en = {
   /* ── page chrome ───────────────────────────────────────────────────────── */
   "title": "Scheduled checks",
   "description": "External probe targets, the check definitions that point at them, and their schedules.",
+  /* The "?" by the title (M7-5); the docs page is docs/console/scheduled-checks. */
+  "help.body":
+    "The configuration page for recurring probes, in three tabs. " +
+    "A target names a host or URL outside the fleet; a definition says what the fleet probes — a check type, which agents send, and where the probes go; a schedule is what fires a definition, and a definition without one never fires on its own. " +
+    "This is configuration, not telemetry: everything here lives in the console database, and reading needs the checks:read and targets:read permissions.",
   "tabs.aria": "Section",
   "tab.targets": "Targets",
   "tab.definitions": "Definitions",
@@ -233,6 +238,10 @@ export type TargetsKey = keyof typeof en;
 export const targetsDict: Dictionary<TargetsKey> = defineDict(en, {
   "title": "Плановые проверки",
   "description": "Внешние цели зондирования, определения проверок, которые на них указывают, и их расписания.",
+  "help.body":
+    "Страница настройки регулярных проверок, три вкладки. " +
+    "Цель называет хост или URL вне флота; определение говорит, что флот зондирует: тип проверки, какие агенты шлют и куда идут пробы; расписание — то, что запускает определение, а без расписания оно само не срабатывает никогда. " +
+    "Это конфигурация, а не телеметрия: всё здесь лежит в базе данных консоли, и на чтение нужны права checks:read и targets:read.",
   "tabs.aria": "Раздел",
   "tab.targets": "Цели",
   "tab.definitions": "Определения",

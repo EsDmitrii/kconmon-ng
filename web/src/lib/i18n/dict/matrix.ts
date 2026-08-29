@@ -28,6 +28,12 @@ const en = {
   "description.live": "Live N×N node connectivity, recomputed from Prometheus every 15s.",
   "description.engaged":
     "N×N node connectivity as of {at}, evaluated straight from Prometheus at that instant.",
+  /* The "?" by the title (M7-5); the docs page is docs/console/matrix. */
+  "help.body":
+    "One cell per directed pair: source rows × destination columns, recomputed from Prometheus every 15s. " +
+    "A cell shows the pair's failure percentage and its p95 RTT; UDP and ICMP cells also carry packet loss. " +
+    "The protocol choice travels in the URL, so a matrix view is shareable as it stands. " +
+    "Ctrl and the wheel zoom the grid, the wheel alone scrolls it, and a cell opens that pair's page.",
 
   "protocol.aria": "Protocol",
   "plane": "plane: pod",
@@ -99,6 +105,11 @@ export const matrixDict: Dictionary<MatrixKey> = defineDict(en, {
   "title": "Матрица",
   "description.live": "Живая связность узлов N×N, пересчитывается из Prometheus каждые 15 с.",
   "description.engaged": "Связность узлов N×N на {at}, посчитана прямо из Prometheus на этот момент.",
+  "help.body":
+    "Одна ячейка на направленную пару: источники по строкам, назначения по столбцам, пересчёт из Prometheus каждые 15 с. " +
+    "В ячейке — доля сбоев пары и её p95 RTT; у ячеек UDP и ICMP ещё и потери пакетов. " +
+    "Выбор протокола лежит в URL, так что вид матрицы можно передать ссылкой как есть. " +
+    "Ctrl с колесом масштабируют сетку, колесо само по себе её прокручивает, а ячейка открывает страницу своей пары.",
 
   "protocol.aria": "Протокол",
   "plane": "плоскость: pod",

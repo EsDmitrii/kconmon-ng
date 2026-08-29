@@ -43,4 +43,39 @@ spec:
         - protocol: TCP
           port: 6443
     {{- end }}
+{{- if .Values.controller.externalGateway.enabled }}
+{{- if not .Values.networkPolicy.externalAgentCidrs }}
+{{- fail "controller.externalGateway.enabled and networkPolicy.enabled are both true but networkPolicy.externalAgentCidrs is empty: the shared policy default-denies controller ingress it does not name, so the gateway would render unreachable and every external agent would time out on the TLS handshake while the config looks correct. Set networkPolicy.externalAgentCidrs to the agents' source CIDRs — through a NodePort or a LoadBalancer with externalTrafficPolicy: Cluster that source is the NODE's own IP, so cover the node CIDR or use externalTrafficPolicy: Local — or ask for the open shape explicitly with [0.0.0.0/0]" }}
+{{- end }}
+---
+{{- /*
+Ingress for the external gateway, scoped to the CONTROLLER alone. It cannot live in the shared
+policy: that podSelector matches the agent DaemonSet too, and a rule there would open the gateway
+port from external CIDRs on every node's agent — the widest-exposed component in the deployment.
+Only the gateway port, never config.grpcPort: same reasoning as service-external.yaml.
+*/}}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ printf "%s-gateway" (include "kconmon-ng.controller.fullname" . | trunc 55 | trimSuffix "-") | trunc 63 | trimSuffix "-" }}
+  labels:
+    {{- include "kconmon-ng.labels" . | nindent 4 }}
+    app.kubernetes.io/component: controller
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "kconmon-ng.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: controller
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        {{- range .Values.networkPolicy.externalAgentCidrs }}
+        - ipBlock:
+            cidr: {{ . | quote }}
+        {{- end }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.controller.externalGateway.port }}
+{{- end }}
 {{- end }}

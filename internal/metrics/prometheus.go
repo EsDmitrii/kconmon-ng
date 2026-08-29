@@ -32,6 +32,27 @@ type PrometheusMetrics struct {
 	ICMPLossRatio *prometheus.GaugeVec
 	ICMPResults   *prometheus.CounterVec
 
+	/* The zone family is the SECOND write of every peer probe, aggregated at the source into
+	   {source_zone, destination_zone}. It exists so the per-pair family can be dropped by metric
+	   relabeling at scale while zone alerts and dashboards keep their data — recording rules were
+	   declined because they cut query cost, not scrape cardinality. Loss is counters ONLY:
+	   averaging per-pair ratio gauges weights every pair equally regardless of traffic, so
+	   sum(rate(received))/sum(rate(sent)) is the only honest zone-level loss. Zones outlive
+	   peers: nothing ever deletes these series (see ForgetPeer). */
+	ZoneTCPConnect *prometheus.HistogramVec
+	ZoneTCPTotal   *prometheus.HistogramVec
+	ZoneTCPResults *prometheus.CounterVec
+
+	ZoneUDPRtt             *prometheus.HistogramVec
+	ZoneUDPResults         *prometheus.CounterVec
+	ZoneUDPPacketsSent     *prometheus.CounterVec
+	ZoneUDPPacketsReceived *prometheus.CounterVec
+
+	ZoneICMPRtt             *prometheus.HistogramVec
+	ZoneICMPResults         *prometheus.CounterVec
+	ZoneICMPPacketsSent     *prometheus.CounterVec
+	ZoneICMPPacketsReceived *prometheus.CounterVec
+
 	DNSDuration *prometheus.HistogramVec
 	DNSResults  *prometheus.CounterVec
 
@@ -82,6 +103,12 @@ func NewPrometheusMetrics(prefix string, reg prometheus.Registerer) *PrometheusM
 
 	peerLabels := []string{"source_node", "destination_node", "source_zone", "destination_zone"}
 	resultPeerLabels := []string{"source_node", "destination_node", "source_zone", "destination_zone", "result"}
+
+	/* An agent without a zone carries source_zone="" on its per-pair series, and the zone family
+	   mirrors that verbatim: a placeholder minted only here would make the aggregate disagree
+	   with the very family it aggregates. */
+	zoneLabels := []string{"source_zone", "destination_zone"}
+	resultZoneLabels := []string{"source_zone", "destination_zone", "result"}
 
 	/* target is the operator's NAME for the destination, target_kind is the closed set host|url and
 	   check_type is the probe's own type; none carries an address, and both derived labels come from
@@ -151,6 +178,57 @@ func NewPrometheusMetrics(prefix string, reg prometheus.Registerer) *PrometheusM
 			Name: prefix + "_icmp_results_total",
 			Help: "Total ICMP probe results",
 		}, resultPeerLabels),
+
+		ZoneTCPConnect: factory.NewHistogramVec(prometheus.HistogramOpts{
+			Name:    prefix + "_zone_tcp_connect_seconds",
+			Help:    "TCP connect time in seconds, aggregated per zone pair",
+			Buckets: defaultBuckets,
+		}, zoneLabels),
+		ZoneTCPTotal: factory.NewHistogramVec(prometheus.HistogramOpts{
+			Name:    prefix + "_zone_tcp_total_seconds",
+			Help:    "Total TCP probe round-trip time in seconds, aggregated per zone pair",
+			Buckets: defaultBuckets,
+		}, zoneLabels),
+		ZoneTCPResults: factory.NewCounterVec(prometheus.CounterOpts{
+			Name: prefix + "_zone_tcp_results_total",
+			Help: "Total TCP probe results, aggregated per zone pair",
+		}, resultZoneLabels),
+
+		ZoneUDPRtt: factory.NewHistogramVec(prometheus.HistogramOpts{
+			Name:    prefix + "_zone_udp_rtt_seconds",
+			Help:    "UDP round-trip time in seconds, aggregated per zone pair",
+			Buckets: defaultBuckets,
+		}, zoneLabels),
+		ZoneUDPResults: factory.NewCounterVec(prometheus.CounterOpts{
+			Name: prefix + "_zone_udp_results_total",
+			Help: "Total UDP probe results, aggregated per zone pair",
+		}, resultZoneLabels),
+		ZoneUDPPacketsSent: factory.NewCounterVec(prometheus.CounterOpts{
+			Name: prefix + "_zone_udp_packets_sent_total",
+			Help: "Total UDP probe packets put on the wire, per zone pair; loss = 1 - received/sent",
+		}, zoneLabels),
+		ZoneUDPPacketsReceived: factory.NewCounterVec(prometheus.CounterOpts{
+			Name: prefix + "_zone_udp_packets_received_total",
+			Help: "Total UDP probe packets answered, per zone pair",
+		}, zoneLabels),
+
+		ZoneICMPRtt: factory.NewHistogramVec(prometheus.HistogramOpts{
+			Name:    prefix + "_zone_icmp_rtt_seconds",
+			Help:    "ICMP round-trip time in seconds, aggregated per zone pair",
+			Buckets: defaultBuckets,
+		}, zoneLabels),
+		ZoneICMPResults: factory.NewCounterVec(prometheus.CounterOpts{
+			Name: prefix + "_zone_icmp_results_total",
+			Help: "Total ICMP probe results, aggregated per zone pair",
+		}, resultZoneLabels),
+		ZoneICMPPacketsSent: factory.NewCounterVec(prometheus.CounterOpts{
+			Name: prefix + "_zone_icmp_packets_sent_total",
+			Help: "Total ICMP echo requests put on the wire, per zone pair; loss = 1 - received/sent",
+		}, zoneLabels),
+		ZoneICMPPacketsReceived: factory.NewCounterVec(prometheus.CounterOpts{
+			Name: prefix + "_zone_icmp_packets_received_total",
+			Help: "Total ICMP echo replies received, per zone pair",
+		}, zoneLabels),
 
 		DNSDuration: factory.NewHistogramVec(prometheus.HistogramOpts{
 			Name:    prefix + "_dns_duration_seconds",
@@ -310,6 +388,35 @@ func (m *PrometheusMetrics) PeerResultCounter(checkType string) *prometheus.Coun
 	}
 }
 
+// ZoneResultCounter is PeerResultCounter's zone-family twin: only the pair-probing check types
+// aggregate into zones, everything else returns nil.
+func (m *PrometheusMetrics) ZoneResultCounter(checkType string) *prometheus.CounterVec {
+	switch checkType {
+	case "tcp":
+		return m.ZoneTCPResults
+	case "udp":
+		return m.ZoneUDPResults
+	case "icmp":
+		return m.ZoneICMPResults
+	default:
+		return nil
+	}
+}
+
+// ZonePacketCounters returns the (sent, received) pair for a check type that counts packets on the
+// wire; tcp is a single connect, not a packet train, so inventing a packet counter for it would
+// fabricate a loss signal.
+func (m *PrometheusMetrics) ZonePacketCounters(checkType string) (sent, received *prometheus.CounterVec) {
+	switch checkType {
+	case "udp":
+		return m.ZoneUDPPacketsSent, m.ZoneUDPPacketsReceived
+	case "icmp":
+		return m.ZoneICMPPacketsSent, m.ZoneICMPPacketsReceived
+	default:
+		return nil, nil
+	}
+}
+
 /*
 ForgetPeer drops the gauge series for ONE departed destination; a counter is cumulative and is never
 dropped here.
@@ -328,6 +435,10 @@ holes in exactly the series alerts fire on:
 
 DeletePartialMatch takes the label the departure is actually about and leaves every other series
 standing.
+
+The zone family is deliberately absent here: zones outlive peers, and its cumulative counters feed
+the rate() expressions zone alerts evaluate — deleting them on peer churn would reset those series
+once per pod event.
 */
 func (m *PrometheusMetrics) ForgetPeer(destinationNode string) {
 	labels := prometheus.Labels{"destination_node": destinationNode}
