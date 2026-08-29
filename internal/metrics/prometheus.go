@@ -3,6 +3,8 @@ package metrics //nolint:revive // intentional: "metrics" is clearer than altern
 import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
+
+	"github.com/EsDmitrii/kconmon-ng/internal/config"
 )
 
 var defaultBuckets = []float64{
@@ -12,6 +14,10 @@ var defaultBuckets = []float64{
 type PrometheusMetrics struct {
 	prefix string
 	reg    prometheus.Registerer
+
+	// BuildInfo mirrors the console's *_console_build_info: labels carry the
+	// ldflags-injected version/commit, the value is always 1.
+	BuildInfo *prometheus.GaugeVec
 
 	TCPConnectDuration *prometheus.HistogramVec
 	TCPTotalDuration   *prometheus.HistogramVec
@@ -93,6 +99,11 @@ func NewPrometheusMetrics(prefix string, reg prometheus.Registerer) *PrometheusM
 	m := &PrometheusMetrics{
 		prefix: prefix,
 		reg:    reg,
+
+		BuildInfo: factory.NewGaugeVec(prometheus.GaugeOpts{
+			Name: prefix + "_build_info",
+			Help: "Build info; value is always 1.",
+		}, []string{"version", "commit"}),
 
 		TCPConnectDuration: factory.NewHistogramVec(prometheus.HistogramOpts{
 			Name:    prefix + "_tcp_connect_duration_seconds",
@@ -269,6 +280,10 @@ func NewPrometheusMetrics(prefix string, reg prometheus.Registerer) *PrometheusM
 			Help: "Number of agents with a non-empty continuous external-check assignment",
 		}, []string{}),
 	}
+
+	// Populated here, not in cmd/main: both binaries create their registries
+	// inside their own New(), and the ldflags land in internal/config anyway.
+	m.BuildInfo.WithLabelValues(config.Version, config.Commit).Set(1)
 
 	return m
 }
