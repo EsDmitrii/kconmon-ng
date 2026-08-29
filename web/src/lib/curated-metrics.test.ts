@@ -1,6 +1,6 @@
 import type * as echarts from "echarts";
 import { describe, expect, it } from "vitest";
-import { CURATED_CHARTS, RANGE_TOKEN, resolveRangeToken, toSeriesOption } from "./curated-metrics";
+import { CURATED_CHARTS, RANGE_TOKEN, elideSeriesName, legendNamePrefix, resolveRangeToken, toSeriesOption } from "./curated-metrics";
 import type { PromResult } from "./types";
 
 // Full metric-name inventory from docs/metrics.md (also verified against
@@ -243,5 +243,81 @@ describe("toSeriesOption", () => {
   it("returns no series when the PromResult is a Prometheus error envelope", () => {
     const errorResult: PromResult = { status: "error", errorType: "bad_data", error: "parse error" };
     expect(toSeriesOption(tcpP95, errorResult, false).series).toEqual([]);
+  });
+});
+
+/* ── M3-6: legend legibility on a real fleet ──────────────────────────────
+   Real node names share a long cluster prefix, so a scroll legend printed
+   "adm-kuber-0…" five times over and paged through indistinguishable entries.
+   The DISPLAY drops the shared prefix down to the distinguishing suffix; the
+   series NAME stays whole — it is the identity the axis tooltip, the legend
+   tooltip and legend selection all key on. */
+describe("legend elision (M3-6)", () => {
+  const tcpP95 = CURATED_CHARTS.find((c) => c.id === "tcp-p95")!;
+
+  const fleetResult: PromResult = {
+    status: "success",
+    data: {
+      resultType: "matrix",
+      result: [
+        {
+          metric: { source_node: "adm-kuber-01", destination_node: "adm-kuber-02" },
+          values: [[1700000000, "0.2"]],
+        },
+        {
+          metric: { source_node: "adm-kuber-03", destination_node: "adm-kuber-04" },
+          values: [[1700000000, "0.3"]],
+        },
+      ],
+    },
+  };
+
+  type Legend = {
+    formatter?: (name: string) => string;
+    tooltip?: { show?: boolean };
+  };
+
+  it("computes the shared name prefix over the arrow-separated halves", () => {
+    expect(legendNamePrefix(["adm-kuber-01→adm-kuber-02", "adm-kuber-03→adm-kuber-04"])).toBe("adm-kuber-");
+    // Names that agree on no separator-terminated prefix stay whole.
+    expect(legendNamePrefix(["a→b", "c→d"])).toBe("");
+    expect(legendNamePrefix(["tcp", "udp", "icmp"])).toBe("");
+    // A single host name has nothing to compare against.
+    expect(legendNamePrefix(["example.com"])).toBe("");
+  });
+
+  it("elides each half down to its distinguishing suffix, display only", () => {
+    expect(elideSeriesName("adm-kuber-01→adm-kuber-02", "adm-kuber-")).toBe("…01→…02");
+    // A compare-panel name keeps its leg label and still elides the node halves.
+    expect(elideSeriesName("A: TCP RTT p95 · adm-kuber-01→adm-kuber-02", "adm-kuber-")).toBe(
+      "A: TCP RTT p95 · …01→…02",
+    );
+    expect(elideSeriesName("a→b", "")).toBe("a→b");
+  });
+
+  it("wires the elision into the legend and keeps the full name as identity", () => {
+    const option = toSeriesOption(tcpP95, fleetResult, false);
+    const series = option.series as echarts.LineSeriesOption[];
+    expect(series.map((s) => s.name)).toEqual(["adm-kuber-01→adm-kuber-02", "adm-kuber-03→adm-kuber-04"]);
+
+    const legend = option.legend as Legend;
+    expect(legend.formatter?.("adm-kuber-01→adm-kuber-02")).toBe("…01→…02");
+    // The full name stays one hover away, on the legend entry itself.
+    expect(legend.tooltip?.show).toBe(true);
+  });
+
+  it("leaves a legend without a qualifying shared prefix untouched", () => {
+    const shortResult: PromResult = {
+      status: "success",
+      data: {
+        resultType: "matrix",
+        result: [
+          { metric: { source_node: "a", destination_node: "b" }, values: [[0, "1"]] },
+          { metric: { source_node: "c", destination_node: "d" }, values: [[0, "2"]] },
+        ],
+      },
+    };
+    const legend = toSeriesOption(tcpP95, shortResult, false).legend as Legend;
+    expect(legend.formatter?.("a→b")).toBe("a→b");
   });
 });

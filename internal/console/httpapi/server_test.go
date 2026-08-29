@@ -102,8 +102,12 @@ type configBody struct {
 		Configured bool `json:"configured"`
 	} `json:"prometheus"`
 	Database struct {
-		Configured bool `json:"configured"`
+		Configured    bool `json:"configured"`
+		RetentionDays int  `json:"retentionDays"`
 	} `json:"database"`
+	Scheduler struct {
+		Enabled bool `json:"enabled"`
+	} `json:"scheduler"`
 }
 
 func TestConfigEndpointAdvertisesAnonymousBanner(t *testing.T) {
@@ -427,4 +431,53 @@ func TestAPICatchAllLeavesEveryOtherRouteAlone(t *testing.T) {
 	if w := do(t, s, "/api/v1/version"); w.Code != http.StatusOK {
 		t.Errorf("GET /api/v1/version = %d, want 200 — the catch-all must not shadow a real route", w.Code)
 	}
+}
+
+// TestConfigEndpointServesSchedulerAndRetention pins the two facts M3-13 adds to GET
+// /api/v1/config: schedules silently never fire while console.scheduler.enabled is false, and the
+// Settings page cannot print retention numbers it was never told.
+func TestConfigEndpointServesSchedulerAndRetention(t *testing.T) {
+	t.Run("defaults off", func(t *testing.T) {
+		w := do(t, newTestServer(t), "/api/v1/config")
+		if w.Code != http.StatusOK {
+			t.Fatalf("config = %d", w.Code)
+		}
+		var body configBody
+		if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+			t.Fatalf("config json: %v", err)
+		}
+		if body.Scheduler.Enabled {
+			t.Errorf("scheduler.enabled = true, want false: the test config leaves it off")
+		}
+		if body.Database.RetentionDays != 0 {
+			t.Errorf("database.retentionDays = %d, want 0", body.Database.RetentionDays)
+		}
+	})
+
+	t.Run("configured values pass through", func(t *testing.T) {
+		cfg := &config.Config{HTTPPort: 8080, LogLevel: "info", LogFormat: "json", MetricsPrefix: "kconmon_ng",
+			Auth:      config.AuthConfig{Mode: "anonymous", Anonymous: config.AnonymousConfig{Role: "viewer"}},
+			Scheduler: config.SchedulerConfig{Enabled: true, TickInterval: 5 * time.Second},
+			Database:  config.DatabaseConfig{RetentionDays: 45},
+		}
+		reg := prometheus.NewRegistry()
+		m := metrics.New(cfg.MetricsPrefix, reg)
+		ui := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte("spa")) })
+		s := NewServer(Deps{Config: cfg, Metrics: m, PromRegistry: reg, UI: ui})
+
+		w := do(t, s, "/api/v1/config")
+		if w.Code != http.StatusOK {
+			t.Fatalf("config = %d", w.Code)
+		}
+		var body configBody
+		if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+			t.Fatalf("config json: %v", err)
+		}
+		if !body.Scheduler.Enabled {
+			t.Errorf("scheduler.enabled = false, want true")
+		}
+		if body.Database.RetentionDays != 45 {
+			t.Errorf("database.retentionDays = %d, want 45", body.Database.RetentionDays)
+		}
+	})
 }

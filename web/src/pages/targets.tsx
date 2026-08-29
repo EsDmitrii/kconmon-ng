@@ -23,6 +23,7 @@ import {
   deleteCheck,
   deleteSchedule,
   deleteTarget,
+  getConfig,
   listAllChecks,
   listAllSchedules,
   listAllTargets,
@@ -30,6 +31,7 @@ import {
   updateSchedule,
   updateTarget,
 } from "@/lib/api";
+import type { components } from "@/lib/api-types";
 // Read directly in each mutating component rather than threaded down from the page as a prop: it is
 // a context read.
 import { DEFAULT_LOCALE, stampFull, useLocale, useT, type Locale, type Translate, type Vars } from "@/lib/i18n";
@@ -1270,6 +1272,10 @@ function DefinitionsTab({ canRead, canWrite }: { canRead: boolean; canWrite: boo
 
 /* ── Schedules tab ──────────────────────────────────────────────────────── */
 
+/* The generated OpenAPI shape of GET /api/v1/config. lib/types.ts's hand-written Config predates
+   the scheduler field; drop this alias once it re-exports the schema. */
+type ApiConfig = components["schemas"]["Config"];
+
 export function fmtIntervalNs(ns: number): string {
   /* Number.isFinite, not just falsiness (QA hostile pass): `!ns` already caught
      0, NaN, null and undefined, but an INFINITE cadence walked straight through
@@ -1854,6 +1860,8 @@ function SchedulesTab({ canRead, canWrite }: { canRead: boolean; canWrite: boole
     { mode: "none" } | { mode: "create" } | { mode: "edit"; schedule: Schedule }
   >({ mode: "none" });
   const query = useQuery({ queryKey: ["schedules"], queryFn: () => listAllSchedules(), enabled: canRead });
+  /* Same ["config"] entry useDatabaseAvailable caches, so this costs no extra round trip. */
+  const configQuery = useQuery({ queryKey: ["config"], queryFn: getConfig, staleTime: Infinity });
   // Named, not numbered: a schedule row that shows only a definition UUID
   // tells an operator nothing. Same ["definitions"] cache entry the
   // Definitions tab fills.
@@ -1874,8 +1882,19 @@ function SchedulesTab({ canRead, canWrite }: { canRead: boolean; canWrite: boole
     return <PermissionCard permission="checks:read">{t("schedules.gate.read")}</PermissionCard>;
   }
 
+  /* An explicit false, never a missing answer: an older server that omits the flag must not draw a
+     warning. Continuous cadences run on the agents, so only a cadence the loop owns makes it true. */
+  const loopOff =
+    (configQuery.data as ApiConfig | undefined)?.scheduler?.enabled === false &&
+    schedules.some((s) => s.enabled && s.kind !== "continuous");
+
   return (
     <div className="flex flex-col gap-4">
+      {loopOff ? (
+        <Card role="status" className="border-l-4 border-l-health-warn bg-health-warn-soft/40 p-5">
+          <p className="max-w-prose text-sm leading-relaxed">{t("schedules.schedulerOff")}</p>
+        </Card>
+      ) : null}
       {canWrite ? null : (
         <PermissionCard permission="schedules:write">{t("schedules.gate.write")}</PermissionCard>
       )}

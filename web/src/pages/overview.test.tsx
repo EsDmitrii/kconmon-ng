@@ -766,3 +766,47 @@ describe("OverviewPage — ru", () => {
     expect(screen.getAllByText("TCP · плоскость pod").length).toBeGreaterThanOrEqual(3);
   });
 });
+
+/* ── M3-1: the worst-pairs rows join the golden path ──────────────────────
+   A ranked problem row must open its pair card and its investigation without
+   a detour through the matrix — the same two affordances a matrix cell and a
+   firing-alert row already carry. */
+describe("OverviewPage — worst pairs are links (M3-1)", () => {
+  const stubMatrix = () =>
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((url: string) => Promise.resolve(String(url).includes("/topology") ? json(topo) : json(matrix))),
+    );
+
+  it("links every pair cell to its pair card, worst first", async () => {
+    stubMatrix();
+    renderPage();
+    const links = await screen.findAllByTestId("worst-pair-link");
+    expect(links).toHaveLength(3);
+    expect(links[0].getAttribute("href")).toBe("/pairs/c/a");
+    expect(links[1].getAttribute("href")).toBe("/pairs/b/c");
+    expect(links[2].getAttribute("href")).toBe("/pairs/b/a");
+  });
+
+  it("carries the viewed instant on the pair link, exactly as the matrix cells do", async () => {
+    window.history.pushState({}, "", "/?at=2026-01-01T00:00:00Z");
+    try {
+      stubMatrix();
+      renderPage();
+      const links = await screen.findAllByTestId("worst-pair-link");
+      expect(links[0].getAttribute("href") ?? "").toContain("at=");
+    } finally {
+      window.history.pushState({}, "", "/");
+    }
+  });
+
+  it("offers an investigate link per row — the firing-alert rows' own affordance", async () => {
+    stubMatrix();
+    renderPage();
+    const links = await screen.findAllByTestId("worst-pair-investigate");
+    expect(links).toHaveLength(3);
+    const href = links[0].getAttribute("href") ?? "";
+    expect(href).toContain("/investigate?kind=pair");
+    expect(href).toContain(encodeURIComponent("c→a"));
+  });
+});

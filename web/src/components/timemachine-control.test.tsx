@@ -34,7 +34,9 @@ describe("TimeMachineControl", () => {
       </TimeMachineProvider>,
     );
     const trigger = screen.getByRole("button", { name: /time machine/i });
-    expect(trigger).toHaveTextContent("Now");
+    // The feature's name is IN the idle label (M3-11): a bare "Now" chip was
+    // invisible as the Time Machine on the live console.
+    expect(trigger).toHaveTextContent("Time Machine: Now");
 
     fireEvent.click(trigger);
     fireEvent.click(screen.getByRole("button", { name: "1h ago" }));

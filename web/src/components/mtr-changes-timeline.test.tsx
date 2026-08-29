@@ -412,6 +412,21 @@ describe("PathChangesTimeline — the window and the markers", () => {
     expect(xAxis?.max).toBeGreaterThan(xAxis!.min!);
   });
 
+  /* Loss is a ratio ≤ 1, but ECharts's nice rounding pushed the auto axis to 1.2
+     on a fully-lossy pair and the labels read "120%" (M3-3, live pass). The clamp
+     is a callback over the DATA extent so a 2% wiggle keeps its auto scale. */
+  it("never lets the loss axis pass 100%, while small losses keep their auto scale", async () => {
+    renderTimeline({ snapshots: byLastSeen });
+
+    await waitFor(() => expect(captured.options.length).toBeGreaterThan(0));
+    const yAxis = (captured.options.at(-1) as { yAxis?: { max?: unknown } }).yAxis;
+    expect(typeof yAxis?.max).toBe("function");
+    const clamp = yAxis!.max as (extent: { min: number; max: number }) => number | null;
+    expect(clamp({ min: 0, max: 1 })).toBe(1); // total loss: the axis tops out at 100%, not 120%
+    expect(clamp({ min: 0, max: 0.7 })).toBe(1); // high enough that nice rounding could overshoot
+    expect(clamp({ min: 0, max: 0.02 })).toBeNull(); // low loss stays auto-scaled and readable
+  });
+
   it("selects that route when a marker is clicked", async () => {
     const onSelect = vi.fn();
     renderTimeline({ snapshots: byLastSeen, onSelect });

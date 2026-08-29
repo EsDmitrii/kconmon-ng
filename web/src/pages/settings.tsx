@@ -29,6 +29,7 @@ import {
   testWebhook,
   updateWebhook,
 } from "@/lib/api";
+import type { components } from "@/lib/api-types";
 // Read in each mutating component rather than threaded down as a prop, the same way
 // pages/targets.tsx does it.
 import { stampFull, translate, useLocale, useT, type Locale, type Translate } from "@/lib/i18n";
@@ -1519,10 +1520,15 @@ export function subjectLine(kind: string, displayName: string): string {
   return [kind, displayName].map((s) => s.trim()).filter((s) => s !== "").join(" · ");
 }
 
+/* The generated OpenAPI shape of GET /api/v1/config. lib/types.ts's hand-written Config predates
+   the scheduler/retention fields; drop this alias once it re-exports the schema. */
+type ApiConfig = components["schemas"]["Config"];
+
 function AboutSection() {
   const t = useT(settingsDict);
   const { me } = useAuth();
-  const { data: config } = useQuery({ queryKey: ["config"], queryFn: getConfig, staleTime: Infinity });
+  const { data } = useQuery({ queryKey: ["config"], queryFn: getConfig, staleTime: Infinity });
+  const config = data as ApiConfig | undefined;
   /* Same ["version"] entry useCapabilities polls, so this costs no extra round
      trip. The section that answers "what am I looking at" could not say WHICH
      BUILD it was — the first question of any bug report. */
@@ -1581,7 +1587,15 @@ function AboutSection() {
         </p>
       ) : null}
 
-      <p className="mt-4 max-w-prose text-xs leading-relaxed text-muted-foreground">{t("about.retention")}</p>
+      {/* Real numbers, printed only when the server actually told them: without a database there
+          is nothing retained, and an older server omits the field entirely. */}
+      {config?.database.configured && typeof config.database.retentionDays === "number" ? (
+        <p className="mt-4 max-w-prose text-xs leading-relaxed text-muted-foreground">
+          {config.database.retentionDays > 0
+            ? t("about.retention", { days: config.database.retentionDays })
+            : t("about.retention.off")}
+        </p>
+      ) : null}
       <p className="mt-3 max-w-prose text-xs leading-relaxed text-muted-foreground">
         {withNodes(t("about.maintenance"), {
           investigate: <SurfaceLink to="/investigate">{t("link.investigate")}</SurfaceLink>,

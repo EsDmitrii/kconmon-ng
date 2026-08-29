@@ -176,6 +176,13 @@ describe("sidebar", () => {
     expect(screen.queryByText("Network connectivity console")).not.toBeInTheDocument();
   });
 
+  /* M3-12: the palette hotkey's one visible trace in the chrome. The keys stay
+     an identifier (jsdom is not a Mac, so Ctrl+K); the words around them translate. */
+  it("translates the palette hint in the footer", async () => {
+    renderShell({ locale: "ru" });
+    expect(await screen.findByTitle("Ctrl+K — поиск и команды")).toBeInTheDocument();
+  });
+
   it("switches language in place, with no reload and no refetch", async () => {
     const { container } = renderShell();
     await screen.findByRole("navigation");
@@ -268,9 +275,9 @@ describe("Time Machine bar", () => {
   it("translates the live trigger, label and accessible name together", () => {
     renderBar({ locale: "ru" });
     const trigger = screen.getByRole("button", { name: "Сейчас. Машина времени: посмотреть консоль на момент в прошлом" });
-    // The visible word is the ANCHOR the window ends at; the feature's name
-    // stays in the accessible name and the tooltip.
-    expect(trigger).toHaveTextContent("Сейчас");
+    // The visible label names the feature AND the anchor (M3-11): the bare
+    // «Сейчас» chip was invisible as the Time Machine on the live console.
+    expect(trigger).toHaveTextContent("Машина времени: сейчас");
   });
 
   it("keeps the palette's seam locale-independent", () => {
@@ -280,7 +287,7 @@ describe("Time Machine bar", () => {
     renderBar({ locale: "ru" });
     const el = document.querySelector<HTMLElement>(TIME_MACHINE_TRIGGER_SELECTOR);
     expect(el).not.toBeNull();
-    expect(el).toHaveTextContent("Сейчас");
+    expect(el).toHaveTextContent("Машина времени: сейчас");
   });
 
   it("translates the engaged banner, its hint and its escape hatch", () => {

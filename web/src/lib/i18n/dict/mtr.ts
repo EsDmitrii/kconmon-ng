@@ -90,8 +90,10 @@ const en = {
   /* ── pane 2: the pair's routes ─────────────────────────────────────────── */
   "history.title": "Path history",
   /* Deliberately says no "on the left" (QA round 4, #20): under ~700px the
-     three panes stack and the destinations pane is ABOVE this one. */
-  "history.noPair": "Pick a source to see its path history.",
+     three panes stack and the destinations pane is ABOVE this one. And it names
+     the actual gesture: the pane it points at is titled Destinations, and the
+     source rows only appear inside an expanded destination card (M3-2). */
+  "history.noPair": "Expand a destination and pick a source to see that pair's path history.",
   "history.empty": "No path recorded for this pair yet.",
   /* A shared "Open in MTR Explorer" link for a pair path history has never seen.
      The generic list said nothing about the pair that was asked for. */
@@ -251,7 +253,7 @@ export const mtrDict: Dictionary<MTRKey> = defineDict(en, {
   "traces.many": "{count} трассировок",
 
   "history.title": "История путей",
-  "history.noPair": "Выберите источник, чтобы увидеть историю его путей.",
+  "history.noPair": "Раскройте назначение и выберите источник, чтобы увидеть историю путей этой пары.",
   "history.empty": "Для этой пары путей пока не записано.",
   "history.linkEmpty": "Для пары {source} → {destination} путей пока не записано.",
   "history.compareHint": "Отметьте два пути, чтобы сравнить. Третья отметка вытеснит более раннюю из двух.",

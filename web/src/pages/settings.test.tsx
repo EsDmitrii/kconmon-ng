@@ -47,7 +47,8 @@ function configBody(over: Record<string, unknown> = {}) {
     anonymousBanner: false,
     controller: { configured: true },
     prometheus: { configured: true },
-    database: { configured: true },
+    database: { configured: true, retentionDays: 90 },
+    scheduler: { enabled: false },
     ...over,
   };
 }
@@ -1109,9 +1110,28 @@ describe("About this console", () => {
     expect(await screen.findByText(/every unauthenticated request is the viewer role/i)).toBeInTheDocument();
   });
 
-  it("says plainly that retention numbers are not served to the browser", async () => {
-    renderPage();
-    expect(await screen.findByText(/GET \/api\/v1\/config does not serve the retention/i)).toBeInTheDocument();
+  /* M3-13: GET /api/v1/config serves database.retentionDays now, so the old
+     "numbers it was never told" self-confession is replaced by the numbers. */
+  it("prints the retention window the config serves", async () => {
+    renderPage({ config: { database: { configured: true, retentionDays: 45 } } });
+    expect(await screen.findByText(/keeps 45 days of history/)).toBeInTheDocument();
+    expect(screen.queryByText(/does not serve the retention/)).toBeNull();
+  });
+
+  it("says pruning is disabled when retentionDays is 0", async () => {
+    renderPage({ config: { database: { configured: true, retentionDays: 0 } } });
+    expect(await screen.findByText(/pruning is disabled/i)).toBeInTheDocument();
+  });
+
+  it("prints no retention sentence without a database, or when an older server omits the number", async () => {
+    renderPage({ config: { database: { configured: false, retentionDays: 90 } } });
+    expect(await screen.findByText(/About this console/)).toBeInTheDocument();
+    expect(screen.queryByText(/days of history/)).toBeNull();
+    cleanup();
+    renderPage({ config: { database: { configured: true } } });
+    expect(await screen.findByText(/About this console/)).toBeInTheDocument();
+    expect(screen.queryByText(/days of history/)).toBeNull();
+    expect(screen.queryByText(/undefined/)).toBeNull();
   });
 
   it("links to the maintenance surfaces rather than duplicating them", async () => {
@@ -1694,5 +1714,35 @@ describe("the webhook form asks before discarding unsaved work (#23)", () => {
     fireEvent.change(screen.getByLabelText("Name"), { target: { value: "ci" } });
     fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
     await waitFor(() => expect(screen.queryByLabelText("Name")).toBeNull());
+  });
+});
+
+/*
+ * M3-7 (verify-first): a live a11y-tree read showed "…declared where they explain something — on
+ * and , next to the chart they cov." and the roadmap suspected broken {investigate}/{explore}
+ * interpolation. These tests reproduce the render: if the links sit inside the sentence and no
+ * placeholder or empty joint survives, the a11y observation was the tree splitting anchors into
+ * their own nodes — not a rendering bug.
+ */
+describe("link interpolation in translated sentences (M3-7)", () => {
+  it("renders About's maintenance sentence with real Investigate/Explore links, no leftovers", async () => {
+    renderPage();
+    const para = await screen.findByText(/Maintenance windows are declared where they explain something/);
+    const links = within(para).getAllByRole("link");
+    expect(links.map((l) => l.textContent)).toEqual(["Investigate", "Explore"]);
+    expect(links.map((l) => l.getAttribute("href"))).toEqual(["/investigate", "/explore"]);
+    expect(para.textContent).toContain("on Investigate and Explore, next to the chart they cover");
+    expect(para.textContent).not.toMatch(/[{}]/);
+    expect(para.textContent).not.toContain("on  and ");
+  });
+
+  it("renders the maintenance-list blurb's links the same way", async () => {
+    /* The section itself is gated on maintenance:write (see MaintenanceWindowsSection). */
+    renderPage({ permissions: [...ADMIN, "maintenance:write"] });
+    const para = await screen.findByText(/Declaring a window still happens next to the chart it explains/);
+    const links = within(para).getAllByRole("link");
+    expect(links.map((l) => l.textContent)).toEqual(["Investigate", "Explore"]);
+    expect(para.textContent).toContain("on Investigate or Explore");
+    expect(para.textContent).not.toMatch(/[{}]/);
   });
 });

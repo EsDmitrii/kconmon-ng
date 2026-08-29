@@ -145,6 +145,48 @@ function formatRatio(value: number): string {
 export const AXIS_COLOR = { dark: CHART_FALLBACK.dark.axis, light: CHART_FALLBACK.light.axis };
 export const SPLIT_COLOR = { dark: CHART_FALLBACK.dark.grid, light: CHART_FALLBACK.light.grid };
 
+/* ── legend elision (M3-6) ──────────────────────────────────────────────── */
+
+/**
+ * legendNamePrefix is the prefix every arrow-separated half of every series name shares, cut back
+ * to a "-" or "." separator — pages/matrix.tsx's sharedNamePrefix rule applied to legend entries.
+ * Re-stated here rather than imported because lib code must not depend on a page module.
+ */
+export function legendNamePrefix(names: readonly string[]): string {
+  const segments = names.flatMap((n) => n.split("→"));
+  if (segments.length < 2) return "";
+  let prefix = segments[0];
+  for (const s of segments.slice(1)) {
+    let i = 0;
+    while (i < prefix.length && i < s.length && prefix[i] === s[i]) i++;
+    prefix = prefix.slice(0, i);
+    if (prefix === "") return "";
+  }
+  const cut = Math.max(prefix.lastIndexOf("-"), prefix.lastIndexOf("."));
+  if (cut < 3) return "";
+  prefix = prefix.slice(0, cut + 1);
+  const shortest = Math.min(...segments.map((s) => s.length));
+  return shortest - prefix.length >= 2 ? prefix : "";
+}
+
+/**
+ * elideSeriesName is the legend DISPLAY of one series: each name segment that carries the shared
+ * prefix loses it to an ellipsis, so five entries reading "adm-kuber-0…" become "…01→…02" and the
+ * scroll legend pages through suffixes a reader can tell apart. Splitting keeps the "→" and the
+ * compare panel's " · " joins, so a leg-labelled name elides its node halves too.
+ */
+export function elideSeriesName(name: string, prefix: string): string {
+  if (!prefix) return name;
+  return name
+    .split(/(→| · )/)
+    .map((part) =>
+      part !== "→" && part !== " · " && part.startsWith(prefix) && part.length > prefix.length
+        ? `…${part.slice(prefix.length)}`
+        : part,
+    )
+    .join("");
+}
+
 /**
  * PlotWindow is the span the reader ASKED for. Passed in, the axis is pinned to it instead of to
  * whatever the data happened to cover: a 24h pick over a Prometheus holding six hours drew a
@@ -180,6 +222,10 @@ export function toSeriesOption(
     labelForMetric(a.metric).localeCompare(labelForMetric(b.metric)),
   );
 
+  /* The DISPLAY prefix the legend drops; the series names themselves stay whole
+     (identity for legend selection, and what both tooltips print). */
+  const namePrefix = legendNamePrefix(sorted.map((e) => labelForMetric(e.metric)));
+
   return {
     animation: false,
     textStyle: { color: colors.axis },
@@ -195,6 +241,10 @@ export function toSeriesOption(
       textStyle: { color: colors.axis, fontSize: 11 },
       pageIconColor: colors.axis,
       pageTextStyle: { color: colors.axis },
+      /* Display only: the fleet prefix goes, the distinguishing suffix stays,
+         and the full name is one hover away on the entry itself. */
+      formatter: (name: string) => elideSeriesName(name, namePrefix),
+      tooltip: { show: true },
     },
     tooltip: {
       trigger: "axis",

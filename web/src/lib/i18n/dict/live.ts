@@ -83,10 +83,11 @@ const en = {
   "missed.hide": "Hide",
 
   /* ── the feed itself ────────────────────────────────────────────────────── */
+  /* No "col.type": the summary opens with the same words the Type column printed,
+     so the column went (M3-4). The type WORDS below stay — the filter needs them. */
   "col.time": "Time",
   "col.severity": "Severity",
   "col.summary": "Summary",
-  "col.type": "Type",
   "col.scope": "Scope",
   "feed.aria": "Event feed, newest first",
   "skeleton.loading": "Connecting to the event stream…",
@@ -101,9 +102,9 @@ const en = {
   "type.mtrCompleted": "MTR completed",
   "type.diagnosticProgress": "Diagnostic progress",
 
-  /* An operator's note wearing the feed's columns. */
+  /* An operator's note wearing the feed's columns. The span marker rides beside
+     the text on RANGED notes only — a momentary note is fully said by its badge. */
   "note.badge": "Note",
-  "note.moment": "Annotation",
   "note.span": "Annotation (span)",
 
   /* ── the cards above the feed ───────────────────────────────────────────── */
@@ -179,7 +180,6 @@ export const liveDict: Dictionary<LiveKey> = defineDict(en, {
   "col.time": "Время",
   "col.severity": "Важность",
   "col.summary": "Сводка",
-  "col.type": "Тип",
   "col.scope": "Область",
   "feed.aria": "Лента событий, новые сверху",
   "skeleton.loading": "Подключаемся к потоку событий…",
@@ -195,7 +195,6 @@ export const liveDict: Dictionary<LiveKey> = defineDict(en, {
   "type.diagnosticProgress": "Ход диагностики",
 
   "note.badge": "Заметка",
-  "note.moment": "Заметка",
   "note.span": "Заметка (интервал)",
 
   "topicError.title": "Топик живой ленты отклонён",

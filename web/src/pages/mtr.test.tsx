@@ -1332,10 +1332,15 @@ describe("MTRPage — copy", () => {
     expect(await screen.findByText("2 hops")).toBeInTheDocument();
   });
 
-  it("does not tell a 700px reader to look 'on the left', where the pane is stacked above", async () => {
+  /* Two rules in one string. No "on the left" (under ~700px the panes stack); and
+     no bare "pick a source" either — the pane it points at is titled Destinations,
+     and the source rows only exist inside an expanded destination card (M3-2). */
+  it("names the actual gesture — expand a destination, pick a source — and never says 'on the left'", async () => {
     renderPage();
 
-    expect(await screen.findByText("Pick a source to see its path history.")).toBeInTheDocument();
+    expect(
+      await screen.findByText("Expand a destination and pick a source to see that pair's path history."),
+    ).toBeInTheDocument();
     expect(screen.queryByText(/on the left/i)).not.toBeInTheDocument();
   });
 });
