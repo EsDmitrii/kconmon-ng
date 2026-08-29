@@ -35,14 +35,13 @@ default. The project README has the full tour:
 The chart is published as an OCI artifact on GHCR.
 
 ```bash
-helm install kconmon-ng oci://ghcr.io/esdmitrii/charts/kconmon-ng --version 2.0.0
+helm install kconmon-ng oci://ghcr.io/esdmitrii/charts/kconmon-ng
 ```
 
 With the Prometheus Operator objects, which is what most installs want:
 
 ```bash
 helm upgrade --install kconmon-ng oci://ghcr.io/esdmitrii/charts/kconmon-ng \
-  --version 2.0.0 \
   --set serviceMonitor.enabled=true \
   --set prometheusRule.enabled=true
 ```
@@ -51,7 +50,7 @@ With custom values:
 
 ```bash
 helm install kconmon-ng oci://ghcr.io/esdmitrii/charts/kconmon-ng \
-  --version 2.0.0 -f values.yaml
+  -f values.yaml
 ```
 
 ### Multi-node kind/minikube needs a real local provisioner
@@ -67,7 +66,7 @@ your database chart's `storageClass` at it.
 
 ```bash
 helm upgrade kconmon-ng oci://ghcr.io/esdmitrii/charts/kconmon-ng \
-  --version 2.0.0 -f values.yaml
+  -f values.yaml
 ```
 
 ### Uninstalling

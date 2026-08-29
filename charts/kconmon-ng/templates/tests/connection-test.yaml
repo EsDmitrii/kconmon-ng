@@ -26,6 +26,16 @@ spec:
   containers:
     - name: connection-test
       image: curlimages/curl:8.18.0
+      # The four fields restricted-PSS admission checks; without them `helm test` on a hardened
+      # namespace fails at admission, not on the health check. The image already runs as uid 100.
+      securityContext:
+        runAsNonRoot: true
+        allowPrivilegeEscalation: false
+        seccompProfile:
+          type: RuntimeDefault
+        capabilities:
+          drop:
+            - ALL
       command:
         - sh
         - -c

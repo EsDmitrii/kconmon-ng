@@ -76,6 +76,9 @@ spec:
       tolerations:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+      {{- with .Values.console.priorityClassName }}
+      priorityClassName: {{ . }}
+      {{- end }}
       {{- /* fsGroup is what lets the nonroot process read the 0440 projected Secret files, so it
              drops when there is no such volume -- but runAsNonRoot and the rest of the context are
              what a restricted-PSS namespace admits the pod on, and they stay either way. */}}

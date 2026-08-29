@@ -3,7 +3,7 @@ apiVersion: v2
 name: kconmon-ng
 description: Kubernetes Node Connectivity Monitor - Next Generation
 type: application
-version: 2.0.3
+version: 2.1.0
 appVersion: "2.0.3"
 keywords:
   - kubernetes
@@ -32,52 +32,19 @@ annotations:
   # operator evaluating 2.0.0 read that `prometheusRule.rules` was "DEPRECATED but still honoured ...
   # so existing installs are unaffected" and that the chart shipped optional CNPG and Valkey
   # subcharts — statements 2.0.0 contradicts, and the first of them describes a key it now rejects
-  # outright. What follows is 2.0.0 and nothing else.
+  # outright. What follows is 2.1.0 and nothing else.
   artifacthub.io/changes: |
-    - kind: changed
-      description: >-
-        BREAKING — the chart installs no infrastructure. PostgreSQL and the Redis-compatible bus were
-        subcharts and modes; they are now two top-level blocks, database and redis, each taking one
-        Secret that holds a DSN. Run whatever you already run
-    - kind: removed
-      description: >-
-        console.database.*, console.valkey.*, database.mode, database.cnpg.*, redis.mode,
-        redis.address, the valkey and cnpg-operator subcharts, console.networkPolicy.valkeyEgress
-        and valkeyIngressFrom — every one of them fails the render with the key to use instead
-    - kind: removed
-      description: >-
-        prometheusRule.rules, console.controller.grpcAddr, console.webhooks.encryptionKeySecret and
-        pdb.* are removed rather than deprecated: each fails the render naming its replacement,
-        because a rename that keeps accepting the old name leaves two names for one setting
-    - kind: changed
-      description: >-
-        BREAKING — the existingSecretKey defaults changed (database `dsn` to `console-database-dsn`,
-        and the three console secrets likewise). Set the key explicitly to keep 1.x behaviour; a
-        default cannot be migrated automatically without guessing
-    - kind: security
-      description: >-
-        /metrics moved to config.metricsPort (9091) on a listener of its own, for the agent, the
-        controller and the console alike. The scrape NetworkPolicy opens that port only: letting a
-        scraper in must not mean handing its whole namespace the component's unauthenticated API
-    - kind: security
-      description: >-
-        networkPolicy.prometheusPodLabels narrows the scrape rule to the scraper's own pods, and the
-        console policy honours it too
-    - kind: security
-      description: >-
-        networkPolicy.kubeAPIEgress lands on the CONTROLLER alone; it used to be spliced into the
-        shared policy, which also selects the agent DaemonSet — the most network-exposed component
-        in the release, which has no apiserver client at all
     - kind: added
       description: >-
-        controller.pdb.* (was pdb.*, which only ever rendered the controller's budget) and
-        console.pdb.* alongside it
-    - kind: changed
+        agent.updateStrategy is a value (default unchanged: RollingUpdate with maxUnavailable 1).
+        The old hardcode meant a fleet-wide DaemonSet rollout moved one node at a time; hundreds of
+        nodes now get to choose their own pace
+    - kind: added
       description: >-
-        prometheusRule.additionalRules is spliced verbatim, so a recording rule or keep_firing_for
-        survives; the built-ins are still rendered field by field, because the per-rule knobs rewrite
-        them
-    - kind: changed
+        agent.priorityClassName, controller.priorityClassName and console.priorityClassName (empty
+        default renders nothing). An agent at priority 0 is evicted first on exactly the node whose
+        degradation it was measuring
+    - kind: fixed
       description: >-
-        values.yaml is nine numbered sections, with database and redis at the top level ahead of the
-        components that consume them
+        The helm-test pod now carries the restricted-PSS securityContext fields; `helm test` used to
+        be rejected at admission on the hardened installs the chart itself targets

@@ -197,6 +197,15 @@ agent:
   pingGroupRange: true
   nodeSelector: {}
   affinity: {}
+  # Empty renders nothing. The agent is the workload worth raising: under node pressure the kubelet
+  # evicts lowest priority first, and the first pod gone should not be the one reporting the node.
+  priorityClassName: ""
+  # DaemonSet rollout strategy, passed through verbatim. One node at a time is the safe default and
+  # a slow one: on hundreds of nodes raise maxUnavailable (count or percentage) or use OnDelete.
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
 
 # == 6. Controller == Deployment serving peer lists over gRPC and watching nodes as leader.
 
@@ -236,6 +245,8 @@ controller:
   nodeSelector: {}
   tolerations: []
   affinity: {}
+  # Empty renders nothing.
+  priorityClassName: ""
   # PodDisruptionBudget; rendered only at replicaCount > 1, since minAvailable 1 over a single
   # replica blocks every voluntary eviction and hangs node drains.
   pdb:
@@ -543,6 +554,8 @@ console:
   nodeSelector: {}
   tolerations: []
   affinity: {}
+  # Empty renders nothing.
+  priorityClassName: ""
   # Rendered only when console.enabled and replicas > 1.
   pdb:
     enabled: true
