@@ -1,0 +1,35 @@
+---
+name: Scheduled vulnerability scan
+
+# The PR-time govulncheck job in ci.yaml only runs when someone opens a PR; a CVE
+# published against a dependency already on main would stay invisible until the
+# next PR. This weekly run closes that gap.
+on:
+  schedule:
+    # Monday morning UTC, inside the same quiet window renovate.json schedules in.
+    - cron: "30 4 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  govulncheck:
+    name: Vulnerability scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+          cache-dependency-path: go.sum
+
+      - name: Run govulncheck
+        run: |
+          # Same pinned version as ci.yaml; Renovate bumps both via the custom
+          # regex manager in renovate.json.
+          go install golang.org/x/vuln/cmd/govulncheck@v1.7.0
+          govulncheck ./...

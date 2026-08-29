@@ -1,3 +1,4 @@
+---
 name: Release
 
 on:
@@ -5,20 +6,23 @@ on:
     tags:
       - "v*"
 
+# Read-only by default; each job below requests exactly the scopes it needs.
 permissions:
-  contents: write
-  packages: write
-  id-token: write # cosign keyless signing (OIDC)
+  contents: read
 
 jobs:
   ci:
     name: CI
     uses: ./.github/workflows/ci.yaml
 
-  release:
-    name: Release
+  draft:
+    name: Build and draft release
     needs: ci
     runs-on: ubuntu-latest
+    permissions:
+      contents: write  # goreleaser creates the draft release and uploads assets
+      packages: write  # image pushes to GHCR
+      id-token: write  # cosign keyless signing (OIDC)
     steps:
       - uses: actions/checkout@v7
         with:
@@ -45,40 +49,18 @@ jobs:
       - name: Install cosign
         uses: sigstore/cosign-installer@v4.1.2
 
+      # goreleaser's `sboms` section shells out to syft; goreleaser-action does not install it.
+      - name: Install syft
+        uses: anchore/sbom-action/download-syft@v0
+
       - name: Compute version
         id: ver
         run: |
           echo "version=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_OUTPUT"
           echo "build_date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
 
-      # The console image cannot go through goreleaser dockers (those need a prebuilt binary + thin Dockerfile;
-      # Dockerfile.console has a Node build stage and needs full source context).
-      - name: Build and push console image
-        id: console-image
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          file: Dockerfile.console
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: |
-            ghcr.io/esdmitrii/kconmon-ng-console:${{ steps.ver.outputs.version }}
-            ghcr.io/esdmitrii/kconmon-ng-console:latest
-          build-args: |
-            VERSION=${{ steps.ver.outputs.version }}
-            COMMIT=${{ github.sha }}
-            BUILD_DATE=${{ steps.ver.outputs.build_date }}
-          labels: |
-            org.opencontainers.image.title=kconmon-ng-console
-            org.opencontainers.image.version=${{ steps.ver.outputs.version }}
-            org.opencontainers.image.source=https://github.com/EsDmitrii/kconmon-ng
-            org.opencontainers.image.revision=${{ github.sha }}
-
-      - name: Sign console image (cosign keyless)
-        run: |
-          # Sign by digest, not tag: tags are mutable, digests are what verifiers pin.
-          cosign sign --yes "ghcr.io/esdmitrii/kconmon-ng-console@${{ steps.console-image.outputs.digest }}"
-
+      # Before any push on purpose: a missing notes section must fail the release while it is
+      # still a no-op, not after the console image has already been published.
       - name: Extract current release notes
         run: |
           # RELEASE_NOTES.md keeps the full history, and the GitHub Release body must carry the
@@ -95,6 +77,36 @@ jobs:
             exit 1
           fi
 
+      # The console image cannot go through goreleaser dockers (those need a prebuilt binary + thin Dockerfile;
+      # Dockerfile.console has a Node build stage and needs full source context).
+      - name: Build and push console image
+        id: console-image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: Dockerfile.console
+          platforms: linux/amd64,linux/arm64
+          push: true
+          # :latest only for stable versions -- the same prerelease gate as the krew step and the
+          # goreleaser :latest manifests (skip_push: auto). Empty lines in the list are dropped.
+          tags: |
+            ghcr.io/esdmitrii/kconmon-ng-console:${{ steps.ver.outputs.version }}
+            ${{ !contains(github.ref_name, '-') && 'ghcr.io/esdmitrii/kconmon-ng-console:latest' || '' }}
+          build-args: |
+            VERSION=${{ steps.ver.outputs.version }}
+            COMMIT=${{ github.sha }}
+            BUILD_DATE=${{ steps.ver.outputs.build_date }}
+          labels: |
+            org.opencontainers.image.title=kconmon-ng-console
+            org.opencontainers.image.version=${{ steps.ver.outputs.version }}
+            org.opencontainers.image.source=https://github.com/EsDmitrii/kconmon-ng
+            org.opencontainers.image.revision=${{ github.sha }}
+
+      - name: Sign console image (cosign keyless)
+        run: |
+          # Sign by digest, not tag: tags are mutable, digests are what verifiers pin.
+          cosign sign --yes "ghcr.io/esdmitrii/kconmon-ng-console@${{ steps.console-image.outputs.digest }}"
+
       - name: Run GoReleaser
         uses: goreleaser/goreleaser-action@v7
         with:
@@ -103,6 +115,8 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+      # Stays in this job because render-manifest.sh reads the archives from dist/; the upload only
+      # attaches an asset to the DRAFT release, so nothing becomes public before the e2e gate.
       - name: Render and upload krew manifest
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -111,11 +125,35 @@ jobs:
           ./krew/render-manifest.sh "$VERSION" dist kconmon.yaml
           gh release upload "$GITHUB_REF_NAME" kconmon.yaml --clobber
 
+  # The release gate: the freshly built images and the chart must pass e2e on a kind cluster
+  # before the draft release is published and the chart/krew artifacts go out.
+  e2e:
+    name: E2E
+    needs: draft
+    permissions:
+      contents: read
+    uses: ./.github/workflows/e2e.yaml
+
+  publish:
+    name: Publish release
+    needs: e2e
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write  # gh release edit/download
+      packages: write  # helm chart + Artifact Hub metadata pushes
+      id-token: write  # cosign keyless signing (OIDC)
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v4.1.2
+
       - name: Set up Helm
         uses: azure/setup-helm@v5
         with:
           version: v4.2.4
 
+      # No `helm dependency build` here: the chart deliberately has no dependencies (see Chart.yaml).
       - name: Package and push Helm chart
         id: helm-push
         env:
@@ -124,9 +162,6 @@ jobs:
           printf '%s' "$HELM_TOKEN" | helm registry login ghcr.io -u "${{ github.actor }}" --password-stdin
           VERSION="${GITHUB_REF#refs/tags/v}"
           OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
-          # Optional subcharts are pinned in Chart.lock; build (not update) so the
-          # published artifact carries exactly the locked versions.
-          helm dependency build charts/kconmon-ng
           helm package charts/kconmon-ng --version "$VERSION" --app-version "$VERSION"
           PUSH_OUT=$(helm push "kconmon-ng-${VERSION}.tgz" "oci://ghcr.io/${OWNER}/charts" 2>&1)
           echo "$PUSH_OUT"
@@ -151,15 +186,29 @@ jobs:
             --config /dev/null:application/vnd.cncf.artifacthub.config.v1+yaml \
             artifacthub-repo.yml:application/vnd.cncf.artifacthub.repository-metadata.layer.v1.yaml
 
-      # Last step on purpose: goreleaser creates the release as a DRAFT (immutable releases seal assets at publish
-      # time).
+      # After the chart push on purpose: goreleaser created the release as a DRAFT (immutable
+      # releases seal assets at publish time).
       - name: Publish release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release edit "$GITHUB_REF_NAME" --draft=false --latest
+          if [[ "$GITHUB_REF_NAME" == *-* ]]; then
+            # GitHub refuses --latest on a prerelease, and a prerelease must not become "latest" anyway.
+            gh release edit "$GITHUB_REF_NAME" --draft=false
+          else
+            gh release edit "$GITHUB_REF_NAME" --draft=false --latest
+          fi
 
-      # Opens the version-bump PR in kubernetes-sigs/krew-index, so a release no longer needs a hand-written krew PR.
+      # Rendered and attached by the draft job; this job runs in a fresh workspace.
+      - name: Fetch krew manifest from the release
+        if: ${{ !contains(github.ref_name, '-') }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release download "$GITHUB_REF_NAME" --pattern kconmon.yaml
+
+      # Opens the version-bump PR in kubernetes-sigs/krew-index, so a release no longer needs a
+      # hand-written krew PR.
       - name: Open krew-index bump PR
         if: ${{ !contains(github.ref_name, '-') }}
         uses: rajatjindal/krew-release-bot@v0.0.51

@@ -1,62 +1,42 @@
 ---
 name: E2E
 
+# Reusable workflow: release.yaml calls it between the draft job (images built, release still a
+# draft) and the publish job, so nothing user-visible goes out before these tests pass on kind.
 on:
-  workflow_run:
-    workflows: ["Release"]
-    types: [completed]
+  workflow_call:
 
 # Read-only: this job clones, builds a kind cluster and installs the released
 # chart. It never pushes anything and never reads GITHUB_TOKEN.
 permissions:
   contents: read
 
-concurrency:
-  group: e2e-${{ github.ref }}
-  cancel-in-progress: true
-
 jobs:
   e2e:
     name: E2E Tests
     runs-on: ubuntu-latest
-    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
 
     steps:
-      # CodeQL flags workflow_run + checkout of workflow_run.head_sha as an untrusted checkout in a privileged
-      # context; it cannot here: the parent is Release, which triggers only on `push: tags: v*`.
+      # workflow_call shares the caller's github context, and release.yaml only runs on
+      # `push: tags: v*` -- so the default checkout ref is always the released tag.
       - name: Checkout released commit
         uses: actions/checkout@v7
-        with:
-          fetch-depth: 0
-          ref: ${{ github.event.workflow_run.head_sha }}
 
-      - name: Detect release tag and build metadata
+      - name: Compute build metadata
         id: meta
         run: |
-          set -e
-          git fetch --tags --force
-
-          TAG="$(git tag --points-at "${{ github.event.workflow_run.head_sha }}" | grep '^v' | head -n1 || true)"
-          if [ -z "$TAG" ]; then
-            echo "No v* tag points at this commit. Skipping E2E."
-            echo "skip=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          echo "skip=false" >> "$GITHUB_OUTPUT"
-          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
-          echo "commit=${{ github.event.workflow_run.head_sha }}" >> "$GITHUB_OUTPUT"
-          echo "build_date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+          {
+            echo "version=${GITHUB_REF_NAME#v}"
+            echo "commit=${GITHUB_SHA}"
+            echo "build_date=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Set up Go
-        if: ${{ steps.meta.outputs.skip != 'true' }}
         uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
 
       - name: Write kind config
-        if: ${{ steps.meta.outputs.skip != 'true' }}
         run: |
           cat > kind-config.yaml <<'YAML'
           kind: Cluster
@@ -68,7 +48,6 @@ jobs:
           YAML
 
       - name: Create Kind cluster
-        if: ${{ steps.meta.outputs.skip != 'true' }}
         uses: helm/kind-action@v1
         with:
           cluster_name: kconmon-ng-e2e
@@ -86,11 +65,9 @@ jobs:
           config: kind-config.yaml
 
       - name: Set up Docker Buildx
-        if: ${{ steps.meta.outputs.skip != 'true' }}
         uses: docker/setup-buildx-action@v4
 
       - name: Build agent image
-        if: ${{ steps.meta.outputs.skip != 'true' }}
         uses: docker/build-push-action@v7
         with:
           context: .
@@ -104,7 +81,6 @@ jobs:
             BUILD_DATE=${{ steps.meta.outputs.build_date }}
 
       - name: Build controller image
-        if: ${{ steps.meta.outputs.skip != 'true' }}
         uses: docker/build-push-action@v7
         with:
           context: .
@@ -119,7 +95,6 @@ jobs:
 
       # Dockerfile.console is a SEPARATE Dockerfile (not a `target:` of the root one, see Makefile's docker-build).
       - name: Build console image
-        if: ${{ steps.meta.outputs.skip != 'true' }}
         uses: docker/build-push-action@v7
         with:
           context: .
@@ -134,7 +109,6 @@ jobs:
             BUILD_DATE=${{ steps.meta.outputs.build_date }}
 
       - name: Load images into Kind
-        if: ${{ steps.meta.outputs.skip != 'true' }}
         run: |
           kind load docker-image kconmon-ng-agent:test --name kconmon-ng-e2e
           kind load docker-image kconmon-ng-controller:test --name kconmon-ng-e2e
@@ -142,7 +116,6 @@ jobs:
 
       # See e2e/testdata/prometheusrule-crd.yaml's header for what the vendored CRD does and does not cover.
       - name: Apply the PrometheusRule CRD and the foreign rule fixture
-        if: ${{ steps.meta.outputs.skip != 'true' }}
         run: |
           kubectl apply -f e2e/testdata/prometheusrule-crd.yaml
           kubectl wait --for condition=established \
@@ -156,7 +129,6 @@ jobs:
       # Deliberately a plain postgres:17-alpine Deployment/Service, not CNPG -- see e2e/testdata/postgres.yaml's
       # header for why.
       - name: Apply Postgres fixture
-        if: ${{ steps.meta.outputs.skip != 'true' }}
         run: |
           kubectl apply -f e2e/testdata/postgres.yaml
           kubectl wait --for=condition=ready pod \
@@ -166,16 +138,14 @@ jobs:
       # Same shape as the Postgres DSN Secret above -- created here, referenced BY NAME from
       # e2e/testdata/console-values.yaml.
       - name: Create the webhook encryption key Secret
-        if: ${{ steps.meta.outputs.skip != 'true' }}
         run: |
           kubectl create secret generic kconmon-e2e-webhooks-key \
             --from-literal=encryptionKey="$(openssl rand -base64 32)" \
             --dry-run=client -o yaml | kubectl apply -f -
 
+      # No `helm dependency build` here: the chart deliberately has no dependencies (see Chart.yaml).
       - name: Install Helm chart
-        if: ${{ steps.meta.outputs.skip != 'true' }}
         run: |
-          helm dependency build ./charts/kconmon-ng
           helm upgrade --install kconmon-ng ./charts/kconmon-ng \
             -f e2e/testdata/values.yaml \
             -f e2e/testdata/console-values.yaml \
@@ -192,7 +162,6 @@ jobs:
             --timeout 5m
 
       - name: Wait for pods
-        if: ${{ steps.meta.outputs.skip != 'true' }}
         run: |
           kubectl wait --for=condition=ready pod \
             -l app.kubernetes.io/name=kconmon-ng \
@@ -201,7 +170,6 @@ jobs:
       # The console's sync path fails identically ("this ServiceAccount may not write prometheusrules") whether the
       # Role was never rendered.
       - name: Verify the alerting RBAC rendered
-        if: ${{ steps.meta.outputs.skip != 'true' }}
         run: |
           kubectl get role kconmon-ng-console-alerting \
             -o jsonpath='{.rules}'
@@ -211,7 +179,6 @@ jobs:
           echo
 
       - name: Smoke tests
-        if: ${{ steps.meta.outputs.skip != 'true' }}
         run: |
           CONTROLLER_POD=$(kubectl get pods \
             -l app.kubernetes.io/component=controller \
@@ -228,7 +195,6 @@ jobs:
           kill $PF_PID || true
 
       - name: Run E2E tests
-        if: ${{ steps.meta.outputs.skip != 'true' }}
         run: |
           CONTROLLER_POD=$(kubectl get pods \
             -l app.kubernetes.io/component=controller \
@@ -298,7 +264,6 @@ jobs:
       # does not read, helm accepted it, and the console kept its database -- every degraded-mode
       # assertion then failed against a fully-functional console.
       - name: Reinstall console with database disabled
-        if: ${{ steps.meta.outputs.skip != 'true' }}
         run: |
           helm upgrade --install kconmon-ng ./charts/kconmon-ng \
             -f e2e/testdata/values.yaml \
@@ -317,7 +282,6 @@ jobs:
             --timeout 5m
 
       - name: Run degraded-mode E2E tests
-        if: ${{ steps.meta.outputs.skip != 'true' }}
         run: |
           CONSOLE_POD=$(kubectl get pods \
             -l app.kubernetes.io/component=console \
@@ -331,7 +295,7 @@ jobs:
           KCONMON_CONSOLE_URL: http://localhost:8081
 
       - name: Collect debug info on failure
-        if: ${{ steps.meta.outputs.skip != 'true' && failure() }}
+        if: ${{ failure() }}
         run: |
           echo "=== Pod status ==="
           kubectl get pods -o wide

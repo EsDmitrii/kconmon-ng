@@ -119,6 +119,8 @@ docker_manifests:
       - "ghcr.io/esdmitrii/kconmon-ng-agent:{{.Version}}-arm64"
 
   - name_template: "ghcr.io/esdmitrii/kconmon-ng-agent:latest"
+    # A prerelease must not move :latest; same gate as the krew and console-image steps.
+    skip_push: auto
     image_templates:
       - "ghcr.io/esdmitrii/kconmon-ng-agent:{{.Version}}-amd64"
       - "ghcr.io/esdmitrii/kconmon-ng-agent:{{.Version}}-arm64"
@@ -129,9 +131,18 @@ docker_manifests:
       - "ghcr.io/esdmitrii/kconmon-ng-controller:{{.Version}}-arm64"
 
   - name_template: "ghcr.io/esdmitrii/kconmon-ng-controller:latest"
+    # A prerelease must not move :latest; same gate as the krew and console-image steps.
+    skip_push: auto
     image_templates:
       - "ghcr.io/esdmitrii/kconmon-ng-controller:{{.Version}}-amd64"
       - "ghcr.io/esdmitrii/kconmon-ng-controller:{{.Version}}-arm64"
+
+# Keyless cosign for the agent/controller images, same trust model as the console image signed in
+# release.yaml: sign the digest, because tags are mutable and digests are what verifiers pin.
+docker_signs:
+  - cmd: cosign
+    artifacts: all
+    args: ["sign", "--yes", "${artifact}@${digest}"]
 
 archives:
   - id: server
@@ -149,6 +160,22 @@ archives:
 
 checksum:
   name_template: checksums.txt
+
+# Keyless cosign over checksums.txt: one blob signature covers every archive listed in it.
+signs:
+  - cmd: cosign
+    artifacts: checksum
+    certificate: "${artifact}.pem"
+    args:
+      - sign-blob
+      - "--output-signature=${signature}"
+      - "--output-certificate=${certificate}"
+      - "--yes"
+      - "${artifact}"
+
+# SPDX SBOMs for the archives (agent, controller, kubectl plugin); syft is installed in release.yaml.
+sboms:
+  - artifacts: archive
 
 changelog:
   sort: asc

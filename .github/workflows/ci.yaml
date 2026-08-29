@@ -81,7 +81,9 @@ jobs:
 
       - name: Run govulncheck
         run: |
-          go install golang.org/x/vuln/cmd/govulncheck@latest
+          # Pinned, not @latest: reproducible runs, and Renovate owns the bump
+          # (custom regex manager in renovate.json).
+          go install golang.org/x/vuln/cmd/govulncheck@v1.7.0
           govulncheck ./...
 
   lint:
@@ -128,6 +130,61 @@ jobs:
           name: coverage
           path: coverage.txt
           retention-days: 7
+
+  integration:
+    name: Integration test
+    needs: lint
+    runs-on: ubuntu-latest
+    # Everything the `//go:build integration` files need: the store and scheduler
+    # suites take a Postgres DSN (the scheduler creates its own database, allowed
+    # because the image's POSTGRES_USER is a superuser), the cache suite a Valkey addr.
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: kconmon
+          POSTGRES_PASSWORD: kconmon
+          POSTGRES_DB: kconmon_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U kconmon"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      valkey:
+        image: valkey/valkey:8-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "valkey-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+          cache-dependency-path: go.sum
+
+      - name: Run integration tests
+        env:
+          KCONMON_TEST_DATABASE_DSN: postgres://kconmon:kconmon@127.0.0.1:5432/kconmon_test?sslmode=disable
+          REDIS_TEST_ADDR: 127.0.0.1:6379
+        # The suites skip themselves when their env var is unset, so a green run
+        # can mean "ran nothing"; the grep turns that silent skip into a failure.
+        run: |
+          set -euo pipefail
+          go test -race -count=1 -tags=integration -v ./internal/console/... \
+            | tee /tmp/integration-tests.log
+          if grep -E 'SKIP.*(KCONMON_TEST_DATABASE_DSN|REDIS_TEST_ADDR) not set' /tmp/integration-tests.log; then
+            echo "::error::integration tests were skipped; the service env did not reach the tests"
+            exit 1
+          fi
 
   build:
     name: Build
