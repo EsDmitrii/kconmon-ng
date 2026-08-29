@@ -108,6 +108,8 @@ const en = {
   "table.status": "Status",
   "table.status.failing": "Failing",
   "table.status.degraded": "Degraded",
+  /* The row's investigate affordance — deliberately the same word the firing-alert rows use. */
+  "table.investigate": "investigate",
 
   /* ── firing alerts ──────────────────────────────────────────────────────── */
   "alerts.title": "Firing alerts",
@@ -238,6 +240,7 @@ export const overviewDict: Dictionary<OverviewKey> = defineDict(en, {
   "table.status": "Статус",
   "table.status.failing": "Сбой",
   "table.status.degraded": "Деградация",
+  "table.investigate": "расследовать",
 
   "alerts.title": "Активные оповещения",
   "alerts.open": "открыть Оповещения",

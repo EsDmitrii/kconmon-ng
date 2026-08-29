@@ -41,6 +41,11 @@ const ICONS: Record<string, LucideIcon> = {
   "/settings": Settings,
 };
 
+/* The palette answers both ⌘K and Ctrl+K (components/command-palette.tsx); the
+   footer hint names the one this OS actually uses. */
+const IS_MAC = typeof navigator !== "undefined" && /Mac|iPhone|iPad|iPod/.test(navigator.platform);
+const PALETTE_KEYS = IS_MAC ? "⌘K" : "Ctrl+K";
+
 /* The header is a translation KEY rather than a literal: the group names are
    the one piece of sidebar text with no NavItem behind it to fall back to. */
 const GROUPS: { key: ChromeKey; paths: string[] }[] = [
@@ -141,16 +146,26 @@ export function AppSidebar({ onNavigate }: { onNavigate?: () => void } = {}) {
           </div>
         ))}
       </nav>
-      <div className="border-t border-border px-4 py-3">
+      <div className="flex items-center justify-between gap-3 border-t border-border px-4 py-3">
         {/* me is undefined until GET /api/v1/auth/me answers, and isAnonymous
             reads false in that gap (use-auth.ts's fail-closed default) — so
             this only ever shows the real user menu once a genuinely
             non-anonymous subject is confirmed, never mid-load. */}
-        {me && !isAnonymous ? (
-          <UserMenu me={me} can={can} />
-        ) : (
-          <span className="text-[11px] text-muted-foreground">{t("sidebar.footer")}</span>
-        )}
+        <div className="min-w-0 flex-1">
+          {me && !isAnonymous ? (
+            <UserMenu me={me} can={can} />
+          ) : (
+            <span className="text-[11px] text-muted-foreground">{t("sidebar.footer")}</span>
+          )}
+        </div>
+        {/* The palette's one visible trace in the chrome (M3-12): without it,
+            ⌘K/Ctrl+K existed only for readers of the docs. */}
+        <kbd
+          title={t("sidebar.palette.hint", { keys: PALETTE_KEYS })}
+          className="shrink-0 rounded border border-border bg-surface-2 px-1.5 py-1 font-mono text-[10px] leading-none text-muted-foreground"
+        >
+          {PALETTE_KEYS}
+        </kbd>
       </div>
     </aside>
   );

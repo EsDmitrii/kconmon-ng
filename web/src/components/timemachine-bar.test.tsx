@@ -64,11 +64,12 @@ describe("Time Machine while live", () => {
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   });
 
-  /* Live it says where the window ENDS, which is the one word that connects it
-     to the range presets it now sits beside. */
-  it("reads Now, so the trigger states the anchor rather than naming a feature", () => {
+  /* Live it names the feature AND the anchor. The bare "Now" chip read as part
+     of the range presets and nobody found the Time Machine behind it (M3-11
+     reversed the earlier anchor-only wording on live-console evidence). */
+  it("reads 'Time Machine: Now', so the idle trigger is findable as the Time Machine", () => {
     renderBar();
-    expect(screen.getByRole("button", { name: /time machine/i })).toHaveTextContent("Now");
+    expect(screen.getByRole("button", { name: /time machine/i })).toHaveTextContent("Time Machine: Now");
   });
 
   it("opens the calendar popover on now", () => {

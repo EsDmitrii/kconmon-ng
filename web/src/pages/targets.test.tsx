@@ -34,13 +34,14 @@ function meBody(permissions: string[]) {
   };
 }
 
-function configBody(databaseConfigured: boolean) {
+function configBody(databaseConfigured: boolean, schedulerEnabled: boolean) {
   return {
     auth: { mode: "local", role: "", loginPath: "/api/v1/auth/login" },
     anonymousBanner: false,
     controller: { configured: true },
     prometheus: { configured: true },
-    database: { configured: databaseConfigured },
+    database: { configured: databaseConfigured, retentionDays: 90 },
+    scheduler: { enabled: schedulerEnabled },
   };
 }
 
@@ -105,6 +106,8 @@ function renderPage(
   opts: {
     permissions?: string[];
     databaseConfigured?: boolean;
+    /** Defaults ON in the harness: most tests exercise an install where schedules work. */
+    schedulerEnabled?: boolean;
     targets?: unknown[];
     definitions?: unknown[];
     schedules?: unknown[];
@@ -117,6 +120,7 @@ function renderPage(
   const {
     permissions = OPERATOR,
     databaseConfigured = true,
+    schedulerEnabled = true,
     targets = [],
     definitions = [],
     schedules = [],
@@ -138,7 +142,9 @@ function renderPage(
     calls.push({ method, url: href, body });
 
     if (href.includes("/api/v1/auth/me")) return Promise.resolve(json(meBody(permissions)));
-    if (href.includes("/api/v1/config")) return Promise.resolve(json(configBody(databaseConfigured)));
+    if (href.includes("/api/v1/config")) {
+      return Promise.resolve(json(configBody(databaseConfigured, schedulerEnabled)));
+    }
     // Before the bare /api/v1/checks branch: the projection endpoint is a
     // longer path under the same prefix.
     if (href.startsWith("/api/v1/checks/projection")) return Promise.resolve(json(projection));
@@ -1178,5 +1184,39 @@ describe("rows wrap instead of overflowing a narrow viewport (#1)", () => {
     const cell = await screen.findByText(long);
     expect(cell.className).toContain("min-w-0");
     expect(cell.className).toContain("truncate");
+  });
+});
+
+/*
+ * M3-13: on the chart's default install console.scheduler.enabled is false, so a created schedule
+ * is stored and then silently never fires. The tab has to say so — and only when it is true:
+ * continuous cadences run on the agents and never fire on the scheduler's clock.
+ */
+describe("the schedules tab warns when the scheduler loop is off (M3-13)", () => {
+  it("shows the banner when an enabled interval schedule exists and the loop is off", async () => {
+    renderPage({ definitions: [definitionRow()], schedules: [scheduleRow()], schedulerEnabled: false });
+    await openTab(/schedules/i);
+    expect(await screen.findByText(/scheduler loop is disabled/i)).toBeInTheDocument();
+  });
+
+  it("stays silent while the loop is on", async () => {
+    renderPage({ definitions: [definitionRow()], schedules: [scheduleRow()], schedulerEnabled: true });
+    await openTab(/schedules/i);
+    await screen.findByRole("list", { name: /schedules/i });
+    expect(screen.queryByText(/scheduler loop is disabled/i)).toBeNull();
+  });
+
+  it("stays silent when there is nothing the loop would fire", async () => {
+    renderPage({
+      definitions: [definitionRow()],
+      schedules: [
+        scheduleRow({ id: "s-1", enabled: false }),
+        scheduleRow({ id: "s-2", kind: "continuous", intervalNs: 0, nextFireAt: null }),
+      ],
+      schedulerEnabled: false,
+    });
+    await openTab(/schedules/i);
+    await screen.findByRole("list", { name: /schedules/i });
+    expect(screen.queryByText(/scheduler loop is disabled/i)).toBeNull();
   });
 });

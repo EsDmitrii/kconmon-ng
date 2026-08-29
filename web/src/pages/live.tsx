@@ -11,8 +11,8 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { useCapabilities, useDatabaseAvailable } from "@/hooks/use-capabilities";
 import { getWsClient } from "@/hooks/use-ws-topic";
 import { useAnnotations } from "@/components/annotations";
-import { localeTag, useLocale, useT, type Translate } from "@/lib/i18n";
-import { SEVERITY_KEYS, TYPE_KEYS, liveDict, type LiveKey } from "@/lib/i18n/dict/live";
+import { localeTag, useLocale, useT } from "@/lib/i18n";
+import { SEVERITY_KEYS, TYPE_KEYS, liveDict } from "@/lib/i18n/dict/live";
 import { ApiError, getEvents } from "@/lib/api";
 import { GLOBAL_SCOPE } from "@/lib/annotations";
 import { useTimeContext } from "@/lib/timemachine";
@@ -242,13 +242,6 @@ function isKnownSeverity(value: string): value is LiveEventSeverity {
   return (LIVE_EVENT_SEVERITIES as readonly string[]).includes(value);
 }
 
-/** The label for an event type, or the raw wire string for one this build has
- *  never heard of — untranslated on purpose, because inventing a Russian name
- *  for an unknown `type` would be this console making one up. */
-function typeLabel(t: Translate<LiveKey>, type: string): string {
-  return isKnownType(type) ? t(TYPE_KEYS[type]) : type;
-}
-
 /* The feed's clock is lib/utils.fmtEventStamp — fmtEventTime plus the DAY for a row that is not
    from today. A 2000-event ring plus "Load older" reaches back past midnight routinely, and a bare
    15:12 on yesterday's row reads as this afternoon's, which is the one reading a change feed must
@@ -265,7 +258,6 @@ function SeverityBadge({ severity }: { severity: string }) {
 }
 
 function EventRow({ event }: { event: LiveEvent }) {
-  const t = useT(liveDict);
   const { locale } = useLocale();
   return (
     <>
@@ -277,11 +269,10 @@ function EventRow({ event }: { event: LiveEvent }) {
           columns to the right leave this one about 300px, and the row has no expander, no click
           handler and no detail view — the truncated half was simply gone. The annotation row beside
           it has carried a title all along. */}
+      {/* No Type column: the summary opens with the same words, so the column repeated
+          every row's first breath while eating 160px the summary needed. */}
       <span title={event.summary} className="min-w-0 flex-1 truncate text-sm">
         {event.summary}
-      </span>
-      <span className="hidden w-40 shrink-0 truncate text-xs text-muted-foreground lg:block">
-        {typeLabel(t, event.type)}
       </span>
       <span className="hidden w-52 shrink-0 truncate text-xs text-muted-foreground md:block">{event.scope}</span>
     </>
@@ -306,9 +297,11 @@ function AnnotationFeedRow({ annotation }: { annotation: Annotation }) {
       <span className="min-w-0 flex-1 truncate text-sm italic" title={annotation.text}>
         {annotation.text}
       </span>
-      <span className="hidden w-40 shrink-0 truncate text-xs text-muted-foreground lg:block">
-        {t(annotation.endAt ? "note.span" : "note.moment")}
-      </span>
+      {/* Only a RANGED note earns a marker (the Type column that carried it is gone):
+          the badge already says "Note", but not that it covers a span. */}
+      {annotation.endAt ? (
+        <span className="shrink-0 text-xs text-muted-foreground">{t("note.span")}</span>
+      ) : null}
       <span className="hidden w-52 shrink-0 truncate text-xs text-muted-foreground md:block">
         {annotation.createdBy}
       </span>
@@ -328,7 +321,6 @@ function FeedSkeleton() {
           <Skeleton className="h-3 w-20" />
           <Skeleton className="h-4 w-16 rounded-full" />
           <Skeleton className="h-3 flex-1" />
-          <Skeleton className="hidden h-3 w-32 lg:block" />
           <Skeleton className="hidden h-3 w-44 md:block" />
         </div>
       ))}
@@ -888,7 +880,6 @@ export function LivePage() {
           <span className="w-24 shrink-0">{t("col.time")}</span>
           <span className="w-[5.25rem] shrink-0">{t("col.severity")}</span>
           <span className="min-w-0 flex-1">{t("col.summary")}</span>
-          <span className="hidden w-40 shrink-0 lg:block">{t("col.type")}</span>
           <span className="hidden w-52 shrink-0 md:block">{t("col.scope")}</span>
         </div>
 

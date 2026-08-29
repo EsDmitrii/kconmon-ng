@@ -3034,7 +3034,7 @@ components:
 
     Config:
       type: object
-      required: [auth, anonymousBanner, controller, prometheus, database]
+      required: [auth, anonymousBanner, controller, prometheus, database, scheduler]
       properties:
         auth:
           type: object
@@ -3057,7 +3057,28 @@ components:
         prometheus:
           $ref: "#/components/schemas/ConfiguredFlag"
         database:
-          $ref: "#/components/schemas/ConfiguredFlag"
+          type: object
+          required: [configured, retentionDays]
+          properties:
+            configured:
+              type: boolean
+            retentionDays:
+              type: integer
+              description: >-
+                console.database.retentionDays -- how many days of history the pruner keeps; 0
+                disables pruning. Meaningful only while `configured` is true.
+          additionalProperties: false
+        scheduler:
+          type: object
+          required: [enabled]
+          properties:
+            enabled:
+              type: boolean
+              description: >-
+                console.scheduler.enabled -- whether this install runs the loop that fires due
+                schedules. Schedules can be created and stored regardless; while this is false
+                they never fire.
+          additionalProperties: false
       additionalProperties: false
 
     ConfiguredFlag:
@@ -5131,6 +5152,11 @@ components:
           type: object
           description: Whatever the per-route allow-list let through; {} for almost everything.
           additionalProperties: true
+        subjectDisplay:
+          type: string
+          description: >-
+            Human-readable name of the subject at the time of the action (display name or
+            email), when one was recorded; absent on rows written before it was captured.
       additionalProperties: false
 
     AuditPage:

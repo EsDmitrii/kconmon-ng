@@ -1238,7 +1238,15 @@ export interface components {
             anonymousBanner: boolean;
             controller: components["schemas"]["ConfiguredFlag"];
             prometheus: components["schemas"]["ConfiguredFlag"];
-            database: components["schemas"]["ConfiguredFlag"];
+            database: {
+                configured: boolean;
+                /** @description console.database.retentionDays -- how many days of history the pruner keeps; 0 disables pruning. Meaningful only while `configured` is true. */
+                retentionDays: number;
+            };
+            scheduler: {
+                /** @description console.scheduler.enabled -- whether this install runs the loop that fires due schedules. Schedules can be created and stored regardless; while this is false they never fire. */
+                enabled: boolean;
+            };
         };
         ConfiguredFlag: {
             configured: boolean;
@@ -2239,6 +2247,8 @@ export interface components {
             detail: {
                 [key: string]: unknown;
             };
+            /** @description Human-readable name of the subject at the time of the action (display name or email), when one was recorded; absent on rows written before it was captured. */
+            subjectDisplay?: string;
         };
         AuditPage: {
             entries: components["schemas"]["AuditEntry"][];

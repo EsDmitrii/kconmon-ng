@@ -147,6 +147,9 @@ const en = {
   "schedules.subject": "schedules",
   "schedules.empty": "No schedules yet.",
   "schedules.unavailable": "Schedules are unavailable",
+  "schedules.schedulerOff":
+    "These schedules will not fire: the scheduler loop is disabled on this install " +
+    "(console.scheduler.enabled). Continuous schedules are unaffected — they run on the agents.",
   "schedules.gate.read":
     "Schedules have no read permission of their own — listing them rides on the definitions they belong to.",
   "schedules.gate.write":
@@ -311,6 +314,9 @@ export const targetsDict: Dictionary<TargetsKey> = defineDict(en, {
   "schedules.subject": "Расписания",
   "schedules.empty": "Расписаний пока нет.",
   "schedules.unavailable": "Расписания недоступны",
+  "schedules.schedulerOff":
+    "Эти расписания не сработают: цикл планировщика на этой инсталляции выключен " +
+    "(console.scheduler.enabled). Расписаний continuous это не касается — они выполняются на агентах.",
   "schedules.gate.read":
     "Своего права на чтение у расписаний нет: список открывается вместе с определениями, которым они " +
     "принадлежат.",

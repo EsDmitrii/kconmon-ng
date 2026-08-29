@@ -236,10 +236,12 @@ const en = {
   "about.anonymous":
     "Anonymous mode: every unauthenticated request is the {role} role (console.auth.anonymous.role). There is no " +
     "sign-in.",
+  /* {days} is console.database.retentionDays, straight from GET /api/v1/config. */
   "about.retention":
-    "Retention: GET /api/v1/config does not serve the retention windows to the browser, so this page will not " +
-    "print numbers it was never told. They are console.retention.* in the console config (Helm: " +
-    "console.retention), and the pruner logs what it swept.",
+    "Retention: the database keeps {days} days of history (console.database.retentionDays), and the pruner logs " +
+    "what it swept.",
+  "about.retention.off":
+    "Retention: pruning is disabled (console.database.retentionDays: 0) — history is kept until removed by hand.",
   "about.maintenance":
     "Maintenance windows are declared where they explain something — on {investigate} and {explore}, next to the " +
     "chart they cover — rather than a second time here. The section above lists every declared window with no " +
@@ -434,9 +436,10 @@ export const settingsDict: Dictionary<SettingsKey> = defineDict(en, {
     "Анонимный режим: каждый неаутентифицированный запрос идёт с ролью {role} (console.auth.anonymous.role). " +
     "Входа нет.",
   "about.retention":
-    "Хранение. GET /api/v1/config сроки хранения браузеру не отдаёт, поэтому страница не печатает цифры, которых " +
-    "ей никто не называл. Задаются они как console.retention.* в конфиге консоли (в Helm это console.retention), " +
-    "а очиститель пишет в лог, что именно вычистил.",
+    "Хранение: база держит историю {days} дн. (console.database.retentionDays), а очиститель пишет в лог, что " +
+    "именно вычистил.",
+  "about.retention.off":
+    "Хранение: очистка выключена (console.database.retentionDays: 0) — история копится, пока её не удалят руками.",
   "about.maintenance":
     "Окна работ объявляют там, где они что-то объясняют: на {investigate} и {explore}, рядом с графиком, который " +
     "они закрывают. Второй такой формы здесь нет. Раздел выше показывает все объявленные окна без отсечки по " +

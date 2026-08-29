@@ -46,6 +46,9 @@ const en = {
   "nav.group.manage": "Manage",
 
   "sidebar.footer": "Network connectivity console",
+  /* The footer's <kbd> tooltip. {keys} is the palette hotkey as this OS spells
+     it (⌘K or Ctrl+K) — an identifier, interpolated rather than translated. */
+  "sidebar.palette.hint": "{keys} — search and commands",
 
   "shell.skipToContent": "Skip to main content",
   /* The <nav>'s accessible NAME. A screen reader announces it before the first
@@ -73,9 +76,10 @@ const en = {
   /* ── Time Machine bar ──────────────────────────────────────────────────── */
   "timemachine.label": "Time Machine",
   "timemachine.trigger": "Now — Time Machine, view the console at a past time",
-  /* The control sits beside the page's range presets, which choose how LONG the
-     window is; this one chooses where it ENDS, and says so in one word. */
-  "timemachine.now": "Now",
+  /* The idle chip names the feature AND the anchor: sitting beside the range
+     presets, a bare "Now" read as one of them and nobody found the Time
+     Machine behind it (M3-11, live pass). */
+  "timemachine.now": "Time Machine: Now",
   "timemachine.hint": "Time Machine: the presets pick how far back, this picks the moment you are looking from.",
   /* {at} is the bar's ONE stamp, formatted in the INTERFACE language (lib/i18n's
      localeTag) because it lands inside these sentences — see
@@ -118,6 +122,7 @@ export const chromeDict: Dictionary<ChromeKey> = defineDict(en, {
   "nav.group.manage": "Управление",
 
   "sidebar.footer": "Консоль сетевой связности",
+  "sidebar.palette.hint": "{keys} — поиск и команды",
 
   "shell.skipToContent": "Перейти к основному содержимому",
   "shell.nav.aria": "Основная навигация",
@@ -134,7 +139,7 @@ export const chromeDict: Dictionary<ChromeKey> = defineDict(en, {
 
   "timemachine.label": "Машина времени",
   "timemachine.trigger": "Сейчас. Машина времени: посмотреть консоль на момент в прошлом",
-  "timemachine.now": "Сейчас",
+  "timemachine.now": "Машина времени: сейчас",
   "timemachine.hint": "Машина времени: пресеты задают глубину окна, а это — момент, из которого вы смотрите.",
   "timemachine.viewing": "Вы смотрите состояние на {at}.",
   "timemachine.viewingHint": "Чтобы что-то менять, вернитесь в реальное время.",

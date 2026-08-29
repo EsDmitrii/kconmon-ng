@@ -187,7 +187,13 @@ export function PathChangesTimeline({
     const legend = full.legend && !Array.isArray(full.legend)
       ? { ...full.legend, bottom: undefined, top: 0, left: "center" as const, itemHeight: 2, itemWidth: 12 }
       : full.legend;
-    const yAxis = full.yAxis && !Array.isArray(full.yAxis) ? { ...full.yAxis, splitNumber: 3 } : full.yAxis;
+    /* Loss is a ratio ≤ 1, but ECharts's nice rounding extended the auto axis to
+       1.2 on a fully-lossy pair and the labels read "120%". Pin the top to 100%
+       once the data extent is high enough to overshoot; small losses keep the
+       auto scale so a 2% wiggle stays readable. */
+    const clampLossMax = ({ max }: { min: number; max: number }) => (max > 0.5 ? 1 : null);
+    const yAxis =
+      full.yAxis && !Array.isArray(full.yAxis) ? { ...full.yAxis, splitNumber: 3, max: clampLossMax } : full.yAxis;
     return { ...full, grid: { ...PLOT_GRID }, legend, yAxis };
   }, [full]);
   // promqlQueryRange RESOLVES Prometheus's own error envelope rather than

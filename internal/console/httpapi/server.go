@@ -612,7 +612,15 @@ func (s *Server) handleConfig(w http.ResponseWriter, _ *http.Request) {
 		"prometheus":      map[string]bool{"configured": s.prom != nil},
 		// s.events is non-nil exactly when cmd/console wired a database (Deps.Events is assigned only
 		// inside its own "if db != nil" branch).
-		"database": map[string]bool{"configured": s.events != nil},
+		"database": map[string]any{
+			"configured": s.events != nil,
+			// Told to the browser so Settings/About can print real numbers; meaningful only with a
+			// database, and 0 means pruning is off.
+			"retentionDays": s.cfg.Database.RetentionDays,
+		},
+		// Schedules can be created and stored while the loop that fires them is off — the UI needs
+		// this flag to say so instead of letting them silently never run.
+		"scheduler": map[string]bool{"enabled": s.cfg.Scheduler.Enabled},
 	})
 }
 

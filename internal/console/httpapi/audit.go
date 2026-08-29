@@ -82,7 +82,7 @@ func (s *Server) recordAudit(r *http.Request, subject authz.Subject, outcome str
 		resource:    auditResource(r),
 		outcome:     outcome,
 		remoteAddr:  r.RemoteAddr,
-		detail:      detail,
+		detail:      withSubjectDisplay(detail, subject.ID, subject.DisplayName),
 	}
 	/* A DENIAL is the cheapest row to produce and the least valuable to keep, and that asymmetry was
 	   a hole: a flood of rejected requests (no rate limit outside login and runs) kept this buffer
@@ -309,6 +309,66 @@ func mergeAuditResult(detail json.RawMessage, holder *auditResultHolder) json.Ra
 		return detail
 	}
 	return encoded
+}
+
+/*
+ * auditSubjectDisplayKey is the reserved detail member carrying the subject's human-readable name
+ * (display name or email). The audit table stores subject kind/id only, and an OIDC id is a UUID
+ * nobody recognises a week later — so the name the session already carries rides in the detail
+ * column, and handleAudit lifts it back out into its own response field. It cannot collide with
+ * caller input: auditDetailFor copies only allow-listed keys and no allow-list names this one.
+ */
+const auditSubjectDisplayKey = "subjectDisplay"
+
+// withSubjectDisplay folds displayName into detail when it adds information over the id; sanitised
+// and bounded like every other value a row carries, because IdP claims are caller-shaped data.
+func withSubjectDisplay(detail json.RawMessage, id, displayName string) json.RawMessage {
+	name := sanitizeAuditText(displayName)
+	if name == "" || name == id {
+		return detail
+	}
+	merged := map[string]json.RawMessage{}
+	if len(detail) > 0 {
+		// A detail that does not decode is emptyDetail or a marshal this package produced; starting
+		// from {} is correct either way (mergeAuditResult's reasoning).
+		_ = json.Unmarshal(detail, &merged)
+	}
+	encodedName, err := json.Marshal(name)
+	if err != nil {
+		return detail
+	}
+	merged[auditSubjectDisplayKey] = boundAuditValue(encodedName)
+	encoded, err := json.Marshal(merged)
+	if err != nil {
+		return detail
+	}
+	return encoded
+}
+
+// liftSubjectDisplay moves the reserved member out of a stored detail into its own value, so the
+// response's detail keeps carrying only what the route's allow-list let through; a row written
+// before the member existed passes through untouched.
+func liftSubjectDisplay(detail json.RawMessage) (rest json.RawMessage, display string) {
+	if !bytes.Contains(detail, []byte(auditSubjectDisplayKey)) {
+		return detail, ""
+	}
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(detail, &m); err != nil {
+		return detail, ""
+	}
+	raw, ok := m[auditSubjectDisplayKey]
+	if !ok {
+		return detail, ""
+	}
+	if err := json.Unmarshal(raw, &display); err != nil {
+		return detail, ""
+	}
+	delete(m, auditSubjectDisplayKey)
+	encoded, err := json.Marshal(m)
+	if err != nil {
+		return detail, display
+	}
+	return encoded, display
 }
 
 // auditDetailFor extracts action's allow-listed subset of body's top-level JSON keys; values are
@@ -681,6 +741,9 @@ type auditEntryResponse struct {
 	Outcome     string          `json:"outcome"`
 	RemoteAddr  string          `json:"remoteAddr"`
 	Detail      json.RawMessage `json:"detail"`
+	// SubjectDisplay is the human-readable name recorded with the row (liftSubjectDisplay); absent
+	// on rows written before it was captured.
+	SubjectDisplay string `json:"subjectDisplay,omitempty"`
 }
 
 // auditResponse is GET /api/v1/audit's body -- same keyset-cursor shape as
@@ -733,10 +796,11 @@ func (s *Server) handleAudit(w http.ResponseWriter, r *http.Request) {
 	out := make([]auditEntryResponse, 0, len(page.Entries))
 	for i := range page.Entries {
 		e := &page.Entries[i]
+		detail, display := liftSubjectDisplay(e.Detail)
 		out = append(out, auditEntryResponse{
 			ID: e.ID, At: e.At, SubjectKind: e.SubjectKind, SubjectID: e.SubjectID,
 			Action: e.Action, Resource: e.Resource, Outcome: e.Outcome,
-			RemoteAddr: e.RemoteAddr, Detail: e.Detail,
+			RemoteAddr: e.RemoteAddr, Detail: detail, SubjectDisplay: display,
 		})
 	}
 	writeJSON(w, auditResponse{Entries: out, NextCursor: page.NextCursor})

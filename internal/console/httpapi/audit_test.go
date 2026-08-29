@@ -626,3 +626,107 @@ func TestAuditDetailPreservesALargeIntegerExactly(t *testing.T) {
 		t.Errorf("detail = %s, want the integer recorded verbatim", detail)
 	}
 }
+
+/*
+ * The three tests below pin M3-5: the Investigate timeline showed a raw "user:oidc:<uuid>" because
+ * the audit table stores subject kind/id only. The display name the session already carries is
+ * folded into the row's detail at WRITE time (the store schema is untouched) and lifted into a
+ * top-level `subjectDisplay` field at READ time.
+ */
+
+func TestAuditMutationRecordsSubjectDisplay(t *testing.T) {
+	fs := &fakeAuditStore{}
+	policy := authz.NewPolicy(map[string][]authz.Permission{"tester": {authz.PermRBACManage}})
+	authr := fakeAuthenticator{subject: authz.Subject{
+		Kind:        authz.SubjectUser,
+		ID:          "oidc:2f0d3a9c-9a67-4c11-8f3e-000000000000",
+		DisplayName: "d.esin@group-ib.com",
+	}}
+	s := newAuthzServer(t, authr, policy, Deps{
+		Roles: fakeRoleResolver{roles: []string{"tester"}},
+		Audit: fs,
+		RBAC:  newFakeRoleAdmin(),
+	})
+
+	w := doRequest(t, s, http.MethodPost, "/api/v1/rbac/roles",
+		strings.NewReader(`{"name":"custom-1","permissions":["topology:read"]}`), mutateWithCSRF)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status %d: %s", w.Code, w.Body)
+	}
+
+	entries := waitForOneAuditEntry(t, fs)
+	var detail map[string]json.RawMessage
+	if err := json.Unmarshal(entries[0].Detail, &detail); err != nil {
+		t.Fatalf("detail: %v", err)
+	}
+	var display string
+	if err := json.Unmarshal(detail["subjectDisplay"], &display); err != nil || display != "d.esin@group-ib.com" {
+		t.Errorf("detail.subjectDisplay = %s (err %v), want the session's display name", detail["subjectDisplay"], err)
+	}
+	// The allow-listed body keys must survive alongside it.
+	if _, ok := detail["name"]; !ok {
+		t.Errorf("detail lost the allow-listed name key: %s", entries[0].Detail)
+	}
+}
+
+// TestWithSubjectDisplaySkipsRedundantNames: a display name that adds nothing over the id (or is
+// absent) writes nothing, so header-mode rows and anonymous rows stay exactly as they were.
+func TestWithSubjectDisplaySkipsRedundantNames(t *testing.T) {
+	cases := []struct {
+		name, id, display string
+		want              string
+	}{
+		{"absent", "u1", "", `{}`},
+		{"same as id", "d.esin", "d.esin", `{}`},
+		{"adds information", "oidc:abc", "Ada", `{"subjectDisplay":"Ada"}`},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := withSubjectDisplay(json.RawMessage(`{}`), c.id, c.display)
+			if string(got) != c.want {
+				t.Errorf("withSubjectDisplay = %s, want %s", got, c.want)
+			}
+		})
+	}
+}
+
+func TestAuditListLiftsSubjectDisplayOutOfDetail(t *testing.T) {
+	fs := &fakeAuditStore{}
+	s := newAuditTestServer(t, fs, []authz.Permission{authz.PermAuditRead}, Deps{})
+
+	ctx := context.Background()
+	// A pre-M3-5 row with no display recorded, then a current one carrying it.
+	_, _ = fs.InsertAuditEntry(ctx, "user", "u-old", "POST /api/v1/runs", "", "allowed", "", json.RawMessage(`{"type":"tcp"}`))
+	_, _ = fs.InsertAuditEntry(ctx, "user", "oidc:abc", "POST /api/v1/rbac/roles", "", "allowed", "",
+		json.RawMessage(`{"name":"custom-1","subjectDisplay":"d.esin@group-ib.com"}`))
+
+	w := doRequest(t, s, http.MethodGet, "/api/v1/audit", nil, nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status %d: %s", w.Code, w.Body)
+	}
+	var body struct {
+		Entries []struct {
+			SubjectDisplay string                     `json:"subjectDisplay"`
+			Detail         map[string]json.RawMessage `json:"detail"`
+		} `json:"entries"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(body.Entries) != 2 {
+		t.Fatalf("entries = %d, want 2", len(body.Entries))
+	}
+	newest := body.Entries[0] // newest first
+	if newest.SubjectDisplay != "d.esin@group-ib.com" {
+		t.Errorf("subjectDisplay = %q, want the recorded display name", newest.SubjectDisplay)
+	}
+	if _, ok := newest.Detail["subjectDisplay"]; ok {
+		t.Errorf("detail still carries subjectDisplay after the lift: %v", newest.Detail)
+	}
+	if _, ok := newest.Detail["name"]; !ok {
+		t.Errorf("the lift dropped an allow-listed detail key: %v", newest.Detail)
+	}
+	if old := body.Entries[1]; old.SubjectDisplay != "" {
+		t.Errorf("pre-capture row invented a subjectDisplay: %q", old.SubjectDisplay)
+	}
+}

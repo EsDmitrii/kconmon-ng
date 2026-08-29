@@ -402,7 +402,22 @@ describe("LivePage", () => {
     const rows = screen.getAllByRole("listitem");
     expect(rows).toHaveLength(1);
     expect(rows[0]).toHaveTextContent("from the future");
-    expect(rows[0]).toHaveTextContent("quantum_flux");
+    // The Type column is gone (M3-4): the summary is the row's account of what happened.
+    expect(rows[0]).not.toHaveTextContent("quantum_flux");
+  });
+
+  /* M3-4: the Type column duplicated the summary's own prefix word for word,
+     so it went; Scope stays — it is the scannable right edge of the feed. */
+  it("has no Type column, keeps the Scope column", async () => {
+    renderPage();
+    open();
+    await emit([ev(1, { type: "check_observed", summary: "probe failed", scope: "node-a→node-b" })]);
+
+    expect(screen.getByText("Scope")).toBeInTheDocument();
+    expect(screen.queryByText("Type")).toBeNull();
+    const row = screen.getAllByRole("listitem")[0];
+    expect(row).toHaveTextContent("node-a→node-b");
+    expect(row).not.toHaveTextContent("Check observed");
   });
 
   it("waits for events once the socket is open and the feed is empty", () => {

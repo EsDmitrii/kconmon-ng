@@ -671,6 +671,9 @@ function FiringAlerts() {
 
 function WorstPairsTable({ pairs }: { pairs: MatrixCell[] }) {
   const t = useT(overviewDict);
+  /* The instant the table is drawn at, so a drill-down opens the same moment (null = Live) —
+     the matrix grid's own rule for its cell links. */
+  const { at } = useTimeContext();
   return (
     <div className="overflow-x-auto">
       <table className="w-full text-sm">
@@ -694,12 +697,25 @@ function WorstPairsTable({ pairs }: { pairs: MatrixCell[] }) {
             <th scope="col" className="py-3 font-semibold">
               {t("table.status")}
             </th>
+            {/* The investigate column carries links, not data — named for screen readers only. */}
+            <th scope="col" className="py-3 pl-4">
+              <span className="sr-only">{t("table.investigate")}</span>
+            </th>
           </tr>
         </thead>
         <tbody className="divide-y divide-border">
           {pairs.map((c, i) => {
             const fail = c.failRatio ?? 0;
             const failing = fail >= 0.1;
+            /* Same two links a matrix cell carries: the pair card AT the viewed instant, and an
+               investigation window ending there rather than at the wall clock. */
+            const pairHref = withAtParam(
+              `/pairs/${encodeURIComponent(c.source)}/${encodeURIComponent(c.destination)}`,
+            );
+            const investigateHref = buildInvestigateURL(
+              { kind: "pair", a: c.source, b: c.destination },
+              at ?? new Date(),
+            );
             return (
               <tr
                 /* The rank leads the key: two cells naming the same pair is
@@ -710,7 +726,11 @@ function WorstPairsTable({ pairs }: { pairs: MatrixCell[] }) {
               >
                 <td className="nums py-4 pr-4 text-xs text-muted-foreground">{i + 1}</td>
                 <td className="max-w-[22rem] py-4 pr-6">
-                  <span className="flex items-center gap-2">
+                  <a
+                    href={pairHref}
+                    data-testid="worst-pair-link"
+                    className="flex items-center gap-2 rounded text-primary hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                  >
                     <span className="truncate" title={c.source}>
                       {c.source}
                     </span>
@@ -720,7 +740,7 @@ function WorstPairsTable({ pairs }: { pairs: MatrixCell[] }) {
                     <span className="truncate" title={c.destination}>
                       {c.destination}
                     </span>
-                  </span>
+                  </a>
                 </td>
                 <td
                   className={cn(
@@ -735,6 +755,15 @@ function WorstPairsTable({ pairs }: { pairs: MatrixCell[] }) {
                   <Badge variant={failing ? "bad" : "warn"} dot>
                     {t(failing ? "table.status.failing" : "table.status.degraded")}
                   </Badge>
+                </td>
+                <td className="py-4 pl-4 text-right">
+                  <a
+                    href={investigateHref}
+                    data-testid="worst-pair-investigate"
+                    className="text-xs text-primary hover:underline"
+                  >
+                    {t("table.investigate")}
+                  </a>
                 </td>
               </tr>
             );
