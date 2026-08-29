@@ -1,10 +1,14 @@
 package agent
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/http"
+	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -267,5 +271,96 @@ func TestRunFailsFastWhenRegistrationIsRejectedAsInvalid(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("Run kept retrying a registration the controller rejected as invalid; a configuration error must fail fast")
+	}
+}
+
+// lockedBuffer is a goroutine-safe io.Writer for capturing slog output written
+// by the agent's background goroutines during a full Run().
+type lockedBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+// rejectingReregisterRegistry accepts the first registration and rejects every
+// later one as InvalidArgument, the way a controller whose validation tightened
+// mid-life (upgrade) would. WatchPeers fails at once to force re-registration.
+type rejectingReregisterRegistry struct {
+	pb.UnimplementedAgentRegistryServer
+	registerCalls atomic.Int64
+}
+
+func (s *rejectingReregisterRegistry) Register(_ context.Context, req *pb.RegisterRequest) (*pb.RegisterResponse, error) {
+	if s.registerCalls.Add(1) > 1 {
+		return nil, grpcstatus.Error(codes.InvalidArgument, "register: zone label is malformed")
+	}
+	return &pb.RegisterResponse{AgentId: req.GetAgent().GetId(), Agent: req.GetAgent()}, nil
+}
+
+func (s *rejectingReregisterRegistry) WatchPeers(*pb.WatchPeersRequest, grpc.ServerStreamingServer[pb.PeerUpdate]) error {
+	return grpcstatus.Error(codes.Unavailable, "peer stream torn down")
+}
+
+/*
+M2-3 symmetry for the RE-registration path: an InvalidArgument mid-life is a
+configuration error and must be logged as one (ERROR, distinct message), not
+as the generic "re-registration failed, retrying" WARN. Unlike the first
+registration it must KEEP retrying: probes continue on the last known peer
+list (M2-2), so the fleet loses nothing, and the rejection may be a transient
+controller-side validation change during an upgrade.
+*/
+func TestReregisterLogsConfigRejectionAsErrorAndKeepsRetrying(t *testing.T) {
+	logs := &lockedBuffer{}
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	var lc net.ListenConfig
+	lis, err := lc.Listen(context.Background(), "tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listening for the fake controller: %v", err)
+	}
+	reg := &rejectingReregisterRegistry{}
+	gs := grpc.NewServer()
+	pb.RegisterAgentRegistryServer(gs, reg)
+	go func() { _ = gs.Serve(lis) }()
+	t.Cleanup(gs.Stop)
+
+	cfg := testRunConfig(t, lis.Addr().String())
+	a, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	runErr := startRun(t, a)
+
+	// Three Register calls = initial success + a rejection + a retry AFTER that
+	// rejection, proving the loop logs the config error but does not fail fast.
+	waitFor(t, 20*time.Second, "a re-registration retry after an InvalidArgument rejection", func() bool {
+		return reg.registerCalls.Load() >= 3
+	})
+
+	select {
+	case exitErr := <-runErr:
+		t.Fatalf("Run exited on a re-registration rejection: %v", exitErr)
+	default:
+	}
+
+	out := logs.String()
+	if !strings.Contains(out, `level=ERROR msg="controller rejected the re-registration payload`) {
+		t.Errorf("no ERROR log for the InvalidArgument re-registration rejection; logs:\n%s", out)
+	}
+	if strings.Contains(out, "re-registration failed, retrying") {
+		t.Errorf("InvalidArgument rejection was logged with the generic retry WARN instead of a config-error message; logs:\n%s", out)
 	}
 }

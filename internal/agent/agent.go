@@ -379,7 +379,14 @@ func (a *Agent) Run(ctx context.Context) error {
 				slog.Info("re-registered with controller after reconnect")
 				return
 			}
-			slog.Warn("re-registration failed, retrying", "error", regErr, "backoff", wait+jitter)
+			// A rejection here is a config error, but unlike the first registration we keep
+			// retrying: probes continue on the last known peer list, and a mid-life
+			// InvalidArgument may just be a controller upgrade tightening validation.
+			if isConfigRejection(regErr) {
+				slog.Error("controller rejected the re-registration payload, check agent configuration and controller/agent version skew", "error", regErr, "backoff", wait+jitter)
+			} else {
+				slog.Warn("re-registration failed, retrying", "error", regErr, "backoff", wait+jitter)
+			}
 			// Same reason as the first registration: only a fresh connection can reach the leader
 			// after a failover moved it to another pod.
 			if shouldRedial(regErr) {
