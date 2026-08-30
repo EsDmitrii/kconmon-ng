@@ -1,21 +1,33 @@
 # Install in 15 minutes
 
 From `helm install` to per-pair, per-protocol metrics in Prometheus. Nothing on
-this page needs the Console — that is the [next page](enable-the-console.md).
+this page needs the Console; that is the [next page](enable-the-console.md).
 
 ## Prerequisites
 
 - **Kubernetes 1.31+** (CI runs against 1.36).
-- **Helm 4** — the chart ships as an OCI artifact; Helm ≥3.14 also works.
+- **Helm 4**, or Helm 3 from 3.14 up, the floor every project doc states. The
+  chart ships as an OCI artifact, which both pull natively.
 - **Prometheus** somewhere to scrape the metrics. The Prometheus Operator is
   optional: with it you get the bundled `ServiceMonitor` and alert rules; a
   [plain `scrape_config`](#no-prometheus-operator) works too.
 
-The agent needs **no added capabilities**: ICMP and MTR ride the unprivileged
-ICMP socket that the `net.ipv4.ping_group_range` sysctl opens, and the chart
-sets that sysctl — a kubelet *safe* one — along with RBAC for the controller's
-node watch. Every component drops `ALL` capabilities and passes restricted
-Pod Security Standards unchanged.
+The agent needs **no added capabilities**. ICMP and MTR ride the unprivileged
+ICMP socket that the `net.ipv4.ping_group_range` sysctl opens; the chart sets
+that sysctl (a kubelet *safe* one) along with RBAC for the controller's node
+watch. Every component drops `ALL` capabilities and passes restricted Pod
+Security Standards unchanged.
+
+??? note "If your admission policy still objects to the sysctl"
+    The sysctl has its own switch, `agent.pingGroupRange: false`, precisely so
+    you can opt out without touching `agent.podSecurityContext`. The old
+    opt-out was nulling that whole block, which deleted `runAsNonRoot`,
+    `runAsUser` and `seccompProfile` with it — exactly the keys a namespace
+    enforcing restricted PSS demands, so the DaemonSet got rejected at
+    admission. With the sysctl off, ICMP and MTR need another door: add
+    `NET_RAW` under `agent.securityContext.capabilities` and make it
+    effective. That buys intermediate MTR hops on kernels that withhold them
+    from ping sockets, and costs you the restricted PSS profile.
 
 !!! tip "No cluster at hand?"
     `make local-up` in a repo clone brings up Minikube with Prometheus, Grafana
@@ -37,12 +49,33 @@ helm upgrade --install kconmon-ng oci://ghcr.io/esdmitrii/charts/kconmon-ng \
 Without the operator, drop both `--set` flags. The examples track the latest
 published chart; pass `--version` if you need a pinned, reproducible install.
 
-Expect one controller pod plus one agent per node — the agent DaemonSet
-tolerates every taint by default, so control-plane nodes get one too:
+Expect one controller pod plus one agent per node. The agent DaemonSet
+tolerates every taint by default (`tolerations: [{operator: Exists}]`), so
+control-plane nodes get one too:
 
 ```bash
 kubectl get pods -l app.kubernetes.io/name=kconmon-ng -o wide
 ```
+
+### What the fleet costs
+
+Per node, the agent requests 50m CPU and 64Mi memory, with limits at 200m and
+128Mi. The controller carries the same defaults, and can afford to: it is
+coordination only, no probe result ever flows through it. On a 100-node
+cluster the whole fleet therefore asks for about 5 CPU and 6.25Gi of requests.
+The real capacity question is on the Prometheus side — see
+[Scaling and cardinality](../metrics.md#scaling-and-cardinality).
+
+### Keeping agents off some nodes
+
+Narrow the blanket toleration (replace `agent.tolerations`) or pin the
+DaemonSet with `agent.nodeSelector` / `agent.affinity`. One side effect to
+know: the controller derives `kconmon_ng_controller_expected_agents` from the
+count of *schedulable* nodes, each of which it expects to run an agent. Keep
+agents off schedulable nodes and registered stays below expected, so the
+bundled `KconmonAgentsMissing` alert fires about a gap you created on
+purpose. Cordoned nodes are excluded from the count; selector-excluded ones
+are not.
 
 ## Verify agents are probing
 
@@ -60,9 +93,17 @@ You should see per-pair series naming real node pairs —
 friends. If the list is empty, check that more than one agent is running: a
 one-node cluster has no peers to probe.
 
+Why port 8080 here when the scrape target is 9091? Both listeners serve
+`GET /metrics`. Port 8080 is the agent's HTTP port and the handy one for a
+quick port-forward; `config.metricsPort` (9091) is a dedicated listener that
+exists because the controller's API shares the HTTP port and authenticates
+nothing, so the scrape NetworkPolicy opens only 9091. The
+[FAQ entry](../faq.md#why-does-prometheus-scrape-a-separate-port) has the
+full reasoning.
+
 ## Look at the metrics
 
-Three questions, three queries, against your Prometheus:
+Ask your Prometheus the three questions that matter on day one:
 
 ```promql
 # Is any pair losing UDP packets? (all pairs should read 0)
@@ -75,6 +116,11 @@ sum(rate(kconmon_ng_tcp_results_total{result="fail"}[5m]))
 kconmon_ng_controller_registered_agents
 kconmon_ng_controller_expected_agents
 ```
+
+<figure markdown="span">
+  ![Prometheus expression browser: kconmon_ng_udp_packet_loss_ratio in table view, six ordered pairs all at 0](../img/install-15-min-first-metrics.png){ loading=lazy }
+  <figcaption>A healthy 3-node install: all six ordered pairs at 0 loss, with source/destination node and zone labels on every series.</figcaption>
+</figure>
 
 Every exported family, its labels and the nine bundled alert rules are in the
 [metrics and alerting reference](../metrics.md).
@@ -94,12 +140,17 @@ Otherwise import the JSON files from the repo's
 [`dashboards/`](https://github.com/EsDmitrii/kconmon-ng/tree/main/dashboards)
 directory through the Grafana UI.
 
-### No Prometheus Operator?
+<figure markdown="span">
+  ![Bundled Grafana cluster-overview dashboard on a healthy stand: 3 agents, 0 missing, all-green matrix, 100% success rates](../img/install-15-min-grafana-overview.png){ loading=lazy }
+  <figcaption>The bundled cluster-overview dashboard right after install: fleet complete, every protocol at 100%.</figcaption>
+</figure>
+
+## No Prometheus Operator?
 
 Skip `serviceMonitor.enabled` and add one scrape job instead. The agent and
 the controller both expose a dedicated `metrics` port (`config.metricsPort`,
-`9091` by default) on their Services — separate from the unauthenticated API
-port on purpose — so a single endpoints-role job covers the whole fleet:
+`9091` by default) on their Services, kept separate from the unauthenticated
+API port, so a single endpoints-role job covers the whole fleet:
 
 ```yaml
 scrape_configs:
@@ -126,11 +177,10 @@ either, lift them from the
 
 ## Next steps
 
-- **[Enable the console](enable-the-console.md)** — the web UI is one flag on
-  the same release.
-- **[Catch a breakage](catch-a-breakage.md)** — break a node pair on purpose
-  and watch the tool isolate it.
-- **[Helm values](../reference/helm-values.md)** — every knob, with the full
-  commented `values.yaml`.
-- **[Scaling and cardinality](../metrics.md#scaling-and-cardinality)** — read
-  this before installing on a large cluster: pairs grow as N×(N−1).
+The natural next move is **[enabling the console](enable-the-console.md)**:
+the web UI is a flag on the release you just installed. After that,
+**[catch a breakage](catch-a-breakage.md)** breaks a node pair on a test
+cluster and lets you watch the tool isolate it. When you start tuning, the
+[Helm values reference](../reference/helm-values.md) documents every knob
+inline, and [Scaling and cardinality](../metrics.md#scaling-and-cardinality)
+is required reading before a large-cluster rollout: pairs grow as N×(N−1).

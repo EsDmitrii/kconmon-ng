@@ -1,13 +1,23 @@
 # Breaking the network on purpose: a reproducible kconmon-ng demo
 
+!!! tip "Short on time?"
+    This is the long, verified walkthrough on a disposable Minikube stand.
+    For the ten-minute version of the same idea on a cluster you already
+    have (one broken pair, caught and explained), take
+    [Catch a breakage](../getting-started/catch-a-breakage.md) instead and
+    come back here for the full tour.
+
 This walkthrough deliberately breaks connectivity between two Kubernetes nodes
 and shows how kconmon-ng pinpoints **which protocol, which node pair, and which
 hop** is affected — while every other path stays green. It is the hands-on
 version of the question kconmon-ng exists to answer: not "is the mesh up?" but
 "what exactly degraded, and where?"
 
-Every command and every number below came off a live 3-node Minikube stand.
-Your digits will differ. The shape will not.
+Every command and every number below came off a live 3-node Minikube stand
+built by `hack/local-test.sh` on a 2.x chart: the Console flow shown is the
+current UI, and the stand's values assume the post-2.0.0 world where the
+chart installs no database of its own. Your digits will differ. The shape
+will not.
 
 ## Prerequisites
 
@@ -41,7 +51,7 @@ kubectl port-forward -n monitoring svc/monitoring-grafana 3000:80   # admin/admi
 `hack/local-test.sh up` brings the Console up with the rest of the release
 (`hack/values-local.yaml` sets `console.enabled: true`, `auth.mode=anonymous`
 with the **admin** role, the local PostgreSQL fixture and the webhook
-encryption key). There is nothing to install here — just reach it:
+encryption key). There is nothing to install here, just reach it:
 
 ```bash
 kubectl port-forward svc/kconmon-ng-console 8081:8080
@@ -50,27 +60,27 @@ kubectl port-forward svc/kconmon-ng-console 8081:8080
 Do NOT re-run `helm upgrade` with `--set-string *.image.tag=local`: the helper
 builds a unique tag per run (`local-<timestamp>`, so minikube's image cache
 cannot serve stale code), and pinning the literal tag `local` points the
-Deployments at an image that was never built — every pod then sits in
+Deployments at an image that was never built, so every pod then sits in
 `ErrImageNeverPull` and the stand the helper just gave you is gone. If you do
 need to change a value, use `--reuse-values` and set only that value.
 
-Four things that flag matters for, so nothing below is a surprise:
+Four properties of this stand's values matter later in the walkthrough, so
+here they are before anything breaks:
 
 - **`database.existingSecret` needs a Secret holding a `postgres://` DSN** and
   nothing else — the chart stopped installing PostgreSQL in 2.0.0, so any
   reachable server does: RDS, a StatefulSet, a CloudNativePG cluster you run
   yourself. Without a database the Console still serves topology, matrix and
-  Explore — but incidents, saved alert rules and the audit log all answer `503`,
+  Explore, but incidents, saved alert rules and the audit log all answer `503`,
   and the alerting reconciler is skipped rather than running against nothing.
 - **`console.alerting.enabled=true` needs the `PrometheusRule` CRD**, which
   kube-prometheus-stack installs. It also renders a namespaced `Role` letting
   the Console write exactly that one resource, in this namespace.
 - **Your Prometheus must select the object the Console writes.**
   `hack/local-test.sh` passes `ruleSelectorNilUsesHelmValues=false`, so this
-  stand's Prometheus picks up every `PrometheusRule` in every namespace. On a
-  stack that scopes `ruleSelector` by label, the Console's bundle will be
-  ignored until you widen it — the rules will show as `synced` and never fire,
-  which looks like a Console bug and is not one.
+  stand's Prometheus picks up every `PrometheusRule` in every namespace. On
+  a scoped stack the rules can show `synced` and never fire; the caveat is
+  explained in [Set up alerting](../scenarios/set-up-alerting.md#enable-the-console-layer).
 - **This stand runs with `alertmanager.enabled=false`.** That is fine: the
   Console's webhooks are dispatched by the Console itself off Prometheus' alert
   state, not by Alertmanager.
@@ -91,7 +101,7 @@ anonymous-viewer, and a real deployment uses `local`, `header` or `oidc`.
 Agents probe each other **pod-IP to pod-IP**. Mind the ports when writing
 firewall rules: **UDP probes target the agent's gRPC/probe port 9090**, while
 **TCP probes dial the agent's HTTP port 8080**. Blocking the wrong port silently
-matches zero packets — check the iptables `-v` counters.
+matches zero packets; check the iptables `-v` counters.
 
 ## Baseline: everything green
 
@@ -123,7 +133,7 @@ no firing or pending alerts. The Overview dashboard is all green.
 We drop **only UDP** from `m02` to `m03` (pod-to-pod, port 9090), leaving every
 other protocol and every other pair untouched. That is what a firewall typo, a
 conntrack table filling up, or an overlay offload bug actually looks like in
-production: one protocol, one direction, one pair — and every health check in
+production: one protocol, one direction, one pair, and every health check in
 the cluster still green.
 
 Cross-node pod traffic transits the **FORWARD** chain on the destination node,
@@ -151,10 +161,10 @@ minikube -p kconmon-test ssh -n kconmon-test-m03 -- \
 Within one scrape cycle plus a probe interval (~15–20s), the picture is
 unambiguous:
 
-- **`kconmon_ng_udp_packet_loss_ratio{source_node="kconmon-test-m02", destination_node="kconmon-test-m03"}` = 1** — total UDP loss on exactly that ordered pair.
+- **`kconmon_ng_udp_packet_loss_ratio{source_node="kconmon-test-m02", destination_node="kconmon-test-m03"}` = 1**: total UDP loss on exactly that ordered pair.
 - **All five other pairs stay at 0** UDP loss.
-- **`kconmon_ng_icmp_packet_loss_ratio` for m02→m03 = 0** — ICMP is green.
-- **TCP m02→m03**: fail rate 0, success still flowing (~0.2/s) — TCP is green.
+- **`kconmon_ng_icmp_packet_loss_ratio` for m02→m03 = 0**: ICMP is green.
+- **TCP m02→m03**: fail rate 0, success still flowing (~0.2/s): TCP is green.
 - So for the *identical node pair*, UDP is dead while TCP and ICMP are healthy: kconmon-ng isolates both the failing **path** and the failing **protocol**.
 
 Useful PromQL for the panels:
@@ -178,7 +188,11 @@ kconmon_ng_mtr_triggered_total{source_node="kconmon-test-m02",destination_node="
 kconmon_ng_mtr_hop_rtt_seconds{source_node="kconmon-test-m02",destination_node="kconmon-test-m03"}
 ```
 
-The hop series shows the trace toward `10.244.2.15`, ending at the target — the
+Why 2 and not 1: every failed probe wants a trace and the 60s cooldown lets
+one through per minute, so by the time this query ran the pair had earned two
+firings.
+
+The hop series shows the trace toward `10.244.2.15`, ending at the target. The
 failing path captured the moment it broke, not after you SSH in to investigate.
 
 ### The alert
@@ -186,7 +200,7 @@ failing path captured the moment it broke, not after you SSH in to investigate.
 The bundled `UDPLossHigh` rule (`kconmon_ng_udp_packet_loss_ratio > 0.5`,
 `for: 5m`, severity `warning`) went **pending ~26s after the break** (visible at
 Prometheus `/alerts`, labelled `source=m02, dest=m03`) and fires after the 5m
-hold. The hold is deliberate — it rides out transient blips and only pages on
+hold. The hold is deliberate: it rides out transient blips and only pages on
 sustained loss.
 
 Timing summary for this run: loss visible in metrics within ~one scrape
@@ -201,11 +215,16 @@ Console at <http://localhost:8081>.
 ### Watch it go red on `/matrix`
 
 Open **Matrix**, protocol **UDP**. Five cells stay green and the
-`m02 → m03` cell turns red — the same single-cell failure the PromQL above
+`m02 → m03` cell turns red, the same single-cell failure the PromQL above
 proves, without writing a query. The badge in the top bar reads **Live** while
 the event stream is connected. Switch the protocol selector to TCP or ICMP and
 the same cell is green: the Console is showing you the protocol isolation, not
 just a red square.
+
+<figure markdown>
+  ![Matrix on UDP during the blackhole: the m02 to m03 cell red, five cells green, Live badge in the top bar](../img/breaking-cni-matrix-red.png){ loading=lazy }
+  <figcaption>Matrix, protocol UDP, mid-blackhole: exactly one directed cell red, the Live badge confirming the event stream.</figcaption>
+</figure>
 
 Clicking the cell opens the **pair card**: the pair's loss and RTT charts, its
 recent MTR path history, and a "Recent changes" rail of the topology and
@@ -220,18 +239,23 @@ from the loss series, the MTR path change, the diagnostic runs, topology and
 K8s events, audit writes, maintenance windows, annotations, and any firing
 alerts.
 
-Two things worth noticing rather than skipping past:
+Slow down for two details here:
 
 - **The candidate-causes panel ranks by documented arithmetic**, not by
   cleverness: class weight times a linear decay over the five minutes before
   onset. A path change outranks a config write outranks a maintenance window,
   and the threshold crossing itself scores zero — a symptom is not its own
   cause. The weights are plain exported constants in the scoring source
-  ([`web/src/lib/investigation.ts`](../../web/src/lib/investigation.ts)), and
-  the panel links straight to them.
+  ([`web/src/lib/investigation.ts`](https://github.com/EsDmitrii/kconmon-ng/blob/main/web/src/lib/investigation.ts)),
+  and the panel links straight to them.
 - **Sources you have not enabled say so.** With `kubernetesContext` off, the
   K8s-events row is one muted line naming the flag, not a silent absence you
   could read as "nothing happened in the cluster".
+
+<figure markdown>
+  ![Investigate page scoped to the broken pair: merged timeline with the threshold crossing and MTR path change, candidate-causes panel empty of culprits](../img/breaking-cni-investigate.png){ loading=lazy }
+  <figcaption>Investigate, scoped to m02 → m03 around the break: the timeline carries the threshold crossing and the path change, and the candidate-causes panel invents nothing.</figcaption>
+</figure>
 
 In this demo the honest answer is that nothing in the timeline caused it —
 you typed an iptables rule on a node, and the Console has no source that sees
@@ -260,6 +284,11 @@ there is no expression parser in this codebase, so "is this valid" is answered
 by the server that will evaluate it. While the blackhole is in place the
 preview matches the pair; after you revert it matches nothing.
 
+<figure markdown>
+  ![New rule builder filled with the pair-loss template and the preview panel matching the broken pair](../img/breaking-cni-rule-preview.png){ loading=lazy }
+  <figcaption>The rule builder mid-blackhole: pair-loss, udp, 50%, scoped to m02 → m03, for 2m, and the preview matching the pair right now.</figcaption>
+</figure>
+
 Save. The Console renders every enabled rule into **one** `PrometheusRule`
 object and server-side-applies it:
 
@@ -268,13 +297,13 @@ kubectl get prometheusrule kconmon-ng-console-rules -o yaml
 ```
 
 The rule row shows `synced` with a timestamp. Prometheus picks the object up on
-its next config reload, and `/alerts` in the Console — and the Overview page's
-firing-alerts card — show it `firing` once the `for` window elapses. Pending
+its next config reload, and `/alerts` in the Console (and the Overview page's
+firing-alerts card) show it `firing` once the `for` window elapses. Pending
 alerts are deliberately not shown: inside `for`, nothing has fired.
 
 If the row shows `error` instead, the message's first word is the cause class:
 `crd-missing` (no Prometheus Operator), `forbidden` (the `Role` did not apply),
-or `other`. The rule stays in the database either way — a failed sync costs you
+or `other`. The rule stays in the database either way: a failed sync costs you
 the alerting, not the rule.
 
 ### Get it delivered
@@ -286,23 +315,17 @@ outcome verbatim.
 
 When the rule fires, the Console POSTs a signed payload — `X-Kconmon-Signature:
 sha256=…`, HMAC over the exact body bytes. When it stops firing, an
-`alert.resolved` follows with a `resolvedAt`.
-
-Two properties to know before you wire this to a pager:
-
-- **`resolvedAt` is only as precise as `console.webhooks.alertPollInterval`**
-  (30s by default). A resolution is detected by the alert's absence from a poll,
-  so the timestamp means "somewhere in the interval ending here".
-- **Every replica delivers.** There is no leader election on the watcher, so
-  `console.replicas: 2` means two copies of each edge. The payload carries a
-  stable `(event, ruleId, labels, firedAt)` tuple precisely so a receiver can
-  dedupe on it.
+`alert.resolved` follows with a `resolvedAt`. The full payload schema, the
+retry ladder, signature verification and the properties to know before wiring
+a pager (resolution precision, every-replica delivery, the dedupe tuple) are
+all in [Set up alerting](../scenarios/set-up-alerting.md#the-payload-on-the-wire);
+the demo only needs the endpoint to exist.
 
 ### Adopt rules you already have
 
 If your cluster already has hand-written `PrometheusRule` objects in this
 namespace, **Alerting → Foreign rules** lists them read-only, and **Import**
-copies one into the builder. It never touches the object it read — which means
+copies one into the builder. It never touches the object it read, which means
 that until you delete one of the two, **the same alerts now exist twice and
 both evaluate**. The import report says so, and lists every rule it skipped
 (recording rules, unparseable `for` values, names already taken) with the
@@ -359,8 +382,8 @@ minikube -p kconmon-test ssh -n kconmon-test-m03 -- \
 ```
 
 Within a minute the Overview reads like an incident report: TCP dead for exactly
-one pair, UDP blackholed on another, ICMP loss on a third (both directions —
-the reply path is filtered too), HTTP failing from a single node — and every
+one pair, UDP blackholed on another, ICMP loss on a third (both directions:
+the reply path is filtered too), HTTP failing from a single node, and every
 remaining path still green. Four different failures, four different blast radii,
 one dashboard:
 
@@ -390,27 +413,27 @@ Tear the whole stand down when finished:
 
 ## What this proves
 
-"Can m02 reach m03?" was *yes* for the whole run — TCP and ICMP between those
+"Can m02 reach m03?" was *yes* for the whole run: TCP and ICMP between those
 two nodes never stopped. Ask only that question and this outage stays invisible
 while every UDP workload on the pair quietly fails.
 
 The run answered the question you actually need:
 
-- **which protocol** — UDP, with TCP and ICMP proven healthy on the same pair;
-- **which node pair** — m02→m03, with the other five pairs proven unaffected;
-- **which hop** — captured by the MTR trace that fired on its own;
+- **which protocol**: UDP, with TCP and ICMP proven healthy on the same pair;
+- **which node pair**: m02→m03, with the other five pairs proven unaffected;
+- **which hop**: captured by the MTR trace that fired on its own;
 - **and it paged** on sustained loss, from a rule that ships with the chart.
 
 Four facts, no SSH, no guessing.
 
 ## Further experiments
 
-- **Latency injection** (not covered in this validated run): `netem` is available
-  on the nodes (`/sbin/tc`, `sch_netem` module present). Adding
-  `tc qdisc add dev <iface> root netem delay 100ms` on a node makes the RTT panels
-  react without any loss — a clean way to demo latency-vs-loss separation. Apply
-  it narrowly and revert with `tc qdisc del` promptly, since node-level netem
-  affects all traffic on the interface, including kubelet/apiserver.
+- **Latency injection** (not covered in this validated run): `netem` is
+  available on the nodes (`/sbin/tc`, `sch_netem` module present).
+  `tc qdisc add dev <iface> root netem delay 100ms` makes the RTT panels react
+  without any loss, a clean demo of latency-vs-loss separation. Apply it
+  narrowly and revert with `tc qdisc del` promptly: node-level netem affects
+  all traffic on the interface, kubelet and apiserver included.
 - **DNS-only failure**: block egress to the cluster DNS service and watch
-  `kconmon_ng_dns_results_total{result="fail"}` and `DNSChecksFailing` react while
-  TCP/UDP/ICMP peer checks stay green.
+  `kconmon_ng_dns_results_total{result="fail"}` and `DNSChecksFailing` react
+  while TCP/UDP/ICMP peer checks stay green.

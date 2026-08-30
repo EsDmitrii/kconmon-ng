@@ -31,3 +31,6 @@ charts/kconmon-ng/charts/
 # Environment
 .env
 .env.local
+
+# MkDocs build output
+site/
