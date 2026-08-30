@@ -352,3 +352,23 @@ describe("elideForHeaders", () => {
     expect(elideForHeaders(fleet, "", 40, 11)).toBe("");
   });
 });
+
+describe("sharedNamePrefix with a mixed fleet", () => {
+  it("falls back to the majority family when one external node kills the global prefix", () => {
+    const names = [
+      ...Array.from({ length: 10 }, (_, i) => `kconmon-night-worker${i}`),
+      "mac-external-01",
+    ];
+    expect(sharedNamePrefix(names)).toBe("kconmon-night-");
+  });
+
+  it("stays empty for a genuinely diverse fleet", () => {
+    expect(sharedNamePrefix(["alpha-1", "bravo-2", "charlie-3"])).toBe("");
+  });
+
+  it("stays empty when the largest family is below half the fleet", () => {
+    expect(
+      sharedNamePrefix(["kconmon-a", "kconmon-b", "x-1", "y-2", "z-3"]),
+    ).toBe("");
+  });
+});

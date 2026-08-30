@@ -28,6 +28,7 @@ import { enT, topologyDict, type TopologyKey } from "@/lib/i18n/dict/topology";
 import { DEGRADED_AT, FAILING_AT, fmtRatio, isProblemCell, severityRatio } from "@/lib/matrix-cells";
 import { compareNaturalName } from "@/lib/natural-name";
 import { formatAtParam, useTimeContext } from "@/lib/timemachine";
+import { packZones } from "@/lib/zone-layout";
 import type { Matrix, MatrixCell, Topology } from "@/lib/types";
 /* The matrix payload gate, imported from the page that owns the matrix rather
    than re-stated here: this map colours its boxes and draws its edges from the
@@ -193,23 +194,24 @@ export function buildFlow(
     worstOut.set(c.source, Math.max(worstOut.get(c.source) ?? 0, r));
   }
 
-  // Zones are laid left to right, each as wide as its own grid needs.
-  let zoneX = 0;
-  const nodes: Node[] = zones.map((z) => {
+  /* Zones pack into ROWS, not one strip: at 5+ zones a single row overflowed
+     the pane sideways while the canvas above and below stayed empty. Wrapping
+     is safe for the edges — React Flow recomputes every edge path from its
+     endpoints' live positions, and buildFlow hands it ids only. */
+  const zoneMeta = zones.map((z) => {
     const count = mapped.filter((n) => n.zone === z).length;
-    const width = zoneWidth(count);
     const rows = Math.ceil(count / zoneColumns(count));
-    const node: Node = {
-      id: `zone:${z}`,
-      type: "zone",
-      position: { x: zoneX, y: 0 },
-      data: { label: zoneLabel(z), count },
-      className: "topo-zone",
-      style: { width, height: 64 + rows * NODE_H },
-    };
-    zoneX += width + 80;
-    return node;
+    return { zone: z, count, width: zoneWidth(count), height: 64 + rows * NODE_H };
   });
+  const zonePoints = packZones(zoneMeta);
+  const nodes: Node[] = zoneMeta.map((m, i) => ({
+    id: `zone:${m.zone}`,
+    type: "zone",
+    position: zonePoints[i],
+    data: { label: zoneLabel(m.zone), count: m.count },
+    className: "topo-zone",
+    style: { width: m.width, height: m.height },
+  }));
 
   for (const z of zones) {
     const zoneNodes = mapped.filter((n) => n.zone === z);

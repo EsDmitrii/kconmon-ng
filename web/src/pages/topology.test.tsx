@@ -802,6 +802,99 @@ describe("edge label precision", () => {
   });
 });
 
+/* ── zone packing: rows instead of one strip ───────────────────────────────
+ *
+ * All zone boxes went into ONE horizontal row, so 5+ zones overflowed the pane
+ * sideways while the canvas above and below stayed empty. lib/zone-layout packs
+ * them 2-3 per row; these tests pin the two acceptance shapes (6 zones → rows,
+ * 2 zones → the old layout, to the pixel) on buildFlow's output, not the canvas.
+ */
+describe("buildFlow — zone packing", () => {
+  const sixZones: Topology = {
+    nodes: Array.from({ length: 6 }, (_, i) => ({ name: `n${i + 1}`, zone: `z${i + 1}`, ready: true })),
+    agents: [],
+    timestamp: "t",
+  };
+
+  it("packs 6 zones into two rows of three instead of one strip", () => {
+    const zones = buildFlow(sixZones).nodes.filter((n) => n.type === "zone");
+    expect(zones.map((n) => n.position)).toEqual([
+      { x: 0, y: 0 },
+      { x: 380, y: 0 },
+      { x: 760, y: 0 },
+      { x: 0, y: 208 },
+      { x: 380, y: 208 },
+      { x: 760, y: 208 },
+    ]);
+  });
+
+  it("keeps 2 zones on the exact one-row layout the map always had", () => {
+    const zones = buildFlow(topo).nodes.filter((n) => n.type === "zone");
+    expect(zones.map((n) => n.position)).toEqual([
+      { x: 0, y: 0 },
+      { x: 380, y: 0 },
+    ]);
+  });
+
+  it("keeps an inter-zone edge intact across the row wrap — edges carry ids, never coordinates", () => {
+    const m: Matrix = {
+      protocol: "tcp", plane: "pod", nodes: [],
+      cells: [{ source: "n1", destination: "n4", failRatio: 0.2 }],
+      timestamp: "t",
+    };
+    const { nodes, edges } = buildFlow(sixZones, m);
+    /* React Flow recomputes every edge path from its endpoints' live positions
+       on each render; buildFlow hands it ids only, so a wrapped row cannot
+       orphan the edge. The endpoints really do sit on different rows: */
+    const parentY = (id: string) => {
+      const box = nodes.find((n) => n.id === id)!;
+      return nodes.find((n) => n.id === box.parentId)!.position.y;
+    };
+    expect(edges).toHaveLength(1);
+    expect(edges[0]).toMatchObject({ source: "n1", target: "n4" });
+    expect(parentY("n1")).toBe(0);
+    expect(parentY("n4")).toBe(208);
+  });
+
+  it("lets a 1-node zone keep its own height beside a tall one, and clears the TALL one for the next row", () => {
+    /* The external-agent shape: z1 holds 4 nodes (580×192), z2..z5 one each
+       (300×128). Two per row; the tiny z2 is top-aligned at its own 128, and
+       the second row starts at 192 + 80, under the tall neighbour. */
+    const mixed: Topology = {
+      nodes: [
+        ...["a1", "a2", "a3", "a4"].map((name) => ({ name, zone: "z1", ready: true })),
+        ...["b2", "b3", "b4", "b5"].map((name, i) => ({ name, zone: `z${i + 2}`, ready: true })),
+      ],
+      agents: [],
+      timestamp: "t",
+    };
+    const zones = buildFlow(mixed).nodes.filter((n) => n.type === "zone");
+    expect(zones.map((n) => n.position)).toEqual([
+      { x: 0, y: 0 },
+      { x: 660, y: 0 },
+      { x: 0, y: 272 },
+      { x: 380, y: 272 },
+      { x: 0, y: 480 },
+    ]);
+    expect(zones.find((n) => n.id === "zone:z1")?.style).toMatchObject({ width: 580, height: 192 });
+    expect(zones.find((n) => n.id === "zone:z2")?.style).toMatchObject({ width: 300, height: 128 });
+  });
+
+  it("packs a Time-Machine reconstruction exactly like the live map — one buildFlow serves both", () => {
+    const past: Topology = {
+      ...sixZones,
+      historical: true,
+      asOf: "2026-08-01T12:00:00Z",
+      eventsFolded: 6,
+      unfoldableEvents: 0,
+      truncated: false,
+    };
+    expect(buildFlow(past).nodes.map((n) => n.position)).toEqual(
+      buildFlow(sixZones).nodes.map((n) => n.position),
+    );
+  });
+});
+
 /* ── M4-1/M4-5: the tool surface and the mono data face ──────────────────────
  *
  * Class pins, because jsdom lays nothing out: the map must sit straight on the

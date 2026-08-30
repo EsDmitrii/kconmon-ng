@@ -1,9 +1,10 @@
-import { useMemo, type ReactNode } from "react";
+import { useMemo, useState, type ReactNode } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { PageShell } from "@/components/page-shell";
 import { Badge } from "@/components/ui/badge";
 import { Card } from "@/components/ui/card";
 import { EmptyState } from "@/components/ui/empty-state";
+import { Segmented } from "@/components/ui/segmented";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Table, TBody, Td, Th, THead, Tr } from "@/components/ui/table";
 import { useAuth } from "@/hooks/use-auth";
@@ -16,7 +17,16 @@ import { getEvents, getIncidents, isServerSentence, listAlerts } from "@/lib/api
 import { buildInvestigateURL, incidentPermalink, scopeFromAlertLabels } from "@/lib/investigation-sources";
 import { isMeasured } from "@/lib/matrix-cells";
 import { withAtParam, useTimeContext } from "@/lib/timemachine";
-import type { Alert, LiveEvent, LiveEventSeverity, Matrix, MatrixCell, Topology } from "@/lib/types";
+import {
+  PROTOCOLS,
+  type Alert,
+  type LiveEvent,
+  type LiveEventSeverity,
+  type Matrix,
+  type MatrixCell,
+  type Protocol,
+  type Topology,
+} from "@/lib/types";
 import { cn, fmtEventStamp } from "@/lib/utils";
 
 export interface OverviewSummary {
@@ -140,6 +150,85 @@ export function healthStatement(s: OverviewSummary, t: T): { text: string; tone?
   }
   if (s.pairsScored < s.pairsTotal) return { text: t("health.healthy.scoped", { count: s.pairsScored }) };
   return { text: t(s.pairsTotal === 1 ? "health.healthy.one" : "health.healthy.many", { count: s.pairsTotal }) };
+}
+
+/** One protocol plane's summarize() verdict, tagged with whose it is. */
+export interface PlaneSummary {
+  protocol: Protocol;
+  summary: OverviewSummary;
+}
+
+/**
+ * crossPlaneStatement is the header's verdict lifted over every protocol plane
+ * (P3): the tiles below follow the selector, but the lead sentence must not go
+ * quiet about a plane nobody selected — UDP pairs failing under a TCP-scoped
+ * header left this page claiming health it had not checked.
+ *
+ * No cross-plane arithmetic beyond picking a maximum: trouble reports the WORST
+ * plane's own count with the plane named, and the healthy claim is the fullest
+ * scored plane's own healthStatement. Numbers from different planes are never
+ * added into one figure — the same node pair exists on every plane, so a sum
+ * counts nothing real.
+ *
+ * `complete` is "every plane answered". Trouble on any plane that HAS answered
+ * speaks immediately, but the healthy claim needs all of them: a plane still
+ * loading — or refusing to answer — is not known clean.
+ */
+/* worstDirtyPlane picks the plane the selector should open on: the one the
+   header's verdict is about. Failing beats degraded, higher count beats lower;
+   null when every answered plane is clean (the caller falls back to TCP). */
+export function worstDirtyPlane(planes: readonly PlaneSummary[]): Protocol | null {
+  let best: { p: Protocol; failing: number; degraded: number } | null = null;
+  for (const { protocol, summary } of planes) {
+    const { pairsFailing: failing, pairsDegraded: degraded } = summary;
+    if (failing === 0 && degraded === 0) continue;
+    if (
+      best === null ||
+      failing > best.failing ||
+      (failing === best.failing && degraded > best.degraded)
+    )
+      best = { p: protocol, failing, degraded };
+  }
+  return best ? best.p : null;
+}
+
+export function crossPlaneStatement(
+  planes: PlaneSummary[],
+  complete: boolean,
+  t: T,
+): { text: string; tone?: Tone } | null {
+  let failing: PlaneSummary | undefined;
+  let degraded: PlaneSummary | undefined;
+  for (const p of planes) {
+    if (p.summary.pairsFailing > (failing?.summary.pairsFailing ?? 0)) failing = p;
+    if (p.summary.pairsDegraded > (degraded?.summary.pairsDegraded ?? 0)) degraded = p;
+  }
+  if (failing) {
+    const count = failing.summary.pairsFailing;
+    return {
+      text: t(count === 1 ? "health.failing.one.plane" : "health.failing.many.plane", {
+        count,
+        plane: failing.protocol.toUpperCase(),
+      }),
+      tone: "bad",
+    };
+  }
+  if (degraded) {
+    const count = degraded.summary.pairsDegraded;
+    return {
+      text: t(count === 1 ? "health.degraded.one.plane" : "health.degraded.many.plane", {
+        count,
+        plane: degraded.protocol.toUpperCase(),
+      }),
+      tone: "warn",
+    };
+  }
+  if (!complete) return null;
+  let best: PlaneSummary | undefined;
+  for (const p of planes) {
+    if (p.summary.pairsScored > (best?.summary.pairsScored ?? 0)) best = p;
+  }
+  return best ? healthStatement(best.summary, t) : null;
 }
 
 /**
@@ -500,8 +589,13 @@ function OverviewEventRow({ event }: { event: LiveEvent }) {
           {event.summary}
         </span>
       </Td>
+      {/* Content-sized with a cap, NOT a fixed width (P2): w-36 cut a pair
+          scope at "mac-external-01→k…" while the summary cell beside it sat
+          on empty slack. The summary's w-full max-w-0 absorbs whatever this
+          cell does not need, so the scope may grow; the cap and the title
+          keep a pathological scope from pushing the card open. */}
       <Td className="hidden pl-3 sm:table-cell">
-        <span className="mono-data block w-36 truncate text-muted-foreground" title={event.scope}>
+        <span className="mono-data block max-w-[20rem] truncate text-muted-foreground" title={event.scope}>
           {event.scope}
         </span>
       </Td>
@@ -882,10 +976,33 @@ function PageProblem({ what, detail }: { what: string; detail: string }) {
 export function OverviewPage() {
   const t = useT(overviewDict);
   const topo = useTopology();
-  const matrix = useMatrix("tcp");
+  /* All three protocol planes, always (P3): the header statement reads every
+     one of them, while the tiles and the worst-pairs table follow `protocol`.
+     The selector FOLLOWS the verdict until the operator touches it: a header
+     naming a failing plane above a TCP card saying "no failing pairs" is the
+     page contradicting itself. */
+  const [picked, setPicked] = useState<Protocol | null>(null);
+  const tcp = useMatrix("tcp");
+  const udp = useMatrix("udp");
+  const icmp = useMatrix("icmp");
+  const byProtocol = { tcp, udp, icmp } as const;
   const { isLive } = useTimeContext();
 
-  const summary = matrix.data ? summarize(matrix.data, topo.data) : undefined;
+  const planes: PlaneSummary[] = useMemo(
+    () =>
+      ([
+        ["tcp", tcp.data],
+        ["udp", udp.data],
+        ["icmp", icmp.data],
+      ] as const).flatMap(([p, data]) => (data ? [{ protocol: p, summary: summarize(data, topo.data) }] : [])),
+    [tcp.data, udp.data, icmp.data, topo.data],
+  );
+  const complete = tcp.data !== undefined && udp.data !== undefined && icmp.data !== undefined;
+  const worstPlane = useMemo(() => worstDirtyPlane(planes), [planes]);
+  const protocol: Protocol = picked ?? worstPlane ?? "tcp";
+  const setProtocol = (p: Protocol) => setPicked(p);
+  const matrix = byProtocol[protocol];
+  const summary = planes.find((p) => p.protocol === protocol)?.summary;
   const nodes = nodesTile(topo.data, topo.isLoading, matrix.data);
   const nodesValue =
     nodes.kind === "counts"
@@ -906,10 +1023,12 @@ export function OverviewPage() {
   const noPairs = summary !== undefined && summary.pairsTotal === 0;
   const pairsValue = (n: number) => (noPairs ? "—" : n);
   const pairsNote = noPairs ? t("tiles.pairs.noData") : undefined;
-  const statement = summary ? healthStatement(summary, t) : null;
-  /* Live at zero measured pairs is an install in progress; engaged it is a
-     past instant with no samples, which the engaged slate already explains. */
-  const firstRun = isLive && noPairs;
+  const statement = crossPlaneStatement(planes, complete, t);
+  /* Live with zero measured pairs on EVERY answered plane is an install in
+     progress; a single empty plane is not (the others may carry data the
+     selector reaches). Engaged it is a past instant with no samples, which
+     the engaged slate already explains. */
+  const firstRun = isLive && noPairs && planes.every((p) => p.summary.pairsTotal === 0);
 
   return (
     <PageShell timeMachine title={t("title")} help={{ body: t("help.body"), slug: "overview" }} description={t(isLive ? "description" : "description.engaged")}>
@@ -932,8 +1051,10 @@ export function OverviewPage() {
 
         {summary ? (
           <>
-            {/* The page LEADS with the verdict in words (M4-6); the tiles below
-                carry the arithmetic. Nothing scored — nothing claimed. */}
+            {/* The page LEADS with the verdict in words (M4-6), and since P3
+                the verdict is CROSS-PLANE — it reads all three protocols and
+                names the worst one, whatever the selector below shows. The
+                tiles carry the arithmetic. Nothing scored — nothing claimed. */}
             {statement ? (
               <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
                 <p
@@ -946,7 +1067,7 @@ export function OverviewPage() {
                 >
                   {statement.text}
                 </p>
-                <Badge variant="neutral">{t("qualifier")}</Badge>
+                <Badge variant="neutral">{t("qualifier.crossPlane")}</Badge>
               </div>
             ) : null}
 
@@ -959,6 +1080,19 @@ export function OverviewPage() {
               />
             ) : null}
 
+            {/* ONE protocol at a time below this line: the matrix page's own
+                selector, same options, same order. Hidden on first run — no
+                plane has anything yet, so there is nothing to switch between. */}
+            {firstRun ? null : (
+              <Segmented
+                aria-label={t("protocol.aria")}
+                className="self-start"
+                options={PROTOCOLS.map((p) => ({ value: p, label: p.toUpperCase() }))}
+                value={protocol}
+                onChange={setProtocol}
+              />
+            )}
+
             <div className="grid gap-4 sm:grid-cols-3">
               <StatTile
                 label={t("tiles.nodesReady")}
@@ -968,13 +1102,14 @@ export function OverviewPage() {
                 note={foldBounds(topo.data, t)}
               />
               {/* Both pair tiles carry the qualifier: they count ONE protocol
-                  on ONE plane, and the bare label claimed the whole fleet. */}
+                  on ONE plane — the SELECTED one, since P3 — and the bare
+                  label claimed the whole fleet. */}
               <StatTile
                 label={t("tiles.failing")}
                 value={pairsValue(summary.pairsFailing)}
                 tone={summary.pairsFailing > 0 ? "bad" : undefined}
                 toneLabel={t("tiles.failing.tone")}
-                hint={t("qualifier")}
+                hint={t("qualifier", { protocol: protocol.toUpperCase() })}
                 note={pairsNote}
               />
               <StatTile
@@ -982,7 +1117,7 @@ export function OverviewPage() {
                 value={pairsValue(summary.pairsDegraded)}
                 tone={summary.pairsDegraded > 0 ? "warn" : undefined}
                 toneLabel={t("tiles.degraded.tone")}
-                hint={t("qualifier")}
+                hint={t("qualifier", { protocol: protocol.toUpperCase() })}
                 note={pairsNote}
               />
             </div>
@@ -994,7 +1129,7 @@ export function OverviewPage() {
                 <div className="flex flex-wrap items-baseline justify-between gap-2">
                   <span className="flex flex-wrap items-baseline gap-2">
                     <h2 className="type-section">{t("worstPairs.title")}</h2>
-                    <Badge variant="neutral">{t("qualifier")}</Badge>
+                    <Badge variant="neutral">{t("qualifier", { protocol: protocol.toUpperCase() })}</Badge>
                   </span>
                   <p className="nums text-xs text-muted-foreground">
                     {t(summary.pairsTotal === 1 ? "worstPairs.measured.one" : "worstPairs.measured.many", {

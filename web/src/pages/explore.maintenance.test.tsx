@@ -168,6 +168,38 @@ describe("ExplorePage maintenance", () => {
     expect(screen.queryByTestId("maintenance-bar")).toBeNull();
   });
 
+  /* UI polish: the two overlay bars used to be two sparse full-width rows, each
+     with a lone right-aligned button. On Explore they now melt into ONE header
+     row — both counts left, both create buttons right — with forms and lists
+     dropping to full-width rows beneath. jsdom draws no boxes, so the pin is
+     the mechanism: display:contents on the bars, order-1 on the buttons. */
+  it("shares ONE header row with the annotation bar — counts left, both buttons right", async () => {
+    stubFetch({ permissions: ["maintenance:read", "maintenance:write", "annotations:write"] });
+    renderPage();
+    const annBar = await screen.findByTestId("annotation-bar");
+    const maintBar = await screen.findByTestId("maintenance-bar");
+    // One flex row hosts both bars' pieces.
+    expect(annBar.parentElement).toBe(maintBar.parentElement);
+    expect(annBar.parentElement?.className).toContain("flex-wrap");
+    expect(annBar.className).toContain("contents");
+    expect(maintBar.className).toContain("contents");
+    // Both buttons are ordered past both counts, to the row's right edge.
+    const annotate = await screen.findByRole("button", { name: "＋ annotate" });
+    const declare = await screen.findByRole("button", { name: "＋ maintenance" });
+    expect(annotate.className).toContain("order-1");
+    expect(declare.className).toContain("order-1");
+    // Nothing lost: both count sentences still render in full.
+    expect(screen.getByText("0 annotations in this window · scope global")).toBeInTheDocument();
+    expect(screen.getByText("0 maintenance windows in this window · scope global")).toBeInTheDocument();
+  });
+
+  it("drops the window list to a full-width row beneath the shared header", async () => {
+    stubFetch({ windows: [win()] });
+    renderPage();
+    const item = await screen.findByTestId("maintenance-item");
+    expect(item.closest("ul")?.className).toContain("basis-full");
+  });
+
   it("anchors the window at t while engaged, and disables create", async () => {
     window.history.pushState({}, "", "/explore?at=2026-08-01T09:00:00Z");
     const { maintenanceQueries } = stubFetch();

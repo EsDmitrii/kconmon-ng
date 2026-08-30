@@ -209,6 +209,31 @@ export function gridMetrics(scale: number): GridMetrics {
  */
 export function sharedNamePrefix(names: readonly string[]): string {
   if (names.length < 2) return "";
+  const all = lcpToSeparator(names);
+  if (all !== "") return all;
+  /* A single outlier (an external agent in a k8s fleet) zeroes the global prefix and every header
+     degrades to the same truncated stem. Fall back to the largest first-token family: the majority
+     still sheds its shared prefix, and callers only strip names that startWith() it, so the
+     outlier keeps its full, already-distinct name. */
+  const families = new Map<string, string[]>();
+  for (const name of names) {
+    const dash = name.indexOf("-");
+    const dot = name.indexOf(".");
+    const cuts = [dash, dot].filter((i) => i > 0);
+    const key = cuts.length ? name.slice(0, Math.min(...cuts)) : name;
+    const family = families.get(key);
+    if (family) family.push(name);
+    else families.set(key, [name]);
+  }
+  let best: string[] = [];
+  for (const family of families.values()) if (family.length > best.length) best = family;
+  if (best.length < 2 || best.length * 2 < names.length) return "";
+  return lcpToSeparator(best);
+}
+
+/* The original all-names rule: longest common prefix, cut back to a separator, only when it buys
+   width and leaves at least two characters on the shortest name. */
+function lcpToSeparator(names: readonly string[]): string {
   let prefix = names[0];
   for (const name of names.slice(1)) {
     let i = 0;

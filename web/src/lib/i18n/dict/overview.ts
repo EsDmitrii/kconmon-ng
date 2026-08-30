@@ -32,17 +32,22 @@ const en = {
   /* The "?" by the title (M7-5); the docs page is docs/console/overview. */
   "help.body":
     "The landing page: is the fleet healthy right now, and if not, which pairs are the problem? " +
-    "Everything here is qualified as TCP · pod plane — one protocol, one network plane. " +
-    "A health statement in words leads, computed from the pair matrix, over the stat tiles and the worst-pairs table. " +
+    "The health statement leads, computed from the pair matrix across all three protocols — TCP, UDP and ICMP — on the pod plane; trouble names the protocol it is on. " +
+    "The stat tiles and the worst-pairs table below show one protocol at a time — pick it with the TCP/UDP/ICMP selector. " +
     "Live, the page recomputes from Prometheus every 15s; with the Time Machine engaged, nothing refreshes.",
 
   "loading": "Loading overview…",
   /* The three summary panels share one skeleton and one sr-only line. */
   "panel.loading": "Loading…",
 
-  /* The qualifier every pair number on this page needs: one protocol, one
-     plane. TCP and pod are identifiers — only "plane" is ours. */
-  "qualifier": "TCP · pod plane",
+  /* The qualifier every pair number below the header needs: one protocol, one
+     plane — and since P3 the protocol follows the selector, so it arrives as a
+     parameter. Protocol names and "pod" are identifiers; only "plane" is ours. */
+  "qualifier": "{protocol} · pod plane",
+  /* The header chip: the statement beside it reads all three protocols. */
+  "qualifier.crossPlane": "TCP/UDP/ICMP · pod plane",
+  /* The selector over the tiles — the matrix page's own word for it. */
+  "protocol.aria": "Protocol",
 
   /* ── the failed-dependency card ─────────────────────────────────────────── */
   "problem.matrix": "The pair matrix is unavailable",
@@ -89,6 +94,14 @@ const en = {
   "health.healthy.one": "The one measured pair is healthy",
   "health.healthy.many": "All {count} pairs healthy",
   "health.healthy.scoped": "All {count} scored pairs healthy",
+  /* The cross-plane lead (P3): the tiles follow the selector, but the header
+     reads every protocol and names the worst one when there is trouble. The
+     count is that plane's OWN — never a sum across planes. TCP/UDP/ICMP are
+     identifiers, identical in both languages. */
+  "health.failing.one.plane": "{count} pair failing ({plane})",
+  "health.failing.many.plane": "{count} pairs failing ({plane})",
+  "health.degraded.one.plane": "{count} pair degraded ({plane})",
+  "health.degraded.many.plane": "{count} pairs degraded ({plane})",
 
   /* ── first-run setup progress (M4-6) ────────────────────────────────────── */
   /* One card for the install path, replacing the noData slate while Live shows
@@ -222,14 +235,16 @@ export const overviewDict: Dictionary<OverviewKey> = defineDict(en, {
   "description.engaged": "Здоровье кластера на выбранный момент, без обновления.",
   "help.body":
     "Стартовая страница: здоров ли флот прямо сейчас, а если нет — какие пары виноваты. " +
-    "Всё здесь оговорено как TCP · плоскость pod: один протокол, одна сетевая плоскость. " +
-    "Сверху — вердикт о здоровье словами, посчитанный по матрице пар, ниже — плитки сводки и таблица худших пар. " +
+    "Сверху — вердикт о здоровье словами, посчитанный по матрице пар сразу для трёх протоколов — TCP, UDP и ICMP — на плоскости pod; проблема называет свой протокол. " +
+    "Плитки сводки и таблица худших пар ниже показывают один протокол за раз, выбирается он переключателем TCP/UDP/ICMP. " +
     "Вживую страница пересчитывается из Prometheus каждые 15 с; с включённой Машиной времени ничего не обновляется.",
 
   "loading": "Загрузка обзора…",
   "panel.loading": "Загрузка…",
 
-  "qualifier": "TCP · плоскость pod",
+  "qualifier": "{protocol} · плоскость pod",
+  "qualifier.crossPlane": "TCP/UDP/ICMP · плоскость pod",
+  "protocol.aria": "Протокол",
 
   "problem.matrix": "Матрица пар недоступна",
   "problem.topology": "Список узлов недоступен",
@@ -257,6 +272,10 @@ export const overviewDict: Dictionary<OverviewKey> = defineDict(en, {
   "health.healthy.one": "Единственная измеренная пара здорова",
   "health.healthy.many": "Все измеренные пары здоровы: {count}",
   "health.healthy.scoped": "Все оценённые пары здоровы: {count}",
+  "health.failing.one.plane": "Пар со сбоями: {count} ({plane})",
+  "health.failing.many.plane": "Пар со сбоями: {count} ({plane})",
+  "health.degraded.one.plane": "Пар с деградацией: {count} ({plane})",
+  "health.degraded.many.plane": "Пар с деградацией: {count} ({plane})",
 
   "setup.title": "Ход установки",
   "setup.agents": "Агентов зарегистрировано",

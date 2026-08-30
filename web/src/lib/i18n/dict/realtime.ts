@@ -8,10 +8,11 @@ import { defineDict, type Dictionary } from "@/lib/i18n";
  * and a run's detail each mount it in their own header, and the sentence about
  * why data may be 15 seconds old must read the same on all three.
  *
- * «Онлайн», the word dict/chrome.ts's nav item uses for the pushed feed — NOT
+ * «Онлайн» is this badge's own word for the pushed transport — NOT
  * «реальное время», which is the Time Machine's present, the instant you left
- * and return to. Two English "Live"s, two Russian words, and this badge is the
- * feed's one: it says the stream is connected, never that you are un-engaged.
+ * and return to, and not «События», the event feed page's name. Two English
+ * "Live"s, two Russian words, and this badge is the feed's one: it says the
+ * stream is connected, never that you are un-engaged.
  *
  * "Delayed data" is NOT an error, and the Russian must not make it one: polling
  * is a supported deployment (controller.events.enabled=false), so the badge

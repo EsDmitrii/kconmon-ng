@@ -562,21 +562,29 @@ export function ExplorePage() {
         />
       }
     >
-      <AnnotationBar
-        scope={GLOBAL_SCOPE}
-        annotations={annotations}
-        error={annotationsError}
-        onChanged={() => void refresh()}
-        className="mt-0"
-      />
-
-      <MaintenanceBar
-        scope={GLOBAL_SCOPE}
-        windows={windows}
-        error={maintenanceError}
-        onChanged={() => void refreshMaintenance()}
-        className="mt-0"
-      />
+      {/* ONE header row for both overlay bars — counts left, create buttons
+          right — instead of two sparse full-width rows with a lone button each.
+          `inline` melts each bar into this row (display: contents); the spacer
+          is what pushes both buttons to the right edge, because an auto margin
+          cannot live inside either bar without it knowing about its sibling.
+          Forms and lists drop to full-width rows below (basis-full). */}
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+        <AnnotationBar
+          inline
+          scope={GLOBAL_SCOPE}
+          annotations={annotations}
+          error={annotationsError}
+          onChanged={() => void refresh()}
+        />
+        <MaintenanceBar
+          inline
+          scope={GLOBAL_SCOPE}
+          windows={windows}
+          error={maintenanceError}
+          onChanged={() => void refreshMaintenance()}
+        />
+        <span aria-hidden="true" className="flex-1" />
+      </div>
 
       <ComparePanel
         rangeSeconds={range.seconds}

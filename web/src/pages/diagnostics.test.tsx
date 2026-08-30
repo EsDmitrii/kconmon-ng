@@ -211,6 +211,18 @@ describe("DiagnosticsPage form", () => {
     expect(createCalls[0]).toEqual({ type: "udp", plane: "pod", sources: [], destinations: [] });
   });
 
+  /* UI polish: the run form spanned the full page width while every other
+     config form (targets, alerting, settings, /mtr's Runner) took max-w-2xl in
+     the M4 wave. Same constraint here — /mtr's Runner already fits the
+     identical two-column Sources/Destinations grid at exactly this width. */
+  it("constrains the form to the M4 column width without breaking the two-column pickers", async () => {
+    renderPage({ nodes: ["a", "b"] });
+    const submit = await screen.findByRole("button", { name: /start run/i });
+    expect(submit.closest("form")?.className).toContain("max-w-2xl");
+    const sources = screen.getByRole("group", { name: "Sources" });
+    expect(sources.parentElement?.className).toContain("sm:grid-cols-2");
+  });
+
   // The regression that matters most in form v2: a NODE run's body must stay the pre-M4 four keys,
   // in the pre-M4 order.
   it("a node run's body is byte-identical to the pre-M4 shape -- no destination* keys at all", async () => {

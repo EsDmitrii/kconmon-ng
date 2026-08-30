@@ -239,8 +239,10 @@ function OverviewTab({
           </p>
         ) : (
           /* The four LABELS are ours; the four values — a zone name, an agent
-             id, a pod IP — are the fleet's own bytes. */
-          <dl className="mt-3 grid grid-cols-2 gap-4 text-sm sm:grid-cols-4">
+             id, a pod IP — are the fleet's own bytes. The agent id is the one
+             that can be long, so its column is the grid's flexible track and
+             the ellipsis engages only when the card is genuinely out of room. */
+          <dl className="mt-3 grid grid-cols-2 gap-4 text-sm sm:grid-cols-[auto_minmax(0,1fr)_auto_auto]">
             <div>
               <dt className="text-xs text-muted-foreground">{t("node.identity.zone")}</dt>
               <dd className="mt-0.5">{zone ?? "—"}</dd>

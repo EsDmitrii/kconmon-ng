@@ -96,17 +96,16 @@ const en = {
   "actions.aria": "Actions",
   "actions.runMTR": "Run MTR now",
   "actions.runTCP": "Run TCP now",
-  "actions.compare": "Compare in Explore",
+  "actions.compare": "Compare in Metrics",
   "actions.export": "Export JSON",
   "actions.saveIncident": "Save as incident",
   "actions.createMaintenance": "Create maintenance",
-  /* Explore's A/B slots are bound to curated metrics and it reads no range
-     from the URL — saying so beats a link that quietly drops half of what it
-     promised. */
+  /* The Metrics page's A/B slots are bound to curated metrics and it reads no
+     range from the URL — saying so beats a link that quietly drops half of
+     what it promised. */
   "actions.compareNote":
-    "Explore's A/B slots are bound to curated metrics and it reads no range from the URL, so that link opens " +
-    "the page and the window has to be chosen there — saying so beats a link that quietly drops half of what it " +
-    "promised.",
+    "The Metrics page binds its A/B slots to curated metrics and reads no range from the URL, so this link " +
+    "opens the page and the window has to be chosen there.",
   /* Two keys around the run-id link. */
   "actions.runStarted.before": "Run",
   "actions.runStarted.after": "started.",
@@ -436,8 +435,7 @@ export const investigateDict: Dictionary<InvestigateKey> = defineDict(en, {
   "actions.createMaintenance": "Создать окно работ",
   "actions.compareNote":
     "Слоты A/B в Метриках привязаны к готовым графикам, а диапазон из адреса та страница не читает. Ссылка просто " +
-    "откроет её, интервал придётся выставить руками. Честнее сказать это сразу, чем дать ссылку, которая молча " +
-    "теряет половину обещанного.",
+    "откроет её, интервал придётся выставить руками.",
   "actions.runStarted.before": "Запуск",
   "actions.runStarted.after": "начат.",
   "actions.runFailed": "Не удалось запустить",

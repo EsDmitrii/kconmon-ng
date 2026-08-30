@@ -1,10 +1,11 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { LOCALE_STORAGE_KEY, LocaleProvider, translate, type Translate } from "@/lib/i18n";
 import { overviewDict, type OverviewKey } from "@/lib/i18n/dict/overview";
 import {
   OverviewPage,
+  crossPlaneStatement,
   fmtAge,
   foldBounds,
   healthStatement,
@@ -12,8 +13,10 @@ import {
   sortFiringAlerts,
   summarize,
   type OverviewSummary,
+  type PlaneSummary,
+  worstDirtyPlane,
 } from "./overview";
-import type { Alert, Matrix, Topology } from "@/lib/types";
+import type { Alert, Matrix, Protocol, Topology } from "@/lib/types";
 import { fmtEventStamp, fmtEventTime } from "@/lib/utils";
 
 /** The two translators the pure helpers take, so a unit case can read either
@@ -489,6 +492,26 @@ describe("OverviewPage — Recent events (Decision 9)", () => {
     renderOverview({ events: [] });
     expect(await screen.findByText(/nothing has happened yet/i)).toBeInTheDocument();
   });
+
+  /* ── P2: the scope column sizes to its content ──────────────────────────
+     jsdom draws no layout, so the fix is pinned structurally, like the 375px
+     overflow test below: the fixed w-36 (9rem ≈ 19 mono characters) cut
+     "mac-external-01→k…" while the summary cell beside it sat empty. Content
+     sizing means NO width class on the span at all — the cell takes what the
+     scope needs, the summary column's own w-full max-w-0 absorbs the slack —
+     and the cap holds a pathological scope without pushing the card open. */
+  it("lets a long pair scope render whole: content-sized with a cap, not a fixed 9rem box (P2)", async () => {
+    const scope = "mac-external-01→kconmon-worker-09";
+    renderOverview({ events: [eventRow({ scope })] });
+
+    const row = await screen.findByTestId("overview-event");
+    const cell = within(row).getByTitle(scope);
+    expect(cell.className).not.toMatch(/\bw-\d/); // a fixed width was the whole finding
+    expect(cell.className).toContain("max-w-[20rem]"); // bounded, not unbounded
+    expect(cell.className).toContain("mono-data"); // the scope keeps the data face
+    expect(cell.className).toContain("truncate"); // and still truncates past the cap
+    expect(within(row).getByText(scope)).toBeInTheDocument();
+  });
 });
 
 /* ── M7 Task 8: the Firing alerts card, replacing the placeholder ───────── */
@@ -912,6 +935,159 @@ describe("OverviewPage — the health statement (M4-6)", () => {
   });
 });
 
+/* ── P3: the header reads every plane; the tiles follow a selector ────────
+   The owner's finding: UDP pairs were failing while the landing page, hard-
+   scoped to TCP, said "No failing or degraded pairs". The lead sentence now
+   reads tcp, udp and icmp; the tiles and the worst-pairs table say WHOSE
+   numbers they carry and switch on the matrix page's own selector. */
+
+describe("crossPlaneStatement (P3)", () => {
+  const sum = (over: Partial<OverviewSummary>): OverviewSummary => ({
+    totalNodes: 2,
+    readyNodes: 2,
+    pairsTotal: 4,
+    pairsScored: 4,
+    pairsFailing: 0,
+    pairsDegraded: 0,
+    worstPairs: [],
+    ...over,
+  });
+  const plane = (protocol: Protocol, over: Partial<OverviewSummary>): PlaneSummary => ({
+    protocol,
+    summary: sum(over),
+  });
+
+  it("names the failing plane even when it is not the selected one", () => {
+    expect(crossPlaneStatement([plane("tcp", {}), plane("udp", { pairsFailing: 2 })], true, enT)).toEqual({
+      text: "2 pairs failing (UDP)",
+      tone: "bad",
+    });
+  });
+
+  it("picks the plane with the biggest failing count — each plane's number stays its own", () => {
+    expect(
+      crossPlaneStatement([plane("tcp", { pairsFailing: 1 }), plane("udp", { pairsFailing: 3 })], true, enT),
+    ).toEqual({ text: "3 pairs failing (UDP)", tone: "bad" });
+  });
+
+  it("lets one failing pair outrank any amount of degradation, the single-plane verdict's own rule", () => {
+    expect(
+      crossPlaneStatement([plane("udp", { pairsDegraded: 4 }), plane("icmp", { pairsFailing: 1 })], true, enT),
+    ).toEqual({ text: "1 pair failing (ICMP)", tone: "bad" });
+  });
+
+  it("falls to the worst degraded plane when nothing is failing anywhere", () => {
+    expect(crossPlaneStatement([plane("tcp", {}), plane("udp", { pairsDegraded: 2 })], true, enT)).toEqual({
+      text: "2 pairs degraded (UDP)",
+      tone: "warn",
+    });
+  });
+
+  it("claims health only once EVERY plane has answered — an unanswered plane is not known clean", () => {
+    expect(crossPlaneStatement([plane("tcp", {})], false, enT)).toBeNull();
+    expect(crossPlaneStatement([plane("tcp", {})], true, enT)).toEqual({ text: "All 4 pairs healthy" });
+  });
+
+  it("keeps the healthy count one plane's own — the same pair exists on every plane, so no sums", () => {
+    expect(
+      crossPlaneStatement([plane("tcp", {}), plane("udp", { pairsTotal: 2, pairsScored: 2 })], true, enT),
+    ).toEqual({ text: "All 4 pairs healthy" });
+  });
+
+  it("still speaks about trouble while other planes are loading", () => {
+    expect(crossPlaneStatement([plane("udp", { pairsFailing: 2 })], false, enT)).toEqual({
+      text: "2 pairs failing (UDP)",
+      tone: "bad",
+    });
+  });
+
+  it("claims nothing when no plane scored a pair", () => {
+    expect(crossPlaneStatement([plane("tcp", { pairsTotal: 0, pairsScored: 0 })], true, enT)).toBeNull();
+  });
+
+  it("reads in Russian too", () => {
+    expect(crossPlaneStatement([plane("udp", { pairsFailing: 2 })], false, ruT)).toEqual({
+      text: "Пар со сбоями: 2 (UDP)",
+      tone: "bad",
+    });
+  });
+});
+
+describe("OverviewPage — the plane selector and the cross-plane header (P3)", () => {
+  const healthyTcp: Matrix = {
+    ...matrix,
+    cells: [
+      { source: "a", destination: "b", failRatio: 0 },
+      { source: "a", destination: "c", failRatio: 0.001 },
+    ],
+  };
+  const udpFailing: Matrix = {
+    protocol: "udp",
+    plane: "pod",
+    nodes: ["a", "b"],
+    cells: [{ source: "mac-external-01", destination: "worker8", failRatio: 0.42, rttP95: 5_000_000 }],
+    timestamp: "2026-01-01T00:00:00Z",
+  };
+  const icmpHealthy: Matrix = { ...healthyTcp, protocol: "icmp" };
+
+  /* Per-protocol bodies: getMatrix carries ?protocol=, so the stub can answer
+     each plane with its own truth — TCP clean, UDP failing, ICMP clean. */
+  const stubPlanes = ({ cleanUdp = false } = {}) =>
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((url: string) => {
+        const href = String(url);
+        if (href.includes("/topology")) return Promise.resolve(json(topo));
+        if (href.includes("protocol=udp"))
+          return Promise.resolve(json(cleanUdp ? icmpHealthy : udpFailing));
+        if (href.includes("protocol=icmp")) return Promise.resolve(json(icmpHealthy));
+        return Promise.resolve(json(healthyTcp));
+      }),
+    );
+
+  it("the header names the failing plane and the whole page follows it", async () => {
+    stubPlanes();
+    renderPage();
+
+    const st = await screen.findByTestId("health-statement");
+    await waitFor(() => expect(st).toHaveTextContent("1 pair failing (UDP)"));
+    expect(st.className).toContain("text-health-bad");
+    /* The selector follows the verdict: a red header naming UDP above a TCP
+       card saying "no failing pairs" was the page contradicting itself. */
+    await waitFor(() => expect(screen.getByRole("radio", { name: "UDP" })).toBeChecked());
+    expect(screen.getAllByTestId("stat-value")[1]).toHaveTextContent("1");
+    expect(screen.getAllByText("UDP · pod plane").length).toBeGreaterThanOrEqual(3);
+    // The header chip says what the statement actually read.
+    expect(screen.getByText("TCP/UDP/ICMP · pod plane")).toBeInTheDocument();
+  });
+
+  it("offers the matrix page's three protocols; TCP is the default only on a clean fleet", async () => {
+    stubPlanes({ cleanUdp: true });
+    renderPage();
+    await screen.findByTestId("health-statement");
+
+    const group = screen.getByRole("radiogroup", { name: "Protocol" });
+    expect(within(group).getAllByRole("radio").map((r) => r.textContent)).toEqual(["TCP", "UDP", "ICMP"]);
+    expect(screen.getByRole("radio", { name: "TCP" })).toBeChecked();
+  });
+
+  it("an operator's own click still wins over the auto-follow", async () => {
+    stubPlanes();
+    renderPage();
+    // Auto-follow lands on the failing plane first.
+    expect(await screen.findByText("42.0%")).toBeInTheDocument();
+    expect(screen.getAllByTestId("worst-pair-link")[0].getAttribute("href")).toBe("/pairs/mac-external-01/worker8");
+
+    fireEvent.click(screen.getByRole("radio", { name: "TCP" }));
+
+    // The pick sticks: TCP's clean numbers under TCP's own chips.
+    expect(await screen.findByText("No failing or degraded pairs")).toBeInTheDocument();
+    expect(screen.getAllByTestId("stat-value")[1]).toHaveTextContent("0");
+    expect(screen.getAllByText("TCP · pod plane").length).toBeGreaterThanOrEqual(3);
+    expect(screen.queryByText("UDP · pod plane")).toBeNull();
+  });
+});
+
 /* ── M4-6: first run — one setup-progress card, not four empty panels ───── */
 
 describe("OverviewPage — first-run setup progress (M4-6)", () => {
@@ -999,5 +1175,31 @@ describe("OverviewPage — table typography (M4)", () => {
     // The fail% cell is numeric: right-aligned in the data face.
     const fail = screen.getByText("50.0%").closest("td");
     expect(fail?.className).toContain("mono-data");
+  });
+});
+
+describe("worstDirtyPlane and the self-following selector", () => {
+  it("picks the failing plane over clean ones, favouring failing count", () => {
+    const mk = (pairsFailing: number, pairsDegraded: number) =>
+      ({ totalNodes: 3, readyNodes: 3, pairsTotal: 6, pairsScored: 6, pairsFailing, pairsDegraded, worstPairs: [] });
+    expect(
+      worstDirtyPlane([
+        { protocol: "tcp", summary: mk(0, 0) },
+        { protocol: "udp", summary: mk(1, 0) },
+        { protocol: "icmp", summary: mk(0, 2) },
+      ]),
+    ).toBe("udp");
+    expect(
+      worstDirtyPlane([
+        { protocol: "tcp", summary: mk(0, 0) },
+        { protocol: "icmp", summary: mk(0, 1) },
+      ]),
+    ).toBe("icmp");
+    expect(
+      worstDirtyPlane([
+        { protocol: "tcp", summary: mk(0, 0) },
+        { protocol: "udp", summary: mk(0, 0) },
+      ]),
+    ).toBeNull();
   });
 });

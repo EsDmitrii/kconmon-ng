@@ -46,7 +46,7 @@ const en = {
   "window.inverted": "The range end must be after its start.",
   /* «реальное время», the Time Machine's present — dict/chrome.ts's
      "timemachine.returnToLive" and dict/shared.ts's write-guard say it the same
-     way, and «Онлайн» is the events PAGE, not this. */
+     way, and «Онлайн» is the realtime badge's transport word, not this. */
   "window.afterInstant": "The window is after the viewed instant — move the range back, or return to Live.",
   /* Stated as a fact about the WINDOW rather than as a warning about the mode:
      the Time Machine bar above it already explains the mode. */

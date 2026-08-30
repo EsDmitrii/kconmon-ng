@@ -18,8 +18,8 @@ import { defineDict, type Dictionary } from "@/lib/i18n";
 const en = {
   "title": "Not built yet — on the roadmap",
   "body":
-    "This view is delivered in a later milestone. The navigation shows the full product so " +
-    "the information architecture stays honest about what is coming.",
+    "This view is delivered in a later milestone. The navigation shows the full product, " +
+    "including what is still to come.",
 } as const;
 
 export type StubPageKey = keyof typeof en;
@@ -28,5 +28,5 @@ export const stubPageDict: Dictionary<StubPageKey> = defineDict(en, {
   "title": "Пока не сделано, но в плане есть",
   "body":
     "Этот экран появится в одной из следующих вех. Навигация показывает продукт целиком, " +
-    "чтобы структура разделов честно говорила о том, что ещё впереди.",
+    "включая то, что ещё впереди.",
 });

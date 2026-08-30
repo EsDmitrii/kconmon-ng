@@ -412,6 +412,7 @@ export function AnnotationBar({
   error,
   onChanged,
   frozenWindow,
+  inline,
   className,
 }: {
   scope: string;
@@ -423,6 +424,12 @@ export function AnnotationBar({
   /** The FROZEN range this bar is listing, when it has one (Investigate).
    *  Enables the out-of-window note after a create — see outsideWindowNote. */
   frozenWindow?: FrozenWindow;
+  /** Melts the bar into the PARENT's flex row (display: contents) instead of a
+   *  column of its own, so two bars can share one header row: counts keep
+   *  source order, the create button is ordered past every count (order-1),
+   *  and the form, note and list drop to full-width rows (order-2 basis-full).
+   *  `className` is ignored while inline — the parent row owns the layout. */
+  inline?: boolean;
   className?: string;
 }) {
   const t = useT(annotationsDict);
@@ -466,8 +473,8 @@ export function AnnotationBar({
   };
 
   return (
-    <div data-testid="annotation-bar" className={cn("mt-3 flex flex-col gap-2", className)}>
-      <div className="flex flex-wrap items-center gap-2">
+    <div data-testid="annotation-bar" className={inline ? "contents" : cn("mt-3 flex flex-col gap-2", className)}>
+      <div className={inline ? "contents" : "flex flex-wrap items-center gap-2"}>
         <span className="text-xs text-muted-foreground">
           {error
             ? t("bar.unavailable")
@@ -484,7 +491,9 @@ export function AnnotationBar({
             type="button"
             size="sm"
             variant="outline"
-            className="ml-auto"
+            /* Inline, the push to the right edge is the PARENT row's spacer;
+               order-1 only lines this button up after every count. */
+            className={inline ? "order-1" : "ml-auto"}
             {...guard}
             aria-expanded={open}
             onClick={() => setOpen((o) => !o)}
@@ -495,21 +504,26 @@ export function AnnotationBar({
       </div>
 
       {open ? (
-        <CreateAnnotationForm
-          scope={scope}
-          frozenWindow={frozenWindow}
-          onDone={({ start, end }) => {
-            closeAndRefocus();
-            handleChanged();
-            /* Normal in-window creates stay SILENT — the row appearing in the list below is the feedback. */
-            setCreatedNote(outsideWindowNote(start, end, frozenWindow, t, locale) ?? undefined);
-          }}
-          onCancel={closeAndRefocus}
-        />
+        <div className={inline ? "order-2 basis-full" : undefined}>
+          <CreateAnnotationForm
+            scope={scope}
+            frozenWindow={frozenWindow}
+            onDone={({ start, end }) => {
+              closeAndRefocus();
+              handleChanged();
+              /* Normal in-window creates stay SILENT — the row appearing in the list below is the feedback. */
+              setCreatedNote(outsideWindowNote(start, end, frozenWindow, t, locale) ?? undefined);
+            }}
+            onCancel={closeAndRefocus}
+          />
+        </div>
       ) : null}
 
       {createdNote ? (
-        <p role="status" className="text-[11px] leading-relaxed text-muted-foreground">
+        <p
+          role="status"
+          className={cn("text-[11px] leading-relaxed text-muted-foreground", inline && "order-2 basis-full")}
+        >
           {createdNote}
         </p>
       ) : null}
@@ -518,7 +532,10 @@ export function AnnotationBar({
           and the window arithmetic read it that way; a list of notes is read from the top, and the
           note somebody just wrote belongs there. */}
       {annotations.length > 0 ? (
-        <ul aria-label={t("bar.list.aria")} className="m-0 divide-y divide-border/60 p-0">
+        <ul
+          aria-label={t("bar.list.aria")}
+          className={cn("m-0 divide-y divide-border/60 p-0", inline && "order-2 basis-full")}
+        >
           {[...annotations].reverse().map((a) => (
             <AnnotationRow key={a.id} annotation={a} canWrite={canWrite} onChanged={handleChanged} />
           ))}
