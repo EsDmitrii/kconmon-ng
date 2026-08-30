@@ -11,7 +11,7 @@ import { defineDict, type Dictionary } from "@/lib/i18n";
  *   - the run STATUS and every pair STATE badge (pending / running / succeeded
  *     / failed / partial / cancelled / dispatched / timeout). They are the
  *     store's own enum, they are what the API answers and what an operator
- *     greps a log for, and the Diagnostics history list beside them prints the
+ *     greps a log for, and the Run checks history list beside them prints the
  *     same words.
  *   - a pair's `error` string and a cancel refusal's problem.detail: the
  *     server wrote them.
@@ -33,7 +33,7 @@ import { defineDict, type Dictionary } from "@/lib/i18n";
 
 const en = {
   /* ── the page frame ────────────────────────────────────────────────────── */
-  "title": "Diagnostics run",
+  "title": "Diagnostic run",
   "loading": "Loading…",
   "loading.run": "Loading run…",
   /* Engaged, the permalink is still shown IN FULL — refusing to render the run
@@ -52,7 +52,7 @@ const en = {
   "notFound.body":
     "It may have been an id typo, or the run history behind it is not persisted (in-memory only) and the " +
     "console has since restarted.",
-  "notFound.back": "Back to Diagnostics",
+  "notFound.back": "Back to Run checks",
 
   /* ── the header card ───────────────────────────────────────────────────── */
   "field.type": "Type",
@@ -226,7 +226,7 @@ export const runDetailDict: Dictionary<RunDetailKey> = defineDict(en, {
   "notFound.body":
     "Возможно, в идентификаторе опечатка. А может, история запусков не сохраняется (живёт только в памяти), " +
     "а консоль с тех пор перезапускалась.",
-  "notFound.back": "Назад к диагностике",
+  "notFound.back": "Назад на страницу «Проверки вручную»",
 
   "field.type": "Тип",
   "field.plane": "Плоскость",

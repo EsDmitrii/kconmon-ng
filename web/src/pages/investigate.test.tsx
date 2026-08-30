@@ -1783,11 +1783,11 @@ describe("InvestigatePage — the actions rail", () => {
     expect((save as HTMLButtonElement).disabled).toBe(true);
   });
 
-  it("links to Explore with the range and says what that link can and cannot carry", async () => {
+  it("links to Metrics with the range and says what that link can and cannot carry", async () => {
     renderPage();
-    const link = await screen.findByRole("link", { name: /Compare in Explore/ });
+    const link = await screen.findByRole("link", { name: /Compare in Metrics/ });
     expect(link.getAttribute("href")).toContain("/explore");
-    expect(screen.getByText(/A\/B slots are bound to curated metrics/i)).toBeTruthy();
+    expect(screen.getByText(/A\/B slots to curated metrics/i)).toBeTruthy();
   });
 
   it("offers the export as a real button", async () => {

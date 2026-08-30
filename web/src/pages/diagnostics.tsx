@@ -618,7 +618,9 @@ function RunForm({
 
   return (
     <Card asChild className="p-6">
-      <form onSubmit={handleSubmit} className="flex flex-col gap-5">
+      {/* max-w-2xl: the M4 column width every config form shares; /mtr's
+          Runner already fits the same two-column node-picker grid in it. */}
+      <form onSubmit={handleSubmit} className="flex max-w-2xl flex-col gap-5">
         <div>
           <span className="mb-2 block text-xs font-medium text-muted-foreground">{t("form.checkType")}</span>
           {/* flex-wrap (QA round 4, finding #17): six options is the widest

@@ -361,8 +361,8 @@ describe("the stub page in Russian", () => {
     expect(screen.getByText("Not built yet — on the roadmap")).toBeInTheDocument();
     expect(
       screen.getByText(
-        "This view is delivered in a later milestone. The navigation shows the full product so " +
-          "the information architecture stays honest about what is coming.",
+        "This view is delivered in a later milestone. The navigation shows the full product, " +
+          "including what is still to come.",
       ),
     ).toBeInTheDocument();
   });

@@ -311,6 +311,33 @@ describe("NodeCardPage — an empty podIP", () => {
   });
 });
 
+/* UI polish: the agent id is the one identity value that can be long, and it
+   truncated inside a fixed quarter-width column while the card had free width
+   (a 1440 viewport leaves the main column hundreds of px of slack). jsdom
+   draws no boxes, so the pin is the mechanism itself: the agent id column is
+   the grid's ONE flexible track, its three short siblings size to content, and
+   the ellipsis (full value one hover away) engages only when the card is
+   genuinely out of room. */
+describe("NodeCardPage — the identity card's agent id", () => {
+  it("gives a long agent id the card's free width instead of a fixed quarter", async () => {
+    const longId = "kconmon-night-worker-6f4b9c7d8e-x2m4q";
+    renderPage("/nodes/node-a", {
+      topology: {
+        ...topologyBody,
+        agents: [{ id: longId, nodeName: "node-a", podIP: "10.0.0.1", zone: "z1" }],
+      },
+    });
+    const dd = await screen.findByText(longId);
+    // The full value is in the DOM, in mono, with the hover fallback intact.
+    expect(dd.getAttribute("title")).toBe(longId);
+    expect(dd.className).toContain("mono-data");
+    // The value column is the flexible track — not one of four equal quarters.
+    const dl = dd.closest("dl");
+    expect(dl?.className).toContain("sm:grid-cols-[auto_minmax(0,1fr)_auto_auto]");
+    expect(dl?.className).not.toContain("sm:grid-cols-4");
+  });
+});
+
 describe("NodeCardPage — the protocol in the URL", () => {
   afterEach(() => window.history.replaceState({}, "", "/"));
 
