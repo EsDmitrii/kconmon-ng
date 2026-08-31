@@ -175,6 +175,16 @@ jobs:
           echo "$PUSH_OUT"
           echo "digest=$(echo "$PUSH_OUT" | awk '/^Digest:/{print $2}')" >> "$GITHUB_OUTPUT"
 
+      # Cosign reads ~/.docker/config.json, not helm's own registry config: the draft/publish job
+      # split left this job with helm+oras logins only, and the chart-signature push arrived at
+      # GHCR anonymous — the first fully-green pipeline died exactly here.
+      - name: Log in to GHCR for cosign
+        uses: docker/login-action@v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Sign Helm chart (cosign keyless)
         run: |
           OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
