@@ -19,7 +19,7 @@ import { TimeMachineBar } from "@/components/timemachine-bar";
 import { PageShell } from "@/components/page-shell";
 import { RouteErrorBoundary } from "@/components/error-boundary";
 import { Card } from "@/components/ui/card";
-import { getConfig } from "@/lib/api";
+import { ApiError, getConfig, getMe } from "@/lib/api";
 import { useT } from "@/lib/i18n";
 import { chromeDict } from "@/lib/i18n/dict/chrome";
 import { notFoundDict } from "@/lib/i18n/dict/not-found";
@@ -225,11 +225,64 @@ const rootRoute = createRootRoute({
      to render it: a not-found match has no layout route under it, so without
      this the reader loses the sidebar exactly when they need a way out. */
   notFoundComponent: () => (
-    <AppShell>
-      <NotFoundPage />
-    </AppShell>
+    <AuthGate>
+      <AppShell>
+        <NotFoundPage />
+      </AppShell>
+    </AuthGate>
   ),
 });
+
+/**
+ * AuthGate holds the shell — and with it every page and every data query —
+ * until GET /auth/me has answered once. Without it a signed-out visitor
+ * briefly SEES the console: the shell and the route render immediately, their
+ * queries all 401 and paint "authentication required" panels, and only then
+ * the first 401's redirect (lib/api.ts) lands on /login — a sub-second flash
+ * of the product's whole layout (owner's screen recording). While the subject
+ * is unknown, and while a 401's redirect is in flight, the screen stays on
+ * GateSplash. Any OTHER failure fails open: a console that cannot ask "who am
+ * I" over a flaky network must degrade to the pages' own inline errors, not
+ * to a permanent splash. Same ["me"] cache entry as useAuth, so the gate's
+ * one answer is the answer every mounted consumer reads.
+ */
+export function AuthGate({ children }: { children: ReactNode }) {
+  /* retryOnMount false, here AND in useAuth: with the default, every consumer
+     of ["me"] that mounts refetches an errored query, which flips it back to
+     pending — the gate closes, the shell (and its useAuth) unmounts, the
+     refetch fails, the gate reopens, and the console flaps between splash and
+     shell forever. An errored subject check is asked again only when login or
+     logout invalidates the key. */
+  const { data, error } = useQuery({
+    queryKey: ["me"],
+    queryFn: getMe,
+    retry: false,
+    retryOnMount: false,
+    staleTime: Infinity,
+  });
+  if (data !== undefined) return <>{children}</>;
+  if (error !== null && !(error instanceof ApiError && error.problem.status === 401)) return <>{children}</>;
+  return <GateSplash />;
+}
+
+/**
+ * GateSplash is the boot screen behind AuthGate: theme background, and the
+ * product's name only after a delay — a same-origin session check usually
+ * answers well inside it, and the name flickering on every reload for a
+ * signed-in operator would be its own version of the flash this gate removes.
+ */
+function GateSplash() {
+  return (
+    <div data-testid="auth-gate-splash" className="flex min-h-screen w-full items-center justify-center">
+      <span
+        className="text-[15px] font-semibold tracking-tight text-muted-foreground"
+        style={{ animation: "fade-in var(--dur-slow) var(--ease-enter) 400ms both" }}
+      >
+        kconmon-ng
+      </span>
+    </div>
+  );
+}
 
 /**
  * The shell is a PATHLESS LAYOUT ROUTE rather than the root's component, which
@@ -241,9 +294,11 @@ const shellRoute = createRoute({
   getParentRoute: () => rootRoute,
   id: "shell",
   component: () => (
-    <AppShell>
-      <Outlet />
-    </AppShell>
+    <AuthGate>
+      <AppShell>
+        <Outlet />
+      </AppShell>
+    </AuthGate>
   ),
 });
 
