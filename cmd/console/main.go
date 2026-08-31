@@ -659,6 +659,33 @@ func main() {
 		slog.Info("schedule loop enabled", "tickInterval", cfg.Scheduler.TickInterval)
 	}
 
+	// The topology sweeper is opt-in (console.sweeper.enabled, default false): a slow census of the
+	// pairs a sparse topology stopped probing, one on-demand probe per interval recorded only into
+	// the zone-aggregated sweep counter (see checks.Sweeper).
+	switch {
+	case !cfg.Sweeper.Enabled:
+	case ctrl == nil:
+		slog.Warn("sweeper.enabled is set but controller.url is empty — the topology sweeper is off " +
+			"(a census probe is an on-demand dispatch, which needs a controller)")
+	default:
+		deps := checks.SweeperDeps{
+			Topology: ctrl, Controller: ctrl, Metrics: m,
+			Interval: cfg.Sweeper.Interval, CheckType: cfg.Sweeper.CheckType, Timeout: cfg.Sweeper.Timeout,
+		}
+		// Both seams are optional and must stay nil interfaces when their backends are absent.
+		// Without the database lock every replica sweeps (a faster census, not a conflict); without
+		// Prometheus the census is the full pair universe rather than plan-minus-planned.
+		if db != nil {
+			deps.Lock = db
+		}
+		if prom != nil {
+			deps.Intended = checks.NewPromIntendedPairs(prom)
+		}
+		spawn("topology-sweeper", checks.NewSweeper(deps).Run)
+		slog.Info("topology sweeper enabled",
+			"interval", cfg.Sweeper.Interval, "checkType", cfg.Sweeper.CheckType)
+	}
+
 	// The Kubernetes event reader is opt-in (console.kubernetesContext.enabled, default false) and
 	// needs a database.
 	switch {

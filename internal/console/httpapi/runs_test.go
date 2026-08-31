@@ -34,6 +34,11 @@ type fakeRunner struct {
 	started   []checks.Spec
 	cancelErr error
 	cancelled []string
+
+	// The zone-pair preset seam: what StartZonePair returns, and what it was asked.
+	zonePairRuns  []checks.ZonePairRun
+	zonePairErr   error
+	zonePairSpecs []checks.ZonePairSpec
 }
 
 func newFakeRunner() *fakeRunner {
@@ -58,6 +63,15 @@ func (f *fakeRunner) Start(_ context.Context, spec checks.Spec, initiator authz.
 		PairTotal: int32(pairTotal), //nolint:gosec // test double, small counts only
 	}
 	return id, nil
+}
+
+// StartZonePair mirrors checks.Runner.StartZonePair's contract: a non-empty slice alongside an
+// error is a partial start.
+func (f *fakeRunner) StartZonePair(_ context.Context, spec checks.ZonePairSpec, _ authz.Subject) ([]checks.ZonePairRun, error) { //nolint:gocritic // Subject is a value type by design
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.zonePairSpecs = append(f.zonePairSpecs, spec)
+	return f.zonePairRuns, f.zonePairErr
 }
 
 func (f *fakeRunner) Get(_ context.Context, runID string) (checks.Run, error) {

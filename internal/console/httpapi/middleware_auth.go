@@ -128,9 +128,12 @@ var routeTable = map[string]routeRule{
 
 	"GET /api/v1/audit": {permission: authz.PermAuditRead},
 
-	"POST /api/v1/runs":     {permission: authz.PermRunsCreate},
-	"GET /api/v1/runs":      {permission: authz.PermRunsRead},
-	"GET /api/v1/runs/{id}": {permission: authz.PermRunsRead},
+	"POST /api/v1/runs": {permission: authz.PermRunsCreate},
+	// The zone-pair preset starts the same class of fleet-wide probe traffic as a plain run — up to
+	// PresetMaxRuns of them — so it is gated by the same permission.
+	"POST /api/v1/runs/zone-pair": {permission: authz.PermRunsCreate},
+	"GET /api/v1/runs":            {permission: authz.PermRunsRead},
+	"GET /api/v1/runs/{id}":       {permission: authz.PermRunsRead},
 	// Cancelling is runs:create, not runs:read and not a permission of its own; gating it on runs:read
 	// would let every viewer stop an operator's diagnostic mid-flight.
 	"POST /api/v1/runs/{id}/cancel": {permission: authz.PermRunsCreate},

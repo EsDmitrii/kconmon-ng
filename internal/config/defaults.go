@@ -60,6 +60,17 @@ func DefaultConfig() *Config {
 			// only pre-picks a port so values files agree on one.
 			ExternalGateway: ExternalGatewayConfig{Enabled: false, Port: 9443},
 		},
+		// Full mesh by default: sparse is an opt-in for fleets where N*(N-1) pairs stop being
+		// affordable. The sparse knobs default to a plan that stays connected (ring) and keeps
+		// every zone pair observed (chords).
+		Topology: TopologyConfig{
+			Mode: TopologyModeFull,
+			Sparse: SparseTopologyConfig{
+				RingDegree:    2,
+				ZoneChords:    2,
+				AutoThreshold: 0,
+			},
+		},
 		Observability: ObservabilityConfig{
 			OTel: OTelConfig{
 				Enabled:  false,

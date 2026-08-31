@@ -34,6 +34,13 @@ type PrometheusMetrics struct {
 	ICMPLossRatio *prometheus.GaugeVec
 	ICMPResults   *prometheus.CounterVec
 
+	/* ProbeIntended is the topology PLAN, scrapable: 1 for every directed pair this agent is
+	   assigned to probe. Under a sparse mesh "no results for a pair" is either a failure or the
+	   plan, and only this family tells them apart — PairWentSilent joins on it, which is why it
+	   ships in the same release as sparse mode. Only the two node names: the join needs exactly
+	   the labels the results families group by. */
+	ProbeIntended *prometheus.GaugeVec
+
 	/* The zone family is the SECOND write of every peer probe, aggregated at the source into
 	   {source_zone, destination_zone}. It exists so the per-pair family can be dropped by metric
 	   relabeling at scale while zone alerts and dashboards keep their data — recording rules were
@@ -194,6 +201,11 @@ func NewPrometheusMetrics(prefix string, reg prometheus.Registerer) *PrometheusM
 			Name: prefix + "_icmp_results_total",
 			Help: "Total ICMP probe results",
 		}, resultPeerLabels),
+
+		ProbeIntended: factory.NewGaugeVec(prometheus.GaugeOpts{
+			Name: prefix + "_probe_intended",
+			Help: "1 for every directed pair the topology plan assigns this agent to probe; absent means unplanned, never failing",
+		}, []string{"source_node", "destination_node"}),
 
 		ZoneTCPConnect: factory.NewHistogramVec(prometheus.HistogramOpts{
 			Name:    prefix + "_zone_tcp_connect_seconds",
@@ -514,6 +526,9 @@ func (m *PrometheusMetrics) ForgetPeer(destinationNode string) {
 	m.ICMPLossRatio.DeletePartialMatch(labels)
 	m.MTRHops.DeletePartialMatch(labels)
 	m.MTRHopRTT.DeletePartialMatch(labels)
+	// The plan gauge goes with the peer: a departed destination is by definition no longer
+	// assigned, and a stale 1 here keeps PairWentSilent armed for a pair nothing probes.
+	m.ProbeIntended.DeletePartialMatch(labels)
 }
 
 // ForgetExternalTarget drops the gauge series for one target that left the controller's assignment.

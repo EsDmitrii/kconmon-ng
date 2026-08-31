@@ -120,6 +120,49 @@ func TestTopologyNullSlicesBecomeEmptyArrays(t *testing.T) {
 	}
 }
 
+/*
+TestTopologyProbePlanSurvivesTheProxy pins both halves of the sparse-plan surfacing contract at
+the console boundary:
+
+  - a controller running a sparse plan answers with probePlan, and the proxy re-marshals it intact
+    (the client struct decodes it; a struct without the field silently dropped it);
+  - a full-mesh controller (or one predating the field) answers without it, and the proxied body
+    must not grow a probePlan key of any shape — absent means "every pair intended", and the web
+    keys the 'not probed' cell state off the field's very presence.
+*/
+func TestTopologyProbePlanSurvivesTheProxy(t *testing.T) {
+	sparse := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"nodes":[],"agents":[],"timestamp":"2026-01-01T00:00:00Z",` +
+			`"probePlan":{"n1":["n2"],"n2":[]}}`))
+	}))
+	defer sparse.Close()
+
+	rec := do(t, newDataServer(t, sparse.URL, ""), http.MethodGet, "/api/v1/topology", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body)
+	}
+	var topo controllerclient.Topology
+	if err := json.Unmarshal(rec.Body.Bytes(), &topo); err != nil {
+		t.Fatalf("bad body: %s (%v)", rec.Body, err)
+	}
+	if len(topo.ProbePlan) != 2 || len(topo.ProbePlan["n1"]) != 1 || topo.ProbePlan["n1"][0] != "n2" {
+		t.Fatalf("probePlan lost or mangled in the proxy: %s", rec.Body)
+	}
+	if topo.ProbePlan["n2"] == nil {
+		t.Fatalf("fail-closed empty list must survive as [], not null: %s", rec.Body)
+	}
+
+	full := fakeController(t)
+	defer full.Close()
+	rec = do(t, newDataServer(t, full.URL, ""), http.MethodGet, "/api/v1/topology", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body)
+	}
+	if strings.Contains(rec.Body.String(), "probePlan") {
+		t.Fatalf("full-mesh proxy body grew a probePlan key: %s", rec.Body)
+	}
+}
+
 func TestTopologyNotConfigured503(t *testing.T) {
 	rec := do(t, newDataServer(t, "", ""), http.MethodGet, "/api/v1/topology", "")
 	if rec.Code != http.StatusServiceUnavailable {

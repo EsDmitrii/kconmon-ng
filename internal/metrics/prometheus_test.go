@@ -519,3 +519,57 @@ func TestAgentSelfMetricNames(t *testing.T) {
 		}
 	}
 }
+
+/*
+kconmon_ng_probe_intended is the topology PLAN made scrapable: value 1 for every directed pair
+this agent is assigned to probe, labelled by the two node names alone. PairWentSilent joins on it,
+so the family must exist under the configured prefix with exactly {source_node, destination_node}
+— an extra label would break the on() join, a missing one would collapse pairs.
+*/
+func TestProbeIntendedRegisteredUnderPrefix(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	m := NewPrometheusMetrics("kconmon_ng", reg)
+	m.ProbeIntended.WithLabelValues("node-a", "node-b").Set(1)
+
+	families, err := reg.Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range families {
+		if f.GetName() != "kconmon_ng_probe_intended" {
+			continue
+		}
+		metric := f.GetMetric()[0]
+		if got := metric.GetGauge().GetValue(); got != 1 {
+			t.Errorf("probe_intended value = %v, want 1: the plan is a membership set, not a measurement", got)
+		}
+		labels := make([]string, 0, len(metric.GetLabel()))
+		for _, l := range metric.GetLabel() {
+			labels = append(labels, l.GetName())
+		}
+		want := []string{"destination_node", "source_node"}
+		if !slices.Equal(labels, want) {
+			t.Errorf("probe_intended labels = %v, want exactly %v", labels, want)
+		}
+		return
+	}
+	t.Fatal("kconmon_ng_probe_intended not gathered")
+}
+
+// A peer that leaves the assignment must take its intent series with it, and only its own:
+// PairWentSilent reads this family as the plan, and a stale 1 keeps alerting on a pair the
+// controller no longer schedules.
+func TestForgetPeerDropsProbeIntendedForThatDestinationOnly(t *testing.T) {
+	m := NewPrometheusMetrics("kconmon_ng", prometheus.NewRegistry())
+	m.ProbeIntended.WithLabelValues("node-a", "node-gone").Set(1)
+	m.ProbeIntended.WithLabelValues("node-a", "node-live").Set(1)
+
+	m.ForgetPeer("node-gone")
+
+	if got := testutil.CollectAndCount(m.ProbeIntended); got != 1 {
+		t.Errorf("probe_intended has %d series after forgetting one peer, want the 1 still assigned", got)
+	}
+	if got := testutil.ToFloat64(m.ProbeIntended.WithLabelValues("node-a", "node-live")); got != 1 {
+		t.Errorf("the still-assigned pair's probe_intended = %v, want 1", got)
+	}
+}

@@ -44,7 +44,34 @@ type Config struct {
 	Agent              AgentConfig         `yaml:"agent"`
 	Checkers           CheckersConfig      `yaml:"checkers"`
 	Controller         ControllerConfig    `yaml:"controller"`
+	Topology           TopologyConfig      `yaml:"topology"`
 	Observability      ObservabilityConfig `yaml:"observability"`
+}
+
+// The two probe-mesh shapes the controller can plan. Full is the default and the pre-M10 behavior:
+// every agent probes every other.
+const (
+	TopologyModeFull   = "full"
+	TopologyModeSparse = "sparse"
+)
+
+// TopologyConfig selects the probe-mesh shape the controller plans. Controller-side only: agents
+// just probe whatever peer list they are handed, so this block changes nothing in agent code.
+type TopologyConfig struct {
+	Mode   string               `yaml:"mode"`
+	Sparse SparseTopologyConfig `yaml:"sparse"`
+}
+
+// SparseTopologyConfig tunes the sparse plan (see internal/controller/meshplan): a ring over the
+// node-name order plus HRW-picked cross-zone chords.
+type SparseTopologyConfig struct {
+	// RingDegree is how many ring successors each agent probes; >= 1, or the graph falls apart.
+	RingDegree int `yaml:"ringDegree"`
+	// ZoneChords is how many extra cross-zone targets each agent probes on top of the ring.
+	ZoneChords int `yaml:"zoneChords"`
+	// AutoThreshold keeps fleets SMALLER than it on full mesh even in sparse mode; 0 disables the
+	// floor. Small fleets lose nothing by probing everyone, and full mesh needs no matrix caveats.
+	AutoThreshold int `yaml:"autoThreshold"`
 }
 
 /*
@@ -418,6 +445,9 @@ func (l *Loader) validate(cfg *Config) error {
 	if err := validateExternalGateway(cfg); err != nil {
 		return err
 	}
+	if err := validateTopology(cfg.Topology); err != nil {
+		return err
+	}
 
 	/* The TTL becomes a ticker PERIOD (agentTtl/2 in controller.Run), and time.NewTicker panics on a
 	   non-positive one. An operator disabling TTL eviction with "0s" got CrashLoopBackOff and a raw
@@ -539,6 +569,32 @@ func applyDerivedDefaults(cfg *Config) {
 		if cfg.Checkers.External.Timeout == 0 {
 			cfg.Checkers.External.Timeout = defaultExternalTimeout
 		}
+	}
+}
+
+// validateTopology refuses a sparse block that cannot plan a connected mesh. The sparse knobs are
+// only checked in sparse mode, so a disabled block stays byte-identical to what the operator wrote.
+func validateTopology(t TopologyConfig) error {
+	switch strings.ToLower(t.Mode) {
+	case "", TopologyModeFull:
+		return nil
+	case TopologyModeSparse:
+		// The ring is the connectivity backbone of the sparse graph; without it nothing guarantees
+		// every agent is probed at all.
+		if t.Sparse.RingDegree < 1 {
+			return fmt.Errorf("topology.sparse.ringDegree must be >= 1 in sparse mode, got %d",
+				t.Sparse.RingDegree)
+		}
+		if t.Sparse.ZoneChords < 0 {
+			return fmt.Errorf("topology.sparse.zoneChords must be >= 0, got %d", t.Sparse.ZoneChords)
+		}
+		if t.Sparse.AutoThreshold < 0 {
+			return fmt.Errorf("topology.sparse.autoThreshold must be >= 0, got %d", t.Sparse.AutoThreshold)
+		}
+		return nil
+	default:
+		return fmt.Errorf("topology.mode must be %q or %q, got %q",
+			TopologyModeFull, TopologyModeSparse, t.Mode)
 	}
 }
 

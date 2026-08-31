@@ -50,6 +50,7 @@ type Config struct {
 	Database   DatabaseConfig   `yaml:"database"`
 	RateLimit  RateLimitConfig  `yaml:"rateLimit"`
 	Scheduler  SchedulerConfig  `yaml:"scheduler"`
+	Sweeper    SweeperConfig    `yaml:"sweeper"`
 	MTR        MTRConfig        `yaml:"mtr"`
 
 	KubernetesContext KubernetesContextConfig `yaml:"kubernetesContext"`
@@ -341,6 +342,45 @@ func (s *SchedulerConfig) validate() error {
 	return nil
 }
 
+// SweeperConfig configures the topology sweeper (internal/console/checks.Sweeper): a slow census
+// that probes ONE rotating pair per interval through the on-demand dispatch path and records only
+// zone-aggregated results. Off by default — it only earns its probes on a sparse topology, where
+// the mesh no longer covers every pair.
+type SweeperConfig struct {
+	Enabled bool `yaml:"enabled"`
+	// Interval is the census cadence: one pair per interval, fleet-wide.
+	Interval time.Duration `yaml:"interval"`
+	// CheckType is the probe used for the census (tcp|udp|icmp|dns|http). mtr is deliberately not
+	// allowed: a census slot is one cheap probe, not a 30-hop trace with a 90-second floor.
+	CheckType string `yaml:"checkType"`
+	// Timeout is the per-probe budget, clamped exactly as a run pair's would be.
+	Timeout time.Duration `yaml:"timeout"`
+}
+
+// minSweeperInterval floors sweeper.interval: the sweeper is a CENSUS, one quiet probe at a time;
+// anything sub-5s is a load generator wearing its name.
+const minSweeperInterval = 5 * time.Second
+
+// validate enforces sweeper.* invariants, only when the loop is enabled — same rule as scheduler's.
+func (s *SweeperConfig) validate() error {
+	if !s.Enabled {
+		return nil
+	}
+	if s.Interval < minSweeperInterval {
+		return fmt.Errorf("sweeper.interval must be at least %v when sweeper.enabled is true, got %v",
+			minSweeperInterval, s.Interval)
+	}
+	switch s.CheckType {
+	case "tcp", "udp", "icmp", "dns", "http":
+	default:
+		return fmt.Errorf("sweeper.checkType must be one of tcp|udp|icmp|dns|http, got %q", s.CheckType)
+	}
+	if s.Timeout <= 0 {
+		return fmt.Errorf("sweeper.timeout must be positive, got %v", s.Timeout)
+	}
+	return nil
+}
+
 // RateLimitConfig configures the console's fixed-window request limits
 // (internal/console/httpapi/ratelimit.go); that is weaker than configured.
 type RateLimitConfig struct {
@@ -559,6 +599,8 @@ func defaults() *Config {
 		// enabled stays false (see SchedulerConfig); the interval is still
 		// defaulted so switching the loop on is a one-line change.
 		Scheduler: SchedulerConfig{TickInterval: 5 * time.Second},
+		// Same shape: the gate stays off, every budget is pre-defaulted.
+		Sweeper: SweeperConfig{Interval: time.Minute, CheckType: "tcp", Timeout: 5 * time.Second},
 		// Same shape as Scheduler above: every gate stays off, every budget is
 		// pre-defaulted, so turning a source on is a one-line change and never
 		// a two-line one that fails validation on the first try.
@@ -823,6 +865,9 @@ func (c *Config) Validate() error {
 		return err
 	}
 	if err := c.Scheduler.validate(); err != nil {
+		return err
+	}
+	if err := c.Sweeper.validate(); err != nil {
 		return err
 	}
 	if err := c.MTR.validate(); err != nil {

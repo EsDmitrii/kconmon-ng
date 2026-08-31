@@ -715,8 +715,25 @@ func (a *Agent) forgetDepartedPeers(next []checker.Target) {
 
 func (a *Agent) syncPeerMetrics() {
 	source := checker.Target{NodeName: a.info.NodeName, Zone: a.info.Zone}
-	preinitPeerResults(a.metrics, source, a.scheduler.Peers(), a.checkers)
-	preinitZoneResults(a.metrics, source, a.scheduler.Peers(), a.checkers)
+	peers := a.scheduler.Peers()
+	preinitPeerResults(a.metrics, source, peers, a.checkers)
+	preinitZoneResults(a.metrics, source, peers, a.checkers)
+	markProbeIntended(a.metrics, source, peers)
+}
+
+// markProbeIntended publishes the topology plan as kconmon_ng_probe_intended: 1 per peer this
+// agent is assigned, source_node always self. The peer list IS the plan — under a sparse mesh the
+// controller already sends the trimmed set, so full mesh is just the degenerate "every peer" case.
+// Departed peers' series are deleted in ForgetPeer, so after every update the family reads as
+// exactly the current assignment.
+func markProbeIntended(
+	m *metrics.PrometheusMetrics,
+	source checker.Target, //nolint:gocritic // hugeParam: Target is passed by value throughout this package
+	peers []checker.Target,
+) {
+	for i := range peers {
+		m.ProbeIntended.WithLabelValues(source.NodeName, peers[i].NodeName).Set(1)
+	}
 }
 
 // resultOutcomes is the closed set of values the "result" label takes on a peer probe counter.

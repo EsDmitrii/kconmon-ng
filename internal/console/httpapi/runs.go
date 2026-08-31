@@ -22,6 +22,10 @@ import (
 // interface, same shape as EventLister/Auditor/RoleAdmin.
 type RunService interface {
 	Start(ctx context.Context, spec checks.Spec, initiator authz.Subject) (string, error) //nolint:gocritic // Subject is a value type by design
+	// StartZonePair is the investigation preset: both zones expanded against live topology, chunked
+	// into runs of at most 400 pairs. A non-empty slice alongside an error means a partial start —
+	// see checks.Runner.StartZonePair.
+	StartZonePair(ctx context.Context, spec checks.ZonePairSpec, initiator authz.Subject) ([]checks.ZonePairRun, error) //nolint:gocritic // Subject is a value type by design
 	Get(ctx context.Context, runID string) (checks.Run, error)
 	GetResults(ctx context.Context, runID string) (results []store.RunResult, truncated bool, err error)
 	List(ctx context.Context, f checks.ListFilter) (checks.RunPage, error)
