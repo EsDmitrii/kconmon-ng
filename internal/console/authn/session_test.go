@@ -252,7 +252,11 @@ func TestSessionStoreRefreshSlidesIdleNotTheAbsoluteDeadline(t *testing.T) {
 	// session that kept being used — the very thing the two-bound policy exists to prevent.
 	kv := cache.NewInProcessKV()
 	t.Cleanup(kv.Close)
-	store := authn.NewSessionStore(kv, time.Hour, 50*time.Millisecond)
+	/* Margins here are CI-sized on purpose: a hosted runner can stall a goroutine for tens of
+	   milliseconds (GC, CFS throttling), and the first green pipeline died on a 20ms margin
+	   exactly that way. Alive-direction assertions get hundreds of milliseconds of slack;
+	   expiry-direction tests keep tight windows because oversleeping cannot fail them. */
+	store := authn.NewSessionStore(kv, time.Hour, time.Second)
 
 	id, err := store.Create(context.Background(), authn.Session{Username: "alice"})
 	if err != nil {
@@ -264,13 +268,13 @@ func TestSessionStoreRefreshSlidesIdleNotTheAbsoluteDeadline(t *testing.T) {
 		t.Fatalf("Get before refresh: ok=%v err=%v", ok, err)
 	}
 
-	time.Sleep(30 * time.Millisecond)
+	time.Sleep(600 * time.Millisecond)
 	if refreshErr := store.Refresh(context.Background(), id); refreshErr != nil {
 		t.Fatalf("Refresh: %v", refreshErr)
 	}
 
-	// Without the refresh the 50ms idle window would have closed by now.
-	time.Sleep(30 * time.Millisecond)
+	// Without the refresh the 1s idle window would have closed by now.
+	time.Sleep(600 * time.Millisecond)
 	after, ok, err := store.Get(context.Background(), id)
 	if err != nil {
 		t.Fatalf("Get after refresh: %v", err)
@@ -320,7 +324,7 @@ func TestSessionIdleTimeoutRefusesAndPurges(t *testing.T) {
 // TestSessionIdleDeadlineSlidesOnUse pins the sliding half: a session in continuous use must not be
 // logged out by the idle bound.
 func TestSessionIdleDeadlineSlidesOnUse(t *testing.T) {
-	store := authn.NewSessionStore(cache.NewInProcessKV(), 12*time.Hour, 100*time.Millisecond)
+	store := authn.NewSessionStore(cache.NewInProcessKV(), 12*time.Hour, 500*time.Millisecond)
 
 	id, err := store.Create(context.Background(), authn.Session{Username: "admin"})
 	if err != nil {
@@ -329,7 +333,7 @@ func TestSessionIdleDeadlineSlidesOnUse(t *testing.T) {
 
 	// Five uses spread over more than one idle window; each slides the deadline.
 	for i := range 5 {
-		time.Sleep(40 * time.Millisecond)
+		time.Sleep(300 * time.Millisecond)
 		if _, ok, gerr := store.Get(context.Background(), id); gerr != nil || !ok {
 			t.Fatalf("use %d: a session in continuous use expired (ok=%v err=%v)", i, ok, gerr)
 		}

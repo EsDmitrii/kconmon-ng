@@ -103,7 +103,10 @@ func TestSchedulerSetSourceZone(t *testing.T) {
 	s.AddChecker(&mockChecker{name: model.CheckTCP}, SchedulerConfig{Interval: 50 * time.Millisecond})
 	s.UpdatePeers([]checker.Target{{AgentID: "peer-1", NodeName: "node-1", PodIP: "10.0.0.2", Port: 8080}})
 
-	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Millisecond)
+	/* The window is CI-sized on purpose: the first round only needs the goroutine scheduled once,
+	   but a hosted runner can stall that for tens of milliseconds (GC, CFS throttling), and a
+	   120ms window left under 120ms of slack for it. */
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
 	s.Run(ctx)
 
@@ -217,14 +220,17 @@ func TestSchedulerNodeLocalRunsOnce(t *testing.T) {
 		NodeLocal: true,
 	})
 
-	const peerCount = 5
+	/* peerCount is far above the ticks a 500ms window can produce (~11 at a 50ms interval), so the
+	   per-peer regression stays unmistakable while the window itself is CI-sized: the old
+	   120ms/5-peer shape left under 120ms of slack for the first round to be scheduled at all. */
+	const peerCount = 50
 	peers := make([]checker.Target, peerCount)
 	for i := range peers {
 		peers[i] = checker.Target{AgentID: fmt.Sprintf("p%d", i), NodeName: fmt.Sprintf("n%d", i)}
 	}
 	s.UpdatePeers(peers)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
 
 	s.Run(ctx)
@@ -241,7 +247,7 @@ func TestSchedulerNodeLocalRunsOnce(t *testing.T) {
 	}
 
 	// NodeLocal: checker is called once per tick, not once per peer per tick.
-	// In ~120ms at 50ms interval we get at most a handful of ticks.
+	// In ~500ms at 50ms interval we get at most a dozen ticks.
 	// If it ran per-peer, calls would be peerCount × ticks — far more than ticks alone.
 	if calls >= peerCount {
 		t.Errorf("NodeLocal checker should not run per-peer: got %d calls with %d peers", calls, peerCount)

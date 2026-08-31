@@ -115,16 +115,19 @@ func TestRegistryHeartbeat(t *testing.T) {
 }
 
 func TestRegistryEvictStale(t *testing.T) {
-	r := NewRegistry(100 * time.Millisecond)
+	/* Margins here are CI-sized: agent-1's heartbeat must still be fresh when EvictStale runs, so
+	   that leg gets hundreds of milliseconds of slack (the old 100ms TTL left 40ms). agent-2's leg
+	   is expiry-direction — oversleeping cannot fail it. */
+	r := NewRegistry(600 * time.Millisecond)
 
 	r.Register(model.AgentInfo{ID: "agent-1", NodeName: "node-1"})
 	r.Register(model.AgentInfo{ID: "agent-2", NodeName: "node-2"})
 
-	time.Sleep(150 * time.Millisecond)
+	time.Sleep(900 * time.Millisecond)
 
 	r.Heartbeat("agent-1")
 
-	time.Sleep(60 * time.Millisecond)
+	time.Sleep(200 * time.Millisecond)
 
 	evicted := r.EvictStale()
 	if evicted != 1 {
