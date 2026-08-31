@@ -59,6 +59,8 @@ import type {
   Webhook,
   WebhookList,
   WebhookRequest,
+  ZonePairRunsRequest,
+  ZonePairRunsResponse,
 } from "./types";
 // The one instant formatter (RFC 3339, UTC, seconds) the URL's ?at= and every
 // request built from it share — see getTopology below.
@@ -342,6 +344,17 @@ export function createRun(req: RunCreateRequest): Promise<RunCreateResponse> {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(req),
   }).then((r) => handle<RunCreateResponse>(r));
+}
+
+// createZonePairRuns is POST /api/v1/runs/zone-pair: the investigation preset.
+// The server expands both zones against live topology and starts up to 8
+// chunked runs of at most 400 pairs each; the 202 body lists every run started.
+export function createZonePairRuns(req: ZonePairRunsRequest): Promise<ZonePairRunsResponse> {
+  return apiFetch("/api/v1/runs/zone-pair", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(req),
+  }).then((r) => handle<ZonePairRunsResponse>(r));
 }
 
 // getRun is GET /api/v1/runs/{id}: the run plus its per-pair results.

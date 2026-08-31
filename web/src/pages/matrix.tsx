@@ -8,6 +8,7 @@ import { Segmented } from "@/components/ui/segmented";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tooltip } from "@/components/ui/tooltip";
 import { useMatrix } from "@/hooks/use-matrix";
+import { useTopology } from "@/hooks/use-topology";
 import { localeTag, useLocale, useT } from "@/lib/i18n";
 import { matrixDict, type MatrixKey } from "@/lib/i18n/dict/matrix";
 /* cellSummary's own table — dict/matrix.ts's NOT-HERE list says why the shared
@@ -22,6 +23,7 @@ import {
   isMeasured,
   type CellTier,
 } from "@/lib/matrix-cells";
+import { isPlanExcluded, readProbePlan } from "@/lib/matrix-plan";
 import {
   MAX_ZOOM,
   MIN_ZOOM,
@@ -254,12 +256,16 @@ function GridCellImpl({
   dst,
   cell,
   density,
+  excluded = false,
 }: {
   src: string;
   dst: string;
   cell: MatrixCell | undefined;
   /** What this size can honestly SHOW — lib/matrix-zoom.ts's cellDensity. */
   density: CellDensity;
+  /** The sparse topology plan assigns nobody to probe this pair (lib/matrix-plan.ts).
+   *  Only an UNMEASURED cell reads it: data, if any arrived, always outranks the plan. */
+  excluded?: boolean;
 }) {
   const t = useT(matrixDict);
   const tc = useT(matrixCellsDict);
@@ -281,6 +287,66 @@ function GridCellImpl({
   const tier = cellTier(cell);
   const measured = isMeasured(cell);
   const fail = cell?.failRatio ?? null;
+
+  /* And the investigation window ends at the viewed instant, not at now: an Investigate link built
+     while the Time Machine is engaged must open the window around what is on screen. */
+  const investigateHref = buildInvestigateURL({ kind: "pair", a: src, b: dst }, viewedAt ?? new Date());
+
+  /* No investigate glyph on a tile: a 12px icon in a 38px box is a target
+     nothing but luck hits, and the affordance returns the moment the cell
+     can hold it. Shared by the measured cell and the plan-excluded one —
+     Investigate probes on demand, so it is the ONE promise both can keep. */
+  const investigateAction =
+    density === "tile" ? null : (
+      <a
+        href={investigateHref}
+        data-testid="cell-investigate"
+        aria-label={t("cell.investigate", { src, dst })}
+        className={cn(
+          "absolute right-1 top-1 rounded p-0.5 text-muted-foreground opacity-0",
+          "group-hover:opacity-100 focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+          "hover:bg-accent hover:text-accent-foreground",
+          /* The DRAWN control is a 12px glyph in a 16px box, which is a target
+             a trackpad hits by luck and a touch screen does not hit at all (QA
+             scope 3, finding #19). The pseudo-element takes it to 40×40 without
+             moving a pixel of what is painted: -inset-3 is 12px on each side of
+             the 16px box. It is deliberately a pseudo rather than padding —
+             padding would push the glyph off the cell's top-right corner, and
+             the corner is where the affordance is learned. */
+          "after:absolute after:-inset-3 after:content-['']",
+        )}
+      >
+        <Search aria-hidden="true" className="size-3" />
+      </a>
+    );
+
+  /* The plan-excluded, unmeasured cell: expected silence, visually apart from 'no data' (dashed
+     hollow box vs the unknown tier's soft fill and em-dash). Deliberately NOT a link — the pair
+     page promises continuous history a pair the plan excludes will never grow — while Investigate
+     stays, because probing on demand is exactly how such a pair gets looked at. Data outranks the
+     plan: a measured cell renders its measurement below even if the plan has since dropped it. */
+  if (excluded && !measured) {
+    return (
+      <td aria-label={`${src} → ${dst}: ${t("cell.notProbed")}`} className="group relative p-0.5">
+        <Tooltip
+          content={
+            <div className="flex min-w-44 flex-col gap-1">
+              <div className="flex items-center gap-1.5 font-medium">
+                <span className="mono-data truncate">{src}</span>
+                <span aria-hidden="true" className="text-muted-foreground">→</span>
+                <span className="mono-data truncate">{dst}</span>
+              </div>
+              <div className="text-muted-foreground">{t("tooltip.notProbed")}</div>
+            </div>
+          }
+        >
+          <div className="h-[var(--m-cell-h)] w-[var(--m-col-w)] rounded-md border border-dashed border-border-strong/70" />
+        </Tooltip>
+        {investigateAction}
+      </td>
+    );
+  }
+
   const label = `${src} → ${dst}: ${cellSummary(cell, tc)}`;
 
   const tooltip = (
@@ -332,10 +398,6 @@ function GridCellImpl({
    * The Investigate affordance lives INSIDE the cell, as a sibling of the pair link rather than a
    * new column or a new row.
    */
-  /* And the investigation window ends at the viewed instant, not at now: an Investigate link built
-     while the Time Machine is engaged must open the window around what is on screen. */
-  const investigateHref = buildInvestigateURL({ kind: "pair", a: src, b: dst }, viewedAt ?? new Date());
-
   return (
     <td className="group relative p-0.5">
       <Tooltip content={tooltip}>
@@ -399,31 +461,7 @@ function GridCellImpl({
           )}
         </a>
       </Tooltip>
-      {/* No investigate glyph on a tile: a 12px icon in a 38px box is a target
-          nothing but luck hits, and the affordance returns the moment the cell
-          can hold it. */}
-      {density === "tile" ? null : (
-      <a
-        href={investigateHref}
-        data-testid="cell-investigate"
-        aria-label={t("cell.investigate", { src, dst })}
-        className={cn(
-          "absolute right-1 top-1 rounded p-0.5 text-muted-foreground opacity-0",
-          "group-hover:opacity-100 focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
-          "hover:bg-accent hover:text-accent-foreground",
-          /* The DRAWN control is a 12px glyph in a 16px box, which is a target
-             a trackpad hits by luck and a touch screen does not hit at all (QA
-             scope 3, finding #19). The pseudo-element takes it to 40×40 without
-             moving a pixel of what is painted: -inset-3 is 12px on each side of
-             the 16px box. It is deliberately a pseudo rather than padding —
-             padding would push the glyph off the cell's top-right corner, and
-             the corner is where the affordance is learned. */
-          "after:absolute after:-inset-3 after:content-['']",
-        )}
-      >
-        <Search aria-hidden="true" className="size-3" />
-      </a>
-      )}
+      {investigateAction}
     </td>
   );
 }
@@ -474,6 +512,12 @@ export function MatrixPage() {
   }, []);
   const { at } = useTimeContext();
   const { data, isPending, error, live } = useMatrix(protocol);
+
+  /* The probe plan rides the topology snapshot, not the matrix payload: null (full mesh, a
+     historical instant, an unreadable field, or a topology fetch that failed outright) renders
+     zero 'not probed' cells — every silence stays the alarming kind. */
+  const topology = useTopology();
+  const plan = useMemo(() => readProbePlan(topology.data?.probePlan), [topology.data]);
 
   /* Everything below reads `nodes` and `byPair`, never data.nodes/data.cells:
      the payload is accepted through the two gates above exactly once. */
@@ -736,6 +780,7 @@ export function MatrixPage() {
                           dst={dst}
                           cell={byPair.get(pairKey(src, dst))}
                           density={density}
+                          excluded={isPlanExcluded(plan, src, dst)}
                         />
                       ))}
                     </tr>
@@ -755,6 +800,18 @@ export function MatrixPage() {
                     {t(key)}
                   </span>
                 ))}
+                {/* Only while a sparse plan is in force: in full mode the state cannot occur, and
+                    a legend row for an impossible state sends readers hunting for it. The dot is
+                    the cell's own reading — a dashed hollow, not a fifth colour. */}
+                {plan !== null ? (
+                  <span data-testid="legend-not-probed" className="flex items-center gap-1.5">
+                    <span
+                      aria-hidden="true"
+                      className="size-2.5 rounded-full border border-dashed border-muted-foreground"
+                    />
+                    {t("legend.notProbed")}
+                  </span>
+                ) : null}
               </div>
               {/* Says what the colour actually reads now: the worst ratio the
                   cell carries, which on a pair with no failure samples is its

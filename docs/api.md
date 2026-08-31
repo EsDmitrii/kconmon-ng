@@ -101,6 +101,21 @@ report a topology with no agents.
 }
 ```
 
+While a sparse topology plan is in force (`topology.mode: sparse`, fleet at or
+above `topology.sparse.autoThreshold`), the snapshot also carries `probePlan`:
+source node name → the sorted node names it is planned to probe. The field is
+**absent** on a full-mesh fleet — absence means "every pair is intended", which
+keeps pre-sparse payloads unchanged. A node mapped to an empty list is planned
+to probe nobody (the plan's fail-closed state until its agent re-registers).
+
+```json
+  "probePlan": {
+    "node-1": ["node-2", "node-3"],
+    "node-2": ["node-3"],
+    "node-3": ["node-1", "node-2"]
+  }
+```
+
 An [external agent](external-agents.md) appears as an ordinary fleet member
 with two tells: its `labels` carry `kconmon-ng.io/external: "true"` (stamped
 automatically on any agent running outside a Pod), and `podIP` holds its

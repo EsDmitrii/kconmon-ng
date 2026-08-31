@@ -177,6 +177,10 @@ export interface Topology {
   nodes: TopologyNode[];
   agents: TopologyAgent[];
   timestamp: string;
+  /** Present ONLY while the controller runs a sparse topology plan: source node → the sorted
+   *  nodes it is planned to probe. Absent means full mesh — every pair intended — and the matrix
+   *  keys its 'not probed' cell state off the field's presence (lib/matrix-plan.ts). */
+  probePlan?: Record<string, string[]>;
   historical?: boolean;
   asOf?: string;
   eventsFolded?: number;
@@ -342,6 +346,33 @@ export interface RunCreateResponse {
    */
   requestedSampleIntervalNs?: number;
   sampleIntervalAdjusted?: "cap" | "round";
+}
+
+// ZonePairRunsRequest mirrors POST /api/v1/runs/zone-pair's body (httpapi
+// zonePairRunsRequest): the investigation preset. No plane and no duration by
+// design — the preset is an instant snapshot on the only plane that exists.
+export interface ZonePairRunsRequest {
+  sourceZone: string;
+  destinationZone: string;
+  type: CheckType;
+  timeoutNs?: number;
+}
+
+// ZonePairRun is one started chunk of the preset (httpapi zonePairRunResponse).
+export interface ZonePairRun {
+  id: string;
+  status: string;
+  pairTotal: number;
+  wsTopic: string;
+}
+
+// ZonePairRunsResponse mirrors POST /api/v1/runs/zone-pair's 202 body.
+export interface ZonePairRunsResponse {
+  sourceZone: string;
+  destinationZone: string;
+  /** The sum over runs — the whole investigation's fan-out. */
+  pairTotal: number;
+  runs: ZonePairRun[];
 }
 
 // RunSummary mirrors httpapi's runSummary: one row of GET /api/v1/runs, and

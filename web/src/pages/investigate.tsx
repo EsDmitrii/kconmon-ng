@@ -21,6 +21,7 @@ import {
   ApiError,
   createIncident,
   createRun,
+  createZonePairRuns,
   deleteIncident,
   getAuditEntries,
   getConfig,
@@ -925,6 +926,9 @@ export function InvestigatePage() {
   const [params, setParams] = useState<InvestigationParams>(hydrated.params);
   const [runError, setRunError] = useState<string>();
   const [runStarted, setRunStarted] = useState<string>();
+  /* The zone-pair preset's answer is SEVERAL run ids (server-side chunking), so it cannot ride
+     runStarted's single-id slot; runError is shared — the rail has one error line. */
+  const [presetRuns, setPresetRuns] = useState<string[]>();
   /* Why the last commit was refused, and whether it moved an edge — both are
      statements about the CURRENT params, so both are cleared by the next
      successful commit (findings #2, #3 and #6). */
@@ -1797,6 +1801,7 @@ export function InvestigatePage() {
     async (type: "mtr" | "tcp") => {
       setRunError(undefined);
       setRunStarted(undefined);
+      setPresetRuns(undefined);
       try {
         const created = await createRun(
           buildRunRequest({
@@ -1815,6 +1820,23 @@ export function InvestigatePage() {
     },
     [runSources, runDestinations, scope.kind, targetIdForScope, t],
   );
+
+  /* The zone-pair preset (M10-3): one click, server-side expansion and chunking. Distinct from
+     startRun because a zone pair may exceed one run's 400-pair bound — POST /api/v1/runs/zone-pair
+     splits it into up to 8 runs and answers with EVERY run started, each with its own permalink.
+     tcp, fixed: the preset is a coverage snapshot ("which pairs of this zone pair connect?"), and
+     a per-type choice already exists one click deeper on each started run's page. */
+  const startZonePairPreset = useCallback(async () => {
+    setRunError(undefined);
+    setRunStarted(undefined);
+    setPresetRuns(undefined);
+    try {
+      const created = await createZonePairRuns({ sourceZone: scope.a, destinationZone: scope.b, type: "tcp" });
+      setPresetRuns(created.runs.map((r) => r.id));
+    } catch (err) {
+      setRunError(queryErrorMessage(err, t("actions.probeZonePairFailed")));
+    }
+  }, [scope.a, scope.b, t]);
 
   const refreshAnnotations = useCallback(() => {
     void qc.invalidateQueries({ queryKey: ["investigate", "annotations"] });
@@ -1987,6 +2009,13 @@ export function InvestigatePage() {
                 <Button type="button" size="sm" variant="outline" {...guard} onClick={() => void startRun("tcp")}>
                   {t("actions.runTCP")}
                 </Button>
+                {/* Zone-pair scope only: the chunked preset that survives the 400-pair bound the
+                    two plain buttons above hit on a wide zone pair. */}
+                {scope.kind === "zone-pair" ? (
+                  <Button type="button" size="sm" variant="outline" {...guard} onClick={() => void startZonePairPreset()}>
+                    {t("actions.probeZonePair")}
+                  </Button>
+                ) : null}
               </>
             ) : null}
 
@@ -2067,6 +2096,20 @@ export function InvestigatePage() {
                 {runStarted}
               </a>{" "}
               {t("actions.runStarted.after")}
+            </p>
+          ) : null}
+          {presetRuns !== undefined && presetRuns.length > 0 ? (
+            <p role="status" className="mt-2 text-xs text-muted-foreground">
+              {/* One sentence, then the ids as links — the ids are data. */}
+              {t("actions.presetStarted", { count: String(presetRuns.length) })}{" "}
+              {presetRuns.map((id, i) => (
+                <span key={id}>
+                  {i > 0 ? ", " : ""}
+                  <a href={withAtParam(`/diagnostics/runs/${id}`)} className="mono-data text-primary hover:underline">
+                    {id}
+                  </a>
+                </span>
+              ))}
             </p>
           ) : null}
           {runError ? (
