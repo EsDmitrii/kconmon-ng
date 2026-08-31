@@ -1,3 +1,62 @@
+## kconmon-ng v2.3.0
+
+> The sparse mesh changes WHAT "no data for a pair" means: under
+> `topology.mode: sparse` most directed pairs are deliberately never probed.
+> Everything in this release that reads per-pair series learns to tell "not
+> planned" from "went dark" through one new metric,
+> `kconmon_ng_probe_intended` — and that metric comes from the AGENT: images
+> below appVersion 2.3.0 do not export it. The chart's rules degrade
+> honestly on an older fleet (see PairWentSilent below), but do not flip
+> `topology.mode: sparse` until controller AND agents run a 2.3.0 image —
+> the controller config key is emitted only when sparse precisely because an
+> older controller image rejects it and crashloops. The appVersion pin is
+> aligned when the app release ships.
+
+### Added
+
+- **`topology.*` — the sparse probe mesh, by values.** `topology.mode:
+  sparse` trims the full N×(N−1) probe matrix to a ring over sorted node
+  names (`sparse.ringDegree` successors each, the connectivity guarantee)
+  plus HRW-chosen cross-zone chords (`sparse.zoneChords` per directed zone
+  pair, which keep the zone metric family fully populated), so probed pairs
+  — and every per-pair series they export — scale ~linearly with node count
+  instead of quadratically. `sparse.autoThreshold` is the floor: fleets
+  smaller than it get the full mesh regardless of mode, because sparse only
+  pays for itself at scale. Default is `mode: full`, byte-identical
+  rendering to 2.2.0.
+- **`kconmon_ng_probe_intended` — the plan, scrapable.** A gauge, value 1
+  for every directed pair the topology plan assigns
+  (`{source_node, destination_node}`, exported by the source agent), preset
+  from the peer list at registration and pruned on every plan change —
+  stale pairs are deleted, not left at 1. In full-mesh mode it simply marks
+  every peer, so dashboards and rules can join on it without caring which
+  mode the fleet runs. It is the one honest way to distinguish "this pair
+  is not supposed to report" from "this pair went dark", which is why it
+  ships in the same release as sparse mode and not one later.
+- **`investigateUrl` on the two zone alerts.** `ZoneChecksFailing` and
+  `ZoneLossHigh` now annotate a console deep link,
+  `/investigate?kind=zone-pair&scope=<source>-><destination>`, straight
+  into the Investigate page scoped to the firing zone pair. The link is
+  console-RELATIVE on purpose — the chart cannot know the console's
+  external URL (ingress is optional), so notification templates prepend
+  their own origin; the console normalises the typeable `->` into its
+  canonical pair arrow.
+
+### Changed
+
+- **`PairWentSilent` joins on the plan.** The rule now fires only for pairs
+  present in the source agent's `kconmon_ng_probe_intended` series — the
+  hard rule of the sparse design, shipped in the same release: without the
+  join, every pair the plan trims would read as "went silent" for the hour
+  its results take to age out of the lookback window. The fallback is per
+  SOURCE, not global: a `source_node` exporting no `probe_intended` at all
+  keeps the old two-window behaviour, so a pre-2.3.0 agent image alerts
+  exactly as before, a mixed fleet mid-rollout gets each behaviour where it
+  applies — and an agent that dies outright takes its `probe_intended`
+  series with it, which lands its pairs in the same fallback and preserves
+  the alert's original purpose: catching an agent that stopped running or
+  stopped being scraped.
+
 ## kconmon-ng v2.2.0
 
 > Everything in this release reads the new zone-level metric family

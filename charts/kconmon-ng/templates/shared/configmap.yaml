@@ -58,6 +58,20 @@ data:
         bootstrapTokenFile: {{ printf "/etc/kconmon-ng-gateway-token/%s" (.bootstrapToken.key | default "token") | quote }}
       {{- end }}
       {{- end }}
+    {{- /* Emitted only when sparse: full is the compiled default, and a pre-2.3.0 image rejects
+           the unknown key. hasKey/ternary rather than `default`, because 0 is a meaningful value
+           for zoneChords and autoThreshold and `default` would silently rewrite it. */}}
+    {{- with .Values.topology }}
+    {{- if eq (.mode | default "full") "sparse" }}
+    {{- $sparse := .sparse | default dict }}
+    topology:
+      mode: "sparse"
+      sparse:
+        ringDegree: {{ ternary $sparse.ringDegree 2 (hasKey $sparse "ringDegree") | int }}
+        zoneChords: {{ ternary $sparse.zoneChords 2 (hasKey $sparse "zoneChords") | int }}
+        autoThreshold: {{ ternary $sparse.autoThreshold 0 (hasKey $sparse "autoThreshold") | int }}
+    {{- end }}
+    {{- end }}
     checkers:
       tcp:
         enabled: {{ .Values.config.checkers.tcp.enabled }}

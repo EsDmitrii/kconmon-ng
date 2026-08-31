@@ -3,7 +3,7 @@ apiVersion: v2
 name: kconmon-ng
 description: Kubernetes Node Connectivity Monitor - Next Generation
 type: application
-version: 2.2.0
+version: 2.3.0
 appVersion: "2.2.0"
 keywords:
   - kubernetes
@@ -32,30 +32,23 @@ annotations:
   # operator evaluating 2.0.0 read that `prometheusRule.rules` was "DEPRECATED but still honoured ...
   # so existing installs are unaffected" and that the chart shipped optional CNPG and Valkey
   # subcharts — statements 2.0.0 contradicts, and the first of them describes a key it now rejects
-  # outright. What follows is 2.2.0 and nothing else.
+  # outright. What follows is 2.3.0 and nothing else.
   artifacthub.io/changes: |
     - kind: added
       description: >-
-        ZoneChecksFailing and ZoneLossHigh alerts on the zone-level metric family
-        (kconmon_ng_zone_*), with the same per-rule toggles as the pair alerts. The family is
-        exported by agents newer than appVersion 2.0.3; on older agents both rules are silently
-        inert
-    - kind: added
-      description: >-
-        agent.metrics.detail scrape-time cardinality valve (full | counters-only | zone-only),
-        rendered as metricRelabelings on the agent ServiceMonitor. At 100 nodes the full mesh is
-        ~0.7M series; counters-only keeps ~0.1M, zone-only keeps only the zone family plus the
-        linear DNS/HTTP/external families
-    - kind: added
-      description: >-
-        controller.externalGateway values block exposing the controller's TLS + bootstrap-token
-        gRPC gateway for agents outside the cluster: a NodePort/LoadBalancer Service carrying the
-        gateway port alone (never the plaintext in-cluster gRPC port), read-only mounts for the
-        referenced TLS and token Secrets, and NetworkPolicy ingress from
-        networkPolicy.externalAgentCidrs. Off by default; enabling it needs a controller image
-        newer than appVersion 2.0.3, and rotating the Secrets needs a controller restart
+        topology values block for the sparse probe mesh (topology.mode full|sparse with
+        sparse.{ringDegree,zoneChords,autoThreshold}): sparse trims the plan to a ring over sorted
+        node names plus cross-zone chords, so probed pairs and their metric series scale
+        ~linearly with node count instead of quadratically. Emitted into the shared config only
+        when sparse; enabling it needs controller and agent images newer than appVersion 2.2.0
     - kind: changed
       description: >-
-        The Zone Heatmap dashboard reads the zone family instead of aggregating per-pair series,
-        so it keeps working in every agent.metrics.detail mode; it renders empty until the agents
-        run an image that exports the family
+        PairWentSilent only fires for pairs present in the new kconmon_ng_probe_intended metric
+        (the plan the topology assigns each agent), so pairs a sparse plan drops stop alerting;
+        a source agent exporting no probe_intended at all keeps the old two-window behaviour, so
+        mixed fleets mid-rollout and fleets on older agent images are unaffected
+    - kind: added
+      description: >-
+        investigateUrl annotation on ZoneChecksFailing and ZoneLossHigh, a console-relative
+        deep link (/investigate?kind=zone-pair&scope=...) into the Investigate page scoped to
+        the firing zone pair

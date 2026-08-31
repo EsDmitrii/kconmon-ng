@@ -65,13 +65,38 @@
 {{- end }}
 {{- with $pr.pairWentSilent }}
 {{- if .enabled }}
+{{/* Fires only for pairs the topology plan assigns (probe_intended == 1): under a sparse mesh
+     every trimmed pair would otherwise read as "went silent" for the hour its results age out.
+     The fallback joins per SOURCE, not globally: a source_node exporting NO probe_intended at all
+     is a pre-2.3.0 agent (or one that stopped being scraped — the case this alert exists for),
+     and its pairs keep the old two-window behaviour; a mixed fleet mid-rollout gets each
+     behaviour exactly where it applies. The two halves are disjoint by construction, so the
+     union never yields a duplicate label set. */}}
 - alert: PairWentSilent
   expr: >-
+    (
+    (
     sum by (source_node, destination_node)
     (rate({{ $prefix }}_tcp_results_total[1h] offset 5m)) > 0
     unless
     sum by (source_node, destination_node)
     (rate({{ $prefix }}_tcp_results_total[5m])) > 0
+    )
+    and on (source_node, destination_node)
+    ({{ $prefix }}_probe_intended == 1)
+    )
+    or
+    (
+    (
+    sum by (source_node, destination_node)
+    (rate({{ $prefix }}_tcp_results_total[1h] offset 5m)) > 0
+    unless
+    sum by (source_node, destination_node)
+    (rate({{ $prefix }}_tcp_results_total[5m])) > 0
+    )
+    unless on (source_node)
+    {{ $prefix }}_probe_intended
+    )
   for: {{ .for }}
   labels:
     severity: {{ .severity }}
@@ -89,7 +114,11 @@
       pod on {{`{{ $labels.source_node }}`}} and its scrape target first, then
       the controller's peer list -- a node that was drained or removed
       produces this too, and the alert clears on its own an hour after the
-      last result. Zone labels are absent by design: this rule compares
+      last result. A pair the sparse topology plan dropped does NOT fire:
+      the rule only matches pairs the source agent still marks in its
+      probe_intended series, and falls back to the plain two-window
+      comparison for agents that do not export that family yet. Zone
+      labels are absent by design: this rule compares
       label sets across two time windows and pairs are matched on node
       names only.
 {{- end }}
@@ -185,6 +214,11 @@
       affected, then the kconmon-ng console Matrix or Investigate page to find
       the node pairs pulling the ratio up — in zone-only mode the per-pair
       evidence lives in the console, not in Prometheus.
+    {{- /* Console-RELATIVE on purpose: the chart cannot know the console's external URL (ingress
+         is optional), and every console parses "->" into its canonical pair arrow. Prepend your
+         console origin in the notification template. */}}
+    investigateUrl: >-
+      /investigate?kind=zone-pair&scope={{`{{ $labels.source_zone }}`}}->{{`{{ $labels.destination_zone }}`}}
 {{- end }}
 {{- end }}
 {{- with $pr.zoneLossHigh }}
@@ -221,6 +255,10 @@
       "kconmon-ng / Zone Heatmap" Grafana dashboard to see whether the loss is
       one direction or both, then the kconmon-ng console Matrix or Investigate
       page scoped to these zones for the pair-level picture.
+    {{- /* Same contract as ZoneChecksFailing's investigateUrl: console-relative, "->" normalised
+         by the console itself. */}}
+    investigateUrl: >-
+      /investigate?kind=zone-pair&scope={{`{{ $labels.source_zone }}`}}->{{`{{ $labels.destination_zone }}`}}
 {{- end }}
 {{- end }}
 {{- with $pr.kconmonAgentsMissing }}

@@ -107,6 +107,7 @@ The table below lists the most relevant parameters. See
 | `agent.podSecurityContext` | `{runAsNonRoot: true, runAsUser: 65532, seccompProfile: {type: RuntimeDefault}, sysctls: [{name: net.ipv4.ping_group_range, value: "0 2147483647"}]}` | Agent Pod securityContext. `null` deletes the WHOLE sub-tree, restricted-PSS keys included; to drop only the sysctl use `agent.pingGroupRange: false` |
 | `agent.pingGroupRange` | `true` | Render the `net.ipv4.ping_group_range` sysctl. Set `false` on a runtime that already opens it, or where the sysctl is not allowed, without losing the restricted-PSS keys |
 | `agent.metrics.detail` | `full` | Scrape-time cardinality valve on the agent ServiceMonitor: `full \| counters-only \| zone-only` (~70 / ~10 / ~0 series per directed pair). Needs `serviceMonitor.enabled`; `zone-only` needs agents that export the zone metric family. Series math in `docs/metrics.md`, "Scaling and cardinality" |
+| `topology.mode` | `full` | Probe topology plan: `full` probes every peer from every agent; `sparse` trims it to a ring over sorted node names (`topology.sparse.ringDegree`) plus cross-zone chords (`topology.sparse.zoneChords`), with `topology.sparse.autoThreshold` as a fleet-size floor below which the mesh stays full. Needs controller and agent images newer than appVersion 2.2.0 |
 | `config.metricsPrefix` | `kconmon_ng` | Prefix for all exported Prometheus metrics |
 | `config.checkers.tcp.enabled` | `true` | Enable TCP checker (interval `5s`, timeout `1s`) |
 | `config.checkers.udp.enabled` | `true` | Enable UDP checker (interval `5s`, timeout `250ms`, `packets: 5`) |
@@ -235,8 +236,8 @@ repeating one generic sentence per firing series:
 | `PairWentSilent` | source → destination node |
 | `DNSChecksFailing` | source node + zone, queried `host`, `resolver`, failed % |
 | `ExternalChecksFailing` | source node + zone, `target`, `target_kind`, failed % |
-| `ZoneChecksFailing` | source → destination zone, failed % |
-| `ZoneLossHigh` | source → destination zone, loss % |
+| `ZoneChecksFailing` | source → destination zone, failed %; `investigateUrl` deep link |
+| `ZoneLossHigh` | source → destination zone, loss %; `investigateUrl` deep link |
 | `KconmonAgentsMissing` | controller `instance` and how many agents are missing |
 | `KconmonControllerDown` | nothing to identify; `absent()` has no series labels |
 
@@ -248,6 +249,13 @@ nothing and answers all three. DNS and external checks are not pair-scoped —
 their series carry `host`/`resolver` and `target`/`target_kind` instead of a
 destination — which is why those two annotations name a resolver or a target
 rather than a peer.
+
+The two zone rules also annotate `investigateUrl`, a **console-relative** deep
+link (`/investigate?kind=zone-pair&scope=<source>-><destination>`) into the
+Investigate page scoped to the firing zone pair. Relative because the chart
+cannot know the console's external URL — ingress is optional — so a
+notification template prepends its own console origin; the console normalises
+the typeable `->` into its canonical pair arrow.
 
 ### Why a ratio, not a rate
 
@@ -316,6 +324,18 @@ Both halves read `<prefix>_tcp_results_total`, the probe every default install
 runs against every peer, and an agent reports all of its checkers or none of
 them. If you disable the TCP checker, repoint both halves at the `udp` or `icmp`
 results family — the shape is identical.
+
+**The `probe_intended` join (2.3.0):** under `topology.mode: sparse` most pairs
+are deliberately never probed, and a pair the plan *drops* would satisfy the
+two-window comparison for the whole hour its results take to age out. So the
+rule fires only for pairs present in `<prefix>_probe_intended` — the plan the
+source agent exports, 1 per assigned pair, pruned on every plan change. The
+fallback joins per source rather than globally: a `source_node` with no
+`probe_intended` series at all gets the plain two-window comparison, which
+covers a pre-2.3.0 agent image (fires exactly as before, mixed fleets included)
+*and* an agent that died outright — a dead agent's `probe_intended` goes stale
+with it, so its pairs land in the fallback and the alert keeps catching the
+case it was written for.
 
 ### Self-monitoring
 

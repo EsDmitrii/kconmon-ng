@@ -99,6 +99,30 @@ config:
       # Bounds resolve-and-authorise only, not the probe itself.
       timeout: 10s
 
+# Probe topology plan, part of the same shared config (rendered into the shared ConfigMap, read by
+# the controller's leader). full is today's behaviour: every agent probes every peer, N*(N-1)
+# directed pairs. sparse trims that to a ring over sorted node names plus cross-zone chords —
+# connectivity and zone-pair coverage hold (property-tested), while pairs and their metric series
+# scale ~linearly with N instead of quadratically. Under sparse, pairs the plan drops STOP being
+# probed: the console matrix marks them unplanned, and PairWentSilent only fires for pairs present
+# in <prefix>_probe_intended, which agents export from this release. Version skew: the key is
+# emitted only when mode=sparse, because a pre-2.3.0 controller image rejects it and crashloops —
+# upgrade the images first, flip the mode second.
+topology:
+  # full | sparse.
+  mode: full
+  # Read only when mode=sparse.
+  sparse:
+    # Ring successors per node over the sorted node-name circle; the ring is what guarantees the
+    # plan stays connected.
+    ringDegree: 2
+    # Cross-zone chords per (source zone, destination zone) pair, chosen by HRW hashing; they keep
+    # every directed zone pair measured so the zone metric family stays fully populated.
+    zoneChords: 2
+    # Fleets SMALLER than this many nodes get the full mesh regardless of mode; 0 means no such
+    # floor. Sparse only pays for itself at scale, and a small fleet is better off measured whole.
+    autoThreshold: 0
+
 # == 3. Database == PostgreSQL the Console stores history, users and the audit log in.
 # BRING YOUR OWN server — CNPG, Percona, RDS, plain postgres, anything that speaks a postgres:// DSN;
 # the chart installs nothing and only needs the Secret holding that DSN. Nothing configured means an
