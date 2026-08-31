@@ -57,7 +57,12 @@
   the alert's original purpose: catching an agent that stopped running or
   stopped being scraped.
 
-## kconmon-ng v2.2.0
+> This release also carries everything prepared for the never-published 2.2.0
+> tag (its pipeline caught two release-tooling defects before anything went
+> out); those changes follow below, under their original heading kept for
+> upgrade notes.
+
+### Carried over from the unreleased 2.2.0
 
 > Everything in this release reads the new zone-level metric family
 > (`kconmon_ng_zone_*`), and that family comes from the AGENT, not the chart:

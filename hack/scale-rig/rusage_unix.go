@@ -32,7 +32,11 @@ func raiseNoFile() {
 		return
 	}
 	rl.Cur = want
-	if rl.Max != syscall.RLIM_INFINITY && rl.Max < want {
+	/* syscall.RLIM_INFINITY is an untyped -1: on linux/amd64 Rlimit fields are uint64 and the
+	   direct comparison fails to COMPILE with an overflow error (darwin builds hid this).
+	   All-ones is the same sentinel on every unix Go supports. */
+	rlimInfinity := ^uint64(0)
+	if rl.Max != rlimInfinity && rl.Max < want {
 		rl.Cur = rl.Max
 	}
 	_ = syscall.Setrlimit(syscall.RLIMIT_NOFILE, &rl)
