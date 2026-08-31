@@ -11,6 +11,7 @@ import (
 
 	pb "github.com/EsDmitrii/kconmon-ng/api/proto"
 	"github.com/EsDmitrii/kconmon-ng/internal/config"
+	"github.com/EsDmitrii/kconmon-ng/internal/controller/meshplan"
 	"github.com/EsDmitrii/kconmon-ng/internal/metrics"
 	"github.com/EsDmitrii/kconmon-ng/internal/model"
 	"github.com/prometheus/client_golang/prometheus"
@@ -34,6 +35,14 @@ type Controller struct {
 // IsLeader reports whether this replica currently serves as the leader.
 func (c *Controller) IsLeader() bool {
 	return c.leader.Load()
+}
+
+// ProbePlan returns the CURRENT sparse probe plan — agent ID to the sorted peer IDs it probes —
+// or nil when the fleet runs full mesh (topology.mode=full, or below the autoThreshold floor).
+// The map is shared and read-only by contract; the topology snapshot and the probe_intended
+// metric read it to say which pairs are MEANT to probe, so sparse gaps do not read as outages.
+func (c *Controller) ProbePlan() meshplan.Plan {
+	return c.grpcServer.CurrentPlan()
 }
 
 // SetLeader updates the leadership state and the controller_leader gauge. Demotion also drops the
@@ -65,6 +74,9 @@ func (c *Controller) SetLeader(leader bool) {
 		   exactly this reason; the external half was simply missed. */
 		if c.grpcServer != nil {
 			c.grpcServer.ExternalCheckManager().Reset()
+			// The probe plan is derived from the registry dropped above; kept, it would leak the
+			// old leader's mesh through ProbePlan on a replica that owns no agents.
+			c.grpcServer.SetPeerPlan(nil)
 		}
 		c.metrics.ControllerExternalAssignments.WithLabelValues().Set(0)
 	}
@@ -94,6 +106,11 @@ func New(cfg *config.Config) *Controller {
 
 	// The events are about the change itself, and a single event cannot name several agents.
 	registry.OnChange(func(agents []model.AgentInfo, change TopologyChange) {
+		/* The plan is rebuilt synchronously, BEFORE the broadcast is scheduled: Register answers
+		   GetPeers right after this callback returns, and a plan lagging the registry would hand the
+		   new agent an empty peer list. Synchronous is affordable — meshplan.Build is ~6ms at
+		   N=1000 — and the fan-out itself stays coalesced. */
+		c.grpcServer.SetPeerPlan(meshplan.Build(agents, cfg.Topology))
 		// Coalesced, not immediate: a rollout's burst of changes must not fan out O(N²) FULL_SYNCs
 		// (see SchedulePeerBroadcast); the events below stay per-change.
 		c.grpcServer.SchedulePeerBroadcast(agents)

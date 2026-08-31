@@ -19,3 +19,7 @@ const ExternalResyncInterval = externalResyncInterval
 // SetLastPushedAt ages the reconciler's push memo, so a test can reach the resync branch without
 // sleeping through it.
 func (r *Reconciler) SetLastPushedAt(at time.Time) { r.lastPushedAt = at }
+
+// SetNow pins the sweeper's rotation clock, so a test walks the census by moving time instead of
+// sleeping through intervals.
+func (s *Sweeper) SetNow(now func() time.Time) { s.now = now }

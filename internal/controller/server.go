@@ -6,6 +6,7 @@ import (
 	"sync/atomic"
 
 	"github.com/EsDmitrii/kconmon-ng/internal/config"
+	"github.com/EsDmitrii/kconmon-ng/internal/controller/meshplan"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
@@ -70,6 +71,15 @@ func (s *HTTPServer) SetNodeWatcher(nw *NodeWatcher) {
 // returns 503.
 func (s *HTTPServer) SetDiagnosticsHandler(h *DiagnosticsHandler) {
 	s.diagHandler.Store(h)
+	/* The probe plan's owner (the gRPC server) already reaches this HTTP server here, as the
+	   diagnostics event publisher; reusing that reference wires the topology snapshot's probePlan
+	   without a new constructor dependency. A fake publisher (tests) simply fails the assertion
+	   and the snapshot keeps its full-mesh shape. */
+	if h != nil {
+		if src, ok := h.events.(interface{ CurrentPlan() meshplan.Plan }); ok {
+			s.topologyHandler.SetPlanSource(src.CurrentPlan)
+		}
+	}
 }
 
 func (s *HTTPServer) handleDiagnostics(w http.ResponseWriter, r *http.Request) {

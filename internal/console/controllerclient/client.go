@@ -78,6 +78,12 @@ type Topology struct {
 	Nodes     []Node    `json:"nodes"`
 	Agents    []Agent   `json:"agents"`
 	Timestamp time.Time `json:"timestamp"`
+	// ProbePlan is present only while the controller runs a sparse topology plan: source node name
+	// to the sorted node names it is planned to probe. Absent — nil, and omitted on re-marshal —
+	// means full mesh (or a controller that predates the field), and the matrix must then treat
+	// every pair as intended. Decoded here so the proxy and the websocket pusher, which both
+	// re-marshal this struct, do not silently drop it.
+	ProbePlan map[string][]string `json:"probePlan,omitempty"`
 }
 
 // Version is the controller's build identity, used for capability detection.

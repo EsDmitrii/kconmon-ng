@@ -1366,3 +1366,37 @@ func TestRedisDSNFileParsesFromYAML(t *testing.T) {
 		t.Errorf("dsnFile = %q", c.Redis.DSNFile)
 	}
 }
+
+func TestSweeperConfigDefaultsAndValidation(t *testing.T) {
+	// Defaults: off, with every budget pre-filled so enabling is a one-line change.
+	cfg, err := Load(filepath.Join(t.TempDir(), "nope.yaml"))
+	if err != nil {
+		t.Fatalf("Load defaults: %v", err)
+	}
+	if cfg.Sweeper.Enabled {
+		t.Error("sweeper.enabled default = true, want false")
+	}
+	if cfg.Sweeper.Interval != time.Minute || cfg.Sweeper.CheckType != "tcp" || cfg.Sweeper.Timeout != 5*time.Second {
+		t.Errorf("sweeper defaults = %v/%q/%v, want 1m/tcp/5s", cfg.Sweeper.Interval, cfg.Sweeper.CheckType, cfg.Sweeper.Timeout)
+	}
+
+	// A disabled sweeper never validates its knobs — the scheduler's own rule.
+	off := SweeperConfig{}
+	if err := off.validate(); err != nil {
+		t.Errorf("disabled sweeper rejected: %v", err)
+	}
+
+	for name, bad := range map[string]SweeperConfig{
+		"sub-floor interval": {Enabled: true, Interval: time.Second, CheckType: "tcp", Timeout: time.Second},
+		"mtr check type":     {Enabled: true, Interval: time.Minute, CheckType: "mtr", Timeout: time.Second},
+		"zero timeout":       {Enabled: true, Interval: time.Minute, CheckType: "tcp"},
+	} {
+		if err := bad.validate(); err == nil {
+			t.Errorf("%s accepted", name)
+		}
+	}
+	good := SweeperConfig{Enabled: true, Interval: time.Minute, CheckType: "icmp", Timeout: 2 * time.Second}
+	if err := good.validate(); err != nil {
+		t.Errorf("valid sweeper rejected: %v", err)
+	}
+}

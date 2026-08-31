@@ -72,6 +72,12 @@ type Metrics struct {
 	SchedulerSkipped *prometheus.CounterVec
 	RunsReaped       *prometheus.CounterVec
 
+	// SweepResults is the topology sweeper's ONLY record (checks.Sweeper): one increment per swept
+	// pair, aggregated to {source_zone, destination_zone, result}. Deliberately no node labels and
+	// no store row — the sweeper exists to census pairs a sparse topology stopped probing WITHOUT
+	// recreating the per-pair series that topology dropped.
+	SweepResults *prometheus.CounterVec
+
 	// Continuous external-check reconciler: internal/console/checks' assignment ticker.
 	ExternalSeriesProjected *prometheus.GaugeVec
 	ExternalReconciles      *prometheus.CounterVec
@@ -234,6 +240,10 @@ func New(prefix string, reg prometheus.Registerer) *Metrics {
 			Name: ns + "_runs_reaped_total",
 			Help: "Runs force-finished as cancelled by the stuck-run reaper.",
 		}, []string{}),
+		SweepResults: f.NewCounterVec(prometheus.CounterOpts{
+			Name: ns + "_sweep_results_total",
+			Help: "Topology sweeper probes, aggregated per zone pair, by result (ok, failed, timeout).",
+		}, []string{"source_zone", "destination_zone", "result"}),
 		ExternalSeriesProjected: f.NewGaugeVec(prometheus.GaugeOpts{
 			Name: ns + "_external_series_projected",
 			Help: "Prometheus series the currently assigned continuous external checks project to.",

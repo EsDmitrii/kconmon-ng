@@ -334,6 +334,7 @@ func NewServer(d Deps) *Server { //nolint:gocritic // hugeParam: Deps is the pin
 		api.Get("/api/v1/audit", s.handleAudit)
 
 		api.Post("/api/v1/runs", s.handleRunsCreate)
+		api.Post("/api/v1/runs/zone-pair", s.handleRunsZonePairCreate)
 		api.Get("/api/v1/runs", s.handleRunsList)
 		api.Get("/api/v1/runs/{id}", s.handleRunsGet)
 		api.Post("/api/v1/runs/{id}/cancel", s.handleRunsCancel)

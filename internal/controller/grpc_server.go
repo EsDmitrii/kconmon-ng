@@ -11,6 +11,7 @@ import (
 	"time"
 
 	pb "github.com/EsDmitrii/kconmon-ng/api/proto"
+	"github.com/EsDmitrii/kconmon-ng/internal/controller/meshplan"
 	"github.com/EsDmitrii/kconmon-ng/internal/metrics"
 	"github.com/EsDmitrii/kconmon-ng/internal/model"
 	"github.com/google/uuid"
@@ -70,6 +71,13 @@ type GRPCServer struct {
 	// peerBroadcastWindow bounds how long a coalesced FULL_SYNC may lag the registry. Shortened by
 	// tests.
 	peerBroadcastWindow time.Duration
+
+	/* peerPlan is the sparse probe plan in force; nil means full mesh (the pre-M10 behavior,
+	   untouched). Every peer list this server hands out — the Register response, the WatchPeers
+	   initial FULL_SYNC, and each broadcast's filtered list — passes through it, so the agent code
+	   needs no change: an agent just probes whatever list arrives. Replaced wholesale from the
+	   registry OnChange chain, never mutated in place. */
+	peerPlan atomic.Pointer[meshplan.Plan]
 }
 
 // defaultLeaderCheckInterval is how often an open WatchEvents stream re-checks
@@ -133,6 +141,58 @@ func (s *GRPCServer) RegisterService(srv *grpc.Server) {
 	}
 }
 
+// SetPeerPlan installs the probe plan applied to every peer list this server emits; nil restores
+// full mesh. Called from the registry OnChange chain (under its notifyMu), so plan replacements
+// arrive in mutation order and Register's own GetPeers below always sees a plan that already
+// includes the agent it just accepted.
+func (s *GRPCServer) SetPeerPlan(p meshplan.Plan) {
+	if p == nil {
+		s.peerPlan.Store(nil)
+		return
+	}
+	s.peerPlan.Store(&p)
+}
+
+// CurrentPlan returns the probe plan in force; nil means full mesh. The returned map is shared and
+// read-only by contract (a Plan is never mutated after meshplan.Build) — the topology snapshot
+// reads it to render which pairs are intended to probe.
+func (s *GRPCServer) CurrentPlan() meshplan.Plan {
+	if p := s.peerPlan.Load(); p != nil {
+		return *p
+	}
+	return nil
+}
+
+// filterPeersByPlan reduces a full peer list to the planned subset. A nil plan returns the input
+// untouched. An agent MISSING from a non-nil plan gets nothing rather than everything: the plan is
+// rebuilt on every registry change, so a missing entry means the agent is not in the registry
+// snapshot the plan was built from, and its own (re-)registration is what repairs it.
+func (s *GRPCServer) filterPeersByPlan(agentID string, peers []model.AgentInfo) []model.AgentInfo {
+	plan := s.CurrentPlan()
+	if plan == nil {
+		return peers
+	}
+	allowed := plan[agentID]
+	filtered := make([]model.AgentInfo, 0, len(allowed))
+	for i := range peers {
+		if planContains(allowed, peers[i].ID) {
+			filtered = append(filtered, peers[i])
+		}
+	}
+	return filtered
+}
+
+// planContains is a linear scan on purpose: a planned peer list is ringDegree+zoneChords entries
+// (single digits), where a per-lookup map build would cost more than it saves.
+func planContains(allowed []string, id string) bool {
+	for _, a := range allowed {
+		if a == id {
+			return true
+		}
+	}
+	return false
+}
+
 // Register accepts an agent into the registry; leader-only when leader election is enabled, or the
 // Service round-robin would split the agents across replicas and each would plan its own mesh.
 func (s *GRPCServer) Register(_ context.Context, req *pb.RegisterRequest) (*pb.RegisterResponse, error) {
@@ -165,7 +225,7 @@ func (s *GRPCServer) Register(_ context.Context, req *pb.RegisterRequest) (*pb.R
 	resolved := s.registry.Register(info)
 	s.metrics.ControllerRegisteredAgents.WithLabelValues().Set(float64(s.registry.Count()))
 
-	peers := s.registry.GetPeers(resolved.ID)
+	peers := s.filterPeersByPlan(resolved.ID, s.registry.GetPeers(resolved.ID))
 	pbPeers := make([]*pb.AgentMeta, 0, len(peers))
 	for i := range peers {
 		pbPeers = append(pbPeers, peerToProto(peers[i]))
@@ -251,7 +311,7 @@ func (s *GRPCServer) WatchPeers(req *pb.WatchPeersRequest, stream pb.AgentRegist
 		close(w.ch)
 	}()
 
-	peers := s.registry.GetPeers(agentID)
+	peers := s.filterPeersByPlan(agentID, s.registry.GetPeers(agentID))
 	pbPeers := make([]*pb.AgentMeta, 0, len(peers))
 	for i := range peers {
 		pbPeers = append(pbPeers, peerToProto(peers[i]))
@@ -642,12 +702,24 @@ func (s *GRPCServer) BroadcastPeerUpdate(agents []model.AgentInfo) {
 	}
 	now := timestamppb.Now()
 
+	// Read once per broadcast, not per watcher: a plan swap mid-loop must not hand half the fleet
+	// the old mesh and half the new one within a single FULL_SYNC generation.
+	plan := s.CurrentPlan()
+
 	for watcherID, set := range s.watchers {
+		var allowed []string
+		if plan != nil {
+			allowed = plan[watcherID]
+		}
 		filtered := make([]*pb.AgentMeta, 0, len(protos))
 		for i := range agents {
-			if agents[i].ID != watcherID {
-				filtered = append(filtered, protos[i])
+			if agents[i].ID == watcherID {
+				continue
 			}
+			if plan != nil && !planContains(allowed, agents[i].ID) {
+				continue
+			}
+			filtered = append(filtered, protos[i])
 		}
 		// One update per id, shared by every stream open for that id.
 		update := &pb.PeerUpdate{

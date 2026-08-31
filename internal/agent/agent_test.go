@@ -1025,3 +1025,64 @@ func TestPreinitZoneResultsIgnoresNonPeerCheckers(t *testing.T) {
 		t.Errorf("dns/http preinit created %d zone tcp series", got)
 	}
 }
+
+// markProbeIntended publishes the plan for THIS agent: one series at 1 per assigned peer,
+// source_node always self. Full mesh is simply "every peer the controller sent", so the same
+// function covers both topology modes without the agent knowing which one it lives under.
+func TestMarkProbeIntendedCoversEveryAssignedPeer(t *testing.T) {
+	m := metrics.NewPrometheusMetrics("kconmon_ng", prometheus.NewRegistry())
+	source := checker.Target{NodeName: "node-a", Zone: "zone-a"}
+	peers := []checker.Target{
+		{NodeName: "node-b", Zone: "zone-a"},
+		{NodeName: "node-c", Zone: "zone-b"},
+	}
+
+	markProbeIntended(m, source, peers)
+
+	if got := testutil.CollectAndCount(m.ProbeIntended); got != 2 {
+		t.Fatalf("probe_intended has %d series, want one per assigned peer (2)", got)
+	}
+	for _, peer := range []string{"node-b", "node-c"} {
+		if got := testutil.ToFloat64(m.ProbeIntended.WithLabelValues("node-a", peer)); got != 1 {
+			t.Errorf("probe_intended{source_node=node-a,destination_node=%s} = %v, want 1", peer, got)
+		}
+	}
+}
+
+// A peer-list change must leave the family describing exactly the NEW plan: series for peers no
+// longer assigned are deleted, not left at a stale 1 — PairWentSilent reads this family as the
+// plan, and a stale 1 would keep the alert armed for a pair nothing probes any more.
+func TestSyncPeerMetricsRetiresStaleProbeIntended(t *testing.T) {
+	m := metrics.NewPrometheusMetrics("kconmon_ng", prometheus.NewRegistry())
+	// AgentIDs are distinct as in production: the scheduler's self-filter compares them, and an
+	// all-empty test fleet would read every peer as self.
+	a := &Agent{
+		metrics:   m,
+		scheduler: NewScheduler(checker.Target{AgentID: "id-a", NodeName: "node-a", Zone: "zone-a"}, nil),
+		info:      model.AgentInfo{ID: "id-a", NodeName: "node-a", Zone: "zone-a"},
+		checkers:  map[model.CheckType]checker.Checker{},
+	}
+
+	first := []checker.Target{
+		{AgentID: "id-b", NodeName: "node-b", Zone: "zone-a"},
+		{AgentID: "id-c", NodeName: "node-c", Zone: "zone-b"},
+	}
+	a.scheduler.UpdatePeers(first)
+	a.syncPeerMetrics()
+	if got := testutil.CollectAndCount(m.ProbeIntended); got != 2 {
+		t.Fatalf("probe_intended has %d series after registration, want 2", got)
+	}
+
+	// The next plan drops node-c: same sequence the peer-update callback runs.
+	next := []checker.Target{{AgentID: "id-b", NodeName: "node-b", Zone: "zone-a"}}
+	a.forgetDepartedPeers(next)
+	a.scheduler.UpdatePeers(next)
+	a.syncPeerMetrics()
+
+	if got := testutil.CollectAndCount(m.ProbeIntended); got != 1 {
+		t.Errorf("probe_intended has %d series after the plan shrank, want 1", got)
+	}
+	if got := testutil.ToFloat64(m.ProbeIntended.WithLabelValues("node-a", "node-b")); got != 1 {
+		t.Errorf("the still-assigned pair reads %v, want 1", got)
+	}
+}
