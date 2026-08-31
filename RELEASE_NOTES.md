@@ -2,8 +2,9 @@
 
 > Everything in this release reads the new zone-level metric family
 > (`kconmon_ng_zone_*`), and that family comes from the AGENT, not the chart:
-> agents at appVersion 2.0.3 — the version this chart still pins — do not
-> export it. Until the fleet runs an agent image that does, the two zone
+> agents below appVersion 2.2.0 do not export it (this chart pins 2.2.0, so a
+> default install is fine — the warning is for fleets running an older agent
+> image behind a newer chart). Until the fleet runs an agent image that does, the two zone
 > alerts are silently inert (their expressions match no series), the Zone
 > Heatmap dashboard renders empty, and `agent.metrics.detail: zone-only`
 > would drop the per-pair series with nothing replacing them — Prometheus
@@ -75,6 +76,23 @@
   "MTR traces triggered" panel: MTR has no zone-level family, its counter is
   per-pair, and in `zone-only` mode that panel reads zero — its description
   now says so.
+
+### Performance and self-observability
+
+- Peer probing fans out with a bounded pool (32 in flight per round): a dead
+  peer costs one timeout, not one timeout per peer in sequence, so probe
+  cadence holds through partitions.
+- Reactive MTR traces are bounded by a global semaphore (4 in flight) on top
+  of the existing per-pair cooldown; a mass partition trickles traces out
+  instead of forking one per broken pair.
+- The agent exports self-metrics under `kconmon_ng_agent_*`: probe cycle
+  duration and overruns per checker, controller reconnects, peer-list age,
+  reactive-MTR in-flight and coalesced counters. All are fleet-size
+  independent.
+- The controller coalesces peer-list broadcasts (trailing edge, 200 ms): a
+  rollout's burst of registrations produces one broadcast, not one per
+  change; the peer message is built once per broadcast and carries only the
+  fields agents read.
 
 ## kconmon-ng v2.1.0
 
