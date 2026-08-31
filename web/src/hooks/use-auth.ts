@@ -10,10 +10,14 @@ import type { Me } from "@/lib/types";
  * permission is absent.
  */
 export function useAuth(): { me: Me | undefined; can: (p: string) => boolean; isAnonymous: boolean } {
+  // retryOnMount false for the same reason as AuthGate (routes.tsx), which
+  // shares this cache entry: a mounting consumer refetching an errored ["me"]
+  // flips it to pending and flaps the gate. Login/logout invalidate the key.
   const { data } = useQuery({
     queryKey: ["me"],
     queryFn: getMe,
     retry: false,
+    retryOnMount: false,
     staleTime: Infinity,
   });
   const permissions = data?.permissions;
