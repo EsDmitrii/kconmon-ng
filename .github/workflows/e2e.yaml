@@ -283,6 +283,17 @@ jobs:
 
       - name: Run degraded-mode E2E tests
         run: |
+          # helm --wait returns when the NEW ReplicaSet is ready, but the OLD console pod can still
+          # be Terminating (grace period) and items[0] picks it by creation order -- the first
+          # v2.2.0 release run port-forwarded into the pre-rollout pod, which still had its
+          # database, and every degraded-mode 503 assertion saw a healthy 200. Wait until exactly
+          # one console pod exists, then there is nothing stale to pick.
+          for _ in $(seq 60); do
+            PODS=$(kubectl get pods -l app.kubernetes.io/component=console --no-headers | wc -l)
+            [ "$PODS" -eq 1 ] && break
+            sleep 2
+          done
+          kubectl get pods -l app.kubernetes.io/component=console
           CONSOLE_POD=$(kubectl get pods \
             -l app.kubernetes.io/component=console \
             -o jsonpath='{.items[0].metadata.name}')
