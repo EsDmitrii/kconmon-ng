@@ -429,13 +429,23 @@ story, including how not to get paged twice, lives in
   annotations:
     summary: More than 10% of external checks for a target are failing
 
+# The three protocol families are joined with label_replace/or, not a __name__ regex union:
+# rate() drops __name__, so a union collapses the families into duplicate labelsets and the
+# whole expression fails evaluation with "vector cannot contain metrics with the same labelset".
 - alert: ZoneChecksFailing
   expr: >-
-    sum by (source_zone, destination_zone)
-    (rate({__name__=~"kconmon_ng_zone_(tcp|udp|icmp)_results_total",result="fail"}[5m]))
+    sum by (source_zone, destination_zone) (
+    label_replace(rate(kconmon_ng_zone_tcp_results_total{result="fail"}[5m]), "proto", "tcp", "", "")
+    or label_replace(rate(kconmon_ng_zone_udp_results_total{result="fail"}[5m]), "proto", "udp", "", "")
+    or label_replace(rate(kconmon_ng_zone_icmp_results_total{result="fail"}[5m]), "proto", "icmp", "", "")
+    )
     /
-    sum by (source_zone, destination_zone)
-    (rate({__name__=~"kconmon_ng_zone_(tcp|udp|icmp)_results_total"}[5m])) > 0.05
+    sum by (source_zone, destination_zone) (
+    label_replace(rate(kconmon_ng_zone_tcp_results_total[5m]), "proto", "tcp", "", "")
+    or label_replace(rate(kconmon_ng_zone_udp_results_total[5m]), "proto", "udp", "", "")
+    or label_replace(rate(kconmon_ng_zone_icmp_results_total[5m]), "proto", "icmp", "", "")
+    )
+    > 0.05
   for: 5m
   labels:
     severity: warning
@@ -444,14 +454,21 @@ story, including how not to get paged twice, lives in
 
 - alert: ZoneLossHigh
   expr: >-
-    (sum by (source_zone, destination_zone)
-    (rate({__name__=~"kconmon_ng_zone_(udp|icmp)_packets_sent_total"}[5m]))
+    (sum by (source_zone, destination_zone) (
+    label_replace(rate(kconmon_ng_zone_udp_packets_sent_total[5m]), "proto", "udp", "", "")
+    or label_replace(rate(kconmon_ng_zone_icmp_packets_sent_total[5m]), "proto", "icmp", "", "")
+    )
     -
-    sum by (source_zone, destination_zone)
-    (rate({__name__=~"kconmon_ng_zone_(udp|icmp)_packets_received_total"}[5m])))
+    sum by (source_zone, destination_zone) (
+    label_replace(rate(kconmon_ng_zone_udp_packets_received_total[5m]), "proto", "udp", "", "")
+    or label_replace(rate(kconmon_ng_zone_icmp_packets_received_total[5m]), "proto", "icmp", "", "")
+    ))
     /
-    sum by (source_zone, destination_zone)
-    (rate({__name__=~"kconmon_ng_zone_(udp|icmp)_packets_sent_total"}[5m])) > 0.1
+    sum by (source_zone, destination_zone) (
+    label_replace(rate(kconmon_ng_zone_udp_packets_sent_total[5m]), "proto", "udp", "", "")
+    or label_replace(rate(kconmon_ng_zone_icmp_packets_sent_total[5m]), "proto", "icmp", "", "")
+    )
+    > 0.1
   for: 5m
   labels:
     severity: warning

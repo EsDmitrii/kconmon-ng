@@ -1,3 +1,19 @@
+## kconmon-ng v2.3.1
+
+### Fixed
+
+- `ZoneChecksFailing` and `ZoneLossHigh` failed every evaluation with "vector
+  cannot contain metrics with the same labelset" and raised
+  `PrometheusRuleFailures` on the cluster: `rate()` over a `__name__` regex
+  union drops the metric name and collapses the per-protocol families into
+  duplicate labelsets. The expressions now build the union with
+  `label_replace(...) or label_replace(...)`, which keeps the branches
+  distinct and still tolerates a disabled checker's absent family.
+- CI now evaluation-tests every alert rule with `promtool test rules` against
+  synthetic series for all metric families, including a positive check that
+  each zone alert fires on staged bad data. Rendering and syntax checks never
+  execute the query engine, which is exactly where this defect lived.
+
 ## kconmon-ng v2.3.0
 
 > The sparse mesh changes WHAT "no data for a pair" means: under

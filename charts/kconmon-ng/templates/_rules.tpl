@@ -184,15 +184,25 @@
 {{- with $pr.zoneChecksFailing }}
 {{- if .enabled }}
 {{- $t := float64 .threshold }}
-{{/* One rule across all three protocols: the __name__ union keeps a disabled checker from
-     blanking the ratio, and the schema pins metricsPrefix to [a-z0-9_] so it is regex-safe. */}}
+{{/* One rule across all three protocols; a disabled checker's family is simply an empty
+     branch of the union. The label_replace/or shape is load-bearing: rate() over a bare
+     __name__ union drops __name__ and collapses the three families into duplicate labelsets,
+     which the engine refuses at EVALUATION time ("vector cannot contain metrics with the same
+     labelset") — helm template and promtool syntax checks never see it. v2.3.0 shipped that
+     and every rule evaluation failed on both production clusters. */}}
 - alert: ZoneChecksFailing
   expr: >-
-    sum by (source_zone, destination_zone)
-    (rate({__name__=~"{{ $prefix }}_zone_(tcp|udp|icmp)_results_total",result="fail"}[5m]))
+    sum by (source_zone, destination_zone) (
+    label_replace(rate({{ $prefix }}_zone_tcp_results_total{result="fail"}[5m]), "proto", "tcp", "", "")
+    or label_replace(rate({{ $prefix }}_zone_udp_results_total{result="fail"}[5m]), "proto", "udp", "", "")
+    or label_replace(rate({{ $prefix }}_zone_icmp_results_total{result="fail"}[5m]), "proto", "icmp", "", "")
+    )
     /
-    sum by (source_zone, destination_zone)
-    (rate({__name__=~"{{ $prefix }}_zone_(tcp|udp|icmp)_results_total"}[5m]))
+    sum by (source_zone, destination_zone) (
+    label_replace(rate({{ $prefix }}_zone_tcp_results_total[5m]), "proto", "tcp", "", "")
+    or label_replace(rate({{ $prefix }}_zone_udp_results_total[5m]), "proto", "udp", "", "")
+    or label_replace(rate({{ $prefix }}_zone_icmp_results_total[5m]), "proto", "icmp", "", "")
+    )
     > {{ $t }}
   for: {{ .for }}
   labels:
@@ -227,15 +237,23 @@
 {{/* Loss is (sent - received) / sent from the zone counters: averaging the per-pair loss-ratio
      gauges into a zone would weight an idle pair the same as a busy one, so the chart never does. */}}
 - alert: ZoneLossHigh
+  {{- /* Same label_replace/or shape as ZoneChecksFailing above, for the same engine-level
+       reason: rate() over a __name__ union collides the udp and icmp families. */}}
   expr: >-
-    (sum by (source_zone, destination_zone)
-    (rate({__name__=~"{{ $prefix }}_zone_(udp|icmp)_packets_sent_total"}[5m]))
+    (sum by (source_zone, destination_zone) (
+    label_replace(rate({{ $prefix }}_zone_udp_packets_sent_total[5m]), "proto", "udp", "", "")
+    or label_replace(rate({{ $prefix }}_zone_icmp_packets_sent_total[5m]), "proto", "icmp", "", "")
+    )
     -
-    sum by (source_zone, destination_zone)
-    (rate({__name__=~"{{ $prefix }}_zone_(udp|icmp)_packets_received_total"}[5m])))
+    sum by (source_zone, destination_zone) (
+    label_replace(rate({{ $prefix }}_zone_udp_packets_received_total[5m]), "proto", "udp", "", "")
+    or label_replace(rate({{ $prefix }}_zone_icmp_packets_received_total[5m]), "proto", "icmp", "", "")
+    ))
     /
-    sum by (source_zone, destination_zone)
-    (rate({__name__=~"{{ $prefix }}_zone_(udp|icmp)_packets_sent_total"}[5m]))
+    sum by (source_zone, destination_zone) (
+    label_replace(rate({{ $prefix }}_zone_udp_packets_sent_total[5m]), "proto", "udp", "", "")
+    or label_replace(rate({{ $prefix }}_zone_icmp_packets_sent_total[5m]), "proto", "icmp", "", "")
+    )
     > {{ $t }}
   for: {{ .for }}
   labels:
