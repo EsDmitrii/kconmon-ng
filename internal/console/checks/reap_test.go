@@ -42,14 +42,17 @@ func TestMemoryStoreReapStuckRunsFinishesOnlyOldRunningRuns(t *testing.T) {
 	ctx := context.Background()
 
 	stuck := mustCreateRunning(t, m, "stuck")
-	time.Sleep(2 * time.Millisecond)
+	time.Sleep(900 * time.Millisecond)
 	healthy := mustCreateRunning(t, m, "healthy")
 
-	/* A budget that allows a run just over the age of the younger one: the older is past its
-	   allowance, the younger is not. */
+	/* A budget that allows a run well over the age of the younger one: the older is past its
+	   allowance, the younger is not. The margins are CI-sized: the healthy run must still be inside
+	   its allowance when the reaper takes its OWN time.Now, so the slack extends hundreds of
+	   milliseconds past its age here — the original +1ms meant any stall between this line and that
+	   internal clock read reaped both runs. */
 	n, err := m.ReapStuckRuns(ctx, store.ReapBudget{
 		PerSourceConcurrency: 1,
-		Slack:                time.Since(healthy.CreatedAt) + time.Millisecond,
+		Slack:                time.Since(healthy.CreatedAt) + 400*time.Millisecond,
 	}, 100)
 	if err != nil {
 		t.Fatalf("ReapStuckRuns: %v", err)

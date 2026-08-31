@@ -105,7 +105,10 @@ func TestSchedulePeerBroadcastCoalescesABurst(t *testing.T) {
 // starving forever the way a resetting debounce would.
 func TestSchedulePeerBroadcastFiresAgainAfterTheWindow(t *testing.T) {
 	srv, _ := newTestGRPCServer()
-	srv.peerBroadcastWindow = 15 * time.Millisecond
+	// The window sizes both drains (quiet = 10 windows) and the exact-count assertions in them: a
+	// flush that lands after its drain leaks into the next one and fails both. 15ms left ~135ms for
+	// the flush goroutine to be scheduled — CI-sized margins need hundreds.
+	srv.peerBroadcastWindow = 50 * time.Millisecond
 
 	stream := subscribePeers(t, srv, "watcher")
 

@@ -48,7 +48,7 @@ jobs:
           YAML
 
       - name: Create Kind cluster
-        uses: helm/kind-action@v1
+        uses: helm/kind-action@v1.14.0
         with:
           cluster_name: kconmon-ng-e2e
           # PINNED alongside the node image, not left to the action's default.
@@ -142,6 +142,13 @@ jobs:
           kubectl create secret generic kconmon-e2e-webhooks-key \
             --from-literal=encryptionKey="$(openssl rand -base64 32)" \
             --dry-run=client -o yaml | kubectl apply -f -
+
+      # Same helm as helm-lint and publish pin: this job used the runner image's floating helm,
+      # the only unpinned CLI on the release-gating path.
+      - name: Set up Helm
+        uses: azure/setup-helm@v5.0.1
+        with:
+          version: v4.2.4
 
       # No `helm dependency build` here: the chart deliberately has no dependencies (see Chart.yaml).
       - name: Install Helm chart

@@ -126,6 +126,18 @@ func newLoginRateLimitServer(t *testing.T, rl config.RateLimitConfig, kv cache.K
 	return ts, users
 }
 
+// erroringUserStore fails every lookup with a non-ErrNotFound error, so the login handler answers
+// 503 right after the rate-limit counters are incremented -- no argon2id work per attempt.
+type erroringUserStore struct{}
+
+func (erroringUserStore) GetUserByUsername(context.Context, string) (store.User, error) {
+	return store.User{}, errors.New("store down (deliberate: only the limiter is under test)")
+}
+
+func (erroringUserStore) GetUserByID(context.Context, string) (store.User, error) {
+	return store.User{}, errors.New("store down (deliberate: only the limiter is under test)")
+}
+
 // postLoginFrom posts to /api/v1/auth/login from a caller-chosen source address.
 func postLoginFrom(t *testing.T, s *Server, remoteAddr, body string) *httptest.ResponseRecorder {
 	t.Helper()
@@ -397,7 +409,16 @@ func TestAuthLoginUsernameAndIPCountedIndependently(t *testing.T) {
 	t.Run("hot IP locks out that IP whatever username it sprays", func(t *testing.T) {
 		kv := cache.NewInProcessKV()
 		t.Cleanup(kv.Close)
-		ts, _ := newLoginRateLimitServer(t, config.RateLimitConfig{LoginPerMinute: 3}, kv)
+		/* The store errors on purpose. Both limiter counters are incremented BEFORE the store is
+		   consulted, so the limiter -- the only thing this subtest pins -- behaves identically;
+		   but an unknown username otherwise pays the full dummy argon2id verify (I-3), and sixty
+		   verifies under -race on a throttled runner outlast rateLimitWindow: the fixed per-IP
+		   window expired mid-spray and attempt 61 was answered 401 instead of 429. */
+		ts := newRateLimitServer(t, "local", config.RateLimitConfig{LoginPerMinute: 3}, kv, Deps{
+			Users:         erroringUserStore{},
+			Sessions:      authn.NewSessionStore(cache.NewInProcessKV(), time.Hour, 0),
+			Authenticator: fakeAuthenticator{err: authn.ErrNoCredentials, mode: "local"},
+		})
 
 		// Different usernames from one source: every username counter sits at 1, and the address
 		// counter climbs to its own, larger ceiling.

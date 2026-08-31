@@ -54,8 +54,11 @@ jobs:
           cosign-release: v3.1.3
 
       # goreleaser's `sboms` section shells out to syft; goreleaser-action does not install it.
+      # Pinned like cosign above: an unpinned tool on the release path is how v2.2.0 died.
       - name: Install syft
-        uses: anchore/sbom-action/download-syft@v0
+        uses: anchore/sbom-action/download-syft@v0.24.0
+        with:
+          syft-version: v1.42.3
 
       - name: Compute version
         id: ver
@@ -80,6 +83,22 @@ jobs:
             echo "RELEASE_NOTES.md has no '## kconmon-ng v${version}' section; add it before tagging." >&2
             exit 1
           fi
+
+      # Same early-fail contract as the notes check: `helm package --version/--app-version` silently
+      # overrides whatever Chart.yaml says, so a forgotten bump ships the wrong per-version
+      # artifacthub.io/changes changelog under the right version number (a stale appVersion already
+      # slipped into a v2.2.0 attempt).
+      - name: Chart version matches the tag
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          chart_version=$(awk '$1 == "version:" {print $2; exit}' charts/kconmon-ng/Chart.yaml)
+          app_version=$(awk '$1 == "appVersion:" {gsub(/"/, "", $2); print $2; exit}' charts/kconmon-ng/Chart.yaml)
+          if [ "$chart_version" != "$version" ] || [ "$app_version" != "$version" ]; then
+            echo "Chart.yaml has version=${chart_version} appVersion=${app_version}," \
+              "tag says ${version}; bump the chart before tagging." >&2
+            exit 1
+          fi
+          echo "Chart.yaml version and appVersion match tag v${version}"
 
       # The console image cannot go through goreleaser dockers (those need a prebuilt binary + thin Dockerfile;
       # Dockerfile.console has a Node build stage and needs full source context).
@@ -112,9 +131,10 @@ jobs:
           cosign sign --yes "ghcr.io/esdmitrii/kconmon-ng-console@${{ steps.console-image.outputs.digest }}"
 
       - name: Run GoReleaser
-        uses: goreleaser/goreleaser-action@v7
+        uses: goreleaser/goreleaser-action@v7.2.3
         with:
-          version: ~>v2
+          # Exact, not ~>v2: a goreleaser minor changed blob-signing output once already (v2.2.0).
+          version: v2.18.0
           args: release --clean --release-notes /tmp/current-release-notes.md
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -157,7 +177,7 @@ jobs:
           cosign-release: v3.1.3
 
       - name: Set up Helm
-        uses: azure/setup-helm@v5
+        uses: azure/setup-helm@v5.0.1
         with:
           version: v4.2.4
 
@@ -192,7 +212,9 @@ jobs:
           cosign sign --yes "ghcr.io/${OWNER}/charts/kconmon-ng@${{ steps.helm-push.outputs.digest }}"
 
       - name: Set up ORAS
-        uses: oras-project/setup-oras@v2
+        uses: oras-project/setup-oras@v2.0.1
+        with:
+          version: 1.3.1
 
       - name: Publish Artifact Hub repository metadata
         env:
