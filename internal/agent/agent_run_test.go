@@ -19,6 +19,7 @@ import (
 	"github.com/EsDmitrii/kconmon-ng/internal/metrics"
 	"github.com/EsDmitrii/kconmon-ng/internal/model"
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	grpcstatus "google.golang.org/grpc/status"
@@ -349,6 +350,12 @@ func TestReregisterLogsConfigRejectionAsErrorAndKeepsRetrying(t *testing.T) {
 	waitFor(t, 20*time.Second, "a re-registration retry after an InvalidArgument rejection", func() bool {
 		return reg.registerCalls.Load() >= 3
 	})
+
+	// M9-2: entering re-registration after a lost stream is counted, once per
+	// entry, not once per retry inside it.
+	if got := testutil.ToFloat64(a.metrics.AgentControllerReconnects.WithLabelValues()); got < 1 {
+		t.Errorf("agent_controller_reconnects_total = %v after a forced re-registration, want >= 1", got)
+	}
 
 	select {
 	case exitErr := <-runErr:

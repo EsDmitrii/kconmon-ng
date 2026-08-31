@@ -3,7 +3,9 @@ package metrics //nolint:revive // var-naming: "metrics" is a valid internal pac
 import (
 	"slices"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/EsDmitrii/kconmon-ng/internal/config"
 	"github.com/prometheus/client_golang/prometheus"
@@ -434,5 +436,86 @@ func TestForgetPeerLeavesZoneFamilyStanding(t *testing.T) {
 	}
 	if got := testutil.CollectAndCount(m.ZoneICMPRtt); got != 1 {
 		t.Errorf("zone icmp rtt has %d series after ForgetPeer, want 1", got)
+	}
+}
+
+/*
+M9-2: the peer-list age is computed AT SCRAPE TIME from the caller's stamp — a
+value written once at update time would serve a stale age on every scrape,
+hiding exactly the cut-off-agent condition the series exists to expose. Before
+the first update the age runs from arming, so "never had a peer list" reads as
+a growing number instead of a lie.
+*/
+func TestEnablePeerListAge(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	m := NewPrometheusMetrics("kconmon_ng", reg)
+
+	var mu sync.Mutex
+	last := time.Time{}
+	m.EnablePeerListAge(func() time.Time {
+		mu.Lock()
+		defer mu.Unlock()
+		return last
+	})
+
+	readAge := func() float64 {
+		t.Helper()
+		families, err := reg.Gather()
+		if err != nil {
+			t.Fatalf("gather: %v", err)
+		}
+		for _, f := range families {
+			if f.GetName() == "kconmon_ng_agent_peer_list_age_seconds" {
+				return f.GetMetric()[0].GetGauge().GetValue()
+			}
+		}
+		t.Fatal("kconmon_ng_agent_peer_list_age_seconds not exported")
+		return 0
+	}
+
+	// Zero stamp: age counts from arming, small and non-negative.
+	if age := readAge(); age < 0 || age > 5 {
+		t.Fatalf("age before any update = %v, want a small non-negative number", age)
+	}
+
+	mu.Lock()
+	last = time.Now().Add(-42 * time.Second)
+	mu.Unlock()
+	if age := readAge(); age < 41 || age > 44 {
+		t.Fatalf("age for a 42s-old stamp = %v, want ~42", age)
+	}
+}
+
+// M9-2: the self-observation family registers under the agent prefix and the
+// documented names.
+func TestAgentSelfMetricNames(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	m := NewPrometheusMetrics("kconmon_ng", reg)
+
+	m.AgentProbeCycleDuration.WithLabelValues("tcp").Observe(0.1)
+	m.AgentProbeCycleOverruns.WithLabelValues("tcp").Inc()
+	m.AgentControllerReconnects.WithLabelValues().Inc()
+	m.AgentMTRReactiveInflight.WithLabelValues().Set(2)
+	m.AgentMTRReactiveCoalesced.WithLabelValues("cooldown").Inc()
+	m.AgentMTRReactiveCoalesced.WithLabelValues("saturated").Inc()
+
+	families, err := reg.Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := map[string]bool{}
+	for _, f := range families {
+		found[f.GetName()] = true
+	}
+	for _, name := range []string{
+		"kconmon_ng_agent_probe_cycle_duration_seconds",
+		"kconmon_ng_agent_probe_cycle_overruns_total",
+		"kconmon_ng_agent_controller_reconnects_total",
+		"kconmon_ng_agent_mtr_reactive_inflight",
+		"kconmon_ng_agent_mtr_reactive_coalesced_total",
+	} {
+		if !found[name] {
+			t.Errorf("expected self-metric %s not found", name)
+		}
 	}
 }

@@ -62,11 +62,24 @@ type GRPCServer struct {
 	// stopCh is closed by Shutdown to end every open server-streaming handler.
 	stopCh   chan struct{}
 	stopOnce sync.Once
+
+	// Trailing-edge coalescing of peer fan-out; see SchedulePeerBroadcast.
+	broadcastMu    sync.Mutex
+	pendingPeers   []model.AgentInfo
+	broadcastArmed bool
+	// peerBroadcastWindow bounds how long a coalesced FULL_SYNC may lag the registry. Shortened by
+	// tests.
+	peerBroadcastWindow time.Duration
 }
 
 // defaultLeaderCheckInterval is how often an open WatchEvents stream re-checks
 // leadership.
 const defaultLeaderCheckInterval = 5 * time.Second
+
+// defaultPeerBroadcastWindow is the coalescing window for peer fan-out: long enough to collapse a
+// registration burst (a DaemonSet rollout lands many registers within tens of milliseconds), short
+// enough that peer-plan staleness is invisible next to probe intervals and reconnect backoff.
+const defaultPeerBroadcastWindow = 200 * time.Millisecond
 
 func NewGRPCServer(
 	registry *Registry,
@@ -86,6 +99,7 @@ func NewGRPCServer(
 		eventsEnabled:       eventsEnabled,
 		eventSubs:           make(map[string]chan *pb.Event),
 		leaderCheckInterval: defaultLeaderCheckInterval,
+		peerBroadcastWindow: defaultPeerBroadcastWindow,
 		stopCh:              make(chan struct{}),
 	}
 }
@@ -154,7 +168,7 @@ func (s *GRPCServer) Register(_ context.Context, req *pb.RegisterRequest) (*pb.R
 	peers := s.registry.GetPeers(resolved.ID)
 	pbPeers := make([]*pb.AgentMeta, 0, len(peers))
 	for i := range peers {
-		pbPeers = append(pbPeers, agentInfoToProto(peers[i]))
+		pbPeers = append(pbPeers, peerToProto(peers[i]))
 	}
 
 	return &pb.RegisterResponse{
@@ -240,7 +254,7 @@ func (s *GRPCServer) WatchPeers(req *pb.WatchPeersRequest, stream pb.AgentRegist
 	peers := s.registry.GetPeers(agentID)
 	pbPeers := make([]*pb.AgentMeta, 0, len(peers))
 	for i := range peers {
-		pbPeers = append(pbPeers, agentInfoToProto(peers[i]))
+		pbPeers = append(pbPeers, peerToProto(peers[i]))
 	}
 	// Through the same bounded write as every later update: the FIRST send is the one a subscriber
 	// that never reads blocks on.
@@ -563,27 +577,86 @@ func (w *peerWatcher) markDesynced() {
 	w.once.Do(func() { close(w.desynced) })
 }
 
+/*
+SchedulePeerBroadcast coalesces peer fan-out: it records the newest snapshot and arms ONE
+trailing-edge flush per window instead of broadcasting on every registry change.
+
+During a rollout N changes arrive as a burst and each used to run its own O(N) broadcast — O(N²)
+messages that overflowed peerWatcherBuffer, desynced every stream, and each desync then cost a
+reconnect plus one more FULL_SYNC. Collapsing is safe because every update is a FULL_SYNC applied
+by wholesale replacement: the newest list supersedes anything a suppressed broadcast would have
+said. The armed timer is deliberately NOT reset by later arrivals — a resetting debounce never
+fires under sustained churn — so staleness is bounded by one window.
+
+Callers arrive in mutation order (the registry publishes under notifyMu), so "newest snapshot
+wins" here preserves the ordering that lock exists to provide.
+*/
+func (s *GRPCServer) SchedulePeerBroadcast(agents []model.AgentInfo) {
+	s.broadcastMu.Lock()
+	s.pendingPeers = agents
+	if s.broadcastArmed {
+		s.broadcastMu.Unlock()
+		return
+	}
+	s.broadcastArmed = true
+	s.broadcastMu.Unlock()
+
+	time.AfterFunc(s.peerBroadcastWindow, s.flushPeerBroadcast)
+}
+
+func (s *GRPCServer) flushPeerBroadcast() {
+	s.broadcastMu.Lock()
+	agents := s.pendingPeers
+	s.pendingPeers = nil
+	s.broadcastArmed = false
+	s.broadcastMu.Unlock()
+
+	select {
+	case <-s.stopCh:
+		// Shutdown outran the window; every stream is ending, nobody needs this snapshot.
+		return
+	default:
+	}
+	// A replica demoted inside the window has nothing to announce about a fleet it no longer owns
+	// (ResetQuiet's reasoning); the new leader's own FULL_SYNC replaces the plan.
+	if s.lostLeadership() {
+		return
+	}
+	s.BroadcastPeerUpdate(agents)
+}
+
 func (s *GRPCServer) BroadcastPeerUpdate(agents []model.AgentInfo) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
+	if len(s.watchers) == 0 {
+		return
+	}
+
+	// Each agent's proto is built ONCE per broadcast and shared by every watcher's filtered list;
+	// stream.Send only marshals, so sharing across streams is safe. Building inside the watcher
+	// loop made one broadcast cost O(watchers × agents) conversions.
+	protos := make([]*pb.AgentMeta, len(agents))
+	for i := range agents {
+		protos[i] = peerToProto(agents[i])
+	}
+	now := timestamppb.Now()
+
 	for watcherID, set := range s.watchers {
-		filtered := make([]*pb.AgentMeta, 0, len(agents))
+		filtered := make([]*pb.AgentMeta, 0, len(protos))
 		for i := range agents {
 			if agents[i].ID != watcherID {
-				filtered = append(filtered, agentInfoToProto(agents[i]))
+				filtered = append(filtered, protos[i])
 			}
 		}
+		// One update per id, shared by every stream open for that id.
+		update := &pb.PeerUpdate{
+			Type:      pb.PeerUpdate_FULL_SYNC,
+			Peers:     filtered,
+			Timestamp: now,
+		}
 
-		// Every stream open for this id. The peer list is identical for all of them, so the update
-		// is built once and each watcher gets its own send.
 		for w := range set {
-			update := &pb.PeerUpdate{
-				Type:      pb.PeerUpdate_FULL_SYNC,
-				Peers:     filtered,
-				Timestamp: timestamppb.New(time.Now()),
-			}
-
 			select {
 			case w.ch <- update:
 				s.metrics.ControllerPeerUpdates.WithLabelValues().Inc()
@@ -607,5 +680,20 @@ func agentInfoToProto(a model.AgentInfo) *pb.AgentMeta { //nolint:gocritic // hu
 		Zone:         a.Zone,
 		Labels:       a.Labels,
 		Capabilities: a.Capabilities,
+	}
+}
+
+// peerToProto is the NARROW projection for peer LISTS: exactly the fields the agent's
+// protoToTargets reads. PodName, Labels and Capabilities are controller-side concerns; in proto3
+// omitting them removes them from the wire entirely (an old agent decodes them as empty, which is
+// what it ignored anyway), and the labels map is the dominant term of a FULL_SYNC's size at 100+
+// nodes. Anything that is NOT a peer list — RegisterResponse.Agent, TaskRequest.Target — keeps
+// agentInfoToProto.
+func peerToProto(a model.AgentInfo) *pb.AgentMeta { //nolint:gocritic // hugeParam: value copy is intentional for proto conversion
+	return &pb.AgentMeta{
+		Id:       a.ID,
+		NodeName: a.NodeName,
+		PodIp:    a.PodIP,
+		Zone:     a.Zone,
 	}
 }

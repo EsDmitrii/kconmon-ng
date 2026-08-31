@@ -166,6 +166,13 @@ func New(cfg *config.Config) (*Agent, error) {
 	sched.SetMTRChecker(mtrChecker)
 	slog.Info("mtr checker enabled", "maxHops", cfg.Checkers.MTR.MaxHops, "cooldown", cfg.Checkers.MTR.Cooldown)
 
+	// Self-observation (M9-2): the scheduler records its own cadence, the age
+	// gauge reads the peer-list stamp at scrape time, and the series that alert
+	// expressions consume exist from the first scrape rather than first event.
+	sched.SetSelfMetrics(m)
+	m.EnablePeerListAge(sched.PeerListUpdatedAt)
+	preinitSelfMetrics(m, checkers, externalChecker != nil)
+
 	a := &Agent{
 		cfg:         cfg,
 		scheduler:   sched,
@@ -185,6 +192,26 @@ func New(cfg *config.Config) (*Agent, error) {
 	}
 
 	return a, nil
+}
+
+// preinitSelfMetrics creates the agent self-observation series at zero, one per enabled checker
+// where labelled, so increase()/rate() expressions see data before the first event they count.
+func preinitSelfMetrics(m *metrics.PrometheusMetrics, enabled map[model.CheckType]checker.Checker, externalEnabled bool) {
+	names := make([]string, 0, len(enabled)+1)
+	for checkType := range enabled {
+		names = append(names, string(checkType))
+	}
+	if externalEnabled {
+		names = append(names, string(model.CheckExternal))
+	}
+	for _, name := range names {
+		m.AgentProbeCycleDuration.WithLabelValues(name)
+		m.AgentProbeCycleOverruns.WithLabelValues(name).Add(0)
+	}
+	m.AgentControllerReconnects.WithLabelValues().Add(0)
+	m.AgentMTRReactiveInflight.WithLabelValues().Set(0)
+	m.AgentMTRReactiveCoalesced.WithLabelValues("cooldown").Add(0)
+	m.AgentMTRReactiveCoalesced.WithLabelValues("saturated").Add(0)
 }
 
 // agentCapabilities returns the opt-in feature flags this agent advertises at registration; it
@@ -347,6 +374,11 @@ func (a *Agent) Run(ctx context.Context) error {
 	// peer list, because pausing blinded the whole fleet for the duration of every
 	// controller restart, upgrade, or failover — exactly when measurements matter most.
 	reregister := func() {
+		// One increment per ENTRY into re-registration — a lost stream or a
+		// heartbeat rejection — not per retry inside it: the counter answers
+		// "how often does this agent lose its controller", and a long outage is
+		// one loss however many backoff attempts it takes.
+		a.metrics.AgentControllerReconnects.WithLabelValues().Inc()
 		wait := 2 * time.Second
 		maxWait := 30 * time.Second
 		for {

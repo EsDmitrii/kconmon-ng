@@ -94,7 +94,9 @@ func New(cfg *config.Config) *Controller {
 
 	// The events are about the change itself, and a single event cannot name several agents.
 	registry.OnChange(func(agents []model.AgentInfo, change TopologyChange) {
-		c.grpcServer.BroadcastPeerUpdate(agents)
+		// Coalesced, not immediate: a rollout's burst of changes must not fan out O(N²) FULL_SYNCs
+		// (see SchedulePeerBroadcast); the events below stay per-change.
+		c.grpcServer.SchedulePeerBroadcast(agents)
 		m.ControllerRegisteredAgents.WithLabelValues().Set(float64(len(agents)))
 		for _, tc := range change.Events() {
 			c.grpcServer.PublishEvent(&pb.Event{Payload: &pb.Event_TopologyChanged{TopologyChanged: tc}})
