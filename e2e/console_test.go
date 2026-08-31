@@ -352,7 +352,7 @@ func TestConsoleConfig(t *testing.T) {
 	}
 	decodeJSON(t, "config response", data, &body)
 	if !body.Database.Configured {
-		t.Errorf("expected database.configured=true (console-values.yaml sets console.database.mode=external)")
+		t.Errorf("expected database.configured=true (console-values.yaml names database.existingSecret)")
 	}
 }
 
@@ -2453,7 +2453,7 @@ func createAlertRule(t *testing.T, base string, body map[string]any) alertRuleRo
 	status, header, data := mustRequest(t, http.MethodPost, base+"/api/v1/alert-rules", body)
 	if status == http.StatusServiceUnavailable {
 		t.Fatalf("POST /api/v1/alert-rules answered 503: this console has no database, so there is nowhere "+
-			"for an alert rule to live. e2e/testdata/console-values.yaml must set console.database.mode. Body: %s", data)
+			"for an alert rule to live. e2e/testdata/console-values.yaml must name database.existingSecret. Body: %s", data)
 	}
 	if status != http.StatusCreated {
 		t.Fatalf("expected POST /api/v1/alert-rules 201, got %d: %s", status, data)
@@ -3635,7 +3635,7 @@ func TestConsoleDegradedMode(t *testing.T) {
 
 	eventsStatus, _, _ := mustRequest(t, http.MethodGet, base+"/api/v1/events", nil)
 	if eventsStatus != http.StatusServiceUnavailable {
-		t.Errorf("expected /api/v1/events 503 with console.database.mode=disabled, got %d", eventsStatus)
+		t.Errorf("expected /api/v1/events 503 with the database disabled, got %d", eventsStatus)
 	}
 
 	// The three CRUD surfaces, read and write side; a write is asserted too because the 503 guard sits
@@ -3700,7 +3700,7 @@ func TestConsoleDegradedMode(t *testing.T) {
 	} {
 		status, _, data := mustRequest(t, tc.method, base+tc.path, tc.body)
 		if status != http.StatusServiceUnavailable {
-			t.Errorf("expected %s %s 503 with console.database.mode=disabled, got %d: %s",
+			t.Errorf("expected %s %s 503 with the database disabled, got %d: %s",
 				tc.method, tc.path, status, data)
 		}
 	}
