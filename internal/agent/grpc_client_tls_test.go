@@ -273,3 +273,11 @@ func TestBearerTokenRequiresTransportSecurity(t *testing.T) {
 		t.Fatal("bearerToken must require transport security")
 	}
 }
+
+// The recv ceiling must ride EVERY dial (plaintext and TLS alike): a wedged
+// resubscribe from an oversized FULL_SYNC is transport-independent.
+func TestDialCarriesPeerRecvCeiling(t *testing.T) {
+	if maxPeerRecvBytes != 16*1024*1024 {
+		t.Fatalf("maxPeerRecvBytes = %d, want 16MiB — resize deliberately, with the projection math redone", maxPeerRecvBytes)
+	}
+}

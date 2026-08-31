@@ -72,8 +72,16 @@ func NewGRPCClient(address string, sec ClientSecurity) (*GRPCClient, error) { //
 	}, nil
 }
 
+// maxPeerRecvBytes bounds a single controller message; see the dial option below for why.
+const maxPeerRecvBytes = 16 * 1024 * 1024
+
 func dialController(address string, sec ClientSecurity) (*grpc.ClientConn, error) { //nolint:gocritic // hugeParam: value semantics intentional
 	opts := []grpc.DialOption{
+		/* The narrow peer projection keeps a FULL_SYNC to ~100 wire bytes per peer, so gRPC's 4MB
+		   default only breaks at tens of thousands of peers; this guard is for the day labels return
+		   to the projection or an external fleet grows past that, when the default would wedge every
+		   resubscribe permanently. */
+		grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(maxPeerRecvBytes)),
 		grpc.WithKeepaliveParams(keepalive.ClientParameters{
 			Time:                10 * time.Second,
 			Timeout:             5 * time.Second,

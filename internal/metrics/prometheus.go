@@ -1,6 +1,8 @@
 package metrics //nolint:revive // intentional: "metrics" is clearer than alternatives for this package
 
 import (
+	"time"
+
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 
@@ -81,6 +83,20 @@ type PrometheusMetrics struct {
 	MTRHops      *prometheus.GaugeVec
 	MTRHopRTT    *prometheus.GaugeVec
 	MTRTriggered *prometheus.CounterVec
+
+	/* The agent's SELF-observation family: how the probing machinery itself behaves, not what it
+	   measures. Cardinality is O(enabled checkers), never O(peers), so these stay ~a dozen series on
+	   any fleet size. The controller binary shares this struct; unused Vecs export nothing there. */
+	AgentProbeCycleDuration *prometheus.HistogramVec
+	AgentProbeCycleOverruns *prometheus.CounterVec
+	// AgentControllerReconnects counts re-registrations forced by a lost
+	// controller stream or a heartbeat rejection, not the initial registration.
+	AgentControllerReconnects *prometheus.CounterVec
+	AgentMTRReactiveInflight  *prometheus.GaugeVec
+	// AgentMTRReactiveCoalesced counts failed probes that started NO trace,
+	// by reason: "cooldown" (a trace for that destination already ran or runs
+	// inside the cooldown window) or "saturated" (all reactive-trace slots busy).
+	AgentMTRReactiveCoalesced *prometheus.CounterVec
 
 	ControllerRegisteredAgents *prometheus.GaugeVec
 	ControllerExpectedAgents   *prometheus.GaugeVec
@@ -315,6 +331,31 @@ func NewPrometheusMetrics(prefix string, reg prometheus.Registerer) *PrometheusM
 			Help: "Number of times MTR was triggered",
 		}, peerLabels),
 
+		AgentProbeCycleDuration: factory.NewHistogramVec(prometheus.HistogramOpts{
+			Name: prefix + "_agent_probe_cycle_duration_seconds",
+			Help: "Wall-clock duration of one checker's full probe round over all peers",
+			// Not defaultBuckets: a round is many probes, and an overrunning one
+			// is the reading that matters — the range must reach past the 5s
+			// interval, not resolve sub-millisecond probes.
+			Buckets: []float64{0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60},
+		}, []string{"checker"}),
+		AgentProbeCycleOverruns: factory.NewCounterVec(prometheus.CounterOpts{
+			Name: prefix + "_agent_probe_cycle_overruns_total",
+			Help: "Probe rounds that took longer than the checker's configured interval",
+		}, []string{"checker"}),
+		AgentControllerReconnects: factory.NewCounterVec(prometheus.CounterOpts{
+			Name: prefix + "_agent_controller_reconnects_total",
+			Help: "Times the agent lost its controller stream and entered re-registration",
+		}, []string{}),
+		AgentMTRReactiveInflight: factory.NewGaugeVec(prometheus.GaugeOpts{
+			Name: prefix + "_agent_mtr_reactive_inflight",
+			Help: "Reactive MTR traces currently running",
+		}, []string{}),
+		AgentMTRReactiveCoalesced: factory.NewCounterVec(prometheus.CounterOpts{
+			Name: prefix + "_agent_mtr_reactive_coalesced_total",
+			Help: "Failed probes that triggered no new reactive MTR trace, by reason (cooldown|saturated)",
+		}, []string{"reason"}),
+
 		ControllerRegisteredAgents: factory.NewGaugeVec(prometheus.GaugeOpts{
 			Name: prefix + "_controller_registered_agents",
 			Help: "Number of currently registered agents",
@@ -364,6 +405,32 @@ func NewPrometheusMetrics(prefix string, reg prometheus.Registerer) *PrometheusM
 	m.BuildInfo.WithLabelValues(config.Version, config.Commit).Set(1)
 
 	return m
+}
+
+/*
+EnablePeerListAge registers the agent_peer_list_age_seconds gauge, computed at scrape time from the
+last peer-list update the caller reports.
+
+A GaugeFunc rather than a Set-on-update gauge, because the reading is an AGE: a value written once
+at update time is correct for exactly one instant and then serves a stale number on every scrape —
+the very failure mode (an agent quietly cut off from its controller) this series exists to expose.
+It is a method, not part of NewPrometheusMetrics, because a GaugeFunc always exports: registered
+unconditionally it would publish a meaningless age from the controller binary, which shares this
+struct. Before the first update the age is measured from arming, i.e. process start — "we have
+never had a peer list for N seconds" is exactly what an operator should see then.
+*/
+func (m *PrometheusMetrics) EnablePeerListAge(lastUpdate func() time.Time) {
+	armedAt := time.Now()
+	promauto.With(m.reg).NewGaugeFunc(prometheus.GaugeOpts{
+		Name: m.prefix + "_agent_peer_list_age_seconds",
+		Help: "Seconds since the last peer list update from the controller (process age until the first one)",
+	}, func() float64 {
+		t := lastUpdate()
+		if t.IsZero() {
+			t = armedAt
+		}
+		return time.Since(t).Seconds()
+	})
 }
 
 /*
