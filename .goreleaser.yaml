@@ -192,14 +192,16 @@ checksum:
   name_template: checksums.txt
 
 # Keyless cosign over checksums.txt: one blob signature covers every archive listed in it.
+# cosign v3 made the sigstore bundle the default output; --output-signature/--output-certificate
+# are ignored under it and cosign then writes the bundle to an empty path — the v2.2.0 release
+# died exactly there. One .sigstore.json bundle now carries signature and certificate both.
 signs:
   - cmd: cosign
     artifacts: checksum
-    certificate: "${artifact}.pem"
+    signature: "${artifact}.sigstore.json"
     args:
       - sign-blob
-      - "--output-signature=${signature}"
-      - "--output-certificate=${certificate}"
+      - "--bundle=${signature}"
       - "--yes"
       - "${artifact}"
 

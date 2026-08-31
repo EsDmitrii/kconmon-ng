@@ -48,6 +48,10 @@ jobs:
 
       - name: Install cosign
         uses: sigstore/cosign-installer@v4.1.2
+        with:
+          # Pinned: v3 changed blob signing to bundle output; an unpinned runner drift is what
+          # broke the first v2.2.0 run. Bump deliberately, together with the signs: config.
+          cosign-release: v3.1.3
 
       # goreleaser's `sboms` section shells out to syft; goreleaser-action does not install it.
       - name: Install syft
@@ -147,6 +151,10 @@ jobs:
 
       - name: Install cosign
         uses: sigstore/cosign-installer@v4.1.2
+        with:
+          # Pinned: v3 changed blob signing to bundle output; an unpinned runner drift is what
+          # broke the first v2.2.0 run. Bump deliberately, together with the signs: config.
+          cosign-release: v3.1.3
 
       - name: Set up Helm
         uses: azure/setup-helm@v5
