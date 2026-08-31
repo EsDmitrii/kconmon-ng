@@ -288,6 +288,20 @@ jobs:
       - name: Every value CI sets is a value the chart defines
         run: python3 hack/values-keys-lint.py
 
+      # Rules must EVALUATE, not merely render: v2.3.0 shipped zone alerts whose expressions
+      # only failed inside the query engine ("vector cannot contain metrics with the same
+      # labelset"), on both production clusters at once. promtool test rules runs them against
+      # synthetic series for every metric family and also proves each alert fires on staged
+      # bad data — see hack/rules-test/.
+      - name: Install promtool
+        run: |
+          base=https://github.com/prometheus/prometheus/releases/download
+          curl -fsSL "$base/v3.14.0/prometheus-3.14.0.linux-amd64.tar.gz" \
+            | tar xz --strip-components=1 -C /usr/local/bin --wildcards '*/promtool'
+          promtool --version
+      - name: Alert rules evaluate and fire (promtool test rules)
+        run: ./hack/rules-test/render-and-test.sh
+
       - name: Dashboards in sync with the chart copy
         run: diff -r dashboards charts/kconmon-ng/dashboards
 

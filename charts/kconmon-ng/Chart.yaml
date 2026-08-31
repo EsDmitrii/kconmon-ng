@@ -3,8 +3,8 @@ apiVersion: v2
 name: kconmon-ng
 description: Kubernetes Node Connectivity Monitor - Next Generation
 type: application
-version: 2.3.0
-appVersion: "2.3.0"
+version: 2.3.1
+appVersion: "2.3.1"
 keywords:
   - kubernetes
   - connectivity
@@ -32,23 +32,11 @@ annotations:
   # operator evaluating 2.0.0 read that `prometheusRule.rules` was "DEPRECATED but still honoured ...
   # so existing installs are unaffected" and that the chart shipped optional CNPG and Valkey
   # subcharts — statements 2.0.0 contradicts, and the first of them describes a key it now rejects
-  # outright. What follows is 2.3.0 and nothing else.
+  # outright. What follows is 2.3.1 and nothing else.
   artifacthub.io/changes: |
-    - kind: added
+    - kind: fixed
       description: >-
-        topology values block for the sparse probe mesh (topology.mode full|sparse with
-        sparse.{ringDegree,zoneChords,autoThreshold}): sparse trims the plan to a ring over sorted
-        node names plus cross-zone chords, so probed pairs and their metric series scale
-        ~linearly with node count instead of quadratically. Emitted into the shared config only
-        when sparse; enabling it needs controller and agent images newer than appVersion 2.2.0
-    - kind: changed
-      description: >-
-        PairWentSilent only fires for pairs present in the new kconmon_ng_probe_intended metric
-        (the plan the topology assigns each agent), so pairs a sparse plan drops stop alerting;
-        a source agent exporting no probe_intended at all keeps the old two-window behaviour, so
-        mixed fleets mid-rollout and fleets on older agent images are unaffected
-    - kind: added
-      description: >-
-        investigateUrl annotation on ZoneChecksFailing and ZoneLossHigh, a console-relative
-        deep link (/investigate?kind=zone-pair&scope=...) into the Investigate page scoped to
-        the firing zone pair
+        ZoneChecksFailing and ZoneLossHigh evaluated to an engine error ("vector cannot
+        contain metrics with the same labelset"): rate() over a __name__ union collapses the
+        protocol families into duplicate labelsets. Rewritten with a label_replace/or union;
+        rules are now evaluation-tested in CI with promtool against synthetic series

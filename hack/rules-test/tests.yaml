@@ -1,0 +1,101 @@
+---
+# promtool test rules fixture. Purpose #1 is EVALUATION: every alert expression must evaluate
+# without an engine error against series carrying all metric families at once (the exact input
+# that collapsed the v2.3.0 zone rules). Purpose #2 is a positive proof per alert: crafted bad
+# data must actually fire it — an expression that silently matches nothing passes purpose #1.
+rule_files:
+  - RULES_FILE
+
+evaluation_interval: 30s
+
+tests:
+  # ── all families present and healthy: nothing may error, nothing may fire ──
+  - interval: 30s
+    input_series:
+      - series: kconmon_ng_zone_tcp_results_total{source_zone="a",destination_zone="b",result="success",pod="p1"}
+        values: '0+10x40'
+      - series: kconmon_ng_zone_udp_results_total{source_zone="a",destination_zone="b",result="success",pod="p1"}
+        values: '0+10x40'
+      - series: kconmon_ng_zone_icmp_results_total{source_zone="a",destination_zone="b",result="success",pod="p1"}
+        values: '0+10x40'
+      - series: kconmon_ng_zone_udp_packets_sent_total{source_zone="a",destination_zone="b",pod="p1"}
+        values: '0+50x40'
+      - series: kconmon_ng_zone_udp_packets_received_total{source_zone="a",destination_zone="b",pod="p1"}
+        values: '0+50x40'
+      - series: kconmon_ng_zone_icmp_packets_sent_total{source_zone="a",destination_zone="b",pod="p1"}
+        values: '0+10x40'
+      - series: kconmon_ng_zone_icmp_packets_received_total{source_zone="a",destination_zone="b",pod="p1"}
+        values: '0+10x40'
+      # yamllint disable-line rule:line-length
+      - series: kconmon_ng_tcp_results_total{source_node="n1",destination_node="n2",source_zone="a",destination_zone="b",result="success"}
+        values: '0+10x40'
+      - series: kconmon_ng_probe_intended{source_node="n1",destination_node="n2"}
+        values: '1x40'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: ZoneChecksFailing
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: ZoneLossHigh
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: PairWentSilent
+        exp_alerts: []
+
+  # ── zone failure: every probe on every protocol fails a->b; both zone alerts must fire ──
+  - interval: 30s
+    input_series:
+      - series: kconmon_ng_zone_tcp_results_total{source_zone="a",destination_zone="b",result="fail",pod="p1"}
+        values: '0+10x40'
+      - series: kconmon_ng_zone_udp_results_total{source_zone="a",destination_zone="b",result="fail",pod="p1"}
+        values: '0+10x40'
+      - series: kconmon_ng_zone_icmp_results_total{source_zone="a",destination_zone="b",result="fail",pod="p1"}
+        values: '0+10x40'
+      - series: kconmon_ng_zone_udp_packets_sent_total{source_zone="a",destination_zone="b",pod="p1"}
+        values: '0+50x40'
+      - series: kconmon_ng_zone_udp_packets_received_total{source_zone="a",destination_zone="b",pod="p1"}
+        values: '0x40'
+      - series: kconmon_ng_zone_icmp_packets_sent_total{source_zone="a",destination_zone="b",pod="p1"}
+        values: '0+10x40'
+      - series: kconmon_ng_zone_icmp_packets_received_total{source_zone="a",destination_zone="b",pod="p1"}
+        values: '0x40'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: ZoneChecksFailing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              source_zone: a
+              destination_zone: b
+            exp_annotations:
+              summary: Zone checks failing a -> b at 100% of probes
+              description: >-
+                100% of all TCP, UDP and ICMP probes from zone a to zone b failed
+                over the last 5m, above the 5% threshold. This is the
+                zone-level aggregate, so it keeps firing under the agent.metrics.detail
+                scrape modes that drop per-pair series. Open the "kconmon-ng / Zone
+                Heatmap" Grafana dashboard to see which protocol carries the failures
+                and whether the whole fabric between the zones or only one direction is
+                affected, then the kconmon-ng console Matrix or Investigate page to find
+                the node pairs pulling the ratio up — in zone-only mode the per-pair
+                evidence lives in the console, not in Prometheus.
+              investigateUrl: /investigate?kind=zone-pair&scope=a->b
+      - eval_time: 15m
+        alertname: ZoneLossHigh
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              source_zone: a
+              destination_zone: b
+            exp_annotations:
+              summary: Packet loss a -> b at 100%
+              description: >-
+                UDP and ICMP probes from zone a to zone b have lost 100% of their
+                packets over the last 5m, above the 10% threshold. The ratio is
+                packet-weighted across every pair between the zones, so a single broken
+                link is diluted here and belongs to UDPLossHigh; this firing means the
+                fabric between the zones is losing traffic. Open the "kconmon-ng / Zone
+                Heatmap" Grafana dashboard to see whether the loss is one direction or
+                both, then the kconmon-ng console Matrix or Investigate page scoped to
+                these zones for the pair-level picture.
+              investigateUrl: /investigate?kind=zone-pair&scope=a->b
