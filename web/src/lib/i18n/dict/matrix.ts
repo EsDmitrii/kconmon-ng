@@ -33,7 +33,8 @@ const en = {
     "One cell per directed pair: source rows × destination columns, recomputed from Prometheus every 15s. " +
     "A cell shows the pair's failure percentage and its p95 RTT; UDP and ICMP cells also carry packet loss. " +
     "The protocol choice travels in the URL, so a matrix view is shareable as it stands. " +
-    "Ctrl and the wheel zoom the grid, the wheel alone scrolls it, and a cell opens that pair's page.",
+    "Ctrl and the wheel zoom the grid, the wheel alone scrolls it, and a cell opens that pair's page. " +
+    "Under a sparse topology plan, pairs no agent is assigned to probe render as dashed 'not probed' cells — expected silence, not an outage.",
 
   "protocol.aria": "Protocol",
   "plane": "plane: pod",
@@ -73,16 +74,28 @@ const en = {
   "cell.loss": "loss {ratio}",
 
   "tooltip.unmeasured": "No probe data in Prometheus for this pair.",
+  /* The sparse-plan cell (M10). Says what CAN still be done — Investigate probes on demand
+     regardless of the plan — because the cell deliberately opens no pair page: a pair the plan
+     excludes will never grow the continuous history that page promises. */
+  "tooltip.notProbed":
+    "The sparse topology plan assigns no agent to probe this pair, so no data is expected here. Investigate probes it on demand.",
   "tooltip.failRatio": "Failure ratio",
   "tooltip.noSamples": "no samples",
   "tooltip.rtt": "RTT p95",
   "tooltip.loss": "Packet loss",
+
+  /* The aria-label's reading of a sparse-plan cell — the one phrase that may claim the silence is
+     INTENDED. cellSummary's "no data" stays reserved for a pair something should have measured. */
+  "cell.notProbed": "not probed by the topology plan",
 
   /* ── legend ─────────────────────────────────────────────────────────────── */
   "legend.ok": "Healthy · fail < 1%",
   "legend.warn": "Degraded · 1–10%",
   "legend.bad": "Failing · ≥ 10%",
   "legend.unknown": "No data",
+  /* Rendered ONLY while a sparse plan is in force: in full mode the state cannot occur, and a
+     legend row for an impossible state would send readers hunting for it. */
+  "legend.notProbed": "Not probed · excluded by the topology plan",
   /* The green row reads "fail < 1%", and a cell with NO fail samples is green
      too — so the note has to say on what grounds. It is green by the ABSENCE of
      a bad signal, not by a measured zero, and the console never turns the one
@@ -109,7 +122,8 @@ export const matrixDict: Dictionary<MatrixKey> = defineDict(en, {
     "Одна ячейка на направленную пару: источники по строкам, назначения по столбцам, пересчёт из Prometheus каждые 15 с. " +
     "В ячейке — доля сбоев пары и её p95 RTT; у ячеек UDP и ICMP ещё и потери пакетов. " +
     "Выбор протокола лежит в URL, так что вид матрицы можно передать ссылкой как есть. " +
-    "Ctrl с колесом масштабируют сетку, колесо само по себе её прокручивает, а ячейка открывает страницу своей пары.",
+    "Ctrl с колесом масштабируют сетку, колесо само по себе её прокручивает, а ячейка открывает страницу своей пары. " +
+    "При разреженном плане топологии пары, которые никто не зондирует по плану, рисуются пунктирными ячейками «не зондируется» — это ожидаемая тишина, а не сбой.",
 
   "protocol.aria": "Протокол",
   "plane": "плоскость: pod",
@@ -155,15 +169,22 @@ export const matrixDict: Dictionary<MatrixKey> = defineDict(en, {
   "cell.loss": "потери {ratio}",
 
   "tooltip.unmeasured": "Для этой пары в Prometheus нет данных зондов.",
+  "tooltip.notProbed":
+    "План разреженной топологии не назначает агента зондировать эту пару, данных здесь не ожидается. «Расследовать» зондирует её по требованию.",
   "tooltip.failRatio": "Доля сбоев",
   "tooltip.noSamples": "нет выборок",
   "tooltip.rtt": "RTT p95",
   "tooltip.loss": "Потери пакетов",
 
+  /* «не зондируется», not «нет данных»: вторая формулировка зарезервирована за парой, которую
+     ДОЛЖНЫ были измерить. Здесь тишина запланирована. */
+  "cell.notProbed": "не зондируется по плану топологии",
+
   "legend.ok": "Норма · сбой < 1%",
   "legend.warn": "Деградация · 1–10%",
   "legend.bad": "Сбой · ≥ 10%",
   "legend.unknown": "Нет данных",
+  "legend.notProbed": "Не зондируется · исключено планом топологии",
   "legend.note":
     "цвет = худшее из доли сбоев и потерь пакетов · ячейка без выборок сбоев показывает свой p95 и остаётся зелёной потому, что плохого сигнала нет, а не потому, что измерен ноль",
 

@@ -110,6 +110,11 @@ const en = {
   "actions.runStarted.before": "Run",
   "actions.runStarted.after": "started.",
   "actions.runFailed": "Failed to start the run",
+  /* The zone-pair preset: server-side expansion into chunked runs (M10-3). */
+  "actions.probeZonePair": "Probe this zone pair now",
+  "actions.probeZonePairFailed": "Failed to start the zone-pair probe",
+  /* {count} is how many chunked runs the server started; the ids follow as links — data. */
+  "actions.presetStarted": "Zone-pair probe started as {count} runs:",
 
   /* ── save as incident ──────────────────────────────────────────────────── */
   "save.aria": "Save as incident",
@@ -439,6 +444,9 @@ export const investigateDict: Dictionary<InvestigateKey> = defineDict(en, {
   "actions.runStarted.before": "Запуск",
   "actions.runStarted.after": "начат.",
   "actions.runFailed": "Не удалось запустить",
+  "actions.probeZonePair": "Прозвонить эту пару зон сейчас",
+  "actions.probeZonePairFailed": "Не удалось запустить прозвон пары зон",
+  "actions.presetStarted": "Прозвон пары зон начат, запусков: {count} —",
 
   "save.aria": "Сохранить как инцидент",
   "save.scopeLabel": "Область",

@@ -407,6 +407,60 @@ paths:
         "503":
           $ref: "#/components/responses/Unavailable"
 
+  /api/v1/runs/zone-pair:
+    post:
+      operationId: createZonePairRuns
+      tags: [runs]
+      summary: Start the zone-pair investigation preset (asynchronous).
+      description: >-
+        One click on a zone-pair scope: both zones are expanded to their
+        agent-backed node lists against live topology and probed as ordinary
+        diagnostics runs, chunked so no single run exceeds the 400-pair bound
+        and no source agent is shared between concurrently running chunks. At
+        most 8 runs per call; a zone pair that would need more is refused with
+        422 (`zone pair too large`) telling the operator to narrow the scope,
+        as is a destination zone wider than 400 nodes. Requires runs:create
+        (the same fleet-wide probe traffic as POST /api/v1/runs, several runs
+        of it), and charges the runs rate limit ONE token per call - the
+        preset's own run cap bounds the burst. Instant runs only: no plane, no
+        duration, no cadence. No Location header - a preset starts several
+        runs, and each row of the body carries its own id.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ZonePairRunsRequest"
+      responses:
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "202":
+          description: Every chunk was accepted and started.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ZonePairRunsResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "422":
+          $ref: "#/components/responses/UnprocessableEntity"
+        "502":
+          description: >-
+            The controller was unreachable, or - distinctly - a MID-PRESET
+            failure: some chunks started before one refused. The problem
+            detail then names the run ids that ARE running (title `zone-pair
+            runs partially started`); they continue and appear in run history.
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
   /api/v1/runs/{id}:
     parameters:
       - $ref: "#/components/parameters/PathID"
@@ -3159,6 +3213,21 @@ components:
             True when the fold hit its 100k-row guard, so the reconstruction is
             missing its newest events and must not be trusted. Historical only.
           type: boolean
+        probePlan:
+          description: >-
+            Present ONLY while the controller runs a sparse topology plan
+            (`topology.mode: sparse`): source node name -> the sorted node
+            names it is planned to probe. Absent means full mesh -- every pair
+            intended -- and clients must key any "not probed" reading off the
+            field's presence, never off an empty object. A node mapped to an
+            empty array is planned to probe nobody (the plan's fail-closed
+            state until its agent re-registers). Live only; a historical fold
+            never carries it.
+          type: object
+          additionalProperties:
+            type: array
+            items:
+              type: string
       additionalProperties: false
 
     MatrixCell:
@@ -4674,6 +4743,59 @@ components:
             this fan-out cannot finish that fast, so the plan is one round's
             floor. Absent when nothing moved, which includes every run that
             sent no sampleIntervalNs and was not stretched.
+      additionalProperties: false
+
+    ZonePairRunsRequest:
+      type: object
+      required: [sourceZone, destinationZone, type]
+      properties:
+        sourceZone:
+          type: string
+          description: Every agent-backed node in this zone becomes a run source.
+        destinationZone:
+          type: string
+          description: >-
+            Every agent-backed node in this zone becomes a destination. The
+            same zone on both sides is a legitimate scope (intra-zone weather);
+            self-pairs are dropped exactly as POST /api/v1/runs drops them.
+        type:
+          $ref: "#/components/schemas/CheckType"
+        timeoutNs:
+          type: integer
+          format: int64
+          description: Per-pair timeout in nanoseconds; unset lets the server apply its own default and clamp.
+      additionalProperties: false
+
+    ZonePairRun:
+      type: object
+      required: [id, status, pairTotal, wsTopic]
+      properties:
+        id:
+          type: string
+        status:
+          $ref: "#/components/schemas/RunStatus"
+        pairTotal:
+          type: integer
+        wsTopic:
+          type: string
+          description: Server-chosen topic name, same contract as RunCreateResponse's.
+      additionalProperties: false
+
+    ZonePairRunsResponse:
+      type: object
+      required: [sourceZone, destinationZone, pairTotal, runs]
+      properties:
+        sourceZone:
+          type: string
+        destinationZone:
+          type: string
+        pairTotal:
+          type: integer
+          description: The sum over runs - the whole investigation's fan-out.
+        runs:
+          type: array
+          items:
+            $ref: "#/components/schemas/ZonePairRun"
       additionalProperties: false
 
     RunSummary:

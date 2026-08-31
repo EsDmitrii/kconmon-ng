@@ -164,6 +164,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/runs/zone-pair": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Start the zone-pair investigation preset (asynchronous).
+         * @description One click on a zone-pair scope: both zones are expanded to their agent-backed node lists against live topology and probed as ordinary diagnostics runs, chunked so no single run exceeds the 400-pair bound and no source agent is shared between concurrently running chunks. At most 8 runs per call; a zone pair that would need more is refused with 422 (`zone pair too large`) telling the operator to narrow the scope, as is a destination zone wider than 400 nodes. Requires runs:create (the same fleet-wide probe traffic as POST /api/v1/runs, several runs of it), and charges the runs rate limit ONE token per call - the preset's own run cap bounds the burst. Instant runs only: no plane, no duration, no cadence. No Location header - a preset starts several runs, and each row of the body carries its own id.
+         */
+        post: operations["createZonePairRuns"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/runs/{id}": {
         parameters: {
             query?: never;
@@ -1283,6 +1303,10 @@ export interface components {
             unfoldableEvents?: number;
             /** @description True when the fold hit its 100k-row guard, so the reconstruction is missing its newest events and must not be trusted. Historical only. */
             truncated?: boolean;
+            /** @description Present ONLY while the controller runs a sparse topology plan (`topology.mode: sparse`): source node name -> the sorted node names it is planned to probe. Absent means full mesh -- every pair intended -- and clients must key any "not probed" reading off the field's presence, never off an empty object. A node mapped to an empty array is planned to probe nobody (the plan's fail-closed state until its agent re-registers). Live only; a historical fold never carries it. */
+            probePlan?: {
+                [key: string]: string[];
+            };
         };
         MatrixCell: {
             source: string;
@@ -2010,6 +2034,32 @@ export interface components {
              * @enum {string}
              */
             sampleIntervalAdjusted?: "cap" | "round";
+        };
+        ZonePairRunsRequest: {
+            /** @description Every agent-backed node in this zone becomes a run source. */
+            sourceZone: string;
+            /** @description Every agent-backed node in this zone becomes a destination. The same zone on both sides is a legitimate scope (intra-zone weather); self-pairs are dropped exactly as POST /api/v1/runs drops them. */
+            destinationZone: string;
+            type: components["schemas"]["CheckType"];
+            /**
+             * Format: int64
+             * @description Per-pair timeout in nanoseconds; unset lets the server apply its own default and clamp.
+             */
+            timeoutNs?: number;
+        };
+        ZonePairRun: {
+            id: string;
+            status: components["schemas"]["RunStatus"];
+            pairTotal: number;
+            /** @description Server-chosen topic name, same contract as RunCreateResponse's. */
+            wsTopic: string;
+        };
+        ZonePairRunsResponse: {
+            sourceZone: string;
+            destinationZone: string;
+            /** @description The sum over runs - the whole investigation's fan-out. */
+            pairTotal: number;
+            runs: components["schemas"]["ZonePairRun"][];
         };
         RunSummary: {
             id: string;
@@ -2854,6 +2904,45 @@ export interface operations {
             422: components["responses"]["UnprocessableEntity"];
             429: components["responses"]["TooManyRequests"];
             502: components["responses"]["BadGateway"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    createZonePairRuns: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ZonePairRunsRequest"];
+            };
+        };
+        responses: {
+            /** @description Every chunk was accepted and started. */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ZonePairRunsResponse"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            422: components["responses"]["UnprocessableEntity"];
+            429: components["responses"]["TooManyRequests"];
+            /** @description The controller was unreachable, or - distinctly - a MID-PRESET failure: some chunks started before one refused. The problem detail then names the run ids that ARE running (title `zone-pair runs partially started`); they continue and appear in run history. */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
             503: components["responses"]["Unavailable"];
         };
     };

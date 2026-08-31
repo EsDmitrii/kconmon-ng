@@ -310,6 +310,22 @@ function renderPage(opts: Options = {}) {
       return Promise.resolve(json({ destinations: [{ sourceNode: "node-a", destination: "node-b", snapshotCount: 1, traceCount: 1, firstSeen: FROM, lastSeen: TO }] }));
     }
     if (href.startsWith("/api/v1/mtr/snapshots")) return Promise.resolve(json({ snapshots, nextCursor: "" }));
+    if (method === "POST" && href === "/api/v1/runs/zone-pair") {
+      return Promise.resolve(
+        json(
+          {
+            sourceZone: "zone-1",
+            destinationZone: "zone-2",
+            pairTotal: 2,
+            runs: [
+              { id: "zp-run-1", status: "pending", pairTotal: 1, wsTopic: "run:zp-run-1" },
+              { id: "zp-run-2", status: "pending", pairTotal: 1, wsTopic: "run:zp-run-2" },
+            ],
+          },
+          { status: 202 },
+        ),
+      );
+    }
     if (method === "POST" && href.startsWith("/api/v1/runs")) {
       return Promise.resolve(json({ id: "run-new", status: "pending", pairTotal: 1, wsTopic: "run:run-new" }, { status: 202 }));
     }
@@ -1699,6 +1715,35 @@ describe("InvestigatePage — the actions rail", () => {
 
     expect(postCalls()[0].url).toBe("/api/v1/runs");
     expect(postCalls()[0].body).toMatchObject({ type: "mtr", sources: ["node-a"], destinations: ["node-b"] });
+  });
+
+  it("offers the zone-pair preset only on a zone-pair scope, and lists every started run as a link", async () => {
+    const { postCalls } = renderPage({
+      permissions: [...ALL_READS, "runs:create"],
+      search: `?kind=zone-pair&scope=${encodeURIComponent("zone-1→zone-2")}&from=${FROM}&to=${TO}`,
+    });
+
+    fireEvent.click(await screen.findByRole("button", { name: "Probe this zone pair now" }));
+    await waitFor(() => expect(postCalls().length).toBe(1));
+    expect(postCalls()[0].url).toBe("/api/v1/runs/zone-pair");
+    expect(postCalls()[0].body).toMatchObject({ sourceZone: "zone-1", destinationZone: "zone-2", type: "tcp" });
+
+    // The 202 lists EVERY chunked run; the rail links each one.
+    const first = await screen.findByRole("link", { name: "zp-run-1" });
+    expect(first.getAttribute("href")).toBe("/diagnostics/runs/zp-run-1");
+    expect(screen.getByRole("link", { name: "zp-run-2" }).getAttribute("href")).toBe("/diagnostics/runs/zp-run-2");
+  });
+
+  it("shows no zone-pair preset on a plain pair scope", async () => {
+    renderPage({ permissions: [...ALL_READS, "runs:create"] });
+    await screen.findByRole("button", { name: "Run TCP now" });
+    expect(screen.queryByRole("button", { name: "Probe this zone pair now" })).toBeNull();
+  });
+
+  it("hides the zone-pair preset entirely without runs:create", async () => {
+    renderPage({ search: `?kind=zone-pair&scope=${encodeURIComponent("zone-1→zone-2")}&from=${FROM}&to=${TO}` });
+    await screen.findByRole("button", { name: "Investigate" });
+    expect(screen.queryByRole("button", { name: "Probe this zone pair now" })).toBeNull();
   });
 
   it("keeps the run buttons visible but disabled while the Time Machine is engaged", async () => {
