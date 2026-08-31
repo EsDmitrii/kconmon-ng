@@ -4,7 +4,7 @@ name: kconmon-ng
 description: Kubernetes Node Connectivity Monitor - Next Generation
 type: application
 version: 2.3.0
-appVersion: "2.2.0"
+appVersion: "2.3.0"
 keywords:
   - kubernetes
   - connectivity
