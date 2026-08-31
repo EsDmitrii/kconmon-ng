@@ -1,0 +1,15 @@
+---
+# Sparse mesh plan rendered into the shared config, with the rules that must ship beside it:
+# PairWentSilent joins on probe_intended in the same release, or every pair the plan trims reads
+# as "went silent" for an hour. Non-default sparse numbers on purpose, so a render regression that
+# falls back to defaults is visible in the output.
+topology:
+  mode: sparse
+  sparse:
+    ringDegree: 3
+    zoneChords: 1
+    autoThreshold: 12
+serviceMonitor:
+  enabled: true
+prometheusRule:
+  enabled: true

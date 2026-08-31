@@ -1501,6 +1501,41 @@
         }
       }
     },
+    "topology": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "mode": {
+          "description": "full probes every peer from every agent (today's behaviour); sparse trims the plan to a ring over sorted node names plus cross-zone chords. Emitted into the shared config only when sparse, because a pre-2.3.0 controller image rejects the key.",
+          "type": "string",
+          "enum": [
+            "full",
+            "sparse"
+          ]
+        },
+        "sparse": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "ringDegree": {
+              "description": "Ring successors per node; at least 1, or the plan loses the connectivity guarantee.",
+              "type": "integer",
+              "minimum": 1
+            },
+            "zoneChords": {
+              "description": "Cross-zone chords per directed zone pair; 0 leaves zone coverage to whatever the ring happens to cross.",
+              "type": "integer",
+              "minimum": 0
+            },
+            "autoThreshold": {
+              "description": "Fleets smaller than this many nodes get the full mesh regardless of mode; 0 disables the floor.",
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        }
+      }
+    },
     "dashboards": {
       "type": "object",
       "additionalProperties": false,
