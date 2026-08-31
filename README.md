@@ -33,10 +33,10 @@ minute it broke.
 <table>
   <tr>
     <td width="50%"><img src="docs/img/console-matrix.png" alt="Console Matrix: N×N heatmap of node-to-node loss and latency, one cell per ordered pair — a broken node reads as a red column"></td>
-    <td width="50%"><img src="docs/img/console-investigate.png" alt="Console Investigate: merged timeline around one scope and window, with a causes panel that ranks only when the window holds a threshold crossing"></td>
+    <td width="50%"><img src="docs/img/console-incidents-timeline.png" alt="Console Investigate: merged timeline around one scope and window, with a causes panel that ranks only when the window holds a threshold crossing"></td>
   </tr>
   <tr>
-    <td width="50%"><img src="docs/img/console-alerting.png" alt="Console Alerting: managed rules with their live sync status against the cluster"></td>
+    <td width="50%"><img src="docs/img/console-alerting-rules.png" alt="Console Alerting: managed rules with their live sync status against the cluster"></td>
     <td width="50%"><img src="docs/img/console-timemachine.png" alt="Console Time Machine: the same matrix resolved at a past instant instead of now"></td>
   </tr>
 </table>
@@ -169,13 +169,13 @@ so your own panels and recording rules are a `grep` away in
 [docs/metrics.md](docs/metrics.md).
 
 <p align="center">
-  <img src="docs/img/overview.png" alt="Grafana Overview dashboard: fleet status tiles (10 agents, 0 missing, 90 monitored pairs, 9 failing), per-protocol failure ratios and the top-10 worst pairs table" width="100%">
+  <img src="docs/img/install-15-min-grafana-overview.png" alt="Grafana Overview dashboard: fleet status tiles, per-protocol failure ratios and the worst-pairs table on a healthy 10-node fleet" width="100%">
 </p>
 
 <table>
   <tr>
     <td width="50%"><img src="docs/img/zone-heatmap.png" alt="Grafana Zone Heatmap dashboard: zone-to-zone loss, RTT and MTR trigger matrices"></td>
-    <td width="50%"><img src="docs/img/node-detail.png" alt="Grafana Node Detail dashboard: one node's outbound and inbound health against every peer"></td>
+    <td width="50%"><img src="docs/img/zone-heatmap.png" alt="Grafana Zone Heatmap dashboard: zone-pair loss and RTT from the kconmon_ng_zone_* family on a 4-zone fleet"></td>
   </tr>
 </table>
 
