@@ -56,7 +56,7 @@ jobs:
       # goreleaser's `sboms` section shells out to syft; goreleaser-action does not install it.
       # Pinned like cosign above: an unpinned tool on the release path is how v2.2.0 died.
       - name: Install syft
-        uses: anchore/sbom-action/download-syft@v0.24.0
+        uses: anchore/sbom-action/download-syft@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
         with:
           syft-version: v1.42.3
 
