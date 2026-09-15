@@ -118,6 +118,13 @@ jobs:
       - name: Apply the PrometheusRule CRD and the foreign rule fixture
         run: |
           kubectl apply -f e2e/testdata/prometheusrule-crd.yaml
+          # kubectl wait fails instead of waiting while a fresh CRD has no status.conditions yet.
+          for _ in $(seq 1 60); do
+            est=$(kubectl get crd prometheusrules.monitoring.coreos.com \
+              -o jsonpath='{.status.conditions[?(@.type=="Established")].status}')
+            [ "$est" = "True" ] && break
+            sleep 1
+          done
           kubectl wait --for condition=established \
             crd/prometheusrules.monitoring.coreos.com \
             --timeout=60s
@@ -281,6 +288,13 @@ jobs:
       - name: Apply the ScrapeConfig CRD
         run: |
           kubectl apply --server-side -f e2e/testdata/scrapeconfig-crd.yaml
+          # kubectl wait fails instead of waiting while a fresh CRD has no status.conditions yet.
+          for _ in $(seq 1 60); do
+            est=$(kubectl get crd scrapeconfigs.monitoring.coreos.com \
+              -o jsonpath='{.status.conditions[?(@.type=="Established")].status}')
+            [ "$est" = "True" ] && break
+            sleep 1
+          done
           kubectl wait --for condition=established \
             crd/scrapeconfigs.monitoring.coreos.com \
             --timeout=60s
