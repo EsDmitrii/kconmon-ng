@@ -6,8 +6,8 @@ Curated metric charts: the fleet's key series over time, compared with each othe
     This chapter documents the console's **Metrics** screen. The reference for the exported Prometheus metrics and the chart-shipped alert rules is [Metrics and alerting](../metrics.md).
 
 <figure markdown>
-![Five charts with the synced hover cursor across them, a self-comparison 24h earlier drawn dashed, and annotation and maintenance bars underneath](../img/console-metrics-compare.png){ loading=lazy }
-<figcaption>Compare set to "itself, earlier": solid now against dashed 24 h ago, with the hover cursor crossing all five charts at one instant.</figcaption>
+![Metrics page, 1h range, during a staged break: the Compare bar with Probe failure rate by protocol as A, the another metric tab active and UDP packet loss (worst 5 pairs) as B; the overlay chart with B's dashed lines at 100% since about 09:37 after two shorter bursts before 08:56, and A's tcp, udp and icmp lines climbing together to about 62%, drawn on top of each other so only the purple udp line shows; below it the TCP RTT p95 and UDP packet loss worst-5 charts](../img/console-metrics-compare.png){ loading=lazy }
+<figcaption>A comparison engaged: probe failure rate by protocol as A, UDP packet loss on the worst five pairs as B on the same axes. B's dashed lines jump to 100% at the break and A climbs after them to about 62%. TCP, UDP and ICMP fail at the same rate here, so A's three lines coincide and read as one. The single-metric charts continue below.</figcaption>
 </figure>
 
 ## The five charts
@@ -45,7 +45,7 @@ Both are create-and-delete surfaces: an annotation or window can be removed (del
 
 ## When the p95 charts go dark
 
-Under the 2.2.0 cardinality valve (`agent.metrics.detail`), `counters-only` drops the four per-pair histograms at scrape time. On this page that darkens **TCP RTT p95** and **ICMP RTT p95**, while **UDP packet loss** (a gauge) and **Probe failure rate** (counters) keep drawing — and **DNS resolution p95** survives too, because the DNS family is recorded per host and resolver, not per pair. Under `zone-only` every series naming a destination node is gone; the DNS, HTTP and external families remain. Details on the modes: [Matrix](matrix.md#when-series-are-missing).
+Under the cardinality valve (`agent.metrics.detail`, chart 2.3.0 and later), `counters-only` drops the four per-pair histograms at scrape time. On this page that darkens **TCP RTT p95** and **ICMP RTT p95**, while **UDP packet loss** (a gauge) and **Probe failure rate** (counters) keep drawing — and **DNS resolution p95** survives too, because the DNS family is recorded per host and resolver, not per pair. Under `zone-only` every series naming a destination node is gone; the DNS, HTTP and external families remain. Details on the modes: [Matrix](matrix.md#when-series-are-missing).
 
 ## Deep links
 
@@ -56,4 +56,4 @@ Under the 2.2.0 cardinality valve (`agent.metrics.detail`), `counters-only` drop
      web/src/lib/curated-metrics.ts, web/src/lib/i18n/dict/explore.ts, web/src/lib/chart-cursor.tsx (timestamp not
      pixel, page-as-sync-group), web/src/components/page-shell.tsx L10-12, web/src/components/annotations.tsx and
      maintenance.tsx (create + confirm-delete, no edit affordance), charts/kconmon-ng/values.yaml L159-174 +
-     docs/metrics.md L458 (which histograms counters-only drops), RELEASE_NOTES.md v2.2.0. -->
+     docs/metrics.md L458 (which histograms counters-only drops), RELEASE_NOTES.md v2.3.0 (the carried-over cardinality valve entry). -->

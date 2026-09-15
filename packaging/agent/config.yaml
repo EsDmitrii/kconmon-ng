@@ -1,6 +1,7 @@
 # kconmon-ng external agent — example configuration.
 # The agent reads /etc/kconmon-ng/config.yaml (override with the KCONMON_NG_CONFIG env var).
 # Fill in controllerAddress and the TLS/token material, then: systemctl enable --now kconmon-ng-agent
+# Docs: https://esdmitrii.github.io/kconmon-ng/external-agents/
 
 # The controller's EXTERNAL GATEWAY (controller.externalGateway.port, 9443 by default) — not the
 # in-cluster gRPC port. The host part is also the name the server certificate is verified against,
@@ -33,8 +34,10 @@ agent:
   bootstrapTokenFile: /etc/kconmon-ng/bootstrap-token
 
 # Peers probe each other on httpPort (TCP) and grpcPort (UDP probes); Prometheus scrapes
-# metricsPort — open those in the host firewall along with ICMP. v1 contract: httpPort and
-# grpcPort must be identical across the whole fleet.
+# metricsPort. Open all three in the host firewall along with ICMP. Since 2.4.0 the agent reports
+# them at registration and peers dial what it reported, so they may differ from the cluster's.
+# Keep them equal to the fleet's until EVERY agent runs 2.4.0: an older agent ignores reported
+# ports and dials its own values, on-demand checks included, so mixed ports fail one way.
 # httpPort: 8080
 # grpcPort: 9090
 # metricsPort: 9091

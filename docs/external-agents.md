@@ -3,12 +3,12 @@
 kconmon-ng measures node-to-node connectivity, and not every node worth
 measuring is a Kubernetes node. A bare-metal machine, a VM in another
 network, the far end of a VPN. Install the agent there and it joins the
-same mesh as the in-cluster DaemonSet: same binary, same checkers, same
-metrics, one matrix with every vantage point on it.
+same mesh as the in-cluster DaemonSet: the same Linux binary, the same
+checkers, the same metrics, one matrix with every vantage point on it.
 
 <figure markdown>
-  ![Matrix including a bare-host agent in the external zone with green cells in both directions against the in-cluster fleet](img/external-agents-topology.png){ loading=lazy }
-  <figcaption>One matrix, every vantage point: a bare-host agent (zone "external") probing the in-cluster fleet and being probed back.</figcaption>
+  ![Matrix on TCP, Live: ten kconmon-stand cluster nodes and the external agent edge-host-01 as the first row and column, all 110 cells green at 0.0% with their p95 RTT](img/enable-the-console-minimal.png){ loading=lazy }
+  <figcaption>One matrix, every vantage point: <code>edge-host-01</code> is the first row and the first column, and both are green. The column is the cluster probing the external host; the row is the host's own probes, which reach the console because Prometheus <a href="#scraping-external-agents">scrapes the external agent</a>.</figcaption>
 </figure>
 
 What differs is trust and delivery. In-cluster agents dial the controller's
@@ -24,29 +24,39 @@ untouched by all of this; exposing it directly remains the thing not to do
 
 Two prerequisites bite before any of the configuration below does.
 
-!!! warning "Upgrade the controller image before enabling the gateway"
-    Chart 2.2.0 ships the gateway values but still pins `appVersion: 2.0.3`,
-    and a 2.0.3 controller **rejects the `externalGateway` config key and
-    crashloops**. The chart emits the key only when the gateway is enabled,
-    which is exactly why the safe order is: roll a controller image that
-    understands the gateway first, flip `controller.externalGateway.enabled`
-    second. The same skew logic applies to the agent-side keys
-    (`agent.tls`, `agent.bootstrapTokenFile`): a 2.0.3 agent binary does not
-    know them either, so install a current package on the host.
+!!! warning "Keep the images at least as new as the chart"
+    The gateway shipped in kconmon-ng v2.3.0: the controller understands the
+    `externalGateway` config key from that release on, and the agent knows
+    `agent.tls` and `agent.bootstrapTokenFile` from the same one. The chart
+    emits the gateway key only when the gateway is enabled, because a
+    controller image that predates it **rejects the unknown key and
+    crashloops**. A default install pins matching images; if yours pins the
+    controller image behind the chart, roll the image first and flip
+    `controller.externalGateway.enabled` second. The same skew logic applies
+    on the host: an agent binary older than the gateway does not know the TLS
+    keys either, so install a current package there.
 
 With `networkPolicy.enabled`, there is a second, quieter trap. The chart's
 agent policy admits probe ingress and egress **only from and to this
 release's agent pods**, a pod-selector match. An external agent's host IP
 matches no pod selector, so every external↔cluster probe is dropped by the
 CNI even after the host firewall is satisfied, and
-`networkPolicy.externalAgentCidrs` does not help: that list opens only the
-**gateway port on the controller**, nothing on the agents. The chart has no
-knob for the agent-side rules today. Until it does, add your own
-NetworkPolicy alongside the chart's, allowing the external agents' CIDRs
-to and from the agent pods on TCP `httpPort` (8080), UDP `grpcPort` (9090),
-and ICMP (a ports-less rule, since NetworkPolicy v1 cannot name ICMP as a
-port). Without it the gateway registration succeeds and every probe cell
-stays red.
+`networkPolicy.externalAgentCidrs` does not help on its own: that list opens
+only the **gateway port on the controller**, registration and nothing else.
+The probe half is `networkPolicy.externalPeerCidrs` (since 2.4.0): the CIDRs
+you list there are spliced as `ipBlock` peers into the agent↔agent rules of
+the shared policy, ingress and egress, UDP `grpcPort` (9090) and TCP
+`httpPort` (8080) plus the ports-less ICMP/MTR rule (NetworkPolicy v1 cannot
+name ICMP as a port), and never into the gateway rule. Set both lists.
+Without `externalAgentCidrs` the agent cannot register; without
+`externalPeerCidrs` it registers fine and every cell between it and the
+cluster stays red.
+
+A third list, `networkPolicy.nodeCidrs`, belongs to
+[`agent.hostNetwork`](#when-the-pod-network-does-not-route) rather than to
+external agents as such: host-network agents register from node IPs, and the
+chart refuses to render the policy without the list. Read that section
+before turning the option on.
 
 ## The trust model
 
@@ -79,6 +89,19 @@ everything carrying an `agent_id`). A message that carries no identity (an
 event-stream subscription, for instance) passes on the token alone. Any
 token holder can therefore subscribe to domain events even with a client CA
 configured; the CA constrains who can *act as* an agent, not who can listen.
+
+Token-only mode has one more consequence since 2.4.0, and it deserves its own
+paragraph. The controller now publishes every external agent's advertised
+address as a Prometheus scrape target
+([Scraping external agents](#scraping-external-agents)), so a token holder
+who registers a fictitious external agent with an address of their choosing
+makes Prometheus connect to that `host:port` from the monitoring namespace:
+an SSRF-shaped primitive, built from a credential that was only ever meant
+to prove membership. Client-certificate pinning closes it, since a
+registration then needs a certificate your CA issued for exactly that node
+name. If you would rather write scrape targets by hand,
+`controller.prometheusSD.enabled: false` closes the publishing side
+altogether.
 
 ## Cluster side: enable the gateway
 
@@ -283,6 +306,29 @@ The `agent.tls` block is itself the switch: setting any key in it moves the
 dial to TLS, while an empty block keeps the plaintext in-cluster dial
 byte-identical.
 
+### Ports
+
+`httpPort`, `grpcPort` and `metricsPort` are top-level keys, the same three
+the in-cluster agents use (`grpcPort` is the UDP echo port on an agent; the
+name is an old overload). Since 2.4.0 an agent reports all three at
+registration and its peers probe it on the ports it reported, so an external
+host may run on ports of its own: a host that registered `httpPort: 18080` is
+dialled on 18080 whatever the cluster pods listen on. `metricsPort` is never
+probed; it is published for [scrape discovery](#scraping-external-agents).
+Ports are read once at startup with the rest of the identity, so a change
+takes a service restart and reaches the peers with the re-registration. The
+agent never adopts ports from the controller's registration reply; zone is
+the only field it takes from there.
+
+The rule that comes with it: **keep one port set for the whole fleet until
+every agent, deb/rpm hosts included, runs 2.4.0.** An older agent reports no
+ports and, worse, ignores the ports its peers report: it dials every peer on
+its *own* configured values, on-demand diagnostics included. In a fleet where
+ports differ, each old agent fails one way toward every peer on other ports,
+and the matrix shows one-way red on exactly those rows. A 2.3.x controller
+drops the port fields at registration, so behind an old controller the whole
+fleet stays on the fleet-wide contract as well.
+
 Identity resolution (env over file over fallback) is shared with in-cluster
 agents and spelled out in
 [Configuration → Agent identity](configuration.md#agent-identity). Two
@@ -291,8 +337,28 @@ the `agent` block take a service restart. And an agent running outside any
 Pod is automatically labeled `kconmon-ng.io/external=true` in its
 registration metadata; the label comes back verbatim in every
 `GET /api/v1/topology` response (`agents[].labels`), which is how API
-consumers tell bare-host agents apart, while in the Console the agent simply
-appears under whatever `zone` you configured.
+consumers tell bare-host agents apart.
+
+Since 2.4.0 the Console reads that label too. The Topology map draws the host
+beside the cluster nodes with a neutral **external** badge and "readiness
+unknown" (a bare host has no Kubernetes node to be ready); the node page
+swaps *Pod IP* for *Advertised address*, notes that readiness is not reported
+for an external host, and lists the probe planes the agent advertised
+(TCP, UDP, ICMP, MTR chips; "unknown" for an agent older than 2.4.0, which
+advertises none); the Matrix marks the row and column header "external
+agent"; Overview badges the name in *Worst pairs* and adds "+N external
+agent(s)" beside the *Nodes ready* tile without counting them in, since that
+count is Kubernetes readiness. When Prometheus is not scraping the host, the
+Matrix says so instead of leaving a bare grey row: the tooltip on every cell
+of that row and a note above the grid name the agent and link to
+[Scraping external agents](#scraping-external-agents). The CLI follows:
+`kubectl kconmon agents` gained an `EXTERNAL` column and
+`kubectl kconmon topology` prints bare-host rows after the node rows, with
+`-o json` carrying labels and capabilities verbatim. All of it rides on the
+label, so a 2.3.x console in front of a 2.4.0 controller shows the agent as
+one more row under its zone with nothing marking it as external, and the
+Time Machine can badge only history a 2.4.0 controller recorded, since older
+topology events carry no labels.
 
 When the gateway pins identities, issue each host a certificate whose **CN
 equals its `nodeName`** (the resolved one: the hostname, if you did not set
@@ -308,11 +374,11 @@ mesh needs more than the gateway port:
 
 | Path | Protocol / port | Purpose |
 | --- | --- | --- |
-| agent ↔ agent | TCP `httpPort` (default 8080), both directions | TCP connect probes; agent health endpoints |
-| agent ↔ agent | UDP `grpcPort` (default 9090), both directions | UDP loss/RTT probes (each agent's echo server) |
+| agent ↔ agent | TCP `httpPort` (default 8080; each peer's own reported port since 2.4.0), both directions | TCP connect probes; agent health endpoints |
+| agent ↔ agent | UDP `grpcPort` (default 9090; likewise per peer since 2.4.0), both directions | UDP loss/RTT probes (each agent's echo server) |
 | agent ↔ agent | ICMP echo, both directions | ICMP RTT/loss; MTR hop tracing |
 | agent → controller | TCP `controller.externalGateway.port` (default 9443) | registration, peer list, heartbeats, tasks, results |
-| Prometheus → agent | TCP `metricsPort` (default 9091) | metrics scrape |
+| Prometheus → agent | TCP `metricsPort` (default 9091; the port the SD body publishes) | metrics scrape |
 
 "Both directions" is literal: every fleet member probes every other, so the
 external host must accept these from the cluster's agents, and the cluster
@@ -325,17 +391,183 @@ routable from the external host. Without a routable pod network (BGP-
 announced pods, cloud-native routing, a VPN that carries pod CIDRs), every
 external↔cluster cell shows red. That is an accurate measurement of a
 network that genuinely cannot deliver those packets, not a kconmon-ng bug.
-Prometheus must likewise be able to reach the external host's
-`metricsPort`, or the new vantage point produces no metrics at all.
+Prometheus must likewise be able to reach the external host's `metricsPort`;
+how it learns the address is the [next section](#scraping-external-agents).
+
+### When the pod network does not route
+
+The alternative to routing pod CIDRs to the host is `agent.hostNetwork: true`
+in the chart: the agent DaemonSet moves into each node's network namespace,
+advertises the node IP, and listens on TCP `httpPort`, UDP `grpcPort` and TCP
+`metricsPort` of the node itself. An external host that can reach the nodes
+can then reach every agent, with no BGP and no VPN carrying pod CIDRs.
+
+The price is loud, and it is why the option is off by default: it changes
+**what is measured** for the whole DaemonSet, not only where the pods listen.
+Every in-cluster pair then probes node IP to node IP over the underlay, and
+the CNI datapath (overlay, conntrack, NetworkPolicy enforcement) is no longer
+exercised, so the failure class this tool exists to catch hides behind a
+green matrix. Diagnostics keep reporting `plane=pod` either way; read the
+field as "the addresses the agents advertise", as
+[Mesh and planes](concepts/mesh-and-planes.md#host-networking) explains.
+Turn it on only when the goal is visibility between external agents and a
+cluster whose pod network the hosts cannot route to.
+
+What must already be true, because each miss fails in its own quiet way:
+
+- The namespace runs at PSS `privileged` or is exempted: `baseline` refuses
+  `hostNetwork` at admission while the release still looks healthy.
+- TCP `httpPort`, UDP `grpcPort` and TCP `metricsPort` are free on **every**
+  node (`ss -lntup` first; Calico's Felix metrics also default to 9091 when
+  enabled). An occupied port crash-loops the agent on that node alone and
+  fires `KconmonAgentsMissing`. The kubelet's liveness and readiness probes
+  now hit the node's port 8080 as well.
+- `net.ipv4.ping_group_range` is set by the node OS (a `sysctl.d` file, the
+  same line the deb/rpm ships): the kubelet refuses `net.*` pod sysctls under
+  host networking, so the chart stops rendering it.
+- `networkPolicy.nodeCidrs` is set when `networkPolicy.enabled`: registrations
+  now arrive from node IPs, which no pod selector matches, and the chart
+  refuses to render the policy without the list.
+- `agent.dnsPolicy` can stay empty: the chart renders
+  `ClusterFirstWithHostNet` under host networking, because `controllerAddress`
+  is a bare Service name that only cluster DNS resolves.
+
+`hostNetwork` and `dnsPolicy` are pod-template fields, so flipping them rolls
+the DaemonSet; during the rollout a mixed fleet (node IPs next to pod IPs)
+keeps working, with some transient `PairWentSilent` noise. A host-network
+agent from a 2.4.0 image also labels itself `kconmon-ng.io/host-network=true`,
+so `GET /api/v1/topology` tells the two address kinds apart.
+
+One rule closes the section: **a machine cannot run both a host-network
+agent pod and a bare-host external agent.** They would share one IP and the
+same three ports: the agents' self filter skips any peer with their own node
+name or address, so neither would probe the other, and the second one to
+start cannot bind its listeners anyway. One agent per machine.
+
+## Scraping external agents
+
+An in-cluster agent is found by the chart's `ServiceMonitor` through its
+Service. A bare host has no Service, so before 2.4.0 nothing scraped it: the
+agent's column in the Matrix filled in (the cluster probes it), its row
+stayed grey (nobody read its own probes), and its zone metrics and worst
+pairs were blind to everything it measured. Since 2.4.0 the controller, the
+one party that knows a host registered and on which address, tells
+Prometheus itself: `GET /api/v1/prometheus/sd` answers in the
+[HTTP service discovery](https://prometheus.io/docs/prometheus/latest/configuration/configuration/#http_sd_config)
+format with one target group per external agent, served on `metricsPort`
+(the port the chart's scrape NetworkPolicy already opens) and on `httpPort`
+alike. The body and its rules are in the
+[API reference](api.md#get-apiv1prometheussd).
+
+### With the Prometheus Operator
+
+The chart renders a `ScrapeConfig` (the `scrapeconfigs.monitoring.coreos.com`
+CRD; `kubectl get crd scrapeconfigs.monitoring.coreos.com` tells you whether
+your operator ships it) pointing at the endpoint:
+
+```yaml
+scrapeConfig:
+  externalAgents:
+    enabled: true
+    # Selector labels YOUR Prometheus requires. kube-prometheus-stack selects
+    # only ScrapeConfigs labelled release=<its release name>; an operator with
+    # an empty scrapeConfigSelector needs nothing here.
+    labels:
+      release: kube-prometheus-stack
+    # Empty = <release>-agent-external. Keep "kconmon" in it: the bundled
+    # dashboards filter on job=~".*kconmon.*".
+    jobName: ""
+    # How often Prometheus re-reads the target list; matches config.controllerAgentTtl.
+    refreshInterval: 30s
+    # Scrape interval; empty falls back to serviceMonitor.interval.
+    interval: ""
+```
+
+The object is named `<release>-agent-external`, carries the chart labels plus
+whatever you put in `labels`, and applies the same `agent.metrics.detail`
+cardinality valve as the agent ServiceMonitor, so an external host never
+returns per-pair detail the valve dropped for the pods. Two guards refuse
+combinations that cannot work: the ScrapeConfig without
+`controller.externalGateway.enabled` (no gateway, no external agents, an
+empty target list forever) and without `controller.prometheusSD.enabled`
+(the endpoint would answer 404 on every refresh). The install notes print a
+reminder when the gateway is on and the ScrapeConfig is not, and another when
+`labels` is empty, since a kube-prometheus-stack Prometheus silently ignores
+an unlabelled object.
+
+### Plain Prometheus
+
+Without the operator, the same discovery is one `http_sd_configs` job. Keep
+`agent-external` in the job name (the optional `KconmonExternalAgentDown`
+alert matches on it) and `kconmon` (the dashboards filter on it):
+
+```yaml
+- job_name: kconmon-ng-agent-external
+  http_sd_configs:
+    - url: http://kconmon-ng-controller.kconmon-ng.svc:9091/api/v1/prometheus/sd
+      refresh_interval: 30s
+  # The agent.metrics.detail valve by hand; drop the block to keep full detail.
+  metric_relabel_configs:
+    # counters-only: drop the four per-pair histograms.
+    - source_labels: [__name__]
+      regex: kconmon_ng_(tcp_connect_duration|tcp_total_duration|udp_rtt|icmp_rtt)_seconds_(bucket|sum|count)
+      action: drop
+    # zone-only instead: a per-pair series is exactly one naming a destination node.
+    # - source_labels: [destination_node]
+    #   regex: .+
+    #   action: drop
+```
+
+Adjust the Service name and namespace to your release
+(`<release>-controller.<namespace>.svc:<config.metricsPort>`). The targets
+arrive labelled `node`, `zone`, `external="true"` and `agent_id`, and nothing
+else: an agent's own labels never reach Prometheus.
+
+### What to expect
+
+- **Leader only.** The endpoint answers `503 not the leader` from a standby,
+  never an empty list, because Prometheus treats every `200` as the complete
+  new target set and a standby's `[]` would wipe every external target. On a
+  non-200 Prometheus keeps the list it has. With `controller.replicaCount > 1`
+  the Service spreads refreshes over all replicas, so roughly half of them
+  land on a standby: `prometheus_sd_http_failures_total` climbs for the job
+  while the targets stay correct. Cosmetic, and written down here so nobody
+  chases it.
+- **Reachability is yours.** The chart's NetworkPolicy admits the scraper to
+  `metricsPort`; egress from the monitoring namespace to the hosts is your
+  policy, not the chart's. On most CNIs a pod's egress is NATed to the node
+  IP, so the host firewall must admit the **node CIDR**, not "the Prometheus
+  pod's IP". A target the controller lists but Prometheus cannot reach sits
+  at `up == 0`; `prometheusRule.externalAgentDown.enabled` turns that into a
+  warning after 5 minutes.
+- **A 2.3.x host in a 2.4.0 fleet** reports no metrics port, so the
+  controller assumes its own `config.metricsPort` and logs
+  `metrics port assumed from controller config` once per agent. A host on a
+  different port then shows `up == 0` with that log line as the clue: upgrade
+  the package, or move the host to the fleet port.
+- **`KconmonAgentsMissing` no longer counts external agents.** Registered
+  agents include them and expected agents (schedulable nodes) never did, so
+  one external agent used to mask one missing cluster node. Since 2.4.0 the
+  controller exports `<prefix>_controller_external_agents` and the rule
+  subtracts it.
 
 ## What v1 does not do
 
-The limits, so they are a decision you make up front:
+The limits, so they are a decision you make up front. Per-agent ports,
+scraping and console awareness were the v1 gaps 2.4.0 closed; what remains:
 
-- **One port set for the whole fleet.** Peer records carry no per-agent
-  ports: every agent probes its peers on its *own* configured `httpPort`
-  and `grpcPort`. External agents must therefore use the same two values as
-  the in-cluster fleet, and both must be free on the host.
+- **Linux only.** The agent builds for Windows, and TCP, UDP, DNS and HTTP
+  would work as written, but ICMP and MTR would not: the ICMP checker sits on
+  a datagram ICMP socket that `golang.org/x/net/icmp` supports only on Linux
+  and Darwin by its own contract, and raw ICMP on Windows needs the
+  Administrators group, so an agent that also runs on-demand probes for the
+  controller would run as SYSTEM. Go's monotonic clock on Windows is also
+  interrupt-tick granular (up to 15.6 ms), so a sub-millisecond LAN round
+  trip would read as zero or as one tick while the histograms looked valid. A
+  Windows vantage point (TCP, UDP, DNS and HTTP, with ICMP and MTR explicitly
+  unsupported) is designed but not scheduled; the trigger is a concrete host
+  that needs it. CI keeps `GOOS=windows go vet` green on the agent and
+  checker trees so the door stays open at no cost.
 - **Token-only mode allows impersonation inside the fleet.** Any token
   holder can register under any node name, or attach to another agent's
   subscriptions and heartbeats. The token authenticates membership, nothing

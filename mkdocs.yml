@@ -3,9 +3,7 @@ site_name: kconmon-ng
 site_description: >-
   Kubernetes inter-node connectivity monitoring: per-pair, per-protocol
   latency, jitter and packet loss, with MTR traces on failure.
-# TODO(M7-6): set the real GitHub Pages URL before the first deploy — needed
-# for canonical URLs and the sitemap.
-# site_url: https://esdmitrii.github.io/kconmon-ng/
+site_url: https://esdmitrii.github.io/kconmon-ng/
 repo_url: https://github.com/EsDmitrii/kconmon-ng
 repo_name: EsDmitrii/kconmon-ng
 edit_uri: edit/main/docs/
@@ -16,14 +14,6 @@ docs_dir: docs
 exclude_docs: |
   .DS_Store
   .gitkeep
-
-validation:
-  links:
-    # TODO(M7): restore to the default (warn) once the pre-site repo-relative
-    # links in configuration.md (-> ../charts/...) and demo/breaking-cni.md
-    # (-> ../../web/...) are rewritten to point at site pages; until then they
-    # target files outside docs/ and would fail `build --strict`.
-    not_found: info
 
 theme:
   name: material
@@ -96,6 +86,16 @@ markdown_extensions:
       # (charts/kconmon-ng/values.yaml, RELEASE_NOTES.md).
       base_path: !relative $config_dir
       check_paths: true
+
+# Footer icons on every page: the site is the front door, these are the two other doors.
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/EsDmitrii/kconmon-ng
+      name: Source on GitHub
+    - icon: simple/artifacthub
+      link: https://artifacthub.io/packages/helm/kconmon-ng/kconmon-ng
+      name: Helm chart on Artifact Hub
 
 nav:
   - Home: index.md

@@ -117,13 +117,16 @@ kconmon_ng_controller_registered_agents
 kconmon_ng_controller_expected_agents
 ```
 
+The first query returns one series per ordered pair, so N nodes give
+N×(N−1) rows; on the stand these screenshots come from, ten in-cluster agents plus one external agent, that is 110:
+
 <figure markdown="span">
-  ![Prometheus expression browser: kconmon_ng_udp_packet_loss_ratio in table view, six ordered pairs all at 0](../img/install-15-min-first-metrics.png){ loading=lazy }
-  <figcaption>A healthy 3-node install: all six ordered pairs at 0 loss, with source/destination node and zone labels on every series.</figcaption>
+  ![Prometheus query page: kconmon_ng_udp_packet_loss_ratio in Table view, Result series: 110, rows for kconmon-stand pairs at 0 with source_node, destination_node, source_zone and destination_zone labels, edge-host-01 among the destinations in zone external](../img/install-15-min-first-metrics.png){ loading=lazy }
+  <figcaption>A healthy install of ten in-cluster agents plus one external agent: <code>kconmon_ng_udp_packet_loss_ratio</code> returns 110 series, every one at 0, each with source/destination node and zone labels; the external agent shows up as <code>destination_zone="external"</code>.</figcaption>
 </figure>
 
-Every exported family, its labels and the nine bundled alert rules are in the
-[metrics and alerting reference](../metrics.md).
+Every exported family, its labels and the ten bundled alert rules (nine on by
+default) are in the [metrics and alerting reference](../metrics.md).
 
 ### Grafana dashboards
 
@@ -140,9 +143,12 @@ Otherwise import the JSON files from the repo's
 [`dashboards/`](https://github.com/EsDmitrii/kconmon-ng/tree/main/dashboards)
 directory through the Grafana UI.
 
+The cluster-overview dashboard below was captured on the same stand while
+it was healthy, so this is the baseline a clean fleet gives you:
+
 <figure markdown="span">
-  ![Bundled Grafana cluster-overview dashboard on a healthy stand: 3 agents, 0 missing, all-green matrix, 100% success rates](../img/install-15-min-grafana-overview.png){ loading=lazy }
-  <figcaption>The bundled cluster-overview dashboard right after install: fleet complete, every protocol at 100%.</figcaption>
+  ![Bundled Grafana cluster-overview dashboard on a healthy stand, 10:55 to 11:10 UTC: Fleet status with 11 agents registered, 11 reporting, 0 missing, LEADER OK, 110 monitored pairs and 0 pairs with failures; the worst-pair bars for TCP, UDP, ICMP, DNS and UDP packet loss at 0.00%; the fleet and worst-pair failure ratio charts flat at 0 on a 0 to 100% axis; and the Top 10 worst pairs table with 0 failed probes and every ratio at 0.00%](../img/install-15-min-grafana-overview.png){ loading=lazy }
+  <figcaption>The bundled cluster-overview dashboard on a healthy stand: Fleet status (11 registered, 11 reporting, 0 missing, leader OK, 110 monitored pairs, 0 with failures), the failure-ratio bars and charts flat at 0 on a 0-100% axis, and every visible row of the top-10 worst pairs table at 0.00%.</figcaption>
 </figure>
 
 ## No Prometheus Operator?

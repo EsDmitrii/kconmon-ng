@@ -31,8 +31,8 @@ Roles resolve as the union of `groupRoles` (a declarative group→role map in va
 Bearer tokens for calling the [HTTP API](../api.md) without a session. The console stores only a hash of the secret: the value is shown once, at creation ("Copy {name} now — this is the only time it is shown"), and a lost token cannot be read back, only revoked and replaced. Rows show owner, created, last used and expiry; live tokens are *revoked*, spent ones deleted.
 
 <figure markdown>
-![The token-created panel showing the copy-now warning above the tokens table with owner, created, last-used and expires columns](../img/console-settings-tokens.png){ loading=lazy }
-<figcaption>A token just created: the one moment its secret is visible, above the table that will only ever show its metadata.</figcaption>
+![Settings: the Language switch, then the token-created panel Copy demo-ci now — this is the only time it is shown, with the token value painted over, Copy token and I have saved it, above the API tokens table listing two demo-ci tokens (owner system, never used, no expiry, active) with Revoke actions](../img/console-settings-tokens.png){ loading=lazy }
+<figcaption>A token just created: the one moment its secret is visible (the value is painted over in this frame), above the table that will only ever show its metadata: owner, created, last used, expiry, state.</figcaption>
 </figure>
 
 ## Webhooks
@@ -58,11 +58,6 @@ What a receiver's author needs, in one place. The scenario walkthrough is [Set u
 **Export configuration** downloads a JSON bundle of everything *declared* (targets, check definitions, schedules, alert rules, webhook endpoints, maintenance windows), never anything observed. With `rbac:manage`, custom roles too; bindings are exported for the record and never imported.
 
 Choosing a bundle file runs an immediate **dry run** that predicts, per collection, exactly what *Apply import* would do. Two limits to know going in: each section applies only if you hold that page's own permission, and webhook endpoints are never *created* by an import, since a bundle carries no secrets; create the endpoint first and the import applies its url, events and enabled flag on top.
-
-<figure markdown>
-![Export/import section with a bundle chosen: per-collection dry-run predictions above Apply import, and the webhooks section showing a signed badge and a failure streak](../img/console-settings-import.png){ loading=lazy }
-<figcaption>A bundle dry-run: the predictions say what Apply would change before anything changes.</figcaption>
-</figure>
 
 ## Retention
 

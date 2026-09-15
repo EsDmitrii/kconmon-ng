@@ -8,15 +8,32 @@ fire a reactive MTR trace when a probe fails, and export latency, jitter, loss
 and per-hop results as Prometheus metrics — per ordered node pair, per protocol.
 
 An optional [Console](#console-optional) web UI ships in the same chart, off by
-default. The project README has the full tour:
-<https://github.com/EsDmitrii/kconmon-ng#readme>.
+default. The project docs (install guide, console guide, annotated Helm values,
+FAQ) live at <https://esdmitrii.github.io/kconmon-ng/>; the source is on
+[GitHub](https://github.com/EsDmitrii/kconmon-ng).
 
 ## Prerequisites
 
 - Kubernetes 1.31+ (CI tests against 1.36)
 - Helm 4 (Helm ≥3.14 also works; the chart ships as an OCI artifact)
 - Optional: Prometheus Operator, if you want the `ServiceMonitor` and
-  `PrometheusRule` resources (`serviceMonitor.enabled` / `prometheusRule.enabled`)
+  `PrometheusRule` resources (`serviceMonitor.enabled` / `prometheusRule.enabled`),
+  and its `ScrapeConfig` CRD (`scrapeconfigs.monitoring.coreos.com`) if you
+  want the chart to scrape external agents through the controller's HTTP SD
+  endpoint (`scrapeConfig.externalAgents.enabled`; see
+  [Scraping external agents](#scraping-external-agents))
+- `agent.hostNetwork` brings prerequisites of its own, each failing quietly
+  when missed: a namespace at PSS `privileged` or an exemption (`baseline`
+  refuses `hostNetwork` at admission while the release still looks healthy);
+  TCP 8080, UDP 9090 and TCP 9091 (or your `config.*Port` values) free on
+  EVERY node, checked with `ss -lntup` first, since an occupied port
+  CrashLoops the agent on that node alone; `net.ipv4.ping_group_range` set by
+  the node OS, because the kubelet refuses `net.*` pod sysctls under host
+  networking and the chart stops rendering it; and `networkPolicy.nodeCidrs`
+  whenever `networkPolicy.enabled`. The option changes what every in-cluster
+  pair measures (node-to-node underlay, not the CNI datapath); the docs'
+  [External agents](https://esdmitrii.github.io/kconmon-ng/external-agents/#when-the-pod-network-does-not-route)
+  page says when that trade is worth it
 - The agent Pods request NO capabilities. ICMP and MTR run on the unprivileged
   ICMP socket; `NET_RAW` used to be requested and never reached the effective set
   of a non-root container with `allowPrivilegeEscalation: false`, so it bought
@@ -101,13 +118,16 @@ The table below lists the most relevant parameters. See
 | `controller.resources` | requests `50m`/`64Mi`, limits `200m`/`128Mi` | Controller resource requests/limits |
 | `controller.externalGateway.enabled` | `false` | TLS + bootstrap-token gRPC gateway for agents OUTSIDE the cluster, with its own NodePort/LoadBalancer Service exposing the gateway port ALONE (the plaintext in-cluster gRPC port authenticates by network position and never leaves the cluster). Requires `tls.secretName` and `bootstrapToken.secretName`; with `networkPolicy.enabled` also `networkPolicy.externalAgentCidrs`. Rotating the referenced Secrets needs a controller restart |
 | `controller.externalGateway.tls.clientCaKey` | `""` | Key in the TLS Secret holding the CA that signs agent CLIENT certs; setting it pins each cert's CN/URI SAN to the agent's node name. Empty is token-only mode: any token holder can impersonate any agent |
+| `controller.prometheusSD.enabled` | `true` | Serve `GET /api/v1/prometheus/sd` (the external-agent target list Prometheus reads) on `httpPort` and `metricsPort`; `false` answers 404 on both. Written to the shared ConfigMap ONLY when `false`, so a controller image older than 2.4.0 never sees the key |
 | `agent.tolerations` | `[{operator: Exists}]` | Agent DaemonSet tolerations (default: run on all nodes) |
 | `agent.resources` | requests `50m`/`64Mi`, limits `200m`/`128Mi` | Agent resource requests/limits |
 | `agent.securityContext` | `{allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: {drop: [ALL]}}` | Agent container securityContext; add `NET_RAW` yourself only if you also make it effective |
 | `agent.podSecurityContext` | `{runAsNonRoot: true, runAsUser: 65532, seccompProfile: {type: RuntimeDefault}, sysctls: [{name: net.ipv4.ping_group_range, value: "0 2147483647"}]}` | Agent Pod securityContext. `null` deletes the WHOLE sub-tree, restricted-PSS keys included; to drop only the sysctl use `agent.pingGroupRange: false` |
-| `agent.pingGroupRange` | `true` | Render the `net.ipv4.ping_group_range` sysctl. Set `false` on a runtime that already opens it, or where the sysctl is not allowed, without losing the restricted-PSS keys |
-| `agent.metrics.detail` | `full` | Scrape-time cardinality valve on the agent ServiceMonitor: `full \| counters-only \| zone-only` (~70 / ~10 / ~0 series per directed pair). Needs `serviceMonitor.enabled`; `zone-only` needs agents that export the zone metric family. Series math in `docs/metrics.md`, "Scaling and cardinality" |
-| `topology.mode` | `full` | Probe topology plan: `full` probes every peer from every agent; `sparse` trims it to a ring over sorted node names (`topology.sparse.ringDegree`) plus cross-zone chords (`topology.sparse.zoneChords`), with `topology.sparse.autoThreshold` as a fleet-size floor below which the mesh stays full. Needs controller and agent images newer than appVersion 2.2.0 |
+| `agent.pingGroupRange` | `true` | Render the `net.ipv4.ping_group_range` sysctl. Set `false` on a runtime that already opens it, or where the sysctl is not allowed, without losing the restricted-PSS keys. Never rendered under `agent.hostNetwork`, where the kubelet refuses `net.*` pod sysctls and the node OS must set it |
+| `agent.metrics.detail` | `full` | Scrape-time cardinality valve on the agent ServiceMonitor and the external-agent ScrapeConfig: `full \| counters-only \| zone-only` (~70 / ~10 / ~0 series per directed pair). Needs `serviceMonitor.enabled` or `scrapeConfig.externalAgents.enabled`; `zone-only` needs agents that export the zone metric family. Series math in `docs/metrics.md`, "Scaling and cardinality" |
+| `agent.hostNetwork` | `false` | Run the agents in the node's network namespace (node IPs, `hostPort` on all three ports) so external hosts reach them without a routable pod network. Changes WHAT every in-cluster pair measures (the underlay, not the CNI datapath); see [Prerequisites](#prerequisites). Cannot share a machine with a bare-host external agent |
+| `agent.dnsPolicy` | `""` | Pod `dnsPolicy`, passed through verbatim (`ClusterFirst`, `ClusterFirstWithHostNet`, `Default`, `None`). Empty renders `ClusterFirstWithHostNet` under `agent.hostNetwork` (the controller address is a bare Service name only cluster DNS resolves) and nothing otherwise |
+| `topology.mode` | `full` | Probe topology plan: `full` probes every peer from every agent; `sparse` trims it to a ring over sorted node names (`topology.sparse.ringDegree`) plus cross-zone chords (`topology.sparse.zoneChords`), with `topology.sparse.autoThreshold` as a fleet-size floor below which the mesh stays full. Needs controller and agent images at appVersion 2.3.0 or newer |
 | `config.metricsPrefix` | `kconmon_ng` | Prefix for all exported Prometheus metrics |
 | `config.checkers.tcp.enabled` | `true` | Enable TCP checker (interval `5s`, timeout `1s`) |
 | `config.checkers.udp.enabled` | `true` | Enable UDP checker (interval `5s`, timeout `250ms`, `packets: 5`) |
@@ -115,10 +135,18 @@ The table below lists the most relevant parameters. See
 | `config.checkers.dns.enabled` | `true` | Enable DNS checker (interval `5s`, timeout `5s`) |
 | `config.checkers.http.enabled` | `false` | Enable HTTP checker (interval `30s`, timeout `5s`) |
 | `serviceMonitor.enabled` | `false` | Create a Prometheus Operator `ServiceMonitor` |
-| `prometheusRule.enabled` | `false` | Create a Prometheus Operator `PrometheusRule` with the nine built-in alerts ([Alerting rules](#alerting-rules)) |
+| `scrapeConfig.externalAgents.enabled` | `false` | Create a Prometheus Operator `ScrapeConfig` that reads the controller's HTTP SD endpoint and scrapes external agents ([Scraping external agents](#scraping-external-agents)). Refused without `controller.externalGateway.enabled`, or with `controller.prometheusSD.enabled=false` |
+| `scrapeConfig.externalAgents.labels` | `{}` | Selector labels the operator's Prometheus requires on the object: kube-prometheus-stack selects only `release: <its release name>`; an empty `scrapeConfigSelector` needs nothing |
+| `scrapeConfig.externalAgents.jobName` | `""` | Job label; empty means `<release>-agent-external`. Keep `kconmon` in it (the bundled dashboards filter `job=~".*kconmon.*"`) and `agent-external` (the `KconmonExternalAgentDown` rule matches on it) |
+| `scrapeConfig.externalAgents.refreshInterval` | `30s` | How often Prometheus re-reads the target list; matches `config.controllerAgentTtl` |
+| `scrapeConfig.externalAgents.interval` | `""` | Scrape interval; empty falls back to `serviceMonitor.interval` |
+| `prometheusRule.enabled` | `false` | Create a Prometheus Operator `PrometheusRule` with the ten built-in alerts, nine on by default ([Alerting rules](#alerting-rules)) |
 | `prometheusRule.<alertName>` | all enabled | Per-rule `enabled` / `threshold` / `for` / `severity` |
+| `prometheusRule.externalAgentDown.enabled` | `false` | `KconmonExternalAgentDown`: an external agent the SD endpoint lists sits at `up == 0` for `for` (`5m`, `warning`). Off by default because its job exists only with the ScrapeConfig or a hand-written `*agent-external*` job |
 | `prometheusRule.additionalRules` | `[]` | Extra rules appended to the group verbatim |
 | `networkPolicy.enabled` | `false` | Create a `NetworkPolicy` (set `networkPolicy.prometheusNamespace` to allow scraping) |
+| `networkPolicy.externalPeerCidrs` | `[]` | External agents' source CIDRs spliced into the agent↔agent probe rules in both directions (UDP `grpcPort`, TCP `httpPort`, the ports-less ICMP/MTR rule), never into the gateway rule. `externalAgentCidrs` covers registration only; without this list an external agent registers and every cell between it and the cluster stays red |
+| `networkPolicy.nodeCidrs` | `[]` | Node CIDRs admitted to the controller's gRPC port. REQUIRED with `agent.hostNetwork` when policies are on: host-network agents register from node IPs, which no podSelector matches, and the chart refuses to render the policy without it rather than drop every registration silently |
 | `controller.pdb.enabled` | `true` | PodDisruptionBudget for the controller — rendered ONLY at `controller.replicaCount > 1` |
 
 ## Console (optional)
@@ -157,13 +185,52 @@ Selected key metrics:
 - `kconmon_ng_icmp_packet_loss_ratio` — ICMP packet loss ratio (0.0–1.0)
 - `kconmon_ng_zone_{udp,icmp}_packets_{sent,received}_total` — the zone plane's loss counters; the whole `kconmon_ng_zone_*` family is in `docs/metrics.md`
 - `kconmon_ng_dns_results_total` — total DNS resolution results (labelled by `result`)
-- `kconmon_ng_controller_registered_agents` — agents currently registered with the controller
+- `kconmon_ng_controller_registered_agents` — agents currently registered with the controller, external ones included
 - `kconmon_ng_controller_expected_agents` — schedulable nodes expected to run an agent
+- `kconmon_ng_controller_external_agents` — registered agents running outside the cluster (2.4.0+); what `KconmonAgentsMissing` subtracts
+
+### Scraping external agents
+
+In-cluster agents are scraped through their Service by the agent
+`ServiceMonitor`. An [external agent](https://esdmitrii.github.io/kconmon-ng/external-agents/)
+has no Service, so the controller publishes it instead: `GET /api/v1/prometheus/sd`
+answers in Prometheus' HTTP SD format with one target per external agent
+(`<advertised address>:<its metricsPort>`, labels `node`, `zone`, `external`,
+`agent_id` and nothing an agent could inject), served on `config.metricsPort`
+so the scrape NetworkPolicy already admits it. `scrapeConfig.externalAgents.enabled`
+renders a `ScrapeConfig` named `<release>-agent-external` that reads it:
+
+```yaml
+controller:
+  externalGateway:
+    enabled: true          # external agents only exist through the gateway
+scrapeConfig:
+  externalAgents:
+    enabled: true
+    labels:
+      release: kube-prometheus-stack   # whatever your Prometheus' scrapeConfigSelector wants
+```
+
+The object carries the same `agent.metrics.detail` relabelings as the
+ServiceMonitor, so a bare host never returns detail the valve dropped for the
+pods. Two combinations are refused at render time: the ScrapeConfig without
+the gateway (the target list would be empty forever) and with
+`controller.prometheusSD.enabled=false` (every refresh would 404). The endpoint
+is leader-only and answers `503` from a standby rather than an empty list,
+because Prometheus treats every `200` as the complete target set; with
+`controller.replicaCount > 1` the standby's share of refreshes shows up as
+`prometheus_sd_http_failures_total` while the targets stay right. Reaching
+the hosts is the scraper namespace's egress policy, and on most CNIs that
+egress is NATed to a node IP, so the host firewall must admit the node CIDR.
+`prometheusRule.externalAgentDown.enabled` alerts when a listed host stops
+answering scrapes. Without the operator, the plain-Prometheus
+`http_sd_configs` job is in the docs'
+[Scraping external agents](https://esdmitrii.github.io/kconmon-ng/external-agents/#scraping-external-agents).
 
 ## Alerting rules
 
-`prometheusRule.enabled=true` renders one `PrometheusRule` with nine built-in
-alerts. The rules themselves live in the chart
+`prometheusRule.enabled=true` renders one `PrometheusRule` with ten built-in
+alerts, nine of them on by default. The rules themselves live in the chart
 ([`templates/_rules.tpl`](templates/_rules.tpl)), not in `values.yaml`: rule
 text, rate windows and label groupings are chart code, and `values.yaml` carries
 only what an operator actually tunes.
@@ -177,8 +244,9 @@ only what an operator actually tunes.
 | `ExternalChecksFailing` | External **failure ratio** > 10% for 5m | `prometheusRule.externalChecksFailing` | `threshold` `0.1`, `for` `5m`, `severity` `warning` |
 | `ZoneChecksFailing` | zone-pair **failure ratio** across TCP+UDP+ICMP > 5% for 5m | `prometheusRule.zoneChecksFailing` | `threshold` `0.05`, `for` `5m`, `severity` `warning` |
 | `ZoneLossHigh` | zone-pair packet loss (from sent/received counters) > 10% for 5m | `prometheusRule.zoneLossHigh` | `threshold` `0.1`, `for` `5m`, `severity` `warning` |
-| `KconmonAgentsMissing` | `expected_agents - registered_agents > 0` for 10m | `prometheusRule.kconmonAgentsMissing` | `for` `10m`, `severity` `warning` |
+| `KconmonAgentsMissing` | `expected_agents - (registered_agents - external_agents) > 0` for 10m; `external_agents` falls back to 0 on a controller image without the gauge | `prometheusRule.kconmonAgentsMissing` | `for` `10m`, `severity` `warning` |
 | `KconmonControllerDown` | `absent(<prefix>_controller_leader == 1)` for 5m | `prometheusRule.kconmonControllerDown` | `for` `5m`, `severity` `critical` |
+| `KconmonExternalAgentDown` | `up{job=~".*agent-external.*"} == 0` for 5m; **off by default**, the job exists only once external agents are scraped | `prometheusRule.externalAgentDown` | `enabled` `false`, `for` `5m`, `severity` `warning` |
 
 The two `Zone*` rules read the zone-level metric family
 (`<prefix>_zone_*`), which only agents new enough to export it serve — on an
@@ -339,13 +407,20 @@ case it was written for.
 
 ### Self-monitoring
 
-The last two rules watch kconmon-ng itself, so a monitor that goes quiet pages
-you instead of looking healthy. Both need `controller.leaderElection=true`: the
-node informer and the leader metric only run on the leader.
-`KconmonAgentsMissing` is written as a subtraction rather than
-`registered < expected` so that `$value` is the *number of missing agents*; with
-`<` the alert value would be the registered count, the one number an operator
-can already see everywhere.
+`KconmonAgentsMissing` and `KconmonControllerDown` watch kconmon-ng itself,
+so a monitor that goes quiet pages you instead of looking healthy. Both need
+`controller.leaderElection=true`: the node informer and the leader metric only
+run on the leader. `KconmonAgentsMissing` is written as a subtraction rather
+than `registered < expected` so that `$value` is the *number of missing
+agents*; with `<` the alert value would be the registered count, the one
+number an operator can already see everywhere. Since 2.4.0 it subtracts
+`<prefix>_controller_external_agents` from the registered count first:
+`registered_agents` counts bare hosts that came in through the gateway and
+`expected_agents` (schedulable nodes) never did, so one external agent used
+to hide one missing node. The `or registered * 0` fallback keeps the rule
+firing on a controller image that predates the gauge. The third self-watch,
+`KconmonExternalAgentDown`, covers the hosts outside the cluster and ships off
+because its `up` job exists only once they are scraped.
 
 ### Metric prefix
 
@@ -473,7 +548,7 @@ operator; `console.prometheus.url` points the data pages at the server.
 | PostgreSQL | yours, by DSN (`database.existingSecret`) | run one — CNPG, Percona, RDS… |
 | Redis-compatible bus | yours, by DSN (`redis.existingSecret`) | run one — Valkey, Redis, ElastiCache… |
 | Secrets | `existingSecret`, or `secret.create` with an injector | none |
-| Pod hardening | restricted-PSS defaults for every component, agent included (runAsNonRoot, drop ALL, seccomp RuntimeDefault, read-only root) | none — `net.ipv4.ping_group_range` is a kubelet safe sysctl. If you re-add `NET_RAW` to `agent.securityContext`, the agent needs a `privileged` namespace or a PSS exemption — `baseline` refuses an added capability too, and the DaemonSet is then rejected at admission with nothing in the release marked unhealthy |
+| Pod hardening | restricted-PSS defaults for every component, agent included (runAsNonRoot, drop ALL, seccomp RuntimeDefault, read-only root) | none — `net.ipv4.ping_group_range` is a kubelet safe sysctl. If you re-add `NET_RAW` to `agent.securityContext`, or turn on `agent.hostNetwork`, the agent needs a `privileged` namespace or a PSS exemption — `baseline` refuses an added capability and host networking alike, and the DaemonSet is then rejected at admission with nothing in the release marked unhealthy |
 | Prometheus / Grafana themselves | **not installed** — external infrastructure | you run them |
 
 ### GeoLite2 databases keep themselves current
@@ -839,6 +914,9 @@ across the move.
 
 ## Links
 
+- Documentation: <https://esdmitrii.github.io/kconmon-ng/>
+- Helm values reference (this chart, annotated): <https://esdmitrii.github.io/kconmon-ng/reference/helm-values/>
+- Release notes: <https://esdmitrii.github.io/kconmon-ng/reference/release-notes/>
 - GitHub repository: <https://github.com/EsDmitrii/kconmon-ng>
 - Grafana dashboards: [`dashboards/`](https://github.com/EsDmitrii/kconmon-ng/tree/main/dashboards)
   (`overview.json`, `node-detail.json`, `zone-heatmap.json`)

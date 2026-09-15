@@ -81,11 +81,13 @@ interval a probe fails and the agent publishes loss 1.0; Prometheus then
 picks it up on its next scrape (this stand scrapes every 10 s, set by
 `serviceMonitor.interval` in `hack/values-local.yaml`; the chart default is
 15 s). Around 15–20 seconds after the break, five cells stay green and the
-`m02 → m03` cell turns red.
+`m02 → m03` cell turns red. The frame below is the same exercise at a larger
+scale on the stand the screenshots were taken on, with UDP dropped on its way
+into the three zone-b nodes, `worker3`, `worker4` and `worker5`:
 
 <figure markdown="span">
-  ![Matrix on UDP during the staged blackhole: one red m02 to m03 cell, five green cells, Live badge on](../img/catch-a-breakage-matrix-red.png){ loading=lazy }
-  <figcaption>The Matrix mid-break: UDP selected, exactly one red cell for m02 → m03, the Live badge confirming the event stream is up.</figcaption>
+  ![Matrix on UDP, Live, eleven rows in total, ten kconmon-stand nodes plus edge-host-01: the worker3, worker4 and worker5 columns red for every source, 30 cells, each printing a fail ratio of 19 to 22%, every other cell green](../img/catch-a-breakage-matrix-red.png){ loading=lazy }
+  <figcaption>The Matrix mid-break with UDP dropped on its way into zone-b: UDP selected, the worker3, worker4 and worker5 columns red for all ten sources, the external agent <code>edge-host-01</code> among them, while the zone-b rows stay green toward every node outside zone-b. The Live badge confirms the event stream is up.</figcaption>
 </figure>
 
 Now flip the protocol selector to TCP or ICMP: the same cell is green. That
@@ -101,9 +103,14 @@ auto-triggers MTR for the pair, and the demo page walks
 `UDPLossHigh` alert goes *pending* within about half a minute and fires
 after its 5-minute hold.
 
+The pair page below was shot during a different, larger break on the same
+stand, with zone-c (`worker6` and `worker7`) blackholed on TCP, UDP and ICMP.
+That is why `worker3 → worker6` fails on TCP and in both directions, which
+the UDP drop into zone-b above would never produce:
+
 <figure markdown="span">
-  ![Pair card for m02 to m03 during the break: loss chart at 1.0 with the onset cliff, RTT chart, one auto-triggered MTR path entry, events rail](../img/catch-a-breakage-pair-card.png){ loading=lazy }
-  <figcaption>The pair card mid-break: the loss chart cliffs to 1.0 at onset, and the auto-triggered MTR trace is already in path history.</figcaption>
+  ![Pair page for kconmon-stand-worker3 → kconmon-stand-worker6 on its Overview tab: both directions at 100.0% in red in the header, the RTT p95 by protocol chart over the last hour, no open incident, and the Recent changes rail listing tcp diagnostic timeout, dispatched and tcp check failed events](../img/console-pair-page-overview.png){ loading=lazy }
+  <figcaption>The pair page for worker3 → worker6 on the kind stand during the zone-c blackhole, not the zone-b UDP drop: per-direction verdicts in the header (TCP, both failing at 100.0%), the RTT p95 by protocol chart for the last hour, and the Recent changes rail listing the pair's diagnostic timeouts and failed checks as they happen.</figcaption>
 </figure>
 
 Prefer proof in PromQL over pictures? The
@@ -129,7 +136,7 @@ has a loop that checks every node in one go. Then:
 ./hack/local-test.sh down
 ```
 
-**Keep going:** the [full demo](../demo/breaking-cni.md) runs four
-protocol-specific breaks at once, correlates one on the Incidents page, saves
-it as an incident, and wires an alert rule with a signed webhook to the same
-failure.
+**Keep going:** the [full demo](../demo/breaking-cni.md) blackholes UDP on a
+single pair, correlates it on the Incidents page, declares an alert rule scoped
+to that pair and points a signed webhook at it, then cuts off a whole zone and
+two more nodes at once on TCP, UDP and ICMP.

@@ -86,9 +86,10 @@ them down; see [Mesh and planes](mesh-and-planes.md).
 
 The channel is plaintext and unauthenticated, safe only inside the cluster
 boundary: the port is never exposed, and the optional NetworkPolicy pins it
-further. Do not expose it to run agents outside the cluster:
-[External agents](../external-agents.md) explains what that would hand over
-and what is planned instead.
+further. Agents outside the cluster never dial it: since v2.3.0 they connect
+to a separate TLS gateway on the controller, authenticated with a bootstrap
+token or a client certificate. [External agents](../external-agents.md) covers
+the setup and the trust model.
 
 ## Domain events
 

@@ -39,8 +39,8 @@ flag is off. It renders a teaching empty state that names the capability and
 the value that turns it on, and the API routes behind it answer `503`.
 
 <figure markdown="span">
-  ![Incidents page on a database-less console: an empty state naming the missing database flag instead of an error](../img/enable-the-console-degraded.png){ loading=lazy }
-  <figcaption>Incidents on a minimal install: the page explains that history needs a database and which value enables it.</figcaption>
+  ![Overview on a database-less install whose Prometheus has no agent series yet: the Setup progress card (Agents registered 11, Prometheus scraped not yet, First probe round waiting), 11/11 nodes ready plus one external agent, pair tiles showing dashes, and the Open incidents and Recent events panels each saying History needs a database — set console.database.mode](../img/console-overview-setup.png){ loading=lazy }
+  <figcaption>Overview on a minimal install, before Prometheus holds a single agent series: the Setup progress card names the next step, the pair tiles print dashes instead of zeros, and the two history panels explain that history needs a database and which value turns it on, instead of erroring. Eleven agents are registered: ten in the cluster and the external agent counted under the node tile as <em>+1 external agent</em>.</figcaption>
 </figure>
 
 The replicas restriction has a concrete reason. Sessions, the fixed-window
@@ -72,8 +72,8 @@ That gets you the read-only pages as an anonymous viewer on
 <http://localhost:8081>.
 
 <figure markdown="span">
-  ![Fresh console at the minimal enable: Matrix rendering live data, full navigation visible, no login UI](../img/enable-the-console-minimal.png){ loading=lazy }
-  <figcaption>The minimal enable: Matrix serving data from nothing but a Prometheus URL, as an anonymous viewer.</figcaption>
+  ![Matrix on TCP with the Live badge and the anonymous-mode banner: ten kconmon-stand nodes plus the external agent edge-host-01, all 110 cells green](../img/enable-the-console-minimal.png){ loading=lazy }
+  <figcaption>The console in anonymous mode: Matrix on TCP, every one of the 110 pairs green, the external agent <code>edge-host-01</code> included as a row and a column. The <em>Live</em> badge means this stand also had <code>controller.events.enabled</code> on; with the Prometheus URL alone the page polls instead.</figcaption>
 </figure>
 
 Add flags from the table above one at a time as you need them; every knob is

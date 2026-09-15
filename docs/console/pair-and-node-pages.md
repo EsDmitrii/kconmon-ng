@@ -7,8 +7,8 @@ The object pages. None of them is in the sidebar; you reach one by clicking the 
 `/pairs/<source>/<destination>`: one directed pair. The header shows both directed legs as badges, and each badge is a matrix cell's reading — the failure percentage, or *no data* for a pair nothing probed, or *no fail data* for a silent failure counter next to a live p95. That is the matrix's own [two-readings rule](matrix.md#reading-the-heatmap), in the same words.
 
 <figure markdown>
-![Pair page on its Overview tab: the tab strip, tier badge, RTT p95 by protocol chart, and the last-run row with the Run check button](../img/console-pair-page-overview.png){ loading=lazy }
-<figcaption>A pair's Overview tab: the per-protocol RTT chart, with the Overview/Diagnostics strip above it.</figcaption>
+![Pair page for kconmon-stand-worker3 → kconmon-stand-worker6 on its Overview tab during a staged break: both directions at 100.0% in red in the header, Investigate and Time Machine buttons, the RTT p95 by protocol chart for icmp, tcp and udp over the last hour with a TCP spike to nearly 80 ms after 09:35, annotation and maintenance rows, no open incident, and a Recent changes rail of tcp diagnostic timeouts and a failed tcp check](../img/console-pair-page-overview.png){ loading=lazy }
+<figcaption>A pair's Overview tab mid-break: both directions failing at 100.0% in the header, the per-protocol RTT chart with the Overview/Diagnostics strip above it, and the open-incident and Recent changes rails on the right, the latter filling with diagnostic timeouts and failed checks.</figcaption>
 </figure>
 
 The header badges read from the **TCP matrix**, and the card says so ("Pair connectivity (TCP matrix)"). The chart below is per-protocol, so the two can disagree: the badge is a matrix cell and the matrix a badge summarises is one protocol's; the chart is a Prometheus query and asks all three. For a per-protocol *verdict* on this traffic, use the protocol switch on the node page or on [Matrix](matrix.md).
@@ -26,8 +26,8 @@ A pair whose endpoints the fleet does not report gets a named 404 ("This fleet h
 `/nodes/<name>`: one node, both directions. The header shows the zone, the tier badge, and "{percent}% healthy"; when only part of the evidence is scored, the figure carries its own denominator ("{scored} of {total} pairs scored") rather than presenting a claim about one ninth of the node as a claim about the node.
 
 <figure markdown>
-![Node page with the TCP/UDP/ICMP protocol switch and tab strip, Diagnostics tab active showing runs touching this node and the scan note](../img/console-node-page-diagnostics.png){ loading=lazy }
-<figcaption>A node's Diagnostics tab: the protocol switch in the header, and the 20-run scan with its disclosed bound.</figcaption>
+![Node page for the external agent edge-host-01 (Zone external, TCP, 100.0% healthy, Healthy, an external badge) with the TCP/UDP/ICMP switch and the Overview/Diagnostics tabs, Diagnostics active: Runs touching this node with the 20-run scan note, failed HTTP runs every five minutes and one running TCP run, Showing 10 of 20 runs, and a Recent changes rail of tcp check and diagnostic events](../img/console-node-page-diagnostics.png){ loading=lazy }
+<figcaption>A node's Diagnostics tab, here for the external agent <code>edge-host-01</code>: the protocol switch and the <em>external</em> badge in the header, and the 20-run scan with its disclosed bound.</figcaption>
 </figure>
 
 The header also carries a **protocol switch** (TCP / UDP / ICMP). It changes which matrix the whole card reads: the header's tier and health percentage, and the per-destination table below. The choice is written to `?protocol=`, the same URL key Matrix uses, so the view is shareable and the two surfaces cannot spell it differently. On UDP and ICMP the verdict is worst-of failure ratio and packet loss, and the breakdown table grows a **Packet loss** column whenever the cells carry loss: the vector that can decide the tier is the vector that gets a column.
@@ -38,6 +38,13 @@ Two tabs:
 
 - **Agent identity**: Zone, Agent ID, Pod IP, Ready. Readiness comes from the Kubernetes node informer, and a registered agent is not evidence of it, so on a fleet with no k8s node view the field stays an em dash and the hover says why. Zone falls back to what the agent registered with, so that field has an answer either way.
 - **Per-destination breakdown**: a paged table of the node's outgoing pairs (Destination, linking to the pair page; Fail ratio; Packet loss while measured; RTT p95), using the same *no data* / *no fail data* readings as the matrix.
+
+For an [external agent](../external-agents.md) (2.4.0) the card changes shape without changing its words for cluster nodes. The header carries a neutral **external** badge; *Pod IP* becomes **Advertised address**, since a bare host has no Pod and what it registered is the address its peers probe; the Ready dash explains itself on hover with "an external host has no Kubernetes node; readiness is not reported"; and a **Planes** row lists the mesh probes the agent advertised as chips, TCP, UDP, ICMP and MTR, with the ones it left out struck through (a strike survives a monochrome screen where a greyed chip would not). DNS and HTTP are not chips: they are checks against targets, not planes between peers. An agent that advertised no planes at all (older than 2.4.0) shows *unknown*, and the console reads that as every plane rather than none. When Prometheus is not scraping the host, there is no breakdown to page: the table gives way to an empty state saying that its probe results never reach the console, with a link to [Scraping external agents](../external-agents.md#scraping-external-agents).
+
+<figure markdown>
+![Node page for the external agent edge-host-01 on its Overview tab: Zone external, the TCP/UDP/ICMP switch on TCP, 100.0% healthy, Healthy and an external badge in the header; the Agent identity card with Zone external, Agent ID edge-host-01-kconmon-stand-worker10, Advertised address 192.168.97.11, Ready as a dash, and a Planes row of TCP, UDP, ICMP and MTR chips; a per-destination breakdown of ten kconmon-stand nodes, each at 0.0% fail ratio with an RTT p95 between 4.8 and 8.2 ms; no open incident; and a Recent changes rail of failed http checks from edge-host-01 to hooks-sink and their dispatched diagnostics](../img/console-node-page-external.png){ loading=lazy }
+<figcaption>An external agent's Overview tab: the <em>external</em> badge in the header, <em>Advertised address</em> 192.168.97.11 in the slot a cluster node fills with its Pod IP, a dash for Ready, and a <em>Planes</em> row with TCP, UDP, ICMP and MTR, none struck through. The breakdown below lists its ten cluster peers, all at 0.0%.</figcaption>
+</figure>
 
 **Diagnostics** holds **Runs touching this node**: the same 20-run client-side scan as the pair page with the same disclosed bound, listing every run with at least one result on either side of this node.
 
@@ -50,8 +57,8 @@ The right rail holds **Related incidents**, the **Recent changes** feed, and **A
 `/targets/<id>`: one external target, read-only by design; changing targets happens on [Scheduled checks](scheduled-checks.md). The header shows the name, kind, address, and a health verdict computed by an instant Prometheus query: the success share of `kconmon_ng_external_results_total` for this target over 5 minutes. Under the Time Machine that query's evaluation instant moves, which is what "state as of {at}" means for an instant read.
 
 <figure markdown>
-![Target card with its three-tab strip, one definition carrying the no-schedule hint, and the probe-duration chart](../img/console-target-card-checks.png){ loading=lazy }
-<figcaption>A target's Checks &amp; Schedules tab: definitions probing this target, one of them with no schedule and only ever run by hand.</figcaption>
+![Target page legacy-billing-db (host 10.96.200.200:5432, 0.0% healthy, Failing): the Checks & Schedules, History and Runs tabs, the definition legacy-billing-db-tcp (tcp, all, enabled) with an every-15m schedule disabled and a continuous one enabled, no open incident, and an empty Recent changes rail](../img/console-target-card-checks.png){ loading=lazy }
+<figcaption>A target's Checks &amp; Schedules tab: the definition probing this target with each schedule attached to it, the <em>Failing</em> verdict in the header for a database that never answers, and the rails for open incidents and recent changes, both empty here.</figcaption>
 </figure>
 
 Access is layered, and each layer says what it gates. `targets:read` (operator and admin; deliberately not viewer, which is the role an anonymous session gets) shows the header. The definitions and schedules below need `checks:read`; a cadence tells you nothing the definition it belongs to does not, so schedules ride the same permission. The card needs the database outright, since targets are configuration; only the History tab needs Prometheus, and the card says the other tabs do not.
@@ -78,12 +85,17 @@ A bad link gets the same named-404 treatment as the pair page, with one addition
 
 <!-- verified against: web/src/pages/pair-card.tsx (TABS L386-389, useMatrix("tcp"), pairSeriesQuery, RUN_SCAN_LIMIT=20
      + cost comment, useWindowAnchor shared hour, knownNodes/unknownPairEndpoints incl. live-only judgement),
-     web/src/pages/node-card.tsx (TABS L108-111, Segmented PROTOCOLS L533-539, nodeHealth coverage, BreakdownTable
-     loss-column rule, RUN_SCAN_LIMIT=20 L288, zone fallback, readiness informer note, NodeAnnotations 24h),
+     web/src/pages/node-card.tsx (TABS L117, MESH_PLANES tcp/udp/icmp/mtr + why-not-dns/http L64-67, Segmented PROTOCOLS
+     L629, nodeHealth coverage, BreakdownTable loss-column rule, RUN_SCAN_LIMIT=20 L377, zone fallback, readiness informer
+     note, identity card external branches L310-338 (Advertised address, readyNote.external, Planes chips, unknown),
+     external Badge L658-660, unscraped EmptyState L145, NodeAnnotations 24h), web/src/lib/agents.ts (isExternalAgent,
+     agentPlanes null=unknown, unscrapedExternalNodes, EXTERNAL_SCRAPE_DOCS_URL),
      web/src/pages/target-card.tsx (three TABS L571-575, targetHealthQuery/targetDurationQuery + why-duration comment,
      gates: targets:read/checks:read/db/prometheus, runsTouchingTarget spec-names-target rule, instant query at `at`),
-     web/src/lib/i18n/dict/cards.ts (tab.*, cell.noData/noFailData, pair.description "TCP matrix" L140,
-     target.checks.noSchedule, target.history.empty four-way, notFound bodies, scanNote strings),
+     web/src/lib/i18n/dict/cards.ts (tab.*, cell.noData/noFailData, pair.description "TCP matrix",
+     node.external / node.identity.address / node.identity.readyNote.external / node.identity.planes(.unknown) /
+     node.breakdown.empty.unscraped L112-130, target.checks.noSchedule, target.history.empty four-way, notFound
+     bodies, scanNote strings),
      web/src/components/recent-changes.tsx (RECENT_CHANGES_LIMIT=50, RECENT_CHANGES_CAP=200, matchesScope
      either-side rule, db-degraded note, upTo header) + web/src/lib/i18n/dict/recent-changes.ts,
      web/src/routes.tsx (route paths). -->

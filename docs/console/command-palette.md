@@ -3,8 +3,8 @@
 One keystroke to anywhere: two keypresses and a word beat any amount of clicking, and mid-incident it is the fastest route into "run a check" or "start an investigation".
 
 <figure markdown>
-![Palette open with Navigation, Actions and View groups visible, one write action disabled with a Live only tag while the Time Machine is engaged](../img/console-command-palette-actions.png){ loading=lazy }
-<figcaption>All three command groups, with the Time Machine engaged: write actions stay listed but wear the "Live only" tag.</figcaption>
+![The command palette open over a blurred Overview with the Time Machine engaged at 9/15/2026 09:11:00, filtered by an: the Navigation group (Incidents, Metrics, Run checks, Alerting, Settings) and the Actions group with Add an annotation… and Create an alert rule… dimmed and tagged Live only, Start an investigation… available](../img/console-command-palette-actions.png){ loading=lazy }
+<figcaption>The palette over a page rewound with the Time Machine, filtered by <em>an</em>: matches from Navigation and Actions in one list, the write actions dimmed and tagged <strong>Live only</strong>, and <em>Start an investigation…</em> left available.</figcaption>
 </figure>
 
 ## Opening it

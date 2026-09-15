@@ -3,8 +3,8 @@
 View the console at a past instant: what did this page say at 03:12 last night? Open the console *as of* the incident and read every page in that moment's terms, or put two tabs on two `?at=` values for a before/after of a change.
 
 <figure markdown>
-![The engaged Time Machine control in its warning colour beside the range presets, the viewing banner, and the picker popover with calendar and Now button](../img/console-timemachine-engaged.png){ loading=lazy }
-<figcaption>Engaged: the amber control shows the viewed instant, the banner offers Return to Live, and the picker popover holds calendar, date and time fields, and Now.</figcaption>
+![Overview with the Time Machine engaged at 9/15/2026, 11:53:14: the amber banner You are viewing … return to Live to act with a Return to Live button, 68 pairs failing (TCP), 11/11 nodes ready with +1 external agent, 68 failing pairs, the Worst pairs table at 30.5% with kconmon-stand-worker2 → edge-host-01 badged external, the Firing alerts panel saying alert state is a live-only signal, the open incident zone-c blackhole drill, and the time picker popover open with 15m ago, 1h ago, 6h ago and 24h ago presets, a September 2026 calendar with the 15th selected, date and time fields, Now, Cancel and Apply](../img/console-timemachine-engaged.png){ loading=lazy }
+<figcaption>Engaged, with the picker open: the amber control top right shows the viewed instant and opens a popover with relative presets, a calendar, date and time fields and <em>Now</em>. The banner offers <em>Return to Live</em>, and the page reads in that instant's terms: 68 pairs failing on TCP, 11 of 11 nodes ready plus one external agent, <code>edge-host-01</code> badged external in the worst pairs, and a Firing alerts panel explaining that alert state is live-only and has no history here.</figcaption>
 </figure>
 
 ## The ?at= parameter
@@ -45,7 +45,7 @@ Even on time-aware pages, some data has no past to travel to, and each page stat
 - **Alert firing state** is live-only, since Prometheus keeps no firing history (Overview, Incidents).
 - The **MTR Explorer's** route panes are live; those endpoints take no time parameter ([Routes · MTR](routes-mtr.md)).
 - **Run history** is cut to the instant client-side over loaded pages, because `GET /api/v1/runs` has no time filter.
-- A **Topology** past view is a [reconstruction from topology events](topology.md#the-map-under-the-time-machine), bounded by database retention.
+- A **Topology** past view is a [reconstruction from topology events](topology.md#the-map-under-the-time-machine), bounded by database retention. It starts from the topology snapshot the console stores on connect and hourly, so an instant from before the first snapshot shows only the nodes whose agents changed after recording began.
 
 How far back you can go is bounded by `database.retentionDays` (default 90 days) for event-backed views, and by Prometheus's own retention for metric-backed ones.
 

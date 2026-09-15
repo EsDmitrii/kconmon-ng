@@ -68,7 +68,9 @@ const topologyFixture = `{
   ],
   "agents": [
     {"id": "node-1-kconmon-ng-agent-aaaaa", "nodeName": "node-1", "podIP": "10.0.0.1", "zone": "us-east-1a", "lastSeen": "2025-01-01T00:00:00Z"},
-    {"id": "node-2-kconmon-ng-agent-bbbbb", "nodeName": "node-2", "podIP": "10.0.0.2", "zone": "us-east-1b", "lastSeen": "2025-01-01T00:00:00Z"}
+    {"id": "node-2-kconmon-ng-agent-bbbbb", "nodeName": "node-2", "podIP": "10.0.0.2", "zone": "us-east-1b", "lastSeen": "2025-01-01T00:00:00Z"},
+    {"id": "edge-01-agent", "nodeName": "edge-01", "podIP": "192.0.2.10", "zone": "office", "lastSeen": "2025-01-01T00:00:00Z",
+     "labels": {"kconmon-ng.io/external": "true"}, "capabilities": ["external-checks", "plane:tcp", "plane:mtr"]}
   ],
   "timestamp": "2025-01-01T00:00:00Z"
 }`
@@ -90,6 +92,10 @@ func TestTopologyCommandTable(t *testing.T) {
 	if !strings.Contains(out, "NODE") || !strings.Contains(out, "node-1-kconmon-ng-agent-aaaaa") {
 		t.Errorf("unexpected topology table:\n%s", out)
 	}
+	// The external host has no Node in the fixture, so it is listed as a bare-host row of its own.
+	if !strings.Contains(out, "edge-01") || !strings.Contains(out, "192.0.2.10") {
+		t.Errorf("topology table omits the external host:\n%s", out)
+	}
 }
 
 func TestTopologyCommandJSON(t *testing.T) {
@@ -101,8 +107,12 @@ func TestTopologyCommandJSON(t *testing.T) {
 	if err := json.Unmarshal([]byte(out), &snap); err != nil {
 		t.Fatalf("json output not decodable: %v\n%s", err, out)
 	}
-	if len(snap.Nodes) != 2 || len(snap.Agents) != 2 {
+	if len(snap.Nodes) != 2 || len(snap.Agents) != 3 {
 		t.Errorf("unexpected decoded snapshot: %+v", snap)
+	}
+	// -o json is the raw controller body, so labels and capabilities survive for scripts.
+	if !snap.Agents[2].IsExternal() || len(snap.Agents[2].Capabilities) != 3 {
+		t.Errorf("json output lost the external agent's labels/capabilities: %+v", snap.Agents[2])
 	}
 }
 
@@ -113,6 +123,17 @@ func TestAgentsCommand(t *testing.T) {
 	}
 	if !strings.Contains(out, "POD IP") || !strings.Contains(out, "10.0.0.2") {
 		t.Errorf("unexpected agents table:\n%s", out)
+	}
+	if !strings.Contains(out, "EXTERNAL") {
+		t.Errorf("agents table has no EXTERNAL column:\n%s", out)
+	}
+	for _, l := range strings.Split(out, "\n") {
+		if strings.HasPrefix(l, "edge-01-agent") && !strings.Contains(l, "yes") {
+			t.Errorf("external agent row is not marked yes: %q", l)
+		}
+		if strings.HasPrefix(l, "node-1-") && strings.Contains(l, "yes") {
+			t.Errorf("in-cluster agent row is marked external: %q", l)
+		}
 	}
 }
 
@@ -241,5 +262,17 @@ func TestCheckCommandRespectsClientDeadline(t *testing.T) {
 	// we didn't hang indefinitely.
 	if elapsed > 5*time.Second {
 		t.Fatalf("command took %s, want well under 5s", elapsed)
+	}
+}
+
+// TestRootHelpPointsAtDocs pins the docs URL in --help: for a krew user it is the only pointer
+// to the site that ships with the binary.
+func TestRootHelpPointsAtDocs(t *testing.T) {
+	stdout, _, code := runCLI(t, http.NotFoundHandler(), "--help")
+	if code != exitOK {
+		t.Fatalf("exit code = %d, want %d", code, exitOK)
+	}
+	if !strings.Contains(stdout, "Docs: https://esdmitrii.github.io/kconmon-ng/") {
+		t.Fatalf("--help does not mention the docs site:\n%s", stdout)
 	}
 }

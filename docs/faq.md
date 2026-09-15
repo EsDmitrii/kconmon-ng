@@ -11,9 +11,27 @@ Prometheus metrics enriched with zones. It is written in Node.js and was
 archived in June 2026. kconmon-ng is a ground-up Go implementation of the
 same idea, not a fork (no code is shared), extended with ICMP, reactive MTR
 tracing and the Console. Here is the comparison against kconmon, goldpinger
-and kubenurse, included from the project README:
+and kubenurse:
 
---8<-- "README.md:329:348"
+| | kconmon-ng | [kconmon](https://github.com/Stono/kconmon) | [goldpinger](https://github.com/bloomberg/goldpinger) | [kubenurse](https://github.com/postfinance/kubenurse) |
+|---|---|---|---|---|
+| Status | active | archived (June 2026) | active | active |
+| Language | Go | Node.js | Go | Go |
+| Architecture | agent DaemonSet + controller; peer list pushed over gRPC | agent DaemonSet + controller; peers fetched every 5s | one DaemonSet; every pod queries the Kubernetes API for peers | one DaemonSet |
+| Node-to-node probes | TCP, UDP and ICMP on every ordered pair, per protocol | TCP (HTTP GET), UDP | HTTP between pods; UDP optional, off by default | HTTP between neighbours |
+| Other checks | DNS, HTTP(S) URLs, external targets behind an agent-side CIDR allowlist | DNS | DNS; TCP/HTTP(S) to external targets | API server (direct and via DNS), ingress, service |
+| On probe failure | reactive MTR trace, per-hop path history | — | — | — |
+| Zone awareness | `source_zone`/`destination_zone` on every peer metric | zone labels on metrics | — | — |
+| Behaviour at scale | full N×N mesh by default; sparse mesh since v2.3.0 | full N×N mesh | full mesh | caps neighbour checks at 10 nodes by default |
+| UI | optional Console: matrix, topology, incidents, Time Machine, alert rule editor | — (sample Grafana dashboard) | built-in connectivity graph | — (Grafana dashboard provided) |
+
+The table states what each project's README claims as of August 2026; a `—`
+means the README does not claim the feature, not that a flag or fork cannot add
+it. Reach for **goldpinger** when an HTTP-level "can pods see each other" graph
+with a tiny footprint is enough, for **kubenurse** when the question is the path
+through ingress, service and API server rather than raw node-to-node transport,
+and for **kconmon-ng** when you need per-protocol pair evidence — the
+UDP-but-not-TCP class of failure — with the bad hop already traced.
 
 ### Do I need the Prometheus Operator?
 
@@ -87,11 +105,40 @@ an invalid config is rejected while the previous one stays active.
 
 ### Can I run an agent on a host outside the cluster?
 
-Not yet, and do not work around it by exposing the controller's gRPC port:
-that hands the probe mesh to anyone who can reach it.
-[External agents](external-agents.md) states exactly what holds today, what
-blocks it and what is planned; the supported answer meanwhile is the reverse
-direction, [external checks](scenarios/external-targets.md).
+Yes, since v2.3.0. The same agent installs on a bare host from the deb or
+rpm package and joins the mesh through a **separate TLS gateway** on the
+controller: it authenticates with a bearer token and can prove which agent
+it is with a client certificate the gateway pins. The in-cluster plaintext
+gRPC port stays unexposed, and opening it is still the wrong shortcut, since
+it hands the probe mesh to anyone who can reach it.
+[External agents](external-agents.md) walks through the trust model, the
+cluster side and the host side; read
+[What v1 does not do](external-agents.md#what-v1-does-not-do) before you
+plan a rollout. 2.4.0 closes the largest of those gaps: per-agent ports, a
+Prometheus HTTP SD endpoint that makes external hosts scrapable without
+hand-written targets
+([Scraping external agents](external-agents.md#scraping-external-agents)),
+`agent.hostNetwork` for clusters whose pod network the hosts cannot route
+to, and a console that shows external members as what they are. The one
+rule to carry into a mixed fleet: keep one port set until every agent,
+packaged hosts included, runs 2.4.0. If what you need is probing *toward* an external
+destination, [external checks](scenarios/external-targets.md) do that from
+the in-cluster agents with no new trust surface.
+
+### Does the agent run on Windows?
+
+No, and it is not planned without a named user. The agent compiles for
+`windows/amd64`, and four checkers (TCP, UDP, DNS, HTTP) would work as
+written, but the two that make this tool what it is do not: ICMP and MTR
+sit on a datagram ICMP socket that `golang.org/x/net/icmp` supports only on
+Linux and Darwin by its own contract, and the raw-socket alternative on
+Windows needs the Administrators group, so an agent that also runs on-demand
+probes for the controller would run as SYSTEM. On top of that, Go's
+`time.Now()` on Windows is tick-granular (up to 15.6 ms), so a 0.3 ms LAN
+round trip reads as zero or as one tick and the histograms look valid while
+being wrong. A Windows vantage point is tracked as a tier-2 backlog item
+(TCP, UDP, DNS and HTTP, with ICMP and MTR explicitly unsupported); the
+trigger is a concrete host that needs it.
 
 ## Scale
 
@@ -101,8 +148,10 @@ direction, [external checks](scenarios/external-targets.md).
 probes, it is the metrics: each directed pair keeps roughly 70 active series
 and pairs grow as N×(N−1), which lands around 690k series at 100 nodes. The
 full arithmetic is in
-[Scaling and cardinality](metrics.md#scaling-and-cardinality); a sparse mesh
-for larger fleets is on the roadmap.
+[Scaling and cardinality](metrics.md#scaling-and-cardinality). For larger
+fleets, `topology.mode: sparse` (since v2.3.0) trims the probed pairs to a
+ring over the node names plus cross-zone chords, so the series count grows
+roughly linearly with node count instead of quadratically.
 
 ### My Prometheus is drowning — what are the levers?
 
@@ -120,12 +169,17 @@ agent pods, and the agent then stops exporting that protocol's families at
 the source.
 
 !!! warning "Check your agent version before `zone-only`"
-    The zone family comes from the agent image, and the chart still pins
-    agent 2.0.3, which does not export it. On such a fleet `zone-only` drops
-    the per-pair series with nothing replacing them: Prometheus goes dark on
-    the mesh, and the two zone alerts sit inert. Upgrade the agent image
-    first; the [v2.2.0 release notes](reference/release-notes.md) spell out
-    the order.
+    The zone family comes from the agent image, and every chart since 2.3.0
+    pins an agent that exports it, so a default install is fine. The trap is
+    a fleet running an older agent image behind a newer chart (an image tag
+    override, or host packages nobody upgraded): there `zone-only` drops the
+    per-pair series with nothing replacing them, Prometheus goes dark on the
+    mesh, and the two zone alerts sit inert. Upgrade the agent image first;
+    the [v2.3.0 release notes](reference/release-notes.md) spell out the
+    order. The same rule carries into 2.4.0, which adds per-agent ports,
+    Prometheus HTTP SD, `agent.hostNetwork` and console awareness of
+    external agents: each arrives with the image, and a mixed fleet falls
+    back to the older behaviour rather than breaking.
 
 ### Why is everything in one zone / why does Topology say no zone?
 
@@ -144,9 +198,9 @@ A bounded trade-off, made once and stated out loud: the port is never
 exposed outside the cluster, and the optional NetworkPolicy pins it further.
 Outside that boundary the same channel is disqualifying, since anyone who
 can reach it can register agents, receive the full peer list and steer the
-fleet's probes. That is why external agents are planned around a **separate**
-authenticated TLS gateway rather than around "just expose the port". Details
-in [External agents](external-agents.md).
+fleet's probes. That is why external agents come in through a **separate**
+authenticated TLS gateway (shipped in v2.3.0) rather than through "just
+expose the port". Details in [External agents](external-agents.md).
 
 ### Is the Console safe to expose?
 

@@ -99,7 +99,9 @@ Check types:
 Exit codes:
   0  command succeeded (for check/mtr: the probe ran and passed)
   1  CLI or API error (bad arguments, node not found, timeout, no controller)
-  2  the check ran to completion but reported failure — useful in scripts`,
+  2  the check ran to completion but reported failure — useful in scripts
+
+Docs: https://esdmitrii.github.io/kconmon-ng/`,
 		Example: `  # Where is everything and are all agents registered?
   kubectl kconmon topology
   kubectl kconmon agents

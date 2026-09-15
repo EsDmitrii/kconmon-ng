@@ -5,8 +5,8 @@ Loss appeared on a pair. Before blaming either endpoint, ask the question this p
 ## Explorer
 
 <figure markdown>
-![MTR Explorer with a destination expanded to its source nodes, a path history showing a hop change row, and the Path diff pane open](../img/console-routes-mtr-explorer.png){ loading=lazy }
-<figcaption>Explorer: destinations on the left, one pair's route history in the middle with a "hop 3: a → b" change row, and a two-route diff open.</figcaption>
+![MTR Explorer: the Destinations list with edge-host-01 expanded (10 paths · 16 traces) to its ten source rows, kconmon-stand-worker3 selected, and the Path history for kconmon-stand-worker3 → edge-host-01: a note that loss is shown for the last 24h, a note that the pair has no loss series over the window, and one route of 2 hops, hash a2d46d355389, 2 traces between 9/14/2026 09:36:33 and 9/15/2026 09:47:12, ending with 1 path · 2 traces · nothing older is retained](../img/console-routes-mtr-explorer.png){ loading=lazy }
+<figcaption>Explorer: destinations on the left, the external agent <code>edge-host-01</code> expanded to its per-source rows, and the chosen pair's path history on the right: a single route (worker3 → * → 192.168.97.11 → edge-host-01, 2 hops, 2 traces) with a tick box for comparing routes, under the two notes that stand in for the loss chart, and the line saying nothing older is retained.</figcaption>
 </figure>
 
 Three panes, left to right:
@@ -38,8 +38,8 @@ With enrichment enabled, each hop row gains an expandable disclosure with up to 
 An interval MTR is how you prove a flapping path: a route that alternates shows up as two distinct routes trading places in history, which a single instant trace cannot see.
 
 <figure markdown>
-![MTR Runner with an interval duration chosen, the cadence caption visible, trace interval on Auto and a pairs estimate](../img/console-routes-mtr-runner.png){ loading=lazy }
-<figcaption>Runner: an interval run planned, with the cadence caption and the "~N pairs" estimate shown before Start.</figcaption>
+![MTR Runner tab: Duration set to Instant with the caption One trace per pair, right now.; Destination kind Nodes; Sources and Destinations both All nodes (12); the estimate ~132 pairs; a Start MTR button](../img/console-routes-mtr-runner.png){ loading=lazy }
+<figcaption>Runner: an instant run planned across every node the pickers list, with the duration caption and the "~132 pairs" estimate shown before Start.</figcaption>
 </figure>
 
 ## Deep links

@@ -30,20 +30,20 @@ broke.
 [Install in 15 minutes](getting-started/install-15-min.md){ .md-button .md-button--primary }
 
 <figure markdown="span">
-  ![Console Overview: cluster health summary, worst node pairs, firing alerts and open incidents](img/console-overview.png){ loading=lazy }
-  <figcaption>The Overview page on a live 3-node cluster: health tiles, worst pairs, a firing alert and an open incident.</figcaption>
+  ![Console Overview on a kind cluster with an external agent: all 110 pairs healthy, 11/11 nodes ready plus one external agent, no failing or degraded pairs, no firing alert, one open incident](img/console-overview.png){ loading=lazy }
+  <figcaption>The Overview page on a kind cluster with ten in-cluster agents and the external agent edge-host-01: all 110 pairs healthy, 11/11 nodes ready plus one external agent, an empty worst-pairs panel over 110 measured pairs, no firing alert and one open incident, a zone-c blackhole drill.</figcaption>
 </figure>
 
 <div class="grid" markdown>
 
 <figure markdown="span">
-  ![Console Matrix: N×N heatmap of node-to-node loss and latency, one cell per ordered pair](img/console-matrix.png){ loading=lazy }
-  <figcaption>The Matrix on UDP with one pair blackholed: a single red cell, five green.</figcaption>
+  ![Console Matrix, TCP, live, during a staged break: worker2, worker5, worker6 and worker7 red at 100% as rows and columns, 68 of 110 cells red, the external agent edge-host-01 green as a row and a column everywhere except toward the four broken nodes](img/console-matrix.png){ loading=lazy }
+  <figcaption>The Matrix on TCP, live, mid-break: worker2, worker5, worker6 and worker7 are red at 100% as rows and as columns, 68 of 110 cells. The external agent edge-host-01 is the top row and the first column, green against every healthy node and red only where the break is.</figcaption>
 </figure>
 
 <figure markdown="span">
-  ![Console Time Machine: the same matrix resolved at a past instant instead of now](img/console-timemachine.png){ loading=lazy }
-  <figcaption>The same Matrix rewound with <code>?at=</code>: the Time Machine bar marks the viewed instant.</figcaption>
+  ![Console Time Machine: the Matrix resolved at 9/15/2026 09:36:00 instead of now, the amber banner and time control marking the instant, all 110 cells green including the edge-host-01 row and column](img/console-timemachine.png){ loading=lazy }
+  <figcaption>The Matrix rewound with <code>?at=</code> to 9/15/2026 09:36:00, a minute before the break in the frame above: the amber banner and time control mark the viewed instant, and every one of the 110 pairs is green, the external agent's row and column included.</figcaption>
 </figure>
 
 </div>
@@ -86,6 +86,16 @@ broke.
     [probe external targets](scenarios/external-targets.md),
     [wire up OIDC](scenarios/oidc-setup.md).
 
+-   **[External agents](external-agents.md)**
+
+    ---
+
+    Since v2.3.0 the same agent runs on a host outside the cluster: deb or
+    rpm on the host, a TLS gateway on the controller, a bearer token and
+    optional client-certificate pinning. The trust model and
+    [what v1 does not do](external-agents.md#what-v1-does-not-do) are
+    stated up front.
+
 -   **[Reference](reference/helm-values.md)**
 
     ---
@@ -101,5 +111,16 @@ broke.
 
     The questions that come up: privileges, controller outages, scale
     limits, what is safe to expose.
+
+-   **[Project](https://github.com/EsDmitrii/kconmon-ng)**
+
+    ---
+
+    Source on [GitHub](https://github.com/EsDmitrii/kconmon-ng); the chart
+    on [Artifact Hub](https://artifacthub.io/packages/helm/kconmon-ng/kconmon-ng)
+    and as `oci://ghcr.io/esdmitrii/charts/kconmon-ng`; images
+    `ghcr.io/esdmitrii/kconmon-ng-{agent,controller,console}` on
+    [GHCR](https://github.com/EsDmitrii?tab=packages&repo_name=kconmon-ng);
+    the [release notes](reference/release-notes.md).
 
 </div>
