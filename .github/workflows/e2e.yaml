@@ -264,6 +264,179 @@ jobs:
           # so it is unroutable regardless.
           KCONMON_DENIED_TARGET_ADDR: 203.0.113.10:80
 
+      # ---- External-agent leg: gateway, one simulated bare-host agent, HTTP SD ----------------
+      # The run above covers the in-cluster fleet. What follows upgrades the same release with the
+      # controller's external gateway on (e2e/testdata/gateway-values.yaml), joins ONE simulated
+      # external agent through it, and checks what an operator relies on for a bare host: the
+      # topology marks it external at the node's address with its ports, the SD endpoint publishes
+      # it, a Prometheus reading that endpoint scrapes it, the console matrix and the CLI show it.
+      # The degraded-mode steps further down are untouched: they reinstall WITHOUT this overlay.
+
+      # The plugin is asserted through its table output, the way people read it.
+      - name: Build kubectl-kconmon
+        run: go build -o "$RUNNER_TEMP/kubectl-kconmon" ./cmd/kubectl-kconmon
+
+      # Vendored verbatim from prometheus-operator v0.89.0 and applied server-side; the fixture's
+      # header says why. This is what makes the chart's ScrapeConfig admissible on kind.
+      - name: Apply the ScrapeConfig CRD
+        run: |
+          kubectl apply --server-side -f e2e/testdata/scrapeconfig-crd.yaml
+          kubectl wait --for condition=established \
+            crd/scrapeconfigs.monitoring.coreos.com \
+            --timeout=60s
+
+      # A plain Prometheus, not the operator (see e2e/testdata/prometheus.yaml's header). It reads
+      # the SD endpoint itself and is what the console queries for the matrix from here on.
+      - name: Apply the Prometheus fixture
+        run: |
+          kubectl apply -f e2e/testdata/prometheus.yaml
+          kubectl wait --for=condition=ready pod \
+            -l app=kconmon-e2e-prometheus \
+            --timeout=120s
+
+      # Self-signed, made per run and discarded with the cluster, like the webhook key. The agent
+      # dials the gateway by node IP, so every node's InternalIP is an IP SAN; the DNS SAN is the
+      # rendered Service name for anyone dialing from inside. Three Secrets, referenced by name from
+      # gateway-values.yaml and external-agent-pod.yaml: the serving pair and the token for the
+      # controller, and the agent's own copy of CA plus token, never the private key.
+      - name: Create the gateway TLS and token Secrets
+        run: |
+          mkdir -p "$RUNNER_TEMP/gateway"
+          cd "$RUNNER_TEMP/gateway"
+          SAN="DNS:kconmon-ng-controller-external,DNS:kconmon-ng-controller-external.default.svc"
+          for ip in $(kubectl get nodes \
+              -o jsonpath='{range .items[*]}{.status.addresses[?(@.type=="InternalIP")].address}{" "}{end}'); do
+            SAN="$SAN,IP:$ip"
+          done
+          echo "SAN: $SAN"
+          openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -days 2 \
+            -subj "/CN=kconmon-e2e-gateway-ca" \
+            -addext "basicConstraints=critical,CA:TRUE" -addext "keyUsage=critical,keyCertSign" \
+            -keyout ca.key -out ca.crt
+          openssl req -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes \
+            -subj "/CN=kconmon-ng-controller-external" -keyout tls.key -out tls.csr
+          printf 'subjectAltName=%s\nextendedKeyUsage=serverAuth\nbasicConstraints=CA:FALSE\n' "$SAN" > tls.ext
+          openssl x509 -req -in tls.csr -CA ca.crt -CAkey ca.key -CAcreateserial -days 2 \
+            -extfile tls.ext -out tls.crt
+          openssl x509 -in tls.crt -noout -ext subjectAltName
+          openssl rand -hex 24 > token
+          kubectl create secret tls kconmon-e2e-gateway-tls --cert=tls.crt --key=tls.key \
+            --dry-run=client -o yaml | kubectl apply -f -
+          kubectl create secret generic kconmon-e2e-gateway-token --from-file=token=token \
+            --dry-run=client -o yaml | kubectl apply -f -
+          kubectl create secret generic kconmon-e2e-external-agent-creds \
+            --from-file=ca.crt=ca.crt --from-file=token=token \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+      # Same release, same images, one more values file. helm takes the values wholesale (no
+      # --reuse-values), so the degraded reinstall below, which passes only the first two files,
+      # removes the gateway again by itself.
+      - name: Enable the external gateway and the ScrapeConfig
+        run: |
+          helm upgrade --install kconmon-ng ./charts/kconmon-ng \
+            -f e2e/testdata/values.yaml \
+            -f e2e/testdata/console-values.yaml \
+            -f e2e/testdata/gateway-values.yaml \
+            --set controller.image.repository=kconmon-ng-controller \
+            --set controller.image.tag=test \
+            --set controller.image.pullPolicy=Never \
+            --set agent.image.repository=kconmon-ng-agent \
+            --set agent.image.tag=test \
+            --set agent.image.pullPolicy=Never \
+            --set console.image.repository=kconmon-ng-console \
+            --set console.image.tag=test \
+            --set console.image.pullPolicy=Never \
+            --wait \
+            --timeout 5m
+          # --wait returns while the OLD controller and console pods may still be Terminating (the
+          # trap the degraded-mode step documents), and items[0] below would pick them. One of each.
+          for component in controller console; do
+            for _ in $(seq 60); do
+              PODS=$(kubectl get pods -l app.kubernetes.io/component=$component --no-headers | wc -l)
+              [ "$PODS" -eq 1 ] && break
+              sleep 2
+            done
+          done
+          kubectl get pods -o wide
+          # The two objects the overlay adds, as the apiserver holds them: the gateway Service on the
+          # pinned NodePort, and the ScrapeConfig the operator's real schema admitted.
+          kubectl get service kconmon-ng-controller-external \
+            -o jsonpath='{.spec.type} {.spec.ports[0].nodePort}'
+          echo
+          kubectl get scrapeconfig kconmon-ng-agent-external \
+            -o jsonpath='{.spec.jobName} {.spec.httpSDConfigs[0].url}'
+          echo
+
+      # One Pod on the host network of the worker the controller is NOT on, so the gateway hop is a
+      # real node-to-node one. Node name and gateway address exist only at run time, hence sed; the
+      # tests get the same name and IP through GITHUB_ENV.
+      - name: Run a simulated external agent
+        run: |
+          CONTROLLER_NODE=$(kubectl get pods \
+            -l app.kubernetes.io/component=controller \
+            -o jsonpath='{.items[0].spec.nodeName}')
+          EXTERNAL_NODE=$(kubectl get nodes -l '!node-role.kubernetes.io/control-plane' \
+            -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' \
+            | grep -v "^${CONTROLLER_NODE}$" | head -n 1)
+          node_ip() {
+            kubectl get node "$1" -o jsonpath='{.status.addresses[?(@.type=="InternalIP")].address}'
+          }
+          NODE_PORT=$(kubectl get service kconmon-ng-controller-external \
+            -o jsonpath='{.spec.ports[0].nodePort}')
+          GATEWAY_ADDR="$(node_ip "$CONTROLLER_NODE"):$NODE_PORT"
+          EXTERNAL_NODE_IP=$(node_ip "$EXTERNAL_NODE")
+          echo "controller on $CONTROLLER_NODE, gateway $GATEWAY_ADDR"
+          echo "external agent on $EXTERNAL_NODE ($EXTERNAL_NODE_IP)"
+          sed -e "s/__NODE_NAME__/$EXTERNAL_NODE/" -e "s/__CONTROLLER_ADDRESS__/$GATEWAY_ADDR/" \
+            e2e/testdata/external-agent-pod.yaml > "$RUNNER_TEMP/external-agent-pod.yaml"
+          kubectl apply -f "$RUNNER_TEMP/external-agent-pod.yaml"
+          kubectl wait --for=condition=ready pod kconmon-e2e-external-agent --timeout=120s
+          kubectl logs kconmon-e2e-external-agent --tail=20
+          {
+            echo "EXTERNAL_NODE=$EXTERNAL_NODE"
+            echo "EXTERNAL_NODE_IP=$EXTERNAL_NODE_IP"
+          } >> "$GITHUB_ENV"
+
+      # The controller is forwarded on BOTH listeners: the SD route is asserted on the metrics one
+      # (what the ScrapeConfig and the scrape NetworkPolicy use) and compared with the API one.
+      - name: Run the external-agent E2E tests
+        run: |
+          CONTROLLER_POD=$(kubectl get pods \
+            -l app.kubernetes.io/component=controller \
+            -o jsonpath='{.items[0].metadata.name}')
+          kubectl port-forward "pod/$CONTROLLER_POD" 8080:8080 9091:9091 &
+          CONTROLLER_PF_PID=$!
+
+          CONSOLE_POD=$(kubectl get pods \
+            -l app.kubernetes.io/component=console \
+            -o jsonpath='{.items[0].metadata.name}')
+          kubectl port-forward "pod/$CONSOLE_POD" 8081:8080 &
+          CONSOLE_PF_PID=$!
+
+          kubectl port-forward service/kconmon-e2e-prometheus 9095:9090 &
+          PROM_PF_PID=$!
+          sleep 3
+
+          go test -tags=e2e -v -count=1 ./e2e/... -run 'TestExternal' -timeout 15m
+
+          kill "$CONTROLLER_PF_PID" "$CONSOLE_PF_PID" "$PROM_PF_PID" || true
+        env:
+          KCONMON_CONTROLLER_URL: http://localhost:8080
+          KCONMON_SD_URL: http://localhost:9091
+          KCONMON_CONSOLE_URL: http://localhost:8081
+          KCONMON_PROMETHEUS_URL: http://localhost:9095
+          KCONMON_EXTERNAL_NODE_IP: ${{ env.EXTERNAL_NODE_IP }}
+          # agent.nodeName in e2e/testdata/external-agent-pod.yaml.
+          KCONMON_EXTERNAL_NODE_NAME: edge-host-01
+          # job_name of the http_sd job in e2e/testdata/prometheus.yaml.
+          KCONMON_EXTERNAL_JOB: kconmon-ng-agent-external
+          KCONMON_KUBECTL_KCONMON: ${{ runner.temp }}/kubectl-kconmon
+
+      # The degraded reinstall drops the gateway overlay; an external agent left behind would sit
+      # redialing a closed port. Remove it so that step sees the fleet the main run had.
+      - name: Retire the external agent
+        run: kubectl delete -f "$RUNNER_TEMP/external-agent-pod.yaml" --ignore-not-found --wait=true
+
       # The console skips the reconciler when there is no database -- alert rules live in PostgreSQL.
       #
       # Chart 2.x has no console.database.mode: the database is on exactly when a DSN Secret is named,
@@ -325,6 +498,11 @@ jobs:
           kubectl logs -l app.kubernetes.io/component=console --tail=50 || true
           echo "=== Postgres logs ==="
           kubectl logs -l app=kconmon-e2e-postgres --tail=50 || true
+          echo "=== External agent (gateway leg) ==="
+          kubectl get pod kconmon-e2e-external-agent -o wide || true
+          kubectl logs kconmon-e2e-external-agent --tail=50 || true
+          echo "=== Prometheus fixture logs (gateway leg) ==="
+          kubectl logs -l app=kconmon-e2e-prometheus --tail=50 || true
           echo "=== PrometheusRule objects (M7) ==="
           kubectl get prometheusrules -o yaml || true
           echo "=== Alerting RBAC (M7) ==="

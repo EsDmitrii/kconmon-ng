@@ -1,0 +1,39 @@
+---
+# Gateway overlay for the external-agent leg of .github/workflows/e2e.yaml; layered on top of
+# values.yaml and console-values.yaml (this file last, so it wins). It turns the controller's
+# external gateway on with the smallest shape kind can serve, and points the console at the
+# fixture Prometheus so the matrix has something to read.
+controller:
+  externalGateway:
+    enabled: true
+    service:
+      # NodePort, not LoadBalancer: kind has no cloud controller, so a LoadBalancer would stay
+      # <pending> forever. The fixed port is what the external-agent manifest dials
+      # (<nodeIP>:30943), so it is pinned rather than left to the apiserver.
+      type: NodePort
+      nodePort: 30943
+    # Both Secrets are created by the workflow right before this upgrade (openssl self-signed pair,
+    # openssl rand token) and referenced BY NAME, the same convention as the Postgres DSN and the
+    # webhook key. clientCaKey is left empty on purpose: token-only mode is the leg's subject, the
+    # client-certificate pinning path is covered by the chart's ci/external-gateway-values.yaml.
+    tls:
+      secretName: kconmon-e2e-gateway-tls
+    bootstrapToken:
+      secretName: kconmon-e2e-gateway-token
+
+# Applies against the real ScrapeConfig CRD (e2e/testdata/scrapeconfig-crd.yaml). No operator reads
+# it on kind; the assertion is that the chart's object is valid under the operator's own schema.
+# labels stays empty: nothing selects it. The two intervals are lowered from the defaults so the
+# object mirrors the pace the fixture Prometheus actually runs at.
+scrapeConfig:
+  externalAgents:
+    enabled: true
+    labels: {}
+    refreshInterval: 10s
+    interval: 5s
+
+# The fixture Prometheus from e2e/testdata/prometheus.yaml. Absent from console-values.yaml on
+# purpose: the main run pins the console's no-Prometheus branches, this leg pins the matrix.
+console:
+  prometheus:
+    url: http://kconmon-e2e-prometheus:9090
