@@ -1,4 +1,7 @@
 {{- if .Values.networkPolicy.enabled }}
+{{- if and .Values.agent.hostNetwork (not .Values.networkPolicy.nodeCidrs) }}
+{{- fail "agent.hostNetwork and networkPolicy.enabled are both true but networkPolicy.nodeCidrs is empty: host-network agents register from their NODE's IP, and Kubernetes leaves NetworkPolicy behaviour for hostNetwork pods undefined; the common implementation treats their traffic as node-IP traffic, which no podSelector matches, so every registration except the agent on the controller's own node would be dropped silently while the config looks correct. Set networkPolicy.nodeCidrs to the node CIDRs (plain strings), or ask for the open shape explicitly with [0.0.0.0/0]" }}
+{{- end }}
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -26,6 +29,11 @@ spec:
             matchLabels:
               {{- include "kconmon-ng.selectorLabels" . | nindent 14 }}
               app.kubernetes.io/component: agent
+        {{- /* Host-network agents register from node IPs, which no podSelector matches. */}}
+        {{- range .Values.networkPolicy.nodeCidrs }}
+        - ipBlock:
+            cidr: {{ . | quote }}
+        {{- end }}
       ports:
         - protocol: TCP
           port: {{ .Values.config.grpcPort }}
@@ -35,6 +43,12 @@ spec:
             matchLabels:
               {{- include "kconmon-ng.selectorLabels" . | nindent 14 }}
               app.kubernetes.io/component: agent
+        {{- /* External agents probe from outside the pod network: their CIDRs are peers in every
+               agent-to-agent rule, ingress and egress, and never in the gateway rule. */}}
+        {{- range .Values.networkPolicy.externalPeerCidrs }}
+        - ipBlock:
+            cidr: {{ . | quote }}
+        {{- end }}
       ports:
         - protocol: UDP
           port: {{ .Values.config.grpcPort }}
@@ -53,6 +67,10 @@ spec:
             matchLabels:
               {{- include "kconmon-ng.selectorLabels" . | nindent 14 }}
               app.kubernetes.io/component: agent
+        {{- range .Values.networkPolicy.externalPeerCidrs }}
+        - ipBlock:
+            cidr: {{ . | quote }}
+        {{- end }}
     {{- if .Values.console.enabled }}
     # Console to controller HTTP API (topology); the Prometheus rule below only covers this when prometheusNamespace is empty.
     - from:
@@ -105,6 +123,10 @@ spec:
     # and this rule opens that. Letting a scraper in and letting a caller drive the fleet are now two
     # different decisions, which is the only shape a NetworkPolicy can express.
     #
+    # The controller's external-agent target list (GET /api/v1/prometheus/sd, read by the
+    # scrapeConfig.externalAgents ScrapeConfig) is served on this same listener, so discovery needs
+    # no rule of its own. Reaching the hosts is the scraper namespace's egress policy, not this chart's.
+    #
     # RENDERED ONLY WITH networkPolicy.prometheusNamespace SET: with it unset the chart cannot name
     # the scraper's namespace, so it opens nothing and the scrape fails visibly (up = 0).
     - from:
@@ -137,6 +159,10 @@ spec:
             matchLabels:
               {{- include "kconmon-ng.selectorLabels" . | nindent 14 }}
               app.kubernetes.io/component: agent
+        {{- range .Values.networkPolicy.externalPeerCidrs }}
+        - ipBlock:
+            cidr: {{ . | quote }}
+        {{- end }}
       ports:
         - protocol: UDP
           port: {{ .Values.config.grpcPort }}
@@ -158,6 +184,10 @@ spec:
             matchLabels:
               {{- include "kconmon-ng.selectorLabels" . | nindent 14 }}
               app.kubernetes.io/component: agent
+        {{- range .Values.networkPolicy.externalPeerCidrs }}
+        - ipBlock:
+            cidr: {{ . | quote }}
+        {{- end }}
     {{- if .Values.config.checkers.external.enabled }}
     {{- if not .Values.networkPolicy.externalEgress }}
     {{- fail "config.checkers.external.enabled is true and networkPolicy.enabled is true but networkPolicy.externalEgress is empty: external targets take tcp/icmp/mtr on operator-chosen ports and NetworkPolicy v1 cannot express ICMP as a port rule, so the only default the chart could render is a ports-less rule to 0.0.0.0/0 — allow-everything egress, which it will not do silently. Set networkPolicy.externalEgress to the egress rules your targets need, scoped to config.checkers.external.allowedCidrs (e.g. [{to: [{ipBlock: {cidr: 10.0.0.0/8}}]}]; omit ports on an entry to allow ICMP to that peer), or ask for the old permissive shape explicitly with [{to: [{ipBlock: {cidr: 0.0.0.0/0}}]}]" }}

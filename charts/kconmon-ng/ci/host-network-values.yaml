@@ -1,0 +1,17 @@
+---
+# Exercises agent.hostNetwork at its documented shape: the DaemonSet in the node's network namespace
+# with dnsPolicy inferred (ClusterFirstWithHostNet), pingGroupRange left at its default to prove the
+# chart drops the pod sysctl the kubelet would refuse, the NetworkPolicy with the node CIDRs the
+# controller gRPC rule now needs plus the external peers' CIDRs on the agent-to-agent rules, and the
+# ServiceMonitor, whose endpoints carry node IPs from here on.
+agent:
+  hostNetwork: true
+networkPolicy:
+  enabled: true
+  prometheusNamespace: monitoring
+  nodeCidrs:
+    - 10.0.0.0/8
+  externalPeerCidrs:
+    - 203.0.113.0/24
+serviceMonitor:
+  enabled: true
