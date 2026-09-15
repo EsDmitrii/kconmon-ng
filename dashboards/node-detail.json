@@ -389,7 +389,7 @@
         "type": "prometheus",
         "uid": "${datasource}"
       },
-      "description": "Traces this node triggered on its own, which is an independent signal that it saw a link degrade.",
+      "description": "Traces this node ran over the last hour: the ones its own failed probes triggered plus any the console asked for. Read it against the node's usual count; the number on its own is not a health verdict.",
       "gridPos": {
         "h": 4,
         "w": 4,
@@ -401,7 +401,8 @@
       "fieldConfig": {
         "defaults": {
           "color": {
-            "mode": "thresholds"
+            "mode": "fixed",
+            "fixedColor": "text"
           },
           "decimals": 0,
           "mappings": [],
@@ -411,14 +412,6 @@
               {
                 "color": "green",
                 "value": null
-              },
-              {
-                "color": "yellow",
-                "value": 1
-              },
-              {
-                "color": "red",
-                "value": 10
               }
             ]
           }
@@ -426,7 +419,7 @@
         "overrides": []
       },
       "options": {
-        "colorMode": "background",
+        "colorMode": "value",
         "graphMode": "none",
         "justifyMode": "auto",
         "orientation": "auto",
@@ -495,6 +488,7 @@
             "axisColorMode": "text",
             "axisLabel": "",
             "axisPlacement": "auto",
+            "axisSoftMax": 1,
             "barAlignment": 0,
             "drawStyle": "line",
             "fillOpacity": 8,
@@ -910,6 +904,7 @@
             "axisColorMode": "text",
             "axisLabel": "",
             "axisPlacement": "auto",
+            "axisSoftMax": 1,
             "barAlignment": 0,
             "drawStyle": "line",
             "fillOpacity": 8,
@@ -1325,6 +1320,7 @@
             "axisColorMode": "text",
             "axisLabel": "",
             "axisPlacement": "auto",
+            "axisSoftMax": 1,
             "barAlignment": 0,
             "drawStyle": "line",
             "fillOpacity": 8,
@@ -1423,6 +1419,7 @@
             "axisColorMode": "text",
             "axisLabel": "",
             "axisPlacement": "auto",
+            "axisSoftMax": 1,
             "barAlignment": 0,
             "drawStyle": "line",
             "fillOpacity": 8,
@@ -1521,6 +1518,7 @@
             "axisColorMode": "text",
             "axisLabel": "",
             "axisPlacement": "auto",
+            "axisSoftMax": 1,
             "barAlignment": 0,
             "drawStyle": "line",
             "fillOpacity": 8,

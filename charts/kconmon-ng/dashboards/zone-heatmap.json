@@ -48,7 +48,7 @@
             "inspect": false,
             "minWidth": 70
           },
-          "decimals": 3,
+          "decimals": 1,
           "mappings": [],
           "thresholds": {
             "mode": "absolute",
@@ -73,7 +73,7 @@
           {
             "matcher": {
               "id": "byName",
-              "options": "source_zone\\destination_zone"
+              "options": "from \\ to"
             },
             "properties": [
               {
@@ -119,11 +119,41 @@
       ],
       "transformations": [
         {
+          "id": "sortBy",
+          "options": {
+            "fields": {},
+            "sort": [
+              {
+                "field": "destination_zone"
+              }
+            ]
+          }
+        },
+        {
           "id": "groupingToMatrix",
           "options": {
             "columnField": "destination_zone",
             "rowField": "source_zone",
             "valueField": "Value"
+          }
+        },
+        {
+          "id": "sortBy",
+          "options": {
+            "fields": {},
+            "sort": [
+              {
+                "field": "source_zone\\destination_zone"
+              }
+            ]
+          }
+        },
+        {
+          "id": "organize",
+          "options": {
+            "renameByName": {
+              "source_zone\\destination_zone": "from \\ to"
+            }
           }
         }
       ],
@@ -155,7 +185,6 @@
             "inspect": false,
             "minWidth": 70
           },
-          "decimals": 4,
           "mappings": [],
           "thresholds": {
             "mode": "absolute",
@@ -180,7 +209,7 @@
           {
             "matcher": {
               "id": "byName",
-              "options": "source_zone\\destination_zone"
+              "options": "from \\ to"
             },
             "properties": [
               {
@@ -226,11 +255,41 @@
       ],
       "transformations": [
         {
+          "id": "sortBy",
+          "options": {
+            "fields": {},
+            "sort": [
+              {
+                "field": "destination_zone"
+              }
+            ]
+          }
+        },
+        {
           "id": "groupingToMatrix",
           "options": {
             "columnField": "destination_zone",
             "rowField": "source_zone",
             "valueField": "Value"
+          }
+        },
+        {
+          "id": "sortBy",
+          "options": {
+            "fields": {},
+            "sort": [
+              {
+                "field": "source_zone\\destination_zone"
+              }
+            ]
+          }
+        },
+        {
+          "id": "organize",
+          "options": {
+            "renameByName": {
+              "source_zone\\destination_zone": "from \\ to"
+            }
           }
         }
       ],
@@ -262,7 +321,6 @@
             "inspect": false,
             "minWidth": 70
           },
-          "decimals": 4,
           "mappings": [],
           "thresholds": {
             "mode": "absolute",
@@ -287,7 +345,7 @@
           {
             "matcher": {
               "id": "byName",
-              "options": "source_zone\\destination_zone"
+              "options": "from \\ to"
             },
             "properties": [
               {
@@ -333,11 +391,41 @@
       ],
       "transformations": [
         {
+          "id": "sortBy",
+          "options": {
+            "fields": {},
+            "sort": [
+              {
+                "field": "destination_zone"
+              }
+            ]
+          }
+        },
+        {
           "id": "groupingToMatrix",
           "options": {
             "columnField": "destination_zone",
             "rowField": "source_zone",
             "valueField": "Value"
+          }
+        },
+        {
+          "id": "sortBy",
+          "options": {
+            "fields": {},
+            "sort": [
+              {
+                "field": "source_zone\\destination_zone"
+              }
+            ]
+          }
+        },
+        {
+          "id": "organize",
+          "options": {
+            "renameByName": {
+              "source_zone\\destination_zone": "from \\ to"
+            }
           }
         }
       ],
@@ -369,7 +457,7 @@
             "inspect": false,
             "minWidth": 70
           },
-          "decimals": 3,
+          "decimals": 1,
           "mappings": [],
           "thresholds": {
             "mode": "absolute",
@@ -394,7 +482,7 @@
           {
             "matcher": {
               "id": "byName",
-              "options": "source_zone\\destination_zone"
+              "options": "from \\ to"
             },
             "properties": [
               {
@@ -440,11 +528,41 @@
       ],
       "transformations": [
         {
+          "id": "sortBy",
+          "options": {
+            "fields": {},
+            "sort": [
+              {
+                "field": "destination_zone"
+              }
+            ]
+          }
+        },
+        {
           "id": "groupingToMatrix",
           "options": {
             "columnField": "destination_zone",
             "rowField": "source_zone",
             "valueField": "Value"
+          }
+        },
+        {
+          "id": "sortBy",
+          "options": {
+            "fields": {},
+            "sort": [
+              {
+                "field": "source_zone\\destination_zone"
+              }
+            ]
+          }
+        },
+        {
+          "id": "organize",
+          "options": {
+            "renameByName": {
+              "source_zone\\destination_zone": "from \\ to"
+            }
           }
         }
       ],
@@ -476,7 +594,7 @@
             "inspect": false,
             "minWidth": 70
           },
-          "decimals": 3,
+          "decimals": 1,
           "mappings": [],
           "thresholds": {
             "mode": "absolute",
@@ -501,7 +619,7 @@
           {
             "matcher": {
               "id": "byName",
-              "options": "source_zone\\destination_zone"
+              "options": "from \\ to"
             },
             "properties": [
               {
@@ -547,11 +665,41 @@
       ],
       "transformations": [
         {
+          "id": "sortBy",
+          "options": {
+            "fields": {},
+            "sort": [
+              {
+                "field": "destination_zone"
+              }
+            ]
+          }
+        },
+        {
           "id": "groupingToMatrix",
           "options": {
             "columnField": "destination_zone",
             "rowField": "source_zone",
             "valueField": "Value"
+          }
+        },
+        {
+          "id": "sortBy",
+          "options": {
+            "fields": {},
+            "sort": [
+              {
+                "field": "source_zone\\destination_zone"
+              }
+            ]
+          }
+        },
+        {
+          "id": "organize",
+          "options": {
+            "renameByName": {
+              "source_zone\\destination_zone": "from \\ to"
+            }
           }
         }
       ],
@@ -576,8 +724,7 @@
           "custom": {
             "align": "center",
             "cellOptions": {
-              "type": "color-background",
-              "mode": "gradient"
+              "type": "auto"
             },
             "filterable": false,
             "inspect": false,
@@ -591,14 +738,6 @@
               {
                 "color": "green",
                 "value": null
-              },
-              {
-                "color": "yellow",
-                "value": 1
-              },
-              {
-                "color": "red",
-                "value": 10
               }
             ]
           }
@@ -607,7 +746,7 @@
           {
             "matcher": {
               "id": "byName",
-              "options": "source_zone\\destination_zone"
+              "options": "from \\ to"
             },
             "properties": [
               {
@@ -653,11 +792,41 @@
       ],
       "transformations": [
         {
+          "id": "sortBy",
+          "options": {
+            "fields": {},
+            "sort": [
+              {
+                "field": "destination_zone"
+              }
+            ]
+          }
+        },
+        {
           "id": "groupingToMatrix",
           "options": {
             "columnField": "destination_zone",
             "rowField": "source_zone",
             "valueField": "Value"
+          }
+        },
+        {
+          "id": "sortBy",
+          "options": {
+            "fields": {},
+            "sort": [
+              {
+                "field": "source_zone\\destination_zone"
+              }
+            ]
+          }
+        },
+        {
+          "id": "organize",
+          "options": {
+            "renameByName": {
+              "source_zone\\destination_zone": "from \\ to"
+            }
           }
         }
       ],
@@ -811,6 +980,7 @@
             "axisColorMode": "text",
             "axisLabel": "",
             "axisPlacement": "auto",
+            "axisSoftMax": 1,
             "barAlignment": 0,
             "drawStyle": "line",
             "fillOpacity": 8,
@@ -921,6 +1091,7 @@
             "axisColorMode": "text",
             "axisLabel": "",
             "axisPlacement": "auto",
+            "axisSoftMax": 1,
             "barAlignment": 0,
             "drawStyle": "line",
             "fillOpacity": 8,
@@ -1154,6 +1325,7 @@
             "axisColorMode": "text",
             "axisLabel": "",
             "axisPlacement": "auto",
+            "axisSoftMax": 1,
             "barAlignment": 0,
             "drawStyle": "line",
             "fillOpacity": 8,
@@ -1350,6 +1522,7 @@
             "axisColorMode": "text",
             "axisLabel": "",
             "axisPlacement": "auto",
+            "axisSoftMax": 1,
             "barAlignment": 0,
             "drawStyle": "line",
             "fillOpacity": 8,
