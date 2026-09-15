@@ -59,11 +59,24 @@ spec:
       tolerations:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+      {{- if .Values.agent.hostNetwork }}
+      hostNetwork: true
+      {{- end }}
+      {{- /* Empty dnsPolicy means ClusterFirstWithHostNet under hostNetwork: controllerAddress is a bare
+             Service name, and a host-network pod left on ClusterFirst reads the node's resolv.conf. */}}
+      {{- $dns := .Values.agent.dnsPolicy }}
+      {{- if and (not $dns) .Values.agent.hostNetwork }}
+      {{- $dns = "ClusterFirstWithHostNet" }}
+      {{- end }}
+      {{- with $dns }}
+      dnsPolicy: {{ . }}
+      {{- end }}
       {{- /* The sysctl is appended to podSecurityContext rather than living inside it, so switching it
              off does not take runAsNonRoot / runAsUser / seccompProfile with it -- the three keys a
              namespace enforcing restricted PSS requires. */}}
       {{- $podSec := deepCopy (.Values.agent.podSecurityContext | default dict) }}
-      {{- if .Values.agent.pingGroupRange }}
+      {{- /* Never under hostNetwork: the kubelet refuses net.* sysctls in the host netns (SysctlForbidden, pkg/kubelet/sysctl/allowlist.go), so the node OS sets it. */}}
+      {{- if and .Values.agent.pingGroupRange (not .Values.agent.hostNetwork) }}
       {{- $podSec = merge $podSec (dict "sysctls" (list (dict "name" "net.ipv4.ping_group_range" "value" "0 2147483647"))) }}
       {{- end }}
       {{- with $podSec }}
@@ -78,16 +91,29 @@ spec:
             {{- with .Values.agent.securityContext }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
+          {{- /* hostPort must equal containerPort under hostNetwork; declaring it lets the scheduler see
+                 clashes with other hostPort pods (node daemons stay invisible to it and CrashLoop the agent). */}}
           ports:
             - name: http
               containerPort: {{ .Values.config.httpPort }}
+              {{- if .Values.agent.hostNetwork }}
+              hostPort: {{ .Values.config.httpPort }}
+              {{- end }}
               protocol: TCP
             - name: metrics
               containerPort: {{ .Values.config.metricsPort }}
+              {{- if .Values.agent.hostNetwork }}
+              hostPort: {{ .Values.config.metricsPort }}
+              {{- end }}
               protocol: TCP
+            {{- /* Named grpc for compatibility, but on an agent config.grpcPort is the UDP echo port (internal/agent/probe_server.go)
+                   and nothing listens on TCP there; the scheduler keys hostPort clashes on protocol, so TCP would guard an unused port. */}}
             - name: grpc
               containerPort: {{ .Values.config.grpcPort }}
-              protocol: TCP
+              {{- if .Values.agent.hostNetwork }}
+              hostPort: {{ .Values.config.grpcPort }}
+              {{- end }}
+              protocol: UDP
           env:
             - name: KCONMON_NG_NODE_NAME
               valueFrom:
@@ -97,10 +123,16 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.name
+            {{- /* The kubelet already reports the node IP as podIP for a host-network pod; naming hostIP
+                   keeps that intent in the manifest instead of leaning on the aliasing. */}}
             - name: KCONMON_NG_POD_IP
               valueFrom:
                 fieldRef:
-                  fieldPath: status.podIP
+                  fieldPath: {{ if .Values.agent.hostNetwork }}status.hostIP{{ else }}status.podIP{{ end }}
+            {{- if .Values.agent.hostNetwork }}
+            - name: KCONMON_NG_HOST_NETWORK
+              value: "true"
+            {{- end }}
             {{- if .Values.agent.zone }}
             - name: KCONMON_NG_ZONE
               valueFrom:

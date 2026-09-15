@@ -16,6 +16,7 @@ process lifecycle. Knowing which saves a confused hour:
 | --- | --- | --- |
 | `agent` (identity: `nodeName`, `advertiseAddress`, `zone`) | next agent restart | a changed identity is a different agent to every peer, so it is resolved once at startup |
 | `agent.tls.*`, `agent.bootstrapTokenFile` (file *contents*) | next reconnect, no restart | the agent re-reads certificate and token files on every dial |
+| `httpPort`, `grpcPort`, `metricsPort` | next restart | listeners bind once per process; the ports an agent advertises to its peers (2.4.0+) travel with its registration, so they change only when it registers again |
 | `controller.externalGateway` | next controller restart | the TLS listener is built once, before serving starts; the token is read once with it |
 
 Rotating gateway material therefore means restarting the controller; rotating
@@ -63,6 +64,11 @@ controller:
   events:
     # Serve EventStream.WatchEvents; leader-only, needs a controller newer than v1.3.3.
     enabled: false
+  # GET /api/v1/prometheus/sd on httpPort and metricsPort: the external-agent
+  # target list for Prometheus (2.4.0+). false answers 404 on both; only
+  # `enabled` is accepted under this key.
+  prometheusSD:
+    enabled: true
   # Second gRPC listener for agents OUTSIDE the cluster: same services, same
   # registry, but TLS plus a bearer token. The in-cluster listener is untouched.
   externalGateway:
@@ -137,10 +143,12 @@ The controller's `httpPort` serves its whole API (`GET /api/v1/topology`,
 authenticates anything. A NetworkPolicy rule that let a scraper reach
 `/metrics` on that port therefore let the scraper's entire namespace reach the
 fleet's control plane, and a NetworkPolicy cannot say "this port, but only
-these paths". Two listeners can: `metricsPort` carries `/metrics` plus the
-health endpoints and nothing else, so "let Prometheus in" and "let this caller
-drive the fleet" become two different firewall decisions. The API port keeps
-serving `/metrics` too; nothing in the chart opens it to a scraper any more.
+these paths". Two listeners can: `metricsPort` carries `/metrics`, the health
+endpoints and, on the controller, the read-only external-agent target list
+for Prometheus (`GET /api/v1/prometheus/sd`, since 2.4.0), so "let Prometheus
+in" and "let this caller drive the fleet" become two different firewall
+decisions. The API port keeps serving `/metrics` too; nothing in the chart
+opens it to a scraper any more.
 
 ### Validation rules the loader enforces
 
@@ -205,7 +213,8 @@ that a hung resolver cannot pin a task slot.
 | `KCONMON_NG_ADVERTISE_ADDRESS`    | `agent.advertiseAddress` |
 | `KCONMON_NG_ZONE`                 | `agent.zone` (in-cluster: injected by Downward API) |
 | `KCONMON_NG_POD_NAME`             | injected by Downward API; not a config key |
-| `KCONMON_NG_POD_IP`               | injected by Downward API; not a config key |
+| `KCONMON_NG_POD_IP`               | injected by Downward API; not a config key (`status.hostIP` under `agent.hostNetwork`) |
+| `KCONMON_NG_HOST_NETWORK`         | set to `true` by the chart under `agent.hostNetwork`; a 2.4.0+ agent image then adds the label `kconmon-ng.io/host-network=true` to its registration, older images ignore it; not a config key |
 
 The identity block shares its env names with the chart's Downward API
 injection on purpose: the same ConfigMap can be mounted fleet-wide while each
@@ -232,8 +241,24 @@ every key resolves the same way in-cluster and on a bare host:
 
 An agent started without `KCONMON_NG_POD_NAME` (that is, outside any Pod) is
 labeled `kconmon-ng.io/external=true` in its registration metadata, so
-consoles and API consumers can tell bare-host agents apart. The controller
-needs no configuration for any of this.
+consoles and API consumers can tell bare-host agents apart. A 2.4.0+ agent
+started with `KCONMON_NG_HOST_NETWORK=true` (what the chart sets under
+`agent.hostNetwork`) adds `kconmon-ng.io/host-network=true` the same way. The
+controller needs no configuration for any of this.
+
+### Ports travel with the identity
+
+Since 2.4.0 the registration also carries the agent's three listener ports:
+`httpPort` (the TCP probe target), `grpcPort` (on an agent, the UDP echo port;
+reported as `udpPort`) and `metricsPort` (never probed; published so Prometheus
+can [discover external hosts](external-agents.md#scraping-external-agents)).
+Peers probe an agent on the ports *it* reported, so an external host may run on
+ports of its own. An agent that reports none (older than 2.4.0) is probed on
+the prober's own configured ports, and the agent itself never adopts ports from
+the controller's reply; zone is the only field it takes from there. The rule
+that follows, spelled out in [External agents](external-agents.md#ports):
+keep one port set for the whole fleet until every agent runs 2.4.0, because an
+old agent dials every peer on its own values, on-demand diagnostics included.
 
 ## Helm values that matter most
 
@@ -270,7 +295,7 @@ serviceMonitor:
   interval: 15s
 
 prometheusRule:
-  enabled: true # deploy the nine built-in alerting rules
+  enabled: true # deploy the built-in alerting rules (ten; externalAgentDown ships off)
   udpLossHigh:
     threshold: 0.25 # per-rule knobs: enabled / threshold / for / severity
     # a threshold may also be a string ("0.25") — that is what --set produces

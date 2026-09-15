@@ -8,7 +8,7 @@ is half of this page:
 | Port | Default | Serves | Who talks to it |
 | --- | --- | --- | --- |
 | `httpPort` | 8080 | the HTTP API below, plus `/metrics` for backward compatibility | Console, `kubectl-kconmon`, curl |
-| `metricsPort` | 9091 | `/metrics`, `/healthz`, `/readyz` and nothing else | Prometheus (this is the port the chart scrapes) |
+| `metricsPort` | 9091 | `/metrics`, `/healthz`, `/readyz`; on the controller also `GET /api/v1/prometheus/sd`, the external-agent target list | Prometheus (this is the port the chart scrapes, and the one its `ScrapeConfig` reads discovery from) |
 | `grpcPort` | 9090 | agent-controller gRPC; on agents, also the UDP probe server | the fleet itself |
 | `controller.externalGateway.port` | 9443 | a second gRPC listener: TLS plus a bearer token, for [external agents](external-agents.md) | bare-host agents |
 
@@ -23,7 +23,11 @@ why `/metrics` got a listener of its own: a NetworkPolicy cannot say "this
 port, but only these paths", so admitting a scraper to the API port admitted
 the scraper's whole namespace to the fleet's control plane. Two listeners make
 "let Prometheus in" and "let this caller drive the fleet" two separate
-decisions.
+decisions. The one route added to the metrics listener since 2.4.0 follows
+the same logic: the external-agent target list is served there precisely
+because that is the port the scrape rule opens, so discovery needs no second
+hole in the policy. It is read-only and discloses only what a scraper is
+about to scrape anyway.
 
 ## Agent
 
@@ -45,6 +49,7 @@ decisions.
 | `/api/v1/version`     | GET  | Build info plus capability flags; see below                              |
 | `/api/v1/diagnostics` | POST | Run a one-shot connectivity check between two nodes (leader only)        |
 | `/api/v1/external-checks` | PUT  | Replace the fleet's continuous external-check assignment (leader only) |
+| `/api/v1/prometheus/sd` | GET  | Prometheus HTTP SD body listing external agents as scrape targets (leader only; also served on `metricsPort`) |
 
 ### `GET /api/v1/version`
 
@@ -86,7 +91,10 @@ report a topology with no agents.
       "nodeName": "node-1",
       "podIP": "10.0.0.1",
       "zone": "us-east-1a",
-      "capabilities": ["external-checks"]
+      "capabilities": ["external-checks", "plane:tcp", "plane:udp", "plane:icmp", "plane:dns", "plane:mtr"],
+      "httpPort": 8080,
+      "udpPort": 9090,
+      "metricsPort": 9091
     },
     {
       "id": "edge-host-01-edge-host-01",
@@ -94,12 +102,27 @@ report a topology with no agents.
       "podIP": "203.0.113.10",
       "zone": "external",
       "labels": { "kconmon-ng.io/external": "true" },
-      "capabilities": ["external-checks"]
+      "capabilities": ["external-checks", "plane:tcp", "plane:udp", "plane:icmp", "plane:dns", "plane:mtr"],
+      "httpPort": 18080,
+      "udpPort": 19090,
+      "metricsPort": 19091
     }
   ],
   "timestamp": "2025-01-01T00:00:00Z"
 }
 ```
+
+`httpPort`, `udpPort` and `metricsPort` are the listener ports the agent
+reported at registration (2.4.0 and newer): the TCP probe target, the UDP
+echo target, and the `/metrics` listener that is never probed but feeds
+[scrape discovery](#get-apiv1prometheussd). They are omitted for an agent
+that reported none, and a probing peer then falls back to its own configured
+ports, which is why a mixed fleet keeps one port set
+([External agents](external-agents.md#ports)). `labels` is the agent's own
+registration map, verbatim: `kconmon-ng.io/external: "true"` on any agent
+running outside a Pod, and `kconmon-ng.io/host-network: "true"` on a 2.4.0
+agent image running under `agent.hostNetwork`, whose `podIP` is then the
+node's address.
 
 While a sparse topology plan is in force (`topology.mode: sparse`, fleet at or
 above `topology.sparse.autoThreshold`), the snapshot also carries `probePlan`:
@@ -122,7 +145,71 @@ automatically on any agent running outside a Pod), and `podIP` holds its
 advertised address rather than a pod IP (the field name predates bare-host
 agents, but the value is always "the address peers probe"). `capabilities`
 lists what each agent build advertised at registration; a pre-v1.6.0 agent
-sends none.
+sends none. Since 2.4.0 the list also carries `plane:<protocol>` entries
+naming the probe planes the agent runs (one per enabled checker, `plane:mtr`
+always): an agent with no `plane:` entry at all is older than 2.4.0 and must
+be read as running every plane, never as running none. The Console applies
+exactly that fail-open rule.
+
+### `GET /api/v1/prometheus/sd`
+
+The Prometheus
+[HTTP service discovery](https://prometheus.io/docs/prometheus/latest/configuration/configuration/#http_sd_config)
+body for [external agents](external-agents.md#scraping-external-agents): one
+target group per agent registered from outside the cluster, so that a bare
+host, which no `ServiceMonitor` can select, is still scraped. Mounted on
+`httpPort` and, because that is the port the scrape NetworkPolicy opens, on
+`metricsPort` too. `GET` only; the mux answers `405` to anything else.
+
+```json
+[
+  {
+    "targets": ["203.0.113.10:19091"],
+    "labels": {
+      "node": "edge-host-01",
+      "zone": "external",
+      "external": "true",
+      "agent_id": "edge-host-01-edge-host-01"
+    }
+  }
+]
+```
+
+Headers are `Content-Type: application/json` and `Cache-Control: no-store`:
+every refresh must see the registry as it is now, since a cached body would
+outlive an eviction. The rules:
+
+- **One group per external agent**, ordered by node name (agent ID breaks
+  ties) and deduplicated by target address, first in that order wins: a
+  rolling restart on a host can briefly leave two records at one address,
+  which Prometheus would otherwise scrape twice under two label sets. IPv6
+  addresses are bracketed (`[fd00::1]:9091`). In-cluster agents never appear.
+- **The port** is the agent's reported `metricsPort` (agents 2.4.0 and
+  newer). An older agent reports none, and the controller substitutes its own
+  `config.metricsPort` as captured at startup, logging
+  `metrics port assumed from controller config` once per agent ID (fields
+  `agent`, `node`, `address`, `port`), so a host on a non-default port is
+  diagnosable instead of silently `up == 0`.
+- **The label set is fixed**: `node`, `zone`, `external` (always `"true"`)
+  and `agent_id`. The agent's own registration labels are never copied
+  through: an agent owns its labels map, and copying it would let a host
+  inject arbitrary target labels, `__address__` included, into Prometheus.
+- **No external agents** is the literal `[]` with `200`, the same convention
+  as every other list this API serves.
+- **Leader only**, through the same gate as `/api/v1/topology`: a standby
+  answers `503 not the leader` as `text/plain`. Never `200 []`: Prometheus
+  reads every `200` as the complete new target list, so an empty body from a
+  standby would drop every external target, whereas on a non-200 it keeps
+  the list it has, which is exactly right until the next refresh lands on
+  the leader. With more than one replica behind the Service, expect
+  `prometheus_sd_http_failures_total` to climb on the standby's share of
+  refreshes while the targets stay right.
+- **Off** (`controller.prometheusSD.enabled: false`, default `true`) means
+  `404` on both ports, for operators who would rather not disclose external
+  hosts' addresses to everything admitted to `metricsPort`. The chart writes
+  the key into the shared ConfigMap only when it is `false`, so a controller
+  image older than 2.4.0 never sees it. The trust consequences are in
+  [SECURITY.md](https://github.com/EsDmitrii/kconmon-ng/blob/main/SECURITY.md).
 
 ### `POST /api/v1/diagnostics`
 
