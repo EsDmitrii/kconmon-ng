@@ -1,3 +1,272 @@
+## kconmon-ng v2.4.0
+
+> External agents stop being second-class. A host outside the cluster now
+> tells its peers where it listens, gets scraped without a hand-written
+> target, and shows up as what it is in the console, the CLI and the Time
+> Machine. One rule comes with it, and it is the one to read before rolling
+> out: **per-agent ports are honoured only by upgraded agents; keep one port
+> set until every agent, deb/rpm hosts included, runs 2.4.0.** An older agent
+> reports no ports and dials every peer on its own configured values, so in a
+> fleet whose ports differ each old agent goes one-way red toward every peer
+> listening elsewhere, its on-demand diagnostics included. The full skew
+> matrix is under Upgrade notes at the end of this section.
+
+### Added
+
+- **Per-agent ports on the wire.** `AgentMeta` gains `http_port`,
+  `udp_port` and `metrics_port`. Every agent reports its three listener
+  ports at registration, and peers probe it on the ones it reported, for the
+  scheduled mesh and for on-demand tasks alike, so an external host no longer
+  has to mirror the cluster's port pair. Zero means "not reported" (an agent
+  older than 2.4.0): the prober then dials its own configured port, each port
+  falling back on its own. The controller refuses a port above 65535, peer
+  lists carry the two probe ports but not `metrics_port` (nobody dials it),
+  and an agent never adopts ports from the controller's reply; zone stays the
+  only thing it takes from there. See
+  [Ports](https://esdmitrii.github.io/kconmon-ng/external-agents/#ports).
+- **Prometheus HTTP SD for external agents.** A bare host has no Service for
+  a ServiceMonitor to select, so the controller, the one party that knows
+  the host registered and on which address, now publishes it:
+  `GET /api/v1/prometheus/sd`, served on `httpPort` and on `metricsPort` (the
+  port the chart's scrape NetworkPolicy already opens). The contract:
+    - one target group per external agent, `<advertised address>:<metricsPort>`,
+      sorted by node name and deduplicated by address;
+    - a fixed label set, `node`, `zone`, `external="true"` and `agent_id`. An
+      agent's own labels never reach Prometheus, so a host cannot inject
+      target labels;
+    - with no external agent registered the body is the literal `[]`, and
+      the list is always served with `Cache-Control: no-store`;
+    - a standby answers `503 not the leader`, never `200 []`: Prometheus reads
+      every 200 as the complete target set, so an empty one from a standby
+      would wipe every external target, while on a non-200 it keeps the list
+      it has;
+    - an agent that reported no metrics port (older than 2.4.0) is published
+      on the controller's own `config.metricsPort`, and the controller logs
+      `metrics port assumed from controller config` once per agent, which is
+      the clue when such a host on another port sits at `up == 0`;
+    - `controller.prometheusSD.enabled: false` closes the route (404 on both
+      listeners). The key reaches the shared ConfigMap only when false, so an
+      older controller image never trips over it;
+    - with `controller.replicaCount > 1` the controller Service spreads
+      refreshes over all replicas and roughly half of them land on a standby:
+      `prometheus_sd_http_failures_total` climbs for the job while the targets
+      stay correct. Cosmetic, and written down so nobody chases it. Body and
+      semantics in the
+      [HTTP API reference](https://esdmitrii.github.io/kconmon-ng/api/#get-apiv1prometheussd).
+- **`scrapeConfig.externalAgents` in the chart.** Renders a Prometheus
+  Operator `ScrapeConfig` (needs the `scrapeconfigs.monitoring.coreos.com`
+  CRD) named `<release>-agent-external` that reads the SD route, with
+  `labels` for your Prometheus' selector (kube-prometheus-stack wants
+  `release: <its release name>`), `jobName`, `refreshInterval` (30s) and
+  `interval`. It applies the same `agent.metrics.detail` valve as the agent
+  ServiceMonitor, so an external host never returns per-pair detail the valve
+  drops for the pods, and the valve no longer insists on
+  `serviceMonitor.enabled` when this is on. The chart refuses the
+  ScrapeConfig without `controller.externalGateway.enabled` (nothing external
+  could register) or with `controller.prometheusSD.enabled=false` (every
+  refresh would 404), and the install notes remind you when the gateway is on
+  without it, or when `labels` is empty. Plain-Prometheus `http_sd_configs`
+  job and the reachability rules in
+  [Scraping external agents](https://esdmitrii.github.io/kconmon-ng/external-agents/#scraping-external-agents).
+- **`KconmonExternalAgentDown` and `kconmon_ng_controller_external_agents`.**
+  An optional warning (`prometheusRule.externalAgentDown`, off by default,
+  `for: 5m`) on `up{job=~".*agent-external.*"} == 0`: a host the controller
+  lists that Prometheus cannot scrape, usually the host firewall admitting the
+  Prometheus pod IP when the CNI NATs its egress to a node IP. The new
+  controller gauge counts registered agents that came through the gateway.
+- **`agent.hostNetwork`, for pod networks external hosts cannot route.**
+  The DaemonSet moves into each node's network namespace: the agents
+  advertise the node IP (`KCONMON_NG_POD_IP` from `status.hostIP`), declare
+  `hostPort` on all three ports, get `dnsPolicy: ClusterFirstWithHostNet`
+  unless `agent.dnsPolicy` says otherwise, and label themselves
+  `kconmon-ng.io/host-network=true` from a 2.4.0 image. The chart stops
+  rendering the `ping_group_range` pod sysctl there, since the kubelet refuses
+  `net.*` sysctls in the host namespace. **It changes what is measured, for
+  the whole DaemonSet**: every in-cluster pair then probes node IP to node IP
+  over the underlay, and the CNI datapath (overlay, conntrack, NetworkPolicy
+  enforcement) is no longer on the probe path, so the breakage this tool
+  exists to catch can hide behind a green matrix. Turn it on only when the
+  goal is visibility between external agents and a cluster whose pod network
+  they cannot reach. Before you do: PSS `privileged` for the namespace, TCP
+  8080, UDP 9090 and TCP 9091 (or your `config.*Port` values) free on every
+  node, `ping_group_range` set by the node OS, and one agent per machine (a
+  host-network pod and a bare-host agent cannot share an IP). See
+  [When the pod network does not route](https://esdmitrii.github.io/kconmon-ng/external-agents/#when-the-pod-network-does-not-route)
+  and [Host networking](https://esdmitrii.github.io/kconmon-ng/concepts/mesh-and-planes/#host-networking).
+- **`networkPolicy.nodeCidrs` and `networkPolicy.externalPeerCidrs`.**
+  Host-network agents register from node IPs that no pod selector matches, so
+  with `agent.hostNetwork` and `networkPolicy.enabled` both on, the chart
+  refuses to render the policy until `nodeCidrs` lists the node CIDRs; without
+  it every registration but the one from the controller's own node would drop
+  silently. `externalPeerCidrs` closes the old gap where an external agent
+  registered fine and every cell between it and the cluster stayed red: its
+  CIDRs join the agent-to-agent rules in both directions (UDP `grpcPort`,
+  TCP `httpPort`, the ports-less ICMP/MTR rule) and never the gateway rule.
+- **External agents in the console.** Everything keys off the
+  `kconmon-ng.io/external` registration label, which the console now passes
+  through from the controller's topology together with the agent's
+  capabilities (`labels` and `capabilities` on `TopologyAgent` in the Console
+  API).
+    - *Topology* draws the host beside the cluster nodes in the lane of its
+      zone, with a neutral **external** badge (identity, never a health tier)
+      and "readiness unknown" for screen readers.
+    - *Node page* swaps Pod IP for **Advertised address**, explains the Ready
+      dash, and lists the probe **Planes** the agent advertised. Agents now
+      advertise `plane:tcp`, `plane:udp`, `plane:icmp`, `plane:dns`,
+      `plane:http` and `plane:mtr`; an agent advertising none (older than
+      2.4.0) reads as "unknown", never as running nothing.
+    - *Overview* badges the host in Worst pairs and adds "+N external agents"
+      beside Nodes ready without counting them in, since that tile is
+      Kubernetes readiness.
+    - *Matrix* tells two silences apart from plain no-data. An external agent
+      Prometheus is not scraping keeps the no-data fill and aria text, but its
+      cells' tooltip and a note above the grid say why and link the scraping
+      docs, until the first measured cell appears. A protocol the source does
+      not run renders dashed like *not probed*, with its own legend row.
+      Precedence when a cell has no data: excluded by the plan, then
+      unsupported, then unscraped. See
+      [Silence with a known cause](https://esdmitrii.github.io/kconmon-ng/console/matrix/#silence-with-a-known-cause)
+      and [External agents on the map](https://esdmitrii.github.io/kconmon-ng/console/topology/#external-agents-on-the-map).
+- **External agents in the Time Machine.** `TopologyChanged` events carry the
+  agent's labels, so a replay badges a host the way the live view does, and a
+  reconstructed topology lists a bare host under `agents` only, never as a
+  presence-derived READY node. **History recorded before the upgrade shows no
+  external badges**: a 2.3.x controller wrote no labels, and such a host stays
+  an ordinary node in those instants. Historical responses never carry
+  capabilities, since no event records them.
+
+### Changed
+
+- **`KconmonAgentsMissing` is no longer masked by external agents.**
+  Registered agents include them and expected agents (schedulable nodes) never
+  did, so one external host hid one missing in-cluster agent. The expression
+  now subtracts `controller_external_agents`, with an `or registered * 0`
+  stand-in so the rule keeps working against a controller image that predates
+  the gauge.
+- **`kubectl kconmon` tables.** `agents` gains an `EXTERNAL` column (`yes`,
+  or `-` for the DaemonSet's own), and `topology` prints bare-host rows after
+  the node rows (NODE is the registered name, READY is `-`, AGENT IP the
+  advertised address). Scripts that parse the human tables will see the
+  columns and rows shift; `-o json` stays the controller's body, unchanged
+  apart from `httpPort`, `udpPort` and `metricsPort` on agents that report
+  them.
+- **Documentation lives on the site.** The chart's Artifact Hub links, the
+  install notes (`Docs:`, `Helm values:`, `Console setup:`), the chart README,
+  `kubectl kconmon --help`, the krew manifest, the packaged agent config, the
+  image OCI labels and the GitHub release footer now point at
+  <https://esdmitrii.github.io/kconmon-ng/>. In the console, Settings → About
+  gains Documentation, Release notes and Source links, and the command palette
+  an *Open documentation* action. The README turned into a short front door
+  with a Scope and limits section in place of the old "Not yet" list.
+- **Screenshots and the demo match one stand.** The docs frames were re-shot
+  on one kind stand with an external agent, `edge-host-01`, in the mesh; the
+  captions were rewritten to describe what each frame shows, near-duplicate
+  frames were folded into one, and the API tokens frame no longer shows a
+  token. The
+  [breaking-the-network demo](https://esdmitrii.github.io/kconmon-ng/demo/breaking-cni/)
+  was rewritten for that kind stand instead of the old Minikube helper, with
+  the stand's own names and numbers.
+- **Console polish.** One type scale across pages, row actions reduced to
+  their verbs (Test, Edit, Delete), and status and identity badges drawn as
+  one system. Chart hover pills print the time as `HH:mm:ss` instead of a
+  date wide enough to clip, the pill on a two-axis chart reads each axis in
+  its own unit, and the topology map zooms out far enough to fit a phone.
+- **Windows is explicitly unsupported.** The agent compiles for
+  `windows/amd64`, and TCP, UDP, DNS and HTTP would work as written, but the
+  two checkers that make this tool what it is would not: ICMP and MTR sit on
+  a datagram ICMP socket that `golang.org/x/net/icmp` supports only on Linux
+  and Darwin by its own contract, and raw ICMP on Windows needs the
+  Administrators group, so an agent that also runs on-demand probes for the
+  controller would run as SYSTEM. On top of that, Go's clock on Windows is
+  interrupt-tick granular (up to 15.6 ms), so a 0.3 ms LAN round trip would
+  read as zero or as one tick while the histograms looked perfectly valid. A
+  Windows vantage point without ICMP and MTR is designed but not scheduled;
+  the trigger is a concrete host that needs it. CI now runs
+  `GOOS=windows go vet` over the agent and checker trees so the door stays
+  open at no cost. See the
+  [FAQ](https://esdmitrii.github.io/kconmon-ng/faq/#does-the-agent-run-on-windows).
+- **CI guards.** The buf plugins are pinned and CI regenerates the protobuf
+  code and fails on a diff, so a `.proto` edit that skipped `make proto` can
+  no longer ship a wire skew. Chart CI checks the host-network and
+  ScrapeConfig renders, and that the chart refuses a host-network policy
+  without `nodeCidrs` and a ScrapeConfig without the gateway. The kind e2e
+  gained a leg that turns the gateway on, joins one simulated external agent
+  through it, and checks the topology, the SD body, a Prometheus scrape of the
+  host, the console matrix and the CLI.
+
+### Fixed
+
+- **The `-arm64` agent and controller images shipped an x86-64 binary.** The
+  arm64 image entries in `.goreleaser.yaml` never set `goarch`, goreleaser
+  defaults it to amd64, so every published `-arm64` image and the arm64 half of
+  the multi-arch tags carried the amd64 build since the first release (checked
+  on `kconmon-ng-agent:2.3.1` and `kconmon-ng-controller:2.3.1`). On an arm64
+  node the container failed with `exec format error`; amd64 clusters were never
+  affected. 2.4.0 builds both from the arm64 binary. The console image was not
+  affected: it is built outside goreleaser.
+
+- **The Time Machine topology forgot agents that never changed.** Topology
+  events only say what changed, so a console that started recording next to a
+  running fleet never showed an agent that stayed put afterwards, external
+  agents included, and retention pruning stripped old registrations the same
+  way. The console now stores the controller's whole topology as a
+  `topology_baseline` row each time its event stream connects and hourly
+  while it stays connected, and a reconstruction starts from the newest
+  baseline at or before the instant, then replays the events after it. The
+  events list never shows these rows. The cost, on consoles with a database
+  and the event stream: one row per console replica per hour, plus one per
+  reconnect, sized by the fleet at roughly 170 to 230 bytes of JSON per node
+  with its agent, so about 20 KB an hour per replica at 100 nodes. History
+  recorded before the upgrade stays baseline-less and folds from events alone,
+  with the same gaps as before.
+- **Grafana dashboards.** Ratio panels in Overview and Node detail cap their
+  axis at 100% (`axisSoftMax: 1`) instead of stretching a flat zero line to a
+  0-10000% axis. Node detail's MTR trace count is plain text now: it counts
+  traces, including the ones the console asked for, and colouring it green,
+  yellow or red passed that off as a health verdict. The Zone heatmap tables
+  sort rows and columns the same way, so same-zone cells line up on the
+  diagonal, under a `from \ to` corner header.
+- **Console accessibility.** Buttons and links meet 4.5:1 contrast in both
+  themes (the dark theme's destructive fill and the light theme's primary
+  fill, focus ring and muted text were darkened), links inside running text
+  carry an underline instead of relying on colour, scroll regions are
+  keyboard-reachable and labelled, headings follow page order, the live event
+  feed is a valid list inside a labelled log region, and phones get a proper
+  header landmark.
+- **Tooltips covered what they described.** The entrance animation's final
+  `transform` outlived the animation and overrode the tooltip's own
+  positioning, so a matrix tooltip landed on the very cell it explained.
+- **Topology edges never showed their failure label on hover**: React Flow
+  disables pointer events on edges of a non-selectable map, so the hover
+  handler never fired.
+- **The agent DaemonSet declared its `grpc` port as TCP.** On an agent that
+  port is the UDP echo listener; it is declared UDP now, which is what makes
+  the scheduler's `hostPort` clash check guard the right protocol under
+  `agent.hostNetwork`.
+
+### Upgrade notes
+
+The default install pins controller, agent and console images to 2.4.0 and
+needs nothing special. The table is for fleets that run mixed versions for a
+while, most often deb/rpm hosts upgraded after the cluster.
+
+| Old side + new side | Per-agent ports | Prometheus SD | Topology event labels (Time Machine) | Console badges and hints | `agent.hostNetwork` |
+| --- | --- | --- | --- | --- | --- |
+| 2.3.x agent + 2.4.0 controller | reports none; peers dial it on their own ports | listed on the controller's `metricsPort`, logged once as assumed | carried as the agent sent them (a 2.3.x external agent already sets the label) | badge shows; planes read "unknown" | the agent ignores `KCONMON_NG_HOST_NETWORK`, so no host-network label |
+| 2.4.0 agent + 2.3.x controller | dropped at registration; everyone dials their own ports | no route: a ScrapeConfig on it fails every refresh | not recorded | depends on the console | the node IP passes registration; the label is stored verbatim |
+| 2.3.x console + 2.4.0 controller | n/a | n/a | the new field is ignored | none: external agents look like ordinary nodes | n/a |
+| 2.4.0 console + 2.3.x controller | n/a | n/a | events carry no labels; only the console's own baselines badge history | live badges and the unscraped hint work (the controller already publishes labels) | n/a |
+| 2.3.x deb/rpm agent in a 2.4.0 fleet | reports none, dials its own ports: one-way red toward peers on other ports | scraped on the controller's `metricsPort` | badged | badge shows; planes "unknown" | n/a |
+| mixed fleet with different ports | old agents dial their own ports: one-way red, on-demand tasks included | n/a | n/a | n/a | n/a |
+
+If you pin the controller image behind the chart, note that
+`controller.prometheusSD.enabled` reaches the shared ConfigMap only when
+false: a pre-2.4.0 controller image rejects the unknown key and crashloops,
+so leave it at the default until the image is current. Flipping
+`agent.hostNetwork` or `agent.dnsPolicy` rolls the DaemonSet; during the
+rollout node IPs and pod IPs coexist and a little transient `PairWentSilent`
+noise is expected.
+
 ## kconmon-ng v2.3.1
 
 ### Fixed
