@@ -67,11 +67,14 @@ dockers:
       - "--label=org.opencontainers.image.title=kconmon-ng-agent"
       - "--label=org.opencontainers.image.version={{.Version}}"
       - "--label=org.opencontainers.image.source=https://github.com/EsDmitrii/kconmon-ng"
+      - "--label=org.opencontainers.image.url=https://esdmitrii.github.io/kconmon-ng/"
+      - "--label=org.opencontainers.image.documentation=https://esdmitrii.github.io/kconmon-ng/"
       - "--label=org.opencontainers.image.revision={{.FullCommit}}"
       - "--label=org.opencontainers.image.created={{.Date}}"
 
   - id: agent-arm64
     ids: [agent]
+    goarch: arm64
     use: buildx
     image_templates:
       - "ghcr.io/esdmitrii/kconmon-ng-agent:{{.Version}}-arm64"
@@ -81,6 +84,8 @@ dockers:
       - "--label=org.opencontainers.image.title=kconmon-ng-agent"
       - "--label=org.opencontainers.image.version={{.Version}}"
       - "--label=org.opencontainers.image.source=https://github.com/EsDmitrii/kconmon-ng"
+      - "--label=org.opencontainers.image.url=https://esdmitrii.github.io/kconmon-ng/"
+      - "--label=org.opencontainers.image.documentation=https://esdmitrii.github.io/kconmon-ng/"
       - "--label=org.opencontainers.image.revision={{.FullCommit}}"
       - "--label=org.opencontainers.image.created={{.Date}}"
 
@@ -95,11 +100,14 @@ dockers:
       - "--label=org.opencontainers.image.title=kconmon-ng-controller"
       - "--label=org.opencontainers.image.version={{.Version}}"
       - "--label=org.opencontainers.image.source=https://github.com/EsDmitrii/kconmon-ng"
+      - "--label=org.opencontainers.image.url=https://esdmitrii.github.io/kconmon-ng/"
+      - "--label=org.opencontainers.image.documentation=https://esdmitrii.github.io/kconmon-ng/"
       - "--label=org.opencontainers.image.revision={{.FullCommit}}"
       - "--label=org.opencontainers.image.created={{.Date}}"
 
   - id: controller-arm64
     ids: [controller]
+    goarch: arm64
     use: buildx
     image_templates:
       - "ghcr.io/esdmitrii/kconmon-ng-controller:{{.Version}}-arm64"
@@ -109,6 +117,8 @@ dockers:
       - "--label=org.opencontainers.image.title=kconmon-ng-controller"
       - "--label=org.opencontainers.image.version={{.Version}}"
       - "--label=org.opencontainers.image.source=https://github.com/EsDmitrii/kconmon-ng"
+      - "--label=org.opencontainers.image.url=https://esdmitrii.github.io/kconmon-ng/"
+      - "--label=org.opencontainers.image.documentation=https://esdmitrii.github.io/kconmon-ng/"
       - "--label=org.opencontainers.image.revision={{.FullCommit}}"
       - "--label=org.opencontainers.image.created={{.Date}}"
 
@@ -171,6 +181,7 @@ nfpms:
       kconmon-ng external agent.
       Registers with a kconmon-ng controller over the TLS external gateway and
       runs TCP/UDP/ICMP/DNS/HTTP/MTR probes against the fleet.
+      Docs: https://esdmitrii.github.io/kconmon-ng/external-agents/
     license: Apache-2.0
     formats: [deb, rpm]
     bindir: /usr/bin
@@ -225,3 +236,15 @@ release:
   prerelease: auto
   # Create the release as a draft: GitHub immutable releases seal assets at publish time.
   draft: true
+  # release.yaml passes --release-notes, which only replaces the generated changelog; the footer is
+  # still rendered around it at publish time (internal/pipe/release/body.go), so every release page
+  # links the site.
+  footer: |
+    ---
+
+    - Docs: <https://esdmitrii.github.io/kconmon-ng/>
+    - Release notes: <https://esdmitrii.github.io/kconmon-ng/reference/release-notes/>
+    - Helm chart: <https://artifacthub.io/packages/helm/kconmon-ng/kconmon-ng>
+    - Images: `ghcr.io/esdmitrii/kconmon-ng-agent:{{ .Version }}`,
+      `ghcr.io/esdmitrii/kconmon-ng-controller:{{ .Version }}`,
+      `ghcr.io/esdmitrii/kconmon-ng-console:{{ .Version }}`
