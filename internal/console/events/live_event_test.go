@@ -60,6 +60,25 @@ func TestToLiveEventEveryPayloadType(t *testing.T) {
 			wantDetails: `{"reason":"zone_updated","nodeName":"node-a","agentId":"agent-a","zone":"zone-b"}`,
 		},
 		{
+			// The labels are what lets a Time Machine replay badge an external host; an event that
+			// carries none (a controller older than 2.4.0) keeps the four-key shape above, so the
+			// key is written only when there is something to write.
+			name: "topology_changed carries the agent's labels when the controller sent them",
+			event: &pb.Event{Seq: 6, Timestamp: fixedTime(), Payload: &pb.Event_TopologyChanged{
+				TopologyChanged: &pb.TopologyChanged{
+					Reason: "agent_registered", NodeName: "edge-01", AgentId: "edge-01-agent", Zone: "office",
+					Labels: map[string]string{"kconmon-ng.io/external": "true"},
+				},
+			}},
+			wantID:      "6-1753400000000000000",
+			wantType:    "topology_changed",
+			wantSever:   "info",
+			wantScope:   "edge-01",
+			wantSummary: "topology changed: agent_registered (edge-01)",
+			wantDetails: `{"reason":"agent_registered","nodeName":"edge-01","agentId":"edge-01-agent","zone":"office",` +
+				`"labels":{"kconmon-ng.io/external":"true"}}`,
+		},
+		{
 			name: "topology_changed without a node scopes to the cluster",
 			event: &pb.Event{Seq: 4, Timestamp: fixedTime(), Payload: &pb.Event_TopologyChanged{
 				TopologyChanged: &pb.TopologyChanged{Reason: "agent_evicted"},

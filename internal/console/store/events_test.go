@@ -376,6 +376,110 @@ func TestFoldTopologyOutputIsSorted(t *testing.T) {
 	}
 }
 
+// topoEventLabelled builds the 2.4.0 details shape: the four keys plus the agent's own labels map.
+func topoEventLabelled(t *testing.T, offset time.Duration, reason, node, agent, zone string, labels map[string]string) EventRecord {
+	t.Helper()
+	details, err := json.Marshal(map[string]any{
+		"reason": reason, "nodeName": node, "agentId": agent, "zone": zone, "labels": labels,
+	})
+	if err != nil {
+		t.Fatalf("marshal details: %v", err)
+	}
+	return EventRecord{
+		EventTime: base.Add(offset),
+		Type:      eventTypeTopologyChanged,
+		Severity:  "info",
+		Scope:     node,
+		Summary:   fmt.Sprintf("topology changed: %s", reason),
+		Details:   details,
+	}
+}
+
+var externalLabels = map[string]string{"kconmon-ng.io/external": "true"}
+
+// TestFoldTopologyKeepsTheLastLabelsPerAgent is the Time Machine half of the external badge: the
+// fold must agree with the live snapshot about which agents are external.
+func TestFoldTopologyKeepsTheLastLabelsPerAgent(t *testing.T) {
+	snap := foldTopology([]EventRecord{
+		topoEventLabelled(t, 0, topologyReasonRegistered, "edge-01", "edge-01-agent", "office", externalLabels),
+		topoEventZoned(t, time.Minute, topologyReasonRegistered, "node-a", "agent-a", "zone-a"),
+	})
+
+	if len(snap.Agents) != 2 {
+		t.Fatalf("agents = %v, want both", agentIDs(&snap))
+	}
+	// Sorted by ID: agent-a first, edge-01-agent second.
+	if snap.Agents[0].Labels != nil {
+		t.Errorf("agent-a labels = %v, want nil: its event carried no labels key", snap.Agents[0].Labels)
+	}
+	if !reflect.DeepEqual(snap.Agents[1].Labels, externalLabels) {
+		t.Errorf("edge-01-agent labels = %v, want %v", snap.Agents[1].Labels, externalLabels)
+	}
+}
+
+// A later event about the same agent that carries no labels (a zone_updated from a controller that
+// attributes but does not label, or a mixed-version fleet) must not erase what an earlier event
+// stated, exactly as the zone rule works.
+func TestFoldTopologyLaterUnlabelledEventDoesNotEraseKnownLabels(t *testing.T) {
+	snap := foldTopology([]EventRecord{
+		topoEventLabelled(t, 0, topologyReasonRegistered, "edge-01", "edge-01-agent", "office", externalLabels),
+		topoEventZoned(t, time.Minute, topologyReasonZoneUpdated, "edge-01", "edge-01-agent", "office-2"),
+	})
+
+	if len(snap.Agents) != 1 {
+		t.Fatalf("agents = %v, want one", agentIDs(&snap))
+	}
+	if !reflect.DeepEqual(snap.Agents[0].Labels, externalLabels) {
+		t.Errorf("labels = %v, want the registration's %v kept through the unlabelled zone_updated",
+			snap.Agents[0].Labels, externalLabels)
+	}
+	if snap.Agents[0].Zone != "office-2" {
+		t.Errorf("zone = %q, want office-2: the zone rule is unchanged", snap.Agents[0].Zone)
+	}
+}
+
+// A newer labelled event replaces the older labels wholesale: the map is the agent's own current
+// set, not an accumulation.
+func TestFoldTopologyNewerLabelsReplaceOlderOnes(t *testing.T) {
+	snap := foldTopology([]EventRecord{
+		topoEventLabelled(t, 0, topologyReasonRegistered, "n", "a", "z", map[string]string{"role": "old"}),
+		topoEventLabelled(t, time.Minute, topologyReasonZoneUpdated, "n", "a", "z", map[string]string{"role": "new"}),
+	})
+
+	if got := snap.Agents[0].Labels; !reflect.DeepEqual(got, map[string]string{"role": "new"}) {
+		t.Errorf("labels = %v, want the newer event's map", got)
+	}
+}
+
+// TestFoldTopologyOldShapeEventFoldsToNilLabels pins the compatibility case from the release skew
+// table: history a pre-2.4.0 controller wrote has no labels key at all, and the fold must report
+// nil rather than an empty map, so a consumer can tell "unknown" from "no labels".
+func TestFoldTopologyOldShapeEventFoldsToNilLabels(t *testing.T) {
+	snap := foldTopology([]EventRecord{
+		topoEvent(t, 0, topologyReasonRegistered, "node-a", "agent-a"),
+		topoEventZoned(t, time.Minute, topologyReasonRegistered, "node-b", "agent-b", "zone-b"),
+	})
+
+	for _, a := range snap.Agents {
+		if a.Labels != nil {
+			t.Errorf("agent %s labels = %v, want nil for an event without a labels key", a.ID, a.Labels)
+		}
+	}
+}
+
+// Leaving and rejoining starts the agent's labels from the rejoin event, like every other field.
+func TestFoldTopologyRejoinWithoutLabelsStartsUnlabelled(t *testing.T) {
+	snap := foldTopology([]EventRecord{
+		topoEventLabelled(t, 0, topologyReasonRegistered, "edge-01", "edge-01-agent", "office", externalLabels),
+		topoEventZoned(t, time.Minute, topologyReasonDeregistered, "edge-01", "edge-01-agent", "office"),
+		topoEventZoned(t, 2*time.Minute, topologyReasonRegistered, "edge-01", "edge-01-agent", "office"),
+	})
+
+	if len(snap.Agents) != 1 || snap.Agents[0].Labels != nil {
+		t.Errorf("agents = %+v, want one rejoined agent with nil labels", snap.Agents)
+	}
+}
+
 func TestFoldTopologyNodeOnlyAndAgentOnlyEvents(t *testing.T) {
 	// The two halves of the identity are independent fields, so an event may
 	// name one without the other. Each half folds on its own.
@@ -392,5 +496,166 @@ func TestFoldTopologyNodeOnlyAndAgentOnlyEvents(t *testing.T) {
 	}
 	if snap.UnfoldableEvents != 0 {
 		t.Errorf("UnfoldableEvents = %d, want 0: each event named at least one subject", snap.UnfoldableEvents)
+	}
+}
+
+// TestFoldTopologyBareHostIsAnAgentNotANode: the live snapshot never lists a Kubernetes node for an
+// external agent (there is none), so the fold must not invent one either -- with Ready true, that
+// node read as a READY k8s node in the Time Machine while the live card said "—".
+func TestFoldTopologyBareHostIsAnAgentNotANode(t *testing.T) {
+	snap := foldTopology([]EventRecord{
+		topoEventZoned(t, 0, topologyReasonRegistered, "node-a", "agent-a", "zone-a"),
+		topoEventLabelled(t, time.Minute, topologyReasonRegistered, "edge-01", "edge-01-agent", "office", externalLabels),
+	})
+
+	if got, want := nodeNames(&snap), []string{"node-a"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("nodes = %v, want %v: the bare host has no Kubernetes node to list", got, want)
+	}
+	if got, want := agentIDs(&snap), []string{"agent-a", "edge-01-agent"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("agents = %v, want %v: the host is still served, through Agents", got, want)
+	}
+	if a := snap.Agents[1]; a.NodeName != "edge-01" || a.Zone != "office" || !reflect.DeepEqual(a.Labels, externalLabels) {
+		t.Errorf("edge-01-agent = %+v, want nodeName edge-01, zone office and the external label", a)
+	}
+}
+
+// The labels rule carries an earlier registration's external label through a later unlabelled event,
+// so the host stays out of Nodes whichever event was folded last.
+func TestFoldTopologyBareHostStaysOutOfNodesThroughAnUnlabelledZoneUpdate(t *testing.T) {
+	snap := foldTopology([]EventRecord{
+		topoEventLabelled(t, 0, topologyReasonRegistered, "edge-01", "edge-01-agent", "office", externalLabels),
+		topoEventZoned(t, time.Minute, topologyReasonZoneUpdated, "edge-01", "edge-01-agent", "office-2"),
+	})
+
+	if len(snap.Nodes) != 0 {
+		t.Errorf("nodes = %v, want none: the zone_updated without labels does not turn the host into a node", nodeNames(&snap))
+	}
+	if len(snap.Agents) != 1 || snap.Agents[0].Zone != "office-2" {
+		t.Errorf("agents = %+v, want the one host in office-2", snap.Agents)
+	}
+}
+
+// Only the exact label value marks a bare host; a labelled in-cluster agent, or one whose history
+// predates labels entirely, keeps its node -- unknown is not external.
+func TestFoldTopologyOnlyTheExternalLabelHidesANode(t *testing.T) {
+	snap := foldTopology([]EventRecord{
+		topoEvent(t, 0, topologyReasonRegistered, "node-old", "agent-old"),
+		topoEventLabelled(t, time.Minute, topologyReasonRegistered, "node-b", "agent-b", "zone-b", map[string]string{"role": "edge"}),
+		topoEventLabelled(t, 2*time.Minute, topologyReasonRegistered, "node-c", "agent-c", "zone-c",
+			map[string]string{"kconmon-ng.io/external": "false"}),
+	})
+
+	if got, want := nodeNames(&snap), []string{"node-b", "node-c", "node-old"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("nodes = %v, want %v", got, want)
+	}
+}
+
+// A bare host that leaves takes its agent with it and leaves no node behind either.
+func TestFoldTopologyBareHostDeregisterLeavesNothing(t *testing.T) {
+	snap := foldTopology([]EventRecord{
+		topoEventLabelled(t, 0, topologyReasonRegistered, "edge-01", "edge-01-agent", "office", externalLabels),
+		topoEventZoned(t, time.Minute, topologyReasonDeregistered, "edge-01", "edge-01-agent", "office"),
+	})
+
+	if len(snap.Nodes) != 0 || len(snap.Agents) != 0 {
+		t.Errorf("nodes/agents = %v/%v, want both empty", nodeNames(&snap), agentIDs(&snap))
+	}
+}
+
+// baselineRecord builds one topology_baseline EventRecord: the controller's whole topology as the
+// ingester read it when its stream came up, in the node/agent JSON shape GET /api/v1/topology uses.
+func baselineRecord(t *testing.T, offset time.Duration, nodes []map[string]any, agents []map[string]any) EventRecord {
+	t.Helper()
+	details, err := json.Marshal(map[string]any{"nodes": nodes, "agents": agents})
+	if err != nil {
+		t.Fatalf("marshal baseline: %v", err)
+	}
+	return EventRecord{
+		EventTime: base.Add(offset),
+		Type:      eventTypeTopologyBaseline,
+		Severity:  "info",
+		Scope:     "cluster",
+		Summary:   "topology baseline",
+		Details:   details,
+	}
+}
+
+// The stand case: the console started recording while the fleet was already up, so the only
+// topology_changed rows it holds are an evict/re-register of SOME agents. The subjects that never
+// changed after recording started (worker2, worker9, a node with no agent, the bare host) exist only
+// in the baseline, and the fold must keep them.
+func TestFoldTopologyBaselineKeepsSubjectsThatNeverChangedAfterRecordingStarted(t *testing.T) {
+	snap := foldTopology([]EventRecord{
+		baselineRecord(t, 0,
+			[]map[string]any{
+				{"name": "cp", "zone": "zone-a", "ready": true},
+				{"name": "worker2", "zone": "zone-a", "ready": true},
+				{"name": "worker9", "zone": "zone-d", "ready": true},
+				{"name": "worker10", "zone": "zone-d", "ready": false},
+			},
+			[]map[string]any{
+				{"id": "cp-agent", "nodeName": "cp", "zone": "zone-a"},
+				{"id": "worker2-agent", "nodeName": "worker2", "zone": "zone-a"},
+				{"id": "worker9-agent", "nodeName": "worker9", "zone": "zone-d"},
+				{"id": "edge-agent", "nodeName": "edge-host-01", "zone": "office", "labels": externalLabels},
+			}),
+		topoEventZoned(t, time.Minute, topologyReasonEvicted, "cp", "cp-agent", "zone-a"),
+		topoEventZoned(t, 2*time.Minute, topologyReasonRegistered, "cp", "cp-agent", "zone-a"),
+	})
+
+	if got, want := nodeNames(&snap), []string{"cp", "worker10", "worker2", "worker9"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("nodes = %v, want %v: the baseline's nodes survive, the bare host is not one", got, want)
+	}
+	if got, want := agentIDs(&snap), []string{"cp-agent", "edge-agent", "worker2-agent", "worker9-agent"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("agents = %v, want %v", got, want)
+	}
+	for _, a := range snap.Agents {
+		if a.ID == "edge-agent" && (a.NodeName != "edge-host-01" || !reflect.DeepEqual(a.Labels, externalLabels)) {
+			t.Errorf("edge-agent = %+v, want nodeName edge-host-01 with the external label, so the badge renders", a)
+		}
+	}
+	for _, n := range snap.Nodes {
+		if n.Name == "worker10" && n.Ready {
+			t.Error("worker10 ready = true, want the baseline's false: no event ever touched it")
+		}
+	}
+	if snap.EventsFolded != 3 || snap.UnfoldableEvents != 0 {
+		t.Errorf("EventsFolded/UnfoldableEvents = %d/%d, want 3/0", snap.EventsFolded, snap.UnfoldableEvents)
+	}
+}
+
+// A baseline is the whole truth at its instant: whatever the fold held before it is replaced, not
+// merged, and events after it apply on top.
+func TestFoldTopologyBaselineReplacesEarlierState(t *testing.T) {
+	snap := foldTopology([]EventRecord{
+		topoEventZoned(t, 0, topologyReasonRegistered, "gone", "gone-agent", "zone-a"),
+		baselineRecord(t, time.Minute,
+			[]map[string]any{{"name": "node-a", "zone": "zone-a", "ready": true}},
+			[]map[string]any{{"id": "agent-a", "nodeName": "node-a", "zone": "zone-a"}}),
+		topoEventZoned(t, 2*time.Minute, topologyReasonRegistered, "node-b", "agent-b", "zone-b"),
+	})
+
+	if got, want := nodeNames(&snap), []string{"node-a", "node-b"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("nodes = %v, want %v", got, want)
+	}
+	if got, want := agentIDs(&snap), []string{"agent-a", "agent-b"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("agents = %v, want %v", got, want)
+	}
+}
+
+// A broken baseline is counted and skipped; it must not wipe the state folded so far.
+func TestFoldTopologyBrokenBaselineIsUnfoldable(t *testing.T) {
+	bad := baselineRecord(t, time.Minute, nil, nil)
+	bad.Details = []byte("{not json")
+	snap := foldTopology([]EventRecord{
+		topoEventZoned(t, 0, topologyReasonRegistered, "node-a", "agent-a", "zone-a"),
+		bad,
+	})
+
+	if got, want := nodeNames(&snap), []string{"node-a"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("nodes = %v, want %v", got, want)
+	}
+	if snap.UnfoldableEvents != 1 {
+		t.Errorf("UnfoldableEvents = %d, want 1", snap.UnfoldableEvents)
 	}
 }

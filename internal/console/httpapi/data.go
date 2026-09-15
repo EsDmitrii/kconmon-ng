@@ -139,8 +139,10 @@ func (s *Server) serveHistoricalTopology(w http.ResponseWriter, r *http.Request,
 		out.Nodes = append(out.Nodes, controllerclient.Node{Name: n.Name, Zone: n.Zone, Ready: n.Ready})
 	}
 	for _, a := range snap.Agents {
+		// Capabilities are deliberately absent: no event records them, and inventing an empty list
+		// would read as "no planes" to a consumer that keys off the field's presence.
 		out.Agents = append(out.Agents, controllerclient.Agent{
-			ID: a.ID, NodeName: a.NodeName, PodIP: a.PodIP, Zone: a.Zone,
+			ID: a.ID, NodeName: a.NodeName, PodIP: a.PodIP, Zone: a.Zone, Labels: a.Labels,
 		})
 	}
 	writeJSON(w, out)

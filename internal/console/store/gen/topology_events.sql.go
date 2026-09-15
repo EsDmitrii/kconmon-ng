@@ -64,10 +64,35 @@ func (q *Queries) InsertTopologyEvent(ctx context.Context, arg InsertTopologyEve
 	return result.RowsAffected(), nil
 }
 
+const latestTopologyBaseline = `-- name: LatestTopologyBaseline :one
+SELECT id, event_time, details
+FROM topology_events
+WHERE type = 'topology_baseline'
+  AND event_time <= $1::timestamptz
+ORDER BY event_time DESC, id DESC
+LIMIT 1
+`
+
+type LatestTopologyBaselineRow struct {
+	ID        int64
+	EventTime time.Time
+	Details   json.RawMessage
+}
+
+// The newest topology_baseline row at or before at: the fold's starting state. Served by
+// topology_events_type_time_idx.
+func (q *Queries) LatestTopologyBaseline(ctx context.Context, at time.Time) (LatestTopologyBaselineRow, error) {
+	row := q.db.QueryRow(ctx, latestTopologyBaseline, at)
+	var i LatestTopologyBaselineRow
+	err := row.Scan(&i.ID, &i.EventTime, &i.Details)
+	return i, err
+}
+
 const listTopologyEvents = `-- name: ListTopologyEvents :many
 SELECT id, event_seq, event_time, type, severity, scope, summary, details
 FROM topology_events
-WHERE ($1::text[]  IS NULL OR type = ANY($1::text[]))
+WHERE type <> 'topology_baseline'
+  AND ($1::text[]  IS NULL OR type = ANY($1::text[]))
   AND ($2::text    IS NULL OR scope = $2::text)
   AND ($3::timestamptz IS NULL OR event_time >= $3::timestamptz)
   AND ($4::timestamptz   IS NULL OR event_time <  $4::timestamptz)
@@ -99,6 +124,7 @@ type ListTopologyEventsRow struct {
 }
 
 // scope is the EXACT filter. The pair-aware one lives in ListTopologyEventsByScopeNode.
+// topology_baseline rows are the Time Machine fold's seed, not something that happened: never listed.
 func (q *Queries) ListTopologyEvents(ctx context.Context, arg ListTopologyEventsParams) ([]ListTopologyEventsRow, error) {
 	rows, err := q.db.Query(ctx, listTopologyEvents,
 		arg.Types,
@@ -141,6 +167,7 @@ const listTopologyEventsByScopeNode = `-- name: ListTopologyEventsByScopeNode :m
 SELECT id, event_seq, event_time, type, severity, scope, summary, details
 FROM topology_events
 WHERE scope_left = $2::text
+  AND type <> 'topology_baseline'
   AND ($3::text[] IS NULL OR type = ANY($3::text[]))
   AND ($4::timestamptz IS NULL OR event_time >= $4::timestamptz)
   AND ($5::timestamptz   IS NULL OR event_time <  $5::timestamptz)
@@ -155,6 +182,7 @@ SELECT id, event_seq, event_time, type, severity, scope, summary, details
 FROM topology_events
 WHERE scope_right = $2::text
   AND scope_left <> $2::text
+  AND type <> 'topology_baseline'
   AND ($3::text[] IS NULL OR type = ANY($3::text[]))
   AND ($4::timestamptz IS NULL OR event_time >= $4::timestamptz)
   AND ($5::timestamptz   IS NULL OR event_time <  $5::timestamptz)
@@ -247,14 +275,16 @@ SELECT id, event_time, details
 FROM topology_events
 WHERE type = $1::text
   AND event_time <= $2::timestamptz
+  AND ($3::timestamptz IS NULL OR event_time > $3::timestamptz)
 ORDER BY event_time, id
-LIMIT $3
+LIMIT $4
 `
 
 type ListTopologyEventsForFoldParams struct {
-	Type string
-	At   time.Time
-	Lim  int32
+	Type      string
+	At        time.Time
+	AfterTime pgtype.Timestamptz
+	Lim       int32
 }
 
 type ListTopologyEventsForFoldRow struct {
@@ -263,9 +293,15 @@ type ListTopologyEventsForFoldRow struct {
 	Details   json.RawMessage
 }
 
-// A fold is only correct when it sees EVERY event from the beginning of retention.
+// A fold is only correct when it sees EVERY event since its starting point: the beginning of
+// retention, or (after_time set) the baseline it starts from.
 func (q *Queries) ListTopologyEventsForFold(ctx context.Context, arg ListTopologyEventsForFoldParams) ([]ListTopologyEventsForFoldRow, error) {
-	rows, err := q.db.Query(ctx, listTopologyEventsForFold, arg.Type, arg.At, arg.Lim)
+	rows, err := q.db.Query(ctx, listTopologyEventsForFold,
+		arg.Type,
+		arg.At,
+		arg.AfterTime,
+		arg.Lim,
+	)
 	if err != nil {
 		return nil, err
 	}

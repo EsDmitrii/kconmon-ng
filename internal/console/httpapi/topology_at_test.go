@@ -186,6 +186,60 @@ func TestTopologyAtFoldsAndMarksTheResponseHistorical(t *testing.T) {
 	}
 }
 
+// TestTopologyAtCarriesAgentLabels: the historical body carries each agent's folded labels under the
+// SAME key the live passthrough uses, so the Time Machine can badge an external host the way the
+// live map does; an agent whose history never carried labels (pre-2.4.0 events) has no labels key
+// at all, never a null, which is the shape the web's fail-open rule reads as "unknown".
+func TestTopologyAtCarriesAgentLabels(t *testing.T) {
+	history := &fakeTopologyHistory{snap: store.TopologySnapshot{
+		Nodes: []store.TopologyNode{{Name: "node-a", Zone: "zone-a", Ready: true}},
+		Agents: []store.TopologyAgent{
+			{ID: "agent-a", NodeName: "node-a", Zone: "zone-a"},
+			{ID: "edge-01-agent", NodeName: "edge-01", Zone: "office",
+				Labels: map[string]string{"kconmon-ng.io/external": "true"}},
+		},
+		LastChange:     time.Date(2026, 8, 5, 9, 0, 0, 0, time.UTC),
+		OldestRetained: time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC),
+		EventsFolded:   2,
+	}}
+	srv := newTopologyServer(t, "", history)
+
+	rec := do(t, srv, http.MethodGet, "/api/v1/topology?at=2026-08-05T12:00:00Z", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body)
+	}
+
+	var got struct {
+		Agents []struct {
+			ID     string            `json:"id"`
+			Labels map[string]string `json:"labels"`
+		} `json:"agents"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("unmarshal %s: %v", rec.Body, err)
+	}
+	if len(got.Agents) != 2 {
+		t.Fatalf("agents = %+v, want both", got.Agents)
+	}
+	if got.Agents[1].Labels["kconmon-ng.io/external"] != "true" {
+		t.Errorf("edge-01-agent labels = %v, want the external label carried from the fold", got.Agents[1].Labels)
+	}
+	if got.Agents[0].Labels != nil {
+		t.Errorf("agent-a labels = %v, want none: its history carried no labels", got.Agents[0].Labels)
+	}
+	body := rec.Body.String()
+	if strings.Contains(body, `"labels":null`) {
+		t.Errorf("an unlabelled agent must not grow a null labels key: %s", body)
+	}
+	if strings.Count(body, `"labels":`) != 1 {
+		t.Errorf("labels must appear exactly once (the external agent's): %s", body)
+	}
+	// Capabilities are not recorded by any event, so the historical body never invents them.
+	if strings.Contains(body, `"capabilities"`) {
+		t.Errorf("historical body invented a capabilities key no event carries: %s", body)
+	}
+}
+
 // TestTopologyAtEmptyFoldStillServes200 covers the fold that legitimately reconstructs nothing.
 func TestTopologyAtEmptyFoldStillServes200(t *testing.T) {
 	history := &fakeTopologyHistory{snap: store.TopologySnapshot{

@@ -163,6 +163,53 @@ func TestTopologyProbePlanSurvivesTheProxy(t *testing.T) {
 	}
 }
 
+/*
+TestTopologyLabelsAndCapabilitiesSurviveTheProxy is the probePlan contract applied to the two
+per-agent fields the web needs to tell an external host from a node:
+
+  - an agent that registered with labels and capabilities reaches the browser with both, verbatim
+    (the client struct used to have four fields, so the proxy re-marshalled them away);
+  - an agent that sent neither must not grow a "labels":null or "capabilities":null key -- absence
+    is the pre-2.4.0 shape, and the web's fail-open rule reads absence as "unknown".
+*/
+func TestTopologyLabelsAndCapabilitiesSurviveTheProxy(t *testing.T) {
+	ctrl := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"nodes":[{"name":"n1","zone":"z1","ready":true}],` +
+			`"agents":[{"id":"n1-agent","nodeName":"n1","podIP":"10.0.0.1","zone":"z1"},` +
+			`{"id":"edge-01-agent","nodeName":"edge-01","podIP":"192.0.2.10","zone":"office",` +
+			`"labels":{"kconmon-ng.io/external":"true"},"capabilities":["external-checks","plane:tcp"]}],` +
+			`"timestamp":"2026-01-01T00:00:00Z"}`))
+	}))
+	defer ctrl.Close()
+
+	rec := do(t, newDataServer(t, ctrl.URL, ""), http.MethodGet, "/api/v1/topology", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body)
+	}
+	var topo controllerclient.Topology
+	if err := json.Unmarshal(rec.Body.Bytes(), &topo); err != nil {
+		t.Fatalf("bad body: %s (%v)", rec.Body, err)
+	}
+	if len(topo.Agents) != 2 {
+		t.Fatalf("agents lost in the proxy: %s", rec.Body)
+	}
+	ext := topo.Agents[1]
+	if ext.Labels["kconmon-ng.io/external"] != "true" {
+		t.Errorf("external label dropped by the proxy: %s", rec.Body)
+	}
+	if len(ext.Capabilities) != 2 || ext.Capabilities[1] != "plane:tcp" {
+		t.Errorf("capabilities dropped or reordered by the proxy: %s", rec.Body)
+	}
+	// The in-cluster agent is re-marshalled without either key, never with a null.
+	body := rec.Body.String()
+	if strings.Contains(body, `"labels":null`) || strings.Contains(body, `"capabilities":null`) {
+		t.Errorf("an agent that sent no labels/capabilities must not grow a null key: %s", body)
+	}
+	if strings.Count(body, `"labels":`) != 1 || strings.Count(body, `"capabilities":`) != 1 {
+		t.Errorf("labels/capabilities must appear exactly once (the external agent's): %s", body)
+	}
+}
+
 func TestTopologyNotConfigured503(t *testing.T) {
 	rec := do(t, newDataServer(t, "", ""), http.MethodGet, "/api/v1/topology", "")
 	if rec.Code != http.StatusServiceUnavailable {

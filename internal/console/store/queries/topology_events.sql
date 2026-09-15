@@ -25,6 +25,7 @@ ON CONFLICT ON CONSTRAINT topology_events_natural_key DO NOTHING;
 SELECT id, event_seq, event_time, type, severity, scope, summary, details
 FROM topology_events
 WHERE scope_left = sqlc.arg('scope_node')::text
+  AND type <> 'topology_baseline'
   AND (sqlc.narg('types')::text[] IS NULL OR type = ANY(sqlc.narg('types')::text[]))
   AND (sqlc.narg('from_time')::timestamptz IS NULL OR event_time >= sqlc.narg('from_time')::timestamptz)
   AND (sqlc.narg('to_time')::timestamptz   IS NULL OR event_time <  sqlc.narg('to_time')::timestamptz)
@@ -39,6 +40,7 @@ SELECT id, event_seq, event_time, type, severity, scope, summary, details
 FROM topology_events
 WHERE scope_right = sqlc.arg('scope_node')::text
   AND scope_left <> sqlc.arg('scope_node')::text
+  AND type <> 'topology_baseline'
   AND (sqlc.narg('types')::text[] IS NULL OR type = ANY(sqlc.narg('types')::text[]))
   AND (sqlc.narg('from_time')::timestamptz IS NULL OR event_time >= sqlc.narg('from_time')::timestamptz)
   AND (sqlc.narg('to_time')::timestamptz   IS NULL OR event_time <  sqlc.narg('to_time')::timestamptz)
@@ -52,9 +54,11 @@ LIMIT sqlc.arg('lim');
 
 -- name: ListTopologyEvents :many
 -- scope is the EXACT filter. The pair-aware one lives in ListTopologyEventsByScopeNode.
+-- topology_baseline rows are the Time Machine fold's seed, not something that happened: never listed.
 SELECT id, event_seq, event_time, type, severity, scope, summary, details
 FROM topology_events
-WHERE (sqlc.narg('types')::text[]  IS NULL OR type = ANY(sqlc.narg('types')::text[]))
+WHERE type <> 'topology_baseline'
+  AND (sqlc.narg('types')::text[]  IS NULL OR type = ANY(sqlc.narg('types')::text[]))
   AND (sqlc.narg('scope')::text    IS NULL OR scope = sqlc.narg('scope')::text)
   AND (sqlc.narg('from_time')::timestamptz IS NULL OR event_time >= sqlc.narg('from_time')::timestamptz)
   AND (sqlc.narg('to_time')::timestamptz   IS NULL OR event_time <  sqlc.narg('to_time')::timestamptz)
@@ -68,13 +72,25 @@ LIMIT sqlc.arg('lim');
 SELECT event_time FROM topology_events ORDER BY event_time LIMIT 1;
 
 -- name: ListTopologyEventsForFold :many
--- A fold is only correct when it sees EVERY event from the beginning of retention.
+-- A fold is only correct when it sees EVERY event since its starting point: the beginning of
+-- retention, or (after_time set) the baseline it starts from.
 SELECT id, event_time, details
 FROM topology_events
 WHERE type = sqlc.arg('type')::text
   AND event_time <= sqlc.arg('at')::timestamptz
+  AND (sqlc.narg('after_time')::timestamptz IS NULL OR event_time > sqlc.narg('after_time')::timestamptz)
 ORDER BY event_time, id
 LIMIT sqlc.arg('lim');
+
+-- name: LatestTopologyBaseline :one
+-- The newest topology_baseline row at or before at: the fold's starting state. Served by
+-- topology_events_type_time_idx.
+SELECT id, event_time, details
+FROM topology_events
+WHERE type = 'topology_baseline'
+  AND event_time <= sqlc.arg('at')::timestamptz
+ORDER BY event_time DESC, id DESC
+LIMIT 1;
 
 -- name: DeleteTopologyEventsBefore :execrows
 -- The inner subquery aliases topology_events as te: sqlc v1.31.1's own query analyzer.
