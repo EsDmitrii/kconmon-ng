@@ -41,6 +41,14 @@ data:
       events:
         enabled: true
       {{- end }}
+      {{- /* Emitted only when OFF: true is the compiled default, and a pre-2.4.0 image rejects the
+             unknown key. `with` keeps a --reuse-values upgrade that predates the block silent. */}}
+      {{- with .Values.controller.prometheusSD }}
+      {{- if and (hasKey . "enabled") (not .enabled) }}
+      prometheusSD:
+        enabled: false
+      {{- end }}
+      {{- end }}
       {{- /* Emitted only when ON, same reason as events: pre-M6 images reject the key. The file
              paths must match the Secret mounts in templates/controller/deployment.yaml. */}}
       {{- with .Values.controller.externalGateway }}

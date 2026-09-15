@@ -235,6 +235,28 @@ agent:
   # seccompProfile with it -- precisely the keys a namespace enforcing restricted
   # PSS demands, so opting out of the sysctl got the DaemonSet rejected at admission.
   pingGroupRange: true
+  # Run the agents in the NODE's network namespace. Off by default; read this before flipping it.
+  # It changes WHAT IS MEASURED for the whole DaemonSet, not only where the pods listen: every
+  # in-cluster pair then probes node IP to node IP over the underlay, and the CNI datapath (overlay,
+  # conntrack, NetworkPolicy enforcement) is no longer exercised, so the failure class this tool
+  # exists to catch hides behind a green matrix. Turn it on only when the goal is visibility between
+  # external agents and the cluster on a pod network the external hosts cannot route to.
+  # What must already be true, because each miss fails in its own quiet way:
+  #   - the namespace runs at PSS privileged or is exempted: baseline refuses hostNetwork at
+  #     admission and the release still looks healthy;
+  #   - TCP config.httpPort, UDP config.grpcPort and TCP config.metricsPort are free on EVERY node
+  #     (`ss -lntup` first; Felix metrics also default to 9091 when enabled): an occupied port
+  #     CrashLoops the agent on that node alone and fires KconmonAgentsMissing;
+  #   - net.ipv4.ping_group_range is set by the node OS (sysctl.d, the same line the deb/rpm ships):
+  #     the kubelet refuses net.* pod sysctls under host networking, so the chart stops rendering it;
+  #   - networkPolicy.nodeCidrs is set when networkPolicy.enabled: registrations now arrive from
+  #     node IPs, and the chart refuses to render the policy without it.
+  # One host cannot run both a hostNetwork agent and a bare-host external agent: same IP, same ports.
+  hostNetwork: false
+  # Pod DNS policy, passed through verbatim. Empty renders ClusterFirstWithHostNet under hostNetwork
+  # (controllerAddress is a bare Service name that only cluster DNS resolves; a host-network pod left
+  # on ClusterFirst reads the node's resolv.conf instead) and nothing at all otherwise.
+  dnsPolicy: ""
   nodeSelector: {}
   affinity: {}
   # Empty renders nothing. The agent is the workload worth raising: under node pressure the kubelet
@@ -257,6 +279,11 @@ controller:
   events:
     # Domain event stream for the Console's realtime ingester (leader-only).
     enabled: false
+  # The external-agent target list (GET /api/v1/prometheus/sd) on httpPort and metricsPort, read by
+  # scrapeConfig.externalAgents; false closes it. It reaches the shared ConfigMap only when false,
+  # so an older controller image never sees the key.
+  prometheusSD:
+    enabled: true
   # SECOND gRPC listener for agents OUTSIDE the cluster: same services and registry, but TLS with a
   # bearer token — the in-cluster port is guarded by a NetworkPolicy, and whatever reaches a
   # NodePort/LoadBalancer is guarded by nothing but what is configured here. The in-cluster listener
@@ -664,6 +691,25 @@ serviceMonitor:
   enabled: false
   interval: 15s
 
+# ScrapeConfig (monitoring.coreos.com/v1alpha1, needs the operator's ScrapeConfig CRD) that
+# discovers EXTERNAL agents through the controller's HTTP SD endpoint: the agent ServiceMonitor
+# selects pods, and an agent on a bare host is not one. Requires controller.externalGateway, and
+# the chart refuses the combination without it, since the endpoint would list nothing.
+scrapeConfig:
+  externalAgents:
+    enabled: false
+    # Selector labels the operator's Prometheus requires. kube-prometheus-stack selects only
+    # ScrapeConfigs labelled release=<its release name>, e.g. {release: kube-prometheus-stack};
+    # an operator with an empty scrapeConfigSelector needs nothing here.
+    labels: {}
+    # Empty means <agent fullname>-external, i.e. <release>-agent-external for a release named
+    # kconmon-ng. Keep "kconmon" in it: dashboards/overview.json filters job=~".*kconmon.*".
+    jobName: ""
+    # How often Prometheus re-reads the target list; matches config.controllerAgentTtl.
+    refreshInterval: 30s
+    # Scrape interval; empty falls back to serviceMonitor.interval.
+    interval: ""
+
 # PrometheusRule with the built-in alerts; rule text lives in templates/_rules.tpl, tuning here.
 prometheusRule:
   enabled: false
@@ -727,6 +773,14 @@ prometheusRule:
     enabled: true
     for: 5m
     severity: critical
+  # An external agent the controller's SD endpoint lists but Prometheus cannot scrape: up == 0 on
+  # a job whose name contains "agent-external" (the scrapeConfig.externalAgents default, and the
+  # plain-Prometheus job in docs/external-agents.md). Off by default: the job only exists with one
+  # of those.
+  externalAgentDown:
+    enabled: false
+    for: 5m
+    severity: warning
   # Extra rules appended verbatim; write metric names with your own prefix.
   additionalRules: []
 
@@ -767,6 +821,18 @@ networkPolicy:
   # NODE's own IP, so either cover the node CIDR here or use externalTrafficPolicy: Local.
   # [{cidr: 203.0.113.0/24}] shapes are not accepted — plain CIDR strings.
   externalAgentCidrs: []
+  # Node CIDRs, opened on config.grpcPort toward the controller pods. REQUIRED when agent.hostNetwork
+  # is on together with this policy: a host-network agent registers from its NODE's IP, and Kubernetes
+  # leaves NetworkPolicy behaviour for hostNetwork pods undefined; the common implementation treats
+  # their traffic as node traffic, which no podSelector matches, so every registration except the
+  # agent on the controller's own node would be dropped while the config looks correct. The chart
+  # refuses to render that silently. Plain CIDR strings, as for externalAgentCidrs.
+  nodeCidrs: []
+  # Source CIDRs of the EXTERNAL agents' probe traffic, spliced into the agent-to-agent rules in both
+  # directions (UDP grpcPort, TCP httpPort, and the ports-less ICMP/MTR rule). The gateway rule covers
+  # registration only, so without this an external agent registers fine and every cell between it
+  # and the cluster stays red. Never spliced into the gateway rule. Plain CIDR strings.
+  externalPeerCidrs: []
   # Empty renders TCP 80/443 to 0.0.0.0/0 when the HTTP checker is on.
   httpEgress: []
   # Egress to DNS resolvers outside the cluster (config.checkers.dns.resolvers).

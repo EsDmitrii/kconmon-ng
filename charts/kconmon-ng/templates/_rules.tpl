@@ -281,11 +281,15 @@
 {{- end }}
 {{- with $pr.kconmonAgentsMissing }}
 {{- if .enabled }}
-{{/* Standbys hold no agents by design, so only the lease holder's counts are evidence. */}}
+{{/* Standbys hold no agents by design, so only the lease holder's counts are evidence. External
+     agents register through the gateway with no node to expect them on, so they leave the
+     registered count; `or registered * 0` stands in for the gauge on a controller image that
+     predates it and carries the same labels, where a bare vector(0) has none and matches nothing. */}}
 - alert: KconmonAgentsMissing
   expr: >-
     ({{ $prefix }}_controller_expected_agents
-    - {{ $prefix }}_controller_registered_agents > 0)
+    - ({{ $prefix }}_controller_registered_agents
+    - ({{ $prefix }}_controller_external_agents or {{ $prefix }}_controller_registered_agents * 0)) > 0)
     and ({{ $prefix }}_controller_leader == 1)
   for: {{ .for }}
   labels:
@@ -302,6 +306,9 @@
       being blocked. Every pair involving a missing node simply stops being
       probed, so the other rules in this group go quiet rather than firing.
       The kconmon-ng console topology view lists the nodes it does know.
+      Agents that joined through the external gateway are not counted
+      against the node total, so one of them cannot hide a missing
+      in-cluster agent.
 {{- end }}
 {{- end }}
 {{- with $pr.kconmonControllerDown }}
@@ -320,6 +327,31 @@
       quietly stops describing reality. Check the controller Deployment, its
       lease in the release namespace, and the controller scrape target in
       Prometheus.
+{{- end }}
+{{- end }}
+{{- with $pr.externalAgentDown }}
+{{- if .enabled }}
+{{/* up is Prometheus' own series, so no metricsPrefix. The job regex, not the resolved jobName,
+     so the plain-Prometheus job from docs/external-agents.md is covered too; the labels are the
+     ones the controller's SD body attaches (node, zone, external, agent_id). */}}
+- alert: KconmonExternalAgentDown
+  expr: up{job=~".*agent-external.*"} == 0
+  for: {{ .for }}
+  labels:
+    severity: {{ .severity }}
+  annotations:
+    summary: >-
+      External kconmon-ng agent {{`{{ $labels.node }}`}} is not answering scrapes
+    description: >-
+      Prometheus discovered {{`{{ $labels.node }}`}} at {{`{{ $labels.instance }}`}}
+      (zone {{`{{ $labels.zone }}`}}) through the controller's SD endpoint and has
+      not scraped it successfully for {{ .for }}. The agent still registers with
+      the gateway, otherwise the target would have left the list, so the usual
+      cause is the host firewall or the monitoring namespace's egress policy
+      blocking the metrics port; on most CNIs Prometheus egress is NATed to a
+      node IP, so the host must admit the node CIDR rather than the Prometheus
+      pod IP. The kconmon-ng console keeps showing the node while it registers,
+      so its probe results tell whether the host itself is healthy.
 {{- end }}
 {{- end }}
 {{- end -}}

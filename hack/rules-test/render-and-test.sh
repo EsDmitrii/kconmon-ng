@@ -13,6 +13,7 @@ helm template charts/kconmon-ng \
   --set prometheusRule.enabled=true \
   --set prometheusRule.zoneChecksFailing.enabled=true \
   --set prometheusRule.zoneLossHigh.enabled=true \
+  --set prometheusRule.externalAgentDown.enabled=true \
   > "$tmp/manifests.yaml"
 python3 - "$tmp/manifests.yaml" "$tmp/rules.yaml" <<'PY'
 import sys, yaml

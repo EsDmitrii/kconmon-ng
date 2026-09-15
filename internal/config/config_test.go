@@ -429,6 +429,47 @@ func TestLoadFromFileEventsEnabled(t *testing.T) {
 	}
 }
 
+// On by default: the SD body is empty until an external agent registers, so an installation
+// without the gateway pays nothing for it, and Prometheus can be pointed at it without a redeploy.
+func TestDefaultConfigPrometheusSDEnabled(t *testing.T) {
+	cfg := DefaultConfig()
+	if !cfg.Controller.PrometheusSD.Enabled {
+		t.Error("expected controller.prometheusSD.enabled to default true")
+	}
+}
+
+// The chart emits controller.prometheusSD.enabled only when false; that file must load, validate
+// and land as false (a strict decoder with an unknown key would refuse the whole config).
+func TestLoadPrometheusSDDisabledFromFile(t *testing.T) {
+	loader := NewLoader(writeConfig(t, "controller:\n  prometheusSD:\n    enabled: false\n"))
+	if err := loader.Load(); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if loader.Get().Controller.PrometheusSD.Enabled {
+		t.Error("expected controller.prometheusSD.enabled false after load")
+	}
+}
+
+// An empty block keeps the default, and the block's only key is `enabled`.
+func TestPrometheusSDStrictKeys(t *testing.T) {
+	loader := NewLoader(writeConfig(t, "controller:\n  prometheusSD: {}\n"))
+	if err := loader.Load(); err != nil {
+		t.Fatalf("Load with an empty prometheusSD block: %v", err)
+	}
+	if !loader.Get().Controller.PrometheusSD.Enabled {
+		t.Error("empty prometheusSD block must keep the default true")
+	}
+
+	loader = NewLoader(writeConfig(t, "controller:\n  prometheusSD:\n    enabeld: false\n"))
+	err := loader.Load()
+	if err == nil {
+		t.Fatal("expected an error for unknown key prometheusSD.enabeld, got nil")
+	}
+	if !strings.Contains(err.Error(), "enabeld") {
+		t.Errorf("error should name the offending key, got: %v", err)
+	}
+}
+
 // writeExternalConfig writes a minimal valid config with the given
 // checkers.external block and returns its path.
 func writeExternalConfig(t *testing.T, external string) string {

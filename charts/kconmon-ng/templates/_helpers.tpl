@@ -322,3 +322,38 @@ disabled
 {{- end -}}
 {{- end -}}
 {{- end }}
+
+{{/* The agent.metrics.detail cardinality valve as a metricRelabelings block, shared by the agent
+     ServiceMonitor and the external-agent ScrapeConfig so both scrape paths drop the same series;
+     empty for detail=full. Callers nindent it under the endpoint or the spec. */}}
+{{- define "kconmon-ng.agent.metricRelabelings" -}}
+{{- if eq .Values.agent.metrics.detail "counters-only" -}}
+metricRelabelings:
+  # Drop only the four per-pair histograms — 64 of the ~70 series a directed pair costs.
+  # The prefix needs no regex escaping: the schema pins it to [a-z][a-z0-9_]*. The zone
+  # histograms do not match, their names carry "zone_" between prefix and protocol.
+  - sourceLabels: [__name__]
+    regex: {{ printf "%s_(tcp_connect_duration|tcp_total_duration|udp_rtt|icmp_rtt)_seconds_(bucket|sum|count)" .Values.config.metricsPrefix }}
+    action: drop
+{{- else if eq .Values.agent.metrics.detail "zone-only" -}}
+metricRelabelings:
+  # A per-pair series is exactly one that names a destination node, so matching the label
+  # drops every pair-scoped family at once and survives any metric rename or prefix. The
+  # zone, DNS, HTTP and external families carry no destination_node and pass through.
+  - sourceLabels: [destination_node]
+    regex: .+
+    action: drop
+{{- end -}}
+{{- end }}
+
+{{/* Whether the external-agent ScrapeConfig renders. Nil-safe on purpose: a --reuse-values upgrade
+     whose stored values predate the block reads as off instead of failing every render. */}}
+{{- define "kconmon-ng.scrapeConfig.externalAgents.enabled" -}}
+{{- if dig "externalAgents" "enabled" false (.Values.scrapeConfig | default dict) -}}true{{- end -}}
+{{- end }}
+
+{{/* Job label of the external-agent ScrapeConfig: the operator's value, else <agent fullname>-external,
+     which keeps "kconmon" wherever the ServiceMonitor's job does (the dashboards filter on it). */}}
+{{- define "kconmon-ng.scrapeConfig.externalAgents.jobName" -}}
+{{- .Values.scrapeConfig.externalAgents.jobName | default (printf "%s-external" (include "kconmon-ng.agent.fullname" .)) -}}
+{{- end }}

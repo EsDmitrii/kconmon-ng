@@ -64,6 +64,7 @@ func (c *Controller) SetLeader(leader bool) {
 		// The gauge belongs to this replica's own view, and it now holds nothing. It used to be
 		// zeroed as a side effect of the notification ResetQuiet deliberately does not send.
 		c.metrics.ControllerRegisteredAgents.WithLabelValues().Set(0)
+		c.metrics.ControllerExternalAgents.WithLabelValues().Set(0)
 		/* And the EXTERNAL assignment, which is the same kind of state and was left behind.
 
 		   A demoted replica kept the assignment map it held as leader, so
@@ -99,6 +100,11 @@ func New(cfg *config.Config) *Controller {
 
 	c.grpcServer = NewGRPCServer(registry, m, cfg.Controller.LeaderElection, c.IsLeader, cfg.Controller.Events.Enabled)
 	c.httpServer = NewHTTPServer(registry, nil, promReg, capabilitiesFor(cfg))
+	// The SD body carries the controller's metricsPort as the fallback target port: ports are
+	// startup-only configuration, so the value captured here is the one every listener bound to.
+	if cfg.Controller.PrometheusSD.Enabled {
+		c.httpServer.EnablePrometheusSD(cfg.MetricsPort)
+	}
 	// Only when the checker is on: an allowlist nobody probes by is not a promise.
 	if cfg.Checkers.External.Enabled {
 		c.httpServer.SetExternalAllowedCIDRs(cfg.Checkers.External.AllowedCIDRs)
@@ -115,6 +121,7 @@ func New(cfg *config.Config) *Controller {
 		// (see SchedulePeerBroadcast); the events below stay per-change.
 		c.grpcServer.SchedulePeerBroadcast(agents)
 		m.ControllerRegisteredAgents.WithLabelValues().Set(float64(len(agents)))
+		m.ControllerExternalAgents.WithLabelValues().Set(float64(countExternal(agents)))
 		for _, tc := range change.Events() {
 			c.grpcServer.PublishEvent(&pb.Event{Payload: &pb.Event_TopologyChanged{TopologyChanged: tc}})
 		}
@@ -218,10 +225,7 @@ func (c *Controller) Run(ctx context.Context) error {
 
 	/* The METRICS listener, on a port of its own. The chart's scrape rule opens THIS one, so letting
 	   a scraper in no longer lets its whole namespace reach the unauthenticated API above. */
-	metricsSrv := metrics.NewListener(
-		fmt.Sprintf(":%d", c.cfg.MetricsPort),
-		metrics.NewListenerHandler(c.promReg, c.httpServer.Ready),
-	)
+	metricsSrv := metrics.NewListener(fmt.Sprintf(":%d", c.cfg.MetricsPort), c.metricsListenerHandler())
 
 	go func() {
 		slog.Info("metrics server listening", "port", c.cfg.MetricsPort)
@@ -296,6 +300,28 @@ func (c *Controller) Run(ctx context.Context) error {
 	case err := <-errCh:
 		return err
 	}
+}
+
+// metricsListenerHandler is what the metrics listener serves: /metrics, the health endpoints and,
+// when enabled, the Prometheus SD body, which has to answer on the one port the chart opens to the
+// scraper. Same handler instance as the API mux, so the leader gate is shared.
+func (c *Controller) metricsListenerHandler() http.Handler {
+	var extra []metrics.Route
+	if sd := c.httpServer.SDHandler(); sd != nil {
+		extra = append(extra, metrics.Route{Pattern: "GET " + prometheusSDPath, Handler: sd})
+	}
+	return metrics.NewListenerHandler(c.promReg, c.httpServer.Ready, extra...)
+}
+
+// countExternal is the bare-host subset of a registry snapshot, for controller_external_agents.
+func countExternal(agents []model.AgentInfo) int {
+	n := 0
+	for i := range agents {
+		if agents[i].IsExternal() {
+			n++
+		}
+	}
+	return n
 }
 
 // The controller's HTTP budget. Every endpoint on this server answers in milliseconds -- /metrics,

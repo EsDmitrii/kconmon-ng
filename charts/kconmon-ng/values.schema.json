@@ -131,6 +131,15 @@
             }
           }
         },
+        "prometheusSD": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            }
+          }
+        },
         "externalGateway": {
           "type": "object",
           "additionalProperties": false,
@@ -510,6 +519,19 @@
         },
         "pingGroupRange": {
           "type": "boolean"
+        },
+        "hostNetwork": {
+          "type": "boolean"
+        },
+        "dnsPolicy": {
+          "type": "string",
+          "enum": [
+            "",
+            "ClusterFirst",
+            "ClusterFirstWithHostNet",
+            "Default",
+            "None"
+          ]
         },
         "priorityClassName": {
           "type": "string"
@@ -1581,6 +1603,36 @@
         }
       }
     },
+    "scrapeConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "externalAgents": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "labels": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "string"
+              }
+            },
+            "jobName": {
+              "type": "string"
+            },
+            "refreshInterval": {
+              "type": "string"
+            },
+            "interval": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    },
     "prometheusRule": {
       "type": "object",
       "additionalProperties": false,
@@ -1622,6 +1674,9 @@
         "kconmonControllerDown": {
           "$ref": "#/$defs/alert"
         },
+        "externalAgentDown": {
+          "$ref": "#/$defs/alert"
+        },
         "additionalRules": {
           "type": "array",
           "items": {
@@ -1658,6 +1713,20 @@
             "type": "string"
           },
           "description": "Plain CIDR strings, not rule objects; each becomes one ipBlock on the gateway port."
+        },
+        "nodeCidrs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Plain CIDR strings; each becomes one ipBlock on the controller gRPC ingress rule. Required together with agent.hostNetwork."
+        },
+        "externalPeerCidrs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Plain CIDR strings; each becomes one ipBlock on the agent-to-agent probe rules, ingress and egress, never on the gateway rule."
         },
         "httpEgress": {
           "type": "array",

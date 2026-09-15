@@ -1,0 +1,35 @@
+{{- if include "kconmon-ng.scrapeConfig.externalAgents.enabled" . }}
+{{- if not .Values.controller.externalGateway.enabled }}
+{{- fail "scrapeConfig.externalAgents.enabled=true but controller.externalGateway.enabled=false: external agents can only register through the gateway, so the controller's SD endpoint would list no targets and the ScrapeConfig would scrape nothing. Enable controller.externalGateway (docs/external-agents.md), or leave scrapeConfig.externalAgents off" }}
+{{- end }}
+{{- if not .Values.controller.prometheusSD.enabled }}
+{{- fail "scrapeConfig.externalAgents.enabled=true but controller.prometheusSD.enabled=false: the ScrapeConfig reads GET /api/v1/prometheus/sd, which that switch turns off, so every Prometheus refresh would fail. Turn one of the two around" }}
+{{- end }}
+{{- $sc := .Values.scrapeConfig.externalAgents }}
+{{- /* Targets come from the controller, not from a Service: an external agent has no pod for a
+       ServiceMonitor to select. The SD route is served on metricsPort so the scrape NetworkPolicy
+       already admits it. */}}
+apiVersion: monitoring.coreos.com/v1alpha1
+kind: ScrapeConfig
+metadata:
+  name: {{ include "kconmon-ng.agent.fullname" . }}-external
+  labels:
+    {{- include "kconmon-ng.labels" . | nindent 4 }}
+    app.kubernetes.io/component: agent
+    {{- with $sc.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  jobName: {{ include "kconmon-ng.scrapeConfig.externalAgents.jobName" . | quote }}
+  {{- /* Upper case on purpose: the ScrapeConfig CRD accepted only HTTP/HTTPS before prometheus-operator
+         v0.87, unlike the ServiceMonitor endpoint scheme, which is lower case. */}}
+  scheme: HTTP
+  metricsPath: /metrics
+  scrapeInterval: {{ $sc.interval | default .Values.serviceMonitor.interval }}
+  httpSDConfigs:
+    - url: http://{{ include "kconmon-ng.controller.fullname" . }}.{{ .Release.Namespace }}.svc:{{ .Values.config.metricsPort }}/api/v1/prometheus/sd
+      refreshInterval: {{ $sc.refreshInterval }}
+  {{- with include "kconmon-ng.agent.metricRelabelings" . }}
+  {{- . | nindent 2 }}
+  {{- end }}
+{{- end }}
