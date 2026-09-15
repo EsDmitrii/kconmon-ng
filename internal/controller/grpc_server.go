@@ -220,6 +220,10 @@ func (s *GRPCServer) Register(_ context.Context, req *pb.RegisterRequest) (*pb.R
 		// Retained so the diagnostics handler can gate external destinations on
 		// what this agent build actually supports.
 		Capabilities: agentMeta.GetCapabilities(),
+		// 0 = the agent predates the port fields; peers then fall back to their own configured port.
+		HTTPPort:    int(agentMeta.GetHttpPort()),
+		UDPPort:     int(agentMeta.GetUdpPort()),
+		MetricsPort: int(agentMeta.GetMetricsPort()),
 	}
 
 	resolved := s.registry.Register(info)
@@ -239,9 +243,13 @@ func (s *GRPCServer) Register(_ context.Context, req *pb.RegisterRequest) (*pb.R
 	}, nil
 }
 
+// maxPort bounds the port fields of AgentMeta: they are uint32 on the wire, so a value no socket
+// can bind has to be refused here rather than published to the fleet as a peer to dial.
+const maxPort = 65535
+
 // validateAgentMeta rejects a registration that cannot describe a probe target. The PodIP has to
 // PARSE: a peer with a malformed address is a checker target that can never connect, published to
-// every other agent in the fleet.
+// every other agent in the fleet. Ports are optional (0 = a pre-2.4.0 agent), but never > 65535.
 func validateAgentMeta(m *pb.AgentMeta) error {
 	switch {
 	case m == nil:
@@ -254,6 +262,12 @@ func validateAgentMeta(m *pb.AgentMeta) error {
 		return errors.New("register: pod IP is empty")
 	case net.ParseIP(m.GetPodIp()) == nil:
 		return fmt.Errorf("register: pod IP %q is not an IP address", m.GetPodIp())
+	case m.GetHttpPort() > maxPort:
+		return fmt.Errorf("register: http_port %d is out of range", m.GetHttpPort())
+	case m.GetUdpPort() > maxPort:
+		return fmt.Errorf("register: udp_port %d is out of range", m.GetUdpPort())
+	case m.GetMetricsPort() > maxPort:
+		return fmt.Errorf("register: metrics_port %d is out of range", m.GetMetricsPort())
 	}
 	return nil
 }
@@ -752,20 +766,37 @@ func agentInfoToProto(a model.AgentInfo) *pb.AgentMeta { //nolint:gocritic // hu
 		Zone:         a.Zone,
 		Labels:       a.Labels,
 		Capabilities: a.Capabilities,
+		HttpPort:     portToProto(a.HTTPPort),
+		UdpPort:      portToProto(a.UDPPort),
+		MetricsPort:  portToProto(a.MetricsPort),
 	}
 }
 
-// peerToProto is the NARROW projection for peer LISTS: exactly the fields the agent's
-// protoToTargets reads. PodName, Labels and Capabilities are controller-side concerns; in proto3
-// omitting them removes them from the wire entirely (an old agent decodes them as empty, which is
-// what it ignored anyway), and the labels map is the dominant term of a FULL_SYNC's size at 100+
-// nodes. Anything that is NOT a peer list — RegisterResponse.Agent, TaskRequest.Target — keeps
-// agentInfoToProto.
+// peerToProto is the NARROW projection for peer LISTS: exactly what the agent's protoToTargets
+// reads — id, node_name, pod_ip, zone, http_port (TCP probe target) and udp_port (echo target).
+// metrics_port is for scrape discovery, not for peers: no agent dials it, and at FULL_SYNC it would
+// be one more varint per peer for nothing. PodName, Labels and Capabilities are controller-side
+// concerns; in proto3 omitting them removes them from the wire entirely (an old agent decodes them
+// as empty, which is what it ignored anyway), and the labels map is the dominant term of a
+// FULL_SYNC's size at 100+ nodes. Anything that is NOT a peer list — RegisterResponse.Agent,
+// TaskRequest.Target — keeps agentInfoToProto.
 func peerToProto(a model.AgentInfo) *pb.AgentMeta { //nolint:gocritic // hugeParam: value copy is intentional for proto conversion
 	return &pb.AgentMeta{
 		Id:       a.ID,
 		NodeName: a.NodeName,
 		PodIp:    a.PodIP,
 		Zone:     a.Zone,
+		HttpPort: portToProto(a.HTTPPort),
+		UdpPort:  portToProto(a.UDPPort),
 	}
+}
+
+// portToProto narrows a stored port for the wire. Registration already refused anything above
+// maxPort, so an out-of-range value here can only come from controller-side code; it is sent as 0
+// ("unknown") rather than wrapped into a port that does not exist.
+func portToProto(p int) uint32 {
+	if p < 0 || p > maxPort {
+		return 0
+	}
+	return uint32(p) //nolint:gosec // G115: range-checked above
 }

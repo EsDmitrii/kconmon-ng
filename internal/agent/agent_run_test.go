@@ -227,6 +227,85 @@ func TestProbesContinueAcrossControllerDrop(t *testing.T) {
 	}
 }
 
+// freeUDPPort reserves a loopback UDP port and releases it for the caller to bind.
+func freeUDPPort(t *testing.T) int {
+	t.Helper()
+	var lc net.ListenConfig
+	conn, err := lc.ListenPacket(context.Background(), "udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("reserving a UDP port: %v", err)
+	}
+	port := conn.LocalAddr().(*net.UDPAddr).Port
+	_ = conn.Close()
+	return port
+}
+
+/*
+The 2.4.0 sibling of the test above, which stays the regression for the zero-port fallback: a peer
+that REPORTED its UDP echo port is probed there, end to end through Register and WatchPeers. The
+fake peer's UDPPort names a second ProbeServer on loopback while the agent's own echo server keeps
+answering on cfg.GRPCPort, so success alone proves nothing; closing the second server must make the
+probes fail, which they only do if the peer's port, not the agent's own, was dialled.
+*/
+func TestProbesReachThePeerOnItsReportedUDPPort(t *testing.T) {
+	t.Setenv("KCONMON_NG_POD_NAME", "m2-agent-pod")
+	t.Setenv("KCONMON_NG_POD_IP", "::1")
+
+	peerPort := freeUDPPort(t)
+	peerEcho := NewProbeServer(peerPort)
+	if err := peerEcho.ListenUDP(context.Background()); err != nil {
+		t.Fatalf("starting the peer's echo server: %v", err)
+	}
+	t.Cleanup(func() { _ = peerEcho.Close() })
+
+	var lc net.ListenConfig
+	lis, err := lc.Listen(context.Background(), "tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listening for the controller: %v", err)
+	}
+	reg := controller.NewRegistry(30 * time.Second)
+	reg.Register(model.AgentInfo{ID: "m2-peer", NodeName: "m2-peer-node", PodName: "m2-peer-pod", PodIP: "127.0.0.1", UDPPort: peerPort})
+	m := metrics.NewPrometheusMetrics("test_peer_udp_port", prometheus.NewRegistry())
+	srv := controller.NewGRPCServer(reg, m, false, nil, false)
+	gs := grpc.NewServer()
+	srv.RegisterService(gs)
+	go func() { _ = gs.Serve(lis) }()
+	t.Cleanup(gs.Stop)
+
+	cfg := testRunConfig(t, lis.Addr().String())
+	cfg.Agent.NodeName = "m2-agent-node"
+	cfg.Checkers.UDP.Enabled = true
+	cfg.Checkers.UDP.Interval = 50 * time.Millisecond
+	cfg.Checkers.UDP.Timeout = 250 * time.Millisecond
+	cfg.Checkers.UDP.Packets = 1
+
+	a, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	var succeeded, failed atomic.Int64
+	a.scheduler.handler = func(r model.CheckResult) {
+		if r.Success {
+			succeeded.Add(1)
+		} else {
+			failed.Add(1)
+		}
+	}
+
+	startRun(t, a)
+
+	waitFor(t, 10*time.Second, "successful probes against the peer's reported echo port", func() bool {
+		return succeeded.Load() >= 3
+	})
+
+	// Take the peer's echo away. The agent's own echo server is still up on cfg.GRPCPort, so a
+	// probe that fell back to it would keep succeeding.
+	_ = peerEcho.Close()
+	waitFor(t, 10*time.Second, "probes failing once the peer's reported echo port is gone", func() bool {
+		return failed.Load() >= 3
+	})
+}
+
 // invalidArgumentRegistry rejects every registration the way the controller
 // rejects a payload failing validateAgentMeta (missing downward-API env).
 type invalidArgumentRegistry struct {

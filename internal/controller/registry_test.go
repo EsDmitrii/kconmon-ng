@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"maps"
 	"slices"
 	"sync"
 	"testing"
@@ -58,6 +59,71 @@ func TestRegistryAgentWithoutCapabilities(t *testing.T) {
 	}
 	if len(info.Capabilities) != 0 {
 		t.Errorf("expected no capabilities for a pre-M4 agent, got %v", info.Capabilities)
+	}
+}
+
+// TestRegistryRetainsAgentPorts pins the 2.4.0 port round-trip: the ports an agent reported at
+// registration are what RegisterResponse.Agent, the stored AgentInfo and the FULL projection hand
+// back, while the NARROW peer projection carries only the two a probing peer dials.
+func TestRegistryRetainsAgentPorts(t *testing.T) {
+	srv, reg := newTestGRPCServer()
+
+	resp, err := srv.Register(context.Background(), &pb.RegisterRequest{
+		Agent: &pb.AgentMeta{
+			Id: "agent-ports", NodeName: "node-ports", PodIp: "10.0.0.9",
+			HttpPort: 18080, UdpPort: 19090, MetricsPort: 19091,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	if a := resp.GetAgent(); a.GetHttpPort() != 18080 || a.GetUdpPort() != 19090 || a.GetMetricsPort() != 19091 {
+		t.Errorf("RegisterResponse.agent ports = %d/%d/%d, want 18080/19090/19091",
+			a.GetHttpPort(), a.GetUdpPort(), a.GetMetricsPort())
+	}
+
+	info, ok := reg.GetByNodeName("node-ports")
+	if !ok {
+		t.Fatal("agent not found by node name after Register")
+	}
+	if info.HTTPPort != 18080 || info.UDPPort != 19090 || info.MetricsPort != 19091 {
+		t.Errorf("AgentInfo ports = %d/%d/%d, want 18080/19090/19091", info.HTTPPort, info.UDPPort, info.MetricsPort)
+	}
+	if full := agentInfoToProto(info); full.GetHttpPort() != 18080 || full.GetUdpPort() != 19090 || full.GetMetricsPort() != 19091 {
+		t.Errorf("agentInfoToProto ports = %d/%d/%d, want 18080/19090/19091",
+			full.GetHttpPort(), full.GetUdpPort(), full.GetMetricsPort())
+	}
+	if peer := peerToProto(info); peer.GetHttpPort() != 18080 || peer.GetUdpPort() != 19090 || peer.GetMetricsPort() != 0 {
+		t.Errorf("peerToProto ports = %d/%d/%d, want 18080/19090 and NO metrics_port",
+			peer.GetHttpPort(), peer.GetUdpPort(), peer.GetMetricsPort())
+	}
+}
+
+// A pre-2.4.0 agent sends no ports at all; the registry must keep them at 0 ("unknown, dial your
+// own") rather than invent a default, in both projections.
+func TestRegistryAgentWithoutPortsIsZero(t *testing.T) {
+	srv, reg := newTestGRPCServer()
+
+	resp, err := srv.Register(context.Background(), &pb.RegisterRequest{
+		Agent: &pb.AgentMeta{Id: "agent-old", NodeName: "node-old", PodIp: "10.0.0.9"},
+	})
+	if err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	if a := resp.GetAgent(); a.GetHttpPort() != 0 || a.GetUdpPort() != 0 || a.GetMetricsPort() != 0 {
+		t.Errorf("RegisterResponse.agent ports = %d/%d/%d, want all zero for a pre-2.4.0 agent",
+			a.GetHttpPort(), a.GetUdpPort(), a.GetMetricsPort())
+	}
+
+	info, ok := reg.GetByNodeName("node-old")
+	if !ok {
+		t.Fatal("agent not found by node name after Register")
+	}
+	if info.HTTPPort != 0 || info.UDPPort != 0 || info.MetricsPort != 0 {
+		t.Errorf("AgentInfo ports = %d/%d/%d, want all zero", info.HTTPPort, info.UDPPort, info.MetricsPort)
+	}
+	if peer := peerToProto(info); peer.GetHttpPort() != 0 || peer.GetUdpPort() != 0 {
+		t.Errorf("peerToProto ports = %d/%d, want zero so the peer falls back to its own", peer.GetHttpPort(), peer.GetUdpPort())
 	}
 }
 
@@ -336,6 +402,15 @@ func TestRegistryDeregisterUnknownNoOp(t *testing.T) {
 
 // topology attribution Every registry mutation that fires OnChange must name WHO it was about.
 
+// subjectsEqual compares subjects field by field: TopologySubject carries a labels map, so it is
+// not comparable and slices.Equal does not apply.
+func subjectsEqual(a, b []TopologySubject) bool {
+	return slices.EqualFunc(a, b, func(x, y TopologySubject) bool {
+		return x.AgentID == y.AgentID && x.NodeName == y.NodeName && x.Zone == y.Zone &&
+			maps.Equal(x.Labels, y.Labels)
+	})
+}
+
 // recordChanges subscribes to r and returns a snapshot-taking accessor for
 // every TopologyChange observed since subscription.
 func recordChanges(r *Registry) func() []TopologyChange {
@@ -368,7 +443,7 @@ func TestRegisterAttributesTheRegisteringAgent(t *testing.T) {
 		t.Errorf("reason = %q, want agent_registered", got[0].Reason)
 	}
 	want := []TopologySubject{{AgentID: "agent-1", NodeName: "node-1", Zone: "zone-a"}}
-	if !slices.Equal(got[0].Subjects, want) {
+	if !subjectsEqual(got[0].Subjects, want) {
 		t.Errorf("subjects = %+v, want %+v", got[0].Subjects, want)
 	}
 }
@@ -409,7 +484,7 @@ func TestUpdateZoneAttributesEveryAgentOnTheNodeWithTheNewZone(t *testing.T) {
 		{AgentID: "agent-1", NodeName: "node-1", Zone: "zone-a"},
 		{AgentID: "agent-1b", NodeName: "node-1", Zone: "zone-a"},
 	}
-	if !slices.Equal(got[0].Subjects, want) {
+	if !subjectsEqual(got[0].Subjects, want) {
 		t.Errorf("subjects = %+v, want %+v (agent-2 is on another node)", got[0].Subjects, want)
 	}
 }
@@ -433,7 +508,7 @@ func TestDeregisterAttributesTheDepartedAgentsLastKnownPlacement(t *testing.T) {
 		t.Errorf("reason = %q, want agent_deregistered", got[0].Reason)
 	}
 	want := []TopologySubject{{AgentID: "agent-1", NodeName: "node-1", Zone: "zone-a"}}
-	if !slices.Equal(got[0].Subjects, want) {
+	if !subjectsEqual(got[0].Subjects, want) {
 		t.Errorf("subjects = %+v, want %+v", got[0].Subjects, want)
 	}
 }
@@ -462,8 +537,84 @@ func TestEvictStaleAttributesEveryEvictedAgent(t *testing.T) {
 		{AgentID: "agent-1", NodeName: "node-1", Zone: "zone-a"},
 		{AgentID: "agent-2", NodeName: "node-2", Zone: "zone-b"},
 	}
-	if !slices.Equal(got[0].Subjects, want) {
+	if !subjectsEqual(got[0].Subjects, want) {
 		t.Errorf("subjects = %+v, want %+v (sorted by agent id)", got[0].Subjects, want)
+	}
+}
+
+// Every subject a mutation names carries the agent's labels, departures included: the Time
+// Machine fold tells an external host from a node by TopologyChanged.labels, and a history that
+// forgets the label on the way out would draw the host as an ordinary node right up to its exit.
+func TestTopologySubjectsCarryTheAgentsLabels(t *testing.T) {
+	external := map[string]string{model.LabelExternal: "true"}
+	labelled := model.AgentInfo{ID: "agent-1", NodeName: "node-1", Zone: "zone-a", Labels: external}
+
+	cases := []struct {
+		name   string
+		reason string
+		mutate func(r *Registry)
+	}{
+		{"register", "agent_registered", func(r *Registry) { r.Register(labelled) }},
+		{"zone update", "zone_updated", func(r *Registry) { r.UpdateZone("node-1", "zone-b") }},
+		{"deregister", "agent_deregistered", func(r *Registry) { r.Deregister("agent-1") }},
+		{"reset", "agent_deregistered", func(r *Registry) { r.Reset() }},
+		{"evict", "agent_evicted", func(r *Registry) {
+			time.Sleep(time.Millisecond)
+			if n := r.EvictStale(); n != 1 {
+				t.Fatalf("expected 1 eviction, got %d", n)
+			}
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := NewRegistry(time.Nanosecond)
+			if tc.name != "register" {
+				r.Register(labelled)
+			}
+			changes := recordChanges(r)
+
+			tc.mutate(r)
+
+			got := changes()
+			if len(got) != 1 {
+				t.Fatalf("expected 1 change, got %d: %+v", len(got), got)
+			}
+			if got[0].Reason != tc.reason {
+				t.Errorf("reason = %q, want %s", got[0].Reason, tc.reason)
+			}
+			if len(got[0].Subjects) != 1 {
+				t.Fatalf("expected 1 subject, got %+v", got[0].Subjects)
+			}
+			if !maps.Equal(got[0].Subjects[0].Labels, external) {
+				t.Errorf("subject labels = %v, want %v", got[0].Subjects[0].Labels, external)
+			}
+			evs := got[0].Events()
+			if len(evs) != 1 || !maps.Equal(evs[0].GetLabels(), external) {
+				t.Errorf("TopologyChanged.labels = %v, want %v", evs[0].GetLabels(), external)
+			}
+		})
+	}
+}
+
+// An agent that sent no labels yields events with none: the fold must not see an invented map.
+func TestTopologySubjectsWithoutLabelsStayEmpty(t *testing.T) {
+	r := NewRegistry(30 * time.Second)
+	changes := recordChanges(r)
+
+	r.Register(model.AgentInfo{ID: "agent-1", NodeName: "node-1", Zone: "zone-a"})
+	r.Deregister("agent-1")
+
+	got := changes()
+	if len(got) != 2 {
+		t.Fatalf("expected 2 changes, got %d: %+v", len(got), got)
+	}
+	for _, change := range got {
+		if n := len(change.Subjects[0].Labels); n != 0 {
+			t.Errorf("%s: subject carries %d labels the agent never sent", change.Reason, n)
+		}
+		if n := len(change.Events()[0].GetLabels()); n != 0 {
+			t.Errorf("%s: TopologyChanged carries %d labels the agent never sent", change.Reason, n)
+		}
 	}
 }
 
@@ -474,7 +625,7 @@ func TestTopologyChangeEventsAreOnePerSubject(t *testing.T) {
 		Reason: "agent_evicted",
 		Subjects: []TopologySubject{
 			{AgentID: "agent-1", NodeName: "node-1", Zone: "zone-a"},
-			{AgentID: "agent-2", NodeName: "node-2", Zone: "zone-b"},
+			{AgentID: "agent-2", NodeName: "node-2", Zone: "zone-b", Labels: map[string]string{model.LabelExternal: "true"}},
 		},
 	}
 
@@ -488,7 +639,8 @@ func TestTopologyChangeEventsAreOnePerSubject(t *testing.T) {
 		}
 		if ev.GetAgentId() != change.Subjects[i].AgentID ||
 			ev.GetNodeName() != change.Subjects[i].NodeName ||
-			ev.GetZone() != change.Subjects[i].Zone {
+			ev.GetZone() != change.Subjects[i].Zone ||
+			!maps.Equal(ev.GetLabels(), change.Subjects[i].Labels) {
 			t.Errorf("event %d = %+v, want subject %+v", i, ev, change.Subjects[i])
 		}
 	}

@@ -139,7 +139,7 @@ func (a *rigAgent) registerWithRetry(ctx context.Context, client *agent.GRPCClie
 	for {
 		attempt := time.Now()
 		rctx, cancel := context.WithTimeout(ctx, 10*time.Second)
-		_, _, err := client.Register(rctx, info, a.rig.httpPort)
+		_, _, err := client.Register(rctx, info, a.rig.ownPorts())
 		cancel()
 		if err == nil {
 			a.rig.counters.registerOK.Add(1)
@@ -167,7 +167,7 @@ func (a *rigAgent) registerWithRetry(ctx context.Context, client *agent.GRPCClie
 // re-register (its desync recovery), then re-subscribe.
 func (a *rigAgent) watchLoop(ctx context.Context, client *agent.GRPCClient) {
 	for {
-		_ = client.WatchPeers(ctx, a.rig.httpPort)
+		_ = client.WatchPeers(ctx, a.rig.ownPorts())
 		if ctx.Err() != nil {
 			return
 		}
@@ -197,7 +197,7 @@ func (a *rigAgent) reregisterLoop(ctx context.Context, client *agent.GRPCClient)
 		info := a.info
 		a.mu.Unlock()
 		rctx, cancel := context.WithTimeout(ctx, 10*time.Second)
-		_, _, err := client.Register(rctx, info, a.rig.httpPort)
+		_, _, err := client.Register(rctx, info, a.rig.ownPorts())
 		cancel()
 		if err == nil {
 			a.rig.counters.registerOK.Add(1)

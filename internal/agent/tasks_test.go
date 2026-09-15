@@ -93,13 +93,17 @@ func (r *fakeReporter) last() *pb.TaskResult {
 	return r.results[len(r.results)-1]
 }
 
+// testOwnPorts stands in for the agent's own listener ports: the fallback for a task target that
+// reported none.
+var testOwnPorts = checker.PeerPorts{HTTP: 8080, UDP: 9090}
+
 func newTestExecutor(reporter taskReporter, checkers ...*fakeChecker) *TaskExecutor {
 	cmap := make(map[model.CheckType]checker.Checker, len(checkers))
 	for _, c := range checkers {
 		cmap[c.name] = c
 	}
 	src := checker.Target{AgentID: "a1", NodeName: "node-a", Zone: "zone-a"}
-	return NewTaskExecutor(cmap, nil, src, 8080, reporter, 4, ExternalPolicy{})
+	return NewTaskExecutor(cmap, nil, src, testOwnPorts, reporter, 4, ExternalPolicy{})
 }
 
 func waitForReport(t *testing.T, r *fakeReporter) {
@@ -219,7 +223,7 @@ func TestMTRBypassesCooldown(t *testing.T) {
 	mtr := checker.NewMTRChecker(1, 10*time.Millisecond, time.Hour)
 	rep := newFakeReporter()
 	src := checker.Target{AgentID: "a1", NodeName: "node-a", Zone: "zone-a"}
-	ex := NewTaskExecutor(map[model.CheckType]checker.Checker{}, mtr, src, 8080, rep, 4, ExternalPolicy{})
+	ex := NewTaskExecutor(map[model.CheckType]checker.Checker{}, mtr, src, testOwnPorts, rep, 4, ExternalPolicy{})
 
 	req := &pb.TaskRequest{
 		CheckType: "mtr",
@@ -252,7 +256,7 @@ func TestSaturationReportsImmediateError(t *testing.T) {
 
 	src := checker.Target{AgentID: "a1", NodeName: "node-a"}
 	// Semaphore of 1: one in-flight task saturates the executor.
-	ex := NewTaskExecutor(map[model.CheckType]checker.Checker{model.CheckTCP: fc}, nil, src, 8080, rep, 1, ExternalPolicy{})
+	ex := NewTaskExecutor(map[model.CheckType]checker.Checker{model.CheckTCP: fc}, nil, src, testOwnPorts, rep, 1, ExternalPolicy{})
 
 	req := func(id string) *pb.TaskRequest {
 		return &pb.TaskRequest{
@@ -293,7 +297,7 @@ func TestContextCancelAbortsExecution(t *testing.T) {
 	fc := &fakeChecker{name: model.CheckTCP, inCall: inCall, block: block, result: model.CheckResult{Success: true}}
 	rep := newFakeReporter()
 	src := checker.Target{AgentID: "a1", NodeName: "node-a"}
-	ex := NewTaskExecutor(map[model.CheckType]checker.Checker{model.CheckTCP: fc}, nil, src, 8080, rep, 4, ExternalPolicy{})
+	ex := NewTaskExecutor(map[model.CheckType]checker.Checker{model.CheckTCP: fc}, nil, src, testOwnPorts, rep, 4, ExternalPolicy{})
 
 	ctx, cancel := context.WithCancel(context.Background())
 	req := &pb.TaskRequest{
@@ -354,7 +358,7 @@ func newExternalExecutor(t *testing.T, r checker.Resolver, allowed, denied []str
 		t.Fatalf("building allowlist: %v", err)
 	}
 	src := checker.Target{AgentID: "a1", NodeName: "node-a", Zone: "zone-a"}
-	return NewTaskExecutor(cmap, nil, src, 8080, nil, 4, ExternalPolicy{
+	return NewTaskExecutor(cmap, nil, src, testOwnPorts, nil, 4, ExternalPolicy{
 		Enabled:   true,
 		Allowlist: list,
 		Resolver:  r,
@@ -421,7 +425,7 @@ func TestExternalTargetWithFeatureDisabledNamesTheHelmValue(t *testing.T) {
 func TestExternalTargetEnabledWithoutAllowlistDenies(t *testing.T) {
 	fc := &fakeChecker{name: model.CheckTCP, result: model.CheckResult{Success: true}}
 	src := checker.Target{AgentID: "a1", NodeName: "node-a"}
-	ex := NewTaskExecutor(map[model.CheckType]checker.Checker{model.CheckTCP: fc}, nil, src, 8080, nil, 4,
+	ex := NewTaskExecutor(map[model.CheckType]checker.Checker{model.CheckTCP: fc}, nil, src, testOwnPorts, nil, 4,
 		ExternalPolicy{Enabled: true})
 
 	res := ex.executeOne(context.Background(), externalReq("noallow", "tcp", "10.0.0.9"))
@@ -710,7 +714,7 @@ func TestExternalAddressWithEmbeddedPortIsSplitNotResolved(t *testing.T) {
 	}
 	fake := &fakeChecker{}
 	e := NewTaskExecutor(map[model.CheckType]checker.Checker{model.CheckTCP: fake}, nil,
-		checker.Target{NodeName: "n1", Zone: "z1"}, 8080, nil, 1,
+		checker.Target{NodeName: "n1", Zone: "z1"}, testOwnPorts, nil, 1,
 		ExternalPolicy{Enabled: true, Allowlist: allow, Resolver: &stubResolver{}})
 
 	res := e.executeOne(t.Context(), &pb.TaskRequest{
@@ -739,7 +743,7 @@ func TestExternalExplicitPortFieldWinsOverEmbeddedPort(t *testing.T) {
 	}
 	fake := &fakeChecker{}
 	e := NewTaskExecutor(map[model.CheckType]checker.Checker{model.CheckTCP: fake}, nil,
-		checker.Target{NodeName: "n1", Zone: "z1"}, 8080, nil, 1,
+		checker.Target{NodeName: "n1", Zone: "z1"}, testOwnPorts, nil, 1,
 		ExternalPolicy{Enabled: true, Allowlist: allow, Resolver: &stubResolver{}})
 
 	res := e.executeOne(t.Context(), &pb.TaskRequest{
@@ -758,7 +762,7 @@ func TestExternalExplicitPortFieldWinsOverEmbeddedPort(t *testing.T) {
 // an empty DetailsJson, the controller returned it verbatim as a 200 body, and the Console recorded
 // "decode result: unexpected end of JSON input" instead of the reason the agent gave.
 func TestErrorResultCarriesADecodableCheckResult(t *testing.T) {
-	e := NewTaskExecutor(nil, nil, checker.Target{NodeName: "node-1", Zone: "zone-a"}, 8080, nil, 1, ExternalPolicy{})
+	e := NewTaskExecutor(nil, nil, checker.Target{NodeName: "node-1", Zone: "zone-a"}, testOwnPorts, nil, 1, ExternalPolicy{})
 
 	res := e.errorResult(&pb.TaskRequest{
 		TaskId:    "task-1",
@@ -792,7 +796,7 @@ func TestErrorResultCarriesADecodableCheckResult(t *testing.T) {
 // rows: nine outbound MTR pairs against a semaphore of four.
 func TestSaturatedExecutorReportsAnHonestResult(t *testing.T) {
 	rep := &recordingReporter{}
-	e := NewTaskExecutor(nil, nil, checker.Target{NodeName: "node-1"}, 8080, rep, 1, ExternalPolicy{})
+	e := NewTaskExecutor(nil, nil, checker.Target{NodeName: "node-1"}, testOwnPorts, rep, 1, ExternalPolicy{})
 
 	// Fill the only slot, then offer a second task.
 	e.sem <- struct{}{}
@@ -830,4 +834,34 @@ func (r *recordingReporter) results() []*pb.TaskResult {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return append([]*pb.TaskResult(nil), r.seen...)
+}
+
+/*
+Per-agent ports (2.4.0) on the on-demand path: TaskRequest.Target is the controller's FULL projection
+of the peer, ports included, and the executor dials those. A target that reported none (an agent older
+than 2.4.0) is dialled on this agent's own ports, exactly as the scheduler's peer list falls back.
+*/
+func TestTargetFromRequestHonoursReportedPortsAndFallsBack(t *testing.T) {
+	fc := &fakeChecker{name: model.CheckUDP, result: model.CheckResult{Success: true}}
+	ex := newTestExecutor(nil, fc)
+
+	ex.executeOne(t.Context(), &pb.TaskRequest{
+		TaskId: "t-ports", CheckType: "udp", Plane: "pod",
+		Target: &pb.AgentMeta{Id: "b", NodeName: "node-b", PodIp: "10.0.0.2", Zone: "zone-b", HttpPort: 18080, UdpPort: 19090, MetricsPort: 19091},
+	})
+	if got := fc.lastTarget(); got.Port != 18080 || got.UDPPort != 19090 {
+		t.Errorf("reported ports: dialled http %d / udp %d, want 18080 / 19090", got.Port, got.UDPPort)
+	}
+
+	ex.executeOne(t.Context(), &pb.TaskRequest{
+		TaskId: "t-no-ports", CheckType: "udp", Plane: "pod",
+		Target: &pb.AgentMeta{Id: "c", NodeName: "node-c", PodIp: "10.0.0.3", Zone: "zone-c"},
+	})
+	if got := fc.lastTarget(); got.Port != testOwnPorts.HTTP || got.UDPPort != testOwnPorts.UDP {
+		t.Errorf("no reported ports: dialled http %d / udp %d, want the agent's own %d / %d",
+			got.Port, got.UDPPort, testOwnPorts.HTTP, testOwnPorts.UDP)
+	}
+	if got := fc.lastTarget(); got.External {
+		t.Error("a peer target came out marked External")
+	}
 }

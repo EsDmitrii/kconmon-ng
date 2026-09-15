@@ -208,10 +208,11 @@ func TestBroadcastPeerUpdateBuildsEachPeerProtoOnce(t *testing.T) {
 }
 
 // TestPeerListsCarryTheNarrowProjection: the agent's protoToTargets reads exactly id, node_name,
-// pod_ip and zone from a peer, so every peer LIST the controller emits (Register response peers,
-// the WatchPeers initial FULL_SYNC, broadcast FULL_SYNCs) omits pod_name, labels and capabilities.
-// The agent's OWN resolved meta on RegisterResponse.Agent stays full — the agent reads its zone
-// from it and the capability round-trip is pinned elsewhere.
+// pod_ip, zone, http_port and udp_port from a peer, so every peer LIST the controller emits
+// (Register response peers, the WatchPeers initial FULL_SYNC, broadcast FULL_SYNCs) carries those
+// six and omits pod_name, labels, capabilities and metrics_port. The agent's OWN resolved meta on
+// RegisterResponse.Agent stays full — the agent reads its zone from it, the capability round-trip
+// is pinned elsewhere, and metrics_port is there for scrape discovery.
 func TestPeerListsCarryTheNarrowProjection(t *testing.T) {
 	srv, _ := newTestGRPCServer()
 
@@ -224,6 +225,9 @@ func TestPeerListsCarryTheNarrowProjection(t *testing.T) {
 			Zone:         "z1",
 			Labels:       map[string]string{"role": "worker"},
 			Capabilities: []string{"external-checks"},
+			HttpPort:     8080,
+			UdpPort:      9090,
+			MetricsPort:  9091,
 		}
 	}
 
@@ -233,10 +237,12 @@ func TestPeerListsCarryTheNarrowProjection(t *testing.T) {
 			t.Fatalf("%s: no peers to inspect", where)
 		}
 		for _, p := range peers {
-			if p.GetId() == "" || p.GetNodeName() == "" || p.GetPodIp() == "" || p.GetZone() == "" {
+			if p.GetId() == "" || p.GetNodeName() == "" || p.GetPodIp() == "" || p.GetZone() == "" ||
+				p.GetHttpPort() == 0 || p.GetUdpPort() == 0 {
 				t.Errorf("%s: a field the agent reads is missing: %+v", where, p)
 			}
-			if p.GetPodName() != "" || len(p.GetLabels()) != 0 || len(p.GetCapabilities()) != 0 {
+			if p.GetPodName() != "" || len(p.GetLabels()) != 0 || len(p.GetCapabilities()) != 0 ||
+				p.GetMetricsPort() != 0 {
 				t.Errorf("%s: peer %s carries fields no agent reads: %+v", where, p.GetId(), p)
 			}
 		}
@@ -250,7 +256,7 @@ func TestPeerListsCarryTheNarrowProjection(t *testing.T) {
 		t.Fatalf("register agent-2: %v", err)
 	}
 	assertNarrow(t, "Register response peers", resp.GetPeers())
-	if got := resp.GetAgent(); got.GetPodName() == "" || len(got.GetCapabilities()) == 0 {
+	if got := resp.GetAgent(); got.GetPodName() == "" || len(got.GetCapabilities()) == 0 || got.GetMetricsPort() == 0 {
 		t.Errorf("RegisterResponse.Agent must stay the FULL projection, got %+v", got)
 	}
 
@@ -266,10 +272,12 @@ func TestPeerListsCarryTheNarrowProjection(t *testing.T) {
 		{
 			ID: "agent-1", NodeName: "node-1", PodName: "kconmon-1", PodIP: "10.0.0.1",
 			Zone: "z1", Labels: map[string]string{"role": "worker"}, Capabilities: []string{"external-checks"},
+			HTTPPort: 8080, UDPPort: 9090, MetricsPort: 9091,
 		},
 		{
 			ID: "agent-3", NodeName: "node-3", PodName: "kconmon-3", PodIP: "10.0.0.3",
 			Zone: "z1", Labels: map[string]string{"role": "worker"}, Capabilities: []string{"external-checks"},
+			HTTPPort: 8080, UDPPort: 9090, MetricsPort: 9091,
 		},
 	})
 	select {
@@ -313,6 +321,7 @@ func TestNarrowPeerProjectionWireCompat(t *testing.T) {
 	info := model.AgentInfo{
 		ID: "a-1", NodeName: "node-a", PodName: "kconmon-abc", PodIP: "10.0.0.7",
 		Zone: "z1", Labels: map[string]string{"role": "worker"}, Capabilities: []string{"external-checks"},
+		HTTPPort: 8080, UDPPort: 9090, MetricsPort: 9091,
 	}
 
 	narrowRaw, err := proto.Marshal(peerToProto(info))
@@ -320,7 +329,7 @@ func TestNarrowPeerProjectionWireCompat(t *testing.T) {
 		t.Fatalf("marshal narrow: %v", err)
 	}
 	handRolled, err := proto.Marshal(&pb.AgentMeta{
-		Id: "a-1", NodeName: "node-a", PodIp: "10.0.0.7", Zone: "z1",
+		Id: "a-1", NodeName: "node-a", PodIp: "10.0.0.7", Zone: "z1", HttpPort: 8080, UdpPort: 9090,
 	})
 	if err != nil {
 		t.Fatalf("marshal hand-rolled: %v", err)
@@ -329,17 +338,19 @@ func TestNarrowPeerProjectionWireCompat(t *testing.T) {
 		t.Fatalf("narrow projection is not plain field omission:\n narrow=%x\nrolled=%x", narrowRaw, handRolled)
 	}
 
-	// A new (narrowed) controller's peer decodes on any agent with the four read fields intact
+	// A new (narrowed) controller's peer decodes on any agent with the six read fields intact
 	// and nothing materializing out of the omitted ones.
 	var decoded pb.AgentMeta
 	if err = proto.Unmarshal(narrowRaw, &decoded); err != nil {
 		t.Fatalf("unmarshal narrow: %v", err)
 	}
 	if decoded.GetId() != "a-1" || decoded.GetNodeName() != "node-a" ||
-		decoded.GetPodIp() != "10.0.0.7" || decoded.GetZone() != "z1" {
+		decoded.GetPodIp() != "10.0.0.7" || decoded.GetZone() != "z1" ||
+		decoded.GetHttpPort() != 8080 || decoded.GetUdpPort() != 9090 {
 		t.Fatalf("a field the agent reads was lost: %+v", &decoded)
 	}
-	if decoded.GetPodName() != "" || len(decoded.GetLabels()) != 0 || len(decoded.GetCapabilities()) != 0 {
+	if decoded.GetPodName() != "" || len(decoded.GetLabels()) != 0 || len(decoded.GetCapabilities()) != 0 ||
+		decoded.GetMetricsPort() != 0 {
 		t.Fatalf("omitted fields materialized out of a narrow message: %+v", &decoded)
 	}
 	again, err := proto.Marshal(&decoded)
@@ -350,7 +361,7 @@ func TestNarrowPeerProjectionWireCompat(t *testing.T) {
 		t.Fatal("narrow message wire bytes changed across a round trip")
 	}
 
-	// And an OLD controller's full-projection peer still decodes with those same four fields —
+	// And an OLD controller's full-projection peer still decodes with those same read fields —
 	// the agent code path is identical either way.
 	fullRaw, err := proto.Marshal(agentInfoToProto(info))
 	if err != nil {

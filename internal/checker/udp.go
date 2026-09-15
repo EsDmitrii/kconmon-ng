@@ -36,17 +36,22 @@ func (c *UDPChecker) Check(ctx context.Context, target Target) model.CheckResult
 		Timestamp: time.Now(),
 	}
 
-	/* A PEER is probed on the checker's own configured echo port -- that is where the agent listens,
-	   and Target.Port carries the peer's HTTP port, not a UDP one. An EXTERNAL destination has no
-	   agent behind it, so the port the operator asked for is the only port that means anything;
-	   probing c.port there sent every packet to the wrong place and reported 100% loss.
+	/* A PEER is probed on the echo port it REPORTED at registration (Target.UDPPort), and on the
+	   checker's own configured port when it reported none: an agent older than 2.4.0 sends no ports
+	   and still assumes the fleet-wide "one port set" contract. Target.Port is the peer's HTTP port,
+	   never a UDP one. An EXTERNAL destination has no agent behind it, so the port the operator asked
+	   for is the only port that means anything; probing c.port there sent every packet to the wrong
+	   place and reported 100% loss.
 
 	   With no port at all an external target has nothing to fall back TO. Falling back to c.port
 	   pointed the probe at the agent's own echo port (config.grpcPort, 9090 by default) on someone
 	   else's host: a UDP diagnostic against a public address that reported a clean 100% loss while
 	   naming the operator's intended destination, and quietly sent packets at a port nobody asked
 	   about. An error says the same thing honestly. */
-	port := c.port
+	port := target.UDPPort
+	if port == 0 {
+		port = c.port
+	}
 	if target.External {
 		if target.Port == 0 {
 			result.Error = "external UDP destination has no port: name one on the target (address host:port, or the port field)"

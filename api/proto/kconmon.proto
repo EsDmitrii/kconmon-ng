@@ -45,6 +45,12 @@ message AgentMeta {
   // capabilities are opt-in feature flags this agent build supports, e.g. "external-checks"; a
   // pre-M4 agent sends an empty list and the controller refuses to dispatch anything that needs.
   repeated string capabilities = 7;
+  // Listener ports this agent serves PEERS on. 0 = not reported (an agent older
+  // than this field); the probing agent then falls back to its OWN configured
+  // port, which is the pre-2.4 fleet-wide contract.
+  uint32 http_port = 8;     // TCP probe target: connect + GET /readyz (config httpPort)
+  uint32 udp_port = 9;      // UDP echo probe target (config grpcPort on an agent)
+  uint32 metrics_port = 10; // /metrics listener; never probed, published for scrape discovery
 }
 
 message RegisterRequest {
@@ -184,6 +190,9 @@ message TopologyChanged {
   string node_name = 2;
   string agent_id = 3;
   string zone = 4;
+  // labels are the agent's own labels at the time of the change (e.g. kconmon-ng.io/external), so
+  // a Time Machine replay can badge the subject; empty from controllers older than 2.4.0.
+  map<string, string> labels = 5;
 }
 
 // CheckObserved reports the outcome of a completed ON-DEMAND diagnostic check (POST

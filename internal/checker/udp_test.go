@@ -272,3 +272,51 @@ func TestUDPCheckerSurvivesOneLateReply(t *testing.T) {
 		t.Errorf("lossRatio = %.2f after one late reply, want at most the one packet's worth", details.LossRatio)
 	}
 }
+
+/* ── a peer is probed on the port IT reported, not on ours ───────────────── */
+
+// deadUDPPort reserves a loopback UDP port and releases it, so nothing answers there.
+func deadUDPPort(t *testing.T) int {
+	t.Helper()
+	lc := net.ListenConfig{}
+	conn, err := lc.ListenPacket(context.Background(), "udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := conn.LocalAddr().(*net.UDPAddr).Port
+	_ = conn.Close()
+	return port
+}
+
+/*
+Per-agent ports (2.4.0): Target.UDPPort is the echo port the PEER reported at registration, and it
+wins over the checker's own configured port. Before this every agent dialled its OWN grpcPort on
+every peer, which is why the whole fleet had to share one port set. A peer that reported nothing
+(older than 2.4.0) still gets the checker's own port: that is the contract it assumes.
+*/
+func TestUDPCheckerDialsThePeerReportedPort(t *testing.T) {
+	echoPort, cleanup := startUDPEchoServer(t)
+	defer cleanup()
+	dead := deadUDPPort(t)
+
+	tests := []struct {
+		name        string
+		ownPort     int
+		targetPort  int
+		wantSuccess bool
+	}{
+		{"reported port wins over a dead own port", dead, echoPort, true},
+		{"zero falls back to the own port", echoPort, 0, true},
+		{"reported dead port loses even though the own port answers", echoPort, dead, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			c := NewUDPChecker(200*time.Millisecond, 3, tc.ownPort)
+			result := c.Check(context.Background(), Target{PodIP: "127.0.0.1", UDPPort: tc.targetPort})
+			if result.Success != tc.wantSuccess {
+				t.Fatalf("success = %v, want %v (own port %d, target UDPPort %d, echo on %d): %s",
+					result.Success, tc.wantSuccess, tc.ownPort, tc.targetPort, echoPort, result.Error)
+			}
+		})
+	}
+}

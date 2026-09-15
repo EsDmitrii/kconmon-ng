@@ -5,10 +5,13 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"slices"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	pb "github.com/EsDmitrii/kconmon-ng/api/proto"
+	"github.com/EsDmitrii/kconmon-ng/internal/checker"
 	"github.com/EsDmitrii/kconmon-ng/internal/controller"
 	"github.com/EsDmitrii/kconmon-ng/internal/metrics"
 	"github.com/EsDmitrii/kconmon-ng/internal/model"
@@ -66,7 +69,7 @@ func TestGRPCClientReconnectOpensANewTransport(t *testing.T) {
 	// PodIP is required by the controller's registration validation: an agent that cannot say where
 	// it is becomes a peer every other agent probes at "".
 	info := model.AgentInfo{ID: "agent-1", NodeName: "node-1", PodIP: "10.0.0.1"}
-	if _, _, err := client.Register(ctx, info, 8080); err != nil {
+	if _, _, err := client.Register(ctx, info, checker.PeerPorts{HTTP: 8080}); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
 	before := lis.accepted.Load()
@@ -78,7 +81,7 @@ func TestGRPCClientReconnectOpensANewTransport(t *testing.T) {
 		t.Fatalf("Reconnect: %v", err)
 	}
 
-	if _, _, err := client.Register(ctx, info, 8080); err != nil {
+	if _, _, err := client.Register(ctx, info, checker.PeerPorts{HTTP: 8080}); err != nil {
 		t.Fatalf("Register after Reconnect: %v", err)
 	}
 	if got := lis.accepted.Load(); got <= before {
@@ -112,5 +115,33 @@ func TestShouldRedialOnlyForUnavailable(t *testing.T) {
 				t.Errorf("shouldRedial(%v) = %v, want %v", tc.err, got, tc.want)
 			}
 		})
+	}
+}
+
+/*
+protoToTargets is where a peer's reported ports become what this agent dials (2.4.0). A peer older
+than that reports none, and is probed on this agent's OWN ports: the fleet-wide contract such an
+agent still assumes. Each port falls back on its own, so a half-reported peer is not all-or-nothing.
+*/
+func TestProtoToTargetsPrefersReportedPortsAndFallsBackToOwn(t *testing.T) {
+	own := checker.PeerPorts{HTTP: 8080, UDP: 9090}
+	peers := []*pb.AgentMeta{
+		{Id: "new", NodeName: "node-new", PodIp: "10.0.0.2", Zone: "z1", HttpPort: 18080, UdpPort: 19090, MetricsPort: 19091},
+		{Id: "old", NodeName: "node-old", PodIp: "10.0.0.3", Zone: "z2"},
+		{Id: "half", NodeName: "node-half", PodIp: "10.0.0.4", Zone: "z3", HttpPort: 18081},
+	}
+
+	got := protoToTargets(peers, own)
+
+	want := []checker.Target{
+		{AgentID: "new", NodeName: "node-new", PodIP: "10.0.0.2", Zone: "z1", Port: 18080, UDPPort: 19090},
+		{AgentID: "old", NodeName: "node-old", PodIP: "10.0.0.3", Zone: "z2", Port: 8080, UDPPort: 9090},
+		{AgentID: "half", NodeName: "node-half", PodIP: "10.0.0.4", Zone: "z3", Port: 18081, UDPPort: 9090},
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("protoToTargets =\n  %+v\nwant\n  %+v", got, want)
+	}
+	if got := protoToTargets(nil, own); len(got) != 0 {
+		t.Errorf("an empty peer list produced %d targets", len(got))
 	}
 }

@@ -871,6 +871,107 @@ func TestRegisterRejectsIncompleteAgentMeta(t *testing.T) {
 	}
 }
 
+/* ── 2.4.0: ports are optional, but a port that cannot exist is not a port ── */
+
+// A peer entry with http_port 65536 is a target no agent can ever dial, published to the whole
+// fleet; the wire type is uint32, so the check has to live here.
+func TestRegisterRejectsPortsOutOfRange(t *testing.T) {
+	srv, reg := newTestGRPCServer()
+
+	cases := []struct {
+		name string
+		meta *pb.AgentMeta
+	}{
+		{"http_port", &pb.AgentMeta{Id: "agent-1", NodeName: "node-1", PodIp: "10.0.0.1", HttpPort: 65536}},
+		{"udp_port", &pb.AgentMeta{Id: "agent-1", NodeName: "node-1", PodIp: "10.0.0.1", UdpPort: 65536}},
+		{"metrics_port", &pb.AgentMeta{Id: "agent-1", NodeName: "node-1", PodIp: "10.0.0.1", MetricsPort: 1 << 20}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := srv.Register(context.Background(), &pb.RegisterRequest{Agent: tc.meta})
+			if grpcstatus.Code(err) != codes.InvalidArgument {
+				t.Fatalf("Register(%s out of range) = %v, want codes.InvalidArgument", tc.name, err)
+			}
+		})
+	}
+	if reg.Count() != 0 {
+		t.Errorf("registry holds %d agents after %d rejected registrations", reg.Count(), len(cases))
+	}
+}
+
+// 0 is exactly what a pre-2.4.0 agent sends (the proto3 default) and 65535 is the last real port;
+// both must register, and the stored values must be what was sent, not a substituted default.
+func TestRegisterAcceptsZeroAndBoundaryPorts(t *testing.T) {
+	srv, reg := newTestGRPCServer()
+
+	if _, err := srv.Register(context.Background(), &pb.RegisterRequest{
+		Agent: &pb.AgentMeta{Id: "agent-old", NodeName: "node-old", PodIp: "10.0.0.1"},
+	}); err != nil {
+		t.Fatalf("Register(no ports) = %v, want success", err)
+	}
+	resp, err := srv.Register(context.Background(), &pb.RegisterRequest{
+		Agent: &pb.AgentMeta{
+			Id: "agent-max", NodeName: "node-max", PodIp: "10.0.0.2",
+			HttpPort: 65535, UdpPort: 65535, MetricsPort: 65535,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Register(ports 65535) = %v, want success", err)
+	}
+	if a := resp.GetAgent(); a.GetHttpPort() != 65535 || a.GetUdpPort() != 65535 || a.GetMetricsPort() != 65535 {
+		t.Errorf("RegisterResponse.agent ports = %d/%d/%d, want 65535 each", a.GetHttpPort(), a.GetUdpPort(), a.GetMetricsPort())
+	}
+
+	old, ok := reg.GetByNodeName("node-old")
+	if !ok || old.HTTPPort != 0 || old.UDPPort != 0 || old.MetricsPort != 0 {
+		t.Errorf("pre-2.4.0 agent stored as %+v (found=%v), want zero ports", old, ok)
+	}
+	if reg.Count() != 2 {
+		t.Errorf("registry holds %d agents, want 2", reg.Count())
+	}
+}
+
+// The Time Machine fold tells an external host from a node by TopologyChanged.labels, so the
+// labels an agent registers with must reach the event, and an agent without any must yield none.
+func TestRegisterPublishesTheAgentsLabelsInTopologyChanged(t *testing.T) {
+	srv, reg := newTestGRPCServer()
+
+	var events []*pb.TopologyChanged
+	reg.OnChange(func(_ []model.AgentInfo, change TopologyChange) {
+		events = append(events, change.Events()...)
+	})
+
+	if _, err := srv.Register(context.Background(), &pb.RegisterRequest{
+		Agent: &pb.AgentMeta{
+			Id: "host-1-host-1", NodeName: "host-1", PodIp: "203.0.113.7",
+			Labels: map[string]string{model.LabelExternal: "true"},
+		},
+	}); err != nil {
+		t.Fatalf("Register(external): %v", err)
+	}
+	if _, err := srv.Register(context.Background(), &pb.RegisterRequest{
+		Agent: &pb.AgentMeta{Id: "agent-2", NodeName: "node-2", PodIp: "10.0.0.2"},
+	}); err != nil {
+		t.Fatalf("Register(in-cluster): %v", err)
+	}
+	if _, err := srv.Deregister(context.Background(), &pb.DeregisterRequest{AgentId: "host-1-host-1"}); err != nil {
+		t.Fatalf("Deregister(external): %v", err)
+	}
+
+	if len(events) != 3 {
+		t.Fatalf("expected 3 topology events, got %d: %+v", len(events), events)
+	}
+	if got := events[0].GetLabels()[model.LabelExternal]; got != "true" {
+		t.Errorf("agent_registered labels = %v, want %s=true", events[0].GetLabels(), model.LabelExternal)
+	}
+	if n := len(events[1].GetLabels()); n != 0 {
+		t.Errorf("an agent without labels produced %d labels: %v", n, events[1].GetLabels())
+	}
+	if got := events[2].GetLabels()[model.LabelExternal]; events[2].GetReason() != "agent_deregistered" || got != "true" {
+		t.Errorf("departure event = %+v, want agent_deregistered still carrying %s=true", events[2], model.LabelExternal)
+	}
+}
+
 // blockingPeerStream never accepts a Send, which is what an HTTP/2 flow-control window looks like
 // once a subscriber stops reading while keeping the connection alive.
 type blockingPeerStream struct {

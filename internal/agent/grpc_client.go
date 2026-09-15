@@ -250,7 +250,8 @@ func (c *GRPCClient) OnExternalAssignment(fn func(*pb.ExternalCheckAssignment)) 
 
 // Register registers the agent and returns the peer list plus the zone the
 // controller resolved for this agent (empty if the controller has no zone).
-func (c *GRPCClient) Register(ctx context.Context, info model.AgentInfo, httpPort int) ([]checker.Target, string, error) { //nolint:gocritic // hugeParam: AgentInfo is passed by value intentionally
+// own is this agent's listener ports, dialled on peers that reported none.
+func (c *GRPCClient) Register(ctx context.Context, info model.AgentInfo, own checker.PeerPorts) ([]checker.Target, string, error) { //nolint:gocritic // hugeParam: AgentInfo is passed by value intentionally
 	resp, err := c.stub().Register(ctx, &pb.RegisterRequest{
 		Agent: &pb.AgentMeta{
 			Id:       info.ID,
@@ -262,6 +263,11 @@ func (c *GRPCClient) Register(ctx context.Context, info model.AgentInfo, httpPor
 			// Capabilities gate the controller's dispatch of features an older
 			// agent would silently ignore; see model.AgentInfo.Capabilities.
 			Capabilities: info.Capabilities,
+			// Where peers reach THIS agent; a pre-2.4.0 controller drops them and every peer keeps
+			// dialling its own ports, the contract that fleet already runs on.
+			HttpPort:    uint32(info.HTTPPort),    //nolint:gosec // the config loader bounds every port to 1..65535
+			UdpPort:     uint32(info.UDPPort),     //nolint:gosec // as above
+			MetricsPort: uint32(info.MetricsPort), //nolint:gosec // as above
 		},
 	})
 	if err != nil {
@@ -271,7 +277,7 @@ func (c *GRPCClient) Register(ctx context.Context, info model.AgentInfo, httpPor
 	c.mu.Lock()
 	c.agentID = resp.GetAgentId()
 	c.mu.Unlock()
-	return protoToTargets(resp.GetPeers(), httpPort), resp.GetAgent().GetZone(), nil
+	return protoToTargets(resp.GetPeers(), own), resp.GetAgent().GetZone(), nil
 }
 
 // Deregister tells the controller to remove this agent immediately, so peers
@@ -313,7 +319,9 @@ func (c *GRPCClient) StartHeartbeat(ctx context.Context, interval time.Duration)
 	}
 }
 
-func (c *GRPCClient) WatchPeers(ctx context.Context, httpPort int) error {
+// WatchPeers streams peer-list updates to the OnPeersUpdate handler; own is this agent's listener
+// ports, dialled on peers that reported none.
+func (c *GRPCClient) WatchPeers(ctx context.Context, own checker.PeerPorts) error {
 	stream, err := c.stub().WatchPeers(ctx, &pb.WatchPeersRequest{
 		AgentId: c.id(),
 	})
@@ -327,7 +335,7 @@ func (c *GRPCClient) WatchPeers(ctx context.Context, httpPort int) error {
 			return fmt.Errorf("receiving peer update: %w", err)
 		}
 
-		targets := protoToTargets(update.GetPeers(), httpPort)
+		targets := protoToTargets(update.GetPeers(), own)
 		slog.Info("peer update received", "type", update.GetType(), "count", len(targets))
 
 		if c.onPeers != nil {
@@ -410,7 +418,11 @@ func (c *GRPCClient) Close() error {
 	return nil
 }
 
-func protoToTargets(peers []*pb.AgentMeta, httpPort int) []checker.Target {
+// protoToTargets maps a peer list onto checker targets. Each peer is dialled on the ports it
+// reported; a zero (an agent older than 2.4.0, or a controller that dropped the fields) means this
+// agent's own port, the fleet-wide contract such a peer still assumes. Each port falls back on its
+// own, so a half-reported peer is not all-or-nothing.
+func protoToTargets(peers []*pb.AgentMeta, own checker.PeerPorts) []checker.Target {
 	targets := make([]checker.Target, 0, len(peers))
 	for _, p := range peers {
 		targets = append(targets, checker.Target{
@@ -418,8 +430,17 @@ func protoToTargets(peers []*pb.AgentMeta, httpPort int) []checker.Target {
 			NodeName: p.GetNodeName(),
 			PodIP:    p.GetPodIp(),
 			Zone:     p.GetZone(),
-			Port:     httpPort,
+			Port:     portOr(p.GetHttpPort(), own.HTTP),
+			UDPPort:  portOr(p.GetUdpPort(), own.UDP),
 		})
 	}
 	return targets
+}
+
+// portOr returns the port a peer reported, or fallback when it reported none.
+func portOr(reported uint32, fallback int) int {
+	if reported == 0 {
+		return fallback
+	}
+	return int(reported)
 }

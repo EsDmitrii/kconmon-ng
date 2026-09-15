@@ -8,6 +8,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/EsDmitrii/kconmon-ng/internal/model"
+
+	"github.com/EsDmitrii/kconmon-ng/internal/checker"
 	"github.com/EsDmitrii/kconmon-ng/internal/config"
 	"github.com/EsDmitrii/kconmon-ng/internal/controller"
 	"github.com/EsDmitrii/kconmon-ng/internal/metrics"
@@ -55,8 +58,8 @@ func TestResolveIdentityBareHostFallsBackToHostname(t *testing.T) {
 	if info.Zone != "dc-east" {
 		t.Errorf("Zone = %q, want dc-east", info.Zone)
 	}
-	if info.Labels[externalAgentLabel] != "true" {
-		t.Errorf("labels = %v, want %s=true on an agent without a pod name", info.Labels, externalAgentLabel)
+	if info.Labels[model.LabelExternal] != "true" {
+		t.Errorf("labels = %v, want %s=true on an agent without a pod name", info.Labels, model.LabelExternal)
 	}
 }
 
@@ -65,6 +68,7 @@ func TestResolveIdentityBareHostFallsBackToHostname(t *testing.T) {
 func TestResolveIdentityInClusterKeepsPodIdentity(t *testing.T) {
 	t.Setenv("KCONMON_NG_POD_NAME", "kconmon-ng-agent-x7c9k")
 	t.Setenv("KCONMON_NG_POD_IP", "10.42.0.17")
+	t.Setenv("KCONMON_NG_HOST_NETWORK", "")
 	cfg := config.DefaultConfig()
 	cfg.Agent.NodeName = "worker-3" // the loader put KCONMON_NG_NODE_NAME here
 	cfg.Agent.Zone = "zone-b"
@@ -85,8 +89,35 @@ func TestResolveIdentityInClusterKeepsPodIdentity(t *testing.T) {
 	if info.PodIP != "10.42.0.17" {
 		t.Errorf("PodIP = %q, want the Downward API pod IP", info.PodIP)
 	}
-	if _, marked := info.Labels[externalAgentLabel]; marked {
+	if _, marked := info.Labels[model.LabelExternal]; marked {
 		t.Errorf("an in-pod agent must not carry the external marker, got labels %v", info.Labels)
+	}
+	if _, marked := info.Labels[model.LabelHostNetwork]; marked {
+		t.Errorf("a pod-network agent must not carry the host-network marker, got labels %v", info.Labels)
+	}
+}
+
+// The chart sets KCONMON_NG_HOST_NETWORK=true under agent.hostNetwork; the
+// agent turns it into the host-network label and nothing else changes.
+func TestResolveIdentityHostNetworkEnvSetsLabel(t *testing.T) {
+	t.Setenv("KCONMON_NG_POD_NAME", "kconmon-ng-agent-x7c9k")
+	t.Setenv("KCONMON_NG_POD_IP", "10.0.1.7")
+	t.Setenv("KCONMON_NG_HOST_NETWORK", "true")
+	cfg := config.DefaultConfig()
+	cfg.Agent.NodeName = "worker-3"
+
+	info, err := resolveIdentity(cfg)
+	if err != nil {
+		t.Fatalf("resolveIdentity: %v", err)
+	}
+	if info.Labels[model.LabelHostNetwork] != "true" {
+		t.Errorf("labels = %v, want %s=true when KCONMON_NG_HOST_NETWORK=true", info.Labels, model.LabelHostNetwork)
+	}
+	if _, marked := info.Labels[model.LabelExternal]; marked {
+		t.Errorf("a host-network pod is still in-cluster and must not carry the external marker, got %v", info.Labels)
+	}
+	if info.PodIP != "10.0.1.7" {
+		t.Errorf("PodIP = %q, want the Downward API value (the chart points it at status.hostIP)", info.PodIP)
 	}
 }
 
@@ -206,6 +237,7 @@ func TestHostIdentityRegistersAgainstUnmodifiedController(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolveIdentity on a bare host: %v", err)
 	}
+	advertiseListenerPorts(&info, cfg)
 
 	client, err := NewGRPCClient(cfg.ControllerAddress, ClientSecurity{})
 	if err != nil {
@@ -213,7 +245,7 @@ func TestHostIdentityRegistersAgainstUnmodifiedController(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = client.Close() })
 
-	_, resolvedZone, err := client.Register(ctx, info, cfg.HTTPPort)
+	_, resolvedZone, err := client.Register(ctx, info, checker.PeerPorts{HTTP: info.HTTPPort, UDP: info.UDPPort})
 	if err != nil {
 		t.Fatalf("the unmodified controller rejected a host-identity registration: %v", err)
 	}
@@ -229,10 +261,16 @@ func TestHostIdentityRegistersAgainstUnmodifiedController(t *testing.T) {
 	if net.ParseIP(got.PodIP) == nil {
 		t.Errorf("registered address %q is not an IP literal", got.PodIP)
 	}
-	if got.Labels[externalAgentLabel] != "true" {
+	if got.Labels[model.LabelExternal] != "true" {
 		t.Errorf("the external marker did not survive the register path, labels: %v", got.Labels)
 	}
 	if got.Zone != "dc-east" {
 		t.Errorf("registered zone = %q, want dc-east", got.Zone)
+	}
+	// The listener ports land in the registry as configured (2.4.0): this is what lets a peer dial a
+	// bare host on ITS ports instead of assuming the whole fleet shares one set.
+	if got.HTTPPort != cfg.HTTPPort || got.UDPPort != cfg.GRPCPort || got.MetricsPort != cfg.MetricsPort {
+		t.Errorf("registry ports http/udp/metrics = %d/%d/%d, want the config's %d/%d/%d",
+			got.HTTPPort, got.UDPPort, got.MetricsPort, cfg.HTTPPort, cfg.GRPCPort, cfg.MetricsPort)
 	}
 }
