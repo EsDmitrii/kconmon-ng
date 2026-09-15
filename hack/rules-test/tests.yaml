@@ -31,6 +31,19 @@ tests:
         values: '0+10x40'
       - series: kconmon_ng_probe_intended{source_node="n1",destination_node="n2"}
         values: '1x40'
+      # Three nodes, three in-cluster agents plus one external: registered exceeds expected and
+      # the external gauge explains the surplus, so nothing is missing.
+      - series: kconmon_ng_controller_expected_agents{instance="c1",job="kconmon-ng-controller",pod="ctrl-0"}
+        values: '3x40'
+      - series: kconmon_ng_controller_registered_agents{instance="c1",job="kconmon-ng-controller",pod="ctrl-0"}
+        values: '4x40'
+      - series: kconmon_ng_controller_external_agents{instance="c1",job="kconmon-ng-controller",pod="ctrl-0"}
+        values: '1x40'
+      - series: kconmon_ng_controller_leader{instance="c1",job="kconmon-ng-controller",pod="ctrl-0"}
+        values: '1x40'
+      # yamllint disable-line rule:line-length
+      - series: up{job="kconmon-ng-agent-external",instance="10.20.30.40:9091",node="edge-host-01",zone="external",external="true",agent_id="edge-host-01-edge-host-01"}
+        values: '1x40'
     alert_rule_test:
       - eval_time: 15m
         alertname: ZoneChecksFailing
@@ -40,6 +53,12 @@ tests:
         exp_alerts: []
       - eval_time: 15m
         alertname: PairWentSilent
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: KconmonAgentsMissing
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: KconmonExternalAgentDown
         exp_alerts: []
 
   # ── zone failure: every probe on every protocol fails a->b; both zone alerts must fire ──
@@ -99,3 +118,102 @@ tests:
                 both, then the kconmon-ng console Matrix or Investigate page scoped to
                 these zones for the pair-level picture.
               investigateUrl: /investigate?kind=zone-pair&scope=a->b
+
+  # ── one external agent must not mask one missing in-cluster agent ──
+  # Three schedulable nodes, three registered agents, one of them external: only two in-cluster
+  # agents are present, so exactly one is missing. The old expression (expected - registered)
+  # read this as zero and stayed silent.
+  - interval: 30s
+    input_series:
+      - series: kconmon_ng_controller_expected_agents{instance="c1",job="kconmon-ng-controller",pod="ctrl-0"}
+        values: '3x40'
+      - series: kconmon_ng_controller_registered_agents{instance="c1",job="kconmon-ng-controller",pod="ctrl-0"}
+        values: '3x40'
+      - series: kconmon_ng_controller_external_agents{instance="c1",job="kconmon-ng-controller",pod="ctrl-0"}
+        values: '1x40'
+      - series: kconmon_ng_controller_leader{instance="c1",job="kconmon-ng-controller",pod="ctrl-0"}
+        values: '1x40'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: KconmonAgentsMissing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              instance: c1
+              job: kconmon-ng-controller
+              pod: ctrl-0
+            exp_annotations:
+              summary: 1 kconmon-ng agent(s) missing on the leading controller c1
+              description: >-
+                The leading controller on c1 expects one agent per schedulable node, and 1 of
+                them have not registered for 10m. The usual causes are a DaemonSet that cannot
+                schedule (taints or resources), crash-looping agent pods, or agent-to-controller
+                gRPC being blocked. Every pair involving a missing node simply stops being probed,
+                so the other rules in this group go quiet rather than firing. The kconmon-ng
+                console topology view lists the nodes it does know. Agents that joined through
+                the external gateway are not counted against the node total, so one of them
+                cannot hide a missing in-cluster agent.
+
+  # ── a controller image without the external-agents gauge must still fire ──
+  # Same rule, no kconmon_ng_controller_external_agents series at all (a pre-2.4.0 controller):
+  # the fallback must read the missing gauge as zero, not drop the whole expression.
+  - interval: 30s
+    input_series:
+      - series: kconmon_ng_controller_expected_agents{instance="c1",job="kconmon-ng-controller",pod="ctrl-0"}
+        values: '3x40'
+      - series: kconmon_ng_controller_registered_agents{instance="c1",job="kconmon-ng-controller",pod="ctrl-0"}
+        values: '2x40'
+      - series: kconmon_ng_controller_leader{instance="c1",job="kconmon-ng-controller",pod="ctrl-0"}
+        values: '1x40'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: KconmonAgentsMissing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              instance: c1
+              job: kconmon-ng-controller
+              pod: ctrl-0
+            exp_annotations:
+              summary: 1 kconmon-ng agent(s) missing on the leading controller c1
+              description: >-
+                The leading controller on c1 expects one agent per schedulable node, and 1 of
+                them have not registered for 10m. The usual causes are a DaemonSet that cannot
+                schedule (taints or resources), crash-looping agent pods, or agent-to-controller
+                gRPC being blocked. Every pair involving a missing node simply stops being probed,
+                so the other rules in this group go quiet rather than firing. The kconmon-ng
+                console topology view lists the nodes it does know. Agents that joined through
+                the external gateway are not counted against the node total, so one of them
+                cannot hide a missing in-cluster agent.
+
+  # ── an external agent the SD endpoint lists but Prometheus cannot scrape ──
+  # The labels are exactly what the controller's SD body attaches plus Prometheus' own job and
+  # instance, so the annotations prove the rule reads the SD labels, not a ServiceMonitor's.
+  - interval: 30s
+    input_series:
+      # yamllint disable-line rule:line-length
+      - series: up{job="kconmon-ng-agent-external",instance="10.20.30.40:9091",node="edge-host-01",zone="external",external="true",agent_id="edge-host-01-edge-host-01"}
+        values: '0x40'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: KconmonExternalAgentDown
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: kconmon-ng-agent-external
+              instance: 10.20.30.40:9091
+              node: edge-host-01
+              zone: external
+              external: "true"
+              agent_id: edge-host-01-edge-host-01
+            exp_annotations:
+              summary: External kconmon-ng agent edge-host-01 is not answering scrapes
+              description: >-
+                Prometheus discovered edge-host-01 at 10.20.30.40:9091 (zone external) through
+                the controller's SD endpoint and has not scraped it successfully for 5m. The
+                agent still registers with the gateway, otherwise the target would have left the
+                list, so the usual cause is the host firewall or the monitoring namespace's egress
+                policy blocking the metrics port; on most CNIs Prometheus egress is NATed to a
+                node IP, so the host must admit the node CIDR rather than the Prometheus pod IP.
+                The kconmon-ng console keeps showing the node while it registers, so its probe
+                results tell whether the host itself is healthy.

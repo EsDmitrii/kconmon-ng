@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"net/http"
 	"slices"
 	"testing"
 	"time"
@@ -11,6 +12,7 @@ import (
 	pb "github.com/EsDmitrii/kconmon-ng/api/proto"
 	"github.com/EsDmitrii/kconmon-ng/internal/config"
 	"github.com/EsDmitrii/kconmon-ng/internal/model"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 )
@@ -197,5 +199,75 @@ func TestControllerRunShutsDownWithActiveEventSubscriber(t *testing.T) {
 		}
 	case <-time.After(15 * time.Second):
 		t.Fatal("Run did not return after ctx cancel with an active WatchEvents subscriber")
+	}
+}
+
+// KconmonAgentsMissing subtracts controller_external_agents from registered_agents, so the gauge
+// has to move with the registry exactly where registered_agents does, demotion included.
+func TestControllerExternalAgentsGauge(t *testing.T) {
+	cfg := &config.Config{MetricsPrefix: "test"}
+	cfg.Controller.AgentTTL = 30 * time.Second
+	cfg.Controller.LeaderElection = false
+
+	c := New(cfg)
+	registered := c.metrics.ControllerRegisteredAgents.WithLabelValues()
+	external := c.metrics.ControllerExternalAgents.WithLabelValues()
+
+	c.registry.Register(model.AgentInfo{ID: "pod-1", NodeName: "node-1", PodIP: "10.0.0.1"})
+	c.registry.Register(externalAgent("edge-edge", "edge", "10.20.30.40", 9091))
+
+	if got := testutil.ToFloat64(registered); got != 2 {
+		t.Errorf("registered_agents = %v, want 2", got)
+	}
+	if got := testutil.ToFloat64(external); got != 1 {
+		t.Errorf("external_agents = %v, want 1", got)
+	}
+
+	c.registry.Deregister("edge-edge")
+	if got := testutil.ToFloat64(external); got != 0 {
+		t.Errorf("external_agents after deregister = %v, want 0", got)
+	}
+
+	c.registry.Register(externalAgent("edge-edge", "edge", "10.20.30.40", 9091))
+	c.SetLeader(false)
+	if got := testutil.ToFloat64(external); got != 0 {
+		t.Errorf("external_agents after demotion = %v, want 0 (registry dropped)", got)
+	}
+	if got := testutil.ToFloat64(registered); got != 0 {
+		t.Errorf("registered_agents after demotion = %v, want 0", got)
+	}
+}
+
+// The metrics listener is the one port the chart opens to Prometheus, so that is where the SD
+// body must answer; and controller.prometheusSD.enabled=false must leave no route on it.
+func TestControllerMountsPrometheusSDOnMetricsListener(t *testing.T) {
+	for _, enabled := range []bool{true, false} {
+		t.Run(fmt.Sprintf("enabled=%v", enabled), func(t *testing.T) {
+			cfg := &config.Config{MetricsPrefix: "test", MetricsPort: 9191}
+			cfg.Controller.AgentTTL = 30 * time.Second
+			cfg.Controller.LeaderElection = false
+			cfg.Controller.PrometheusSD.Enabled = enabled
+
+			c := New(cfg)
+			// A 2.3.x host agent reports no port: the target must carry the controller's own.
+			c.registry.Register(externalAgent("edge-edge", "edge", "10.20.30.40", 0))
+
+			for name, h := range map[string]http.Handler{
+				"metrics listener": c.metricsListenerHandler(),
+				"API mux":          c.httpServer.Handler(),
+			} {
+				rec := getSD(t, h)
+				if !enabled {
+					if rec.Code != http.StatusNotFound {
+						t.Errorf("%s: status = %d, want 404 when disabled", name, rec.Code)
+					}
+					continue
+				}
+				groups := decodeSD(t, rec)
+				if len(groups) != 1 || groups[0].Targets[0] != "10.20.30.40:9191" {
+					t.Errorf("%s: groups = %+v, want target 10.20.30.40:9191", name, groups)
+				}
+			}
+		})
 	}
 }

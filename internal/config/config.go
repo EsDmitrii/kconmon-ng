@@ -200,6 +200,14 @@ type ControllerConfig struct {
 	AgentTTL        time.Duration         `yaml:"agentTtl"`
 	Events          EventsConfig          `yaml:"events"`
 	ExternalGateway ExternalGatewayConfig `yaml:"externalGateway"`
+	PrometheusSD    PrometheusSDConfig    `yaml:"prometheusSD"`
+}
+
+// PrometheusSDConfig gates GET /api/v1/prometheus/sd on both the API and the metrics listener.
+// Off is the opt-out for operators who do not want external hosts' addresses disclosed to
+// everything admitted to metricsPort; when off the route answers 404.
+type PrometheusSDConfig struct {
+	Enabled bool `yaml:"enabled"`
 }
 
 /*

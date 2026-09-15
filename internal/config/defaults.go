@@ -59,6 +59,9 @@ func DefaultConfig() *Config {
 			// Off by default: enabling the gateway is a deliberate exposure decision, and 9443
 			// only pre-picks a port so values files agree on one.
 			ExternalGateway: ExternalGatewayConfig{Enabled: false, Port: 9443},
+			// On by default: the body is empty until an external agent registers, so it costs an
+			// installation without the gateway nothing.
+			PrometheusSD: PrometheusSDConfig{Enabled: true},
 		},
 		// Full mesh by default: sparse is an opt-in for fleets where N*(N-1) pairs stop being
 		// affordable. The sparse knobs default to a plan that stays connected (ring) and keeps

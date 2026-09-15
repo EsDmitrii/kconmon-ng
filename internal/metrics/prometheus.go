@@ -106,6 +106,9 @@ type PrometheusMetrics struct {
 	AgentMTRReactiveCoalesced *prometheus.CounterVec
 
 	ControllerRegisteredAgents *prometheus.GaugeVec
+	// ControllerExternalAgents is the bare-host subset of registered agents. KconmonAgentsMissing
+	// subtracts it: registered counts external agents too, so one of them masked one missing node.
+	ControllerExternalAgents   *prometheus.GaugeVec
 	ControllerExpectedAgents   *prometheus.GaugeVec
 	ControllerPeerUpdates      *prometheus.CounterVec
 	ControllerGRPCConnections  *prometheus.GaugeVec
@@ -371,6 +374,10 @@ func NewPrometheusMetrics(prefix string, reg prometheus.Registerer) *PrometheusM
 		ControllerRegisteredAgents: factory.NewGaugeVec(prometheus.GaugeOpts{
 			Name: prefix + "_controller_registered_agents",
 			Help: "Number of currently registered agents",
+		}, []string{}),
+		ControllerExternalAgents: factory.NewGaugeVec(prometheus.GaugeOpts{
+			Name: prefix + "_controller_external_agents",
+			Help: "Number of registered agents running outside the cluster (external gateway)",
 		}, []string{}),
 		ControllerExpectedAgents: factory.NewGaugeVec(prometheus.GaugeOpts{
 			Name: prefix + "_controller_expected_agents",
