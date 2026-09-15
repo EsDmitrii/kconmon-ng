@@ -50,9 +50,9 @@ export interface paths {
         };
         /**
          * Live cluster topology from the controller, or a reconstruction as of an instant.
-         * @description Without `at`, the controller's snapshot verbatim: a non-leader reply is retried with backoff, and if every attempt still fails the console answers 502. With `at`, the topology is instead REBUILT by folding persisted `topology_changed` events up to that instant, and the body carries `historical: true` plus the fold's own counters.
+         * @description Without `at`, the controller's snapshot verbatim: a non-leader reply is retried with backoff, and if every attempt still fails the console answers 502. With `at`, the topology is instead REBUILT from persisted history: the newest `topology_baseline` row at or before that instant (the console stores the controller's whole topology each time its event stream connects, and hourly after that), then the `topology_changed` events after it, and the body carries `historical: true` plus the fold's own counters. History recorded before 2.4.0 has no baseline and folds from the events alone, so it misses agents that never changed.
          *
-         *     A reconstruction is bounded by what those events record, which since M7 is `{reason, nodeName, agentId, zone}` -- the controller attributes every emission site, one event per affected agent, and a stated `zone` wins while an omitted one never erases a known one. `podIP` is still never recorded and comes back empty on every folded entry; `ready` means "seen registered and not since removed", not kubelet readiness. Events written by pre-M7 controllers carry the reason alone: that stretch of history folds to an empty `nodes` array with every such event counted in `unfoldableEvents` -- the counter, not the empty array, is the honest signal, and it shrinks as those rows age out of retention.
+         *     A reconstruction is bounded by what those rows record, which since M7 is `{reason, nodeName, agentId, zone}` (plus the agent's `labels` since 2.4.0) -- the controller attributes every emission site, one event per affected agent, and a stated `zone` wins while an omitted one never erases a known one. `podIP` is still never recorded and comes back empty on every folded entry; `ready` means "seen registered and not since removed", not kubelet readiness, except for a node no event touched after the baseline, which keeps the readiness the baseline recorded. A bare host -- an agent whose folded labels carry `kconmon-ng.io/external: "true"` -- has no Kubernetes node and is served under `agents` only, exactly as the live snapshot does; it never appears in `nodes` with that presence-derived `ready`. Events written by pre-M7 controllers carry the reason alone: that stretch of history folds to an empty `nodes` array with every such event counted in `unfoldableEvents` -- the counter, not the empty array, is the honest signal, and it shrinks as those rows age out of retention.
          */
         get: operations["getTopology"];
         put?: never;
@@ -1281,13 +1281,20 @@ export interface components {
             nodeName: string;
             podIP: string;
             zone: string;
+            /** @description The agent's own labels as registered, verbatim. `kconmon-ng.io/external: "true"` marks an agent that runs outside any Pod (nodeName is then the name it registered under and podIP the address it advertised). Absent when the agent sent none, and on a historical (`?at=`) response for history recorded by a controller older than 2.4.0. */
+            labels?: {
+                [key: string]: string;
+            };
+            /** @description The feature flags the agent advertised at registration, verbatim. `plane:<protocol>` entries (plane:tcp, plane:udp, plane:icmp, plane:dns, plane:http, plane:mtr) name the probe planes it runs. An agent with NO `plane:` entry at all (older than 2.4.0) must be read as running every plane, never as running none. Live responses only: no event records capabilities, so a historical (`?at=`) response never carries them. */
+            capabilities?: string[];
         };
         Topology: {
+            /** @description The Kubernetes nodes. An external agent's host is never one of them, live or historical; find it under `agents` by its `kconmon-ng.io/external` label. */
             nodes: components["schemas"]["TopologyNode"][];
             agents: components["schemas"]["TopologyAgent"][];
             /**
              * Format: date-time
-             * @description Live: the controller's snapshot time. Historical: when this topology came into being, i.e. the time of the last folded change at or before `asOf` (falling back to `asOf` when nothing folded).
+             * @description Live: the controller's snapshot time. Historical: the time of the newest row folded at or before `asOf`: the last change, or the `topology_baseline` the fold started from when nothing changed after it (the set is then known to hold from that instant on). Falls back to `asOf` when nothing folded.
              */
             timestamp: string;
             /** @description Present and true ONLY on a `?at=` response. Absent on the live passthrough, which is how a client tells the two apart. */
@@ -1297,7 +1304,7 @@ export interface components {
              * @description The instant `?at=` asked about, echoed back. Historical only.
              */
             asOf?: string;
-            /** @description How many topology_changed events the fold consumed. Historical only. */
+            /** @description How many rows the fold consumed: the topology_changed events, plus the one topology_baseline row it started from when there was one. Historical only. */
             eventsFolded?: number;
             /** @description How many of those could not move the node set: they named neither a node nor an agent, carried unparseable details, or used a reason this build does not know. A high value beside an empty `nodes` array means the events do not name their subject -- NOT that the cluster was empty. Historical only. */
             unfoldableEvents?: number;

@@ -9,3 +9,6 @@ func (i *Ingester) SetConnectGrace(d time.Duration) { i.connectGrace = d }
 // PairScope exposes the emitted-scope renderer so a test can prove the normalizer's output equals
 // what the column actually stores.
 func PairScope(src, dst string) string { return pairScope(src, dst) }
+
+// SetBaselineInterval overrides how often a connected ingester re-records the topology baseline.
+func (i *Ingester) SetBaselineInterval(d time.Duration) { i.baselineInterval = d }

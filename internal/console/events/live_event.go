@@ -34,6 +34,11 @@ const (
 	TypeMTRTriggered       = "mtr_triggered"
 	TypeMTRCompleted       = "mtr_completed"
 	TypeDiagnosticProgress = "diagnostic_progress"
+
+	// TypeTopologyBaseline is not a controller event: the ingester writes one to the sink, never to the
+	// bus, each time its stream comes up, carrying the controller's whole topology. It is the Time
+	// Machine fold's starting state; the events API never lists it.
+	TypeTopologyBaseline = "topology_baseline"
 )
 
 // scopeCluster is the Scope for an event that is about neither one node nor one
@@ -62,6 +67,9 @@ type topologyChangedDetails struct {
 	NodeName string `json:"nodeName"`
 	AgentID  string `json:"agentId"`
 	Zone     string `json:"zone"`
+	// Labels is omitted, not null, when the controller sent none (older than 2.4.0): the store's
+	// fold reads a missing key as "unknown" and keeps whatever an earlier event stated.
+	Labels map[string]string `json:"labels,omitempty"`
 }
 
 type checkObservedDetails struct {
@@ -131,6 +139,7 @@ func ToLiveEvent(ev *pb.Event) (LiveEvent, error) {
 			NodeName: p.GetNodeName(),
 			AgentID:  p.GetAgentId(),
 			Zone:     p.GetZone(),
+			Labels:   p.GetLabels(),
 		}
 	case ev.GetCheckObserved() != nil:
 		p := ev.GetCheckObserved()

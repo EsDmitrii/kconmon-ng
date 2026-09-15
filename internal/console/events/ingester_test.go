@@ -66,6 +66,10 @@ type fakeControllerAPI struct {
 	capabilities []string
 	calls        atomic.Int64
 	down         atomic.Bool
+	// topology, when set, is served on GET /api/v1/topology; nil answers 404 like a route this
+	// fake does not have, so the tests that predate baselines see no extra sink writes.
+	topology  atomic.Pointer[controllerclient.Topology]
+	topoCalls atomic.Int64
 }
 
 func (f *fakeControllerAPI) setCapabilities(caps ...string) {
@@ -80,6 +84,17 @@ func (f *fakeControllerAPI) setDown(down bool) { f.down.Store(down) }
 
 func (f *fakeControllerAPI) handler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v1/topology" {
+			topo := f.topology.Load()
+			if topo == nil {
+				w.WriteHeader(http.StatusNotFound)
+				return
+			}
+			f.topoCalls.Add(1)
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(topo)
+			return
+		}
 		if r.URL.Path != "/api/v1/version" {
 			w.WriteHeader(http.StatusNotFound)
 			return
@@ -954,7 +969,10 @@ func TestIngesterSinkErrorDoesNotStopPublishing(t *testing.T) {
 // TestIngesterSinkConflictIsNotAnError is the normal N-replica path: another replica already
 // inserted the row.
 func TestIngesterSinkConflictIsNotAnError(t *testing.T) {
-	_, ctrl := startFakeController(t, "events")
+	api, ctrl := startFakeController(t, "events")
+	// Served, so the baseline is persisted (and conflicts) like any row instead of warning about a
+	// topology route this fake would otherwise not have.
+	api.topology.Store(&controllerclient.Topology{Timestamp: time.Now()})
 	fake, addr := startFakeEventStream(t)
 
 	bus := cache.NewInProcessBus()
@@ -981,8 +999,8 @@ func TestIngesterSinkConflictIsNotAnError(t *testing.T) {
 		t.Fatal("the event never reached the bus")
 	}
 
-	waitFor(t, `events_persisted_total{result="conflict"} == 1`, func() bool {
-		return testutil.ToFloat64(m.EventsPersisted.WithLabelValues("conflict")) == 1
+	waitFor(t, `events_persisted_total{result="conflict"} == 2 (the baseline and the event)`, func() bool {
+		return testutil.ToFloat64(m.EventsPersisted.WithLabelValues("conflict")) == 2
 	})
 
 	logs.mu.Lock()
@@ -1158,6 +1176,163 @@ func TestIngesterBusErrorStillPersists(t *testing.T) {
 	}
 	if !ing.Healthy() {
 		t.Error("a bus failure must not tear the stream down")
+	}
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run did not return after ctx cancel")
+	}
+}
+
+// TestIngesterPersistsATopologyBaselineOnConnect: events only say what changed, so a console that
+// starts recording next to a running fleet must also write down what was already there. Without the
+// baseline the Time Machine folded the stand to 8 of its 11 nodes and lost the bare host entirely.
+func TestIngesterPersistsATopologyBaselineOnConnect(t *testing.T) {
+	api, ctrl := startFakeController(t, "events")
+	snapshotAt := time.Date(2026, 9, 15, 8, 30, 0, 123456789, time.UTC)
+	api.topology.Store(&controllerclient.Topology{
+		Nodes: []controllerclient.Node{
+			{Name: "worker2", Zone: "zone-a", Ready: true},
+			{Name: "worker10", Zone: "zone-d", Ready: false},
+		},
+		Agents: []controllerclient.Agent{
+			{ID: "worker2-agent", NodeName: "worker2", PodIP: "10.0.0.2", Zone: "zone-a", Capabilities: []string{"plane:pod"}},
+			{ID: "edge-agent", NodeName: "edge-host-01", Zone: "office", Labels: map[string]string{"kconmon-ng.io/external": "true"}},
+		},
+		Timestamp: snapshotAt,
+	})
+	_, addr := startFakeEventStream(t)
+
+	bus := cache.NewInProcessBus()
+	msgs, unsubscribe := bus.Subscribe(liveBusTopic)
+	defer unsubscribe()
+
+	sink := &fakeSink{}
+	ing := events.NewIngester(ctrl, addr, bus, newTestMetrics(), events.WithEventSink(sink))
+	ing.SetConnectGrace(preconditionGrace)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() { defer close(done); ing.Run(ctx) }()
+
+	waitFor(t, "the baseline to reach the sink", func() bool { return sink.callCount() == 1 })
+
+	got := sink.calls()[0]
+	if got.Type != events.TypeTopologyBaseline || got.Seq != 0 || got.Scope != "cluster" || got.Severity != events.SeverityInfo {
+		t.Errorf("baseline = type %q seq %d scope %q severity %q, want topology_baseline/0/cluster/info",
+			got.Type, got.Seq, got.Scope, got.Severity)
+	}
+	if !got.Timestamp.Equal(snapshotAt) {
+		t.Errorf("baseline timestamp = %v, want the controller's snapshot time %v: events carry the controller clock too", got.Timestamp, snapshotAt)
+	}
+	var details struct {
+		Nodes []struct {
+			Name  string `json:"name"`
+			Zone  string `json:"zone"`
+			Ready bool   `json:"ready"`
+		} `json:"nodes"`
+		Agents []struct {
+			ID       string            `json:"id"`
+			NodeName string            `json:"nodeName"`
+			Zone     string            `json:"zone"`
+			Labels   map[string]string `json:"labels"`
+		} `json:"agents"`
+	}
+	if err := json.Unmarshal(got.Details, &details); err != nil {
+		t.Fatalf("baseline details are not JSON: %v (%s)", err, got.Details)
+	}
+	if len(details.Nodes) != 2 || details.Nodes[1].Name != "worker10" || details.Nodes[1].Ready {
+		t.Errorf("baseline nodes = %+v, want worker2 and a not-ready worker10", details.Nodes)
+	}
+	if len(details.Agents) != 2 || details.Agents[1].NodeName != "edge-host-01" ||
+		details.Agents[1].Labels["kconmon-ng.io/external"] != "true" {
+		t.Errorf("baseline agents = %+v, want worker2-agent and edge-agent with its external label", details.Agents)
+	}
+
+	select {
+	case msg := <-msgs:
+		t.Errorf("the baseline reached the live bus (%s); it is history, not something that happened", msg.Data)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run did not return after ctx cancel")
+	}
+}
+
+// TestIngesterRefreshesTheBaselineWhileConnected: retention prunes by age, so a baseline written only
+// when the stream came up would age out under a console that stays connected for longer than
+// database.retentionDays, and the fold would silently go back to events alone.
+func TestIngesterRefreshesTheBaselineWhileConnected(t *testing.T) {
+	api, ctrl := startFakeController(t, "events")
+	api.topology.Store(&controllerclient.Topology{
+		Nodes:     []controllerclient.Node{{Name: "worker2", Zone: "zone-a", Ready: true}},
+		Agents:    []controllerclient.Agent{{ID: "worker2-agent", NodeName: "worker2", Zone: "zone-a"}},
+		Timestamp: time.Now(),
+	})
+	_, addr := startFakeEventStream(t)
+
+	sink := &fakeSink{}
+	ing := events.NewIngester(ctrl, addr, cache.NewInProcessBus(), newTestMetrics(), events.WithEventSink(sink))
+	ing.SetConnectGrace(preconditionGrace)
+	ing.SetBaselineInterval(30 * time.Millisecond)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() { defer close(done); ing.Run(ctx) }()
+
+	waitFor(t, "three baselines on one connection", func() bool { return sink.callCount() >= 3 })
+	for _, got := range sink.calls() {
+		if got.Type != events.TypeTopologyBaseline {
+			t.Errorf("sink got %q, want only topology_baseline rows: the stream sent nothing", got.Type)
+		}
+	}
+	if n := api.topoCalls.Load(); n < 3 {
+		t.Errorf("topology fetched %d times, want one per baseline", n)
+	}
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run did not return after ctx cancel")
+	}
+	settled := sink.callCount()
+	time.Sleep(100 * time.Millisecond)
+	if sink.callCount() != settled {
+		t.Error("a baseline was written after Run returned")
+	}
+}
+
+// A controller whose topology route fails costs the Time Machine its baseline, never the stream:
+// events keep reaching the sink.
+func TestIngesterBaselineFailureDoesNotStopEvents(t *testing.T) {
+	_, ctrl := startFakeController(t, "events") // no topology set: GET /api/v1/topology answers 404
+	fake, addr := startFakeEventStream(t)
+
+	sink := &fakeSink{}
+	ing := events.NewIngester(ctrl, addr, cache.NewInProcessBus(), newTestMetrics(), events.WithEventSink(sink))
+	ing.SetConnectGrace(preconditionGrace)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() { defer close(done); ing.Run(ctx) }()
+
+	waitFor(t, "the stream to be healthy", ing.Healthy)
+	fake.send(t, &pb.Event{Seq: 1, Timestamp: timestamppb.Now(), Payload: &pb.Event_TopologyChanged{
+		TopologyChanged: &pb.TopologyChanged{Reason: "agent_registered", NodeName: "n", AgentId: "a"},
+	}})
+	waitFor(t, "the event to reach the sink", func() bool { return sink.callCount() == 1 })
+	if got := sink.calls()[0].Type; got != events.TypeTopologyChanged {
+		t.Errorf("sink got %q, want topology_changed", got)
 	}
 
 	cancel()

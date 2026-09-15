@@ -160,6 +160,9 @@ type Querier interface {
 	// InsertTopologyEvent uses over its own natural key.
 	InsertK8sEvent(ctx context.Context, arg InsertK8sEventParams) (int64, error)
 	InsertTopologyEvent(ctx context.Context, arg InsertTopologyEventParams) (int64, error)
+	// The newest topology_baseline row at or before at: the fold's starting state. Served by
+	// topology_events_type_time_idx.
+	LatestTopologyBaseline(ctx context.Context, at time.Time) (LatestTopologyBaselineRow, error)
 	// UNPAGED by design, the same call ListWebhooks makes: the row count is rules an operator typed --
 	// dozens.
 	ListAlertRules(ctx context.Context, enabledOnly bool) ([]AlertRule, error)
@@ -242,6 +245,7 @@ type Querier interface {
 	// and API responses, and the hash must never leave the database once written.
 	ListTokens(ctx context.Context) ([]ListTokensRow, error)
 	// scope is the EXACT filter. The pair-aware one lives in ListTopologyEventsByScopeNode.
+	// topology_baseline rows are the Time Machine fold's seed, not something that happened: never listed.
 	ListTopologyEvents(ctx context.Context, arg ListTopologyEventsParams) ([]ListTopologyEventsRow, error)
 	//
 	// The PAIR-AWARE filter a node or target card needs: every event whose scope names this node, on
@@ -261,7 +265,8 @@ type Querier interface {
 	// a sort. The second arm excludes rows the first already returned: a NON-pair scope has
 	// scope_left = scope_right = scope, so without it every node-scoped event would appear twice.
 	ListTopologyEventsByScopeNode(ctx context.Context, arg ListTopologyEventsByScopeNodeParams) ([]ListTopologyEventsByScopeNodeRow, error)
-	// A fold is only correct when it sees EVERY event from the beginning of retention.
+	// A fold is only correct when it sees EVERY event since its starting point: the beginning of
+	// retention, or (after_time set) the baseline it starts from.
 	ListTopologyEventsForFold(ctx context.Context, arg ListTopologyEventsForFoldParams) ([]ListTopologyEventsForFoldRow, error)
 	// password_hash is NEVER selected here: this result set is exposed to admin UI and API responses.
 	ListUsers(ctx context.Context) ([]ListUsersRow, error)

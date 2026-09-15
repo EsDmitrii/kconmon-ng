@@ -96,12 +96,15 @@ type Ingester struct {
 	// only have come from a received event. Never changed after Run starts.
 	connectGrace time.Duration
 
+	// baselineInterval defaults to the baselineInterval const; export_test.go shortens it.
+	baselineInterval time.Duration
+
 	connected atomic.Bool
 }
 
 // NewIngester returns an ingester for the controller at grpcAddr.
 func NewIngester(ctrl *controllerclient.Client, grpcAddr string, bus cache.Bus, m *metrics.Metrics, opts ...Option) *Ingester {
-	i := &Ingester{ctrl: ctrl, grpcAddr: grpcAddr, bus: bus, metrics: m, connectGrace: connectGrace}
+	i := &Ingester{ctrl: ctrl, grpcAddr: grpcAddr, bus: bus, metrics: m, connectGrace: connectGrace, baselineInterval: baselineInterval}
 	for _, opt := range opts {
 		opt(i)
 	}
@@ -201,8 +204,20 @@ func (i *Ingester) precheck(ctx context.Context) error {
 // consume runs the stream to its end; it does NOT report the ingester healthy just because the
 // stream object exists.
 func (i *Ingester) consume(ctx context.Context, stream pb.EventStream_WatchEventsClient) error {
-	gate := &connectGate{ing: i}
+	gate := &connectGate{ing: i, established: make(chan struct{})}
 	defer gate.finish()
+
+	// Events only say what changed, so the Time Machine also needs what was already there when this
+	// console started listening. Joined before returning: no baseline outlives its attempt.
+	if i.sink != nil && i.ctrl != nil {
+		baselineCtx, stopBaselines := context.WithCancel(ctx)
+		var wg sync.WaitGroup
+		wg.Go(func() { i.recordBaselines(baselineCtx, gate.established) })
+		defer func() {
+			stopBaselines()
+			wg.Wait()
+		}()
+	}
 
 	grace := time.AfterFunc(i.connectGrace, gate.markConnected)
 	defer grace.Stop()
@@ -222,6 +237,9 @@ func (i *Ingester) consume(ctx context.Context, stream pb.EventStream_WatchEvent
 // connectGate owns the connected state of ONE attempt.
 type connectGate struct {
 	ing *Ingester
+
+	// established is closed by the promotion, the one proof this attempt's stream is live.
+	established chan struct{}
 
 	mu       sync.Mutex
 	finished bool // the attempt is over; no further promotion is permitted
@@ -246,6 +264,7 @@ func (g *connectGate) promote() bool {
 	}
 	g.up = true
 	g.ing.setConnected(true)
+	close(g.established)
 	return true
 }
 
@@ -294,6 +313,11 @@ func (i *Ingester) publish(ctx context.Context, ev *pb.Event) {
 		slog.Warn("publishing live event to the bus failed", "id", live.ID, "error", err)
 	}
 
+	i.persist(ctx, live)
+}
+
+// persist hands one event to the sink, when there is one, and counts the outcome.
+func (i *Ingester) persist(ctx context.Context, live LiveEvent) { //nolint:gocritic // hugeParam: LiveEvent is passed by value to the sink anyway
 	if i.sink == nil {
 		return
 	}

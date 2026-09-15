@@ -14,6 +14,7 @@ import (
 
 	"github.com/EsDmitrii/kconmon-ng/internal/console/metrics"
 	"github.com/EsDmitrii/kconmon-ng/internal/console/store/gen"
+	"github.com/EsDmitrii/kconmon-ng/internal/model"
 )
 
 // Limit bounds for EventFilter.Limit: zero means "unset, use defaultLimit";
@@ -68,6 +69,7 @@ const (
 	queryListTopologyEvents        = "ListTopologyEvents"
 	queryOldestTopologyEventTime   = "OldestTopologyEventTime"
 	queryListTopologyEventsForFold = "ListTopologyEventsForFold"
+	queryLatestTopologyBaseline    = "LatestTopologyBaseline"
 
 	// Every one of *DB's auth.go methods is metered.
 	queryGetUserByID              = "GetUserByID"
@@ -376,11 +378,23 @@ const (
 // than imported.
 const eventTypeTopologyChanged = "topology_changed"
 
+// eventTypeTopologyBaseline mirrors events.TypeTopologyBaseline: the controller's whole topology,
+// written by the ingester each time its stream comes up. Events only say what CHANGED, so without it a
+// console that starts recording next to a running fleet never learns about the agents that stay put.
+const eventTypeTopologyBaseline = "topology_baseline"
+
 // topologyFoldLimit bounds the fold's single query; a fold is only correct when it sees EVERY event
 // from the beginning of retention.
 const topologyFoldLimit = 100_000
 
-// TopologyNode is one node in a reconstructed topology.
+// baselineReplayOverlap is how far before a baseline the fold starts replaying topology_changed rows.
+// The controller stamps its snapshot after reading the registry, so a change can carry a timestamp a
+// hair older than a snapshot that does not yet contain it; replaying a few seconds early is safe
+// because every reason is last-write-wins per subject.
+const baselineReplayOverlap = 5 * time.Second
+
+// TopologyNode is one Kubernetes node in a reconstructed topology. A bare host (an agent labelled
+// model.LabelExternal) is never one of these, live or folded: it is found under Agents only.
 type TopologyNode struct {
 	Name  string
 	Zone  string
@@ -389,12 +403,15 @@ type TopologyNode struct {
 
 // TopologyAgent is one agent in a reconstructed topology, the durable twin of
 // controllerclient.Agent. PodIP is ALWAYS empty -- no event ever recorded it.
-// Zone comes from the events and is empty for pre-M7 history.
+// Zone comes from the events and is empty for pre-M7 history. Labels is the
+// last labels map any event stated for the agent, and nil for history a
+// controller older than 2.4.0 wrote: nil means "unknown", not "no labels".
 type TopologyAgent struct {
 	ID       string
 	NodeName string
 	Zone     string
 	PodIP    string
+	Labels   map[string]string
 }
 
 // TopologySnapshot is the result of folding topology_changed events up to an
@@ -404,9 +421,10 @@ type TopologySnapshot struct {
 	Nodes  []TopologyNode
 	Agents []TopologyAgent
 
-	// LastChange is the event_time of the newest event folded -- i.e. when the
-	// topology last actually changed at or before the requested instant. Zero
-	// when no event was folded at all.
+	// LastChange is the event_time of the newest row folded: the last change at
+	// or before the requested instant, or the baseline when nothing changed since
+	// it (the set is then known to hold from that instant on). Zero when nothing
+	// was folded at all.
 	LastChange time.Time
 
 	// OldestRetained is the event_time of the OLDEST row still in topology_events, whatever its type;
@@ -429,15 +447,34 @@ type TopologySnapshot struct {
 // by hand from events.topologyChangedDetails (which is unexported there, and
 // store must not import that package anyway).
 type topologyChangeDetails struct {
-	Reason   string `json:"reason"`
-	NodeName string `json:"nodeName"`
-	AgentID  string `json:"agentId"`
-	Zone     string `json:"zone"`
+	Reason   string            `json:"reason"`
+	NodeName string            `json:"nodeName"`
+	AgentID  string            `json:"agentId"`
+	Zone     string            `json:"zone"`
+	Labels   map[string]string `json:"labels"`
 }
 
-// TopologyAt reconstructs the node/agent set as of at by replaying every topology_changed event
-// with event_time <= at in (event_time, id) order; the returned snapshot ALWAYS carries
-// OldestRetained, even when the fold itself is empty.
+// topologyBaselineDetails is the details JSON of a topology_baseline row: the node and agent entries
+// of GET /api/v1/topology, cut to the fields the fold keeps. Mirrored by hand from the events package
+// for the same reason as topologyChangeDetails.
+type topologyBaselineDetails struct {
+	Nodes []struct {
+		Name  string `json:"name"`
+		Zone  string `json:"zone"`
+		Ready bool   `json:"ready"`
+	} `json:"nodes"`
+	Agents []struct {
+		ID       string            `json:"id"`
+		NodeName string            `json:"nodeName"`
+		Zone     string            `json:"zone"`
+		Labels   map[string]string `json:"labels"`
+	} `json:"agents"`
+}
+
+// TopologyAt reconstructs the node/agent set as of at: it starts from the newest topology_baseline
+// row at or before at (or from nothing, for history recorded before baselines existed) and replays
+// the topology_changed events after it in (event_time, id) order; the returned snapshot ALWAYS
+// carries OldestRetained, even when the fold itself is empty.
 func (s *eventStore) TopologyAt(ctx context.Context, at time.Time) (TopologySnapshot, error) {
 	oldestStart := time.Now()
 	oldest, err := s.q.OldestTopologyEventTime(ctx)
@@ -455,12 +492,32 @@ func (s *eventStore) TopologyAt(ctx context.Context, at time.Time) (TopologySnap
 		s.observe(queryOldestTopologyEventTime, oldestStart, resultOK)
 	}
 
-	foldStart := time.Now()
-	rows, err := s.q.ListTopologyEventsForFold(ctx, gen.ListTopologyEventsForFoldParams{
+	var recs []EventRecord
+	params := gen.ListTopologyEventsForFoldParams{
 		Type: eventTypeTopologyChanged,
 		At:   at,
 		Lim:  topologyFoldLimit,
-	})
+	}
+	baselineStart := time.Now()
+	baseline, err := s.q.LatestTopologyBaseline(ctx, at)
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		s.observe(queryLatestTopologyBaseline, baselineStart, resultOK)
+	case err != nil:
+		s.observe(queryLatestTopologyBaseline, baselineStart, resultError)
+		return TopologySnapshot{}, fmt.Errorf("store: topology at: baseline: %w", err)
+	default:
+		s.observe(queryLatestTopologyBaseline, baselineStart, resultOK)
+		recs = append(recs, EventRecord{
+			EventTime: baseline.EventTime,
+			Type:      eventTypeTopologyBaseline,
+			Details:   baseline.Details,
+		})
+		params.AfterTime = pgtype.Timestamptz{Time: baseline.EventTime.Add(-baselineReplayOverlap), Valid: true}
+	}
+
+	foldStart := time.Now()
+	rows, err := s.q.ListTopologyEventsForFold(ctx, params)
 	if err != nil {
 		s.observe(queryListTopologyEventsForFold, foldStart, resultError)
 		return TopologySnapshot{}, fmt.Errorf("store: topology at: fold: %w", err)
@@ -470,13 +527,12 @@ func (s *eventStore) TopologyAt(ctx context.Context, at time.Time) (TopologySnap
 	// The rows are already (event_time, id) ascending -- the fold is a pure
 	// function of that order, so it is reused verbatim by the unit tests over
 	// synthetic records.
-	recs := make([]EventRecord, len(rows))
 	for i := range rows {
-		recs[i] = EventRecord{
+		recs = append(recs, EventRecord{
 			EventTime: rows[i].EventTime,
 			Type:      eventTypeTopologyChanged,
 			Details:   rows[i].Details,
-		}
+		})
 	}
 
 	snap := foldTopology(recs)
@@ -498,14 +554,45 @@ func foldTopology(recs []EventRecord) TopologySnapshot {
 	type placement struct {
 		nodeName string
 		zone     string
+		labels   map[string]string
 	}
-	nodes := map[string]string{}     // node name -> zone last stated for it
+	type nodeState struct {
+		zone  string
+		ready bool
+	}
+	nodes := map[string]nodeState{}  // node name -> zone last stated for it, and readiness
 	agents := map[string]placement{} // agent id -> where it was last seen
 
 	snap := TopologySnapshot{EventsFolded: len(recs)}
 	for i := range recs {
 		rec := &recs[i]
-		snap.LastChange = rec.EventTime
+		// max, not last: the rows replayed right after a baseline may be a few seconds older than it.
+		if rec.EventTime.After(snap.LastChange) {
+			snap.LastChange = rec.EventTime
+		}
+
+		if rec.Type == eventTypeTopologyBaseline {
+			var b topologyBaselineDetails
+			if err := json.Unmarshal(rec.Details, &b); err != nil {
+				snap.UnfoldableEvents++
+				continue
+			}
+			// The whole set at that instant, so it replaces what the fold held rather than merging:
+			// a subject missing from it had left without an event this console received.
+			nodes = make(map[string]nodeState, len(b.Nodes))
+			for _, n := range b.Nodes {
+				if n.Name != "" {
+					nodes[n.Name] = nodeState{zone: n.Zone, ready: n.Ready}
+				}
+			}
+			agents = make(map[string]placement, len(b.Agents))
+			for _, a := range b.Agents {
+				if a.ID != "" {
+					agents[a.ID] = placement{nodeName: a.NodeName, zone: a.Zone, labels: a.Labels}
+				}
+			}
+			continue
+		}
 
 		var d topologyChangeDetails
 		if err := json.Unmarshal(rec.Details, &d); err != nil {
@@ -523,16 +610,25 @@ func foldTopology(recs []EventRecord) TopologySnapshot {
 		case topologyReasonRegistered, topologyReasonZoneUpdated:
 			// The zone rule: an event that states one WINS (zone_updated exists precisely to restate it).
 			if d.NodeName != "" {
-				if _, seen := nodes[d.NodeName]; d.Zone != "" || !seen {
-					nodes[d.NodeName] = d.Zone
+				prev, seen := nodes[d.NodeName]
+				zone := prev.zone
+				if d.Zone != "" || !seen {
+					zone = d.Zone
 				}
+				nodes[d.NodeName] = nodeState{zone: zone, ready: true}
 			}
 			if d.AgentID != "" {
 				zone := d.Zone
 				if zone == "" {
 					zone = agents[d.AgentID].zone
 				}
-				agents[d.AgentID] = placement{nodeName: d.NodeName, zone: zone}
+				// Same rule as the zone: an event that carries a labels map wins, one without the
+				// key (older controller, or a mixed fleet) leaves the last stated map alone.
+				labels := d.Labels
+				if labels == nil {
+					labels = agents[d.AgentID].labels
+				}
+				agents[d.AgentID] = placement{nodeName: d.NodeName, zone: zone, labels: labels}
 			}
 		case topologyReasonDeregistered, topologyReasonEvicted:
 			// Removing something absent is a no-op, not an error: retention
@@ -546,18 +642,32 @@ func foldTopology(recs []EventRecord) TopologySnapshot {
 		}
 	}
 
+	// A bare host registers under a node name like everybody else, but there is no Kubernetes node
+	// behind it, so the live snapshot never lists one. Emitting it here with a presence-derived Ready
+	// would hand the Time Machine a READY node the live view says does not exist; the host is served
+	// through Agents only, and its label is the one evidence of what it is. History a pre-2.4.0
+	// controller wrote carries no labels, and such a host stays a node -- unknown is not external.
+	bareHosts := map[string]struct{}{}
+	for _, p := range agents {
+		if p.labels[model.LabelExternal] == "true" {
+			bareHosts[p.nodeName] = struct{}{}
+		}
+	}
 	snap.Nodes = make([]TopologyNode, 0, len(nodes))
-	for name, zone := range nodes {
-		// Ready is presence-derived, and Zone is whatever the events said --
-		// empty for history a pre-M7 controller wrote. See the block comment
-		// on this section.
-		snap.Nodes = append(snap.Nodes, TopologyNode{Name: name, Zone: zone, Ready: true})
+	for name, n := range nodes {
+		if _, bare := bareHosts[name]; bare {
+			continue
+		}
+		// Ready is presence-derived for a node an event registered, and the baseline's own flag for
+		// one no event touched since. Zone is whatever the events said -- empty for history a pre-M7
+		// controller wrote.
+		snap.Nodes = append(snap.Nodes, TopologyNode{Name: name, Zone: n.zone, Ready: n.ready})
 	}
 	sort.Slice(snap.Nodes, func(i, j int) bool { return snap.Nodes[i].Name < snap.Nodes[j].Name })
 
 	snap.Agents = make([]TopologyAgent, 0, len(agents))
 	for id, p := range agents {
-		snap.Agents = append(snap.Agents, TopologyAgent{ID: id, NodeName: p.nodeName, Zone: p.zone})
+		snap.Agents = append(snap.Agents, TopologyAgent{ID: id, NodeName: p.nodeName, Zone: p.zone, Labels: p.labels})
 	}
 	sort.Slice(snap.Agents, func(i, j int) bool { return snap.Agents[i].ID < snap.Agents[j].ID })
 
