@@ -43,10 +43,8 @@ type AgentRegistryClient interface {
 	// ReportTaskResult delivers the outcome of a WatchTasks task back to the
 	// controller.
 	ReportTaskResult(ctx context.Context, in *TaskResult, opts ...grpc.CallOption) (*emptypb.Empty, error)
-	// WatchExternalChecks server-streams this agent's CONTINUOUS external-check
-	// assignment, mirroring the WatchPeers push pattern. Each message is the
-	// agent's COMPLETE assignment, never a delta: a dropped message can then
-	// never leave an agent probing a target the operator deleted.
+	// WatchExternalChecks server-streams this agent's CONTINUOUS external-check assignment; each
+	// message is the agent's COMPLETE assignment.
 	WatchExternalChecks(ctx context.Context, in *WatchExternalChecksRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[ExternalCheckAssignment], error)
 }
 
@@ -169,10 +167,8 @@ type AgentRegistryServer interface {
 	// ReportTaskResult delivers the outcome of a WatchTasks task back to the
 	// controller.
 	ReportTaskResult(context.Context, *TaskResult) (*emptypb.Empty, error)
-	// WatchExternalChecks server-streams this agent's CONTINUOUS external-check
-	// assignment, mirroring the WatchPeers push pattern. Each message is the
-	// agent's COMPLETE assignment, never a delta: a dropped message can then
-	// never leave an agent probing a target the operator deleted.
+	// WatchExternalChecks server-streams this agent's CONTINUOUS external-check assignment; each
+	// message is the agent's COMPLETE assignment.
 	WatchExternalChecks(*WatchExternalChecksRequest, grpc.ServerStreamingServer[ExternalCheckAssignment]) error
 	mustEmbedUnimplementedAgentRegistryServer()
 }
@@ -523,10 +519,9 @@ const (
 //
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
 //
-// EventStream lets the Console watch controller-observed domain events in
-// realtime. Leader-only: a non-leader replica fails the call immediately
-// (codes.Unavailable) so the Console's reconnect loop retries and may land on
-// the leader on a subsequent dial.
+// EventStream lets the Console watch controller-observed domain events in realtime; Leader-only: a
+// non-leader replica fails the call immediately (codes.Unavailable) so the Console's reconnect loop
+// retries and may land on the leader on a subsequent dial.
 type EventStreamClient interface {
 	WatchEvents(ctx context.Context, in *WatchEventsRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[Event], error)
 }
@@ -562,10 +557,9 @@ type EventStream_WatchEventsClient = grpc.ServerStreamingClient[Event]
 // All implementations must embed UnimplementedEventStreamServer
 // for forward compatibility.
 //
-// EventStream lets the Console watch controller-observed domain events in
-// realtime. Leader-only: a non-leader replica fails the call immediately
-// (codes.Unavailable) so the Console's reconnect loop retries and may land on
-// the leader on a subsequent dial.
+// EventStream lets the Console watch controller-observed domain events in realtime; Leader-only: a
+// non-leader replica fails the call immediately (codes.Unavailable) so the Console's reconnect loop
+// retries and may land on the leader on a subsequent dial.
 type EventStreamServer interface {
 	WatchEvents(*WatchEventsRequest, grpc.ServerStreamingServer[Event]) error
 	mustEmbedUnimplementedEventStreamServer()

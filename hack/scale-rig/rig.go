@@ -10,6 +10,7 @@ import (
 
 	pb "github.com/EsDmitrii/kconmon-ng/api/proto"
 	"github.com/EsDmitrii/kconmon-ng/internal/agent"
+	"github.com/EsDmitrii/kconmon-ng/internal/checker"
 	"github.com/EsDmitrii/kconmon-ng/internal/config"
 	"github.com/EsDmitrii/kconmon-ng/internal/controller"
 	"google.golang.org/grpc"
@@ -70,6 +71,12 @@ func newRig(cfg RigConfig, logs *logCounter) *Rig { //nolint:gocritic // hugePar
 		r.agents[i] = newRigAgent(r, i)
 	}
 	return r
+}
+
+// ownPorts is what every rig agent advertises and falls back to for peers. The rig runs no probes,
+// so only HTTP mirrors the controller's listener like a real agent config would; UDP stays 0.
+func (r *Rig) ownPorts() checker.PeerPorts {
+	return checker.PeerPorts{HTTP: r.httpPort}
 }
 
 // Run executes the whole measurement: controller up, observers on, cold start, churn, steady
@@ -327,7 +334,7 @@ func (r *Rig) runProbes(ctx context.Context) (failures int) {
 		threshold := base + p - 1
 		r.tracker.addProbe(threshold, expected, time.Now())
 		rctx, cancel := context.WithTimeout(ctx, 10*time.Second)
-		_, _, rerr := client.Register(rctx, probeAgentInfo(p), r.httpPort)
+		_, _, rerr := client.Register(rctx, probeAgentInfo(p), r.ownPorts())
 		cancel()
 		if rerr != nil {
 			failures++

@@ -24,12 +24,14 @@ const (
 	reasonAgentEvicted      = "agent_evicted"
 )
 
-// TopologySubject names ONE agent a topology change was about, with the node and zone it occupied
-// at that moment.
+// TopologySubject names ONE agent a topology change was about, with the node, zone and labels it
+// had at that moment. Labels ride along so the Console's history fold can tell an external host
+// from a node at every event, departures included, the same way the live topology does.
 type TopologySubject struct {
 	AgentID  string
 	NodeName string
 	Zone     string
+	Labels   map[string]string
 }
 
 // TopologyChange is what a registry mutation tells its OnChange subscribers: the reason; until the
@@ -51,6 +53,7 @@ func (c TopologyChange) Events() []*pb.TopologyChanged {
 			NodeName: s.NodeName,
 			AgentId:  s.AgentID,
 			Zone:     s.Zone,
+			Labels:   s.Labels,
 		})
 	}
 	return out
@@ -122,7 +125,7 @@ func (r *Registry) Register(info model.AgentInfo) model.AgentInfo { //nolint:goc
 	// actually stored rather than the (possibly empty) one the agent sent.
 	r.notifyChange(snapshot, TopologyChange{
 		Reason:   reasonAgentRegistered,
-		Subjects: []TopologySubject{{AgentID: info.ID, NodeName: info.NodeName, Zone: info.Zone}},
+		Subjects: []TopologySubject{{AgentID: info.ID, NodeName: info.NodeName, Zone: info.Zone, Labels: info.Labels}},
 	})
 	return info
 }
@@ -141,7 +144,7 @@ func (r *Registry) UpdateZone(nodeName, zone string) {
 		if agent.info.NodeName == nodeName && agent.info.Zone != zone {
 			agent.info.Zone = zone
 			subjects = append(subjects, TopologySubject{
-				AgentID: agent.info.ID, NodeName: nodeName, Zone: zone,
+				AgentID: agent.info.ID, NodeName: nodeName, Zone: zone, Labels: agent.info.Labels,
 			})
 		}
 	}
@@ -172,7 +175,9 @@ func (r *Registry) Deregister(agentID string) {
 	var subject TopologySubject
 	agent, existed := r.agents[agentID]
 	if existed {
-		subject = TopologySubject{AgentID: agentID, NodeName: agent.info.NodeName, Zone: agent.info.Zone}
+		subject = TopologySubject{
+			AgentID: agentID, NodeName: agent.info.NodeName, Zone: agent.info.Zone, Labels: agent.info.Labels,
+		}
 		delete(r.agents, agentID)
 	}
 	snapshot := r.snapshotLocked()
@@ -219,7 +224,7 @@ func (r *Registry) Reset() {
 	subjects := make([]TopologySubject, 0, len(r.agents))
 	for id, agent := range r.agents {
 		subjects = append(subjects, TopologySubject{
-			AgentID: id, NodeName: agent.info.NodeName, Zone: agent.info.Zone,
+			AgentID: id, NodeName: agent.info.NodeName, Zone: agent.info.Zone, Labels: agent.info.Labels,
 		})
 	}
 	r.agents = make(map[string]*registeredAgent)
@@ -313,7 +318,7 @@ func (r *Registry) EvictStale() int {
 		if agent.lastSeen.Before(cutoff) {
 			evictedList = append(evictedList, evictedEntry{
 				subject: TopologySubject{
-					AgentID: id, NodeName: agent.info.NodeName, Zone: agent.info.Zone,
+					AgentID: id, NodeName: agent.info.NodeName, Zone: agent.info.Zone, Labels: agent.info.Labels,
 				},
 				lastSeen: agent.lastSeen,
 			})

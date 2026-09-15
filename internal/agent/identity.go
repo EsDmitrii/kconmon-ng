@@ -12,11 +12,6 @@ import (
 	"github.com/EsDmitrii/kconmon-ng/internal/model"
 )
 
-// externalAgentLabel marks an agent running outside any Pod (no Downward API
-// pod name), so consoles and dashboards can tell bare-host agents apart
-// without guessing from the pod name's shape.
-const externalAgentLabel = "kconmon-ng.io/external"
-
 /*
 resolveIdentity builds what this agent asserts about itself at registration.
 
@@ -48,7 +43,15 @@ func resolveIdentity(cfg *config.Config) (model.AgentInfo, error) {
 		if podName == "" {
 			podName = nodeName
 		}
-		labels = map[string]string{externalAgentLabel: "true"}
+		labels = map[string]string{model.LabelExternal: "true"}
+	}
+	if os.Getenv("KCONMON_NG_HOST_NETWORK") == "true" {
+		// Set by the chart under agent.hostNetwork: the advertised address is then a node IP and
+		// consumers must know the CNI datapath was not on the probe path.
+		if labels == nil {
+			labels = map[string]string{}
+		}
+		labels[model.LabelHostNetwork] = "true"
 	}
 
 	addr, err := resolveAdvertiseAddress(cfg)

@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/EsDmitrii/kconmon-ng/internal/checker"
 	"github.com/EsDmitrii/kconmon-ng/internal/config"
 	"github.com/EsDmitrii/kconmon-ng/internal/controller"
 	"github.com/EsDmitrii/kconmon-ng/internal/metrics"
@@ -186,12 +187,18 @@ func TestGRPCClientDialsTLSGatewayEndToEnd(t *testing.T) {
 	// The identity matches the certificate CN, as resolveIdentity would produce on that host.
 	info := model.AgentInfo{
 		ID: "edge-host-1-edge-host-1", NodeName: "edge-host-1", PodName: "edge-host-1", PodIP: "192.0.2.7",
+		HTTPPort: 18080, UDPPort: 19090, MetricsPort: 19091,
 	}
-	if _, _, regErr := client.Register(ctx, info, 8080); regErr != nil {
+	if _, _, regErr := client.Register(ctx, info, checker.PeerPorts{HTTP: 8080}); regErr != nil {
 		t.Fatalf("Register through the TLS gateway: %v", regErr)
 	}
 	if reg.Count() != 1 {
 		t.Fatalf("registry holds %d agents after a gateway registration, want 1", reg.Count())
+	}
+	// The ports ride through the gateway untouched: its interceptors pin node_name and agent_id only.
+	if got := reg.GetAll()[0]; got.HTTPPort != 18080 || got.UDPPort != 19090 || got.MetricsPort != 19091 {
+		t.Errorf("ports through the gateway http/udp/metrics = %d/%d/%d, want 18080/19090/19091",
+			got.HTTPPort, got.UDPPort, got.MetricsPort)
 	}
 
 	// A node name OUTSIDE the certificate must be refused: the client carries the pinning
@@ -199,7 +206,7 @@ func TestGRPCClientDialsTLSGatewayEndToEnd(t *testing.T) {
 	foreign := model.AgentInfo{
 		ID: "other-node-x", NodeName: "other-node", PodName: "x", PodIP: "192.0.2.8",
 	}
-	_, _, err = client.Register(ctx, foreign, 8080)
+	_, _, err = client.Register(ctx, foreign, checker.PeerPorts{HTTP: 8080})
 	if st, ok := grpcstatus.FromError(err); !ok || st.Code() != codes.PermissionDenied {
 		t.Fatalf("Register outside the certificate = %v, want PermissionDenied", err)
 	}
@@ -209,7 +216,7 @@ func TestGRPCClientDialsTLSGatewayEndToEnd(t *testing.T) {
 	if err := client.Reconnect(); err != nil {
 		t.Fatalf("Reconnect over TLS: %v", err)
 	}
-	if _, _, err := client.Register(ctx, info, 8080); err != nil {
+	if _, _, err := client.Register(ctx, info, checker.PeerPorts{HTTP: 8080}); err != nil {
 		t.Fatalf("Register after Reconnect: %v", err)
 	}
 }
@@ -238,7 +245,7 @@ func TestGRPCClientTLSGatewayRejectsWrongToken(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	info := model.AgentInfo{ID: "h-h", NodeName: "h", PodName: "h", PodIP: "192.0.2.9"}
-	_, _, err = client.Register(ctx, info, 8080)
+	_, _, err = client.Register(ctx, info, checker.PeerPorts{HTTP: 8080})
 	if st, ok := grpcstatus.FromError(err); !ok || st.Code() != codes.Unauthenticated {
 		t.Fatalf("Register with the wrong token = %v, want Unauthenticated", err)
 	}

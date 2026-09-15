@@ -78,15 +78,16 @@ func TestGracefulDeregisterDoesNotBlockOnError(t *testing.T) {
 }
 
 // TestAgentCapabilitiesGatedOnExternalEnabled pins the advertisement that makes an opted-out agent
-// invisible to the controller's external dispatch path.
+// invisible to the controller's external dispatch path. plane:mtr rides along unconditionally
+// because the MTR checker is always built (New wires it whatever the config says).
 func TestAgentCapabilitiesGatedOnExternalEnabled(t *testing.T) {
 	tests := []struct {
 		name    string
 		enabled bool
 		want    []string
 	}{
-		{name: "external disabled advertises nothing", enabled: false, want: []string{}},
-		{name: "external enabled advertises external-checks", enabled: true, want: []string{"external-checks"}},
+		{name: "external disabled advertises only the always-on plane", enabled: false, want: []string{"plane:mtr"}},
+		{name: "external enabled advertises external-checks", enabled: true, want: []string{"external-checks", "plane:mtr"}},
 	}
 
 	for _, tc := range tests {
@@ -100,6 +101,50 @@ func TestAgentCapabilitiesGatedOnExternalEnabled(t *testing.T) {
 			}
 			if !slices.Equal(got, tc.want) {
 				t.Errorf("agentCapabilities(external.enabled=%v) = %v, want %v", tc.enabled, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestAgentCapabilitiesAdvertisePlanes pins the plane:* list, one capability per enabled checker,
+// in a fixed order, with the constant prefix the console and CLI key off. The absence case matters
+// as much as the presence one: a consumer reading "no plane:* at all" must treat the agent as
+// running every plane (every pre-2.4.0 agent looks like that), so the list is never padded with
+// "plane:none" or similar to make absence explicit.
+func TestAgentCapabilitiesAdvertisePlanes(t *testing.T) {
+	all := &config.Config{}
+	all.Checkers.TCP.Enabled = true
+	all.Checkers.UDP.Enabled = true
+	all.Checkers.ICMP.Enabled = true
+	all.Checkers.DNS.Enabled = true
+	all.Checkers.HTTP.Enabled = true
+	all.Checkers.External.Enabled = true
+
+	some := &config.Config{}
+	some.Checkers.TCP.Enabled = true
+	some.Checkers.ICMP.Enabled = true
+
+	tests := []struct {
+		name string
+		cfg  *config.Config
+		want []string
+	}{
+		{name: "every checker on", cfg: all, want: []string{
+			"external-checks", "plane:tcp", "plane:udp", "plane:icmp", "plane:dns", "plane:http", "plane:mtr",
+		}},
+		{name: "tcp and icmp only", cfg: some, want: []string{"plane:tcp", "plane:icmp", "plane:mtr"}},
+		{name: "nothing configured still advertises mtr", cfg: &config.Config{}, want: []string{"plane:mtr"}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := agentCapabilities(tc.cfg)
+			if !slices.Equal(got, tc.want) {
+				t.Errorf("agentCapabilities = %v, want %v", got, tc.want)
+			}
+			for _, c := range got {
+				if strings.HasPrefix(c, "plane:") && !strings.HasPrefix(c, model.CapabilityPlanePrefix) {
+					t.Errorf("capability %q does not use model.CapabilityPlanePrefix %q", c, model.CapabilityPlanePrefix)
+				}
 			}
 		})
 	}
@@ -1084,5 +1129,29 @@ func TestSyncPeerMetricsRetiresStaleProbeIntended(t *testing.T) {
 	}
 	if got := testutil.ToFloat64(m.ProbeIntended.WithLabelValues("node-a", "node-b")); got != 1 {
 		t.Errorf("the still-assigned pair reads %v, want 1", got)
+	}
+}
+
+// New stamps the config's listener ports onto the identity it registers (2.4.0), so peers can dial
+// THIS agent's ports; UDP is config.grpcPort, the echo port's long-standing name. The same ports
+// are the fallback for peers that reported none.
+func TestNewAgentAdvertisesItsListenerPorts(t *testing.T) {
+	cfg := testNewConfig()
+	cfg.HTTPPort, cfg.GRPCPort, cfg.MetricsPort = 18080, 19090, 19091
+
+	a, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if a.info.HTTPPort != 18080 || a.info.UDPPort != 19090 || a.info.MetricsPort != 19091 {
+		t.Errorf("info ports http/udp/metrics = %d/%d/%d, want 18080/19090/19091",
+			a.info.HTTPPort, a.info.UDPPort, a.info.MetricsPort)
+	}
+	if got := a.registrationInfo(); got.HTTPPort != 18080 || got.UDPPort != 19090 || got.MetricsPort != 19091 {
+		t.Errorf("registration ports http/udp/metrics = %d/%d/%d, want 18080/19090/19091",
+			got.HTTPPort, got.UDPPort, got.MetricsPort)
+	}
+	if got, want := a.ownPorts(), (checker.PeerPorts{HTTP: 18080, UDP: 19090}); got != want {
+		t.Errorf("ownPorts() = %+v, want %+v", got, want)
 	}
 }

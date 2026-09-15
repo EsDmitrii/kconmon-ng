@@ -28,7 +28,8 @@ type TaskExecutor struct {
 	checkers map[model.CheckType]checker.Checker
 	mtr      *checker.MTRChecker
 	source   checker.Target
-	httpPort int
+	// own is this agent's listener ports, dialled on a task target that reported none.
+	own      checker.PeerPorts
 	reporter taskReporter
 	sem      chan struct{}
 	external ExternalPolicy
@@ -49,8 +50,8 @@ type ExternalPolicy struct {
 }
 
 // defaultExternalTCPPort is the port an external TCP probe dials when the request carries no
-// explicit port; a peer TCP probe dials the agent's own httpPort because the far end is another
-// kconmon agent.
+// explicit port; a peer TCP probe dials the httpPort the peer reported (this agent's own when it
+// reported none) because the far end is another kconmon agent.
 const defaultExternalTCPPort = 80
 
 /*
@@ -78,7 +79,7 @@ func NewTaskExecutor(
 	checkers map[model.CheckType]checker.Checker,
 	mtr *checker.MTRChecker,
 	source checker.Target, //nolint:gocritic // hugeParam: Target copied intentionally, mirrors scheduler
-	httpPort int,
+	own checker.PeerPorts,
 	reporter taskReporter,
 	maxConcurrent int,
 	external ExternalPolicy, //nolint:gocritic // hugeParam: policy copied intentionally, it is immutable config
@@ -90,7 +91,7 @@ func NewTaskExecutor(
 		checkers: checkers,
 		mtr:      mtr,
 		source:   source,
-		httpPort: httpPort,
+		own:      own,
 		reporter: reporter,
 		sem:      make(chan struct{}, maxConcurrent),
 		external: external,
@@ -188,7 +189,9 @@ func (e *TaskExecutor) executeOne(ctx context.Context, req *pb.TaskRequest) *pb.
 	}
 }
 
-// targetFromRequest builds a checker.Target from the task's target AgentMeta.
+// targetFromRequest builds a checker.Target from the task's target AgentMeta, the controller's full
+// projection of the peer: its ports are dialled as reported, with the same zero-means-own fallback as
+// the scheduler's peer list.
 func (e *TaskExecutor) targetFromRequest(req *pb.TaskRequest) checker.Target {
 	t := req.GetTarget()
 	return checker.Target{
@@ -196,7 +199,8 @@ func (e *TaskExecutor) targetFromRequest(req *pb.TaskRequest) checker.Target {
 		NodeName: t.GetNodeName(),
 		PodIP:    t.GetPodIp(),
 		Zone:     t.GetZone(),
-		Port:     e.httpPort,
+		Port:     portOr(t.GetHttpPort(), e.own.HTTP),
+		UDPPort:  portOr(t.GetUdpPort(), e.own.UDP),
 	}
 }
 

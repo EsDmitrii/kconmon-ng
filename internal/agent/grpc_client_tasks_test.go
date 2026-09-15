@@ -115,7 +115,7 @@ func TestWatchTasksReceivesDispatchedTaskAndReportsResult(t *testing.T) {
 		map[model.CheckType]checker.Checker{model.CheckTCP: fc},
 		nil,
 		checker.Target{AgentID: "agent-1", NodeName: "node-a", Zone: "zone-a"},
-		8080,
+		checker.PeerPorts{HTTP: 8080},
 		client,
 		4,
 		ExternalPolicy{},

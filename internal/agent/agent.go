@@ -65,6 +65,7 @@ func New(cfg *config.Config) (*Agent, error) {
 		return nil, fmt.Errorf("resolving agent identity: %w", idErr)
 	}
 	info.Capabilities = agentCapabilities(cfg)
+	advertiseListenerPorts(&info, cfg)
 
 	// The external-destination gate is built here, not lazily at first probe.
 	external := ExternalPolicy{}
@@ -216,12 +217,48 @@ func preinitSelfMetrics(m *metrics.PrometheusMetrics, enabled map[model.CheckTyp
 
 // agentCapabilities returns the opt-in feature flags this agent advertises at registration; it
 // mirrors the controller's capabilitiesFor: feature detection, never version sniffing.
+//
+// The plane:* entries name the probe planes this agent runs, one per enabled checker; plane:mtr is
+// unconditional because New always builds the MTR checker. Fail-open rule, stated once: an agent
+// advertising no plane:* at all (every agent older than 2.4.0) means "unknown, assume all planes".
+// Consumers must never read absence as "unsupported", or a rolling upgrade would turn every grey
+// cell into a calming "not probed" frame.
 func agentCapabilities(cfg *config.Config) []string {
 	caps := []string{}
 	if cfg.Checkers.External.Enabled {
 		caps = append(caps, capabilityExternalChecks)
 	}
+	planes := []struct {
+		name    string
+		enabled bool
+	}{
+		{string(model.CheckTCP), cfg.Checkers.TCP.Enabled},
+		{string(model.CheckUDP), cfg.Checkers.UDP.Enabled},
+		{string(model.CheckICMP), cfg.Checkers.ICMP.Enabled},
+		{string(model.CheckDNS), cfg.Checkers.DNS.Enabled},
+		{string(model.CheckHTTP), cfg.Checkers.HTTP.Enabled},
+		{string(model.CheckMTR), true},
+	}
+	for _, p := range planes {
+		if p.enabled {
+			caps = append(caps, model.CapabilityPlanePrefix+p.name)
+		}
+	}
 	return caps
+}
+
+// advertiseListenerPorts stamps the config's listener ports onto what the agent registers. Kept out
+// of resolveIdentity on purpose: identity is WHO the agent is, the ports are WHERE it listens.
+func advertiseListenerPorts(info *model.AgentInfo, cfg *config.Config) {
+	info.HTTPPort = cfg.HTTPPort
+	info.UDPPort = cfg.GRPCPort // config.grpcPort is the UDP echo port on an agent
+	info.MetricsPort = cfg.MetricsPort
+}
+
+// ownPorts is the fallback for a peer that reported no ports (older than 2.4.0): such an agent
+// listens where this one does, which was the fleet-wide contract before per-agent ports.
+func (a *Agent) ownPorts() checker.PeerPorts {
+	return checker.PeerPorts{HTTP: a.info.HTTPPort, UDP: a.info.UDPPort}
 }
 
 func (a *Agent) Run(ctx context.Context) error {
@@ -283,7 +320,7 @@ func (a *Agent) Run(ctx context.Context) error {
 	backoff := 1 * time.Second
 	maxBackoff := 15 * time.Second
 	for {
-		peers, resolvedZone, err = grpcClient.Register(ctx, a.registrationInfo(), a.cfg.HTTPPort)
+		peers, resolvedZone, err = grpcClient.Register(ctx, a.registrationInfo(), a.ownPorts())
 		if err == nil {
 			break
 		}
@@ -316,6 +353,8 @@ func (a *Agent) Run(ctx context.Context) error {
 	// Adopt the controller-resolved zone when no explicit zone was configured.
 	// This happens before the scheduler starts, so all emitted metrics carry
 	// the correct source_zone from the first check.
+	// Zone is the ONLY thing ever adopted from RegisterResponse.Agent: ports are never taken from the
+	// controller, because the config is the truth about where this process actually listens.
 	if z := resolveZone(a.configuredZone, resolvedZone); z != a.info.Zone {
 		slog.Info("adopted zone from controller", "zone", z)
 		a.info.Zone = z
@@ -359,7 +398,7 @@ func (a *Agent) Run(ctx context.Context) error {
 			Zone:     a.info.Zone,
 			Port:     a.cfg.HTTPPort,
 		},
-		a.cfg.HTTPPort,
+		a.ownPorts(),
 		grpcClient,
 		maxConcurrentTasks,
 		a.external,
@@ -388,7 +427,7 @@ func (a *Agent) Run(ctx context.Context) error {
 				return
 			case <-time.After(wait + jitter):
 			}
-			newPeers, newZone, regErr := grpcClient.Register(ctx, a.registrationInfo(), a.cfg.HTTPPort)
+			newPeers, newZone, regErr := grpcClient.Register(ctx, a.registrationInfo(), a.ownPorts())
 			if regErr == nil {
 				if z := resolveZone(a.configuredZone, newZone); z != a.info.Zone {
 					slog.Info("adopted zone from controller on re-registration", "zone", z)
@@ -422,7 +461,7 @@ func (a *Agent) Run(ctx context.Context) error {
 
 	go func() {
 		for {
-			err := grpcClient.WatchPeers(ctx, a.cfg.HTTPPort)
+			err := grpcClient.WatchPeers(ctx, a.ownPorts())
 			if ctx.Err() != nil {
 				return
 			}
