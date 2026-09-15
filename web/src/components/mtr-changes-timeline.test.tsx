@@ -412,19 +412,31 @@ describe("PathChangesTimeline — the window and the markers", () => {
     expect(xAxis?.max).toBeGreaterThan(xAxis!.min!);
   });
 
-  /* Loss is a ratio ≤ 1, but ECharts's nice rounding pushed the auto axis to 1.2
-     on a fully-lossy pair and the labels read "120%" (M3-3, live pass). The clamp
-     is a callback over the DATA extent so a 2% wiggle keeps its auto scale. */
-  it("never lets the loss axis pass 100%, while small losses keep their auto scale", async () => {
+  /* Loss is a ratio in [0, 1] and the axis says so on every pair: ECharts's nice
+     rounding pushed an auto axis to 1.2 on a fully-lossy pair ("120%", M3-3) and
+     drew 90/60/30% on another, so the same 100% step read differently from one
+     pair to the next. A fixed frame with a tick every 25% is the same picture
+     everywhere (2.4.0 audit). */
+  it("pins the loss axis to 0..100% with a tick every 25%", async () => {
     renderTimeline({ snapshots: byLastSeen });
 
     await waitFor(() => expect(captured.options.length).toBeGreaterThan(0));
-    const yAxis = (captured.options.at(-1) as { yAxis?: { max?: unknown } }).yAxis;
-    expect(typeof yAxis?.max).toBe("function");
-    const clamp = yAxis!.max as (extent: { min: number; max: number }) => number | null;
-    expect(clamp({ min: 0, max: 1 })).toBe(1); // total loss: the axis tops out at 100%, not 120%
-    expect(clamp({ min: 0, max: 0.7 })).toBe(1); // high enough that nice rounding could overshoot
-    expect(clamp({ min: 0, max: 0.02 })).toBeNull(); // low loss stays auto-scaled and readable
+    const yAxis = (captured.options.at(-1) as { yAxis?: { min?: unknown; max?: unknown; interval?: unknown } }).yAxis;
+    expect(yAxis?.min).toBe(0);
+    expect(yAxis?.max).toBe(1);
+    expect(yAxis?.interval).toBe(0.25);
+  });
+
+  it("captions the chart with what the lines and the hairlines are, and only when there is a chart", async () => {
+    renderTimeline({ snapshots: byLastSeen });
+
+    await waitFor(() => expect(captured.options.length).toBeGreaterThan(0));
+    expect(screen.getByText("Loss on this pair per plane; a marker per recorded route")).toBeInTheDocument();
+
+    cleanup();
+    renderTimeline({ snapshots: byLastSeen, prometheusConfigured: false });
+    await screen.findByText(/set console\.prometheus\.address/i);
+    expect(screen.queryByText(/a marker per recorded route/)).not.toBeInTheDocument();
   });
 
   it("selects that route when a marker is clicked", async () => {

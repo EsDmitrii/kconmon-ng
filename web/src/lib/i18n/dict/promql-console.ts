@@ -55,8 +55,14 @@ const en = {
      a failed query has no result to be empty, and the page used to show the
      red error card and this line at the same time. */
   "table.empty": "No data — the query returned an empty result.",
+  "table.empty.body": "Nothing matched the selectors at this instant; loosen a label matcher, or try Range mode.",
   /* ui/pager.tsx's noun for the result table. */
   "table.subject": "rows",
+  /* The idle slate: one title for both tabs, the tab's own sentence as the body, and a Run
+     button under it (the header's Run, said again where the eye is). The visible verb is
+     `run`; the button's full sentence lives in its aria-label. */
+  "result.idle.title": "No result yet",
+  "result.run.aria": "Run the query",
   "table.idle": "Run a query to see results.",
   /* Every figure below was read at some instant, and the table used to say
      which one nowhere. Two sentences because they are two claims: a vector is
@@ -69,7 +75,9 @@ const en = {
   "table.col.time": "time",
   "table.at": "Read at {at}",
   "table.lastAt": "Last values, read at {at}",
+  "table.scrollAria": "Query result table",
   "chart.empty": "No series to chart.",
+  "chart.empty.body": "The range came back without a single series, so there is nothing to draw.",
   "chart.idle": "Run a query that returns a series to see a chart.",
   "json.idle": "Run a query to see the raw response.",
 
@@ -128,7 +136,10 @@ export const promqlConsoleDict: Dictionary<PromQLConsoleKey> = defineDict(en, {
   "tab.chart.disabled": "В этом результате нет серий для графика",
 
   "table.empty": "Данных нет: запрос вернул пустой результат.",
+  "table.empty.body": "На этот момент под селекторы ничего не попало: ослабьте матчер по меткам или попробуйте режим «Диапазон».",
   "table.subject": "Строки",
+  "result.idle.title": "Результата пока нет",
+  "result.run.aria": "Выполнить запрос",
   "table.idle": "Выполните запрос, чтобы увидеть результат.",
   "table.col.value": "значение",
   "table.col.points": "точек",
@@ -136,7 +147,9 @@ export const promqlConsoleDict: Dictionary<PromQLConsoleKey> = defineDict(en, {
   "table.col.time": "время",
   "table.at": "Снято на {at}",
   "table.lastAt": "Последние значения, снято на {at}",
+  "table.scrollAria": "Таблица с результатом запроса",
   "chart.empty": "Рисовать нечего, серий нет.",
+  "chart.empty.body": "Диапазон вернулся без единой серии, рисовать нечего.",
   "chart.idle": "Выполните запрос, который вернёт серию, чтобы увидеть график.",
 
   "raw.title": "Серии",

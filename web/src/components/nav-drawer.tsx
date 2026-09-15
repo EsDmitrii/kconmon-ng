@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { Menu, X } from "lucide-react";
 import { AppSidebar } from "@/components/app-sidebar";
 import { useT } from "@/lib/i18n";
@@ -102,7 +103,9 @@ export function NavDrawer() {
         {open ? <X aria-hidden="true" className="size-5" /> : <Menu aria-hidden="true" className="size-5" />}
       </button>
 
-      {open ? (
+      {/* Portalled to <body>, like ui/modal: the trigger sits in the mobile <header>, and the
+          sidebar's <aside> may not nest inside that banner landmark. */}
+      {open ? createPortal(
         <div className="fixed inset-0 z-40 h-[100dvh] md:hidden">
           {/* The scrim is a button so a pointer user can dismiss by tapping
               beside the drawer; aria-hidden because Escape and the trigger are
@@ -125,7 +128,8 @@ export function NavDrawer() {
           >
             <AppSidebar onNavigate={close} />
           </div>
-        </div>
+        </div>,
+        document.body,
       ) : null}
     </>
   );

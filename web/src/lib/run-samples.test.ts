@@ -3,10 +3,13 @@ import {
   aggregateSamples,
   effectivePlannedSamplesPerPair,
   effectiveSampleIntervalNs,
+  fmtMicrosNs,
+  fmtNsCompact,
   formatCadenceNs,
   groupSamplesByPair,
   isIntervalRun,
   MAX_SAMPLES_PER_PAIR,
+  MICROSECOND_FLOOR_NS,
   MTR_PER_PAIR_BUDGET_NS,
   pairProgress,
   percentileNs,
@@ -431,5 +434,39 @@ describe("snapshotForSample", () => {
       snap("older", "2026-08-09T10:00:00Z", "2026-08-09T12:00:00Z"),
     ];
     expect(snapshotForSample(overlapping, "2026-08-09T11:30:00Z")?.id).toBe("newer");
+  });
+});
+
+/* ── one unit rule for a latency, shared with the MTR hop table ─────────────── */
+describe("fmtNsCompact / fmtMicrosNs", () => {
+  it("switches to microseconds below 0.1ms instead of rounding a real probe to 0.0ms", () => {
+    expect(fmtNsCompact(95_000)).toBe("95µs");
+    expect(fmtNsCompact(38_000)).toBe("38µs");
+    expect(fmtNsCompact(1_500)).toBe("2µs");
+    // The boundary stays in milliseconds: 0.1ms has a decimal that holds it.
+    expect(fmtNsCompact(MICROSECOND_FLOOR_NS)).toBe("0.1ms");
+    expect(fmtNsCompact(99_999)).toBe("100µs");
+  });
+
+  it("keeps one decimal under 10ms and whole milliseconds above", () => {
+    expect(fmtNsCompact(400_000)).toBe("0.4ms");
+    expect(fmtNsCompact(2_500_000)).toBe("2.5ms");
+    expect(fmtNsCompact(9_960_000)).toBe("10.0ms");
+    expect(fmtNsCompact(12_400_000)).toBe("12ms");
+  });
+
+  it("keeps a genuine zero in milliseconds, and dashes anything that is not a number", () => {
+    expect(fmtNsCompact(0)).toBe("0.0ms");
+    expect(fmtNsCompact(undefined)).toBe("—");
+    expect(fmtNsCompact(Number.NaN)).toBe("—");
+    expect(fmtNsCompact(Number.POSITIVE_INFINITY)).toBe("—");
+    expect(fmtNsCompact("fast" as unknown as number)).toBe("—");
+  });
+
+  it("is the same floor the hop table's fmtRttNs reads", () => {
+    expect(MICROSECOND_FLOOR_NS).toBe(100_000);
+    expect(fmtMicrosNs(-4_000)).toBe("-4µs");
+    expect(fmtMicrosNs(0)).toBeUndefined();
+    expect(fmtMicrosNs(100_000)).toBeUndefined();
   });
 });

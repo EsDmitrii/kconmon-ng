@@ -129,6 +129,8 @@ const en = {
 
   /* ── the path-changes strip ────────────────────────────────────────────── */
   "changes.aria": "Path changes over time",
+  /* The caption over the chart: what the lines are and what the hairlines are. */
+  "changes.caption": "Loss on this pair per plane; a marker per recorded route",
   "changes.list.aria": "Path changes",
   "changes.marker.aria": "Path {hash} first seen {at}",
   /* Two lines: the FULL hash, then when it was first seen. The newline is part
@@ -215,6 +217,7 @@ export const mtrDetailDict: Dictionary<MTRDetailKey> = defineDict(en, {
   "diff.kind.removed.title": "этот хоп был только в старом пути",
 
   "changes.aria": "Смены путей во времени",
+  "changes.caption": "Потери на этой паре по плоскостям; метка на каждый записанный маршрут",
   "changes.list.aria": "Смены путей",
   "changes.marker.aria": "Путь {hash}, впервые виден {at}",
   "changes.marker.title": "{hash}\nвпервые виден {at}",

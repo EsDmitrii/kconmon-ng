@@ -122,6 +122,13 @@ const en = {
   /* The agents-built map's third form. A box with no "not ready" badge would
      otherwise be announced exactly like a node the informer confirmed ready. */
   "node.aria.readyUnknown": "{node}, {zone}, {health}, readiness unknown",
+  /* A bare-host agent (kconmon-ng.io/external: "true") drawn beside the Kubernetes nodes. The
+     badge is IDENTITY, never a health tier — Badge variant neutral — and «внешний» is the one
+     word for it across matrix, cards and overview (lib/i18n/cards.test.tsx pins it). */
+  "node.external": "external",
+  /* The readyUnknown form with its reason: an external host has no Kubernetes node for
+     readiness to come from, so the silence is expected, not a fault. */
+  "node.aria.external": "{node}, {zone}, {health}, external agent, readiness unknown",
   "health.ok": "healthy",
   "health.degraded": "degraded",
   "health.failing": "failing",
@@ -212,6 +219,8 @@ export const topologyDict: Dictionary<TopologyKey> = defineDict(en, {
   "node.aria": "{node}, {zone}, {health}",
   "node.aria.notReady": "{node}, {zone}, {health}, не готов",
   "node.aria.readyUnknown": "{node}, {zone}, {health}, готовность неизвестна",
+  "node.external": "внешний",
+  "node.aria.external": "{node}, {zone}, {health}, внешний агент, готовность неизвестна",
   "health.ok": "в норме",
   "health.degraded": "деградация",
   "health.failing": "сбой",

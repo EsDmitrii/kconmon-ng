@@ -1,6 +1,7 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { DOCS_BASE_URL } from "@/components/page-help";
 import { LOCALE_STORAGE_KEY, LocaleProvider } from "@/lib/i18n";
 import { TimeMachineProvider } from "@/lib/timemachine";
 import {
@@ -429,18 +430,21 @@ describe("tokens section", () => {
       tokens: [tokenRow({ lastUsedAt: "2026-02-03T04:05:00Z" }), tokenRow({ id: "t-2", name: "grafana" })],
     });
 
-    const list = await screen.findByRole("list", { name: "API tokens" });
-    const rows = within(list).getAllByTestId("token-row");
+    /* The shared dense table (polish round): one column per fact, the header
+       naming it once for every row instead of a key repeated in each. */
+    const table = await screen.findByRole("table", { name: "API tokens" });
+    const rows = within(table).getAllByTestId("token-row");
     expect(rows).toHaveLength(2);
     expect(within(rows[0]).getByText("ci-pipeline")).toBeInTheDocument();
-    /* The owner id sits in its own mono-data span (M4 data face) inside the
-       labelled line, so the label and the value are asserted as one sentence
-       and the face is pinned on the value. */
+    for (const header of ["Name", "Owner", "Created", "Last used", "Expires", "State"]) {
+      expect(within(table).getByText(header)).toBeInTheDocument();
+    }
+    /* The owner id sits in its own mono-data span (M4 data face) under the
+       Owner column, so the face is pinned on the value. */
     const owner = within(rows[0]).getByText("u1");
     expect(owner.className).toContain("mono-data");
-    expect(owner.parentElement).toHaveTextContent("owner u1");
     expect(within(rows[0]).getByTestId("token-last-used")).toHaveTextContent(
-      `last used ${new Date("2026-02-03T04:05:00Z").toLocaleString(undefined, { hour12: false })}`,
+      new Date("2026-02-03T04:05:00Z").toLocaleString(undefined, { hour12: false }),
     );
   });
 
@@ -607,10 +611,13 @@ describe("webhook list", () => {
     expect(within(row).getByText("signed")).toBeInTheDocument();
   });
 
-  it("shows an em-dash for an endpoint nothing has ever been delivered to", async () => {
+  it("says 'never delivered' for an endpoint nothing has ever been delivered to", async () => {
     renderPage({ webhooks: [webhookRow({ lastStatus: "", failures: 0 })] });
     const row = await screen.findByRole("listitem");
-    expect(within(row).getByTestId("last-status")).toHaveTextContent("—");
+    /* One muted sentence (polish round), not an em-dash pill beside an
+       em-dash stamp — and no stamp at all, since there was no attempt. */
+    expect(within(row).getByTestId("last-status")).toHaveTextContent("never delivered");
+    expect(within(row).queryByText("—")).not.toBeInTheDocument();
     // No invented "healthy": never-attempted is its own state.
     expect(within(row).queryByText("ok")).not.toBeInTheDocument();
   });
@@ -1099,6 +1106,41 @@ describe("About this console", () => {
     expect(screen.queryByRole("heading", { name: /RBAC/i })).not.toBeInTheDocument();
     expect(screen.getByText(/Roles and role bindings are not administered from this console at all/)).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "API tokens" })).toBeInTheDocument();
+  });
+
+  /* W0-4: the docs site was reachable only from inside a page's "?" dialog.
+     About is where an operator looks for "where is this thing documented", so
+     it names the site, its release notes and the source outright — the same
+     DOCS_BASE_URL the help dialogs use, so the site can still move by editing
+     one line. */
+  it("links the docs site, its release notes and the source, each in a new tab", async () => {
+    renderPage();
+    await screen.findByRole("heading", { name: "About this console" });
+    expect(screen.getByText("Links")).toBeInTheDocument();
+    const docs = screen.getByRole("link", { name: "Documentation" });
+    const notes = screen.getByRole("link", { name: "Release notes" });
+    const source = screen.getByRole("link", { name: "Source on GitHub" });
+    expect(docs).toHaveAttribute("href", DOCS_BASE_URL);
+    expect(notes).toHaveAttribute("href", `${DOCS_BASE_URL}reference/release-notes/`);
+    expect(source).toHaveAttribute("href", "https://github.com/EsDmitrii/kconmon-ng");
+    for (const a of [docs, notes, source]) {
+      expect(a).toHaveAttribute("target", "_blank");
+      expect(a.getAttribute("rel")).toMatch(/\bnoopener\b/);
+    }
+  });
+
+  it("names the links in Russian, hrefs untouched", async () => {
+    renderPage({ locale: "ru" });
+    expect(await screen.findByRole("link", { name: "Документация" })).toHaveAttribute("href", DOCS_BASE_URL);
+    expect(screen.getByRole("link", { name: "Заметки к релизам" })).toHaveAttribute(
+      "href",
+      `${DOCS_BASE_URL}reference/release-notes/`,
+    );
+    expect(screen.getByRole("link", { name: "Исходники на GitHub" })).toHaveAttribute(
+      "href",
+      "https://github.com/EsDmitrii/kconmon-ng",
+    );
+    expect(screen.getByText("Ссылки")).toBeInTheDocument();
   });
 });
 

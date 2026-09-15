@@ -117,10 +117,10 @@ export function AppShell({ children }: { children: ReactNode }) {
           <AppSidebar />
         </div>
         <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
-          <div className="flex items-center gap-2 px-3 pt-3 md:hidden">
+          <header className="flex items-center gap-2 px-3 pt-3 md:hidden">
             <NavDrawer />
             <span className="text-[15px] font-semibold tracking-tight">kconmon-ng</span>
-          </div>
+          </header>
           <AnonymousBanner mode={config?.auth.mode} role={config?.auth.role} />
           <TimeMachineBar />
           {/* tabIndex -1 so the skip link's jump actually MOVES focus rather

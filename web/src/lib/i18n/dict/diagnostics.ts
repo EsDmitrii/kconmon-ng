@@ -185,6 +185,8 @@ const en = {
      none. */
   "history.emptyFiltered.title": "No runs match these filters",
   "history.emptyFiltered.body": "The server was asked for this type and status and has none. Widen the filters above.",
+  /* The filtered slate's one action: both selects back to "all". */
+  "history.clearFilters": "Clear filters",
   /* Engaged with everything filtered out is a DIFFERENT fact from "nobody has
      ever run one", and the form above is disabled anyway. */
   "history.emptyAt.title": "No runs at or before the viewed instant",
@@ -315,6 +317,7 @@ export const diagnosticsDict: Dictionary<DiagnosticsKey> = defineDict(en, {
   "history.empty.body": "Запуски из формы выше (или запущенные другим оператором) появятся здесь.",
   "history.emptyFiltered.title": "Под эти фильтры ничего не подходит",
   "history.emptyFiltered.body": "Сервер спросили про этот тип и статус, у него таких нет. Ослабьте фильтры выше.",
+  "history.clearFilters": "Сбросить фильтры",
   "history.emptyAt.title": "Запусков на выбранный момент и раньше нет",
   "history.emptyAt.body":
     "Все запуски на загруженной странице начались позже. Вернитесь в реальное время или подгрузите старые страницы.",

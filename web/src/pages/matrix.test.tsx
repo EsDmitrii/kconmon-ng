@@ -537,6 +537,57 @@ describe("MatrixPage — what a cell keeps at every scale", () => {
   });
 });
 
+/* ── a tile is a swatch ────────────────────────────────────────────────────
+ * At 19px the 3px rail was most of what a cell drew, so a zoomed-out grid read
+ * as a column of green ticks over grey. A tile takes the tier's soft fill,
+ * healthy included, drops the rail, and squares its corners so a 38×19 box is
+ * a tile rather than a pill (rounded-xs: the theme's sm radius is 8px, which
+ * at this height is still a capsule). Every figure stays in the tooltip and
+ * the aria-label, which the tests above already pin at this size.
+ */
+describe("MatrixPage — a tile is a swatch", () => {
+  afterEach(unstubViewportWidth);
+
+  const healthyGrid = (n: number) => ({
+    ...gridOf(n),
+    cells: [
+      { source: "node-00", destination: "node-01", failRatio: 0.5, rttP95: 2_000_000 },
+      { source: "node-01", destination: "node-00", failRatio: 0, rttP95: 1_000_000 },
+    ],
+  });
+
+  it("paints a tile with the tier's soft fill, healthy green included, without the rail and without the pill", async () => {
+    stubViewportWidth(700);
+    stubFetch(healthyGrid(50));
+    renderPage();
+
+    const failing = await screen.findByLabelText(/^node-00 → node-01:/);
+    expect(failing.className).toContain("bg-health-bad-soft");
+    expect(failing.className).toContain("before:hidden");
+    expect(failing.className).toContain("rounded-xs");
+    expect(failing.className).not.toContain("rounded-md");
+    expect(failing.className).not.toContain("rounded-sm");
+
+    const healthy = screen.getByLabelText(/^node-01 → node-00:/);
+    expect(healthy.className).toContain("bg-health-ok-soft");
+    expect(healthy.className).not.toContain("bg-surface-2/60");
+    expect(healthy.className).toContain("before:hidden");
+  });
+
+  it("keeps the rail and the quiet healthy surface once the cell is big enough to be a card", async () => {
+    stubViewportWidth(1600);
+    stubFetch(healthyGrid(3));
+    renderPage();
+
+    const healthy = await screen.findByLabelText(/^node-01 → node-00:/);
+    expect(healthy.className).toContain("bg-surface-2/60");
+    expect(healthy.className).toContain("before:bg-health-ok");
+    expect(healthy.className).toContain("rounded-md");
+    expect(healthy.className).not.toContain("before:hidden");
+    expect(healthy.className).not.toContain("bg-health-ok-soft");
+  });
+});
+
 describe("MatrixPage — headers stay put while the grid pans", () => {
   afterEach(unstubViewportWidth);
 
@@ -1048,6 +1099,73 @@ describe("MatrixPage — column headers stay distinguishable", () => {
     // The prefix is named once, above the grid, so nothing is left to guess at.
     expect(screen.getByText(/drop the shared prefix kconmon-prod\.node-/)).toBeInTheDocument();
   });
+
+  it("clips, rather than double-elides, a prefix-stripped header that still overflows its column", async () => {
+    stubFetch({
+      ...matrixBody,
+      nodes: ["kconmon-prod.node-01", "kconmon-prod.node-02"],
+      cells: [{ source: "kconmon-prod.node-01", destination: "kconmon-prod.node-02", failRatio: 0 }],
+    });
+    renderPage();
+
+    await screen.findByLabelText(/^kconmon-prod\.node-01 → kconmon-prod\.node-02:/);
+    const elided = screen.getAllByRole("columnheader").slice(1)[0].querySelector("a") as HTMLElement;
+    expect(elided).toHaveTextContent("…01");
+    /* The label already opens with an ellipsis; text-overflow would hang a
+       second one on the end ("…control-pla…"), so this label clips at the box
+       edge instead. A name that kept its prefix keeps its `truncate`. */
+    expect(elided.className).not.toMatch(/truncate/);
+    expect(elided.className).toMatch(/overflow-hidden/);
+    expect(elided.className).toMatch(/whitespace-nowrap/);
+  });
+
+  it("leaves a header that kept its whole name on the ordinary truncation", async () => {
+    stubFetch(matrixBody);
+    renderPage();
+    await screen.findByRole("table");
+    const whole = screen.getAllByLabelText("Open the card for a")[0];
+    expect(whole).toHaveTextContent("a");
+    expect(whole.className).toMatch(/truncate/);
+  });
+});
+
+/* ── the zoom hint, per kind of hand ──────────────────────────────────────
+ * A phone has no Ctrl and no wheel, so the sentence about them promised a
+ * gesture the reader could not make. Width decides which hint exists, the
+ * way the nav drawer decides which sidebar exists (`hidden md:`), so nothing
+ * listens for a breakpoint and no width mounts both.
+ */
+describe("MatrixPage — the zoom hint per kind of hand", () => {
+  afterEach(() => localStorage.removeItem(LOCALE_STORAGE_KEY));
+
+  it("keeps the Ctrl+wheel sentence for a pointer width and says pinch and drag under it", async () => {
+    stubFetch(matrixBody);
+    renderPage();
+    await screen.findByRole("table");
+
+    const wheel = screen.getByText("Ctrl and the wheel zoom the grid; the wheel alone scrolls it.");
+    expect(wheel.className).toContain("hidden");
+    expect(wheel.className).toContain("md:block");
+    const touch = screen.getByText("Pinch to zoom, drag to scroll.");
+    expect(touch.className).toContain("md:hidden");
+    expect(touch.className).not.toContain("hidden ");
+  });
+
+  it("says both in Russian when that is the reader's language", async () => {
+    localStorage.setItem(LOCALE_STORAGE_KEY, "ru");
+    stubFetch(matrixBody);
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={qc}>
+        <LocaleProvider>
+          <MatrixPage />
+        </LocaleProvider>
+      </QueryClientProvider>,
+    );
+    await screen.findByRole("table");
+    expect(screen.getByText("Ctrl с колесом меняет масштаб, одно колесо прокручивает сетку.")).toBeInTheDocument();
+    expect(screen.getByText("Щипок меняет масштаб, перетаскивание прокручивает сетку.").className).toContain("md:hidden");
+  });
 });
 
 /* ── M4-1/M4-5: the tool surface and the mono data face ──────────────────────
@@ -1080,5 +1198,312 @@ describe("MatrixPage — the tool surface", () => {
     // The zoom-scaled sizes stay the zoom engine's, not mono-data's fixed 13px.
     expect(hero.className).toContain("text-[length:var(--m-font-hero)]");
     expect(header.className).not.toContain("mono-data");
+  });
+});
+
+/* ── external agents in the grid (2.4.0) ──────────────────────────────────────
+ *
+ * A bare-host agent registers with the external label and, unless somebody
+ * wrote a scrape job for its metrics port, Prometheus never reads it: the
+ * in-cluster agents' probes fill its COLUMN, its own ROW is silence. The grid
+ * keeps that silence as the 'no data' it is — same fill, same em-dash, same
+ * pinned aria-label — and says WHY in the tooltip and above the grid. The
+ * topology rides GET /api/v1/topology, so the stub below routes the two GETs.
+ */
+
+const EXTERNAL_LABEL = "kconmon-ng.io/external";
+const SCRAPE_DOCS = "https://esdmitrii.github.io/kconmon-ng/external-agents/#scraping-external-agents";
+
+function stubFetchRoutes({ matrix, topology }: { matrix: unknown; topology: unknown }) {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn((url: string) => {
+      const u = String(url);
+      if (u.includes("/api/v1/topology")) return Promise.resolve(json(topology));
+      if (u.includes("/api/v1/matrix")) return Promise.resolve(json(matrix));
+      return Promise.resolve(json({ version: "2.4.0", commit: "abc" }));
+    }),
+  );
+}
+
+const clusterAgent = (node: string, capabilities?: string[]) => ({
+  id: `agent-${node}`,
+  nodeName: node,
+  podIP: "10.0.0.1",
+  zone: "z1",
+  ...(capabilities ? { capabilities } : {}),
+});
+
+const externalAgent = (node: string, capabilities?: string[]) => ({
+  ...clusterAgent(node, capabilities),
+  podIP: "192.0.2.10",
+  zone: "office",
+  labels: { [EXTERNAL_LABEL]: "true" },
+});
+
+const nodesOf = (...names: string[]) => names.map((name) => ({ name, zone: "z1", ready: true }));
+
+function renderRu() {
+  localStorage.setItem(LOCALE_STORAGE_KEY, "ru");
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  return render(
+    <QueryClientProvider client={qc}>
+      <LocaleProvider>
+        <MatrixPage />
+      </LocaleProvider>
+    </QueryClientProvider>,
+  );
+}
+
+describe("MatrixPage — an external agent Prometheus does not scrape", () => {
+  afterEach(() => localStorage.removeItem(LOCALE_STORAGE_KEY));
+
+  /* a is in-cluster and probes ext-1; ext-1 is a bare host nobody scrapes: a column with data, a row of silence. */
+  const matrix = {
+    protocol: "tcp", plane: "pod", nodes: ["a", "ext-1"],
+    cells: [{ source: "a", destination: "ext-1", failRatio: 0, rttP95: 3_000_000 }],
+    timestamp: "t",
+  };
+  const topology = {
+    nodes: nodesOf("a"),
+    agents: [clusterAgent("a"), externalAgent("ext-1", ["external-checks", "plane:tcp"])],
+    timestamp: "t",
+  };
+
+  it("keeps the row cell exactly as 'no data': the pinned aria-label, the unknown fill, the em-dash, the pair link", async () => {
+    stubFetchRoutes({ matrix, topology });
+    renderPage();
+    const cell = await screen.findByLabelText("ext-1 → a: no data");
+    expect(cell).toHaveTextContent("—");
+    expect(cell).toHaveAttribute("href", "/pairs/ext-1/a");
+    expect(cell.className).toContain("bg-health-unknown-soft");
+    expect(cell.tagName).toBe("A");
+  });
+
+  it("says why in the tooltip, with a link to the scrape docs that opens in a new tab", async () => {
+    stubFetchRoutes({ matrix, topology });
+    renderPage();
+    const cell = await screen.findByLabelText("ext-1 → a: no data");
+    fireEvent.mouseEnter(cell);
+    const tooltip = await screen.findByRole("tooltip");
+    expect(tooltip).toHaveTextContent(
+      "No series from ext-1: Prometheus is not scraping this external agent's metrics port.",
+    );
+    expect(tooltip).not.toHaveTextContent("No probe data in Prometheus for this pair.");
+    const link = tooltip.querySelector(`a[href="${SCRAPE_DOCS}"]`);
+    expect(link).not.toBeNull();
+    expect(link).toHaveAttribute("target", "_blank");
+    expect(link?.getAttribute("rel") ?? "").toMatch(/noopener/);
+    fireEvent.mouseLeave(cell);
+
+    // The measured cell in its column keeps the ordinary figures tooltip.
+    const measured = screen.getByLabelText("a → ext-1: fail 0.0%, RTT p95 3.0ms");
+    fireEvent.mouseEnter(measured);
+    const figures = await screen.findByRole("tooltip");
+    expect(figures).toHaveTextContent("RTT p95");
+    expect(figures).not.toHaveTextContent("No series");
+  });
+
+  it("names the agent above the grid, next to the prefix note, with the same link", async () => {
+    stubFetchRoutes({ matrix, topology });
+    renderPage();
+    const note = await screen.findByTestId("matrix-unscraped-note");
+    expect(note).toHaveTextContent(
+      "ext-1 is an external agent Prometheus is not scraping, so its row has no data.",
+    );
+    const link = note.querySelector(`a[href="${SCRAPE_DOCS}"]`);
+    expect(link).toHaveAttribute("target", "_blank");
+    expect(link?.getAttribute("rel") ?? "").toMatch(/noopener/);
+  });
+
+  it("lists several of them by name", async () => {
+    stubFetchRoutes({
+      matrix: { ...matrix, nodes: ["a", "ext-1", "ext-2"] },
+      topology: { ...topology, agents: [...topology.agents, externalAgent("ext-2")] },
+    });
+    renderPage();
+    const note = await screen.findByTestId("matrix-unscraped-note");
+    expect(note).toHaveTextContent("ext-1, ext-2 are external agents Prometheus is not scraping, so their rows have no data.");
+  });
+
+  it("drops the note and the hint the moment the source has a cell of its own", async () => {
+    stubFetchRoutes({
+      matrix: {
+        ...matrix,
+        nodes: ["a", "b", "ext-1"],
+        cells: [
+          ...matrix.cells,
+          // Scraped now: one series from ext-1 is the proof, whatever ext-1 → b says.
+          { source: "ext-1", destination: "a", failRatio: null, rttP95: 1_000_000 },
+        ],
+      },
+      topology: { ...topology, nodes: nodesOf("a", "b"), agents: [...topology.agents, clusterAgent("b")] },
+    });
+    renderPage();
+    const cell = await screen.findByLabelText("ext-1 → b: no data");
+    expect(screen.queryByTestId("matrix-unscraped-note")).not.toBeInTheDocument();
+    fireEvent.mouseEnter(cell);
+    const tooltip = await screen.findByRole("tooltip");
+    expect(tooltip).toHaveTextContent("No probe data in Prometheus for this pair.");
+    expect(tooltip).not.toHaveTextContent("No series");
+  });
+
+  it("claims nothing about an in-cluster agent's silence", async () => {
+    stubFetchRoutes({
+      matrix: { ...matrix, nodes: ["a", "b"], cells: [{ source: "a", destination: "b", failRatio: 0.5 }] },
+      topology: { nodes: nodesOf("a", "b"), agents: [clusterAgent("a"), clusterAgent("b")], timestamp: "t" },
+    });
+    renderPage();
+    const cell = await screen.findByLabelText("b → a: no data");
+    expect(screen.queryByTestId("matrix-unscraped-note")).not.toBeInTheDocument();
+    fireEvent.mouseEnter(cell);
+    expect(await screen.findByRole("tooltip")).toHaveTextContent("No probe data in Prometheus for this pair.");
+  });
+
+  it("marks the external header in its aria-label and its tooltip, leaving the cluster node's alone", async () => {
+    stubFetchRoutes({ matrix, topology });
+    renderPage();
+    const headers = await screen.findAllByRole("link", { name: "Open the card for ext-1, external agent" });
+    expect(headers).toHaveLength(2); // one column header, one row header
+    for (const h of headers) expect(h).toHaveAttribute("href", "/nodes/ext-1");
+    fireEvent.mouseEnter(headers[0]);
+    const tooltip = await screen.findByRole("tooltip");
+    expect(tooltip).toHaveTextContent("ext-1");
+    expect(tooltip).toHaveTextContent("external agent");
+    fireEvent.mouseLeave(headers[0]);
+
+    const cluster = screen.getAllByRole("link", { name: "Open the card for a" });
+    expect(cluster).toHaveLength(2);
+    fireEvent.mouseEnter(cluster[0]);
+    expect(await screen.findByRole("tooltip")).not.toHaveTextContent("external agent");
+  });
+
+  it("speaks the header, the note and the hint in Russian", async () => {
+    stubFetchRoutes({ matrix, topology });
+    renderRu();
+    expect(await screen.findAllByRole("link", { name: "Открыть карточку узла ext-1, внешний агент" })).toHaveLength(2);
+    expect(screen.getByTestId("matrix-unscraped-note")).toHaveTextContent(
+      "ext-1: внешний агент, метрики которого Prometheus не собирает",
+    );
+    const cell = screen.getByLabelText("ext-1 → a: нет данных");
+    fireEvent.mouseEnter(cell);
+    expect(await screen.findByRole("tooltip")).toHaveTextContent("Серий от ext-1 нет");
+  });
+});
+
+/* ── a plane the agent does not run ────────────────────────────────────────────
+ *
+ * An agent advertises the probe planes it runs as plane:* capabilities. A
+ * source that named its planes and left this protocol out will never emit a
+ * series for it, so its unmeasured cells are expected silence — dashed, like
+ * 'not probed' — with the reason in the aria-label. An agent that advertised NO
+ * plane at all is read as running every plane (lib/agents.ts's fail-open rule):
+ * its silence stays the alarming kind.
+ */
+describe("MatrixPage — a plane the agent does not run", () => {
+  beforeEach(() => window.history.replaceState({}, "", "/matrix?protocol=icmp"));
+  afterEach(() => {
+    window.history.replaceState({}, "", "/");
+    localStorage.removeItem(LOCALE_STORAGE_KEY);
+  });
+
+  const UNSUPPORTED = /: the source does not run ICMP probes$/;
+
+  /* a runs TCP only; b runs TCP and ICMP; c never said (pre-2.4.0). The grid is ICMP. */
+  const matrix = {
+    protocol: "icmp", plane: "pod", nodes: ["a", "b", "c"],
+    cells: [
+      { source: "b", destination: "a", failRatio: 0.01, lossRatio: 0 },
+      // Measured although a says it runs no ICMP: data outranks the advertisement.
+      { source: "a", destination: "c", failRatio: 0.02 },
+    ],
+    timestamp: "t",
+  };
+  const topology = {
+    nodes: nodesOf("a", "b", "c"),
+    agents: [clusterAgent("a", ["plane:tcp"]), clusterAgent("b", ["plane:tcp", "plane:icmp"]), clusterAgent("c")],
+    timestamp: "t",
+  };
+
+  it("draws the source's unmeasured cells dashed, with the reason in the aria-label and the tooltip", async () => {
+    stubFetchRoutes({ matrix, topology });
+    renderPage();
+    const cell = await screen.findByLabelText("a → b: the source does not run ICMP probes");
+    // Like 'not probed': the label sits on the <td>, no pair page is promised, Investigate stays.
+    expect(cell.tagName).toBe("TD");
+    expect(cell.querySelector('a[href^="/pairs/"]')).toBeNull();
+    expect(cell.querySelector('[data-testid="cell-investigate"]')).not.toBeNull();
+    const box = cell.querySelector("div.border-dashed");
+    expect(box).not.toBeNull();
+    fireEvent.mouseEnter(box as Element);
+    expect(await screen.findByRole("tooltip")).toHaveTextContent("a does not run ICMP probes");
+  });
+
+  it("marks exactly that source's unmeasured cells, and adds the legend row for them", async () => {
+    stubFetchRoutes({ matrix, topology });
+    renderPage();
+    await screen.findByLabelText(UNSUPPORTED);
+    expect(screen.getAllByLabelText(UNSUPPORTED).map((el) => el.getAttribute("aria-label"))).toEqual([
+      "a → b: the source does not run ICMP probes",
+    ]);
+    expect(screen.getByTestId("legend-unsupported")).toHaveTextContent(
+      "Not run · the source does not run this protocol's probes",
+    );
+  });
+
+  it("lets data outrank the advertised planes", async () => {
+    stubFetchRoutes({ matrix, topology });
+    renderPage();
+    expect(await screen.findByLabelText("a → c: fail 2.0%")).toHaveTextContent("2.0%");
+  });
+
+  it("leaves a source that runs the plane, or never said, on 'no data'", async () => {
+    stubFetchRoutes({ matrix, topology });
+    renderPage();
+    await screen.findByLabelText(UNSUPPORTED);
+    expect(screen.getByLabelText("b → c: no data")).toBeInTheDocument();
+    expect(screen.getByLabelText("c → a: no data")).toBeInTheDocument();
+    expect(screen.getByLabelText("c → b: no data")).toBeInTheDocument();
+  });
+
+  it("shows the legend row only while such a cell is on the grid", async () => {
+    stubFetchRoutes({
+      // Every one of a's cells is measured: the state has nowhere to occur.
+      matrix: { ...matrix, cells: [...matrix.cells, { source: "a", destination: "b", failRatio: 0 }] },
+      topology,
+    });
+    renderPage();
+    await screen.findByLabelText("a → b: fail 0.0%");
+    expect(screen.queryAllByLabelText(UNSUPPORTED)).toHaveLength(0);
+    expect(screen.queryByTestId("legend-unsupported")).not.toBeInTheDocument();
+  });
+
+  it("reads an agent that advertised no plane at all as running every plane, never as unsupported (fail-open)", async () => {
+    stubFetchRoutes({
+      matrix,
+      topology: { ...topology, agents: [clusterAgent("a", ["external-checks"]), clusterAgent("b"), clusterAgent("c")] },
+    });
+    renderPage();
+    await screen.findByLabelText("a → b: no data");
+    expect(screen.queryAllByLabelText(UNSUPPORTED)).toHaveLength(0);
+    expect(screen.queryByTestId("legend-unsupported")).not.toBeInTheDocument();
+  });
+
+  it("follows the protocol switch: on TCP the same source runs its probes", async () => {
+    stubFetchRoutes({ matrix, topology });
+    renderPage();
+    await screen.findByLabelText("a → b: the source does not run ICMP probes");
+    fireEvent.click(screen.getByRole("radio", { name: "TCP" }));
+    expect(await screen.findByLabelText("a → b: no data")).toBeInTheDocument();
+    expect(screen.queryByTestId("legend-unsupported")).not.toBeInTheDocument();
+  });
+
+  it("speaks the state in Russian", async () => {
+    stubFetchRoutes({ matrix, topology });
+    renderRu();
+    expect(await screen.findByLabelText("a → b: источник не запускает зонды ICMP")).toBeInTheDocument();
+    expect(screen.getByTestId("legend-unsupported")).toHaveTextContent(
+      "Не запускается · источник не запускает зонды этого протокола",
+    );
   });
 });

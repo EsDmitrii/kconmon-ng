@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ThemeProvider } from "@/components/theme-provider";
 import { LOCALE_STORAGE_KEY, LocaleProvider, type Locale } from "@/lib/i18n";
@@ -48,10 +48,15 @@ import {
   type InvestigationScope,
 } from "@/lib/investigation-sources";
 import {
+  SignalPanels,
   deltaFromVectors,
   signalChartOption,
+  snapModel,
   withOverlays,
 } from "@/components/investigation-signals";
+import { ChartCursorProvider, TIMELINE_CURSOR_SOURCE, useChartCursor, type CursorGroup } from "@/lib/chart-cursor";
+import { stampClock } from "@/lib/i18n";
+import { useEffect } from "react";
 import { formatSeconds } from "@/lib/curated-metrics";
 import { MAINTENANCE_SERIES_NAME, maintenanceOverlaySeries } from "@/lib/annotations";
 
@@ -1235,6 +1240,119 @@ describe("signalChartOption", () => {
     const names = (option.series as { name?: string }[]).map((s) => s.name);
     expect(names).toContain(MAINTENANCE_SERIES_NAME);
   });
+
+  /* Both charts read against ONE span. Without the pin each axis fitted its
+     own samples, so a loss series that stopped at 00:30 and an RTT series that
+     ran to 01:00 drew two different hours under one cursor. */
+  it("pins the x-axis to the investigated window, so loss and RTT share one span", () => {
+    const option = signalChartOption(chart("ratio"), matrixBody(LOSS_STEPS), false, {
+      windows: [],
+      window: { from: new Date(FROM), to: new Date(TO) },
+    });
+    const axis = option.xAxis as { min?: number; max?: number };
+    expect(axis.min).toBe(Date.parse(FROM));
+    expect(axis.max).toBe(Date.parse(TO));
+  });
+
+  it("leaves the axis to fit the data when no window is handed in — the unit tests above still hold", () => {
+    const axis = signalChartOption(chart("ratio"), matrixBody(LOSS_STEPS), false, overlays).xAxis as { min?: number };
+    expect(axis.min).toBeUndefined();
+  });
+
+  /* The shared builder names a label-less aggregate "series", and both signal
+     queries aggregate the scope down to exactly that. */
+  it("names the one unnamed series after the chart, and leaves the overlay's name alone", () => {
+    const option = signalChartOption(chart("ratio"), matrixBody(LOSS_STEPS), false, {
+      windows: [maintenanceRow()],
+      seriesName: "Loss",
+    });
+    const names = (option.series as { name?: string }[]).map((s) => s.name);
+    expect(names).toEqual(["Loss", MAINTENANCE_SERIES_NAME]);
+    expect(names).not.toContain("series");
+  });
+
+  /* The pills and the tooltip belong to lib/chart-tooltip.ts at the shared chart
+     mount; this builder declares no x pointer label of its own to fight it. */
+  it("leaves the x pointer's pill to the shared tooltip layer", () => {
+    const option = signalChartOption(chart("ratio"), matrixBody(LOSS_STEPS), false, overlays);
+    expect((option.xAxis as { axisPointer?: unknown }).axisPointer).toBeUndefined();
+  });
+});
+
+/* ── the readout prints the sample the tooltip describes ─────────────────── */
+
+describe("the cursor readout under the delta chip", () => {
+  /** Grabs the page's cursor group from inside the provider, the way a chart would. */
+  function Grab({ onGroup }: { onGroup: (group: CursorGroup | null) => void }) {
+    const group = useChartCursor();
+    useEffect(() => {
+      onGroup(group);
+    }, [group, onGroup]);
+    return null;
+  }
+
+  function renderColumn() {
+    let group: CursorGroup | null = null;
+    render(
+      <ThemeProvider>
+        <ChartCursorProvider>
+          <Grab onGroup={(g) => (group = g)} />
+          <SignalPanels
+            scopeLabel="node-a → node-b"
+            loss={matrixBody(LOSS_STEPS)}
+            rtt={matrixBody(RTT_STEPS)}
+            delta={{ before: 0.1, after: 0.25, delta: 0.15 }}
+            windows={[]}
+            annotations={[]}
+            promConfigured
+            gated={false}
+            rangeTooWide={false}
+          />
+        </ChartCursorProvider>
+      </ThemeProvider>,
+    );
+    return () => group;
+  }
+
+  const readout = () => screen.getByTestId("signal-cursor").textContent ?? "";
+
+  it("snaps a CHART's pixel instant to the nearest sample — the one the tooltip is describing", async () => {
+    const group = renderColumn();
+    expect(readout()).toMatch(/nothing hovered/);
+    // Thirty-five seconds past a ten-minute sample: the tooltip says 00:10:00, so must this.
+    act(() => group()?.set(Date.parse("2026-08-08T00:10:35Z"), "chart-1"));
+    await waitFor(() => expect(readout()).toContain(stampClock(new Date("2026-08-08T00:10:00Z"), "en")));
+    expect(readout()).not.toContain(stampClock(new Date("2026-08-08T00:10:35Z"), "en"));
+  });
+
+  it("prints a TIMELINE row's exact instant untouched — a row is not a sample", async () => {
+    const group = renderColumn();
+    act(() => group()?.set(Date.parse("2026-08-08T00:10:35Z"), TIMELINE_CURSOR_SOURCE));
+    await waitFor(() => expect(readout()).toContain(stampClock(new Date("2026-08-08T00:10:35Z"), "en")));
+  });
+
+  it("falls back to the pixel instant inside a hole wider than a step, and clears on leave", async () => {
+    const group = renderColumn();
+    // The loss series stops at 00:30 and the RTT one at 00:20; 00:55 is more than a step past both.
+    act(() => group()?.set(Date.parse("2026-08-08T00:55:00Z"), "chart-1"));
+    await waitFor(() => expect(readout()).toContain(stampClock(new Date("2026-08-08T00:55:00Z"), "en")));
+    act(() => group()?.set(null, "chart-1"));
+    await waitFor(() => expect(readout()).toMatch(/nothing hovered/));
+  });
+});
+
+describe("snapModel", () => {
+  it("turns the two matrices into snap-able series with their own sampling step", () => {
+    const model = snapModel(matrixBody(LOSS_STEPS), matrixBody(RTT_STEPS), undefined);
+    expect(model).toHaveLength(2);
+    expect(model[0].points).toHaveLength(4);
+    expect(model[0].step).toBe(600_000);
+    expect(model[1].points).toHaveLength(3);
+  });
+
+  it("is empty for an error envelope and for nothing fetched", () => {
+    expect(snapModel(undefined, { status: "error", error: "boom" } as PromResult)).toEqual([]);
+  });
 });
 
 /* ── the page ───────────────────────────────────────────────────────────── */
@@ -2262,10 +2380,56 @@ describe("#4 the delta chip survives a fleet running one protocol", () => {
     expect(chip.textContent).not.toContain("—");
   });
 
-  it("still says — when neither end could be measured at all", async () => {
+  /* CONSCIOUS pin change: this used to expect "—". Three dashes and a figure
+     said nothing about WHICH end was missing, so a missing sample is one muted
+     sentence naming the edge, and "—" is no longer the chip's answer at all. */
+  it("says in words that neither end could be measured, instead of '— → — —'", async () => {
     renderPage({ search: PAIR_SEARCH, failRatio: "NaN" });
     const chip = await screen.findByTestId("matrix-delta");
-    await waitFor(() => expect(chip.textContent).toContain("—"));
+    await waitFor(() => expect(chip.textContent).toContain("no sample at either end of the window"));
+    expect(chip.textContent).not.toContain("—");
+    expect(chip.textContent).not.toContain("pp");
+  });
+});
+
+describe("the delta chip names the edge that has no sample", () => {
+  const panels = (delta: { before: number | null; after: number | null; delta: number | null }) =>
+    render(
+      <ThemeProvider>
+        <SignalPanels
+          scopeLabel="node-a → node-b"
+          loss={undefined}
+          rtt={undefined}
+          delta={delta}
+          windows={[]}
+          annotations={[]}
+          promConfigured
+          gated={false}
+          rangeTooWide={false}
+        />
+      </ThemeProvider>,
+    );
+
+  it("says the window START has no sample, and prints no figure beside it", () => {
+    panels({ before: null, after: 0.2, delta: null });
+    const chip = screen.getByTestId("matrix-delta");
+    expect(within(chip).getByTestId("matrix-delta-missing").textContent).toBe("no sample at the window start");
+    expect(chip.textContent).not.toContain("—");
+    expect(chip.textContent).not.toContain("20.0%");
+  });
+
+  it("says the window END has no sample", () => {
+    panels({ before: 0.2, after: null, delta: null });
+    expect(screen.getByTestId("matrix-delta-missing").textContent).toBe("no sample at the window end");
+  });
+
+  it("still prints both figures and the signed change when both ends answered", () => {
+    panels({ before: 0.1, after: 0.25, delta: 0.15 });
+    const chip = screen.getByTestId("matrix-delta");
+    expect(within(chip).queryByTestId("matrix-delta-missing")).toBeNull();
+    expect(chip.textContent).toContain("10.0%");
+    expect(chip.textContent).toContain("25.0%");
+    expect(chip.textContent).toContain("+15.0 pp");
   });
 });
 
@@ -3265,5 +3429,162 @@ describe("one instant, one shape, in Russian too (findings #7 and #18)", () => {
        00:00 and 06:00), so newest-first rows across midnight read as out of order when every row
        says only the time — 23:50 sitting under 00:10. */
     expect(clock).toMatch(/^\d{1,2}\s*\S+.*\d{1,2}:\d{2}/);
+  });
+});
+
+/* ── the header's own scope line ─────────────────────────────────────────── */
+
+describe("the committed scope under the title", () => {
+  it("badges the scope KIND as the form names it, with the scope beside it and the cluster-wide caveat under it", async () => {
+    renderPage({ search: `?kind=zone-pair&scope=${encodeURIComponent("zone-1→zone-2")}&from=${FROM}&to=${TO}` });
+    const line = await screen.findByTestId("scope-headline");
+    // "Zone pair", the Segmented's own word, not the URL's zone-pair.
+    expect(within(line).getByText("Zone pair")).toBeTruthy();
+    expect(within(line).queryByText("zone-pair")).toBeNull();
+    expect(within(line).getByText("zone zone-1 → zone zone-2")).toBeTruthy();
+    expect(within(line).getByTestId("scope-wide-note").textContent).toMatch(/cluster-wide for this scope kind/);
+  });
+
+  it("says the same for the whole cluster", async () => {
+    renderPage({ search: `?kind=cluster&from=${FROM}&to=${TO}` });
+    const line = await screen.findByTestId("scope-headline");
+    expect(within(line).getByText("Cluster")).toBeTruthy();
+    expect(within(line).getByText("the whole cluster")).toBeTruthy();
+    expect(within(line).getByTestId("scope-wide-note")).toBeTruthy();
+  });
+
+  it("makes no cluster-wide claim for a pair, which really is filtered", async () => {
+    renderPage();
+    const line = await screen.findByTestId("scope-headline");
+    expect(within(line).getByText("Pair")).toBeTruthy();
+    expect(within(line).getByText("node-a → node-b")).toBeTruthy();
+    expect(within(line).queryByTestId("scope-wide-note")).toBeNull();
+  });
+
+  it("wears the filter face on the scope pickers, the same track the Segmented beside them wears", async () => {
+    renderPage();
+    const picker = (await screen.findByLabelText("Source node")) as HTMLSelectElement;
+    expect(picker.tagName).toBe("SELECT");
+    expect(picker.className).toContain("appearance-none");
+    expect(picker.className).toContain("bg-surface-2");
+    // Still the real <select>: keyboard, mobile and screen-reader behaviour untouched.
+    expect(picker.value).toBe("node-a");
+  });
+});
+
+/* ── the actions rail is ONE row ─────────────────────────────────────────── */
+
+describe("the actions rail", () => {
+  it("melts the maintenance bar into the row so Create maintenance stands with its siblings", async () => {
+    renderPage({ permissions: [...ALL_READS, "maintenance:write"] });
+    const create = await screen.findByRole("button", { name: "Create maintenance" });
+    const bar = screen.getByTestId("maintenance-bar");
+    expect(bar.className).toContain("contents");
+    // Same flex row as the rail's own buttons: the bar's wrappers are display:contents, so the
+    // row that holds Export JSON holds the bar too.
+    const row = screen.getByRole("button", { name: "Export JSON" }).parentElement;
+    expect(row?.contains(create)).toBe(true);
+    // The count sentence is still there, as the caption line the arbitrary variant orders under the row.
+    expect(within(row as HTMLElement).getByText(/maintenance windows? in this window/)).toBeTruthy();
+  });
+
+  it("keeps the fold caveat next to the audit bound in the source list", async () => {
+    renderPage();
+    const sources = await screen.findByRole("list", { name: "Timeline sources" });
+    /* The permission lines wait for GET /auth/me, so the list is empty for a
+       round trip; the caveat is awaited rather than read off the first paint. */
+    await within(sources).findByText(/folded into one row each/);
+    const text = within(sources)
+      .getAllByRole("listitem")
+      .map((li) => li.textContent ?? "")
+      .join(" ");
+    expect(text).toContain("newest 200 audit rows");
+    expect(text).toContain("still counted and exported");
+  });
+
+  it("carries no fold caveat when the audit log was never asked — there is nothing to fold", async () => {
+    renderPage({ permissions: ALL_READS.filter((p) => p !== "audit:read") });
+    const sources = await screen.findByRole("list", { name: "Timeline sources" });
+    await within(sources).findByText(/audit:read/);
+    expect(within(sources).queryByText(/folded into one row each/)).toBeNull();
+  });
+});
+
+/* ── pinned findings say what they pinned ────────────────────────────────── */
+
+describe("a pinned finding whose row IS in the window", () => {
+  it("draws the row's own stamp and title, and demotes the stored id to the title attribute", async () => {
+    renderPage({
+      search: "?incident=inc-1",
+      permissions: WRITE,
+      incident: incidentRow({ pinned: [{ kind: "audit", id: "1757", note: "the rollout" }] }),
+      auditRows: [
+        {
+          id: 1757,
+          at: "2026-08-08T00:20:00Z",
+          subjectKind: "user",
+          subjectId: "ada",
+          action: "POST /api/v1/targets",
+          resource: "targets",
+          outcome: "allowed",
+          remoteAddr: "10.0.0.1",
+          detail: {},
+        },
+      ],
+    });
+
+    const row = await screen.findByTestId("pinned-finding");
+    const title = await within(row).findByTestId("pinned-finding-title");
+    expect(title.textContent).toBe("POST /api/v1/targets");
+    expect(title.getAttribute("title")).toBe("audit 1757");
+    // The stamp is the timeline's own column, in the data face.
+    const stamp = title.previousElementSibling as HTMLElement;
+    expect(stamp.className).toContain("mono-data");
+    expect(stamp.textContent).toMatch(/\d{1,2}:\d{2}/);
+    // The id is no longer the row's visible text.
+    expect(row.textContent).not.toContain("1757");
+    expect(within(row).queryByTestId("pin-out-of-window")).toBeNull();
+    expect(within(row).getByDisplayValue("the rollout")).toBeTruthy();
+  });
+});
+
+/* ── the incident notes box sizes itself ─────────────────────────────────── */
+
+describe("the incident notes box", () => {
+  it("grows with its lines, three at the least and eight at the most, and lets the browser size the rest", async () => {
+    renderPage({
+      search: "?incident=inc-1",
+      permissions: WRITE,
+      incident: incidentRow({ notes: "one\ntwo\nthree\nfour\nfive" }),
+    });
+    const box = (await screen.findByLabelText("Incident notes")) as HTMLTextAreaElement;
+    expect(box.rows).toBe(5);
+    expect(box.className).toContain("[field-sizing:content]");
+    expect(box.className).toContain("max-h-[calc(8lh_+_0.75rem)]");
+
+    fireEvent.change(box, { target: { value: Array.from({ length: 12 }, (_, i) => `line ${i}`).join("\n") } });
+    expect(box.rows).toBe(8);
+
+    fireEvent.change(box, { target: { value: "one" } });
+    expect(box.rows).toBe(3);
+  });
+});
+
+/* ── the notes rail drops the chip for its own scope ─────────────────────── */
+
+describe("the notes rail", () => {
+  it("drops the scope chip on a note filed under the page's own scope, and keeps it on a global one", async () => {
+    renderPage({
+      annotations: [
+        annotationRow({ id: "a-own", scope: "node-a→node-b", text: "own scope note" }),
+        annotationRow({ id: "a-global", scope: "", text: "global note" }),
+      ],
+    });
+    const notes = await screen.findByRole("region", { name: "Notes" });
+    const items = await within(notes).findAllByTestId("annotation-item");
+    const own = items.find((li) => (li.textContent ?? "").includes("own scope note"));
+    const global = items.find((li) => (li.textContent ?? "").includes("global note"));
+    expect(own && within(own).queryByText("node-a→node-b")).toBeNull();
+    expect(global && within(global).getByText("global")).toBeTruthy();
   });
 });

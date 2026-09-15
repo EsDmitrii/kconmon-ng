@@ -22,8 +22,9 @@ import { useRouter } from "@tanstack/react-router";
 import { useMatrix } from "@/hooks/use-matrix";
 import { useTopology } from "@/hooks/use-topology";
 import { useTheme } from "@/components/theme-provider";
+import { externalByNode } from "@/lib/agents";
 import { goTo } from "@/lib/api";
-import { localeTag, useLocale, useT, type Translate } from "@/lib/i18n";
+import { stampFull, useLocale, useT, type Translate } from "@/lib/i18n";
 import { enT, topologyDict, type TopologyKey } from "@/lib/i18n/dict/topology";
 import { DEGRADED_AT, FAILING_AT, fmtRatio, isProblemCell, severityRatio } from "@/lib/matrix-cells";
 import { compareNaturalName } from "@/lib/natural-name";
@@ -66,6 +67,30 @@ function zoneWidth(count: number): number {
 /* Edge policy — Progressive Disclosure. */
 const EDGE_CAP = 10;
 
+/* How far the map may zoom OUT. React Flow's own floor is 0.5, and fitView
+   honours it: on a 375px phone a five-zone map could not get small enough to
+   fit, so the fitted view showed a corner of it and the rest hung off the
+   right edge. 0.1 is far enough for a fleet this map will ever draw. */
+export const MAP_MIN_ZOOM = 0.1;
+
+/* The one fit the map is ever asked for: ReactFlow's initial fitView and the
+   "Fit the whole map" control read the same object. maxZoom 1 is what keeps a
+   one-box historical map from being inflated to twice its size to fill the
+   pane; minZoom is the same floor as the map's own, or fitView would stop
+   short of it. */
+export const FIT_VIEW_OPTIONS = { padding: 0.15, minZoom: MAP_MIN_ZOOM, maxZoom: 1 } as const;
+
+/* The arrowhead takes the edge's own colour. React Flow builds every marker
+   from its props (the colour is part of the marker id), so a marker without
+   one is drawn in the library's default grey at the tip of a red path. The
+   value is a token reference: the marker's polyline gets it as an inline
+   style, where var() resolves like anywhere else, so both themes come out
+   right without a measurement. */
+const EDGE_COLOR = {
+  failing: "hsl(var(--health-bad))",
+  degraded: "hsl(var(--health-warn))",
+} as const;
+
 /* NUL, the same separator pages/matrix.tsx keys its cell map on: a composite key
    built with a printable separator is only unambiguous while no name contains
    it. Internal only — it never reaches the DOM. */
@@ -92,12 +117,15 @@ const HEALTH_KEYS: Readonly<Record<"ok" | "degraded" | "failing", TopologyKey>> 
 /**
  * MapNode is one box this map draws. `ready` is `undefined` — not `false` —
  * when the box came from an AGENT: readiness is a Kubernetes node condition,
- * and a registered agent is not evidence of it either way.
+ * and a registered agent is not evidence of it either way. `external` is true
+ * when an agent registered under this name as a bare host (lib/agents.ts reads
+ * the label); such a box never carries a readiness, whichever half it came from.
  */
 export interface MapNode {
   name: string;
   zone: string;
   ready: boolean | undefined;
+  external: boolean;
 }
 
 /** Which half of the topology response the boxes were built from. */
@@ -129,17 +157,31 @@ const zoneOf = (zone: unknown): string => (typeof zone === "string" ? zone : "")
 
 export function mapNodes(topo: Topology | undefined): { nodes: MapNode[]; source: MapSource } {
   if (!topo) return { nodes: [], source: "nodes" };
+  /* The bare hosts, by the name they registered under. The LABEL is the one evidence of an
+     external agent, and it decides the flag for a box from either half: live and folded
+     topologies alike serve the host through agents only, but a name the label claims is
+     flagged wherever it turns up. */
+  const external = externalByNode(topo);
   const sorted = (nodes: MapNode[]) => nodes.sort((a, b) => compareNaturalName(a.name, b.name));
   /* Deduplicated BY NAME, the way the agents branch below already was. A node
      name is this map's React Flow id and its /nodes/{name} link, so a repeated
      one is not a second box — it is two boxes React Flow cannot tell apart,
      with a duplicate-key warning for each. The first wins, which is the same
      rule the agents branch keeps. */
-  const collect = (rows: readonly MapNode[]) => {
+  const collect = (rows: readonly { name: unknown; zone: unknown; ready: boolean | undefined }[]) => {
     const byName = new Map<string, MapNode>();
     for (const r of rows) {
       if (typeof r.name !== "string" || r.name === "" || byName.has(r.name)) continue;
-      byName.set(r.name, { name: r.name, zone: zoneOf(r.zone), ready: r.ready });
+      const isExternal = external.has(r.name);
+      /* A bare host has no Kubernetes node for readiness to come from, so a `ready` stated
+         for it by any server (a fold older than 2.4.0 listed the host with a presence-derived
+         true) is not a fact this box may carry. */
+      byName.set(r.name, {
+        name: r.name,
+        zone: zoneOf(r.zone),
+        ready: isExternal ? undefined : r.ready,
+        external: isExternal,
+      });
     }
     return sorted([...byName.values()]);
   };
@@ -147,16 +189,23 @@ export function mapNodes(topo: Topology | undefined): { nodes: MapNode[]; source
   const rows = (xs: unknown): { name: unknown; zone: unknown; ready?: unknown }[] =>
     Array.isArray(xs) ? xs.filter((x) => x !== null && typeof x === "object") : [];
 
-  const nodes = collect(
-    rows(topo.nodes).map((n) => ({ name: n.name, zone: n.zone, ready: n.ready }) as MapNode),
-  );
-  if (nodes.length > 0) return { nodes, source: "nodes" };
+  const nodeRows = rows(topo.nodes).map((n) => ({ name: n.name, zone: n.zone, ready: n.ready as boolean | undefined }));
+  const nodes = collect(nodeRows);
+  if (nodes.length > 0) {
+    /* A bare host the informer will never list is merged INTO the Kubernetes map: the map's
+       provenance is still the node view, so `source` stays "nodes" and the "built from
+       registered agents" notice stays quiet. An UNLABELLED agent whose node is missing from
+       the list is what an informer lag looks like, and earns no box. */
+    const known = new Set(nodes.map((n) => n.name));
+    const bareHosts = [...external.values()]
+      .filter((a) => !known.has(a.nodeName))
+      .map((a) => ({ name: a.nodeName, zone: a.zone, ready: undefined }));
+    return { nodes: bareHosts.length > 0 ? collect([...nodeRows, ...bareHosts]) : nodes, source: "nodes" };
+  }
 
   return {
     nodes: collect(
-      rows(topo.agents).map(
-        (a) => ({ name: (a as { nodeName?: unknown }).nodeName, zone: a.zone, ready: undefined }) as MapNode,
-      ),
+      rows(topo.agents).map((a) => ({ name: (a as { nodeName?: unknown }).nodeName, zone: a.zone, ready: undefined })),
     ),
     source: "agents",
   };
@@ -229,10 +278,17 @@ export function buildFlow(
         parentId: `zone:${z}`,
         extent: "parent",
         position: { x: ZONE_PAD + (j % cols) * (NODE_W + NODE_GAP), y: 52 + Math.floor(j / cols) * NODE_H },
-        data: { label: n.name, ready: n.ready, health },
-        /* The map is a picture, and a picture with no text is nothing to a screen reader. */
+        data: { label: n.name, ready: n.ready, health, external: n.external },
+        /* The map is a picture, and a picture with no text is nothing to a screen reader. An
+           external box is the readyUnknown case WITH its reason, so it takes that form. */
         ariaLabel: t(
-          n.ready === undefined ? "node.aria.readyUnknown" : n.ready ? "node.aria" : "node.aria.notReady",
+          n.external
+            ? "node.aria.external"
+            : n.ready === undefined
+              ? "node.aria.readyUnknown"
+              : n.ready
+                ? "node.aria"
+                : "node.aria.notReady",
           {
             node: n.name,
             zone: zoneSpoken(z),
@@ -274,6 +330,7 @@ export function buildFlow(
     const ratio = severityRatio(c) ?? 0;
     const mutual = drawnKeys.has(pairKey(c.destination, c.source));
     const forward = c.source < c.destination;
+    const tier = ratio >= FAILING_AT ? "failing" : "degraded";
     return {
       id: edgeId(c.source, c.destination),
       source: c.source,
@@ -303,8 +360,8 @@ export function buildFlow(
         destination: c.destination,
         detail: t(c.failRatio === null ? "edge.label.loss" : "edge.label", { pct: fmtRatio(ratio) }),
       }),
-      markerEnd: { type: MarkerType.ArrowClosed, width: 14, height: 14 },
-      className: ratio >= FAILING_AT ? "topo-edge--failing" : "topo-edge--degraded",
+      markerEnd: { type: MarkerType.ArrowClosed, width: 14, height: 14, color: EDGE_COLOR[tier] },
+      className: `topo-edge--${tier}`,
     };
   });
 
@@ -336,7 +393,12 @@ function TopoNode({ data }: NodeProps) {
   const t = useT(topologyDict);
   /* `ready` is undefined on the agents-built map — the box carries no badge
      there, and the readiness gap is stated once, above the map. */
-  const d = data as { label: string; ready: boolean | undefined; health: "ok" | "degraded" | "failing" };
+  const d = data as {
+    label: string;
+    ready: boolean | undefined;
+    health: "ok" | "degraded" | "failing";
+    external?: boolean;
+  };
   return (
     <>
       <Handle type="target" position={Position.Left} className="!size-1.5 !opacity-0" />
@@ -347,6 +409,9 @@ function TopoNode({ data }: NodeProps) {
       <span className="mono-data min-w-0 flex-1 truncate" title={d.label}>
         {d.label}
       </span>
+      {/* IDENTITY, next to the name and in the neutral pill: a bare host is not a health
+          tier, and the health word (below) must keep its own colour beside it. */}
+      {d.external ? <Badge variant="neutral">{t("node.external")}</Badge> : null}
       {/* The health is a WORD as well as a border colour. The colour was the only channel: under
           deuteranopia healthy and failing simulate to 1.16:1 luminance, so a red/green-blind
           operator could not tell one box from another anywhere on the map — and the legend above
@@ -412,7 +477,7 @@ function MapControls() {
       <ControlButton
         aria-label={t("controls.fitView")}
         title={t("controls.fitView")}
-        onClick={() => void flow.fitView({ padding: 0.15 })}
+        onClick={() => void flow.fitView(FIT_VIEW_OPTIONS)}
       >
         <Maximize aria-hidden="true" />
       </ControlButton>
@@ -500,8 +565,8 @@ export function TopologyPage() {
         stamp
           ? t("description.engaged", {
               /* Interpolated into a TRANSLATED sentence, so it takes the
-                 sentence's own language — lib/i18n's localeTag. */
-              at: stamp.toLocaleString(localeTag(locale)),
+                 sentence's own language and the house clock — lib/i18n's stampFull. */
+              at: stampFull(stamp, locale),
             })
           : t("description.live")
       }
@@ -645,7 +710,8 @@ export function TopologyPage() {
               nodeTypes={NODE_TYPES}
               colorMode={theme}
               fitView
-              fitViewOptions={{ padding: 0.15 }}
+              fitViewOptions={FIT_VIEW_OPTIONS}
+              minZoom={MAP_MIN_ZOOM}
               /* This map is a READ-ONLY picture of what the controller reports. */
               nodesDraggable={false}
               nodesConnectable={false}

@@ -249,6 +249,17 @@ describe("shell chrome", () => {
       ),
     ).toBeInTheDocument();
   });
+
+  /* The one-clause form a phone shows in place of the sentence, in both languages. */
+  it("translates the banner's narrow-width clause", async () => {
+    renderShell({ locale: "ru" });
+    expect(await screen.findByText("Аутентификация выключена; у всех роль viewer.")).toBeInTheDocument();
+  });
+
+  it("keeps the narrow-width clause's English wording byte-for-byte", async () => {
+    renderShell();
+    expect(await screen.findByText("Authentication is disabled; everyone is viewer.")).toBeInTheDocument();
+  });
 });
 
 /* ── Time Machine bar ───────────────────────────────────────────────────── */

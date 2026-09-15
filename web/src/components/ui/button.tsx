@@ -7,13 +7,27 @@ import { cn } from "@/lib/utils";
    against the light theme's page background, under WCAG AA's 4.5:1 for 14px
    text, and a disabled control still has to be READ — the Sync button on
    /alerting carries the reason it is off in its own title. 65 lands at 5.03:1
-   on light and 7.44:1 on dark, so one value covers both themes. */
+   on light and 7.44:1 on dark, so one value covers both themes.
+
+   A disabled PRIMARY also stops looking primary: muted fill, no shadow, the
+   plain foreground for its label. Opacity alone left a live-looking blue
+   button in dark mode, and a disabled primary is a real state on Run checks,
+   Settings import and every mutation the Time Machine locks. The label token
+   was measured, not picked: muted-foreground composited at .65 over the page
+   is 2.44:1 on light and 3.28:1 on dark, under AA; foreground is 4.77:1 and
+   6.89:1 (4.71:1 / 6.90:1 on a card), so that is the one that ships.
+
+   destructive is the confirm step of every delete: the primary treatment in
+   the destructive hue, so the second click reads as the irreversible one and
+   the page keeps its single blue action. */
 const buttonVariants = cva(
   "inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium transition-[background-color,box-shadow,color] duration-(--dur) ease-(--ease) focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background disabled:pointer-events-none disabled:opacity-65",
   {
     variants: {
       variant: {
-        default: "bg-primary text-primary-foreground hover:bg-primary/90",
+        default:
+          "bg-primary text-primary-foreground hover:bg-primary/90 disabled:bg-muted disabled:text-foreground disabled:shadow-none",
+        destructive: "bg-destructive text-destructive-foreground hover:bg-destructive/90",
         secondary: "bg-secondary text-secondary-foreground hover:bg-secondary/80",
         outline: "border border-border-strong bg-transparent hover:bg-accent hover:text-accent-foreground",
         ghost: "hover:bg-accent hover:text-accent-foreground",

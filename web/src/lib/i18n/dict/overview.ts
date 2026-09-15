@@ -74,6 +74,11 @@ const en = {
      so in its own counters. Shown only when a bound actually bit. */
   "tiles.nodesReady.bounded.truncated": "The event window was truncated, so this reconstruction is partial.",
   "tiles.nodesReady.bounded.unfoldable": "{count} events carried no node detail and could not be folded in.",
+  /* Bare-host agents (kconmon-ng.io/external: "true") beside the tile's count.
+     The count itself is Kubernetes readiness, which an external host has none
+     of, so the arithmetic stays put and this hint says how many sit outside it. */
+  "tiles.nodesReady.external.one": "+{count} external agent",
+  "tiles.nodesReady.external.many": "+{count} external agents",
   "tiles.failing": "Failing pairs",
   "tiles.failing.tone": "Fail ≥ 10%",
   "tiles.degraded": "Degraded pairs",
@@ -146,6 +151,9 @@ const en = {
   "worstPairs.empty.healthy.title": "No failing or degraded pairs",
   "worstPairs.empty.healthy.body":
     "Every scored pair is under a 1% failure ratio. Anything that crosses that line shows up here, worst first.",
+  /* The healthy slate's next step: the whole matrix, in the same "open X"
+     shape the alerts and events panels use. */
+  "worstPairs.open": "open Matrix",
 
   "table.caption": "Worst pairs by failure ratio",
   "table.pair": "Pair",
@@ -156,6 +164,10 @@ const en = {
   "table.status.degraded": "Degraded",
   /* The row's investigate affordance — deliberately the same word the firing-alert rows use. */
   "table.investigate": "investigate",
+  /* The neutral badge after an external agent's name in a pair: identity, not a
+     status, and the same word the topology map and the node card wear
+     (lib/i18n/cards.test.tsx pins the equality). */
+  "table.external": "external",
 
   /* ── firing alerts ──────────────────────────────────────────────────────── */
   "alerts.title": "Firing alerts",
@@ -187,6 +199,8 @@ const en = {
   "incidents.denied": "Open incidents need incidents:read — none was requested.",
   "incidents.error": "The incident list is unavailable right now.",
   "incidents.empty": "No open incidents. Saving an investigation on /investigate opens one.",
+  /* The empty slate's next step — the page the sentence above names. */
+  "incidents.open": "open Investigate",
   /* Our word for an incident whose scope is EMPTY; any other scope is data. */
   "incidents.scope.global": "global",
 
@@ -259,6 +273,10 @@ export const overviewDict: Dictionary<OverviewKey> = defineDict(en, {
   "tiles.nodesReady.fromMatrix": "Считано по матрице пар, без инвентаря узлов k8s: готовность неизвестна.",
   "tiles.nodesReady.bounded.truncated": "Окно событий обрезано, поэтому восстановление неполное.",
   "tiles.nodesReady.bounded.unfoldable": "Событий без деталей узла, которые не свернулись: {count}.",
+  /* Both forms carry one string: «внешних агентов: N» agrees with every count,
+     where «+2 внешних агентов» would not (README: sidestep the plural). */
+  "tiles.nodesReady.external.one": "Ещё внешних агентов: {count}",
+  "tiles.nodesReady.external.many": "Ещё внешних агентов: {count}",
   "tiles.failing": "Пары со сбоями",
   "tiles.failing.tone": "Сбой ≥ 10%",
   "tiles.degraded": "Пары с деградацией",
@@ -305,6 +323,7 @@ export const overviewDict: Dictionary<OverviewKey> = defineDict(en, {
     "Пар с измеренной задержкой: {count}, но у серии доли сбоев здесь нет ни одной выборки. Ранжирование от худших держится именно на ней, поэтому список остаётся пустым, а не выдаёт себя за норму.",
   "worstPairs.empty.unscored.body.many":
     "Пар с измеренной задержкой: {count}, но у серии доли сбоев здесь нет ни одной выборки. Ранжирование от худших держится именно на ней, поэтому список остаётся пустым, а не выдаёт себя за норму.",
+  "worstPairs.open": "открыть Матрицу",
   "worstPairs.empty.healthy.title": "Пар со сбоями и деградацией нет",
   "worstPairs.empty.healthy.body":
     "У всех оценённых пар доля сбоев ниже 1%. Что перевалит за эту черту, появится здесь, худшее первым.",
@@ -317,6 +336,7 @@ export const overviewDict: Dictionary<OverviewKey> = defineDict(en, {
   "table.status.failing": "Сбой",
   "table.status.degraded": "Деградация",
   "table.investigate": "расследовать",
+  "table.external": "внешний",
 
   "alerts.title": "Активные оповещения",
   "alerts.open": "открыть Оповещения",
@@ -339,6 +359,7 @@ export const overviewDict: Dictionary<OverviewKey> = defineDict(en, {
   "incidents.denied": "Открытым инцидентам нужно право incidents:read, которого у роли нет, так что запрос не отправлялся.",
   "incidents.error": "Список инцидентов сейчас недоступен.",
   "incidents.empty": "Открытых инцидентов нет. Сохраните расследование на /investigate, и инцидент откроется.",
+  "incidents.open": "открыть Расследование",
   "incidents.scope.global": "глобальный",
 
   "events.title": "Последние события",

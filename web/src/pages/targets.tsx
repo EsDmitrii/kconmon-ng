@@ -119,9 +119,10 @@ const TARGET_KINDS: TargetKind[] = ["host", "url"];
    to someone filling in a HOST was suggesting the exact value that comes back a
    422 — the same reasoning, and the same shape, as diagnostics.tsx's
    ADHOC_PLACEHOLDER. Addresses are syntax, so the examples live here rather
-   than in the dictionary. */
+   than in the dictionary. Two host examples, not three: the third clipped
+   inside a phone-wide field, so the port form moved into the field's hint. */
 export const TARGET_ADDRESS_PLACEHOLDER: Record<TargetKind, string> = {
-  host: "10.0.0.1 · edge-gateway.internal · 10.0.0.1:8443",
+  host: "10.0.0.1 · edge-gateway.internal",
   url: "https://example.test/health",
 };
 const SOURCE_SELECTIONS: SourceSelection[] = ["all", "per-zone", "one-per-zone"];
@@ -272,6 +273,7 @@ function TextField({
   error,
   placeholder,
   textarea,
+  hint,
 }: {
   label: string;
   value: string;
@@ -279,15 +281,18 @@ function TextField({
   error?: string;
   placeholder?: string;
   textarea?: boolean;
+  /** What the box accepts beyond what its placeholder can show — same slot SelectField has. */
+  hint?: string;
 }) {
   const id = useId();
   const errorId = `${id}-error`;
+  const hintId = `${id}-hint`;
   const shared = {
     id,
     value,
     placeholder,
     "aria-invalid": error ? (true as const) : undefined,
-    "aria-describedby": error ? errorId : undefined,
+    "aria-describedby": cn(error ? errorId : undefined, hint ? hintId : undefined) || undefined,
   };
   return (
     <div className="flex flex-col gap-1 text-[13px]">
@@ -299,6 +304,11 @@ function TextField({
       ) : (
         <Input {...shared} onChange={(e) => onChange(e.target.value)} />
       )}
+      {hint ? (
+        <span id={hintId} className="text-xs leading-relaxed text-muted-foreground">
+          {hint}
+        </span>
+      ) : null}
       {error ? (
         <span id={errorId} role="alert" className="text-xs leading-relaxed text-health-bad">
           {error}
@@ -476,15 +486,18 @@ function TargetForm({
   return (
     <div ref={panelRef} tabIndex={-1}>
     <Card asChild className="p-6">
-      <form onSubmit={handleSubmit} className="flex max-w-2xl flex-col gap-4">
-        <h3 className="type-section">
+      {/* The card runs full width so its edges line up with the list card
+          below; only the FIELDS are held to a reading width. */}
+      <form onSubmit={handleSubmit} className="flex flex-col gap-4">
+        <h2 className="type-section">
           {initial ? t("targets.form.edit", { name: initial.name }) : t("targets.form.create")}
-        </h3>
+        </h2>
+        <div className="flex max-w-2xl flex-col gap-4">
         <div className="grid gap-4 sm:grid-cols-2">
           {/* The placeholders stay: "edge-gateway" and "env=prod, tier=edge"
               are example VALUES, and a Russian sample label key would be an
-              example nobody can paste. Only the connective in the address
-              placeholder is prose, so only that one is translated. */}
+              example nobody can paste. The address placeholder is two sample
+              addresses; the port form is the hint's, and it is prose. */}
           <TextField
             label={t("targets.form.name")}
             value={name}
@@ -505,6 +518,7 @@ function TargetForm({
             onChange={setAddress}
             error={errors.address}
             placeholder={TARGET_ADDRESS_PLACEHOLDER[kind]}
+            hint={kind === "host" ? t("targets.form.addressHint.host") : undefined}
           />
           <TextField
             label={t("targets.form.labels")}
@@ -530,6 +544,7 @@ function TargetForm({
             {t("cancel")}
           </Button>
         </div>
+        </div>
       </form>
     </Card>
     </div>
@@ -537,23 +552,30 @@ function TargetForm({
 }
 
 /**
- * RowActionLabel is the VISIBLE half of a row button whose label carries the
- * object's own name.
+ * RowActionLabel is the VISIBLE half of a row button whose accessible name
+ * carries the object's own name.
  *
  * "Delete {name}" is the right thing for a screen reader — three "Delete"
- * buttons in a list are three identical announcements — but a 60-character
- * target name rendered in full blew the row's width apart (QA scope 2, #22).
- * The name stays whole in the aria-label and in `title`; only the pixels are
- * bounded, and the truncation is CSS, so nothing has to guess a character
- * count for a language it has not seen.
+ * buttons in a list are three identical announcements — but the name drawn in
+ * full made every row's action cluster as wide as its longest name (QA scope
+ * 2, #22), and on the Schedules tab the cadence rode along too. So the pixels
+ * show the VERB alone; the whole sentence stays in the button's aria-label and
+ * in this span's `title`, and the cap plus CSS truncation still bounds a verb
+ * in a language this code has not seen.
  */
-function RowActionLabel({ text }: { text: string }) {
+function RowActionLabel({ text, verb }: { text: string; verb: string }) {
   return (
     <span aria-hidden="true" className="block max-w-[14rem] truncate" title={text}>
-      {text}
+      {verb}
     </span>
   );
 }
+
+/* The action cluster is the row's FIXED right column (see the grid on each
+   row): it never wraps under the data, and below `sm` its buttons stack so a
+   phone-wide row keeps most of its width for the data cell. flex-wrap stays
+   for the confirm pair and any width a translation adds. */
+const ROW_ACTIONS_CLASS = "flex flex-wrap items-center gap-2 max-sm:flex-col max-sm:items-stretch";
 
 function TargetRowActions({ target, onEdit }: { target: Target; onEdit: () => void }) {
   const t = useT(targetsDict);
@@ -583,21 +605,22 @@ function TargetRowActions({ target, onEdit }: { target: Target; onEdit: () => vo
 
   if (confirming) {
     return (
-      <span className="flex flex-wrap items-center gap-2">
+      <span className={ROW_ACTIONS_CLASS}>
         {/* Spoken as well as drawn — the row swaps its controls under the reader. */}
         <span role="status" className="sr-only">
           {t("targets.row.confirmDelete", { name: target.name })}
         </span>
+        {/* destructive: the second, irreversible click is the one that gets the hue. */}
         <Button
           ref={confirmRef}
           size="sm"
-          variant="outline"
+          variant="destructive"
           loading={busy}
           {...guard}
           aria-label={t("targets.row.confirmDelete", { name: target.name })}
           onClick={handleDelete}
         >
-          <RowActionLabel text={t("targets.row.confirmDelete", { name: target.name })} />
+          <RowActionLabel text={t("targets.row.confirmDelete", { name: target.name })} verb={t("action.confirmDelete")} />
         </Button>
         <Button size="sm" variant="ghost" onClick={reset}>
           {t("cancel")}
@@ -606,29 +629,33 @@ function TargetRowActions({ target, onEdit }: { target: Target; onEdit: () => vo
     );
   }
   return (
-    <span className="flex flex-wrap items-center gap-2">
-      {/* Edit opens a form whose only purpose is to submit a PUT, so it is
-          disabled with the write it leads to rather than left to dead-end at a
-          greyed Save. */}
-      <Button size="sm" variant="ghost" {...guard} aria-label={t("targets.row.edit", { name: target.name })} onClick={onEdit}>
-        <RowActionLabel text={t("targets.row.edit", { name: target.name })} />
-      </Button>
-      <Button
-        ref={triggerRef}
-        size="sm"
-        variant="ghost"
-        {...guard}
-        aria-label={t("targets.row.delete", { name: target.name })}
-        onClick={ask}
-      >
-        <RowActionLabel text={t("targets.row.delete", { name: target.name })} />
-      </Button>
+    <>
+      <span className={ROW_ACTIONS_CLASS}>
+        {/* Edit opens a form whose only purpose is to submit a PUT, so it is
+            disabled with the write it leads to rather than left to dead-end at a
+            greyed Save. */}
+        <Button size="sm" variant="ghost" {...guard} aria-label={t("targets.row.edit", { name: target.name })} onClick={onEdit}>
+          <RowActionLabel text={t("targets.row.edit", { name: target.name })} verb={t("action.edit")} />
+        </Button>
+        <Button
+          ref={triggerRef}
+          size="sm"
+          variant="ghost"
+          {...guard}
+          aria-label={t("targets.row.delete", { name: target.name })}
+          onClick={ask}
+        >
+          <RowActionLabel text={t("targets.row.delete", { name: target.name })} verb={t("action.delete")} />
+        </Button>
+      </span>
+      {/* The server's sentence is a row of its own under the data (col-span-2
+          in the row grid), never a widener of the fixed actions column. */}
       {error ? (
-        <span role="alert" className="text-xs text-health-bad">
+        <span role="alert" className="col-span-2 text-xs text-health-bad">
           {error}
         </span>
       ) : null}
-    </span>
+    </>
   );
 }
 
@@ -707,31 +734,46 @@ function TargetsTab({ canWrite }: { canWrite: boolean }) {
             <>
             <ul aria-label={t("targets.listAria")} className="mt-4 divide-y divide-border">
               {pager.visible.map((t) => (
-                <li key={t.id} className="flex flex-wrap items-center gap-3 py-3 text-sm">
-                  {/* The row's name is the way into the Target card
-                      (pages/target-card.tsx). A plain <a href>, not a router
-                      <Link>: the card reads its id off
-                      window.location.pathname, so a full navigation and a
-                      bookmarked cold load take exactly the same code path —
-                      the same choice pages/diagnostics.tsx already makes for a
-                      run permalink. */}
-                  <a
-                    href={withAtParam(`/targets/${encodeURIComponent(t.id)}`)}
-                    className="font-medium text-primary hover:underline"
-                  >
-                    {t.name}
-                  </a>
-                  <Badge variant="neutral">{t.kind}</Badge>
-                  {/* The address is the row's own data, so it reads in the data
-                      face and in the foreground; the labels stay muted metadata. */}
-                  <span className="mono-data min-w-0 truncate">{t.address}</span>
-                  {Object.keys(t.labels).length > 0 ? (
-                    <span className="mono-data min-w-0 truncate text-muted-foreground">{formatLabels(t.labels)}</span>
-                  ) : null}
-                  {canWrite ? (
-                    <span className="ml-auto flex flex-wrap items-center gap-2">
-                      <TargetRowActions target={t} onEdit={() => setEditing({ mode: "edit", target: t })} />
+                /* Two columns: a data cell that may shrink to nothing
+                   (minmax(0,1fr)) and a fixed actions column, so the buttons
+                   never fall under the data. Inside the cell, the name group
+                   is an `auto` track and takes its full width first; the
+                   address and labels get what is left and truncate — labels
+                   first, then the address. Below `sm` the grid is one column,
+                   so the same two groups stack into exactly two lines: payload,
+                   then meta. */
+                <li key={t.id} className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-x-3 gap-y-1 py-3 text-sm">
+                  <div className="grid min-w-0 grid-cols-1 items-center gap-x-3 gap-y-1 sm:grid-cols-[auto_minmax(0,1fr)]">
+                    <span className="flex min-w-0 items-center gap-2">
+                      {/* The row's name is the way into the Target card
+                          (pages/target-card.tsx). A plain <a href>, not a router
+                          <Link>: the card reads its id off
+                          window.location.pathname, so a full navigation and a
+                          bookmarked cold load take exactly the same code path —
+                          the same choice pages/diagnostics.tsx already makes for a
+                          run permalink. */}
+                      <a
+                        href={withAtParam(`/targets/${encodeURIComponent(t.id)}`)}
+                        className="min-w-0 truncate font-medium text-primary hover:underline"
+                      >
+                        {t.name}
+                      </a>
+                      <Badge variant="neutral">{t.kind}</Badge>
                     </span>
+                    {/* The address is the row's own data, so it reads in the data
+                        face and in the foreground; the labels stay muted metadata
+                        and are the first to give way, and a phone drops them. */}
+                    <span className="grid min-w-0 grid-cols-[minmax(0,auto)_minmax(0,1fr)] items-center gap-3">
+                      <span className="mono-data min-w-0 truncate">{t.address}</span>
+                      {Object.keys(t.labels).length > 0 ? (
+                        <span className="mono-data hidden min-w-0 truncate text-muted-foreground sm:block">
+                          {formatLabels(t.labels)}
+                        </span>
+                      ) : null}
+                    </span>
+                  </div>
+                  {canWrite ? (
+                    <TargetRowActions target={t} onEdit={() => setEditing({ mode: "edit", target: t })} />
                   ) : null}
                 </li>
               ))}
@@ -944,10 +986,12 @@ function DefinitionForm({
 
   return (
     <Card asChild className="p-6">
-      <form onSubmit={handleSubmit} className="flex max-w-2xl flex-col gap-4">
-        <h3 className="type-section">
+      {/* Full-width card, reading-width fields — the same split TargetForm makes. */}
+      <form onSubmit={handleSubmit} className="flex flex-col gap-4">
+        <h2 className="type-section">
           {initial ? t("definitions.form.edit", { name: initial.name }) : t("definitions.form.create")}
-        </h3>
+        </h2>
+        <div className="flex max-w-2xl flex-col gap-4">
         <div className="grid gap-4 sm:grid-cols-2">
           {/* Every select below renders its WIRE VALUES as its labels
               (plainOptions). They stay English because they are not English —
@@ -1070,6 +1114,7 @@ function DefinitionForm({
             {t("cancel")}
           </Button>
         </div>
+        </div>
       </form>
     </Card>
   );
@@ -1102,7 +1147,7 @@ function DefinitionRowActions({ definition, onEdit }: { definition: CheckDefinit
 
   if (confirming) {
     return (
-      <span className="flex flex-wrap items-center gap-2">
+      <span className={ROW_ACTIONS_CLASS}>
         {/* Spoken as well as drawn — the row swaps its controls under the reader. */}
         <span role="status" className="sr-only">
           {t("definitions.row.confirmDelete", { name: definition.name })}
@@ -1110,13 +1155,16 @@ function DefinitionRowActions({ definition, onEdit }: { definition: CheckDefinit
         <Button
           ref={confirmRef}
           size="sm"
-          variant="outline"
+          variant="destructive"
           loading={busy}
           {...guard}
           aria-label={t("definitions.row.confirmDelete", { name: definition.name })}
           onClick={handleDelete}
         >
-          <RowActionLabel text={t("definitions.row.confirmDelete", { name: definition.name })} />
+          <RowActionLabel
+            text={t("definitions.row.confirmDelete", { name: definition.name })}
+            verb={t("action.confirmDelete")}
+          />
         </Button>
         <Button size="sm" variant="ghost" onClick={reset}>
           {t("cancel")}
@@ -1125,32 +1173,34 @@ function DefinitionRowActions({ definition, onEdit }: { definition: CheckDefinit
     );
   }
   return (
-    <span className="flex flex-wrap items-center gap-2">
-      <Button
-        size="sm"
-        variant="ghost"
-        {...guard}
-        aria-label={t("definitions.row.edit", { name: definition.name })}
-        onClick={onEdit}
-      >
-        <RowActionLabel text={t("definitions.row.edit", { name: definition.name })} />
-      </Button>
-      <Button
-        ref={triggerRef}
-        size="sm"
-        variant="ghost"
-        {...guard}
-        aria-label={t("definitions.row.delete", { name: definition.name })}
-        onClick={ask}
-      >
-        <RowActionLabel text={t("definitions.row.delete", { name: definition.name })} />
-      </Button>
+    <>
+      <span className={ROW_ACTIONS_CLASS}>
+        <Button
+          size="sm"
+          variant="ghost"
+          {...guard}
+          aria-label={t("definitions.row.edit", { name: definition.name })}
+          onClick={onEdit}
+        >
+          <RowActionLabel text={t("definitions.row.edit", { name: definition.name })} verb={t("action.edit")} />
+        </Button>
+        <Button
+          ref={triggerRef}
+          size="sm"
+          variant="ghost"
+          {...guard}
+          aria-label={t("definitions.row.delete", { name: definition.name })}
+          onClick={ask}
+        >
+          <RowActionLabel text={t("definitions.row.delete", { name: definition.name })} verb={t("action.delete")} />
+        </Button>
+      </span>
       {error ? (
-        <span role="alert" className="text-xs text-health-bad">
+        <span role="alert" className="col-span-2 text-xs text-health-bad">
           {error}
         </span>
       ) : null}
-    </span>
+    </>
   );
 }
 
@@ -1237,27 +1287,39 @@ function DefinitionsTab({ canRead, canWrite }: { canRead: boolean; canWrite: boo
             <>
             <ul aria-label={t("definitions.listAria")} className="mt-4 divide-y divide-border">
               {pager.visible.map((d) => (
-                <li key={d.id} className="flex flex-wrap items-center gap-3 py-3 text-sm">
-                  <span className="font-medium">{d.name}</span>
-                  {/* checkType and sourceSelection are the row's own stored
-                      values, shown as they are stored. The PILL beside them is
-                      this page describing a boolean, so it translates. */}
-                  <span className="text-xs uppercase tracking-wide text-muted-foreground">{d.checkType}</span>
-                  {/* The src→dst pair is the definition's data — the data face,
-                      not a muted caption (M4 iron rule). */}
-                  <span className="mono-data">
-                    {d.sourceSelection} → {destinationLabel(d, targets, t)}
-                  </span>
-                  <Badge variant={d.enabled ? "ok" : "neutral"} dot>
-                    {d.enabled ? t("definitions.enabled") : t("definitions.disabled")}
-                  </Badge>
-                  {canWrite ? (
-                    <span className="ml-auto flex flex-wrap items-center gap-2">
-                      <DefinitionRowActions
-                        definition={d}
-                        onEdit={() => setEditing({ mode: "edit", definition: d })}
-                      />
+                /* Same two-column row as the Targets tab: data cell, fixed
+                   actions column. On desktop the cell is name group, state
+                   pill, then the pair in the one flexible track; on a phone
+                   each of the three is a line of its own, so the pair (the
+                   definition's data) is never cut down to make room for the
+                   pill. */
+                <li key={d.id} className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-x-3 gap-y-1 py-3 text-sm">
+                  <div className="grid min-w-0 grid-cols-1 items-center gap-x-3 gap-y-1 sm:grid-cols-[auto_auto_minmax(0,1fr)]">
+                    <span className="flex min-w-0 items-center gap-2">
+                      <span className="min-w-0 truncate font-medium">{d.name}</span>
+                      {/* checkType and sourceSelection are the row's own stored
+                          values, shown as they are stored — the check type as the
+                          same identity chip the card and the Targets tab's `kind`
+                          wear. The PILL is this page describing a boolean, so it
+                          translates. */}
+                      <Badge variant="neutral">{d.checkType}</Badge>
                     </span>
+                    <span className="flex items-center">
+                      <Badge variant={d.enabled ? "ok" : "unknown"} dot>
+                        {d.enabled ? t("definitions.enabled") : t("definitions.disabled")}
+                      </Badge>
+                    </span>
+                    {/* The src→dst pair is the definition's data — the data face,
+                        not a muted caption (M4 iron rule). */}
+                    <span className="mono-data min-w-0 truncate">
+                      {d.sourceSelection} → {destinationLabel(d, targets, t)}
+                    </span>
+                  </div>
+                  {canWrite ? (
+                    <DefinitionRowActions
+                      definition={d}
+                      onEdit={() => setEditing({ mode: "edit", definition: d })}
+                    />
                   ) : null}
                 </li>
               ))}
@@ -1577,15 +1639,17 @@ function ScheduleForm({
 
   return (
     <Card asChild className="p-6">
-      <form onSubmit={handleSubmit} className="flex max-w-2xl flex-col gap-4">
-        <h3 className="type-section">
+      {/* Full-width card, reading-width fields — the same split TargetForm makes. */}
+      <form onSubmit={handleSubmit} className="flex flex-col gap-4">
+        <h2 className="type-section">
           {initial
             ? t("schedules.form.edit", {
                 cadence: cadence(initial, locale, t),
                 name: definitions.find((d) => d.id === initial.definitionId)?.name ?? initial.definitionId,
               })
             : t("schedules.form.create")}
-        </h3>
+        </h2>
+        <div className="flex max-w-2xl flex-col gap-4">
         <div className="grid gap-4 sm:grid-cols-2">
           {/* Which definition a schedule fires is not a cadence edit; changing
               it would silently move the row to another check. Editing keeps the
@@ -1707,6 +1771,7 @@ function ScheduleForm({
             {t("cancel")}
           </Button>
         </div>
+        </div>
       </form>
     </Card>
   );
@@ -1754,7 +1819,7 @@ function ScheduleRowActions({
 
   if (confirming) {
     return (
-      <span className="flex flex-wrap items-center gap-2">
+      <span className={ROW_ACTIONS_CLASS}>
         {/* Spoken as well as drawn — the row swaps its controls under the reader. */}
         <span role="status" className="sr-only">
           {t("schedules.row.confirmDelete", { name: label })}
@@ -1762,13 +1827,13 @@ function ScheduleRowActions({
         <Button
           ref={confirmRef}
           size="sm"
-          variant="outline"
+          variant="destructive"
           loading={busy}
           {...guard}
           aria-label={t("schedules.row.confirmDelete", { name: label })}
           onClick={() => run(() => deleteSchedule(schedule.id), t("schedules.row.deleteFailed"))}
         >
-          <RowActionLabel text={t("schedules.row.confirmDelete", { name: label })} />
+          <RowActionLabel text={t("schedules.row.confirmDelete", { name: label })} verb={t("action.confirmDelete")} />
         </Button>
         <Button size="sm" variant="ghost" onClick={reset}>
           {t("cancel")}
@@ -1777,65 +1842,68 @@ function ScheduleRowActions({
     );
   }
   return (
-    <span className="flex flex-wrap items-center gap-2">
-      {/* One key per direction rather than a translated verb glued to a name:
-          «Включить X» and «Выключить X» are two whole sentences, and the
-          English `{verb} {label}` shape cannot produce either without the
-          interpolation being in the wrong half. */}
-      <Button
-        size="sm"
-        variant="ghost"
-        loading={busy}
-        {...guard}
-        onClick={() =>
-          run(
-            () => updateSchedule(schedule.id, scheduleRequestFrom(schedule, !schedule.enabled)),
-            t("schedules.row.updateFailed"),
-          )
-        }
-        aria-label={
-          schedule.enabled
-            ? t("schedules.row.disable", { name: label })
-            : t("schedules.row.enable", { name: label })
-        }
-      >
-        <RowActionLabel
-          text={
+    <>
+      <span className={ROW_ACTIONS_CLASS}>
+        {/* One key per direction rather than a translated verb glued to a name:
+            «Включить X» and «Выключить X» are two whole sentences, and the
+            English `{verb} {label}` shape cannot produce either without the
+            interpolation being in the wrong half. */}
+        <Button
+          size="sm"
+          variant="ghost"
+          loading={busy}
+          {...guard}
+          onClick={() =>
+            run(
+              () => updateSchedule(schedule.id, scheduleRequestFrom(schedule, !schedule.enabled)),
+              t("schedules.row.updateFailed"),
+            )
+          }
+          aria-label={
             schedule.enabled
               ? t("schedules.row.disable", { name: label })
               : t("schedules.row.enable", { name: label })
           }
-        />
-      </Button>
-      <Button
-        size="sm"
-        variant="ghost"
-        loading={busy}
-        {...guard}
-        aria-label={t("schedules.row.edit", { name: label })}
-        onClick={onEdit}
-      >
-        <RowActionLabel text={t("schedules.row.edit", { name: label })} />
-      </Button>
-      {/* loading={busy} for the same reason the toggle carries it: while one of
-          this row's writes is in flight, none of the others may start. */}
-      <Button
-        ref={triggerRef}
-        size="sm"
-        variant="ghost"
-        loading={busy}
-        {...guard}
-        aria-label={t("schedules.row.delete", { name: label })}
-        onClick={ask}
-      >
-        <RowActionLabel text={t("schedules.row.delete", { name: label })} />
-      </Button>
+        >
+          <RowActionLabel
+            text={
+              schedule.enabled
+                ? t("schedules.row.disable", { name: label })
+                : t("schedules.row.enable", { name: label })
+            }
+            verb={schedule.enabled ? t("action.disable") : t("action.enable")}
+          />
+        </Button>
+        <Button
+          size="sm"
+          variant="ghost"
+          loading={busy}
+          {...guard}
+          aria-label={t("schedules.row.edit", { name: label })}
+          onClick={onEdit}
+        >
+          <RowActionLabel text={t("schedules.row.edit", { name: label })} verb={t("action.edit")} />
+        </Button>
+        {/* loading={busy} for the same reason the toggle carries it: while one of
+            this row's writes is in flight, none of the others may start. */}
+        <Button
+          ref={triggerRef}
+          size="sm"
+          variant="ghost"
+          loading={busy}
+          {...guard}
+          aria-label={t("schedules.row.delete", { name: label })}
+          onClick={ask}
+        >
+          <RowActionLabel text={t("schedules.row.delete", { name: label })} verb={t("action.delete")} />
+        </Button>
+      </span>
       {error ? (
-        <span role="alert" className="text-xs text-health-bad">
+        <span role="alert" className="col-span-2 text-xs text-health-bad">
           {error}
         </span>
       ) : null}
-    </span>
+    </>
   );
 }
 
@@ -1959,38 +2027,53 @@ function SchedulesTab({ canRead, canWrite }: { canRead: boolean; canWrite: boole
                    an operator loses the only record of why. */
                 const failing = s.lastError !== "";
                 return (
-                  <li key={s.id} className="flex flex-wrap items-center gap-3 py-3 text-sm">
-                    <span className="font-medium">{label}</span>
-                    {/* s.kind is the stored value (once/interval/continuous)
-                        and stays; the cadence next to it is the sentence this
-                        page builds out of it, so that one translates. */}
-                    <Badge variant="neutral">{s.kind}</Badge>
-                    <span className="text-xs text-muted-foreground">{cadenceText}</span>
-                    {/* Paused is its own state, not a shade of "enabled": the
-                        row IS on, and it still fires nothing, because the
-                        definition behind it is off. Saying "enabled" here was
-                        the console contradicting what the scheduler does. */}
-                    <Badge
-                      variant={paused ? "unknown" : !s.enabled ? "neutral" : failing ? "warn" : "ok"}
-                      dot
-                      title={paused ? t("schedules.paused.title", { name: label }) : undefined}
-                    >
-                      {paused
-                        ? t("schedules.paused")
-                        : s.enabled
-                          ? t("schedules.enabled")
-                          : t("schedules.disabled")}
-                    </Badge>
-                    {/* nextFireAt is null for a continuous schedule (the loop
-                        never fires one) and for a retired "once" — fmtTime
-                        renders that as an em dash rather than inventing a
-                        time. */}
-                    <span className="ml-auto text-xs text-muted-foreground">
-                      {t("schedules.row.next", { at: fmtTime(s.nextFireAt, locale) })}
-                    </span>
-                    <span className="text-xs text-muted-foreground">
-                      {t("schedules.row.last", { at: fmtTime(s.lastFiredAt, locale) })}
-                    </span>
+                  /* The row grid the other two tabs use, with a second, muted
+                     line for next/last under the name. Below `sm` the grid is
+                     one column: name group, then state and cadence, then the
+                     stamps, each a single line that truncates at its end
+                     rather than wrapping; the row is as tall as its three
+                     stacked buttons either way. */
+                  <li key={s.id} className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-x-3 gap-y-1 py-3 text-sm">
+                    <div className="grid min-w-0 grid-cols-1 items-center gap-x-3 gap-y-1 sm:grid-cols-[auto_minmax(0,1fr)]">
+                      <span className="flex min-w-0 items-center gap-2">
+                        <span className="min-w-0 truncate font-medium">{label}</span>
+                        {/* s.kind is the stored value (once/interval/continuous)
+                            and stays; the cadence next to it is the sentence this
+                            page builds out of it, so that one translates. */}
+                        <Badge variant="neutral">{s.kind}</Badge>
+                      </span>
+                      <span className="flex min-w-0 items-center gap-2">
+                        {/* Paused is its own state, not a shade of "enabled": the
+                            row IS on, and it still fires nothing, because the
+                            definition behind it is off. Saying "enabled" here was
+                            the console contradicting what the scheduler does. */}
+                        <Badge
+                          variant={paused ? "unknown" : !s.enabled ? "unknown" : failing ? "warn" : "ok"}
+                          dot
+                          title={paused ? t("schedules.paused.title", { name: label }) : undefined}
+                        >
+                          {paused
+                            ? t("schedules.paused")
+                            : s.enabled
+                              ? t("schedules.enabled")
+                              : t("schedules.disabled")}
+                        </Badge>
+                        {/* A continuous schedule's cadence sentence is the same
+                            word as its kind chip, so the chip alone says it. */}
+                        {s.kind === "continuous" ? null : (
+                          <span className="type-meta nums min-w-0 truncate">{cadenceText}</span>
+                        )}
+                      </span>
+                      {/* nextFireAt is null for a continuous schedule (the loop
+                          never fires one) and for a retired "once" — fmtTime
+                          renders that as an em dash rather than inventing a
+                          time. */}
+                      <span className="type-meta nums min-w-0 truncate sm:col-span-2">
+                        <span>{t("schedules.row.next", { at: fmtTime(s.nextFireAt, locale) })}</span>
+                        {" · "}
+                        <span>{t("schedules.row.last", { at: fmtTime(s.lastFiredAt, locale) })}</span>
+                      </span>
+                    </div>
                     {canWrite ? (
                       <ScheduleRowActions
                         schedule={s}
@@ -1999,14 +2082,14 @@ function SchedulesTab({ canRead, canWrite }: { canRead: boolean; canWrite: boole
                       />
                     ) : null}
                     {failing ? (
-                      /* Full width (basis-full) under the row rather than
+                      /* Full width (col-span-2) under the row rather than
                          inline: the server's own message is a sentence, and
                          squeezing it between two pills would truncate the
                          actionable half. Verbatim — this console does not
                          paraphrase what the scheduler recorded. */
                       <p
                         data-testid="schedule-failure"
-                        className="basis-full text-xs leading-relaxed text-health-bad"
+                        className="col-span-2 text-xs leading-relaxed text-health-bad"
                         title={s.lastErrorAt ? t("schedules.row.recorded", { at: fmtTime(s.lastErrorAt, locale) }) : undefined}
                       >
                         {t("schedules.row.failing", { message: s.lastError })}

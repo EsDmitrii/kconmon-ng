@@ -49,6 +49,14 @@ const en = {
   "loading": "Loading…",
   "permission.requires": "Requires the {permission} permission",
   "cancel": "Cancel",
+  /* Row actions show the VERB alone; the full "{verb} {name}" sentence stays
+     in the button's aria-label and title (the *.row.* keys below), so three
+     Delete buttons in a list are still three different announcements. */
+  "action.edit": "Edit",
+  "action.delete": "Delete",
+  "action.enable": "Enable",
+  "action.disable": "Disable",
+  "action.confirmDelete": "Confirm delete",
 
   /* ── page-level degraded states ────────────────────────────────────────── */
   "gate.read":
@@ -80,7 +88,9 @@ const en = {
   "targets.form.kind": "Kind",
   "targets.form.address": "Address",
   "targets.form.labels": "Labels",
-  /* Only the connective is ours; both sides of it are sample addresses. */
+  /* The host placeholder holds two examples that fit a phone-wide field; the
+     port form lives here so the sample "10.0.0.1:8443" is still shown. */
+  "targets.form.addressHint.host": "An IP or a resolvable name, with an optional port: 10.0.0.1:8443.",
   "targets.form.save": "Save target",
   "targets.form.createButton": "Create target",
   /* The label parser's own sentence, moved here verbatim. {part} arrives
@@ -249,6 +259,11 @@ export const targetsDict: Dictionary<TargetsKey> = defineDict(en, {
   "loading": "Загрузка…",
   "permission.requires": "Нужно право {permission}",
   "cancel": "Отмена",
+  "action.edit": "Изменить",
+  "action.delete": "Удалить",
+  "action.enable": "Включить",
+  "action.disable": "Выключить",
+  "action.confirmDelete": "Подтвердить удаление",
 
   "gate.read":
     "Внешние цели, их определения проверок и расписания относятся к конфигурации, а не к телеметрии. Читать их " +
@@ -274,6 +289,7 @@ export const targetsDict: Dictionary<TargetsKey> = defineDict(en, {
   "targets.form.kind": "Вид",
   "targets.form.address": "Адрес",
   "targets.form.labels": "Метки",
+  "targets.form.addressHint.host": "IP или разрешимое имя, при желании с портом: 10.0.0.1:8443.",
   "targets.form.save": "Сохранить цель",
   "targets.form.createButton": "Создать цель",
   "targets.form.labelsSyntax": "метки задаются парами \"ключ=значение\" через запятую; получено {part}",

@@ -29,6 +29,11 @@ import { capTooltipRows, type AxisTooltipRow } from "./chart-tooltip";
 /** Who published — the hovered chart skips its own echo. */
 export type CursorSource = string;
 
+/** The Investigate timeline's name in the group. Exported because the page's
+ *  cursor readout has to tell a row's exact instant from a chart's pixel one
+ *  (see readoutInstant), and a chart's source is a React id it cannot predict. */
+export const TIMELINE_CURSOR_SOURCE = "investigation-timeline";
+
 export interface CursorGroup {
   /** Publish an instant (epoch ms) or null for "nothing hovered". */
   set(at: number | null, source: CursorSource): void;
@@ -110,6 +115,45 @@ export function useChartCursor(): CursorGroup | null {
 export function isTimeSeriesOption(option: echarts.EChartsOption): boolean {
   const axis = Array.isArray(option.xAxis) ? option.xAxis[0] : option.xAxis;
   return (axis as { type?: string } | undefined)?.type === "time";
+}
+
+/* ── what a readout in words prints ─────────────────────────────────────── */
+
+/**
+ * readoutInstant picks the instant a readout in words (Investigate's "Cursor
+ * 23:25:30") prints, out of the two things a page knows about the pointer.
+ *
+ * The shared cursor carries the RAW instant: a pixel converted through the
+ * hovered chart's axis, which essentially never lands on a sample. The chart's
+ * own axis pointer snaps to the sample its tooltip is describing, and a readout
+ * saying 23:25:35 beside a tooltip saying 23:25:30 leaves the reader wondering
+ * which one is the reading. So while a CHART is the source, the snapped instant
+ * wins whenever there is one. A timeline row publishes an exact instant and
+ * owns no axis pointer, so it prints as it is; and nothing hovered is nothing
+ * to print, whatever the pointer last snapped to.
+ */
+export function readoutInstant(cursor: number | null, fromChart: boolean, snapped: number | null): number | null {
+  if (cursor === null || !Number.isFinite(cursor)) return null;
+  if (fromChart && snapped !== null && Number.isFinite(snapped)) return snapped;
+  return cursor;
+}
+
+/**
+ * nearestInstant is the sample instant a chart's own axis pointer would snap
+ * to: across every series of the panel, the reading nearest the raw instant,
+ * under nearestSample's one-step rule below. Null when no series has a sample
+ * that close — a hole, or a chart with nothing on it — in which case the
+ * readout prints the raw instant and the tooltip is not describing a sample
+ * either.
+ */
+export function nearestInstant(model: readonly ReadoutSeries[], at: number): number | null {
+  let best: number | null = null;
+  for (const series of model) {
+    const sample = nearestSample(series, at);
+    if (sample === null) continue;
+    if (best === null || Math.abs(sample.t - at) < Math.abs(best - at)) best = sample.t;
+  }
+  return best;
 }
 
 /* ── what a neighbour marks at the shared instant ───────────────────────── */

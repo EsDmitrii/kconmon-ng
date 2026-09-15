@@ -77,9 +77,14 @@ const en = {
     "object; the status on each row is the reconciler's view of whether the cluster agrees, as of the instant next " +
     "to it.",
   "rules.empty": "No rules yet. Prometheus is evaluating nothing on this console's behalf.",
+  /* The second line of the empty slate: what the list will hold once it holds
+     anything. The first line is the sentence above, unchanged. */
+  "rules.empty.body": "Each rule you create appears here with its kind, severity and the reconciler's verdict on it.",
   "rules.unavailable": "Alert rules are unavailable",
   "rules.unknownLink": "No rule matches this link — it may have been deleted.",
   "rules.new": "New rule",
+  /* The ghost button beside a failed list read; it re-runs the same query. */
+  "error.retry": "Retry",
 
   /* The reconciler's verdict, as a word rather than as its wire value. */
   "sync.synced": "synced",
@@ -95,6 +100,15 @@ const en = {
   "row.edit": "Edit {name}",
   "row.delete": "Delete {name}",
   "row.confirmDelete": "Confirm delete {name}",
+  /* The VISIBLE half of each row action is the verb alone; the full sentence
+     above stays as the button's accessible name and title, so a row of four
+     actions reads as four words on screen and four distinct names to a screen
+     reader. */
+  "row.details.verb": "Details",
+  "row.sync.verb": "Sync",
+  "row.edit.verb": "Edit",
+  "row.delete.verb": "Delete",
+  "row.confirmDelete.verb": "Confirm delete",
   "row.renderedExpr": "Rendered expression",
   "row.forLine": "for {duration} · last applied {at}",
   "row.never": "never",
@@ -220,8 +234,14 @@ const en = {
     "PrometheusRule objects in this console's namespace that it does not own. Read-only: this console never writes " +
     "to somebody else's object. Importing COPIES a rule's alerting entries into console-managed rows.",
   "foreign.empty": "No foreign PrometheusRule objects in this namespace.",
+  "foreign.empty.body":
+    "Any PrometheusRule object in this namespace that this console does not own is listed here, with an Import beside it.",
+  /* The slate's action: nothing here creates a foreign object, so the next
+     step is the docs chapter that says where they come from. */
+  "foreign.empty.action": "Read about foreign rules",
   "foreign.unavailable": "Foreign rules are unavailable",
   "foreign.import": "Import {name}",
+  "foreign.import.verb": "Import",
   "foreign.importRefused": "The import was refused",
 
   /* ── maintenance windows ───────────────────────────────────────────────── */
@@ -238,6 +258,10 @@ const en = {
     "the charts cannot show because those are bounded to what the chart plots. Declaring a window still happens " +
     "next to the chart it explains, on {investigate} or {explore}; this list is for finding and removing one.",
   "maintenance.empty": "No maintenance windows have been declared.",
+  "maintenance.empty.body":
+    "Windows declared beside a chart on Incidents or Metrics are listed here, the ones still in the future included.",
+  /* A window is declared on a chart surface, so the slate's action goes there. */
+  "maintenance.empty.action": "Open Incidents",
   "maintenance.loadMore": "Load older windows",
   "maintenance.unavailable": "Maintenance windows are unavailable",
 
@@ -303,9 +327,11 @@ export const alertingDict: Dictionary<AlertingKey> = defineDict(en, {
     "PrometheusRule. Статус в строке показывает, как реконсилер видит согласие кластера, по состоянию на " +
     "указанный рядом момент.",
   "rules.empty": "Правил пока нет. Prometheus ничего не вычисляет по поручению этой консоли.",
+  "rules.empty.body": "Каждое созданное правило появится здесь с видом, важностью и вердиктом реконсилера.",
   "rules.unavailable": "Правила оповещений недоступны",
   "rules.unknownLink": "По этой ссылке правило не найдено. Возможно, его удалили.",
   "rules.new": "Новое правило",
+  "error.retry": "Повторить",
 
   "sync.synced": "синхронизировано",
   "sync.drift": "расхождение",
@@ -320,6 +346,11 @@ export const alertingDict: Dictionary<AlertingKey> = defineDict(en, {
   "row.edit": "Изменить {name}",
   "row.delete": "Удалить {name}",
   "row.confirmDelete": "Подтвердить удаление {name}",
+  "row.details.verb": "Подробности",
+  "row.sync.verb": "Синхронизировать",
+  "row.edit.verb": "Изменить",
+  "row.delete.verb": "Удалить",
+  "row.confirmDelete.verb": "Подтвердить удаление",
   "row.renderedExpr": "Сформированное выражение",
   "row.forLine": "for {duration} · применено {at}",
   "row.never": "никогда",
@@ -428,8 +459,13 @@ export const alertingDict: Dictionary<AlertingKey> = defineDict(en, {
     "Объекты PrometheusRule в пространстве имён консоли, которыми она не владеет. Только чтение: в чужой объект " +
     "консоль не пишет никогда. Импорт КОПИРУЕТ записи оповещений правила в строки под управлением консоли.",
   "foreign.empty": "Чужих объектов PrometheusRule в этом пространстве имён нет.",
+  "foreign.empty.body":
+    "Любой объект PrometheusRule в этом пространстве имён, которым консоль не владеет, появится здесь с кнопкой " +
+    "импорта рядом.",
+  "foreign.empty.action": "О чужих правилах в документации",
   "foreign.unavailable": "Чужие правила недоступны",
   "foreign.import": "Импортировать {name}",
+  "foreign.import.verb": "Импортировать",
   "foreign.importRefused": "Импорт отклонён",
 
   "maintenance.heading": "Окна работ",
@@ -440,6 +476,9 @@ export const alertingDict: Dictionary<AlertingKey> = defineDict(en, {
     "их не покажут: полоса ограничена тем отрезком, который рисует график. Объявляют окно по-прежнему там, где оно " +
     "что-то объясняет, на {investigate} или {explore}. Этот список нужен для другого: найти окно и убрать.",
   "maintenance.empty": "Окна работ ещё не объявлялись.",
+  "maintenance.empty.body":
+    "Окна, объявленные рядом с графиком на Инцидентах или Метриках, появятся здесь, включая те, что ещё впереди.",
+  "maintenance.empty.action": "Открыть Инциденты",
   "maintenance.loadMore": "Показать более старые окна",
   "maintenance.unavailable": "Окна работ недоступны",
 

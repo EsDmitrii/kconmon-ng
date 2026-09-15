@@ -83,6 +83,38 @@ describe("mergeFeedRows", () => {
   it("returns annotations alone when there are no events", () => {
     expect(mergeFeedRows([], [ann()]).map((r) => r.kind)).toEqual(["annotation"]);
   });
+
+  /* A note has no severity and no type, so narrowing on either leaves it out; a scope query keeps
+     the notes on that scope and drops the global ones. Without this a filter that matched no event
+     still drew a lone note under "Showing 0 of N" instead of the filtered slate. */
+  describe("answers to the filter bar", () => {
+    const all = { type: "all", severity: "all", scope: "" } as const;
+
+    it("keeps every note under the default filters", () => {
+      expect(mergeFeedRows([], [ann()], all)).toHaveLength(1);
+    });
+
+    it("drops notes when a severity is picked", () => {
+      expect(mergeFeedRows([], [ann()], { ...all, severity: "error" })).toHaveLength(0);
+    });
+
+    it("drops notes when a type is picked", () => {
+      expect(mergeFeedRows([], [ann()], { ...all, type: "mtr_completed" })).toHaveLength(0);
+    });
+
+    it("keeps a note whose scope contains the query, normalised like the events' own scope", () => {
+      const rows = mergeFeedRows([], [ann({ scope: "node-a→node-b" })], { ...all, scope: "node-a -> node-b" });
+      expect(rows.map((r) => r.kind)).toEqual(["annotation"]);
+    });
+
+    it("drops a global note once a scope is being searched for", () => {
+      expect(mergeFeedRows([], [ann({ scope: "" })], { ...all, scope: "node-a" })).toHaveLength(0);
+    });
+
+    it("drops a note on another scope", () => {
+      expect(mergeFeedRows([], [ann({ scope: "node-c→node-d" })], { ...all, scope: "node-a" })).toHaveLength(0);
+    });
+  });
 });
 
 interface RenderOpts {

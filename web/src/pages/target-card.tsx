@@ -17,7 +17,7 @@ import { useAuth } from "@/hooks/use-auth";
 import { useDatabaseAvailable } from "@/hooks/use-capabilities";
 import { ApiError, getConfig, getRun, getRuns, getTarget, listChecks, listSchedules, promqlQuery, promqlQueryRange } from "@/lib/api";
 import { toSeriesOption, type CuratedChart } from "@/lib/curated-metrics";
-import { localeTag, stampFull, useLocale, useT, type Locale, type Translate } from "@/lib/i18n";
+import { stampFull, useLocale, useT, type Locale, type Translate } from "@/lib/i18n";
 import { cardsDict, type CardsKey } from "@/lib/i18n/dict/cards";
 import type { InvestigationScope } from "@/lib/investigation-sources";
 import { withAtParam, useTimeContext } from "@/lib/timemachine";
@@ -62,11 +62,16 @@ export function targetDurationQuery(name: string): string {
 /**
  * targetHealthQuery is the header's health%; `_external_results_total` counts only probes that
  * REACHED the network.
+ *
+ * The numerator is wrapped in `or vector(0)`: a target that is probed and never succeeds has NO
+ * success series at all, and an empty numerator made the division empty too, so a target failing
+ * 100% of its probes read "No data" instead of 0%. vector(0) only pairs with a denominator that
+ * exists, so an unprobed target (empty denominator) still comes back empty and stays "No data".
  */
 export function targetHealthQuery(name: string): string {
   const sel = `target="${escapeLabelValue(name)}"`;
   return (
-    `sum(rate(kconmon_ng_external_results_total{${sel},result="success"}[5m])) / ` +
+    `(sum(rate(kconmon_ng_external_results_total{${sel},result="success"}[5m])) or vector(0)) / ` +
     `sum(rate(kconmon_ng_external_results_total{${sel}}[5m]))`
   );
 }
@@ -96,8 +101,9 @@ interface VectorEntry {
 }
 
 /**
- * healthFromVector turns targetHealthQuery's instant vector into the header's percentage and tier;
- * the three no-answer shapes — an empty vector (nothing has probed this target).
+ * healthFromVector turns targetHealthQuery's instant vector into the header's percentage and tier.
+ * An empty vector means nothing has probed this target (no data); a "0" is a real answer, the
+ * probed-and-always-failing target, and lands at 0.0% in the bad tier.
  */
 export function healthFromVector(res: PromResult | undefined): { percent: number | null; tier: Tier } {
   const none = { percent: null, tier: "unknown" as const };
@@ -240,18 +246,20 @@ function DefinitionRow({ definition, schedules }: { definition: CheckDefinition;
   const { locale } = useLocale();
   return (
     <li className="flex flex-col gap-2 py-3 text-sm">
-      <div className="flex flex-wrap items-center gap-3">
-        <span className="font-medium">{definition.name}</span>
+      {/* One line that never wraps: the name truncates, the chips keep their
+          width. */}
+      <div className="flex min-w-0 items-center gap-2">
+        <span className="min-w-0 truncate font-medium">{definition.name}</span>
         {/* checkType and sourceSelection are stored values, exactly as on
             pages/targets.tsx; only the pill describing `enabled` translates. */}
         <Badge variant="neutral">{definition.checkType}</Badge>
-        <span className="text-xs text-muted-foreground">{definition.sourceSelection}</span>
+        <span className="type-meta">{definition.sourceSelection}</span>
         <Badge variant={definition.enabled ? "ok" : "unknown"} dot>
           {definition.enabled ? t("schedule.enabled") : t("schedule.disabled")}
         </Badge>
       </div>
       {schedules.length === 0 ? (
-        <p className="text-xs text-muted-foreground">{t("target.checks.noSchedule")}</p>
+        <p className="type-meta">{t("target.checks.noSchedule")}</p>
       ) : (
         <ul className="flex flex-col gap-1">
           {schedules.map((s) => {
@@ -264,22 +272,31 @@ function DefinitionRow({ definition, schedules }: { definition: CheckDefinition;
             // switching the cadence off afterwards does not unmake it.
             const failing = s.lastError !== "";
             return (
-              <li key={s.id} className="flex flex-wrap items-center gap-3 text-xs text-muted-foreground">
-                <span className="nums">{cadence(s, locale, t)}</span>
-                <Badge
-                  variant={paused ? "unknown" : !s.enabled ? "unknown" : failing ? "warn" : "ok"}
-                  dot
-                  title={paused ? t("schedule.paused.title", { name: definition.name }) : undefined}
-                >
-                  {paused ? t("schedule.paused") : s.enabled ? t("schedule.enabled") : t("schedule.disabled")}
-                </Badge>
-                <span className="nums">{t("schedule.next", { at: fmtTime(s.nextFireAt, locale) })}</span>
-                <span className="nums">{t("schedule.last", { at: fmtTime(s.lastFiredAt, locale) })}</span>
+              /* Cadence and state, then next/last: one line on desktop, two
+                 stacked lines on a phone, the stamps truncating at their end
+                 instead of wrapping. The cadence stays even for a continuous
+                 schedule — here it is the row's only name for itself. */
+              <li key={s.id} className="grid grid-cols-1 items-center gap-x-3 gap-y-0.5 sm:grid-cols-[auto_minmax(0,1fr)]">
+                <span className="flex min-w-0 items-center gap-2">
+                  <span className="type-meta nums min-w-0 truncate">{cadence(s, locale, t)}</span>
+                  <Badge
+                    variant={paused ? "unknown" : !s.enabled ? "unknown" : failing ? "warn" : "ok"}
+                    dot
+                    title={paused ? t("schedule.paused.title", { name: definition.name }) : undefined}
+                  >
+                    {paused ? t("schedule.paused") : s.enabled ? t("schedule.enabled") : t("schedule.disabled")}
+                  </Badge>
+                </span>
+                <span className="type-meta nums min-w-0 truncate">
+                  <span>{t("schedule.next", { at: fmtTime(s.nextFireAt, locale) })}</span>
+                  {" · "}
+                  <span>{t("schedule.last", { at: fmtTime(s.lastFiredAt, locale) })}</span>
+                </span>
                 {failing ? (
                   /* The scheduler's own message follows the colon, verbatim. */
                   <p
                     data-testid="schedule-failure"
-                    className="basis-full text-xs leading-relaxed text-health-bad"
+                    className="text-xs leading-relaxed text-health-bad sm:col-span-2"
                     title={s.lastErrorAt ? t("schedule.recorded", { at: fmtTime(s.lastErrorAt, locale) }) : undefined}
                   >
                     {t("schedule.failing", { message: s.lastError })}
@@ -307,7 +324,7 @@ function ChecksTab({ targetId, canRead }: { targetId: string; canRead: boolean }
   return (
     <Card asChild className="p-6">
       <section>
-        <h3 className="text-sm font-semibold">{t("target.checks.heading")}</h3>
+        <h2 className="text-sm font-semibold">{t("target.checks.heading")}</h2>
         {at ? (
           <p data-testid="checks-tm-notice" className="mt-1 text-xs leading-relaxed text-muted-foreground">
             {t("target.checks.tmNotice")}
@@ -394,14 +411,35 @@ function HistoryTab({ targetName, promConfigured, promResolved }: { targetName: 
   return (
     <Card asChild className="p-5">
       <section>
-        <h3 className="text-sm font-semibold">
+        <h2 className="text-sm font-semibold">
           {chart.title}{" "}
           {/* Inside a translated sentence, so the stamp takes that sentence's
-              language — lib/i18n's localeTag. */}
-          {at
-            ? t("target.history.hourEnding", { at: at.toLocaleString(localeTag(locale)) })
-            : t("target.history.lastHour")}
-        </h3>
+              language and the house clock — lib/i18n's stampFull. */}
+          {at ? t("target.history.hourEnding", { at: stampFull(at, locale) }) : t("target.history.lastHour")}
+        </h2>
+
+        {/* ONE header row for both overlay bars, the shape pages/explore.tsx
+            established: counts left, create buttons right, forms and lists
+            dropping to full-width rows below. ownScope: a note filed under
+            this very target needs no chip saying so; a global one keeps its. */}
+        <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-2">
+          <AnnotationBar
+            inline
+            scope={targetName}
+            ownScope={targetName}
+            annotations={annotations}
+            error={annotationsError}
+            onChanged={() => void refresh()}
+          />
+          <MaintenanceBar
+            inline
+            scope={targetName}
+            windows={windows}
+            error={maintenanceError}
+            onChanged={() => void refreshMaintenance()}
+          />
+          <span aria-hidden="true" className="flex-1" />
+        </div>
 
         {promResolved && !promConfigured ? (
           <p role="status" className="mt-3 text-xs leading-relaxed text-muted-foreground">
@@ -435,18 +473,6 @@ function HistoryTab({ targetName, promConfigured, promResolved }: { targetName: 
             className="mt-3 h-64 w-full"
           />
         ) : null}
-        <AnnotationBar
-          scope={targetName}
-          annotations={annotations}
-          error={annotationsError}
-          onChanged={() => void refresh()}
-        />
-        <MaintenanceBar
-          scope={targetName}
-          windows={windows}
-          error={maintenanceError}
-          onChanged={() => void refreshMaintenance()}
-        />
       </section>
     </Card>
   );
@@ -506,7 +532,7 @@ function RunsTab({ targetName }: { targetName: string }) {
     <Card asChild className="overflow-hidden p-0">
       <section>
         <div className="border-b border-border px-4 py-3">
-          <h3 className="text-sm font-semibold">{t("target.runs.heading")}</h3>
+          <h2 className="text-sm font-semibold">{t("target.runs.heading")}</h2>
           <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
             {t("target.runs.scanNote", { limit: RUN_SCAN_LIMIT })}
           </p>
@@ -721,7 +747,7 @@ export function TargetCardPage() {
       timeMachine
       title={target.name}
       description={
-        at ? t("target.descriptionAt", { at: at.toLocaleString(localeTag(locale)) }) : t("target.description")
+        at ? t("target.descriptionAt", { at: stampFull(at, locale) }) : t("target.description")
       }
       actions={
         <>

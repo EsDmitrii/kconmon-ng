@@ -57,6 +57,12 @@ const en = {
   "scope.headline.zonePair": "zone {a} {sep} zone {b}",
   "scope.headline.cluster": "the whole cluster",
   "scope.headline.empty": "(nothing selected)",
+  /* The wide scopes ask every store-backed source UNFILTERED (scopeFilterValue
+     is "" for both), so the header says so before the reader trusts a row to
+     be about the zone pair they chose. */
+  "scope.wideNote":
+    "Events, audit rows, maintenance windows and notes are cluster-wide for this scope kind: nothing on this " +
+    "page narrows them to it.",
 
   /* ── the entry form ────────────────────────────────────────────────────── */
   "form.aria": "Investigation scope",
@@ -261,6 +267,12 @@ const en = {
     "no time filter, so a very busy console can push older in-range rows off that page. They are NOT narrowed to " +
     "this scope either — the audit log is cluster-wide and has no scope filter, so these rows are every subject's " +
     "requests, not this pair's.",
+  /* The fold is a RENDERING of the rows, not a filter on them: every folded
+     call is still counted above and still in the export. The reader who wants
+     the calls back gets them one click away, on the folded row itself. */
+  "source.auditFold":
+    "Consecutive read-only API calls (GET, and the console's own PromQL queries) are folded into one row each; " +
+    "the calls are still counted and exported, and each folded row opens on request.",
   "source.annotations": "Annotations need annotations:read — no note was requested.",
   "source.mtr": "Path changes need mtr:read — no MTR snapshot was requested.",
   "source.mtrScope":
@@ -359,6 +371,15 @@ const en = {
   "timeline.entries.aria": "Timeline entries",
   "timeline.pin": "Pin: {title}",
   "timeline.unpin": "Unpin: {title}",
+  /* The folded run of read-only audit calls: one summary row with a verb-only
+     toggle whose whole sentence lives in aria-label and title. */
+  "timeline.fold.one": "{count} read-only API call",
+  "timeline.fold.few": "{count} read-only API calls",
+  "timeline.fold.many": "{count} read-only API calls",
+  "timeline.fold.show": "Show",
+  "timeline.fold.hide": "Hide",
+  "timeline.fold.show.aria": "Show {count} read-only API calls",
+  "timeline.fold.hide.aria": "Hide {count} read-only API calls",
 
   /* The pager's own words moved to dict/shared.ts with the control itself —
      ui/pager.tsx is one component with a mount on every list now. */
@@ -405,6 +426,9 @@ export const investigateDict: Dictionary<InvestigateKey> = defineDict(en, {
   "scope.headline.zonePair": "зона {a} {sep} зона {b}",
   "scope.headline.cluster": "весь кластер",
   "scope.headline.empty": "(ничего не выбрано)",
+  "scope.wideNote":
+    "События, строки аудита, окна работ и заметки для такого типа области берутся по всему кластеру: до " +
+    "выбранной области их здесь ничто не сужает.",
 
   "form.aria": "Область расследования",
   "form.sourceNode": "Узел-источник",
@@ -558,6 +582,10 @@ export const investigateDict: Dictionary<InvestigateKey> = defineDict(en, {
     "GET /api/v1/audit нет фильтра по времени. На нагруженной консоли строки постарше, которые в интервал " +
     "попадают, могут вытесниться с этой страницы. По области они тоже НЕ сужаются: журнал аудита общий на весь " +
     "кластер и фильтра по области у него нет, так что здесь запросы всех субъектов, а не только этой пары.",
+  "source.auditFold":
+    "Подряд идущие вызовы API только на чтение (GET и собственные PromQL-запросы консоли) свёрнуты в одну строку " +
+    "каждая серия; сами вызовы по-прежнему учтены в счётчике и попадают в выгрузку, а свёрнутая строка " +
+    "раскрывается по запросу.",
   "source.annotations": "Заметкам нужно право annotations:read. Ни одна не запрашивалась.",
   "source.mtr": "Сменам путей нужно право mtr:read. Ни один снимок MTR не запрашивался.",
   "source.mtrScope":
@@ -638,6 +666,13 @@ export const investigateDict: Dictionary<InvestigateKey> = defineDict(en, {
   "timeline.entries.aria": "Записи ленты",
   "timeline.pin": "Закрепить: {title}",
   "timeline.unpin": "Открепить: {title}",
+  "timeline.fold.one": "{count} вызов API только на чтение",
+  "timeline.fold.few": "{count} вызова API только на чтение",
+  "timeline.fold.many": "{count} вызовов API только на чтение",
+  "timeline.fold.show": "Показать",
+  "timeline.fold.hide": "Скрыть",
+  "timeline.fold.show.aria": "Показать вызовы API только на чтение: {count}",
+  "timeline.fold.hide.aria": "Скрыть вызовы API только на чтение: {count}",
 
   "kind.event": "событие",
   "kind.audit": "аудит",

@@ -46,6 +46,8 @@ const en = {
   "noDatabase": "Incidents are stored — set console.database.mode. Nothing was requested.",
 
   "empty": "No open incident names this object.",
+  /* The line under that title in the empty slate: what would fill the rail. */
+  "empty.body": "An incident filed against this object will show up here while it stays open.",
   /* The row badge. Every incident in this list is open by construction — the
      query asks for status=open — so it is a label, not a status readout. */
   "open": "Open",
@@ -63,5 +65,6 @@ export const investigateEntryDict: Dictionary<InvestigateEntryKey> = defineDict(
   "noDatabase": "Инциденты хранятся в базе, задайте console.database.mode. Запрос не отправлялся.",
 
   "empty": "Ни один открытый инцидент не называет этот объект.",
+  "empty.body": "Инцидент, заведённый на этот объект, будет виден здесь, пока открыт.",
   "open": "Открыт",
 });

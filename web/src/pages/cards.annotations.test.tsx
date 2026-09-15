@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ThemeProvider } from "@/components/theme-provider";
 import { resetWsClient } from "@/hooks/use-ws-topic";
@@ -187,6 +187,19 @@ describe("NodeCardPage annotations", () => {
     await screen.findByText("fleet note");
   });
 
+  it("drops the scope chip from a note filed under the node itself and keeps it on the fleet-wide one", async () => {
+    stubFetch({
+      byScope: { "node-a": [ann({ id: "n", scope: "node-a", text: "drained node-a" })], "": [ann({ id: "g", text: "fleet note" })] },
+    });
+    renderAt("/nodes/node-a", <NodeCardPage />);
+    const own = (await screen.findByText("drained node-a")).closest("li") as HTMLElement;
+    const fleet = (await screen.findByText("fleet note")).closest("li") as HTMLElement;
+    // The reader chose this node; a chip repeating it said nothing new. The scope stays on the row's title.
+    expect(within(own).queryByText("node-a")).toBeNull();
+    expect(own).toHaveAttribute("title", "node-a");
+    expect(within(fleet).getByText("global")).toBeInTheDocument();
+  });
+
   it("creates against the node's scope, fixed", async () => {
     const { createBodies } = stubFetch();
     renderAt("/nodes/node-a", <NodeCardPage />);
@@ -225,6 +238,22 @@ describe("PairCardPage annotations", () => {
     stubFetch({ byScope: { "node-a→node-b": [ann({ id: "p", scope: "node-a→node-b", text: "flap" })] } });
     renderAt("/pairs/node-a/node-b", <PairCardPage />);
     await waitFor(() => expect(screen.getByTestId("echart").getAttribute("data-annotations")).toBe("p"));
+  });
+
+  it("drops the scope chip from a note filed under the pair itself and keeps it on the fleet-wide one", async () => {
+    stubFetch({
+      byScope: {
+        "node-a→node-b": [ann({ id: "p", scope: "node-a→node-b", text: "flap" })],
+        "": [ann({ id: "g", text: "fleet note" })],
+      },
+    });
+    renderAt("/pairs/node-a/node-b", <PairCardPage />);
+    const own = (await screen.findByText("flap")).closest("li") as HTMLElement;
+    const fleet = (await screen.findByText("fleet note")).closest("li") as HTMLElement;
+    // The pair scope was the widest thing on the row and named the page the reader is on.
+    expect(within(own).queryByText("node-a→node-b")).toBeNull();
+    expect(own).toHaveAttribute("title", "node-a→node-b");
+    expect(within(fleet).getByText("global")).toBeInTheDocument();
   });
 
   it("creates against the pair scope, fixed", async () => {

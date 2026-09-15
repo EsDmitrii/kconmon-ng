@@ -28,6 +28,9 @@ function editorTheme(dark: boolean) {
         border: "none",
       },
       ".cm-activeLine": { backgroundColor: "hsl(var(--surface-2) / 0.5)" },
+      /* The band marks where typing lands; with the focus elsewhere it is a stripe across
+         a one-line query for no reason (audit frame console-idle). */
+      "&:not(.cm-focused) .cm-activeLine": { backgroundColor: "transparent" },
       ".cm-activeLineGutter": { backgroundColor: "transparent" },
       "&.cm-focused .cm-selectionBackground, .cm-selectionBackground, ::selection": {
         backgroundColor: "hsl(var(--primary) / 0.25)",

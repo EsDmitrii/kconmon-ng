@@ -44,6 +44,38 @@ export const POINTS_COL = "table.col.points";
 export const LAST_COL = "table.col.last";
 export const TIME_COL = "table.col.time";
 
+/**
+ * isNumericColumn tags the columns that hold FIGURES: this module's own value,
+ * point-count and last-value columns, and the stamp column under whichever name
+ * it stepped aside to. A label column is an identifier and stays left-aligned.
+ */
+export function isNumericColumn(column: string): boolean {
+  return column === VALUE_COL || column === POINTS_COL || column === LAST_COL || column.startsWith(TIME_COL);
+}
+
+/** isFigureColumn is the subset of the above that carries a SAMPLE value, the ones formatValue reads. */
+export function isFigureColumn(column: string): boolean {
+  return column === VALUE_COL || column === LAST_COL;
+}
+
+/**
+ * formatValue is how a sample value READS in a cell: six significant figures,
+ * trailing zeros trimmed, so `0.004947212522190138` becomes `0.00494721` and
+ * `1.00000` becomes `1`. An integer under 1e15 is printed whole — a count is a
+ * count. Anything that is not a finite number is left exactly as Prometheus
+ * sent it: its own `NaN`, `+Inf` and `-Inf` tokens, and a string result. The
+ * exact string belongs on the cell's title; the JSON tab stays raw.
+ */
+export function formatValue(raw: string): string {
+  if (raw.trim() === "") return raw;
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return raw;
+  if (Number.isInteger(n) && Math.abs(n) < 1e15) return String(n);
+  const [mantissa, exponent] = n.toPrecision(6).split("e");
+  const trimmed = mantissa.includes(".") ? mantissa.replace(/\.?0+$/, "") : mantissa;
+  return exponent === undefined ? trimmed : `${trimmed}e${exponent}`;
+}
+
 
 const EMPTY: PromTable = { columns: [], rows: [], at: null, kind: "instant" };
 

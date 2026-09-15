@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { Tooltip } from "./tooltip";
@@ -73,5 +74,40 @@ describe("Tooltip placement", () => {
     const right = window.innerWidth - 32;
     const bubble = open({ top: 400, left: right, width: 64, height: 48 });
     expect(Number.parseFloat(bubble.style.left)).toBeLessThanOrEqual(window.innerWidth - 8 - BUBBLE.width / 2);
+  });
+});
+
+/**
+ * The bubble landed ON the cell it described even with the arithmetic above
+ * right: the entrance keyframes animated `transform`, and with fill-mode
+ * `both` the end frame outlived the animation and overrode the inline
+ * translate for good. A -translate-x-1/2 utility then doubled the horizontal
+ * shift once the inline value survived. So: one inline transform, no
+ * translate utility, and keyframes that only touch `scale`.
+ */
+describe("Tooltip transform — one inline translate, nothing fighting it", () => {
+  it("centres and lifts with the inline transform alone when placed above", () => {
+    const bubble = open({ top: 400, left: 300, width: 64, height: 48 });
+    expect(bubble.style.transform).toBe("translate(-50%, -100%)");
+    expect(bubble.className).not.toMatch(/translate-x/);
+  });
+
+  it("keeps the inline transform, centred and unlifted, when flipped below", () => {
+    const bubble = open({ top: 10, left: 300, width: 64, height: 48 });
+    expect(bubble.style.transform).toBe("translate(-50%, 0)");
+    expect(bubble.className).not.toMatch(/translate-x/);
+  });
+
+  it("enters through keyframes that never set transform (index.css scale-in)", () => {
+    // Relative to the vitest root (web/): import.meta.url is not a file: URL under jsdom.
+    const css = readFileSync("src/index.css", "utf8");
+    const block = css.match(/@keyframes scale-in\s*\{([\s\S]*?)\n\}/);
+    expect(block).not.toBeNull();
+    expect(block![1]).not.toMatch(/transform\s*:/);
+    expect(block![1]).toMatch(/\bscale\s*:/);
+    expect(block![1]).toMatch(/opacity\s*:/);
+    // And the bubble still uses that entrance.
+    const bubble = open({ top: 400, left: 300, width: 64, height: 48 });
+    expect(bubble).toHaveClass("pop-enter");
   });
 });

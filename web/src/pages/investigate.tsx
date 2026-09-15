@@ -9,8 +9,10 @@ import { PageShell } from "@/components/page-shell";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
+import { TextLink } from "@/components/ui/text-link";
 import { DateTimePicker } from "@/components/ui/datetime-picker";
 import { Segmented } from "@/components/ui/segmented";
+import { Select } from "@/components/ui/select";
 import { useAuth } from "@/hooks/use-auth";
 import { useDatabaseAvailable } from "@/hooks/use-capabilities";
 import { useConfirmStep, useKeyedConfirmStep } from "@/hooks/use-confirm-step";
@@ -40,7 +42,7 @@ import {
   promqlQuery,
   promqlQueryRange,
 } from "@/lib/api";
-import { stampClock, stampFull, useLocale, useT, type Locale, type Translate } from "@/lib/i18n";
+import { stampClock, stampFull, stampShort, useLocale, useT, type Locale, type Translate } from "@/lib/i18n";
 /* The centre pane picks the plural forms of the counts it renders; countForm is
    here for the ONE count this page owns — how many of our own alerts the scope
    kept off the timeline, which is a source note and therefore the page's. */
@@ -56,6 +58,7 @@ import {
   mergeTimeline,
   rankCauses,
   thresholdCrossings,
+  type TimelineEntry,
 } from "@/lib/investigation";
 import {
   DEFAULT_RANGE_SECONDS,
@@ -103,7 +106,7 @@ import {
 } from "@/lib/investigation-sources";
 import { withAtParam, useTimeContext, useWriteGuard, useWritesDisabled } from "@/lib/timemachine";
 import type { Incident, IncidentStatus, K8sEvent, MaintenanceWindow, PathSnapshot, PinnedRef } from "@/lib/types";
-import { buildRunRequest, CONTROL_CLASS } from "@/pages/diagnostics";
+import { buildRunRequest } from "@/pages/diagnostics";
 
 /**
  * `?kind=&scope=&from= &to=` is what a card's "Investigate" action builds, what the browser's Back
@@ -320,6 +323,22 @@ const INPUT_CLASS =
 
 const TEXTAREA_CLASS =
   "w-full rounded-md bg-surface-2 px-2 py-1.5 text-sm text-foreground placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring";
+
+/**
+ * The incident notes box sizes itself to what is written, three lines at the
+ * least and NOTES_ROWS_MAX at the most, and past that it scrolls. field-sizing
+ * does the growing where the browser has it; the `rows` attribute is the
+ * fallback and the min/max heights are what cap both. The two heights are
+ * whole lines plus the box's own vertical padding (py-1.5 twice), so the last
+ * visible line is never a half line cut by the bottom edge.
+ */
+const NOTES_ROWS_MIN = 3;
+const NOTES_ROWS_MAX = 8;
+const NOTES_SIZING_CLASS = "[field-sizing:content] min-h-[calc(3lh_+_0.75rem)] max-h-[calc(8lh_+_0.75rem)] overflow-y-auto";
+
+function notesRows(text: string): number {
+  return Math.min(NOTES_ROWS_MAX, Math.max(NOTES_ROWS_MIN, text.split("\n").length));
+}
 
 /** fmtStamp is the incident strip's stamp, through lib/i18n's shared helper so
  *  the opened/resolved line, the save form's window and the bars below all draw
@@ -647,10 +666,10 @@ function IncidentStrip({
               <textarea
                 aria-label={t("incident.notes.aria")}
                 value={notes}
-                rows={3}
+                rows={notesRows(notes)}
                 maxLength={INCIDENT_NOTES_MAX}
                 onChange={(e) => setNotes(e.target.value)}
-                className={`${TEXTAREA_CLASS} mt-2`}
+                className={`${TEXTAREA_CLASS} ${NOTES_SIZING_CLASS} mt-2`}
               />
               <div className="mt-2 flex items-center gap-2">
                 <Button
@@ -691,7 +710,7 @@ function IncidentStrip({
  */
 function PinnedFindings({
   pinned,
-  presentKeys,
+  present,
   canWrite,
   writesDisabled,
   busy,
@@ -702,13 +721,15 @@ function PinnedFindings({
 }: {
   pinned: PinnedRef[];
   /**
-   * pinKey() of every timeline row currently in the window. A pin whose row is
-   * NOT in here was pinned from a window this page is no longer framing, and the
-   * page has nothing but the stored (kind, id) to show for it (QA scope 3,
-   * finding #10) — so it says so rather than letting "audit / 1757" stand as if
-   * it were a finding's name.
+   * Every timeline row currently in the window, by its pinKey(). A pin whose row
+   * IS here draws that row's stamp and title as its own text — the finding is
+   * the row, and the stored (kind, id) is only how it is addressed. A pin whose
+   * row is NOT here was pinned from a window this page is no longer framing,
+   * and the page has nothing but the stored (kind, id) to show for it (QA scope
+   * 3, finding #10) — so it says so rather than letting "audit / 1757" stand as
+   * if it were a finding's name.
    */
-  presentKeys: ReadonlySet<string>;
+  present: ReadonlyMap<string, TimelineEntry>;
   canWrite: boolean;
   writesDisabled: boolean;
   busy: boolean;
@@ -718,6 +739,7 @@ function PinnedFindings({
   onSave: () => void;
 }) {
   const t = useT(investigateDict);
+  const { locale } = useLocale();
   /* Which row is asking "are you sure?", by pinKey rather than by index — the
      list is re-keyed by every save, and an index would move the confirm onto a
      different finding under the operator's cursor. The hook is what carries
@@ -727,7 +749,7 @@ function PinnedFindings({
   return (
     <Card asChild className="p-5">
       <section aria-label={t("pinned.aria")}>
-        <h3 className="type-section">{t("pinned.title")}</h3>
+        <h2 className="type-section">{t("pinned.title")}</h2>
         {pinned.length === 0 ? (
           <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
             {t("pinned.empty.lead")} {canWrite ? t("pinned.empty.canWrite") : t("pinned.empty.gated")}{" "}
@@ -742,12 +764,31 @@ function PinnedFindings({
           </p>
         ) : (
           <ul className="mt-3 flex flex-col gap-2">
-            {pinned.map((p, i) => (
+            {pinned.map((p, i) => {
+              const entry = present.get(pinKey(p));
+              return (
               <li key={pinKey(p)} data-testid="pinned-finding" className="flex flex-wrap items-center gap-2 text-xs">
                 <Badge variant="neutral">{p.kind}</Badge>
-                <span className="mono-data max-w-[12rem] truncate text-muted-foreground" title={p.id}>
-                  {p.id}
-                </span>
+                {entry ? (
+                  <>
+                    {/* The row itself, as the reader saw it in the timeline: its
+                        stamp and its title. The stored id is demoted to the
+                        title attribute — it is how the pin is addressed, not
+                        what it says. */}
+                    <span className="mono-data shrink-0 text-muted-foreground">{stampShort(entry.at, locale)}</span>
+                    <span
+                      data-testid="pinned-finding-title"
+                      className="min-w-0 flex-1 basis-[12rem] truncate"
+                      title={`${p.kind} ${p.id}`}
+                    >
+                      {entry.title}
+                    </span>
+                  </>
+                ) : (
+                  <span className="mono-data max-w-[12rem] truncate text-muted-foreground" title={p.id}>
+                    {p.id}
+                  </span>
+                )}
                 {canWrite ? (
                   <>
                     <input
@@ -757,7 +798,7 @@ function PinnedFindings({
                       maxLength={PIN_NOTE_MAX}
                       placeholder={t("pinned.note.placeholder")}
                       onChange={(e) => onNote(i, e.target.value)}
-                      className={`${INPUT_CLASS} min-w-0 flex-1`}
+                      className={`${INPUT_CLASS} min-w-0 flex-1 basis-[14rem]`}
                     />
                     {/* Unpin DISCARDS the note (QA round 3, finding #22). The
                         API replaces `pinned` wholesale — there is no per-ref
@@ -813,13 +854,14 @@ function PinnedFindings({
                     "audit / 1757" were what somebody pinned it for. The
                     operator's own note, when there is one, is the actual answer
                     and is already on the row above this line. */}
-                {presentKeys.has(pinKey(p)) ? null : (
+                {entry ? null : (
                   <span data-testid="pin-out-of-window" className="basis-full type-meta">
                     {t("pinned.outOfWindow")}
                   </span>
                 )}
               </li>
-            ))}
+              );
+            })}
           </ul>
         )}
         {canWrite && pinned.length > 0 ? (
@@ -841,7 +883,7 @@ function PinnedFindings({
 }
 
 /**
- * Select is the scope pickers' one control, and it CARRIES A VALUE THE OPTIONS DO
+ * ScopeSelect is the scope pickers' one control, and it CARRIES A VALUE THE OPTIONS DO
  * NOT HAVE rather than dropping it (QA scope 4).
  *
  * A select whose `value` matches no option renders blank — and every reason to
@@ -856,7 +898,7 @@ function PinnedFindings({
  * the mark says the fleet has no such object today, which is itself a finding on
  * an investigation page. Choosing anything else drops it, exactly as it should.
  */
-function Select({
+function ScopeSelect({
   label,
   value,
   options,
@@ -879,14 +921,18 @@ function Select({
   return (
     <label className="flex flex-col gap-1 text-[13px]">
       <span className="text-muted-foreground">{label}</span>
-      <select
+      {/* The filter face: the picker stands in one row with two Segmented
+          tracks, and a bordered field beside two recessed tracks read as a
+          different kind of control. */}
+      <Select
+        variant="filter"
         aria-label={label}
         value={value}
         onChange={(e) => onChange(e.target.value)}
         /* max-w as well as min-w: a <select>'s intrinsic width is its WIDEST option, and a scope
            comes off the wire — the stand carries one at 250 characters. Without a cap the control
            measured ~1950px and `main` (overflow-auto) scrolled the whole page sideways. */
-        className={`${CONTROL_CLASS} min-w-[10rem] max-w-[20rem]`}
+        className="min-w-[10rem] max-w-[20rem]"
       >
         <option value="">—</option>
         {orphan ? (
@@ -899,7 +945,7 @@ function Select({
             {o}
           </option>
         ))}
-      </select>
+      </Select>
     </label>
   );
 }
@@ -1427,14 +1473,15 @@ export function InvestigatePage() {
     [entries, onset],
   );
 
-  /* Which pinned findings still have a ROW on screen. A pin outlives the window
-     it was made in — that is the point of pinning — and the pinned pane has to
-     say when the row behind one is not here to be read (finding #10). */
-  const presentPinKeys = useMemo(() => {
-    const out = new Set<string>();
+  /* Which pinned findings still have a ROW on screen, and which row. A pin
+     outlives the window it was made in — that is the point of pinning — so the
+     pinned pane draws the row's own stamp and title while it is here, and says
+     so when it is not (finding #10). */
+  const presentPins = useMemo(() => {
+    const out = new Map<string, TimelineEntry>();
     for (const entry of entries) {
       const ref = pinnedRefFor(entry);
-      if (ref !== null) out.add(pinKey(ref));
+      if (ref !== null) out.set(pinKey(ref), entry);
     }
     return out;
   }, [entries]);
@@ -1554,6 +1601,11 @@ export function InvestigatePage() {
       out.push({ id: "audit", text: t("source.audit") });
     } else {
       out.push({ id: "audit-window", text: t("source.auditWindow", { limit: AUDIT_SCAN_LIMIT }) });
+      /* The pane folds runs of read-only calls into one row each
+         (components/investigation-timeline.tsx's foldReadOnlyAudit); the
+         rows are still there, and the caption says so before a reader counts
+         ten rows against a header claiming four hundred. */
+      out.push({ id: "audit-fold", text: t("source.auditFold") });
     }
     if (!canAnnotations) {
       out.push({ id: "annotations", text: t("source.annotations") });
@@ -1851,20 +1903,40 @@ export function InvestigatePage() {
     void qc.invalidateQueries({ queryKey: ["maintenance"] });
   }, [qc]);
 
+  /* The wide scopes ask every store-backed source unfiltered; both the save
+     form and the header caption say so. */
+  const wide = scope.kind === "zone-pair" || scope.kind === "cluster";
+  /* The committed scope KIND, as the form names it: the Segmented above says
+     "Zone pair", so the badge under the title says "Zone pair" too, not the
+     URL's zone-pair. The scope's own value beside it stays wire bytes. */
+  const kindLabel = t(SCOPE_OPTIONS.find((o) => o.value === params.kind)?.key ?? "scope.cluster");
+  const signalSpan = useMemo(() => ({ from: params.from, to: params.to }), [params.from, params.to]);
+
   return (
     <PageShell
       timeMachine
       title={t("title")}
       help={{ body: t("help.body"), slug: "incidents" }}
       description={t("description")}
-      actions={
-        <>
-          {/* params.kind is the URL's own vocabulary — a wire value. */}
-          <Badge variant="neutral">{params.kind}</Badge>
-          <span className={cn("text-sm text-muted-foreground", scope.kind !== "cluster" && scope.a !== "" && "mono-data")}>{scopeHeadline(t, scope)}</span>
-        </>
-      }
     >
+      {/* ── the committed scope, under the description ──
+          Its own left-aligned line for every scope kind rather than the
+          header's action slot, where a pair headline sat beside the Time
+          Machine control and wrapped under it at anything narrower than a
+          desktop. -mt-4 closes most of the shell's column gap so it reads as
+          the header's sub-line, which is what it is. */}
+      <div data-testid="scope-headline" className="-mt-4 flex flex-wrap items-center gap-x-2 gap-y-1">
+        <Badge variant="neutral">{kindLabel}</Badge>
+        <span className={cn("text-sm text-muted-foreground", scope.kind !== "cluster" && scope.a !== "" && "mono-data")}>
+          {scopeHeadline(t, scope)}
+        </span>
+        {wide ? (
+          <p data-testid="scope-wide-note" className="basis-full type-meta">
+            {t("scope.wideNote")}
+          </p>
+        ) : null}
+      </div>
+
       {/* ── entry form ── */}
       <Card asChild className="p-5">
         <section aria-label={t("form.aria")}>
@@ -1881,21 +1953,21 @@ export function InvestigatePage() {
 
             {draftKind === "pair" ? (
               <>
-                <Select label={t("form.sourceNode")} value={draftA} options={nodeNames} onChange={setDraftA} />
-                <Select label={t("form.destinationNode")} value={draftB} options={nodeNames} onChange={setDraftB} />
+                <ScopeSelect label={t("form.sourceNode")} value={draftA} options={nodeNames} onChange={setDraftA} />
+                <ScopeSelect label={t("form.destinationNode")} value={draftB} options={nodeNames} onChange={setDraftB} />
               </>
             ) : null}
             {draftKind === "node" ? (
-              <Select label={t("form.node")} value={draftA} options={nodeNames} onChange={setDraftA} />
+              <ScopeSelect label={t("form.node")} value={draftA} options={nodeNames} onChange={setDraftA} />
             ) : null}
             {draftKind === "zone-pair" ? (
               <>
-                <Select label={t("form.sourceZone")} value={draftA} options={zoneNames} onChange={setDraftA} />
-                <Select label={t("form.destinationZone")} value={draftB} options={zoneNames} onChange={setDraftB} />
+                <ScopeSelect label={t("form.sourceZone")} value={draftA} options={zoneNames} onChange={setDraftA} />
+                <ScopeSelect label={t("form.destinationZone")} value={draftB} options={zoneNames} onChange={setDraftB} />
               </>
             ) : null}
             {draftKind === "target" ? (
-              <Select label={t("form.target")} value={draftA} options={targetNames} onChange={setDraftA} />
+              <ScopeSelect label={t("form.target")} value={draftA} options={targetNames} onChange={setDraftA} />
             ) : null}
 
             <div className="flex flex-col gap-1 text-[13px]">
@@ -1997,7 +2069,21 @@ export function InvestigatePage() {
       {/* ── actions rail ── */}
       <Card asChild className="p-4">
         <section aria-label={t("actions.aria")}>
-          <div className="flex flex-wrap items-center gap-2">
+          {/* ONE row for every action, the maintenance bar's own button
+              included: the bar is mounted `inline` (display: contents, see
+              components/maintenance.tsx), which puts its count sentence and
+              its button into this row as items. The button is ordered past
+              the count by the bar itself; the arbitrary variant below is this
+              page's one word on the count — its own full-width line under the
+              row, where the other captions live — because the bar's inline
+              contract puts the count first and the button after it, and the
+              rail wants the button up here with its siblings. */}
+          <div
+            className={cn(
+              "flex flex-wrap items-center gap-2",
+              "[&>[data-testid=maintenance-bar]>div>span]:order-2 [&>[data-testid=maintenance-bar]>div>span]:basis-full",
+            )}
+          >
             {/* Permission HIDES, time DISABLES — lib/timemachine.tsx's
                 useWritesDisabled documents the split and this is the
                 composition it prescribes. */}
@@ -2047,6 +2133,33 @@ export function InvestigatePage() {
               </Button>
             ) : null}
 
+            {/* Task 7's second disabled seam, made real (M6 Task 9). The bar is
+                the shared one every other surface mounts, given the windows THIS
+                page already fetched as timeline source 7 — a second useMaintenance
+                here would ask the same two questions twice and let the rows and
+                the rail disagree about what is declared. The button is named for
+                the rail's own vocabulary rather than the compact "＋ maintenance"
+                a chart carries.
+
+                The scope is the investigation's, fixed: scopeFilterValue is the
+                same string the events and annotations legs ask for, so a window
+                declared here is one this page will read back. */}
+            <MaintenanceBar
+              inline
+              scope={scopeFilterValue(scope)}
+              /* What the count sentence CALLS the scope: the wide scopes were queried unfiltered. */
+              scopeCaption={scopeCaptionValue(scope, ts)}
+              windows={windows}
+              error={maintenanceQuery.error as Error | null}
+              onChanged={refreshMaintenance}
+              /* The committed window is FROZEN here, so a window declared outside
+                 it will not appear in the list below and the bar has to say so
+                 (finding #8). */
+              frozenWindow={{ from: params.from, to: params.to }}
+              /* The bar is a shared component; this label is the RAIL's own
+                 vocabulary and therefore this surface's string. */
+              createLabel={t("actions.createMaintenance")}
+            />
           </div>
 
           {saveOpen ? (
@@ -2054,47 +2167,20 @@ export function InvestigatePage() {
               scopeText={scopeFilterValue(scope)}
               from={params.from}
               to={params.to}
-              wide={scope.kind === "zone-pair" || scope.kind === "cluster"}
+              wide={wide}
               onCreate={saveIncident}
               onCancel={() => setSaveOpen(false)}
             />
           ) : null}
-
-          {/* Task 7's second disabled seam, made real (M6 Task 9). The bar is
-              the shared one every other surface mounts, given the windows THIS
-              page already fetched as timeline source 7 — a second useMaintenance
-              here would ask the same two questions twice and let the rows and
-              the rail disagree about what is declared. The button is named for
-              the rail's own vocabulary rather than the compact "＋ maintenance"
-              a chart carries.
-
-              The scope is the investigation's, fixed: scopeFilterValue is the
-              same string the events and annotations legs ask for, so a window
-              declared here is one this page will read back. */}
-          <MaintenanceBar
-            scope={scopeFilterValue(scope)}
-            /* What the count sentence CALLS the scope: the wide scopes were queried unfiltered. */
-            scopeCaption={scopeCaptionValue(scope, ts)}
-            windows={windows}
-            error={maintenanceQuery.error as Error | null}
-            onChanged={refreshMaintenance}
-            /* The committed window is FROZEN here, so a window declared outside
-               it will not appear in the list below and the bar has to say so
-               (finding #8). */
-            frozenWindow={{ from: params.from, to: params.to }}
-            /* The bar is a shared component; this label is the RAIL's own
-               vocabulary and therefore this surface's string. */
-            createLabel={t("actions.createMaintenance")}
-          />
 
           <p className="mt-2 type-meta">{t("actions.compareNote")}</p>
           {runStarted ? (
             <p role="status" className="mt-2 text-xs text-muted-foreground">
               {/* Two keys around the run-id link: the id is data. */}
               {t("actions.runStarted.before")}{" "}
-              <a href={withAtParam(`/diagnostics/runs/${runStarted}`)} className="mono-data text-primary hover:underline">
+              <TextLink href={withAtParam(`/diagnostics/runs/${runStarted}`)} className="mono-data">
                 {runStarted}
-              </a>{" "}
+              </TextLink>{" "}
               {t("actions.runStarted.after")}
             </p>
           ) : null}
@@ -2105,9 +2191,9 @@ export function InvestigatePage() {
               {presetRuns.map((id, i) => (
                 <span key={id}>
                   {i > 0 ? ", " : ""}
-                  <a href={withAtParam(`/diagnostics/runs/${id}`)} className="mono-data text-primary hover:underline">
+                  <TextLink href={withAtParam(`/diagnostics/runs/${id}`)} className="mono-data">
                     {id}
-                  </a>
+                  </TextLink>
                 </span>
               ))}
             </p>
@@ -2183,7 +2269,7 @@ export function InvestigatePage() {
         <>
           <PinnedFindings
             pinned={pinned}
-            presentKeys={presentPinKeys}
+            present={presentPins}
             canWrite={canIncidentsWrite}
             writesDisabled={writesDisabled}
             busy={pinBusy}
@@ -2217,7 +2303,10 @@ export function InvestigatePage() {
           timeline missing, and why" — and the count drives the partial banner
           that suppresses the nothing-happened claim. */}
 
-      <div className="grid grid-cols-1 gap-5 lg:grid-cols-[minmax(0,1fr)_24rem]">
+      {/* items-start: the rail is three cards that end where they end; without
+          it the grid stretched the column to the timeline's height and the
+          notes card grew a page of empty space under its rows. */}
+      <div className="grid grid-cols-1 items-start gap-5 lg:grid-cols-[minmax(0,1fr)_24rem]">
         <InvestigationTimeline
           entries={entries}
           notes={notes}
@@ -2248,6 +2337,9 @@ export function InvestigatePage() {
                never came back (finding #1). */
             deltaError={deltaQuery.error as Error | null}
             windows={windows}
+            /* Both charts pin their axis to the investigated window, so loss
+               and RTT read against one span. */
+            span={signalSpan}
             annotations={annotations}
             promConfigured={promConfigured}
             gated={!canPromQL}
@@ -2256,7 +2348,7 @@ export function InvestigatePage() {
 
           <Card asChild className="p-5">
             <section aria-label={t("causes.aria")}>
-              <h3 className="type-section">{t("causes.title")}</h3>
+              <h2 className="type-section">{t("causes.title")}</h2>
               {onset === null ? (
                 <p className="mt-2 text-xs leading-relaxed text-muted-foreground">{t("causes.noOnset")}</p>
               ) : (
@@ -2306,15 +2398,14 @@ export function InvestigatePage() {
                     so it is both unreachable from an air-gapped console and, on
                     any console, a description of whatever main holds today
                     rather than of the build in front of the reader. */}
-                <a
+                <TextLink
                   href={DOC_LINK}
                   target="_blank"
                   rel="noreferrer"
                   title={t("causes.method.link.title")}
-                  className="text-primary hover:underline"
                 >
                   {t("causes.method.link")}
-                </a>
+                </TextLink>
                 {t("causes.method.after")}
               </p>
             </section>
@@ -2322,9 +2413,12 @@ export function InvestigatePage() {
 
           <Card asChild className="p-5">
             <section aria-label={t("notes.aria")}>
-              <h3 className="type-section">{t("notes.title")}</h3>
+              <h2 className="type-section">{t("notes.title")}</h2>
               <AnnotationBar
                 scope={eventScope}
+                /* A note filed under this page's own scope needs no chip
+                   saying so; a foreign scope keeps its chip. */
+                ownScope={eventScope}
                 /* finding #7 — see the MaintenanceBar above. */
                 scopeCaption={scopeCaptionValue(scope, ts)}
                 annotations={annotations}

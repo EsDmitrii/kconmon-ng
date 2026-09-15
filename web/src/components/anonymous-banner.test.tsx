@@ -49,6 +49,27 @@ describe("AnonymousBanner role prop", () => {
   });
 });
 
+/* Below sm the strip shows one clause instead of the sentence (the sentence took four lines of a
+   375px viewport before the page title). Both forms are in the DOM and CSS picks one, so this
+   pins what jsdom can see: the clause, and the full sentence riding on title. */
+describe("AnonymousBanner narrow-width clause", () => {
+  it("carries the short clause next to the sentence, and the sentence on title", () => {
+    render(<AnonymousBanner mode="anonymous" role="admin" />);
+    const banner = screen.getByRole("status");
+    expect(banner).toHaveTextContent("Authentication is disabled; everyone is admin.");
+    expect(banner).toHaveAttribute(
+      "title",
+      "Anonymous mode. Authentication is disabled — everyone has the admin role (console.auth.anonymous.role). Do not use in production.",
+    );
+    expect(screen.getByText("Authentication is disabled; everyone is admin.")).toHaveClass("sm:hidden");
+  });
+
+  it("keeps the role out of the clause when the config carried none", () => {
+    render(<AnonymousBanner mode="anonymous" role="" />);
+    expect(screen.getByRole("status")).toHaveTextContent("Authentication is disabled; everyone has one fixed role.");
+  });
+});
+
 /**
  * TestAnonymousModeRendersExactlyLikeM2: with GET /api/v1/config and GET /api/v1/auth/me both
  * reporting anonymous.

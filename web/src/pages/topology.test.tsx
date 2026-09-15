@@ -1,11 +1,57 @@
+import type { ComponentProps } from "react";
 import { QueryClient, QueryClientProvider, onlineManager } from "@tanstack/react-query";
-import { cleanup, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import type { Edge } from "@xyflow/react";
 import { ThemeProvider } from "@/components/theme-provider";
 import { LOCALE_STORAGE_KEY, LocaleProvider, translate, type Translate } from "@/lib/i18n";
 import { topologyDict, type TopologyKey } from "@/lib/i18n/dict/topology";
-import { TopologyPage, buildFlow, mapNodes, nodeNavigationPath, unfoldableEmpty } from "./topology";
+import { EXTERNAL_LABEL } from "@/lib/agents";
+import {
+  FIT_VIEW_OPTIONS,
+  MAP_MIN_ZOOM,
+  TopologyPage,
+  buildFlow,
+  mapNodes,
+  nodeNavigationPath,
+  unfoldableEmpty,
+} from "./topology";
 import type { Matrix, Topology } from "@/lib/types";
+
+/* React Flow is REAL in this file — the tool-surface tests count its node boxes — but the props
+   the page hands it are the map's contract: the zoom floor, the fit options, the label an edge
+   gains under the pointer. A pass-through wrapper records the latest render's props, and
+   useReactFlow is the one export replaced, so the "Fit the whole map" control can be watched
+   calling in. Edges themselves never reach the DOM in jsdom (React Flow draws one only once both
+   boxes have been measured), which is why the hover is exercised through the handler. */
+const flowSpy = vi.hoisted(() => ({
+  props: null as null | Record<string, unknown>,
+  api: {
+    fitView: vi.fn(async () => true),
+    zoomIn: vi.fn(async () => true),
+    zoomOut: vi.fn(async () => true),
+  },
+}));
+vi.mock("@xyflow/react", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@xyflow/react")>();
+  const ReactFlow = (props: ComponentProps<typeof actual.ReactFlow>) => {
+    flowSpy.props = props as unknown as Record<string, unknown>;
+    return <actual.ReactFlow {...props} />;
+  };
+  return { ...actual, ReactFlow, useReactFlow: () => flowSpy.api };
+});
+
+/** The props of the most recent <ReactFlow> render, typed for what the tests below read. */
+type FlowProps = {
+  edges: Edge[];
+  minZoom: number;
+  fitViewOptions: unknown;
+  elementsSelectable: boolean;
+  onEdgeClick?: unknown;
+  onEdgeMouseEnter: (event: unknown, edge: Edge) => void;
+  onEdgeMouseLeave: (event: unknown, edge: Edge) => void;
+};
+const flowProps = () => flowSpy.props as unknown as FlowProps;
 
 const topo: Topology = {
   nodes: [
@@ -45,6 +91,17 @@ describe("buildFlow", () => {
     expect(edges[0].label).toBeUndefined(); // percentage appears on hover only
     expect(edges[0].data).toMatchObject({ failLabel: "20.0%" });
     expect(problemTotal).toBe(1);
+  });
+
+  it("tips every edge with an arrowhead in the edge's own tier colour", () => {
+    // 20% is failing: the arrowhead is the same red as the path it ends.
+    const { edges } = buildFlow(topo, matrix);
+    expect(edges[0].markerEnd).toEqual({ type: "arrowclosed", width: 14, height: 14, color: "hsl(var(--health-bad))" });
+    expect(edges[0].className).toBe("topo-edge--failing");
+    // 5% is degraded: amber path, amber arrowhead — never the library's default grey.
+    const degraded = buildFlow(topo, { ...matrix, cells: [{ source: "n1", destination: "n2", failRatio: 0.05 }] });
+    expect(degraded.edges[0].markerEnd).toMatchObject({ color: "hsl(var(--health-warn))" });
+    expect(degraded.edges[0].className).toBe("topo-edge--degraded");
   });
 
   it("caps at the WORST paths, not the first encountered, and reports the total", () => {
@@ -944,5 +1001,328 @@ describe("TopologyPage — the tool surface", () => {
     const label = await screen.findByTitle("n1");
     expect(label.className).toContain("mono-data");
     expect(label).toHaveTextContent("n1");
+  });
+});
+
+/* ── the map's zoom bounds, and the label an edge gains under the pointer ──
+ *
+ * React Flow's own zoom floor is 0.5 and fitView honours it, so on a 375px
+ * phone the fitted map showed one corner of the fleet with the rest hanging
+ * off the right edge. The floor is 0.1 now, on the map AND in the fit options
+ * (fitView stops at whichever is higher), and the fit's maxZoom is 1 so a
+ * one-box historical map is never inflated to twice its size. The control's
+ * own fitView reads the same object, which is what keeps the two in step.
+ */
+describe("TopologyPage — the map's zoom bounds", () => {
+  afterEach(() => {
+    cleanup();
+    vi.unstubAllGlobals();
+    flowSpy.props = null;
+    flowSpy.api.fitView.mockClear();
+  });
+
+  const renderWithMatrix = () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((url: string) => {
+        const href = String(url);
+        if (href.startsWith("/api/v1/topology")) return Promise.resolve(json(topo));
+        if (href.startsWith("/api/v1/matrix")) return Promise.resolve(json(matrix));
+        return Promise.resolve(json({}));
+      }),
+    );
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    return render(
+      <QueryClientProvider client={qc}>
+        <ThemeProvider><TopologyPage /></ThemeProvider>
+      </QueryClientProvider>,
+    );
+  };
+
+  it("lets the map zoom out to 0.1 and fits between that floor and 1", async () => {
+    renderWithMatrix();
+    await screen.findByTitle("n1");
+    expect(flowProps().minZoom).toBe(0.1);
+    expect(flowProps().fitViewOptions).toEqual({ padding: 0.15, minZoom: 0.1, maxZoom: 1 });
+    // The two constants the page exports are the same numbers, by construction.
+    expect(MAP_MIN_ZOOM).toBe(0.1);
+    expect(FIT_VIEW_OPTIONS).toEqual({ padding: 0.15, minZoom: 0.1, maxZoom: 1 });
+  });
+
+  it("fits through the control with the very same options, so a one-box map is never inflated", async () => {
+    renderWithMatrix();
+    await screen.findByTitle("n1");
+    fireEvent.click(screen.getByRole("button", { name: "Fit the whole map" }));
+    expect(flowSpy.api.fitView).toHaveBeenCalledTimes(1);
+    expect(flowSpy.api.fitView).toHaveBeenCalledWith({ padding: 0.15, minZoom: 0.1, maxZoom: 1 });
+  });
+
+  it("reveals the failure ratio while an edge is hovered and takes it back on leave, with no onEdgeClick to lean on", async () => {
+    renderWithMatrix();
+    await screen.findByTitle("n1");
+    const edge = flowProps().edges.find((e) => e.id === "n1->n2");
+    expect(edge).toBeDefined();
+    // Quiet by default: the percentage is Progressive Disclosure, not a permanent label.
+    expect(edge?.label).toBeUndefined();
+    /* Hover is all the edge is asked for. React Flow marks every edge `inactive`
+       (pointer-events: none) while the map is not selectable and has no
+       onEdgeClick; index.css gives the edge its pointer events back, so the page
+       must not paper over that with a click handler it does not want. */
+    expect(flowProps().onEdgeClick).toBeUndefined();
+    expect(flowProps().elementsSelectable).toBe(false);
+
+    act(() => flowProps().onEdgeMouseEnter({}, edge as Edge));
+    expect(flowProps().edges.find((e) => e.id === "n1->n2")?.label).toBe("20.0%");
+
+    act(() => flowProps().onEdgeMouseLeave({}, edge as Edge));
+    expect(flowProps().edges.find((e) => e.id === "n1->n2")?.label).toBeUndefined();
+  });
+});
+
+/* ── an agent that has no Kubernetes node ──────────────────────────────────
+ *
+ * A bare host registers with the controller like any other agent, but no
+ * informer will ever list a node for it. It used to be drawn ONLY when the
+ * controller had no node view at all (the agents-built map); on kind/prod it
+ * lived in agents[] and never reached the picture. The label is the one
+ * evidence of a bare host (lib/agents.ts), and it decides the badge for a box
+ * from either half of the response: the fold puts the host into nodes[] too.
+ */
+const withExternal: Topology = {
+  nodes: [
+    { name: "n1", zone: "z1", ready: true },
+    { name: "n2", zone: "z2", ready: false },
+  ],
+  agents: [
+    { id: "a-1", nodeName: "n1", podIP: "10.0.0.1", zone: "z1" },
+    { id: "a-2", nodeName: "n2", podIP: "10.0.0.2", zone: "z2" },
+    { id: "edge-01-agent", nodeName: "edge-01", podIP: "192.0.2.10", zone: "z1", labels: { [EXTERNAL_LABEL]: "true" } },
+  ],
+  timestamp: "t",
+};
+
+describe("mapNodes — an external agent beside the Kubernetes nodes", () => {
+  it("draws the bare host into the node-built map without changing where the map came from", () => {
+    const { nodes, source } = mapNodes(withExternal);
+    expect(source).toBe("nodes");
+    expect(nodes.map((n) => n.name)).toEqual(["edge-01", "n1", "n2"]);
+  });
+
+  it("marks it external, in the zone it registered with, and with readiness UNKNOWN", () => {
+    const edge = mapNodes(withExternal).nodes.find((n) => n.name === "edge-01");
+    expect(edge).toEqual({ name: "edge-01", zone: "z1", ready: undefined, external: true });
+  });
+
+  it("leaves the Kubernetes nodes exactly as the informer said", () => {
+    const { nodes } = mapNodes(withExternal);
+    expect(nodes.find((n) => n.name === "n1")).toEqual({ name: "n1", zone: "z1", ready: true, external: false });
+    expect(nodes.find((n) => n.name === "n2")).toEqual({ name: "n2", zone: "z2", ready: false, external: false });
+  });
+
+  /* An agent the informer has not listed a node for yet is what an informer lag
+     looks like; without the label there is no evidence of a bare host, and a
+     transient box with a badge painted from absence would be a guess. */
+  it("does not draw an UNLABELLED agent whose node is merely missing from the list", () => {
+    const lagging: Topology = {
+      ...withExternal,
+      agents: [...withExternal.agents, { id: "a-9", nodeName: "n9", podIP: "10.0.0.9", zone: "z1" }],
+    };
+    expect(mapNodes(lagging).nodes.map((n) => n.name)).toEqual(["edge-01", "n1", "n2"]);
+  });
+
+  /* The Time Machine's shape: the fold lists every registered agent's node,
+     ready: true because readiness there is presence-derived, and the label
+     rides on the agent. A bare host has no Kubernetes node for readiness to
+     come from, so the box may not carry that true. */
+  it("badges a host the fold ALSO listed as a node, and drops the readiness the fold invented", () => {
+    const folded: Topology = {
+      nodes: [
+        { name: "n1", zone: "z1", ready: true },
+        { name: "edge-01", zone: "z1", ready: true },
+      ],
+      agents: [
+        { id: "a-1", nodeName: "n1", podIP: "", zone: "z1" },
+        { id: "edge-01-agent", nodeName: "edge-01", podIP: "", zone: "z1", labels: { [EXTERNAL_LABEL]: "true" } },
+      ],
+      timestamp: "t",
+      historical: true,
+    };
+    const { nodes, source } = mapNodes(folded);
+    expect(source).toBe("nodes");
+    expect(nodes.find((n) => n.name === "edge-01")).toEqual({ name: "edge-01", zone: "z1", ready: undefined, external: true });
+    expect(nodes.find((n) => n.name === "n1")).toEqual({ name: "n1", zone: "z1", ready: true, external: false });
+  });
+
+  it("badges the bare host on the agents-built map too", () => {
+    const { nodes, source } = mapNodes({ ...withExternal, nodes: [] });
+    expect(source).toBe("agents");
+    expect(nodes.map((n) => [n.name, n.external])).toEqual([
+      ["edge-01", true],
+      ["n1", false],
+      ["n2", false],
+    ]);
+  });
+});
+
+describe("buildFlow — an external agent beside the Kubernetes nodes", () => {
+  it("draws the bare host in its zone's lane and writes external into the box", () => {
+    const { nodes, source } = buildFlow(withExternal, matrix);
+    expect(source).toBe("nodes");
+    expect(nodes.find((n) => n.id === "zone:z1")?.data).toMatchObject({ label: "z1", count: 2 });
+    const edge = nodes.find((n) => n.id === "edge-01");
+    expect(edge?.parentId).toBe("zone:z1");
+    expect(edge?.data).toEqual({ label: "edge-01", ready: undefined, health: "ok", external: true });
+  });
+
+  it("tells a screen reader it is an external agent, and why readiness is unknown", () => {
+    const { nodes } = buildFlow(withExternal, matrix);
+    expect(nodes.find((n) => n.id === "edge-01")?.ariaLabel).toBe("edge-01, zone z1, healthy, external agent, readiness unknown");
+    // The in-cluster boxes are announced exactly as before.
+    expect(nodes.find((n) => n.id === "n1")?.ariaLabel).toBe("n1, zone z1, failing");
+    expect(nodes.find((n) => n.id === "n2")?.ariaLabel).toBe("n2, zone z2, failing, not ready");
+  });
+
+  it("says it in Russian when that is the reader's language", () => {
+    const ruT: Translate<TopologyKey> = (key, vars) => translate(topologyDict, "ru", key, vars);
+    const { nodes } = buildFlow(withExternal, matrix, ruT);
+    expect(nodes.find((n) => n.id === "edge-01")?.ariaLabel).toBe("edge-01, зона z1, в норме, внешний агент, готовность неизвестна");
+  });
+
+  it("colours it from the matrix, the one signal a bare host has, and never condemns it for readiness", () => {
+    const failing: Matrix = {
+      protocol: "tcp", plane: "pod", nodes: ["edge-01", "n1"],
+      cells: [{ source: "edge-01", destination: "n1", failRatio: 0.5 }],
+      timestamp: "t",
+    };
+    expect(buildFlow(withExternal, failing).nodes.find((n) => n.id === "edge-01")?.className).toContain("failing");
+    expect(buildFlow(withExternal, matrix).nodes.find((n) => n.id === "edge-01")?.className).toContain("topo-node--ok");
+  });
+
+  it("draws a problem edge to and from the bare host like any other box", () => {
+    const both: Matrix = {
+      protocol: "tcp", plane: "pod", nodes: ["edge-01", "n1"],
+      cells: [
+        { source: "edge-01", destination: "n1", failRatio: 0.5 },
+        { source: "n1", destination: "edge-01", failRatio: 0.3 },
+      ],
+      timestamp: "t",
+    };
+    const { edges } = buildFlow(withExternal, both);
+    expect(edges.map((e) => e.id).sort()).toEqual(["edge-01->n1", "n1->edge-01"]);
+  });
+});
+
+describe("a fleet with no external agents", () => {
+  afterEach(() => {
+    cleanup();
+    vi.unstubAllGlobals();
+  });
+
+  /* Every in-cluster agent's node is in nodes[], so nothing merges, and every
+     box is the box it was: same ids, same order, same classes, same words.
+     Pinned field by field rather than by snapshot so a change here names
+     what moved. */
+  const fleet: Topology = {
+    ...topo,
+    agents: [
+      { id: "a-1", nodeName: "n1", podIP: "10.0.0.1", zone: "z1" },
+      { id: "a-2", nodeName: "n2", podIP: "10.0.0.2", zone: "z2" },
+    ],
+  };
+
+  it("builds the very same picture out of buildFlow", () => {
+    for (const input of [topo, fleet]) {
+      const { nodes, edges, source, problemTotal } = buildFlow(input, matrix);
+      expect(source).toBe("nodes");
+      expect(problemTotal).toBe(1);
+      expect(nodes.map((n) => [n.id, n.type, n.parentId, n.className])).toEqual([
+        ["zone:z1", "zone", undefined, "topo-zone"],
+        ["zone:z2", "zone", undefined, "topo-zone"],
+        ["n1", "topoNode", "zone:z1", "topo-node topo-node--failing"],
+        ["n2", "topoNode", "zone:z2", "topo-node topo-node--failing"],
+      ]);
+      expect(nodes.map((n) => n.ariaLabel)).toEqual([undefined, undefined, "n1, zone z1, failing", "n2, zone z2, failing, not ready"]);
+      expect(nodes.find((n) => n.id === "n1")?.data).toEqual({ label: "n1", ready: true, health: "failing", external: false });
+      expect(nodes.find((n) => n.id === "n2")?.data).toEqual({ label: "n2", ready: false, health: "failing", external: false });
+      expect(edges.map((e) => e.id)).toEqual(["n1->n2"]);
+    }
+  });
+
+  it("puts no external badge and no provenance notice on the page", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((url: string) => {
+        const href = String(url);
+        if (href.startsWith("/api/v1/topology")) return Promise.resolve(json(fleet));
+        if (href.includes("/api/v1/promql/query")) {
+          return Promise.resolve(json({ status: "success", data: { resultType: "vector", result: [] } }));
+        }
+        return Promise.resolve(json({}));
+      }),
+    );
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={qc}>
+        <ThemeProvider><TopologyPage /></ThemeProvider>
+      </QueryClientProvider>,
+    );
+    await screen.findByTestId("edge-caption");
+    expect(document.querySelectorAll(".react-flow__node.topo-node")).toHaveLength(2);
+    expect(screen.queryByText("external")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("topology-from-agents")).not.toBeInTheDocument();
+    expect(screen.getByLabelText("n1, zone z1, healthy")).toBeInTheDocument();
+    expect(screen.getByLabelText("n2, zone z2, failing, not ready")).toBeInTheDocument();
+  });
+});
+
+describe("TopologyPage — an external agent on the live map", () => {
+  afterEach(() => {
+    cleanup();
+    vi.unstubAllGlobals();
+  });
+
+  const renderLive = (topology: Topology) => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((url: string) => {
+        const href = String(url);
+        if (href.startsWith("/api/v1/topology")) return Promise.resolve(json(topology));
+        if (href.includes("/api/v1/promql/query")) {
+          return Promise.resolve(json({ status: "success", data: { resultType: "vector", result: [] } }));
+        }
+        return Promise.resolve(json({}));
+      }),
+    );
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    return render(
+      <QueryClientProvider client={qc}>
+        <ThemeProvider><TopologyPage /></ThemeProvider>
+      </QueryClientProvider>,
+    );
+  };
+
+  it("draws the bare host beside the Kubernetes nodes, wearing the external badge", async () => {
+    renderLive(withExternal);
+    await screen.findByTestId("edge-caption");
+    const box = screen.getByLabelText("edge-01, zone z1, healthy, external agent, readiness unknown");
+    expect(within(box).getByText("external")).toBeInTheDocument();
+    expect(within(box).getByText("edge-01")).toBeInTheDocument();
+    // The badge is identity, not a health tier: no "not ready", nothing red on a quiet host.
+    expect(within(box).queryByText("not ready")).not.toBeInTheDocument();
+    expect(box).toHaveClass("topo-node--ok");
+  });
+
+  it("keeps the map's provenance: no 'built from registered agents' notice for a fleet the informer listed", async () => {
+    renderLive(withExternal);
+    await screen.findByTestId("edge-caption");
+    expect(screen.queryByTestId("topology-from-agents")).not.toBeInTheDocument();
+    expect(document.querySelectorAll(".react-flow__node.topo-node")).toHaveLength(3);
+  });
+
+  it("badges the in-cluster boxes with nothing new", async () => {
+    renderLive(withExternal);
+    await screen.findByTestId("edge-caption");
+    expect(screen.getAllByText("external")).toHaveLength(1);
+    expect(within(screen.getByLabelText("n1, zone z1, healthy")).queryByText("external")).not.toBeInTheDocument();
   });
 });

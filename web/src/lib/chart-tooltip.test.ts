@@ -12,6 +12,7 @@ import {
   sharedTooltipOption,
   type AxisTooltipRow,
 } from "./chart-tooltip";
+import { stampClock } from "./i18n";
 
 /**
  * The clipping the owner reported: hovering a worst-5 panel near the left of the
@@ -373,5 +374,97 @@ describe("the y-axis pointer pill", () => {
 
     expect(Array.isArray(wired.yAxis)).toBe(true);
     expect((wired.yAxis as { axisPointer?: unknown }[])[0].axisPointer).toBeUndefined();
+  });
+});
+
+/* ── the x pill, and a series with a formatter of its own ────────────────── */
+
+/**
+ * Two more things the shared layer settles. ECharts' default x pill on a time
+ * axis printed the whole date and time, and clipped at the canvas edge on every
+ * chart in the console (audit frame console-hover): it is the house clock now,
+ * HH:mm:ss. And a series may carry its OWN tooltip formatter, which Explore's
+ * compare panel uses for a ratio leg drawn beside a seconds leg: the rows of
+ * that leg print in its unit, every other row in the chart's.
+ */
+describe("the x-axis pointer pill", () => {
+  const wireOption = (option: echarts.EChartsOption) =>
+    sharedTooltipOption(option, () => null, { cursorValue: () => null, more: (n) => `+${n} more` });
+
+  const xPill = (option: echarts.EChartsOption) =>
+    (wireOption(option).xAxis as { axisPointer?: { label?: { formatter?: (p: { value: unknown }) => string } } })
+      ?.axisPointer?.label?.formatter;
+
+  it("prints the house clock, HH:mm:ss, on a time axis", () => {
+    const pill = xPill({ xAxis: { type: "time" }, yAxis: { type: "value" }, tooltip: { trigger: "axis" }, series: [] });
+    expect(pill?.({ value: new Date(2026, 8, 6, 23, 52, 7).getTime() })).toBe(stampClock(new Date(2026, 8, 6, 23, 52, 7), "en"));
+    expect(pill?.({ value: new Date(2026, 8, 6, 23, 52, 7).getTime() })).toBe("23:52:07");
+  });
+
+  it("leaves a CATEGORY axis alone — its labels are not instants", () => {
+    const wired = wireOption({ xAxis: { type: "category" }, yAxis: { type: "value" }, tooltip: { trigger: "axis" }, series: [] });
+    expect((wired.xAxis as { axisPointer?: unknown }).axisPointer).toBeUndefined();
+  });
+
+  it("hands an unreadable value back as it came rather than printing Invalid Date", () => {
+    const pill = xPill({ xAxis: { type: "time" }, yAxis: { type: "value" }, tooltip: { trigger: "axis" }, series: [] });
+    expect(pill?.({ value: "garbage" })).toBe("garbage");
+  });
+});
+
+describe("a series with a formatter of its own", () => {
+  const wireOption = (option: echarts.EChartsOption) =>
+    sharedTooltipOption(option, () => null, { cursorValue: () => null, more: (n) => `+${n} more` });
+
+  const rows = (): AxisTooltipRow[] => [
+    { seriesIndex: 0, seriesName: "A · pair", value: [1, 0.0081], axisValueLabel: "12:00" },
+    { seriesIndex: 1, seriesName: "B · pair", value: [1, 0.5], axisValueLabel: "12:00" },
+  ];
+
+  it("is printed with it, while every other row takes the chart's formatter", () => {
+    const wired = wireOption({
+      xAxis: { type: "time" },
+      yAxis: [{ type: "value" }, { type: "value" }],
+      tooltip: { trigger: "axis", valueFormatter: (v) => `${(Number(v) * 1000).toFixed(1)}ms` },
+      series: [{ type: "line", data: [] }, { type: "line", data: [], yAxisIndex: 1, tooltip: { valueFormatter: (v: unknown) => `${(Number(v) * 100).toFixed(1)}%` } }],
+    });
+    const html = (wired.tooltip as { formatter: (p: unknown) => string }).formatter(rows());
+    expect(html).toContain("8.1ms");
+    expect(html).toContain("50.0%");
+    expect(html).not.toContain("500.0ms");
+  });
+
+  it("still formats when the chart itself declares none — the series' own word is enough", () => {
+    const wired = wireOption({
+      xAxis: { type: "time" },
+      yAxis: { type: "value" },
+      tooltip: { trigger: "axis" },
+      series: [{ type: "line", data: [] }, { type: "line", data: [], tooltip: { valueFormatter: (v: unknown) => `${v}%` } }],
+    });
+    const html = (wired.tooltip as { formatter: (p: unknown) => string }).formatter(rows());
+    expect(html).toContain("0.0081");
+    expect(html).toContain("0.5%");
+  });
+});
+
+describe("the y pills of a two-axis chart", () => {
+  const wireOption = (option: echarts.EChartsOption) =>
+    sharedTooltipOption(option, () => null, { cursorValue: () => null, more: (n) => `+${n} more` });
+
+  it("each take their OWN axis's label formatter, never the tooltip's", () => {
+    const wired = wireOption({
+      xAxis: { type: "time" },
+      yAxis: [
+        { type: "value", axisLabel: { formatter: (v: number) => `${v * 1000}ms` } },
+        { type: "value", axisLabel: { formatter: (v: number) => `${v * 100}%` } },
+      ],
+      tooltip: { trigger: "axis", valueFormatter: (v) => `${v}ms` },
+      series: [],
+    });
+    const pills = (wired.yAxis as { axisPointer?: { label?: { formatter?: (p: { value: unknown }) => string } } }[]).map(
+      (axis) => axis.axisPointer?.label?.formatter,
+    );
+    expect(pills[0]?.({ value: 0.008 })).toBe("8ms");
+    expect(pills[1]?.({ value: 0.5 })).toBe("50%");
   });
 });

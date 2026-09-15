@@ -32,14 +32,24 @@ export function TimeMachineBar() {
   return (
     <div
       role="status"
-      className="flex flex-wrap items-center gap-2.5 border-b border-border bg-health-warn-soft/60 px-5 py-1.5 text-[13px] text-foreground"
+      /* Below sm this is a two-column grid (icon | sentence, button on its own row at the end):
+         a wrapping flex row put the icon alone on the first line whenever the sentence did not fit
+         beside it (the Russian one is 4px too wide), and with a 0 basis the wide Russian button
+         squeezed the sentence into a 74px column. From sm up it is one flex row. */
+      className="grid grid-cols-[auto_minmax(0,1fr)] items-center gap-2.5 border-b border-border bg-health-warn-soft/60 px-4 py-1.5 text-[13px] text-foreground sm:flex sm:flex-wrap sm:px-5"
     >
       <History aria-hidden="true" className="size-3.5 shrink-0 text-health-warn" />
-      <span className="min-w-0">
+      <span className="min-w-0 sm:grow">
         <span className="font-medium">{t("timemachine.viewing", { at: stamp(at!, locale) })}</span>{" "}
-        <span className="text-muted-foreground">{t("timemachine.viewingHint")}</span>
+        {/* The hint clause is what pushed a 375px banner to three rows; the button says it. */}
+        <span className="hidden text-muted-foreground sm:inline">{t("timemachine.viewingHint")}</span>
       </span>
-      <Button variant="outline" size="sm" className="h-7" onClick={() => returnToLive()}>
+      <Button
+        variant="outline"
+        size="sm"
+        className="col-span-2 h-7 justify-self-end sm:col-auto sm:ml-auto"
+        onClick={() => returnToLive()}
+      >
         {t("timemachine.returnToLive")}
       </Button>
     </div>

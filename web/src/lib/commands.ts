@@ -1,3 +1,6 @@
+/* The site's ONE constant lives beside the help dialogs that use it most; the
+   registry reads it rather than keeping a second copy that could drift. */
+import { DOCS_BASE_URL } from "@/components/page-help";
 import { DEFAULT_LOCALE, type Locale } from "@/lib/i18n";
 import { chromeDict, NAV_KEYS } from "@/lib/i18n/dict/chrome";
 import { NAV_DESC_KEYS, paletteDict, type PaletteKey } from "@/lib/i18n/dict/palette";
@@ -41,6 +44,9 @@ export interface CommandContext {
   /** Whether the page currently on screen HAS that picker. The control is opt-in per page, so a
    *  page that ignores `?at=` has none — and a command that opens nothing must not be offered. */
   hasTimeMachinePicker: boolean;
+  /** Opens a URL outside the console, in a new tab with no opener. Supplied by
+   *  the component so an entry never reaches for `window` itself. */
+  openExternal: (url: string) => void;
 }
 
 /** CommandGroup stays an ENGLISH UNION, because it is a type before it is a word: entries are declared with it. */
@@ -293,6 +299,15 @@ function actionCommands(): Command[] {
       permission: "annotations:write",
       write: true,
       perform: (ctx) => ctx.navigate("/explore"),
+    },
+    {
+      id: "action:docs",
+      title: en("action.docs"),
+      titleRu: ru("action.docs"),
+      group: "Actions",
+      keywords: kw("action.docs.kw"),
+      // A read: no permission and no write flag, so the Time Machine never greys it.
+      perform: (ctx) => ctx.openExternal(DOCS_BASE_URL),
     },
   ];
 }

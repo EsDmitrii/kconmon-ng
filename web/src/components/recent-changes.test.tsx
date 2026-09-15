@@ -119,6 +119,15 @@ describe("RecentChanges", () => {
     expect(screen.getByText("No recent changes.")).toBeInTheDocument();
   });
 
+  it("renders the empty rail as a slate: the pinned sentence as title, a body saying what will appear", async () => {
+    renderRail("node-a");
+    const title = await screen.findByText("No recent changes.");
+    expect(title).toHaveClass("font-medium");
+    expect(screen.getByText("Events about this object will show up here as they happen.")).toHaveClass("text-muted-foreground");
+    // One Investigate link per page, and it lives in the card header — the slate adds none.
+    expect(screen.queryByRole("link", { name: "Investigate" })).toBeNull();
+  });
+
   it("with database.configured === false renders the degraded note and makes no history request", async () => {
     const { fetchMock } = renderRail("node-a", { databaseConfigured: false });
     expect(await screen.findByText(/history requires a database/i)).toBeInTheDocument();

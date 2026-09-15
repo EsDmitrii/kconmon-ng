@@ -95,4 +95,12 @@ describe("AppSidebar — palette hint", () => {
     await waitFor(() => expect(screen.getByText("Ada")).toBeInTheDocument());
     expect(screen.getByTitle("Ctrl+K — search and commands")).toHaveTextContent("Ctrl+K");
   });
+
+  /* Below md this column is the touch drawer (components/nav-drawer.tsx), where a keyboard
+     shortcut cannot be pressed: the <kbd> stays in the DOM and CSS hides it there. */
+  it("hides the hint below md by class, not by dropping it from the DOM", async () => {
+    renderSidebar({ anonymous: true });
+    await screen.findByRole("navigation");
+    expect(screen.getByTitle("Ctrl+K — search and commands")).toHaveClass("hidden", "md:inline-flex");
+  });
 });

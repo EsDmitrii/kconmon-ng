@@ -257,6 +257,39 @@ export function pairProgress(
   };
 }
 
+/* ── one unit rule for a latency ─────────────────────────────────────────────
+   Under this, milliseconds have run out of resolution: 22µs is 0.022ms, and one
+   decimal renders it "0.0ms" — a same-node hop, or a same-cluster TCP probe,
+   reported as no time at all. The run permalink's duration cells and the MTR
+   hop table (fmtRttNs) both read this floor, so the two tables cannot drift on
+   where a millisecond stops being a unit. */
+export const MICROSECOND_FLOOR_NS = 100_000;
+
+/** fmtMicrosNs is the microsecond branch of that rule: the rendering for a
+ *  reading below the floor, and undefined for anything the caller should keep
+ *  in milliseconds. On the MAGNITUDE, so a negative reading — the wire's
+ *  nonsense, not ours — reads "-4µs" rather than "-0.0ms"; and never for a
+ *  genuine zero, which stays "0.0ms" because "0µs" reads as a measurement. */
+export function fmtMicrosNs(ns: number): string | undefined {
+  const abs = Math.abs(ns);
+  return abs > 0 && abs < MICROSECOND_FLOOR_NS ? `${Math.round(ns / 1e3)}µs` : undefined;
+}
+
+/** fmtNsCompact renders a nanosecond duration the way a figure column wants
+ *  it: microseconds below the floor, one decimal of a millisecond up to 10ms
+ *  so a 0.4ms probe never reads "0ms", whole milliseconds above that. Anything
+ *  that is not a finite number is a measurement that did not arrive, and the
+ *  em dash is what every cell already says for one — `(NaN / 1e6).toFixed(0)`
+ *  is the string "NaN", and "NaNms" is a value an operator would go looking
+ *  for. */
+export function fmtNsCompact(ns?: number): string {
+  if (typeof ns !== "number" || !Number.isFinite(ns)) return "—";
+  const micros = fmtMicrosNs(ns);
+  if (micros !== undefined) return micros;
+  const ms = ns / 1e6;
+  return ms < 10 ? `${ms.toFixed(1)}ms` : `${ms.toFixed(0)}ms`;
+}
+
 /** A rendered span is a WORD, not a value: ru reads «5 с / 12 мин / 24 ч» while measured latencies
  *  and the selector's own range tokens ("1m", "24h") stay Latin. */
 const DURATION_UNITS: Record<string, readonly [string, string, string]> = {

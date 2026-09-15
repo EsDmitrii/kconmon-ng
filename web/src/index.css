@@ -56,7 +56,8 @@
      interaction (links, active controls, focus) — never for status. */
   --primary: 211 96% 60%;
   --primary-foreground: 228 40% 8%;
-  --destructive: 357 72% 58%;
+  /* 50%, not brighter: the light label on the confirm-delete fill needs 4.5:1 (4.66:1 here). */
+  --destructive: 357 72% 50%;
   --destructive-foreground: 210 20% 98%;
 
   /* --border separates; --border-strong outlines a control that needs a
@@ -126,13 +127,15 @@
 
   --foreground: 228 22% 15%;
   --muted: 220 27% 96%;
-  --muted-foreground: 226 11% 46%;
+  --muted-foreground: 226 11% 43%;
   --accent: 221 30% 94%;
   --accent-foreground: 228 22% 15%;
   --secondary: 220 27% 96%;
   --secondary-foreground: 228 22% 15%;
 
-  --primary: 211 92% 46%;
+  /* 41%, not brighter: hover:bg-primary/90 lightens the fill on white, and the white label must
+     still hold 4.5:1 there (4.68:1; at 46% it was 3.99:1). */
+  --primary: 211 92% 41%;
   --primary-foreground: 0 0% 100%;
   --destructive: 357 68% 48%;
   --destructive-foreground: 0 0% 100%;
@@ -140,7 +143,7 @@
   --border: 222 22% 91%;
   --border-strong: 222 16% 81%;
   --input: 222 16% 81%;
-  --ring: 211 92% 46%;
+  --ring: 211 92% 41%;
 
   --health-ok: 152 55% 34%;
   /* 33% rather than 42%: this token lands on TEXT — the failure percentage is the hero figure of
@@ -298,8 +301,9 @@ body {
 }
 
 /* ---------------------------------------------------------------------------
-   Motion primitives. Entrances only animate transform+opacity (compositor
-   work, no layout), and everything collapses to ~0 under reduced motion.
+   Motion primitives. Entrances only animate opacity and the transform
+   family (compositor work, no layout), and everything collapses to ~0 under
+   reduced motion.
    --------------------------------------------------------------------------- */
 @keyframes fade-up {
   from { opacity: 0; transform: translateY(6px); }
@@ -309,9 +313,15 @@ body {
   from { opacity: 0; }
   to { opacity: 1; }
 }
+/* scale-in animates the individual `scale` property, never `transform`: the
+   tooltip positions itself with an inline translate(-50%, -100%), and with
+   animation-fill-mode: both a `transform` keyframe outlives the animation and
+   overrides that inline value for good, so the bubble landed on the very cell
+   it described. Everything else on .pop-enter (command palette, modal, theme
+   toggle) only ever lost a 2px translateY it never needed. */
 @keyframes scale-in {
-  from { opacity: 0; transform: scale(0.97) translateY(2px); }
-  to { opacity: 1; transform: scale(1) translateY(0); }
+  from { opacity: 0; scale: 0.97; }
+  to { opacity: 1; scale: 1; }
 }
 @keyframes shimmer {
   from { background-position: 200% 0; }
@@ -498,4 +508,10 @@ body {
 .react-flow__edge:hover .react-flow__edge-path {
   stroke-opacity: 1;
   transition: stroke-opacity var(--dur-fast) var(--ease);
+}
+/* React Flow marks every edge `inactive` (pointer-events: none) while the map
+   is not elementsSelectable and has no onEdgeClick; hover is all the topology
+   asks of an edge, so it gets the library's own active value back. */
+.react-flow .react-flow__edge.inactive {
+  pointer-events: visibleStroke;
 }

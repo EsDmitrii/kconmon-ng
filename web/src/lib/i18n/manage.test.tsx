@@ -175,10 +175,12 @@ describe("/alerting in Russian", () => {
     const severity = screen.getByLabelText(alertingDict.ru["form.severity"]) as HTMLSelectElement;
     expect([...severity.options].map((o) => o.value)).toEqual(["info", "warning", "critical"]);
     expect([...severity.options].map((o) => o.textContent)).toEqual(["info", "warning", "critical"]);
-    // The kind option keeps its identifier and translates only the blurb.
+    // The kind option is the bare identifier; the translated blurb is the
+    // field's hint under the select, not part of the option text.
     const kind = screen.getByLabelText(alertingDict.ru["form.kind"]) as HTMLSelectElement;
     expect(kind.options[0].value).toBe("pair-loss");
-    expect(kind.options[0].textContent).toBe(`pair-loss — ${alertingDict.ru["kind.pair-loss"]}`);
+    expect(kind.options[0].textContent).toBe("pair-loss");
+    expect(screen.getByText(alertingDict.ru["kind.pair-loss"])).toBeInTheDocument();
   });
 });
 

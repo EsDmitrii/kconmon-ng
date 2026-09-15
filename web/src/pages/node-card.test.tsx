@@ -318,6 +318,59 @@ describe("NodeCardPage — an empty podIP", () => {
    the grid's ONE flexible track, its three short siblings size to content, and
    the ellipsis (full value one hover away) engages only when the card is
    genuinely out of room. */
+/* ── the header actions on a phone ────────────────────────────────────────
+ * At 375px the shell's action row broke between the percentage and the tier
+ * badge: "23.7% healthy" hung beside the protocol switch, a line away from the
+ * "Failing" it belongs to. The switch takes a row of its own below sm (the
+ * wrapper is the flex item, so the track keeps its natural width) and the
+ * verdict — percentage, tier, external — is one group that never wraps inside.
+ */
+describe("NodeCardPage — the header actions reflow", () => {
+  it("gives the protocol switch a row of its own below sm and keeps the verdict on one line", async () => {
+    renderPage();
+    await screen.findByTestId("node-health-percent");
+
+    const row = screen.getByTestId("node-protocol-row");
+    expect(row.className).toContain("basis-full");
+    expect(row.className).toContain("sm:basis-auto");
+    expect(within(row).getByRole("radiogroup", { name: "Protocol" })).toBeInTheDocument();
+
+    const verdict = screen.getByTestId("node-verdict");
+    expect(verdict.className).toContain("flex-nowrap");
+    expect(within(verdict).getByTestId("node-health-percent")).toBeInTheDocument();
+    // node-a → node-b fails 2% in the fixture: the tier word beside the figure is Degraded.
+    expect(within(verdict).getByText("Degraded")).toBeInTheDocument();
+    // Investigate is NOT in the group: it is the next thing to wrap, never the figure.
+    expect(verdict.contains(screen.getByText("Investigate"))).toBe(false);
+  });
+
+  it("keeps the external badge inside the verdict group, beside the tier", async () => {
+    renderPage("/nodes/mac-external-01", { topology: externalTopology, matrix: inboundOnlyMatrix });
+    const badge = await screen.findByTestId("node-external-badge");
+    expect(badge.closest("[data-testid='node-verdict']")).not.toBeNull();
+  });
+});
+
+describe("NodeCardPage — the identity card without an agent id", () => {
+  it("lays the four placeholders in one row and sets the dash in the text face, like its siblings", async () => {
+    renderWithTopology({ status: 200, body: { nodes: [], agents: [], timestamp: "t" } }, "/nodes/node-zzz");
+    await screen.findByText("Zone");
+
+    const agentId = screen.getByText("Agent ID").parentElement?.querySelector("dd");
+    expect(agentId).toHaveTextContent("—");
+    expect(agentId?.className).not.toContain("mono-data");
+    expect(agentId?.getAttribute("title")).toBeNull();
+    const podIP = screen.getByText("Pod IP").parentElement?.querySelector("dd");
+    expect(podIP).toHaveTextContent("—");
+    expect(podIP?.className).not.toContain("mono-data");
+    // No id, nothing for a flexible track to hold: a plain row rather than a grid with a blank middle.
+    const dl = agentId?.closest("dl");
+    expect(dl?.className).toContain("sm:flex");
+    expect(dl?.className).toContain("sm:gap-10");
+    expect(dl?.className).not.toContain("sm:grid-cols-[auto_minmax(0,1fr)_auto_auto]");
+  });
+});
+
 describe("NodeCardPage — the identity card's agent id", () => {
   it("gives a long agent id the card's free width instead of a fixed quarter", async () => {
     const longId = "kconmon-night-worker-6f4b9c7d8e-x2m4q";
@@ -579,5 +632,188 @@ describe("NodeCardPage — a node the cluster never labelled", () => {
       },
     });
     await waitFor(() => expect(screen.getByText("z9")).toBeInTheDocument());
+  });
+});
+
+/* ── spec 5.3: a bare-host agent (kconmon-ng.io/external: "true") on the card ── */
+
+const EXTERNAL_LABELS = { "kconmon-ng.io/external": "true" };
+
+/** A host outside the cluster: an agent entry with no node entry behind it. */
+const externalAgent = {
+  id: "agent-ext",
+  nodeName: "mac-external-01",
+  podIP: "203.0.113.7",
+  zone: "office",
+  labels: EXTERNAL_LABELS,
+  capabilities: ["plane:tcp", "plane:icmp", "plane:mtr"],
+};
+
+const externalTopology = {
+  ...topologyBody,
+  agents: [...topologyBody.agents, externalAgent],
+};
+
+/** Prometheus scrapes the cluster agents only: the host is a destination in
+ *  every cell that names it and a source in none — the unscraped signature. */
+const inboundOnlyMatrix = {
+  protocol: "tcp",
+  plane: "pod",
+  nodes: ["node-a", "node-b", "mac-external-01"],
+  cells: [
+    { source: "node-a", destination: "mac-external-01", failRatio: 0.02, rttP95: 1e6 },
+    { source: "node-a", destination: "node-b", failRatio: 0 },
+  ],
+  timestamp: "t",
+};
+
+const SCRAPE_DOCS = "https://esdmitrii.github.io/kconmon-ng/external-agents/#scraping-external-agents";
+const READY_NOTE_EXTERNAL = "an external host has no Kubernetes node; readiness is not reported";
+const READY_NOTE_INFORMER = "node readiness comes from the Kubernetes node informer";
+
+describe("NodeCardPage — an external agent", () => {
+  it("labels the address row Advertised address and wears the external badge", async () => {
+    renderPage("/nodes/mac-external-01", { topology: externalTopology, matrix: inboundOnlyMatrix });
+    await waitFor(() => expect(screen.getByText("Advertised address")).toBeInTheDocument());
+    expect(screen.queryByText("Pod IP")).toBeNull();
+    const address = screen.getByText("Advertised address").parentElement?.querySelector("dd");
+    expect(address).toHaveTextContent("203.0.113.7");
+    // Identity, not a tier: the badge sits in the header actions beside the verdict.
+    expect(screen.getByTestId("node-external-badge")).toHaveTextContent("external");
+    // Readiness stays an em-dash, and the title says why a bare host has none.
+    const ready = screen.getByText("Ready").parentElement?.querySelector("dd");
+    expect(ready).toHaveTextContent("—");
+    expect(ready?.getAttribute("title")).toBe(READY_NOTE_EXTERNAL);
+  });
+
+  it("lists the planes it advertised as chips, the ones it left out muted", async () => {
+    renderPage("/nodes/mac-external-01", { topology: externalTopology, matrix: inboundOnlyMatrix });
+    await waitFor(() => expect(screen.getByText("Planes")).toBeInTheDocument());
+    const chips = screen.getAllByTestId("plane-chip");
+    expect(chips.map((c) => c.textContent)).toEqual(["TCP", "UDP", "ICMP", "MTR"]);
+    expect(chips.map((c) => c.getAttribute("data-present"))).toEqual(["true", "false", "true", "true"]);
+  });
+
+  it("says the planes are unknown when the agent advertised none", async () => {
+    const silent = {
+      ...topologyBody,
+      agents: [...topologyBody.agents, { ...externalAgent, capabilities: [] }],
+    };
+    renderPage("/nodes/mac-external-01", { topology: silent, matrix: inboundOnlyMatrix });
+    await waitFor(() => expect(screen.getByText("Planes")).toBeInTheDocument());
+    const planes = screen.getByText("Planes").parentElement?.querySelector("dd");
+    expect(planes).toHaveTextContent("unknown");
+    expect(screen.queryAllByTestId("plane-chip")).toHaveLength(0);
+  });
+
+  it("says why the breakdown is empty for an unscraped external host", async () => {
+    renderPage("/nodes/mac-external-01", { topology: externalTopology, matrix: inboundOnlyMatrix });
+    expect(await screen.findByText("No probe data for this node yet.")).toBeInTheDocument();
+    expect(screen.getByText(/Prometheus is not scraping this external agent's metrics port/)).toBeInTheDocument();
+    const link = screen.getByRole("link", { name: "Learn more in the docs" });
+    expect(link).toHaveAttribute("href", SCRAPE_DOCS);
+    expect(link).toHaveAttribute("target", "_blank");
+  });
+
+  it("does not blame the scrape job on a plane the host said it does not run", async () => {
+    // externalAgent advertises tcp, icmp and mtr: on the UDP view its silent row has a known
+    // cause, and the identity card's struck-through UDP chip already names it.
+    renderPage("/nodes/mac-external-01?protocol=udp", { topology: externalTopology, matrix: inboundOnlyMatrix });
+    expect(await screen.findByText("No probe data for this node yet.")).toBeInTheDocument();
+    await waitFor(() => expect(screen.getAllByTestId("plane-chip")).toHaveLength(4));
+    const udp = screen.getAllByTestId("plane-chip").find((c) => c.textContent === "UDP");
+    expect(udp?.getAttribute("data-present")).toBe("false");
+    expect(screen.queryByText(/Prometheus is not scraping/)).toBeNull();
+    expect(screen.queryByTestId("breakdown-unscraped")).toBeNull();
+    // The same host on a plane it DOES run is still the scrape gap it was.
+    cleanup();
+    renderPage("/nodes/mac-external-01?protocol=icmp", { topology: externalTopology, matrix: inboundOnlyMatrix });
+    expect(await screen.findByTestId("breakdown-unscraped")).toBeInTheDocument();
+  });
+
+  it("keeps the plain empty line while the matrix has no cells at all", async () => {
+    const young = { ...inboundOnlyMatrix, cells: [] };
+    renderPage("/nodes/mac-external-01", { topology: externalTopology, matrix: young });
+    expect(await screen.findByText("No probe data for this node yet.")).toBeInTheDocument();
+    // Silence everywhere is a young deployment, not a scrape job somebody forgot.
+    expect(screen.queryByText(/Prometheus is not scraping/)).toBeNull();
+    expect(screen.queryByRole("link", { name: "Learn more in the docs" })).toBeNull();
+  });
+
+  it("draws the breakdown as usual once Prometheus scrapes the host", async () => {
+    const scraped = {
+      ...inboundOnlyMatrix,
+      cells: [
+        ...inboundOnlyMatrix.cells,
+        { source: "mac-external-01", destination: "node-a", failRatio: 0.05, rttP95: 3e6 },
+      ],
+    };
+    renderPage("/nodes/mac-external-01", { topology: externalTopology, matrix: scraped });
+    const link = await screen.findByRole("link", { name: "node-a" });
+    expect(link).toHaveAttribute("href", "/pairs/mac-external-01/node-a");
+    expect(screen.getByText("5.0%")).toBeInTheDocument();
+    expect(screen.queryByText(/Prometheus is not scraping/)).toBeNull();
+    // Scraped or not, it is still a bare host.
+    expect(screen.getByTestId("node-external-badge")).toBeInTheDocument();
+    expect(screen.getByText("Advertised address")).toBeInTheDocument();
+  });
+
+  it("changes nothing on an in-cluster node of the same fleet", async () => {
+    renderPage("/nodes/node-a", { topology: externalTopology, matrix: inboundOnlyMatrix });
+    await waitFor(() => expect(screen.getByText("Pod IP")).toBeInTheDocument());
+    expect(screen.queryByText("Advertised address")).toBeNull();
+    expect(screen.queryByTestId("node-external-badge")).toBeNull();
+    expect(screen.queryByText("Planes")).toBeNull();
+    expect(screen.queryAllByTestId("plane-chip")).toHaveLength(0);
+    // node-a HAS a k8s node, so Ready is a value and carries no note at all.
+    const ready = screen.getByText("Ready").parentElement?.querySelector("dd");
+    expect(ready).toHaveTextContent("yes");
+    expect(ready?.getAttribute("title")).toBeNull();
+  });
+
+  it("keeps the informer note on an in-cluster node the topology lists no node for", async () => {
+    renderWithTopology({
+      status: 200,
+      body: { nodes: [], agents: [{ id: "agent-1", nodeName: "node-a", podIP: "10.0.0.1", zone: "z9" }], timestamp: "t" },
+    });
+    await waitFor(() => expect(screen.getByText("z9")).toBeInTheDocument());
+    const ready = screen.getByText("Ready").parentElement?.querySelector("dd");
+    expect(ready?.getAttribute("title")).toBe(READY_NOTE_INFORMER);
+    expect(screen.queryByTestId("node-external-badge")).toBeNull();
+  });
+});
+
+describe("NodeCardPage — an external agent under a hostile wire", () => {
+  const hostileAgent = (over: Record<string, unknown>) => ({
+    ...topologyBody,
+    agents: [{ id: "agent-1", nodeName: "node-a", podIP: "10.0.0.1", zone: "z1", ...over }],
+  });
+
+  it("renders the in-cluster card for labels: null and capabilities: null", async () => {
+    renderPage("/nodes/node-a", { topology: hostileAgent({ labels: null, capabilities: null }) });
+    await waitFor(() => expect(screen.getByText("Pod IP")).toBeInTheDocument());
+    expect(screen.queryByTestId("node-external-badge")).toBeNull();
+    expect(screen.queryByText("Planes")).toBeNull();
+    expect(screen.getByText("10.0.0.1")).toBeInTheDocument();
+  });
+
+  it("reads labels sent as an array, or a value of \"True\", as not external", async () => {
+    renderPage("/nodes/node-a", { topology: hostileAgent({ labels: ["kconmon-ng.io/external"] }) });
+    await waitFor(() => expect(screen.getByText("Pod IP")).toBeInTheDocument());
+    expect(screen.queryByTestId("node-external-badge")).toBeNull();
+    cleanup();
+    renderPage("/nodes/node-a", { topology: hostileAgent({ labels: { "kconmon-ng.io/external": "True" } }) });
+    await waitFor(() => expect(screen.getByText("Pod IP")).toBeInTheDocument());
+    expect(screen.queryByTestId("node-external-badge")).toBeNull();
+  });
+
+  it("shows the planes as unknown for an external agent whose capabilities are null", async () => {
+    renderPage("/nodes/mac-external-01", {
+      topology: { ...topologyBody, agents: [{ ...externalAgent, capabilities: null }] },
+      matrix: inboundOnlyMatrix,
+    });
+    await waitFor(() => expect(screen.getByText("Planes")).toBeInTheDocument());
+    expect(screen.getByText("Planes").parentElement?.querySelector("dd")).toHaveTextContent("unknown");
+    expect(screen.getByTestId("node-external-badge")).toBeInTheDocument();
   });
 });

@@ -156,6 +156,16 @@ describe("Time Machine while engaged", () => {
     expect(banner).toHaveTextContent(/return to live to act/i);
   });
 
+  /* On a phone the banner is the stamp line plus the button: the hint clause is sm-up only
+     (the button says it), and the button ends its own grid row below sm and rides ml-auto
+     above it, so it can never sit under the icon. */
+  it("keeps the hint clause for sm and up only, with the button pushed to the end", () => {
+    renderEngaged();
+    // Scoped to the banner: the provider's sr-only reason for disabled writes says the same words.
+    expect(within(screen.getByRole("status")).getByText("— return to Live to act.")).toHaveClass("hidden", "sm:inline");
+    expect(screen.getByRole("button", { name: /return to live/i })).toHaveClass("justify-self-end", "sm:ml-auto");
+  });
+
   it("offers Return to Live, which clears ?at= and drops back to the trigger", () => {
     renderEngaged();
     fireEvent.click(screen.getByRole("button", { name: /return to live/i }));

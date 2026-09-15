@@ -1,4 +1,5 @@
 import type * as echarts from "echarts";
+import { stampClock, type Locale } from "./i18n";
 
 /**
  * chart-tooltip.ts — why every chart tooltip in this console used to be cut off,
@@ -105,7 +106,12 @@ export interface AxisTooltipRow {
   axisValueLabel?: string;
   /** [x, y] on a time axis; a bare number on a category one. */
   value?: unknown;
+  /** Which series the row came from, so a series with a formatter of its own is printed with it. */
+  seriesIndex?: number;
 }
+
+/** ValueFormatter writes one y value; the row is there for a formatter that differs per series. */
+export type ValueFormatter = (value: unknown, row?: AxisTooltipRow) => string;
 
 /** rowValue is the y a row carries, or null when it carries nothing numeric. */
 export function rowValue(row: AxisTooltipRow): number | null {
@@ -204,12 +210,12 @@ export function renderAxisTooltip(
   hidden: number,
   header: string,
   more: (count: number) => string,
-  valueFormatter?: (value: unknown) => string,
+  valueFormatter?: ValueFormatter,
 ): string {
   const body = rows
     .map((row) => {
       const raw = Array.isArray(row.value) ? row.value[row.value.length - 1] : row.value;
-      const shown = tooltipValueText(raw, valueFormatter);
+      const shown = tooltipValueText(raw, valueFormatter ? (value) => valueFormatter(value, row) : undefined);
       return (
         `<div style="display:flex;align-items:center;gap:8px;line-height:1.5">${row.marker ?? ""}` +
         `<span style="flex:1 1 auto;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:22rem">` +
@@ -317,41 +323,108 @@ export function axisValueFormatter(option: echarts.EChartsOption): ((value: unkn
     : undefined;
 }
 
-/** withPointerLabel teaches the Y axis's own pointer to print the pill properly. */
-function withPointerLabel(option: echarts.EChartsOption): Partial<echarts.EChartsOption> {
-  const format = axisValueFormatter(option);
-  const yAxis = option.yAxis;
-  if (!format || !yAxis || Array.isArray(yAxis)) return {};
-  const axis = yAxis as Record<string, unknown>;
-  const pointer = (axis.axisPointer ?? {}) as Record<string, unknown>;
+/** One axis, with its pointer pill taught to print through `format`. */
+function pillOn(axis: object, format: (value: unknown) => string): object {
+  const pointer = ((axis as Record<string, unknown>).axisPointer ?? {}) as Record<string, unknown>;
   return {
+    ...axis,
+    axisPointer: {
+      ...pointer,
+      label: { ...((pointer.label ?? {}) as object), formatter: (p: { value: unknown }) => format(p.value) },
+    },
+  };
+}
+
+/** The label formatter an axis declares for its own ticks, when it is a function. */
+function ownLabelFormatter(axis: unknown): ((value: unknown) => string) | undefined {
+  const label = (axis as { axisLabel?: { formatter?: unknown } } | undefined)?.axisLabel;
+  return typeof label?.formatter === "function"
+    ? (value: unknown) => String((label.formatter as (v: unknown) => unknown)(value))
+    : undefined;
+}
+
+/**
+ * withPointerLabel teaches each axis's own pointer to print its pill properly.
+ *
+ * The y pill takes the chart's value formatter (axisValueFormatter). A chart
+ * with TWO y axes — Explore's compare panel with a ratio on the right of a
+ * seconds axis — gets a pill per axis from that axis's OWN tick formatter, and
+ * never the tooltip's, which belongs to the left axis alone.
+ *
+ * The x pill on a TIME axis prints the house clock as HH:mm:ss. ECharts' default
+ * writes the full date and time there, a label wide enough to clip at the
+ * canvas edge on every chart in the console (audit frame console-hover).
+ */
+function withPointerLabel(option: echarts.EChartsOption, locale: Locale): Partial<echarts.EChartsOption> {
+  const out: Partial<echarts.EChartsOption> = {};
+
+  const yAxis = option.yAxis;
+  if (Array.isArray(yAxis)) {
+    const axes = yAxis.map((axis) => {
+      const format = ownLabelFormatter(axis);
+      return format ? pillOn(axis as object, format) : axis;
+    });
+    if (axes.some((axis, i) => axis !== yAxis[i])) out.yAxis = axes as echarts.EChartsOption["yAxis"];
+  } else if (yAxis) {
+    const format = axisValueFormatter(option);
     /* On the Y AXIS rather than on the tooltip: the tooltip's own axisPointer
        label governs BOTH pills, and running a value formatter over the x pill
        would turn an instant into a latency. */
-    yAxis: {
-      ...axis,
-      axisPointer: {
-        ...pointer,
-        label: { ...((pointer.label ?? {}) as object), formatter: (p: { value: unknown }) => format(p.value) },
-      },
-    } as echarts.EChartsOption["yAxis"],
-  };
+    if (format) out.yAxis = pillOn(yAxis as object, format) as echarts.EChartsOption["yAxis"];
+  }
+
+  const xAxis = option.xAxis;
+  const first = Array.isArray(xAxis) ? xAxis[0] : xAxis;
+  if (first && (first as { type?: string }).type === "time") {
+    const clock = (value: unknown) => {
+      const d = new Date(Number(value));
+      return Number.isFinite(d.getTime()) ? stampClock(d, locale) : String(value ?? "");
+    };
+    const pinned = pillOn(first as object, clock);
+    out.xAxis = (Array.isArray(xAxis) ? [pinned, ...xAxis.slice(1)] : pinned) as echarts.EChartsOption["xAxis"];
+  }
+
+  return out;
+}
+
+/** The formatter a series declared for its own tooltip rows, if any. */
+function seriesValueFormatter(option: echarts.EChartsOption, index: number | undefined): ValueFormatter | undefined {
+  if (index === undefined) return undefined;
+  const list = Array.isArray(option.series) ? option.series : option.series ? [option.series] : [];
+  const own = (list[index] as { tooltip?: { valueFormatter?: unknown } } | undefined)?.tooltip?.valueFormatter;
+  return typeof own === "function" ? (own as ValueFormatter) : undefined;
 }
 
 export function sharedTooltipOption(
   option: echarts.EChartsOption,
   host: () => HTMLElement | null,
-  opts: { cursorValue: () => number | null; more: (count: number) => string; cap?: number },
+  opts: {
+    cursorValue: () => number | null;
+    more: (count: number) => string;
+    cap?: number;
+    /** The interface language for the x pill's clock; "en" is the viewer's own locale, 24-hour. */
+    locale?: Locale;
+  },
 ): echarts.EChartsOption {
   const tooltip = option.tooltip;
   if (!tooltip || Array.isArray(tooltip)) return option;
 
   const pointer = (tooltip.axisPointer ?? {}) as Record<string, unknown>;
-  const valueFormatter = tooltip.valueFormatter as ((value: unknown) => string) | undefined;
+  const chartFormatter = tooltip.valueFormatter as ((value: unknown) => string) | undefined;
+  /* A series with a formatter of its own — leg B of a mixed-unit compare, a
+     ratio drawn beside seconds — is printed with it; every other row takes the
+     chart's. Undefined when neither exists, so a raw axis stays raw. */
+  const hasOwn = (Array.isArray(option.series) ? option.series : []).some(
+    (s) => typeof (s as { tooltip?: { valueFormatter?: unknown } }).tooltip?.valueFormatter === "function",
+  );
+  const valueFormatter: ValueFormatter | undefined =
+    chartFormatter || hasOwn
+      ? (value, row) => (seriesValueFormatter(option, row?.seriesIndex) ?? chartFormatter ?? String)(value)
+      : undefined;
 
   const withCross: echarts.EChartsOption = {
     ...option,
-    ...withPointerLabel(option),
+    ...withPointerLabel(option, opts.locale ?? "en"),
     tooltip: {
       ...tooltip,
       /* A cross draws with crossStyle, not lineStyle, so each surface's own grid

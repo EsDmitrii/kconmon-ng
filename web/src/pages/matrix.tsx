@@ -1,16 +1,20 @@
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from "react";
-import { Inbox, Maximize, Minus, Plus, Search } from "lucide-react";
+import { ExternalLink, Inbox, Maximize, Minus, Plus, Search } from "lucide-react";
 import { PageShell } from "@/components/page-shell";
 import { RealtimeBadge } from "@/components/realtime-badge";
 import { Badge } from "@/components/ui/badge";
 import { Card } from "@/components/ui/card";
+import { textLinkClass } from "@/components/ui/text-link";
 import { Segmented } from "@/components/ui/segmented";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tooltip } from "@/components/ui/tooltip";
 import { useMatrix } from "@/hooks/use-matrix";
 import { useTopology } from "@/hooks/use-topology";
-import { localeTag, useLocale, useT } from "@/lib/i18n";
+import { externalByNode, runsPlane, unscrapedExternalNodes } from "@/lib/agents";
+import { stampFull, useLocale, useT } from "@/lib/i18n";
 import { matrixDict, type MatrixKey } from "@/lib/i18n/dict/matrix";
+/* The docs-link wording is components/page-help.tsx's, worded once in dict/shared.ts. */
+import { sharedDict } from "@/lib/i18n/dict/shared";
 /* cellSummary's own table — dict/matrix.ts's NOT-HERE list says why the shared
    reading of a cell is not this page's to fork. */
 import { matrixCellsDict } from "@/lib/i18n/dict/matrix-cells";
@@ -38,12 +42,49 @@ import {
   type CellDensity,
 } from "@/lib/matrix-zoom";
 import { withAtParam, useTimeContext } from "@/lib/timemachine";
-import { PROTOCOLS, type MatrixCell, type Protocol } from "@/lib/types";
+import { PROTOCOLS, type MatrixCell, type Protocol, type TopologyAgent } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 // NUL keeps the composite key unambiguous even if a node name contained the
 // separator; node names are DNS labels today, but this stays robust regardless.
 const pairKey = (source: string, destination: string) => `${source}\0${destination}`;
+
+/**
+ * Silence is WHY an unmeasured cell is quiet, decided once per cell in MatrixPage from three
+ * memoised readings of the topology and handed to the cell as one string:
+ *
+ *   excluded     the sparse plan assigns nobody to the pair (lib/matrix-plan.ts);
+ *   unsupported  the source advertised its planes and left this protocol out (lib/agents.ts);
+ *   unscraped    the source is an external agent Prometheus never reads — no series from it at
+ *                all while the grid has cells, AND it runs this plane (lib/agents.ts's
+ *                unscrapedExternalNodes reads it per plane: a source that left the plane out is
+ *                'unsupported', and no scrape job would change that);
+ *   none         nothing known: the alarming 'no data'.
+ *
+ * Precedence is excluded > unsupported > unscraped — the plan is the operator's own statement
+ * about the pair, the other two are inferences. Only an UNMEASURED cell reads any of them.
+ */
+export type Silence = "none" | "excluded" | "unsupported" | "unscraped";
+
+/**
+ * ScrapeDocsLink is the "see External agents docs" every unscraped hint ends on: page-help.tsx's
+ * link, aimed at the scrape chapter. A new tab with no opener, like every outbound link here.
+ */
+function ScrapeDocsLink() {
+  const t = useT(matrixDict);
+  const ts = useT(sharedDict);
+  return (
+    <a
+      href={t("docs.scrapeExternal")}
+      target="_blank"
+      rel="noopener noreferrer"
+      className={cn("inline-flex items-center gap-1 font-medium", textLinkClass)}
+    >
+      {ts("help.learnMore")}
+      <ExternalLink aria-hidden="true" className="size-3" />
+    </a>
+  );
+}
 
 /* ── what the page will accept as a matrix ────────────────────────────────────
  *
@@ -145,6 +186,19 @@ const TIER_RAIL: Record<Tier, string> = {
   unknown: "before:bg-transparent",
 };
 
+/* A TILE is a swatch, not a card: at 19px the 3px rail was most of what a cell
+   drew, so a zoomed-out grid read as a column of green ticks over grey. The
+   tile takes the tier's soft fill instead, healthy included — the heat map is
+   the one place an all-green grid is meant to look green. rounded-xs, not
+   rounded-sm: the theme's sm radius is 8px (index.css), which on a 38×19 box
+   is a capsule; xs is the 2px that makes it read as a tile. */
+const TILE_FILL: Record<Tier, string> = {
+  ok: "bg-health-ok-soft",
+  warn: "bg-health-warn-soft",
+  bad: "bg-health-bad-soft",
+  unknown: "bg-health-unknown-soft",
+};
+
 /* Tailwind only sees literal class names, so the legend dots use an explicit
    map rather than interpolation. */
 const TIER_DOT: Record<Tier, string> = {
@@ -224,7 +278,18 @@ const HEADER_CELL =
  * truncates inside a fixed box now and stays whole in the tooltip and the
  * aria-label, which is where it was always read from anyway.
  */
-function NodeLabel({ name, width, elide = "" }: { name: string; width: "column" | "label"; elide?: string }) {
+function NodeLabel({
+  name,
+  width,
+  elide = "",
+  external = false,
+}: {
+  name: string;
+  width: "column" | "label";
+  elide?: string;
+  /** A bare-host agent (lib/agents.ts's external label): the tooltip and the aria say so, the link does not change. */
+  external?: boolean;
+}) {
   const t = useT(matrixDict);
   /* The DISTINGUISHING part of the name, when every node shares a prefix. A column is about as wide
      as thirteen characters, and a real fleet's names agree for longer than that — every header on
@@ -232,15 +297,31 @@ function NodeLabel({ name, width, elide = "" }: { name: string; width: "column" 
      all. The shared prefix is dropped here and named once above the grid; the whole name stays in
      the tooltip and in the accessible name, which is where it was read from anyway. */
   const shown = elide && name.startsWith(elide) && name.length > elide.length ? `…${name.slice(elide.length)}` : name;
+  /* A name that lost its prefix already opens with an ellipsis. If it STILL overflows the box,
+     text-overflow would hang a second one on the end ("…control-pla…"), so that label clips at
+     the edge instead; the whole name is one hover away either way. */
+  const elided = shown !== name;
   return (
-    <Tooltip content={name}>
+    <Tooltip
+      content={
+        external ? (
+          <div className="flex flex-col gap-0.5">
+            <span className="mono-data">{name}</span>
+            <span className="text-muted-foreground">{t("header.external")}</span>
+          </div>
+        ) : (
+          name
+        )
+      }
+    >
       <a
         href={withAtParam(`/nodes/${encodeURIComponent(name)}`)}
-        aria-label={t("header.node", { node: name })}
+        aria-label={t(external ? "header.node.external" : "header.node", { node: name })}
         className={cn(
           /* font-mono, not .mono-data: the data face at the size the zoom engine
              picked — .mono-data pins 13px and would stop labels scaling. */
-          "block truncate rounded px-1 font-mono hover:text-foreground hover:underline",
+          "block rounded px-1 font-mono hover:text-foreground hover:underline",
+          elided ? "overflow-hidden whitespace-nowrap" : "truncate",
           "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
           width === "column" ? "max-w-[var(--m-col-w)]" : "max-w-[var(--m-label-w)]",
         )}
@@ -256,16 +337,19 @@ function GridCellImpl({
   dst,
   cell,
   density,
-  excluded = false,
+  protocol,
+  silence = "none",
 }: {
   src: string;
   dst: string;
   cell: MatrixCell | undefined;
   /** What this size can honestly SHOW — lib/matrix-zoom.ts's cellDensity. */
   density: CellDensity;
-  /** The sparse topology plan assigns nobody to probe this pair (lib/matrix-plan.ts).
-   *  Only an UNMEASURED cell reads it: data, if any arrived, always outranks the plan. */
-  excluded?: boolean;
+  /** The grid's protocol, named in the 'unsupported' reading. */
+  protocol: Protocol;
+  /** Why the pair is expected to be quiet, if it is (see Silence). Only an UNMEASURED cell
+   *  reads it: data, if any arrived, always outranks every reason for its absence. */
+  silence?: Silence;
 }) {
   const t = useT(matrixDict);
   const tc = useT(matrixCellsDict);
@@ -274,7 +358,12 @@ function GridCellImpl({
   if (src === dst) {
     return (
       <td aria-label={t("cell.self", { node: src })} className="p-0.5">
-        <div className="flex h-[var(--m-cell-h)] w-[var(--m-col-w)] items-center justify-center rounded-md bg-surface-2/40 text-muted-foreground/40">
+        <div
+          className={cn(
+            "flex h-[var(--m-cell-h)] w-[var(--m-col-w)] items-center justify-center bg-surface-2/40 text-muted-foreground/40",
+            density === "tile" ? "rounded-xs" : "rounded-md",
+          )}
+        >
           {density === "tile" ? null : "—"}
         </div>
       </td>
@@ -287,6 +376,9 @@ function GridCellImpl({
   const tier = cellTier(cell);
   const measured = isMeasured(cell);
   const fail = cell?.failRatio ?? null;
+  /* Data outranks the silence: a measured cell renders its measurement even if the plan has
+     since dropped the pair or the source now claims it runs no such probes. */
+  const why: Silence = measured ? "none" : silence;
 
   /* And the investigation window ends at the viewed instant, not at now: an Investigate link built
      while the Time Machine is engaged must open the window around what is on screen. */
@@ -320,14 +412,19 @@ function GridCellImpl({
       </a>
     );
 
-  /* The plan-excluded, unmeasured cell: expected silence, visually apart from 'no data' (dashed
-     hollow box vs the unknown tier's soft fill and em-dash). Deliberately NOT a link — the pair
-     page promises continuous history a pair the plan excludes will never grow — while Investigate
-     stays, because probing on demand is exactly how such a pair gets looked at. Data outranks the
-     plan: a measured cell renders its measurement below even if the plan has since dropped it. */
-  if (excluded && !measured) {
+  /* The EXPECTED silences, visually apart from 'no data' (dashed hollow box vs the unknown
+     tier's soft fill and em-dash): the plan assigns nobody to the pair, or the source said it runs
+     no probes of this protocol. Deliberately NOT a link — the pair page promises continuous
+     history such a pair will never grow — while Investigate stays, because probing on demand is
+     exactly how such a pair gets looked at. The two differ only in what they are CALLED. */
+  if (why === "excluded" || why === "unsupported") {
+    const upper = protocol.toUpperCase();
+    const reading =
+      why === "excluded" ? t("cell.notProbed") : t("cell.unsupported", { protocol: upper });
+    const explanation =
+      why === "excluded" ? t("tooltip.notProbed") : t("tooltip.unsupported", { node: src, protocol: upper });
     return (
-      <td aria-label={`${src} → ${dst}: ${t("cell.notProbed")}`} className="group relative p-0.5">
+      <td aria-label={`${src} → ${dst}: ${reading}`} className="group relative p-0.5">
         <Tooltip
           content={
             <div className="flex min-w-44 flex-col gap-1">
@@ -336,11 +433,16 @@ function GridCellImpl({
                 <span aria-hidden="true" className="text-muted-foreground">→</span>
                 <span className="mono-data truncate">{dst}</span>
               </div>
-              <div className="text-muted-foreground">{t("tooltip.notProbed")}</div>
+              <div className="text-muted-foreground">{explanation}</div>
             </div>
           }
         >
-          <div className="h-[var(--m-cell-h)] w-[var(--m-col-w)] rounded-md border border-dashed border-border-strong/70" />
+          <div
+            className={cn(
+              "h-[var(--m-cell-h)] w-[var(--m-col-w)] border border-dashed border-border-strong/70",
+              density === "tile" ? "rounded-xs" : "rounded-md",
+            )}
+          />
         </Tooltip>
         {investigateAction}
       </td>
@@ -357,7 +459,16 @@ function GridCellImpl({
         <span className="mono-data truncate">{dst}</span>
       </div>
       {!measured ? (
-        <div className="text-muted-foreground">{t("tooltip.unmeasured")}</div>
+        /* 'unscraped' IS no data — same fill, same em-dash, same aria-label, so the pinned
+           reading never changes — and only the tooltip says why, and what to do about it. */
+        why === "unscraped" ? (
+          <div className="flex max-w-64 flex-col gap-1 text-muted-foreground">
+            <span>{t("tooltip.unscraped", { src })}</span>
+            <ScrapeDocsLink />
+          </div>
+        ) : (
+          <div className="text-muted-foreground">{t("tooltip.unmeasured")}</div>
+        )
       ) : (
         <dl className="nums grid grid-cols-[auto_1fr] gap-x-4 gap-y-0.5 text-muted-foreground">
           <dt>{t("tooltip.failRatio")}</dt>
@@ -405,13 +516,15 @@ function GridCellImpl({
           href={pairHref}
           aria-label={label}
           className={cn(
-            "relative flex h-[var(--m-cell-h)] w-[var(--m-col-w)] flex-col items-center justify-center overflow-hidden rounded-md",
+            "relative flex h-[var(--m-cell-h)] w-[var(--m-col-w)] flex-col items-center justify-center overflow-hidden",
             "before:absolute before:inset-y-0 before:left-0 before:w-[3px]",
             "transition-[transform,box-shadow] duration-(--dur-fast) ease-(--ease)",
             "hover:-translate-y-px hover:shadow-raised hover:ring-1 hover:ring-border-strong",
             "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
-            TIER_FILL[tier],
-            TIER_RAIL[tier],
+            /* The rail is a card's device; a tile is all fill (see TILE_FILL). */
+            density === "tile"
+              ? cn("rounded-xs before:hidden", TILE_FILL[tier])
+              : cn("rounded-md", TIER_FILL[tier], TIER_RAIL[tier]),
           )}
         >
           {/* Below a certain size a cell is a coloured TILE and nothing else:
@@ -529,6 +642,61 @@ export function MatrixPage() {
     return m;
   }, [data]);
 
+  /* ── the three readings of the topology a cell's silence is decided from ──
+     Each is a Set (or Map) keyed by node name and memoised on the topology snapshot, so the
+     per-cell question is one lookup: a fifty-node grid asks it 2 500 times a render, and
+     re-reading every agent's labels and capabilities inside that loop is what this avoids.
+     react-query shares structure across identical polls, so an unchanged topology keeps the
+     same sets and the memoised cells keep their props. */
+  const external = useMemo(() => externalByNode(topology.data), [topology.data]);
+  /* Per plane, so the note above the grid and the cells agree: an external agent that left THIS
+     protocol out is not listed here — its row reads 'unsupported' below, and a scrape job is not
+     the fix. */
+  const unscrapedList = useMemo(
+    () => unscrapedExternalNodes(topology.data, data, protocol),
+    [topology.data, data, protocol],
+  );
+  const unscraped = useMemo(() => new Set(unscrapedList), [unscrapedList]);
+  /* The sources that advertised their planes and left THIS protocol out. A name two agents
+     claim is unsupported only if neither runs the plane — on any doubt, the alarming reading. */
+  const unsupportedSources = useMemo(() => {
+    const out = new Set<string>();
+    const agents: unknown = topology.data?.agents;
+    if (!Array.isArray(agents)) return out;
+    const runs = new Set<string>();
+    for (const raw of agents as unknown[]) {
+      if (!raw || typeof raw !== "object") continue;
+      const agent = raw as TopologyAgent;
+      const name: unknown = agent.nodeName;
+      if (typeof name !== "string" || name === "") continue;
+      (runsPlane(agent, protocol) ? runs : out).add(name);
+    }
+    for (const name of runs) out.delete(name);
+    return out;
+  }, [topology.data, protocol]);
+  /* The legend row appears only while such a cell is ON the grid: a source whose every pair is
+     measured or plan-excluded has nowhere for the state to occur. Only its own rows are walked. */
+  const hasUnsupportedCell = useMemo(() => {
+    if (unsupportedSources.size === 0) return false;
+    for (const src of nodes) {
+      if (!unsupportedSources.has(src)) continue;
+      for (const dst of nodes) {
+        if (src === dst || isPlanExcluded(plan, src, dst) || isMeasured(byPair.get(pairKey(src, dst)))) continue;
+        return true;
+      }
+    }
+    return false;
+  }, [nodes, unsupportedSources, plan, byPair]);
+  /* The one place the precedence is spelt out: excluded > unsupported > unscraped (see Silence). */
+  const silenceFor = (src: string, dst: string): Silence =>
+    isPlanExcluded(plan, src, dst)
+      ? "excluded"
+      : unsupportedSources.has(src)
+        ? "unsupported"
+        : unscraped.has(src)
+          ? "unscraped"
+          : "none";
+
   /* ── the zoom ─────────────────────────────────────────────────────────────
      `manual` is what the READER asked for and null means "whatever fits", so a
      window resize keeps a fitted grid fitted while a chosen scale is left where
@@ -628,8 +796,9 @@ export function MatrixPage() {
       help={{ body: t("help.body"), slug: "matrix" }}
       description={
         /* The stamp lands INSIDE a translated sentence, so it takes that
-           sentence's language — lib/i18n's localeTag, not the bare default. */
-        at ? t("description.engaged", { at: at.toLocaleString(localeTag(locale)) }) : t("description.live")
+           sentence's language and the house clock — lib/i18n's stampFull, not
+           the bare default. */
+        at ? t("description.engaged", { at: stampFull(at, locale) }) : t("description.live")
       }
       actions={
         <>
@@ -685,7 +854,12 @@ export function MatrixPage() {
                 order and with the same words: out, in, fit. One vocabulary for
                 "this picture is bigger than its box" across the console. */}
             <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2">
-              <p className="text-xs text-muted-foreground">{t("zoom.hint")}</p>
+              {/* Two hints, one per kind of hand, and the width decides which
+                  exists (the nav-drawer's own `hidden md:` rule): a phone has
+                  no Ctrl and no wheel, so the sentence about them promised a
+                  gesture the reader could not make. */}
+              <p className="hidden text-xs text-muted-foreground md:block">{t("zoom.hint")}</p>
+              <p className="text-xs text-muted-foreground md:hidden">{t("zoom.hint.touch")}</p>
               <div role="group" aria-label={t("zoom.aria")} className="flex items-center gap-1">
                 <button
                   type="button"
@@ -736,6 +910,18 @@ export function MatrixPage() {
               </p>
             ) : null}
 
+            {/* The external agents whose rows are silence with a known cause, named once above
+                the grid rather than fifty times in tooltips; gone the moment one of them has a
+                cell of its own, which is the proof the scrape job landed. */}
+            {unscrapedList.length > 0 ? (
+              <p data-testid="matrix-unscraped-note" className="max-w-prose px-1 pb-1 text-xs leading-relaxed text-muted-foreground">
+                {t(unscrapedList.length === 1 ? "note.unscraped.one" : "note.unscraped.many", {
+                  nodes: unscrapedList.join(", "),
+                })}{" "}
+                <ScrapeDocsLink />
+              </p>
+            ) : null}
+
             {/* overflow-auto on BOTH axes and a bounded height: that is what
                 makes the sticky headers below stick to something, and what the
                 grid pans inside once it is at the floor and still too wide. */}
@@ -759,7 +945,7 @@ export function MatrixPage() {
                     </th>
                     {nodes.map((n) => (
                       <th key={n} className={cn(HEADER_CELL, "top-0 w-[var(--m-col-w)]")} scope="col">
-                        <NodeLabel name={n} width="column" elide={columnElide} />
+                        <NodeLabel name={n} width="column" elide={columnElide} external={external.has(n)} />
                       </th>
                     ))}
                   </tr>
@@ -771,7 +957,7 @@ export function MatrixPage() {
                         {/* The ROW axis carries the same prefix as the column axis, and at a narrow
                             viewport the label column is 88px — every row read "kconmon-prod-…".
                             Same elision, same note above the grid. */}
-                        <NodeLabel name={src} width="label" elide={labelElide} />
+                        <NodeLabel name={src} width="label" elide={labelElide} external={external.has(src)} />
                       </th>
                       {nodes.map((dst) => (
                         <GridCell
@@ -780,7 +966,8 @@ export function MatrixPage() {
                           dst={dst}
                           cell={byPair.get(pairKey(src, dst))}
                           density={density}
-                          excluded={isPlanExcluded(plan, src, dst)}
+                          protocol={protocol}
+                          silence={silenceFor(src, dst)}
                         />
                       ))}
                     </tr>
@@ -810,6 +997,16 @@ export function MatrixPage() {
                       className="size-2.5 rounded-full border border-dashed border-muted-foreground"
                     />
                     {t("legend.notProbed")}
+                  </span>
+                ) : null}
+                {/* Same rule, same dashed dot: the cell reads the same, only its name differs. */}
+                {hasUnsupportedCell ? (
+                  <span data-testid="legend-unsupported" className="flex items-center gap-1.5">
+                    <span
+                      aria-hidden="true"
+                      className="size-2.5 rounded-full border border-dashed border-muted-foreground"
+                    />
+                    {t("legend.unsupported")}
                   </span>
                 ) : null}
               </div>

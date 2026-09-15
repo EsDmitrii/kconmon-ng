@@ -1,17 +1,20 @@
-import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { ChevronDown, Pause, Play, Radio, Search, TriangleAlert } from "lucide-react";
+import { Pause, Play, Radio, Search, TriangleAlert } from "lucide-react";
 import { PageShell } from "@/components/page-shell";
 import { RealtimeBadge } from "@/components/realtime-badge";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
+import { scrollRegionClass } from "@/components/ui/scroll-region";
+import { EmptyState } from "@/components/ui/empty-state";
 import { Segmented } from "@/components/ui/segmented";
+import { Select } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useCapabilities, useDatabaseAvailable } from "@/hooks/use-capabilities";
 import { getWsClient } from "@/hooks/use-ws-topic";
 import { useAnnotations } from "@/components/annotations";
-import { localeTag, useLocale, useT } from "@/lib/i18n";
+import { localeTag, stampFull, useLocale, useT } from "@/lib/i18n";
 import { SEVERITY_KEYS, TYPE_KEYS, liveDict } from "@/lib/i18n/dict/live";
 import { ApiError, getEvents } from "@/lib/api";
 import { GLOBAL_SCOPE } from "@/lib/annotations";
@@ -30,14 +33,49 @@ import { TOPIC_LIVE, type WsEnvelope } from "@/lib/ws";
 /** The browser keeps a bounded ring of the most recent events and drops the oldest. */
 export const LIVE_RING_CAP = 2000;
 
-/* Fixed-height rows, so the virtualizer never needs measureElement: a feed line is one line tall. */
+/* Fixed-height rows, so the virtualizer never needs measureElement: from md up a feed line is one
+   line tall. Below md the row stacks (clock and badge, then a two-line summary) and takes
+   STACKED_ROW_HEIGHT; useRowHeight picks between the two on the same query the row's classes use. */
 export const ROW_HEIGHT = 44;
+export const STACKED_ROW_HEIGHT = 64;
+
+/* Tailwind's md is 48rem; this is its complement, so the query is true exactly where the row
+   markup stacks. Written with `not` rather than a max-width so the boundary is the same pixel. */
+const STACKED_QUERY = "not all and (min-width: 48rem)";
+
+function matchesStacked(): boolean {
+  if (typeof window === "undefined" || typeof window.matchMedia !== "function") return false;
+  return window.matchMedia(STACKED_QUERY).matches;
+}
+
+/**
+ * useRowHeight is the row height the virtualizer and the scroll anchor both read, so the two never
+ * disagree about where a row sits. Without matchMedia (jsdom) it answers the desktop height.
+ */
+export function useRowHeight(): number {
+  const [stacked, setStacked] = useState(matchesStacked);
+  useEffect(() => {
+    if (typeof window === "undefined" || typeof window.matchMedia !== "function") return;
+    const mq = window.matchMedia(STACKED_QUERY);
+    const update = () => setStacked(mq.matches);
+    update();
+    if (typeof mq.addEventListener === "function") {
+      mq.addEventListener("change", update);
+      return () => mq.removeEventListener("change", update);
+    }
+    mq.addListener(update);
+    return () => mq.removeListener(update);
+  }, []);
+  return stacked ? STACKED_ROW_HEIGHT : ROW_HEIGHT;
+}
 
 export interface LiveFilters {
   type: LiveEventType | "all";
   severity: LiveEventSeverity | "all";
   scope: string;
 }
+
+const EMPTY_FILTERS: LiveFilters = { type: "all", severity: "all", scope: "" };
 
 /* The store: three pure functions, unit-tested without React. */
 
@@ -189,11 +227,29 @@ export type FeedRow =
   | { kind: "annotation"; key: string; at: number; annotation: Annotation };
 
 /**
- * mergeFeedRows interleaves annotations into the (already filtered, already newest-first) event
- * list at their own timestamp position; annotations are NOT filtered by the type/severity/scope
- * controls.
+ * annotationMatchesFilters is the note's side of the filter bar. A note has no type and no
+ * severity, so narrowing on either excludes it; a scope query keeps a note whose scope contains
+ * it, and a global note only while the query is empty. Without this, a filter that matched no
+ * event still drew a lone note under "Showing 0 of N", which is not "no events match" and not a
+ * feed either.
  */
-export function mergeFeedRows(events: LiveEvent[], annotations: Annotation[]): FeedRow[] {
+export function annotationMatchesFilters(annotation: Annotation, filters: LiveFilters): boolean {
+  if (filters.type !== "all" || filters.severity !== "all") return false;
+  const scope = normalizePairInput(filters.scope).toLowerCase();
+  if (scope === "") return true;
+  return annotation.scope !== "" && annotation.scope.toLowerCase().includes(scope);
+}
+
+/**
+ * mergeFeedRows interleaves annotations into the (already filtered, already newest-first) event
+ * list at their own timestamp position; annotations answer to the same filters through
+ * annotationMatchesFilters.
+ */
+export function mergeFeedRows(
+  events: LiveEvent[],
+  annotations: Annotation[],
+  filters: LiveFilters = EMPTY_FILTERS,
+): FeedRow[] {
   const rows: FeedRow[] = events.map((event, i) => ({
     kind: "event",
     // The controller-assigned id, and a positional fallback for a row that
@@ -204,6 +260,7 @@ export function mergeFeedRows(events: LiveEvent[], annotations: Annotation[]): F
     event,
   }));
   for (const annotation of annotations) {
+    if (!annotationMatchesFilters(annotation, filters)) continue;
     const parsed = Date.parse(annotation.startAt);
     rows.push({
       kind: "annotation",
@@ -247,54 +304,77 @@ function isKnownSeverity(value: string): value is LiveEventSeverity {
    15:12 on yesterday's row reads as this afternoon's, which is the one reading a change feed must
    not invite. */
 
+/* The label is read at every width and SEEN from md up: below md the row stacks and the badge is
+   the dot alone, with the word still there for a screen reader. */
 function SeverityBadge({ severity }: { severity: string }) {
   const t = useT(liveDict);
   const known = isKnownSeverity(severity);
   return (
     <Badge variant={known ? SEVERITY_VARIANT[severity] : "unknown"} dot>
-      {known ? t(SEVERITY_KEYS[severity]) : severity}
+      <span className="sr-only md:not-sr-only">{known ? t(SEVERITY_KEYS[severity]) : severity}</span>
     </Badge>
   );
 }
+
+/* The row's columns. One line from md up; below md the li wraps and the summary takes a full
+   line of its own (basis-full), clamped to two lines, under the clock and the badge.
+
+   From md the summary and the scope share the slack with the summary ahead: the summary starts
+   at 28rem and takes three quarters of any room left over, the scope starts at 20rem, takes the
+   last quarter up to 26rem and gives way four times faster when the row is short of room. A
+   basis of 0 on the summary handed the scope its full width first and left the summary whatever
+   remained, which at 768px was nothing at all. Both are fixed bases, so the columns still line
+   up row to row. */
+const STAMP_CLASSES = "mono-data shrink-0 leading-5 text-muted-foreground md:w-32";
+const BADGE_CELL_CLASSES = "shrink-0 md:w-[5.25rem]";
+const PAYLOAD_CLASSES = "min-w-0 basis-full text-sm md:flex-[3_1_28rem]";
+const SCOPE_CLASSES =
+  "mono-data hidden min-w-0 truncate text-muted-foreground md:block md:max-w-[26rem] md:flex-[1_4_20rem]";
 
 function EventRow({ event }: { event: LiveEvent }) {
   const { locale } = useLocale();
   return (
     <>
-      <span className="mono-data w-32 shrink-0 text-muted-foreground">{fmtEventStamp(event.timestamp, localeTag(locale))}</span>
-      <span className="w-[5.25rem] shrink-0">
+      <span className={STAMP_CLASSES}>{fmtEventStamp(event.timestamp, localeTag(locale))}</span>
+      <span className={BADGE_CELL_CLASSES}>
         <SeverityBadge severity={event.severity} />
       </span>
-      {/* The whole summary in the title, because the tail is where the node name lives: the fixed
-          columns to the right leave this one about 300px, and the row has no expander, no click
-          handler and no detail view — the truncated half was simply gone. The annotation row beside
-          it has carried a title all along. */}
+      {/* The whole summary in the title, because the tail is where the node name lives: the row
+          has no expander, no click handler and no detail view — the truncated half was simply
+          gone. The annotation row beside it has carried a title all along. */}
       {/* No Type column: the summary opens with the same words, so the column repeated
           every row's first breath while eating 160px the summary needed. */}
-      <span title={event.summary} className="min-w-0 flex-1 truncate text-sm">
+      <span title={event.summary} className={cn(PAYLOAD_CLASSES, "line-clamp-2 md:line-clamp-1")}>
         {event.summary}
       </span>
-      <span className="mono-data hidden w-52 shrink-0 truncate text-muted-foreground md:block">{event.scope}</span>
+      {/* Titled like the summary: a long pair still truncates past the cap, and the tail is the
+          destination. */}
+      <span className={SCOPE_CLASSES} title={event.scope}>
+        {event.scope}
+      </span>
     </>
   );
 }
 
 /**
  * AnnotationFeedRow is an operator's note wearing the feed's own columns; the badge says "Note"
- * rather than a severity (a note has none).
+ * rather than a severity (a note has none). The text wraps to two lines rather than truncating —
+ * a note is prose an operator wrote, and its second half is the half with the reason in it.
  */
 function AnnotationFeedRow({ annotation }: { annotation: Annotation }) {
   const t = useT(liveDict);
   const { locale } = useLocale();
   return (
     <>
-      <span className="mono-data w-32 shrink-0 text-muted-foreground">{fmtEventStamp(annotation.startAt, localeTag(locale))}</span>
-      <span className="w-[5.25rem] shrink-0">
+      <span className={STAMP_CLASSES}>{fmtEventStamp(annotation.startAt, localeTag(locale))}</span>
+      <span className={BADGE_CELL_CLASSES}>
         <Badge variant="neutral" dot>
-          {t("note.badge")}
+          <span className="sr-only md:not-sr-only">{t("note.badge")}</span>
         </Badge>
       </span>
-      <span className="min-w-0 flex-1 truncate text-sm italic" title={annotation.text}>
+      {/* order-last below md: the text is the second line, so the span marker (when there is one)
+          stays on the first line beside the badge rather than opening a third. */}
+      <span className={cn(PAYLOAD_CLASSES, "order-last line-clamp-2 italic md:order-none")} title={annotation.text}>
         {annotation.text}
       </span>
       {/* Only a RANGED note earns a marker (the Type column that carried it is gone):
@@ -302,7 +382,7 @@ function AnnotationFeedRow({ annotation }: { annotation: Annotation }) {
       {annotation.endAt ? (
         <span className="shrink-0 text-xs text-muted-foreground">{t("note.span")}</span>
       ) : null}
-      <span className="mono-data hidden w-52 shrink-0 truncate text-muted-foreground md:block">
+      <span className={SCOPE_CLASSES} title={annotation.createdBy}>
         {annotation.createdBy}
       </span>
     </>
@@ -310,14 +390,18 @@ function AnnotationFeedRow({ annotation }: { annotation: Annotation }) {
 }
 
 /* The skeleton mirrors the loaded shape — same columns, same row rhythm — so
-   the page does not reflow when the first event lands. h-11 is ROW_HEIGHT. */
+   the page does not reflow when the first event lands. h-11 is ROW_HEIGHT,
+   h-16 the stacked height below md. */
 function FeedSkeleton() {
   const t = useT(liveDict);
   return (
     <div role="status" aria-live="polite" className="flex flex-col">
       <span className="sr-only">{t("skeleton.loading")}</span>
       {Array.from({ length: 8 }, (_, i) => (
-        <div key={i} className="flex h-11 items-center gap-4 border-b border-border/60 px-4 last:border-b-0">
+        <div
+          key={i}
+          className="flex h-16 items-center gap-4 border-b border-border/60 px-3 last:border-b-0 sm:px-4 md:h-11"
+        >
           <Skeleton className="h-3 w-20" />
           <Skeleton className="h-4 w-16 rounded-full" />
           <Skeleton className="h-3 flex-1" />
@@ -328,23 +412,10 @@ function FeedSkeleton() {
   );
 }
 
-function BlankSlate({ title, body, action }: { title: string; body: string; action?: ReactNode }) {
-  return (
-    <div className="flex flex-col items-center gap-3 px-6 py-14 text-center">
-      <span
-        aria-hidden="true"
-        className="flex size-12 items-center justify-center rounded-full bg-surface-2 text-muted-foreground"
-      >
-        <Radio className="size-5" />
-      </span>
-      <p className="text-sm font-medium">{title}</p>
-      <p className="max-w-sm text-xs leading-relaxed text-muted-foreground">{body}</p>
-      {action}
-    </div>
-  );
+/* The feed's blank slates draw the shared EmptyState with the feed's own glyph. */
+function FeedGlyph() {
+  return <Radio className="size-5" />;
 }
-
-const EMPTY_FILTERS: LiveFilters = { type: "all", severity: "all", scope: "" };
 
 /**
  * SCOPE_MAX is what the scope box will hold: two Kubernetes node names (253
@@ -597,7 +668,7 @@ export function LivePage() {
   const visible = useMemo(() => filterEvents(events, filters), [events, filters]);
   /* GLOBAL annotations only, and that is the whole story on this page: the feed is fleet-wide. */
   const { annotations } = useAnnotations(GLOBAL_SCOPE, LIVE_ANNOTATION_RANGE_SECONDS);
-  const rows = useMemo(() => mergeFeedRows(visible, annotations), [visible, annotations]);
+  const rows = useMemo(() => mergeFeedRows(visible, annotations, filters), [visible, annotations, filters]);
   // Two ways to lose an event, one number: a hole in the controller's numbering
   // (something went missing between the controller and this tab) and a slab
   // trim (this tab could not keep up and dropped its own backlog).
@@ -608,12 +679,22 @@ export function LivePage() {
   const missedNoteId = useId();
   const missed = gaps + discarded;
 
+  const rowHeight = useRowHeight();
+  const rowHeightRef = useRef(rowHeight);
+  rowHeightRef.current = rowHeight;
+
   const virtualizer = useVirtualizer({
     count: rows.length,
     getScrollElement: () => scrollRef.current,
-    estimateSize: () => ROW_HEIGHT,
+    estimateSize: () => rowHeightRef.current,
     overscan: 12,
   });
+
+  /* The virtualizer caches the estimate per item; crossing md changes every row's height at
+     once, so the cache is dropped and the rows are laid out again at the new size. */
+  useEffect(() => {
+    virtualizer.measure();
+  }, [rowHeight, virtualizer]);
 
   /* Rows are PREPENDED (newest first); at the top that is exactly what a live feed should do. */
   const filterKey = `${filters.type} ${filters.severity} ${filters.scope}`;
@@ -631,7 +712,7 @@ export function LivePage() {
     const el = scrollRef.current;
     if (!el) return;
     const { rows: current, filterKey: key } = feedRef.current;
-    const index = Math.max(0, Math.round(el.scrollTop / ROW_HEIGHT));
+    const index = Math.max(0, Math.round(el.scrollTop / rowHeightRef.current));
     anchorRef.current = { key, index, id: current[index]?.key ?? null };
   }, []);
 
@@ -646,10 +727,10 @@ export function LivePage() {
       const now = rows.findIndex((r) => r.key === anchor.id);
       // Gone (evicted off the tail) reads as -1: nothing left to anchor to, so
       // leave the offset alone and re-record against whatever is there now.
-      if (now >= 0 && now !== anchor.index) el.scrollTop += (now - anchor.index) * ROW_HEIGHT;
+      if (now >= 0 && now !== anchor.index) el.scrollTop += (now - anchor.index) * rowHeight;
     }
     recordAnchor();
-  }, [filterKey, rows, recordAnchor]);
+  }, [filterKey, rows, recordAnchor, rowHeight]);
 
   /* Exhausted: the walk has nowhere left to go under the CURRENT filters. */
   const exhausted = history.nextCursor === "" && !history.loading;
@@ -672,8 +753,9 @@ export function LivePage() {
       description={
         at
           ? /* Inside a translated sentence, so the stamp takes that sentence's
-               language — lib/i18n's localeTag (QA scope 2, finding #8). */
-            t("description.engaged", { at: at.toLocaleString(localeTag(locale)) })
+               language and the house clock — lib/i18n's stampFull (QA scope 2,
+               finding #8). */
+            t("description.engaged", { at: stampFull(at, locale) })
           : t("description.live", { cap: LIVE_RING_CAP })
       }
       actions={
@@ -687,35 +769,28 @@ export function LivePage() {
             value={filters.severity}
             onChange={(severity) => setFilters((f) => ({ ...f, severity }))}
           />
-          {/* A native <select> keeps the platform picker (keyboard, mobile,
-              screen readers) — only its closed face is dressed in kit tokens:
-              recessed surface-2 like the Segmented track, no border, a real
-              chevron instead of the UA arrow. */}
-          <span className="relative inline-flex">
-            <select
-              aria-label={t("filters.type")}
-              value={filters.type}
-              onChange={(e) => {
-                const next = e.target.value;
-                // Runtime membership, not a cast: the union is ours, the wire is
-                // Go's. An unknown value falls back to "all" rather than
-                // filtering the feed down to nothing forever.
-                setFilters((f) => ({ ...f, type: isKnownType(next) ? next : "all" }));
-              }}
-              className="h-10 appearance-none rounded-md bg-surface-2 py-1 pl-3.5 pr-8 text-sm text-foreground transition-colors duration-(--dur-fast) ease-(--ease) hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-            >
-              <option value="all">{t("filters.type.all")}</option>
-              {LIVE_EVENT_TYPES.map((value) => (
-                <option key={value} value={value}>
-                  {t(TYPE_KEYS[value])}
-                </option>
-              ))}
-            </select>
-            <ChevronDown
-              aria-hidden="true"
-              className="pointer-events-none absolute right-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground"
-            />
-          </span>
+          {/* The shared filter Select: a native <select> keeps the platform
+              picker (keyboard, mobile, screen readers), dressed like the
+              Segmented track beside it. */}
+          <Select
+            variant="filter"
+            aria-label={t("filters.type")}
+            value={filters.type}
+            onChange={(e) => {
+              const next = e.target.value;
+              // Runtime membership, not a cast: the union is ours, the wire is
+              // Go's. An unknown value falls back to "all" rather than
+              // filtering the feed down to nothing forever.
+              setFilters((f) => ({ ...f, type: isKnownType(next) ? next : "all" }));
+            }}
+          >
+            <option value="all">{t("filters.type.all")}</option>
+            {LIVE_EVENT_TYPES.map((value) => (
+              <option key={value} value={value}>
+                {t(TYPE_KEYS[value])}
+              </option>
+            ))}
+          </Select>
           {/* Pause holds a live tail still. Engaged there is no tail, so the
               button has nothing to act on — disabled rather than removed, the
               same rule the mutation affordances follow
@@ -744,9 +819,10 @@ export function LivePage() {
               A socket that dropped during a long pause is exactly what an
               operator needs to know BEFORE pressing Resume, so the badge stays
               — saying paused, and saying what the transport is doing under it.
-              The slot keeps its width in every case, so nothing to its left
-              moves when the badge changes. */}
-          <span data-testid="live-transport-slot" className="inline-flex min-w-[7.5rem] justify-end">
+              The slot keeps its width from sm up, so nothing to its left
+              moves when the badge changes; on a phone the toolbar wraps
+              anyway and the badge simply follows Pause. */}
+          <span data-testid="live-transport-slot" className="inline-flex sm:min-w-[7.5rem] sm:justify-end">
             {engaged ? null : paused ? (
               <Badge variant={realtime && connected ? "neutral" : "warn"} dot>
                 {t(realtime && connected ? "paused.socket.live" : "paused.socket.down")}
@@ -790,9 +866,12 @@ export function LivePage() {
 
       {/* The working surface, unboxed: the shell's "tool" variant runs the feed
           to the edges, so the card that used to frame it is gone and the filter
-          bar reads as the slim toolbar it is (M4-5). */}
-      <div>
-        <div className="flex flex-wrap items-center gap-x-4 gap-y-2 border-b border-border px-4 py-3">
+          bar reads as the slim toolbar it is (M4-5). The block bleeds out by
+          the shell's own padding (-mx-3 sm:-mx-4) and every bar and row puts
+          it back (px-3 sm:px-4), so the rules and the hover run edge to edge
+          while the text lines up with the toolbar above. */}
+      <div className="-mx-3 sm:-mx-4">
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-2 border-b border-border px-3 py-3 sm:px-4">
           <label className="relative flex items-center">
             <span className="sr-only">{t("filters.scope.label")}</span>
             <Search aria-hidden="true" className="pointer-events-none absolute left-2.5 size-3.5 text-muted-foreground" />
@@ -878,14 +957,17 @@ export function LivePage() {
           </p>
         </div>
 
+        {/* Column headers only where there are columns: below md the row is
+            two stacked lines and a header over them would name nothing. */}
         <div
           aria-hidden="true"
-          className="flex items-center gap-4 border-b border-border px-4 py-2 text-[11px] font-medium text-muted-foreground"
+          className="hidden items-center gap-4 border-b border-border px-3 py-2 text-[11px] font-medium text-muted-foreground sm:px-4 md:flex"
         >
           <span className="w-32 shrink-0">{t("col.time")}</span>
           <span className="w-[5.25rem] shrink-0">{t("col.severity")}</span>
-          <span className="min-w-0 flex-1">{t("col.summary")}</span>
-          <span className="hidden w-52 shrink-0 md:block">{t("col.scope")}</span>
+          {/* The same flex as the row's own columns, so the headers sit over them. */}
+          <span className="min-w-0 md:flex-[3_1_28rem]">{t("col.summary")}</span>
+          <span className="hidden min-w-0 md:block md:max-w-[26rem] md:flex-[1_4_20rem]">{t("col.scope")}</span>
         </div>
 
         {connecting ? <FeedSkeleton /> : null}
@@ -893,7 +975,8 @@ export function LivePage() {
         {/* rows.length rather than events.length: a window with no events but
             an operator note in it is not an empty feed. */}
         {!connecting && events.length === 0 && rows.length === 0 ? (
-          <BlankSlate
+          <EmptyState
+            icon={<FeedGlyph />}
             title={t(engaged ? "empty.engaged.title" : "empty.waiting.title")}
             body={t(engaged ? "empty.engaged.body" : "empty.waiting.body")}
           />
@@ -902,7 +985,8 @@ export function LivePage() {
         {/* rows, not `visible`: the list below renders annotation rows too, so gating on the event
             count alone put "no events match these filters" directly above a populated list. */}
         {!connecting && events.length > 0 && rows.length === 0 ? (
-          <BlankSlate
+          <EmptyState
+            icon={<FeedGlyph />}
             title={t("empty.filtered.title")}
             body={t("empty.filtered.body", { count: events.length })}
             action={
@@ -913,14 +997,25 @@ export function LivePage() {
           />
         ) : null}
 
+        {/* Viewport-relative: the feed is the page, so it runs to the bottom of
+            the window instead of stopping at 60vh with the rest of the screen
+            empty. 17rem is the chrome above it (banner, title row, toolbar,
+            filter bar, column headers); the floor keeps a short window from
+            squeezing the feed to nothing. */}
         {rows.length > 0 ? (
-          <div ref={scrollRef} onScroll={recordAnchor} className="h-[min(60vh,40rem)] overflow-auto">
+          <div
+            ref={scrollRef}
+            onScroll={recordAnchor}
+            // role="log" names the region for what it is: an append-only feed that a screen-reader
+            // user navigates deliberately. It sits on the scroller, not the <ul>, so the list keeps
+            // its own semantics and the keyboard can focus and scroll the feed.
+            role="log"
+            aria-live="off"
+            aria-label={t("feed.aria")}
+            tabIndex={0}
+            className={cn("h-[calc(100dvh-17rem)] min-h-[20rem] overflow-auto", scrollRegionClass)}
+          >
             <ul
-              role="log"
-              // role="log" names the region for what it is: an append-only feed that a
-              // screen-reader user navigates deliberately.
-              aria-live="off"
-              aria-label={t("feed.aria")}
               className="relative m-0 list-none p-0"
               style={{ height: `${virtualizer.getTotalSize()}px` }}
             >
@@ -934,8 +1029,10 @@ export function LivePage() {
                     data-testid={row.kind === "annotation" ? "annotation-feed-row" : undefined}
                     style={{ height: `${item.size}px`, transform: `translateY(${item.start}px)` }}
                     className={cn(
-                      "absolute left-0 top-0 flex w-full items-center gap-4 px-4",
-                      "border-b border-border/60",
+                      /* Wraps below md (the summary takes its own line), one line from md up;
+                         content-center keeps the two lines together in the fixed-height row. */
+                      "absolute left-0 top-0 flex w-full flex-wrap content-center items-center gap-x-4 gap-y-0.5 px-3 sm:px-4 md:flex-nowrap",
+                      "border-b border-border/60 transition-colors duration-(--dur-fast) ease-(--ease) hover:bg-accent/40",
                       // A note is not an event, and the row says so before it is
                       // read: recessed, with a left rule in the accent colour.
                       row.kind === "annotation" && "border-l-2 border-l-primary bg-surface-2/50",

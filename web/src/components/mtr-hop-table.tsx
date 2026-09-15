@@ -5,6 +5,7 @@ import { EChart } from "@/components/echart";
 import { useTheme } from "@/components/theme-provider";
 import { chartColors, seriesColor } from "@/lib/chart-theme";
 import { formatMillis } from "@/lib/curated-metrics";
+import { fmtMicrosNs } from "@/lib/run-samples";
 import { stampFull, translate, useLocale, useT, type Locale, type Translate } from "@/lib/i18n";
 import { countForm, mtrDetailDict, type MTRDetailKey } from "@/lib/i18n/dict/mtr-detail";
 import { Table, TBody, Td, Th, THead, Tr } from "@/components/ui/table";
@@ -16,16 +17,13 @@ import { cn } from "@/lib/utils";
 /** enT is the ENGLISH translator the one PURE, exported helper below defaults to. */
 const enT: Translate<MTRDetailKey> = (key, vars) => translate(mtrDetailDict, "en", key, vars);
 
-/* Under this, milliseconds have run out of resolution: 22µs is 0.022ms, and
-   one decimal renders it "0.0ms" — a first hop inside the same node reported as
-   no time at all (QA scope 4, finding #14). */
-const RTT_MICROSECOND_FLOOR_NS = 100_000;
-
 /** fmtRttNs renders the repo's nanosecond wire convention in the unit that can
  *  actually hold the number: milliseconds with one decimal down to 0.1ms, and
  *  MICROSECONDS below that, because a same-node hop really does answer in tens
  *  of µs and rounding it to "0.0ms" erases the measurement rather than
- *  reporting it. */
+ *  reporting it (QA scope 4, finding #14). The floor and the µs branch are
+ *  lib/run-samples' — the run permalink's duration column reads the same rule,
+ *  so the two tables agree on where a millisecond stops being a unit. */
 export function fmtRttNs(ns: number | undefined): string {
   /* Anything that is not a finite NUMBER is a measurement that did not arrive,
      and an em dash is what the table already says for one. The old guard tested
@@ -35,11 +33,7 @@ export function fmtRttNs(ns: number | undefined): string {
      in no time at all, which is a measurement the console invented (hostile-QA
      probe N). A string sneaks past it too and renders "NaNms". */
   if (typeof ns !== "number" || !Number.isFinite(ns)) return "—";
-  /* On the MAGNITUDE, so a negative reading — nonsense, but the wire's nonsense
-     and not ours — reads "-4µs" rather than being rounded into "-0.0ms". */
-  const abs = Math.abs(ns);
-  if (abs > 0 && abs < RTT_MICROSECOND_FLOOR_NS) return `${Math.round(ns / 1e3)}µs`;
-  return `${(ns / 1e6).toFixed(1)}ms`;
+  return fmtMicrosNs(ns) ?? `${(ns / 1e6).toFixed(1)}ms`;
 }
 
 /**

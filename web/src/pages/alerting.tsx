@@ -1,9 +1,13 @@
 import { Fragment, useEffect, useId, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { useInfiniteQuery, useQuery, useQueryClient } from "@tanstack/react-query";
+import { ExternalLink } from "lucide-react";
+import { docsConsoleUrl } from "@/components/page-help";
 import { PageShell } from "@/components/page-shell";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
+import { TextLink } from "@/components/ui/text-link";
+import { EmptyState } from "@/components/ui/empty-state";
 import { Input, Textarea } from "@/components/ui/input";
 import { Pager, usePager } from "@/components/ui/pager";
 import { Select } from "@/components/ui/select";
@@ -41,7 +45,7 @@ import type {
   AlertSyncStatus,
   ForeignRule,
 } from "@/lib/types";
-import { CHECKBOX_CLASS } from "@/lib/utils";
+import { CHECKBOX_CLASS, cn } from "@/lib/utils";
 
 /** Prometheus evaluates, the console MANAGES; with alerting off this section is the only one that stops working. */
 
@@ -68,21 +72,56 @@ function problemStatus(error: unknown): number | undefined {
   return error instanceof ApiError ? error.problem.status : undefined;
 }
 
-function SectionCard({ title, children }: { title: string; children: ReactNode }) {
+function SectionCard({
+  title,
+  blurb,
+  action,
+  children,
+}: {
+  title: string;
+  /** The one-paragraph explanation under the heading. */
+  blurb?: ReactNode;
+  /** The section's own create button, on the heading line at the right. */
+  action?: ReactNode;
+  children: ReactNode;
+}) {
   return (
-    <Card asChild className="p-6">
+    <Card asChild className="p-4 sm:p-6">
       <section>
-        <h2 className="type-section">{title}</h2>
+        <div className="flex items-start justify-between gap-4">
+          <h2 className="type-section">{title}</h2>
+          {action ? <div className="shrink-0">{action}</div> : null}
+        </div>
+        {blurb ? <p className="mt-1 max-w-prose text-xs leading-relaxed text-muted-foreground">{blurb}</p> : null}
         {children}
       </section>
     </Card>
   );
 }
 
-function ErrorLine({ testId, children }: { testId?: string; children: ReactNode }) {
+function ErrorLine({
+  testId,
+  onRetry,
+  className,
+  children,
+}: {
+  testId?: string;
+  /** Re-runs the read that failed; a small ghost button beside the sentence. */
+  onRetry?: () => void;
+  className?: string;
+  children: ReactNode;
+}) {
+  const t = useT(alertingDict);
+  /* The sentence and the role stay on ONE element — tests and assistive tech
+     both find the alert by its text — and the button rides inside it. */
   return (
-    <p role="alert" data-testid={testId} className="mt-3 text-sm leading-relaxed text-health-bad">
+    <p role="alert" data-testid={testId} className={cn("mt-3 text-sm leading-relaxed text-health-bad", className)}>
       {children}
+      {onRetry ? (
+        <Button type="button" size="sm" variant="ghost" className="ml-3 h-7 px-2 align-middle" onClick={onRetry}>
+          {t("error.retry")}
+        </Button>
+      ) : null}
     </p>
   );
 }
@@ -102,9 +141,9 @@ function withNodes(template: string, nodes: Record<string, ReactNode>): ReactNod
  *  callers cannot forget — a bare href would silently drop a pinned ?at=. */
 function SurfaceLink({ to, children }: { to: string; children: ReactNode }) {
   return (
-    <a href={withAtParam(to)} className="text-primary hover:underline">
+    <TextLink href={withAtParam(to)}>
       {children}
-    </a>
+    </TextLink>
   );
 }
 
@@ -131,7 +170,7 @@ function PermissionCard({ permission, children }: { permission: string; children
   /* The permission string is interpolated, never translated — "alerts:manage"
      is what an operator asks for and what authz/roles.go spells. */
   return (
-    <Card role="status" className="p-6">
+    <Card role="status" className="p-4 sm:p-6">
       <p className="text-sm font-medium">{t("permission.requires", { permission })}</p>
       <p className="mt-1 max-w-prose text-xs leading-relaxed text-muted-foreground">{children}</p>
     </Card>
@@ -145,23 +184,28 @@ function PermissionCard({ permission, children }: { permission: string; children
  * the same fix.
  *
  * "Delete {name}" is the right thing for a screen reader: four buttons reading
- * "Delete" in a list are four identical announcements. But a rule name is a
- * free string an operator types, this row carries FOUR of those buttons, and a
- * 400-character name rendered in full put sixteen hundred characters of button
- * text into one flex row. The name stays whole in the aria-label and in
- * `title`; only the pixels are bounded, and the truncation is CSS, so nothing
- * has to guess a character count for a language it has not seen.
+ * "Delete" in a list are four identical announcements. On screen the VERB is
+ * enough — the name is the row's first column — so `text` is the verb and
+ * `title` the whole sentence, which also rides the button as its aria-label.
+ * A rule name is a free string an operator types, so the span stays bounded
+ * and truncating: a 400-character name once put sixteen hundred characters of
+ * button text into one flex row, and nothing here may let that back in.
  *
  * Not lifted into components/ui: it is six lines with no state, and the two
  * copies are cheaper to read than a shared import that has to explain itself.
  */
-function RowActionLabel({ text }: { text: string }) {
+function RowActionLabel({ text, title }: { text: string; title?: string }) {
   return (
-    <span aria-hidden="true" className="block max-w-[14rem] truncate" title={text}>
+    <span aria-hidden="true" className="block max-w-[14rem] truncate" title={title ?? text}>
       {text}
     </span>
   );
 }
+
+/** ROW_ACTION is the compact ghost button every row action on this page is
+ *  drawn as; a touch tighter on a phone so four of them share a line with
+ *  the toggle. */
+const ROW_ACTION = "h-7 px-1.5 sm:px-2";
 
 function ListSkeleton() {
   const t = useT(alertingDict);
@@ -536,6 +580,18 @@ export function duplicateKey(pairs: Pair[]): string | undefined {
   return undefined;
 }
 
+/** repeatIndex is the row of the SECOND occurrence of `key` — the one the
+ *  refusal renders under, since the first is the one that would have won. */
+export function repeatIndex(pairs: Pair[], key: string): number {
+  let seen = false;
+  for (let i = 0; i < pairs.length; i++) {
+    if (pairs[i].key.trim() !== key) continue;
+    if (seen) return i;
+    seen = true;
+  }
+  return -1;
+}
+
 /**
  * paramFieldsFor is the ONE way this file reads KIND_PARAMS, because the lookup
  * can miss. AlertRuleKind is the set the API ACCEPTS, while the alert_rules
@@ -741,26 +797,44 @@ function RuleRow({
   }
 
   return (
-    <li ref={rowRef} data-testid="rule-row" className="flex flex-wrap items-center gap-3 py-3 text-sm">
-      <span className="font-medium">{rule.name}</span>
-      {/* kind and severity are WIRE VALUES: the builder writes them, the
-          renderer stamps severity onto the rule as a label, and Alertmanager
-          routes on it. They render as themselves in both languages. */}
-      <Badge variant="neutral">{rule.kind}</Badge>
-      <Badge variant={SEVERITY_TONE[rule.severity]}>{rule.severity}</Badge>
-      {/* syncStatus is the opposite case and does translate: nothing writes it
-          and nothing routes on it — it is the reconciler's verdict rendered as
-          a pill. A status this build has never heard of still renders, as
-          itself. The reconciler's one-liner rides the chip as a title so it is
-          reachable without expanding, and is repeated in full in the details
-          panel: a title alone is invisible to touch and to anyone not
-          hovering. */}
-      <span data-testid="sync-status" title={rule.syncMessage === "" ? undefined : rule.syncMessage}>
-        <Badge variant={SYNC_TONE[rule.syncStatus]}>
-          {SYNC_KEYS[rule.syncStatus] ? t(SYNC_KEYS[rule.syncStatus]) : rule.syncStatus}
-        </Badge>
+    <li ref={rowRef} data-testid="rule-row" className="flex flex-wrap items-center gap-x-3 gap-y-1.5 py-2 text-sm">
+      {/* The name is the ONE flexible column — flex-1 with a zero basis — so
+          a long one truncates rather than pushing the chips and the actions
+          onto a second line at desktop widths. The whole name is the title.
+          min-w-[8rem] is the phone rule: the name keeps at least that much,
+          so when the chip group cannot fit beside it the GROUP wraps under
+          the name rather than the name shrinking to three letters. Each
+          fixed group below (chips, stamp, toggle, actions) wraps as a whole. */}
+      <span className="min-w-[8rem] flex-1 truncate font-medium" title={rule.name}>
+        {rule.name}
       </span>
-      <span data-testid="last-synced" title={absoluteTime(rule.lastSyncedAt, locale)} className="text-xs text-muted-foreground">
+      <span className="flex shrink-0 items-center gap-2">
+        {/* kind and severity are WIRE VALUES: the builder writes them, the
+            renderer stamps severity onto the rule as a label, and Alertmanager
+            routes on it. They render as themselves in both languages. The kind
+            is an identity chip (neutral, no dot); severity carries a hue. */}
+        <Badge variant="neutral">{rule.kind}</Badge>
+        <Badge dot variant={SEVERITY_TONE[rule.severity]}>
+          {rule.severity}
+        </Badge>
+        {/* syncStatus is the opposite case and does translate: nothing writes it
+            and nothing routes on it — it is the reconciler's verdict rendered as
+            a pill. A status this build has never heard of still renders, as
+            itself. The reconciler's one-liner rides the chip as a title so it is
+            reachable without expanding, and is repeated in full in the details
+            panel: a title alone is invisible to touch and to anyone not
+            hovering. */}
+        <span data-testid="sync-status" title={rule.syncMessage === "" ? undefined : rule.syncMessage}>
+          <Badge dot variant={SYNC_TONE[rule.syncStatus]}>
+            {SYNC_KEYS[rule.syncStatus] ? t(SYNC_KEYS[rule.syncStatus]) : rule.syncStatus}
+          </Badge>
+        </span>
+      </span>
+      <span
+        data-testid="last-synced"
+        title={absoluteTime(rule.lastSyncedAt, locale)}
+        className="type-meta shrink-0 whitespace-nowrap"
+      >
         {relativeTime(rule.lastSyncedAt, new Date(), t)}
       </span>
       {canManage ? (
@@ -768,7 +842,7 @@ function RuleRow({
            bare checkbox in a row of pills says nothing about what it toggles: the only clue was an
            aria-label, so a sighted operator had to infer it from position, and the two audiences saw
            two different controls for one fact. */
-        <label className="flex items-center gap-1.5 text-xs text-muted-foreground">
+        <label className="type-meta flex shrink-0 items-center gap-1.5">
           <input
             type="checkbox"
             aria-label={t("row.enabledAria", { name: rule.name })}
@@ -780,96 +854,105 @@ function RuleRow({
           {rule.enabled ? t("row.enabled") : t("row.disabled")}
         </label>
       ) : (
-        <Badge variant={rule.enabled ? "ok" : "unknown"}>
+        <Badge dot variant={rule.enabled ? "ok" : "unknown"}>
           {rule.enabled ? t("row.enabled") : t("row.disabled")}
         </Badge>
       )}
 
-      <span className="ml-auto flex flex-wrap items-center gap-2">
-        {/* aria-controls, not aria-expanded alone: components/mtr-hop-table.tsx
-            set this shape's bar (a row that expands into a detail block names
-            the block it expands), and "expanded" with nothing named leaves a
-            screen-reader user hunting the page for what just appeared. */}
-        <Button
-          size="sm"
-          variant="ghost"
-          aria-expanded={expanded}
-          aria-controls={detailsId}
-          aria-label={t("row.details", { name: rule.name })}
-          onClick={() => {
-            setExpanded((v) => {
-              writeFocusedRule(rule.id, !v);
-              return !v;
-            });
-          }}
-        >
-          <RowActionLabel text={t("row.details", { name: rule.name })} />
-        </Button>
-        {canManage ? (
-          confirming ? (
-            <>
-              {/* Spoken as well as drawn — the row swaps its controls under the reader. */}
-              <span role="status" className="sr-only">
-                {t("row.confirmDelete", { name: rule.name })}
-              </span>
-              <Button
-                ref={confirmRef}
-                size="sm"
-                variant="outline"
-                loading={busy}
-                {...guard}
-                aria-label={t("row.confirmDelete", { name: rule.name })}
-                onClick={() => void handleDelete()}
-              >
-                <RowActionLabel text={t("row.confirmDelete", { name: rule.name })} />
-              </Button>
-              <Button size="sm" variant="ghost" onClick={reset}>
-                {t("cancel")}
-              </Button>
-            </>
-          ) : (
-            <>
-              {/* A control must not offer what the thing behind it refuses: with
-                  sync off this button can only ever produce the 409 the section
-                  header is already showing. The reason rides on it, so the
-                  disabled state is never a mystery. */}
-              <Button
-                size="sm"
-                variant="ghost"
-                {...guard}
-                disabled={writesDisabled || busy || ruleSync.disabled}
-                title={ruleSync.disabled ? ruleSync.message : undefined}
-                aria-label={t("row.sync", { name: rule.name })}
-                onClick={() => void handleSync()}
-              >
-                <RowActionLabel text={t("row.sync", { name: rule.name })} />
-              </Button>
-              <Button
-                size="sm"
-                variant="ghost"
-                {...guard}
-                aria-label={t("row.edit", { name: rule.name })}
-                onClick={onEdit}
-              >
-                <RowActionLabel text={t("row.edit", { name: rule.name })} />
-              </Button>
-              <Button
-                ref={triggerRef}
-                size="sm"
-                variant="ghost"
-                {...guard}
-                aria-label={t("row.delete", { name: rule.name })}
-                onClick={ask}
-              >
-                <RowActionLabel text={t("row.delete", { name: rule.name })} />
-              </Button>
-            </>
-          )
-        ) : null}
+      {/* The actions are the right column: ml-auto pins them to the edge on
+          whichever line they land, so they can never fall under the data. */}
+      <span className="ml-auto flex shrink-0 items-center gap-1">
+          {/* aria-controls, not aria-expanded alone: components/mtr-hop-table.tsx
+              set this shape's bar (a row that expands into a detail block names
+              the block it expands), and "expanded" with nothing named leaves a
+              screen-reader user hunting the page for what just appeared. */}
+          <Button
+            size="sm"
+            variant="ghost"
+            className={ROW_ACTION}
+            aria-expanded={expanded}
+            aria-controls={detailsId}
+            aria-label={t("row.details", { name: rule.name })}
+            onClick={() => {
+              setExpanded((v) => {
+                writeFocusedRule(rule.id, !v);
+                return !v;
+              });
+            }}
+          >
+            <RowActionLabel text={t("row.details.verb")} title={t("row.details", { name: rule.name })} />
+          </Button>
+          {canManage ? (
+            confirming ? (
+              <>
+                {/* Spoken as well as drawn — the row swaps its controls under the reader. */}
+                <span role="status" className="sr-only">
+                  {t("row.confirmDelete", { name: rule.name })}
+                </span>
+                {/* The destructive treatment is reserved for this second click:
+                    it is the one that cannot be taken back. */}
+                <Button
+                  ref={confirmRef}
+                  size="sm"
+                  variant="destructive"
+                  className={ROW_ACTION}
+                  loading={busy}
+                  {...guard}
+                  aria-label={t("row.confirmDelete", { name: rule.name })}
+                  onClick={() => void handleDelete()}
+                >
+                  <RowActionLabel text={t("row.confirmDelete.verb")} title={t("row.confirmDelete", { name: rule.name })} />
+                </Button>
+                <Button size="sm" variant="ghost" className={ROW_ACTION} onClick={reset}>
+                  {t("cancel")}
+                </Button>
+              </>
+            ) : (
+              <>
+                {/* A control must not offer what the thing behind it refuses: with
+                    sync off this button can only ever produce the 409 the section
+                    header is already showing. The reason rides on it, so the
+                    disabled state is never a mystery. */}
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  className={ROW_ACTION}
+                  {...guard}
+                  disabled={writesDisabled || busy || ruleSync.disabled}
+                  title={ruleSync.disabled ? ruleSync.message : undefined}
+                  aria-label={t("row.sync", { name: rule.name })}
+                  onClick={() => void handleSync()}
+                >
+                  <RowActionLabel text={t("row.sync.verb")} title={t("row.sync", { name: rule.name })} />
+                </Button>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  className={ROW_ACTION}
+                  {...guard}
+                  aria-label={t("row.edit", { name: rule.name })}
+                  onClick={onEdit}
+                >
+                  <RowActionLabel text={t("row.edit.verb")} title={t("row.edit", { name: rule.name })} />
+                </Button>
+                <Button
+                  ref={triggerRef}
+                  size="sm"
+                  variant="ghost"
+                  className={ROW_ACTION}
+                  {...guard}
+                  aria-label={t("row.delete", { name: rule.name })}
+                  onClick={ask}
+                >
+                  <RowActionLabel text={t("row.delete.verb")} title={t("row.delete", { name: rule.name })} />
+                </Button>
+              </>
+            )
+          ) : null}
       </span>
 
       {expanded ? (
-        <div id={detailsId} className="w-full border-l-2 border-border pl-3 text-xs">
+        <div id={detailsId} className="basis-full border-l-2 border-border pl-3 text-xs">
           <p className="text-muted-foreground">{t("row.renderedExpr")}</p>
           {/* The SERVER's bytes, not a re-render: renderedExpr is on the row so
               the expression an operator reads is the one the bundle carries. */}
@@ -889,12 +972,12 @@ function RuleRow({
       ) : null}
 
       {kicked ? (
-        <span role="status" data-testid="sync-ack" className="w-full text-xs text-muted-foreground">
+        <span role="status" data-testid="sync-ack" className="type-meta basis-full">
           {t("row.syncAck")}
         </span>
       ) : null}
       {error ? (
-        <span role="alert" className="w-full text-xs leading-relaxed text-health-bad">
+        <span role="alert" className="basis-full text-xs leading-relaxed text-health-bad">
           {error}
         </span>
       ) : null}
@@ -916,17 +999,24 @@ function Field({
   hint,
   error,
   testId,
+  className,
   children,
 }: {
   label: string;
   hint?: string;
   error?: string;
   testId: string;
+  /** Grid placement (the PromQL box spans both columns). */
+  className?: string;
   children: (id: string, invalid: boolean) => ReactNode;
 }) {
   const id = useId();
+  /* min-w-0: a grid item's default min-width is its content, and a <select>
+     is as wide as its widest option — at 375px that pushed the form past the
+     viewport edge. The cell may now shrink below the control's natural width,
+     and the control (w-full) follows the cell. */
   return (
-    <div className="flex flex-col gap-1 text-[13px]">
+    <div className={cn("flex min-w-0 flex-col gap-1 text-[13px]", className)}>
       <label htmlFor={id} className="text-muted-foreground">
         {label}
       </label>
@@ -949,6 +1039,7 @@ function PairEditor({
   removeKey,
   pairs,
   disabled,
+  errorAt,
   onChange,
 }: {
   legendKey: AlertingKey;
@@ -958,43 +1049,65 @@ function PairEditor({
   removeKey: AlertingKey;
   pairs: Pair[];
   disabled: boolean;
+  /** The refusal that belongs under row `i`, if any: it renders right there,
+   *  with that row's name box marked invalid, rather than under the whole
+   *  list where the reader has to work out which row it means. */
+  errorAt?: (index: number) => string | undefined;
   onChange: (pairs: Pair[]) => void;
 }) {
   const t = useT(alertingDict);
   const noun = t(nounKey);
+  /* min-w-0 on the fieldset: browsers give a fieldset min-inline-size:
+     min-content, so a one-line row of two boxes and a button widened the
+     whole group past a phone viewport instead of letting the boxes shrink. */
   return (
-    <fieldset className="flex flex-col gap-2 text-[13px]">
+    <fieldset className="flex min-w-0 flex-col gap-2 text-[13px]">
       <legend className="text-muted-foreground">{t(legendKey)}</legend>
-      {pairs.map((pair, i) => (
-        <div key={i} className="flex flex-wrap items-center gap-2">
-          {/* Placeholders, because "Add label" produces TWO identical empty
-              boxes and nothing on screen says which is which (QA round 5,
-              finding #15). The aria-labels have always been right; a sighted
-              operator had only the order to go on, and the order is the one
-              thing a two-box row does not communicate. */}
-          <Input
-            aria-label={t("pairs.nameAria", { noun, index: i + 1 })}
-            placeholder={t("pairs.namePlaceholder")}
-            value={pair.key}
-            onChange={(e) => onChange(pairs.map((p, j) => (i === j ? { ...p, key: e.target.value } : p)))}
-            invalid={reservedLabelMessage(pair.key.trim()) !== undefined}
-          />
-          <Input
-            aria-label={t("pairs.valueAria", { noun, index: i + 1 })}
-            placeholder={t("pairs.valuePlaceholder")}
-            value={pair.value}
-            onChange={(e) => onChange(pairs.map((p, j) => (i === j ? { ...p, value: e.target.value } : p)))}
-          />
-          <Button
-            type="button"
-            size="sm"
-            variant="ghost"
-            onClick={() => onChange(pairs.filter((_, j) => j !== i))}
-          >
-            {t(removeKey, { index: i + 1 })}
-          </Button>
-        </div>
-      ))}
+      {pairs.map((pair, i) => {
+        const error = errorAt?.(i);
+        return (
+          <div key={i} className="flex flex-col gap-1">
+            <div className="flex items-center gap-2">
+              {/* Placeholders, because "Add label" produces TWO identical empty
+                  boxes and nothing on screen says which is which (QA round 5,
+                  finding #15). The aria-labels have always been right; a sighted
+                  operator had only the order to go on, and the order is the one
+                  thing a two-box row does not communicate. The two boxes share
+                  the row's width (flex-1, min-w-0) so the row is one line at
+                  every width instead of stacking on a phone. */}
+              <Input
+                aria-label={t("pairs.nameAria", { noun, index: i + 1 })}
+                placeholder={t("pairs.namePlaceholder")}
+                value={pair.key}
+                onChange={(e) => onChange(pairs.map((p, j) => (i === j ? { ...p, key: e.target.value } : p)))}
+                invalid={error !== undefined}
+                className="min-w-0 flex-1"
+              />
+              <Input
+                aria-label={t("pairs.valueAria", { noun, index: i + 1 })}
+                placeholder={t("pairs.valuePlaceholder")}
+                value={pair.value}
+                onChange={(e) => onChange(pairs.map((p, j) => (i === j ? { ...p, value: e.target.value } : p)))}
+                className="min-w-0 flex-1"
+              />
+              <Button
+                type="button"
+                size="sm"
+                variant="ghost"
+                className="shrink-0"
+                onClick={() => onChange(pairs.filter((_, j) => j !== i))}
+              >
+                {t(removeKey, { index: i + 1 })}
+              </Button>
+            </div>
+            {error !== undefined ? (
+              <ErrorLine testId="builder-error" className="mt-0">
+                {error}
+              </ErrorLine>
+            ) : null}
+          </div>
+        );
+      })}
       <div>
         <Button type="button" size="sm" variant="outline" disabled={disabled} onClick={() => onChange([...pairs, { key: "", value: "" }])}>
           {t(addKey)}
@@ -1113,6 +1226,24 @@ function RuleForm({ initial, onDone }: { initial?: AlertRule; onDone: () => void
      two separate maps, and a key may legitimately appear in both. */
   const duplicateLabel = useMemo(() => duplicateKey(draft.labels), [draft.labels]);
   const duplicateAnnotation = useMemo(() => duplicateKey(draft.annotations), [draft.annotations]);
+  /* Each refusal renders under the row it is about. A reserved name is
+     refused on every row that carries it; a repeat is refused on the row that
+     repeats — the second one, since the first is the one the map would have
+     kept. */
+  const labelErrorAt = (i: number): string | undefined =>
+    reservedLabelMessage(draft.labels[i]?.key.trim() ?? "") ??
+    (duplicateLabel !== undefined && repeatIndex(draft.labels, duplicateLabel) === i
+      ? t("pairs.duplicate", { name: duplicateLabel })
+      : undefined);
+  const annotationErrorAt = (i: number): string | undefined =>
+    duplicateAnnotation !== undefined && repeatIndex(draft.annotations, duplicateAnnotation) === i
+      ? t("pairs.duplicate", { name: duplicateAnnotation })
+      : undefined;
+  /* The selected kind's one-line blurb, as the hint under the select. It used
+     to ride inside every <option> after an em dash, which made the closed
+     select as wide as its longest sentence and pushed a phone-width form past
+     the viewport; the identifier is the option, the blurb explains the pick. */
+  const kindBlurb = ALERT_RULE_KINDS.find(([kind]) => kind === draft.kind)?.[1];
 
   const duration = parsePromDuration(draft.forText, t);
   const previewReady = fields.every((f) => !f.required || (draft.params[f.key] ?? "").trim() !== "");
@@ -1223,17 +1354,17 @@ function RuleForm({ initial, onDone }: { initial?: AlertRule; onDone: () => void
   }
 
   return (
-    <Card asChild className="p-6">
+    <Card asChild className="p-4 sm:p-6">
       <form
         onSubmit={handleSubmit}
         aria-label={initial ? t("form.editAria", { name: initial.name }) : t("form.createAria")}
         className="flex max-w-2xl flex-col gap-4"
       >
-        <h3 className="type-section">
+        <h2 className="type-section">
           {initial ? t("form.edit", { name: initial.name }) : t("form.create")}
-        </h3>
+        </h2>
 
-        <div className="grid gap-4 sm:grid-cols-2">
+        <div className="grid grid-cols-[minmax(0,1fr)] gap-4 sm:grid-cols-2">
           <Field label={t("form.name")} testId="name" error={errorFor("name")} hint={t("form.nameHint")}>
             {(id, invalid) => (
               <Input
@@ -1242,22 +1373,24 @@ function RuleForm({ initial, onDone }: { initial?: AlertRule; onDone: () => void
                 placeholder="PairLossHigh"
                 onChange={(e) => setDraft((d) => ({ ...d, name: e.target.value }))}
                 invalid={invalid}
+                className="w-full"
               />
             )}
           </Field>
 
-          <Field label={t("form.kind")} testId="kind">
+          <Field label={t("form.kind")} testId="kind" hint={kindBlurb ? t(kindBlurb) : undefined}>
             {(id) => (
               <Select
                 id={id}
                 value={draft.kind}
                 onChange={(e) => setDraft((d) => ({ ...d, kind: e.target.value as AlertRuleKind }))}
+                className="w-full"
               >
-                {/* The kind is the stored identifier and stays; the blurb after
-                    the dash is this page explaining it, and translates. */}
-                {ALERT_RULE_KINDS.map(([kind, blurbKey]) => (
+                {/* The option is the stored identifier alone; the blurb that
+                    explains it is the hint under the select, and translates. */}
+                {ALERT_RULE_KINDS.map(([kind]) => (
                   <option key={kind} value={kind}>
-                    {kind} — {t(blurbKey)}
+                    {kind}
                   </option>
                 ))}
               </Select>
@@ -1265,10 +1398,11 @@ function RuleForm({ initial, onDone }: { initial?: AlertRule; onDone: () => void
           </Field>
         </div>
 
-        <div className="grid gap-4 sm:grid-cols-2">
+        <div className="grid grid-cols-[minmax(0,1fr)] gap-4 sm:grid-cols-2">
           {fields.map((field) => (
             <Field
               key={field.key}
+              className={field.type === "expr" ? "sm:col-span-2" : undefined}
               label={t(field.labelKey)}
               hint={
                 field.type === "target" && !targetsReady
@@ -1287,6 +1421,7 @@ function RuleForm({ initial, onDone }: { initial?: AlertRule; onDone: () => void
                     value={draft.params[field.key] ?? ""}
                     onChange={(e) => setDraft((d) => ({ ...d, params: { ...d.params, [field.key]: e.target.value } }))}
                     invalid={invalid}
+                    className="w-full"
                   >
                     {/* "" is a real, meaningful value here — every external
                         target — so it is named rather than left as an em dash
@@ -1314,6 +1449,7 @@ function RuleForm({ initial, onDone }: { initial?: AlertRule; onDone: () => void
                     value={draft.params[field.key] ?? ""}
                     onChange={(e) => setDraft((d) => ({ ...d, params: { ...d.params, [field.key]: e.target.value } }))}
                     invalid={invalid}
+                    className="w-full"
                   >
                     <option value="">{t("form.enumUnset")}</option>
                     {/* The options are the WIRE values (tcp, 0.95). They are
@@ -1333,7 +1469,7 @@ function RuleForm({ initial, onDone }: { initial?: AlertRule; onDone: () => void
                     value={draft.params[field.key] ?? ""}
                     onChange={(e) => setDraft((d) => ({ ...d, params: { ...d.params, [field.key]: e.target.value } }))}
                     invalid={invalid}
-                    className="p-3 font-mono text-[12px]"
+                    className="mono-data w-full p-3"
                   />
                 ) : (
                   <Input
@@ -1342,6 +1478,7 @@ function RuleForm({ initial, onDone }: { initial?: AlertRule; onDone: () => void
                     value={draft.params[field.key] ?? ""}
                     onChange={(e) => setDraft((d) => ({ ...d, params: { ...d.params, [field.key]: e.target.value } }))}
                     invalid={invalid}
+                    className="w-full"
                   />
                 )
               }
@@ -1359,7 +1496,7 @@ function RuleForm({ initial, onDone }: { initial?: AlertRule; onDone: () => void
           ) : null}
         </div>
 
-        <div className="grid gap-4 sm:grid-cols-2">
+        <div className="grid grid-cols-[minmax(0,1fr)] gap-4 sm:grid-cols-2">
           <Field
             label={t("form.severity")}
             testId="severity"
@@ -1372,6 +1509,7 @@ function RuleForm({ initial, onDone }: { initial?: AlertRule; onDone: () => void
                 value={draft.severity}
                 onChange={(e) => setDraft((d) => ({ ...d, severity: e.target.value as AlertSeverity }))}
                 invalid={invalid}
+                className="w-full"
               >
                 {SEVERITIES.map((s) => (
                   <option key={s} value={s}>
@@ -1395,11 +1533,15 @@ function RuleForm({ initial, onDone }: { initial?: AlertRule; onDone: () => void
                 placeholder="5m"
                 onChange={(e) => setDraft((d) => ({ ...d, forText: e.target.value }))}
                 invalid={invalid}
+                className="w-full"
               />
             )}
           </Field>
         </div>
 
+        {/* A reserved name is refused in the SERVER's own sentence, reproduced
+            so client and server refuse it in identical words — data here, and
+            rendered as written, under the row that carries it. */}
         <PairEditor
           legendKey="pairs.labels"
           nounKey="pairs.noun.label"
@@ -1407,15 +1549,9 @@ function RuleForm({ initial, onDone }: { initial?: AlertRule; onDone: () => void
           removeKey="pairs.remove.label"
           pairs={draft.labels}
           disabled={false}
+          errorAt={labelErrorAt}
           onChange={(labels) => setDraft((d) => ({ ...d, labels }))}
         />
-        {/* reservedMessage is the SERVER's own sentence, reproduced so client
-            and server refuse a reserved label in identical words — so it is
-            data here, and renders as written. */}
-        {reservedMessage ? <ErrorLine testId="builder-error">{reservedMessage}</ErrorLine> : null}
-        {duplicateLabel !== undefined ? (
-          <ErrorLine testId="builder-error">{t("pairs.duplicate", { name: duplicateLabel })}</ErrorLine>
-        ) : null}
 
         <PairEditor
           legendKey="pairs.annotations"
@@ -1424,11 +1560,9 @@ function RuleForm({ initial, onDone }: { initial?: AlertRule; onDone: () => void
           removeKey="pairs.remove.annotation"
           pairs={draft.annotations}
           disabled={false}
+          errorAt={annotationErrorAt}
           onChange={(annotations) => setDraft((d) => ({ ...d, annotations }))}
         />
-        {duplicateAnnotation !== undefined ? (
-          <ErrorLine testId="builder-error">{t("pairs.duplicate", { name: duplicateAnnotation })}</ErrorLine>
-        ) : null}
 
         <label className="flex items-center gap-2 text-[13px]">
           <input
@@ -1449,7 +1583,7 @@ function RuleForm({ initial, onDone }: { initial?: AlertRule; onDone: () => void
           </p>
         ) : null}
 
-        <div className="flex gap-2">
+        <div className="flex flex-wrap gap-2">
           <Button type="submit" loading={submitting} {...guard} disabled={guard.disabled || exprRejected}>
             {initial ? t("form.save") : t("form.createButton")}
           </Button>
@@ -1579,26 +1713,32 @@ function RulesSection({ canManage }: { canManage: boolean }) {
    */
   const unknownRule = focusedRule !== "" && query.isSuccess && !rules.some((r) => r.id === focusedRule);
 
+  const listEmpty = query.isSuccess && rules.length === 0;
+  /* The create button sits on the section's heading line, or in the empty
+     slate when there is nothing listed, so the one action is never drawn
+     twice. It is not drawn at all until the list has settled: mounting it in
+     the heading and then moving it into the slate is a REMOUNT, and a click
+     that landed on the first node between the two renders opened nothing.
+     While the builder is open there is no button either — the form is the
+     action. */
+  const createButton =
+    canManage && editing.mode === "none" && !query.isPending ? (
+      <Button size="sm" {...guard} onClick={() => setEditing({ mode: "create" })}>
+        {t("rules.new")}
+      </Button>
+    ) : null;
+
   return (
-    <div className="flex flex-col gap-4">
-      {canManage ? (
-        editing.mode === "none" ? (
-          <div>
-            <Button size="sm" {...guard} onClick={() => setEditing({ mode: "create" })}>
-              {t("rules.new")}
-            </Button>
-          </div>
-        ) : (
-          <RuleForm
-            key={editing.mode === "edit" ? editing.rule.id : "create"}
-            initial={editing.mode === "edit" ? editing.rule : undefined}
-            onDone={() => setEditing({ mode: "none" })}
-          />
-        )
+    <div className="flex flex-col gap-5">
+      {canManage && editing.mode !== "none" ? (
+        <RuleForm
+          key={editing.mode === "edit" ? editing.rule.id : "create"}
+          initial={editing.mode === "edit" ? editing.rule : undefined}
+          onDone={() => setEditing({ mode: "none" })}
+        />
       ) : null}
 
-      <SectionCard title={t("rules.heading")}>
-        <p className="mt-1 max-w-prose text-xs leading-relaxed text-muted-foreground">{t("rules.blurb")}</p>
+      <SectionCard title={t("rules.heading")} blurb={t("rules.blurb")} action={listEmpty ? null : createButton}>
         {unknownRule ? (
           <p
             role="status"
@@ -1618,7 +1758,11 @@ function RulesSection({ canManage }: { canManage: boolean }) {
             explains that the rules above are unaffected. Rendered verbatim.
             Still here for the console that only learns this ON the click. */}
         {syncConflict ? <SyncDisabledNotice testId="rules-sync-banner">{syncConflict}</SyncDisabledNotice> : null}
-        {query.isError ? <ErrorLine>{queryErrorMessage(query.error, t("rules.unavailable"))}</ErrorLine> : null}
+        {query.isError ? (
+          <ErrorLine onRetry={() => void query.refetch()}>
+            {queryErrorMessage(query.error, t("rules.unavailable"))}
+          </ErrorLine>
+        ) : null}
         {/* isPending, not isLoading: a query whose retry is PAUSED (react-query
             pauses retries while the browser thinks it is offline) is pending
             but not fetching — isLoading is false there, and an empty-state
@@ -1626,8 +1770,14 @@ function RulesSection({ canManage }: { canManage: boolean }) {
             settled answer nobody actually got. Found live at the M7 final
             gate; the only honest empty is isSuccess && empty. */}
         {query.isPending ? <ListSkeleton /> : null}
-        {query.isSuccess && rules.length === 0 ? (
-          <p className="px-1 py-10 text-center text-xs text-muted-foreground">{t("rules.empty")}</p>
+        {listEmpty ? (
+          <EmptyState
+            compact
+            className="mt-4"
+            title={t("rules.empty")}
+            body={t("rules.empty.body")}
+            action={createButton}
+          />
         ) : null}
         {rules.length > 0 ? (
           <>
@@ -1751,39 +1901,46 @@ function ForeignRow({ rule, canManage }: { rule: ForeignRule; canManage: boolean
   }
 
   return (
-    <li className="flex flex-wrap items-center gap-3 py-3 text-sm">
-      <span className="font-medium">{rule.name}</span>
+    <li className="flex flex-wrap items-center gap-x-3 gap-y-1.5 py-2 text-sm">
+      {/* The name is the flexible column and truncates; the counts, the owner
+          and the action keep their width and wrap under it on a phone (the
+          same min-w-[8rem] rule the managed rows follow). */}
+      <span className="min-w-[8rem] flex-1 truncate font-medium" title={rule.name}>
+        {rule.name}
+      </span>
       {/* Three Russian forms where English has two, so the noun is chosen by
           count rather than by an `=== 1` suffix — see pluralKey. */}
-      <span className="text-xs text-muted-foreground">
+      <span className="type-meta nums shrink-0 whitespace-nowrap">
         {rule.groups} {t(pluralKey(rule.groups, "count.groups.one", "count.groups.few", "count.groups.many", locale))}
       </span>
-      <span className="text-xs text-muted-foreground">
+      <span className="type-meta nums shrink-0 whitespace-nowrap">
         {rule.rules} {t(pluralKey(rule.rules, "count.rules.one", "count.rules.few", "count.rules.many", locale))}
       </span>
       {/* An object carrying no managed-by label gets an em dash, not a blank:
           "nobody claims this" is a fact, and a blank cell reads as a bug. */}
-      <span data-testid="managed-by" className="mono-data text-muted-foreground">
+      <span data-testid="managed-by" className="mono-data shrink-0 text-muted-foreground">
         {rule.managedBy === "" ? "—" : rule.managedBy}
       </span>
       {canManage ? (
-        <span className="ml-auto">
+        <span className="ml-auto shrink-0">
           {/* Same bound as the managed rows above: a PrometheusRule's
-              metadata.name is up to 253 characters and this button carries it. */}
+              metadata.name is up to 253 characters and this button's accessible
+              name carries it; the verb is what shows. */}
           <Button
             size="sm"
             variant="ghost"
+            className={ROW_ACTION}
             loading={busy}
             {...guard}
             aria-label={t("foreign.import", { name: rule.name })}
             onClick={() => void handleImport()}
           >
-            <RowActionLabel text={t("foreign.import", { name: rule.name })} />
+            <RowActionLabel text={t("foreign.import.verb")} title={t("foreign.import", { name: rule.name })} />
           </Button>
         </span>
       ) : null}
       {error ? (
-        <span role="alert" className="w-full text-xs leading-relaxed text-health-bad">
+        <span role="alert" className="basis-full text-xs leading-relaxed text-health-bad">
           {error}
         </span>
       ) : null}
@@ -1802,8 +1959,7 @@ function ForeignSection({ canManage }: { canManage: boolean }) {
   const pager = usePager(foreign);
 
   return (
-    <SectionCard title={t("foreign.heading")}>
-      <p className="mt-1 max-w-prose text-xs leading-relaxed text-muted-foreground">{t("foreign.blurb")}</p>
+    <SectionCard title={t("foreign.heading")} blurb={t("foreign.blurb")}>
       {/* Whatever the server said — the 409 that names console.alerting.enabled
           and explains that the rules above are unaffected, or the 503 that names
           console.database.mode — is rendered as it was written. Both are one
@@ -1816,14 +1972,35 @@ function ForeignSection({ canManage }: { canManage: boolean }) {
             {queryErrorMessage(query.error, t("foreign.unavailable"))}
           </SyncDisabledNotice>
         ) : (
-          <ErrorLine>{queryErrorMessage(query.error, t("foreign.unavailable"))}</ErrorLine>
+          <ErrorLine onRetry={() => void query.refetch()}>
+            {queryErrorMessage(query.error, t("foreign.unavailable"))}
+          </ErrorLine>
         )
       ) : null}
       {/* isPending / isSuccess, not !isLoading && !isError — the paused-retry
           trap; see the rules list above. */}
       {query.isPending ? <ListSkeleton /> : null}
       {query.isSuccess && foreign.length === 0 ? (
-        <p className="px-1 py-10 text-center text-xs text-muted-foreground">{t("foreign.empty")}</p>
+        <EmptyState
+          compact
+          className="mt-4"
+          title={t("foreign.empty")}
+          body={t("foreign.empty.body")}
+          /* Nothing on this page creates a foreign object, so the next step is
+             the chapter that says where they come from. Outbound: a new tab
+             with no opener, the same way About's links open. */
+          action={
+            <a
+              href={`${docsConsoleUrl("alerting")}#foreign-rules`}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex items-center gap-1.5 text-sm font-medium text-primary hover:underline"
+            >
+              {t("foreign.empty.action")}
+              <ExternalLink aria-hidden="true" className="size-3.5" />
+            </a>
+          }
+        />
       ) : null}
       {foreign.length > 0 ? (
         <>
@@ -1874,22 +2051,31 @@ function MaintenanceSection() {
   };
 
   return (
-    <SectionCard title={t("maintenance.heading")}>
-      <p className="mt-1 max-w-prose text-xs leading-relaxed text-muted-foreground">
-        {withNodes(t("maintenance.blurb"), {
-          investigate: <SurfaceLink to="/investigate">{t("link.investigate")}</SurfaceLink>,
-          explore: <SurfaceLink to="/explore">{t("link.explore")}</SurfaceLink>,
-        })}
-      </p>
+    <SectionCard
+      title={t("maintenance.heading")}
+      blurb={withNodes(t("maintenance.blurb"), {
+        investigate: <SurfaceLink to="/investigate">{t("link.investigate")}</SurfaceLink>,
+        explore: <SurfaceLink to="/explore">{t("link.explore")}</SurfaceLink>,
+      })}
+    >
       {query.isError ? (
-        <ErrorLine>{queryErrorMessage(query.error, t("maintenance.unavailable"))}</ErrorLine>
+        <ErrorLine onRetry={() => void query.refetch()}>
+          {queryErrorMessage(query.error, t("maintenance.unavailable"))}
+        </ErrorLine>
       ) : null}
       {/* isPending / isSuccess, the guard every list on this page uses: a paused
           retry is pending-but-not-fetching, and presenting that as "none
           declared" would be a settled answer nobody gave. */}
       {query.isPending ? <ListSkeleton /> : null}
       {query.isSuccess && windows.length === 0 ? (
-        <p className="px-1 py-10 text-center text-xs text-muted-foreground">{t("maintenance.empty")}</p>
+        <EmptyState
+          compact
+          className="mt-4"
+          title={t("maintenance.empty")}
+          body={t("maintenance.empty.body")}
+          /* A window is declared beside a chart, so the slate points at one. */
+          action={<SurfaceLink to="/investigate">{t("maintenance.empty.action")}</SurfaceLink>}
+        />
       ) : null}
       {windows.length > 0 ? (
         <>

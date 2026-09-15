@@ -564,6 +564,76 @@ describe("#11 the note keeps the row's remaining width", () => {
   });
 });
 
+/* ── polish: the row reflows by the LIST's width, and a chip is for foreign scopes ── */
+
+describe("the row lays itself out by its container, not the viewport", () => {
+  it("stacks the note first and full-width under @md, and is the single truncating line from @md", async () => {
+    stubFetch({ byScope: { "": [ann({ scope: "", text: "rolled the gateway" })] } });
+    renderHarness("");
+    const text = await screen.findByTestId("annotation-text");
+    // Stacked: the note is its own first line, clamped to two, and may wrap.
+    expect(text.className).toContain("order-first");
+    expect(text.className).toContain("basis-full");
+    expect(text.className).toContain("line-clamp-2");
+    expect(text.className).toContain("whitespace-normal");
+    // Single line: the flex-1 / min-w-0 / truncate trio, now behind the container variant.
+    expect(text.className).toContain("@md:flex-1");
+    expect(text.className).toContain("@md:truncate");
+    expect(text.className).toContain("@md:order-none");
+    // The list is the container the row measures against, and never wider than its parent.
+    const list = text.closest("ul")!;
+    expect(list.className).toContain("@container");
+    expect(list.className).toContain("w-full");
+    expect(list.className).toContain("min-w-0");
+    // Delete hugs the right of the meta line.
+    expect(screen.getByRole("button", { name: /^delete annotation/i }).className).toContain("ml-auto");
+  });
+});
+
+describe("ownScope: the scope chip names a FOREIGN scope", () => {
+  function renderOwn(ownScope: string | undefined) {
+    stubFetch();
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    return render(
+      <QueryClientProvider client={qc}>
+        <TimeMachineProvider>
+          <AnnotationBar
+            scope="node-a→node-b"
+            ownScope={ownScope}
+            annotations={[
+              ann({ id: "own", scope: "node-a→node-b", text: "pair note" }),
+              ann({ id: "fleet", scope: "", text: "fleet note" }),
+            ]}
+            onChanged={() => {}}
+          />
+        </TimeMachineProvider>
+      </QueryClientProvider>,
+    );
+  }
+  const chips = (row: HTMLElement) => [...row.querySelectorAll("span")].map((s) => s.textContent);
+
+  it("drops the chip on a note filed under the surface's own scope and keeps it on a global one", async () => {
+    renderOwn("node-a→node-b");
+    const rows = await screen.findAllByTestId("annotation-item");
+    const own = rows.find((r) => r.textContent?.includes("pair note"))!;
+    const fleet = rows.find((r) => r.textContent?.includes("fleet note"))!;
+    expect(chips(own)).not.toContain("node-a→node-b");
+    // The full scope is still one hover away, on the row.
+    expect(own).toHaveAttribute("title", "node-a→node-b");
+    expect(chips(fleet)).toContain("global");
+    expect(fleet).not.toHaveAttribute("title");
+  });
+
+  it("shows every chip when no ownScope is given — the harness is unchanged", async () => {
+    renderOwn(undefined);
+    const rows = await screen.findAllByTestId("annotation-item");
+    expect(rows).toHaveLength(2);
+    expect(chips(rows.find((r) => r.textContent?.includes("pair note"))!)).toContain("node-a→node-b");
+    expect(chips(rows.find((r) => r.textContent?.includes("fleet note"))!)).toContain("global");
+    rows.forEach((r) => expect(r).not.toHaveAttribute("title"));
+  });
+});
+
 describe("#15 the form is a disclosure, not a dialog", () => {
   it("carries role=form with its own name, and no dialog role anywhere", async () => {
     stubFetch();

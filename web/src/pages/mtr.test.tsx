@@ -491,12 +491,16 @@ describe("MTRPage — destinations pane", () => {
     await expandDestination("node-b");
     const row = await screen.findByRole("button", { name: /qa-node-worker-07.*node-b/ });
     const [name, , count] = Array.from(row.children) as HTMLElement[];
-    // The name grows into the leftover and cannot be shrunk away...
-    expect(name.className).toMatch(/flex-1/);
-    // ...and the count is capped and shrinkable, which is what makes it yield
+    // The name never shrinks and truncates only when it alone is wider than
+    // the row (2.4.0 audit: a zero-basis flex-1 handed it only the leftover)...
+    expect(name.className).toMatch(/shrink-0/);
+    expect(name.className).toMatch(/max-w-full/);
+    expect(name.className).toMatch(/truncate/);
+    // ...and the count is the shrinkable one, which is what makes it yield
     // first. `shrink-0` here is the bug.
     expect(count.className).not.toMatch(/shrink-0/);
-    expect(count.className).toMatch(/max-w-\[45%\]/);
+    expect(count.className).toMatch(/\bshrink\b/);
+    expect(count.className).toMatch(/min-w-0/);
     // Whichever side does clip, the full text stays reachable.
     expect(name).toHaveAttribute("title", expect.stringContaining("qa-node-worker-07"));
     expect(count).toHaveAttribute("title", expect.stringContaining("traces"));
@@ -588,13 +592,19 @@ describe("MTRPage — destination cards collapse", () => {
     renderPage({ destinations: fanIn(2) });
 
     const header = await screen.findByRole("button", { name: /^node-b[,:]/ });
-    const [, name, , counts] = Array.from(header.children) as HTMLElement[];
-    // The name grows into every spare pixel and can never be shrunk away...
-    expect(name.className).toMatch(/flex-1/);
+    const name = within(header).getByTitle("node-b");
+    const counts = within(header).getByTitle(/traces/);
+    // The name never shrinks and truncates only when it alone is wider than the
+    // row (2.4.0 audit: a zero-basis flex-1 handed it only what the counts left)...
+    expect(name.className).toMatch(/shrink-0/);
+    expect(name.className).toMatch(/max-w-full/);
     expect(name.className).toMatch(/min-w-0/);
-    // ...and the counts are the shrinkable half. `shrink-0` here is the bug.
+    // ...and the counts are the shrinkable half, uncapped, so they yield first.
+    // `shrink-0` here is the bug.
     expect(counts.className).not.toMatch(/shrink-0/);
+    expect(counts.className).toMatch(/\bshrink\b/);
     expect(counts.className).toMatch(/truncate/);
+    expect(counts.className).not.toMatch(/max-w-\[45%\]/);
     // Whichever side does clip, the whole string stays reachable.
     expect(name).toHaveAttribute("title", "node-b");
     expect(counts).toHaveAttribute("title", expect.stringContaining("traces"));
@@ -1794,5 +1804,36 @@ describe("MTRPage — the traces behind a route", () => {
     fireEvent.click(await screen.findByRole("button", { name: /^Path aaaaaaaaaaaa$/ }));
 
     expect(await screen.findByText("1 of 147")).toBeInTheDocument();
+  });
+});
+
+/* ── 2.4.0 polish: the Runner's pair-count hue and the history pane's pair line ── */
+describe("MTRPage — 2.4.0 polish", () => {
+  const RUNNER = ["mtr:read", "runs:create"];
+
+  it("keeps the Runner's pair-count sentence muted while the address is still empty", async () => {
+    renderPage({ permissions: RUNNER, nodes: ["node-a", "node-b"] });
+
+    fireEvent.click(await screen.findByRole("radio", { name: /runner/i }));
+    fireEvent.click(screen.getByRole("radio", { name: /ad-hoc/i }));
+    const sentence = await screen.findByText(/no address typed yet/i);
+    expect(sentence.className).toMatch(/text-muted-foreground/);
+    expect(sentence.className).not.toMatch(/text-health-bad/);
+  });
+
+  it("lets the history pane's pair line wrap rather than truncate", async () => {
+    renderPage({
+      destinations: [destinationRow({ sourceNode: "kconmon-stand-worker6", destination: "kconmon-stand-worker9" })],
+      onSnapshots: () =>
+        json({
+          snapshots: [snapshotRow({ sourceNode: "kconmon-stand-worker6", destination: "kconmon-stand-worker9" })],
+          nextCursor: "",
+        }),
+    });
+
+    await selectPair("kconmon-stand-worker6", "kconmon-stand-worker9");
+    const line = await screen.findByText("kconmon-stand-worker6 → kconmon-stand-worker9");
+    expect(line.className).toMatch(/break-all/);
+    expect(line.className).not.toMatch(/truncate/);
   });
 });

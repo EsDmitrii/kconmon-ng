@@ -6,8 +6,10 @@ import {
   READOUT_ROW_CAP,
   createCursorGroup,
   isTimeSeriesOption,
+  nearestInstant,
   nearestSample,
   pickReadoutRows,
+  readoutInstant,
   readoutSeries,
   useChartCursor,
   type ReadoutSeries,
@@ -458,5 +460,55 @@ describe("the readout under an option nobody would write on purpose", () => {
     expect(
       pickReadoutRows(readoutSeries({ series: [{ type: "line", data: [] }, { type: "line", data: [] }] }), 0),
     ).toEqual({ rows: [], hidden: 0 });
+  });
+});
+
+/* ── the readout in words ─────────────────────────────────────────────────── */
+
+describe("readoutInstant prints the sample the tooltip is describing", () => {
+  it("prefers the snapped instant while a chart is the source", () => {
+    expect(readoutInstant(1_000, true, 1_030)).toBe(1_030);
+  });
+
+  it("prints a timeline row's own instant untouched, whatever the pointer last snapped to", () => {
+    expect(readoutInstant(1_000, false, 1_030)).toBe(1_000);
+  });
+
+  it("falls back to the raw instant when the chart snapped to nothing", () => {
+    expect(readoutInstant(1_000, true, null)).toBe(1_000);
+  });
+
+  it("prints nothing for nothing hovered, even with a stale snap behind it", () => {
+    expect(readoutInstant(null, true, 1_030)).toBeNull();
+  });
+
+  it("refuses NaN in either channel rather than printing 'Invalid Date'", () => {
+    expect(readoutInstant(Number.NaN, true, 1_030)).toBeNull();
+    expect(readoutInstant(1_000, true, Number.NaN)).toBe(1_000);
+  });
+});
+
+describe("nearestInstant snaps across a panel's series the way its axis pointer does", () => {
+  const tenMinutes = (from: number, n: number): ReadoutSeries => ({
+    name: "s",
+    color: null,
+    points: Array.from({ length: n }, (_, i) => [from + i * 600_000, i] as const),
+    step: 600_000,
+  });
+
+  it("answers the nearest sample of the nearest series", () => {
+    const a = tenMinutes(0, 4);
+    const b = tenMinutes(300_000, 4); // offset by five minutes
+    expect(nearestInstant([a, b], 610_000)).toBe(600_000);
+    expect(nearestInstant([a, b], 880_000)).toBe(900_000);
+  });
+
+  it("answers null when no series has a sample within its step", () => {
+    expect(nearestInstant([tenMinutes(0, 2)], 5_000_000)).toBeNull();
+    expect(nearestInstant([], 1_000)).toBeNull();
+  });
+
+  it("lands ON a sample when the instant is exactly on it", () => {
+    expect(nearestInstant([tenMinutes(0, 3)], 1_200_000)).toBe(1_200_000);
   });
 });

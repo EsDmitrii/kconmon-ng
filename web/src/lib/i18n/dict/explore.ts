@@ -68,12 +68,18 @@ const en = {
   "compare.legA.now": "A · now (solid)",
   "compare.legB.earlier": "A · {label} earlier (dashed)",
 
-  /* The mixed-units caption names both units, and the two halves are NOT the
+  /* The caption under the controls in metric-B mode: the two titles, said once,
+     because the legend now names its entries "A · pair" / "B · pair". "A" and
+     "B" stay Latin for the reason the leg prefixes do. */
+  "compare.legs": "A: {a} · B: {b}.",
+  /* The mixed-units note names both units, and the two halves are NOT the
      same word list: A's is its declared `unit` ("seconds" | "ratio") because
      that is what the axis is, while B's says what KIND of quantity it is
      ("duration" for a seconds chart). Four keys rather than two, so the
-     Russian can decline each side on its own. */
-  "compare.unitsDiffer": "B is a {unitB} on A's {unitA} axis — read its shape, not its height.",
+     Russian can decline each side on its own. B has an axis of its OWN now
+     (pages/explore.tsx, toCompareOption); the old note told the reader to
+     ignore B's height, which was a description of the bug. */
+  "compare.unitsDiffer": "B is a {unitB} against A's {unitA}, so B is read on the right-hand axis.",
   "compare.unitB.ratio": "ratio",
   "compare.unitB.duration": "duration",
   "compare.unitA.ratio": "ratio",
@@ -90,10 +96,13 @@ const en = {
    * whose retention is 24h drew leg A alone — one line, no legend entry for B,
    * no error — and the honest reading of that picture is "the fleet behaved
    * identically a week ago", which is the opposite of the truth. So the note
-   * names retention AND the distance, which is the number an operator has to
-   * compare against their own `--storage.tsdb.retention.time`.
+   * names the distance, which is the number an operator has to compare
+   * against their own `--storage.tsdb.retention.time`, and offers BOTH causes
+   * the console cannot tell apart: retention stopping short, or a fleet that
+   * was not being probed yet (a stand an hour old asked for "1h earlier").
    */
-  "compare.shiftedEmpty": "No data {shift} ago — Prometheus's retention does not reach that far back.",
+  "compare.shiftedEmpty":
+    "No data {shift} ago — either Prometheus's retention stops short of it, or nothing was being probed yet.",
 } as const;
 
 export type ExploreKey = keyof typeof en;
@@ -135,7 +144,8 @@ export const exploreDict: Dictionary<ExploreKey> = defineDict(en, {
   "compare.legA.now": "A · сейчас (сплошная)",
   "compare.legB.earlier": "A · {label} назад (пунктир)",
 
-  "compare.unitsDiffer": "B здесь {unitB} на оси A ({unitA}), поэтому смотрите на форму, а не на высоту.",
+  "compare.legs": "A: {a} · B: {b}.",
+  "compare.unitsDiffer": "B здесь {unitB}, а ось A ({unitA}) остаётся слева, поэтому B читается по правой оси.",
   "compare.unitB.ratio": "доля",
   "compare.unitB.duration": "длительность",
   "compare.unitA.ratio": "доли",
@@ -144,5 +154,6 @@ export const exploreDict: Dictionary<ExploreKey> = defineDict(en, {
     "Выберите вторую метрику или прошлое окно, и на оси A ляжет опорная линия. Пока этого нет, " +
     "ни один запрос не уходит.",
 
-  "compare.shiftedEmpty": "Данных за {shift} назад нет: так далеко ретенция Prometheus не достаёт.",
+  "compare.shiftedEmpty":
+    "Данных за {shift} назад нет: либо ретенция Prometheus так далеко не достаёт, либо тогда ещё ничего не проверялось.",
 });

@@ -57,13 +57,13 @@ const json = (body: unknown) =>
   new Response(JSON.stringify(body), { status: 200, headers: { "Content-Type": "application/json" } });
 
 /** Routes the three GETs the page now issues; topology is the parameterized one. */
-function stubFetchRoutes(topology: unknown) {
+function stubFetchRoutes(topology: unknown, matrix: unknown = matrixBody) {
   vi.stubGlobal(
     "fetch",
     vi.fn((url: string) => {
       const u = String(url);
       if (u.includes("/api/v1/topology")) return Promise.resolve(json(topology));
-      if (u.includes("/api/v1/matrix")) return Promise.resolve(json(matrixBody));
+      if (u.includes("/api/v1/matrix")) return Promise.resolve(json(matrix));
       return Promise.resolve(json({ version: "2.3.0", commit: "abc" }));
     }),
   );
@@ -149,5 +149,115 @@ describe("MatrixPage — sparse topology plan", () => {
     expect(screen.getByTestId("legend-not-probed")).toHaveTextContent(
       "Не зондируется · исключено планом топологии",
     );
+  });
+});
+
+/* ── the plan outranks the other two silences (2.4.0) ─────────────────────────
+ *
+ * An unmeasured cell can now be quiet for three reasons — the plan excludes the
+ * pair, the source advertised planes without this protocol, or the source is an
+ * external agent Prometheus never scrapes — and a cell says ONE of them. The
+ * plan comes first: it is the operator's own statement about the pair, and the
+ * other two are inferences.
+ */
+describe("MatrixPage — the plan outranks the other silences", () => {
+  /* a → b is the only measured pair. a runs UDP only (no TCP); c is a bare host with no series of
+     its own. The plan: a probes b, b probes a, c probes nobody. */
+  const layeredMatrix = {
+    ...matrixBody,
+    cells: [{ source: "a", destination: "b", failRatio: 0.5, rttP95: 2_000_000 }],
+  };
+  const layeredTopology = {
+    ...sparseTopology,
+    agents: [
+      { id: "ag-a", nodeName: "a", podIP: "10.0.0.1", zone: "z1", capabilities: ["plane:udp"] },
+      { id: "ag-b", nodeName: "b", podIP: "10.0.0.2", zone: "z1" },
+      {
+        id: "ag-c", nodeName: "c", podIP: "192.0.2.10", zone: "office",
+        labels: { "kconmon-ng.io/external": "true" },
+        capabilities: ["plane:tcp"],
+      },
+    ],
+  };
+
+  it("reads a pair that is excluded AND unsupported as 'not probed'", async () => {
+    stubFetchRoutes(layeredTopology, layeredMatrix);
+    renderPage();
+    const cell = await screen.findByLabelText("a → c: not probed by the topology plan");
+    fireEvent.mouseEnter(cell.querySelector("div.border-dashed") as Element);
+    const tooltip = await screen.findByRole("tooltip");
+    expect(tooltip).toHaveTextContent("The sparse topology plan assigns no agent to probe this pair");
+    expect(tooltip).not.toHaveTextContent("does not run");
+    expect(screen.queryAllByLabelText(/does not run TCP probes$/)).toHaveLength(0);
+  });
+
+  it("reads a pair that is excluded AND unscraped as 'not probed', not as a scrape gap", async () => {
+    stubFetchRoutes(layeredTopology, layeredMatrix);
+    renderPage();
+    const cell = await screen.findByLabelText("c → a: not probed by the topology plan");
+    fireEvent.mouseEnter(cell.querySelector("div.border-dashed") as Element);
+    const tooltip = await screen.findByRole("tooltip");
+    expect(tooltip).toHaveTextContent("The sparse topology plan assigns no agent to probe this pair");
+    expect(tooltip).not.toHaveTextContent("No series");
+  });
+
+  it("gates each legend row on its own cells: the plan's row is there, the unsupported one is not", async () => {
+    stubFetchRoutes(layeredTopology, layeredMatrix);
+    renderPage();
+    await screen.findByTestId("legend-not-probed");
+    // a's one planned pair is measured and its other is the plan's: no unsupported cell survives.
+    expect(screen.queryByTestId("legend-unsupported")).not.toBeInTheDocument();
+    // The planned-but-silent pair is still the alarming kind of silence.
+    expect(screen.getByLabelText("b → a: no data")).toBeInTheDocument();
+  });
+});
+
+/* ── the note above the grid obeys the same precedence as the cells ─────────
+ *
+ * The 'unscraped' reading is per plane: an external agent that advertised planes
+ * without this protocol has a KNOWN cause for its silent row (unsupported), and
+ * the note must not tell the operator to add a scrape job for it. The same
+ * agent, on a grid for a plane it does run, is a scrape gap and is named.
+ */
+describe("MatrixPage — the unscraped note is gated by the plane on show", () => {
+  /* ext-1 runs TCP and MTR only; a is an in-cluster agent with no plane list (every plane).
+     The one cell is a → ext-1: ext-1 is a destination everywhere and a source nowhere. */
+  const gatedTopology = {
+    nodes: [{ name: "a", zone: "z1", ready: true }],
+    agents: [
+      { id: "ag-a", nodeName: "a", podIP: "10.0.0.1", zone: "z1" },
+      {
+        id: "ag-ext", nodeName: "ext-1", podIP: "192.0.2.10", zone: "office",
+        labels: { "kconmon-ng.io/external": "true" },
+        capabilities: ["external-checks", "plane:tcp", "plane:mtr"],
+      },
+    ],
+    timestamp: "2026-01-01T00:00:00Z",
+  };
+  const gatedMatrix = (protocol: string) => ({
+    protocol, plane: "pod", nodes: ["a", "ext-1"],
+    cells: [{ source: "a", destination: "ext-1", failRatio: 0 }],
+    timestamp: "2026-01-01T00:00:00Z",
+  });
+
+  afterEach(() => window.history.pushState({}, "", "/"));
+
+  it("on the UDP grid: the row is 'unsupported' and no scrape note is shown", async () => {
+    window.history.pushState({}, "", "/matrix?protocol=udp");
+    stubFetchRoutes(gatedTopology, gatedMatrix("udp"));
+    renderPage();
+    expect(await screen.findByLabelText("ext-1 → a: the source does not run UDP probes")).toBeInTheDocument();
+    expect(screen.queryByTestId("matrix-unscraped-note")).not.toBeInTheDocument();
+    expect(screen.queryByText(/Prometheus is not scraping/)).not.toBeInTheDocument();
+  });
+
+  it("on the TCP grid the same host IS a scrape gap: the note names it and the row says why", async () => {
+    window.history.pushState({}, "", "/matrix?protocol=tcp");
+    stubFetchRoutes(gatedTopology, gatedMatrix("tcp"));
+    renderPage();
+    const note = await screen.findByTestId("matrix-unscraped-note");
+    expect(note).toHaveTextContent("ext-1 is an external agent Prometheus is not scraping");
+    expect(screen.getByLabelText(/^ext-1 → a: /)).not.toHaveAccessibleName(/does not run/);
+    expect(screen.queryAllByLabelText(/does not run TCP probes$/)).toHaveLength(0);
   });
 });

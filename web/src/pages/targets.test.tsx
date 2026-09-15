@@ -577,9 +577,9 @@ describe("TargetsPage — schedules tab", () => {
     await openTab(/schedules/i);
     const list = await screen.findByRole("list", { name: /schedules/i });
     expect(within(list).getByText("gw-tcp")).toBeInTheDocument();
-    // Scoped to the cadence CELL: the action names carry the cadence too now
-    // (finding 3), so a bare text query matches several nodes.
-    expect(within(list).getByText("every 30s", { selector: "span.text-muted-foreground" })).toBeInTheDocument();
+    // Scoped to the cadence CELL (the meta face): the action names carry the
+    // cadence too now (finding 3), so a bare text query matches several nodes.
+    expect(within(list).getByText("every 30s", { selector: "span.type-meta" })).toBeInTheDocument();
   });
 
   it("renders an empty schedules list rather than a stub", async () => {
@@ -1175,6 +1175,66 @@ describe("the address placeholder follows the kind (#24)", () => {
 
     fireEvent.change(screen.getByLabelText("Kind"), { target: { value: "url" } });
     expect(screen.getByLabelText("Address")).toHaveAttribute("placeholder", TARGET_ADDRESS_PLACEHOLDER.url);
+  });
+
+  // Three examples clipped inside a phone-wide field; the port form now lives in the hint, which
+  // the field points at through aria-describedby so it is read with the box.
+  it("keeps the host placeholder to two examples and moves the port form into the hint", async () => {
+    renderPage();
+    fireEvent.click(await screen.findByRole("button", { name: /new target/i }));
+
+    const address = screen.getByLabelText("Address");
+    expect(TARGET_ADDRESS_PLACEHOLDER.host.split(" · ")).toHaveLength(2);
+    const hint = document.getElementById(address.getAttribute("aria-describedby") ?? "");
+    expect(hint).toHaveTextContent("10.0.0.1:8443");
+
+    fireEvent.change(screen.getByLabelText("Kind"), { target: { value: "url" } });
+    expect(screen.getByLabelText("Address")).not.toHaveAttribute("aria-describedby");
+  });
+});
+
+/* The visible half of a row action is the verb alone; the object's name (and
+   on the Schedules tab its cadence) stays in the accessible name and in the
+   span's title. Every row is a two-column grid whose second column is the
+   action cluster, so the buttons can never fall under the data. */
+describe("row actions read as verbs inside a fixed column", () => {
+  it("shows 'Delete' while the accessible name keeps 'Delete api-gw'", async () => {
+    renderPage({ targets: [targetRow()] });
+    const del = await screen.findByRole("button", { name: "Delete api-gw" });
+    const visible = del.querySelector('[aria-hidden="true"]');
+    expect(visible).toHaveTextContent(/^Delete$/);
+    expect(visible).toHaveAttribute("title", "Delete api-gw");
+    expect(screen.getByRole("button", { name: "Edit api-gw" }).querySelector('[aria-hidden="true"]')).toHaveTextContent(
+      /^Edit$/,
+    );
+
+    const row = del.closest("li");
+    expect(row?.className).toContain("grid-cols-[minmax(0,1fr)_auto]");
+    // The cluster is the row's own grid item, not something floated inside the data cell.
+    expect(del.parentElement?.parentElement).toBe(row);
+  });
+
+  it("arms delete with the destructive treatment and the bare 'Confirm delete'", async () => {
+    renderPage({ targets: [targetRow()] });
+    fireEvent.click(await screen.findByRole("button", { name: "Delete api-gw" }));
+    const confirm = screen.getByRole("button", { name: /confirm delete api-gw/i });
+    expect(confirm.className).toContain("bg-destructive");
+    expect(confirm.querySelector('[aria-hidden="true"]')).toHaveTextContent(/^Confirm delete$/);
+    expect(confirm.querySelector('[aria-hidden="true"]')).toHaveAttribute("title", "Confirm delete api-gw");
+  });
+
+  it("names the schedule toggle by its verb and says 'continuous' once", async () => {
+    renderPage({
+      definitions: [definitionRow()],
+      schedules: [scheduleRow({ id: "s-2", kind: "continuous", intervalNs: 0, nextFireAt: null })],
+    });
+    await openTab(/schedules/i);
+    const toggle = await screen.findByRole("button", { name: "Disable gw-tcp, continuous" });
+    expect(toggle.querySelector('[aria-hidden="true"]')).toHaveTextContent(/^Disable$/);
+    // The kind chip already says it; the cadence sentence is skipped for continuous.
+    const row = toggle.closest("li") as HTMLElement;
+    expect(within(row).getAllByText("continuous")).toHaveLength(1);
+    expect(row).toHaveTextContent("next — · last —");
   });
 });
 

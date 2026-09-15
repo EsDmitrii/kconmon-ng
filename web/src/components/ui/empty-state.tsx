@@ -7,9 +7,15 @@ import { cn } from "@/lib/utils";
 
 /* The neutral "nothing here" glyph BlankSlate always drew — kept as the
    default so existing slates look identical after migration. */
-function DefaultIcon() {
+function DefaultIcon({ compact = false }: { compact?: boolean }) {
   return (
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" className="size-5">
+    <svg
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.6"
+      className={compact ? "size-4" : "size-5"}
+    >
       <circle cx="12" cy="12" r="9" />
       <path d="M9 12h6" strokeLinecap="round" />
     </svg>
@@ -23,18 +29,31 @@ export interface EmptyStateProps extends React.HTMLAttributes<HTMLDivElement> {
   icon?: React.ReactNode;
   /* Optional CTA slot under the body — a Button or a link. */
   action?: React.ReactNode;
+  /* The slate for a panel or a rail rather than a whole page: tighter
+     padding, a smaller glyph, a 13px title. Same three parts, same order. */
+  compact?: boolean;
 }
 
-export function EmptyState({ title, body, icon, action, className, ...props }: EmptyStateProps) {
+export function EmptyState({ title, body, icon, action, compact = false, className, ...props }: EmptyStateProps) {
   return (
-    <div className={cn("flex flex-col items-center gap-2 px-6 py-10 text-center", className)} {...props}>
+    <div
+      className={cn(
+        "flex flex-col items-center text-center",
+        compact ? "gap-1.5 px-4 py-6" : "gap-2 px-6 py-10",
+        className,
+      )}
+      {...props}
+    >
       <span
         aria-hidden="true"
-        className="mb-1 flex size-10 items-center justify-center rounded-full bg-surface-2 text-muted-foreground"
+        className={cn(
+          "mb-1 flex items-center justify-center rounded-full bg-surface-2 text-muted-foreground",
+          compact ? "size-8" : "size-10",
+        )}
       >
-        {icon ?? <DefaultIcon />}
+        {icon ?? <DefaultIcon compact={compact} />}
       </span>
-      <p className="text-sm font-medium">{title}</p>
+      <p className={cn("font-medium", compact ? "text-[13px]" : "text-sm")}>{title}</p>
       {body != null ? <p className="max-w-sm text-xs leading-relaxed text-muted-foreground">{body}</p> : null}
       {action != null ? <div className="mt-2">{action}</div> : null}
     </div>

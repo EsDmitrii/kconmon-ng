@@ -635,3 +635,79 @@ describe("Console table — when the figures were read", () => {
     expect(await screen.findByText(`Снято на ${ru}`)).toBeInTheDocument();
   });
 });
+
+/* ── the slates, and the figures ─────────────────────────────────────────── */
+
+/**
+ * The two placeholders were a glyph over a bare centred sentence (audit frames
+ * console-idle, console-empty). They are the house EmptyState now: a title, the
+ * tab's own sentence as the body, and on the idle slate a Run button under it
+ * that fires the same query the header's Run does. The button is an OUTLINE
+ * Run with its full sentence in the accessible name, so the page keeps one
+ * primary action and the tests keep one button called "Run".
+ */
+describe("Console slates", () => {
+  it("names the idle slate, keeps the tab's sentence as its body, and offers Run", async () => {
+    const { calls } = renderConsole();
+
+    expect(screen.getByText("No result yet")).toBeInTheDocument();
+    expect(screen.getByText("Run a query to see results.")).toBeInTheDocument();
+    const cta = screen.getByRole("button", { name: "Run the query" });
+    expect(cta).toHaveAttribute("title", "Run the query");
+    expect(cta).not.toHaveClass("bg-primary");
+    fireEvent.click(cta);
+    await waitFor(() => expect(calls).toHaveLength(1));
+    expect(await screen.findByText(/no data — the query returned an empty result/i)).toBeInTheDocument();
+    // Ran and matched nothing: a different slate, with a body of its own and no Run under it.
+    expect(screen.queryByRole("button", { name: "Run the query" })).toBeNull();
+    expect(screen.queryByText("No result yet")).toBeNull();
+  });
+
+  it("says the chart's own sentence on the Chart tab's idle slate", () => {
+    renderConsole();
+    pickRange();
+    fireEvent.click(tab("Chart"));
+
+    expect(screen.getByText("No result yet")).toBeInTheDocument();
+    expect(screen.getByText("Run a query that returns a series to see a chart.")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Run the query" })).toBeInTheDocument();
+  });
+});
+
+describe("Console figures", () => {
+  it("prints a last value to six significant figures, with the exact string on the cell", async () => {
+    await runRange({
+      status: "success",
+      data: {
+        resultType: "matrix",
+        result: [{ metric: { __name__: "q", zone: "a" }, values: [[1, "0.1"], [2, "0.004947212522190138"]] }],
+      },
+    });
+
+    const row = rawRows()[0];
+    expect(row).toHaveTextContent("0.00494721");
+    expect(row).not.toHaveTextContent("0.004947212522190138");
+    expect(row.querySelector('[title="0.004947212522190138"]')).not.toBeNull();
+  });
+
+  it("right-aligns the figures of the result table in the data face, and never wraps a cell", async () => {
+    renderConsole({
+      answer: {
+        status: "success",
+        data: { resultType: "vector", result: [{ metric: { pod: "kconmon-agent-000" }, value: [1, "0.123456789"] }] },
+      },
+    });
+    run();
+
+    const value = await screen.findByText("0.123457");
+    expect(value).toHaveAttribute("title", "0.123456789");
+    expect(value.className).toContain("text-right");
+    expect(value.className).toContain("mono-data");
+    expect(value.className).toContain("whitespace-nowrap");
+    const label = screen.getByText("kconmon-agent-000");
+    expect(label.className).not.toContain("text-right");
+    expect(label.className).toContain("mono-data");
+    expect(screen.getByRole("columnheader", { name: "value" }).className).toContain("text-right");
+    expect(screen.getByRole("columnheader", { name: "pod" }).className).not.toContain("text-right");
+  });
+});

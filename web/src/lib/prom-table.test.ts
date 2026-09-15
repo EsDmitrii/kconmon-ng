@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { LAST_COL, POINTS_COL, TIME_COL, VALUE_COL, toTable } from "./prom-table";
+import { LAST_COL, POINTS_COL, TIME_COL, VALUE_COL, formatValue, isFigureColumn, isNumericColumn, toTable } from "./prom-table";
 import type { PromResult } from "./types";
 
 describe("toTable", () => {
@@ -208,5 +208,60 @@ describe("a stamp outside the Date range is treated as no stamp at all", () => {
       String,
     );
     expect(table.at).toBe(1_754_000_000_000);
+  });
+});
+
+/* ── how a column sits, and how a figure reads ───────────────────────────── */
+
+describe("isNumericColumn", () => {
+  it("tags this module's own columns as figures, the stamp column under any name it stepped aside to", () => {
+    expect(isNumericColumn(VALUE_COL)).toBe(true);
+    expect(isNumericColumn(POINTS_COL)).toBe(true);
+    expect(isNumericColumn(LAST_COL)).toBe(true);
+    expect(isNumericColumn(TIME_COL)).toBe(true);
+    expect(isNumericColumn(`${TIME_COL}_`)).toBe(true);
+  });
+
+  it("leaves a label column alone — an identifier is not a figure", () => {
+    for (const label of ["instance", "pod", "value", "time", "__name__"]) expect(isNumericColumn(label)).toBe(false);
+  });
+
+  it("narrows to the two columns that carry a SAMPLE for formatValue", () => {
+    expect(isFigureColumn(VALUE_COL)).toBe(true);
+    expect(isFigureColumn(LAST_COL)).toBe(true);
+    expect(isFigureColumn(POINTS_COL)).toBe(false);
+    expect(isFigureColumn(TIME_COL)).toBe(false);
+  });
+});
+
+/**
+ * The listing printed `0.004947212522190138` in every last-value cell (audit
+ * frame console-range-table): sixteen digits of a p95 that moves in its third.
+ * Six significant figures on screen; the exact string stays on the cell's
+ * title and in the JSON tab.
+ */
+describe("formatValue", () => {
+  it("prints six significant figures with the trailing zeros trimmed", () => {
+    expect(formatValue("0.004947212522190138")).toBe("0.00494721");
+    expect(formatValue("0.0000012345678")).toBe("0.00000123457");
+    expect(formatValue("1.000000")).toBe("1");
+    expect(formatValue("0.5")).toBe("0.5");
+    expect(formatValue("2.50")).toBe("2.5");
+  });
+
+  it("prints a count whole — an integer is not rounded away", () => {
+    expect(formatValue("146")).toBe("146");
+    expect(formatValue("1234567")).toBe("1234567");
+    expect(formatValue("-3")).toBe("-3");
+    expect(formatValue("0")).toBe("0");
+  });
+
+  it("keeps the exponent form readable past what six figures can hold", () => {
+    expect(formatValue("1e21")).toBe("1e+21");
+    expect(formatValue("1234567890123456789")).toBe("1.23457e+18");
+  });
+
+  it("leaves Prometheus's own tokens and a string result exactly as they arrived", () => {
+    for (const raw of ["NaN", "+Inf", "-Inf", "hello", "", "  "]) expect(formatValue(raw)).toBe(raw);
   });
 });

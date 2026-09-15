@@ -9,6 +9,7 @@ import { PageShell } from "@/components/page-shell";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
+import { TextLink } from "@/components/ui/text-link";
 import { Modal } from "@/components/ui/modal";
 import { Pager, usePager } from "@/components/ui/pager";
 import { Segmented } from "@/components/ui/segmented";
@@ -24,7 +25,7 @@ import {
   getMTRSnapshots,
   listAllTargets,
 } from "@/lib/api";
-import { localeTag, useLocale, useT, type Translate } from "@/lib/i18n";
+import { stampFull, useLocale, useT, type Translate } from "@/lib/i18n";
 import { countForm, mtrDict, type MTRKey } from "@/lib/i18n/dict/mtr";
 import { scopeNodeOptions } from "@/lib/investigation-sources";
 import { compareNaturalName } from "@/lib/natural-name";
@@ -377,23 +378,27 @@ function DestinationCard({
             )}
           />
           {/* The NAME wins the width fight, the same rule the source rows below
-              already follow (QA scope 4, finding #5). A zero basis with flex-1
-              hands it every spare pixel AND leaves it nothing to give back when
-              the row is short, so all the shrinking lands on the counts. This
-              header had the counts at `shrink-0`, which inverted it: they took
-              what they wanted and the name arrived as «kco…» (rev13 acceptance). */}
-          <span className="mono-data min-w-0 flex-1 truncate font-medium" title={group.destination}>
-            {group.destination}
-          </span>
-          <span aria-hidden="true" className="shrink-0 text-xs text-muted-foreground">{" · "}</span>
-          {/* The shut card's whole claim: how many distinct routes, over how
-              many traces. Both, because one without the other says nothing
-              about how well the fleet knows this destination. */}
-          <span
-            className="nums min-w-0 max-w-[45%] shrink truncate text-xs text-muted-foreground"
-            title={t("destinations.counts", { paths, traces })}
-          >
-            {t("destinations.counts", { paths, traces })}
+              follow (QA scope 4, finding #5), and it wins it OUTRIGHT: the name
+              does not shrink at all, so the counts are the first to give, and it
+              truncates only when it alone is wider than the row (max-w-full).
+              The zero-basis flex-1 it had before handed the name only what the
+              counts left over, so a 295px rail showed «kconmon-stand-co…» beside
+              a count that had every pixel it asked for (2.4.0 audit). The
+              wrapper clips the separator once the name has taken the row. */}
+          <span className="flex min-w-0 flex-1 items-center gap-2 overflow-hidden">
+            <span className="mono-data min-w-0 max-w-full shrink-0 truncate font-medium" title={group.destination}>
+              {group.destination}
+            </span>
+            <span aria-hidden="true" className="shrink-0 text-xs text-muted-foreground">{" · "}</span>
+            {/* The shut card's whole claim: how many distinct routes, over how
+                many traces. Both, because one without the other says nothing
+                about how well the fleet knows this destination. */}
+            <span
+              className="nums type-meta min-w-0 shrink truncate"
+              title={t("destinations.counts", { paths, traces })}
+            >
+              {t("destinations.counts", { paths, traces })}
+            </span>
           </span>
         </button>
       </h3>
@@ -418,7 +423,7 @@ function DestinationCard({
                     aria-label={`${row.sourceNode} → ${row.destination}`}
                     onClick={() => onSelect(row)}
                     className={cn(
-                      "flex w-full items-baseline justify-between gap-1 rounded-md px-2 py-1.5 text-left text-xs",
+                      "flex w-full items-baseline justify-between gap-1 overflow-hidden rounded-md px-2 py-1.5 text-left text-xs",
                       "transition-colors duration-(--dur) ease-(--ease) hover:bg-accent",
                       "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
                       /* The source name is the row's primary content and reads in
@@ -431,12 +436,12 @@ function DestinationCard({
                         #5). The count used to be shrink-0, so in Russian —
                         where "трассировок" is three times the width of
                         "traces" — it ate the row and the source collapsed
-                        to «от qa-nod…», which names nothing. flex-1 with a
-                        zero basis hands the leftover to the name and puts
-                        all the shrinking on the count, and the cap keeps
-                        the name at least 55% of the row whatever the
-                        language does. */}
-                    <span className="min-w-0 flex-1 truncate" title={from}>
+                        to «от qa-nod…», which names nothing. Now the name is
+                        the one that never shrinks: the count yields first,
+                        down to nothing, and the name truncates only when it
+                        alone is wider than the row (the header above keeps
+                        the same rule). */}
+                    <span className="min-w-0 max-w-full shrink-0 truncate" title={from}>
                       {from}
                     </span>
                     {/* A REAL character between the two halves, not a CSS gap.
@@ -446,7 +451,7 @@ function DestinationCard({
                         Decoration to a screen reader, a separator to everything
                         that reads the row as a string. */}
                     <span aria-hidden="true" className="shrink-0 text-muted-foreground">{" · "}</span>
-                    <span className="nums min-w-0 max-w-[45%] shrink truncate text-muted-foreground" title={counts}>
+                    <span className="nums min-w-0 shrink truncate text-muted-foreground" title={counts}>
                       {counts}
                     </span>
                   </button>
@@ -538,9 +543,9 @@ function DestinationsPane({
           {/* Three keys, not one interpolation: the link sits INSIDE the
               sentence, which is the one shape a placeholder cannot carry. */}
           {t("destinations.empty.before")}{" "}
-          <a href={withAtParam("/diagnostics")} className="text-primary hover:underline">
+          <TextLink href={withAtParam("/diagnostics")}>
             {t("destinations.empty.link")}
-          </a>{" "}
+          </TextLink>{" "}
           {t("destinations.empty.after")}
         </EmptyNote>
       ) : null}
@@ -706,7 +711,10 @@ function HistoryPane({
   return (
     <Pane title={t("history.title")}>
       {pair ? (
-        <p className="mono-data mt-0.5 truncate text-muted-foreground">
+        /* Wraps rather than truncates: on a phone the pane is the pair's only
+           full name on screen, and «kconmon-stand-worker6 → kconmon-stand-…»
+           named half of it. */
+        <p className="mono-data mt-0.5 break-all text-muted-foreground">
           {pair.source} → {pair.destination}
         </p>
       ) : null}
@@ -1151,7 +1159,9 @@ function RunnerPane({ canReadTargets }: { canReadTargets: boolean }) {
           />
         </div>
 
-        <div className="grid gap-4 sm:grid-cols-2">
+        {/* items-start: the two cells are a picker and a one-line field, and a
+            stretched picker box drew a border around nothing. */}
+        <div className="grid items-start gap-4 sm:grid-cols-2">
           <NodeSelector
             label={t("runner.sources")}
             nodes={nodeNames}
@@ -1209,8 +1219,10 @@ function RunnerPane({ canReadTargets }: { canReadTargets: boolean }) {
         {/* The count AND, at zero, the reason — the Diagnostics form's own
             posture: a dead button owes an explanation, and "no sources" is one
             the operator can act on (wire a controller, or wait for an agent to
-            register). */}
-        <span className={cn("nums text-sm", noPairs ? "text-health-bad" : "text-muted-foreground")}>
+            register). Muted, not red: a zero here is a form not yet filled in,
+            and the health scale is for a fault the fleet measured. A rejected
+            address and a server refusal keep their own red alert lines. */}
+        <span className="nums text-sm text-muted-foreground">
           {t(`runner.pairs.${countForm(locale, pairCount)}` as MTRKey, { count: pairCount })}
           {pairsReason ? t(pairsReason) : ""}
         </span>
@@ -1234,9 +1246,9 @@ function RunnerPane({ canReadTargets }: { canReadTargets: boolean }) {
           <p role="status" className="text-sm">
             {/* Three keys: the link is INSIDE the sentence. */}
             {t("runner.started.before")}{" "}
-            <a href={withAtParam(`/diagnostics/runs/${startedRunId}`)} className="text-primary hover:underline">
+            <TextLink href={withAtParam(`/diagnostics/runs/${startedRunId}`)}>
               {t("runner.started.link")}
-            </a>
+            </TextLink>
             {t("runner.started.after")}
           </p>
         ) : null}
@@ -1413,8 +1425,9 @@ export function MTRPage() {
       title={t("title")}
       help={{ body: t("help.body"), slug: "routes-mtr" }}
       /* {at} lands INSIDE a translated sentence, so it takes that sentence's
-         language — lib/i18n's localeTag, same as /diagnostics and /explore. */
-      description={at ? t("description.at", { at: at.toLocaleString(localeTag(locale)) }) : t("description")}
+         language and the house clock — lib/i18n's stampFull, same as
+         /diagnostics and /explore. */
+      description={at ? t("description.at", { at: stampFull(at, locale) }) : t("description")}
     >
       {body}
     </PageShell>
