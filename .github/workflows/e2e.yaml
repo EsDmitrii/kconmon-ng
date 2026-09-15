@@ -5,6 +5,7 @@ name: E2E
 # draft) and the publish job, so nothing user-visible goes out before these tests pass on kind.
 on:
   workflow_call:
+  workflow_dispatch:
 
 # Read-only: this job clones, builds a kind cluster and installs the released
 # chart. It never pushes anything and never reads GITHUB_TOKEN.
@@ -18,7 +19,8 @@ jobs:
 
     steps:
       # workflow_call shares the caller's github context, and release.yaml only runs on
-      # `push: tags: v*` -- so the default checkout ref is always the released tag.
+      # `push: tags: v*` -- so the default checkout ref is always the released tag. A manual
+      # workflow_dispatch run checks out the ref it was started on, to test a fix before tagging.
       - name: Checkout released commit
         uses: actions/checkout@v7
 
@@ -118,10 +120,10 @@ jobs:
       - name: Apply the PrometheusRule CRD and the foreign rule fixture
         run: |
           kubectl apply -f e2e/testdata/prometheusrule-crd.yaml
-          # kubectl wait fails instead of waiting while a fresh CRD has no status.conditions yet.
+          # kubectl wait and a jsonpath filter both error while a fresh CRD has no status.conditions yet.
           for _ in $(seq 1 60); do
             est=$(kubectl get crd prometheusrules.monitoring.coreos.com \
-              -o jsonpath='{.status.conditions[?(@.type=="Established")].status}')
+              -o jsonpath='{.status.conditions[?(@.type=="Established")].status}' 2>/dev/null || true)
             [ "$est" = "True" ] && break
             sleep 1
           done
@@ -288,10 +290,10 @@ jobs:
       - name: Apply the ScrapeConfig CRD
         run: |
           kubectl apply --server-side -f e2e/testdata/scrapeconfig-crd.yaml
-          # kubectl wait fails instead of waiting while a fresh CRD has no status.conditions yet.
+          # kubectl wait and a jsonpath filter both error while a fresh CRD has no status.conditions yet.
           for _ in $(seq 1 60); do
             est=$(kubectl get crd scrapeconfigs.monitoring.coreos.com \
-              -o jsonpath='{.status.conditions[?(@.type=="Established")].status}')
+              -o jsonpath='{.status.conditions[?(@.type=="Established")].status}' 2>/dev/null || true)
             [ "$est" = "True" ] && break
             sleep 1
           done
