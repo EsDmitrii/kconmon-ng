@@ -62,6 +62,9 @@ const en = {
   /* The shortcut, stated rather than left to be discovered. A plain wheel is
      deliberately NOT zoom: it is how a grid wider than its box is panned. */
   "zoom.hint": "Ctrl and the wheel zoom the grid; the wheel alone scrolls it.",
+  /* The same sentence for a hand with no wheel: what a phone can do with the
+     grid is the browser's own pinch, and a drag inside the box. */
+  "zoom.hint.touch": "Pinch to zoom, drag to scroll.",
 
   /* ── the grid ───────────────────────────────────────────────────────────── */
   "grid.caption": "Node-to-node failure ratio matrix, {protocol}",
@@ -105,6 +108,39 @@ const en = {
 
   /* ── the row and column headers ─────────────────────────────────────────── */
   "header.node": "Open the card for {node}",
+
+  /* ── external agents: bare hosts in the grid ────────────────────────────── */
+  /* The header of an agent that runs outside any Pod (kconmon-ng.io/external:
+     "true"): the tooltip's second line under the name, and the header's aria.
+     «внешний» is the one word for it across topology, cards and overview;
+     lib/i18n/cards.test.tsx pins the equality. */
+  "header.external": "external agent",
+  "header.node.external": "Open the card for {node}, external agent",
+  /* An external agent that is never a cell's SOURCE while the grid has cells
+     at all: Prometheus is not scraping it, so its row is silence with a KNOWN
+     cause. The cell keeps the 'no data' fill, the em-dash and the aria — it IS
+     no data — and only the tooltip says why, and what to do about it. */
+  "tooltip.unscraped":
+    "No series from {src}: Prometheus is not scraping this external agent's metrics port. Add a scrape job — see External agents docs.",
+  /* Where every "see External agents docs" points. A URL is data, identical in
+     both halves; ONE key so the target moves in one place (lib/agents.ts reads
+     it for the surfaces outside this file). */
+  "docs.scrapeExternal": "https://esdmitrii.github.io/kconmon-ng/external-agents/#scraping-external-agents",
+  /* The note above the grid, beside the prefix note, listing the unscraped
+     external agents by name; gone the moment a source has a single cell. */
+  "note.unscraped.one":
+    "{nodes} is an external agent Prometheus is not scraping, so its row has no data. Add a scrape job for its metrics port — see External agents docs.",
+  "note.unscraped.many":
+    "{nodes} are external agents Prometheus is not scraping, so their rows have no data. Add a scrape job for their metrics ports — see External agents docs.",
+  /* A source that advertised its planes (plane:* capabilities) and left this
+     protocol out. Dashed like 'not probed': expected silence. An agent that
+     advertised NO plane is read as running every plane (lib/agents.ts's
+     fail-open rule), so a pre-2.4.0 agent never lands here. */
+  "tooltip.unsupported": "{node} does not run {protocol} probes",
+  /* The aria-label's reading of that cell, after the "src → dst: " part. */
+  "cell.unsupported": "the source does not run {protocol} probes",
+  /* Rendered only while at least one such cell is on the grid, like legend.notProbed. */
+  "legend.unsupported": "Not run · the source does not run this protocol's probes",
 } as const;
 
 export type MatrixKey = keyof typeof en;
@@ -144,6 +180,7 @@ export const matrixDict: Dictionary<MatrixKey> = defineDict(en, {
   "zoom.fit": "Вписать",
   "zoom.level": "{pct}%",
   "zoom.hint": "Ctrl с колесом меняет масштаб, одно колесо прокручивает сетку.",
+  "zoom.hint.touch": "Щипок меняет масштаб, перетаскивание прокручивает сетку.",
 
   "grid.caption": "Матрица доли сбоев между узлами, {protocol}",
   "grid.prefix": "В именах узлов опущен общий префикс {prefix}",
@@ -189,4 +226,19 @@ export const matrixDict: Dictionary<MatrixKey> = defineDict(en, {
     "цвет = худшее из доли сбоев и потерь пакетов · ячейка без выборок сбоев показывает свой p95 и остаётся зелёной потому, что плохого сигнала нет, а не потому, что измерен ноль",
 
   "header.node": "Открыть карточку узла {node}",
+
+  "header.external": "внешний агент",
+  "header.node.external": "Открыть карточку узла {node}, внешний агент",
+  "tooltip.unscraped":
+    "Серий от {src} нет: Prometheus не собирает метрики с порта этого внешнего агента. Добавьте scrape job, см. документацию по внешним агентам.",
+  "docs.scrapeExternal": "https://esdmitrii.github.io/kconmon-ng/external-agents/#scraping-external-agents",
+  "note.unscraped.one":
+    "{nodes}: внешний агент, метрики которого Prometheus не собирает, поэтому в его строке нет данных. Добавьте scrape job на его порт метрик, см. документацию по внешним агентам.",
+  "note.unscraped.many":
+    "{nodes}: внешние агенты, метрики которых Prometheus не собирает, поэтому в их строках нет данных. Добавьте scrape job на их порты метрик, см. документацию по внешним агентам.",
+  "tooltip.unsupported": "{node} не запускает зонды {protocol}",
+  /* «не запускает», not «нет данных»: the second phrase is reserved for a pair
+     something should have measured. Here the source said it would not. */
+  "cell.unsupported": "источник не запускает зонды {protocol}",
+  "legend.unsupported": "Не запускается · источник не запускает зонды этого протокола",
 });

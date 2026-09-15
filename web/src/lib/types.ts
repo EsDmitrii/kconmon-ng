@@ -171,6 +171,13 @@ export interface TopologyAgent {
   nodeName: string;
   podIP: string;
   zone: string;
+  /** The agent's own labels, verbatim. `kconmon-ng.io/external: "true"` marks a bare-host agent
+   *  (lib/agents.ts reads it); absent from a pre-2.4.0 controller and from history it recorded. */
+  labels?: Record<string, string>;
+  /** The feature flags it advertised at registration; `plane:<protocol>` entries name the probe
+   *  planes it runs. NO plane entry at all means unknown, read as every plane (lib/agents.ts).
+   *  Live only: no event records them, so a `?at=` response never carries them. */
+  capabilities?: string[];
 }
 /** Topology is GET /api/v1/topology's body; the five optional fields are the `?at=` (Time Machine) half. */
 export interface Topology {

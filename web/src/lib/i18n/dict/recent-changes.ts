@@ -41,13 +41,17 @@ const en = {
      though they read the same today: a screen reader announces the landmark
      before the heading, and the two are free to diverge. */
   "aria": "Recent changes",
-  /* {at} is the Time Machine's instant, already toLocaleString()'d by the
-     component — interpolated, never translated. */
+  "list.aria": "Recent changes list",
+  /* {at} is the Time Machine's instant, already formatted by the component
+     (lib/i18n's stampFull, the house clock) — interpolated, never translated. */
   "upTo": "up to {at}",
   "db.note": "History requires a database — showing live events only.",
   "error.fallback": "Event history is unavailable",
   "loading": "Loading recent changes…",
+  /* The empty slate: `empty` is its title (pinned by four tests, so it stays
+     byte-for-byte), `empty.body` the line under it saying what will appear. */
   "empty": "No recent changes.",
+  "empty.body": "Events about this object will show up here as they happen.",
 } as const;
 
 export type RecentChangesKey = keyof typeof en;
@@ -55,9 +59,11 @@ export type RecentChangesKey = keyof typeof en;
 export const recentChangesDict: Dictionary<RecentChangesKey> = defineDict(en, {
   "title": "Недавние изменения",
   "aria": "Недавние изменения",
+  "list.aria": "Список недавних изменений",
   "upTo": "до {at}",
   "db.note": "Истории нужна база, поэтому показываем только онлайн-события.",
   "error.fallback": "История событий недоступна",
   "loading": "Загружаем недавние изменения…",
   "empty": "Недавних изменений нет.",
+  "empty.body": "Как только с этим объектом что-то произойдёт, событие появится здесь.",
 });

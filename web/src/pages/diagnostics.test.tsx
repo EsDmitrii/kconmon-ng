@@ -1184,3 +1184,79 @@ describe("DiagnosticsPage sample interval", () => {
     expect(adjusted.textContent).toMatch(/чаще чем раз в 90 секунд этот запуск не пойдёт/);
   });
 });
+
+/* ── 2.4.0 polish: the run form's hue and the filtered slate's next step ────── */
+describe("DiagnosticsPage — 2.4.0 polish", () => {
+  /* The health scale is for what the fleet measured. A zero because nothing is
+     picked or typed yet is a form not yet filled in; only the one verdict the
+     server will actually refuse — over the pair limit — reads red. */
+  it("keeps the pair-count sentence muted while a target or an address is still missing", async () => {
+    renderPage({ permissions: OPERATOR, nodes: ["a", "b"] });
+
+    await pickDestination(/target/i);
+    const noTarget = await screen.findByText(/no target picked yet/i);
+    expect(noTarget.className).toMatch(/text-muted-foreground/);
+    expect(noTarget.className).not.toMatch(/text-health-bad/);
+
+    await pickDestination(/ad-hoc/i);
+    const noAddress = await screen.findByText(/no address typed yet/i);
+    expect(noAddress.className).toMatch(/text-muted-foreground/);
+    expect(noAddress.className).not.toMatch(/text-health-bad/);
+  });
+
+  it("reads red only over the pair limit", async () => {
+    // 21 × 21 = 441 raw pairs, over the 400 the server gates on.
+    const nodes = Array.from({ length: 21 }, (_, i) => `n${i}`);
+    renderPage({ permissions: OPERATOR, nodes });
+
+    const over = await screen.findByText(/above the 400-pair limit/i);
+    expect(over.className).toMatch(/text-health-bad/);
+  });
+
+  /* The picker is still a fieldset — its legend is what names the group and
+     tells the two columns' "node-a" apart — drawn as the plain label-above-box
+     the destination field beside it gets from FieldLabel. */
+  it("keeps the node pickers named groups, with the legend above the box rather than cut into it", async () => {
+    renderPage({ permissions: OPERATOR, nodes: ["a", "b"] });
+
+    const sources = await screen.findByRole("group", { name: "Sources" });
+    expect(sources.tagName).toBe("FIELDSET");
+    expect(sources.className).not.toMatch(/border/);
+    const legend = sources.querySelector("legend");
+    expect(legend).toHaveTextContent("Sources");
+    // The border sits on the box under the legend.
+    expect(within(sources).getByLabelText(/all nodes/i).closest("div")?.className).toMatch(/border/);
+    // The row the two pickers share aligns them to the top instead of stretching the shorter one.
+    expect(sources.parentElement?.className).toMatch(/items-start/);
+  });
+
+  it("offers 'Clear filters' on the filtered-empty slate, and it resets both selects", async () => {
+    const urlsSeen: URLSearchParams[] = [];
+    renderPage({
+      onRuns: (qs) => {
+        urlsSeen.push(qs);
+        return json({ runs: qs.get("status") || qs.get("type") ? [] : [runRow("r-1")], nextCursor: "" });
+      },
+    });
+
+    await screen.findByText("r-1");
+    fireEvent.change(screen.getByLabelText(/filter runs by check type/i), { target: { value: "dns" } });
+    fireEvent.change(screen.getByLabelText(/filter runs by status/i), { target: { value: "cancelled" } });
+
+    // The slate keeps its title and body word for word, and gains the one next step.
+    expect(await screen.findByText("No runs match these filters")).toBeInTheDocument();
+    expect(
+      screen.getByText("The server was asked for this type and status and has none. Widen the filters above."),
+    ).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Clear filters" }));
+
+    expect(await screen.findByText("r-1")).toBeInTheDocument();
+    expect(screen.getByLabelText(/filter runs by check type/i)).toHaveValue("");
+    expect(screen.getByLabelText(/filter runs by status/i)).toHaveValue("");
+    // Page one of the unfiltered list, asked for from the server.
+    const last = urlsSeen.at(-1);
+    expect(last?.get("type")).toBeNull();
+    expect(last?.get("status")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Clear filters" })).not.toBeInTheDocument();
+  });
+});

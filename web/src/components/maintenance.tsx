@@ -367,9 +367,13 @@ export function MaintenanceRow({
           under the very click that asks you to confirm it (QA scope 2, #19).
           With a floor on the column the row wraps instead, which is the same
           give the stamp already takes below lg. */}
+      {/* Below lg the reason wraps to two lines instead of truncating: on a
+          phone the whole row is the reason, and "Rolling the CNI upg…" told an
+          operator nothing about which window this is. From lg up it is the
+          single truncating line beside the range, full text on title. */}
       <span
         data-testid="maintenance-reason"
-        className="min-w-0 flex-1 basis-40 truncate lg:min-w-[10rem]"
+        className="min-w-0 flex-1 basis-40 line-clamp-2 break-words whitespace-normal lg:line-clamp-none lg:truncate lg:min-w-[10rem]"
         title={w.reason}
       >
         {w.reason}
@@ -552,7 +556,10 @@ export function MaintenanceBar({
       {windows.length > 0 ? (
         <ul
           aria-label={t("bar.list.aria")}
-          className={cn("m-0 divide-y divide-border/60 p-0", inline && "order-2 basis-full")}
+          /* w-full min-w-0: the inline list is a flex item under a
+             display:contents parent, and basis-full alone let it overflow a
+             phone-width page (the annotation list had the same hole). */
+          className={cn("m-0 w-full min-w-0 divide-y divide-border/60 p-0", inline && "order-2 basis-full")}
         >
           {[...windows].reverse().map((w) => (
             <MaintenanceRow key={w.id} window={w} canWrite={canWrite} onChanged={handleChanged} />

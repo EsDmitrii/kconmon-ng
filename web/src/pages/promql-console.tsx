@@ -7,15 +7,18 @@ import { PageShell } from "@/components/page-shell";
 import { PromQLEditor } from "@/components/promql-editor";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
+import { EmptyState } from "@/components/ui/empty-state";
 import { Pager, usePager } from "@/components/ui/pager";
 import { Segmented } from "@/components/ui/segmented";
+import { TBody, THead, Table, Td, Th, Tr } from "@/components/ui/table";
 import { useTheme } from "@/components/theme-provider";
 import { promqlQuery, promqlQueryRange } from "@/lib/api";
 import { chartColors } from "@/lib/chart-theme";
-import { stampFull, useLocale, useT } from "@/lib/i18n";
+import { GRID_BOTTOM, GRID_RIGHT, timeAxisLabel } from "@/lib/curated-metrics";
+import { stampFull, useLocale, useT, type Locale } from "@/lib/i18n";
 import { promqlConsoleDict, type PromQLConsoleKey } from "@/lib/i18n/dict/promql-console";
 import { paletteColor, seriesIdentities, showLegend, type SeriesIdentity } from "@/lib/prom-series";
-import { toTable } from "@/lib/prom-table";
+import { formatValue, isFigureColumn, isNumericColumn, toTable } from "@/lib/prom-table";
 import { useTimeContext } from "@/lib/timemachine";
 import type { PromResult } from "@/lib/types";
 import { cn } from "@/lib/utils";
@@ -119,7 +122,7 @@ function matrixEntries(res: PromResult): MatrixEntry[] {
  *    curated charts, which carry a unit and answer the second question, keep
  *    their zero baseline (lib/curated-metrics.ts).
  */
-export function toChartModel(res: PromResult, dark: boolean): ChartModel {
+export function toChartModel(res: PromResult, dark: boolean, locale: Locale = "en"): ChartModel {
   const entries = matrixEntries(res);
   const colors = chartColors(dark ? "dark" : "light");
   const identities = seriesIdentities(entries.map((e) => e.metric));
@@ -149,7 +152,7 @@ export function toChartModel(res: PromResult, dark: boolean): ChartModel {
       textStyle: { color: colors.axis },
       /* The bottom inset is the legend's room. Without a legend the plot takes
          it back rather than sitting above a reserved strip of nothing. */
-      grid: { left: 56, right: 16, top: 12, bottom: legend ? 46 : 12 },
+      grid: { left: 56, right: GRID_RIGHT, top: 12, bottom: legend ? GRID_BOTTOM : 24 },
       legend: {
         show: legend,
         bottom: 0,
@@ -169,8 +172,9 @@ export function toChartModel(res: PromResult, dark: boolean): ChartModel {
         type: "time",
         axisLine: { lineStyle: { color: colors.grid } },
         // Same anti-smear rule the curated charts take (QA round 2, #19): this
-        // console's plot lives in a narrower column than any of them.
-        axisLabel: { color: colors.axis, hideOverlap: true },
+        // console's plot lives in a narrower column than any of them. And the
+        // same clock: HH:mm, the day on its own line where it turns.
+        axisLabel: { color: colors.axis, hideOverlap: true, formatter: (value: number) => timeAxisLabel(value, locale) },
         splitLine: { show: false },
       },
       yAxis: {
@@ -332,8 +336,8 @@ function RawSeriesRow({ row, index }: { row: ChartSeries; index: number }) {
 
   return (
     <>
-      <tr data-testid="raw-row" className="transition-colors duration-(--dur-fast) hover:bg-accent/40">
-        <td className="border-b border-border py-2 pl-4 pr-2 align-top">
+      <Tr data-testid="raw-row" className="transition-colors duration-(--dur-fast) hover:bg-accent/40">
+        <Td className="pl-4 pr-1 align-top">
           <button
             type="button"
             aria-expanded={open}
@@ -352,8 +356,11 @@ function RawSeriesRow({ row, index }: { row: ChartSeries; index: number }) {
               className={cn("size-3.5 transition-transform duration-(--dur-fast) ease-(--ease)", open && "rotate-90")}
             />
           </button>
-        </td>
-        <td className="border-b border-border py-2 pr-4 align-top">
+        </Td>
+        {/* The one flexible column, and the one that truncates: the table is
+            laid out fixed so the two figures on the right always stay in view,
+            on a phone above all. */}
+        <Td className="min-w-0 overflow-hidden pr-4 align-top">
           <span className="flex items-center gap-2">
             {/* The line's own colour, which is what ties this row to the plot
                 above now that the legend is gone on a big result. */}
@@ -368,15 +375,18 @@ function RawSeriesRow({ row, index }: { row: ChartSeries; index: number }) {
               {row.identity.text}
             </span>
           </span>
-        </td>
-        <td className="mono-data border-b border-border py-2 pr-4 text-right align-top text-muted-foreground">
+        </Td>
+        <Td numeric className="whitespace-nowrap pr-4 align-top text-muted-foreground">
           {row.points}
-        </td>
-        <td className="mono-data border-b border-border py-2 pr-4 text-right align-top">{row.lastValue}</td>
-      </tr>
+        </Td>
+        {/* Six significant figures on screen; the exact string Prometheus sent on the title. */}
+        <Td numeric title={row.lastValue} className="whitespace-nowrap pr-4 align-top">
+          {formatValue(row.lastValue)}
+        </Td>
+      </Tr>
       {open ? (
-        <tr>
-          <td colSpan={4} className="border-b border-border bg-surface-2/40 px-4 py-2">
+        <Tr>
+          <Td colSpan={4} className="bg-surface-2/40 px-4">
             <code
               id={fullId}
               data-testid="raw-full-labels"
@@ -384,8 +394,8 @@ function RawSeriesRow({ row, index }: { row: ChartSeries; index: number }) {
             >
               {row.identity.fullText}
             </code>
-          </td>
-        </tr>
+          </Td>
+        </Tr>
       ) : null}
     </>
   );
@@ -410,9 +420,9 @@ function RawSeriesTable({ series, sharedText }: { series: ChartSeries[]; sharedT
   return (
     <Card className="overflow-hidden p-0">
       <div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1 border-b border-border px-4 py-2.5">
-        <h3 className="text-[11px] font-medium uppercase tracking-[0.06em] text-muted-foreground">
+        <h2 className="text-[11px] font-medium uppercase tracking-[0.06em] text-muted-foreground">
           {t("raw.title")}
-        </h3>
+        </h2>
         {/* Said ONCE. These are the labels every series in the result carries,
             and repeating them on eighty-six rows is what pushed the two
             characters that differ off the end of every one of them. */}
@@ -422,29 +432,31 @@ function RawSeriesTable({ series, sharedText }: { series: ChartSeries[]; sharedT
           </code>
         ) : null}
       </div>
-      <div className="overflow-x-auto">
-        <table data-testid="raw-table" className="w-full border-separate border-spacing-0 text-sm">
-          <caption className="sr-only">{t("raw.caption")}</caption>
-          <thead>
-            <tr className="text-[11px] font-medium uppercase tracking-[0.06em] text-muted-foreground">
-              <th scope="col" className="border-b border-border py-2 pl-4 pr-2 text-left">
-                <span className="sr-only">{t("raw.showFull")}</span>
-              </th>
-              <th scope="col" className="border-b border-border py-2 pr-4 text-left">{t("raw.col.series")}</th>
-              <th scope="col" className="border-b border-border py-2 pr-4 text-right">{t("raw.col.points")}</th>
-              <th scope="col" className="border-b border-border py-2 pr-4 text-right">{t("raw.col.last")}</th>
-            </tr>
-          </thead>
-          <tbody>
-            {pager.visible.map((row, i) => (
-              /* The index disambiguates the one case fullText cannot: two series
-                 agreeing on every label. It also collapses an expanded row when
-                 the page under it turns, which is the right reset. */
-              <RawSeriesRow key={`${row.identity.fullText}#${i}`} row={row} index={i} />
-            ))}
-          </tbody>
-        </table>
-      </div>
+      {/* Fixed layout: the header row sizes the expander and the two figure
+          columns, the identity takes what is left and truncates (its title
+          and expander carry the whole label set). Auto layout let a long
+          identity push points and last value off a phone's screen. */}
+      <Table variant="dense" data-testid="raw-table" className="table-fixed">
+        <caption className="sr-only">{t("raw.caption")}</caption>
+        <THead>
+          <Tr>
+            <Th className="w-9 pl-4 pr-1">
+              <span className="sr-only">{t("raw.showFull")}</span>
+            </Th>
+            <Th className="pr-4">{t("raw.col.series")}</Th>
+            <Th numeric className="w-16 pr-4 sm:w-20">{t("raw.col.points")}</Th>
+            <Th numeric className="w-24 pr-4 sm:w-40">{t("raw.col.last")}</Th>
+          </Tr>
+        </THead>
+        <TBody>
+          {pager.visible.map((row, i) => (
+            /* The index disambiguates the one case fullText cannot: two series
+               agreeing on every label. It also collapses an expanded row when
+               the page under it turns, which is the right reset. */
+            <RawSeriesRow key={`${row.identity.fullText}#${i}`} row={row} index={i} />
+          ))}
+        </TBody>
+      </Table>
       <Pager pager={pager} subject={t("raw.subject")} />
     </Card>
   );
@@ -540,8 +552,8 @@ export function PromQLConsolePage() {
   const chart = useMemo(
     /* Built for any MATRIX answer, whatever mode asked for it: an instant query
        on a range vector (`up[5m]`) comes back as a matrix and draws fine. */
-    () => (data && data.data?.resultType === "matrix" ? toChartModel(data, theme === "dark") : undefined),
-    [data, mode, theme],
+    () => (data && data.data?.resultType === "matrix" ? toChartModel(data, theme === "dark", locale) : undefined),
+    [data, mode, theme, locale],
   );
 
   /* Drop back to Table when there is no chart to draw. The condition is the
@@ -652,7 +664,7 @@ export function PromQLConsolePage() {
         {activeTab === "table" ? (
           <ResultPanel tab="table">
             {table && table.rows.length > 0 ? (
-              <Card className="overflow-x-auto p-0">
+              <Card className="overflow-hidden p-0">
                 {/* The instant every row shares, said ONCE. When the rows
                     disagree — a series that stopped early — there is no
                     sentence here and prom-table puts a `time` column in the
@@ -662,37 +674,58 @@ export function PromQLConsolePage() {
                     {t(table.kind === "series" ? "table.lastAt" : "table.at", { at: formatTime(table.at) })}
                   </p>
                 ) : null}
-                <table className="w-full border-separate border-spacing-0 text-sm">
-                  <thead>
-                    <tr>
+                {/* The Table wrapper is the scroll container: a wide label set
+                    scrolls under the caption above and the pager below, which
+                    stay put. Cells never wrap, so a row is one line. */}
+                <Table variant="dense" scrollLabel={t("table.scrollAria")}>
+                  <THead>
+                    <Tr>
                       {table.columns.map((c) => (
-                        <th
-                          key={c}
-                          className="border-b border-border bg-surface px-4 py-2.5 text-left text-[11px] font-medium uppercase tracking-[0.06em] text-muted-foreground"
-                          scope="col"
-                        >
+                        <Th key={c} numeric={isNumericColumn(c)} className="px-4">
                           {/* Our own columns travel as dictionary keys
                               (lib/prom-table.ts); a LABEL name is Prometheus's
                               identifier and is printed as it arrived. */}
                           {c.startsWith("table.col.") ? t(c as PromQLConsoleKey) : c}
-                        </th>
+                        </Th>
                       ))}
-                    </tr>
-                  </thead>
-                  <tbody>
+                    </Tr>
+                  </THead>
+                  <TBody>
                     {pager.visible.map((row, i) => (
-                      <tr key={i} className="transition-colors duration-(--dur-fast) hover:bg-accent/40">
-                        {row.map((cell, j) => (
-                          <td key={j} className="mono-data border-b border-border px-4 py-2.5">{cell}</td>
-                        ))}
-                      </tr>
+                      <Tr key={i} className="transition-colors duration-(--dur-fast) hover:bg-accent/40">
+                        {row.map((cell, j) => {
+                          const column = table.columns[j];
+                          const figure = isFigureColumn(column);
+                          /* Identifiers and figures alike wear the data face;
+                             a figure is right-aligned and printed to six
+                             significant digits with the exact string on title. */
+                          return (
+                            <Td
+                              key={j}
+                              numeric={isNumericColumn(column)}
+                              title={figure ? cell : undefined}
+                              className="mono-data whitespace-nowrap px-4"
+                            >
+                              {figure ? formatValue(cell) : cell}
+                            </Td>
+                          );
+                        })}
+                      </Tr>
                     ))}
-                  </tbody>
-                </table>
+                  </TBody>
+                </Table>
                 <Pager pager={pager} subject={t("table.subject")} />
               </Card>
-            ) : failed ? null : (
-              <ResultPlaceholder text={data ? t("table.empty") : t("table.idle")} />
+            ) : failed ? null : data ? (
+              <ResultPlaceholder title={t("table.empty")} body={t("table.empty.body")} />
+            ) : (
+              <ResultPlaceholder
+                title={t("result.idle.title")}
+                body={t("table.idle")}
+                onRun={runQuery}
+                runnable={runnable}
+                pending={mutation.isPending}
+              />
             )}
           </ResultPanel>
         ) : null}
@@ -708,14 +741,22 @@ export function PromQLConsolePage() {
         {activeTab === "chart" ? (
           <ResultPanel tab="chart">
             {chart && chart.series.length > 0 ? (
-              <div className="flex flex-col gap-4">
-                <Card className="p-5">
+              <div className="flex flex-col gap-5">
+                <Card className="p-4 sm:p-6">
                   <EChart option={chart.option} className="h-80 w-full" />
                 </Card>
                 <RawSeriesTable series={chart.series} sharedText={chart.sharedText} />
               </div>
-            ) : failed ? null : (
-              <ResultPlaceholder text={data ? t("chart.empty") : t("chart.idle")} />
+            ) : failed ? null : data ? (
+              <ResultPlaceholder title={t("chart.empty")} body={t("chart.empty.body")} />
+            ) : (
+              <ResultPlaceholder
+                title={t("result.idle.title")}
+                body={t("chart.idle")}
+                onRun={runQuery}
+                runnable={runnable}
+                pending={mutation.isPending}
+              />
             )}
           </ResultPanel>
         ) : null}
@@ -734,11 +775,50 @@ export function PromQLConsolePage() {
   );
 }
 
-function ResultPlaceholder({ text }: { text: string }) {
+/**
+ * ResultPlaceholder is the house EmptyState inside a result card: glyph, title,
+ * body, and for the idle slate a Run button so the next step is where the eye
+ * already is. The button is a second Run, not a second primary: outline, with
+ * the visible verb and the full sentence in its accessible name. The page keeps
+ * one blue action, the header's.
+ */
+function ResultPlaceholder({
+  title,
+  body,
+  onRun,
+  runnable = false,
+  pending = false,
+}: {
+  title: string;
+  body: string;
+  onRun?: () => void;
+  runnable?: boolean;
+  pending?: boolean;
+}) {
+  const t = useT(promqlConsoleDict);
   return (
-    <Card className="flex flex-col items-center gap-2 px-6 py-12 text-center">
-      <SquareTerminal aria-hidden="true" className="size-5 text-muted-foreground" />
-      <p className="text-xs text-muted-foreground">{text}</p>
+    <Card className="p-0">
+      <EmptyState
+        compact
+        icon={<SquareTerminal aria-hidden="true" className="size-4" />}
+        title={title}
+        body={body}
+        action={
+          onRun ? (
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={onRun}
+              disabled={!runnable}
+              loading={pending}
+              aria-label={t("result.run.aria")}
+              title={t("result.run.aria")}
+            >
+              {t("run")}
+            </Button>
+          ) : undefined
+        }
+      />
     </Card>
   );
 }

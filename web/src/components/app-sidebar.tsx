@@ -174,10 +174,11 @@ export function AppSidebar({ onNavigate }: { onNavigate?: () => void } = {}) {
           )}
         </div>
         {/* The palette's one visible trace in the chrome (M3-12): without it,
-            ⌘K/Ctrl+K existed only for readers of the docs. */}
+            ⌘K/Ctrl+K existed only for readers of the docs. Hidden below md, where
+            this column is the touch drawer and the shortcut cannot be pressed. */}
         <kbd
           title={t("sidebar.palette.hint", { keys: PALETTE_KEYS })}
-          className="shrink-0 rounded border border-border bg-surface-2 px-1.5 py-1 font-mono text-[10px] leading-none text-muted-foreground"
+          className="hidden shrink-0 rounded border border-border bg-surface-2 px-1.5 py-1 font-mono text-[10px] leading-none text-muted-foreground md:inline-flex"
         >
           {PALETTE_KEYS}
         </kbd>

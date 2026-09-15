@@ -17,10 +17,14 @@ import (
 	"github.com/EsDmitrii/kconmon-ng/internal/console/controllerclient"
 )
 
+// topoJSON is the controller's docs/api.md topology body: one in-cluster agent with no labels, and
+// one external host that registered through the gateway with its label and plane capabilities.
 func topoJSON() string {
 	return `{"nodes":[{"name":"node-1","zone":"us-east-1a","ready":true},
 	{"name":"node-2","zone":"us-east-1b","ready":false}],
-	"agents":[{"id":"node-1-agent-x","nodeName":"node-1","podIP":"10.0.0.1","zone":"us-east-1a"}],
+	"agents":[{"id":"node-1-agent-x","nodeName":"node-1","podIP":"10.0.0.1","zone":"us-east-1a"},
+	{"id":"edge-01-agent","nodeName":"edge-01","podIP":"192.0.2.10","zone":"office",
+	"labels":{"kconmon-ng.io/external":"true"},"capabilities":["external-checks","plane:tcp","plane:mtr"]}],
 	"timestamp":"2026-01-01T00:00:00Z"}`
 }
 
@@ -39,11 +43,23 @@ func TestTopology(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Topology: %v", err)
 	}
-	if len(topo.Nodes) != 2 || len(topo.Agents) != 1 {
+	if len(topo.Nodes) != 2 || len(topo.Agents) != 2 {
 		t.Fatalf("unexpected topology: %+v", topo)
 	}
 	if topo.Nodes[0].Name != "node-1" || !topo.Nodes[0].Ready || topo.Agents[0].PodIP != "10.0.0.1" {
 		t.Errorf("field mapping wrong: %+v", topo)
+	}
+	// Labels and capabilities are decoded verbatim: the console is the only reader that can tell
+	// the UI an agent is external, and it used to drop both on the way through.
+	if topo.Agents[0].Labels != nil || topo.Agents[0].Capabilities != nil {
+		t.Errorf("in-cluster agent grew labels/capabilities it never sent: %+v", topo.Agents[0])
+	}
+	ext := topo.Agents[1]
+	if ext.Labels["kconmon-ng.io/external"] != "true" {
+		t.Errorf("external label lost in decode: %+v", ext)
+	}
+	if len(ext.Capabilities) != 3 || ext.Capabilities[1] != "plane:tcp" {
+		t.Errorf("capabilities lost or reordered in decode: %+v", ext)
 	}
 }
 

@@ -108,6 +108,27 @@ const en = {
      is a KUBERNETES node condition, and a registered agent is not evidence of
      it. */
   "node.identity.readyNote": "node readiness comes from the Kubernetes node informer",
+
+  /* ── the node card of an EXTERNAL agent (kconmon-ng.io/external: "true") ── */
+  /* The header badge: identity, not a tier — the same word the topology map
+     and the Overview's worst-pairs table use; lib/i18n/cards.test.tsx pins it. */
+  "node.external": "external",
+  /* A bare host has no Pod; what it registered is the address it advertised to
+     its peers, so the row is named for what it is. In-cluster nodes keep "Pod IP". */
+  "node.identity.address": "Advertised address",
+  /* The Ready cell's title on an external host: the em-dash is not a fault,
+     there is no Kubernetes node for readiness to be reported on. */
+  "node.identity.readyNote.external": "an external host has no Kubernetes node; readiness is not reported",
+  /* The planes it advertised (plane:* capabilities), as chips; "unknown" when it
+     advertised none, which lib/agents.ts reads as every plane rather than no plane. */
+  "node.identity.planes": "Planes",
+  "node.identity.planes.unknown": "unknown",
+  /* The per-destination table of an external host Prometheus does not scrape:
+     the EmptyState BODY under node.breakdown.empty as its title, with the scrape
+     docs link (lib/agents.ts's EXTERNAL_SCRAPE_DOCS_URL) as its action. */
+  "node.breakdown.empty.unscraped":
+    "Prometheus is not scraping this external agent's metrics port, so its probe results never reach the console. Add a scrape job for the port — see External agents docs.",
+
   "node.breakdown": "Per-destination breakdown",
   "node.breakdown.caption": "Per-destination breakdown for {name}",
   "node.breakdown.destination": "Destination",
@@ -302,6 +323,15 @@ export const cardsDict: Dictionary<CardsKey> = defineDict(en, {
   "node.identity.yes": "да",
   "node.identity.no": "нет",
   "node.identity.readyNote": "готовность узла приходит от информера узлов Kubernetes",
+
+  "node.external": "внешний",
+  "node.identity.address": "Объявленный адрес",
+  "node.identity.readyNote.external": "у внешнего хоста нет узла Kubernetes, готовность не сообщается",
+  "node.identity.planes": "Плоскости",
+  "node.identity.planes.unknown": "неизвестно",
+  "node.breakdown.empty.unscraped":
+    "Prometheus не собирает метрики с порта этого внешнего агента, поэтому результаты его зондов до консоли не доходят. Добавьте scrape job на этот порт, см. документацию по внешним агентам.",
+
   "node.breakdown": "Разбивка по назначениям",
   "node.breakdown.caption": "Разбивка по назначениям для {name}",
   "node.breakdown.destination": "Назначение",

@@ -70,3 +70,27 @@ describe("EmptyState — the BlankSlate look", () => {
     expect(slate).not.toHaveClass("py-10");
   });
 });
+
+/* The variant a panel or a rail mounts (Overview panels, the card rails, the
+   PromQL result placeholders): same three parts, tighter rhythm. */
+describe("EmptyState — compact", () => {
+  it("tightens padding, glyph and title without touching the default classes", () => {
+    const { container } = render(<EmptyState compact title="No recent changes." body="Events will show up here." />);
+    const root = container.firstElementChild;
+    expect(root).toHaveClass("flex", "flex-col", "items-center", "text-center", "gap-1.5", "px-4", "py-6");
+    expect(root).not.toHaveClass("gap-2", "px-6", "py-10");
+
+    const circle = container.querySelector('span[aria-hidden="true"]');
+    expect(circle).toHaveClass("size-8", "rounded-full", "bg-surface-2");
+    expect(circle).not.toHaveClass("size-10");
+    expect(circle!.querySelector("svg")).toHaveClass("size-4");
+
+    expect(screen.getByText("No recent changes.")).toHaveClass("text-[13px]", "font-medium");
+    expect(screen.getByText("Events will show up here.")).toHaveClass("text-xs", "text-muted-foreground");
+  });
+
+  it("keeps the CTA slot", () => {
+    render(<EmptyState compact title="t" action={<a href="/live">open Live</a>} />);
+    expect(screen.getByRole("link", { name: "open Live" }).parentElement).toHaveClass("mt-2");
+  });
+});

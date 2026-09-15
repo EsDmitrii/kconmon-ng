@@ -157,7 +157,7 @@ describe("the write guard's reason", () => {
     expect(document.getElementById(TIME_MACHINE_REASON_ID)?.textContent).toBe(TIME_MACHINE_DISABLED_REASON);
   });
 
-  it("travels in Russian — the tooltip AND the one sr-only node it points at", () => {
+  it("travels in Russian — the tooltip AND the one hidden node it points at", () => {
     renderGuard({ locale: "ru", engaged: true });
     const ru = sharedDict.ru["timemachine.disabledReason"];
     expect(screen.getByRole("button", { name: "save" })).toHaveAttribute("title", ru);

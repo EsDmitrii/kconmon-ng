@@ -13,11 +13,12 @@ import { useQuery } from "@tanstack/react-query";
 import { TraceDetail } from "@/components/mtr-hop-table";
 import { isTerminalRunStatus, type RunPairRow, useRun } from "@/hooks/use-run";
 import { ApiError, cancelRun, getMTRSnapshots } from "@/lib/api";
-import { localeTag, stampFull, useLocale, useT, type Locale, type Translate } from "@/lib/i18n";
+import { stampFull, useLocale, useT, type Locale, type Translate } from "@/lib/i18n";
 import { countForm, runDetailDict, type RunDetailKey } from "@/lib/i18n/dict/run-detail";
 import {
   aggregateSamples,
   groupSamplesByPair,
+  fmtNsCompact,
   formatCadenceNs,
   formatCadenceProse,
   formatDurationNs,
@@ -82,21 +83,38 @@ const PAIR_VARIANT: Record<string, NonNullable<BadgeProps["variant"]>> = {
 };
 
 function StatusBadge({ status }: { status: string }) {
+  const t = useT(runDetailDict);
+  /* "partial" is the one word in the store's enum that does not explain itself: the runner's
+     finalStatus says it when some pairs succeeded and some failed, and beside "110/110 ok" that
+     needs saying. The other five stay bare — they mean what they say. */
+  const title = status === "partial" ? t("status.partial.title") : undefined;
   return (
-    <Badge variant={STATUS_VARIANT[status] ?? "unknown"} dot>
+    <Badge variant={STATUS_VARIANT[status] ?? "unknown"} dot title={title}>
       {status}
     </Badge>
   );
 }
 
-/** The em dash covers "no duration recorded" AND "a duration that is not a
- *  number": `(NaN / 1e6).toFixed(0)` is the string "NaN", and "NaNms" in the
- *  Duration column is a measurement an operator would go looking for. */
+/**
+ * sharedPairError is the ONE error every pair carries, when they all carry the same one; undefined
+ * for a run with fewer than two pairs, a pair without an error, or two pairs that disagree.
+ *
+ * A run refused up front — an HTTP definition dispatched against a target the runner will not
+ * serve that way — writes the identical sentence into every row, and a table that prints it five
+ * times reads as five faults. Saying it once in the header is the honest count.
+ */
+export function sharedPairError(pairs: RunPairRow[]): string | undefined {
+  if (pairs.length < 2) return undefined;
+  const first = pairs[0].error;
+  if (typeof first !== "string" || first === "") return undefined;
+  return pairs.every((p) => p.error === first) ? first : undefined;
+}
+
+/** fmtDuration is the Duration column: lib/run-samples' fmtNsCompact, so this column and the MTR
+ *  hop table keep one unit rule (µs under 0.1ms, then milliseconds). Whole milliseconds used to
+ *  print "0ms" for every same-cluster TCP probe — a real 0.46ms measurement rendered as no time
+ *  at all — and one decimal still printed "0.0ms" for a 38µs one. */
 function fmtDuration(ns?: number): string {
-  /* fmtNsCompact, not toFixed(0). Whole milliseconds printed "0ms" for every same-cluster TCP and
-     ICMP probe — a real 0.46ms measurement rendered as no time at all — and collapsed everything
-     below 1.5ms onto "0ms" or "1ms", hiding a 2x difference between two links in the column an
-     operator opened the run to compare. */
   return fmtNsCompact(ns);
 }
 
@@ -117,16 +135,6 @@ function fmtTime(ts: string | undefined, locale: Locale): string {
   if (!ts) return "—";
   const d = new Date(ts);
   return Number.isNaN(d.getTime()) ? ts : stampFull(d, locale);
-}
-
-/** fmtNsCompact renders a nanosecond duration the way the aggregate row wants
- *  it: sub-millisecond latencies keep a decimal so a 0.4ms hop does not read
- *  as "0ms", everything else is whole milliseconds. */
-export function fmtNsCompact(ns?: number): string {
-  // Same rule as fmtDuration: only a finite number is a latency.
-  if (typeof ns !== "number" || !Number.isFinite(ns)) return MISSING;
-  const ms = ns / 1e6;
-  return ms < 10 ? `${ms.toFixed(1)}ms` : `${ms.toFixed(0)}ms`;
 }
 
 /** fmtPercent renders a 0..1 ratio. One decimal, because a 400-sample run can
@@ -415,6 +423,7 @@ function IntervalSummary({
   pairCount,
   cadence,
   observed,
+  terminal,
 }: {
   durationNs: number;
   agg: SampleAggregate;
@@ -424,6 +433,9 @@ function IntervalSummary({
   cadence?: RunCadence;
   /** What the samples on screen MEASURE; undefined until some pair has two. */
   observed?: ObservedCadence;
+  /** The run has stopped: "so far" describes a count still growing, and a
+   *  finished run's count is final. */
+  terminal: boolean;
 }) {
   const t = useT(runDetailDict);
   const { locale } = useLocale();
@@ -462,7 +474,9 @@ function IntervalSummary({
           </dd>
           <dd className="nums mt-0.5 text-[11px] text-muted-foreground">
             {observed
-              ? t("summary.cadence.observed", {
+              ? /* "so far" only while the count can still grow: on a finished run it promised a
+                   tail that will never come. */
+                t(terminal ? "summary.cadence.observed.settled" : "summary.cadence.observed", {
                   pairs: t(`summary.pairs.${countForm(locale, pairCount)}` as RunDetailKey, { count: pairCount }),
                   samples: observed.samplesPerPair,
                 })
@@ -677,10 +691,14 @@ function PairTable({ pairs, isMTR, runId }: { pairs: RunPairRow[]; isMTR: boolea
           </Th>
           <Th className="pr-4">{t("pairs.col.pair")}</Th>
           <Th className="pr-4">{t("pairs.col.state")}</Th>
-          <Th numeric className="pr-4">
+          {/* Duration and Error leave the phone by CLASS, never by a second table: below sm the
+              row is the pair and its state, and both figures are one chevron away in the expanded
+              row's PairDetail. From sm up every column is back, so the table's roles and text are
+              the same at every width. */}
+          <Th numeric className="hidden pr-4 sm:table-cell">
             {t("pairs.col.duration")}
           </Th>
-          <Th className="pr-4">{t("pairs.col.error")}</Th>
+          <Th className="hidden pr-4 sm:table-cell">{t("pairs.col.error")}</Th>
         </Tr>
       </THead>
       <TBody>
@@ -720,27 +738,47 @@ function PairTable({ pairs, isMTR, runId }: { pairs: RunPairRow[]; isMTR: boolea
                   />
                 </button>
               </Td>
-              <Td className="mono-data max-w-[22rem] pr-4">
-                <span className="flex items-center gap-2">
-                  <span className="truncate" title={p.source}>
+              {/* Every cell is top-aligned, so the chevron, the pair and the badge sit on the row's
+                  first line whatever the Error cell wraps to. On a phone the pair STACKS — source
+                  on one line, destination on the next, break-all for a name longer than the cell —
+                  where a 22rem cap and an ellipsis left «kconmon-stand-wo…» to identify nothing.
+                  The arrow leaves the phone with the second line: the cell is 171px wide at 375px
+                  and a 21-character node name is 164px, so "→ name" can never share a line, and an
+                  arrow on a line of its own made the row three lines. Direction is the order
+                  (from above to), the expander's label and the expanded row's From/To. The cap,
+                  the ellipsis and the arrow come back from sm up, where a row is one line. */}
+              <Td className="mono-data break-all pr-4 align-top sm:max-w-[22rem]">
+                <span className="flex flex-col sm:flex-row sm:items-center sm:gap-x-2">
+                  <span className="sm:truncate" title={p.source}>
                     {p.source}
                   </span>
-                  <span aria-hidden="true" className="shrink-0 text-muted-foreground">
+                  <span aria-hidden="true" className="hidden shrink-0 text-muted-foreground sm:inline">
                     →
                   </span>
-                  <span className="truncate" title={p.destination}>
+                  <span className="sm:truncate" title={p.destination}>
                     {p.destination}
                   </span>
                 </span>
               </Td>
-              <Td className="pr-4">
+              <Td className="pr-4 align-top">
                 <Badge variant={PAIR_VARIANT[p.state] ?? "unknown"} dot>
                   {p.state}
                 </Badge>
               </Td>
-              <Td numeric className="pr-4">{fmtDuration(p.durationNs)}</Td>
-              <Td className={cn("pr-4 text-xs", p.error ? "text-health-bad" : "text-muted-foreground")}>
-                {p.error ?? "—"}
+              <Td numeric className="hidden pr-4 align-top sm:table-cell">{fmtDuration(p.durationNs)}</Td>
+              {/* Two lines of the agent's sentence, the whole of it in the title and in the expanded
+                  row: a run whose every pair failed the same way used to be a table of three-line
+                  paragraphs, and the pair column was the part that got squeezed. */}
+              <Td
+                className={cn("hidden pr-4 align-top text-xs sm:table-cell", p.error ? "text-health-bad" : "text-muted-foreground")}
+              >
+                {p.error ? (
+                  <span className="line-clamp-2" title={p.error}>
+                    {p.error}
+                  </span>
+                ) : (
+                  "—"
+                )}
               </Td>
             </Tr>
             {expanded ? (
@@ -908,6 +946,7 @@ export function RunDetailPage() {
      the honest fallback — never larger than the truth, and never a non-number. */
   const pairTotal = Number.isFinite(run.pairTotal) ? Number(run.pairTotal) : pairs.length;
   const isMTR = run.type === "mtr";
+  const sharedError = sharedPairError(pairs);
 
   return (
     <PageShell
@@ -916,8 +955,9 @@ export function RunDetailPage() {
       description={
         at
           ? /* Inside a translated sentence, so the stamp takes that sentence's
-               language — lib/i18n's localeTag (QA scope 2, finding #8). */
-            t("description.at", { id: decodeRunId(run.id), at: at.toLocaleString(localeTag(locale)) })
+               language and the house clock — lib/i18n's stampFull (QA scope 2,
+               finding #8). */
+            t("description.at", { id: decodeRunId(run.id), at: stampFull(at, locale) })
           : decodeRunId(run.id)
       }
       actions={
@@ -960,6 +1000,12 @@ export function RunDetailPage() {
             <dd className="nums mt-0.5">
               {t("pairs.okOfTotal", { ok: okPairs(pairs), total: pairTotal })}
             </dd>
+            {/* What the numerator COUNTS. On a degraded interval run this tile read "110/110 ok"
+                beside "Failed 612": the tile is each pair's latest probe, the aggregate is every
+                probe, and without the caption the two contradict each other. */}
+            <dd data-testid="pairs-basis" className="type-meta mt-0.5">
+              {t("pairs.okOfTotal.basis")}
+            </dd>
           </div>
           <div>
             <dt className="text-xs text-muted-foreground">{t("field.started")}</dt>
@@ -984,6 +1030,7 @@ export function RunDetailPage() {
           pairCount={pairTotal}
           cadence={cadence}
           observed={observed}
+          terminal={terminal}
         />
       ) : null}
 
@@ -992,6 +1039,16 @@ export function RunDetailPage() {
           <div className="border-b border-border px-4 py-3">
             <h2 className="type-section">{t("pairs.title")}</h2>
             {interval ? <p className="mt-0.5 text-xs text-muted-foreground">{t("pairs.intervalNote")}</p> : null}
+            {/* One sentence for one fault. The error the table prints per row is clamped on a desktop
+                and off the phone altogether, so when every pair carries the same one it is said here,
+                whole, once. */}
+            {sharedError ? (
+              <p data-testid="pairs-shared-error" className="mt-0.5 text-xs leading-relaxed text-muted-foreground">
+                {t("pairs.sameError", { count: pairs.length })}
+                {": "}
+                <span className="text-health-bad">{sharedError}</span>
+              </p>
+            ) : null}
           </div>
           {/* runId, not run.id: the pager's reset key is the permalink the
               reader is ON, so opening a second run from a cached list starts at

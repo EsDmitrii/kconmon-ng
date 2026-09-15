@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { DOCS_BASE_URL } from "@/components/page-help";
 import {
   buildRegistry,
   commandTitle,
@@ -24,6 +25,7 @@ function ctx(over: Partial<CommandContext> = {}): CommandContext {
     returnToLive: () => {},
     openTimeMachinePicker: () => {},
     hasTimeMachinePicker: true,
+    openExternal: () => {},
     ...over,
   };
 }
@@ -250,6 +252,47 @@ describe("buildRegistry action destinations", () => {
       buildRegistry(c).find((x) => x.id === id)!.perform(c);
       expect(navigate, id).toHaveBeenCalledWith(path);
     }
+  });
+});
+
+/* W0-4: the docs site had no entry point in the console outside a page's "?"
+   dialog. The palette gets one: an ACTION that leaves through the context's
+   openExternal rather than reaching for window itself. */
+describe("the documentation entry (W0-4)", () => {
+  it("is an Actions entry that opens DOCS_BASE_URL through the context, without navigating", () => {
+    const openExternal = vi.fn();
+    const navigate = vi.fn();
+    const c = ctx({ openExternal, navigate });
+    const entry = buildRegistry(c).find((x) => x.id === "action:docs");
+    expect(entry).toBeDefined();
+    expect(entry!.group).toBe("Actions");
+    entry!.perform(c);
+    expect(openExternal).toHaveBeenCalledTimes(1);
+    expect(openExternal).toHaveBeenCalledWith(DOCS_BASE_URL);
+    expect(navigate).not.toHaveBeenCalled();
+  });
+
+  it("is a read: offered to a subject with no permissions and never greyed by the Time Machine", () => {
+    const engaged = ctx({ writesDisabled: true, isLive: false, can: () => false });
+    const entry = buildRegistry(engaged).find((x) => x.id === "action:docs");
+    expect(entry).toBeDefined();
+    expect(entry!.permission).toBeUndefined();
+    expect(isCommandDisabled(entry!, engaged)).toBe(false);
+  });
+
+  it("answers to docs and help in English, «документация» and «справка» in Russian, in either locale", () => {
+    const registry = buildRegistry(ctx());
+    for (const q of ["docs", "documentation", "help"]) {
+      expect(searchCommands(q, registry, "en").map((c) => c.id), q).toContain("action:docs");
+      expect(searchCommands(q, registry, "ru").map((c) => c.id), q).toContain("action:docs");
+    }
+    for (const q of ["документация", "справка", "доки"]) {
+      expect(searchCommands(q, registry, "ru").map((c) => c.id), q).toContain("action:docs");
+      expect(searchCommands(q, registry, "en").map((c) => c.id), q).toContain("action:docs");
+    }
+    const entry = registry.find((c) => c.id === "action:docs")!;
+    expect(commandTitle(entry, "en")).toBe("Open documentation");
+    expect(commandTitle(entry, "ru")).toBe(paletteDict.ru["action.docs"]);
   });
 });
 

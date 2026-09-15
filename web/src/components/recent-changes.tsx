@@ -3,16 +3,18 @@ import { useQuery } from "@tanstack/react-query";
 import { useDatabaseAvailable } from "@/hooks/use-capabilities";
 import { getWsClient } from "@/hooks/use-ws-topic";
 import { ApiError, getEvents } from "@/lib/api";
-import { localeTag, useLocale, useT } from "@/lib/i18n";
+import { localeTag, stampFull, useLocale, useT } from "@/lib/i18n";
 import { recentChangesDict } from "@/lib/i18n/dict/recent-changes";
 import { useTimeContext } from "@/lib/timemachine";
 import type { LiveEvent, LiveEventSeverity } from "@/lib/types";
-import { fmtEventStamp } from "@/lib/utils";
+import { cn, fmtEventStamp } from "@/lib/utils";
 import { TOPIC_LIVE, type WsEnvelope } from "@/lib/ws";
 // Reuses the Live page's own merge/dedupe store rather than re-implementing it.
 import { pushEvents } from "@/pages/live";
 import { Badge } from "./ui/badge";
 import { Card } from "./ui/card";
+import { EmptyState } from "./ui/empty-state";
+import { scrollRegionClass } from "./ui/scroll-region";
 import { Skeleton } from "./ui/skeleton";
 
 /** GET /api/v1/events page size for the rail — task-25-brief.md's own number. */
@@ -140,14 +142,11 @@ export function RecentChanges({ scope = "", scopeNode = "" }: RecentChangesProps
           {/* The rail says what it is bounded BY, right where the rows are —
               the top-bar banner explains the mode, this states the cut. The
               stamp lands INSIDE that translated sentence, so it takes the
-              sentence's own language (lib/i18n's localeTag). */}
+              sentence's own language and the house clock: lib/i18n's stampFull,
+              the one formatter every page description shares. */}
           {at ? (
             <p className="mt-0.5 text-[11px] text-muted-foreground">
-              {/* hour12: false, like every other instant this console prints (lib/utils' own rule).
-                  A bare toLocaleString picks the locale's default, so this header read
-                  "8/17/2026, 12:30:00 PM" directly above rows stamped "11:48:27" — and at night the
-                  two notations collide outright on the same hour. */}
-              {t("upTo", { at: at.toLocaleString(localeTag(locale), { hour12: false }) })}
+              {t("upTo", { at: stampFull(at, locale) })}
             </p>
           ) : null}
         </div>
@@ -175,26 +174,35 @@ export function RecentChanges({ scope = "", scopeNode = "" }: RecentChangesProps
           </div>
         ) : null}
 
+        {/* No Investigate CTA on purpose: the card header above carries the
+            one Investigate link the page gets (see investigate-entry.tsx). */}
         {!loadingFirstPage && events.length === 0 ? (
-          <p className="px-4 py-10 text-center text-xs text-muted-foreground">{t("empty")}</p>
+          <EmptyState compact title={t("empty")} body={t("empty.body")} />
         ) : null}
 
         {events.length > 0 ? (
-          <ul className="flex flex-col divide-y divide-border overflow-y-auto">
-            {events.map((e) => (
-              <li key={e.id} className="flex flex-col gap-1 px-4 py-2.5">
-                <div className="flex items-center justify-between gap-2">
-                  <span className="nums text-[11px] text-muted-foreground" title={e.timestamp}>
-                    {fmtEventStamp(e.timestamp, localeTag(locale))}
-                  </span>
-                  <Badge variant={isKnownSeverity(e.severity) ? SEVERITY_VARIANT[e.severity] : "unknown"} dot>
-                    {e.severity}
-                  </Badge>
-                </div>
-                <p className="text-xs leading-snug text-foreground">{e.summary}</p>
-              </li>
-            ))}
-          </ul>
+          <div
+            tabIndex={0}
+            role="region"
+            aria-label={t("list.aria")}
+            className={cn("min-h-0 overflow-y-auto", scrollRegionClass)}
+          >
+            <ul className="flex flex-col divide-y divide-border">
+              {events.map((e) => (
+                <li key={e.id} className="flex flex-col gap-1 px-4 py-2.5">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="nums text-[11px] text-muted-foreground" title={e.timestamp}>
+                      {fmtEventStamp(e.timestamp, localeTag(locale))}
+                    </span>
+                    <Badge variant={isKnownSeverity(e.severity) ? SEVERITY_VARIANT[e.severity] : "unknown"} dot>
+                      {e.severity}
+                    </Badge>
+                  </div>
+                  <p className="text-xs leading-snug text-foreground">{e.summary}</p>
+                </li>
+              ))}
+            </ul>
+          </div>
         ) : null}
       </aside>
     </Card>

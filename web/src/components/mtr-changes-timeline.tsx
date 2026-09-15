@@ -187,13 +187,13 @@ export function PathChangesTimeline({
     const legend = full.legend && !Array.isArray(full.legend)
       ? { ...full.legend, bottom: undefined, top: 0, left: "center" as const, itemHeight: 2, itemWidth: 12 }
       : full.legend;
-    /* Loss is a ratio ≤ 1, but ECharts's nice rounding extended the auto axis to
-       1.2 on a fully-lossy pair and the labels read "120%". Pin the top to 100%
-       once the data extent is high enough to overshoot; small losses keep the
-       auto scale so a 2% wiggle stays readable. */
-    const clampLossMax = ({ max }: { min: number; max: number }) => (max > 0.5 ? 1 : null);
+    /* Loss is a ratio in [0, 1] and the axis says so: 0 to 100% with a tick
+       every 25%, whatever the data's extent. The auto scale drew "90.0 / 60.0 /
+       30.0%" on a fully-lossy pair and nice-rounded another to 120%; a fixed
+       frame reads the same on every pair, and a 100% step is a 100% step on
+       every one of them (2.4.0 audit). */
     const yAxis =
-      full.yAxis && !Array.isArray(full.yAxis) ? { ...full.yAxis, splitNumber: 3, max: clampLossMax } : full.yAxis;
+      full.yAxis && !Array.isArray(full.yAxis) ? { ...full.yAxis, min: 0, max: 1, interval: 0.25 } : full.yAxis;
     return { ...full, grid: { ...PLOT_GRID }, legend, yAxis };
   }, [full]);
   // promqlQueryRange RESOLVES Prometheus's own error envelope rather than
@@ -237,6 +237,10 @@ export function PathChangesTimeline({
 
   return (
     <section aria-label={t("changes.aria")} className="mt-3">
+      {/* What the frame is a picture of, before the picture: two series and a
+          set of hairlines were an unlabelled chart. Only with a chart to
+          caption — without one the notes under the strip say what is there. */}
+      {hasChart ? <p className="type-meta mb-1">{t("changes.caption")}</p> : null}
       <div className={cn("relative w-full", hasChart ? "h-36" : "h-6")}>
         {hasChart ? <EChart option={option} className="absolute inset-0 h-full w-full" /> : null}
 

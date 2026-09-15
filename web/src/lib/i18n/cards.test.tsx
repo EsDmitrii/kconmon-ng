@@ -210,6 +210,58 @@ describe("the ONE word for a probe that failed", () => {
   });
 });
 
+/* ── the external word, across dictionaries ──────────────────────────────── */
+
+/**
+ * An agent that runs outside any Pod (kconmon-ng.io/external: "true") wears
+ * ONE badge on four surfaces — the topology map, the matrix header, the node
+ * card and the Overview's worst-pairs table — and it is the same word on all
+ * four, in both languages. English is pinned too: "external" is the spec's own
+ * copy, and a surface that drifted to "remote" or "bare host" would be making
+ * a different claim about the same agent.
+ */
+describe("the ONE word for an external agent", () => {
+  it("is «внешний» on the map, the node card and the worst-pairs badge", () => {
+    expect(cardsDict.ru["node.external"]).toBe("внешний");
+    expect(topologyDict.ru["node.external"]).toBe(cardsDict.ru["node.external"]);
+    expect(overviewDict.ru["table.external"]).toBe(cardsDict.ru["node.external"]);
+  });
+
+  it("opens the matrix header's longer form, which the map's aria repeats", () => {
+    const word = cardsDict.ru["node.external"];
+    expect(matrixDict.ru["header.external"].startsWith(word)).toBe(true);
+    expect(matrixDict.ru["header.node.external"]).toContain(matrixDict.ru["header.external"]);
+    expect(topologyDict.ru["node.aria.external"]).toContain(matrixDict.ru["header.external"]);
+  });
+
+  it("is the same English word on all four, byte for byte", () => {
+    expect(cardsDict.en["node.external"]).toBe("external");
+    expect(topologyDict.en["node.external"]).toBe("external");
+    expect(overviewDict.en["table.external"]).toBe("external");
+    expect(matrixDict.en["header.external"]).toBe("external agent");
+    expect(topologyDict.en["node.aria.external"]).toContain(matrixDict.en["header.external"]);
+  });
+
+  it("sends every scrape hint to the one docs anchor, with one link phrase", () => {
+    // The URL is data and identical in both halves; the phrase around it is
+    // ours and reads the same on the matrix tooltip, the note and the node
+    // card's empty state.
+    const url = matrixDict.en["docs.scrapeExternal"];
+    expect(url).toBe("https://esdmitrii.github.io/kconmon-ng/external-agents/#scraping-external-agents");
+    expect(matrixDict.ru["docs.scrapeExternal"]).toBe(url);
+    const hints = [
+      [matrixDict.en["tooltip.unscraped"], matrixDict.ru["tooltip.unscraped"]],
+      [matrixDict.en["note.unscraped.one"], matrixDict.ru["note.unscraped.one"]],
+      [matrixDict.en["note.unscraped.many"], matrixDict.ru["note.unscraped.many"]],
+      [cardsDict.en["node.breakdown.empty.unscraped"], cardsDict.ru["node.breakdown.empty.unscraped"]],
+    ];
+    for (const [en, ru] of hints) {
+      expect(en).toContain("see External agents docs");
+      expect(ru).toContain("см. документацию по внешним агентам");
+    }
+  });
+});
+
 describe("the node card in Russian", () => {
   beforeEach(() => window.history.pushState({}, "", "/nodes/node-a"));
 

@@ -10,6 +10,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CommandPalette } from "@/components/command-palette";
+import { DOCS_BASE_URL } from "@/components/page-help";
 import { ThemeProvider } from "@/components/theme-provider";
 import { TimeMachineControl } from "@/components/timemachine-control";
 import { openCommandPalette } from "@/lib/commands";
@@ -327,6 +328,25 @@ describe("performing", () => {
     fireEvent.keyDown(input(), { key: "Enter" });
     expect(document.documentElement.classList.contains("dark")).toBe(!before);
   });
+
+  /* W0-4: the one entry that leaves the console. A new tab with no opener,
+     the palette closed, the route untouched. */
+  it("opens the documentation in a new tab and stays on the page", async () => {
+    const open = vi.spyOn(window, "open").mockImplementation(() => null);
+    try {
+      const router = await renderPalette();
+      pressK();
+      fireEvent.change(input(), { target: { value: "documentation" } });
+      expect(optionTitles()).toEqual(["Open documentation"]);
+      fireEvent.keyDown(input(), { key: "Enter" });
+      expect(open).toHaveBeenCalledTimes(1);
+      expect(open).toHaveBeenCalledWith(DOCS_BASE_URL, "_blank", "noopener,noreferrer");
+      expect(queryPalette()).not.toBeInTheDocument();
+      expect(router.state.location.pathname).toBe("/");
+    } finally {
+      open.mockRestore();
+    }
+  });
 });
 
 describe("permission gating (HIDE)", () => {
@@ -376,6 +396,15 @@ describe("Time Machine treatment (DISABLE=time)", () => {
     fireEvent.change(input(), { target: { value: "return to live" } });
     fireEvent.keyDown(input(), { key: "Enter" });
     expect(new URLSearchParams(window.location.search).get("at")).toBeNull();
+  });
+
+  it("keeps Open documentation enabled while engaged: reading the docs is not a write", async () => {
+    await renderPalette();
+    pressK();
+    fireEvent.change(input(), { target: { value: "documentation" } });
+    expect(optionTitles()).toEqual(["Open documentation"]);
+    expect(options()[0]).not.toHaveAttribute("aria-disabled");
+    expect(options()[0].textContent).not.toContain("Live only");
   });
 });
 

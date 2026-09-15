@@ -5,7 +5,14 @@ import { useTheme } from "@/components/theme-provider";
 import { Badge } from "@/components/ui/badge";
 import { Card } from "@/components/ui/card";
 import { maintenanceOverlaySeries } from "@/lib/annotations";
-import { useChartCursor } from "@/lib/chart-cursor";
+import {
+  TIMELINE_CURSOR_SOURCE,
+  nearestInstant,
+  readoutInstant,
+  readoutSeries,
+  useChartCursor,
+  type ReadoutSeries,
+} from "@/lib/chart-cursor";
 import { ApiError } from "@/lib/api";
 import { toSeriesOption, type CuratedChart } from "@/lib/curated-metrics";
 import { stampClock, translate, useLocale, useT, type Translate } from "@/lib/i18n";
@@ -95,19 +102,46 @@ function fmtSignedPct(v: number | null, unit = "pp"): string {
   return `${sign}${rounded.toFixed(1)} ${unit}`;
 }
 
+/** The window BOTH charts are pinned to, so loss and RTT share one x-axis. */
+export interface SignalWindow {
+  from: Date;
+  to: Date;
+}
+
+/**
+ * The name lib/curated-metrics.ts's builder gives a series whose metric carries
+ * no labels — which is every series here, since both queries aggregate the
+ * scope down to one. A legend reading "series" under "Packet loss" names
+ * nothing, so the chart's own name replaces it; a series that DID keep a label
+ * keeps its own name.
+ */
+const UNNAMED_SERIES = "series";
+
 /**
  * signalChartOption is this column's OWN option builder; it composes lib/curated-metrics.ts's
  * toSeriesOption — the series.
+ *
+ * Two things it adds to the shared builder's answer, both about this column and
+ * neither about the series: the window the reader asked for as the axis span
+ * (so loss and RTT line up, and a window with no samples still draws as a
+ * window rather than vanishing), and the chart's own series name where the
+ * builder had none. The pills and the tooltip are lib/chart-tooltip.ts's,
+ * applied at the shared chart mount, and are not restated here.
  */
 export function signalChartOption(
   chart: CuratedChart,
   result: PromResult,
   dark: boolean,
-  overlays: { windows: MaintenanceWindow[] },
+  overlays: { windows: MaintenanceWindow[]; window?: SignalWindow; seriesName?: string },
 ): EChartsOption {
-  const base = toSeriesOption(chart, result, dark);
+  const span = overlays.window;
+  const base = toSeriesOption(chart, result, dark, span ? { start: span.from, end: span.to } : undefined);
+  const named: SeriesOption[] = (Array.isArray(base.series) ? (base.series as SeriesOption[]) : []).map((s) =>
+    overlays.seriesName !== undefined && s.name === UNNAMED_SERIES ? { ...s, name: overlays.seriesName } : s,
+  );
   const withAxes: EChartsOption = {
     ...base,
+    series: named,
     xAxis: { ...(base.xAxis as object), axisLabel: { ...(base.xAxis as { axisLabel?: object }).axisLabel, hideOverlap: true } },
     /* No yAxis override. toSeriesOption already installs the unit's own
        formatter — formatSeconds for seconds, formatRatio for ratios — and the
@@ -115,16 +149,34 @@ export function signalChartOption(
        which ECharts reads as "no formatter at all": the packet-loss axis then
        printed 0.01 beside a tooltip saying 1.0%. */
   } as EChartsOption;
-  return withOverlays(withAxes, { ...overlays, dark });
+  return withOverlays(withAxes, { windows: overlays.windows, dark });
+}
+
+/**
+ * snapModel is what the readout snaps to: every sample the two charts draw,
+ * in lib/chart-cursor.tsx's own series shape. Built from the Prometheus
+ * matrices directly rather than from a chart option, so it is one memo per
+ * fetch and does not wait for a chart to mount.
+ */
+export function snapModel(...results: (PromResult | undefined)[]): ReadoutSeries[] {
+  const series = results.flatMap((res) => {
+    if (!res || res.status !== "success" || res.data?.resultType !== "matrix" || !Array.isArray(res.data.result)) return [];
+    return (res.data.result as { values?: [number, string][] }[]).map((entry) => ({
+      data: (entry.values ?? []).map(([ts, v]) => [ts * 1000, Number(v)]),
+    }));
+  });
+  return readoutSeries({ series } as EChartsOption);
 }
 
 function SignalChart({
   id,
   title,
+  seriesName,
   unit,
   result,
   error,
   windows,
+  span,
   annotations,
   emptyNote,
   refusal,
@@ -134,11 +186,15 @@ function SignalChart({
    *  that changes with the interface language is not an id. */
   id: string;
   title: string;
+  /** What the legend and the tooltip call the one series — see UNNAMED_SERIES. */
+  seriesName: string;
   unit: CuratedChart["unit"];
   result: PromResult | undefined;
   /** The REJECTION, as opposed to Prometheus's own error envelope below. */
   error?: Error | null;
   windows: MaintenanceWindow[];
+  /** The investigated window, pinned as the axis span on both charts. */
+  span?: SignalWindow;
   annotations: Annotation[];
   emptyNote: string;
   /** OUR OWN refusal, decided before anything was fetched, so it outranks both
@@ -151,8 +207,8 @@ function SignalChart({
   const dark = theme === "dark";
   const chart = useMemo<CuratedChart>(() => ({ id, title, unit, query: "" }), [id, title, unit]);
   const option = useMemo(
-    () => (result ? signalChartOption(chart, result, dark, { windows }) : undefined),
-    [chart, result, dark, windows],
+    () => (result ? signalChartOption(chart, result, dark, { windows, window: span, seriesName }) : undefined),
+    [chart, result, dark, windows, span, seriesName],
   );
 
   // promqlQueryRange RESOLVES Prometheus's own error envelope rather than
@@ -166,7 +222,7 @@ function SignalChart({
 
   return (
     <section aria-label={title} className="mt-4 first:mt-0">
-      <h4 className="text-xs font-medium text-muted-foreground">{title}</h4>
+      <h3 className="text-xs font-medium text-muted-foreground">{title}</h3>
       {problem ? (
         <p role="alert" className="mt-1 text-xs leading-relaxed text-health-bad">
           {problem}
@@ -190,8 +246,16 @@ function SignalChart({
  * mousemove behind it re-renders one paragraph rather than the Investigate page.
  * The state is the FORMATTED string, which means React bails out of most frames
  * of a drag: the clock only ticks once a second.
+ *
+ * What it prints while a chart is hovered is the instant the chart's own axis
+ * pointer snapped to — the sample the tooltip beside it is describing — not
+ * the pixel under the mouse. The group carries the pixel's instant, and the
+ * shared chart mount owns the pointer (its pill, its tooltip), so the snap is
+ * computed here from the same samples the charts draw: `snap` is those
+ * samples, lib/chart-cursor.tsx's nearestInstant is the snap, and its
+ * readoutInstant is the rule that decides when it applies.
  */
-function CursorReadout() {
+function CursorReadout({ snap }: { snap: readonly ReadoutSeries[] }) {
   const t = useT(signalsDict);
   const { locale } = useLocale();
   const group = useChartCursor();
@@ -199,11 +263,16 @@ function CursorReadout() {
 
   useEffect(() => {
     if (!group) return;
-    const show = (at: number | null) =>
-      setText(at === null || !Number.isFinite(at) ? t("cursor.none") : stampClock(new Date(at), locale));
-    show(group.current());
+    const show = () => {
+      const raw = group.current();
+      const fromChart = group.currentSource() !== TIMELINE_CURSOR_SOURCE;
+      const snapped = raw === null || !fromChart ? null : nearestInstant(snap, raw);
+      const at = readoutInstant(raw, fromChart, snapped);
+      setText(at === null ? t("cursor.none") : stampClock(new Date(at), locale));
+    };
+    show();
     return group.subscribe(show);
-  }, [group, locale, t]);
+  }, [group, snap, locale, t]);
 
   return (
     <p data-testid="signal-cursor" className="mt-2 text-[11px] text-muted-foreground">
@@ -227,6 +296,7 @@ export function SignalPanels({
   delta,
   deltaError,
   windows,
+  span,
   annotations,
   promConfigured,
   gated,
@@ -245,6 +315,9 @@ export function SignalPanels({
    *  back — a figure, in the place a figure lives, describing nothing. */
   deltaError?: Error | null;
   windows: MaintenanceWindow[];
+  /** The investigated window. Both charts pin their x-axis to it, so the loss
+   *  and RTT panels share one span whatever each series happens to cover. */
+  span?: SignalWindow;
   annotations: Annotation[];
   promConfigured: boolean;
   /** True when the subject holds no promql:query — the panes render their own
@@ -259,11 +332,23 @@ export function SignalPanels({
 }) {
   const t = useT(signalsDict);
   const tooWide = rangeTooWide ? t("chart.tooWide", { hours: PROMQL_MAX_RANGE_MS / 3_600_000 }) : undefined;
+  /* Every sample the two charts draw, for the readout to snap to. */
+  const snap = useMemo(() => snapModel(loss, rtt), [loss, rtt]);
+  /* Which edge has no sample, said in one muted sentence. "— → 0.0% —" was
+     three dashes and a figure, and none of the four said which end was missing. */
+  const missing =
+    delta.before === null && delta.after === null
+      ? t("delta.noSample.both")
+      : delta.before === null
+        ? t("delta.noSample.start")
+        : delta.after === null
+          ? t("delta.noSample.end")
+          : null;
   return (
     <Card asChild className="p-5">
       <section aria-label={t("title")}>
         <div className="flex flex-wrap items-center gap-2">
-          <h3 className="text-sm font-semibold">{t("title")}</h3>
+          <h2 className="type-section">{t("title")}</h2>
           <span className="text-xs text-muted-foreground">{scopeLabel}</span>
         </div>
 
@@ -276,6 +361,10 @@ export function SignalPanels({
             <span role="alert" className="leading-relaxed text-health-bad">
               {problemDetail(deltaError, t)}
             </span>
+          ) : missing !== null ? (
+            <span data-testid="matrix-delta-missing" className="type-meta">
+              {missing}
+            </span>
           ) : (
             <>
               <span className="nums">{fmtPct(delta.before)}</span>
@@ -283,9 +372,7 @@ export function SignalPanels({
                 →
               </span>
               <span className="nums">{fmtPct(delta.after)}</span>
-              <Badge
-                variant={delta.delta === null ? "unknown" : delta.delta > 0 ? "bad" : delta.delta < 0 ? "ok" : "neutral"}
-              >
+              <Badge variant={delta.delta === null ? "unknown" : delta.delta > 0 ? "bad" : delta.delta < 0 ? "ok" : "neutral"}>
                 {fmtSignedPct(delta.delta, t("delta.unit"))}
               </Badge>
               <span className="text-[11px] text-muted-foreground">{t("delta.caption")}</span>
@@ -293,7 +380,7 @@ export function SignalPanels({
           )}
         </div>
 
-        <CursorReadout />
+        <CursorReadout snap={snap} />
 
         {gated ? (
           <p className="mt-3 text-xs leading-relaxed text-muted-foreground">{t("gated")}</p>
@@ -304,10 +391,12 @@ export function SignalPanels({
             <SignalChart
               id="packet-loss"
               title={t("chart.loss")}
+              seriesName={t("series.loss")}
               unit="ratio"
               result={loss}
               error={lossError}
               windows={windows}
+              span={span}
               annotations={annotations}
               emptyNote={t("chart.loss.empty")}
               refusal={tooWide}
@@ -315,10 +404,12 @@ export function SignalPanels({
             <SignalChart
               id="rtt-p95"
               title={t("chart.rtt")}
+              seriesName={t("series.rtt")}
               unit="seconds"
               result={rtt}
               error={rttError}
               windows={windows}
+              span={span}
               annotations={annotations}
               emptyNote={t("chart.rtt.empty")}
               refusal={tooWide}

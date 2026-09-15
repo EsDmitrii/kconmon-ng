@@ -5,10 +5,12 @@ import { cn } from "@/lib/utils";
    verbatim in targets.tsx, alerting.tsx and settings.tsx. Focus ring mirrors
    button.tsx so keyboard focus reads the same on every control; hover raises
    the edge quietly in both themes. An invalid field keeps its bad border on
-   hover — the error must not fade under the pointer. */
+   hover — the error must not fade under the pointer. min-w-0 max-w-full: a
+   <select>'s intrinsic width is its widest option, and a long one pushed a
+   phone-width form past the viewport edge. */
 export function fieldClasses(invalid = false): string {
   return cn(
-    "h-9 rounded-md border bg-transparent px-3 text-[13px]",
+    "h-9 min-w-0 max-w-full rounded-md border bg-transparent px-3 text-[13px]",
     "transition-[border-color,box-shadow] duration-(--dur-fast) ease-(--ease)",
     "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background",
     "disabled:cursor-not-allowed disabled:opacity-70",

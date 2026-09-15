@@ -63,6 +63,16 @@ const en = {
      the bare "2/2" was arrived/total and read as passed/total, so a run whose
      every pair FAILED announced itself as a complete success. */
   "pairs.okOfTotal": "{ok}/{total} ok",
+  /* What that numerator counts. The tile is one row per pair and reads each pair's LATEST probe;
+     the interval aggregate beside it counts every probe, so "110/110 ok" and "Failed 612" are both
+     true of the same run and need the caption to say so. */
+  "pairs.okOfTotal.basis": "by each pair's latest probe",
+  /* The status badge's title for the one enum word that does not explain itself. The runner's
+     finalStatus says "partial" when neither every pair succeeded nor every pair failed. */
+  "status.partial.title": "Some pairs succeeded and some failed",
+  /* Said once in the Pairs header when every row carries the identical error; the rows still
+     print it, clamped, and the expanded row prints it whole. {count} is the pair count. */
+  "pairs.sameError": "all {count} pairs failed with the same error",
 
   /* ── the route behind a pair row ──────────────────────────────────────────
      The owner on this page: «вся суть MTR — это путь», and «ничего не
@@ -137,6 +147,8 @@ const en = {
   "summary.cadence.value.measured": "{interval} measured",
   "summary.cadence.value.planned": "{interval} planned",
   "summary.cadence.observed": "{pairs} · ≥ {samples} per pair so far",
+  /* The same line on a FINISHED run: "so far" promises a tail that will never come. */
+  "summary.cadence.observed.settled": "{pairs} · ≥ {samples} per pair",
   "summary.cadence.planNote": "planned no slower than once every {interval}, ≥ {samples} per pair",
   "summary.pairs.one": "{count} pair",
   "summary.pairs.few": "{count} pairs",
@@ -233,6 +245,10 @@ export const runDetailDict: Dictionary<RunDetailKey> = defineDict(en, {
   "field.pairs": "Пары",
   "field.started": "Начат",
   "pairs.okOfTotal": "{ok}/{total} успешно",
+  "pairs.okOfTotal.basis": "по последнему зонду каждой пары",
+  "status.partial.title": "Часть пар прошла, часть не прошла",
+  /* Без склонения числительного: «у всех пар (2)» читается при любом {count}. */
+  "pairs.sameError": "у всех пар ({count}) одна и та же ошибка",
 
   "pairs.col.expand": "Показать маршрут",
   "pairs.expand.aria": "Показать маршрут от {source} до {destination}",
@@ -265,6 +281,7 @@ export const runDetailDict: Dictionary<RunDetailKey> = defineDict(en, {
   "summary.cadence.value.measured": "{interval} по факту",
   "summary.cadence.value.planned": "{interval} по плану",
   "summary.cadence.observed": "{pairs} · пока ≥ {samples} на пару",
+  "summary.cadence.observed.settled": "{pairs} · ≥ {samples} на пару",
   /* «не реже» — это именно то, что обещает план: он считает круг по худшему случаю, а круг,
      закончившийся раньше, сразу начинает следующий, так что фактический период всегда не больше
      планового. Период здесь словом (formatCadenceProse): «не реже раза в 5 с» читается как предлог. */

@@ -5,6 +5,7 @@ import { PageShell } from "@/components/page-shell";
 import { Badge, type BadgeProps } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
+import { EmptyState } from "@/components/ui/empty-state";
 import { Pager, usePager } from "@/components/ui/pager";
 import { Segmented } from "@/components/ui/segmented";
 import { useAuth } from "@/hooks/use-auth";
@@ -12,7 +13,7 @@ import { useDatabaseAvailable } from "@/hooks/use-capabilities";
 import { useSubmitGuard } from "@/hooks/use-submit-guard";
 import { useTopology } from "@/hooks/use-topology";
 import { ApiError, createCheck, createRun, getRuns, goTo, listAllTargets } from "@/lib/api";
-import { localeTag, stampFull, useLocale, useT, type Locale, type Translate } from "@/lib/i18n";
+import { stampFull, useLocale, useT, type Locale, type Translate } from "@/lib/i18n";
 import { countForm, diagnosticsDict, type DiagnosticsKey } from "@/lib/i18n/dict/diagnostics";
 /* The ad-hoc address refusal is lib/utils.ts's, shared with the definition
    form on /targets — one rule, one sentence, one table. */
@@ -149,39 +150,45 @@ export function NodeSelector({
   const t = useT(diagnosticsDict);
   const groupId = useId();
   const nodeInputId = (n: string) => `${groupId}-node-${n}`;
+  /* Still a fieldset — the legend is what names the group and tells the two
+     columns' "node-a" apart — but the border moves onto the box UNDER it, so
+     the legend reads as the same plain label-above-box the destination field
+     beside it gets from FieldLabel, rather than a caption cut into a frame. */
   return (
-    <fieldset className="rounded-md border border-border p-3">
-      <legend className="px-1 text-xs font-medium text-muted-foreground">{label}</legend>
-      <label htmlFor={`${groupId}-all`} className="flex items-center gap-2 text-sm">
-        <input
-          id={`${groupId}-all`}
-          type="checkbox"
-          checked={all}
-          onChange={(e) => onAllChange(e.target.checked)}
-          className={CHECKBOX_CLASS}
-        />
-        {t("nodes.all", { count: nodes.length })}
-      </label>
-      {!all ? (
-        <div className="mt-2 flex max-h-40 flex-col gap-1 overflow-y-auto">
-          {nodes.length === 0 ? (
-            <p className="text-xs text-muted-foreground">{t("nodes.empty")}</p>
-          ) : (
-            nodes.map((n) => (
-              <label key={n} htmlFor={nodeInputId(n)} className="flex items-center gap-2 text-sm">
-                <input
-                  id={nodeInputId(n)}
-                  type="checkbox"
-                  checked={selected.includes(n)}
-                  onChange={() => onToggle(n)}
-                  className={CHECKBOX_CLASS}
-                />
-                <span className="truncate">{n}</span>
-              </label>
-            ))
-          )}
-        </div>
-      ) : null}
+    <fieldset className="min-w-0 text-[13px]">
+      <legend className="mb-1 text-muted-foreground">{label}</legend>
+      <div className="rounded-md border border-border p-3">
+        <label htmlFor={`${groupId}-all`} className="flex items-center gap-2 text-sm">
+          <input
+            id={`${groupId}-all`}
+            type="checkbox"
+            checked={all}
+            onChange={(e) => onAllChange(e.target.checked)}
+            className={CHECKBOX_CLASS}
+          />
+          {t("nodes.all", { count: nodes.length })}
+        </label>
+        {!all ? (
+          <div className="mt-2 flex max-h-40 flex-col gap-1 overflow-y-auto">
+            {nodes.length === 0 ? (
+              <p className="text-xs text-muted-foreground">{t("nodes.empty")}</p>
+            ) : (
+              nodes.map((n) => (
+                <label key={n} htmlFor={nodeInputId(n)} className="flex items-center gap-2 text-sm">
+                  <input
+                    id={nodeInputId(n)}
+                    type="checkbox"
+                    checked={selected.includes(n)}
+                    onChange={() => onToggle(n)}
+                    className={CHECKBOX_CLASS}
+                  />
+                  <span className="truncate">{n}</span>
+                </label>
+              ))
+            )}
+          </div>
+        ) : null}
+      </div>
     </fieldset>
   );
 }
@@ -718,7 +725,9 @@ function RunForm({
           />
         </div>
 
-        <div className="grid gap-4 sm:grid-cols-2">
+        {/* items-start: a picker beside a one-line field used to stretch to the
+            taller cell and draw a border around nothing. */}
+        <div className="grid items-start gap-4 sm:grid-cols-2">
           <NodeSelector
             label={t("form.sources")}
             nodes={nodeNames}
@@ -818,8 +827,14 @@ function RunForm({
           {/* "~" flags this as an estimate: the server is the only real
               arbiter, and on an overlapping selection this self-excluded
               number can even read as under the limit while the raw S×D
-              product the server actually gates on is over it. */}
-          <span className={cn("nums text-sm", overLimit || noPairs ? "text-health-bad" : "text-muted-foreground")}>
+              product the server actually gates on is over it.
+
+              Red ONLY over the limit: that is the one verdict here the server
+              will actually refuse. A zero because no target is picked or no
+              address typed yet is a form not yet filled in, not a fault, and
+              the health scale is for what the fleet measured. A rejected
+              address and a server refusal keep their own red alert lines. */}
+          <span className={cn("nums text-sm", overLimit ? "text-health-bad" : "text-muted-foreground")}>
             {t(`pairs.${countForm(locale, pairCount)}` as DiagnosticsKey, { count: pairCount })}
             {overLimit
               ? t("pairs.overLimit", {
@@ -1057,11 +1072,14 @@ function HistoryList({
   runs,
   engaged,
   filtered,
+  onClearFilters,
   scope,
 }: {
   runs: RunSummary[];
   engaged: boolean;
   filtered: boolean;
+  /** The filtered slate's one next step: both selects back to "all". */
+  onClearFilters: () => void;
   /** The list's IDENTITY — the two filters and the viewed instant. See the
    *  pager's resetKey below. */
   scope: string;
@@ -1084,49 +1102,31 @@ function HistoryList({
        run one", and the run form above is not the remedy for it. Checked
        BEFORE the engaged branch: a filter is something the reader just did,
        and it is the likelier cause of the two. */
+    /* All three slates are the one EmptyState: glyph, title, body — and the
+       filtered one carries the next step, because a filter is the one cause
+       of an empty list the reader can undo from right here. */
+    const icon = <ClipboardList className="size-5" />;
     if (filtered) {
       return (
-        <div className="flex flex-col items-center gap-3 px-6 py-14 text-center">
-          <span
-            aria-hidden="true"
-            className="flex size-12 items-center justify-center rounded-full bg-surface-2 text-muted-foreground"
-          >
-            <ClipboardList className="size-5" />
-          </span>
-          <p className="text-sm font-medium">{t("history.emptyFiltered.title")}</p>
-          <p className="max-w-sm text-xs leading-relaxed text-muted-foreground">{t("history.emptyFiltered.body")}</p>
-        </div>
+        <EmptyState
+          icon={icon}
+          title={t("history.emptyFiltered.title")}
+          body={t("history.emptyFiltered.body")}
+          action={
+            <Button type="button" variant="outline" size="sm" onClick={onClearFilters}>
+              {t("history.clearFilters")}
+            </Button>
+          }
+        />
       );
     }
     if (engaged) {
       // Engaged with everything filtered out is a DIFFERENT fact from "nobody
       // has ever run one", and offering the form above as the remedy would be
       // wrong twice over — the form is disabled while engaged.
-      return (
-        <div className="flex flex-col items-center gap-3 px-6 py-14 text-center">
-          <span
-            aria-hidden="true"
-            className="flex size-12 items-center justify-center rounded-full bg-surface-2 text-muted-foreground"
-          >
-            <ClipboardList className="size-5" />
-          </span>
-          <p className="text-sm font-medium">{t("history.emptyAt.title")}</p>
-          <p className="max-w-sm text-xs leading-relaxed text-muted-foreground">{t("history.emptyAt.body")}</p>
-        </div>
-      );
+      return <EmptyState icon={icon} title={t("history.emptyAt.title")} body={t("history.emptyAt.body")} />;
     }
-    return (
-      <div className="flex flex-col items-center gap-3 px-6 py-14 text-center">
-        <span
-          aria-hidden="true"
-          className="flex size-12 items-center justify-center rounded-full bg-surface-2 text-muted-foreground"
-        >
-          <ClipboardList className="size-5" />
-        </span>
-        <p className="text-sm font-medium">{t("history.empty.title")}</p>
-        <p className="max-w-sm text-xs leading-relaxed text-muted-foreground">{t("history.empty.body")}</p>
-      </div>
-    );
+    return <EmptyState icon={icon} title={t("history.empty.title")} body={t("history.empty.body")} />;
   }
   return (
     <>
@@ -1230,9 +1230,9 @@ export function DiagnosticsPage() {
       title={t("title")}
       help={{ body: t("help.body"), slug: "run-checks" }}
       /* {at} lands INSIDE a translated sentence, so it takes that sentence's
-         language — lib/i18n's localeTag. Computed here, never formatted by the
-         dictionary (QA scope 2, finding #8). */
-      description={at ? t("description.at", { at: at.toLocaleString(localeTag(locale)) }) : t("description")}
+         language and the house clock — lib/i18n's stampFull. Computed here,
+         never formatted by the dictionary (QA scope 2, finding #8). */
+      description={at ? t("description.at", { at: stampFull(at, locale) }) : t("description")}
     >
       {canCreate ? (
         <RunForm nodeNames={nodeNames} canReadTargets={can("targets:read")} canWriteChecks={can("checks:write")} />
@@ -1306,6 +1306,10 @@ export function DiagnosticsPage() {
             runs={visibleRuns}
             engaged={at !== null}
             filtered={typeFilter !== "" || statusFilter !== ""}
+            onClearFilters={() => {
+              setTypeFilter("");
+              setStatusFilter("");
+            }}
             scope={`${typeFilter}|${statusFilter}|${at?.toISOString() ?? ""}`}
           />
 

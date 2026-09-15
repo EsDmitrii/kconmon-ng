@@ -1,10 +1,11 @@
 import { Pin, PinOff } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { Badge, type BadgeProps } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Pager, usePager } from "@/components/ui/pager";
 import { Skeleton } from "@/components/ui/skeleton";
-import { useChartCursor } from "@/lib/chart-cursor";
+import { TIMELINE_CURSOR_SOURCE, useChartCursor } from "@/lib/chart-cursor";
 import { stampShort, useLocale, useT, type Locale } from "@/lib/i18n";
 import { countForm, investigateDict, type InvestigateKey } from "@/lib/i18n/dict/investigate";
 import type { TimelineEntry, TimelineKind } from "@/lib/investigation";
@@ -17,8 +18,10 @@ import { cn } from "@/lib/utils";
    the owner's product rule made it every list's. */
 
 /** Who this pane is in the page's cursor group — charts skip their own echo by
- *  source, and the timeline is never a chart, so it just needs a name. */
-const CURSOR_SOURCE = "investigation-timeline";
+ *  source, and the timeline is never a chart, so it just needs a name. The
+ *  constant lives in lib/chart-cursor.tsx because the signal column's readout
+ *  reads it too. */
+const CURSOR_SOURCE = TIMELINE_CURSOR_SOURCE;
 
 /**
  * KIND_KEY maps a source onto its badge text in lib/i18n/dict/investigate.ts; the words there are
@@ -60,6 +63,21 @@ export interface SourceNote {
 
 const ROW_CLASS = "flex flex-wrap items-baseline gap-x-3 gap-y-1 border-l-2 px-3 py-2 text-sm outline-none";
 
+/* ONE row, two shapes, the same DOM. From sm up the stamp and the badge are
+   direct flex items (the wrapper is display:contents) and the title is the
+   flexible column between them and the action. Below sm the wrapper is a real
+   line of its own — stamp and badge — the title drops to a full-width line
+   under it (basis-full, ordered past the action so the action stays on the
+   first line), and the detail is the third. The phone layout is the desktop
+   row reflowed, never a second copy of it. */
+const STAMP_GROUP_CLASS = "flex min-w-0 flex-1 basis-0 items-baseline gap-2 sm:contents";
+const STAMP_CLASS = "mono-data w-28 shrink-0 text-muted-foreground";
+/* [overflow-wrap:anywhere] rather than break-all: a URL or a src→dst pair
+   breaks at its separators first and mid-token only when a single token is
+   wider than the column. */
+const TITLE_CLASS = "order-1 min-w-0 basis-full break-words [overflow-wrap:anywhere] sm:order-none sm:flex-1";
+const DETAIL_CLASS = "order-2 w-full text-xs sm:order-none";
+
 /**
  * rowKey is a row's IDENTITY — its React key, and what the pane highlights by.
  *
@@ -69,6 +87,132 @@ const ROW_CLASS = "flex flex-wrap items-baseline gap-x-3 gap-y-1 border-l-2 px-3
  */
 function rowKey(entry: TimelineEntry, index: number): string {
   return `${entry.kind}:${entry.ref?.id ?? index}:${entry.at.getTime()}`;
+}
+
+/* ── the fold: a run of read-only audit rows drawn as ONE row ─────────────── */
+
+/**
+ * The console audits its own reads, and an investigation page polls PromQL
+ * through the audited proxy: on a busy hour the audit source alone contributed
+ * eight of the ten rows on page one, every one of them "POST
+ * /api/v1/promql/query_range · allowed". They are history and they stay in the
+ * list (lib/investigation-sources.ts's auditEntries keeps them, the export
+ * carries them, the count above counts them) — what changes is how a RUN of
+ * them is drawn: one summary row per run, opened on request.
+ *
+ * The fold is a rendering decision, made here and nowhere earlier: the merge,
+ * the dedupe, the onset detection and the cause ranking all still see every
+ * row. FOLD_MIN is two because a single read-only call is a row like any
+ * other, and a summary of one thing is longer than the thing.
+ */
+export const FOLD_MIN = 2;
+
+export interface TimelineFold {
+  /** Identity for React and for the open/closed set — the first row's key. */
+  key: string;
+  /** NEWEST FIRST, the order the pane draws in. */
+  entries: TimelineEntry[];
+  /** The first entry's position in the whole drawn list; each entry's own
+   *  index is `index + i`, which keeps rowKey stable across a fold opening. */
+  index: number;
+}
+
+export type TimelineItem =
+  | { kind: "row"; entry: TimelineEntry; index: number }
+  | { kind: "fold"; fold: TimelineFold };
+
+/** A read the audit log recorded — see lib/investigation-sources.ts's isReadOnlyAudit. */
+function isReadOnlyAudit(entry: TimelineEntry): boolean {
+  return entry.kind === "audit" && entry.readOnly === true;
+}
+
+/**
+ * foldReadOnlyAudit turns the drawn list into rows and folds. Pure, and over
+ * the WHOLE list rather than the page: folding inside a page would leave the
+ * page mostly empty when the run is what filled it, and the point is that page
+ * one shows the things that happened.
+ */
+export function foldReadOnlyAudit(list: readonly TimelineEntry[]): TimelineItem[] {
+  const items: TimelineItem[] = [];
+  let i = 0;
+  while (i < list.length) {
+    if (!isReadOnlyAudit(list[i])) {
+      items.push({ kind: "row", entry: list[i], index: i });
+      i++;
+      continue;
+    }
+    let end = i;
+    while (end < list.length && isReadOnlyAudit(list[end])) end++;
+    if (end - i < FOLD_MIN) {
+      items.push({ kind: "row", entry: list[i], index: i });
+      i++;
+      continue;
+    }
+    items.push({
+      kind: "fold",
+      fold: { key: `fold:${rowKey(list[i], i)}`, entries: list.slice(i, end), index: i },
+    });
+    i = end;
+  }
+  return items;
+}
+
+/**
+ * FoldRow is the summary: the newest call's stamp, the audit badge, how many
+ * calls, and the verb that opens them. The verb is the row's only new text
+ * treatment — the whole sentence is in aria-label and title. Nothing here moves
+ * the shared cursor: a run spans a stretch of time, and a cursor is an instant.
+ */
+function FoldRow({
+  fold,
+  open,
+  locale,
+  onToggle,
+}: {
+  fold: TimelineFold;
+  open: boolean;
+  locale: Locale;
+  onToggle: () => void;
+}) {
+  const t = useT(investigateDict);
+  const count = fold.entries.length;
+  const newest = fold.entries[0];
+  const oldest = fold.entries[count - 1];
+  const sentence = t(open ? "timeline.fold.hide.aria" : "timeline.fold.show.aria", { count });
+  const from = stampShort(oldest.at, locale);
+  const to = stampShort(newest.at, locale);
+  return (
+    <li data-testid="timeline-fold" className={cn(ROW_CLASS, "border-l-border")}>
+      <div className={STAMP_GROUP_CLASS}>
+        <span className={STAMP_CLASS}>{to}</span>
+        <Badge variant="neutral">{t("kind.audit")}</Badge>
+      </div>
+      <span className={cn(TITLE_CLASS, "text-muted-foreground")}>
+        {t(`timeline.fold.${countForm(locale, count)}` as InvestigateKey, { count })}
+      </span>
+      <Button
+        type="button"
+        size="sm"
+        variant="ghost"
+        aria-expanded={open}
+        aria-label={sentence}
+        title={sentence}
+        onClick={onToggle}
+        /* -my-1.5: the 32px control sits on the text's own line height rather
+           than making the summary row taller than the rows it stands for. */
+        className="-my-1.5 shrink-0"
+      >
+        {t(open ? "timeline.fold.hide" : "timeline.fold.show")}
+      </Button>
+      {/* The stretch the run covers, only when it is wider than one minute —
+          the newest stamp alone would let thirty minutes of polling read as one. */}
+      {from !== to ? (
+        <span className={cn(DETAIL_CLASS, "mono-data text-muted-foreground")}>
+          {from} – {to}
+        </span>
+      ) : null}
+    </li>
+  );
 }
 
 /**
@@ -119,13 +263,15 @@ function TimelineRow({
         "focus-visible:ring-2 focus-visible:ring-ring",
       )}
     >
-      {/* stampShort, not stampClock: the window is arbitrary (?from/?to, an incident permalink, and
-          the 6h preset any time the operator looks between 00:00 and 06:00), so a clock alone made
-          newest-first rows across midnight read as out of order — 23:50 sitting under 00:10. The
-          column carries the day when there is one to carry. */}
-      <span className="mono-data w-28 shrink-0 text-muted-foreground">{stampShort(entry.at, locale)}</span>
-      <Badge variant={SEVERITY_VARIANT[entry.severity]}>{t(KIND_KEY[entry.kind])}</Badge>
-      <span className="min-w-0 flex-1 break-words">{entry.title}</span>
+      <div className={STAMP_GROUP_CLASS}>
+        {/* stampShort, not stampClock: the window is arbitrary (?from/?to, an incident permalink, and
+            the 6h preset any time the operator looks between 00:00 and 06:00), so a clock alone made
+            newest-first rows across midnight read as out of order — 23:50 sitting under 00:10. The
+            column carries the day when there is one to carry. */}
+        <span className={STAMP_CLASS}>{stampShort(entry.at, locale)}</span>
+        <Badge variant={SEVERITY_VARIANT[entry.severity]}>{t(KIND_KEY[entry.kind])}</Badge>
+      </div>
+      <span className={TITLE_CLASS}>{entry.title}</span>
       {ref && pinning ? (
         <button
           type="button"
@@ -150,7 +296,7 @@ function TimelineRow({
         </button>
       ) : null}
       {/* detailTitle keeps the machine identity a readable detail replaced (raw audit subject) one hover away. */}
-      {entry.detail ? <span className="w-full text-xs" title={entry.detailTitle}>{entry.detail}</span> : null}
+      {entry.detail ? <span className={DETAIL_CLASS} title={entry.detailTitle}>{entry.detail}</span> : null}
     </li>
   );
 }
@@ -248,12 +394,24 @@ export function InvestigationTimeline({
    * Adjusting state during render rather than in an effect (React's own "resetting state when a
    * prop changes" pattern).
    */
+  /* Which folds the reader has opened, by fold key. */
+  const [openFolds, setOpenFolds] = useState<ReadonlySet<string>>(() => new Set());
+  const toggleFold = (key: string) =>
+    setOpenFolds((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+
   const [seenWindow, setSeenWindow] = useState(windowKey);
   if (seenWindow !== windowKey) {
     setSeenWindow(windowKey);
-    /* A new window is a new list; the row that was lit is not in it. The PAGE
-       is reset by usePager, which takes the same key. */
+    /* A new window is a new list; the row that was lit is not in it, and
+       neither is the fold that was open. The PAGE is reset by usePager, which
+       takes the same key. */
     setActiveKey(null);
+    setOpenFolds(new Set());
   }
 
   /* NEWEST FIRST. The entries arrive ascending — mergeTimeline builds them that way and the onset
@@ -263,16 +421,22 @@ export function InvestigationTimeline({
      sees time running forwards. */
   const newestFirst = useMemo<TimelineEntry[]>(() => [...entries].reverse(), [entries]);
 
+  /* Then the fold, over the whole drawn list — see foldReadOnlyAudit. The
+     pager pages over ROWS AS DRAWN, so "Showing 10 of 190" counts what is on
+     screen against what can be paged to, while the header above keeps counting
+     entries: the two are different numbers on purpose and each says which. */
+  const items = useMemo(() => foldReadOnlyAudit(newestFirst), [newestFirst]);
+
   /* The slice, the size and the anchor all come from the shared pager now. */
-  const pager = usePager(newestFirst, { resetKey: windowKey });
-  const { slice, visible } = pager;
+  const pager = usePager(items, { resetKey: windowKey });
+  const { visible } = pager;
 
   return (
     <Card asChild className="overflow-hidden p-0">
       <section aria-label={t("timeline.aria")}>
         <div className="border-b border-border px-4 py-3">
           <div className="flex items-baseline justify-between gap-3">
-            <h3 className="type-section">{t("timeline.title")}</h3>
+            <h2 className="type-section">{t("timeline.title")}</h2>
             {/* The WINDOW's count, never the page's (see the file header), and
                 it is rendered at ZERO too (QA scope 3, finding #15). A count
                 that disappears when it reaches nought leaves the reader to work
@@ -379,19 +543,46 @@ export function InvestigationTimeline({
 
         {entries.length > 0 ? (
           <ul aria-label={t("timeline.entries.aria")} className="divide-y divide-border/60">
-            {visible.map((e, i) => {
-              const key = rowKey(e, slice.start + i);
-              return (
-                <TimelineRow
-                  key={key}
-                  entry={e}
-                  active={activeKey === key}
-                  locale={locale}
-                  onEnter={() => enter(key, e.at)}
-                  onLeave={leave}
-                  pinning={pinning}
-                />
-              );
+            {visible.map((item) => {
+              if (item.kind === "row") {
+                const key = rowKey(item.entry, item.index);
+                return (
+                  <TimelineRow
+                    key={key}
+                    entry={item.entry}
+                    active={activeKey === key}
+                    locale={locale}
+                    onEnter={() => enter(key, item.entry.at)}
+                    onLeave={leave}
+                    pinning={pinning}
+                  />
+                );
+              }
+              const { fold } = item;
+              const open = openFolds.has(fold.key);
+              /* An OPEN fold is its summary followed by its rows, each a row
+                 like any other — hoverable, focusable, pinnable — under the
+                 same list, so a keyboard walk and the cursor sync see nothing
+                 special about them. */
+              return [
+                <FoldRow key={fold.key} fold={fold} open={open} locale={locale} onToggle={() => toggleFold(fold.key)} />,
+                ...(open
+                  ? fold.entries.map((e, j) => {
+                      const key = rowKey(e, fold.index + j);
+                      return (
+                        <TimelineRow
+                          key={key}
+                          entry={e}
+                          active={activeKey === key}
+                          locale={locale}
+                          onEnter={() => enter(key, e.at)}
+                          onLeave={leave}
+                          pinning={pinning}
+                        />
+                      );
+                    })
+                  : []),
+              ];
             })}
           </ul>
         ) : null}

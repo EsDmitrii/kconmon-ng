@@ -37,7 +37,7 @@ const en = {
   "help.body":
     "The controller's event feed, newest first. " +
     "Live, the feed is pushed over the WebSocket and the browser holds a ring of the most recent events; anything older is served from event history, which needs the console database. " +
-    "Operator annotations are interleaved at their own timestamps and ignore the event filters. " +
+    "Operator annotations are interleaved at their own timestamps and answer to the same filters: a severity or type narrows them out, a scope query keeps only the notes on that scope. " +
     "With the Time Machine engaged, the live tail is off and the feed becomes scrollback ending at the viewed instant.",
 
   /* ── toolbar ────────────────────────────────────────────────────────────── */
@@ -153,7 +153,7 @@ export const liveDict: Dictionary<LiveKey> = defineDict(en, {
   "help.body":
     "Лента событий контроллера, новые сверху. " +
     "Вживую события приходят по WebSocket, и браузер держит только кольцо самых свежих; всё, что старше, отдаёт история событий, а ей нужна база данных консоли. " +
-    "Заметки операторов вклиниваются в ленту по своему времени и фильтров событий не слушаются. " +
+    "Заметки операторов вклиниваются в ленту по своему времени и подчиняются тем же фильтрам: важность или тип их отсеивают, а запрос по области оставляет только заметки на эту область. " +
     "С включённой Машиной времени живой хвост выключен, и лента становится прокруткой назад от выбранного момента.",
 
   "filters.severity": "Важность",

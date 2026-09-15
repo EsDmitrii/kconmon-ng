@@ -18,6 +18,12 @@ const GAP = 8;
  * it, flipped to the other one; the horizontal centre is clamped into the
  * viewport by the same margin, so a first- or last-column header no longer
  * pushes half the bubble off screen.
+ *
+ * The horizontal centring lives in the INLINE transform only. A -translate-x-1/2
+ * utility on top of it doubled the shift once the entrance animation stopped
+ * clobbering `transform` (index.css's scale-in), and the pop-enter keyframes
+ * animate `scale`, not `transform`, for the same reason: with fill-mode both
+ * the end keyframe permanently overrode this element's own translate.
  */
 export function Tooltip({
   content,
@@ -109,7 +115,7 @@ export function Tooltip({
                   role="tooltip"
                   data-side={resolved}
                   className={cn(
-                    "pop-enter pointer-events-none fixed z-50 -translate-x-1/2 rounded-md bg-popover px-3 py-2 text-xs text-popover-foreground shadow-pop",
+                    "pop-enter pointer-events-none fixed z-50 rounded-md bg-popover px-3 py-2 text-xs text-popover-foreground shadow-pop",
                     className,
                   )}
                   style={{

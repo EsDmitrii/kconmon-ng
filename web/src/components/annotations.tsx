@@ -305,7 +305,18 @@ function CreateAnnotationForm({
   );
 }
 
-function AnnotationRow({ annotation, canWrite, onChanged }: { annotation: Annotation; canWrite: boolean; onChanged: () => void }) {
+function AnnotationRow({
+  annotation,
+  canWrite,
+  ownScope,
+  onChanged,
+}: {
+  annotation: Annotation;
+  canWrite: boolean;
+  /** The scope the SURFACE is about; a note filed under it needs no chip. */
+  ownScope?: string;
+  onChanged: () => void;
+}) {
   const t = useT(annotationsDict);
   const { locale } = useLocale();
   const guard = useWriteGuard();
@@ -327,30 +338,52 @@ function AnnotationRow({ annotation, canWrite, onChanged }: { annotation: Annota
     }
   }
 
+  /* The chip names a FOREIGN scope (a global note on a pair card). A note filed
+     under the scope the reader chose said nothing new, and a pair scope was
+     the widest thing on the row: it broke to "kconmon-stand-wo…" in a rail.
+     The full scope stays on the row's title either way. */
+  const showScope = ownScope === undefined || annotation.scope !== ownScope;
+
   return (
-    <li data-testid="annotation-item" className="flex flex-wrap items-center gap-2 py-1.5 text-xs">
+    <li
+      data-testid="annotation-item"
+      className="flex flex-wrap items-center gap-x-2 gap-y-1 py-1.5 text-xs"
+      title={showScope ? undefined : scopeLabel(annotation.scope, t)}
+    >
       {/* Narrow, truncating and allowed to shrink — the note is what this row
           is for, and the stamp was taking a quarter of a 20rem rail for a year
           and a seconds field nobody reads here (finding #11). */}
       <span className="nums w-28 shrink-0 truncate text-muted-foreground" title={fmtStamp(annotation.startAt, locale)}>
         {fmtStampCompact(annotation.startAt, locale)}
       </span>
-      <span data-testid="annotation-text" className="min-w-0 flex-1 truncate" title={annotation.text}>
+      {/* Two layouts, one element, keyed on the LIST's width (the <ul> is the
+          @container). Under 28rem the note is its own line, first, clamped to
+          two, and the stamp, scope and Delete form the line under it; at 28rem
+          and up it is the single truncating line between them. A 24rem rail
+          used to leave the note 38px ("Zo…"), and a phone truncated it at
+          "Stand bro…"; the full text stays on title in both. No basis-auto at
+          @md: flex-1 already resets the basis to 0, and a content-width basis
+          in a wrapping row shoved the chip and Delete onto a second line. */}
+      <span
+        data-testid="annotation-text"
+        className="order-first min-w-0 basis-full line-clamp-2 break-words whitespace-normal @md:order-none @md:flex-1 @md:line-clamp-none @md:truncate"
+        title={annotation.text}
+      >
         {annotation.text}
       </span>
-      {/* The scope column now truncates too (QA round 3, finding #11). Round 2
-          gave the stamp a w-28 cap, but the scope kept its natural width, and a
-          pair scope ("node-a→node-b") is wider than the stamp: inside the
-          Investigate page's 24rem right column the note — the one thing this
-          row exists to show — was squeezed to about 38px. A scope the reader
+      {/* The scope column truncates too (QA round 3, finding #11): a pair scope
+          ("node-a→node-b") is wider than the stamp, and inside the Investigate
+          page's 24rem column it squeezed the note out. A scope the reader
           already chose is the cheapest thing on the row to shorten, and the
           whole value stays one hover away. */}
-      <span
-        className="max-w-[7rem] shrink-0 truncate text-[11px] text-muted-foreground"
-        title={scopeLabel(annotation.scope, t)}
-      >
-        {scopeLabel(annotation.scope, t)}
-      </span>
+      {showScope ? (
+        <span
+          className="max-w-[7rem] shrink-0 truncate text-[11px] text-muted-foreground"
+          title={scopeLabel(annotation.scope, t)}
+        >
+          {scopeLabel(annotation.scope, t)}
+        </span>
+      ) : null}
       {error ? (
         <span role="alert" className="text-[11px] text-health-bad">
           {error}
@@ -367,11 +400,15 @@ function AnnotationRow({ annotation, canWrite, onChanged }: { annotation: Annota
             <span role="status" className="sr-only">
               {t("row.confirmDelete.aria", { text: annotation.text })}
             </span>
+            {/* ml-auto: on the stacked layout the actions hug the right of the
+                meta line; on the single line the note's flex-1 leaves no slack
+                for it to act on. */}
             <Button
               ref={confirmRef}
               type="button"
               size="sm"
               variant="outline"
+              className="ml-auto"
               loading={busy}
               {...guard}
               aria-label={t("row.confirmDelete.aria", { text: annotation.text })}
@@ -389,6 +426,7 @@ function AnnotationRow({ annotation, canWrite, onChanged }: { annotation: Annota
             type="button"
             size="sm"
             variant="ghost"
+            className="ml-auto"
             {...guard}
             aria-label={t("row.delete.aria", { text: annotation.text })}
             onClick={ask}
@@ -413,11 +451,16 @@ export function AnnotationBar({
   onChanged,
   frozenWindow,
   inline,
+  ownScope,
   className,
 }: {
   scope: string;
   /** What the count sentence CALLS the scope, when that differs from the value notes are filed under. */
   scopeCaption?: string;
+  /** Opt-in: rows whose scope IS this one drop their scope chip (a pair card
+   *  need not tell the reader the note is about the pair). Foreign scopes,
+   *  "global" included, keep theirs. Absent, every row shows its chip. */
+  ownScope?: string;
   annotations: Annotation[];
   error?: Error | null;
   onChanged: () => void;
@@ -531,13 +574,18 @@ export function AnnotationBar({
       {/* NEWEST FIRST for the reader. mergeAnnotations sorts ascending because the chart's markLines
           and the window arithmetic read it that way; a list of notes is read from the top, and the
           note somebody just wrote belongs there. */}
+      {/* @container: each row lays itself out by the width the LIST has, not
+          the viewport, so one rule serves the Investigate rail (24rem), a card
+          rail (20rem) and a phone. w-full min-w-0: inline, the list is a flex
+          item under a display:contents parent, and basis-full alone still let
+          a long note push Explore past the viewport edge on a phone. */}
       {annotations.length > 0 ? (
         <ul
           aria-label={t("bar.list.aria")}
-          className={cn("m-0 divide-y divide-border/60 p-0", inline && "order-2 basis-full")}
+          className={cn("@container m-0 w-full min-w-0 divide-y divide-border/60 p-0", inline && "order-2 basis-full")}
         >
           {[...annotations].reverse().map((a) => (
-            <AnnotationRow key={a.id} annotation={a} canWrite={canWrite} onChanged={handleChanged} />
+            <AnnotationRow key={a.id} annotation={a} canWrite={canWrite} ownScope={ownScope} onChanged={handleChanged} />
           ))}
         </ul>
       ) : null}

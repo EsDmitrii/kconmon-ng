@@ -71,6 +71,12 @@ type Agent struct {
 	NodeName string `json:"nodeName"`
 	PodIP    string `json:"podIP"`
 	Zone     string `json:"zone"`
+	// Labels and Capabilities are the agent's own registration data, carried verbatim: the web
+	// derives "external" (kconmon-ng.io/external) and the probed planes (plane:*) from them, and
+	// a struct without the fields silently dropped both on re-marshal. Absent (nil, omitted) means
+	// the agent sent none, which consumers must read as "unknown", never as "unsupported".
+	Labels       map[string]string `json:"labels,omitempty"`
+	Capabilities []string          `json:"capabilities,omitempty"`
 }
 
 // Topology is the controller's topology snapshot.

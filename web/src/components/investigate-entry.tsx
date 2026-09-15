@@ -13,6 +13,7 @@ import {
 import { useTimeContext, withAtParam } from "@/lib/timemachine";
 import { Badge } from "./ui/badge";
 import { Card } from "./ui/card";
+import { EmptyState } from "./ui/empty-state";
 import { cn } from "@/lib/utils";
 
 /** Both are parameterised by ONE InvestigationScope rather than by a name and a kind. */
@@ -76,7 +77,7 @@ export function RelatedIncidents({ scope }: { scope: InvestigationScope }) {
         ) : resolved && !available ? (
           <p className="mt-2 text-xs leading-relaxed text-muted-foreground">{t("noDatabase")}</p>
         ) : related.length === 0 ? (
-          <p className="mt-2 text-xs leading-relaxed text-muted-foreground">{t("empty")}</p>
+          <EmptyState compact title={t("empty")} body={t("empty.body")} />
         ) : (
           <ul className="mt-2 flex flex-col divide-y divide-border">
             {related.map((i) => (

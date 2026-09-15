@@ -193,9 +193,11 @@ export function TimeMachineProvider({ children }: { children: ReactNode }) {
       {/* The description every time-disabled control points its
           aria-describedby at, mounted ONCE and only while engaged — an
           always-present "Time Machine is engaged" in the accessibility tree
-          would be a lie for the whole time the console is Live. */}
+          would be a lie for the whole time the console is Live. `hidden`, not
+          sr-only: aria-describedby still reads a hidden node, and the sentence
+          stays out of the page's reading order, where no landmark holds it. */}
       {at ? (
-        <span id={TIME_MACHINE_REASON_ID} className="sr-only">
+        <span id={TIME_MACHINE_REASON_ID} hidden>
           {t("timemachine.disabledReason")}
         </span>
       ) : null}

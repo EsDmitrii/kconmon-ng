@@ -1,9 +1,13 @@
 import { Fragment, useEffect, useId, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { ExternalLink } from "lucide-react";
+import { DOCS_BASE_URL } from "@/components/page-help";
 import { PageShell } from "@/components/page-shell";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
+import { TextLink } from "@/components/ui/text-link";
+import { EmptyState } from "@/components/ui/empty-state";
 import { Pager, usePager } from "@/components/ui/pager";
 import { DateTimePicker } from "@/components/ui/datetime-picker";
 import { Input } from "@/components/ui/input";
@@ -81,25 +85,78 @@ function fmtTime(timestamp: string | null | undefined, locale: Locale): string {
   return Number.isNaN(d.getTime()) ? timestamp : stampFull(d, locale);
 }
 
-function SectionCard({ id, title, children }: { id?: string; title: string; children: ReactNode }) {
+function SectionCard({
+  id,
+  title,
+  blurb,
+  action,
+  children,
+}: {
+  id?: string;
+  title: string;
+  /** The one-paragraph explanation under the heading. */
+  blurb?: ReactNode;
+  /** The section's own create button, on the heading line at the right. */
+  action?: ReactNode;
+  children: ReactNode;
+}) {
   return (
-    <Card asChild className="p-6">
+    <Card asChild className="p-4 sm:p-6">
       {/* `id` is the anchor the sidebar's user menu links a deep link at. */}
       <section id={id}>
-        <h2 className="type-section">{title}</h2>
+        <div className="flex items-start justify-between gap-4">
+          <h2 className="type-section">{title}</h2>
+          {action ? <div className="shrink-0">{action}</div> : null}
+        </div>
+        {blurb ? <p className="mt-1 max-w-prose text-xs leading-relaxed text-muted-foreground">{blurb}</p> : null}
         {children}
       </section>
     </Card>
   );
 }
 
-function ErrorLine({ children, id }: { children: ReactNode; id?: string }) {
+function ErrorLine({
+  children,
+  id,
+  onRetry,
+}: {
+  children: ReactNode;
+  id?: string;
+  /** Re-runs the read that failed; a small ghost button beside the sentence. */
+  onRetry?: () => void;
+}) {
+  const t = useT(settingsDict);
+  /* The sentence and the role stay on ONE element — tests and assistive tech
+     both find the alert by its text — and the button rides inside it. */
   return (
     <p id={id} role="alert" className="mt-3 text-sm leading-relaxed text-health-bad">
       {children}
+      {onRetry ? (
+        <Button type="button" size="sm" variant="ghost" className="ml-3 h-7 px-2 align-middle" onClick={onRetry}>
+          {t("error.retry")}
+        </Button>
+      ) : null}
     </p>
   );
 }
+
+/**
+ * RowActionLabel is the VISIBLE half of a row button whose accessible name
+ * carries the object's own name — pages/alerting.tsx's component, verbatim.
+ * `text` is the verb that shows, `title` the whole sentence; the span stays
+ * bounded and truncating because a name is operator bytes of any length.
+ */
+function RowActionLabel({ text, title }: { text: string; title?: string }) {
+  return (
+    <span aria-hidden="true" className="block max-w-[14rem] truncate" title={title ?? text}>
+      {text}
+    </span>
+  );
+}
+
+/** ROW_ACTION is the compact ghost button every row action on this page is
+ *  drawn as; a touch tighter on a phone, the same value pages/alerting.tsx uses. */
+const ROW_ACTION = "h-7 px-1.5 sm:px-2";
 
 /** enT is the English translator this file's PURE helpers default to, so
  *  parseBundle keeps the signature (and the output) its unit tests read. */
@@ -129,9 +186,9 @@ function withNodes(template: string, nodes: Record<string, ReactNode>): ReactNod
  */
 function SurfaceLink({ to, children }: { to: string; children: ReactNode }) {
   return (
-    <a href={withAtParam(to)} className="text-primary hover:underline">
+    <TextLink href={withAtParam(to)}>
       {children}
-    </a>
+    </TextLink>
   );
 }
 
@@ -355,17 +412,17 @@ function WebhookForm({ initial, onDone }: { initial?: Webhook; onDone: () => voi
   }
 
   return (
-    <Card asChild className="p-6">
+    <Card asChild className="p-4 sm:p-6">
       <form onSubmit={handleSubmit} className="flex max-w-2xl flex-col gap-4">
         <h3 className="type-section">
           {initial ? t("webhooks.form.edit", { name: initial.name }) : t("webhooks.form.create")}
         </h3>
-        <div className="grid gap-4 sm:grid-cols-2">
+        <div className="grid grid-cols-[minmax(0,1fr)] gap-4 sm:grid-cols-2">
           {/* The message is a SIBLING of the label, not a child of it: text
               inside a wrapping <label> becomes part of the control's accessible
               name, and "Name webhook: name "pd" is already taken" is not what
               the box is called. */}
-          <div className="flex flex-col gap-1 text-[13px]">
+          <div className="flex min-w-0 flex-col gap-1 text-[13px]">
             <label className="flex flex-col gap-1">
               <span className="text-muted-foreground">{t("webhooks.form.name")}</span>
               {/* The two placeholders are sample VALUES — a receiver's name and
@@ -376,11 +433,12 @@ function WebhookForm({ initial, onDone }: { initial?: Webhook; onDone: () => voi
                 aria-invalid={invalid("name") || undefined}
                 aria-describedby={describedBy("name")}
                 onChange={(e) => edit("name", { name: e.target.value })}
+                className="w-full"
               />
             </label>
             <FieldError field="name" />
           </div>
-          <div className="flex flex-col gap-1 text-[13px]">
+          <div className="flex min-w-0 flex-col gap-1 text-[13px]">
             <label className="flex flex-col gap-1">
               <span className="text-muted-foreground">{t("webhooks.form.url")}</span>
               <Input
@@ -389,6 +447,7 @@ function WebhookForm({ initial, onDone }: { initial?: Webhook; onDone: () => voi
                 aria-invalid={invalid("url") || undefined}
                 aria-describedby={describedBy("url")}
                 onChange={(e) => edit("url", { url: e.target.value })}
+                className="w-full"
               />
             </label>
             <FieldError field="url" />
@@ -407,8 +466,10 @@ function WebhookForm({ initial, onDone }: { initial?: Webhook; onDone: () => voi
             {t("webhooks.form.events")}
           </legend>
           {/* The event IDs are the wire values the checkbox writes and the
-              payload carries — they render as themselves. */}
-          <div className="flex flex-wrap gap-4">
+              payload carries — they render as themselves. A grid, not a wrap:
+              five boxes in a wrapping row left the fifth alone on a line of
+              its own; two columns on a phone and three above it never do. */}
+          <div className="grid grid-cols-2 gap-x-4 gap-y-2 sm:grid-cols-3">
             {WEBHOOK_EVENTS.map((event) => (
               <label key={event} className="flex items-center gap-2">
                 <input
@@ -417,7 +478,7 @@ function WebhookForm({ initial, onDone }: { initial?: Webhook; onDone: () => voi
                   onChange={() => toggleEvent(event)}
                   className={CHECKBOX_CLASS}
                 />
-                <span>{event}</span>
+                <span className="mono-data">{event}</span>
               </label>
             ))}
           </div>
@@ -443,15 +504,20 @@ function WebhookForm({ initial, onDone }: { initial?: Webhook; onDone: () => voi
             type="password"
             value={draft.secret}
             aria-invalid={invalid("secret") || undefined}
-            aria-describedby={invalid("secret") ? `${fieldErrorId("secret")} ${secretId}-help` : `${secretId}-help`}
+            aria-describedby={invalid("secret") ? fieldErrorId("secret") : `${secretId}-help`}
             onChange={(e) => edit("secret", { secret: e.target.value })}
+            className="w-full"
           />
           <FieldError field="secret" />
           {/* Write-only, in both directions: the API never returns a secret, so
-              this box starts empty even when editing an endpoint that has one. */}
-          <span id={`${secretId}-help`} className="text-xs leading-relaxed text-muted-foreground">
-            {initial ? t("webhooks.form.secretKeep") : t("webhooks.form.secretNew")}
-          </span>
+              this box starts empty even when editing an endpoint that has one.
+              While the refusal is showing, the hint steps aside: the two said
+              the same thing twice, once in red and once in grey. */}
+          {invalid("secret") ? null : (
+            <span id={`${secretId}-help`} className="text-xs leading-relaxed text-muted-foreground">
+              {initial ? t("webhooks.form.secretKeep") : t("webhooks.form.secretNew")}
+            </span>
+          )}
         </div>
 
         {/* The form-level slot, for a refusal that names no field this form
@@ -460,7 +526,7 @@ function WebhookForm({ initial, onDone }: { initial?: Webhook; onDone: () => voi
             are now in the same place. */}
         {errors.form ? <ErrorLine id={errorId}>{errors.form}</ErrorLine> : null}
 
-        <div className="flex gap-2">
+        <div className="flex flex-wrap gap-2">
           <Button type="submit" loading={submitting} {...guard}>
             {initial ? t("webhooks.form.save") : t("webhooks.form.createButton")}
           </Button>
@@ -541,81 +607,143 @@ function WebhookRow({ hook, onEdit }: { hook: Webhook; onEdit: () => void }) {
   }
 
   return (
-    <li className="flex flex-wrap items-center gap-3 py-3 text-sm">
-      <span className="font-medium">{hook.name}</span>
-      {/* The endpoint URL is an identifier — data face (M4 iron rule). */}
-      <span className="mono-data truncate text-muted-foreground">{hook.url}</span>
-      {hook.events.map((event) => (
-        <Badge key={event} variant="neutral">
-          {event}
-        </Badge>
-      ))}
-      {/* Both pills describe a BOOLEAN this page read, so both translate. */}
-      <Badge variant={hook.enabled ? "ok" : "unknown"}>
-        {hook.enabled ? t("webhooks.row.enabled") : t("webhooks.row.disabled")}
-      </Badge>
-      {/* hasSecret is always true for a stored row, so this reads as the
-          contract statement the API intends — "this endpoint signs its
-          deliveries" — rather than as a question with two answers. An imported
-          endpoint is the one case that can be false (plan Decision 9). */}
-      <Badge variant={hook.hasSecret ? "neutral" : "bad"}>
-        {hook.hasSecret ? t("webhooks.row.signed") : t("webhooks.row.noSecret")}
-      </Badge>
-      {/* lastStatus is the DELIVERY LADDER's own string ("ok", "failed: 502").
-          This row picks its colour and prints it; it does not rewrite it. */}
-      <span data-testid="last-status" className="text-xs">
-        <Badge variant={lastStatusTone(hook.lastStatus)}>{hook.lastStatus === "" ? "—" : hook.lastStatus}</Badge>
-      </span>
-      <span className="mono-data text-muted-foreground">{fmtTime(hook.lastAttempt, locale)}</span>
-      {hook.failures > 0 ? (
-        <span className="text-xs text-health-bad">
-          {t("webhooks.row.failures", {
-            count: hook.failures,
-            /* The locale, because 21 is singular in Russian and plural in
-               English — pluralKey's own doc comment has the case. */
-            word: t(pluralKey(locale, hook.failures, "count.failures.one", "count.failures.few", "count.failures.many")),
-          })}
-        </span>
-      ) : null}
+    /* Two lines of data and a fixed action column: the first line is the
+       endpoint (name, URL, the state pills), the second its subscriptions.
+       The actions never fall under the data — on a phone they take a line of
+       their own, right-aligned; from sm up they are the right column. */
+    <li className="flex flex-wrap items-start gap-x-3 gap-y-2 py-2.5 text-sm sm:flex-nowrap">
+      <div className="flex min-w-0 flex-1 flex-col gap-1.5">
+        <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
+          <span className="shrink-0 font-medium">{hook.name}</span>
+          {/* The endpoint URL is an identifier — data face (M4 iron rule). It
+              is the flexible column: flex-1 with a small floor, so a long one
+              truncates and the pills stay on this line rather than wrapping
+              under it; the whole value is the title. */}
+          <span className="mono-data min-w-[10rem] flex-1 truncate text-muted-foreground" title={hook.url}>
+            {hook.url}
+          </span>
+          {/* Both pills describe a BOOLEAN this page read, so both translate. */}
+          <Badge dot variant={hook.enabled ? "ok" : "unknown"}>
+            {hook.enabled ? t("webhooks.row.enabled") : t("webhooks.row.disabled")}
+          </Badge>
+          {/* hasSecret is always true for a stored row, so this reads as the
+              contract statement the API intends — "this endpoint signs its
+              deliveries" — rather than as a question with two answers. An
+              imported endpoint is the one case that can be false (plan
+              Decision 9), and that one is a measured bad state with a dot. */}
+          <Badge dot={!hook.hasSecret} variant={hook.hasSecret ? "neutral" : "bad"}>
+            {hook.hasSecret ? t("webhooks.row.signed") : t("webhooks.row.noSecret")}
+          </Badge>
+          {/* lastStatus is the DELIVERY LADDER's own string ("ok", "failed: 502").
+              This row picks its colour and prints it; it does not rewrite it.
+              Empty means the ladder has never tried: one muted sentence, not
+              an em-dash pill beside an em-dash stamp. */}
+          <span data-testid="last-status" className="flex items-center gap-2">
+            {hook.lastStatus === "" ? (
+              <span className="type-meta">{t("webhooks.row.neverDelivered")}</span>
+            ) : (
+              <Badge dot variant={lastStatusTone(hook.lastStatus)}>
+                {hook.lastStatus}
+              </Badge>
+            )}
+          </span>
+          {hook.lastAttempt ? (
+            <span className="mono-data whitespace-nowrap text-muted-foreground">{fmtTime(hook.lastAttempt, locale)}</span>
+          ) : null}
+          {hook.failures > 0 ? (
+            <span className="text-xs text-health-bad">
+              {t("webhooks.row.failures", {
+                count: hook.failures,
+                /* The locale, because 21 is singular in Russian and plural in
+                   English — pluralKey's own doc comment has the case. */
+                word: t(pluralKey(locale, hook.failures, "count.failures.one", "count.failures.few", "count.failures.many")),
+              })}
+            </span>
+          ) : null}
+        </div>
+        {/* The subscriptions: machine values, so the chips wear the data face. */}
+        <div className="flex flex-wrap gap-2">
+          {hook.events.map((event) => (
+            <Badge key={event} variant="neutral" className="mono-data">
+              {event}
+            </Badge>
+          ))}
+        </div>
+        {queued ? (
+          <span role="status" className="type-meta">
+            {t("webhooks.row.queued")}
+          </span>
+        ) : null}
+        {error ? (
+          <span role="alert" className="text-xs leading-relaxed text-health-bad">
+            {error}
+          </span>
+        ) : null}
+      </div>
 
-      <span className="ml-auto flex flex-wrap items-center gap-2">
+      <span className="flex basis-full shrink-0 items-center justify-end gap-1 sm:basis-auto">
         {confirming ? (
           <>
             {/* Spoken as well as drawn — the row swaps its controls under the reader. */}
             <span role="status" className="sr-only">
               {t("webhooks.row.confirmDelete", { name: hook.name })}
             </span>
-            <Button ref={confirmRef} size="sm" variant="outline" loading={busy} {...guard} onClick={handleDelete}>
-              {t("webhooks.row.confirmDelete", { name: hook.name })}
+            {/* The destructive treatment is reserved for this second click. */}
+            <Button
+              ref={confirmRef}
+              size="sm"
+              variant="destructive"
+              className={ROW_ACTION}
+              loading={busy}
+              {...guard}
+              aria-label={t("webhooks.row.confirmDelete", { name: hook.name })}
+              onClick={handleDelete}
+            >
+              <RowActionLabel
+                text={t("webhooks.row.confirmDelete.verb")}
+                title={t("webhooks.row.confirmDelete", { name: hook.name })}
+              />
             </Button>
-            <Button size="sm" variant="ghost" onClick={reset}>
+            <Button size="sm" variant="ghost" className={ROW_ACTION} onClick={reset}>
               {t("cancel")}
             </Button>
           </>
         ) : (
           <>
-            <Button size="sm" variant="ghost" {...guard} onClick={handleTest}>
-              {t("webhooks.row.test", { name: hook.name })}
+            <Button
+              size="sm"
+              variant="ghost"
+              className={ROW_ACTION}
+              {...guard}
+              aria-label={t("webhooks.row.test", { name: hook.name })}
+              onClick={handleTest}
+            >
+              <RowActionLabel text={t("webhooks.row.test.verb")} title={t("webhooks.row.test", { name: hook.name })} />
             </Button>
-            <Button size="sm" variant="ghost" {...guard} onClick={onEdit}>
-              {t("webhooks.row.edit", { name: hook.name })}
+            <Button
+              size="sm"
+              variant="ghost"
+              className={ROW_ACTION}
+              {...guard}
+              aria-label={t("webhooks.row.edit", { name: hook.name })}
+              onClick={onEdit}
+            >
+              <RowActionLabel text={t("webhooks.row.edit.verb")} title={t("webhooks.row.edit", { name: hook.name })} />
             </Button>
-            <Button ref={triggerRef} size="sm" variant="ghost" {...guard} onClick={ask}>
-              {t("webhooks.row.delete", { name: hook.name })}
+            <Button
+              ref={triggerRef}
+              size="sm"
+              variant="ghost"
+              className={ROW_ACTION}
+              {...guard}
+              aria-label={t("webhooks.row.delete", { name: hook.name })}
+              onClick={ask}
+            >
+              <RowActionLabel text={t("webhooks.row.delete.verb")} title={t("webhooks.row.delete", { name: hook.name })} />
             </Button>
           </>
         )}
       </span>
-      {queued ? (
-        <span role="status" className="w-full text-xs text-muted-foreground">
-          {t("webhooks.row.queued")}
-        </span>
-      ) : null}
-      {error ? (
-        <span role="alert" className="w-full text-xs leading-relaxed text-health-bad">
-          {error}
-        </span>
-      ) : null}
     </li>
   );
 }
@@ -631,25 +759,35 @@ function WebhooksSection() {
   const hooks = query.data?.webhooks ?? [];
   const pager = usePager(hooks);
 
+  const listEmpty = query.isSuccess && hooks.length === 0;
+  /* The create button sits on the section's heading line, or in the empty
+     slate when there is nothing listed, so the one action is never drawn
+     twice. Not until the list has settled, though: heading-then-slate is a
+     REMOUNT, and a click on the first node between the two renders opened
+     nothing. While the form is open there is no button either. */
+  const createButton =
+    editing.mode === "none" && !query.isPending ? (
+      <Button size="sm" {...guard} onClick={() => setEditing({ mode: "create" })}>
+        {t("webhooks.new")}
+      </Button>
+    ) : null;
+
   return (
-    <div className="flex flex-col gap-4">
-      {editing.mode === "none" ? (
-        <div>
-          <Button size="sm" {...guard} onClick={() => setEditing({ mode: "create" })}>
-            {t("webhooks.new")}
-          </Button>
-        </div>
-      ) : (
+    <div className="flex flex-col gap-5">
+      {editing.mode !== "none" ? (
         <WebhookForm
           key={editing.mode === "edit" ? editing.hook.id : "create"}
           initial={editing.mode === "edit" ? editing.hook : undefined}
           onDone={() => setEditing({ mode: "none" })}
         />
-      )}
+      ) : null}
 
-      <SectionCard title={t("webhooks.heading")}>
-        <p className="mt-1 max-w-prose text-xs leading-relaxed text-muted-foreground">{t("webhooks.blurb")}</p>
-        {query.isError ? <ErrorLine>{queryErrorMessage(query.error, t("webhooks.unavailable"))}</ErrorLine> : null}
+      <SectionCard title={t("webhooks.heading")} blurb={t("webhooks.blurb")} action={listEmpty ? null : createButton}>
+        {query.isError ? (
+          <ErrorLine onRetry={() => void query.refetch()}>
+            {queryErrorMessage(query.error, t("webhooks.unavailable"))}
+          </ErrorLine>
+        ) : null}
         {/* isPending / isSuccess, not !isLoading && !isError: a paused retry
             (react-query pauses while the browser thinks it is offline) is
             pending-but-not-fetching, and the old guard would present "no
@@ -660,8 +798,14 @@ function WebhooksSection() {
             <Skeleton className="h-10 w-full" />
           </div>
         ) : null}
-        {query.isSuccess && hooks.length === 0 ? (
-          <p className="px-1 py-10 text-center text-xs text-muted-foreground">{t("webhooks.empty")}</p>
+        {listEmpty ? (
+          <EmptyState
+            compact
+            className="mt-4"
+            title={t("webhooks.empty")}
+            body={t("webhooks.empty.body")}
+            action={createButton}
+          />
         ) : null}
         {hooks.length > 0 ? (
           <>
@@ -726,7 +870,7 @@ function MintedToken({ minted, onDismiss }: { minted: TokenCreateResponse; onDis
   }
 
   return (
-    <Card asChild className="border-l-4 border-l-health-warn bg-health-warn-soft/40 p-6">
+    <Card asChild className="border-l-4 border-l-health-warn bg-health-warn-soft/40 p-4 sm:p-6">
       <section aria-label={t("tokens.secret.aria")}>
         <h3 className="type-section">{t("tokens.secret.title", { name: minted.name })}</h3>
         {/* The server's bytes, selectable and wrapped — never truncated, or the
@@ -816,11 +960,11 @@ function TokenForm({ onMinted, onDone }: { onMinted: (minted: TokenCreateRespons
   }
 
   return (
-    <Card asChild className="p-6">
+    <Card asChild className="p-4 sm:p-6">
       <form onSubmit={handleSubmit} className="flex max-w-2xl flex-col gap-4">
         <h3 className="type-section">{t("tokens.form.create")}</h3>
-        <div className="grid gap-4 sm:grid-cols-2">
-          <div className="flex flex-col gap-1 text-[13px]">
+        <div className="grid grid-cols-[minmax(0,1fr)] gap-4 sm:grid-cols-2">
+          <div className="flex min-w-0 flex-col gap-1 text-[13px]">
             <label htmlFor={nameId} className="text-muted-foreground">
               {t("tokens.form.name")}
             </label>
@@ -835,18 +979,21 @@ function TokenForm({ onMinted, onDone }: { onMinted: (minted: TokenCreateRespons
               aria-invalid={invalid("name") || undefined}
               aria-describedby={invalid("name") ? `${errorId} ${nameId}-help` : `${nameId}-help`}
               onChange={(e) => setName(e.target.value)}
+              className="w-full"
             />
             <span id={`${nameId}-help`} className="text-xs leading-relaxed text-muted-foreground">
               {t("tokens.form.nameHelp")}
             </span>
           </div>
-          <div className="flex flex-col gap-1 text-[13px]">
+          <div className="flex min-w-0 flex-col gap-1 text-[13px]">
             <span className="text-muted-foreground">{t("tokens.form.expires")}</span>
             {/* The M5 DateTimePicker, the one way this console asks for an
                 instant — and here for the reason the schedule's Run-at field
                 takes it: allowFuture lifts the ceiling, disablePast is the
                 other half of the same rule. An expiry in the past is refused
-                by the server, so a control must not offer one. */}
+                by the server, so a control must not offer one. Its trigger
+                takes the field height (h-9) so it lines up with the name box
+                beside it. */}
             <div className="flex items-center gap-1">
               <DateTimePicker
                 aria-label={t("tokens.form.expires")}
@@ -857,6 +1004,7 @@ function TokenForm({ onMinted, onDone }: { onMinted: (minted: TokenCreateRespons
                 allowFuture
                 disablePast
                 onApply={setExpires}
+                className="h-9"
               />
               {expires !== null ? (
                 <Button
@@ -878,7 +1026,7 @@ function TokenForm({ onMinted, onDone }: { onMinted: (minted: TokenCreateRespons
 
         {error ? <ErrorLine id={errorId}>{error}</ErrorLine> : null}
 
-        <div className="flex gap-2">
+        <div className="flex flex-wrap gap-2">
           <Button type="submit" loading={submitting} {...guard}>
             {t("tokens.form.createButton")}
           </Button>
@@ -928,91 +1076,117 @@ function TokenRow({ token }: { token: Token }) {
     reset();
   }
 
-  return (
-    <li data-testid="token-row" className="flex flex-wrap items-center gap-x-3 gap-y-1 py-3 text-sm">
-      {/* The name is SERVER text and can be anything, including 4 000 characters with no space in
-          them. An unbreakable string in a flex row has no width to lay out against, so the row grew
-          to ~950 000 pixels and every page in the console scrolled sideways. It is bounded here and
-          bounded again at the API (tokenNameMaxLen); the whole name stays in the title. */}
-      <span className="min-w-0 max-w-full truncate font-medium" title={token.name}>
-        {token.name}
-      </span>
-      {state === "active" ? null : (
-        <Badge variant={state === "revoked" ? "bad" : "unknown"}>
-          {t(state === "revoked" ? "tokens.revoked" : "tokens.expired")}
-        </Badge>
-      )}
-      {/* The owner is a SUBJECT ID the server assigned; it prints as it came —
-          identifiers and stamps wear the data face, the labels stay prose. */}
-      <span className="text-xs text-muted-foreground">
-        {t("tokens.col.owner")} <span className="mono-data">{token.owner}</span>
-      </span>
-      <span className="text-xs text-muted-foreground">
-        {t("tokens.col.created")} <span className="mono-data">{fmtTime(token.createdAt, locale)}</span>
-      </span>
-      {/* An absent lastUsedAt means never used, which is a fact worth stating —
-          fmtTime's em-dash would have read as "the API did not say". */}
-      <span data-testid="token-last-used" className="text-xs text-muted-foreground">
-        {token.lastUsedAt ? (
-          <>
-            {t("tokens.col.lastUsed")} <span className="mono-data">{fmtTime(token.lastUsedAt, locale)}</span>
-          </>
-        ) : (
-          t("tokens.lastUsed.never")
-        )}
-      </span>
-      {token.expiresAt ? (
-        <span className="text-xs text-muted-foreground">
-          {t("tokens.col.expires")} <span className="mono-data">{fmtTime(token.expiresAt, locale)}</span>
-        </span>
-      ) : null}
+  /* The sentence with the name in it is the accessible name and the title;
+     the verb alone is what shows. */
+  const confirmSentence = t(spent ? "tokens.row.confirmPurge" : "tokens.row.confirmDelete", { name: token.name });
+  const askSentence = t(spent ? "tokens.row.purge" : "tokens.row.delete", { name: token.name });
 
-      <span className="ml-auto flex flex-wrap items-center gap-2">
-        {confirming ? (
-          <>
-            <span role="status" className="sr-only">
-              {t(spent ? "tokens.row.confirmPurge" : "tokens.row.confirmDelete", { name: token.name })}
-            </span>
-            <Button
-              ref={confirmRef}
-              size="sm"
-              variant="outline"
-              loading={busy}
-              {...guard}
-              aria-label={t(spent ? "tokens.row.confirmPurge" : "tokens.row.confirmDelete", { name: token.name })}
-              onClick={handleDelete}
-            >
-              <span className="block max-w-[18rem] truncate">
-                {t(spent ? "tokens.row.confirmPurge" : "tokens.row.confirmDelete", { name: token.name })}
-              </span>
-            </Button>
-            <Button size="sm" variant="ghost" onClick={reset}>
-              {t("cancel")}
-            </Button>
-          </>
-        ) : (
-          <Button
-            ref={triggerRef}
-            size="sm"
-            variant="ghost"
-            {...guard}
-            title={spent ? t("tokens.row.purgeHint") : undefined}
-            aria-label={t(spent ? "tokens.row.purge" : "tokens.row.delete", { name: token.name })}
-            onClick={ask}
-          >
-            {/* Truncated for the same reason the name above is: this label CARRIES the name. */}
-            <span className="block max-w-[18rem] truncate">
-              {t(spent ? "tokens.row.purge" : "tokens.row.delete", { name: token.name })}
-            </span>
-          </Button>
-        )}
-      </span>
+  return (
+    <>
+      <Tr data-testid="token-row">
+        {/* The name is SERVER text and can be anything, including 4 000 characters with no space in
+            them. An unbreakable string has no width to lay out against, so the row once grew to
+            ~950 000 pixels and every page in the console scrolled sideways. It is bounded here and
+            bounded again at the API (tokenNameMaxLen); the whole name stays in the title. */}
+        <Td className="font-medium">
+          {/* 8rem on a phone (name, state and the action share 311px), 12rem
+              from sm up: with three full stamps beside it, a wider name column
+              pushed Expires and the action into the scroll wrapper at 1440. */}
+          <span className="block max-w-[8rem] truncate sm:max-w-[12rem]" title={token.name}>
+            {token.name}
+          </span>
+        </Td>
+        {/* The owner is a SUBJECT ID the server assigned; it prints as it came —
+            identifiers and stamps wear the data face — bounded like the name,
+            whole in the title. The secondary columns drop out on narrow screens
+            by class, so a phone keeps the name, the state and the action
+            instead of squeezing six keys into 311px. */}
+        <Td className="hidden lg:table-cell">
+          <span className="mono-data block max-w-[9rem] truncate" title={token.owner}>
+            {token.owner}
+          </span>
+        </Td>
+        <Td className="mono-data hidden whitespace-nowrap text-muted-foreground md:table-cell">
+          {fmtTime(token.createdAt, locale)}
+        </Td>
+        {/* An absent lastUsedAt means never used, which is a fact worth stating —
+            fmtTime's em-dash would have read as "the API did not say". */}
+        <Td data-testid="token-last-used" className="hidden whitespace-nowrap sm:table-cell">
+          {token.lastUsedAt ? (
+            <span className="mono-data text-muted-foreground">{fmtTime(token.lastUsedAt, locale)}</span>
+          ) : (
+            <span className="type-meta">{t("tokens.lastUsed.never")}</span>
+          )}
+        </Td>
+        <Td className="hidden whitespace-nowrap md:table-cell">
+          {token.expiresAt ? (
+            <span className="mono-data text-muted-foreground">{fmtTime(token.expiresAt, locale)}</span>
+          ) : (
+            <span className="type-meta">{t("tokens.expires.none")}</span>
+          )}
+        </Td>
+        <Td>
+          <Badge dot variant={state === "active" ? "ok" : state === "revoked" ? "bad" : "unknown"}>
+            {t(state === "active" ? "tokens.state.active" : state === "revoked" ? "tokens.revoked" : "tokens.expired")}
+          </Badge>
+        </Td>
+        <Td className="whitespace-nowrap text-right">
+          <span className="inline-flex items-center justify-end gap-1">
+            {confirming ? (
+              <>
+                <span role="status" className="sr-only">
+                  {confirmSentence}
+                </span>
+                {/* The destructive treatment is reserved for this second click. */}
+                <Button
+                  ref={confirmRef}
+                  size="sm"
+                  variant="destructive"
+                  className={ROW_ACTION}
+                  loading={busy}
+                  {...guard}
+                  aria-label={confirmSentence}
+                  onClick={handleDelete}
+                >
+                  <RowActionLabel
+                    text={t(spent ? "tokens.row.confirmPurge.verb" : "tokens.row.confirmDelete.verb")}
+                    title={confirmSentence}
+                  />
+                </Button>
+                <Button size="sm" variant="ghost" className={ROW_ACTION} onClick={reset}>
+                  {t("cancel")}
+                </Button>
+              </>
+            ) : (
+              <Button
+                ref={triggerRef}
+                size="sm"
+                variant="ghost"
+                className={ROW_ACTION}
+                {...guard}
+                title={spent ? t("tokens.row.purgeHint") : undefined}
+                aria-label={askSentence}
+                onClick={ask}
+              >
+                <RowActionLabel
+                  text={t(spent ? "tokens.row.purge.verb" : "tokens.row.delete.verb")}
+                  title={spent ? t("tokens.row.purgeHint") : askSentence}
+                />
+              </Button>
+            )}
+          </span>
+        </Td>
+      </Tr>
       {error ? (
-        <span role="alert" className="w-full text-xs leading-relaxed text-health-bad">
-          {error}
-        </span>
+        <Tr>
+          <Td colSpan={7}>
+            <span role="alert" className="text-xs leading-relaxed text-health-bad">
+              {error}
+            </span>
+          </Td>
+        </Tr>
       ) : null}
-    </li>
+    </>
   );
 }
 
@@ -1030,8 +1204,29 @@ function TokensSection() {
   const tokens = query.data?.tokens ?? [];
   const pager = usePager(tokens);
 
+  const listEmpty = query.isSuccess && tokens.length === 0;
+  /* The button is REPLACED by the form, so the keyboard has to be handed over;
+     see hooks/use-disclosure-focus. It sits on the section's heading line, or
+     in the empty slate when there is nothing listed, so the one action is
+     never drawn twice — and not until the list has settled, because
+     heading-then-slate is a REMOUNT and a click on the first node between the
+     two renders opened nothing. */
+  const createButton = creating || query.isPending ? null : (
+    <Button
+      ref={createFocus.triggerRef}
+      size="sm"
+      {...guard}
+      onClick={() => {
+        createFocus.onOpen();
+        setCreating(true);
+      }}
+    >
+      {t("tokens.new")}
+    </Button>
+  );
+
   return (
-    <div className="flex flex-col gap-4">
+    <div className="flex flex-col gap-5">
       {creating ? (
         <div ref={createFocus.panelRef} tabIndex={-1}>
           <TokenForm
@@ -1046,29 +1241,21 @@ function TokensSection() {
             }}
           />
         </div>
-      ) : (
-        <div>
-          {/* The button is REPLACED by the form, so the keyboard has to be handed over; see
-              hooks/use-disclosure-focus. */}
-          <Button
-            ref={createFocus.triggerRef}
-            size="sm"
-            {...guard}
-            onClick={() => {
-              createFocus.onOpen();
-              setCreating(true);
-            }}
-          >
-            {t("tokens.new")}
-          </Button>
-        </div>
-      )}
+      ) : null}
 
       {minted ? <MintedToken minted={minted} onDismiss={() => setMinted(undefined)} /> : null}
 
-      <SectionCard id={TOKENS_ANCHOR} title={t("tokens.heading")}>
-        <p className="mt-1 max-w-prose text-xs leading-relaxed text-muted-foreground">{t("tokens.blurb")}</p>
-        {query.isError ? <ErrorLine>{queryErrorMessage(query.error, t("tokens.unavailable"))}</ErrorLine> : null}
+      <SectionCard
+        id={TOKENS_ANCHOR}
+        title={t("tokens.heading")}
+        blurb={t("tokens.blurb")}
+        action={listEmpty ? null : createButton}
+      >
+        {query.isError ? (
+          <ErrorLine onRetry={() => void query.refetch()}>
+            {queryErrorMessage(query.error, t("tokens.unavailable"))}
+          </ErrorLine>
+        ) : null}
         {/* isPending / isSuccess, the webhooks list's own guard: a paused retry
             is pending-but-not-fetching and must not read as "no tokens". */}
         {query.isPending ? (
@@ -1077,17 +1264,46 @@ function TokensSection() {
             <Skeleton className="h-10 w-full" />
           </div>
         ) : null}
-        {query.isSuccess && tokens.length === 0 ? (
-          <p className="px-1 py-10 text-center text-xs text-muted-foreground">{t("tokens.empty")}</p>
+        {listEmpty ? (
+          <EmptyState
+            compact
+            className="mt-4"
+            title={t("tokens.empty")}
+            body={t("tokens.empty.body")}
+            action={createButton}
+          />
         ) : null}
         {tokens.length > 0 ? (
           <>
-          <ul aria-label={t("tokens.listAria")} className="mt-4 divide-y divide-border">
-            {pager.visible.map((token) => (
-              <TokenRow key={token.id} token={token} />
-            ))}
-          </ul>
-          <Pager pager={pager} subject={t("tokens.subject")} className="px-0" />
+            {/* The shared dense table: stamps in tabular figures so the rows
+                line up, secondary columns dropped by class on narrow screens
+                (each cell says which), the action a fixed right column. */}
+            <Table
+              variant="dense"
+              aria-label={t("tokens.listAria")}
+              containerClassName="mt-4"
+              className="[&_td:not(:last-child)]:pr-3 [&_th:not(:last-child)]:pr-3"
+            >
+              <THead>
+                <Tr>
+                  <Th>{t("tokens.head.name")}</Th>
+                  <Th className="hidden lg:table-cell">{t("tokens.head.owner")}</Th>
+                  <Th className="hidden md:table-cell">{t("tokens.head.created")}</Th>
+                  <Th className="hidden sm:table-cell">{t("tokens.head.lastUsed")}</Th>
+                  <Th className="hidden md:table-cell">{t("tokens.head.expires")}</Th>
+                  <Th>{t("tokens.head.state")}</Th>
+                  <Th className="text-right">
+                    <span className="sr-only">{t("tokens.head.actions")}</span>
+                  </Th>
+                </Tr>
+              </THead>
+              <TBody>
+                {pager.visible.map((token) => (
+                  <TokenRow key={token.id} token={token} />
+                ))}
+              </TBody>
+            </Table>
+            <Pager pager={pager} subject={t("tokens.subject")} className="px-0" />
           </>
         ) : null}
       </SectionCard>
@@ -1184,7 +1400,8 @@ function ImportResultTable({ result }: { result: ConfigImportResult }) {
   return (
     <div role="status" className="mt-4">
       <p className="text-sm font-medium">{result.dryRun ? t("bundle.dryRun") : t("bundle.applied")}</p>
-      <Table variant="dense" containerClassName="mt-2">
+      {/* Four short columns: capped, or three counts drift to the far edge of a wide card. */}
+      <Table variant="dense" containerClassName="mt-2 max-w-lg" scrollLabel={t("bundle.table.aria")}>
         <THead>
           <Tr>
             <Th className="pr-4">{t("bundle.col.collection")}</Th>
@@ -1309,9 +1526,7 @@ function ExportImportSection() {
   }
 
   return (
-    <SectionCard title={t("bundle.heading")}>
-      <p className="mt-1 max-w-prose text-xs leading-relaxed text-muted-foreground">{t("bundle.blurb")}</p>
-
+    <SectionCard title={t("bundle.heading")} blurb={t("bundle.blurb")}>
       <div className="mt-4 flex flex-col gap-2">
         {/* Export is a READ, so the Time Machine does not touch it. Engaging the
             Time Machine blocks WRITES to avoid the confusion of editing the
@@ -1378,6 +1593,12 @@ function ExportImportSection() {
         <div>
           <Button
             size="sm"
+            /* Outline until there is a bundle to apply: a primary that cannot
+               act yet would be the page's one blue promising something the
+               operator has not yet given it. With a bundle loaded it is the
+               primary, and a Time-Machine lock on it wears the muted disabled
+               primary the Button defines. */
+            variant={bundle === undefined ? "outline" : "default"}
             loading={importing}
             /* Enabled the moment a bundle is loaded, and NOT gated on what the dry run predicted. */
             {...guard} disabled={writesDisabled || bundle === undefined}
@@ -1409,8 +1630,7 @@ function LanguageSection() {
   const { locale, setLocale } = useLocale();
   const t = useT(settingsDict);
   return (
-    <SectionCard title={t("language.title")}>
-      <p className="mt-1 max-w-prose text-xs leading-relaxed text-muted-foreground">{t("language.description")}</p>
+    <SectionCard title={t("language.title")} blurb={t("language.description")}>
       <div className="mt-4">
         <Segmented options={LANGUAGE_OPTIONS} value={locale} onChange={setLocale} aria-label={t("language.aria")} />
       </div>
@@ -1434,9 +1654,28 @@ export function subjectLine(kind: string, displayName: string): string {
   return [kind, displayName].map((s) => s.trim()).filter((s) => s !== "").join(" · ");
 }
 
+/** shortCommit is the twelve characters a full hash is known by on screen; anything
+ *  that short already ("dev", "unknown", a seven-char short hash) prints as it came.
+ *  The caller keeps the full value in the title. */
+export function shortCommit(commit: string): string {
+  return commit.length > 12 ? commit.slice(0, 12) : commit;
+}
+
 /* The generated OpenAPI shape of GET /api/v1/config. lib/types.ts's hand-written Config predates
    the scheduler/retention fields; drop this alias once it re-exports the schema. */
 type ApiConfig = components["schemas"]["Config"];
+
+/** Where "Source on GitHub" points. The site itself is page-help.tsx's
+ *  DOCS_BASE_URL, so either destination moves by editing one line. */
+export const SOURCE_URL = "https://github.com/EsDmitrii/kconmon-ng";
+
+/* The About row's three destinations. Release notes are the site's rendering
+   of RELEASE_NOTES.md (docs/reference/release-notes.md), not the raw file. */
+const ABOUT_LINKS: ReadonlyArray<{ key: SettingsKey; href: string }> = [
+  { key: "about.links.docs", href: DOCS_BASE_URL },
+  { key: "about.links.releaseNotes", href: `${DOCS_BASE_URL}reference/release-notes/` },
+  { key: "about.links.source", href: SOURCE_URL },
+];
 
 function AboutSection() {
   const t = useT(settingsDict);
@@ -1447,6 +1686,9 @@ function AboutSection() {
      trip. The section that answers "what am I looking at" could not say WHICH
      BUILD it was — the first question of any bug report. */
   const { data: version } = useQuery({ queryKey: ["version"], queryFn: getVersion });
+  /* Absent until the query answers, and absent from an older server's body
+     too; either way the row says so rather than reading .length off nothing. */
+  const commit = typeof version?.commit === "string" ? version.commit : undefined;
   const mode = config?.auth.mode ?? "—";
   const roles = me?.subject.roles ?? [];
 
@@ -1473,8 +1715,15 @@ function AboutSection() {
           </span>
         </Fact>
         <Fact label={t("about.commit")}>
-          <span className="mono-data break-all" data-testid="about-commit">
-            {version?.commit ?? "—"}
+          {/* The short hash on screen, the full one a hover away: forty hex
+              characters wrapped onto two lines on a phone and said nothing the
+              first twelve do not. */}
+          <span
+            className="mono-data"
+            data-testid="about-commit"
+            title={commit !== undefined && commit.length > 12 ? commit : undefined}
+          >
+            {commit === undefined ? "—" : shortCommit(commit)}
           </span>
         </Fact>
         <Fact label={t("about.controller")}>
@@ -1487,6 +1736,24 @@ function AboutSection() {
             the two above are masculine and keep the plain key. */}
         <Fact label={t("about.database")}>
           {config?.database.configured ? t("about.configured.f") : t("about.notConfigured.f")}
+        </Fact>
+        {/* Outbound, so a new tab with no opener: the console stays where the
+            operator left it, and the site gets no handle on this window. */}
+        <Fact label={t("about.links")}>
+          <span className="flex flex-wrap gap-x-3 gap-y-1">
+            {ABOUT_LINKS.map((link) => (
+              <a
+                key={link.key}
+                href={link.href}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center gap-1 text-primary hover:underline"
+              >
+                {t(link.key)}
+                <ExternalLink aria-hidden="true" className="size-3" />
+              </a>
+            ))}
+          </span>
         </Fact>
       </dl>
 
@@ -1545,7 +1812,7 @@ export function SettingsPage() {
         {/* First, and for everyone — see LanguageSection. */}
         <LanguageSection />
         {!canTokens && !canWebhooks && !canBundle ? (
-          <Card role="status" className="p-6">
+          <Card role="status" className="p-4 sm:p-6">
             <p className="text-sm font-medium">{t("nothing.title")}</p>
             <p className="mt-1 max-w-prose text-xs leading-relaxed text-muted-foreground">{t("nothing.body")}</p>
           </Card>

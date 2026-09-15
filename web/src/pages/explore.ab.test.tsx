@@ -25,7 +25,8 @@ const AT_MS = Date.parse(AT);
 const HOUR_MS = 60 * 60 * 1000;
 
 const CHART_A = CURATED_CHARTS[0]; // TCP RTT p95 — the panel's default leg A.
-const CHART_B = CURATED_CHARTS[1]; // UDP packet loss.
+const CHART_B = CURATED_CHARTS[1]; // UDP packet loss: a RATIO, so it gets an axis of its own beside A.
+const CHART_C = CURATED_CHARTS[2]; // ICMP RTT p95: seconds, like A, so it shares A's axis.
 
 const json = (body: unknown) =>
   new Response(JSON.stringify(body), { status: 200, headers: { "Content-Type": "application/json" } });
@@ -158,15 +159,80 @@ describe("toCompareOption", () => {
     expect(legB.lineStyle.type).toBe("dashed");
   });
 
-  it("draws both legs on A's single pair of axes", () => {
+  it("draws two legs of the SAME unit on A's single pair of axes", () => {
+    // CHART_C is ICMP RTT p95: seconds, like A.
     const opt = toCompareOption(
       { chart: CHART_A, label: "A", data: a },
-      { chart: CHART_B, label: "B", data: b },
+      { chart: CHART_C, label: "B", data: b },
       true,
     );
     expect(Array.isArray(opt.xAxis)).toBe(false);
     expect(Array.isArray(opt.yAxis)).toBe(false);
     expect((opt.series as BuiltSeries[]).every((s) => !("yAxisIndex" in s))).toBe(true);
+  });
+
+  /* A ratio drawn against a seconds axis read as a 1000ms spike beside 8ms
+     lines (audit frame explore-compare-metric), and the caption told the reader
+     to ignore its height. B gets an axis of its own on the right instead. */
+  it("gives a leg of a DIFFERENT unit a right-hand axis of its own, in its own formatter", () => {
+    const opt = toCompareOption(
+      { chart: CHART_A, label: "A", data: a },
+      { chart: CHART_B, label: "B", data: matrix("beta", [[100, "0.5"]]) },
+      true,
+    );
+    const axes = opt.yAxis as { position?: string; splitLine?: { show?: boolean }; axisLabel: { formatter: (v: number) => string } }[];
+    expect(Array.isArray(axes)).toBe(true);
+    expect(axes).toHaveLength(2);
+    expect(axes[1].position).toBe("right");
+    // One grid, A's: the right axis draws no gridlines of its own.
+    expect(axes[1].splitLine?.show).toBe(false);
+    expect(axes[0].axisLabel.formatter(0.008)).toBe("8.0ms");
+    expect(axes[1].axisLabel.formatter(0.5)).toBe("50.0%");
+    const [legA, legB] = opt.series as (BuiltSeries & { yAxisIndex?: number; tooltip?: { valueFormatter: (v: unknown) => string } })[];
+    expect(legA.yAxisIndex).toBeUndefined();
+    expect(legB.yAxisIndex).toBe(1);
+    // The tooltip prints B in B's unit too (lib/chart-tooltip.ts honours a series' own formatter).
+    expect(legB.tooltip?.valueFormatter(0.5)).toBe("50.0%");
+    expect(legA.tooltip).toBeUndefined();
+    // Room for the right-hand labels.
+    expect((opt.grid as { right: number }).right).toBeGreaterThanOrEqual(56);
+  });
+
+  /* The legend entry used to be "A: TCP RTT p95 (worst 5 pairs) · …worker2→…worker6", so five entries
+     paged one at a time (audit frame explore-compare-icmp). The legend now shows the leg's short name
+     and the pair; the series NAME stays whole, which is what the tooltip prints. */
+  it("shows the legend as 'A · pair' with the fleet prefix elided over both legs, and keeps the whole name on the series", () => {
+    const fleet = (src: string, dst: string): PromResult => ({
+      status: "success",
+      data: {
+        resultType: "matrix",
+        result: [{ metric: { source_node: src, destination_node: dst }, values: [[100, "1"]] }],
+      },
+    });
+    const opt = toCompareOption(
+      { chart: CHART_A, label: `A: ${CHART_A.title}`, legend: "A", data: fleet("kconmon-stand-worker2", "kconmon-stand-worker6") },
+      { chart: CHART_C, label: `B: ${CHART_C.title}`, legend: "B", data: fleet("kconmon-stand-worker3", "kconmon-stand-worker5") },
+      true,
+    );
+    const names = (opt.series as BuiltSeries[]).map((s) => s.name);
+    expect(names).toEqual([
+      `A: ${CHART_A.title} · kconmon-stand-worker2→kconmon-stand-worker6`,
+      `B: ${CHART_C.title} · kconmon-stand-worker3→kconmon-stand-worker5`,
+    ]);
+    const display = (opt.legend as { formatter: (name: string) => string }).formatter;
+    expect(display(names[0])).toBe("A · …worker2→…worker6");
+    expect(display(names[1])).toBe("B · …worker3→…worker5");
+  });
+
+  it("falls back to the label in the legend when a leg has no short name — self-shift mode", () => {
+    const opt = toCompareOption(
+      { chart: CHART_A, label: "A · now (solid)", data: a },
+      { chart: CHART_A, label: "A · 24h earlier (dashed)", data: b, shiftMs: 24 * HOUR_MS },
+      true,
+    );
+    const display = (opt.legend as { formatter: (name: string) => string }).formatter;
+    expect(display("A · now (solid) · alpha")).toBe("A · now (solid) · alpha");
+    expect(display("A · 24h earlier (dashed) · beta")).toBe("A · 24h earlier (dashed) · beta");
   });
 
   it("overlays a time-shifted leg on A's window by adding the shift back to its timestamps", () => {
@@ -217,6 +283,10 @@ describe("ExplorePage compare panel — a shifted leg that has no data", () => {
     vi.stubGlobal("fetch", fetchMock);
   }
 
+  /* Both causes, because the console cannot tell them apart: on a stand an hour
+     old, "1h earlier" is empty for the second reason, and a note that asserted
+     retention was diagnosing what it could not see (audit frame
+     explore-compare-self). */
   it("says so, and names the distance, instead of drawing leg A alone in silence", async () => {
     stubShiftedEmpty(7 * 24 * HOUR_MS);
     renderPage();
@@ -224,7 +294,9 @@ describe("ExplorePage compare panel — a shifted leg that has no data", () => {
     setSelect("Compare with earlier", "7d");
 
     expect(
-      await screen.findByText("No data 7d ago — Prometheus's retention does not reach that far back."),
+      await screen.findByText(
+        "No data 7d ago — either Prometheus's retention stops short of it, or nothing was being probed yet.",
+      ),
     ).toBeInTheDocument();
   });
 
@@ -234,7 +306,7 @@ describe("ExplorePage compare panel — a shifted leg that has no data", () => {
     pickSelfMode();
     setSelect("Compare with earlier", "7d");
 
-    await screen.findByText(/retention does not reach/);
+    await screen.findByText(/retention stops short/);
     // Leg A is real data and stays drawn; in self-shift mode it is named by its
     // clock rather than by a title both legs share.
     expect(seriesNames(compareChart()).some((n) => n.startsWith("A · now"))).toBe(true);
@@ -247,7 +319,7 @@ describe("ExplorePage compare panel — a shifted leg that has no data", () => {
     setSelect("Compare with earlier", "24h");
 
     await waitFor(() => expect(seriesNames(compareChart()).length).toBe(2));
-    expect(screen.queryByText(/retention does not reach/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/retention stops short/)).not.toBeInTheDocument();
   });
 
   it("says nothing in metric-B mode — an empty second METRIC is a different fact", async () => {
@@ -266,7 +338,7 @@ describe("ExplorePage compare panel — a shifted leg that has no data", () => {
     setSelect("Compare with metric", CHART_B.id);
 
     await waitFor(() => expect(screen.getAllByText(/no series returned/i).length).toBeGreaterThan(0));
-    expect(screen.queryByText(/retention does not reach/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/retention stops short/)).not.toBeInTheDocument();
   });
 });
 
@@ -304,6 +376,26 @@ describe("ExplorePage compare panel — metric-B mode", () => {
     const names = seriesNames(compareChart());
     expect(names[0]).toContain(`A: ${CHART_A.title}`);
     expect(names[1]).toContain(`B: ${CHART_B.title}`);
+  });
+
+  it("says the two titles once under the controls, and where B is read when its unit differs", async () => {
+    stubFetch();
+    renderPage();
+    setSelect("Compare with metric", CHART_B.id);
+    const caption = await screen.findByText(new RegExp(`^A: ${CHART_A.title.replace(/[()]/g, "\\$&")} · B: `));
+    expect(caption).toHaveTextContent(`A: ${CHART_A.title} · B: ${CHART_B.title}`);
+    // A ratio beside seconds: B has its own axis on the right, and the caption says so.
+    expect(caption).toHaveTextContent("B is a ratio against A's seconds, so B is read on the right-hand axis.");
+    expect(caption).not.toHaveTextContent(/not its height/);
+  });
+
+  it("keeps the caption to the two titles when the units match", async () => {
+    stubFetch();
+    renderPage();
+    setSelect("Compare with metric", CHART_C.id);
+    const caption = await screen.findByText(new RegExp(`^A: ${CHART_A.title.replace(/[()]/g, "\\$&")} · B: `));
+    expect(caption).toHaveTextContent(`A: ${CHART_A.title} · B: ${CHART_C.title}`);
+    expect(caption).not.toHaveTextContent(/right-hand axis/);
   });
 
   it("follows the metric-A picker, so A is not nailed to the first curated chart", async () => {

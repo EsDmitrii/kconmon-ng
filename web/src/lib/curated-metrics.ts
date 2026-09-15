@@ -1,7 +1,7 @@
 import type * as echarts from "echarts";
-import { CHART_FALLBACK, chartColors, seriesColor } from "./chart-theme";
+import { CHART_FALLBACK, chartColors, seriesColor, type ChartColors } from "./chart-theme";
 import { NO_VALUE } from "./chart-tooltip";
-import type { Locale } from "./i18n";
+import { stampClock, stampShort, type Locale } from "./i18n";
 import { sharedNamePrefix } from "./matrix-zoom";
 import type { PromResult } from "./types";
 
@@ -83,16 +83,29 @@ export const CURATED_CHARTS: CuratedChart[] = [
     query: "histogram_quantile(0.95, sum by (host, le) (rate(kconmon_ng_dns_duration_seconds_bucket[5m])))",
   },
   {
-    // Corrected during implementation: the first sketch of this query (a label_replace-free `and on
-    // vector(0) or ...` shape) was flagged as wrong in the task brief.
+    // A RATIO, failures over every probe of that protocol. The first shape summed
+    // failures per second under a percent axis, and on a stand with a whole zone
+    // blackholed the axis read 800% (audit frame explore-default-scroll).
     id: "fail-rate",
     title: "Probe failure rate by protocol",
     titleRu: "Частота сбоев зондов по протоколам",
     unit: "ratio",
-    query:
-      'sum by (protocol) (label_replace(rate(kconmon_ng_tcp_results_total{result="fail"}[5m]), "protocol", "tcp", "", "") or label_replace(rate(kconmon_ng_udp_results_total{result="fail"}[5m]), "protocol", "udp", "", "") or label_replace(rate(kconmon_ng_icmp_results_total{result="fail"}[5m]), "protocol", "icmp", "", ""))',
+    query: `${failRateByProtocol('{result="fail"}')} / ${failRateByProtocol("")}`,
   },
 ];
+
+/**
+ * failRateByProtocol is one label_replace chain over the three result
+ * counters, tagged with a `protocol` label so `sum by (protocol)` can fold them.
+ * Called twice by the fail-rate chart: once with the failure selector for the
+ * numerator, once bare for the denominator, so the quotient is bounded by 1 by
+ * construction (a failing probe is a probe).
+ */
+export function failRateByProtocol(selector: string): string {
+  const leg = (proto: "tcp" | "udp" | "icmp") =>
+    `label_replace(rate(kconmon_ng_${proto}_results_total${selector}[5m]), "protocol", "${proto}", "", "")`;
+  return `sum by (protocol) (${leg("tcp")} or ${leg("udp")} or ${leg("icmp")})`;
+}
 
 // Prometheus range-query matrix result entry (Prometheus's own envelope shape,
 // narrowed from PromResult.data.result's `unknown[]`).
@@ -142,6 +155,68 @@ function formatRatio(value: number): string {
   return `${(value * 100).toFixed(1)}%`;
 }
 
+/** unitFormatter is how a value of this unit READS: on the axis, in the tooltip, on a pointer pill. */
+export function unitFormatter(unit: CuratedChart["unit"]): (value: number) => string {
+  return unit === "seconds" ? formatSeconds : formatRatio;
+}
+
+/**
+ * ratioAxisMax pins a ratio axis to 100% once the data climbs past half of it.
+ * ECharts' nice rounding runs an auto axis on to 1.2 and labels it "120%"; a
+ * small loss keeps the auto scale so a 2% wiggle stays a readable shape. null
+ * is ECharts' "not specified" (scaleRawExtentInfo.parseAxisModelMinMax).
+ */
+export function ratioAxisMax({ max }: { min: number; max: number }): number | null {
+  return max > 0.5 ? 1 : null;
+}
+
+/** valueAxis is the y axis a unit gets: its own formatter on the ticks, and the ratio bound. */
+export function valueAxis(unit: CuratedChart["unit"], colors: ChartColors): echarts.YAXisComponentOption {
+  const fmt = unitFormatter(unit);
+  return {
+    type: "value",
+    axisLabel: { color: colors.axis, formatter: (value: number) => fmt(value) },
+    splitLine: { lineStyle: { color: colors.grid } },
+    ...(unit === "ratio" ? { max: ratioAxisMax } : {}),
+  };
+}
+
+/**
+ * timeAxisLabel is what a tick on a time axis reads: the house clock as HH:mm,
+ * and on the tick where the day turns a second line with the day itself
+ * ("Sep 6"). ECharts' own level labels printed a bare "6" or "7" there. Both
+ * halves come from lib/i18n's stamps; this only trims the seconds off the one
+ * and the clock off the other, so the console keeps one clock.
+ */
+export function timeAxisLabel(value: number, locale: Locale): string {
+  const d = new Date(value);
+  if (!Number.isFinite(d.getTime())) return "";
+  const clock = stampClock(d, locale).replace(/:\d{2}$/, "");
+  /* Sub-day ticks sit on the unit grid (lib ECharts rounds them to the primary unit), so a day
+     turning inside the window always lands on a 00:00 tick. */
+  const dayTurns = d.getHours() === 0 && d.getMinutes() === 0;
+  return dayTurns ? `${clock}\n${axisDay(d, locale)}` : clock;
+}
+
+/** axisDay is stampShort without its clock: "Sep 6" in English, "6 сент." in Russian. */
+export function axisDay(d: Date, locale: Locale): string {
+  return stampShort(d, locale).replace(/,?\s*\d{1,2}:\d{2}$/, "");
+}
+
+/**
+ * GRID_RIGHT is the room the x axis-pointer pill needs at the right edge: the
+ * pill is centred on the cursor and printed HH:mm:ss (lib/chart-tooltip.ts),
+ * and at 16px it clipped at the canvas edge on every chart.
+ */
+export const GRID_RIGHT = 40;
+
+/**
+ * GRID_BOTTOM is the legend band plus the second line the time axis prints on
+ * the tick where the day turns (timeAxisLabel): at 46px that line sat on the
+ * legend's entries.
+ */
+export const GRID_BOTTOM = 58;
+
 // Chart colour now comes from the design-system tokens via lib/chart-theme.ts.
 export const AXIS_COLOR = { dark: CHART_FALLBACK.dark.axis, light: CHART_FALLBACK.light.axis };
 export const SPLIT_COLOR = { dark: CHART_FALLBACK.dark.grid, light: CHART_FALLBACK.light.grid };
@@ -190,6 +265,8 @@ export function toSeriesOption(
   res: PromResult,
   dark: boolean,
   window?: PlotWindow,
+  /** The interface language, for the day line on the time axis. "en" is the viewer's own locale. */
+  locale: Locale = "en",
 ): echarts.EChartsOption {
   /* Array.isArray, not just a status check. A `success` envelope whose `result` is null is a shape
      Prometheus proxies and mocks really produce, and `[...null]` throws — out of a render-time memo,
@@ -200,7 +277,7 @@ export function toSeriesOption(
     res.status === "success" && res.data?.resultType === "matrix" && Array.isArray(res.data.result)
       ? (res.data.result as MatrixSeriesEntry[])
       : [];
-  const fmt = chart.unit === "seconds" ? formatSeconds : formatRatio;
+  const fmt = unitFormatter(chart.unit);
   const colors = chartColors(dark ? "dark" : "light");
 
   // Stable colour assignment: Prometheus returns a matrix in an arbitrary order per poll (the
@@ -218,7 +295,7 @@ export function toSeriesOption(
     textStyle: { color: colors.axis },
     /* The bottom band is reserved for the scrollable legend so it can never
        collide with the y-axis labels again. */
-    grid: { left: 56, right: 16, top: 12, bottom: 46 },
+    grid: { left: 56, right: GRID_RIGHT, top: 12, bottom: GRID_BOTTOM },
     legend: {
       bottom: 0,
       type: "scroll",
@@ -247,14 +324,14 @@ export function toSeriesOption(
       ...(window ? { min: window.start.getTime(), max: window.end.getTime() } : {}),
       axisLine: { lineStyle: { color: colors.grid } },
       /* hideOverlap drops the ticks that would collide instead of drawing them on top of each other. */
-      axisLabel: { color: colors.axis, hideOverlap: true },
+      axisLabel: {
+        color: colors.axis,
+        hideOverlap: true,
+        formatter: (value: number) => timeAxisLabel(value, locale),
+      },
       splitLine: { show: false },
     },
-    yAxis: {
-      type: "value",
-      axisLabel: { color: colors.axis, formatter: (value: number) => fmt(value) },
-      splitLine: { lineStyle: { color: colors.grid } },
-    },
+    yAxis: valueAxis(chart.unit, colors),
     series: sorted.map(
       (entry, i): echarts.LineSeriesOption => ({
         name: labelForMetric(entry.metric),

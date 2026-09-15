@@ -79,7 +79,9 @@ func newTabWriter(w io.Writer) *tabwriter.Writer {
 }
 
 // formatTopology renders the topology snapshot as a table joining nodes with
-// their registered agent (if any).
+// their registered agent (if any). Agents registered under a name that is not
+// a Kubernetes node (external hosts) follow the node rows as bare-host rows,
+// so the table lists every probe source, not only the DaemonSet's.
 func formatTopology(w io.Writer, snap *model.TopologySnapshot) error {
 	if snap == nil {
 		return nil
@@ -95,17 +97,28 @@ func formatTopology(w io.Writer, snap *model.TopologySnapshot) error {
 	if _, err := fmt.Fprintln(tw, "NODE\tZONE\tREADY\tAGENT\tAGENT IP"); err != nil {
 		return err
 	}
+	isNode := make(map[string]bool, len(snap.Nodes))
 	for _, n := range snap.Nodes {
+		isNode[n.Name] = true
 		agent := "-"
 		agentIP := "-"
 		if a, ok := byNode[n.Name]; ok {
 			agent = a.ID
-			if a.PodIP != "" {
-				agentIP = a.PodIP
-			}
+			agentIP = orDash(a.PodIP)
 		}
 		if _, err := fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n",
 			orDash(n.Name), orDash(n.Zone), boolYesNo(n.Ready), agent, agentIP); err != nil {
+			return err
+		}
+	}
+	// READY is "-" rather than yes/no: nothing reports readiness for a host outside the cluster.
+	for i := range snap.Agents {
+		a := &snap.Agents[i]
+		if isNode[a.NodeName] {
+			continue
+		}
+		if _, err := fmt.Fprintf(tw, "%s\t%s\t-\t%s\t%s\n",
+			orDash(a.NodeName), orDash(a.Zone), orDash(a.ID), orDash(a.PodIP)); err != nil {
 			return err
 		}
 	}
@@ -118,13 +131,18 @@ func formatAgents(w io.Writer, snap *model.TopologySnapshot) error {
 		return nil
 	}
 	tw := newTabWriter(w)
-	if _, err := fmt.Fprintln(tw, "ID\tNODE\tPOD IP\tZONE\tLAST SEEN"); err != nil {
+	if _, err := fmt.Fprintln(tw, "ID\tNODE\tPOD IP\tZONE\tEXTERNAL\tLAST SEEN"); err != nil {
 		return err
 	}
 	for i := range snap.Agents {
 		a := &snap.Agents[i]
-		if _, err := fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n",
-			orDash(a.ID), orDash(a.NodeName), orDash(a.PodIP), orDash(a.Zone),
+		// "-" rather than "no" for the common case, so the eye lands on the exceptions.
+		external := "-"
+		if a.IsExternal() {
+			external = "yes"
+		}
+		if _, err := fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n",
+			orDash(a.ID), orDash(a.NodeName), orDash(a.PodIP), orDash(a.Zone), external,
 			humanizeTime(a.LastSeen)); err != nil {
 			return err
 		}

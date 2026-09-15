@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
+import { ExternalLink } from "lucide-react";
 import { AnnotationBar, useAnnotations } from "@/components/annotations";
 import { InvestigateLink, RelatedIncidents } from "@/components/investigate-entry";
 import { MaintenanceBar, useMaintenance } from "@/components/maintenance";
@@ -7,16 +8,19 @@ import { PageShell } from "@/components/page-shell";
 import { RecentChanges } from "@/components/recent-changes";
 import { Badge, type BadgeProps } from "@/components/ui/badge";
 import { Card } from "@/components/ui/card";
+import { EmptyState } from "@/components/ui/empty-state";
 import { Pager, usePager } from "@/components/ui/pager";
 import { Segmented } from "@/components/ui/segmented";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Table, TBody, Td, Th, THead, Tr } from "@/components/ui/table";
 import { useMatrix } from "@/hooks/use-matrix";
 import { useTopology } from "@/hooks/use-topology";
+import { agentPlanes, EXTERNAL_SCRAPE_DOCS_URL, isExternalAgent, unscrapedExternalNodes, type Plane } from "@/lib/agents";
 import { getRun, getRuns } from "@/lib/api";
 import type { InvestigationScope } from "@/lib/investigation-sources";
-import { localeTag, stampFull, useLocale, useT, type Locale } from "@/lib/i18n";
+import { stampFull, useLocale, useT, type Locale } from "@/lib/i18n";
 import { cardsDict, pluralKey, type CardsKey } from "@/lib/i18n/dict/cards";
+import { sharedDict } from "@/lib/i18n/dict/shared";
 import { DEGRADED_AT, FAILING_AT, isMeasured, severityRatio } from "@/lib/matrix-cells";
 /* The ?protocol= reader and writer live on pages/matrix.tsx — one URL key, one
    spelling, imported the way target-card.tsx imports fmtIntervalNs. */
@@ -56,6 +60,11 @@ const TIER_KEYS: Record<Tier, CardsKey> = {
   bad: "tier.bad",
   unknown: "tier.unknown",
 };
+
+/* The planes an external host's identity card lists: the mesh probes a bare
+   host can run. DNS and HTTP are external checks against targets, not planes
+   between peers, so they are not chips here. */
+const MESH_PLANES: readonly Plane[] = ["tcp", "udp", "icmp", "mtr"];
 
 /**
  * nodeHealth derives the header's health% and status tier from the worst OUTBOUND severity this
@@ -126,13 +135,46 @@ const TABS: { value: NodeTab; labelKey: CardsKey }[] = [
  * measured and says "no fail data" for a lazy failure counter; two different
  * facts, and this table used one glyph for both.
  */
-function BreakdownTable({ nodeName, cells }: { nodeName: string; cells: MatrixCell[] }) {
+function BreakdownTable({
+  nodeName,
+  cells,
+  unscraped,
+}: {
+  nodeName: string;
+  cells: MatrixCell[];
+  /** An external host Prometheus evidently does not scrape (lib/agents.ts): the
+   *  empty table then has a KNOWN cause, and the slate says it. */
+  unscraped: boolean;
+}) {
   const t = useT(cardsDict);
+  const shared = useT(sharedDict);
   const outbound = cells.filter((c) => c.source === nodeName && c.destination !== nodeName);
   const showLoss = outbound.some((c) => c.lossRatio !== undefined);
   /* One row per peer: on a big cluster that is every other node. */
   const pager = usePager(outbound, { resetKey: nodeName });
   if (outbound.length === 0) {
+    if (unscraped) {
+      /* Same headline as the plain empty line, so the two states read as one
+         fact with and without its explanation; the docs link is the action. */
+      return (
+        <EmptyState
+          data-testid="breakdown-unscraped"
+          title={t("node.breakdown.empty")}
+          body={t("node.breakdown.empty.unscraped")}
+          action={
+            <a
+              href={EXTERNAL_SCRAPE_DOCS_URL}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex items-center gap-1.5 text-sm font-medium text-primary hover:underline"
+            >
+              {shared("help.learnMore")}
+              <ExternalLink aria-hidden="true" className="size-3.5" />
+            </a>
+          }
+        />
+      );
+    }
     return <p className="px-4 py-10 text-center text-xs text-muted-foreground">{t("node.breakdown.empty")}</p>;
   }
   return (
@@ -210,6 +252,9 @@ function OverviewTab({
   ready,
   agentId,
   podIP,
+  external,
+  planes,
+  unscraped,
   topologyProblem,
 }: {
   nodeName: string;
@@ -218,6 +263,11 @@ function OverviewTab({
   ready?: boolean;
   agentId?: string;
   podIP?: string;
+  /** A bare-host agent (kconmon-ng.io/external: "true"): no Pod, no k8s node. */
+  external: boolean;
+  /** The planes it advertised; null is "unknown", never "none" (lib/agents.ts). */
+  planes: Set<Plane> | null;
+  unscraped: boolean;
   /** The topology query's own failure detail, when it FAILED. Absent for a
    *  successful read — including a successful read that simply does not know
    *  this node. */
@@ -227,7 +277,7 @@ function OverviewTab({
   return (
     <div className="flex flex-col gap-5">
       <Card className="p-5">
-        <h3 className="type-section">{t("node.identity")}</h3>
+        <h2 className="type-section">{t("node.identity")}</h2>
         {/* Four em-dashes are the answer to "the topology knows nothing about
             this node". They are NOT the answer to "the topology request
             failed" — that reads as a node that exists and has no identity,
@@ -241,33 +291,82 @@ function OverviewTab({
           /* The four LABELS are ours; the four values — a zone name, an agent
              id, a pod IP — are the fleet's own bytes. The agent id is the one
              that can be long, so its column is the grid's flexible track and
-             the ellipsis engages only when the card is genuinely out of room. */
-          <dl className="mt-3 grid grid-cols-2 gap-4 text-sm sm:grid-cols-[auto_minmax(0,1fr)_auto_auto]">
+             the ellipsis engages only when the card is genuinely out of room.
+             Without an id there is nothing for that track to hold, and the
+             grid pushed the last two placeholders to the far edge of the card
+             with a blank field between; four dashes sit in one row instead. */
+          <dl
+            className={cn(
+              "mt-3 grid grid-cols-2 gap-4 text-sm",
+              agentId !== undefined ? "sm:grid-cols-[auto_minmax(0,1fr)_auto_auto]" : "sm:flex sm:gap-10",
+            )}
+          >
             <div>
               <dt className="text-xs text-muted-foreground">{t("node.identity.zone")}</dt>
               <dd className="mt-0.5">{zone ?? "—"}</dd>
             </div>
             <div>
               <dt className="text-xs text-muted-foreground">{t("node.identity.agentId")}</dt>
-              {/* Machine identifiers wear the data face (M4-1). */}
-              <dd className="mono-data mt-0.5 truncate" title={agentId}>
+              {/* Machine identifiers wear the data face (M4-1); the dash that
+                  stands in for one is not an identifier, and in mono it drew
+                  narrower than its three siblings. */}
+              <dd className={cn("mt-0.5 truncate", agentId !== undefined && "mono-data")} title={agentId}>
                 {agentId ?? "—"}
               </dd>
             </div>
             <div>
-              <dt className="text-xs text-muted-foreground">{t("node.identity.podIP")}</dt>
+              {/* A bare host has no Pod: what it registered is the address it
+                  advertised to its peers, and the row is named for what it is. */}
+              <dt className="text-xs text-muted-foreground">{t(external ? "node.identity.address" : "node.identity.podIP")}</dt>
               {/* `?? "—"` never fired for the historical shape, which carries
                   podIP as "" rather than as an absent field — so the cell went
                   blank instead of saying it had no answer (QA scope 2, #6). An
                   explicit empty check, because "" IS the absence here. */}
-              <dd className="mono-data mt-0.5">{podIP === undefined || podIP === "" ? "—" : podIP}</dd>
+              <dd className={cn("mt-0.5", podIP !== undefined && podIP !== "" && "mono-data")}>
+                {podIP === undefined || podIP === "" ? "—" : podIP}
+              </dd>
             </div>
             <div>
               <dt className="text-xs text-muted-foreground">{t("node.identity.ready")}</dt>
-              <dd className="mt-0.5" title={ready === undefined ? t("node.identity.readyNote") : undefined}>
+              {/* The em-dash on an external host is not the informer's silence:
+                  there is no Kubernetes node for readiness to be reported on. */}
+              <dd
+                className="mt-0.5"
+                title={
+                  ready === undefined ? t(external ? "node.identity.readyNote.external" : "node.identity.readyNote") : undefined
+                }
+              >
                 {ready === undefined ? "—" : ready ? t("node.identity.yes") : t("node.identity.no")}
               </dd>
             </div>
+            {external ? (
+              <div className="col-span-2 sm:col-span-full">
+                <dt className="text-xs text-muted-foreground">{t("node.identity.planes")}</dt>
+                <dd className="mt-1 flex flex-wrap gap-1.5">
+                  {planes === null ? (
+                    t("node.identity.planes.unknown")
+                  ) : (
+                    MESH_PLANES.map((plane) => {
+                      const present = planes.has(plane);
+                      return (
+                        /* A plane it left out is struck through, not merely
+                           greyed: the strike is the channel that survives a
+                           monochrome screen (index.css rule 1). */
+                        <Badge
+                          key={plane}
+                          variant="neutral"
+                          data-testid="plane-chip"
+                          data-present={present ? "true" : "false"}
+                          className={cn(!present && "text-muted-foreground line-through opacity-70")}
+                        >
+                          {plane.toUpperCase()}
+                        </Badge>
+                      );
+                    })
+                  )}
+                </dd>
+              </div>
+            ) : null}
           </dl>
         )}
       </Card>
@@ -275,9 +374,9 @@ function OverviewTab({
       <Card asChild className="overflow-hidden p-0">
         <section>
           <div className="border-b border-border px-4 py-3">
-            <h3 className="type-section">{t("node.breakdown")}</h3>
+            <h2 className="type-section">{t("node.breakdown")}</h2>
           </div>
-          <BreakdownTable nodeName={nodeName} cells={cells} />
+          <BreakdownTable nodeName={nodeName} cells={cells} unscraped={unscraped} />
         </section>
       </Card>
     </div>
@@ -342,7 +441,7 @@ function DiagnosticsTab({ nodeName }: { nodeName: string }) {
     <Card asChild className="overflow-hidden p-0">
       <section>
         <div className="border-b border-border px-4 py-3">
-          <h3 className="type-section">{t("node.runs.heading")}</h3>
+          <h2 className="type-section">{t("node.runs.heading")}</h2>
           {/* The engaged half of the same limitation — the endpoint has no time
               filter either, so the page it returns is the newest page NOW and
               the cut to `t` happens here — is a CLAUSE of the same sentence
@@ -441,9 +540,16 @@ function NodeAnnotations({ nodeName }: { nodeName: string }) {
   return (
     <Card asChild className="p-5">
       <section>
-        <h3 className="type-section">{t("node.annotations")}</h3>
+        <h2 className="type-section">{t("node.annotations")}</h2>
         <p className="mt-1 text-xs leading-relaxed text-muted-foreground">{t("node.annotations.blurb")}</p>
-        <AnnotationBar scope={nodeName} annotations={annotations} error={error} onChanged={() => void refresh()} />
+        {/* ownScope: a note filed under this very node needs no chip saying so; a global one keeps its. */}
+        <AnnotationBar
+          scope={nodeName}
+          ownScope={nodeName}
+          annotations={annotations}
+          error={error}
+          onChanged={() => void refresh()}
+        />
         <MaintenanceBar
           scope={nodeName}
           windows={windows}
@@ -491,11 +597,20 @@ export function NodeCardPage() {
   }, []);
   const matrix = useMatrix(protocol);
   const [tab, setTab] = useState<NodeTab>("overview");
+  /* Memoised because the helper walks every cell of the matrix, not just this
+     node's row, and the card re-renders on every poll. Read for the protocol
+     on show: a host that left this plane out has a struck-through chip in the
+     identity card, and the breakdown must not blame the scrape job for that. */
+  const unscrapedNodes = useMemo(
+    () => unscrapedExternalNodes(topo.data, matrix.data, protocol),
+    [topo.data, matrix.data, protocol],
+  );
 
   if (nodeName === "") return <NotFound nodeName={nodeName} />;
 
   const node = topo.data?.nodes.find((n) => n.name === nodeName);
   const agent = topo.data?.agents.find((a) => a.nodeName === nodeName);
+  const external = isExternalAgent(agent);
   /*
    * Zone falls back to the AGENT's own copy; the agent carries the zone it registered with, so the
    * field has an answer.
@@ -523,8 +638,8 @@ export function NodeCardPage() {
           ? t("node.stateAsOf", {
               zone: zone ? `${t("node.zone", { zone })} · ` : "",
               /* Inside a translated sentence, so the stamp takes that
-                 sentence's language — lib/i18n's localeTag. */
-              at: new Date(topo.data?.asOf ?? at).toLocaleString(localeTag(locale)),
+                 sentence's language and the house clock — lib/i18n's stampFull. */
+              at: stampFull(new Date(topo.data?.asOf ?? at), locale),
             })
           : zone
             ? t("node.zone", { zone })
@@ -532,36 +647,52 @@ export function NodeCardPage() {
       }
       actions={
         <>
-          {/* The protocol OPTIONS are the protocols' own names. */}
-          <Segmented
-            aria-label={t("protocol.aria")}
-            options={PROTOCOLS.map((p) => ({ value: p, label: p.toUpperCase() }))}
-            value={protocol}
-            onChange={setProtocol}
-          />
-          {/* No percentage, no sentence. "— healthy" read as a claim with a
-              missing number in front of it; the badge beside it already says
-              the state in words, and it is the honest one (QA round 2, #16).
-              And where the figure exists but rests on part of the evidence, it
-              carries its own denominator rather than being withheld: "100.0%
-              healthy" off one scored pair of nine was a true statement about
-              one ninth of this node, presented as a statement about the node
-              (QA scope 2, #3). Withholding it would throw away the only
-              measurement there is; disclosing the coverage keeps both. */}
-          {health.percent === null ? null : (
-            <span data-testid="node-health-percent" className="nums text-sm text-muted-foreground">
-              {health.scored < health.total
-                ? t("health.percent.scoped", {
-                    percent: health.percent.toFixed(1),
-                    scored: health.scored,
-                    total: health.total,
-                  })
-                : t("health.percent", { percent: health.percent.toFixed(1) })}
-            </span>
-          )}
-          <Badge variant={TIER_VARIANT[health.tier]} dot>
-            {t(TIER_KEYS[health.tier])}
-          </Badge>
+          {/* The protocol OPTIONS are the protocols' own names. Below sm the
+              switch takes a row of its own (the wrapper is the flex item, so
+              the track keeps its natural width) and the verdict group under
+              it stays on ONE line: at 375px the shell's row broke between the
+              percentage and the tier badge, and "23.7% healthy" hung beside
+              the switch a line away from the "Failing" it belongs to. */}
+          <div data-testid="node-protocol-row" className="basis-full sm:basis-auto">
+            <Segmented
+              aria-label={t("protocol.aria")}
+              options={PROTOCOLS.map((p) => ({ value: p, label: p.toUpperCase() }))}
+              value={protocol}
+              onChange={setProtocol}
+            />
+          </div>
+          <span data-testid="node-verdict" className="flex flex-nowrap items-center gap-2">
+            {/* No percentage, no sentence. "— healthy" read as a claim with a
+                missing number in front of it; the badge beside it already says
+                the state in words, and it is the honest one (QA round 2, #16).
+                And where the figure exists but rests on part of the evidence, it
+                carries its own denominator rather than being withheld: "100.0%
+                healthy" off one scored pair of nine was a true statement about
+                one ninth of this node, presented as a statement about the node
+                (QA scope 2, #3). Withholding it would throw away the only
+                measurement there is; disclosing the coverage keeps both. */}
+            {health.percent === null ? null : (
+              <span data-testid="node-health-percent" className="nums text-sm text-muted-foreground">
+                {health.scored < health.total
+                  ? t("health.percent.scoped", {
+                      percent: health.percent.toFixed(1),
+                      scored: health.scored,
+                      total: health.total,
+                    })
+                  : t("health.percent", { percent: health.percent.toFixed(1) })}
+              </span>
+            )}
+            <Badge variant={TIER_VARIANT[health.tier]} dot>
+              {t(TIER_KEYS[health.tier])}
+            </Badge>
+            {/* Identity, not a tier — neutral, no dot, the same word the topology
+                map and the Overview wear (lib/i18n/cards.test.tsx pins it). */}
+            {external ? (
+              <Badge variant="neutral" data-testid="node-external-badge">
+                {t("node.external")}
+              </Badge>
+            ) : null}
+          </span>
           {/* The entry point into Investigation Mode (plan Decision 11): the
               URL is the whole contract, built by the one helper the matrix and
               the other two cards also use. */}
@@ -611,6 +742,9 @@ export function NodeCardPage() {
                 ready={node?.ready}
                 agentId={agent?.id}
                 podIP={agent?.podIP}
+                external={external}
+                planes={agentPlanes(agent)}
+                unscraped={external && unscrapedNodes.includes(nodeName)}
                 topologyProblem={topo.error?.message}
               />
             ) : (

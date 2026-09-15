@@ -242,6 +242,37 @@ describe("PairCardPage", () => {
     await screen.findByText("Last run for this pair");
     expect(screen.queryByRole("button", { name: "Run check" })).not.toBeInTheDocument();
   });
+
+  it("sets the last run's id in the data face, truncating inside a wider track with the whole id on title", async () => {
+    const id = "36a04ef7-b75c-4944-8caa-3a844a53b5dc";
+    const detail = runDetail(id, {
+      results: [
+        { sourceNode: "node-a", destinationNode: "node-b", success: true, durationNs: 500_000, recordedAt: "2026-08-01T00:00:00Z", sampleSeq: 0 },
+      ],
+    });
+    renderPage("/pairs/node-a/node-b", {
+      runs: [{ id, createdAt: "2026-08-01T00:00:00Z", status: "succeeded", type: "tcp", plane: "pod" }],
+      runDetails: { [id]: detail },
+    });
+    fireEvent.click(await screen.findByRole("radio", { name: "Diagnostics" }));
+
+    const link = await screen.findByRole("link", { name: id });
+    expect(link).toHaveAttribute("href", `/diagnostics/runs/${id}`);
+    expect(link).toHaveAttribute("title", id);
+    expect(link.className).toContain("mono-data");
+    expect(link.className).toContain("truncate");
+    // A 36-character UUID gets twice the track of a word, a duration and a stamp,
+    // and a whole row below sm — the node card's own rule for its agent id.
+    const cell = link.closest("div");
+    expect(cell?.className).toContain("col-span-2");
+    expect(cell?.className).toContain("sm:col-span-1");
+    const dl = link.closest("dl");
+    expect(dl?.className).toContain("sm:grid-cols-[minmax(0,2fr)_1fr_1fr_1fr]");
+    expect(dl?.className).not.toContain("sm:grid-cols-4");
+    // The other three cells are what they were.
+    expect(screen.getByText("ok")).toBeInTheDocument();
+    expect(screen.getByText("0.5ms")).toBeInTheDocument();
+  });
 });
 
 /* ── M6 Task 8: the Investigate entry point + the related-incidents rail ── */

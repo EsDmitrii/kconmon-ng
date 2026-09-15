@@ -35,6 +35,19 @@ const en = {
   /* Percentage POINTS, the unit on the delta chip. A word, so it is translated —
      it used to be a hard-coded "pp" in the Russian interface too. */
   "delta.unit": "pp",
+  /* One muted sentence instead of "— → 0.0% —": a missing sample is a fact
+     about the window's edge, and three dashes said nothing about which edge. */
+  "delta.noSample.start": "no sample at the window start",
+  "delta.noSample.end": "no sample at the window end",
+  "delta.noSample.both": "no sample at either end of the window",
+
+  /* ── the series names ──────────────────────────────────────────────────── */
+  /* What the legend and the tooltip call the ONE series each chart draws. The
+     builder falls back to the literal "series" for a label-less aggregate, and
+     a legend saying "series" under a heading saying "Packet loss" names
+     nothing. lib/annotations.ts's two overlay names stay exported constants. */
+  "series.loss": "Loss",
+  "series.rtt": "RTT p95",
 
   /* ── the cursor readout ────────────────────────────────────────────────── */
   /* DOM, not a chart tooltip: a canvas marker cannot be focused or read aloud.
@@ -87,6 +100,12 @@ export const signalsDict: Dictionary<SignalsKey> = defineDict(en, {
   "delta.failRatio": "Доля сбоев",
   "delta.unit": "п.п.",
   "delta.caption": "начало интервала против конца",
+  "delta.noSample.start": "в начале интервала выборки нет",
+  "delta.noSample.end": "в конце интервала выборки нет",
+  "delta.noSample.both": "ни на одном краю интервала выборки нет",
+
+  "series.loss": "Потери",
+  "series.rtt": "RTT p95",
 
   "cursor": "Курсор {at}",
   "cursor.none": "ни на что не наведён",

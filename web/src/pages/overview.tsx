@@ -11,6 +11,7 @@ import { useAuth } from "@/hooks/use-auth";
 import { useDatabaseAvailable } from "@/hooks/use-capabilities";
 import { useMatrix } from "@/hooks/use-matrix";
 import { useTopology } from "@/hooks/use-topology";
+import { externalByNode } from "@/lib/agents";
 import { localeTag, useLocale, useT, type Translate } from "@/lib/i18n";
 import { overviewDict, type OverviewKey } from "@/lib/i18n/dict/overview";
 import { getEvents, getIncidents, isServerSentence, listAlerts } from "@/lib/api";
@@ -250,7 +251,9 @@ type Tone = "warn" | "bad";
 
 /* A tone only appears when the value itself means trouble, and it arrives on three channels at once — a left rail.
    No Card since M4-6: the tiles sit straight on the page background, so the
-   figures read as the page's own numbers rather than three boxed widgets. */
+   figures read as the page's own numbers rather than three boxed widgets.
+   The rail's indent (pl-4) comes and goes with the rail: a clean tile sits
+   flush with the page instead of reserving a margin for a bar it has not got. */
 function StatTile({
   label,
   value,
@@ -258,6 +261,7 @@ function StatTile({
   hint,
   note,
   toneLabel,
+  className,
 }: {
   label: string;
   value: ReactNode;
@@ -266,9 +270,10 @@ function StatTile({
   /** A second line, for what BOUNDS the value rather than what qualifies it. */
   note?: string;
   toneLabel?: string;
+  className?: string;
 }) {
   return (
-    <div className="relative pl-4">
+    <div className={cn("relative", tone && "pl-4", className)}>
       {tone ? (
         <span
           aria-hidden="true"
@@ -386,10 +391,10 @@ function OverviewSkeleton() {
   return (
     <div role="status" aria-live="polite" className="flex flex-col gap-6">
       <span className="sr-only">{t("loading")}</span>
-      <div className="grid gap-4 sm:grid-cols-3">
+      <div className="grid grid-cols-2 gap-4 sm:grid-cols-3">
         {/* Bare like the loaded tiles — a boxed skeleton would jump on load. */}
         {[0, 1, 2].map((i) => (
-          <div key={i} className="pl-4">
+          <div key={i} className={i === 0 ? "col-span-2 sm:col-span-1" : undefined}>
             <SkeletonBar className="h-2.5 w-24" />
             <SkeletonBar className="mt-4 h-8 w-20" />
           </div>
@@ -515,7 +520,16 @@ function OpenIncidents() {
         ) : !enabled || query.isLoading ? (
           <PanelSkeleton rows={3} />
         ) : incidents.length === 0 ? (
-          <PanelNote>{t("incidents.empty")}</PanelNote>
+          <EmptyState
+            compact
+            className="mt-2"
+            title={t("incidents.empty")}
+            action={
+              <a href={withAtParam("/investigate")} className="text-xs text-primary hover:underline">
+                {t("incidents.open")}
+              </a>
+            }
+          />
         ) : (
           <ul className="mt-3 flex flex-col divide-y divide-border">
             {incidents.map((i) => (
@@ -568,24 +582,34 @@ const SEVERITY_KEYS: Record<LiveEventSeverity, OverviewKey> = {
 function OverviewEventRow({ event }: { event: LiveEvent }) {
   const t = useT(overviewDict);
   const { locale } = useLocale();
+  const known = isKnownSeverity(event.severity);
   return (
-    <Tr data-testid="overview-event">
+    /* Below sm the row is two stacked lines — clock and badge, then the summary — and the same
+       cells reflow into a table row from sm up: the tr turns flex and wraps, the cells drop their
+       row padding for the tr's own, and nothing is rendered twice. */
+    <Tr
+      data-testid="overview-event"
+      className="flex flex-wrap items-center gap-x-3 gap-y-0.5 py-1.5 sm:table-row sm:py-0"
+    >
       {/* The DAY, not a bare clock. This card is fed with `to = t` when the Time Machine is engaged
           and has no lower bound at all, so its ten newest rows can be days old — and under a heading
           that says "Recent events", beside a banner naming another date, a bare "14:03" reads as
           this afternoon. The two sibling feeds (/live, recent-changes) already print it this way. */}
-      <Td className="mono-data whitespace-nowrap pr-3 text-muted-foreground">
+      <Td className="mono-data whitespace-nowrap py-0 text-muted-foreground sm:py-1.5 sm:pr-3">
         {fmtEventStamp(event.timestamp, localeTag(locale))}
       </Td>
-      <Td className="pr-3">
-        <Badge variant={isKnownSeverity(event.severity) ? SEVERITY_VARIANT[event.severity] : "unknown"} dot>
-          {isKnownSeverity(event.severity) ? t(SEVERITY_KEYS[event.severity]) : event.severity}
+      {/* The severity word is read at every width and seen from sm: on a phone the badge is the
+          dot alone beside the clock. */}
+      <Td className="py-0 sm:py-1.5 sm:pr-3">
+        <Badge variant={known ? SEVERITY_VARIANT[event.severity] : "unknown"} dot>
+          <span className="sr-only sm:not-sr-only">{known ? t(SEVERITY_KEYS[event.severity]) : event.severity}</span>
         </Badge>
       </Td>
       {/* w-full + max-w-0 is the table-cell spelling of min-w-0 flex-1: take
-          the slack, and truncate rather than push the card open. */}
-      <Td className="w-full max-w-0">
-        <span className="block truncate" title={event.summary}>
+          the slack, and clamp to one line rather than push the card open.
+          Below sm the cell is the second line, two lines deep. */}
+      <Td className="basis-full py-0 sm:w-full sm:max-w-0 sm:py-1.5">
+        <span className="line-clamp-2 sm:line-clamp-1" title={event.summary}>
           {event.summary}
         </span>
       </Td>
@@ -595,7 +619,7 @@ function OverviewEventRow({ event }: { event: LiveEvent }) {
           cell does not need, so the scope may grow; the cap and the title
           keep a pathological scope from pushing the card open. */}
       <Td className="hidden pl-3 sm:table-cell">
-        <span className="mono-data block max-w-[20rem] truncate text-muted-foreground" title={event.scope}>
+        <span className="mono-data block max-w-[26rem] truncate text-muted-foreground" title={event.scope}>
           {event.scope}
         </span>
       </Td>
@@ -623,15 +647,21 @@ function RecentEvents() {
     refetchInterval: enabled ? PANEL_POLL_MS : false,
   });
   const events = query.data?.events ?? [];
+  /* Empty, the panel's link moves into the slate as its next step, so the word
+     appears once. */
+  const empty = enabled && !query.isLoading && !query.isError && events.length === 0;
+  const openLive = (
+    <a href={withAtParam("/live")} className="text-xs text-primary hover:underline">
+      {t("events.open")}
+    </a>
+  );
 
   return (
     <Card asChild className="p-6">
       <section aria-label={t("events.title")}>
         <div className="flex flex-wrap items-baseline justify-between gap-2">
           <h2 className="type-section">{t("events.title")}</h2>
-          <a href={withAtParam("/live")} className="text-xs text-primary hover:underline">
-            {t("events.open")}
-          </a>
+          {empty ? null : openLive}
         </div>
 
         {me !== undefined && !canRead ? (
@@ -645,7 +675,7 @@ function RecentEvents() {
         ) : events.length === 0 ? (
           /* "Nothing has happened yet" is a LIVE sentence; bounded by to=t it
              would be claiming the fleet had never done anything by then. */
-          <PanelNote>{t(at ? "events.empty.engaged" : "events.empty")}</PanelNote>
+          <EmptyState compact className="mt-2" title={t(at ? "events.empty.engaged" : "events.empty")} action={openLive} />
         ) : (
           <Table variant="dense" containerClassName="mt-3">
             <TBody>
@@ -796,6 +826,15 @@ function FiringAlerts() {
   );
   const shown = alerts.slice(0, FIRING_ALERTS_LIMIT);
   const hidden = alerts.length - shown.length;
+  /* Empty, the panel's link moves into the slate as its next step, so the word
+     appears once. */
+  const empty =
+    enabled && !query.isLoading && !query.isError && query.data?.promConfigured !== false && alerts.length === 0;
+  const openAlerting = (
+    <a href={withAtParam("/alerting")} className="text-xs text-primary hover:underline">
+      {t("alerts.open")}
+    </a>
+  );
 
   return (
     /* min-w-0 for the same reason as OpenIncidents above: grid child, min-width:auto, 375 → 495. */
@@ -803,11 +842,7 @@ function FiringAlerts() {
       <section aria-label={t("alerts.title")}>
         <div className="flex flex-wrap items-baseline justify-between gap-2">
           <h2 className="type-section">{t("alerts.title")}</h2>
-          {canRead ? (
-            <a href={withAtParam("/alerting")} className="text-xs text-primary hover:underline">
-              {t("alerts.open")}
-            </a>
-          ) : null}
+          {canRead && !empty ? openAlerting : null}
         </div>
 
         {engaged ? (
@@ -827,7 +862,7 @@ function FiringAlerts() {
         ) : query.data?.promConfigured === false ? (
           <PanelNote>{t("alerts.noPrometheus")}</PanelNote>
         ) : alerts.length === 0 ? (
-          <PanelNote>{t("alerts.empty")}</PanelNote>
+          <EmptyState compact className="mt-2" title={t("alerts.empty")} action={openAlerting} />
         ) : (
           <>
             <ul className="mt-3 flex flex-col divide-y divide-border">
@@ -851,11 +886,27 @@ function FiringAlerts() {
   );
 }
 
-function WorstPairsTable({ pairs }: { pairs: MatrixCell[] }) {
+function WorstPairsTable({
+  pairs,
+  externalNodes,
+}: {
+  pairs: MatrixCell[];
+  /** Node names registered by a bare-host agent (lib/agents.ts): each wears an
+   *  identity badge right after its name, whichever end of the pair it is. */
+  externalNodes: ReadonlySet<string>;
+}) {
   const t = useT(overviewDict);
   /* The instant the table is drawn at, so a drill-down opens the same moment (null = Live) —
      the matrix grid's own rule for its cell links. */
   const { at } = useTimeContext();
+  /* Neutral and dotless: identity, not a status. An inline-flex pill is an
+     atomic inline, so the link's hover underline does not run through it. */
+  const externalBadge = (name: string) =>
+    externalNodes.has(name) ? (
+      <Badge variant="neutral" data-testid="worst-pair-external" className="shrink-0 font-sans">
+        {t("table.external")}
+      </Badge>
+    ) : null;
   return (
     <Table variant="dense">
       <caption className="sr-only">{t("table.caption")}</caption>
@@ -863,17 +914,23 @@ function WorstPairsTable({ pairs }: { pairs: MatrixCell[] }) {
         <Tr>
           {/* "#" is a symbol, not a word — the rank column reads the same in
               every language, so it stays out of the dictionary. */}
-          <Th className="w-10 pr-4">#</Th>
-          <Th className="pr-6">{t("table.pair")}</Th>
-          <Th numeric className="pr-6">
+          {/* The rank, the RTT and the row action are the phone's secondary
+              columns: at 375px Pair, Fail % and Status fit side by side
+              without them, and the pair link is the row's way in. */}
+          <Th className="hidden w-10 pr-4 sm:table-cell">#</Th>
+          {/* w-full: the pair is the one flexible column and the last to
+              truncate; the figures and the badge to its right are
+              content-sized. */}
+          <Th className="w-full pr-4 sm:pr-6">{t("table.pair")}</Th>
+          <Th numeric className="pr-4 sm:pr-6">
             {t("table.fail")}
           </Th>
-          <Th numeric className="pr-6">
+          <Th numeric className="hidden pr-6 sm:table-cell">
             {t("table.rtt")}
           </Th>
           <Th>{t("table.status")}</Th>
           {/* The investigate column carries links, not data — named for screen readers only. */}
-          <Th className="pl-4">
+          <Th className="hidden pl-4 sm:table-cell">
             <span className="sr-only">{t("table.investigate")}</span>
           </Th>
         </Tr>
@@ -899,32 +956,48 @@ function WorstPairsTable({ pairs }: { pairs: MatrixCell[] }) {
                 key={`${i} ${c.source} ${c.destination}`}
                 className="transition-colors duration-(--dur) ease-(--ease) hover:bg-accent/40"
               >
-                <Td className="nums pr-4 text-xs text-muted-foreground">{i + 1}</Td>
-                <Td className="max-w-[22rem] pr-6">
+                <Td className="nums hidden pr-4 text-xs text-muted-foreground sm:table-cell">{i + 1}</Td>
+                {/* max-w-0 with the header's w-full is the table-cell spelling
+                    of min-w-0 flex-1: the cell takes the slack and the two
+                    names truncate inside it (min-w-0 on each) rather than
+                    pushing the table into a sideways scroll on a phone. */}
+                <Td className="max-w-0 pr-4 sm:pr-6">
+                  {/* Two halves, each a name with its badge: one line from sm up, and on a phone
+                      the destination takes the second line (basis-full) so each name keeps
+                      enough room to be read rather than both collapsing to a letter. */}
                   <a
                     href={pairHref}
                     data-testid="worst-pair-link"
-                    className="mono-data flex items-center gap-2 rounded text-primary hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                    className="mono-data flex flex-wrap items-center gap-x-2 gap-y-0.5 rounded text-primary hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring sm:flex-nowrap"
                   >
-                    <span className="truncate" title={c.source}>
-                      {c.source}
+                    <span className="flex min-w-0 max-w-full items-center gap-2">
+                      <span className="min-w-0 truncate" title={c.source}>
+                        {c.source}
+                      </span>
+                      {externalBadge(c.source)}
                     </span>
-                    <span aria-hidden="true" className="shrink-0 text-muted-foreground">
-                      →
-                    </span>
-                    <span className="truncate" title={c.destination}>
-                      {c.destination}
+                    <span className="flex min-w-0 basis-full items-center gap-2 sm:basis-auto">
+                      <span aria-hidden="true" className="shrink-0 text-muted-foreground">
+                        →
+                      </span>
+                      <span className="min-w-0 truncate" title={c.destination}>
+                        {c.destination}
+                      </span>
+                      {externalBadge(c.destination)}
                     </span>
                   </a>
                 </Td>
                 <Td
                   numeric
-                  className={cn("pr-6 font-semibold tracking-tight", failing ? "text-health-bad" : "text-health-warn")}
+                  className={cn(
+                    "pr-4 font-semibold tracking-tight sm:pr-6",
+                    failing ? "text-health-bad" : "text-health-warn",
+                  )}
                 >
                   {(100 * fail).toFixed(1)}%
                 </Td>
                 {/* The RTT is a value, not a caption — it reads in the foreground. */}
-                <Td numeric className="pr-6">
+                <Td numeric className="hidden pr-6 sm:table-cell">
                   {fmtRtt(c.rttP95)}
                 </Td>
                 <Td>
@@ -932,7 +1005,7 @@ function WorstPairsTable({ pairs }: { pairs: MatrixCell[] }) {
                     {t(failing ? "table.status.failing" : "table.status.degraded")}
                   </Badge>
                 </Td>
-                <Td className="pl-4 text-right">
+                <Td className="hidden pl-4 text-right sm:table-cell">
                   <a
                     href={investigateHref}
                     data-testid="worst-pair-investigate"
@@ -1004,6 +1077,9 @@ export function OverviewPage() {
   const matrix = byProtocol[protocol];
   const summary = planes.find((p) => p.protocol === protocol)?.summary;
   const nodes = nodesTile(topo.data, topo.isLoading, matrix.data);
+  /* One index for the worst-pairs badges and the tile hint; keyed on the
+     topology body so a poll that changed nothing rebuilds nothing. */
+  const externalNodes = useMemo(() => new Set(externalByNode(topo.data).keys()), [topo.data]);
   const nodesValue =
     nodes.kind === "counts"
       ? `${nodes.ready}/${nodes.total}`
@@ -1012,12 +1088,19 @@ export function OverviewPage() {
         : nodes.kind === "loading"
           ? "…"
           : "—";
+  /* The external hint rides the k8s count only: that count is readiness, which a
+     bare host has none of, so the arithmetic stays and the hint says how many sit
+     outside it ("Counted from agents" already counts the host, so no hint there). */
   const nodesHint =
     nodes.kind === "unavailable"
       ? t("tiles.nodesReady.noTopology")
       : nodes.kind === "noInventory"
         ? t(nodes.source === "agents" ? "tiles.nodesReady.fromAgents" : "tiles.nodesReady.fromMatrix")
-        : undefined;
+        : nodes.kind === "counts" && externalNodes.size > 0
+          ? t(externalNodes.size === 1 ? "tiles.nodesReady.external.one" : "tiles.nodesReady.external.many", {
+              count: externalNodes.size,
+            })
+          : undefined;
   /* Zero measured pairs means zero over zero, and a bare 0 there reads as a
      clean fleet — the tile takes the nodes tile's em-dash instead. */
   const noPairs = summary !== undefined && summary.pairsTotal === 0;
@@ -1093,8 +1176,12 @@ export function OverviewPage() {
               />
             )}
 
-            <div className="grid gap-4 sm:grid-cols-3">
+            {/* Two tiles to a row on a phone, the nodes tile across both, so
+                the pair figures sit side by side and the column reads in one
+                screen. */}
+            <div className="grid grid-cols-2 gap-4 sm:grid-cols-3">
               <StatTile
+                className="col-span-2 sm:col-span-1"
                 label={t("tiles.nodesReady")}
                 value={nodesValue}
                 hint={nodesHint}
@@ -1166,11 +1253,16 @@ export function OverviewPage() {
                     <EmptyState
                       title={t("worstPairs.empty.healthy.title")}
                       body={t("worstPairs.empty.healthy.body")}
+                      action={
+                        <a href={withAtParam("/matrix")} className="text-xs text-primary hover:underline">
+                          {t("worstPairs.open")}
+                        </a>
+                      }
                     />
                   )
                 ) : (
                   <div className="mt-4">
-                    <WorstPairsTable pairs={summary.worstPairs} />
+                    <WorstPairsTable pairs={summary.worstPairs} externalNodes={externalNodes} />
                   </div>
                 )}
               </section>

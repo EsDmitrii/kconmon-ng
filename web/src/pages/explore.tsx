@@ -7,23 +7,30 @@ import { EChart } from "@/components/echart";
 import { MaintenanceBar, useMaintenance } from "@/components/maintenance";
 import { PageShell } from "@/components/page-shell";
 import { Card } from "@/components/ui/card";
+import { EmptyState } from "@/components/ui/empty-state";
 import { Segmented } from "@/components/ui/segmented";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useTheme } from "@/components/theme-provider";
 import { promqlQueryRange } from "@/lib/api";
-import { localeTag, useLocale, useT } from "@/lib/i18n";
+import { chartColors } from "@/lib/chart-theme";
+import { stampFull, useLocale, useT, type Locale } from "@/lib/i18n";
 import { exploreDict } from "@/lib/i18n/dict/explore";
 import { GLOBAL_SCOPE } from "@/lib/annotations";
 import {
   CURATED_CHARTS,
   chartTitle,
+  elideSeriesName,
+  legendNamePrefix,
   resolveRangeToken,
   toSeriesOption,
+  unitFormatter,
+  valueAxis,
   type CuratedChart,
   type PlotWindow,
 } from "@/lib/curated-metrics";
 import { useTimeContext } from "@/lib/timemachine";
 import type { Annotation, MaintenanceWindow, PromResult } from "@/lib/types";
+import { cn } from "@/lib/utils";
 
 const EXPLORE_POLL_MS = 30_000;
 // Datapoints per chart the step is sized for.
@@ -149,14 +156,26 @@ function useExploreQuery(chart: CuratedChart, rangeSeconds: number, shiftSeconds
 /** One leg of the compare panel: a curated query, its data, and its identity. */
 export interface CompareLeg {
   chart: CuratedChart;
-  /** Legend prefix — "A: TCP RTT p95…" or "A (24h earlier)". */
+  /** Series-name prefix — "A: TCP RTT p95…" or "A (24h earlier)". The whole name is what the tooltip prints. */
   label: string;
+  /** What the LEGEND calls the leg instead: "A" / "B" in metric-B mode, where the two titles are said
+   *  once in the caption rather than on every entry (five entries reading "A: TCP RTT p95 (worst 5
+   *  pairs) · …" paged one name at a time). Absent, the legend shows the label. */
+  legend?: string;
   data: PromResult;
   /** Milliseconds to add back to this leg's timestamps so it overlays A. */
   shiftMs?: number;
 }
 
-function legSeries(leg: CompareLeg, dark: boolean, muted: boolean): echarts.LineSeriesOption[] {
+/* The room a right-hand axis needs: mirrors the left inset, "100.0%" wide. */
+const COMPARE_GRID_RIGHT = 56;
+
+function legSeries(
+  leg: CompareLeg,
+  dark: boolean,
+  muted: boolean,
+  extra: Partial<echarts.LineSeriesOption> = {},
+): echarts.LineSeriesOption[] {
   const built = (toSeriesOption(leg.chart, leg.data, dark).series ?? []) as echarts.LineSeriesOption[];
   const shiftMs = leg.shiftMs ?? 0;
   return built.map((s) => ({
@@ -168,6 +187,7 @@ function legSeries(leg: CompareLeg, dark: boolean, muted: boolean): echarts.Line
           itemStyle: { opacity: MUTED_OPACITY },
         }
       : {}),
+    ...extra,
     data:
       shiftMs === 0
         ? s.data
@@ -175,18 +195,62 @@ function legSeries(leg: CompareLeg, dark: boolean, muted: boolean): echarts.Line
   }));
 }
 
-/** Merges two legs onto ONE pair of axes — A's, built by toSeriesOption exactly as the curated cards build theirs. */
+/** splitLegName takes a compare series name apart: which leg it belongs to, and the pair after it. */
+function splitLegName(name: string, legs: readonly CompareLeg[]): { leg: CompareLeg; rest: string } | null {
+  for (const leg of legs) {
+    const head = `${leg.label} · `;
+    if (name.startsWith(head)) return { leg, rest: name.slice(head.length) };
+  }
+  return null;
+}
+
+/**
+ * Merges two legs onto A's axes, built by toSeriesOption exactly as the curated cards build theirs.
+ *
+ * When the two legs carry different UNITS, B gets a y axis of its own on the right, in B's own
+ * formatter: a ratio drawn against a seconds axis read as a 1000ms spike (audit frame
+ * explore-compare-metric), and "read its shape, not its height" was a caption describing that
+ * bug. Same unit, one shared axis, as before. B's series also carry B's formatter for the tooltip,
+ * which lib/chart-tooltip.ts honours row by row.
+ */
 export function toCompareOption(
   a: CompareLeg,
   b: CompareLeg | undefined,
   dark: boolean,
   window?: PlotWindow,
+  locale: Locale = "en",
 ): echarts.EChartsOption {
   /* A's window for both: leg B is re-timestamped onto it in legSeries. */
-  const base = toSeriesOption(a.chart, a.data, dark, window);
+  const base = toSeriesOption(a.chart, a.data, dark, window, locale);
+  const unitsDiffer = b !== undefined && b.chart.unit !== a.chart.unit;
+  const fmtB = b ? unitFormatter(b.chart.unit) : undefined;
+  const legB: Partial<echarts.LineSeriesOption> =
+    unitsDiffer && fmtB ? { yAxisIndex: 1, tooltip: { valueFormatter: (v: unknown) => fmtB(Number(v)) } } : {};
+  const series = [...legSeries(a, dark, false), ...(b ? legSeries(b, dark, true, legB) : [])];
+
+  /* The legend's display: the leg's short name, then the pair with the fleet prefix elided over
+     BOTH legs' names. The series names themselves stay whole for the tooltip and legend hover. */
+  const legs = b ? [a, b] : [a];
+  const prefix = legendNamePrefix(series.map((s) => splitLegName(String(s.name ?? ""), legs)?.rest ?? String(s.name ?? "")));
+  const legend = {
+    ...(base.legend as echarts.LegendComponentOption),
+    formatter: (name: string) => {
+      const hit = splitLegName(name, legs);
+      return hit ? `${hit.leg.legend ?? hit.leg.label} · ${elideSeriesName(hit.rest, prefix)}` : elideSeriesName(name, prefix);
+    },
+  };
+
+  if (!unitsDiffer || !b) return { ...base, legend, series };
+  const colors = chartColors(dark ? "dark" : "light");
   return {
     ...base,
-    series: [...legSeries(a, dark, false), ...(b ? legSeries(b, dark, true) : [])],
+    legend,
+    grid: { ...(base.grid as object), right: COMPARE_GRID_RIGHT },
+    yAxis: [
+      base.yAxis as echarts.YAXisComponentOption,
+      { ...valueAxis(b.chart.unit, colors), position: "right", splitLine: { show: false } },
+    ],
+    series,
   };
 }
 
@@ -200,15 +264,21 @@ function ChartSkeleton() {
   );
 }
 
+/* The house slate, at the chart's own height so the grid does not jump when a card empties. */
 function ChartEmpty() {
   const t = useT(exploreDict);
   return (
-    <div className="mt-3 flex h-[16.5rem] flex-col items-center justify-center gap-2 rounded-md bg-surface-2/40 text-center">
-      <LineChart aria-hidden="true" className="size-5 text-muted-foreground" />
-      <p className="text-xs text-muted-foreground">{t("chart.empty")}</p>
-    </div>
+    <EmptyState
+      compact
+      icon={<LineChart aria-hidden="true" className="size-4" />}
+      title={t("chart.empty")}
+      className="mt-3 h-[16.5rem] justify-center rounded-md bg-surface-2/40"
+    />
   );
 }
+
+/* Card inset on the 4px grid: p-6, p-4 on a phone (ui/card.tsx's own default is p-6). */
+const CARD_INSET = "p-4 sm:p-6";
 
 function ExploreCard({
   chart,
@@ -216,12 +286,14 @@ function ExploreCard({
   dark,
   annotations,
   maintenance,
+  className,
 }: {
   chart: CuratedChart;
   rangeSeconds: number;
   dark: boolean;
   annotations: Annotation[];
   maintenance: MaintenanceWindow[];
+  className?: string;
 }) {
   const t = useT(exploreDict);
   /* `chart.title` is the ENGLISH source field and the fixture tests read;
@@ -230,8 +302,8 @@ function ExploreCard({
   const { query, window } = useExploreQuery(chart, rangeSeconds);
   const { data, isPending, error } = query;
   const option = useMemo(
-    () => (data ? toSeriesOption(chart, data, dark, window) : undefined),
-    [chart, data, dark, window],
+    () => (data ? toSeriesOption(chart, data, dark, window, locale) : undefined),
+    [chart, data, dark, window, locale],
   );
   // promqlQueryRange resolves (rather than throws) for Prometheus's own error envelope (see
   // lib/api.ts).
@@ -241,7 +313,7 @@ function ExploreCard({
     (data.data?.resultType !== "matrix" || (data.data?.result ?? []).length === 0);
 
   return (
-    <Card asChild interactive className="p-5">
+    <Card asChild interactive className={cn(CARD_INSET, className)}>
       <section>
         <h2 className="type-section">{chartTitle(chart, locale)}</h2>
         {error ? (
@@ -323,6 +395,8 @@ function CompareChart({
   chartB,
   labelA,
   labelB,
+  legendA,
+  legendB,
   shiftSeconds,
   shiftLabel,
   rangeSeconds,
@@ -334,6 +408,9 @@ function CompareChart({
   chartB: CuratedChart | undefined;
   labelA: string;
   labelB: string;
+  /** The legend's short names for the legs (CompareLeg.legend); absent, the legend shows the labels. */
+  legendA?: string;
+  legendB?: string;
   shiftSeconds: number;
   /** The preset's own label ("24h", "7d"), so the note below can say how far
    *  back the missing window was rather than printing seconds. Empty while no
@@ -345,6 +422,7 @@ function CompareChart({
   maintenance: MaintenanceWindow[];
 }) {
   const t = useT(exploreDict);
+  const { locale } = useLocale();
   const legB = chartB ?? chartA;
   const a = useExploreQuery(chartA, rangeSeconds);
   const b = useExploreQuery(legB, rangeSeconds, shiftSeconds);
@@ -352,14 +430,15 @@ function CompareChart({
   const option = useMemo(() => {
     if (!a.query.data) return undefined;
     return toCompareOption(
-      { chart: chartA, label: labelA, data: a.query.data },
+      { chart: chartA, label: labelA, legend: legendA, data: a.query.data },
       b.query.data
-        ? { chart: legB, label: labelB, data: b.query.data, shiftMs: shiftSeconds * 1000 }
+        ? { chart: legB, label: labelB, legend: legendB, data: b.query.data, shiftMs: shiftSeconds * 1000 }
         : undefined,
       dark,
       a.window,
+      locale,
     );
-  }, [a.query.data, a.window, b.query.data, chartA, legB, labelA, labelB, shiftSeconds, dark]);
+  }, [a.query.data, a.window, b.query.data, chartA, legB, labelA, labelB, legendA, legendB, shiftSeconds, dark, locale]);
 
   const error = a.query.error ?? b.query.error;
   const queryError = [a.query.data, b.query.data].find((d) => d?.status === "error");
@@ -439,7 +518,7 @@ function ComparePanel({
   const unitsDiffer = chartB !== undefined && chartB.unit !== chartA.unit;
 
   return (
-    <Card asChild interactive className="p-5">
+    <Card asChild interactive className={CARD_INSET}>
       <section aria-label={t("compare.title")}>
         <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
           <h2 className="type-section">{t("compare.title")}</h2>
@@ -482,12 +561,19 @@ function ComparePanel({
           )}
         </div>
 
-        {unitsDiffer ? (
+        {/* The two metric titles, said ONCE under the controls: the legend names its
+            entries "A · pair" / "B · pair", and a legend entry that repeated the whole
+            title before every pair paged one name at a time. The mixed-units note
+            joins the same line, since it is about the same two legs. */}
+        {chartB ? (
           <p className="mt-2 text-xs text-muted-foreground">
-            {t("compare.unitsDiffer", {
-              unitB: chartB.unit === "ratio" ? t("compare.unitB.ratio") : t("compare.unitB.duration"),
-              unitA: chartA.unit === "ratio" ? t("compare.unitA.ratio") : t("compare.unitA.seconds"),
-            })}
+            {t("compare.legs", { a: chartTitle(chartA, locale), b: chartTitle(chartB, locale) })}
+            {unitsDiffer
+              ? ` ${t("compare.unitsDiffer", {
+                  unitB: chartB.unit === "ratio" ? t("compare.unitB.ratio") : t("compare.unitB.duration"),
+                  unitA: chartA.unit === "ratio" ? t("compare.unitA.ratio") : t("compare.unitA.seconds"),
+                })}`
+              : null}
           </p>
         ) : null}
 
@@ -509,6 +595,11 @@ function ComparePanel({
                 ? t("compare.legB.earlier", { label: shift.label })
                 : t("compare.legB", { title: chartB ? chartTitle(chartB, locale) : "" })
             }
+            /* Metric-B mode only: the caption above carries the titles, so the
+               legend can drop to the letters. In self mode the label IS the
+               distinguishing part (now / earlier) and stays. */
+            legendA={shifted ? undefined : "A"}
+            legendB={shifted ? undefined : "B"}
             /* Gated on `shifted`, exactly as the two labels above are: the shift
                belongs to self-compare mode, and leaving it applied after a switch
                back to metric-B drew B from a window an hour or a week ago under a
@@ -550,9 +641,9 @@ export function ExplorePage() {
       title={t("title")}
       help={{ body: t("help.body"), slug: "metrics" }}
       /* {at} lands INSIDE a translated sentence, so it takes that sentence's
-         language — lib/i18n's localeTag. Computed here and passed in, never
-         formatted by the dictionary (QA scope 2, finding #8). */
-      description={at ? t("description.at", { at: at.toLocaleString(localeTag(locale)) }) : t("description")}
+         language and the house clock — lib/i18n's stampFull. Computed here and
+         passed in, never formatted by the dictionary (QA scope 2, finding #8). */
+      description={at ? t("description.at", { at: stampFull(at, locale) }) : t("description")}
       actions={
         <Segmented
           aria-label={t("range.aria")}
@@ -594,7 +685,7 @@ export function ExplorePage() {
       />
 
       <div className="grid gap-5 md:grid-cols-2">
-        {CURATED_CHARTS.map((chart) => (
+        {CURATED_CHARTS.map((chart, i) => (
           <ExploreCard
             key={chart.id}
             chart={chart}
@@ -602,6 +693,8 @@ export function ExplorePage() {
             dark={theme === "dark"}
             annotations={annotations}
             maintenance={windows}
+            /* An odd fifth card spans the row instead of leaving a hole beside it. */
+            className={i === CURATED_CHARTS.length - 1 && CURATED_CHARTS.length % 2 === 1 ? "md:col-span-2" : undefined}
           />
         ))}
       </div>

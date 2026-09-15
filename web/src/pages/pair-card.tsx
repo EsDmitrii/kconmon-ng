@@ -19,7 +19,7 @@ import { useTopology } from "@/hooks/use-topology";
 import { ApiError, createRun, getRun, getRuns, goTo, promqlQueryRange } from "@/lib/api";
 import { toSeriesOption, type CuratedChart } from "@/lib/curated-metrics";
 import type { InvestigationScope } from "@/lib/investigation-sources";
-import { localeTag, stampFull, useLocale, useT, type Locale } from "@/lib/i18n";
+import { stampFull, useLocale, useT, type Locale } from "@/lib/i18n";
 import { cardsDict, type CardsKey } from "@/lib/i18n/dict/cards";
 /* The badge's TOOLTIP is cellSummary's shared sentence, which has its own
    table — one reading of a cell for every surface that draws one. */
@@ -181,12 +181,12 @@ function PairOverviewTab({ source, destination }: { source: string; destination:
   return (
     <Card asChild className="p-5">
       <section>
-        <h3 className="text-sm font-semibold">
+        <h2 className="text-sm font-semibold">
           {t("pair.chart.title")}{" "}
           {/* Interpolated into a translated sentence, so it takes that
-              sentence's language — lib/i18n's localeTag. */}
-          {at ? t("pair.chart.hourEnding", { at: at.toLocaleString(localeTag(locale)) }) : t("pair.chart.lastHour")}
-        </h3>
+              sentence's language and the house clock — lib/i18n's stampFull. */}
+          {at ? t("pair.chart.hourEnding", { at: stampFull(at, locale) }) : t("pair.chart.lastHour")}
+        </h2>
         {error ? (
           <p role="alert" className="mt-3 text-sm text-health-bad">
             {error.message}
@@ -212,8 +212,11 @@ function PairOverviewTab({ source, destination }: { source: string; destination:
             className="mt-3 h-64 w-full"
           />
         ) : null}
+        {/* ownScope: a note filed under this very pair needs no chip saying so, and the pair
+            scope was the widest thing on the row; a global one keeps its. */}
         <AnnotationBar
           scope={scope}
+          ownScope={scope}
           annotations={annotations}
           error={annotationsError}
           onChanged={() => void refresh()}
@@ -310,7 +313,7 @@ function PairDiagnosticsTab({
     <Card asChild className="p-5">
       <section>
         <div className="flex flex-wrap items-center justify-between gap-3">
-          <h3 className="text-sm font-semibold">{t("pair.lastRun")}</h3>
+          <h2 className="text-sm font-semibold">{t("pair.lastRun")}</h2>
           {/* Permission decides whether this button EXISTS; time decides
               whether it is usable (lib/timemachine.tsx's useWriteGuard
               documents the split, and now carries the REASON with it).
@@ -351,11 +354,20 @@ function PairDiagnosticsTab({
         ) : null}
 
         {last ? (
-          <dl className="nums mt-3 grid grid-cols-2 gap-4 text-sm sm:grid-cols-4">
-            <div>
+          /* The run id is a 36-character UUID and the other three values are a
+             word, a duration and a stamp, so the id's track is twice theirs
+             and the id truncates inside it with the whole string on title —
+             the node card's own rule for its agent id. Below sm it takes a
+             row to itself rather than wrapping a UUID onto three lines. */
+          <dl className="nums mt-3 grid grid-cols-2 gap-4 text-sm sm:grid-cols-[minmax(0,2fr)_1fr_1fr_1fr]">
+            <div className="col-span-2 min-w-0 sm:col-span-1">
               <dt className="text-xs text-muted-foreground">{t("pair.run")}</dt>
               <dd className="mt-0.5">
-                <a href={withAtParam(`/diagnostics/runs/${last.run.id}`)} className="font-medium text-primary hover:underline">
+                <a
+                  href={withAtParam(`/diagnostics/runs/${last.run.id}`)}
+                  title={last.run.id}
+                  className="mono-data block truncate font-medium text-primary hover:underline"
+                >
                   {last.run.id}
                 </a>
               </dd>

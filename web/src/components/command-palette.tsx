@@ -78,6 +78,9 @@ export function CommandPalette() {
       returnToLive,
       openTimeMachinePicker,
       hasTimeMachinePicker: hasPicker,
+      /* A new tab with no opener: the console stays put and the site gets no
+         handle on this window. */
+      openExternal: (url: string) => void window.open(url, "_blank", "noopener,noreferrer"),
     }),
     [can, writesDisabled, navigate, theme, toggle, isLive, returnToLive, openTimeMachinePicker, hasPicker],
   );

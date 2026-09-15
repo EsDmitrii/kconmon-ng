@@ -445,7 +445,8 @@ describe("RunDetailPage under the Time Machine", () => {
     // The run itself is on screen: a permalink is not something to refuse.
     expect(await screen.findByText("succeeded")).toBeInTheDocument();
     expect(
-      screen.getByText(new RegExp(`this permalink is shown in full.*${new Date(at).toLocaleString()}`)),
+      /* The house clock (24h), the same stamp every page description prints. */
+      screen.getByText(new RegExp(`this permalink is shown in full.*${new Date(at).toLocaleString(undefined, { hour12: false })}`)),
     ).toBeInTheDocument();
   });
 });
@@ -1654,4 +1655,127 @@ it("does not frame the sample strip against the plan when the results are a tail
   // against.
   expect(screen.queryAllByTestId("timeline-slot-pending")).toHaveLength(0);
   expect(screen.queryAllByTestId("timeline-slot-filled")).toHaveLength(0);
+});
+
+/* ── 2.4.0 polish: the pair table's density and the header's truth ──────────── */
+describe("RunDetailPage — pairs table (2.4.0 polish)", () => {
+  const s = 1_000_000_000;
+  const REFUSAL =
+    "external destinations support tcp, icmp and mtr checks only; udp is excluded because the UDP probe " +
+    "measures loss by requiring the destination to echo its own sequence number back";
+  function failed(src: string, error = REFUSAL) {
+    return { sourceNode: src, destinationNode: "hooks-sink", success: false, durationNs: 1, recordedAt: "t", sampleSeq: 0, error };
+  }
+
+  it("says ONCE in the header when every pair failed with the identical error", async () => {
+    renderPage(
+      ["events"],
+      runBody({ status: "failed", pairTotal: 3, pairFailed: 3, results: [failed("a"), failed("b"), failed("c")] }),
+    );
+
+    const note = await screen.findByTestId("pairs-shared-error");
+    expect(note).toHaveTextContent("all 3 pairs failed with the same error");
+    expect(note).toHaveTextContent(REFUSAL);
+    // The rows still carry the sentence — clamped, with the whole of it in the title.
+    const cells = screen.getAllByTitle(REFUSAL);
+    expect(cells).toHaveLength(3);
+    for (const c of cells) expect(c.className).toMatch(/line-clamp-2/);
+  });
+
+  it("keeps the header quiet when the errors differ, or when there is one pair", async () => {
+    renderPage(
+      ["events"],
+      runBody({ status: "failed", pairTotal: 2, pairFailed: 2, results: [failed("a"), failed("b", "connection refused")] }),
+    );
+    expect(await screen.findByText("0/2 ok")).toBeInTheDocument();
+    expect(screen.queryByTestId("pairs-shared-error")).not.toBeInTheDocument();
+
+    cleanup();
+    renderPage(["events"], runBody({ status: "failed", pairTotal: 1, pairFailed: 1, results: [failed("a")] }));
+    expect(await screen.findByText("0/1 ok")).toBeInTheDocument();
+    expect(screen.queryByTestId("pairs-shared-error")).not.toBeInTheDocument();
+  });
+
+  /* The phone drops Duration and Error by CLASS, never by a second table: the
+     header cells and the body cells are the same elements at every width, so
+     every role and text pin above holds on a phone too. */
+  it("hides the Duration and Error columns below sm by class, with every cell top-aligned", async () => {
+    renderPage(["events"], runBody({ status: "failed", pairTotal: 1, pairFailed: 1, results: [failed("a")] }));
+
+    const duration = await screen.findByRole("columnheader", { name: "Duration" });
+    const error = screen.getByRole("columnheader", { name: "Error" });
+    expect(duration.className).toMatch(/\bhidden\b/);
+    expect(duration.className).toMatch(/sm:table-cell/);
+    expect(error.className).toMatch(/\bhidden\b/);
+    expect(error.className).toMatch(/sm:table-cell/);
+    const row = screen.getAllByRole("row")[1];
+    const cells = within(row).getAllByRole("cell");
+    expect(cells).toHaveLength(5);
+    for (const c of cells) expect(c.className).toMatch(/align-top/);
+    // The pair cell stacks on a phone — source over destination, the arrow off
+    // with the second line — and truncates only from sm up.
+    expect(cells[1].className).toMatch(/break-all/);
+    expect(cells[1].className).toMatch(/sm:max-w-\[22rem\]/);
+    expect(cells[1].className).not.toMatch(/(^|\s)truncate(\s|$)/);
+    const stack = cells[1].firstElementChild as HTMLElement;
+    expect(stack.className).toMatch(/flex-col/);
+    expect(stack.className).toMatch(/sm:flex-row/);
+    const arrow = within(cells[1]).getByText("→");
+    expect(arrow.className).toMatch(/\bhidden\b/);
+    expect(arrow.className).toMatch(/sm:inline/);
+    expect(within(cells[1]).getByTitle("a").className).toMatch(/sm:truncate/);
+  });
+
+  it("explains 'partial' in the status badge's title", async () => {
+    renderPage(["events"], runBody({ status: "partial", pairTotal: 2, results: [] }));
+
+    const badge = await screen.findByText("partial");
+    expect(badge).toHaveAttribute("title", "Some pairs succeeded and some failed");
+    cleanup();
+    renderPage(["events"], runBody({ status: "succeeded", pairTotal: 2, results: [] }));
+    expect(await screen.findByText("succeeded")).not.toHaveAttribute("title");
+  });
+
+  it("captions the Pairs tile with what its numerator counts", async () => {
+    renderPage(["events"], runBody({ status: "succeeded", pairTotal: 2, results: [] }));
+
+    await screen.findByText("0/2 ok");
+    expect(screen.getByTestId("pairs-basis")).toHaveTextContent("by each pair's latest probe");
+  });
+
+  /* "so far" promises a tail. On a finished run the count is final. */
+  it("drops 'so far' from the measured cadence line once the run has stopped", async () => {
+    const results = [0, 1, 2].map((i) => ({
+      sourceNode: "node-a",
+      destinationNode: "node-b",
+      success: true,
+      durationNs: 2_000_000,
+      recordedAt: `2026-08-11T13:3${3 + i}:00Z`,
+      sampleSeq: i,
+    }));
+    renderPage(
+      ["events"],
+      runBody({ status: "succeeded", spec: { Type: "tcp", Duration: 300 * s }, pairTotal: 1, results }),
+    );
+
+    await screen.findByText("Cadence");
+    const tile = screen.getByTestId("summary-cadence");
+    expect(tile).toHaveTextContent("1m measured");
+    expect(tile).toHaveTextContent("1 pair · ≥ 3 per pair");
+    expect(tile.textContent).not.toMatch(/so far/);
+  });
+
+  it("prints a sub-0.1ms duration in microseconds rather than as 0.0ms", async () => {
+    renderPage(
+      ["events"],
+      runBody({
+        status: "succeeded",
+        pairTotal: 1,
+        results: [{ sourceNode: "a", destinationNode: "b", success: true, durationNs: 95_000, recordedAt: "t", sampleSeq: 0 }],
+      }),
+    );
+
+    expect(await screen.findByText("95µs")).toBeInTheDocument();
+    expect(screen.queryByText("0.0ms")).not.toBeInTheDocument();
+  });
 });

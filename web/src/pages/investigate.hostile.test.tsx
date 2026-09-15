@@ -590,7 +590,7 @@ describe("the incident strip under hostile content", () => {
 
   it("renders a script-shaped title as text and keeps every control addressable", async () => {
     openIncident();
-    await screen.findByRole("heading", { level: 2 });
+    await screen.findByRole("heading", { level: 2, name: HOSTILE });
     expect(document.querySelector("script")).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: `Delete incident: ${HOSTILE}` }));
     expect(screen.getByRole("button", { name: `Confirm delete incident: ${HOSTILE}` })).toBeTruthy();

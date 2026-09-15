@@ -1,6 +1,17 @@
 import type * as echarts from "echarts";
 import { describe, expect, it } from "vitest";
-import { CURATED_CHARTS, RANGE_TOKEN, elideSeriesName, legendNamePrefix, resolveRangeToken, toSeriesOption } from "./curated-metrics";
+import {
+  CURATED_CHARTS,
+  RANGE_TOKEN,
+  axisDay,
+  elideSeriesName,
+  failRateByProtocol,
+  legendNamePrefix,
+  ratioAxisMax,
+  resolveRangeToken,
+  timeAxisLabel,
+  toSeriesOption,
+} from "./curated-metrics";
 import type { PromResult } from "./types";
 
 // Full metric-name inventory from docs/metrics.md (also verified against
@@ -51,12 +62,45 @@ describe("CURATED_CHARTS", () => {
     }
   });
 
-  it("has the corrected fail-rate query, not the flagged sketch", () => {
+  /* The card summed failures per second under a percent axis, and with a zone
+     blackholed the axis read 800% (audit frame explore-default-scroll). A
+     failure RATE is failures over probes, per protocol, and that quotient
+     cannot leave 0..1: the denominator is the numerator's own chain with the
+     failure selector dropped, so every failing probe is counted in both. */
+  it("draws the fail-rate card as a ratio per protocol: failures over every probe of that protocol", () => {
     const failRate = CURATED_CHARTS.find((c) => c.id === "fail-rate")!;
+    const fail = failRateByProtocol('{result="fail"}');
+    const total = failRateByProtocol("");
+    expect(failRate.unit).toBe("ratio");
+    expect(failRate.query).toBe(`${fail} / ${total}`);
     expect(failRate.query).toBe(
-      'sum by (protocol) (label_replace(rate(kconmon_ng_tcp_results_total{result="fail"}[5m]), "protocol", "tcp", "", "") or label_replace(rate(kconmon_ng_udp_results_total{result="fail"}[5m]), "protocol", "udp", "", "") or label_replace(rate(kconmon_ng_icmp_results_total{result="fail"}[5m]), "protocol", "icmp", "", ""))',
+      'sum by (protocol) (label_replace(rate(kconmon_ng_tcp_results_total{result="fail"}[5m]), "protocol", "tcp", "", "") or label_replace(rate(kconmon_ng_udp_results_total{result="fail"}[5m]), "protocol", "udp", "", "") or label_replace(rate(kconmon_ng_icmp_results_total{result="fail"}[5m]), "protocol", "icmp", "", ""))' +
+        ' / ' +
+        'sum by (protocol) (label_replace(rate(kconmon_ng_tcp_results_total[5m]), "protocol", "tcp", "", "") or label_replace(rate(kconmon_ng_udp_results_total[5m]), "protocol", "udp", "", "") or label_replace(rate(kconmon_ng_icmp_results_total[5m]), "protocol", "icmp", "", ""))',
     );
+    // Same three legs on both sides; the only difference is the selector.
+    expect(total).toBe(fail.split('{result="fail"}').join(""));
+    expect(fail.match(/\{result="fail"\}/g)).toHaveLength(3);
     expect(failRate.query).not.toContain("vector(0)");
+  });
+
+  it("bounds a ratio axis at 100%, so a percent axis can never read 800% again", () => {
+    const failRate = CURATED_CHARTS.find((c) => c.id === "fail-rate")!;
+    const res: PromResult = {
+      status: "success",
+      data: { resultType: "matrix", result: [{ metric: { protocol: "tcp" }, values: [[1, "1"]] }] },
+    };
+    const yAxis = toSeriesOption(failRate, res, true).yAxis as { max?: unknown; axisLabel: { formatter: (v: number) => string } };
+    expect(yAxis.max).toBe(ratioAxisMax);
+    // Anything at or past the top is pinned to 1; ECharts' nice rounding used to run on to 1.2.
+    expect(ratioAxisMax({ min: 0, max: 8 })).toBe(1);
+    expect(ratioAxisMax({ min: 0, max: 1 })).toBe(1);
+    expect(ratioAxisMax({ min: 0, max: 0.51 })).toBe(1);
+    // A small loss keeps the auto scale (null is ECharts' "not specified"), so a 2% wiggle stays a shape.
+    expect(ratioAxisMax({ min: 0, max: 0.02 })).toBeNull();
+    expect(yAxis.axisLabel.formatter(1)).toBe("100.0%");
+    // A seconds axis carries no bound at all.
+    expect((toSeriesOption(CURATED_CHARTS[0], res, true).yAxis as { max?: unknown }).max).toBeUndefined();
   });
 
   /* ---------------------------------------------------------------- */
@@ -319,5 +363,59 @@ describe("legend elision (M3-6)", () => {
     };
     const legend = toSeriesOption(tcpP95, shortResult, false).legend as Legend;
     expect(legend.formatter?.("a→b")).toBe("a→b");
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/* The time axis reads the house clock                                 */
+/* ------------------------------------------------------------------ */
+
+/**
+ * ECharts' own time-axis labels are "level" labels: HH:mm on most ticks and a
+ * bare "6" or "7" on the tick where the day turns (audit frames explore-24h,
+ * pair--m2). The console's tick is the 24-hour clock, and on that one tick a
+ * second line with the day. Local-time instants throughout, which is what the
+ * axis draws.
+ */
+describe("timeAxisLabel", () => {
+  const local = (h: number, m: number, s = 0) => new Date(2026, 8, 6, h, m, s).getTime();
+
+  it("prints the clock as HH:mm, 24-hour, seconds trimmed", () => {
+    expect(timeAxisLabel(local(23, 52, 7), "en")).toBe("23:52");
+    expect(timeAxisLabel(local(9, 5), "en")).toBe("09:05");
+  });
+
+  it("adds the day on a second line where the day turns", () => {
+    expect(timeAxisLabel(local(0, 0), "en")).toBe("00:00\nSep 6");
+    // Only there: the tick after midnight is a clock again.
+    expect(timeAxisLabel(local(0, 5), "en")).toBe("00:05");
+  });
+
+  it("writes the day in the interface language, through lib/i18n's stamp", () => {
+    expect(timeAxisLabel(local(0, 0), "ru")).toBe("00:00\n6 сент.");
+    expect(axisDay(new Date(2026, 8, 6, 14, 30), "en")).toBe("Sep 6");
+    expect(axisDay(new Date(2026, 8, 6, 14, 30), "ru")).toBe("6 сент.");
+  });
+
+  it("prints nothing for an instant that is not one", () => {
+    expect(timeAxisLabel(Number.NaN, "en")).toBe("");
+  });
+
+  it("is what every curated chart's x axis prints, in the chart's own locale", () => {
+    const res: PromResult = {
+      status: "success",
+      data: { resultType: "matrix", result: [{ metric: { host: "h" }, values: [[1, "1"]] }] },
+    };
+    const label = (locale: "en" | "ru") =>
+      (toSeriesOption(CURATED_CHARTS[3], res, true, undefined, locale).xAxis as {
+        axisLabel: { formatter: (v: number) => string };
+      }).axisLabel.formatter;
+    expect(label("en")(local(14, 5))).toBe("14:05");
+    expect(label("ru")(local(0, 0))).toBe("00:00\n6 сент.");
+  });
+
+  it("leaves the right inset the axis-pointer pill needs", () => {
+    const res: PromResult = { status: "success", data: { resultType: "matrix", result: [] } };
+    expect((toSeriesOption(CURATED_CHARTS[0], res, true).grid as { right: number }).right).toBeGreaterThanOrEqual(40);
   });
 });

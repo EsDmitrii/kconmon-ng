@@ -48,6 +48,8 @@ func TestHumanizePct(t *testing.T) {
 	}
 }
 
+// sampleTopology is three Kubernetes nodes (one without an agent) plus one external host that
+// registered through the gateway: it has an agent row but no Node, and carries the external label.
 func sampleTopology() *model.TopologySnapshot {
 	now := time.Now()
 	return &model.TopologySnapshot{
@@ -59,9 +61,22 @@ func sampleTopology() *model.TopologySnapshot {
 		Agents: []model.AgentInfo{
 			{ID: "node-1-kconmon-ng-agent-aaaaa", NodeName: "node-1", PodIP: "10.0.0.1", Zone: "us-east-1a", LastSeen: now.Add(-5 * time.Second)},
 			{ID: "node-2-kconmon-ng-agent-bbbbb", NodeName: "node-2", PodIP: "10.0.0.2", Zone: "us-east-1b", LastSeen: now.Add(-2 * time.Second)},
+			{ID: "edge-01-agent", NodeName: "edge-01", PodIP: "192.0.2.10", Zone: "office", LastSeen: now.Add(-3 * time.Second),
+				Labels:       map[string]string{model.LabelExternal: "true"},
+				Capabilities: []string{"external-checks", "plane:tcp", "plane:mtr"}},
 		},
 		Timestamp: now,
 	}
+}
+
+// rowStartingWith returns the first line of a rendered table whose first column is name.
+func rowStartingWith(out, name string) string {
+	for _, l := range strings.Split(strings.TrimSpace(out), "\n") {
+		if strings.HasPrefix(l, name+" ") {
+			return l
+		}
+	}
+	return ""
 }
 
 func TestFormatTopology(t *testing.T) {
@@ -81,13 +96,7 @@ func TestFormatTopology(t *testing.T) {
 		t.Errorf("expected node-1 agent row, got:\n%s", out)
 	}
 	// node-3 has no agent => dashes
-	lines := strings.Split(strings.TrimSpace(out), "\n")
-	var node3 string
-	for _, l := range lines {
-		if strings.HasPrefix(l, "node-3") {
-			node3 = l
-		}
-	}
+	node3 := rowStartingWith(out, "node-3")
 	if node3 == "" {
 		t.Fatalf("node-3 row missing:\n%s", out)
 	}
@@ -99,13 +108,42 @@ func TestFormatTopology(t *testing.T) {
 	}
 }
 
+// TestFormatTopologyListsAgentsWithoutANode: an external host has no Kubernetes Node, so it used to
+// vanish from the table entirely. It gets its own row after the nodes, keyed by the name it
+// registered under, with READY "-" because nothing reports readiness for a bare host.
+func TestFormatTopologyListsAgentsWithoutANode(t *testing.T) {
+	var buf bytes.Buffer
+	if err := formatTopology(&buf, sampleTopology()); err != nil {
+		t.Fatalf("formatTopology: %v", err)
+	}
+	out := buf.String()
+
+	edge := rowStartingWith(out, "edge-01")
+	if edge == "" {
+		t.Fatalf("bare-host row for edge-01 missing:\n%s", out)
+	}
+	fields := strings.Fields(edge)
+	want := []string{"edge-01", "office", "-", "edge-01-agent", "192.0.2.10"}
+	if strings.Join(fields, " ") != strings.Join(want, " ") {
+		t.Errorf("bare-host row = %v, want %v", fields, want)
+	}
+	// The row comes AFTER every node row, so a reader scanning the k8s fleet sees it unchanged.
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	if last := lines[len(lines)-1]; !strings.HasPrefix(last, "edge-01 ") {
+		t.Errorf("bare-host row must be last, got last line %q in:\n%s", last, out)
+	}
+	if n := strings.Count(out, "edge-01-agent"); n != 1 {
+		t.Errorf("edge-01-agent printed %d times, want exactly once:\n%s", n, out)
+	}
+}
+
 func TestFormatAgents(t *testing.T) {
 	var buf bytes.Buffer
 	if err := formatAgents(&buf, sampleTopology()); err != nil {
 		t.Fatalf("formatAgents: %v", err)
 	}
 	out := buf.String()
-	for _, want := range []string{"ID", "NODE", "POD IP", "ZONE", "LAST SEEN"} {
+	for _, want := range []string{"ID", "NODE", "POD IP", "ZONE", "EXTERNAL", "LAST SEEN"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("header missing %q in:\n%s", want, out)
 		}
@@ -115,6 +153,34 @@ func TestFormatAgents(t *testing.T) {
 	}
 	if !strings.Contains(out, "ago") {
 		t.Errorf("expected humanized last-seen in output:\n%s", out)
+	}
+}
+
+// TestFormatAgentsExternalColumn pins the yes/- rendering of the external label, and that the
+// column sits between ZONE and LAST SEEN (identity before age, like kubectl's own tables).
+func TestFormatAgentsExternalColumn(t *testing.T) {
+	var buf bytes.Buffer
+	if err := formatAgents(&buf, sampleTopology()); err != nil {
+		t.Fatalf("formatAgents: %v", err)
+	}
+	out := buf.String()
+
+	header := strings.Fields(strings.SplitN(out, "\n", 2)[0])
+	wantHeader := []string{"ID", "NODE", "POD", "IP", "ZONE", "EXTERNAL", "LAST", "SEEN"}
+	if strings.Join(header, " ") != strings.Join(wantHeader, " ") {
+		t.Errorf("header = %v, want %v", header, wantHeader)
+	}
+
+	edge := rowStartingWith(out, "edge-01-agent")
+	if edge == "" {
+		t.Fatalf("edge-01-agent row missing:\n%s", out)
+	}
+	if f := strings.Fields(edge); len(f) < 5 || f[4] != "yes" {
+		t.Errorf("external agent row = %q, want EXTERNAL column \"yes\"", edge)
+	}
+	node1 := rowStartingWith(out, "node-1-kconmon-ng-agent-aaaaa")
+	if f := strings.Fields(node1); len(f) < 5 || f[4] != "-" {
+		t.Errorf("in-cluster agent row = %q, want EXTERNAL column \"-\"", node1)
 	}
 }
 

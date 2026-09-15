@@ -71,6 +71,10 @@ const en = {
   "action.maintenance.kw": "downtime change window planned explore",
   "action.annotation": "Add an annotation…",
   "action.annotation.kw": "note marker comment explore",
+  /* The one entry that leaves the console: a new tab on the docs site. No
+     ellipsis, because nothing further is asked once it is chosen. */
+  "action.docs": "Open documentation",
+  "action.docs.kw": "docs help guide manual site faq reference",
 
   /* ── view ──────────────────────────────────────────────────────────────── */
   "view.timemachinePick": "Toggle Time Machine — pick a time…",
@@ -132,6 +136,8 @@ export const paletteDict: Dictionary<PaletteKey> = defineDict(en, {
   "action.maintenance.kw": "работы простой окно регламент план метрики",
   "action.annotation": "Добавить заметку…",
   "action.annotation.kw": "заметка метка примечание комментарий метрики",
+  "action.docs": "Открыть документацию",
+  "action.docs.kw": "документация доки справка помощь руководство сайт faq",
 
   "view.timemachinePick": "Машина времени: выбрать момент…",
   "view.timemachinePick.kw": "история прошлое машина времени перемотка повтор момент",

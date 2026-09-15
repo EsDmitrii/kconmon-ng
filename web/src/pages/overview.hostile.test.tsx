@@ -53,15 +53,17 @@ interface Options {
   alertsResponse?: () => Response;
   incidents?: unknown[];
   events?: unknown[];
+  /** A raw body for GET /api/v1/topology; the fixture above when absent. */
+  topology?: unknown;
 }
 
 function renderOverview(opts: Options = {}) {
-  const { cells = [], alerts = [], alertsResponse, incidents = [], events = [] } = opts;
+  const { cells = [], alerts = [], alertsResponse, incidents = [], events = [], topology = topo } = opts;
   const fetchMock = vi.fn((url: string) => {
     const href = String(url);
     if (href.includes("/api/v1/auth/me")) return Promise.resolve(json(meBody(["incidents:read", "events:read", "alerts:read"])));
     if (href.includes("/api/v1/config")) return Promise.resolve(json(configBody()));
-    if (href.includes("/api/v1/topology")) return Promise.resolve(json(topo));
+    if (href.includes("/api/v1/topology")) return Promise.resolve(json(topology));
     if (href.startsWith("/api/v1/incidents")) return Promise.resolve(json({ incidents, nextCursor: "" }));
     if (href.startsWith("/api/v1/events")) return Promise.resolve(json({ events, nextCursor: "" }));
     if (href.startsWith("/api/v1/alerts")) {
@@ -526,5 +528,61 @@ describe("a hostile ?at= in the address bar", () => {
     } finally {
       window.history.replaceState({}, "", "/");
     }
+  });
+});
+
+/* ── an external agent under a hostile wire ─────────────────────────────── */
+
+describe("an external agent under a hostile wire", () => {
+  /** A worst pair that names the agent, so a badge WOULD be drawn if the label read as external. */
+  const namingCells: MatrixCell[] = [{ source: "a", destination: "ext-1", failRatio: 0.3, rttP95: 1e6 }];
+  const agent = (over: Record<string, unknown>) => ({
+    id: "a-ext",
+    nodeName: "ext-1",
+    podIP: "203.0.113.7",
+    zone: "office",
+    ...over,
+  });
+
+  it("renders neither badge nor hint for labels: null and capabilities: null, and does not throw", async () => {
+    renderOverview({ cells: namingCells, topology: { ...topo, agents: [agent({ labels: null, capabilities: null })] } });
+    const links = await screen.findAllByTestId("worst-pair-link");
+    expect(links).toHaveLength(1);
+    expect(screen.queryAllByTestId("worst-pair-external")).toHaveLength(0);
+    expect(screen.queryByText(/external agent/)).toBeNull();
+    expect(screen.getByText("Nodes ready")).toBeInTheDocument();
+  });
+
+  it("reads labels sent as an array, or a value of \"True\", as not external", async () => {
+    renderOverview({
+      cells: namingCells,
+      topology: {
+        ...topo,
+        agents: [agent({ labels: ["kconmon-ng.io/external"] }), agent({ id: "a-2", nodeName: "ext-2", labels: { "kconmon-ng.io/external": "True" } })],
+      },
+    });
+    await screen.findAllByTestId("worst-pair-link");
+    expect(screen.queryAllByTestId("worst-pair-external")).toHaveLength(0);
+    expect(screen.queryByText(/external agent/)).toBeNull();
+  });
+
+  it("survives agents: null on a topology that carries nodes", async () => {
+    renderOverview({ cells: namingCells, topology: { ...topo, agents: null } });
+    await screen.findAllByTestId("worst-pair-link");
+    expect(screen.getByText("1/1")).toBeInTheDocument();
+    expect(screen.queryByText(/external agent/)).toBeNull();
+  });
+
+  it("still badges a well-formed external agent beside a malformed one", async () => {
+    renderOverview({
+      cells: namingCells,
+      topology: {
+        ...topo,
+        agents: [agent({ labels: { "kconmon-ng.io/external": "true" } }), agent({ id: "a-2", nodeName: "ext-2", labels: 7 })],
+      },
+    });
+    const links = await screen.findAllByTestId("worst-pair-link");
+    expect(within(links[0]).getByTestId("worst-pair-external")).toHaveTextContent("external");
+    expect(screen.getByText("+1 external agent")).toBeInTheDocument();
   });
 });

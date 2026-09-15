@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ThemeProvider } from "@/components/theme-provider";
 import { FakeSocket } from "@/lib/fake-websocket";
@@ -125,7 +125,10 @@ describe("TopologyPage engaged at t", () => {
     /* The page's own DESCRIPTION, not just any stamp on screen: the Time
        Machine trigger in the header names the same instant, and it is a
        different claim (where you are looking FROM, vs what the server folded to). */
-    const stamped = new RegExp(new Date(AT).toLocaleString().replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+    /* On the house clock (24h, lib/i18n's stampFull), like every page description. */
+    const stamped = new RegExp(
+      new Date(AT).toLocaleString(undefined, { hour12: false }).replace(/[.*+?^${}()|[\]\\]/g, "\\$&"),
+    );
     expect(screen.getByText(stamped, { selector: "p" })).toBeInTheDocument();
   });
 
@@ -261,5 +264,85 @@ describe("TopologyPage with agents but no nodes", () => {
     renderPage({ nodes: [], agents: [], timestamp: AT });
     await screen.findByText("No nodes reported by the controller yet");
     expect(screen.getByText(/check that the DaemonSet is running/)).toBeInTheDocument();
+  });
+});
+
+/* ── a bare host in the reconstruction ─────────────────────────────────────
+ *
+ * Since 2.4.0 the fold carries each agent's last stated labels and, like the
+ * live snapshot, serves a bare host through `agents` only -- it has no
+ * Kubernetes node to list. A fold written before that listed the host as a
+ * node (ready: true, presence-derived). The Time Machine must draw the host
+ * the same way from either shape: badge from the label, readiness unknown,
+ * health from the matrix.
+ */
+
+describe("TopologyPage engaged at t, with an external agent in the fold", () => {
+  const folded = () =>
+    historical({
+      nodes: [
+        { name: "n1", zone: "z1", ready: true },
+        { name: "edge-01", zone: "z1", ready: true },
+      ],
+      agents: [
+        { id: "agent-a", nodeName: "n1", podIP: "", zone: "z1" },
+        { id: "edge-01-agent", nodeName: "edge-01", podIP: "", zone: "z1", labels: { "kconmon-ng.io/external": "true" } },
+      ],
+      eventsFolded: 2,
+    });
+
+  it("draws the host from the agents list alone, the shape the 2.4.0 fold serves", async () => {
+    renderPage(
+      historical({
+        nodes: [{ name: "n1", zone: "z1", ready: true }],
+        agents: [
+          { id: "agent-a", nodeName: "n1", podIP: "", zone: "z1" },
+          { id: "edge-01-agent", nodeName: "edge-01", podIP: "", zone: "z1", labels: { "kconmon-ng.io/external": "true" } },
+        ],
+        eventsFolded: 2,
+      }),
+    );
+    await screen.findByTestId("edge-caption");
+    expect(screen.getByLabelText("edge-01, zone z1, healthy, external agent, readiness unknown")).toBeInTheDocument();
+    expect(screen.getByLabelText("n1, zone z1, healthy")).toBeInTheDocument();
+    expect(screen.getAllByText("external")).toHaveLength(1);
+  });
+
+  it("wears the external badge and announces readiness as unknown, the same as Live", async () => {
+    renderPage(folded());
+    await screen.findByTestId("edge-caption");
+    const box = screen.getByLabelText("edge-01, zone z1, healthy, external agent, readiness unknown");
+    expect(within(box).getByText("external")).toBeInTheDocument();
+    expect(within(box).queryByText("not ready")).not.toBeInTheDocument();
+    // The in-cluster node the fold listed reads exactly as it did.
+    expect(screen.getByLabelText("n1, zone z1, healthy")).toBeInTheDocument();
+    expect(screen.getAllByText("external")).toHaveLength(1);
+  });
+
+  it("still describes itself as a reconstruction, with no provenance notice", async () => {
+    renderPage(folded());
+    await screen.findByTestId("edge-caption");
+    expect(screen.getByText(/Zone\/node map as of/)).toBeInTheDocument();
+    expect(screen.queryByTestId("topology-from-agents")).not.toBeInTheDocument();
+  });
+
+  /* History a pre-2.4.0 controller wrote carries no labels, and the release
+     notes say so: the host is drawn as the fold lists it, with no badge. */
+  it("draws a host whose history never carried labels as an ordinary node, badge-less", async () => {
+    const older = historical({
+      nodes: [
+        { name: "n1", zone: "z1", ready: true },
+        { name: "edge-01", zone: "z1", ready: true },
+      ],
+      agents: [
+        { id: "agent-a", nodeName: "n1", podIP: "", zone: "z1" },
+        { id: "edge-01-agent", nodeName: "edge-01", podIP: "", zone: "z1" },
+      ],
+      eventsFolded: 2,
+    });
+    renderPage(older);
+    await screen.findByTestId("edge-caption");
+    expect(screen.getByLabelText("edge-01, zone z1, healthy")).toBeInTheDocument();
+    expect(screen.queryByText("external")).not.toBeInTheDocument();
   });
 });

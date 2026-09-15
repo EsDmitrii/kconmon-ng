@@ -237,6 +237,14 @@ describe("targetDurationQuery / targetHealthQuery", () => {
     expect(targetHealthQuery("edge-gw")).toContain('result="success"');
   });
 
+  // A target that is probed and never succeeds has no success series at all; without the
+  // fallback the division was empty and a 100%-failing target read "No data" instead of 0%.
+  it("falls back to vector(0) for the success numerator so an all-fail target lands at 0%", () => {
+    const q = targetHealthQuery("edge-gw");
+    expect(q).toMatch(/^\(sum\(rate\(kconmon_ng_external_results_total\{[^}]*result="success"\}\[5m\]\)\) or vector\(0\)\) \/ /);
+    expect(q).not.toMatch(/vector\(0\)\)?\s*$/);
+  });
+
   it("escapes quotes and backslashes in a target name", () => {
     expect(targetDurationQuery('a"b')).toContain('target="a\\"b"');
     expect(targetHealthQuery("c\\d")).toContain('target="c\\\\d"');
@@ -255,6 +263,14 @@ describe("healthFromVector", () => {
     });
     expect(healthFromVector({ status: "success", data: { resultType: "vector", result: [{ metric: {}, value: [1, "0.5"] }] } })).toEqual({
       percent: 50,
+      tier: "bad",
+    });
+  });
+
+  it("reads a fail-only vector as 0% in the bad tier, not as no data", () => {
+    // What targetHealthQuery's `or vector(0)` yields for a probed target with no success series.
+    expect(healthFromVector({ status: "success", data: { resultType: "vector", result: [{ metric: {}, value: [1, "0"] }] } })).toEqual({
+      percent: 0,
       tier: "bad",
     });
   });

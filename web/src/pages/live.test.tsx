@@ -362,7 +362,7 @@ describe("LivePage", () => {
     open();
     await emit(Array.from({ length: LIVE_RING_CAP }, (_, i) => ev(i + 1)));
 
-    const viewport = screen.getByRole("log").parentElement as HTMLElement;
+    const viewport = screen.getByRole("log");
     // jsdom does no layout, so scrollTop is inert; give this one element a real
     // one — the same boundary stub as offsetHeight above.
     let scrollTop = 40 * ROW_HEIGHT;

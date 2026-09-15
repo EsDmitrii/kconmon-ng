@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { resetWsClient } from "@/hooks/use-ws-topic";
 import { FakeSocket } from "@/lib/fake-websocket";
@@ -186,5 +186,78 @@ describe("MatrixPage — a link whose parameters do not mean anything", () => {
 
     expect(window.location.search).toBe("?protocol=tcp");
     expect(screen.getByRole("radio", { name: "TCP" })).toBeChecked();
+  });
+});
+
+/* ── history that carries the external label ────────────────────────────────
+ *
+ * TopologyChanged records an agent's labels from 2.4.0 on, so a `?at=` topology
+ * can say which agent was a bare host; it never records capabilities, so the
+ * fold has no planes to read and the fail-open rule keeps every historical
+ * source on every plane. The header wears the same tooltip Live does.
+ */
+describe("MatrixPage engaged at t — a history that knows the external agent", () => {
+  /** PromQL as above (a → b measured), plus a `?at=` topology whose agent b carries the label. */
+  function stubFetchWithTopology(topology: unknown) {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((url: string, init?: RequestInit) => {
+        const href = String(url);
+        if (href.includes("/api/v1/version")) {
+          return Promise.resolve(json({ version: "2.4.0", commit: "abc", capabilities: ["events"] }));
+        }
+        if (href.includes("/api/v1/topology")) return Promise.resolve(json(topology));
+        if (href.includes("/api/v1/promql/query")) {
+          const q = (JSON.parse(String(init?.body)) as { query: string }).query;
+          return Promise.resolve(json(vectorFor(q.startsWith("histogram_quantile") ? "0.002" : "0.5")));
+        }
+        return Promise.resolve(json({}));
+      }),
+    );
+  }
+
+  const historical = {
+    nodes: [{ name: "a", zone: "z1", ready: true }],
+    agents: [
+      { id: "ag-a", nodeName: "a", podIP: "10.0.0.1", zone: "z1", labels: { "kconmon-ng.io/node": "a" } },
+      { id: "ag-b", nodeName: "b", podIP: "192.0.2.10", zone: "office", labels: { "kconmon-ng.io/external": "true" } },
+    ],
+    timestamp: AT,
+    historical: true,
+    asOf: AT,
+  };
+
+  it("marks the external header from the folded labels, keeping the instant in its link", async () => {
+    stubFetchWithTopology(historical);
+    renderPage();
+    const headers = await screen.findAllByRole("link", { name: "Open the card for b, external agent" });
+    expect(headers).toHaveLength(2);
+    for (const h of headers) expect(h).toHaveAttribute("href", `/nodes/b?at=${encodeURIComponent(AT)}`);
+    fireEvent.mouseEnter(headers[0]);
+    const tooltip = await screen.findByRole("tooltip");
+    expect(tooltip).toHaveTextContent("b");
+    expect(tooltip).toHaveTextContent("external agent");
+    // The cluster node's header is untouched by a label that is not the external one.
+    expect(screen.getAllByRole("link", { name: "Open the card for a" })).toHaveLength(2);
+  });
+
+  it("reads the external agent's empty row as unscraped, and nobody's cell as unsupported", async () => {
+    stubFetchWithTopology(historical);
+    renderPage();
+    const cell = await screen.findByLabelText("b → a: no data");
+    fireEvent.mouseEnter(cell);
+    expect(await screen.findByRole("tooltip")).toHaveTextContent("No series from b");
+    expect(screen.getByTestId("matrix-unscraped-note")).toHaveTextContent("b is an external agent");
+    // History carries no capabilities: no source can be read as leaving a plane out.
+    expect(screen.queryAllByLabelText(/does not run/)).toHaveLength(0);
+    expect(screen.queryByTestId("legend-unsupported")).not.toBeInTheDocument();
+  });
+
+  it("stays plain when the history predates the label", async () => {
+    stubFetchWithTopology({ ...historical, agents: historical.agents.map(({ labels: _l, ...rest }) => rest) });
+    renderPage();
+    await screen.findByLabelText("a → b: fail 50.0%, RTT p95 2.0ms");
+    expect(screen.getAllByRole("link", { name: "Open the card for b" })).toHaveLength(2);
+    expect(screen.queryByTestId("matrix-unscraped-note")).not.toBeInTheDocument();
   });
 });

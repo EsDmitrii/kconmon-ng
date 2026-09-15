@@ -535,3 +535,175 @@ describe("InvestigationTimeline — M4 typography", () => {
     );
   });
 });
+
+/* ── the fold: a run of read-only audit calls is ONE row ─────────────────────
+   The console audits its own reads and an investigation polls PromQL through
+   the audited proxy, so a busy hour put eight "POST /api/v1/promql/query_range
+   · allowed" rows on page one. They stay in the list (the header counts them,
+   the export carries them); a RUN of them is drawn as one row, opened on
+   request. Folding happens at the render — foldReadOnlyAudit — and nowhere
+   earlier. */
+
+function readOnlyAudits(n: number, from: number, at0 = T0): TimelineEntry[] {
+  return Array.from({ length: n }, (_, i) => ({
+    at: new Date(at0 + (from + i) * 60_000),
+    kind: "audit" as const,
+    severity: "info" as const,
+    title: `audit-${String(i).padStart(3, "0")}`,
+    detail: "anonymous:anonymous · allowed",
+    readOnly: true,
+    ref: { kind: "audit" as const, id: `a-${i}` },
+  }));
+}
+
+function events(n: number, from: number, at0 = T0): TimelineEntry[] {
+  return Array.from({ length: n }, (_, i) => ({
+    at: new Date(at0 + (from + i) * 60_000),
+    kind: "event" as const,
+    severity: "info" as const,
+    title: `entry-${String(from + i).padStart(3, "0")}`,
+    ref: { kind: "event" as const, id: `e-${from + i}` },
+  }));
+}
+
+describe("InvestigationTimeline — read-only audit runs fold", () => {
+  /* Ascending, as mergeTimeline hands them over: three events, five reads, two events. */
+  const RUN = [...events(3, 0), ...readOnlyAudits(5, 3), ...events(2, 8)];
+
+  it("draws the run as ONE row that counts its calls, and keeps counting every entry in the header", () => {
+    renderTimeline({ entries: RUN });
+    expect(screen.getByTestId("timeline-count").textContent).toBe("10 entries in this window");
+    const fold = screen.getByTestId("timeline-fold");
+    expect(fold.textContent).toContain("5 read-only API calls");
+    expect(within(fold).getByText("audit")).toBeTruthy();
+    // The five calls are not rows until asked for.
+    expect(screen.getAllByTestId("timeline-row")).toHaveLength(5);
+    expect(screen.queryByText("audit-000")).toBeNull();
+    // Newest first: the two newest events, the fold, the three oldest events.
+    expect(rowTitles()).toEqual(["entry-009", "entry-008", "entry-002", "entry-001", "entry-000"]);
+  });
+
+  it("says the stretch the run covers, in the data face, when it is wider than one minute", () => {
+    renderTimeline({ entries: RUN });
+    const fold = screen.getByTestId("timeline-fold");
+    const stamps = Array.from(fold.querySelectorAll(".mono-data")).map((el) => el.textContent ?? "");
+    // The column stamp is the NEWEST call; the detail line spans oldest to newest.
+    expect(stamps[0]).toMatch(/\d{1,2}:\d{2}/);
+    expect(stamps[1]).toContain(" – ");
+  });
+
+  it("opens on Show and folds again on Hide, every call a real row in between", () => {
+    renderTimeline({ entries: RUN });
+    const show = screen.getByRole("button", { name: "Show 5 read-only API calls" });
+    // The verb is the visible text; the whole sentence lives in aria-label and title.
+    expect(show.textContent).toBe("Show");
+    expect(show.getAttribute("title")).toBe("Show 5 read-only API calls");
+    expect(show.getAttribute("aria-expanded")).toBe("false");
+
+    fireEvent.click(show);
+    expect(screen.getAllByTestId("timeline-row")).toHaveLength(10);
+    expect(screen.getByText("audit-000")).toBeTruthy();
+    expect(screen.getByText("audit-004")).toBeTruthy();
+    const hide = screen.getByRole("button", { name: "Hide 5 read-only API calls" });
+    expect(hide.textContent).toBe("Hide");
+    expect(hide.getAttribute("aria-expanded")).toBe("true");
+
+    fireEvent.click(hide);
+    expect(screen.getAllByTestId("timeline-row")).toHaveLength(5);
+    expect(screen.queryByText("audit-000")).toBeNull();
+  });
+
+  it("leaves a lone read-only call as an ordinary row — a summary of one thing is longer than the thing", () => {
+    renderTimeline({ entries: [...events(1, 0), ...readOnlyAudits(1, 1), ...events(1, 2)] });
+    expect(screen.queryByTestId("timeline-fold")).toBeNull();
+    expect(screen.getAllByTestId("timeline-row")).toHaveLength(3);
+    expect(screen.getByText("audit-000")).toBeTruthy();
+  });
+
+  it("breaks a run on a WRITE between two reads: a change is never folded away", () => {
+    const write: TimelineEntry = {
+      at: new Date(T0 + 5 * 60_000),
+      kind: "audit",
+      severity: "info",
+      title: "POST /api/v1/targets",
+      readOnly: false,
+      ref: { kind: "audit", id: "w-1" },
+    };
+    renderTimeline({ entries: [...readOnlyAudits(2, 0), write, ...readOnlyAudits(3, 6)] });
+    const folds = screen.getAllByTestId("timeline-fold");
+    expect(folds).toHaveLength(2);
+    expect(folds[0].textContent).toContain("3 read-only API calls");
+    expect(folds[1].textContent).toContain("2 read-only API calls");
+    expect(screen.getByText("POST /api/v1/targets")).toBeTruthy();
+    expect(screen.getAllByTestId("timeline-row")).toHaveLength(1);
+  });
+
+  it("pages over rows AS DRAWN, so a folded run costs one row of a page rather than filling it", () => {
+    // Twelve events, twenty reads, three events: sixteen drawn rows over two pages of ten.
+    renderTimeline({ entries: [...events(12, 0), ...readOnlyAudits(20, 12), ...events(3, 32)] });
+    expect(screen.getByTestId("timeline-count").textContent).toBe("35 entries in this window");
+    expect(pageLabel()).toMatch(/page 1 of 2/i);
+    expect(screen.getByTestId("pager-showing").textContent).toBe("Showing 10 of 16");
+    expect(screen.getAllByTestId("timeline-row")).toHaveLength(9);
+    expect(screen.getByTestId("timeline-fold").textContent).toContain("20 read-only API calls");
+    fireEvent.click(next());
+    expect(screen.queryByTestId("timeline-fold")).toBeNull();
+    expect(screen.getAllByTestId("timeline-row")).toHaveLength(6);
+  });
+
+  it("closes an open fold when the window changes — a new list, nothing of the old one open", () => {
+    const { rerender, props } = renderTimeline({ entries: RUN });
+    fireEvent.click(screen.getByRole("button", { name: "Show 5 read-only API calls" }));
+    expect(screen.getAllByTestId("timeline-row")).toHaveLength(10);
+    rerender(<InvestigationTimeline {...props} entries={RUN} windowKey="pair|node-a|node-c|from|to" />);
+    expect(screen.getAllByTestId("timeline-row")).toHaveLength(5);
+    expect(screen.getByRole("button", { name: "Show 5 read-only API calls" })).toBeTruthy();
+  });
+
+  it("lets the rows inside an open fold be hovered and pinned like any other", () => {
+    const toggled: { kind: string; id: string }[] = [];
+    const seen: (Date | null)[] = [];
+    renderTimeline({
+      entries: RUN,
+      onCursor: (at) => seen.push(at),
+      pinning: { pinnedKeys: new Set(), onToggle: (ref) => toggled.push(ref), busy: false },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Show 5 read-only API calls" }));
+    const audit = screen.getByText("audit-004").closest("li") as HTMLElement;
+    fireEvent.mouseEnter(audit);
+    expect(seen[0]?.getTime()).toBe(T0 + 7 * 60_000);
+    fireEvent.click(within(audit).getByRole("button", { name: "Pin: audit-004" }));
+    expect(toggled).toEqual([{ kind: "audit", id: "a-4" }]);
+  });
+});
+
+/* ── one row, two shapes, the same DOM ────────────────────────────────────── */
+
+describe("InvestigationTimeline — a row reflows on a phone by class, never by a second DOM", () => {
+  it("groups the stamp and the badge in a line that dissolves from sm up, and lets the title break at separators", () => {
+    renderTimeline({
+      entries: [
+        {
+          at: new Date(T0),
+          kind: "event",
+          severity: "info",
+          title: "tcp check node-a→node-b succeeded",
+          detail: "check_observed · node-a→node-b",
+          ref: { kind: "event", id: "e-1" },
+        },
+      ],
+    });
+    const row = screen.getByTestId("timeline-row");
+    const group = row.querySelector("div");
+    expect(group?.className).toContain("sm:contents");
+    expect(group?.querySelector("span")?.className).toContain("mono-data");
+
+    const title = screen.getByText("tcp check node-a→node-b succeeded");
+    expect(title.className).toContain("[overflow-wrap:anywhere]");
+    expect(title.className).toContain("basis-full");
+    expect(title.className).toContain("sm:flex-1");
+    expect(title.className).not.toContain("break-all");
+
+    expect(screen.getByText("check_observed · node-a→node-b").className).toContain("w-full");
+  });
+});

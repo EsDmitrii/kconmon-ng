@@ -507,7 +507,7 @@ describe("OverviewPage — Recent events (Decision 9)", () => {
     const row = await screen.findByTestId("overview-event");
     const cell = within(row).getByTitle(scope);
     expect(cell.className).not.toMatch(/\bw-\d/); // a fixed width was the whole finding
-    expect(cell.className).toContain("max-w-[20rem]"); // bounded, not unbounded
+    expect(cell.className).toContain("max-w-[26rem]"); // bounded, not unbounded
     expect(cell.className).toContain("mono-data"); // the scope keeps the data face
     expect(cell.className).toContain("truncate"); // and still truncates past the cap
     expect(within(row).getByText(scope)).toBeInTheDocument();
@@ -1201,5 +1201,131 @@ describe("worstDirtyPlane and the self-following selector", () => {
         { protocol: "udp", summary: mk(0, 0) },
       ]),
     ).toBeNull();
+  });
+});
+
+/* ── spec 5.3: a bare-host agent (kconmon-ng.io/external: "true") on the Overview ── */
+
+const EXTERNAL_LABELS = { "kconmon-ng.io/external": "true" };
+
+const externalTopo: Topology = {
+  ...topo,
+  agents: [
+    { id: "a-a", nodeName: "a", podIP: "10.0.0.1", zone: "z1" },
+    { id: "a-ext", nodeName: "mac-external-01", podIP: "203.0.113.7", zone: "office", labels: EXTERNAL_LABELS },
+  ],
+};
+
+/** The cluster probes the host (scraped), the host's own row is absent: the
+ *  external name can only ever be a destination here. */
+const matrixNamingExternal: Matrix = {
+  ...matrix,
+  nodes: ["a", "b", "mac-external-01"],
+  cells: [
+    { source: "a", destination: "mac-external-01", failRatio: 0.3, rttP95: 2_000_000 },
+    { source: "b", destination: "a", failRatio: 0.02 },
+  ],
+};
+
+describe("OverviewPage — an external agent in the worst pairs", () => {
+  const stub = (t: unknown = externalTopo, m: unknown = matrixNamingExternal) =>
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((url: string) => Promise.resolve(String(url).includes("/topology") ? json(t) : json(m))),
+    );
+
+  it("wears a neutral external badge right after the external name, and nowhere else", async () => {
+    stub();
+    renderPage();
+    const links = await screen.findAllByTestId("worst-pair-link");
+    expect(links).toHaveLength(2);
+    const badge = within(links[0]).getByTestId("worst-pair-external");
+    expect(badge).toHaveTextContent("external");
+    // After the NAME, not at the end of the row: the badge follows the span it qualifies.
+    expect(badge.previousElementSibling).toHaveTextContent("mac-external-01");
+    expect(within(links[1]).queryByTestId("worst-pair-external")).toBeNull();
+    // The link still opens the same pair card.
+    expect(links[0].getAttribute("href")).toBe("/pairs/a/mac-external-01");
+  });
+
+  it("badges the source too once Prometheus scrapes the host", async () => {
+    stub(externalTopo, {
+      ...matrixNamingExternal,
+      cells: [{ source: "mac-external-01", destination: "a", failRatio: 0.4, rttP95: 1_000_000 }],
+    });
+    renderPage();
+    const links = await screen.findAllByTestId("worst-pair-link");
+    const badge = within(links[0]).getByTestId("worst-pair-external");
+    expect(badge.previousElementSibling).toHaveTextContent("mac-external-01");
+  });
+
+  it("adds the external hint under Nodes ready without touching the count", async () => {
+    stub();
+    renderPage();
+    // 1/2 is k8s readiness — a and b — and the host is not folded into it.
+    expect(await screen.findByText("1/2")).toBeInTheDocument();
+    expect(screen.getByText("+1 external agent")).toBeInTheDocument();
+    expect(screen.queryByText("1/3")).toBeNull();
+  });
+
+  it("pluralises the hint", async () => {
+    stub({
+      ...externalTopo,
+      agents: [
+        ...externalTopo.agents,
+        { id: "a-ext2", nodeName: "win-external-02", podIP: "203.0.113.8", zone: "office", labels: EXTERNAL_LABELS },
+      ],
+    });
+    renderPage();
+    expect(await screen.findByText("+2 external agents")).toBeInTheDocument();
+  });
+
+  it("says nothing about external agents on a fleet that has none", async () => {
+    stub(topo, matrix);
+    renderPage();
+    await screen.findAllByTestId("worst-pair-link");
+    expect(screen.queryAllByTestId("worst-pair-external")).toHaveLength(0);
+    expect(screen.queryByText(/external agent/)).toBeNull();
+  });
+
+  it("keeps the agents-count hint, not the external one, when there is no k8s inventory", async () => {
+    // Counted from agents already counts the host; a second "+1" would count it twice.
+    stub({ ...externalTopo, nodes: [] });
+    renderPage();
+    expect(
+      await screen.findByText("Counted from agents — no k8s node inventory, so readiness is unknown."),
+    ).toBeInTheDocument();
+    expect(screen.getAllByTestId("stat-value")[0]).toHaveTextContent("2");
+    expect(screen.queryByText(/external agent/)).toBeNull();
+  });
+
+  it("says «внешний» in Russian", async () => {
+    window.localStorage.setItem(LOCALE_STORAGE_KEY, "ru");
+    try {
+      stub();
+      const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+      render(
+        <LocaleProvider>
+          <QueryClientProvider client={qc}>
+            <OverviewPage />
+          </QueryClientProvider>
+        </LocaleProvider>,
+      );
+      const links = await screen.findAllByTestId("worst-pair-link");
+      expect(within(links[0]).getByTestId("worst-pair-external")).toHaveTextContent("внешний");
+      expect(screen.getByText("Ещё внешних агентов: 1")).toBeInTheDocument();
+    } finally {
+      window.localStorage.removeItem(LOCALE_STORAGE_KEY);
+    }
+  });
+});
+
+describe("nodesTile — an external agent", () => {
+  it("counts Kubernetes readiness only: the host changes nothing in the arithmetic", () => {
+    expect(nodesTile(externalTopo, false)).toEqual({ kind: "counts", ready: 1, total: 2 });
+  });
+
+  it("is still counted among the agents when no k8s inventory exists", () => {
+    expect(nodesTile({ ...externalTopo, nodes: [] }, false)).toEqual({ kind: "noInventory", nodes: 2, source: "agents" });
   });
 });

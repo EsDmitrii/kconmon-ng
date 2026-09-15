@@ -1,5 +1,6 @@
 import * as React from "react";
 import { cn } from "@/lib/utils";
+import { scrollRegionClass } from "./scroll-region";
 
 /* Table: the semantic table primitives every data table renders through, so
    density is a variant instead of per-page padding arithmetic. "dense" is the
@@ -18,10 +19,13 @@ export interface TableProps extends React.TableHTMLAttributes<HTMLTableElement> 
   bare?: boolean;
   /* Extra classes for the scroll wrapper (ignored when bare). */
   containerClassName?: string;
+  /* Names the scroll wrapper and makes it a focusable region, so a keyboard can scroll a table
+     whose cells hold nothing focusable (axe scrollable-region-focusable). */
+  scrollLabel?: string;
 }
 
 export const Table = React.forwardRef<HTMLTableElement, TableProps>(
-  ({ className, variant = "default", bare = false, containerClassName, ...props }, ref) => {
+  ({ className, variant = "default", bare = false, containerClassName, scrollLabel, ...props }, ref) => {
     const table = (
       <table
         ref={ref}
@@ -31,7 +35,20 @@ export const Table = React.forwardRef<HTMLTableElement, TableProps>(
     );
     return (
       <TableVariantContext.Provider value={variant}>
-        {bare ? table : <div className={cn("overflow-x-auto", containerClassName)}>{table}</div>}
+        {bare ? (
+          table
+        ) : scrollLabel ? (
+          <div
+            tabIndex={0}
+            role="region"
+            aria-label={scrollLabel}
+            className={cn("overflow-x-auto", scrollRegionClass, containerClassName)}
+          >
+            {table}
+          </div>
+        ) : (
+          <div className={cn("overflow-x-auto", containerClassName)}>{table}</div>
+        )}
       </TableVariantContext.Provider>
     );
   },
@@ -78,6 +95,9 @@ export interface ThProps extends React.ThHTMLAttributes<HTMLTableCellElement> {
   numeric?: boolean;
 }
 
+/* whitespace-nowrap on the header: on a phone a numeric header ("RTT p95")
+   wrapped onto two lines while the body cells under it stayed on one. A wide
+   table scrolls inside the Table wrapper instead. */
 export const Th = React.forwardRef<HTMLTableCellElement, ThProps>(
   ({ className, numeric = false, scope = "col", ...props }, ref) => {
     const variant = React.useContext(TableVariantContext);
@@ -86,7 +106,7 @@ export const Th = React.forwardRef<HTMLTableCellElement, ThProps>(
         ref={ref}
         scope={scope}
         className={cn(
-          "text-left",
+          "text-left whitespace-nowrap",
           variant === "dense" ? "py-1.5 font-medium" : "py-3 font-semibold",
           numeric && "text-right",
           className,

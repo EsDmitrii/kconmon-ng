@@ -72,6 +72,10 @@ const en = {
     "Authentication is disabled — everyone has the {role} role (console.auth.anonymous.role). Do not use in production.",
   "banner.anonymous.body":
     "Authentication is disabled — everyone has the fixed role. Do not use in production.",
+  /* The clause a 375px strip shows in place of the sentence above (which stays
+     on the banner's title). Same role/no-role split. */
+  "banner.anonymous.body.short.role": "Authentication is disabled; everyone is {role}.",
+  "banner.anonymous.body.short": "Authentication is disabled; everyone has one fixed role.",
 
   /* ── Time Machine bar ──────────────────────────────────────────────────── */
   "timemachine.label": "Time Machine",
@@ -132,6 +136,8 @@ export const chromeDict: Dictionary<ChromeKey> = defineDict(en, {
     "Аутентификация выключена, у всех роль {role} (console.auth.anonymous.role). Не используйте в продакшене.",
   "banner.anonymous.body":
     "Аутентификация выключена, у всех одна фиксированная роль. Не используйте в продакшене.",
+  "banner.anonymous.body.short.role": "Аутентификация выключена; у всех роль {role}.",
+  "banner.anonymous.body.short": "Аутентификация выключена; у всех одна роль.",
 
   "timemachine.label": "Машина времени",
   "timemachine.trigger": "Сейчас. Машина времени: посмотреть консоль на момент в прошлом",

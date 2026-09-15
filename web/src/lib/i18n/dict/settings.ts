@@ -65,8 +65,14 @@ const en = {
     "Outbound endpoints the console signs and POSTs incident events to. Delivery is asynchronous with a retry " +
     "ladder, so the last outcome below is what actually happened, not what was attempted.",
   "webhooks.empty": "No endpoints yet. Nothing is being notified.",
+  /* The second line of the empty slate: what the list will hold once it holds
+     anything. The first line is the sentence above, unchanged. */
+  "webhooks.empty.body":
+    "Each endpoint you create appears here with its URL, the events it subscribes to and the outcome of its last delivery.",
   "webhooks.unavailable": "Webhooks are unavailable",
   "webhooks.new": "New endpoint",
+  /* The ghost button beside a failed list read; it re-runs the same query. */
+  "error.retry": "Retry",
   "webhooks.form.edit": "Edit {name}",
   "webhooks.form.create": "New endpoint",
   "webhooks.form.name": "Name",
@@ -101,6 +107,15 @@ const en = {
   "webhooks.row.edit": "Edit {name}",
   "webhooks.row.delete": "Delete {name}",
   "webhooks.row.confirmDelete": "Confirm delete {name}",
+  /* The VISIBLE half of each row action is the verb alone; the sentences
+     above stay as the accessible name and the title. */
+  "webhooks.row.test.verb": "Test",
+  "webhooks.row.edit.verb": "Edit",
+  "webhooks.row.delete.verb": "Delete",
+  "webhooks.row.confirmDelete.verb": "Confirm delete",
+  /* lastStatus is empty until the ladder has tried once. One muted sentence,
+     not an em-dash pill beside an em-dash stamp. */
+  "webhooks.row.neverDelivered": "never delivered",
   "webhooks.row.queued": "Test queued; the outcome lands on this row.",
   "webhooks.row.deleteFailed": "Failed to delete the endpoint",
   "webhooks.row.testFailed": "Failed to enqueue the test delivery",
@@ -119,6 +134,7 @@ const en = {
     "Bearer tokens for calling this API without a session. The console stores a hash, never the token, so the " +
     "secret below is shown once at creation and cannot be recovered afterwards — a lost one is replaced, not read.",
   "tokens.empty": "No tokens. Nothing is calling this API with one.",
+  "tokens.empty.body": "Each token you mint appears here with its owner, when it was last used and when it expires.",
   "tokens.unavailable": "API tokens are unavailable",
   "tokens.new": "New token",
   "tokens.form.create": "New token",
@@ -144,11 +160,18 @@ const en = {
   "tokens.secret.noClipboard": "This browser gave the page no clipboard — select the token above and copy it.",
   "tokens.secret.refused": "The browser refused the copy — select the token above and copy it.",
   "tokens.secret.dismiss": "I have saved it",
-  "tokens.col.owner": "owner",
-  "tokens.col.created": "created",
-  "tokens.col.lastUsed": "last used",
-  "tokens.col.expires": "expires",
+  /* The token table's column headers. */
+  "tokens.head.name": "Name",
+  "tokens.head.owner": "Owner",
+  "tokens.head.created": "Created",
+  "tokens.head.lastUsed": "Last used",
+  "tokens.head.expires": "Expires",
+  "tokens.head.state": "State",
+  /* Visually hidden: the column holds one verb per row, which names itself. */
+  "tokens.head.actions": "Actions",
   "tokens.lastUsed.never": "never used",
+  "tokens.expires.none": "no expiry",
+  "tokens.state.active": "active",
   "tokens.revoked": "revoked",
   "tokens.expired": "expired",
   "tokens.row.delete": "Revoke {name}",
@@ -160,6 +183,12 @@ const en = {
   "tokens.row.purge": "Delete {name}",
   "tokens.row.confirmPurge": "Confirm delete {name}",
   "tokens.row.purgeFailed": "Failed to delete the token",
+  /* The VISIBLE half of the row's one action; the sentence with the name in
+     it stays as the accessible name and the title. */
+  "tokens.row.delete.verb": "Revoke",
+  "tokens.row.confirmDelete.verb": "Confirm revoke",
+  "tokens.row.purge.verb": "Delete",
+  "tokens.row.confirmPurge.verb": "Confirm delete",
   "tokens.row.purgeHint": "This token can no longer authenticate anything. Deleting removes the row for good.",
 
   /* The three surfaces named in About's closing paragraph. The SAME words
@@ -194,6 +223,7 @@ const en = {
     "recognises would be a partial restore presented as a complete one, so it is refused.",
   "bundle.dryRun": "Dry run — nothing was written.",
   "bundle.applied": "Applied — these writes happened.",
+  "bundle.table.aria": "Import result by collection",
   "bundle.col.collection": "Collection",
   "bundle.col.created": "Created",
   "bundle.col.updated": "Updated",
@@ -227,6 +257,12 @@ const en = {
      key survived this long. */
   "about.configured.f": "configured",
   "about.notConfigured.f": "not configured",
+  /* The Links row: the site the "?" dialogs already point at, its release
+     notes and the source, reachable without first opening a page's help. */
+  "about.links": "Links",
+  "about.links.docs": "Documentation",
+  "about.links.releaseNotes": "Release notes",
+  "about.links.source": "Source on GitHub",
   "about.anonymous":
     "Anonymous mode: every unauthenticated request is the {role} role (console.auth.anonymous.role). There is no " +
     "sign-in.",
@@ -275,8 +311,11 @@ export const settingsDict: Dictionary<SettingsKey> = defineDict(en, {
     "Исходящие точки: консоль подписывает событие инцидента и отправляет его POST-ом. Доставка асинхронная, с " +
     "лестницей повторов, поэтому последний исход в строке говорит, чем всё кончилось, а не что было предпринято.",
   "webhooks.empty": "Точек пока нет. Никого не уведомляем.",
+  "webhooks.empty.body":
+    "Каждая созданная точка появится здесь с URL, событиями, на которые она подписана, и исходом последней доставки.",
   "webhooks.unavailable": "Вебхуки недоступны",
   "webhooks.new": "Новая точка",
+  "error.retry": "Повторить",
   "webhooks.form.edit": "Изменить {name}",
   "webhooks.form.create": "Новая точка",
   "webhooks.form.name": "Имя",
@@ -307,6 +346,11 @@ export const settingsDict: Dictionary<SettingsKey> = defineDict(en, {
   "webhooks.row.edit": "Изменить {name}",
   "webhooks.row.delete": "Удалить {name}",
   "webhooks.row.confirmDelete": "Подтвердить удаление {name}",
+  "webhooks.row.test.verb": "Тест",
+  "webhooks.row.edit.verb": "Изменить",
+  "webhooks.row.delete.verb": "Удалить",
+  "webhooks.row.confirmDelete.verb": "Подтвердить удаление",
+  "webhooks.row.neverDelivered": "доставок ещё не было",
   "webhooks.row.queued": "Тест в очереди, исход появится в этой строке.",
   "webhooks.row.deleteFailed": "Не удалось удалить точку",
   "webhooks.row.testFailed": "Не удалось поставить тестовую доставку в очередь",
@@ -327,6 +371,8 @@ export const settingsDict: Dictionary<SettingsKey> = defineDict(en, {
     "Bearer-токены для обращений к этому API без сессии. Консоль хранит хеш, а не сам токен, поэтому секрет " +
     "показывается один раз при создании и потом его уже не достать: потерянный не читают, а выпускают заново.",
   "tokens.empty": "Токенов нет. С токеном к этому API никто не ходит.",
+  "tokens.empty.body":
+    "Каждый выпущенный токен появится здесь с владельцем, временем последнего использования и сроком действия.",
   "tokens.unavailable": "Токены API недоступны",
   "tokens.new": "Новый токен",
   "tokens.form.create": "Новый токен",
@@ -349,11 +395,16 @@ export const settingsDict: Dictionary<SettingsKey> = defineDict(en, {
   "tokens.secret.noClipboard": "Браузер не дал странице доступ к буферу обмена. Выделите токен выше и скопируйте.",
   "tokens.secret.refused": "Браузер отказал в копировании. Выделите токен выше и скопируйте.",
   "tokens.secret.dismiss": "Я сохранил",
-  "tokens.col.owner": "владелец",
-  "tokens.col.created": "создан",
-  "tokens.col.lastUsed": "последнее использование",
-  "tokens.col.expires": "истекает",
+  "tokens.head.name": "Имя",
+  "tokens.head.owner": "Владелец",
+  "tokens.head.created": "Создан",
+  "tokens.head.lastUsed": "Последнее использование",
+  "tokens.head.expires": "Истекает",
+  "tokens.head.state": "Состояние",
+  "tokens.head.actions": "Действия",
   "tokens.lastUsed.never": "не использовался",
+  "tokens.expires.none": "без срока",
+  "tokens.state.active": "действует",
   "tokens.revoked": "отозван",
   "tokens.expired": "истёк",
   "tokens.row.delete": "Отозвать {name}",
@@ -362,6 +413,10 @@ export const settingsDict: Dictionary<SettingsKey> = defineDict(en, {
   "tokens.row.purge": "Удалить {name}",
   "tokens.row.confirmPurge": "Подтвердить удаление {name}",
   "tokens.row.purgeFailed": "Не удалось удалить токен",
+  "tokens.row.delete.verb": "Отозвать",
+  "tokens.row.confirmDelete.verb": "Подтвердить отзыв",
+  "tokens.row.purge.verb": "Удалить",
+  "tokens.row.confirmPurge.verb": "Подтвердить удаление",
   "tokens.row.purgeHint": "Этот токен больше ничего не аутентифицирует. Удаление убирает строку насовсем.",
 
   "link.investigate": "Инциденты",
@@ -393,6 +448,7 @@ export const settingsDict: Dictionary<SettingsKey> = defineDict(en, {
     "значило бы выдать частичное восстановление за полное, поэтому импорт отклонён.",
   "bundle.dryRun": "Пробный прогон, ничего не записано.",
   "bundle.applied": "Применено. Записи ниже действительно прошли.",
+  "bundle.table.aria": "Итог импорта по коллекциям",
   "bundle.col.collection": "Коллекция",
   "bundle.col.created": "Создано",
   "bundle.col.updated": "Обновлено",
@@ -421,6 +477,10 @@ export const settingsDict: Dictionary<SettingsKey> = defineDict(en, {
   "about.notConfigured": "не настроен",
   "about.configured.f": "настроена",
   "about.notConfigured.f": "не настроена",
+  "about.links": "Ссылки",
+  "about.links.docs": "Документация",
+  "about.links.releaseNotes": "Заметки к релизам",
+  "about.links.source": "Исходники на GitHub",
   "about.anonymous":
     "Анонимный режим: каждый неаутентифицированный запрос идёт с ролью {role} (console.auth.anonymous.role). " +
     "Входа нет.",

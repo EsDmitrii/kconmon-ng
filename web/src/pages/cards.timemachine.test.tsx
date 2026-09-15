@@ -152,7 +152,8 @@ describe("NodeCardPage engaged at t", () => {
     window.history.pushState({}, "", `/nodes/node-a?at=${AT}`);
     const rec = stubFetch();
     renderCard(<NodeCardPage />);
-    await screen.findByText(new RegExp(`state as of ${escapeRe(new Date(AT).toLocaleString())}`));
+    /* The house clock (24h, lib/i18n's stampFull), not the locale's 12-hour default. */
+    await screen.findByText(new RegExp(`state as of ${escapeRe(new Date(AT).toLocaleString(undefined, { hour12: false }))}`));
     expect(rec.topologyUrls[0]).toContain("at=");
   });
 });
@@ -173,7 +174,7 @@ describe("PairCardPage engaged at t", () => {
     window.history.pushState({}, "", `/pairs/node-a/node-b?at=${AT}`);
     stubFetch();
     renderCard(<PairCardPage />);
-    await screen.findByText(new RegExp(`hour ending ${escapeRe(new Date(AT).toLocaleString())}`));
+    await screen.findByText(new RegExp(`hour ending ${escapeRe(new Date(AT).toLocaleString(undefined, { hour12: false }))}`));
   });
 });
 
@@ -190,7 +191,7 @@ describe("TargetCardPage engaged at t", () => {
     window.history.pushState({}, "", `/targets/t-1?at=${AT}`);
     stubFetch();
     renderCard(<TargetCardPage />);
-    await screen.findByText(`External probe target — state as of ${new Date(AT).toLocaleString()}`);
+    await screen.findByText(`External probe target — state as of ${new Date(AT).toLocaleString(undefined, { hour12: false })}`);
   });
 
   it("sends no time at all while live", async () => {

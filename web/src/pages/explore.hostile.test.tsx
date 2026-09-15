@@ -252,7 +252,7 @@ describe("the compare panel under a switching storm", () => {
     renderPage();
     pickSelf();
     setSelect("Compare with earlier", "7d");
-    await waitFor(() => expect(screen.getByText(/retention does not reach that far back/i)).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText(/retention stops short of it/i)).toBeInTheDocument());
   });
 });
 
