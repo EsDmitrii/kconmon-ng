@@ -71,8 +71,8 @@ Runs come from three places:
   probes, no Console required.
 
 <figure markdown="span">
-  ![Run checks page with one finished on-demand run expanded: fan-out count, per-pair results, terminal status badge](../img/checks-runs-schedules-run-detail.png){ loading=lazy }
-  <figcaption>A finished run on the Run checks page: the fan-out count, per-pair results and the terminal status badge this page's vocabulary describes.</figcaption>
+  ![Permalink of a finished instant ICMP run: succeeded badge, Type ICMP, Plane pod, Pairs 110/110 ok, the first page of pair rows each succeeded with a microsecond duration, Page 1 of 11](../img/checks-runs-schedules-run-detail.png){ loading=lazy }
+  <figcaption>A finished on-demand run on its permalink: the terminal <em>succeeded</em> badge, the fan-out count (110/110 pairs ok) and the per-pair results this page's vocabulary describes, paged ten at a time.</figcaption>
 </figure>
 
 Run history (`GET /api/v1/runs`) is what the Run checks page lists, and what

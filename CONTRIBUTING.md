@@ -101,6 +101,22 @@ helm lint charts/kconmon-ng
 helm lint charts/kconmon-ng -f charts/kconmon-ng/ci/minimal-values.yaml
 ```
 
+## Documentation
+
+The docs site at <https://esdmitrii.github.io/kconmon-ng/> is built with MkDocs Material from `docs/` and `mkdocs.yml`; the toolchain is pinned in `requirements-docs.txt`.
+
+```bash
+# Install the toolchain (a venv is a good idea) and preview at http://127.0.0.1:8000 with live reload
+pip install -r requirements-docs.txt && mkdocs serve
+
+# The PR gate: --strict turns warnings (broken nav entries, bad snippet paths, dead links) into failures
+mkdocs build --strict
+```
+
+`make docs-serve` and `make docs-build` wrap the same two commands; the Makefile build lands outside the repo, in `/tmp/kconmon-ng-site`, so no stray `site/` shows up in the tree. CI runs the strict build on every PR that touches `docs/**`, `mkdocs.yml` or `requirements-docs.txt`, and a push to `main` deploys the site to GitHub Pages.
+
+Link to site pages, not to `docs/*.md` paths. `RELEASE_NOTES.md` is included on the site verbatim, so a repo-relative path like `docs/metrics.md` is dead text there; write `https://esdmitrii.github.io/kconmon-ng/metrics/` instead.
+
 ## Submitting a Pull Request
 
 1. Fork the repository and create a branch from `main`.

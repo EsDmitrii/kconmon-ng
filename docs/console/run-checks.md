@@ -3,8 +3,8 @@
 On-demand diagnostics: does this path work right now, from these nodes, with this protocol? A run form sits on top, run history underneath, and every started run gets a permalink page of its own, [documented below](#the-run-permalink), because it is its own screen with its own controls. Starting a run needs `runs:create`; without it the form is replaced by a card and the history stays readable.
 
 <figure markdown>
-![Run form configured for an interval run: the cadence caption, pairs estimate, Save as definition, and run history with filters below](../img/console-run-checks-form.png){ loading=lazy }
-<figcaption>An interval run before Start: the caption spells out cadence, length and samples per pair, with the "~N pairs" estimate beside it.</figcaption>
+![Run form configured for a 15-minute TCP run: the cadence caption, Sample interval Auto, Plane pod, Nodes as destination, All nodes (12) on both sides, the ~132 pairs estimate, Start run, and the Definition name field with Save as definition](../img/console-run-checks-form.png){ loading=lazy }
+<figcaption>An interval run before Start: the caption spells out cadence, length and samples per pair (every 5s for 15m, about 180 samples), with the "~132 pairs" estimate beside the pickers.</figcaption>
 </figure>
 
 ## The form
@@ -36,8 +36,8 @@ Each dispatched pair gets a timeout, clamped between 1 s and 120 s, with two rai
 Every started run lives at `/diagnostics/runs/<id>`: the spec (**Type**, **Plane**, **Pairs**, **Started**), a live summary (**Duration**, **Cadence** — planned vs measured, **Sent**, **Failed**, **Min**, **Avg**, **p95 / max**), a **Live** badge while results are arriving, and a **Cancel run** button while it is in flight.
 
 <figure markdown>
-![An in-flight interval run: Live badge, Cancel button, planned-vs-measured cadence, one pair expanded to its probe timeline with a recorded MTR route](../img/console-run-detail-live.png){ loading=lazy }
-<figcaption>A run permalink mid-flight: the probe timeline's ticks are clickable, and a recorded route opens in the MTR Explorer.</figcaption>
+![An in-flight diagnostic run: running and Live badges, a Cancel run button, TCP on the pod plane, 110/110 pairs ok, Duration 15m, Cadence 10s measured, Sent 330, Failed 0 (0.0%), latency min 0.1ms, avg 0.5ms, p95/max 1.4ms/4.6ms, and the first pair rows all succeeded](../img/console-run-detail-live.png){ loading=lazy }
+<figcaption>A run permalink mid-flight: the <em>running</em> and <em>Live</em> badges, <em>Cancel run</em>, the measured-versus-planned cadence line (10s measured, at least 3 samples per pair so far), the sent/failed counters with latency stats, and one row per pair with its latest probe.</figcaption>
 </figure>
 
 The Pairs table shows one row per pair with its most recent probe ("{ok}/{total} ok"). Expanding a row opens the pair's own record:

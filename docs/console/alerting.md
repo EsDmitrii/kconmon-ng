@@ -5,8 +5,8 @@ Console-managed Prometheus alert rules: packet-loss and latency alerts without w
 Reading needs `alerts:read`, which every built-in role holds. Managing rules needs `alerts:manage`, held by **operator**, **alert-editor** and **admin**; viewer reads only. (The alert-editor role exists for exactly this page; alerting is its charter.)
 
 <figure markdown>
-![Rules list showing synced, drift and error sync states, foreign rules with an Import action, and the maintenance windows section below](../img/console-alerting-rules.png){ loading=lazy }
-<figcaption>The rules list with all three sync verdicts on display, foreign rules beneath, and the unbounded maintenance-window list at the bottom.</figcaption>
+![Alerting page: two console-managed rules, StandExternalAgentSilent (raw, critical) and StandPairUdpLoss (pair-loss, warning), both synced 21s ago and enabled, each with Details, Sync, Edit and Delete; a Foreign rules section listing kconmon-ng (1 group, 10 rules, Helm) with an Import action; one maintenance window at the bottom](../img/console-alerting-rules.png){ loading=lazy }
+<figcaption>The rules list: two managed rules, both reading <em>synced</em> with the reconciler's timestamp and their row actions, the chart's own PrometheusRule beneath as a foreign rule with <em>Import</em>, and the maintenance-window section with one declared window.</figcaption>
 </figure>
 
 ## How rules reach the cluster
@@ -35,8 +35,8 @@ Row actions: *Details* (rendered expression, `for` duration, last-applied stamp)
 ## The rule builder
 
 <figure markdown>
-![The builder open on pair-loss: per-kind parameters, labels and annotations editors, and the preview reporting how many series match](../img/console-alerting-builder.png){ loading=lazy }
-<figcaption>Building a pair-loss rule: the preview renders the expression and counts matching series before anything is saved.</figcaption>
+![The New rule form as it opens, empty: Name placeholder PairLossHigh, Kind pair-loss, Protocol and Loss threshold blank, Source and Destination node blank, Severity warning, For placeholder 5m, Add label and Add annotation buttons, Enabled ticked](../img/console-alerting-builder.png){ loading=lazy }
+<figcaption>The builder as it opens on pair-loss: per-kind parameters (protocol, loss threshold, source and destination node), severity, <code>for</code>, and the labels and annotations editors, each field explaining itself in a line underneath.</figcaption>
 </figure>
 
 **New rule** opens the builder. *Name* seeds the alert's own name, so it must fit in a Prometheus label value (1–63 bytes); CamelCase is the convention. *Severity* (`info` / `warning` / `critical`) is the label Alertmanager routes on; a fourth value would route nowhere. Extra *Labels* and *Annotations* land on the rendered alert, with two reserved names: `severity` and `kconmon_ng_rule_id` are stamped by the renderer, and supplying either is an error rather than a silent override.

@@ -13,8 +13,8 @@ This is configuration, not telemetry. Everything here lives in the database, rea
 ## The definition form
 
 <figure markdown>
-![Definitions tab with the form open: one-per-zone selected, the projected series line visible, and the scheduler-disabled warning banner in frame](../img/console-scheduled-checks-definitions.png){ loading=lazy }
-<figcaption>A definition before saving: the form projects its series cost, and the banner warns that the scheduler loop is off on this install.</figcaption>
+![Scheduled checks, Definitions tab with the New definition form open: Name billing-db-tcp-per-zone, Check type tcp, Source selection one-per-zone, Destination kind target, Destination target legacy-billing-db, Plane pod, Params (JSON) with the placeholder {"port": 443}, Enabled ticked, the projection ~5 series (5 agents × 1 protocol), limit 400, Create definition and Cancel, and the Check definitions list below starting with legacy-billing-db-tcp](../img/console-scheduled-checks-definitions.png){ loading=lazy }
+<figcaption>The definition form, open above the list of existing definitions: name, check type, source selection, destination kind and target, the fixed <em>pod</em> plane, params, Enabled, and the projection guard reading "~5 series (5 agents × 1 protocol), limit 400".</figcaption>
 </figure>
 
 Fields: *Name*, *Check type*, *Source selection*, *Destination kind* (`node` / `target` / `adhoc`), *Plane*, *Params (JSON)*, *Enabled*. You can also seed one from a filled-in [Run checks](run-checks.md) form via **Save as definition**.
@@ -46,8 +46,8 @@ Only `one-per-zone` reduces the count, which is why the form defaults to it.
 ## Schedules
 
 <figure markdown>
-![Schedules tab with three states staged: an enabled interval schedule with next/last stamps, a paused one, and a failing one showing the scheduler's error](../img/console-scheduled-checks-schedules.png){ loading=lazy }
-<figcaption>Schedule rows in all three states: enabled with its stamps, paused because its definition is off, and failing with the recorded message.</figcaption>
+![Schedules tab with five rows: hooks-sink-http once, enabled; legacy-billing-db-tcp every 15m, disabled; hooks-sink-http every 5m, enabled, with next and last stamps; legacy-billing-db-tcp and apiserver-reachable continuous, enabled](../img/console-scheduled-checks-schedules.png){ loading=lazy }
+<figcaption>Schedule rows: a <em>once</em> schedule, a disabled interval schedule, an enabled interval schedule with its next and last stamps, and two continuous schedules, which have neither.</figcaption>
 </figure>
 
 Three kinds:

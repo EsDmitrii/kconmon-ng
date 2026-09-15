@@ -66,8 +66,8 @@ over three object kinds. The path is target → definition → schedule:
 3. **Schedules tab → New schedule**: pick the definition, kind `continuous`.
 
 <figure markdown>
-  ![Target and check definition forms with a named host target and a dns check using one-per-zone source selection](../img/external-targets-definition.png){ loading=lazy }
-  <figcaption>Scheduled checks: a named host target, and a check definition against it with type dns and one-per-zone agent selection.</figcaption>
+  ![Scheduled checks, Definitions tab with the New definition form open: Name billing-db-tcp-per-zone, Check type tcp, Source selection one-per-zone, Destination kind target, Destination target legacy-billing-db, Plane pod, an empty Params field, Enabled ticked, the projection ~5 series (5 agents × 1 protocol), limit 400, and Create definition](../img/console-scheduled-checks-definitions.png){ loading=lazy }
+  <figcaption>Definitions tab → New definition, filled in for a TCP check against the <code>legacy-billing-db</code> target from one agent per zone, with the projected cost (~5 series from 5 agents) shown before the save.</figcaption>
 </figure>
 
 Continuous checks run at a **fixed cadence: every 30s, with a 5s per-probe

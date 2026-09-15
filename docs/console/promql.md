@@ -3,8 +3,8 @@
 Ad-hoc queries against the same Prometheus the rest of the console reads from. When a curated chart is close but not quite the cut you need, or you are drafting an alert expression and want the series count before saving a rule, write it here and run it — no Grafana required.
 
 <figure markdown>
-![PromQL page running a range query: the editor with the TCP p95 seed, Chart tab active, Range and Step selects with the suggested step](../img/console-promql-range.png){ loading=lazy }
-<figcaption>A range query charted: the step select preselects a value sized for readable resolution.</figcaption>
+![PromQL page running a range query: Range selected, 1h range, 15s step, the editor holding up, the Chart tab active with a flat line at 1 from 09:00 to 09:55, and the Series table led by up for the external agent edge-host-01 (external="true", instance 192.168.97.11:9091) with 241 points and last value 1](../img/console-promql-range.png){ loading=lazy }
+<figcaption>A range query charted: <code>up</code> over the last hour at a 15s step, every target flat at 1, and the series table underneath with points and last value per series, the scraped external agent first.</figcaption>
 </figure>
 
 ## The editor

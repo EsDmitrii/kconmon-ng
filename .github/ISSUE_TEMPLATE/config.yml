@@ -1,5 +1,8 @@
 blank_issues_enabled: false
 contact_links:
+  - name: Documentation
+    url: https://esdmitrii.github.io/kconmon-ng/
+    about: Install guide, console guide, Helm values reference and FAQ. Check here before opening an issue.
   - name: Security vulnerability
     url: https://github.com/EsDmitrii/kconmon-ng/security/advisories/new
     about: Report privately via GitHub security advisories — see SECURITY.md. Please do not open a public issue.

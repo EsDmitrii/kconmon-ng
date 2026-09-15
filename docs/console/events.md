@@ -3,8 +3,8 @@
 The controller's event feed, newest first: restarts, readiness flaps, check observations, reactive traceroutes, in the order the controller saw them. When you need the raw record of what happened around 14:32, this is it.
 
 <figure markdown>
-![Live event feed with mixed Info/Warn/Error rows, an interleaved Note annotation, the filter toolbar and the counter line](../img/console-events-live.png){ loading=lazy }
-<figcaption>The live feed: severity badges, an operator note interleaved at its own timestamp, and "Showing X of Y · capped at 2000".</figcaption>
+![Live event feed during a staged break: severity and type filters, Pause, the Live badge, the scope search, Showing 260 of 260 events · capped at 2000, and rows mixing Info (tcp diagnostic dispatched) and Warn (tcp diagnostic timeout, among them edge-host-01 → kconmon-stand-worker6)](../img/console-events-live.png){ loading=lazy }
+<figcaption>The live feed mid-break: a severity badge on every row (Info and Warn here), the filter toolbar, and "Showing 260 of 260 events · capped at 2000". The Warn rows are TCP diagnostic probes timing out on pairs that touch the broken nodes.</figcaption>
 </figure>
 
 ## How the feed is fed
@@ -34,8 +34,8 @@ Filtering: **Severity** and **Type** selects (both default *All*), and **Scope c
 **Pause** buffers arrivals ("Paused · 3 buffered") while the badge keeps saying whether the socket is alive; **Resume** drains the buffer into the feed. The counter line reads "Showing {shown} of {held} events · capped at 2000".
 
 <figure markdown>
-![Paused feed showing the buffered counter and the missed-events warning with its Why explanation expanded](../img/console-events-paused.png){ loading=lazy }
-<figcaption>Paused with a live socket: arrivals buffer instead of scrolling, and the gap warning explains itself.</figcaption>
+![The feed paused: a Resume (136 buffered) button, the badge reading Paused · socket live, a Paused · 136 buffered chip beside Load older, and the rows frozen at 09:43:54](../img/console-events-paused.png){ loading=lazy }
+<figcaption>Paused with a live socket: the badge keeps saying the socket is alive, the chip counts what arrived while paused (136 events), and <em>Resume</em> drains them into the feed.</figcaption>
 </figure>
 
 **Load older** pages history back through `GET /api/v1/events`. When the 2 000-event ring is already full it refuses instead of spending a round trip on rows it would have to drop: "The buffer is full at {cap} events. Older ones cannot be added without dropping newer ones; narrow the filters or reload to start a fresh buffer."

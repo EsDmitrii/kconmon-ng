@@ -11,7 +11,7 @@ LDFLAGS := -s -w \
 BIN_DIR := bin
 
 .PHONY: all build build-agent build-controller build-console test test-race test-cover lint fmt proto sqlc openapi clean help \
-	local-up local-down local-status local-smoke local-urls
+	local-up local-down local-status local-smoke local-urls docs-serve docs-build
 
 all: lint test build
 
@@ -110,6 +110,18 @@ helm-template: helm-deps
 helm-package: helm-deps
 	helm package charts/kconmon-ng -d dist/
 
+## Docs
+
+# Build outside the repo: a bare `mkdocs build` drops site/ into the repo root, and gitignored or not,
+# generated HTML next to the source is noise. Toolchain: pip install -r requirements-docs.txt.
+DOCS_SITE_DIR ?= /tmp/$(PROJECT_NAME)-site
+
+docs-serve:
+	mkdocs serve
+
+docs-build:
+	mkdocs build --strict -d $(DOCS_SITE_DIR)
+
 ## Docker
 
 docker-build:
@@ -156,6 +168,8 @@ help:
 	@echo "  helm-lint        - Lint Helm chart"
 	@echo "  helm-template    - Render Helm templates"
 	@echo "  helm-package     - Package Helm chart"
+	@echo "  docs-serve       - Preview the docs site with live reload (needs requirements-docs.txt)"
+	@echo "  docs-build       - Strict docs build into $(DOCS_SITE_DIR), the same gate CI runs on PRs"
 	@echo "  docker-build     - Build Docker images"
 	@echo "  clean            - Remove build artifacts"
 	@echo "  local-up         - Start minikube + Prometheus + Grafana + kconmon-ng"

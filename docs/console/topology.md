@@ -3,8 +3,8 @@
 An interactive zone and node map. Nodes are boxes grouped into zone lanes; problem paths are drawn as edges between them, worst first. During a zonal incident the tell is visual: cross-zone edges clustering on one lane.
 
 <figure markdown>
-![Topology map with multi-zone lanes, red problem edges, a capped-edges caption and one node wearing a "not ready" badge](../img/console-topology-problem-paths.png){ loading=lazy }
-<figcaption>Problem paths across zones: the caption counts "showing 10 worst of N", and a not-ready node carries its badge.</figcaption>
+![Topology map, Live, during a staged break: a No zone reported lane with worker10, an External lane with edge-host-01 badged external and failing, four zone lanes (zone-a with 3 nodes, zone-b 3, zone-c 2, zone-d 2) with every node badged failing, red problem edges converging on worker2, worker5, worker6 and worker7, and the caption showing 10 worst of 68 problem paths](../img/console-topology-problem-paths.png){ loading=lazy }
+<figcaption>Problem paths across zones: the map caps its edges and says so ("showing 10 worst of 68 problem paths"), the red edges run into worker2, worker5, worker6 and worker7, and every node with an agent wears a <em>failing</em> badge. The external agent <code>edge-host-01</code> has its own <em>External</em> lane and an <em>external</em> badge beside the cluster nodes; worker10 sits alone in <em>No zone reported</em>, without a badge.</figcaption>
 </figure>
 
 ## Nodes
@@ -14,6 +14,10 @@ Node colour comes from the probe matrix, using the same tiers as the [Matrix](ma
 Each zone is one lane, headed "{zone} · {count} nodes". A big zone wraps into a grid rather than a single column: the column count grows roughly as the square root of the node count and is capped at four, so a zone stays a shape a pane can hold instead of a tall strip the auto-fit has to shrink into illegibility. Nodes whose zone label is absent gather in a lane named **no zone reported** — which is exactly what is true, and also the state you get on a cluster whose nodes lack the `topology.kubernetes.io/zone` label.
 
 Map controls: *Zoom in*, *Zoom out*, *Fit the whole map*. The map is read-only; nodes are not draggable.
+
+### External agents on the map
+
+An agent registered from outside the cluster (a bare host through the [gateway](../external-agents.md)) has no Kubernetes node, so since 2.4.0 the map merges it in from the agent list: it sits in the lane of the zone it registered with, takes its colour from the matrix like any other node, and wears a neutral **external** badge, an identity marker and never a health tier. Readiness is unknown by construction, since there is no node object to be ready, and the box says so to a screen reader: "{node}, {zone}, {health}, external agent, readiness unknown". The map's provenance stays the Kubernetes node view, so a bare host never triggers the "map built from registered agents" notice described below. Under the Time Machine the badge comes from the labels recorded on topology events and snapshots, which a controller older than 2.4.0 did not record: history from before that upgrade shows the host as a plain node.
 
 ## Edges
 
@@ -35,16 +39,22 @@ All the map's non-happy paths, in one place:
 
 Live, the node set refreshes every 15 seconds. Engaged, the map switches mechanism entirely: it is **reconstructed from stored topology events**, folded up to the viewed instant.
 
+Events only record what changed, so the fold starts from a snapshot of the whole topology that the console stores when it connects to the controller's event stream and every hour after that, then replays the events since. Instants from before a console's first snapshot, which includes everything recorded before 2.4.0, get the events alone: the map then shows only the nodes whose agents registered, moved or left inside the retained window, and misses the ones that sat still.
+
 Why events rather than Prometheus? Prometheus can answer "what were the series at 03:12", but node identity, readiness transitions and agent registrations are not series: they are facts the controller reported as they happened. The event log is the only record with them in order, so the fold replays it. The trade is stated by the API itself: historical topology needs the database (`GET /api/v1/topology?at=` answers 503 without one, naming `console.database.mode`), and an instant older than what retention kept answers 422, telling you to pick a later time or raise `console.database.retentionDays`.
 
 The reconstruction states its own bounds in place: an instant past the kept window ("This reconstruction is incomplete"), events that name no node ("Nothing to reconstruct at this time"), or simply no nodes at that time.
 
 <figure markdown>
-![Topology with the Time Machine engaged at an early instant: the map is rebuilt from topology events, and zone-d still holds a single node that later grew to two](../img/console-topology-reconstruction.png){ loading=lazy }
-<figcaption>A reconstruction near the retention edge: the map draws what the event log kept and says the window was cut.</figcaption>
+![Topology with the Time Machine engaged at 9/15/2026, 11:53:14: the banner and the amber control show the instant, the header says the map is reconstructed from topology events, a No zone reported lane with worker10, an External lane with edge-host-01 badged external and failing, four zone lanes (zone-a with 3 nodes, zone-b 3, zone-c 2, zone-d 2) with every node badged failing, red problem edges, and showing 10 worst of 68 problem paths](../img/console-topology-reconstruction.png){ loading=lazy }
+<figcaption>A reconstruction: the header states the instant and that the map was rebuilt from topology events. At 11:53:14 it holds the same twelve node boxes as the live map above, the External lane with <code>edge-host-01</code> and the No zone reported lane with worker10 among them, and counts 68 problem paths, the ten worst drawn.</figcaption>
 </figure>
 
-<!-- verified against: web/src/pages/topology.tsx (EDGE_CAP=10 L66, worst-of dedupe L248-256, ZONE_MAX_COLS=4 +
-     zoneColumns/zoneWidth L43-63), web/src/lib/i18n/dict/topology.ts (stale.*, offline.*, help.body, lane strings),
-     web/src/hooks/use-topology.ts (GET /api/v1/topology, ?at=), internal/console/httpapi/data.go L25-31
-     (topologyHistoryUnavailableDetail 503, topologyRetentionDetail 422), internal/console/httpapi/topology_at_test.go. -->
+<!-- verified against: web/src/pages/topology.tsx (EDGE_CAP=10 L68, worst-of dedupe, ZONE_MAX_COLS=4 + zoneColumns L52-58,
+     mapNodes merging bare hosts with source kept "nodes" L134-184, node.aria.external L255-260, neutral Badge L387),
+     web/src/lib/agents.ts (externalByNode), web/src/lib/i18n/dict/topology.ts (stale.*, offline.*, help.body, lane strings,
+     node.external + node.aria.external L125-131), web/src/hooks/use-topology.ts (GET /api/v1/topology, ?at=),
+     internal/console/httpapi/data.go L25-31 (topologyHistoryUnavailableDetail 503, topologyRetentionDetail 422),
+     internal/console/store/events.go (fold keeps the last stated labels, starts from the newest topology_baseline),
+     internal/console/events/baseline.go (baseline on connect, baselineInterval = 1h), docs/console-api.yaml TopologyAgent.labels
+     (absent on history recorded before 2.4.0), internal/console/httpapi/topology_at_test.go. -->

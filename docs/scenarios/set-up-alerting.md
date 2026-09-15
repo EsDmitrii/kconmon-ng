@@ -6,8 +6,9 @@ Get paged when the network between nodes degrades, and when the monitor
 itself goes quiet, without writing PromQL from scratch. kconmon-ng gives you
 two independent layers:
 
-1. **Chart-shipped rules** (`prometheusRule.enabled`): nine built-in alerts
-   rendered as one static `PrometheusRule`, versioned in Git with your values.
+1. **Chart-shipped rules** (`prometheusRule.enabled`): ten built-in alerts,
+   nine on by default, rendered as one static `PrometheusRule` and versioned
+   in Git with your values.
 2. **Console-managed rules** (`console.alerting.enabled`): rules built in the
    UI from typed templates or raw PromQL, stored in PostgreSQL and reconciled
    into a *separate*, console-owned `PrometheusRule` object.
@@ -24,11 +25,15 @@ helm upgrade kconmon-ng oci://ghcr.io/esdmitrii/charts/kconmon-ng \
   --reuse-values --set prometheusRule.enabled=true
 ```
 
-That ships nine rules: `UDPLossHigh`, `TCPChecksFailing`, `PairWentSilent`,
+That ships ten rules: `UDPLossHigh`, `TCPChecksFailing`, `PairWentSilent`,
 `DNSChecksFailing`, `ExternalChecksFailing`, `ZoneChecksFailing`,
-`ZoneLossHigh`, plus two that watch the monitor itself:
-`KconmonAgentsMissing` and `KconmonControllerDown`. Every expression, and the
-reasoning behind the awkward ones, is in the
+`ZoneLossHigh`, plus three that watch the monitor itself:
+`KconmonAgentsMissing`, `KconmonControllerDown` and
+`KconmonExternalAgentDown`. The last one ships disabled
+(`prometheusRule.externalAgentDown.enabled: false`): its `up{job}` series only
+exists once you [scrape external agents](../external-agents.md#scraping-external-agents),
+so switch it on together with that job. Every expression, and the reasoning
+behind the awkward ones, is in the
 [default alerting rules](../metrics.md#default-alerting-rules) reference.
 
 ## Enable the Console layer
@@ -63,8 +68,8 @@ against your Prometheus *right now* and reports how many series it matches,
 zero named as an answer rather than a failure.
 
 <figure markdown>
-  ![New rule builder with the pair-loss template filled and the preview panel showing the rendered PromQL and matched series](../img/set-up-alerting-rule-builder.png){ loading=lazy }
-  <figcaption>Alerting → New rule: pair-loss template on UDP, threshold in percent, scoped to one pair; the preview shows the rendered PromQL and a live matched-series count.</figcaption>
+  ![New rule form filled in: Name PairUDPLossDemo, Kind pair-loss, Protocol udp, Loss threshold 50, Source node kconmon-stand-worker2, Destination node kconmon-stand-worker6, Severity warning, For at its 5m placeholder, Add label, Add annotation, Enabled ticked](../img/set-up-alerting-rule-builder.png){ loading=lazy }
+  <figcaption>Alerting → New rule, filled in: the pair-loss template on UDP, the threshold in percent, scoped to worker2 → worker6, severity warning, <code>for</code> left at its 5m placeholder.</figcaption>
 </figure>
 
 One caveat that looks like a bug and is not: your Prometheus must *select*
@@ -132,7 +137,7 @@ managed rule carries two reserved labels, `severity` and
 `kconmon_ng_rule_id` in Alertmanager when the console webhook should own
 delivery, or simply do not subscribe an endpoint to the alert events when
 Alertmanager should. The reverse overlap does not exist: the watcher fires
-only for alerts carrying `kconmon_ng_rule_id`, so the chart's nine bundled
+only for alerts carrying `kconmon_ng_rule_id`, so the chart's ten bundled
 rules never arrive through console webhooks; an unmanaged firing alert
 belongs to whoever owns that rule.
 
@@ -222,13 +227,13 @@ probe-shaped payload described above and records the outcome verbatim on the
 row.
 
 <figure markdown>
-  ![Webhooks settings with an endpoint subscribed to alert events and a recorded test outcome on the row](../img/set-up-alerting-webhook-test.png){ loading=lazy }
-  <figcaption>Settings → Webhooks: one endpoint subscribed to alert.fired / alert.resolved, with the Test button's recorded outcome on the row.</figcaption>
+  ![Settings scrolled to Webhooks: the hooks-sink endpoint at http://hooks-sink.kconmon-ng.svc:8080/kconmon subscribed to incident.created, incident.resolved, incident.reopened, alert.fired and alert.resolved, badged enabled, signed and ok with its timestamp, the Test, Edit and Delete actions and the line Test queued; the outcome lands on this row; Configuration export / import below](../img/set-up-alerting-webhook-test.png){ loading=lazy }
+  <figcaption>Settings → Webhooks right after <em>Test</em>: one endpoint subscribed to five event types, its row carrying <em>enabled</em>, <em>signed</em> and the last recorded outcome, <em>ok</em>, with the confirmation that the test was queued and its outcome lands on this row.</figcaption>
 </figure>
 
 To test the whole path (rule, Prometheus, delivery), break something real on
 a disposable stand. [The demo](../demo/breaking-cni.md) blackholes UDP
-between two Minikube nodes, watches `UDPLossHigh` go pending within half a
-minute, declares a console rule scoped to that pair with a short `for`, and
-receives the signed webhook when it fires. Better to learn your paging path
-works from that than from a real incident.
+between two nodes of a kind cluster, watches `UDPLossHigh` go pending within
+half a minute, declares a console rule scoped to that pair with `for` left
+blank, and points a signed webhook endpoint at it. Better to learn your paging
+path works from that than from a real incident.

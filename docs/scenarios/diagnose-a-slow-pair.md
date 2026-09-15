@@ -26,8 +26,8 @@ are looking for structure, not a single number:
 - **A block** aligned with zones → a zone boundary; confirm on the zone view.
 
 <figure markdown>
-  ![Matrix on the UDP protocol with one directed cell in the failing tier and its mirror cell healthy](../img/diagnose-a-slow-pair-matrix-cell.png){ loading=lazy }
-  <figcaption>Matrix, protocol UDP: one directed cell failing while its mirror stays healthy. A directional problem on one pair.</figcaption>
+  ![Matrix on UDP with the worker3, worker4 and worker5 columns red and their rows green except toward each other; a tooltip on kconmon-stand-worker6 → kconmon-stand-worker3 reads Failure ratio 20.3%, RTT p95 0.9ms, Packet loss 100.0%, while the mirror cell worker3 → worker6 is green at 0.0%](../img/diagnose-a-slow-pair-matrix-cell.png){ loading=lazy }
+  <figcaption>Matrix, protocol UDP: worker6 → worker3 failing with 100% packet loss in its tooltip while the mirror cell, worker3 → worker6, stays green at 0.0%. Across the grid the pattern repeats: the worker3, worker4 and worker5 columns red, the same three rows green toward every node but each other. A directional problem into three nodes.</figcaption>
 </figure>
 
 Click the suspect cell to open the [pair page](../console/pair-and-node-pages.md):
@@ -35,9 +35,14 @@ loss and RTT charts for that pair, recent MTR path history, and the events
 around it. If the fleet is large, the [Overview](../console/overview.md)
 page's worst-pairs table is the shortcut to the same cell.
 
+The pair page below comes from a larger break on the same stand, with zone-c
+(`worker6` and `worker7`) blackholed on every protocol. That is why
+`worker3 → worker6` fails in both directions there, while the UDP matrix
+above shows the same cell green.
+
 <figure markdown>
-  ![Pair page with loss and RTT charts showing a degradation step, MTR path history and surrounding events](../img/diagnose-a-slow-pair-pair-page.png){ loading=lazy }
-  <figcaption>The pair page for the suspect pair: the degradation step on the loss and RTT charts, with path history and events alongside.</figcaption>
+  ![Pair page for kconmon-stand-worker3 → kconmon-stand-worker6 on its Overview tab: both directions at 100.0% in the header, the RTT p95 by protocol chart with a TCP spike to nearly 80 ms after 09:35, no open incident, and the Recent changes rail with tcp diagnostic timeout and tcp check failed events](../img/console-pair-page-overview.png){ loading=lazy }
+  <figcaption>The pair page for worker3 → worker6 during the zone-c blackhole, not the UDP break above: per-direction verdicts in the header, the RTT p95 by protocol chart over the last hour, and the Recent changes rail with the diagnostic timeouts and failed checks around the break.</figcaption>
 </figure>
 
 ## Confirm with Metrics
@@ -102,8 +107,8 @@ history is deduplicated by content, so what you see is the list of *path
 changes*, with a diff view between any two traces.
 
 <figure markdown>
-  ![MTR diff view between a pre-break and post-break trace with the changed hop highlighted](../img/diagnose-a-slow-pair-mtr-diff.png){ loading=lazy }
-  <figcaption>Routes (MTR), diff between two traces of the same destination: the changed hop is where the investigation goes next.</figcaption>
+  ![Routes · MTR Explorer: destinations on the left with edge-host-01 expanded, and the path history for kconmon-stand-worker3 → edge-host-01 with one recorded route of 2 hops and 2 traces](../img/console-routes-mtr-explorer.png){ loading=lazy }
+  <figcaption>Routes (MTR) Explorer for worker3 → edge-host-01: one recorded route, 2 hops, 2 traces, with a tick box beside it. Once a second route is recorded, ticking both and comparing them is where the investigation goes next.</figcaption>
 </figure>
 
 Read the hop table for where RTT jumps or per-hop loss starts: everything

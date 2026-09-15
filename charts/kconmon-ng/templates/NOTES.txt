@@ -10,7 +10,7 @@ An agent now runs on every node and probes its peers. Watch them register:
 {{- $todo = append $todo "serviceMonitor.enabled=true — nothing is scraping the metrics yet (needs the Prometheus Operator CRDs)." }}
 {{- end }}
 {{- if not .Values.prometheusRule.enabled }}
-{{- $todo = append $todo "prometheusRule.enabled=true — the seven built-in alerts are not deployed, so a broken link pages nobody." }}
+{{- $todo = append $todo "prometheusRule.enabled=true — the built-in alerts are not deployed, so a broken link pages nobody." }}
 {{- end }}
 {{- if not .Values.dashboards.enabled }}
 {{- $todo = append $todo "dashboards.enabled=true — the Grafana dashboards ship with this chart but are not installed." }}
@@ -45,6 +45,15 @@ An agent now runs on every node and probes its peers. Watch them register:
 {{- if and .Values.controller.externalGateway.enabled (not .Values.controller.externalGateway.tls.clientCaKey) }}
 {{- $todo = append $todo "controller.externalGateway.tls.clientCaKey — empty, so the gateway runs token-only: fleet membership is authenticated but agents are indistinguishable, and any token holder can impersonate any agent. Point it at the CA key that signs agent client certs to pin identities." }}
 {{- end }}
+{{- if and .Values.controller.externalGateway.enabled (not (include "kconmon-ng.scrapeConfig.externalAgents.enabled" .)) }}
+{{- $todo = append $todo "scrapeConfig.externalAgents.enabled=true — the gateway admits external agents but nothing scrapes them, so their matrix rows and dashboard panels stay empty (needs the operator's ScrapeConfig CRD)." }}
+{{- end }}
+{{- if and (include "kconmon-ng.scrapeConfig.externalAgents.enabled" .) (not .Values.scrapeConfig.externalAgents.labels) }}
+{{- $todo = append $todo "scrapeConfig.externalAgents.labels — empty: a kube-prometheus-stack Prometheus selects only ScrapeConfigs labelled release=<its release name> and will ignore this one; an operator with an empty scrapeConfigSelector needs nothing." }}
+{{- end }}
+{{- if .Values.agent.hostNetwork }}
+{{- $todo = append $todo (printf "agent.hostNetwork — the agents listen on node IPs and every in-cluster pair measures the node-to-node path, not the CNI datapath. Keep TCP %d, UDP %d and TCP %d free on every node, set net.ipv4.ping_group_range in the node OS (the chart no longer renders the sysctl), and run the namespace at PSS privileged." (int .Values.config.httpPort) (int .Values.config.grpcPort) (int .Values.config.metricsPort)) }}
+{{- end }}
 {{- if $todo }}
 
 STILL TO DECIDE ({{ len $todo }}):
@@ -54,6 +63,13 @@ STILL TO DECIDE ({{ len $todo }}):
 {{- else }}
 
 Nothing left to decide — scraping, alerts, dashboards and the Console are all configured.
+{{- end }}
+{{- if include "kconmon-ng.scrapeConfig.externalAgents.enabled" . }}
+
+External agents are scraped through ScrapeConfig {{ include "kconmon-ng.agent.fullname" . }}-external (job {{ include "kconmon-ng.scrapeConfig.externalAgents.jobName" . }}).
+Prometheus re-reads their target list every {{ .Values.scrapeConfig.externalAgents.refreshInterval }} from the controller:
+
+  http://{{ include "kconmon-ng.controller.fullname" . }}.{{ .Release.Namespace }}.svc:{{ .Values.config.metricsPort }}/api/v1/prometheus/sd
 {{- end }}
 {{- if .Values.console.enabled }}
 
@@ -65,6 +81,9 @@ Reach the Console:
 {{- else }}
   kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "kconmon-ng.console.fullname" . }} 8080:{{ .Values.console.service.port }}
 {{- end }}
+
+Console setup: https://esdmitrii.github.io/kconmon-ng/getting-started/enable-the-console/
 {{- end }}
 
-Docs: https://github.com/EsDmitrii/kconmon-ng#readme
+Docs:        https://esdmitrii.github.io/kconmon-ng/
+Helm values: https://esdmitrii.github.io/kconmon-ng/reference/helm-values/

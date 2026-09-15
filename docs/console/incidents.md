@@ -3,8 +3,8 @@
 Investigation Mode: one window over one scope, with every source the console can read merged into a single timeline and the correlation rules written down rather than guessed at. A pair went bad at 14:32; this page puts probes, fleet events, Kubernetes events, config changes, route changes and alerts on one axis so you can see what moved first.
 
 <figure markdown>
-![Investigation over a pair scope: a timeline with mixed source badges, a source-bound disclosure line, pinned findings and ranked likely causes](../img/console-incidents-timeline.png){ loading=lazy }
-<figcaption>A pair investigation: the timeline mixes event, k8s, audit, path-change, threshold and alert rows; Likely causes ranks candidates with their weights.</figcaption>
+![Incidents page over the pair scope kconmon-stand-worker3 → kconmon-stand-worker6, 1h range: the scope and range controls, the action row, a Timeline of 331 entries whose newest rows are an audit entry and tcp diagnostic timeout and dispatched events, and a Signals panel with the fail ratio going from 0.0% to 100.0% and a packet-loss chart at 100% since about 09:37](../img/console-incidents-timeline.png){ loading=lazy }
+<figcaption>A pair investigation mid-break: scope and range in the URL, the action row (Run MTR now, Run TCP now, Compare in Metrics, Export JSON, Save as incident, Create maintenance), a 331-entry timeline led by the pair's diagnostic timeouts, and the Signals panel stating the fail ratio rose 100 percentage points across the window.</figcaption>
 </figure>
 
 ## Scope and window
@@ -56,8 +56,8 @@ The actions rail: **Run MTR now**, **Run TCP now** (both start a run via `POST /
 **Save as incident** (needs `incidents:write`) stores the scope, window, title and notes; a zone-pair or cluster scope saves as the *global* scope and the dialog says so. A saved incident gets a permalink, `/investigate?incident=<id>`, and reopening it shows the incident strip: status (*Open* / *Resolved*), *Copy permalink*, *Resolve* / *Reopen*, *Delete* (with confirm), and editable notes. Open incidents also surface on the [Overview](overview.md#firing-alerts-open-incidents-recent-events). An incident permalink carries only `?incident=<id>`; the stored row, not the URL, decides what the page frames.
 
 <figure markdown>
-![A saved incident opened by permalink: the incident strip with Open status, Copy permalink, Resolve and editable notes](../img/console-incidents-permalink.png){ loading=lazy }
-<figcaption>An incident reopened by its permalink: the strip carries status, sharing and lifecycle actions above the frozen investigation.</figcaption>
+![A saved incident opened by permalink: Cluster scope over a custom range from Sep 14, 2026 09:31 to Sep 15, 2026 09:32, the action row with one maintenance window listed, and the incident strip for zone-c blackhole drill with Open status, opened by anonymous, Copy permalink, Resolve, Delete and editable notes (379/16384) with Save notes](../img/console-incidents-permalink.png){ loading=lazy }
+<figcaption>An incident reopened by its permalink: the strip carries status, sharing and lifecycle actions and the editable notes, above the investigation it froze (cluster scope, the saved 24-hour window).</figcaption>
 </figure>
 
 ## Getting here

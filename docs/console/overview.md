@@ -3,8 +3,8 @@
 The landing page. Before any detail, it gives a verdict: is the fleet healthy right now, and if not, which pairs are the problem? Since this is also the first page of the console guide, the end of this chapter covers [the chrome around every page](#the-console-chrome): the sidebar, the user menu, the command-palette hint and the "?" help buttons.
 
 <figure markdown>
-![Overview during a staged CNI breakage: the header counts failing pairs, tiles are non-zero, the Worst pairs table links into investigations](../img/console-overview-failing.png){ loading=lazy }
-<figcaption>Overview during an outage: "N pairs failing" in the header, worst pairs ranked, one firing alert in the panel below.</figcaption>
+![Overview during a staged break: 68 pairs failing (TCP) in the header, 11/11 nodes ready plus one external agent, 68 failing and 0 degraded pairs in the tiles, the Worst pairs table ranking edge-host-01 → worker2, worker5, worker6 and worker7 and control-plane → worker2 at 100.0% with an investigate link each, the Firing alerts panel listing StandPairUdpLoss warnings, and one open incident](../img/console-overview-failing.png){ loading=lazy }
+<figcaption>Overview during an outage: "68 pairs failing (TCP)" in the header, the five worst pairs ranked with fail % and an <em>investigate</em> link each (four of them from the external agent, marked <em>external</em>), the Firing alerts panel listing the console's StandPairUdpLoss rule firing for six minutes, and one open incident on the right.</figcaption>
 </figure>
 
 Every pair number on this page carries the qualifier **TCP · pod plane**. The numbers rest on one protocol and one network plane, and the qualifier states which: the page summarises the TCP matrix, so a pair failing only on UDP shows up on [Matrix](matrix.md) with the protocol switched, not here. There is exactly one plane in this release; the [Plane field on Scheduled checks](scheduled-checks.md#the-definition-form) explains that scope cut.
@@ -28,7 +28,7 @@ Three stat tiles:
 
 | Tile | Meaning |
 | --- | --- |
-| **Nodes ready** | Ready nodes out of the Kubernetes node inventory. When the controller has no k8s node view, the tile counts registered agents (or matrix rows) instead and says so; readiness is then unknown. |
+| **Nodes ready** | Ready nodes out of the Kubernetes node inventory. When the controller has no k8s node view, the tile counts registered agents (or matrix rows) instead and says so; readiness is then unknown. [External agents](../external-agents.md) are not in the count, since a bare host has no Kubernetes readiness to report; instead the tile adds a "+{n} external agent(s)" line under the number, so `10/10` over `+1 external agent` describes eleven vantage points, ten of them nodes. The hint rides only on the Kubernetes count: when the tile falls back to counting agents, the host is already in the number and no hint appears. |
 | **Failing pairs** | Pairs with a failure ratio **≥ 10%** ("Fail ≥ 10%"). |
 | **Degraded pairs** | Pairs with a failure ratio between **1% and 10%** ("Fail 1–10%"). |
 
@@ -38,7 +38,7 @@ Under the Time Machine, the Nodes-ready tile cannot ask Kubernetes about the pas
 
 ## Worst pairs
 
-The **Worst pairs** table holds at most five rows: scored pairs only, failing or degraded only, ranked by failure ratio with p95 RTT as the tiebreak. Two pairs failing at the same ratio are not equally bad, and the slower one ranks higher. Columns are **Pair**, **Fail %**, **p95 RTT** and **Status** (*Failing* / *Degraded*). The pair name links to that pair's [pair page](pair-and-node-pages.md); each row also carries an *investigate* link that opens [Incidents](incidents.md) pre-scoped to the pair.
+The **Worst pairs** table holds at most five rows: scored pairs only, failing or degraded only, ranked by failure ratio with p95 RTT as the tiebreak. Two pairs failing at the same ratio are not equally bad, and the slower one ranks higher. Columns are **Pair**, **Fail %**, **p95 RTT** and **Status** (*Failing* / *Degraded*). The pair name links to that pair's [pair page](pair-and-node-pages.md); each row also carries an *investigate* link that opens [Incidents](incidents.md) pre-scoped to the pair. When either end of a pair is a bare-host agent, its name wears a neutral **external** badge, the same word the [Topology](topology.md) map and the node card use. The badge is identity, not status: it says where the agent runs, and the row's *Failing* / *Degraded* verdict still comes from the failure ratio alone. It is painted from the `kconmon-ng.io/external` registration label, so an agent older than 2.4.0 appears as an ordinary node name.
 
 When only some measured pairs have a failure ratio, the table says so: "{scored} of {total} pairs have a failure ratio; the rest have no failure samples." An empty list distinguishes three cases: no probe data in Prometheus yet, pairs reporting latency but no failure-ratio samples, and the healthy case where every scored pair sits under a 1% failure ratio.
 
@@ -55,13 +55,13 @@ Three summary panels under the table, each with a hard cap:
 While no pair is measured on a fresh install, a **Setup progress** card replaces the empty state and tracks *Agents registered* → *Prometheus scraped* → *First probe round*. Each unmet step carries a one-line fix, e.g. "Prometheus answered with no agent series yet — check that it scrapes the agents (ServiceMonitor or scrape_config)."
 
 <figure markdown>
-![Overview on a fresh install: the Setup progress card with an unmet Prometheus step, pair tiles showing em dashes](../img/console-overview-setup.png){ loading=lazy }
-<figcaption>Fresh install, nothing probed yet: the Setup progress card names the next step, and the pair tiles refuse to print a zero.</figcaption>
+![Overview on a fresh install: the Setup progress card with Prometheus scraped not yet and First probe round waiting, pair tiles showing dashes](../img/console-overview-setup.png){ loading=lazy }
+<figcaption>Fresh install, nothing scraped yet: the Setup progress card names the next step, and the pair tiles refuse to print a zero.</figcaption>
 </figure>
 
 ## When series are missing
 
-Since 2.2.0 the chart carries a scrape-time cardinality valve, `agent.metrics.detail` (`full` | `counters-only` | `zone-only`, `charts/kconmon-ng/values.yaml`). It changes what this page can compute:
+Since 2.3.0 the chart carries a scrape-time cardinality valve, `agent.metrics.detail` (`full` | `counters-only` | `zone-only`, `charts/kconmon-ng/values.yaml`). It changes what this page can compute:
 
 - `counters-only` drops the four per-pair histograms at scrape time. The failure counters stay, so the health statement, the tiles and the worst-pairs ranking keep working, but the **p95 RTT** column goes dark and the RTT tiebreak has nothing to break ties with.
 - `zone-only` drops every series naming a destination node. No pair is measured at all from this page's point of view, and it renders as a fleet with no probe data.
@@ -106,8 +106,10 @@ Everything below wraps every page in the console; it is described once, here.
 **The "?" help button.** Every sidebar page has a small `?` after its title. It opens a few sentences of orientation plus a *Learn more* link pointing at that page's chapter in this guide. The URLs are built as `<docs site>/console/<slug>/` from the file names under `docs/console/`, so renaming a file here silently breaks the in-app links. The in-app text is the short form and these pages are the long form; when one changes, check the other (`web/src/components/page-help.tsx` and each page's `help.body` string). Object pages reached by clicking into things (pair, node, target, run) have no help button; their orientation lives on the page that linked to them.
 
 <!-- verified against: web/src/pages/overview.tsx (summarize, compareWorst, isScored, OPEN_INCIDENTS_LIMIT=5,
-     RECENT_EVENTS_LIMIT=10, FIRING_ALERTS_LIMIT=8), web/src/lib/i18n/dict/overview.ts (qualifier, health.*,
-     setup.*, tiles.nodesReady.bounded.*, alerts.hidden.*), web/src/lib/matrix-cells.ts (isMeasured),
+     RECENT_EVENTS_LIMIT=10, FIRING_ALERTS_LIMIT=8, externalNodes / nodesHint / WorstPairsTable externalBadge),
+     web/src/lib/agents.ts (EXTERNAL_LABEL, isExternalAgent, externalByNode), web/src/lib/i18n/dict/overview.ts
+     (qualifier, health.*, setup.*, tiles.nodesReady.bounded.*, tiles.nodesReady.external.*, table.external,
+     alerts.hidden.*), web/src/lib/matrix-cells.ts (isMeasured),
      web/src/components/app-sidebar.tsx (GROUPS, footer, palette kbd), web/src/components/user-menu.tsx,
      web/src/components/anonymous-banner.tsx + dict/chrome.ts (banner.anonymous.*), web/src/components/theme-toggle.tsx,
      web/src/components/realtime-badge.tsx + dict/realtime.ts, web/src/components/page-help.tsx (DOCS_BASE_URL,

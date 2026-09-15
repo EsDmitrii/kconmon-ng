@@ -118,11 +118,11 @@ keeps (see [Scaling and cardinality](#scaling-and-cardinality)). Each agent
 exports its own zone view, so queries aggregate with
 `sum by (source_zone, destination_zone)` exactly as they would across nodes.
 
-!!! warning "Chart 2.2.0 still pins agents that do not export this family"
-    The zone family comes from the **agent binary**, and agents at appVersion
-    2.0.3, the version chart 2.2.0 pins, do not export it. Until the fleet
-    runs a newer agent image, the two zone alerts match no series and stay
-    silent, the Zone Heatmap dashboard renders empty, and flipping
+!!! warning "The zone family comes from the agent image"
+    The zone family is exported by the **agent binary**, from v2.3.0 on; a
+    chart pointed at an older agent image gets none of it. Until the fleet
+    runs an agent that exports it, the two zone alerts match no series and
+    stay silent, the Zone Heatmap dashboard renders empty, and flipping
     `agent.metrics.detail: zone-only` drops the per-pair series with nothing
     replacing them: Prometheus goes dark on the mesh while the console keeps
     working. Upgrade the agent image first, flip the valve second.
@@ -162,8 +162,9 @@ all.
 
 | Metric                                     | Type    | Labels             | Description                                |
 | ------------------------------------------ | ------- | ------------------ | ------------------------------------------ |
-| `kconmon_ng_controller_registered_agents`  | gauge   | —                  | Currently registered agents                |
+| `kconmon_ng_controller_registered_agents`  | gauge   | —                  | Currently registered agents, external ones included |
 | `kconmon_ng_controller_expected_agents`    | gauge   | —                  | Schedulable nodes expected to run an agent |
+| `kconmon_ng_controller_external_agents`    | gauge   | —                  | Registered agents running outside the cluster (through the external gateway); a subset of `registered_agents`, since 2.4.0 |
 | `kconmon_ng_controller_grpc_connections`   | gauge   | —                  | Active gRPC streaming connections          |
 | `kconmon_ng_controller_peer_updates_total` | counter | —                  | Peer-list updates broadcast to agents      |
 | `kconmon_ng_controller_leader`             | gauge   | —                  | `1` if this instance is the active leader  |
@@ -172,9 +173,13 @@ all.
 | `kconmon_ng_controller_external_subscribers` | gauge | —                  | Active agent `WatchExternalChecks` subscriptions on this replica |
 | `kconmon_ng_controller_external_assignments` | gauge | —                  | Agents with a non-empty continuous external-check assignment |
 
-Both external gauges are unlabelled by design. `external_assignments` counts
-**agents, never specs**: a per-agent series would grow with the cluster for no
-operational gain.
+All three external gauges are unlabelled by design. `external_assignments`
+counts **agents, never specs**: a per-agent series would grow with the cluster
+for no operational gain. `external_agents` is updated in the same registry
+callback as `registered_agents` and zeroed with it when a replica loses the
+lease; it exists so that `KconmonAgentsMissing` can subtract bare hosts from
+the registered count, which `expected_agents` (schedulable nodes) never
+included.
 
 ## Console
 
@@ -477,9 +482,12 @@ story, including how not to get paged twice, lives in
 
 - alert: KconmonAgentsMissing
   # Standbys hold no agents by design, so only the lease holder's counts are evidence.
+  # External agents are registered but never expected, so they are subtracted; the
+  # `or registered * 0` keeps the rule firing on a controller too old to export the gauge.
   expr: >-
     (kconmon_ng_controller_expected_agents
-    - kconmon_ng_controller_registered_agents > 0)
+    - (kconmon_ng_controller_registered_agents
+    - (kconmon_ng_controller_external_agents or kconmon_ng_controller_registered_agents * 0)) > 0)
     and (kconmon_ng_controller_leader == 1)
   for: 10m
   labels:
@@ -494,12 +502,36 @@ story, including how not to get paged twice, lives in
     severity: critical
   annotations:
     summary: No active kconmon-ng controller leader
+
+- alert: KconmonExternalAgentDown
+  # Off by default (prometheusRule.externalAgentDown.enabled): the job exists only with
+  # the chart's ScrapeConfig or the plain-Prometheus job from the external-agents page.
+  expr: up{job=~".*agent-external.*"} == 0
+  for: 5m
+  labels:
+    severity: warning
+  annotations:
+    summary: External kconmon-ng agent {{ $labels.node }} is not answering scrapes
 ```
 
-Nine rules. `expr`/`for`/`severity` above are what the chart renders at its
-default knob values; the `annotations` are abridged; what ships carries a
-templated `summary` and `description` naming the pair, the zones and the
-measured value.
+Ten rules, nine of them on by default; `KconmonExternalAgentDown` ships off
+because its job only exists once external agents are
+[scraped](external-agents.md#scraping-external-agents). `expr`/`for`/`severity`
+above are what the chart renders at its default knob values; the
+`annotations` are abridged; what ships carries a templated `summary` and
+`description` naming the pair, the zones and the measured value.
+
+Two of those expressions changed in 2.4.0. `KconmonAgentsMissing` used to be
+a plain `expected - registered`, and `registered` counts external agents
+while `expected` (schedulable nodes) never did, so one bare host masked one
+missing cluster node. The rule now subtracts
+`kconmon_ng_controller_external_agents`, with `or registered * 0` standing in
+for the gauge on a controller image older than 2.4.0, so the rule keeps
+firing there rather than matching nothing. `KconmonExternalAgentDown` reads
+Prometheus' own `up` for the external-agent job and carries the SD labels
+(`node`, `zone`, `instance`) into its annotations; a custom
+`scrapeConfig.externalAgents.jobName` without `agent-external` in it is not
+matched, which the values comment says next to the knob.
 
 **`PairWentSilent` is the only one that fires on an absence, and it exists
 because the ratio rules cannot.** A rule like `TCPChecksFailing` divides a
@@ -559,8 +591,8 @@ nodes, budget ~0.7M active series for kconmon-ng alone and size Prometheus
 accordingly. Above that the quadratic growth is unforgiving: 300 nodes is
 ~6.3M series. The valve below cuts what Prometheus keeps by an order of
 magnitude by configuration alone; what it cannot change is that the agents
-still *probe* the full N×N mesh, and probing a sparse mesh instead is still
-roadmap work. Do not plan a 1000-node deployment on these defaults.
+still *probe* the full N×N mesh, which is what `topology.mode: sparse`
+(since v2.3.0) trims. Do not plan a 1000-node deployment on these defaults.
 
 ### Levers that exist today
 
@@ -577,9 +609,13 @@ roadmap work. Do not plan a 1000-node deployment on these defaults.
 
   At 100 nodes: ~0.7M series at `full`, ~0.1M at `counters-only`, and
   practically N-independent at `zone-only`. The valve renders as
-  `metricRelabelings` on the agent `ServiceMonitor`, so it needs
-  `serviceMonitor.enabled` (the chart refuses the combination otherwise).
-  Plain-Prometheus equivalents:
+  `metricRelabelings` on the agent `ServiceMonitor` and, since 2.4.0, on the
+  external-agent `ScrapeConfig` as well (one shared template, so a bare host
+  never returns detail the valve dropped for the pods); it needs
+  `serviceMonitor.enabled` or `scrapeConfig.externalAgents.enabled`, and the
+  chart refuses the valve without either. Plain-Prometheus equivalents, which
+  the [external-agents scrape job](external-agents.md#plain-prometheus)
+  carries verbatim:
 
   ```yaml
   metric_relabel_configs:
@@ -594,8 +630,8 @@ roadmap work. Do not plan a 1000-node deployment on these defaults.
   ```
 
   Remember the version floor from the warning above: flip `zone-only` on a
-  fleet of 2.0.3 agents and the per-pair series are dropped with nothing
-  replacing them.
+  fleet of agents older than v2.3.0 and the per-pair series are dropped with
+  nothing replacing them.
 - **Disable checkers you do not need** (`config.checkers.<type>.enabled`).
   Each protocol takes its whole per-pair family with it: TCP off saves ~33
   series/pair (it owns two of the four histograms), UDP off ~19, ICMP off ~18.
@@ -615,10 +651,20 @@ kconmon-ng monitors itself so that degradation of the monitor raises an alert
 instead of a silent gap. The controller derives
 `kconmon_ng_controller_expected_agents` from its node informer: the number of
 schedulable nodes (`spec.unschedulable == false`), each of which should run an
-agent. Two default rules cover the failure modes:
+agent. Two default rules cover the failure modes, and a third, off by
+default, watches the hosts outside the cluster:
 
-- `KconmonAgentsMissing` (warning) fires when registered agents stay below the
-  expected count for 10m: agents failing to register or crash-looping.
+- `KconmonAgentsMissing` (warning) fires when registered in-cluster agents
+  stay below the expected count for 10m: agents failing to register or
+  crash-looping. Since 2.4.0 the registered count has
+  `kconmon_ng_controller_external_agents` subtracted first, so a bare host
+  through the gateway cannot stand in for a missing node.
 - `KconmonControllerDown` (critical) fires when no controller reports itself
   leader for 5m: the control plane is down and no other alert would be
   evaluated.
+- `KconmonExternalAgentDown` (warning, `prometheusRule.externalAgentDown.enabled`)
+  fires when an external agent the controller's SD endpoint lists sits at
+  `up == 0` for 5m. The agent still registers, or the target would have left
+  the list, so the usual cause is the host firewall or the monitoring
+  namespace's egress policy blocking `metricsPort`; on most CNIs that egress
+  is NATed to a node IP, so the host must admit the node CIDR.

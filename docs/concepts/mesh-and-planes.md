@@ -11,9 +11,16 @@ Probes travel pod-IP to pod-IP, and each protocol has a fixed rendezvous:
 
 | Probe | Dials | Port (default) |
 | --- | --- | --- |
-| TCP | the peer agent's HTTP port | `config.httpPort`, 8080 |
-| UDP | the peer agent's gRPC/probe port | `config.grpcPort`, 9090 |
+| TCP | the peer agent's HTTP port | the peer's own `config.httpPort`, 8080 |
+| UDP | the peer agent's gRPC/probe port | the peer's own `config.grpcPort`, 9090 |
 | ICMP | the peer's pod IP | — |
+
+"The peer's own" is literal since 2.4.0: every agent reports its listener
+ports at registration and the controller hands them out with the peer list,
+so a peer on non-default ports is dialled where it actually listens. An agent
+that reports no ports (older than 2.4.0) is dialled on the prober's own
+configured values, which is why a fleet keeps one port set until every member
+is on 2.4.0 ([External agents](../external-agents.md#ports)).
 
 Keep this table at hand when you write firewall rules, or when you break them
 on purpose as [the demo](../demo/breaking-cni.md) does: blocking the wrong
@@ -56,9 +63,34 @@ gets measured is the path pod traffic actually takes through the CNI
 datapath. That is the layer a CNI bug, a conntrack overflow or a fabric
 problem lives in, and it is why the tool probes pod IPs rather than node
 addresses. A workload on `hostNetwork` talks over node addresses instead, a
-path these probes do not exercise. A `host` plane is reserved for exactly
-that, arriving with the [external agents](../external-agents.md) work, where
-an agent advertises a host IP because a bare host has no pod network at all.
+path these probes do not exercise. No separate `host` plane shipped with the
+[external agents](../external-agents.md) work: a bare-host agent advertises
+a host IP because it has no pod network at all, and its probes are still
+recorded under `plane=pod`. Read the field as "the addresses the agents
+advertise", not as a statement about which datapath carried the packets.
+
+### Host networking
+
+Since 2.4.0 the chart can move the whole agent DaemonSet onto node addresses
+with `agent.hostNetwork: true`. Each agent then runs in its node's network
+namespace, advertises the node IP, and listens on TCP `httpPort`, UDP
+`grpcPort` and TCP `metricsPort` of the node itself. The option exists for
+one reason: an [external agent](../external-agents.md#when-the-pod-network-does-not-route)
+on a network that cannot route pod CIDRs can reach node IPs, so this is how
+external↔cluster cells turn green without BGP or a VPN carrying the pod
+network.
+
+It changes the subject of measurement, and that is the cost to weigh before
+flipping it. Every in-cluster pair then probes node IP to node IP over the
+underlay; the overlay, conntrack and NetworkPolicy enforcement that the pod
+plane exercises are out of the path, so a CNI bug that breaks pod traffic
+can sit behind a fully green matrix. Diagnostics and the Console keep
+reporting `plane=pod`, unchanged, and a 2.4.0 agent image marks itself
+`kconmon-ng.io/host-network=true` in its registration so the API can tell a
+node address from a pod address. The prerequisites (a `privileged` namespace,
+free ports on every node, the `ping_group_range` sysctl from the node OS,
+`networkPolicy.nodeCidrs` when policies are on) are listed with the option
+in [External agents](../external-agents.md#when-the-pod-network-does-not-route).
 
 ## Zones and failure domains
 
@@ -88,8 +120,8 @@ any single link by the pair count: sustained loss at 10% of a whole zone pair
 means the fabric is sick, not one node.
 
 <figure markdown="span">
-  ![Zone Heatmap Grafana dashboard: zone-pair grid and zone loss panels built from the kconmon_ng_zone_* family](../img/zone-heatmap.png){ loading=lazy }
-  <figcaption>The bundled Zone Heatmap Grafana dashboard reading the <code>kconmon_ng_zone_*</code> family on a 10-node, 4-zone stand.</figcaption>
+  ![Zone Heatmap Grafana dashboard during a staged break, 11:54 to 12:09 UTC: from-to tables with external and zone-a to zone-d as rows and columns for UDP packet loss, p95 UDP RTT, p95 ICMP RTT, TCP failure ratio, UDP failure ratio and MTR traces triggered over 1h; zone-c at 100.0% as a row and a column on loss and both failure ratios and NaN on both RTT tables](../img/zone-heatmap.png){ loading=lazy }
+  <figcaption>The bundled Zone Heatmap Grafana dashboard reading the <code>kconmon_ng_zone_*</code> family on the kind stand during a staged break, last 15 minutes: zone-c is 100.0% as a source and as a destination on UDP loss and both failure ratios and NaN on both RTT tables, the zone-a and zone-b rows sit between 33.3% and 66.7% outside the zone-c column, and the external agent's zone has its own row and column like the four cluster zones.</figcaption>
 </figure>
 
 ## Full mesh and its limits
@@ -102,16 +134,17 @@ three loss/jitter gauges and three result counters. Roughly 70 active series
 per directed pair, growing quadratically: about 690k series at 100 nodes.
 **50–100 nodes is the production-proven envelope.**
 
-!!! warning "Version skew: the chart still pins agent 2.0.3"
+!!! warning "Version skew: the zone family comes from the agent image"
     Everything zone-flavoured reads the `kconmon_ng_zone_*` family, and that
-    family comes from the **agent image**, which at appVersion 2.0.3 does not
-    export it. Until your fleet runs an agent that does, the two zone alerts
+    family is exported by the **agent**, from v2.3.0 on. A default install is
+    fine, since the chart pins its own appVersion; the trap is a fleet that
+    pins an older agent image behind a newer chart. There the two zone alerts
     are silently inert (their expressions match no series), the Zone Heatmap
     renders empty, and flipping `agent.metrics.detail: zone-only` drops the
     per-pair series with nothing replacing them: Prometheus goes dark on the
     mesh while the console keeps working. Upgrade the agent image first, flip
     the valve second. Details in the
-    [v2.2.0 release notes](../reference/release-notes.md).
+    [v2.3.0 release notes](../reference/release-notes.md).
 
 The levers that exist today, in one line each:
 
@@ -122,12 +155,15 @@ The levers that exist today, in one line each:
 - Disabling a checker removes its families.
 
 One prerequisite on the first two: the valve renders as `metricRelabelings`
-on the agent ServiceMonitor, so it needs `serviceMonitor.enabled` and the
-chart refuses the combination otherwise. Running plain Prometheus instead,
-copy the equivalent `metric_relabel_configs` from
+on the agent ServiceMonitor and, since 2.4.0, on the external-agent
+ScrapeConfig too, so it needs `serviceMonitor.enabled` or
+`scrapeConfig.externalAgents.enabled`, and the chart refuses the valve
+without either. Running plain Prometheus instead, copy the equivalent
+`metric_relabel_configs` from
 [Levers that exist today](../metrics.md#levers-that-exist-today).
 
 The full arithmetic, what each checker costs and what each mode keeps, is in
 [Scaling and cardinality](../metrics.md#scaling-and-cardinality). A sparse
-mesh (probing a structured subset of pairs instead of all of them) is on the
-roadmap for larger fleets; until it lands, do not plan a 1000-node full mesh.
+mesh (`topology.mode: sparse`, since v2.3.0) probes a structured subset of
+pairs instead of all of them and is the lever for fleets past the full-mesh
+envelope; even with it, do not plan a 1000-node full mesh.
