@@ -3,8 +3,8 @@ apiVersion: v2
 name: kconmon-ng
 description: Kubernetes Node Connectivity Monitor - Next Generation
 type: application
-version: 2.3.1
-appVersion: "2.3.1"
+version: 2.4.0
+appVersion: "2.4.0"
 keywords:
   - kubernetes
   - connectivity
@@ -26,17 +26,72 @@ annotations:
     - name: GitHub
       url: https://github.com/EsDmitrii/kconmon-ng
     - name: Documentation
-      url: https://github.com/EsDmitrii/kconmon-ng#readme
+      url: https://esdmitrii.github.io/kconmon-ng/
+    - name: Helm values reference
+      url: https://esdmitrii.github.io/kconmon-ng/reference/helm-values/
+    - name: Release notes
+      url: https://esdmitrii.github.io/kconmon-ng/reference/release-notes/
   # artifacthub.io/changes is PER VERSION: Artifact Hub renders it as the changelog OF the release it
   # is attached to, not as the project's history. It had accumulated every entry since 1.x, so an
   # operator evaluating 2.0.0 read that `prometheusRule.rules` was "DEPRECATED but still honoured ...
   # so existing installs are unaffected" and that the chart shipped optional CNPG and Valkey
   # subcharts — statements 2.0.0 contradicts, and the first of them describes a key it now rejects
-  # outright. What follows is 2.3.1 and nothing else.
+  # outright. What follows is 2.4.0 and nothing else.
   artifacthub.io/changes: |
+    - kind: added
+      description: >-
+        Per-agent ports on the wire: agents report httpPort, the UDP echo port and metricsPort at
+        registration, and peers probe each agent on the ports it reported, falling back to their
+        own when a peer reports none. Honoured only by 2.4.0 agents, so keep one port set until
+        every agent, deb/rpm hosts included, runs 2.4.0
+    - kind: added
+      description: >-
+        Prometheus HTTP SD for external agents: the controller serves GET /api/v1/prometheus/sd
+        on httpPort and metricsPort (leader-only, 503 from a standby, fixed label set;
+        controller.prometheusSD.enabled opts out), and scrapeConfig.externalAgents renders a
+        ScrapeConfig on it with the agent.metrics.detail valve applied. Optional
+        KconmonExternalAgentDown rule (prometheusRule.externalAgentDown)
+    - kind: added
+      description: >-
+        agent.hostNetwork (with agent.dnsPolicy) runs the agents on node IPs so external hosts
+        reach them without a routable pod network; every in-cluster pair then measures the
+        node-to-node underlay, not the CNI datapath. networkPolicy.nodeCidrs is required with
+        networkPolicy.enabled, and networkPolicy.externalPeerCidrs opens the agent-to-agent
+        probe rules to external hosts
+    - kind: added
+      description: >-
+        External agents across the console, CLI and Time Machine: an external badge on the
+        topology map, node page and Overview, matrix hints for an unscraped external agent and
+        for a protocol its source does not run, an EXTERNAL column and bare-host rows in
+        kubectl kconmon, and topology event labels so history badges hosts too
+    - kind: changed
+      description: >-
+        Documentation links (Artifact Hub links, install notes, chart README, CLI help)
+        point at the docs site, https://esdmitrii.github.io/kconmon-ng/
+    - kind: changed
+      description: >-
+        KconmonAgentsMissing subtracts the new controller_external_agents gauge, so an external
+        agent no longer masks a missing in-cluster agent
     - kind: fixed
       description: >-
-        ZoneChecksFailing and ZoneLossHigh evaluated to an engine error ("vector cannot
-        contain metrics with the same labelset"): rate() over a __name__ union collapses the
-        protocol families into duplicate labelsets. Rewritten with a label_replace/or union;
-        rules are now evaluation-tested in CI with promtool against synthetic series
+        The -arm64 agent and controller images shipped the amd64 binary; they now carry the
+        arm64 build
+    - kind: fixed
+      description: >-
+        Time Machine topology left out agents that never changed after the console started
+        recording, external agents included; the console now stores a topology baseline on
+        every controller stream connect and hourly, and the fold starts from it
+    - kind: fixed
+      description: >-
+        Grafana dashboards: ratio axes cap at 100% instead of stretching to 10000% on flat data,
+        the MTR trace count is no longer painted as a health colour, and the zone heatmap
+        tables sort rows and columns the same way
+    - kind: fixed
+      description: >-
+        The agent DaemonSet declared its grpc port, the UDP echo listener, as TCP
+    - kind: fixed
+      description: >-
+        Console accessibility: button and link contrast in both themes, underlined links in
+        running text, keyboard-reachable labelled scroll regions, heading order, live-feed list
+        semantics and a header landmark on phones. Tooltips no longer cover the element they
+        describe, and topology edges now show their failure label on hover
