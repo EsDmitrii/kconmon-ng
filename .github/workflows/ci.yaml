@@ -200,6 +200,22 @@ jobs:
           cache: true
           cache-dependency-path: go.sum
 
+      # Pinned to the version the repo is generated with, so a plugin or codegen change is a deliberate
+      # bump and never a surprise in this diff; buf.gen.yaml pins the two remote plugins the same way.
+      - name: Install buf
+        run: |
+          base=https://github.com/bufbuild/buf/releases/download
+          curl -fsSL "$base/v1.71.0/buf-Linux-x86_64.tar.gz" \
+            | tar xz --strip-components=2 -C /usr/local/bin buf/bin/buf
+          buf --version
+
+      # The generated Go is committed (api/proto/*.pb.go) so `go build` needs no protoc, which also means
+      # a .proto edit that skipped `make proto` compiles fine and ships an agent/controller wire skew.
+      - name: Generated protobuf code is current
+        run: |
+          buf generate api/proto
+          git diff --exit-code api/proto
+
       - name: Build agent
         run: CGO_ENABLED=0 go build -o /dev/null ./cmd/agent
 
@@ -208,6 +224,11 @@ jobs:
 
       - name: Build console
         run: CGO_ENABLED=0 go build -o /dev/null ./cmd/console
+
+      # Windows is unsupported and nothing here runs on it; vetting the agent trees for windows/amd64
+      # keeps that door open at zero cost by catching a Linux-only import the day it lands.
+      - name: Agent still cross-compiles for Windows
+        run: GOOS=windows GOARCH=amd64 go vet ./cmd/agent/... ./internal/agent/... ./internal/checker/...
 
   frontend:
     name: Frontend
@@ -399,6 +420,55 @@ jobs:
                        "that is a needless restart")
           print("ok: the checksum follows the config and nothing else")
           PY
+
+      # Every line asserted here is load-bearing under agent.hostNetwork: a bare Service name does not
+      # resolve without ClusterFirstWithHostNet, node-IP registrations match no podSelector without the
+      # nodeCidrs ipBlock, and the kubelet refuses a net.* sysctl in the host network namespace.
+      - name: agent.hostNetwork renders the host-network shape
+        run: |
+          set -euo pipefail
+          out=$(helm template kconmon-ng charts/kconmon-ng -f charts/kconmon-ng/ci/host-network-values.yaml)
+          for want in 'hostNetwork: true' 'dnsPolicy: ClusterFirstWithHostNet' 'fieldPath: status.hostIP' \
+                      'hostPort: 8080' 'hostPort: 9090' 'hostPort: 9091'; do
+            grep -qF "$want" <<<"$out" || { echo "::error::host-network render lacks '$want'"; exit 1; }
+          done
+          # The agent's grpcPort is a UDP echo listener and the scheduler keys hostPort clashes on the
+          # protocol: declared TCP, it reserved a port nothing uses and left UDP 9090 unguarded.
+          grep -A1 'hostPort: 9090' <<<"$out" | grep -qF 'protocol: UDP' \
+            || { echo "::error::hostPort 9090 is not declared UDP; the scheduler guards the wrong protocol"; exit 1; }
+          # ipBlock and its cidr are consecutive lines; the profile sets nodeCidrs to 10.0.0.0/8.
+          blocks=$(grep -A1 'ipBlock:' <<<"$out")
+          grep -qF 'cidr: "10.0.0.0/8"' <<<"$blocks" \
+            || { echo "::error::networkPolicy.nodeCidrs did not become an ipBlock"; exit 1; }
+          if grep -q ping_group_range <<<"$out"; then
+            echo "::error::ping_group_range sysctl rendered under hostNetwork; the kubelet refuses it"; exit 1
+          fi
+          # A NetworkPolicy without nodeCidrs must refuse to render, and for that reason, not another.
+          if err=$(helm template kconmon-ng charts/kconmon-ng \
+                     --set agent.hostNetwork=true --set networkPolicy.enabled=true 2>&1); then
+            echo "::error::hostNetwork with networkPolicy and no nodeCidrs rendered; it must fail"; exit 1
+          fi
+          grep -q nodeCidrs <<<"$err" \
+            || { echo "::error::the render failed for a reason other than nodeCidrs:"; echo "$err"; exit 1; }
+          echo "ok: host-network shape, and no policy without nodeCidrs"
+
+      # An external agent has no pod for a ServiceMonitor to select, so the ScrapeConfig takes its targets
+      # from the controller's HTTP SD route; with the gateway off nothing external can register and the
+      # chart refuses rather than ship a scrape that finds nothing.
+      - name: scrapeConfig.externalAgents renders a ScrapeConfig on the SD route
+        run: |
+          set -euo pipefail
+          out=$(helm template kconmon-ng charts/kconmon-ng -f charts/kconmon-ng/ci/external-gateway-values.yaml)
+          for want in 'kind: ScrapeConfig' 'scheme: HTTP' '/api/v1/prometheus/sd'; do
+            grep -qF "$want" <<<"$out" || { echo "::error::external-gateway render lacks '$want'"; exit 1; }
+          done
+          if err=$(helm template kconmon-ng charts/kconmon-ng --set scrapeConfig.externalAgents.enabled=true \
+                     --set controller.externalGateway.enabled=false 2>&1); then
+            echo "::error::scrapeConfig.externalAgents without the gateway rendered; it must fail"; exit 1
+          fi
+          grep -q externalGateway <<<"$err" \
+            || { echo "::error::the render failed for a reason other than the gateway:"; echo "$err"; exit 1; }
+          echo "ok: a ScrapeConfig on the SD route, and none without the gateway"
 
       - name: Template chart with every ci profile
         run: |

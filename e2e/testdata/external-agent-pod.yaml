@@ -1,0 +1,111 @@
+---
+# A simulated EXTERNAL agent for the e2e kind cluster: one Pod on the host network of a worker that
+# does not run the controller, dialing the gateway NodePort exactly as a bare host would. It is a
+# Pod only because kind offers nothing else to run a process on a node; what makes it external is
+# what it does NOT carry -- no KCONMON_NG_POD_NAME, no KCONMON_NG_POD_IP -- so identity.go takes
+# the bare-host path: hostname for the pod name, the outbound interface (the node IP) for the
+# address, and the kconmon-ng.io/external=true label.
+#
+# Two placeholders are filled by the workflow with sed before apply, because both values exist
+# only at run time: __NODE_NAME__ (the worker to pin) and __CONTROLLER_ADDRESS__ (<nodeIP>:<nodePort>
+# of the gateway, an IP literal so the server certificate is checked against an IP SAN).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kconmon-e2e-external-agent
+  labels:
+    app: kconmon-e2e-external-agent
+data:
+  # Same shape as packaging/agent/config.yaml. The checkers mirror e2e/testdata/values.yaml (TCP
+  # only), so the external agent runs the same probes as the fleet it joins.
+  config.yaml: |
+    controllerAddress: "__CONTROLLER_ADDRESS__"
+    httpPort: 8080
+    grpcPort: 9090
+    metricsPort: 9091
+    logLevel: info
+    logFormat: json
+    agent:
+      nodeName: edge-host-01
+      zone: external
+      tls:
+        caFile: /etc/kconmon-ng-gateway/ca.crt
+      bootstrapTokenFile: /etc/kconmon-ng-gateway/token
+    checkers:
+      tcp:
+        enabled: true
+      udp:
+        enabled: false
+      icmp:
+        enabled: false
+      dns:
+        enabled: false
+      http:
+        enabled: false
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: kconmon-e2e-external-agent
+  labels:
+    app: kconmon-e2e-external-agent
+spec:
+  # Pinned, not scheduled: the leg asserts the advertised address equals THIS node's InternalIP,
+  # so the workflow decides the node and tells the test the same name.
+  nodeName: __NODE_NAME__
+  hostNetwork: true
+  # The node's own resolv.conf; controllerAddress is an IP literal, cluster DNS is not needed.
+  dnsPolicy: Default
+  restartPolicy: Always
+  # The agent never talks to the apiserver, exactly like the chart's DaemonSet.
+  automountServiceAccountToken: false
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65532
+    # The credential files are group-readable (0440 below) and owned by this group, the same
+    # "mode 0600, owned by the service user" rule the packaged unit follows for a real host.
+    fsGroup: 65532
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: agent
+      image: kconmon-ng-agent:test
+      imagePullPolicy: Never
+      env:
+        - name: KCONMON_NG_CONFIG
+          value: /etc/kconmon-ng/config.yaml
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop:
+            - ALL
+      volumeMounts:
+        - name: config
+          mountPath: /etc/kconmon-ng
+          readOnly: true
+        - name: gateway
+          mountPath: /etc/kconmon-ng-gateway
+          readOnly: true
+      readinessProbe:
+        httpGet:
+          path: /readyz
+          port: 8080
+        periodSeconds: 3
+        timeoutSeconds: 3
+      resources:
+        limits:
+          cpu: 100m
+          memory: 64Mi
+        requests:
+          cpu: 10m
+          memory: 32Mi
+  volumes:
+    - name: config
+      configMap:
+        name: kconmon-e2e-external-agent
+    # ca.crt and token only: the agent's side of the handshake, never the gateway's private key.
+    - name: gateway
+      secret:
+        secretName: kconmon-e2e-external-agent-creds
+        defaultMode: 0440

@@ -1,0 +1,143 @@
+---
+# A plain Prometheus for the external-agent leg, deliberately NOT the operator: kind carries the
+# ScrapeConfig CRD (scrapeconfig-crd.yaml) but nothing that turns a ScrapeConfig into a scrape, so
+# this instance reads the controller's HTTP SD endpoint itself, with the same http_sd_configs the
+# chart's ScrapeConfig renders, plus the in-cluster agents through the pod SD. Both jobs feed the
+# console matrix (console.prometheus.url in gateway-values.yaml): a row needs the external agent's
+# own series, a column needs the in-cluster agents' series about it.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: kconmon-e2e-prometheus
+---
+# Pod discovery for the in-cluster agents; the SD job needs no apiserver access at all.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: kconmon-e2e-prometheus
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: kconmon-e2e-prometheus
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: kconmon-e2e-prometheus
+subjects:
+  - kind: ServiceAccount
+    name: kconmon-e2e-prometheus
+    namespace: default
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kconmon-e2e-prometheus
+data:
+  prometheus.yml: |
+    global:
+      # 5s so rate(...[5m]) in the matrix queries has samples within seconds of the agent
+      # registering, not the 30s+ a production interval would need.
+      scrape_interval: 5s
+      scrape_timeout: 4s
+    scrape_configs:
+      # In-cluster agents by pod label, on the container port the DaemonSet names "metrics".
+      - job_name: kconmon-ng-agent
+        kubernetes_sd_configs:
+          - role: pod
+            namespaces:
+              names: [default]
+        relabel_configs:
+          - source_labels:
+              - __meta_kubernetes_pod_label_app_kubernetes_io_name
+              - __meta_kubernetes_pod_label_app_kubernetes_io_component
+            regex: kconmon-ng;agent
+            action: keep
+          - source_labels: [__meta_kubernetes_pod_container_port_name]
+            regex: metrics
+            action: keep
+          - source_labels: [__meta_kubernetes_pod_node_name]
+            target_label: node
+      # External agents from the controller, the way docs/external-agents.md shows for a plain
+      # Prometheus and the way the chart's ScrapeConfig does it: the SD route on metricsPort.
+      - job_name: kconmon-ng-agent-external
+        http_sd_configs:
+          - url: http://kconmon-ng-controller.default.svc:9091/api/v1/prometheus/sd
+            refresh_interval: 10s
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kconmon-e2e-prometheus
+  labels:
+    app: kconmon-e2e-prometheus
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: kconmon-e2e-prometheus
+  template:
+    metadata:
+      labels:
+        app: kconmon-e2e-prometheus
+    spec:
+      serviceAccountName: kconmon-e2e-prometheus
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        fsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: prometheus
+          # Same release as the promtool pin in ci.yaml.
+          image: prom/prometheus:v3.14.0
+          args:
+            - --config.file=/etc/prometheus/prometheus.yml
+            - --storage.tsdb.path=/prometheus
+            - --storage.tsdb.retention.time=1h
+          ports:
+            - name: http
+              containerPort: 9090
+          volumeMounts:
+            - name: config
+              mountPath: /etc/prometheus
+              readOnly: true
+            - name: data
+              mountPath: /prometheus
+          readinessProbe:
+            httpGet:
+              path: /-/ready
+              port: http
+            periodSeconds: 3
+          resources:
+            limits:
+              cpu: 500m
+              memory: 512Mi
+            requests:
+              cpu: 50m
+              memory: 128Mi
+      volumes:
+        - name: config
+          configMap:
+            name: kconmon-e2e-prometheus
+        - name: data
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kconmon-e2e-prometheus
+spec:
+  selector:
+    app: kconmon-e2e-prometheus
+  ports:
+    - name: http
+      port: 9090
+      targetPort: http
