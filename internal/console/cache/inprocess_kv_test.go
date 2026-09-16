@@ -106,7 +106,9 @@ func TestInProcessKVSweeperReclaimsMemory(t *testing.T) {
 	const keys = 1000
 	for i := range keys {
 		key := fmt.Sprintf("sess:sweep-%d", i)
-		if err := kv.Set(context.Background(), key, []byte("x"), 10*time.Millisecond); err != nil {
+		// Long enough for 1000 inserts under -race on a slow runner: a TTL shorter than one
+		// kvSweepInterval let the sweeper drain keys before the count below was read.
+		if err := kv.Set(context.Background(), key, []byte("x"), 500*time.Millisecond); err != nil {
 			t.Fatalf("Set %s: %v", key, err)
 		}
 	}
@@ -118,7 +120,7 @@ func TestInProcessKVSweeperReclaimsMemory(t *testing.T) {
 	// Advance real time past both the TTL and several sweeper ticks, without
 	// ever calling Get (which would evict lazily and defeat the point of
 	// this test).
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(5 * time.Second)
 	for kv.Len() != 0 && time.Now().Before(deadline) {
 		time.Sleep(10 * time.Millisecond)
 	}
