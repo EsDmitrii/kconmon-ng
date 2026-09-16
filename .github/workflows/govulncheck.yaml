@@ -31,5 +31,5 @@ jobs:
         run: |
           # Same pinned version as ci.yaml; Renovate bumps both via the custom
           # regex manager in renovate.json.
-          go install golang.org/x/vuln/cmd/govulncheck@v1.7.0
+          go install golang.org/x/vuln/cmd/govulncheck@v1.8.0
           govulncheck ./...
