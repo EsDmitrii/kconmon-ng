@@ -83,7 +83,7 @@ jobs:
         run: |
           # Pinned, not @latest: reproducible runs, and Renovate owns the bump
           # (custom regex manager in renovate.json).
-          go install golang.org/x/vuln/cmd/govulncheck@v1.7.0
+          go install golang.org/x/vuln/cmd/govulncheck@v1.8.0
           govulncheck ./...
 
   lint:
