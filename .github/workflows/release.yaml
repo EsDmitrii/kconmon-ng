@@ -179,7 +179,7 @@ jobs:
       - name: Set up Helm
         uses: azure/setup-helm@v5.0.1
         with:
-          version: v4.2.4
+          version: v4.3.0
 
       # No `helm dependency build` here: the chart deliberately has no dependencies (see Chart.yaml).
       - name: Package and push Helm chart
