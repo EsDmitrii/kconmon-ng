@@ -134,7 +134,7 @@ jobs:
         uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3
         with:
           # Exact, not ~>v2: a goreleaser minor changed blob-signing output once already (v2.2.0).
-          version: v2.18.1
+          version: v2.18.2
           args: release --clean --release-notes /tmp/current-release-notes.md
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
