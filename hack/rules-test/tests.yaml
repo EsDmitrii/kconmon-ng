@@ -44,6 +44,14 @@ tests:
       # yamllint disable-line rule:line-length
       - series: up{job="kconmon-ng-agent-external",instance="10.20.30.40:9091",node="edge-host-01",zone="external",external="true",agent_id="edge-host-01-edge-host-01"}
         values: '1x40'
+      # yamllint disable-line rule:line-length
+      - series: kconmon_ng_pmtu_results_total{source_node="n1",destination_node="n2",source_zone="a",destination_zone="b",result="success"}
+        values: '0+1x40'
+      # yamllint disable-line rule:line-length
+      - series: kconmon_ng_pmtu_results_total{source_node="n1",destination_node="n2",source_zone="a",destination_zone="b",result="fail"}
+        values: '0x40'
+      - series: kconmon_ng_pmtu_bytes{source_node="n1",destination_node="n2",source_zone="a",destination_zone="b"}
+        values: '1500x40'
     alert_rule_test:
       - eval_time: 15m
         alertname: ZoneChecksFailing
@@ -59,6 +67,15 @@ tests:
         exp_alerts: []
       - eval_time: 15m
         alertname: KconmonExternalAgentDown
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: PathMTUBlackHole
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: NodeUnreachable
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: NodeIsolated
         exp_alerts: []
 
   # ── zone failure: every probe on every protocol fails a->b; both zone alerts must fire ──
@@ -217,3 +234,161 @@ tests:
                 node IP, so the host must admit the node CIDR rather than the Prometheus pod IP.
                 The kconmon-ng console keeps showing the node while it registers, so its probe
                 results tell whether the host itself is healthy.
+
+  # ── MTU black hole n1 -> n2: full-size probes fail, 1400 bytes cross, TCP is fine ──
+  - interval: 30s
+    input_series:
+      # yamllint disable-line rule:line-length
+      - series: kconmon_ng_pmtu_results_total{source_node="n1",destination_node="n2",source_zone="a",destination_zone="b",result="fail",pod="p1"}
+        values: '0+1x40'
+      # yamllint disable-line rule:line-length
+      - series: kconmon_ng_pmtu_results_total{source_node="n1",destination_node="n2",source_zone="a",destination_zone="b",result="success",pod="p1"}
+        values: '0x40'
+      # yamllint disable-line rule:line-length
+      - series: kconmon_ng_pmtu_bytes{source_node="n1",destination_node="n2",source_zone="a",destination_zone="b",pod="p1"}
+        values: '1400x40'
+      # yamllint disable-line rule:line-length
+      - series: kconmon_ng_tcp_results_total{source_node="n1",destination_node="n2",source_zone="a",destination_zone="b",result="success",pod="p1"}
+        values: '0+10x40'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: PathMTUBlackHole
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              source_node: n1
+              destination_node: n2
+              source_zone: a
+              destination_zone: b
+            exp_annotations:
+              summary: Path MTU black hole n1 -> n2, only 1400-byte datagrams cross
+              description: >-
+                Full-size datagrams from n1 (zone a) to n2 (zone b) are lost with no
+                ICMP frag-needed while 1400-byte ones cross, in more than 50% of path MTU
+                probes over the last 10m. Small packets and TCP handshakes still work, so
+                the other pair alerts stay quiet while large transfers stall. Compare the
+                interface MTU on both nodes with the encapsulation overhead of the CNI
+                (VXLAN and Geneve take 50 bytes, WireGuard 60 to 80) and check whether ICMP
+                type 3 code 4 is filtered on the path.
+      - eval_time: 15m
+        alertname: TCPChecksFailing
+        exp_alerts: []
+
+  # ── peer down: pmtu counters flat (unreachable writes nothing), the stale gauge must not fire ──
+  - interval: 30s
+    input_series:
+      # yamllint disable-line rule:line-length
+      - series: kconmon_ng_pmtu_results_total{source_node="n1",destination_node="n2",source_zone="a",destination_zone="b",result="fail",pod="p1"}
+        values: '0x40'
+      # yamllint disable-line rule:line-length
+      - series: kconmon_ng_pmtu_results_total{source_node="n1",destination_node="n2",source_zone="a",destination_zone="b",result="success",pod="p1"}
+        values: '5x40'
+      # yamllint disable-line rule:line-length
+      - series: kconmon_ng_pmtu_bytes{source_node="n1",destination_node="n2",source_zone="a",destination_zone="b",pod="p1"}
+        values: '1500x40'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: PathMTUBlackHole
+        exp_alerts: []
+
+  # ── node n3 dark: n1, n2, n4 all fail TCP to it, n3 exports nothing; one NodeUnreachable ──
+  - interval: 30s
+    input_series:
+      # yamllint disable-line rule:line-length
+      - series: kconmon_ng_tcp_results_total{source_node="n1",destination_node="n2",destination_zone="z",result="success"}
+        values: '0+10x40'
+      - series: kconmon_ng_tcp_results_total{source_node="n1",destination_node="n3",destination_zone="z",result="fail"}
+        values: '0+10x40'
+      # yamllint disable-line rule:line-length
+      - series: kconmon_ng_tcp_results_total{source_node="n1",destination_node="n4",destination_zone="z",result="success"}
+        values: '0+10x40'
+      # yamllint disable-line rule:line-length
+      - series: kconmon_ng_tcp_results_total{source_node="n2",destination_node="n1",destination_zone="z",result="success"}
+        values: '0+10x40'
+      - series: kconmon_ng_tcp_results_total{source_node="n2",destination_node="n3",destination_zone="z",result="fail"}
+        values: '0+10x40'
+      # yamllint disable-line rule:line-length
+      - series: kconmon_ng_tcp_results_total{source_node="n2",destination_node="n4",destination_zone="z",result="success"}
+        values: '0+10x40'
+      # yamllint disable-line rule:line-length
+      - series: kconmon_ng_tcp_results_total{source_node="n4",destination_node="n1",destination_zone="z",result="success"}
+        values: '0+10x40'
+      # yamllint disable-line rule:line-length
+      - series: kconmon_ng_tcp_results_total{source_node="n4",destination_node="n2",destination_zone="z",result="success"}
+        values: '0+10x40'
+      - series: kconmon_ng_tcp_results_total{source_node="n4",destination_node="n3",destination_zone="z",result="fail"}
+        values: '0+10x40'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: NodeUnreachable
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              destination_node: n3
+              destination_zone: z
+            exp_annotations:
+              summary: Node n3 unreachable from 100% of its peers
+              description: >-
+                TCP probes to n3 (zone z) fail for 100% of the peers that probe it,
+                above the 50% threshold, for 5m. The node is still registered, so its agent
+                runs while its peers cannot reach it: look at the node itself (kubelet, the
+                CNI agent, the host firewall) before the pairs. A node that stops altogether
+                leaves the mesh within the agent TTL and pages as KconmonAgentsMissing
+                instead. The inhibit_rules example in the metrics guide mutes the pair
+                alerts this one explains.
+      - eval_time: 15m
+        alertname: NodeIsolated
+        exp_alerts: []
+
+  # ── n1 egress broken: n1 fails to all three peers, inbound to n1 fine; one NodeIsolated ──
+  - interval: 30s
+    input_series:
+      - series: kconmon_ng_tcp_results_total{source_node="n1",source_zone="z",destination_node="n2",result="fail"}
+        values: '0+10x40'
+      - series: kconmon_ng_tcp_results_total{source_node="n1",source_zone="z",destination_node="n3",result="fail"}
+        values: '0+10x40'
+      - series: kconmon_ng_tcp_results_total{source_node="n1",source_zone="z",destination_node="n4",result="fail"}
+        values: '0+10x40'
+      - series: kconmon_ng_tcp_results_total{source_node="n2",source_zone="z",destination_node="n1",result="success"}
+        values: '0+10x40'
+      - series: kconmon_ng_tcp_results_total{source_node="n3",source_zone="z",destination_node="n1",result="success"}
+        values: '0+10x40'
+      - series: kconmon_ng_tcp_results_total{source_node="n4",source_zone="z",destination_node="n1",result="success"}
+        values: '0+10x40'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: NodeIsolated
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              source_node: n1
+              source_zone: z
+            exp_annotations:
+              summary: Node n1 cannot reach 100% of its peers
+              description: >-
+                TCP probes from n1 (zone z) fail to 100% of the peers it probes, above the
+                50% threshold, for 5m. The node's own egress is broken: its network policy,
+                routes or CNI agent, not the peers. The inhibit_rules example in the metrics
+                guide mutes the pair alerts this one explains.
+      - eval_time: 15m
+        alertname: NodeUnreachable
+        exp_alerts: []
+
+  # ── one bad pair among four nodes, and a two-node cluster: no node-level alert ──
+  - interval: 30s
+    input_series:
+      - series: kconmon_ng_tcp_results_total{source_node="n1",destination_node="n2",result="fail"}
+        values: '0+10x40'
+      - series: kconmon_ng_tcp_results_total{source_node="n1",destination_node="n3",result="success"}
+        values: '0+10x40'
+      - series: kconmon_ng_tcp_results_total{source_node="n3",destination_node="n2",result="success"}
+        values: '0+10x40'
+      - series: kconmon_ng_tcp_results_total{source_node="m1",destination_node="m2",result="fail"}
+        values: '0+10x40'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: NodeUnreachable
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: NodeIsolated
+        exp_alerts: []
