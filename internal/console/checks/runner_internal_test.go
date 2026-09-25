@@ -231,7 +231,7 @@ func TestExecuteIntervalRunKeepsEverySampleAndReProbes(t *testing.T) {
 		seqs[key][results[i].SampleSeq]++
 	}
 	for key, bySeq := range seqs {
-		for seq := int32(0); seq < rounds; seq++ {
+		for seq := range int32(rounds) {
 			if bySeq[seq] != 1 {
 				t.Errorf("pair %s sample_seq %d appeared %d times, want exactly 1", key, seq, bySeq[seq])
 			}

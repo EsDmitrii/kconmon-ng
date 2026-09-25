@@ -6,6 +6,7 @@ import (
 	"io"
 	"math"
 	"strconv"
+	"strings"
 	"text/tabwriter"
 	"time"
 
@@ -306,7 +307,7 @@ func detailLines(res *model.CheckResult) []string {
 				for _, ip := range d.ResolvedIPs {
 					ips = append(ips, ip.String())
 				}
-				line += " ips=" + joinComma(ips)
+				line += " ips=" + strings.Join(ips, ",")
 			}
 			return []string{line}
 		}
@@ -364,20 +365,6 @@ func humanizeTime(t time.Time) string {
 	if t.IsZero() {
 		return "-"
 	}
-	d := time.Since(t)
-	if d < 0 {
-		d = 0
-	}
+	d := max(time.Since(t), 0)
 	return humanizeDuration(d) + " ago"
-}
-
-func joinComma(items []string) string {
-	out := ""
-	for i, s := range items {
-		if i > 0 {
-			out += ","
-		}
-		out += s
-	}
-	return out
 }

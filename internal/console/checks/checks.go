@@ -90,10 +90,7 @@ func SampleInterval(d time.Duration) time.Duration {
 	if d <= 0 {
 		return 0
 	}
-	iv := d / MaxSamplesPerPair
-	if iv < MinSampleInterval {
-		iv = MinSampleInterval
-	}
+	iv := max(d/MaxSamplesPerPair, MinSampleInterval)
 	return iv
 }
 
@@ -318,10 +315,7 @@ func Plan(spec Spec, nodes []string) ([]Pair, error) { //nolint:gocritic // huge
 
 	// Capped defensively at maxPairs+1 (the exact bound the in-loop check below rejects at) rather
 	// than trusted to already be small.
-	hint := rawProduct
-	if hint > maxPairs+1 {
-		hint = maxPairs + 1
-	}
+	hint := min(rawProduct, maxPairs+1)
 	seen := make(map[Pair]struct{}, hint)
 	pairs := make([]Pair, 0, hint)
 	for _, src := range sources {

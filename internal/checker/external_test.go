@@ -525,17 +525,13 @@ func TestExternalCheckerAssignmentSwapIsRaceFree(t *testing.T) {
 
 	var wg sync.WaitGroup
 	for range 4 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			for range 25 {
 				c.Check(ctx, Target{})
 			}
-		}()
+		})
 	}
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		for i := range 50 {
 			if i%2 == 0 {
 				c.SetSpecs([]ExternalSpec{specFor("a")})
@@ -544,7 +540,7 @@ func TestExternalCheckerAssignmentSwapIsRaceFree(t *testing.T) {
 			}
 			_ = c.Counts()
 		}
-	}()
+	})
 	wg.Wait()
 }
 
@@ -808,7 +804,7 @@ func TestExternalCheckerDenialCarriesTypedReason(t *testing.T) {
 				Interval: 30 * time.Second, Timeout: time.Second,
 			})})
 
-			details := externalDetails(t, ptr(c.Check(context.Background(), Target{})))
+			details := externalDetails(t, new(c.Check(context.Background(), Target{})))
 			if !details[0].Denied {
 				t.Fatalf("expected a denied probe, got %+v", details[0])
 			}
@@ -831,13 +827,11 @@ func TestExternalCheckerSuccessfulProbeHasNoDenyReason(t *testing.T) {
 		Interval: 30 * time.Second, Timeout: 2 * time.Second,
 	})})
 
-	details := externalDetails(t, ptr(c.Check(context.Background(), Target{})))
+	details := externalDetails(t, new(c.Check(context.Background(), Target{})))
 	if details[0].Denied || details[0].DenyReason != "" {
 		t.Errorf("a network probe must carry no denial reason, got %+v", details[0])
 	}
 }
-
-func ptr[T any](v T) *T { return &v }
 
 func TestExternalCheckerNilAllowlistDeniesEverything(t *testing.T) {
 	lis := newCountingListener(t)

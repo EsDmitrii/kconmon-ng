@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -185,12 +186,7 @@ func (s *GRPCServer) filterPeersByPlan(agentID string, peers []model.AgentInfo) 
 // planContains is a linear scan on purpose: a planned peer list is ringDegree+zoneChords entries
 // (single digits), where a per-lookup map build would cost more than it saves.
 func planContains(allowed []string, id string) bool {
-	for _, a := range allowed {
-		if a == id {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(allowed, id)
 }
 
 // Register accepts an agent into the registry; leader-only when leader election is enabled, or the

@@ -52,7 +52,7 @@ func (c *gatedCtrl) Diagnose(ctx context.Context, req controllerclient.DiagnoseR
 // awaitBlocked waits until n pairs have reached the blocking wait.
 func (c *gatedCtrl) awaitBlocked(t *testing.T, n int) {
 	t.Helper()
-	for i := 0; i < n; i++ {
+	for i := range n {
 		select {
 		case <-c.blocking:
 		case <-time.After(10 * time.Second):
@@ -289,8 +289,7 @@ func TestCancelledRunFinishesWithoutWaitingOutTheRelay(t *testing.T) {
 	// no relay ever runs on it and the effect under test would be invisible.
 	bus := cache.NewInProcessBus()
 	hub := ws.NewHub(bus, testMetrics(t))
-	hubCtx, stopHub := context.WithCancel(context.Background())
-	defer stopHub()
+	hubCtx := t.Context()
 	go hub.Run(hubCtx)
 	mem := checks.NewMemoryStore()
 	runner := checks.NewRunner(ctrl, hub, bus, mem, testMetrics(t))

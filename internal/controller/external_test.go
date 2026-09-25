@@ -340,7 +340,7 @@ func TestExternalStalledSubscriberDoesNotBlockOthers(t *testing.T) {
 	body := `{"agents":{"agent-a":[{"definitionId":"a","target":{"name":"t","kind":"host","address":"1.1.1.1"},"checkType":"tcp","intervalNs":1,"timeoutNs":1}],` +
 		`"agent-b":[{"definitionId":"b","target":{"name":"t","kind":"host","address":"1.1.1.2"},"checkType":"tcp","intervalNs":1,"timeoutNs":1}]}}`
 
-	for i := 0; i < externalSubscriberBuffer+5; i++ {
+	for i := range externalSubscriberBuffer + 5 {
 		// Alternate the spec so every PUT is a real change for both agents.
 		alt := strings.Replace(body, "1.1.1.2", "1.1.1."+string(rune('0'+i%10)), 1)
 		done := make(chan int, 1)
@@ -376,10 +376,8 @@ func TestExternalConcurrentSubscribeCleanupPush(t *testing.T) {
 	stop := make(chan struct{})
 	var wg sync.WaitGroup
 
-	for w := 0; w < workers; w++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+	for range workers {
+		wg.Go(func() {
 			for {
 				select {
 				case <-stop:
@@ -394,10 +392,10 @@ func TestExternalConcurrentSubscribeCleanupPush(t *testing.T) {
 				cleanup()
 				cleanup() // idempotent
 			}
-		}()
+		})
 	}
 
-	for i := 0; i < rounds; i++ {
+	for i := range rounds {
 		specs := []*pb.ExternalCheckSpec{{
 			DefinitionId: "d",
 			CheckType:    "tcp",

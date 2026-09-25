@@ -127,7 +127,7 @@ func TestAgentsCommand(t *testing.T) {
 	if !strings.Contains(out, "EXTERNAL") {
 		t.Errorf("agents table has no EXTERNAL column:\n%s", out)
 	}
-	for _, l := range strings.Split(out, "\n") {
+	for l := range strings.SplitSeq(out, "\n") {
 		if strings.HasPrefix(l, "edge-01-agent") && !strings.Contains(l, "yes") {
 			t.Errorf("external agent row is not marked yes: %q", l)
 		}

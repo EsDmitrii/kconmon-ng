@@ -25,6 +25,7 @@ linters:
     - gocritic
     - gosec
     - misspell
+    - modernize
     - nilerr
     - noctx
     - prealloc

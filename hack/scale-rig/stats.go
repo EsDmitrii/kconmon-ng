@@ -7,7 +7,7 @@ import (
 	"net"
 	"net/http"
 	"runtime"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -21,11 +21,8 @@ func percentile(samples []time.Duration, p float64) time.Duration {
 	}
 	sorted := make([]time.Duration, len(samples))
 	copy(sorted, samples)
-	sort.Slice(sorted, func(i, j int) bool { return sorted[i] < sorted[j] })
-	rank := int(p/100*float64(len(sorted))+0.5) - 1
-	if rank < 0 {
-		rank = 0
-	}
+	slices.Sort(sorted)
+	rank := max(int(p/100*float64(len(sorted))+0.5)-1, 0)
 	if rank >= len(sorted) {
 		rank = len(sorted) - 1
 	}

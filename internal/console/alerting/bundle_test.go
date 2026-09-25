@@ -3,6 +3,7 @@ package alerting
 import (
 	"encoding/json"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -186,8 +187,8 @@ func TestRenderBundleIsByteIdenticalAcrossCalls(t *testing.T) {
 func TestRenderBundleIsOrderInsensitive(t *testing.T) {
 	forward := bundleFixture()
 	reversed := make([]Rule, 0, len(forward))
-	for i := len(forward) - 1; i >= 0; i-- {
-		reversed = append(reversed, forward[i])
+	for _, f := range slices.Backward(forward) {
+		reversed = append(reversed, f)
 	}
 
 	a, err := defaultRenderer.RenderBundle(forward, "kconmon-ng", "kconmon-ng-console-rules")

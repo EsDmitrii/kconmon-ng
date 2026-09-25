@@ -263,8 +263,7 @@ func (s *Server) writePromResult(w http.ResponseWriter, raw json.RawMessage, err
 	case errors.Is(err, promql.ErrResponseTooLarge):
 		writeProblem(w, http.StatusUnprocessableEntity, "result too large", "narrow the query or shorten the range")
 	default:
-		var ue *promql.UpstreamError
-		if errors.As(err, &ue) {
+		if ue, ok := errors.AsType[*promql.UpstreamError](err); ok {
 			// Forward Prometheus's own error envelope (e.g. PromQL parse errors)
 			// with its status so the PromQL Console can show it verbatim.
 			w.Header().Set("Content-Type", "application/json")

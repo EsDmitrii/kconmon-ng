@@ -78,7 +78,7 @@ func TestRunHonoursContextCancellation(t *testing.T) {
 // TestPruneJitterIsBounded asserts pruneJitter's documented window, [0,
 // pruneJitterMax). Sampled many times since the value is random.
 func TestPruneJitterIsBounded(t *testing.T) {
-	for i := 0; i < 1000; i++ {
+	for range 1000 {
 		d := pruneJitter()
 		if d < 0 || d >= pruneJitterMax {
 			t.Fatalf("pruneJitter() = %v, want [0, %v)", d, pruneJitterMax)
@@ -383,12 +383,11 @@ func TestPoolStatsPollerRunKeepsSampling(t *testing.T) {
 		return poolStats{acquired: 1, idle: 1, total: 2}
 	}, time.Millisecond)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	go p.Run(ctx)
 
 	deadline := time.After(2 * time.Second)
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		select {
 		case <-samples:
 		case <-deadline:

@@ -157,18 +157,14 @@ func TestInProcessBusConcurrentPublishAndSubscribeChurn(t *testing.T) {
 	var wg sync.WaitGroup
 
 	for range 4 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			for range iterations {
 				_ = bus.Publish(context.Background(), "live", cache.Message{Type: "event", Data: json.RawMessage(`{}`)})
 			}
-		}()
+		})
 	}
 	for range 4 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			for range iterations {
 				msgs, unsubscribe := bus.Subscribe("live")
 				// Drain whatever happens to be there; delivery timing is not
@@ -182,7 +178,7 @@ func TestInProcessBusConcurrentPublishAndSubscribeChurn(t *testing.T) {
 				}
 				unsubscribe()
 			}
-		}()
+		})
 	}
 
 	wg.Wait()

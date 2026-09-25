@@ -1,7 +1,6 @@
 package controller
 
 import (
-	"context"
 	"testing"
 	"time"
 
@@ -88,8 +87,7 @@ func TestRunLeaderElectionAcquiresLease(t *testing.T) {
 	c := newElectionController(t)
 	client := fake.NewClientset()
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	go c.runLeaderElection(ctx, testElectionOptions(client, "pod-a"))
 
 	waitForLeadership(t, c, true)
@@ -124,8 +122,7 @@ func TestRunLeaderElectionYieldsToLiveLeaseHolder(t *testing.T) {
 	})
 
 	c := newElectionController(t)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	go c.runLeaderElection(ctx, testElectionOptions(client, "pod-b"))
 
 	// Several retry periods is long enough for a replica that was going to grab the lease to do so.

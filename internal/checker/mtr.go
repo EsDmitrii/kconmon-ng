@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"math/rand/v2"
 	"net"
+	"slices"
 	"sync"
 	"time"
 
@@ -389,9 +390,9 @@ func trimTrailingSilentHops(hops []model.MTRHop) []model.MTRHop {
 // lastAnsweringHop names the furthest hop that replied, which is where the operator's attention
 // belongs: "no reply past 10.244.1.1 (hop 2)" is a lead, "the trace failed" is not.
 func lastAnsweringHop(hops []model.MTRHop) string {
-	for i := len(hops) - 1; i >= 0; i-- {
-		if hops[i].IP != "" && hops[i].IP != "*" {
-			return fmt.Sprintf("last reply from %s at hop %d", hops[i].IP, hops[i].Number)
+	for _, hop := range slices.Backward(hops) {
+		if hop.IP != "" && hop.IP != "*" {
+			return fmt.Sprintf("last reply from %s at hop %d", hop.IP, hop.Number)
 		}
 	}
 	return "no hop answered"

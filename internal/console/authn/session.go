@@ -39,11 +39,11 @@ type Session struct {
 	ExpiresAt   time.Time `json:"expiresAt"`
 	// LastSeenAt is when a request last used this session; it is what the idle timeout measures
 	// from. Zero on a session issued before the field existed, which reads as IssuedAt.
-	LastSeenAt time.Time `json:"lastSeenAt,omitempty"`
+	LastSeenAt time.Time `json:"lastSeenAt"`
 
 	// OIDC only; never leaves the server.
 	RefreshToken string    `json:"refreshToken,omitempty"` //nolint:gosec // not a hardcoded credential; gosec's G117 name heuristic flags any field named *Token
-	AccessExpiry time.Time `json:"accessExpiry,omitempty"`
+	AccessExpiry time.Time `json:"accessExpiry"`
 }
 
 // SessionStore persists Sessions in a cache.KV.
@@ -115,10 +115,7 @@ func (s *SessionStore) Create(ctx context.Context, sess Session) (id string, err
 	// The KV TTL tracks the session's real lifetime; the floor keeps Set
 	// well-defined for an already-past ExpiresAt (Get still misses on it via
 	// the belt-and-braces check).
-	kvTTL := time.Until(sess.ExpiresAt)
-	if kvTTL < time.Second {
-		kvTTL = time.Second
-	}
+	kvTTL := max(time.Until(sess.ExpiresAt), time.Second)
 	if err := s.kv.Set(ctx, sessionKey(id), data, kvTTL); err != nil {
 		return "", fmt.Errorf("authn: create session: %w", err)
 	}
@@ -185,10 +182,7 @@ func (s *SessionStore) Refresh(ctx context.Context, id string) error {
 	}
 
 	// The key never outlives the absolute deadline, so an abandoned session disappears on its own.
-	kvTTL := time.Until(sess.ExpiresAt)
-	if kvTTL < time.Second {
-		kvTTL = time.Second
-	}
+	kvTTL := max(time.Until(sess.ExpiresAt), time.Second)
 	if err := s.kv.Set(ctx, sessionKey(id), data, kvTTL); err != nil {
 		return fmt.Errorf("authn: refresh session: %w", err)
 	}

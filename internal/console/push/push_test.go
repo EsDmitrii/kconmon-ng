@@ -220,7 +220,7 @@ func TestMatrixPusherNudgeBurstCoalescesIntoOneExtraRecompute(t *testing.T) {
 
 	// The pusher is parked inside the querier, so all 50 nudges land while one
 	// recompute is in flight and must collapse into a single pending one.
-	for i := 0; i < 50; i++ {
+	for range 50 {
 		p.Nudge()
 	}
 	close(q.release)
@@ -457,7 +457,7 @@ func TestTopologyPusherNudgeBurstCoalescesIntoOneExtraRefetch(t *testing.T) {
 		t.Fatal("TopologyPusher never started its first refetch")
 	}
 
-	for i := 0; i < 50; i++ {
+	for range 50 {
 		p.Nudge()
 	}
 	close(g.release)
@@ -587,7 +587,7 @@ func TestRunNudgeRelayWithNoNudgersStillDrains(t *testing.T) {
 	done := make(chan struct{})
 	go func() { defer close(done); push.RunNudgeRelay(ctx, bus) }()
 
-	for i := 0; i < 100; i++ {
+	for range 100 {
 		if err := bus.Publish(ctx, ws.TopicLive, cache.Message{Type: "event", Data: liveEventJSON(t, events.TypeTopologyChanged)}); err != nil {
 			t.Fatalf("Publish: %v", err)
 		}

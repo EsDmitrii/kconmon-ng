@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"maps"
 	"sync"
 	"testing"
 	"time"
@@ -137,9 +138,7 @@ func managedAlert(ruleID, name string, extra map[string]string) promAlert {
 		"severity":           "critical",
 		"kconmon_ng_rule_id": ruleID,
 	}
-	for k, v := range extra {
-		labels[k] = v
-	}
+	maps.Copy(labels, extra)
 	at := testActiveAt
 	return promAlert{
 		Labels:      labels,

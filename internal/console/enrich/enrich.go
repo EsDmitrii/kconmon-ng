@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"net"
 	"net/netip"
 	"os"
@@ -288,9 +289,7 @@ func (r *Resolver) Resolve(ctx context.Context, ips []string) map[string]store.E
 	}
 
 	resolved := r.resolveAll(ctx, misses)
-	for ip, row := range resolved {
-		out[ip] = row
-	}
+	maps.Copy(out, resolved)
 	r.writeBack(ctx, resolved)
 	return out
 }
@@ -316,10 +315,7 @@ func dedupe(ips []string) []string {
 // selects on ctx.Done, so a cancelled request stops handing out work immediately and the pool
 // drains within one per-lookup budget instead of one budget per remaining hop.
 func (r *Resolver) resolveAll(ctx context.Context, ips []string) map[string]store.Enrichment {
-	workers := maxConcurrentResolves
-	if len(ips) < workers {
-		workers = len(ips)
-	}
+	workers := min(len(ips), maxConcurrentResolves)
 
 	jobs := make(chan string)
 	var mu sync.Mutex

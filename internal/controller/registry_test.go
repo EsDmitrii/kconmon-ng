@@ -235,7 +235,7 @@ func TestRegistryConcurrency(t *testing.T) {
 	r := NewRegistry(30 * time.Second)
 
 	var wg sync.WaitGroup
-	for i := 0; i < 100; i++ {
+	for i := range 100 {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
@@ -682,11 +682,9 @@ func TestRegistryPublishesSnapshotsInMutationOrder(t *testing.T) {
 	const agents = 24
 	var wg sync.WaitGroup
 	for i := range agents {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			r.Register(model.AgentInfo{ID: fmt.Sprintf("a-%d", i), NodeName: fmt.Sprintf("n-%d", i), Zone: "z"})
-		}()
+		})
 	}
 	wg.Wait()
 

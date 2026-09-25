@@ -122,7 +122,7 @@ func TestMemoryStoreReapStuckRunsTakesPendingAndLeavesTerminalRuns(t *testing.T)
 
 func TestMemoryStoreReapStuckRunsHonoursLimit(t *testing.T) {
 	m := checks.NewMemoryStore()
-	for i := 0; i < 5; i++ {
+	for i := range 5 {
 		mustCreateRunning(t, m, string(rune('a'+i)))
 	}
 	n, err := m.ReapStuckRuns(context.Background(), reapEverything, 2)

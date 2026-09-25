@@ -571,12 +571,10 @@ func main() {
 
 	var wg sync.WaitGroup
 	spawn := func(component string, run func(context.Context)) {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			run(bgCtx)
 			slog.Debug("realtime component stopped", "component", component)
-		}()
+		})
 	}
 
 	spawn("ws-hub", hub.Run)

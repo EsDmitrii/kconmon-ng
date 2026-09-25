@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -90,8 +91,8 @@ func clientIP(r *http.Request, trusted []*net.IPNet) string {
 		return addr
 	}
 	hops := strings.Split(r.Header.Get("X-Forwarded-For"), ",")
-	for i := len(hops) - 1; i >= 0; i-- {
-		hop := strings.TrimSpace(hops[i])
+	for _, raw := range slices.Backward(hops) {
+		hop := strings.TrimSpace(raw)
 		if hop == "" {
 			continue
 		}

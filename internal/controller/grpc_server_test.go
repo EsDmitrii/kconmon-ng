@@ -282,8 +282,7 @@ func TestGRPCServerWatchEventsWithoutLeaderElection(t *testing.T) {
 	m := metrics.NewPrometheusMetrics("test", prometheus.NewRegistry())
 	srv := NewGRPCServer(reg, m, false, nil, true)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	stream := newFakeEventStream(ctx)
 
 	done := make(chan error, 1)
@@ -321,8 +320,7 @@ func TestGRPCServerWatchEventsStopsAfterDemotion(t *testing.T) {
 	// real leader-check interval.
 	srv.leaderCheckInterval = 5 * time.Millisecond
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	stream := newFakeEventStream(ctx)
 
 	done := make(chan error, 1)
@@ -460,8 +458,7 @@ func TestGRPCServerShutdownUnblocksWatchEvents(t *testing.T) {
 	// lostLeadership() is permanently false, so the ticker branch never exits.
 	srv := NewGRPCServer(reg, m, false, nil, true)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	stream := newFakeEventStream(ctx)
 
 	done := make(chan error, 1)
@@ -495,8 +492,7 @@ func TestGRPCServerShutdownUnblocksWatchEvents(t *testing.T) {
 func TestGRPCServerShutdownUnblocksWatchTasks(t *testing.T) {
 	srv, _ := newTestGRPCServer()
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	stream := newFakeTaskStream(ctx)
 
 	done := make(chan error, 1)
@@ -536,8 +532,7 @@ func TestGRPCServerShutdownUnblocksWatchTasks(t *testing.T) {
 func TestGRPCServerShutdownUnblocksWatchPeers(t *testing.T) {
 	srv, _ := newTestGRPCServer()
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	stream := newFakePeerStream(ctx)
 
 	done := make(chan error, 1)
@@ -601,8 +596,7 @@ func TestGRPCServerShutdownConcurrentWithPublishers(t *testing.T) {
 	m := metrics.NewPrometheusMetrics("test", prometheus.NewRegistry())
 	srv := NewGRPCServer(reg, m, false, nil, true)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	eventStream := newFakeEventStream(ctx)
 	taskStream := newFakeTaskStream(ctx)
@@ -618,9 +612,7 @@ func TestGRPCServerShutdownConcurrentWithPublishers(t *testing.T) {
 	// fakeEventStream.Send blocks on a full buffer, so drain it: without this the
 	// handler would be parked in Send rather than in the select the fix touches,
 	// and the test would prove nothing.
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		for {
 			select {
 			case <-stop:
@@ -628,12 +620,10 @@ func TestGRPCServerShutdownConcurrentWithPublishers(t *testing.T) {
 			case <-eventStream.sent:
 			}
 		}
-	}()
+	})
 
 	for range 4 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			for {
 				select {
 				case <-stop:
@@ -645,7 +635,7 @@ func TestGRPCServerShutdownConcurrentWithPublishers(t *testing.T) {
 				}})
 				srv.BroadcastPeerUpdate([]model.AgentInfo{{ID: "agent-2", NodeName: "node-2"}})
 			}
-		}()
+		})
 	}
 
 	srv.Shutdown()
@@ -744,8 +734,7 @@ func TestGRPCServerWatchPeersStopsAfterDemotion(t *testing.T) {
 	srv := NewGRPCServer(reg, m, true, leader.Load, false)
 	srv.leaderCheckInterval = 5 * time.Millisecond
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	stream := newFakePeerStream(ctx)
 
 	done := make(chan error, 1)
@@ -798,8 +787,7 @@ func waitForEventSubscriber(t *testing.T, srv *GRPCServer) {
  */
 func TestBroadcastPeerUpdateEndsTheStreamOnBackpressure(t *testing.T) {
 	srv, reg := newTestGRPCServer()
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	// A stream that never drains: Send blocks on an unbuffered channel nobody reads.
 	stream := &fakePeerStream{ctx: ctx, sent: make(chan *pb.PeerUpdate)}
@@ -821,7 +809,7 @@ func TestBroadcastPeerUpdateEndsTheStreamOnBackpressure(t *testing.T) {
 		time.Sleep(5 * time.Millisecond)
 	}
 	agents := []model.AgentInfo{{ID: "agent-2", NodeName: "node-2", PodIP: "10.0.0.2"}}
-	for i := 0; i < peerWatcherBuffer+4; i++ {
+	for range peerWatcherBuffer + 4 {
 		srv.BroadcastPeerUpdate(agents)
 	}
 

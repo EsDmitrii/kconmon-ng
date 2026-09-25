@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -129,9 +130,7 @@ func (h *logCounter) snapshot() map[string]uint64 {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	out := make(map[string]uint64, len(h.counts))
-	for k, v := range h.counts {
-		out[k] = v
-	}
+	maps.Copy(out, h.counts)
 	return out
 }
 

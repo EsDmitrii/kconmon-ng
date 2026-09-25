@@ -175,7 +175,7 @@ func extractConfigMapConfig(t *testing.T, manifest string) string {
 func sharedConfigMapDoc(t *testing.T, manifest string) string {
 	t.Helper()
 	nameRe := regexp.MustCompile(`(?m)^  name:\s*(\S+)`)
-	for _, doc := range strings.Split(manifest, "\n---\n") {
+	for doc := range strings.SplitSeq(manifest, "\n---\n") {
 		if !strings.Contains(doc, "kind: ConfigMap") || !strings.Contains(doc, "config.yaml:") {
 			continue
 		}

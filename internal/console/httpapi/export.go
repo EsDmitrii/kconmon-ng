@@ -469,7 +469,7 @@ func exportAlertRuleFrom(r *store.AlertRule) exportAlertRule {
 func (s *Server) listAllTargets(ctx context.Context) ([]store.Target, error) {
 	var out []store.Target
 	cursor := ""
-	for page := 0; page < exportMaxPages; page++ {
+	for range exportMaxPages {
 		res, err := s.targets.ListTargets(ctx, store.TargetFilter{Cursor: cursor, Limit: exportPageLimit})
 		if err != nil {
 			return nil, fmt.Errorf("list targets: %w", err)
@@ -486,7 +486,7 @@ func (s *Server) listAllTargets(ctx context.Context) ([]store.Target, error) {
 func (s *Server) listAllDefinitions(ctx context.Context) ([]store.Definition, error) {
 	var out []store.Definition
 	cursor := ""
-	for page := 0; page < exportMaxPages; page++ {
+	for range exportMaxPages {
 		res, err := s.definitions.ListDefinitions(ctx, store.DefinitionFilter{Cursor: cursor, Limit: exportPageLimit})
 		if err != nil {
 			return nil, fmt.Errorf("list check definitions: %w", err)
@@ -503,7 +503,7 @@ func (s *Server) listAllDefinitions(ctx context.Context) ([]store.Definition, er
 func (s *Server) listAllSchedules(ctx context.Context) ([]store.Schedule, error) {
 	var out []store.Schedule
 	cursor := ""
-	for page := 0; page < exportMaxPages; page++ {
+	for range exportMaxPages {
 		res, err := s.schedules.ListSchedules(ctx, store.ScheduleFilter{Cursor: cursor, Limit: exportPageLimit})
 		if err != nil {
 			return nil, fmt.Errorf("list check schedules: %w", err)
@@ -520,7 +520,7 @@ func (s *Server) listAllSchedules(ctx context.Context) ([]store.Schedule, error)
 func (s *Server) listMaintenanceWindows(ctx context.Context, f store.MaintenanceFilter) ([]store.MaintenanceWindow, error) { //nolint:gocritic // hugeParam: mirrors the store signature
 	var out []store.MaintenanceWindow
 	f.Limit = exportPageLimit
-	for page := 0; page < exportMaxPages; page++ {
+	for range exportMaxPages {
 		res, err := s.maintenance.ListMaintenanceWindows(ctx, f)
 		if err != nil {
 			return nil, fmt.Errorf("list maintenance windows: %w", err)

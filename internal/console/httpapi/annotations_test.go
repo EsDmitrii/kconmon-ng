@@ -233,8 +233,8 @@ func TestAnnotationsListScopePointerSemantics(t *testing.T) {
 		want *string
 	}{
 		{"/api/v1/annotations", nil},
-		{"/api/v1/annotations?scope=", ptrTo("")},
-		{"/api/v1/annotations?scope=node-a", ptrTo("node-a")},
+		{"/api/v1/annotations?scope=", new("")},
+		{"/api/v1/annotations?scope=node-a", new("node-a")},
 	}
 	for _, c := range cases {
 		st := newFakeAnnotationStore()
@@ -256,8 +256,6 @@ func TestAnnotationsListScopePointerSemantics(t *testing.T) {
 		}
 	}
 }
-
-func ptrTo[T any](v T) *T { return &v }
 
 func TestAnnotationsListFiltersAndReturnsRows(t *testing.T) {
 	st := newFakeAnnotationStore()

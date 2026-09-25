@@ -320,7 +320,7 @@ func TestAuditFullBufferDropsAndCounts(t *testing.T) {
 	before := testutil.ToFloat64(s.metrics.AuditDropped.WithLabelValues())
 
 	start := time.Now()
-	for i := 0; i < auditBufferSize+8; i++ {
+	for i := range auditBufferSize + 8 {
 		w := doRequest(t, s, http.MethodPost, "/api/v1/auth/logout", strings.NewReader(`{}`), post)
 		if w.Code != http.StatusNoContent {
 			t.Fatalf("logout[%d] status %d, want 204", i, w.Code)

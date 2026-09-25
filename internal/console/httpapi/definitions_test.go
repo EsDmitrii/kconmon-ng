@@ -176,7 +176,7 @@ func (f fakeTopology) Topology(context.Context) (*controllerclient.Topology, err
 func topologyWith(perZone int, zones ...string) *controllerclient.Topology {
 	topo := &controllerclient.Topology{Timestamp: time.Now().UTC()}
 	for _, zone := range zones {
-		for i := 0; i < perZone; i++ {
+		for i := range perZone {
 			name := fmt.Sprintf("%s-node-%d", zone, i)
 			topo.Nodes = append(topo.Nodes, controllerclient.Node{Name: name, Zone: zone, Ready: true})
 			topo.Agents = append(topo.Agents, controllerclient.Agent{
@@ -267,7 +267,7 @@ func TestDefinitionsCreateReturns201AndLocation(t *testing.T) {
 
 func TestDefinitionsCreateDuplicateNameReturns422(t *testing.T) {
 	s := newOperatorChecksServer(t, newFakeChecksStore(), nil)
-	for i := 0; i < 2; i++ {
+	for i := range 2 {
 		w := doRequest(t, s, http.MethodPost, "/api/v1/checks", strings.NewReader(validDefinitionBody), mutateWithCSRF)
 		if i == 0 && w.Code != http.StatusCreated {
 			t.Fatalf("first create = %d, want 201: %s", w.Code, w.Body)

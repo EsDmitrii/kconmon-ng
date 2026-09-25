@@ -336,8 +336,8 @@ func TestIncidentsListScopePointerSemantics(t *testing.T) {
 		want *string
 	}{
 		{"/api/v1/incidents", nil},
-		{"/api/v1/incidents?scope=", ptrTo("")},
-		{"/api/v1/incidents?scope=node-a", ptrTo("node-a")},
+		{"/api/v1/incidents?scope=", new("")},
+		{"/api/v1/incidents?scope=node-a", new("node-a")},
 	}
 	for _, c := range cases {
 		st := newFakeIncidentStore()
@@ -365,7 +365,7 @@ func TestIncidentsListFiltersAndBadInputs(t *testing.T) {
 	st.seed("open one", "node-a", time.Now().UTC())
 	resolved := st.seed("resolved one", "node-b", time.Now().UTC())
 	if _, _, err := st.UpdateIncidentStatus(context.Background(), resolved,
-		store.IncidentStatusResolved, ptrTo(time.Now().UTC())); err != nil {
+		store.IncidentStatusResolved, new(time.Now().UTC())); err != nil {
 		t.Fatalf("seed resolve: %v", err)
 	}
 	s := newM5TestServer(t, "viewer", Deps{Incidents: st})

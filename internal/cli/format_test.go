@@ -71,7 +71,7 @@ func sampleTopology() *model.TopologySnapshot {
 
 // rowStartingWith returns the first line of a rendered table whose first column is name.
 func rowStartingWith(out, name string) string {
-	for _, l := range strings.Split(strings.TrimSpace(out), "\n") {
+	for l := range strings.SplitSeq(strings.TrimSpace(out), "\n") {
 		if strings.HasPrefix(l, name+" ") {
 			return l
 		}

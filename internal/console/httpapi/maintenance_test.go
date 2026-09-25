@@ -197,8 +197,8 @@ func TestMaintenanceListScopePointerSemanticsAndWindow(t *testing.T) {
 		want *string
 	}{
 		{"/api/v1/maintenance", nil},
-		{"/api/v1/maintenance?scope=", ptrTo("")},
-		{"/api/v1/maintenance?scope=node-a", ptrTo("node-a")},
+		{"/api/v1/maintenance?scope=", new("")},
+		{"/api/v1/maintenance?scope=node-a", new("node-a")},
 	}
 	for _, c := range cases {
 		st := newFakeMaintenanceStore()
