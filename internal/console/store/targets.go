@@ -26,17 +26,21 @@ import (
 // deleted.
 var ErrInUse = errors.New("store: in use")
 
-// foreignKeyViolationCode is PostgreSQL's SQLSTATE for a
-// foreign_key_violation, the counterpart to uniqueViolationCode (auth.go). PostgreSQL raises it for
-// BOTH directions of a referential constraint -- the INSERT/UPDATE that names a missing parent and
-// the ON DELETE RESTRICT that still has children -- which the targets integration suite pins.
-const foreignKeyViolationCode = "23503"
+// foreignKeyViolationCode is PostgreSQL's SQLSTATE for a foreign_key_violation, the counterpart
+// to uniqueViolationCode (auth.go): the INSERT/UPDATE that names a missing parent, and on
+// PostgreSQL 17 and earlier also the ON DELETE RESTRICT that still has children.
+// restrictViolationCode is what PostgreSQL 18 raises for that RESTRICT refusal instead. The
+// targets integration suite pins both directions.
+const (
+	foreignKeyViolationCode = "23503"
+	restrictViolationCode   = "23001"
+)
 
 // wrapForeignKeyViolation turns a foreign-key PgError into sentinel, leaving every other error
 // (including a nil one) unchanged.
 func wrapForeignKeyViolation(err, sentinel error) error {
-	var pgErr *pgconn.PgError
-	if errors.As(err, &pgErr) && pgErr.Code == foreignKeyViolationCode {
+	if pgErr, ok := errors.AsType[*pgconn.PgError](err); ok &&
+		(pgErr.Code == foreignKeyViolationCode || pgErr.Code == restrictViolationCode) {
 		return sentinel
 	}
 	return err

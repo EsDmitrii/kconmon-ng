@@ -2,9 +2,13 @@ package store
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 // validTargetInput is the baseline every TargetInput case below mutates one
@@ -488,5 +492,25 @@ func TestOptionalUUIDRoundTrip(t *testing.T) {
 
 	if _, err := optionalUUID("not-a-uuid"); err == nil {
 		t.Error(`optionalUUID("not-a-uuid") = nil error, want one`)
+	}
+}
+
+// PostgreSQL 18 reports an ON DELETE RESTRICT refusal as restrict_violation (23001) where 17 and
+// earlier said foreign_key_violation (23503); both must read as the caller's sentinel.
+func TestWrapForeignKeyViolationCoversRestrictViolation(t *testing.T) {
+	cases := []struct {
+		code string
+		want bool
+	}{
+		{"23503", true},
+		{"23001", true},
+		{"23505", false},
+	}
+	for _, tc := range cases {
+		err := fmt.Errorf("delete: %w", &pgconn.PgError{Code: tc.code})
+		got := errors.Is(wrapForeignKeyViolation(err, ErrInUse), ErrInUse)
+		if got != tc.want {
+			t.Errorf("code %s: wrapped as ErrInUse = %v, want %v", tc.code, got, tc.want)
+		}
 	}
 }
