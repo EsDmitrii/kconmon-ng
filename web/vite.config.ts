@@ -36,25 +36,21 @@ export default defineConfig({
   build: {
     outDir: distDir,
     emptyOutDir: true,
-    rollupOptions: {
+    rolldownOptions: {
       output: {
         // Split the heaviest, page-scoped vendor libs out of the main bundle
         // so an Overview/Matrix-only visit doesn't pay for ECharts/CodeMirror/
         // React Flow. Route-level lazy loading is a bigger change (the router
         // is code-based, not file-based); this is the low-risk first step.
-        manualChunks: {
-          echarts: ["echarts"],
-          codemirror: [
-            "codemirror",
-            "@codemirror/autocomplete",
-            "@codemirror/commands",
-            "@codemirror/language",
-            "@codemirror/lint",
-            "@codemirror/state",
-            "@codemirror/view",
-            "@prometheus-io/codemirror-promql",
+        codeSplitting: {
+          groups: [
+            { name: "echarts", test: /[\\/]node_modules[\\/](echarts|zrender)[\\/]/ },
+            {
+              name: "codemirror",
+              test: /[\\/]node_modules[\\/](codemirror|@codemirror|@lezer|@prometheus-io|style-mod|w3c-keyname|crelt)[\\/]/,
+            },
+            { name: "xyflow", test: /[\\/]node_modules[\\/](@xyflow|d3-[a-z-]+|classcat|zustand)[\\/]/ },
           ],
-          xyflow: ["@xyflow/react"],
         },
       },
     },

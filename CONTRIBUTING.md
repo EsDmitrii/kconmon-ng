@@ -58,8 +58,8 @@ The repository ships with a `.pre-commit-config.yaml` that runs formatting, lint
 # Install pre-commit (requires Python)
 pip install pre-commit   # or: brew install pre-commit
 
-# Install golangci-lint (must match CI version v2.10.1)
-curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b $(go env GOPATH)/bin v2.10.1
+# Install golangci-lint at the version CI runs (the one `make lint` reads from ci.yaml)
+curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b $(go env GOPATH)/bin $(make -s print-golangci-lint-version)
 
 # Register the hooks in your local clone
 pre-commit install

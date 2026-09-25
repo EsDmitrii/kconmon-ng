@@ -10,7 +10,7 @@ LDFLAGS := -s -w \
 
 BIN_DIR := bin
 
-.PHONY: all build build-agent build-controller build-console test test-race test-cover lint fmt proto sqlc openapi clean help \
+.PHONY: all build build-agent build-controller build-console test test-race test-cover lint print-golangci-lint-version fmt proto sqlc openapi clean help \
 	local-up local-down local-status local-smoke local-urls docs-serve docs-build
 
 all: lint test build
@@ -45,13 +45,16 @@ test-fuzz:
 
 ## Lint
 
-# Keep in sync with .github/workflows/ci.yaml (golangci-lint-action `version:`).
-# `go run` pins the exact CI version so local lint == CI lint; a system-wide
-# golangci-lint of a different version has already hidden CI-only findings once.
-GOLANGCI_LINT_VERSION ?= v2.10.1
+# Read from ci.yaml (golangci-lint-action `version:`) so local lint == CI lint and the
+# two cannot drift; a system-wide golangci-lint of a different version has already
+# hidden CI-only findings once.
+GOLANGCI_LINT_VERSION ?= $(shell sed -n '/golangci-lint-action@/,/version:/s/^ *version: *//p' .github/workflows/ci.yaml)
 
 lint:
 	go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION) run ./...
+
+print-golangci-lint-version:
+	@echo $(GOLANGCI_LINT_VERSION)
 
 fmt:
 	gofmt -s -w .
@@ -80,7 +83,7 @@ openapi:
 
 ## Helm
 
-# Optional subcharts are pinned in Chart.lock and gitignored, so a fresh clone must fetch them first.
+# The chart has no dependencies today; the target stays so helm-lint keeps working if one is added.
 # The chart needs its own copy of dashboards/ to package them; this keeps the two honest.
 dashboards-check:
 	@diff -r dashboards charts/kconmon-ng/dashboards && echo "dashboards in sync"

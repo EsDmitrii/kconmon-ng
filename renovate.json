@@ -59,6 +59,23 @@
       "matchStrings": ["go install golang\\.org/x/vuln/cmd/govulncheck@(?<currentValue>v[0-9]+\\.[0-9]+\\.[0-9]+)"],
       "depNameTemplate": "golang.org/x/vuln",
       "datasourceTemplate": "go"
+    },
+    {
+      "customType": "regex",
+      "description": "syft is installed by anchore/sbom-action/download-syft from a `syft-version:` input, which the github-actions manager does not extract; it sat ten minors behind before this manager existed.",
+      "managerFilePatterns": ["/^\\.github/workflows/release\\.yaml$/"],
+      "matchStrings": ["syft-version: (?<currentValue>v[0-9]+\\.[0-9]+\\.[0-9]+)"],
+      "depNameTemplate": "anchore/syft",
+      "datasourceTemplate": "github-releases"
+    },
+    {
+      "customType": "regex",
+      "description": "The oras CLI version is a bare `version:` under oras-project/setup-oras. Its releases are tagged with a leading v, the input takes none.",
+      "managerFilePatterns": ["/^\\.github/workflows/release\\.yaml$/"],
+      "matchStrings": ["setup-oras@[^\\n]+\\n\\s+with:\\n\\s+version: (?<currentValue>[0-9]+\\.[0-9]+\\.[0-9]+)"],
+      "depNameTemplate": "oras-project/oras",
+      "datasourceTemplate": "github-releases",
+      "extractVersionTemplate": "^v(?<version>.*)$"
     }
   ],
 
@@ -155,6 +172,17 @@
       "groupName": "ci tooling",
       "automerge": false,
       "labels": ["dependencies", "ci-tooling"]
+    },
+    {
+      "description": "Release-only tooling: the release job is the only thing that runs it and PR CI never does, so nothing here automerges.",
+      "matchDepNames": ["anchore/syft", "oras-project/oras"],
+      "groupName": "release tooling",
+      "automerge": false
+    },
+    {
+      "description": "grpc 1.84.0 carries GO-2026-6443 (server panic on a request without :authority/Host, reachable from the controller's gRPC server); 1.83.x is not affected. Drop this rule once a release with the fix is out.",
+      "matchPackageNames": ["google.golang.org/grpc"],
+      "allowedVersions": "!/^v1\\.84\\.0$/"
     }
   ]
 }

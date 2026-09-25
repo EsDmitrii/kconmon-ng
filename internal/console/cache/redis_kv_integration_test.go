@@ -33,7 +33,7 @@ func newIntegrationKV(t *testing.T) *cache.RedisKV {
 }
 
 // TestRedisKVSetGetDeleteRoundtrip requires a real Valkey/Redis server.
-// Run: docker run --rm -d -p 6379:6379 valkey/valkey:8-alpine
+// Run: docker run --rm -d -p 6379:6379 valkey/valkey:9-alpine
 // Then: REDIS_TEST_ADDR=127.0.0.1:6379 go test -tags=integration ./internal/console/cache/... -run TestRedisKV -v
 func TestRedisKVSetGetDeleteRoundtrip(t *testing.T) {
 	addr := os.Getenv("REDIS_TEST_ADDR")
