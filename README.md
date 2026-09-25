@@ -6,6 +6,8 @@
 [![Go](https://img.shields.io/badge/go-1.26-00ADD8?logo=go&logoColor=white)](https://go.dev/)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE)
 
+![The console matrix on the PMTU protocol: every pair green at 1500 bytes, then the column of one worker turns red with 1400 as full-size datagrams to it start vanishing, while the TCP matrix stays green](docs/img/pmtu-black-hole.gif)
+
 **Someone says "the network is fine." Prove it.**
 
 kconmon-ng makes inter-node connectivity a measured fact. An agent on every
@@ -67,9 +69,15 @@ Everything lives at **<https://esdmitrii.github.io/kconmon-ng/>**; start with:
   triggers MTR for that pair under a per-pair cooldown; paths are content-hashed
   at ingest, so path history is a list of changes, not identical traces.
   [Routes (MTR)](https://esdmitrii.github.io/kconmon-ng/console/routes-mtr/)
+- **Finds MTU black holes.** A once-a-minute path MTU probe sends full-size
+  datagrams with DF set and bisects on loss, so a pair where handshakes and
+  pings pass but large packets vanish goes red with the size that still
+  crosses, instead of staying green on every other plane.
+  [Catch an MTU black hole](https://esdmitrii.github.io/kconmon-ng/scenarios/mtu-black-hole/)
 - **Speaks Prometheus.** Stable metric names, three Grafana dashboards in
-  [`dashboards/`](dashboards/), ten alert rules with the chart (UDP loss,
-  failing TCP, DNS and external checks, a pair gone silent, two zone rules,
+  [`dashboards/`](dashboards/), thirteen alert rules with the chart (UDP loss,
+  failing TCP, an MTU black hole, a node unreachable or isolated, DNS and
+  external checks, a pair gone silent, two zone rules,
   `KconmonAgentsMissing` and `KconmonControllerDown`, so a monitor that goes
   quiet pages you, plus an opt-in `KconmonExternalAgentDown` for bare-host
   agents), each tunable via `prometheusRule.<alertName>.*`; the
@@ -79,7 +87,7 @@ Everything lives at **<https://esdmitrii.github.io/kconmon-ng/>**; start with:
   curated charts; an Investigate page merging nine timeline sources, causes
   ranked by documented arithmetic; alert rules from typed templates or raw
   PromQL, reconciled into one `PrometheusRule`; diagnostics, external targets,
-  schedules; four auth modes, 25 permissions across four built-in roles, an
+  schedules; four auth modes, 26 permissions across four built-in roles, an
   audit log, HMAC-signed webhooks. Read-only pages need only a Prometheus
   URL; the rest needs PostgreSQL.
   [Console guide](https://esdmitrii.github.io/kconmon-ng/console/overview/)
@@ -140,8 +148,8 @@ OK udp node-1 -> node-2 (us-east-1a -> us-east-1b)  duration=1.1ms
   sent=5 recv=5 loss=0% rtt=1.1ms jitter=240µs
 ```
 
-Until it lands in the krew index, install it from the release manifest:
-`kubectl krew install --manifest-url https://github.com/EsDmitrii/kconmon-ng/releases/latest/download/kconmon.yaml`.
+Install it from the krew index with `kubectl krew install kconmon`, or pin a
+release with `kubectl krew install --manifest-url https://github.com/EsDmitrii/kconmon-ng/releases/latest/download/kconmon.yaml`.
 
 ## Scope and limits
 
@@ -156,7 +164,7 @@ Until it lands in the krew index, install it from the release manifest:
   two agents on one IP, a CSR flow for agent certificates; the full list is
   [What v1 does not do](https://esdmitrii.github.io/kconmon-ng/external-agents/#what-v1-does-not-do).
 - **Scale envelope**: 50–100 nodes on a full mesh is production-proven; each
-  directed pair keeps ~70 active series and pairs grow as N×(N−1), about 690k
+  directed pair keeps ~75 active series and pairs grow as N×(N−1), about 740k
   series at 100 nodes. `topology.mode: sparse` (since v2.3.0) trims probed
   pairs to a ring plus cross-zone chords. Arithmetic and levers:
   [Scaling and cardinality](https://esdmitrii.github.io/kconmon-ng/metrics/#scaling-and-cardinality).
@@ -196,6 +204,13 @@ make local-up   # Minikube + Prometheus + Grafana + kconmon-ng, one command
 CI runs lint, race tests, cross-compile and helm-lint on every PR; a `v*` tag
 publishes images and the chart to GHCR and runs e2e. Start with
 [CONTRIBUTING.md](CONTRIBUTING.md) and [hack/README.md](hack/README.md).
+
+## Community
+
+[Governance](GOVERNANCE.md), [maintainers](MAINTAINERS.md), [roadmap](ROADMAP.md),
+[code of conduct](CODE_OF_CONDUCT.md) and [adopters](ADOPTERS.md). Running
+kconmon-ng somewhere? A pull request adding a line to ADOPTERS.md helps more
+than a star.
 
 ## License
 

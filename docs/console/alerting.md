@@ -69,7 +69,7 @@ The full list of declared windows, entirely-future ones included: the only unbou
 
 ## Webhooks
 
-With alerting and [webhook endpoints](settings.md#webhooks) both configured, the console polls Prometheus alert state every `console.webhooks.alertPollInterval` (default 30 s) and delivers the edges as `alert.fired` / `alert.resolved`. A failed poll freezes the firing set: nothing resolves while Prometheus is unreachable. The full delivery contract (signatures, retries, replica duplicates, what to deduplicate on) is on [Settings](settings.md#the-delivery-contract).
+With alerting and [webhook endpoints](settings.md#webhooks) both configured, the console polls Prometheus alert state every `console.webhooks.alertPollInterval` (default 30 s) and delivers the edges as `alert.fired` / `alert.resolved`. A failed poll freezes the firing set: nothing resolves while Prometheus is unreachable. An open maintenance window holds back the `alert.fired` and `alert.resolved` deliveries of every alert whose labels its scope covers (the whole console, one of the alert's two nodes, its directed pair, or its external target). If the window closes while the alert still fires, `alert.fired` goes out then, with the original `firedAt`. Maintenance windows only govern this console's webhooks: alerts the chart's `PrometheusRule` routes through Alertmanager are silenced there. The full delivery contract (signatures, retries, replica duplicates, what to deduplicate on) is on [Settings](settings.md#the-delivery-contract).
 
 ## Getting here
 

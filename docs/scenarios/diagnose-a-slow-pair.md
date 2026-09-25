@@ -95,8 +95,8 @@ terminal:
 kubectl kconmon mtr node-a node-b
 ```
 
-`kubectl-kconmon` installs via [krew](https://krew.sigs.k8s.io/) from the
-release's krew manifest and needs nothing exposed: it reaches the
+`kubectl-kconmon` installs from the [krew](https://krew.sigs.k8s.io/) index
+(`kubectl krew install kconmon`) and needs nothing exposed: it reaches the
 controller's HTTP API through a client-go port-forward using your kubeconfig.
 It drives the same leader-only diagnostics endpoint the Console uses, so a
 non-leader replica answers `503` and the plugin needs a running kconmon-ng in

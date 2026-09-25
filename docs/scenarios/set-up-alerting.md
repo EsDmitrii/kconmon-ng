@@ -6,8 +6,8 @@ Get paged when the network between nodes degrades, and when the monitor
 itself goes quiet, without writing PromQL from scratch. kconmon-ng gives you
 two independent layers:
 
-1. **Chart-shipped rules** (`prometheusRule.enabled`): ten built-in alerts,
-   nine on by default, rendered as one static `PrometheusRule` and versioned
+1. **Chart-shipped rules** (`prometheusRule.enabled`): thirteen built-in alerts,
+   twelve on by default, rendered as one static `PrometheusRule` and versioned
    in Git with your values.
 2. **Console-managed rules** (`console.alerting.enabled`): rules built in the
    UI from typed templates or raw PromQL, stored in PostgreSQL and reconciled
@@ -25,7 +25,8 @@ helm upgrade kconmon-ng oci://ghcr.io/esdmitrii/charts/kconmon-ng \
   --reuse-values --set prometheusRule.enabled=true
 ```
 
-That ships ten rules: `UDPLossHigh`, `TCPChecksFailing`, `PairWentSilent`,
+That ships thirteen rules: `UDPLossHigh`, `TCPChecksFailing`,
+`PathMTUBlackHole`, `NodeUnreachable`, `NodeIsolated`, `PairWentSilent`,
 `DNSChecksFailing`, `ExternalChecksFailing`, `ZoneChecksFailing`,
 `ZoneLossHigh`, plus three that watch the monitor itself:
 `KconmonAgentsMissing`, `KconmonControllerDown` and

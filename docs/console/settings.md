@@ -1,6 +1,6 @@
 # Settings
 
-The console's own administration: API tokens, webhook endpoints, configuration export/import, and what this instance is running as. Sections appear per permission (API tokens need `tokens:manage`, webhook endpoints `webhooks:manage`, export/import `settings:write`, all three admin-only in the built-in roles), while **Language** and **About** are visible to everyone. Maintenance windows are not here; they moved to [Alerting](alerting.md#maintenance-windows), and the page says so.
+The console's own administration: local users, API tokens, webhook endpoints, configuration export/import, and what this instance is running as. Sections appear per permission (users need `users:manage`, API tokens `tokens:manage`, webhook endpoints `webhooks:manage`, export/import `settings:write`, all four admin-only in the built-in roles), while **Language** and **About** are visible to everyone. Maintenance windows are not here; they moved to [Alerting](alerting.md#maintenance-windows), and the page says so.
 
 ## General
 
@@ -26,6 +26,15 @@ Auth is configured in the [Helm values](../reference/helm-values.md), not on thi
 
 Roles resolve as the union of `groupRoles` (a declarative group→role map in values; an allow-list, and what it grants cannot be revoked through the API, which is the point), any bindings made through the API, and `defaultRole` for an authenticated subject nothing matched. Built-in roles: `viewer`, `operator`, `alert-editor`, `admin`. Sessions for every non-anonymous mode last 12 h absolute with a 1 h sliding idle timeout. See [Configuration](../configuration.md) for the full reference.
 
+## Users
+
+In `local` mode the console is its own identity provider, and this section manages its accounts: list them with the roles they resolve to, create one with a role, change a user's role, disable or re-enable them, and set a new password. It needs `users:manage` and exists only in `local` mode; under `header` and `oidc` the provider owns the accounts and the API answers 404.
+
+- **Passwords** are at least 12 characters. A reset by an administrator, or a user changing their own password from the user menu (which needs the current one), signs that user out of every other session; the user who changed their own keeps working.
+- **Roles.** A user holds one direct role; changing it replaces the old binding in one step, and bindings made for their groups stay. Custom roles are listed next to the built-in ones.
+- **The last administrator** cannot be disabled or given a role without `users:manage`: the console refuses with 409 rather than leave nobody able to manage users. Grant it to someone else first.
+- **Disabled** users are refused on their next request, whatever sessions they hold.
+
 ## API tokens
 
 Bearer tokens for calling the [HTTP API](../api.md) without a session. The console stores only a hash of the secret: the value is shown once, at creation ("Copy {name} now — this is the only time it is shown"), and a lost token cannot be read back, only revoked and replaced. Rows show owner, created, last used and expiry; live tokens are *revoked*, spent ones deleted.
@@ -49,7 +58,7 @@ What a receiver's author needs, in one place. The scenario walkthrough is [Set u
 
 **Retries.** Up to three attempts, delayed 0 / ~30 s / ~5 m with ±20% jitter, 10 s timeout each, until the endpoint answers 2xx. The body (and therefore the signature) is identical across retries, so a receiver must be idempotent. *Send test* is deliberately a single attempt: an operator clicking it is asking a question and waiting for the answer on the endpoint row. Delivery lives in the console process: a restart during the retry window loses the remaining attempts, and the ledger for a miss is the row's last status and failure streak, not a replay queue.
 
-**Replicas and deduplication.** Every console replica polls alert state independently, so N replicas deliver N copies of each alert edge. Deduplicate on `(event, alert.ruleId, alert.labels, alert.firedAt)`; all four are stable across replicas and across the retry ladder. `sentAt` is not; it is per delivery. For the incident family, `(event, incident.id, at)` serves the same purpose.
+**Replicas and deduplication.** Every console replica polls alert state independently, so N replicas deliver N copies of each alert edge. Deduplicate on `(event, alert.ruleId, alert.labels, alert.firedAt)`; all four are stable across replicas and across the retry ladder. `sentAt` is not; it is per delivery. For the incident family, `(event, incident.id, at)` serves the same purpose. A held edge delivered when its maintenance window closes carries the original `firedAt`, so it dedupes across replicas like any other.
 
 **Timing, and what a pager should expect.** `alert.resolved` is stamped when the console *noticed* the alert was gone, at the granularity of `console.webhooks.alertPollInterval` (30 s by default): an absence has no timestamp of its own, so read it as "resolved at some point in the poll interval ending here". `firedAt`, by contrast, is Prometheus's own `activeAt` and identical on every replica, which is what makes it usable in the dedupe key. Two more deliberate properties: the first successful poll after a console restart is a baseline that delivers nothing (a restart never pages about alerts already firing), and a failed poll freezes the firing set, so nothing resolves while Prometheus is unreachable. Only alerts this console manages (those carrying `kconmon_ng_rule_id`) are delivered, and `pending` alerts are not: pending is not fired.
 

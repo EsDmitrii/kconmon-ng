@@ -18,7 +18,7 @@ vanishing into a green aggregate: UDP dropping on one pair while TCP stays
 clean, or DNS timing out from a single node. When a TCP, UDP or ICMP probe
 fails, the agent fires an MTR trace to that peer, so the bad hop is on record
 before anyone starts looking. One caution before a big rollout: pairs grow as
-N×(N−1) and each directed pair keeps roughly 70 series, so read
+N×(N−1) and each directed pair keeps roughly 75 series, so read
 [Scaling and cardinality](metrics.md#scaling-and-cardinality) before pointing
 this at a large cluster.
 

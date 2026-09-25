@@ -145,8 +145,8 @@ trigger is a concrete host that needs it.
 ### How many nodes can it handle?
 
 50–100 nodes is the production-proven envelope. The cost centre is not the
-probes, it is the metrics: each directed pair keeps roughly 70 active series
-and pairs grow as N×(N−1), which lands around 690k series at 100 nodes. The
+probes, it is the metrics: each directed pair keeps roughly 75 active series
+and pairs grow as N×(N−1), which lands around 740k series at 100 nodes. The
 full arithmetic is in
 [Scaling and cardinality](metrics.md#scaling-and-cardinality). For larger
 fleets, `topology.mode: sparse` (since v2.3.0) trims the probed pairs to a
@@ -157,7 +157,7 @@ roughly linearly with node count instead of quadratically.
 
 Three levers, and they work through two different mechanisms. The first two
 are scrape-time: `agent.metrics.detail: counters-only` drops the per-pair
-histograms (~70 → ~10 series per pair) while every pair alert keeps firing,
+histograms (~75 → ~12 series per pair) while every pair alert keeps firing,
 and `zone-only` keeps only the Z² zone-pair plane. Both render as
 `metricRelabelings` on the agent ServiceMonitor, so they require
 `serviceMonitor.enabled` (the chart refuses the combination otherwise); on
@@ -180,6 +180,19 @@ the source.
     Prometheus HTTP SD, `agent.hostNetwork` and console awareness of
     external agents: each arrives with the image, and a mixed fleet falls
     back to the older behaviour rather than breaking.
+
+### Why does PathMTUBlackHole fire when TCP works fine?
+
+Because TCP is the one protocol that can be made to fit. A network that runs
+below the interface MTU often clamps the TCP MSS at the edge, so handshakes and
+TCP transfers stay inside the smaller path while large UDP datagrams, QUIC
+included, die without an ICMP error. The probe reports exactly that: full-size
+datagrams do not cross.
+
+If that network is deliberate and your workloads are TCP-only, probe at the
+size it really carries with `config.checkers.pmtu.size`, or switch the rule off
+with `prometheusRule.pathMtuBlackHole.enabled: false`. See
+[When the black hole is by design](scenarios/mtu-black-hole.md#when-the-black-hole-is-by-design).
 
 ### Why is everything in one zone / why does Topology say no zone?
 

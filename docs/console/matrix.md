@@ -29,9 +29,20 @@ This page is the canonical home of the console's no-data rule, which every other
 
 ## Controls
 
-- **Protocol** switch: **TCP**, **UDP**, **ICMP**. The choice travels in the URL (`?protocol=`), so a matrix view is shareable as it stands, and `?protocol=udp` in a pasted link selects UDP on arrival.
+- **Protocol** switch: **TCP**, **UDP**, **ICMP**, **PMTU**. The choice travels in the URL (`?protocol=`), so a matrix view is shareable as it stands, and `?protocol=udp` in a pasted link selects UDP on arrival.
 - **Zoom** cluster: *Zoom in*, *Zoom out*, *Fit to view*, with the current level shown as a percentage. ++ctrl++ plus the mouse wheel zooms the grid; the wheel alone scrolls it. Zoom walks fixed steps from 40% to 150% rather than a continuous scale, so a size you liked is a size you can get back to. The 40% floor is deliberate: below it a cell is smaller than the smallest legible figure, and shrinking further would trade a grid you cannot fit for a grid you cannot read. At the floor the container pans instead.
 - When all node names share a prefix, the grid drops it and says so ("Node names drop the shared prefix …").
+
+## The PMTU protocol
+
+Since 2.5.0 the matrix can show the path MTU plane. A cell's figure is the
+largest datagram in bytes that crossed the pair on the last probe, and the line
+under it says what that means: *full size* on a green cell, *of 1500* (the size
+the source probes at) on an amber cell whose path is smaller and says so, and
+*black hole* on a red cell whose full-size datagrams vanish without an ICMP
+error. An agent older than 2.5.0 does not advertise `plane:pmtu`, so its row
+reads "the source does not run PMTU probes" instead of an empty cell. The
+walkthrough is [Catch an MTU black hole](../scenarios/mtu-black-hole.md).
 
 ## Cell states
 
