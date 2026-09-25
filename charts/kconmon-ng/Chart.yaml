@@ -3,8 +3,8 @@ apiVersion: v2
 name: kconmon-ng
 description: Kubernetes Node Connectivity Monitor - Next Generation
 type: application
-version: 2.4.0
-appVersion: "2.4.0"
+version: 2.5.0
+appVersion: "2.5.0"
 keywords:
   - kubernetes
   - connectivity
@@ -36,62 +36,61 @@ annotations:
   # operator evaluating 2.0.0 read that `prometheusRule.rules` was "DEPRECATED but still honoured ...
   # so existing installs are unaffected" and that the chart shipped optional CNPG and Valkey
   # subcharts — statements 2.0.0 contradicts, and the first of them describes a key it now rejects
-  # outright. What follows is 2.4.0 and nothing else.
+  # outright. What follows is 2.5.0 and nothing else.
   artifacthub.io/changes: |
     - kind: added
       description: >-
-        Per-agent ports on the wire: agents report httpPort, the UDP echo port and metricsPort at
-        registration, and peers probe each agent on the ports it reported, falling back to their
-        own when a peer reports none. Honoured only by 2.4.0 agents, so keep one port set until
-        every agent, deb/rpm hosts included, runs 2.4.0
+        Path MTU probe, on by default: once a minute every agent sends each peer a small and a
+        full-size UDP datagram with DF set to its echo port and bisects on loss. A pair reads ok,
+        reduced (the path says so with ICMP frag-needed) or a black hole (full-size datagrams
+        vanish). New kconmon_ng_pmtu_bytes, kconmon_ng_pmtu_results_total,
+        kconmon_ng_zone_pmtu_results_total and kconmon_ng_agent_pmtu_probe_bytes, and the
+        PathMTUBlackHole rule (prometheusRule.pathMtuBlackHole, warning). config.checkers.pmtu.*
+        reaches the ConfigMap only when tuned, so 2.4.x agents keep running under this chart
     - kind: added
       description: >-
-        Prometheus HTTP SD for external agents: the controller serves GET /api/v1/prometheus/sd
-        on httpPort and metricsPort (leader-only, 503 from a standby, fixed label set;
-        controller.prometheusSD.enabled opts out), and scrapeConfig.externalAgents renders a
-        ScrapeConfig on it with the agent.metrics.detail valve applied. Optional
-        KconmonExternalAgentDown rule (prometheusRule.externalAgentDown)
+        NodeUnreachable and NodeIsolated node-level rules (prometheusRule.nodeUnreachable,
+        .nodeIsolated; critical, minPeers 2): most peers failing to reach a node, or a node
+        failing to reach most peers, pages once for the node instead of once per pair
     - kind: added
       description: >-
-        agent.hostNetwork (with agent.dnsPolicy) runs the agents on node IPs so external hosts
-        reach them without a routable pod network; every in-cluster pair then measures the
-        node-to-node underlay, not the CNI datapath. networkPolicy.nodeCidrs is required with
-        networkPolicy.enabled, and networkPolicy.externalPeerCidrs opens the agent-to-agent
-        probe rules to external hosts
+        Path MTU panels on the Overview (black-hole pairs, reduced paths, pairs below their probe
+        size) and Node Detail (path MTU to each peer, black-hole probes by peer) dashboards
     - kind: added
       description: >-
-        External agents across the console, CLI and Time Machine: an external badge on the
-        topology map, node page and Overview, matrix hints for an unscraped external agent and
-        for a protocol its source does not run, an EXTERNAL column and bare-host rows in
-        kubectl kconmon, and topology event labels so history badges hosts too
+        Console PMTU protocol: matrix, Overview, node and pair pages, on-demand pmtu checks with
+        the verdict, path MTU and datagrams per pair; kubectl kconmon check --type pmtu
+    - kind: added
+      description: >-
+        Console local user management in auth.mode=local (users:manage, admin only): add, change
+        role, reset password, disable; and a self-service password change. A change or a reset
+        signs the user out of every other session
     - kind: changed
       description: >-
-        Documentation links (Artifact Hub links, install notes, chart README, CLI help)
-        point at the docs site, https://esdmitrii.github.io/kconmon-ng/
+        Console maintenance windows hold the console's own alert webhooks: an alert that starts
+        firing inside a matching window is not delivered, and is delivered when the window closes
+        on it still firing
     - kind: changed
       description: >-
-        KconmonAgentsMissing subtracts the new controller_external_agents gauge, so an external
-        agent no longer masks a missing in-cluster agent
+        Console node page health covers the pairs into the node as well as out of it, and its
+        breakdown switches between paths to and from peers; diagnostic runs list failed pairs first
+    - kind: changed
+      description: >-
+        Console pages load on demand: the initial JavaScript drops from 935 kB to 198 kB gzipped,
+        and charts load only the ECharts parts they draw with
+    - kind: changed
+      description: >-
+        Images build with Go 1.27 on distroless static-debian13; the console UI with Vite 8
     - kind: fixed
       description: >-
-        The -arm64 agent and controller images shipped the amd64 binary; they now carry the
-        arm64 build
+        Config hot reload watched the file instead of its directory, so the first atomic
+        replacement (an editor's save, an ansible or puppet file resource, the kubelet's
+        ConfigMap swap) silently ended it
     - kind: fixed
       description: >-
-        Time Machine topology left out agents that never changed after the console started
-        recording, external agents included; the console now stores a topology baseline on
-        every controller stream connect and hourly, and the fold starts from it
+        Console Overview tiered pairs by failure ratio alone, so a UDP or ICMP pair the matrix
+        painted red for packet loss read healthy there
     - kind: fixed
       description: >-
-        Grafana dashboards: ratio axes cap at 100% instead of stretching to 10000% on flat data,
-        the MTR trace count is no longer painted as a health colour, and the zone heatmap
-        tables sort rows and columns the same way
-    - kind: fixed
-      description: >-
-        The agent DaemonSet declared its grpc port, the UDP echo listener, as TCP
-    - kind: fixed
-      description: >-
-        Console accessibility: button and link contrast in both themes, underlined links in
-        running text, keyboard-reachable labelled scroll regions, heading order, live-feed list
-        semantics and a header landmark on phones. Tooltips no longer cover the element they
-        describe, and topology edges now show their failure label on hover
+        Console on PostgreSQL 18: deleting a target a check definition still references failed
+        with a store error instead of 409 target in use

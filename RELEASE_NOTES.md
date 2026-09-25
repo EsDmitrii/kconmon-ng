@@ -1,3 +1,161 @@
+## kconmon-ng v2.5.0
+
+> The failure small probes cannot see gets a probe of its own. A pair where
+> handshakes and pings cross while full-size packets vanish (an overlay that
+> eats the headroom, an underlay smaller than the pods were told, a firewall
+> that drops ICMP "fragmentation needed") stayed green on every plane; a path
+> MTU probe now turns it red with the size that still crosses. The rest of the
+> release pays the debts a first outside user runs into: one page per
+> unreachable node instead of one per pair, maintenance windows that also hold the
+> console's webhooks, local users managed from the console, a config reload
+> that survives the way files are really replaced, and a console that loads a
+> fifth of the JavaScript it used to. **The probe is on by default and two of
+> the three new rules are critical: read Upgrade notes before rolling out.**
+
+### Added
+
+- **Path MTU probe.** Once a minute (`config.checkers.pmtu.interval`) every
+  agent sends each peer, to its UDP echo port, a 64-byte datagram and a
+  full-size one with Don't Fragment set. The full size is the MTU of the
+  interface that routes to the peer, what the CNI configured in a pod and the
+  NIC's under `agent.hostNetwork`; `config.checkers.pmtu.size` overrides it
+  in IP-level bytes. The small and the full-size datagram get two attempts
+  each. When the full size does not come back, the agent bisects (at most 16
+  sizes, one datagram each, `timeout` per datagram, 500ms by default), then
+  sends the full size and the size it found once more each: the first must
+  vanish again and the second must cross again before the pair counts as a
+  black hole, so a lossy path does not pass for one. A pair reads:
+    - `ok`: the full size is echoed back;
+    - `reduced`: the path refuses it with ICMP frag-needed. TCP adapts; UDP
+      without its own path MTU discovery does not;
+    - `blackhole`: full-size datagrams vanish while the small one crosses,
+      and every large transfer on the pair stalls;
+    - nothing when the small datagram is lost too, or when the sizes above it
+      are lost at random: that is a connectivity failure, and the UDP plane
+      owns it.
+  On Linux the socket probes with `IP_PMTUDISC_PROBE`, so a path MTU the
+  kernel cached from an earlier ICMP never shrinks the probe. A pmtu failure
+  does not trigger MTR: the route is not what broke. New series:
+  `kconmon_ng_pmtu_bytes` (per pair, the size that crossed on the last probe),
+  `kconmon_ng_pmtu_results_total` (`success` for ok and reduced, `fail` for a
+  black hole), `kconmon_ng_zone_pmtu_results_total`, and
+  `kconmon_ng_agent_pmtu_probe_bytes` (the size an agent probes at). Agents
+  advertise `plane:pmtu`. Walkthrough with a kind reproduction in
+  [Catch an MTU black hole](https://esdmitrii.github.io/kconmon-ng/scenarios/mtu-black-hole/).
+- **`PathMTUBlackHole`** (`prometheusRule.pathMtuBlackHole`, warning): more
+  than half of a pair's path MTU probes failed over ten minutes, held for
+  five; the summary names the path MTU. A network that runs below the
+  interface MTU on purpose and clamps TCP MSS can probe at the size it really
+  carries with `config.checkers.pmtu.size`, or turn the rule off.
+- **`NodeUnreachable` and `NodeIsolated`** (`prometheusRule.nodeUnreachable`,
+  `.nodeIsolated`, critical, `for: 5m`). A node is unreachable when more than
+  half of the peers probing it over TCP fail most of their probes, and
+  isolated when it fails to reach more than half of its own peers; either
+  needs at least `minPeers` (2) peers reporting, so a two-node test cluster
+  does not page on one bad pair. Both fire for a node that stays registered
+  while the TCP probes fail (a host firewall, a NetworkPolicy, the node's CNI
+  datapath); a node that stops altogether leaves the mesh within
+  `config.controllerAgentTtl` and pages as `KconmonAgentsMissing`. The
+  per-pair alerts still fire; the
+  [inhibit rules](https://esdmitrii.github.io/kconmon-ng/metrics/#one-alert-per-node-instead-of-one-per-pair)
+  on the metrics page fold them under the node alert in Alertmanager.
+- **Path MTU on the dashboards.** Overview: black-hole pairs over 15
+  minutes, pairs on a reduced path (black holes not counted twice), and the
+  pairs below their probe size with the size that crosses. Node Detail: the
+  path MTU to each peer and black-hole probes by peer.
+- **PMTU in the console and the CLI.** The matrix gains a PMTU protocol: the
+  cell's figure is the path MTU in bytes, green at full size, amber on a
+  reduced path ("1400 of 1500"), red from the first failed probe of a black
+  hole, and dashed "not probed" across the row of an agent older than 2.5.0,
+  which does not run the probe. The
+  Overview tiles and worst pairs (with a Path MTU / probe column), the node
+  page and the pair page (a Path MTU card with both directions) follow it.
+  Run checks accepts `pmtu` (each pair gets at least 15s) and shows the
+  verdict, the path MTU and the datagrams it took per pair.
+  `kubectl kconmon check <source> <destination> --type pmtu` prints the same
+  and exits 2 on a black hole.
+- **Local users in the console.** With `auth.mode=local`, Settings has a
+  Users section: add an account, change its role, reset its password,
+  disable it. It needs the new `users:manage` permission, which only the
+  built-in admin role carries, and the last account that can manage users
+  can be neither disabled nor moved to a role without it. Every local user
+  gets Change password in the user menu (the current password is required,
+  and attempts share the login's per-username rate limit). A password change
+  or a reset signs that user out of every other session. API:
+  `/api/v1/users`, `/api/v1/users/{id}`, `/api/v1/users/{id}/password` and
+  `/api/v1/auth/password`, in the
+  [Console API](https://esdmitrii.github.io/kconmon-ng/reference/console-api/).
+- **Fault-injection end-to-end tests.** The e2e job now breaks the network
+  on purpose with iptables on a kind node: a cut pair must fail its probes,
+  get a reactive MTR and recover, and a black hole on full-size datagrams
+  must come out of the pmtu probe named as one. A local-auth leg drives user
+  management through the API.
+
+### Changed
+
+- **Maintenance windows hold the console's alert webhooks.** A
+  console-managed alert that starts firing inside an open window matching it
+  (fleet-wide, its source or destination node, the pair, or its target) is
+  not delivered. If the window closes while the alert still fires, the fired
+  webhook goes out then; if it resolves inside the window, nothing is sent at
+  all. `kconmon_ng_console_webhook_suppressed_total{event}` counts what the
+  windows held.
+- **The node page covers both directions.** Its health figure and tier take
+  every pair the node is on, into it as well as out of it, so the node
+  `NodeUnreachable` names no longer reads Healthy on its own page; the tier
+  follows the matrix, so a reduced path reads Degraded. The per-peer
+  breakdown switches between To peers and From peers and opens on the
+  direction the trouble is in.
+- **Diagnostic runs list failed pairs first**, then the ones still running,
+  then the rest, so page one of a 90-pair run shows what broke.
+- **Console pages load on demand.** Each page is its own chunk, fetched on
+  the first visit or when the pointer rests on its link. The JavaScript the
+  first page load needs drops from 935 kB to 198 kB gzipped, and the charts
+  pull in only the ECharts parts they draw with (180 kB gzipped instead of
+  371 kB, on chart pages only).
+- **Build stack.** The Go toolchain moves to 1.27.1 (the module stays on
+  language version 1.26), images build on distroless `static-debian13`, the
+  console UI on Vite 8; the e2e and dev fixtures run PostgreSQL 18 and
+  Valkey 9.
+
+### Fixed
+
+- **Config hot reload stopped after the first atomic replacement.** The
+  loader watched the config file itself, so an editor's save, an ansible or
+  puppet file resource, or the kubelet's ConfigMap `..data` swap replaced the
+  watched inode and every later change went unnoticed without a word. It now
+  watches the directory and reloads when the content's hash changes.
+- **The Overview missed pairs red for packet loss.** Its tiles and worst
+  pairs tiered by the failure ratio alone, so a UDP or ICMP pair the matrix
+  painted red for loss read healthy there. Both now use the matrix's rule, and
+  the worst-pairs column reads "Fail / loss %".
+- **Deleting a target still in use on PostgreSQL 18.** PostgreSQL 18 reports
+  `ON DELETE RESTRICT` as `restrict_violation` (23001), not
+  `foreign_key_violation`, so deleting a target a check definition still
+  references came back as a store error instead of 409 target in use.
+
+### Upgrade notes
+
+1. **The path MTU probe is on by default.** Chart 2.5.0 with 2.4.x agent
+   images renders no `pmtu` key, and the old agents keep running without the
+   probe; upgraded agents probe them anyway, because the probe uses the UDP
+   echo every 2.4.x agent already answers. Tuning any `config.checkers.pmtu.*` key needs 2.5.0 agent images:
+   the config decoder is strict and an older agent refuses the unknown key.
+2. **Cardinality.** Three new series per directed pair and one per agent:
+   about 30 thousand more at 100 nodes. `agent.metrics.detail=zone-only`
+   keeps only the zone counter.
+3. **Three new rules, two of them critical.** Check your Alertmanager
+   routing before the upgrade reaches a paging receiver; lower
+   `prometheusRule.nodeUnreachable.severity` and
+   `prometheusRule.nodeIsolated.severity` if the first week should not page.
+4. **`users:manage` is a new permission.** Custom roles that should
+   administer users need it added; the built-in admin role has it.
+5. **Local sessions opened before 2.5.0 keep working until they expire.**
+   From 2.5.0 on, a password change or reset signs the user out everywhere
+   else.
+6. **Maintenance windows govern the console's own webhooks only.** Alerts
+   routed through Alertmanager still need a silence.
+
 ## kconmon-ng v2.4.0
 
 > External agents stop being second-class. A host outside the cluster now
