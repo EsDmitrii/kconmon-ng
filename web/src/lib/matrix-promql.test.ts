@@ -162,3 +162,23 @@ describe("getMatrixAt", () => {
     await expect(getMatrixAt("tcp", AT)).rejects.toThrow("parse error at char 7");
   });
 });
+
+describe("pmtu in the Time Machine", () => {
+  it("asks for failures, the path MTU and the probe size, and no RTT", () => {
+    const q = matrixQueries("pmtu");
+    expect(q.fail).toContain("kconmon_ng_pmtu_results_total");
+    expect(q.mtu).toContain("kconmon_ng_pmtu_bytes");
+    expect(q.probe).toContain("kconmon_ng_agent_pmtu_probe_bytes");
+    expect(q.rtt).toBeUndefined();
+  });
+
+  it("folds the MTU and the source's probe size into the cells", () => {
+    const fail = new Map([["a\0b", 1]]);
+    const mtu = new Map([["a\0b", 1400]]);
+    const probe = new Map([["a", 1500]]);
+    const m = foldMatrix("pmtu", fail, new Map(), new Map(), new Date(0), mtu, probe);
+    expect(m.cells).toEqual([
+      { source: "a", destination: "b", failRatio: 1, mtuBytes: 1400, probeMtuBytes: 1500 },
+    ]);
+  });
+});

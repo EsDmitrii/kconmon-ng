@@ -14,6 +14,8 @@ import { Input } from "@/components/ui/input";
 import { Segmented, type SegmentedOption } from "@/components/ui/segmented";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Table, TBody, Td, Th, THead, Tr } from "@/components/ui/table";
+import { ErrorLine, queryErrorMessage, ROW_ACTION, RowActionLabel, SectionCard } from "@/components/settings-section";
+import { UsersSection } from "./settings-users";
 import { useAuth } from "@/hooks/use-auth";
 import { useConfirmStep } from "@/hooks/use-confirm-step";
 import { useDisclosureFocus } from "@/hooks/use-disclosure-focus";
@@ -52,30 +54,12 @@ import type {
 import { CHECKBOX_CLASS, cn } from "@/lib/utils";
 
 /**
- * WHAT IS HERE: the language switcher, API tokens, webhook endpoints, configuration export/import,
- * and About. Maintenance windows are DECLARED on the chart surfaces and MANAGED on /alerting
+ * WHAT IS HERE: the language switcher, local users (pages/settings-users.tsx), API tokens, webhook
+ * endpoints, configuration export/import, and About. Maintenance windows are DECLARED on the chart surfaces and MANAGED on /alerting
  * (M3-14) — a second form for either here would be a second place to get the same thing wrong.
  */
 
-/* ── shared bits ────────────────────────────────────────────────────────── */
-
-/**
- * queryErrorMessage is what this page says when something failed: the server's
- * own words whenever it wrote any, and this section's own sentence when it did
- * not.
- *
- * The `?? title` alone was not enough. A refusal that never reached the console
- * — a gateway's HTML 502, a proxy's empty problem document — arrives with an
- * ABSENT detail and a title that is the empty statusText, and `"" ` is a string,
- * so every error slot on this page rendered a red paragraph with nothing in it:
- * the list stayed empty, the button un-spun, and the operator was looking at a
- * page that had silently given up. A blank message is worse than a generic one.
- */
-function queryErrorMessage(error: unknown, fallback: string): string {
-  if (!(error instanceof ApiError)) return fallback;
-  const said = [error.problem.detail, error.problem.title].map((s) => s?.trim() ?? "").find((s) => s !== "");
-  return said ?? fallback;
-}
+/* ── shared bits (the section building blocks live in components/settings-section.tsx) ── */
 
 /** The locale is required: a bare toLocaleString() reorders the date and swaps in AM/PM from
  *  whatever the browser was installed in — "8/10/2026 3:47 AM" on a Russian page. */
@@ -85,78 +69,9 @@ function fmtTime(timestamp: string | null | undefined, locale: Locale): string {
   return Number.isNaN(d.getTime()) ? timestamp : stampFull(d, locale);
 }
 
-function SectionCard({
-  id,
-  title,
-  blurb,
-  action,
-  children,
-}: {
-  id?: string;
-  title: string;
-  /** The one-paragraph explanation under the heading. */
-  blurb?: ReactNode;
-  /** The section's own create button, on the heading line at the right. */
-  action?: ReactNode;
-  children: ReactNode;
-}) {
-  return (
-    <Card asChild className="p-4 sm:p-6">
-      {/* `id` is the anchor the sidebar's user menu links a deep link at. */}
-      <section id={id}>
-        <div className="flex items-start justify-between gap-4">
-          <h2 className="type-section">{title}</h2>
-          {action ? <div className="shrink-0">{action}</div> : null}
-        </div>
-        {blurb ? <p className="mt-1 max-w-prose text-xs leading-relaxed text-muted-foreground">{blurb}</p> : null}
-        {children}
-      </section>
-    </Card>
-  );
-}
 
-function ErrorLine({
-  children,
-  id,
-  onRetry,
-}: {
-  children: ReactNode;
-  id?: string;
-  /** Re-runs the read that failed; a small ghost button beside the sentence. */
-  onRetry?: () => void;
-}) {
-  const t = useT(settingsDict);
-  /* The sentence and the role stay on ONE element — tests and assistive tech
-     both find the alert by its text — and the button rides inside it. */
-  return (
-    <p id={id} role="alert" className="mt-3 text-sm leading-relaxed text-health-bad">
-      {children}
-      {onRetry ? (
-        <Button type="button" size="sm" variant="ghost" className="ml-3 h-7 px-2 align-middle" onClick={onRetry}>
-          {t("error.retry")}
-        </Button>
-      ) : null}
-    </p>
-  );
-}
 
-/**
- * RowActionLabel is the VISIBLE half of a row button whose accessible name
- * carries the object's own name — pages/alerting.tsx's component, verbatim.
- * `text` is the verb that shows, `title` the whole sentence; the span stays
- * bounded and truncating because a name is operator bytes of any length.
- */
-function RowActionLabel({ text, title }: { text: string; title?: string }) {
-  return (
-    <span aria-hidden="true" className="block max-w-[14rem] truncate" title={title ?? text}>
-      {text}
-    </span>
-  );
-}
 
-/** ROW_ACTION is the compact ghost button every row action on this page is
- *  drawn as; a touch tighter on a phone, the same value pages/alerting.tsx uses. */
-const ROW_ACTION = "h-7 px-1.5 sm:px-2";
 
 /** enT is the English translator this file's PURE helpers default to, so
  *  parseBundle keeps the signature (and the output) its unit tests read. */
@@ -1797,6 +1712,10 @@ export function SettingsPage() {
   const canTokens = can("tokens:manage");
   const canWebhooks = can("webhooks:manage");
   const canBundle = can("settings:write");
+  /* Users exist only where the console is its own identity provider; under header or oidc the
+     provider owns the accounts and the API answers 404. */
+  const { data: config } = useQuery({ queryKey: ["config"], queryFn: getConfig, staleTime: Infinity });
+  const canUsers = can("users:manage") && config?.auth?.mode === "local";
 
   let body: ReactNode;
   if (me === undefined) {
@@ -1811,7 +1730,7 @@ export function SettingsPage() {
       <>
         {/* First, and for everyone — see LanguageSection. */}
         <LanguageSection />
-        {!canTokens && !canWebhooks && !canBundle ? (
+        {!canTokens && !canWebhooks && !canBundle && !canUsers ? (
           <Card role="status" className="p-4 sm:p-6">
             <p className="text-sm font-medium">{t("nothing.title")}</p>
             <p className="mt-1 max-w-prose text-xs leading-relaxed text-muted-foreground">{t("nothing.body")}</p>
@@ -1819,6 +1738,7 @@ export function SettingsPage() {
         ) : null}
         {/* First of the gated sections: the user menu links straight at it. */}
         {canTokens ? <TokensSection /> : null}
+        {canUsers ? <UsersSection /> : null}
         {canWebhooks ? <WebhooksSection /> : null}
         {canBundle ? <ExportImportSection /> : null}
         <AboutSection />

@@ -24,7 +24,7 @@ import { cardsDict, type CardsKey } from "@/lib/i18n/dict/cards";
 /* The badge's TOOLTIP is cellSummary's shared sentence, which has its own
    table — one reading of a cell for every surface that draws one. */
 import { matrixCellsDict } from "@/lib/i18n/dict/matrix-cells";
-import { cellSummary, cellTier, fmtRatio, isMeasured } from "@/lib/matrix-cells";
+import { cellSummary, cellTier, fmtRatio, isMeasured, pmtuReading } from "@/lib/matrix-cells";
 import { withAtParam, useTimeContext, useWriteGuard } from "@/lib/timemachine";
 import type { Matrix, MatrixCell, RunDetail, RunResult, Topology } from "@/lib/types";
 import { escapeLabelValue, runsAtOrBefore } from "@/lib/utils";
@@ -100,6 +100,60 @@ function DirectionStat({ label, cell }: { label: string; cell?: MatrixCell }) {
         {!measured ? t("cell.noData") : cell?.failRatio == null ? t("cell.noFailData") : fmtRatio(cell.failRatio)}
       </Badge>
     </span>
+  );
+}
+
+/* The PMTU reading's badge wording; the tier colour comes from cellTier like every other chip. */
+const PMTU_READING_KEY = { blackhole: "pair.pmtu.blackhole", reduced: "pair.pmtu.reduced", full: "pair.pmtu.full" } as const;
+
+/**
+ * PathMtuCard says what the PMTU matrix cell said, in both directions: the card header's chips are
+ * the TCP plane, and a black hole passes every TCP probe, so without this the card opened from a red
+ * PMTU cell read as healthy.
+ */
+function PathMtuCard({ forward, reverse, source, destination }: {
+  forward?: MatrixCell;
+  reverse?: MatrixCell;
+  source: string;
+  destination: string;
+}) {
+  const t = useT(cardsDict);
+  const rows = [
+    { label: `${source} → ${destination}`, cell: forward },
+    { label: `${destination} → ${source}`, cell: reverse },
+  ].filter((r) => pmtuReading(r.cell) !== null);
+  return (
+    <Card asChild className="p-4">
+      <section aria-label={t("pair.pmtu.title")}>
+        <h2 className="text-sm font-semibold">{t("pair.pmtu.title")}</h2>
+        {rows.length === 0 ? (
+          <p className="mt-2 text-xs leading-relaxed text-muted-foreground">{t("pair.pmtu.none")}</p>
+        ) : (
+          <dl className="mt-3 flex flex-col gap-2.5 text-xs">
+            {rows.map(({ label, cell }) => {
+              const reading = pmtuReading(cell) ?? "full";
+              const figure =
+                reading === "full" || cell?.probeMtuBytes === undefined
+                  ? t("pair.pmtu.bytes", { mtu: String(cell?.mtuBytes) })
+                  : t("pair.pmtu.bytesOf", { mtu: String(cell?.mtuBytes), probe: String(cell.probeMtuBytes) });
+              return (
+                <div key={label} className="flex flex-col gap-1">
+                  <dt className="mono-data truncate text-muted-foreground" title={label}>
+                    {label}
+                  </dt>
+                  <dd className="flex items-center justify-between gap-2">
+                    <span className="mono-data text-foreground">{figure}</span>
+                    <Badge variant={TIER_VARIANT[cellTier(cell)]} dot>
+                      {t(PMTU_READING_KEY[reading])}
+                    </Badge>
+                  </dd>
+                </div>
+              );
+            })}
+          </dl>
+        )}
+      </section>
+    </Card>
   );
 }
 
@@ -492,6 +546,7 @@ export function PairCardPage() {
      fleet answers nodes:null and carries its node names on the agents. */
   const topo = useTopology();
   const matrix = useMatrix("tcp");
+  const pmtu = useMatrix("pmtu");
   const [tab, setTab] = useState<PairTab>("overview");
 
   if (source === "" || destination === "") return <NotFound />;
@@ -508,6 +563,9 @@ export function PairCardPage() {
   const cells = matrix.data?.cells ?? [];
   const forward = cells.find((c) => c.source === source && c.destination === destination);
   const reverse = cells.find((c) => c.source === destination && c.destination === source);
+  const pmtuCells = pmtu.data?.cells ?? [];
+  const pmtuForward = pmtuCells.find((c) => c.source === source && c.destination === destination);
+  const pmtuReverse = pmtuCells.find((c) => c.source === destination && c.destination === source);
   const scope = pairScope(source, destination);
   const investigationScope: InvestigationScope = { kind: "pair", a: source, b: destination };
 
@@ -550,6 +608,7 @@ export function PairCardPage() {
           )}
         </div>
         <div className="flex flex-col gap-5">
+          <PathMtuCard forward={pmtuForward} reverse={pmtuReverse} source={source} destination={destination} />
           <RelatedIncidents scope={investigationScope} />
           <RecentChanges scope={scope} />
         </div>

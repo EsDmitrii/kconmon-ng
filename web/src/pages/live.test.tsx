@@ -9,14 +9,8 @@ import type { LiveEvent } from "@/lib/types";
 import { fmtEventStamp } from "@/lib/utils";
 import { TOPIC_LIVE } from "@/lib/ws";
 import { NAV_ITEMS } from "@/nav";
-import {
-  LIVE_RING_CAP,
-  LivePage,
-  ROW_HEIGHT,
-  countMissedEvents,
-  filterEvents,
-  pushEvents,
-} from "./live";
+import { LIVE_RING_CAP, pushEvents } from "@/lib/live-events";
+import { LivePage, ROW_HEIGHT, countMissedEvents, filterEvents } from "./live";
 
 // Give the layout a real height for this file only (jsdom defines these as configurable accessors)
 // and restore it afterwards.

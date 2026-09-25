@@ -4,6 +4,8 @@ import {
   cellTier,
   isMeasured,
   isProblemCell,
+  isReducedPath,
+  pmtuReading,
   severityRatio,
 } from "./matrix-cells";
 import type { MatrixCell } from "./types";
@@ -45,6 +47,12 @@ describe("severityRatio", () => {
 });
 
 describe("cellTier", () => {
+  it("paints a fresh PMTU black hole red, the colour the legend gives a black hole", () => {
+    const fresh = { source: "a", destination: "b", failRatio: 0.05, mtuBytes: 1400, probeMtuBytes: 1500 };
+    expect(pmtuReading(fresh)).toBe("blackhole");
+    expect(cellTier(fresh)).toBe("bad");
+  });
+
   it("is unknown only for a cell nothing measured", () => {
     expect(cellTier(cell())).toBe("unknown");
   });
@@ -91,5 +99,52 @@ describe("cellSummary", () => {
 
   it("keeps the wording the grid's aria-labels already used for a full cell", () => {
     expect(cellSummary(cell({ failRatio: 0.5, rttP95: 2_000_000 }))).toBe("fail 50.0%, RTT p95 2.0ms");
+  });
+});
+
+describe("path MTU cells", () => {
+  const ok = { source: "a", destination: "b", failRatio: 0, mtuBytes: 1500, probeMtuBytes: 1500 };
+  const reduced = { source: "a", destination: "b", failRatio: 0, mtuBytes: 1450, probeMtuBytes: 1500 };
+  const blackhole = { source: "a", destination: "b", failRatio: 1, mtuBytes: 1400, probeMtuBytes: 1500 };
+
+  it("reads a full-size path as ok, a reduced one as degraded, a black hole as failing", () => {
+    expect(cellTier(ok)).toBe("ok");
+    expect(cellTier(reduced)).toBe("warn");
+    expect(cellTier(blackhole)).toBe("bad");
+  });
+
+  it("counts an MTU reading as a measurement even without a failure series", () => {
+    expect(isMeasured({ source: "a", destination: "b", failRatio: null, mtuBytes: 1500 })).toBe(true);
+  });
+
+  it("flags a reduced path as a problem pair, and a full one not", () => {
+    expect(isProblemCell(reduced)).toBe(true);
+    expect(isProblemCell(ok)).toBe(false);
+    expect(isReducedPath(reduced)).toBe(true);
+    expect(isReducedPath({ ...reduced, probeMtuBytes: undefined })).toBe(false);
+  });
+
+  it("says the path MTU in the summary", () => {
+    expect(cellSummary(reduced)).toContain("path MTU 1450 of 1500 bytes");
+    expect(cellSummary(ok)).toContain("path MTU 1500 bytes");
+  });
+});
+
+describe("pmtuReading", () => {
+  const cell = (failRatio: number | null, mtuBytes: number, probeMtuBytes = 1500) => ({
+    source: "a", destination: "b", failRatio, mtuBytes, probeMtuBytes,
+  });
+  it("reads a full path, a reduced one and a black hole", () => {
+    expect(pmtuReading(cell(0, 1500))).toBe("full");
+    expect(pmtuReading(cell(0, 1450))).toBe("reduced");
+    expect(pmtuReading(cell(null, 1450))).toBe("reduced");
+    expect(pmtuReading(cell(1, 1400))).toBe("blackhole");
+  });
+  it("calls a fresh black hole one before its ratio crosses the failing line", () => {
+    expect(pmtuReading(cell(0.03, 1400))).toBe("blackhole");
+    expect(pmtuReading(cell(0.03, 1500))).toBe("full");
+  });
+  it("has nothing to say about a cell with no path MTU", () => {
+    expect(pmtuReading({ source: "a", destination: "b", failRatio: 0 })).toBeNull();
   });
 });

@@ -1,7 +1,7 @@
 import { defineDict, translate, type Dictionary, type Translate } from "@/lib/i18n";
 
 /**
- * matrix-cells — the five phrases lib/matrix-cells.ts's `cellSummary` builds a
+ * matrix-cells — the phrases lib/matrix-cells.ts's `cellSummary` builds a
  * cell's sentence out of.
  *
  * ONE READING OF A CELL, SHARED. The same sentence is the matrix grid's
@@ -37,6 +37,8 @@ const en = {
   "noFailSignal": "no failure signal recorded",
   "rttP95": "RTT p95 {rtt}",
   "packetLoss": "packet loss {ratio}",
+  "pathMtu": "path MTU {mtu} bytes",
+  "pathMtuReduced": "path MTU {mtu} of {probe} bytes",
 } as const;
 
 export type MatrixCellsKey = keyof typeof en;
@@ -50,6 +52,8 @@ export const matrixCellsDict: Dictionary<MatrixCellsKey> = defineDict(en, {
   "noFailSignal": "данных о сбоях не записано",
   "rttP95": "RTT p95 {rtt}",
   "packetLoss": "потери пакетов {ratio}",
+  "pathMtu": "MTU пути {mtu} байт",
+  "pathMtuReduced": "MTU пути {mtu} из {probe} байт",
 });
 
 /** enT is the ENGLISH translator cellSummary defaults to, so a caller with one

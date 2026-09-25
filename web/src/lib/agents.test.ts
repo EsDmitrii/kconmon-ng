@@ -66,8 +66,8 @@ describe("the shared vocabulary", () => {
     expect(PLANE_CAPABILITY_PREFIX).toBe("plane:");
   });
 
-  it("knows the six planes the agent can advertise, in the agent's own spelling", () => {
-    expect([...PLANES]).toEqual(["tcp", "udp", "icmp", "dns", "http", "mtr"]);
+  it("knows the seven planes the agent can advertise, in the agent's own spelling", () => {
+    expect([...PLANES]).toEqual(["tcp", "udp", "icmp", "pmtu", "dns", "http", "mtr"]);
   });
 
   it("reads the scrape docs URL out of the matrix dictionary, so the target changes in one place", () => {

@@ -28,6 +28,7 @@ const ALLOWED_METRICS = [
   "kconmon_ng_icmp_rtt_seconds",
   "kconmon_ng_icmp_packet_loss_ratio",
   "kconmon_ng_icmp_results_total",
+  "kconmon_ng_pmtu_results_total",
   "kconmon_ng_dns_duration_seconds",
   "kconmon_ng_dns_results_total",
   "kconmon_ng_http_dns_duration_seconds",
@@ -74,13 +75,13 @@ describe("CURATED_CHARTS", () => {
     expect(failRate.unit).toBe("ratio");
     expect(failRate.query).toBe(`${fail} / ${total}`);
     expect(failRate.query).toBe(
-      'sum by (protocol) (label_replace(rate(kconmon_ng_tcp_results_total{result="fail"}[5m]), "protocol", "tcp", "", "") or label_replace(rate(kconmon_ng_udp_results_total{result="fail"}[5m]), "protocol", "udp", "", "") or label_replace(rate(kconmon_ng_icmp_results_total{result="fail"}[5m]), "protocol", "icmp", "", ""))' +
+      'sum by (protocol) (label_replace(rate(kconmon_ng_tcp_results_total{result="fail"}[5m]), "protocol", "tcp", "", "") or label_replace(rate(kconmon_ng_udp_results_total{result="fail"}[5m]), "protocol", "udp", "", "") or label_replace(rate(kconmon_ng_icmp_results_total{result="fail"}[5m]), "protocol", "icmp", "", "") or label_replace(rate(kconmon_ng_pmtu_results_total{result="fail"}[5m]), "protocol", "pmtu", "", ""))' +
         ' / ' +
-        'sum by (protocol) (label_replace(rate(kconmon_ng_tcp_results_total[5m]), "protocol", "tcp", "", "") or label_replace(rate(kconmon_ng_udp_results_total[5m]), "protocol", "udp", "", "") or label_replace(rate(kconmon_ng_icmp_results_total[5m]), "protocol", "icmp", "", ""))',
+        'sum by (protocol) (label_replace(rate(kconmon_ng_tcp_results_total[5m]), "protocol", "tcp", "", "") or label_replace(rate(kconmon_ng_udp_results_total[5m]), "protocol", "udp", "", "") or label_replace(rate(kconmon_ng_icmp_results_total[5m]), "protocol", "icmp", "", "") or label_replace(rate(kconmon_ng_pmtu_results_total[5m]), "protocol", "pmtu", "", ""))',
     );
-    // Same three legs on both sides; the only difference is the selector.
+    // Same four legs on both sides; the only difference is the selector.
     expect(total).toBe(fail.split('{result="fail"}').join(""));
-    expect(fail.match(/\{result="fail"\}/g)).toHaveLength(3);
+    expect(fail.match(/\{result="fail"\}/g)).toHaveLength(4);
     expect(failRate.query).not.toContain("vector(0)");
   });
 

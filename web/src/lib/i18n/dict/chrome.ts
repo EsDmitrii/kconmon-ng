@@ -51,6 +51,8 @@ const en = {
   "sidebar.palette.hint": "{keys} — search and commands",
 
   "shell.skipToContent": "Skip to main content",
+  /* Screen-reader text of the frame shown while a page's code is still downloading. */
+  "shell.pageLoading": "Loading the page…",
   /* The <nav>'s accessible NAME. A screen reader announces it before the first
      link, and an unnamed landmark in a page with several is one an operator has
      to enter to identify. */
@@ -125,6 +127,7 @@ export const chromeDict: Dictionary<ChromeKey> = defineDict(en, {
   "sidebar.palette.hint": "{keys} — поиск и команды",
 
   "shell.skipToContent": "Перейти к основному содержимому",
+  "shell.pageLoading": "Загрузка страницы…",
   "shell.nav.aria": "Основная навигация",
 
   "shell.menu.open": "Открыть навигацию",

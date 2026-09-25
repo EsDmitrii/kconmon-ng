@@ -159,6 +159,22 @@ describe("nodeHealth", () => {
     expect(h.total).toBe(9);
   });
 
+  it("counts the paths INTO the node: a node nobody can reach is Failing", () => {
+    const unreachable = [
+      { source: "node-a", destination: "node-b", failRatio: 0 },
+      { source: "node-a", destination: "node-c", failRatio: 0 },
+      { source: "node-b", destination: "node-a", failRatio: 1 },
+      { source: "node-c", destination: "node-a", failRatio: 1 },
+      { source: "node-b", destination: "node-c", failRatio: 0.5 },
+    ];
+    expect(nodeHealth(true, unreachable, "node-a")).toEqual({ percent: 0, tier: "bad", scored: 4, total: 4 });
+  });
+
+  it("reads a reduced path as Degraded and states no percentage that contradicts it", () => {
+    const reduced = [{ source: "node-a", destination: "node-b", failRatio: 0, mtuBytes: 1400, probeMtuBytes: 1500 }];
+    expect(nodeHealth(true, reduced, "node-a")).toEqual({ percent: null, tier: "warn", scored: 1, total: 1 });
+  });
+
   it("counts a self-cell in neither half", () => {
     const withSelf = [
       { source: "node-a", destination: "node-a", failRatio: 0 },
@@ -294,6 +310,53 @@ describe("NodeCardPage — the per-destination breakdown", () => {
     };
     renderPage("/nodes/node-a", { matrix: unprobed });
     expect(await screen.findByText("no data")).toBeInTheDocument();
+  });
+});
+
+describe("NodeCardPage — paths into the node", () => {
+  const inboundBroken = {
+    protocol: "tcp",
+    plane: "pod",
+    nodes: ["node-a", "node-b"],
+    cells: [
+      { source: "node-a", destination: "node-b", failRatio: 0, rttP95: 1e6 },
+      { source: "node-b", destination: "node-a", failRatio: 1, rttP95: 2e6 },
+    ],
+    timestamp: "t",
+  };
+
+  it("opens the breakdown on the direction the trouble is in", async () => {
+    renderPage("/nodes/node-a", { matrix: inboundBroken });
+    await waitFor(() => expect(screen.getByText("Failing")).toBeInTheDocument());
+    expect(screen.getByRole("radio", { name: "From peers" })).toHaveAttribute("aria-checked", "true");
+    expect(screen.getByRole("columnheader", { name: "Source" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "node-b" })).toHaveAttribute("href", "/pairs/node-b/node-a");
+    expect(screen.getByText("100.0%")).toBeInTheDocument();
+  });
+
+  it("switches to the paths the node sends", async () => {
+    renderPage("/nodes/node-a", { matrix: inboundBroken });
+    fireEvent.click(await screen.findByRole("radio", { name: "To peers" }));
+    expect(screen.getByRole("columnheader", { name: "Destination" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "node-b" })).toHaveAttribute("href", "/pairs/node-a/node-b");
+    expect(screen.getByText("0.0%")).toBeInTheDocument();
+  });
+
+  it("shows the path MTU on PMTU instead of an RTT the probe never measures", async () => {
+    const pmtu = {
+      protocol: "pmtu",
+      plane: "pod",
+      nodes: ["node-a", "node-b"],
+      cells: [
+        { source: "node-a", destination: "node-b", failRatio: 0, mtuBytes: 1400, probeMtuBytes: 1500 },
+        { source: "node-b", destination: "node-a", failRatio: 0, mtuBytes: 1500, probeMtuBytes: 1500 },
+      ],
+      timestamp: "t",
+    };
+    renderPage("/nodes/node-a?protocol=pmtu", { matrix: pmtu });
+    expect(await screen.findByRole("columnheader", { name: "Path MTU / probe" })).toBeInTheDocument();
+    expect(screen.getByText("1400 / 1500")).toBeInTheDocument();
+    expect(screen.queryByRole("columnheader", { name: "RTT p95" })).toBeNull();
   });
 });
 
@@ -690,8 +753,8 @@ describe("NodeCardPage — an external agent", () => {
     renderPage("/nodes/mac-external-01", { topology: externalTopology, matrix: inboundOnlyMatrix });
     await waitFor(() => expect(screen.getByText("Planes")).toBeInTheDocument());
     const chips = screen.getAllByTestId("plane-chip");
-    expect(chips.map((c) => c.textContent)).toEqual(["TCP", "UDP", "ICMP", "MTR"]);
-    expect(chips.map((c) => c.getAttribute("data-present"))).toEqual(["true", "false", "true", "true"]);
+    expect(chips.map((c) => c.textContent)).toEqual(["TCP", "UDP", "ICMP", "PMTU", "MTR"]);
+    expect(chips.map((c) => c.getAttribute("data-present"))).toEqual(["true", "false", "true", "false", "true"]);
   });
 
   it("says the planes are unknown when the agent advertised none", async () => {
@@ -719,8 +782,10 @@ describe("NodeCardPage — an external agent", () => {
     // externalAgent advertises tcp, icmp and mtr: on the UDP view its silent row has a known
     // cause, and the identity card's struck-through UDP chip already names it.
     renderPage("/nodes/mac-external-01?protocol=udp", { topology: externalTopology, matrix: inboundOnlyMatrix });
-    expect(await screen.findByText("No probe data for this node yet.")).toBeInTheDocument();
-    await waitFor(() => expect(screen.getAllByTestId("plane-chip")).toHaveLength(4));
+    // The stub serves the TCP cells on every protocol, so the inbound row is fictional here: read the host's own row.
+    fireEvent.click(await screen.findByRole("radio", { name: "To peers" }));
+    expect(screen.getByText("No probe data for this node yet.")).toBeInTheDocument();
+    await waitFor(() => expect(screen.getAllByTestId("plane-chip")).toHaveLength(5));
     const udp = screen.getAllByTestId("plane-chip").find((c) => c.textContent === "UDP");
     expect(udp?.getAttribute("data-present")).toBe("false");
     expect(screen.queryByText(/Prometheus is not scraping/)).toBeNull();

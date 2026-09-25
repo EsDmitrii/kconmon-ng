@@ -24,7 +24,7 @@ import { withAtParam, useTimeContext } from "@/lib/timemachine";
 import type { CheckDefinition, PromResult, RunDetail, Schedule, Target } from "@/lib/types";
 // fmtIntervalNs is imported rather than re-derived so a schedule's cadence
 // reads identically on this card and on the Targets page's own Schedules tab —
-// the same reason recent-changes.tsx imports pushEvents from pages/live.
+// the same reason recent-changes.tsx shares pushEvents with the Live page.
 import { escapeLabelValue } from "@/lib/utils";
 import { fmtCadence } from "@/pages/targets";
 

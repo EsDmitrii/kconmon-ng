@@ -25,9 +25,11 @@ import {
   fmtRatio,
   fmtRtt,
   isMeasured,
+  pmtuReading,
   type CellTier,
 } from "@/lib/matrix-cells";
 import { isPlanExcluded, readProbePlan } from "@/lib/matrix-plan";
+import { degradedProtocolParam, readProtocolFromLocation, writeProtocol } from "@/lib/protocol-param";
 import {
   MAX_ZOOM,
   MIN_ZOOM,
@@ -135,7 +137,7 @@ export function measuredCells(cells: unknown): MatrixCell[] {
   const out: MatrixCell[] = [];
   for (const c of cells) {
     if (!c || typeof c !== "object") continue;
-    const { source, destination, failRatio, rttP95, lossRatio } = c as Record<string, unknown>;
+    const { source, destination, failRatio, rttP95, lossRatio, mtuBytes, probeMtuBytes } = c as Record<string, unknown>;
     if (typeof source !== "string" || typeof destination !== "string") continue;
     out.push({
       source,
@@ -143,6 +145,8 @@ export function measuredCells(cells: unknown): MatrixCell[] {
       failRatio: measured(failRatio) ?? null,
       rttP95: measured(rttP95),
       lossRatio: measured(lossRatio),
+      mtuBytes: measured(mtuBytes),
+      probeMtuBytes: measured(probeMtuBytes),
     });
   }
   return out;
@@ -216,44 +220,6 @@ const LEGEND: { tier: Tier; key: MatrixKey }[] = [
   { tier: "bad", key: "legend.bad" },
   { tier: "unknown", key: "legend.unknown" },
 ];
-
-/*
- * PROTOCOL_PARAM is this page's own URL key, carried the way lib/timemachine's `?at=` is carried;
- * TanStack Router owns navigation here but no route declares a search schema (timemachine.tsx
- * documents that decision).
- */
-const PROTOCOL_PARAM = "protocol";
-
-/** readProtocolFromLocation resolves ?protocol= into one of the three the
- *  console probes. Anything else — a typo, a stale link, a protocol this build
- *  does not know — degrades to tcp rather than rendering an empty grid for a
- *  protocol nothing will ever answer for. */
-export function readProtocolFromLocation(search: string): Protocol {
-  const raw = new URLSearchParams(search).get(PROTOCOL_PARAM);
-  return PROTOCOLS.includes(raw as Protocol) ? (raw as Protocol) : "tcp";
-}
-
-/**
- * degradedProtocolParam answers "is the URL still claiming something this page
- * is not showing?" — a `?protocol=sctp` that silently became TCP left the lie
- * in the address bar, which is the string an operator copies and shares (QA
- * scope 2, finding #17). Null when the URL and the view already agree, which
- * includes the ordinary no-param case: the default needs no spelling out.
- */
-export function degradedProtocolParam(search: string): Protocol | null {
-  const raw = new URLSearchParams(search).get(PROTOCOL_PARAM);
-  if (raw === null) return null;
-  const resolved = readProtocolFromLocation(search);
-  return raw === resolved ? null : resolved;
-}
-
-/** writeProtocol is the ONE writer of ?protocol=, shared with the object cards
- *  so a second surface cannot invent a second spelling of the same key. */
-export function writeProtocol(p: Protocol): void {
-  const url = new URL(window.location.href);
-  url.searchParams.set(PROTOCOL_PARAM, p);
-  window.history.replaceState({}, "", `${url.pathname}${url.search}${url.hash}`);
-}
 
 /* Lifted from ui/pager.tsx's prev/next control — the console's one idiom for a
    small square icon button, so the zoom trio is not a fourth invention. */
@@ -345,7 +311,7 @@ function GridCellImpl({
   cell: MatrixCell | undefined;
   /** What this size can honestly SHOW — lib/matrix-zoom.ts's cellDensity. */
   density: CellDensity;
-  /** The grid's protocol, named in the 'unsupported' reading. */
+  /** The grid's protocol: named in the 'unsupported' reading, and a pmtu grid draws sizes. */
   protocol: Protocol;
   /** Why the pair is expected to be quiet, if it is (see Silence). Only an UNMEASURED cell
    *  reads it: data, if any arrived, always outranks every reason for its absence. */
@@ -494,6 +460,14 @@ function GridCellImpl({
               <dd className="mono-data text-right text-popover-foreground">{fmtRatio(cell.lossRatio)}</dd>
             </>
           ) : null}
+          {cell?.mtuBytes !== undefined ? (
+            <>
+              <dt>{t("tooltip.pathMtu")}</dt>
+              <dd className="mono-data text-right text-popover-foreground">
+                {`${cell.mtuBytes} / ${cell.probeMtuBytes ?? "—"}`}
+              </dd>
+            </>
+          ) : null}
         </dl>
       )}
     </div>
@@ -533,7 +507,24 @@ function GridCellImpl({
               figure stays one hover away in the tooltip, and the aria-label
               never changed at all. It is also what bounds the DOM on a big
               fleet — a tile is the link, full stop. */}
-          {density === "tile" ? null : !measured ? (
+          {density === "tile" ? null : protocol === "pmtu" && measured && cell?.mtuBytes !== undefined ? (
+            /* A path MTU cell's hero figure is the size that still crosses; the line under it says
+               whether that is the whole probe, a reduced path, or a black hole. */
+            <>
+              <span className="nums font-mono text-[length:var(--m-font-hero)] font-semibold leading-tight">
+                {cell.mtuBytes}
+              </span>
+              {density === "full" ? (
+                <span className="nums px-1 text-center font-mono text-[length:var(--m-font-sub)] leading-tight text-muted-foreground">
+                  {pmtuReading(cell) === "blackhole"
+                    ? t("cell.mtuBlackhole")
+                    : pmtuReading(cell) === "reduced"
+                      ? t("cell.mtuReduced", { probe: String(cell.probeMtuBytes) })
+                      : t("cell.mtuFull")}
+                </span>
+              ) : null}
+            </>
+          ) : !measured ? (
             /* The em-dash is reserved for a cell nothing measured. A cell with
                a p95 and no failure series shows its p95 as the hero figure —
                throwing away the one number it has and drawing a dash over it
@@ -1016,7 +1007,7 @@ export function MatrixPage() {
                   explains: `ml-auto` shoved it against the right edge, so a
                   sentence about the legend started a screen away from it. */}
               <p data-testid="matrix-legend-note" className="max-w-prose leading-relaxed">
-                {t("legend.note")}
+                {t(protocol === "pmtu" ? "legend.note.pmtu" : "legend.note")}
               </p>
             </div>
           </div>

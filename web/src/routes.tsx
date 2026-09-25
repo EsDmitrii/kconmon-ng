@@ -3,9 +3,11 @@ import {
   createRootRoute,
   createRoute,
   createRouter,
+  lazyRouteComponent,
   Link,
   Outlet,
   useRouterState,
+  type RouteComponent,
 } from "@tanstack/react-router";
 import { useQuery } from "@tanstack/react-query";
 import { NAV_ITEMS } from "@/nav";
@@ -19,29 +21,37 @@ import { TimeMachineBar } from "@/components/timemachine-bar";
 import { PageShell } from "@/components/page-shell";
 import { RouteErrorBoundary } from "@/components/error-boundary";
 import { Card } from "@/components/ui/card";
+import { Skeleton } from "@/components/ui/skeleton";
 import { ApiError, getConfig, getMe } from "@/lib/api";
 import { useT } from "@/lib/i18n";
 import { chromeDict } from "@/lib/i18n/dict/chrome";
 import { notFoundDict } from "@/lib/i18n/dict/not-found";
 import { AtParamSync, TimeMachineProvider } from "@/lib/timemachine";
 import { cn } from "@/lib/utils";
-import { AlertingPage } from "@/pages/alerting";
+/* The landing page and the login are in the first download: neither may wait for a chunk. Every
+   other page is its own chunk, fetched on first navigation (or on hover, see defaultPreload), so a
+   visit to the Overview does not pay for ECharts, CodeMirror and React Flow. */
 import { OverviewPage } from "@/pages/overview";
-import { LivePage } from "@/pages/live";
-import { MatrixPage } from "@/pages/matrix";
-import { TopologyPage } from "@/pages/topology";
-import { DiagnosticsPage } from "@/pages/diagnostics";
-import { ExplorePage } from "@/pages/explore";
-import { InvestigatePage } from "@/pages/investigate";
-import { PromQLConsolePage } from "@/pages/promql-console";
 import { LoginPage } from "@/pages/login";
-import { MTRPage } from "@/pages/mtr";
-import { NodeCardPage } from "@/pages/node-card";
-import { PairCardPage } from "@/pages/pair-card";
-import { RunDetailPage } from "@/pages/run-detail";
-import { SettingsPage } from "@/pages/settings";
-import { TargetCardPage } from "@/pages/target-card";
-import { TargetsPage } from "@/pages/targets";
+
+const PAGES: Record<string, RouteComponent> = {
+  "/": OverviewPage,
+  "/live": lazyRouteComponent(() => import("@/pages/live"), "LivePage"),
+  "/matrix": lazyRouteComponent(() => import("@/pages/matrix"), "MatrixPage"),
+  "/topology": lazyRouteComponent(() => import("@/pages/topology"), "TopologyPage"),
+  "/mtr": lazyRouteComponent(() => import("@/pages/mtr"), "MTRPage"),
+  "/diagnostics": lazyRouteComponent(() => import("@/pages/diagnostics"), "DiagnosticsPage"),
+  "/targets": lazyRouteComponent(() => import("@/pages/targets"), "TargetsPage"),
+  "/explore": lazyRouteComponent(() => import("@/pages/explore"), "ExplorePage"),
+  "/console": lazyRouteComponent(() => import("@/pages/promql-console"), "PromQLConsolePage"),
+  "/investigate": lazyRouteComponent(() => import("@/pages/investigate"), "InvestigatePage"),
+  "/settings": lazyRouteComponent(() => import("@/pages/settings"), "SettingsPage"),
+  "/alerting": lazyRouteComponent(() => import("@/pages/alerting"), "AlertingPage"),
+};
+const RunDetailPage = lazyRouteComponent(() => import("@/pages/run-detail"), "RunDetailPage");
+const NodeCardPage = lazyRouteComponent(() => import("@/pages/node-card"), "NodeCardPage");
+const PairCardPage = lazyRouteComponent(() => import("@/pages/pair-card"), "PairCardPage");
+const TargetCardPage = lazyRouteComponent(() => import("@/pages/target-card"), "TargetCardPage");
 
 /**
  * AppShell is the chrome around every route's Outlet: sidebar, anonymous-mode banner; split out
@@ -306,32 +316,7 @@ const routes = NAV_ITEMS.map((item) =>
   createRoute({
     getParentRoute: () => shellRoute,
     path: item.path,
-    component:
-      item.path === "/"
-        ? OverviewPage
-        : item.path === "/live"
-          ? LivePage
-          : item.path === "/matrix"
-            ? MatrixPage
-            : item.path === "/topology"
-              ? TopologyPage
-              : item.path === "/mtr"
-                ? MTRPage
-                : item.path === "/diagnostics"
-                  ? DiagnosticsPage
-                  : item.path === "/targets"
-                    ? TargetsPage
-                    : item.path === "/explore"
-                      ? ExplorePage
-                      : item.path === "/console"
-                        ? PromQLConsolePage
-                        : item.path === "/investigate"
-                          ? InvestigatePage
-                          : item.path === "/settings"
-                            ? SettingsPage
-                            : item.path === "/alerting"
-                              ? AlertingPage
-                              : () => <StubPage title={item.label} description={item.description} />,
+    component: PAGES[item.path] ?? (() => <StubPage title={item.label} description={item.description} />),
   }),
 );
 
@@ -391,7 +376,24 @@ export const routeTree = rootRoute.addChildren([
   loginRoute,
 ]);
 
-export const router = createRouter({ routeTree });
+/* What the main area shows while a page's chunk is still downloading: the frame every page shows
+   while its own data loads, so a slow first navigation reads as loading rather than as a blank. */
+function PagePending() {
+  const t = useT(chromeDict);
+  return (
+    <Card role="status" aria-live="polite" className="p-6">
+      <span className="sr-only">{t("shell.pageLoading")}</span>
+      <Skeleton className="h-10 w-full" />
+    </Card>
+  );
+}
+
+export const router = createRouter({
+  routeTree,
+  defaultPendingComponent: PagePending,
+  /* Hovering or focusing a link fetches its page's chunk, so the click rarely waits for one. */
+  defaultPreload: "intent",
+});
 
 declare module "@tanstack/react-router" {
   interface Register {

@@ -21,10 +21,10 @@ import type { InvestigationScope } from "@/lib/investigation-sources";
 import { stampFull, useLocale, useT, type Locale } from "@/lib/i18n";
 import { cardsDict, pluralKey, type CardsKey } from "@/lib/i18n/dict/cards";
 import { sharedDict } from "@/lib/i18n/dict/shared";
-import { DEGRADED_AT, FAILING_AT, isMeasured, severityRatio } from "@/lib/matrix-cells";
+import { cellTier, DEGRADED_AT, FAILING_AT, isMeasured, pmtuReading, severityRatio } from "@/lib/matrix-cells";
 /* The ?protocol= reader and writer live on pages/matrix.tsx — one URL key, one
    spelling, imported the way target-card.tsx imports fmtIntervalNs. */
-import { degradedProtocolParam, readProtocolFromLocation, writeProtocol } from "@/pages/matrix";
+import { degradedProtocolParam, readProtocolFromLocation, writeProtocol } from "@/lib/protocol-param";
 import { withAtParam, useTimeContext } from "@/lib/timemachine";
 import { PROTOCOLS, type MatrixCell, type Protocol, type RunDetail } from "@/lib/types";
 import { cn, runsAtOrBefore } from "@/lib/utils";
@@ -64,11 +64,14 @@ const TIER_KEYS: Record<Tier, CardsKey> = {
 /* The planes an external host's identity card lists: the mesh probes a bare
    host can run. DNS and HTTP are external checks against targets, not planes
    between peers, so they are not chips here. */
-const MESH_PLANES: readonly Plane[] = ["tcp", "udp", "icmp", "mtr"];
+const MESH_PLANES: readonly Plane[] = ["tcp", "udp", "icmp", "pmtu", "mtr"];
 
 /**
- * nodeHealth derives the header's health% and status tier from the worst OUTBOUND severity this
- * node reports in the matrix; self-cells are excluded (a node never reports a pair against itself).
+ * nodeHealth derives the header's health% and status tier from the worst pair this node is on, in
+ * either direction: a node nobody can reach is what NodeUnreachable fires on, and its own outbound
+ * row stays green. Self-cells are excluded (a node never reports a pair against itself). The tier
+ * is the matrix's own cellTier, so a reduced path reads Degraded here as it does in the grid; the
+ * percentage counts failures only, and is withheld when the tier rests on something else.
  *
  * `scored` and `total` are the figure's own COVERAGE, and they exist because a
  * bare "100.0% healthy" computed from one scored pair out of nine is a claim
@@ -83,17 +86,36 @@ export function nodeHealth(
   cells: MatrixCell[],
   nodeName: string,
 ): { percent: number | null; tier: Tier; scored: number; total: number } {
-  const pairs = cells.filter((c) => c.source === nodeName && c.destination !== nodeName);
-  const outbound = pairs.filter(isMeasured);
-  const ratios = outbound.map(severityRatio).filter((r): r is number => r !== null);
+  const pairs = cells.filter((c) => (c.source === nodeName) !== (c.destination === nodeName));
+  const measured = pairs.filter(isMeasured);
+  const ratios = measured.map(severityRatio).filter((r): r is number => r !== null);
   const coverage = { scored: ratios.length, total: pairs.length };
   const worst = ratios.length > 0 ? Math.max(...ratios) : null;
   const percent = worst === null ? null : Math.max(0, 100 * (1 - worst));
   if (ready === false) return { percent, tier: "bad", ...coverage };
-  if (outbound.length === 0) return { percent: null, tier: "unknown", ...coverage };
-  if (worst === null) return { percent: null, tier: "ok", ...coverage };
-  const tier: Tier = worst >= FAILING_AT ? "bad" : worst >= DEGRADED_AT ? "warn" : "ok";
-  return { percent, tier, ...coverage };
+  if (measured.length === 0) return { percent: null, tier: "unknown", ...coverage };
+  const tier = worstTier(measured);
+  const ratioTier: Tier = worst === null ? "ok" : worst >= FAILING_AT ? "bad" : worst >= DEGRADED_AT ? "warn" : "ok";
+  return { percent: ratioTier === tier ? percent : null, tier, ...coverage };
+}
+
+const TIER_RANK: Record<Tier, number> = { unknown: 0, ok: 1, warn: 2, bad: 3 };
+
+function worstTier(cells: MatrixCell[]): Tier {
+  return cells.map(cellTier).reduce<Tier>((a, b) => (TIER_RANK[b] > TIER_RANK[a] ? b : a), "ok");
+}
+
+type Direction = "out" | "in";
+
+/** The breakdown opens on the direction the trouble is in; outbound unless inbound is strictly worse. */
+function troubledDirection(outbound: MatrixCell[], inbound: MatrixCell[]): Direction {
+  return TIER_RANK[worstTier(inbound.filter(isMeasured))] > TIER_RANK[worstTier(outbound.filter(isMeasured))]
+    ? "in"
+    : "out";
+}
+
+function fmtMtu(c: MatrixCell): string {
+  return c.mtuBytes === undefined ? "—" : `${c.mtuBytes} / ${c.probeMtuBytes ?? "—"}`;
 }
 
 function fmtFail(ratio: number): string {
@@ -149,14 +171,38 @@ function BreakdownTable({
   const t = useT(cardsDict);
   const shared = useT(sharedDict);
   const outbound = cells.filter((c) => c.source === nodeName && c.destination !== nodeName);
-  const showLoss = outbound.some((c) => c.lossRatio !== undefined);
+  const inbound = cells.filter((c) => c.destination === nodeName && c.source !== nodeName);
+  /* null follows the trouble on every poll; a click pins the direction. An unscraped host opens on
+     its own silent row, because the reason it is silent is the finding. */
+  const [picked, setPicked] = useState<Direction | null>(null);
+  const direction = picked ?? (unscraped && outbound.length === 0 ? "out" : troubledDirection(outbound, inbound));
+  const rows = direction === "out" ? outbound : inbound;
+  const peerOf = (c: MatrixCell) => (direction === "out" ? c.destination : c.source);
+  const showLoss = rows.some((c) => c.lossRatio !== undefined);
+  const showMtu = rows.some((c) => c.mtuBytes !== undefined);
+  const showRtt = !showMtu || rows.some((c) => c.rttP95 !== undefined);
   /* One row per peer: on a big cluster that is every other node. */
-  const pager = usePager(outbound, { resetKey: nodeName });
-  if (outbound.length === 0) {
-    if (unscraped) {
+  const pager = usePager(rows, { resetKey: `${nodeName}:${direction}` });
+  const directionSwitch = (
+    <div className="border-b border-border px-4 py-2">
+      <Segmented
+        aria-label={t("node.breakdown.direction.aria")}
+        options={[
+          { value: "out" as Direction, label: t("node.breakdown.direction.out") },
+          { value: "in" as Direction, label: t("node.breakdown.direction.in") },
+        ]}
+        value={direction}
+        onChange={setPicked}
+      />
+    </div>
+  );
+  /* The unscraped explanation is about THIS node's own reports, so it belongs to the outbound view. */
+  let empty: React.ReactNode = null;
+  if (rows.length === 0) {
+    if (unscraped && direction === "out") {
       /* Same headline as the plain empty line, so the two states read as one
          fact with and without its explanation; the docs link is the action. */
-      return (
+      empty = (
         <EmptyState
           data-testid="breakdown-unscraped"
           title={t("node.breakdown.empty")}
@@ -174,16 +220,30 @@ function BreakdownTable({
           }
         />
       );
+    } else {
+      empty = <p className="px-4 py-10 text-center text-xs text-muted-foreground">{t("node.breakdown.empty")}</p>;
     }
-    return <p className="px-4 py-10 text-center text-xs text-muted-foreground">{t("node.breakdown.empty")}</p>;
+  }
+  /* Nothing in either direction: there is nothing to switch between. */
+  if (outbound.length === 0 && inbound.length === 0) return empty;
+  if (empty !== null) {
+    return (
+      <>
+        {directionSwitch}
+        {empty}
+      </>
+    );
   }
   return (
     <>
+    {directionSwitch}
     <Table variant="dense">
-      <caption className="sr-only">{t("node.breakdown.caption", { name: nodeName })}</caption>
+      <caption className="sr-only">
+        {t(direction === "out" ? "node.breakdown.caption" : "node.breakdown.caption.in", { name: nodeName })}
+      </caption>
       <THead>
         <Tr>
-          <Th className="pl-4 pr-4">{t("node.breakdown.destination")}</Th>
+          <Th className="pl-4 pr-4">{t(direction === "out" ? "node.breakdown.destination" : "node.breakdown.source")}</Th>
           <Th numeric className="pr-4">
             {t("node.breakdown.failRatio")}
           </Th>
@@ -192,24 +252,31 @@ function BreakdownTable({
               {t("node.breakdown.loss")}
             </Th>
           ) : null}
+          {showMtu ? (
+            <Th numeric className="pr-4">
+              {t("node.breakdown.pathMtu")}
+            </Th>
+          ) : null}
           {/* RTT p95 is a metric's name and reads the same in both. */}
-          <Th numeric className="pr-4">
-            {t("node.breakdown.rtt")}
-          </Th>
+          {showRtt ? (
+            <Th numeric className="pr-4">
+              {t("node.breakdown.rtt")}
+            </Th>
+          ) : null}
         </Tr>
       </THead>
       <TBody>
         {pager.visible.map((c) => (
-          <Tr key={c.destination}>
+          <Tr key={peerOf(c)}>
             {/* The destination was the other dead end on this card: the row
                 named a pair and led nowhere (QA scope 2, finding #14). */}
             <Td className="max-w-[16rem] pl-4 pr-4">
               <a
-                href={withAtParam(`/pairs/${encodeURIComponent(nodeName)}/${encodeURIComponent(c.destination)}`)}
-                title={c.destination}
+                href={withAtParam(`/pairs/${encodeURIComponent(c.source)}/${encodeURIComponent(c.destination)}`)}
+                title={peerOf(c)}
                 className="mono-data block truncate rounded text-primary hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
               >
-                {c.destination}
+                {peerOf(c)}
               </a>
             </Td>
             {/* Values read in the foreground (M4-2); only trouble is tinted. */}
@@ -231,9 +298,23 @@ function BreakdownTable({
                 {c.lossRatio === undefined ? "—" : fmtFail(c.lossRatio)}
               </Td>
             ) : null}
-            <Td numeric className="pr-4">
-              {fmtRtt(c.rttP95)}
-            </Td>
+            {showMtu ? (
+              <Td
+                numeric
+                className={cn(
+                  "pr-4",
+                  pmtuReading(c) === "blackhole" && "text-health-bad",
+                  pmtuReading(c) === "reduced" && "text-health-warn",
+                )}
+              >
+                {fmtMtu(c)}
+              </Td>
+            ) : null}
+            {showRtt ? (
+              <Td numeric className="pr-4">
+                {fmtRtt(c.rttP95)}
+              </Td>
+            ) : null}
           </Tr>
         ))}
       </TBody>

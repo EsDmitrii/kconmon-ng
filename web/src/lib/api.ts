@@ -54,6 +54,11 @@ import type {
   TokenCreateRequest,
   TokenCreateResponse,
   TokenList,
+  ConsoleUser,
+  ConsoleUserList,
+  RoleList,
+  UserCreateRequest,
+  UserPatchRequest,
   Topology,
   Version,
   Webhook,
@@ -871,6 +876,62 @@ export function createToken(req: TokenCreateRequest): Promise<TokenCreateRespons
 /** deleteToken is DELETE /api/v1/tokens/{id}: a REVOKE (204), and 404 for one already gone. */
 export function deleteToken(id: string): Promise<void> {
   return apiFetch(`/api/v1/tokens/${encodeURIComponent(id)}`, { method: "DELETE" }).then(handleVoid);
+}
+
+/**
+ * listUsers is GET /api/v1/users (users:manage, auth.mode=local only). Never carries a password or
+ * its hash.
+ */
+export function listUsers(): Promise<ConsoleUser[]> {
+  return apiFetch("/api/v1/users")
+    .then((r) => handle<ConsoleUserList>(r))
+    .then((l) => l.users ?? []);
+}
+
+/** createUser is POST /api/v1/users: the user and its one role, created together. */
+export function createUser(req: UserCreateRequest): Promise<ConsoleUser> {
+  return apiFetch("/api/v1/users", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(req),
+  }).then((r) => handle<ConsoleUser>(r));
+}
+
+/** updateUser is PATCH /api/v1/users/{id}: disable or enable, or replace the direct role. */
+export function updateUser(id: string, patch: UserPatchRequest): Promise<ConsoleUser> {
+  return apiFetch(`/api/v1/users/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(patch),
+  }).then((r) => handle<ConsoleUser>(r));
+}
+
+/** resetUserPassword is POST /api/v1/users/{id}/password; every session of that user goes stale. */
+export function resetUserPassword(id: string, password: string): Promise<void> {
+  return apiFetch(`/api/v1/users/${encodeURIComponent(id)}/password`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ password }),
+  }).then(handleVoid);
+}
+
+/**
+ * changeOwnPassword is POST /api/v1/auth/password: the caller's own password. The response reissues
+ * this browser's session cookie, and every other session of the user goes stale.
+ */
+export function changeOwnPassword(currentPassword: string, newPassword: string): Promise<void> {
+  return apiFetch("/api/v1/auth/password", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ currentPassword, newPassword }),
+  }).then(handleVoid);
+}
+
+/** listRoles is GET /api/v1/rbac/roles: the CUSTOM roles; the built-ins are compiled in. */
+export function listRoles(): Promise<RoleList["roles"]> {
+  return apiFetch("/api/v1/rbac/roles")
+    .then((r) => handle<RoleList>(r))
+    .then((l) => l.roles ?? []);
 }
 
 /**

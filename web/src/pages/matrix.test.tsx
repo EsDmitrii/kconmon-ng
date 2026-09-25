@@ -5,7 +5,8 @@ import { resetWsClient } from "@/hooks/use-ws-topic";
 import { FakeSocket } from "@/lib/fake-websocket";
 import { LOCALE_STORAGE_KEY, LocaleProvider } from "@/lib/i18n";
 import { parseInvestigationParams } from "@/lib/investigation-sources";
-import { degradedProtocolParam, MatrixPage, readProtocolFromLocation } from "./matrix";
+import { degradedProtocolParam, readProtocolFromLocation } from "@/lib/protocol-param";
+import { MatrixPage } from "./matrix";
 
 const matrixBody = {
   protocol: "tcp", plane: "pod", nodes: ["a", "b"],
@@ -201,6 +202,34 @@ describe("MatrixPage", () => {
     );
     renderPage();
     expect(await screen.findByRole("alert")).toHaveTextContent("prometheus not configured");
+  });
+
+  /* A black hole that has just started has a small fail ratio over the window, but a reduced path
+     loses nothing: any failure next to a smaller path MTU is a black hole, never "of 1500". */
+  it("names a fresh black hole a black hole before its ratio crosses the failing line", async () => {
+    window.history.replaceState({}, "", "/matrix?protocol=pmtu");
+    stubFetch({
+      protocol: "pmtu", plane: "pod", nodes: ["a", "b"], timestamp: "2026-09-24T00:00:00Z",
+      cells: [{ source: "a", destination: "b", failRatio: 0.03, mtuBytes: 1400, probeMtuBytes: 1500 }],
+    });
+    renderPage();
+    const cell = await screen.findByLabelText(/^a → b:/);
+    expect(cell).toHaveTextContent("black hole");
+    expect(cell).not.toHaveTextContent("of 1500");
+    window.history.replaceState({}, "", "/");
+  });
+
+  it("draws a black-holed pmtu cell with its path MTU as the hero figure", async () => {
+    window.history.replaceState({}, "", "/matrix?protocol=pmtu");
+    stubFetch({
+      protocol: "pmtu", plane: "pod", nodes: ["a", "b"], timestamp: "2026-09-24T00:00:00Z",
+      cells: [{ source: "a", destination: "b", failRatio: 1, mtuBytes: 1400, probeMtuBytes: 1500 }],
+    });
+    renderPage();
+    const cell = await screen.findByLabelText("a → b: fail 100.0%, path MTU 1400 of 1500 bytes");
+    expect(cell).toHaveTextContent("1400");
+    expect(cell).toHaveTextContent("black hole");
+    window.history.replaceState({}, "", "/");
   });
 });
 
@@ -619,6 +648,21 @@ describe("MatrixPage — the legend reads as one block", () => {
     // And it is no longer hidden from the readers most likely to need it.
     expect(note.className).not.toMatch(/hidden/);
     expect(note).toHaveTextContent(/worst of/i);
+  });
+
+  it("explains what a PMTU cell's colour and figure mean, not packet loss and p95", async () => {
+    window.history.replaceState({}, "", "/matrix?protocol=pmtu");
+    stubFetch({
+      protocol: "pmtu", plane: "pod", nodes: ["a", "b"], timestamp: "2026-09-24T00:00:00Z",
+      cells: [{ source: "a", destination: "b", failRatio: 0, mtuBytes: 1500, probeMtuBytes: 1500 }],
+    });
+    renderPage();
+    await screen.findByLabelText(/^a → b:/);
+    const note = screen.getByTestId("matrix-legend-note");
+    expect(note).toHaveTextContent(/reduced/i);
+    expect(note).toHaveTextContent(/black hole/i);
+    expect(note).not.toHaveTextContent(/p95/);
+    window.history.replaceState({}, "", "/");
   });
 });
 

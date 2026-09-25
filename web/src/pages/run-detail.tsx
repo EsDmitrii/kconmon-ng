@@ -1,4 +1,4 @@
-import { Fragment, useState, type ReactNode } from "react";
+import { Fragment, useMemo, useState, type ReactNode } from "react";
 import { ChevronRight, SearchX } from "lucide-react";
 import { PageShell } from "@/components/page-shell";
 import { RealtimeBadge } from "@/components/realtime-badge";
@@ -633,6 +633,13 @@ function PairTrace({
   );
 }
 
+const PMTU_VERDICT_KEY = {
+  ok: "detail.pmtu.ok",
+  reduced: "detail.pmtu.reduced",
+  blackhole: "detail.pmtu.blackhole",
+  unreachable: "detail.pmtu.unreachable",
+} as const;
+
 /**
  * PairDetail is what a NON-MTR pair row opens into: the sample's own facts,
  * whole. The table above truncates the error into a cell; a timeout's actual
@@ -650,6 +657,23 @@ function PairDetail({ pair }: { pair: RunPairRow }) {
       <dd className="mono-data">{fmtDuration(pair.durationNs)}</dd>
       <dt className="text-muted-foreground">{t("detail.state")}</dt>
       <dd>{pair.state}</dd>
+      {pair.pmtu ? (
+        <>
+          <dt className="text-muted-foreground">{t("detail.pmtu.verdict")}</dt>
+          <dd>{t(PMTU_VERDICT_KEY[pair.pmtu.verdict])}</dd>
+          {pair.pmtu.verdict !== "unreachable" ? (
+            <>
+              <dt className="text-muted-foreground">{t("detail.pmtu.path")}</dt>
+              <dd className="mono-data">
+                {t("detail.pmtu.pathValue", { mtu: String(pair.pmtu.pathMtu), probe: String(pair.pmtu.probeMtu) })}
+                {pair.pmtu.truncated ? <span className="ml-2 text-muted-foreground">{t("detail.pmtu.truncated")}</span> : null}
+              </dd>
+            </>
+          ) : null}
+          <dt className="text-muted-foreground">{t("detail.pmtu.datagrams")}</dt>
+          <dd className="mono-data">{pair.pmtu.steps}</dd>
+        </>
+      ) : null}
       {pair.error ? (
         <>
           <dt className="text-muted-foreground">{t("detail.error")}</dt>
@@ -662,8 +686,16 @@ function PairDetail({ pair }: { pair: RunPairRow }) {
   );
 }
 
-function PairTable({ pairs, isMTR, runId }: { pairs: RunPairRow[]; isMTR: boolean; runId: string }) {
+/** Failed pairs first, then the ones still in flight, then the rest; arrival order within each. */
+function pairRank(p: RunPairRow): number {
+  if (p.success === false || p.state === "failed") return 0;
+  if (p.success === true || p.state === "succeeded") return 2;
+  return 1;
+}
+
+function PairTable({ pairs: arrived, isMTR, runId }: { pairs: RunPairRow[]; isMTR: boolean; runId: string }) {
   const t = useT(runDetailDict);
+  const pairs = useMemo(() => [...arrived].sort((a, b) => pairRank(a) - pairRank(b)), [arrived]);
   /* An all-to-all run is n² rows — ninety for ten nodes — and the table used to
      be every one of them under an endless scroll.
 
@@ -721,7 +753,10 @@ function PairTable({ pairs, isMTR, runId }: { pairs: RunPairRow[]; isMTR: boolea
                   type="button"
                   aria-expanded={expanded}
                   aria-controls={detailId}
-                  aria-label={t("pairs.expand.aria", { source: p.source, destination: p.destination })}
+                  aria-label={t(isMTR ? "pairs.expand.aria" : "pairs.expand.detailsAria", {
+                    source: p.source,
+                    destination: p.destination,
+                  })}
                   onClick={() => setOpen(expanded ? null : key)}
                   className={cn(
                     "flex size-5 items-center justify-center rounded text-muted-foreground",

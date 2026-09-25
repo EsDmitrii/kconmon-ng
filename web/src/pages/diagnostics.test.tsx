@@ -683,13 +683,13 @@ describe("DiagnosticsPage form affordances", () => {
     expect(screen.getByRole("textbox", { name: /^Destination host \(port optional\)$/ })).toBeInTheDocument();
   });
 
-  it("lets the six-option check-type control wrap instead of overflowing a narrow card", async () => {
+  it("lets the seven-option check-type control wrap instead of overflowing a narrow card", async () => {
     renderPage({ nodes: ["a", "b"] });
 
     const group = await screen.findByRole("radiogroup", { name: "Check type" });
     expect(group.className).toContain("flex-wrap");
-    // All six are still reachable — the overflow hid the last two.
-    expect(within(group).getAllByRole("radio")).toHaveLength(6);
+    // All seven are still reachable: the overflow hid the last ones.
+    expect(within(group).getAllByRole("radio")).toHaveLength(7);
   });
 });
 

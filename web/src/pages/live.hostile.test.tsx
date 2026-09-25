@@ -6,7 +6,8 @@ import { FakeSocket } from "@/lib/fake-websocket";
 import { TimeMachineProvider } from "@/lib/timemachine";
 import type { LiveEvent } from "@/lib/types";
 import { TOPIC_LIVE } from "@/lib/ws";
-import { LIVE_RING_CAP, LivePage, countMissedEvents } from "./live";
+import { LIVE_RING_CAP } from "@/lib/live-events";
+import { LivePage, countMissedEvents } from "./live";
 
 /*
  * /live with an operator trying to break it: nonsense in the scope box, a

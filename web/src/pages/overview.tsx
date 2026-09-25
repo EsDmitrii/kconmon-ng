@@ -16,7 +16,7 @@ import { localeTag, useLocale, useT, type Translate } from "@/lib/i18n";
 import { overviewDict, type OverviewKey } from "@/lib/i18n/dict/overview";
 import { getEvents, getIncidents, isServerSentence, listAlerts } from "@/lib/api";
 import { buildInvestigateURL, incidentPermalink, scopeFromAlertLabels } from "@/lib/investigation-sources";
-import { isMeasured } from "@/lib/matrix-cells";
+import { cellTier, isMeasured, severityRatio } from "@/lib/matrix-cells";
 import { withAtParam, useTimeContext } from "@/lib/timemachine";
 import {
   PROTOCOLS,
@@ -46,13 +46,14 @@ export interface OverviewSummary {
 /* isMeasured used to live here. */
 
 /**
- * compareWorst orders the problem table: failure ratio first, RTT as the tiebreak; two pairs
- * failing at the same ratio are not equally bad.
+ * compareWorst orders the problem table the way the matrix ranks a cell: its worst ratio (failure or
+ * packet loss) first, a reduced path MTU after every ratio, RTT as the tiebreak; two pairs failing
+ * at the same ratio are not equally bad.
  */
 function compareWorst(a: MatrixCell, b: MatrixCell): number {
-  const fa = a.failRatio ?? 0;
-  const fb = b.failRatio ?? 0;
-  if (fa !== fb) return fb - fa;
+  const sa = severityRatio(a) ?? 0;
+  const sb = severityRatio(b) ?? 0;
+  if (sa !== sb) return sb - sa;
   return (b.rttP95 ?? 0) - (a.rttP95 ?? 0);
 }
 
@@ -73,8 +74,10 @@ function isScored(cell: MatrixCell): boolean {
 export function summarize(matrix: Matrix, topo?: Topology): OverviewSummary {
   const measured = matrix.cells.filter(isMeasured);
   const scored = matrix.cells.filter(isScored);
-  const failing = scored.filter((c) => (c.failRatio ?? 0) >= 0.1);
-  const degraded = scored.filter((c) => (c.failRatio ?? 0) >= 0.01 && (c.failRatio ?? 0) < 0.1);
+  /* The matrix's own tiers (lib/matrix-cells), so a tile never contradicts the grid it summarises:
+     packet loss counts like failures do, and a reduced path MTU is degraded. */
+  const failing = scored.filter((c) => cellTier(c) === "bad");
+  const degraded = scored.filter((c) => cellTier(c) === "warn");
   return {
     totalNodes: topo?.nodes.length ?? matrix.nodes.length,
     readyNodes: topo ? topo.nodes.filter((n) => n.ready).length : matrix.nodes.length,
@@ -888,9 +891,12 @@ function FiringAlerts() {
 
 function WorstPairsTable({
   pairs,
+  protocol,
   externalNodes,
 }: {
   pairs: MatrixCell[];
+  /** The plane the rows come from: a PMTU row's second figure is its path MTU, not an RTT. */
+  protocol: Protocol;
   /** Node names registered by a bare-host agent (lib/agents.ts): each wears an
    *  identity badge right after its name, whichever end of the pair it is. */
   externalNodes: ReadonlySet<string>;
@@ -926,7 +932,7 @@ function WorstPairsTable({
             {t("table.fail")}
           </Th>
           <Th numeric className="hidden pr-6 sm:table-cell">
-            {t("table.rtt")}
+            {t(protocol === "pmtu" ? "table.pathMtu" : "table.rtt")}
           </Th>
           <Th>{t("table.status")}</Th>
           {/* The investigate column carries links, not data — named for screen readers only. */}
@@ -937,8 +943,9 @@ function WorstPairsTable({
       </THead>
       <TBody>
         {pairs.map((c, i) => {
-            const fail = c.failRatio ?? 0;
-            const failing = fail >= 0.1;
+            /* The matrix's reading of the cell: the worst of failures and packet loss, and its tier. */
+            const worst = severityRatio(c) ?? 0;
+            const failing = cellTier(c) === "bad";
             /* Same two links a matrix cell carries: the pair card AT the viewed instant, and an
                investigation window ending there rather than at the wall clock. */
             const pairHref = withAtParam(
@@ -994,11 +1001,15 @@ function WorstPairsTable({
                     failing ? "text-health-bad" : "text-health-warn",
                   )}
                 >
-                  {(100 * fail).toFixed(1)}%
+                  {(100 * worst).toFixed(1)}%
                 </Td>
-                {/* The RTT is a value, not a caption — it reads in the foreground. */}
+                {/* The second figure is a value, not a caption: it reads in the foreground. */}
                 <Td numeric className="hidden pr-6 sm:table-cell">
-                  {fmtRtt(c.rttP95)}
+                  {protocol === "pmtu"
+                    ? c.mtuBytes === undefined
+                      ? "—"
+                      : `${c.mtuBytes} / ${c.probeMtuBytes ?? "—"}`
+                    : fmtRtt(c.rttP95)}
                 </Td>
                 <Td>
                   <Badge variant={failing ? "bad" : "warn"} dot>
@@ -1049,7 +1060,7 @@ function PageProblem({ what, detail }: { what: string; detail: string }) {
 export function OverviewPage() {
   const t = useT(overviewDict);
   const topo = useTopology();
-  /* All three protocol planes, always (P3): the header statement reads every
+  /* All four protocol planes, always (P3): the header statement reads every
      one of them, while the tiles and the worst-pairs table follow `protocol`.
      The selector FOLLOWS the verdict until the operator touches it: a header
      naming a failing plane above a TCP card saying "no failing pairs" is the
@@ -1058,7 +1069,8 @@ export function OverviewPage() {
   const tcp = useMatrix("tcp");
   const udp = useMatrix("udp");
   const icmp = useMatrix("icmp");
-  const byProtocol = { tcp, udp, icmp } as const;
+  const pmtu = useMatrix("pmtu");
+  const byProtocol = { tcp, udp, icmp, pmtu } as const;
   const { isLive } = useTimeContext();
 
   const planes: PlaneSummary[] = useMemo(
@@ -1067,10 +1079,12 @@ export function OverviewPage() {
         ["tcp", tcp.data],
         ["udp", udp.data],
         ["icmp", icmp.data],
+        ["pmtu", pmtu.data],
       ] as const).flatMap(([p, data]) => (data ? [{ protocol: p, summary: summarize(data, topo.data) }] : [])),
-    [tcp.data, udp.data, icmp.data, topo.data],
+    [tcp.data, udp.data, icmp.data, pmtu.data, topo.data],
   );
-  const complete = tcp.data !== undefined && udp.data !== undefined && icmp.data !== undefined;
+  const complete =
+    tcp.data !== undefined && udp.data !== undefined && icmp.data !== undefined && pmtu.data !== undefined;
   const worstPlane = useMemo(() => worstDirtyPlane(planes), [planes]);
   const protocol: Protocol = picked ?? worstPlane ?? "tcp";
   const setProtocol = (p: Protocol) => setPicked(p);
@@ -1203,7 +1217,7 @@ export function OverviewPage() {
                 label={t("tiles.degraded")}
                 value={pairsValue(summary.pairsDegraded)}
                 tone={summary.pairsDegraded > 0 ? "warn" : undefined}
-                toneLabel={t("tiles.degraded.tone")}
+                toneLabel={t(protocol === "pmtu" ? "tiles.degraded.tone.pmtu" : "tiles.degraded.tone")}
                 hint={t("qualifier", { protocol: protocol.toUpperCase() })}
                 note={pairsNote}
               />
@@ -1262,7 +1276,7 @@ export function OverviewPage() {
                   )
                 ) : (
                   <div className="mt-4">
-                    <WorstPairsTable pairs={summary.worstPairs} externalNodes={externalNodes} />
+                    <WorstPairsTable pairs={summary.worstPairs} protocol={protocol} externalNodes={externalNodes} />
                   </div>
                 )}
               </section>

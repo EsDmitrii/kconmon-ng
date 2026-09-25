@@ -36,14 +36,22 @@ export default defineConfig({
   build: {
     outDir: distDir,
     emptyOutDir: true,
+    // The ECharts vendor chunk is ~535 kB even with only the parts the console registers
+    // (components/echart.tsx), and only the chart pages load it; the default 500 would warn on
+    // every build and teach everyone to ignore the warning.
+    chunkSizeWarningLimit: 600,
     rolldownOptions: {
       output: {
-        // Split the heaviest, page-scoped vendor libs out of the main bundle
-        // so an Overview/Matrix-only visit doesn't pay for ECharts/CodeMirror/
-        // React Flow. Route-level lazy loading is a bigger change (the router
-        // is code-based, not file-based); this is the low-risk first step.
+        // The heaviest vendor libs get chunks of their own, so the lazily
+        // loaded pages that use them (routes.tsx) share one copy each and an
+        // Overview visit downloads none of ECharts, CodeMirror or React Flow.
+        // React (and the store shim the router shares with React Flow) goes
+        // first: a group also captures its members' dependencies, and without
+        // a higher-priority group of its own that code landed inside the
+        // xyflow chunk, which the entry then had to download just for it.
         codeSplitting: {
           groups: [
+            { name: "react", test: /[\\/]node_modules[\\/](react|react-dom|scheduler|use-sync-external-store)[\\/]/, priority: 20 },
             { name: "echarts", test: /[\\/]node_modules[\\/](echarts|zrender)[\\/]/ },
             {
               name: "codemirror",

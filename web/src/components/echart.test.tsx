@@ -76,7 +76,7 @@ function makeChart(): FakeChart {
 
 const init = vi.fn(() => makeChart());
 
-vi.mock("echarts", () => ({ init: (...args: unknown[]) => init(...(args as [])) }));
+vi.mock("echarts/core", () => ({ init: (...args: unknown[]) => init(...(args as [])), use: () => {} }));
 
 /** The observers the component constructs, so a test can fire one by hand. */
 const observers: { cb: () => void; targets: Element[] }[] = [];

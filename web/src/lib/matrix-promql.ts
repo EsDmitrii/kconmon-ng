@@ -26,13 +26,28 @@ function lossQuery(proto: Protocol): string {
   return `avg by (source_node, destination_node) (${METRICS_PREFIX}_${proto}_packet_loss_ratio)`;
 }
 
+function mtuQuery(): string {
+  return `min by (source_node, destination_node) (${METRICS_PREFIX}_pmtu_bytes)`;
+}
+
+function probeQuery(): string {
+  return `max by (source_node) (${METRICS_PREFIX}_agent_pmtu_probe_bytes)`;
+}
+
 /**
  * matrixQueries is the per-protocol query set, mirroring Compute's switch. TCP
  * has no packet-loss series at all (it is a connect/duration probe, not a
  * datagram one), so `loss` is absent rather than an empty string — an absent
- * query is one fewer request, not a request for nothing.
+ * query is one fewer request, not a request for nothing. pmtu has no RTT: it
+ * measures sizes, and reads its source's probe size to tell a reduced path.
  */
-export function matrixQueries(protocol: Protocol): { fail: string; rtt: string; loss?: string } {
+export function matrixQueries(protocol: Protocol): {
+  fail: string;
+  rtt?: string;
+  loss?: string;
+  mtu?: string;
+  probe?: string;
+} {
   switch (protocol) {
     case "tcp":
       return { fail: failRatioQuery("tcp"), rtt: p95Query(`${METRICS_PREFIX}_tcp_total_duration_seconds_bucket`) };
@@ -48,6 +63,8 @@ export function matrixQueries(protocol: Protocol): { fail: string; rtt: string; 
         rtt: p95Query(`${METRICS_PREFIX}_icmp_rtt_seconds_bucket`),
         loss: lossQuery("icmp"),
       };
+    case "pmtu":
+      return { fail: failRatioQuery("pmtu"), mtu: mtuQuery(), probe: probeQuery() };
   }
 }
 
@@ -77,6 +94,20 @@ export function vectorByPair(res: PromResult): Map<PairKey, number> {
   return out;
 }
 
+/** vectorBySource folds a source_node-keyed vector: the agent-level probe size. */
+export function vectorBySource(res: PromResult): Map<string, number> {
+  const out = new Map<string, number>();
+  if (res.status !== "success" || res.data?.resultType !== "vector") return out;
+  for (const raw of res.data.result) {
+    const sample = raw as { metric?: Record<string, string>; value?: [number, string] };
+    const src = sample.metric?.source_node;
+    const v = Number(sample.value?.[1]);
+    if (!src || !Number.isFinite(v)) continue;
+    out.set(src, v);
+  }
+  return out;
+}
+
 /** foldMatrix is matrix.go's Compute minus the fetching: union the pairs. */
 export function foldMatrix(
   protocol: Protocol,
@@ -84,10 +115,12 @@ export function foldMatrix(
   rtt: Map<PairKey, number>,
   loss: Map<PairKey, number>,
   at: Date,
+  mtu: Map<PairKey, number> = new Map(),
+  probe: Map<string, number> = new Map(),
 ): Matrix {
   const nodes = new Set<string>();
   const pairs = new Set<PairKey>();
-  for (const m of [fail, rtt, loss]) {
+  for (const m of [fail, rtt, loss, mtu]) {
     for (const k of m.keys()) {
       const [src, dst] = k.split("\0");
       nodes.add(src);
@@ -101,6 +134,10 @@ export function foldMatrix(
     const cell: MatrixCell = { source, destination, failRatio: fail.has(k) ? (fail.get(k) as number) : null };
     if (rtt.has(k)) cell.rttP95 = Math.round((rtt.get(k) as number) * 1e9);
     if (loss.has(k)) cell.lossRatio = loss.get(k) as number;
+    if (mtu.has(k)) {
+      cell.mtuBytes = mtu.get(k) as number;
+      if (probe.has(source)) cell.probeMtuBytes = probe.get(source) as number;
+    }
     return cell;
   });
   cells.sort((a, b) => (a.source === b.source ? a.destination.localeCompare(b.destination) : a.source.localeCompare(b.source)));
@@ -120,17 +157,30 @@ function promqlError(res: PromResult): string | undefined {
 }
 
 /**
- * getMatrixAt is getMatrix's Time Machine counterpart: the same matrix; the two or three queries go
- * out in parallel.
+ * getMatrixAt is getMatrix's Time Machine counterpart: the same matrix; the protocol's queries go
+ * out in parallel, and an absent one is no request at all.
  */
 export async function getMatrixAt(protocol: Protocol, at: Date): Promise<Matrix> {
   const q = matrixQueries(protocol);
-  const [failRes, rttRes, lossRes] = await Promise.all([
+  const optional = (query: string | undefined) =>
+    query ? promqlQuery(query, at) : Promise.resolve<PromResult>({ status: "success" });
+  const [failRes, rttRes, lossRes, mtuRes, probeRes] = await Promise.all([
     promqlQuery(q.fail, at),
-    promqlQuery(q.rtt, at),
-    q.loss ? promqlQuery(q.loss, at) : Promise.resolve<PromResult>({ status: "success" }),
+    optional(q.rtt),
+    optional(q.loss),
+    optional(q.mtu),
+    optional(q.probe),
   ]);
-  const err = promqlError(failRes) ?? promqlError(rttRes) ?? promqlError(lossRes);
+  const err =
+    promqlError(failRes) ?? promqlError(rttRes) ?? promqlError(lossRes) ?? promqlError(mtuRes) ?? promqlError(probeRes);
   if (err) throw new Error(err);
-  return foldMatrix(protocol, vectorByPair(failRes), vectorByPair(rttRes), vectorByPair(lossRes), at);
+  return foldMatrix(
+    protocol,
+    vectorByPair(failRes),
+    vectorByPair(rttRes),
+    vectorByPair(lossRes),
+    at,
+    vectorByPair(mtuRes),
+    vectorBySource(probeRes),
+  );
 }
