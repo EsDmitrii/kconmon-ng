@@ -1,14 +1,16 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { useQueryClient } from "@tanstack/react-query";
-import { ChevronUp, LogOut, KeyRound } from "lucide-react";
-import { logout } from "@/lib/api";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { ChevronUp, LogOut, KeyRound, Lock } from "lucide-react";
+import { ChangePasswordDialog } from "@/components/change-password";
+import { getConfig, logout } from "@/lib/api";
 import { useT } from "@/lib/i18n";
 import { withAtParam } from "@/lib/timemachine";
 import { userMenuDict } from "@/lib/i18n/dict/user-menu";
 import type { Me } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
-/** UserMenu — display name, roles, "Sign out", and (only with tokens:manage) a link to token management. */
+/** UserMenu — display name, roles, "Sign out", (only with tokens:manage) a link to token management,
+ *  and (only in auth.mode=local) the user's own password change. */
 export function UserMenu({ me, can }: { me: Me; can: (p: string) => boolean }) {
   const [open, setOpen] = useState(false);
   const [signingOut, setSigningOut] = useState(false);
@@ -20,6 +22,11 @@ export function UserMenu({ me, can }: { me: Me; can: (p: string) => boolean }) {
   const triggerRef = useRef<HTMLButtonElement>(null);
   const queryClient = useQueryClient();
   const t = useT(userMenuDict);
+  /* The same ["config"] entry AppShell already holds, so this is no extra round trip. A password is
+     the console's to change only where it is its own identity provider. */
+  const { data: config } = useQuery({ queryKey: ["config"], queryFn: getConfig, staleTime: Infinity });
+  const canChangePassword = config?.auth?.mode === "local" && me.subject.kind === "user";
+  const [passwordOpen, setPasswordOpen] = useState(false);
 
   /** Closes and puts focus back where it came from. */
   const closeAndRefocus = useCallback(() => {
@@ -110,6 +117,21 @@ export function UserMenu({ me, can }: { me: Me; can: (p: string) => boolean }) {
               {t("tokens")}
             </a>
           ) : null}
+          {canChangePassword ? (
+            <button
+              type="button"
+              onClick={() => {
+                /* Focus goes back to the trigger FIRST: the dialog returns focus to whatever held it
+                   when it opened, and this button is about to unmount with the menu. */
+                closeAndRefocus();
+                setPasswordOpen(true);
+              }}
+              className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left text-[13px] text-foreground hover:bg-accent/60"
+            >
+              <Lock aria-hidden="true" className="size-3.5 shrink-0" />
+              {t("password")}
+            </button>
+          ) : null}
           <button
             type="button"
             onClick={handleSignOut}
@@ -121,6 +143,7 @@ export function UserMenu({ me, can }: { me: Me; can: (p: string) => boolean }) {
           </button>
         </div>
       ) : null}
+      {canChangePassword ? <ChangePasswordDialog open={passwordOpen} onClose={() => setPasswordOpen(false)} /> : null}
     </div>
   );
 }

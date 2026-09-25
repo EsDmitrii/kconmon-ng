@@ -21,7 +21,12 @@ function finite(v: unknown): v is number {
  *  is an answer. */
 export function isMeasured(cell: MatrixCell | undefined): boolean {
   if (!cell) return false;
-  return finite(cell.failRatio) || finite(cell.rttP95) || finite(cell.lossRatio);
+  return finite(cell.failRatio) || finite(cell.rttP95) || finite(cell.lossRatio) || finite(cell.mtuBytes);
+}
+
+/** isReducedPath: the path carries less than the source probes at, and says so (PMTUD works). */
+export function isReducedPath(cell: MatrixCell | undefined): boolean {
+  return !!cell && finite(cell.mtuBytes) && finite(cell.probeMtuBytes) && cell.mtuBytes < cell.probeMtuBytes;
 }
 
 /**
@@ -38,20 +43,35 @@ export function severityRatio(cell: MatrixCell | undefined): number | null {
 }
 
 /** cellTier is the colour/badge every surface paints from; "unknown" is reserved for silence — and only silence. */
+/**
+ * pmtuReading names what a path MTU cell shows. A reduced path loses nothing (the path says how big
+ * it may be), so ANY failure next to a smaller path MTU is a black hole, even while its ratio over
+ * the window is still under the failing line; without a smaller MTU only the failing line makes one.
+ */
+export function pmtuReading(cell: MatrixCell | undefined): "blackhole" | "reduced" | "full" | null {
+  if (!cell || !finite(cell.mtuBytes)) return null;
+  const fail = finite(cell.failRatio) ? cell.failRatio : 0;
+  if (fail >= FAILING_AT || (fail > 0 && isReducedPath(cell))) return "blackhole";
+  return isReducedPath(cell) ? "reduced" : "full";
+}
+
 export function cellTier(cell: MatrixCell | undefined): CellTier {
   if (!isMeasured(cell)) return "unknown";
+  // A black hole is red from its first failed probe: the 5m fail ratio lags, the legend does not.
+  if (pmtuReading(cell) === "blackhole") return "bad";
   const ratio = severityRatio(cell);
-  if (ratio === null) return "ok";
-  if (ratio >= FAILING_AT) return "bad";
-  if (ratio >= DEGRADED_AT) return "warn";
+  if (ratio !== null && ratio >= FAILING_AT) return "bad";
+  if (ratio !== null && ratio >= DEGRADED_AT) return "warn";
+  // A reduced path fails nothing and still breaks UDP applications without their own PMTUD.
+  if (isReducedPath(cell)) return "warn";
   return "ok";
 }
 
 /** isProblemCell is the topology edge filter and the worst-pairs cut: a cell
- *  whose severity has crossed the degraded line. Loss-only qualifies. */
+ *  whose severity has crossed the degraded line, or a reduced path MTU. Loss-only qualifies. */
 export function isProblemCell(cell: MatrixCell | undefined): boolean {
   const ratio = severityRatio(cell);
-  return ratio !== null && ratio >= DEGRADED_AT;
+  return (ratio !== null && ratio >= DEGRADED_AT) || isReducedPath(cell);
 }
 
 /** fmtRatio renders a 0–1 ratio as the percentage every surface prints; a non-finite ratio is no measurement, not "NaN%". */
@@ -75,5 +95,12 @@ export function cellSummary(cell: MatrixCell | undefined, t: Translate<MatrixCel
   );
   if (finite(cell?.rttP95)) parts.push(t("rttP95", { rtt: fmtRtt(cell.rttP95) }));
   if (finite(cell?.lossRatio)) parts.push(t("packetLoss", { ratio: fmtRatio(cell.lossRatio) }));
+  if (finite(cell?.mtuBytes)) {
+    parts.push(
+      isReducedPath(cell)
+        ? t("pathMtuReduced", { mtu: String(cell.mtuBytes), probe: String(cell.probeMtuBytes) })
+        : t("pathMtu", { mtu: String(cell.mtuBytes) }),
+    );
+  }
   return parts.join(", ");
 }

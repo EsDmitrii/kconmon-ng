@@ -34,6 +34,36 @@ export interface RunPairRow {
   success?: boolean;
   durationNs?: number;
   error?: string;
+  /** Set on a pmtu result: what the path MTU search found. */
+  pmtu?: PMTUReading;
+}
+
+/** PMTUReading is a pmtu result's details (internal/model PMTUDetails), read defensively. */
+export interface PMTUReading {
+  verdict: "ok" | "reduced" | "blackhole" | "unreachable";
+  probeMtu: number;
+  pathMtu: number;
+  steps: number;
+  truncated: boolean;
+}
+
+const PMTU_VERDICTS = new Set(["ok", "reduced", "blackhole", "unreachable"]);
+
+/** pmtuReadingOf reads a pmtu result's details, or undefined for anything else or anything malformed. */
+export function pmtuReadingOf(result: unknown): PMTUReading | undefined {
+  if (typeof result !== "object" || result === null) return undefined;
+  const r = result as { type?: unknown; details?: unknown };
+  if (r.type !== "pmtu" || typeof r.details !== "object" || r.details === null) return undefined;
+  const d = r.details as Record<string, unknown>;
+  const num = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : 0);
+  if (typeof d.verdict !== "string" || !PMTU_VERDICTS.has(d.verdict)) return undefined;
+  return {
+    verdict: d.verdict as PMTUReading["verdict"],
+    probeMtu: num(d.probeMtu),
+    pathMtu: num(d.pathMtu),
+    steps: num(d.steps),
+    truncated: d.truncated === true,
+  };
 }
 
 // NUL keeps the composite key unambiguous, same convention as matrix.tsx's
@@ -50,6 +80,7 @@ function fromResult(r: RunResult): RunPairRow {
     success: r.success,
     durationNs: r.durationNs,
     error: r.error,
+    pmtu: pmtuReadingOf(r.result),
   };
 }
 

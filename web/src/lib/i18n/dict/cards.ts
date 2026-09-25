@@ -129,9 +129,15 @@ const en = {
   "node.breakdown.empty.unscraped":
     "Prometheus is not scraping this external agent's metrics port, so its probe results never reach the console. Add a scrape job for the port — see External agents docs.",
 
-  "node.breakdown": "Per-destination breakdown",
-  "node.breakdown.caption": "Per-destination breakdown for {name}",
+  "node.breakdown": "Per-peer breakdown",
+  "node.breakdown.caption": "Paths from {name} to each peer",
+  "node.breakdown.caption.in": "Paths from each peer to {name}",
+  "node.breakdown.direction.aria": "Direction of the paths",
+  "node.breakdown.direction.out": "To peers",
+  "node.breakdown.direction.in": "From peers",
   "node.breakdown.destination": "Destination",
+  "node.breakdown.source": "Source",
+  "node.breakdown.pathMtu": "Path MTU / probe",
   "node.breakdown.failRatio": "Fail ratio",
   /* Present only while the cells carry loss — the same rule the matrix tooltip
      follows, and the vector that decides the header's tier on UDP/ICMP. */
@@ -159,6 +165,13 @@ const en = {
   /* ── pair card ─────────────────────────────────────────────────────────── */
   "pair.title": "Pair",
   "pair.description": "Pair connectivity (TCP matrix)",
+  "pair.pmtu.title": "Path MTU",
+  "pair.pmtu.none": "No path MTU measured for this pair.",
+  "pair.pmtu.bytes": "{mtu} bytes",
+  "pair.pmtu.bytesOf": "{mtu} of {probe} bytes",
+  "pair.pmtu.full": "Full size",
+  "pair.pmtu.reduced": "Reduced",
+  "pair.pmtu.blackhole": "Black hole",
   "pair.notFound.bare": "No pair in the URL.",
   "pair.notFound.body": "This link is missing a source and destination.",
   "pair.matrixUnavailable": "Matrix is unavailable",
@@ -332,9 +345,15 @@ export const cardsDict: Dictionary<CardsKey> = defineDict(en, {
   "node.breakdown.empty.unscraped":
     "Prometheus не собирает метрики с порта этого внешнего агента, поэтому результаты его зондов до консоли не доходят. Добавьте scrape job на этот порт, см. документацию по внешним агентам.",
 
-  "node.breakdown": "Разбивка по назначениям",
-  "node.breakdown.caption": "Разбивка по назначениям для {name}",
+  "node.breakdown": "Разбивка по соседям",
+  "node.breakdown.caption": "Пути от {name} к каждому соседу",
+  "node.breakdown.caption.in": "Пути от каждого соседа к {name}",
+  "node.breakdown.direction.aria": "Направление путей",
+  "node.breakdown.direction.out": "К соседям",
+  "node.breakdown.direction.in": "От соседей",
   "node.breakdown.destination": "Назначение",
+  "node.breakdown.source": "Источник",
+  "node.breakdown.pathMtu": "Path MTU / проба",
   /* Word-for-word dict/matrix.ts's "tooltip.failRatio" — the column and the
      matrix tooltip name the same series, so they name it the same. */
   "node.breakdown.failRatio": "Доля сбоев",
@@ -362,6 +381,13 @@ export const cardsDict: Dictionary<CardsKey> = defineDict(en, {
 
   "pair.title": "Пара",
   "pair.description": "Связность пары (матрица TCP)",
+  "pair.pmtu.title": "MTU пути",
+  "pair.pmtu.none": "Для этой пары MTU пути не измерялся.",
+  "pair.pmtu.bytes": "{mtu} байт",
+  "pair.pmtu.bytesOf": "{mtu} из {probe} байт",
+  "pair.pmtu.full": "Полный размер",
+  "pair.pmtu.reduced": "Уменьшен",
+  "pair.pmtu.blackhole": "Чёрная дыра",
   "pair.notFound.bare": "В URL нет пары.",
   "pair.notFound.body": "В этой ссылке не хватает источника и назначения.",
   "pair.matrixUnavailable": "Матрица недоступна",

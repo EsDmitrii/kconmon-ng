@@ -75,6 +75,9 @@ const en = {
   /* The cell's secondary line when the failure series is silent. */
   "cell.noFailData": "no fail data",
   "cell.loss": "loss {ratio}",
+  "cell.mtuBlackhole": "black hole",
+  "cell.mtuReduced": "of {probe}",
+  "cell.mtuFull": "full size",
 
   "tooltip.unmeasured": "No probe data in Prometheus for this pair.",
   /* The sparse-plan cell (M10). Says what CAN still be done — Investigate probes on demand
@@ -86,6 +89,7 @@ const en = {
   "tooltip.noSamples": "no samples",
   "tooltip.rtt": "RTT p95",
   "tooltip.loss": "Packet loss",
+  "tooltip.pathMtu": "Path MTU / probe size",
 
   /* The aria-label's reading of a sparse-plan cell — the one phrase that may claim the silence is
      INTENDED. cellSummary's "no data" stays reserved for a pair something should have measured. */
@@ -105,6 +109,9 @@ const en = {
      into the other (QA scope 2, finding #12). */
   "legend.note":
     "colour = worst of fail % and packet loss · a cell with no fail samples shows its p95 and stays green on the absence of a bad signal, not on a measured zero",
+  /* The PMTU grid draws sizes, not latencies: the note says what its figure and its amber mean. */
+  "legend.note.pmtu":
+    "figure = the largest datagram that crossed, in bytes · amber = reduced, the path is smaller than the probe and says so · red = black hole, full-size datagrams vanish without an ICMP error",
 
   /* ── the row and column headers ─────────────────────────────────────────── */
   "header.node": "Open the card for {node}",
@@ -204,6 +211,9 @@ export const matrixDict: Dictionary<MatrixKey> = defineDict(en, {
      «нет выборок»); this is the 10.5px line that has to fit a grid cell. */
   "cell.noFailData": "сбои: н/д",
   "cell.loss": "потери {ratio}",
+  "cell.mtuBlackhole": "чёрная дыра",
+  "cell.mtuReduced": "из {probe}",
+  "cell.mtuFull": "полный размер",
 
   "tooltip.unmeasured": "Для этой пары в Prometheus нет данных зондов.",
   "tooltip.notProbed":
@@ -212,6 +222,7 @@ export const matrixDict: Dictionary<MatrixKey> = defineDict(en, {
   "tooltip.noSamples": "нет выборок",
   "tooltip.rtt": "RTT p95",
   "tooltip.loss": "Потери пакетов",
+  "tooltip.pathMtu": "MTU пути / размер пробы",
 
   /* «не зондируется», not «нет данных»: вторая формулировка зарезервирована за парой, которую
      ДОЛЖНЫ были измерить. Здесь тишина запланирована. */
@@ -224,6 +235,8 @@ export const matrixDict: Dictionary<MatrixKey> = defineDict(en, {
   "legend.notProbed": "Не зондируется · исключено планом топологии",
   "legend.note":
     "цвет = худшее из доли сбоев и потерь пакетов · ячейка без выборок сбоев показывает свой p95 и остаётся зелёной потому, что плохого сигнала нет, а не потому, что измерен ноль",
+  "legend.note.pmtu":
+    "число = наибольшая прошедшая датаграмма в байтах · янтарный = путь меньше пробы и сообщает об этом · красный = чёрная дыра, полноразмерные датаграммы пропадают без ICMP-ошибки",
 
   "header.node": "Открыть карточку узла {node}",
 

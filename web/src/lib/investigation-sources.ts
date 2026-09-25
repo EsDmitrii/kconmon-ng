@@ -12,6 +12,7 @@ import type {
   PromResult,
   RunDetail,
 } from "./types";
+import { PROTOCOLS } from "./types";
 import { stampFull, type Locale, type Translate } from "./i18n";
 import { enT, investigationSourcesDict, type InvestigationSourcesKey } from "./i18n/dict/investigation-sources";
 import { PAIR_ARROW, escapeLabelValue, normalizePairInput } from "./utils";
@@ -548,11 +549,10 @@ export function investigationFailRatioQuery(scope: InvestigationScope): string {
     );
   }
   const sel = peerSelector(scope);
-  const protocols = ["tcp", "udp", "icmp"];
-  const fails = protocols
+  const fails = PROTOCOLS
     .map((p) => orZero(`sum(rate(${METRICS_PREFIX}_${p}_results_total${withResult(sel, "fail")}[${RATE_WINDOW}]))`))
     .join(" + ");
-  const totals = protocols
+  const totals = PROTOCOLS
     .map((p) => orZero(`sum(rate(${METRICS_PREFIX}_${p}_results_total${braces(sel)}[${RATE_WINDOW}]))`))
     .join(" + ");
   return `(${fails}) / (${totals})`;

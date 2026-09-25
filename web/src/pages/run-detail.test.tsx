@@ -1390,7 +1390,8 @@ describe("a run's pairs open onto the route they took", () => {
       }),
     );
     await screen.findByRole("heading", { name: "Pairs" });
-    fireEvent.click(expander());
+    // A tcp row has no route to show: its expander says it opens the details.
+    fireEvent.click(screen.getByRole("button", { name: "Show the details of node-a → node-b" }));
 
     // No route for a tcp probe — there is none — but the whole error, and the
     // facts the cells above abbreviate.
@@ -1777,5 +1778,65 @@ describe("RunDetailPage — pairs table (2.4.0 polish)", () => {
 
     expect(await screen.findByText("95µs")).toBeInTheDocument();
     expect(screen.queryByText("0.0ms")).not.toBeInTheDocument();
+  });
+});
+
+/* A pmtu run's answer is the verdict and the size, not the duration: the expanded row says both. */
+describe("RunDetailPage — a pmtu pair", () => {
+  const pmtuRun = () =>
+    runBody({
+      status: "partial",
+      type: "pmtu",
+      pairTotal: 1,
+      pairFailed: 1,
+      results: [
+        {
+          sourceNode: "node-a",
+          destinationNode: "node-b",
+          success: false,
+          durationNs: 1_000_000_000,
+          error: "path MTU black hole: 1500-byte datagrams are lost with no ICMP frag-needed, 1400 bytes cross",
+          result: { type: "pmtu", details: { probeMtu: 1500, pathMtu: 1400, verdict: "blackhole", steps: 14 } },
+          recordedAt: "2026-07-28T10:10:00Z",
+          sampleSeq: 0,
+        },
+      ],
+    });
+
+  it("opens onto the verdict, the path MTU and the datagrams it took", async () => {
+    renderPage(["events"], pmtuRun());
+    await screen.findByRole("heading", { name: "Pairs" });
+    fireEvent.click(screen.getByRole("button", { name: "Show the details of node-a → node-b" }));
+    expect(await screen.findByText("black hole: full-size datagrams vanish with no ICMP error")).toBeInTheDocument();
+    expect(screen.getByText("1400 of 1500 bytes")).toBeInTheDocument();
+    expect(screen.getByText("14")).toBeInTheDocument();
+  });
+});
+
+describe("RunDetailPage — the order of the pairs", () => {
+  it("puts the failed pairs first, so page one of a big run shows what broke", async () => {
+    const ok = (source: string, destination: string) => ({
+      sourceNode: source,
+      destinationNode: destination,
+      success: true,
+      durationNs: 1_000_000,
+      recordedAt: "2026-07-28T10:10:00Z",
+      sampleSeq: 0,
+    });
+    const run = runBody({
+      status: "partial",
+      pairTotal: 12,
+      pairOk: 11,
+      pairFailed: 1,
+      results: [
+        ...Array.from({ length: 11 }, (_, i) => ok(`node-${i}`, "node-z")),
+        { ...ok("node-x", "node-y"), success: false, error: "connection refused" },
+      ],
+    });
+    renderPage(["events"], run);
+    await screen.findByRole("heading", { name: "Pairs" });
+    const rows = screen.getAllByRole("button", { name: /^Show the details of / });
+    expect(rows[0]).toHaveAccessibleName("Show the details of node-x → node-y");
+    expect(rows[1]).toHaveAccessibleName("Show the details of node-0 → node-z");
   });
 });

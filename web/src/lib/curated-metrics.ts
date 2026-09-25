@@ -3,7 +3,7 @@ import { CHART_FALLBACK, chartColors, seriesColor, type ChartColors } from "./ch
 import { NO_VALUE } from "./chart-tooltip";
 import { stampClock, stampShort, type Locale } from "./i18n";
 import { sharedNamePrefix } from "./matrix-zoom";
-import type { PromResult } from "./types";
+import { PROTOCOLS, type Protocol, type PromResult } from "./types";
 
 export interface CuratedChart {
   id: string;
@@ -95,16 +95,16 @@ export const CURATED_CHARTS: CuratedChart[] = [
 ];
 
 /**
- * failRateByProtocol is one label_replace chain over the three result
+ * failRateByProtocol is one label_replace chain over the four pair-probe result
  * counters, tagged with a `protocol` label so `sum by (protocol)` can fold them.
  * Called twice by the fail-rate chart: once with the failure selector for the
  * numerator, once bare for the denominator, so the quotient is bounded by 1 by
  * construction (a failing probe is a probe).
  */
 export function failRateByProtocol(selector: string): string {
-  const leg = (proto: "tcp" | "udp" | "icmp") =>
+  const leg = (proto: Protocol) =>
     `label_replace(rate(kconmon_ng_${proto}_results_total${selector}[5m]), "protocol", "${proto}", "", "")`;
-  return `sum by (protocol) (${leg("tcp")} or ${leg("udp")} or ${leg("icmp")})`;
+  return `sum by (protocol) (${PROTOCOLS.map(leg).join(" or ")})`;
 }
 
 // Prometheus range-query matrix result entry (Prometheus's own envelope shape,

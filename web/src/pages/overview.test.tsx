@@ -69,6 +69,23 @@ describe("summarize", () => {
     expect(s.worstPairs.map((c) => c.failRatio)).toEqual([0.5, 0.4, 0.3, 0.2, 0.15]);
   });
 
+  /* The tiles must agree with the matrix they summarise: a pair the grid paints red for packet loss
+     is failing, and a path MTU the path reports smaller than the probe is degraded. */
+  it("tiers pairs the way the matrix colours them: loss counts, a reduced path MTU is degraded", () => {
+    const mixed: Matrix = {
+      ...matrix,
+      cells: [
+        { source: "a", destination: "b", failRatio: 0, lossRatio: 0.3 },
+        { source: "a", destination: "c", failRatio: 0, mtuBytes: 1400, probeMtuBytes: 1500 },
+        { source: "b", destination: "a", failRatio: 0, mtuBytes: 1500, probeMtuBytes: 1500 },
+      ],
+    };
+    const s = summarize(mixed);
+    expect(s.pairsFailing).toBe(1);
+    expect(s.pairsDegraded).toBe(1);
+    expect(s.worstPairs.map((c) => c.destination)).toEqual(["b", "c"]);
+  });
+
   it("falls back to matrix.nodes when topology is absent", () => {
     const s = summarize(matrix);
     expect(s.totalNodes).toBe(3);
@@ -1032,12 +1049,20 @@ describe("OverviewPage — the plane selector and the cross-plane header (P3)", 
 
   /* Per-protocol bodies: getMatrix carries ?protocol=, so the stub can answer
      each plane with its own truth — TCP clean, UDP failing, ICMP clean. */
-  const stubPlanes = ({ cleanUdp = false } = {}) =>
+  const pmtuBlackHole: Matrix = {
+    protocol: "pmtu",
+    plane: "pod",
+    nodes: ["a", "b"],
+    cells: [{ source: "a", destination: "b", failRatio: 1, mtuBytes: 1400, probeMtuBytes: 1500 }],
+    timestamp: "2026-01-01T00:00:00Z",
+  };
+  const stubPlanes = ({ cleanUdp = false, pmtu }: { cleanUdp?: boolean; pmtu?: Matrix } = {}) =>
     vi.stubGlobal(
       "fetch",
       vi.fn((url: string) => {
         const href = String(url);
         if (href.includes("/topology")) return Promise.resolve(json(topo));
+        if (href.includes("protocol=pmtu") && pmtu) return Promise.resolve(json(pmtu));
         if (href.includes("protocol=udp"))
           return Promise.resolve(json(cleanUdp ? icmpHealthy : udpFailing));
         if (href.includes("protocol=icmp")) return Promise.resolve(json(icmpHealthy));
@@ -1058,17 +1083,34 @@ describe("OverviewPage — the plane selector and the cross-plane header (P3)", 
     expect(screen.getAllByTestId("stat-value")[1]).toHaveTextContent("1");
     expect(screen.getAllByText("UDP · pod plane").length).toBeGreaterThanOrEqual(3);
     // The header chip says what the statement actually read.
-    expect(screen.getByText("TCP/UDP/ICMP · pod plane")).toBeInTheDocument();
+    expect(screen.getByText("TCP/UDP/ICMP/PMTU · pod plane")).toBeInTheDocument();
   });
 
-  it("offers the matrix page's three protocols; TCP is the default only on a clean fleet", async () => {
+  it("offers the matrix page's four protocols; TCP is the default only on a clean fleet", async () => {
     stubPlanes({ cleanUdp: true });
     renderPage();
     await screen.findByTestId("health-statement");
 
     const group = screen.getByRole("radiogroup", { name: "Protocol" });
-    expect(within(group).getAllByRole("radio").map((r) => r.textContent)).toEqual(["TCP", "UDP", "ICMP"]);
+    expect(within(group).getAllByRole("radio").map((r) => r.textContent)).toEqual(["TCP", "UDP", "ICMP", "PMTU"]);
     expect(screen.getByRole("radio", { name: "TCP" })).toBeChecked();
+  });
+
+  it("reads a PMTU plane's worst pairs by their path MTU, not an RTT they do not have", async () => {
+    stubPlanes({ cleanUdp: true, pmtu: pmtuBlackHole });
+    renderPage();
+    await waitFor(() => expect(screen.getByRole("radio", { name: "PMTU" })).toBeChecked());
+    expect(await screen.findByRole("columnheader", { name: "Path MTU / probe" })).toBeInTheDocument();
+    expect(screen.getByText("1400 / 1500")).toBeInTheDocument();
+  });
+
+  it("says a PMTU degraded pair may be a reduced path, which fails nothing", async () => {
+    const reduced = { source: "b", destination: "a", failRatio: 0, mtuBytes: 1400, probeMtuBytes: 1500 };
+    stubPlanes({ cleanUdp: true, pmtu: { ...pmtuBlackHole, cells: [...pmtuBlackHole.cells, reduced] } });
+    renderPage();
+    await waitFor(() => expect(screen.getByRole("radio", { name: "PMTU" })).toBeChecked());
+    expect(await screen.findByText("Reduced path or fail 1–10%")).toBeInTheDocument();
+    expect(screen.queryByText("Fail 1–10%")).toBeNull();
   });
 
   it("an operator's own click still wins over the auto-follow", async () => {

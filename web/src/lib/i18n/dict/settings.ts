@@ -41,19 +41,19 @@ const en = {
 
   /* ── page chrome ───────────────────────────────────────────────────────── */
   "title": "Settings",
-  "description": "API tokens, webhook endpoints, configuration export/import, and what this console is running as.",
+  "description": "Local users, API tokens, webhook endpoints, configuration export/import, and what this console is running as.",
   /* The "?" by the title (M7-5); the docs page is docs/console/settings. */
   "help.body":
     "The console's own administration page. " +
-    "Sections appear per permission: API tokens, webhook endpoints and configuration export/import are admin-only in the built-in roles, while Language and About are visible to everyone. " +
+    "Sections appear per permission: local users (auth.mode=local only), API tokens, webhook endpoints and configuration export/import are admin-only in the built-in roles, while Language and About are visible to everyone. " +
     "About reports what this instance runs as — auth mode, your roles and subject, the console build, and whether the controller, Prometheus and the database are configured. " +
     "Maintenance windows are not here: they live on the Alerting page.",
   "loading": "Loading…",
   "cancel": "Cancel",
   "nothing.title": "Your role can view none of the console's settings.",
   "nothing.body":
-    "API tokens need tokens:manage, webhook endpoints need webhooks:manage, and configuration export/import needs " +
-    "settings:write — all three admin-only in the built-in roles. Maintenance windows are managed on the Alerting " +
+    "Local users need users:manage, API tokens need tokens:manage, webhook endpoints need webhooks:manage, and " +
+    "configuration export/import needs settings:write, all four admin-only in the built-in roles. Maintenance windows are managed on the Alerting " +
     "page. What is below is everything this role can read here.",
 
   /* ── webhooks ──────────────────────────────────────────────────────────── */
@@ -290,18 +290,18 @@ export const settingsDict: Dictionary<SettingsKey> = defineDict(en, {
 
   "title": "Настройки",
   "description":
-    "Токены API, точки доставки вебхуков, экспорт и импорт конфигурации, а также то, на чём эта консоль работает.",
+    "Локальные пользователи, токены API, точки доставки вебхуков, экспорт и импорт конфигурации, а также то, на чём эта консоль работает.",
   "help.body":
     "Собственная административная страница консоли. " +
-    "Разделы появляются по правам: токены API, точки доставки вебхуков и экспорт с импортом конфигурации во встроенных ролях доступны только администратору, а язык и «Об этой консоли» видны всем. " +
+    "Разделы появляются по правам: локальные пользователи (только в auth.mode=local), токены API, точки доставки вебхуков и экспорт с импортом конфигурации во встроенных ролях доступны только администратору, а язык и «Об этой консоли» видны всем. " +
     "«Об этой консоли» показывает, на чём работает этот экземпляр: режим аутентификации, ваши роли и субъект, сборку консоли и настроены ли контроллер, Prometheus и база данных. " +
     "Окон работ здесь нет — они живут на странице «Оповещения».",
   "loading": "Загрузка…",
   "cancel": "Отмена",
   "nothing.title": "Эта роль не видит ни одного раздела настроек.",
   "nothing.body":
-    "Токенам API нужно tokens:manage, точкам вебхуков webhooks:manage, экспорту и импорту конфигурации " +
-    "settings:write — все три во встроенных ролях достались только admin. Окна работ ведутся на странице " +
+    "Локальным пользователям нужно users:manage, токенам API tokens:manage, точкам вебхуков webhooks:manage, " +
+    "экспорту и импорту конфигурации settings:write; все четыре во встроенных ролях достались только admin. Окна работ ведутся на странице " +
     "«Оповещения». Ниже всё, что эта роль здесь прочитает.",
 
   "webhooks.heading": "Вебхуки",

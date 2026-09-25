@@ -83,6 +83,8 @@ const en = {
      to components/mtr-hop-table.tsx, whose dictionary already owns them. */
   "pairs.col.expand": "Show the route",
   "pairs.expand.aria": "Show the route from {source} to {destination}",
+  /* A non-MTR row opens the sample's own facts, not a route. */
+  "pairs.expand.detailsAria": "Show the details of {source} → {destination}",
   "trace.loading": "Loading the recorded route…",
   "trace.error": "The recorded route for this pair is unavailable",
   "trace.none": "No route recorded for this pair yet.",
@@ -117,6 +119,15 @@ const en = {
   /* The cell above truncates it; this is the agent's sentence in full, which is
      where a timeout usually gets interesting. */
   "detail.error": "Error",
+  "detail.pmtu.verdict": "Verdict",
+  "detail.pmtu.ok": "full size: the probe-size datagram crossed",
+  "detail.pmtu.reduced": "reduced: the path is smaller and says so with ICMP",
+  "detail.pmtu.blackhole": "black hole: full-size datagrams vanish with no ICMP error",
+  "detail.pmtu.unreachable": "unreachable: even the small datagram was lost",
+  "detail.pmtu.path": "Path MTU",
+  "detail.pmtu.pathValue": "{mtu} of {probe} bytes",
+  "detail.pmtu.truncated": "at least; the search stopped at its time budget",
+  "detail.pmtu.datagrams": "Datagrams",
 
   "cancel": "Cancel run",
   "cancel.failed": "Failed to cancel this run",
@@ -252,6 +263,7 @@ export const runDetailDict: Dictionary<RunDetailKey> = defineDict(en, {
 
   "pairs.col.expand": "Показать маршрут",
   "pairs.expand.aria": "Показать маршрут от {source} до {destination}",
+  "pairs.expand.detailsAria": "Показать подробности {source} → {destination}",
   "trace.loading": "Загружаем записанный маршрут…",
   "trace.error": "Записанный маршрут для этой пары недоступен",
   "trace.none": "Для этой пары маршрут ещё не записан.",
@@ -270,6 +282,15 @@ export const runDetailDict: Dictionary<RunDetailKey> = defineDict(en, {
   "detail.duration": "Длительность",
   "detail.state": "Состояние",
   "detail.error": "Ошибка",
+  "detail.pmtu.verdict": "Вердикт",
+  "detail.pmtu.ok": "полный размер: датаграмма размера пробы прошла",
+  "detail.pmtu.reduced": "уменьшен: путь меньше и сообщает об этом по ICMP",
+  "detail.pmtu.blackhole": "чёрная дыра: полноразмерные датаграммы пропадают без ICMP-ошибки",
+  "detail.pmtu.unreachable": "недоступен: пропала даже маленькая датаграмма",
+  "detail.pmtu.path": "MTU пути",
+  "detail.pmtu.pathValue": "{mtu} из {probe} байт",
+  "detail.pmtu.truncated": "как минимум; поиск упёрся в лимит времени",
+  "detail.pmtu.datagrams": "Датаграмм",
 
   "cancel": "Отменить запуск",
   "cancel.failed": "Не удалось отменить запуск",

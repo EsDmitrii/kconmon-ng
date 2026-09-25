@@ -289,7 +289,7 @@ export function sampleIntervalOptionsFor(durationNs: number): typeof RUN_SAMPLE_
 }
 
 /* ── the external destination, per check type ────────────────────────────────
-   One field served all six check types with one label, one placeholder and no
+   One field served every check type with one label, one placeholder and no
    hint (QA scope 4, finding #10) — so it named the wrong thing for most of
    them, and a value typed for one type survived a switch to another without a
    word. These four shapes are the AGENT's own behaviour, read off
@@ -301,6 +301,8 @@ export function sampleIntervalOptionsFor(durationNs: number): typeof RUN_SAMPLE_
      mtr   same as icmp
      dns   NOT in externalCapableChecks — "external destinations support only
      http  tcp, udp, icmp and mtr checks", refused before any checker runs
+     pmtu  same as dns: it speaks the kconmon echo protocol, which no external
+           host answers
 
    The console does not enforce; it says what the agent will do, and refuses to
    send a body whose refusal is already certain. */
@@ -313,6 +315,7 @@ export const ADHOC_SHAPE: Record<CheckType, AdhocShape> = {
   mtr: "hostOnly",
   dns: "unsupported",
   http: "unsupported",
+  pmtu: "unsupported",
 };
 
 /* Addresses are syntax and do not translate; the CONNECTIVE between two of them

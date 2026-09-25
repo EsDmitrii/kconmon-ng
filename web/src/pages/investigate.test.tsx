@@ -752,7 +752,7 @@ describe("the scope's signal queries", () => {
 
   it("guards every per-protocol sum with `or vector(0)` so an absent protocol contributes 0", () => {
     const q = investigationFailRatioQuery({ kind: "pair", a: "node-a", b: "node-b" });
-    for (const protocol of ["tcp", "udp", "icmp"]) {
+    for (const protocol of ["tcp", "udp", "icmp", "pmtu"]) {
       expect(q).toContain(
         `(sum(rate(kconmon_ng_${protocol}_results_total{source_node="node-a",destination_node="node-b",result="fail"}[5m])) or vector(0))`,
       );
@@ -760,8 +760,8 @@ describe("the scope's signal queries", () => {
         `(sum(rate(kconmon_ng_${protocol}_results_total{source_node="node-a",destination_node="node-b"}[5m])) or vector(0))`,
       );
     }
-    // Six guards: three protocols on each side of the division.
-    expect(q.split("or vector(0)")).toHaveLength(7);
+    // Eight guards: four protocols on each side of the division.
+    expect(q.split("or vector(0)")).toHaveLength(9);
   });
 
   it("guards the target scope's single family the same way", () => {

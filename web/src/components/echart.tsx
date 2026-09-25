@@ -1,5 +1,16 @@
 import { useEffect, useId, useMemo, useRef } from "react";
-import * as echarts from "echarts";
+import type * as echarts from "echarts";
+import { LineChart } from "echarts/charts";
+import {
+  GridComponent,
+  LegendComponent,
+  LegendScrollComponent,
+  MarkAreaComponent,
+  MarkLineComponent,
+  TooltipComponent,
+} from "echarts/components";
+import { init, use } from "echarts/core";
+import { CanvasRenderer } from "echarts/renderers";
 import { withAnnotations, withMaintenance } from "@/lib/annotations";
 import {
   READOUT_ROW_CAP,
@@ -14,6 +25,12 @@ import { useT } from "@/lib/i18n";
 import { sharedDict } from "@/lib/i18n/dict/shared";
 import type { Annotation, MaintenanceWindow } from "@/lib/types";
 import { cn } from "@/lib/utils";
+
+/* Only what the console draws: line series on a grid, the shared tooltip and its axis pointer, a
+   (scrolling) legend, and the mark areas and lines annotations and maintenance windows paint. The
+   full "echarts" bundle is more than twice the size. A chart option that needs anything else must
+   register it here, or ECharts ignores that part of the option. */
+use([LineChart, GridComponent, TooltipComponent, LegendComponent, LegendScrollComponent, MarkAreaComponent, MarkLineComponent, CanvasRenderer]);
 
 /** What the per-frame draw needs and React owns; see the live ref below. */
 interface ReadoutLive {
@@ -112,7 +129,7 @@ export function EChart({
   useEffect(() => {
     const el = host.current;
     if (!el) return;
-    chart.current = echarts.init(el);
+    chart.current = init(el);
     /* A series the reader switched OFF in the legend is not on this chart any more, and a dot on
        its sample was the crosshair marking a curve that is not drawn. The option cannot say so —
        legend selection is runtime state — so it is read from the event and applied per frame. */

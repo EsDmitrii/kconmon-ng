@@ -32,8 +32,8 @@ const en = {
   /* The "?" by the title (M7-5); the docs page is docs/console/overview. */
   "help.body":
     "The landing page: is the fleet healthy right now, and if not, which pairs are the problem? " +
-    "The health statement leads, computed from the pair matrix across all three protocols — TCP, UDP and ICMP — on the pod plane; trouble names the protocol it is on. " +
-    "The stat tiles and the worst-pairs table below show one protocol at a time — pick it with the TCP/UDP/ICMP selector. " +
+    "The health statement leads, computed from the pair matrix across all four probes, TCP, UDP, ICMP and path MTU, on the pod plane; trouble names the protocol it is on. " +
+    "The stat tiles and the worst-pairs table below show one protocol at a time: pick it with the TCP/UDP/ICMP/PMTU selector. " +
     "Live, the page recomputes from Prometheus every 15s; with the Time Machine engaged, nothing refreshes.",
 
   "loading": "Loading overview…",
@@ -44,8 +44,8 @@ const en = {
      plane — and since P3 the protocol follows the selector, so it arrives as a
      parameter. Protocol names and "pod" are identifiers; only "plane" is ours. */
   "qualifier": "{protocol} · pod plane",
-  /* The header chip: the statement beside it reads all three protocols. */
-  "qualifier.crossPlane": "TCP/UDP/ICMP · pod plane",
+  /* The header chip: the statement beside it reads all four protocols. */
+  "qualifier.crossPlane": "TCP/UDP/ICMP/PMTU · pod plane",
   /* The selector over the tiles — the matrix page's own word for it. */
   "protocol.aria": "Protocol",
 
@@ -83,6 +83,7 @@ const en = {
   "tiles.failing.tone": "Fail ≥ 10%",
   "tiles.degraded": "Degraded pairs",
   "tiles.degraded.tone": "Fail 1–10%",
+  "tiles.degraded.tone.pmtu": "Reduced path or fail 1–10%",
   /* Zero over zero. A bare "0" under "Failing pairs" reads as a clean fleet,
      and the nodes tile beside it already answers "nothing measured" with an
      em-dash — the pair tiles now say it the same way. */
@@ -155,10 +156,12 @@ const en = {
      shape the alerts and events panels use. */
   "worstPairs.open": "open Matrix",
 
-  "table.caption": "Worst pairs by failure ratio",
+  "table.caption": "Worst pairs by failure ratio or packet loss",
   "table.pair": "Pair",
-  "table.fail": "Fail %",
+  /* The worst of the two ratios, the same figure the matrix colours a cell by. */
+  "table.fail": "Fail / loss %",
   "table.rtt": "p95 RTT",
+  "table.pathMtu": "Path MTU / probe",
   "table.status": "Status",
   "table.status.failing": "Failing",
   "table.status.degraded": "Degraded",
@@ -249,15 +252,15 @@ export const overviewDict: Dictionary<OverviewKey> = defineDict(en, {
   "description.engaged": "Здоровье кластера на выбранный момент, без обновления.",
   "help.body":
     "Стартовая страница: здоров ли флот прямо сейчас, а если нет — какие пары виноваты. " +
-    "Сверху — вердикт о здоровье словами, посчитанный по матрице пар сразу для трёх протоколов — TCP, UDP и ICMP — на плоскости pod; проблема называет свой протокол. " +
-    "Плитки сводки и таблица худших пар ниже показывают один протокол за раз, выбирается он переключателем TCP/UDP/ICMP. " +
+    "Сверху вердикт о здоровье словами, посчитанный по матрице пар по всем четырём пробам: TCP, UDP, ICMP и MTU пути, на плоскости pod; проблема называет свой протокол. " +
+    "Плитки сводки и таблица худших пар ниже показывают один протокол за раз, выбирается он переключателем TCP/UDP/ICMP/PMTU. " +
     "Вживую страница пересчитывается из Prometheus каждые 15 с; с включённой Машиной времени ничего не обновляется.",
 
   "loading": "Загрузка обзора…",
   "panel.loading": "Загрузка…",
 
   "qualifier": "{protocol} · плоскость pod",
-  "qualifier.crossPlane": "TCP/UDP/ICMP · плоскость pod",
+  "qualifier.crossPlane": "TCP/UDP/ICMP/PMTU · плоскость pod",
   "protocol.aria": "Протокол",
 
   "problem.matrix": "Матрица пар недоступна",
@@ -281,6 +284,7 @@ export const overviewDict: Dictionary<OverviewKey> = defineDict(en, {
   "tiles.failing.tone": "Сбой ≥ 10%",
   "tiles.degraded": "Пары с деградацией",
   "tiles.degraded.tone": "Сбой 1–10%",
+  "tiles.degraded.tone.pmtu": "Путь сужен или сбой 1–10%",
   "tiles.pairs.noData": "Здесь не измерена ни одна пара, считать нечего.",
 
   "health.failing.one": "Пар со сбоями: {count}",
@@ -328,10 +332,11 @@ export const overviewDict: Dictionary<OverviewKey> = defineDict(en, {
   "worstPairs.empty.healthy.body":
     "У всех оценённых пар доля сбоев ниже 1%. Что перевалит за эту черту, появится здесь, худшее первым.",
 
-  "table.caption": "Худшие пары по доле сбоев",
+  "table.caption": "Худшие пары по доле сбоев или потерям пакетов",
   "table.pair": "Пара",
-  "table.fail": "Сбой %",
+  "table.fail": "Сбой / потери %",
   "table.rtt": "p95 RTT",
+  "table.pathMtu": "MTU пути / проба",
   "table.status": "Статус",
   "table.status.failing": "Сбой",
   "table.status.degraded": "Деградация",

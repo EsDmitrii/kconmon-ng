@@ -10,8 +10,9 @@ const me: Me = {
   permissions: ["mtr:run"],
 };
 
-function renderMenu(canManageTokens: boolean) {
+function renderMenu(canManageTokens: boolean, authMode?: "local" | "oidc") {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  if (authMode) qc.setQueryData(["config"], { auth: { mode: authMode } });
   const can = (p: string) => (canManageTokens ? p === "tokens:manage" : false);
   return { qc, ...render(<QueryClientProvider client={qc}><UserMenu me={me} can={can} /></QueryClientProvider>) };
 }
@@ -70,11 +71,27 @@ describe("UserMenu", () => {
     fireEvent.click(screen.getByRole("button", { name: /sign out/i }));
 
     await waitFor(() => expect(vi.mocked(fetch)).toHaveBeenCalledWith("/api/v1/auth/logout", expect.anything()));
-    const [, init] = vi.mocked(fetch).mock.calls[0];
+    const [, init] = vi.mocked(fetch).mock.calls.find(([url]) => url === "/api/v1/auth/logout") ?? [];
     expect(new Headers(init?.headers).get("X-CSRF-Token")).toBe("tok-abc");
     await waitFor(() => expect(qc.getQueryState(["me"])?.isInvalidated).toBe(true));
 
     document.cookie = "csrf=; path=/; expires=Thu, 01 Jan 1970 00:00:00 GMT";
+  });
+});
+
+describe("UserMenu password change", () => {
+  it("offers it in auth.mode=local and opens the dialog", async () => {
+    renderMenu(false, "local");
+    fireEvent.click(screen.getByRole("button", { name: /ada lovelace/i }));
+    fireEvent.click(screen.getByRole("button", { name: "Change password" }));
+    expect(await screen.findByRole("dialog", { name: "Change password" })).toBeInTheDocument();
+    expect(screen.getByLabelText("Current password")).toBeInTheDocument();
+  });
+
+  it("does not offer it where an identity provider owns the password", () => {
+    renderMenu(false, "oidc");
+    fireEvent.click(screen.getByRole("button", { name: /ada lovelace/i }));
+    expect(screen.queryByRole("button", { name: "Change password" })).toBeNull();
   });
 });
 

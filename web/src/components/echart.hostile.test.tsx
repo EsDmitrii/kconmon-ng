@@ -70,7 +70,7 @@ function makeChart(): FakeChart {
 }
 
 const init = vi.fn(() => makeChart());
-vi.mock("echarts", () => ({ init: (...args: unknown[]) => init(...(args as [])) }));
+vi.mock("echarts/core", () => ({ init: (...args: unknown[]) => init(...(args as [])), use: () => {} }));
 
 const frames: (() => void)[] = [];
 

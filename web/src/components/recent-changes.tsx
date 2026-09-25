@@ -10,7 +10,7 @@ import type { LiveEvent, LiveEventSeverity } from "@/lib/types";
 import { cn, fmtEventStamp } from "@/lib/utils";
 import { TOPIC_LIVE, type WsEnvelope } from "@/lib/ws";
 // Reuses the Live page's own merge/dedupe store rather than re-implementing it.
-import { pushEvents } from "@/pages/live";
+import { pushEvents } from "@/lib/live-events";
 import { Badge } from "./ui/badge";
 import { Card } from "./ui/card";
 import { EmptyState } from "./ui/empty-state";

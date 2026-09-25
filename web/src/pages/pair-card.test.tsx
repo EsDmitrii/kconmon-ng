@@ -75,6 +75,7 @@ function renderPage(
     onCreate?: (body: unknown) => Response;
     incidents?: unknown[];
     topology?: unknown;
+    pmtuMatrix?: unknown;
   } = {},
 ) {
   const { permissions = ["runs:create"], runs = [], runDetails = {}, onCreate, incidents = [] } = opts;
@@ -86,6 +87,9 @@ function renderPage(
     if (href.includes("/api/v1/version")) return Promise.resolve(json({ version: "1.6.0", commit: "x", capabilities: [] }));
     if (href.includes("/api/v1/config")) return Promise.resolve(json(configBody()));
     if (href.includes("/api/v1/auth/me")) return Promise.resolve(json(meBody(permissions)));
+    if (href.includes("/api/v1/matrix") && href.includes("protocol=pmtu") && opts.pmtuMatrix) {
+      return Promise.resolve(json(opts.pmtuMatrix));
+    }
     if (href.includes("/api/v1/matrix")) return Promise.resolve(json(matrixBody));
     if (href.includes("/api/v1/topology")) {
       return Promise.resolve(
@@ -272,6 +276,32 @@ describe("PairCardPage", () => {
     // The other three cells are what they were.
     expect(screen.getByText("ok")).toBeInTheDocument();
     expect(screen.getByText("0.5ms")).toBeInTheDocument();
+  });
+});
+
+/* A PMTU matrix cell opens this card: the card must say what that cell said, not a TCP reading. */
+describe("PairCardPage — path MTU", () => {
+  const pmtuMatrix = {
+    protocol: "pmtu", plane: "pod", nodes: ["node-a", "node-b"], timestamp: "2026-09-24T00:00:00Z",
+    cells: [
+      { source: "node-a", destination: "node-b", failRatio: 1, mtuBytes: 1400, probeMtuBytes: 1500 },
+      { source: "node-b", destination: "node-a", failRatio: 0, mtuBytes: 1500, probeMtuBytes: 1500 },
+    ],
+  };
+
+  it("shows both directions' path MTU and what each one means", async () => {
+    renderPage("/pairs/node-a/node-b", { pmtuMatrix });
+    const card = await screen.findByRole("region", { name: "Path MTU" });
+    await waitFor(() => expect(within(card).getByText("1400 of 1500 bytes")).toBeInTheDocument());
+    expect(within(card).getByText("Black hole")).toBeInTheDocument();
+    expect(within(card).getByText("1500 bytes")).toBeInTheDocument();
+    expect(within(card).getByText("Full size")).toBeInTheDocument();
+  });
+
+  it("says so when nothing measured the pair's path MTU", async () => {
+    renderPage("/pairs/node-a/node-b", { pmtuMatrix: { ...pmtuMatrix, cells: [] } });
+    const card = await screen.findByRole("region", { name: "Path MTU" });
+    expect(await within(card).findByText("No path MTU measured for this pair.")).toBeInTheDocument();
   });
 });
 

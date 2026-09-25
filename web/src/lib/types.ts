@@ -155,6 +155,15 @@ export type TokenList = components["schemas"]["TokenList"];
 export type TokenCreateRequest = components["schemas"]["TokenCreateRequest"];
 export type TokenCreateResponse = components["schemas"]["TokenCreateResponse"];
 
+/* Local users (auth.mode=local). `ConsoleUser` never carries a password or its hash; `Role` is a
+ * CUSTOM role, the built-ins are compiled into the server and never listed. */
+export type ConsoleUser = components["schemas"]["User"];
+export type ConsoleUserList = components["schemas"]["UserList"];
+export type UserCreateRequest = components["schemas"]["UserCreate"];
+export type UserPatchRequest = components["schemas"]["UserPatch"];
+export type Role = components["schemas"]["Role"];
+export type RoleList = components["schemas"]["RoleList"];
+
 export type ConfigBundle = components["schemas"]["ConfigBundle"];
 export type ConfigImportRequest = components["schemas"]["ConfigImportRequest"];
 export type ConfigImportResult = components["schemas"]["ConfigImportResult"];
@@ -200,6 +209,10 @@ export interface MatrixCell {
   failRatio: number | null;
   rttP95?: number;
   lossRatio?: number;
+  /** pmtu only: the largest datagram that crossed the pair, bytes. */
+  mtuBytes?: number;
+  /** pmtu only: the size the source probes at; mtuBytes below it with no failures is a reduced path. */
+  probeMtuBytes?: number;
 }
 export interface Matrix {
   protocol: string;
@@ -208,7 +221,7 @@ export interface Matrix {
   cells: MatrixCell[];
   timestamp: string;
 }
-export type Protocol = "tcp" | "udp" | "icmp";
+export type Protocol = "tcp" | "udp" | "icmp" | "pmtu";
 export interface PromResult {
   status: "success" | "error";
   data?: { resultType: string; result: unknown[] };
@@ -294,7 +307,7 @@ export interface Config {
   database: { configured: boolean };
 }
 
-export const PROTOCOLS: Protocol[] = ["tcp", "udp", "icmp"];
+export const PROTOCOLS: Protocol[] = ["tcp", "udp", "icmp", "pmtu"];
 
 // `subject.kind` mirrors Go's authz.SubjectKind ("anonymous" | "user" | "token").
 export type SubjectKind = "anonymous" | "user" | "token";
@@ -305,8 +318,8 @@ export interface Me {
 
 // CheckType mirrors checks.Spec's own comment (internal/console/checks/checks.go) -- the
 // controller's validCheckTypes.
-export type CheckType = "tcp" | "udp" | "icmp" | "dns" | "http" | "mtr";
-export const CHECK_TYPES: CheckType[] = ["tcp", "udp", "icmp", "dns", "http", "mtr"];
+export type CheckType = "tcp" | "udp" | "icmp" | "pmtu" | "dns" | "http" | "mtr";
+export const CHECK_TYPES: CheckType[] = ["tcp", "udp", "icmp", "pmtu", "dns", "http", "mtr"];
 
 // RunStatus mirrors checks.Runner's lifecycle (memory.go: "pending" -> "running" -> finalStatus's
 // "succeeded" | "failed" | "partial"); NOTE: the spec's own RunStatus enum does NOT list
