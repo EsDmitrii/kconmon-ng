@@ -280,8 +280,9 @@ func (s *Server) handleAuthLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	sessionID, err := s.sessions.Create(r.Context(), authn.Session{
-		Username:    user.Username,
-		DisplayName: user.DisplayName,
+		Username:      user.Username,
+		DisplayName:   user.DisplayName,
+		PasswordStamp: authn.PasswordStamp(user.PasswordHash),
 	})
 	if err != nil {
 		slog.Warn("httpapi: create session on login failed", "error", err)

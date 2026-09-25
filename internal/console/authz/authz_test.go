@@ -159,6 +159,7 @@ func TestAdminHoldsEveryPermission(t *testing.T) {
 		authz.PermAuditRead,
 		authz.PermRBACManage,
 		authz.PermTokensManage,
+		authz.PermUsersManage,
 		authz.PermSettingsWrite,
 		authz.PermTargetsRead,
 		authz.PermTargetsWrite,

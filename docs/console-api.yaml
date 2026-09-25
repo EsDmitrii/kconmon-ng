@@ -2755,6 +2755,138 @@ paths:
         "503":
           $ref: "#/components/responses/Unavailable"
 
+  /api/v1/users:
+    get:
+      operationId: listUsers
+      tags: [administration]
+      summary: Local users with the roles a request of theirs would resolve; auth.mode=local only.
+      description: >-
+        404 in every other mode: the identity provider owns the accounts there.
+        Never carries a password or its hash.
+      responses:
+        "200":
+          description: Every local user, sorted by username.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UserList"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "502":
+          $ref: "#/components/responses/BadGateway"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+    post:
+      operationId: createUser
+      tags: [administration]
+      summary: Create a local user and bind it to one role, in one transaction.
+      description: >-
+        The password needs at least 12 characters and at most 256 bytes; the
+        role must be a built-in or an existing custom role. A taken username is
+        409.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UserCreate"
+      responses:
+        "201":
+          description: The created user.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/User"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "502":
+          $ref: "#/components/responses/BadGateway"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
+  /api/v1/users/{id}:
+    parameters:
+      - $ref: "#/components/parameters/PathID"
+    patch:
+      operationId: updateUser
+      tags: [administration]
+      summary: Disable or enable a user, change their role, or both.
+      description: >-
+        409 when the change would leave no enabled user who can manage users,
+        whether by disabling that user or by a role without users:manage.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UserPatch"
+      responses:
+        "200":
+          description: The user after the change.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/User"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "502":
+          $ref: "#/components/responses/BadGateway"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
+  /api/v1/users/{id}/password:
+    parameters:
+      - $ref: "#/components/parameters/PathID"
+    post:
+      operationId: resetUserPassword
+      tags: [administration]
+      summary: Set a user's password; every session they had stops authenticating.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PasswordSet"
+      responses:
+        "204":
+          $ref: "#/components/responses/NoContent"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "502":
+          $ref: "#/components/responses/BadGateway"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
   /api/v1/auth/me:
     get:
       operationId: getMe
@@ -2829,6 +2961,50 @@ paths:
               description: Both cookies cleared.
               schema:
                 type: string
+
+  /api/v1/auth/password:
+    post:
+      operationId: changeOwnPassword
+      tags: [auth]
+      summary: Change the caller's own password; auth.mode=local only.
+      description: >-
+        A public route: no permission is needed to change one's own password,
+        so it carries login's protections instead. The request must come from
+        this console's own origin as application/json, needs a live local
+        session (401 without one), and spends login's per-username rate limit.
+        On success the caller gets a fresh session cookie and every other
+        session of the user stops authenticating. 404 in every other mode.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PasswordChange"
+      responses:
+        "204":
+          description: Changed; a fresh session cookie is set.
+          headers:
+            Set-Cookie:
+              description: The reissued session cookie.
+              schema:
+                type: string
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "502":
+          $ref: "#/components/responses/BadGateway"
+        "503":
+          $ref: "#/components/responses/Unavailable"
 
   /api/v1/auth/oidc/start:
     get:
@@ -3050,13 +3226,13 @@ components:
 
     Protocol:
       type: string
-      enum: [tcp, udp, icmp]
+      enum: [tcp, udp, icmp, pmtu]
       default: tcp
 
     CheckType:
       type: string
       description: A definition names exactly one of these.
-      enum: [tcp, udp, icmp, dns, http, mtr]
+      enum: [tcp, udp, icmp, pmtu, dns, http, mtr]
 
     RunStatus:
       type: string
@@ -3286,6 +3462,14 @@ components:
         lossRatio:
           type: number
           description: udp/icmp only. Omitted when no series matched.
+        mtuBytes:
+          type: integer
+          format: int64
+          description: pmtu only. Largest IP datagram in bytes that crossed the pair. Omitted when no series matched.
+        probeMtuBytes:
+          type: integer
+          format: int64
+          description: pmtu only. The size the source probes at; mtuBytes below it with failRatio 0 is a reduced path.
       additionalProperties: false
 
     Matrix:
@@ -5449,6 +5633,84 @@ components:
           format: date-time
       additionalProperties: false
 
+    UserList:
+      type: object
+      required: [users]
+      properties:
+        users:
+          type: array
+          items:
+            $ref: "#/components/schemas/User"
+      additionalProperties: false
+    User:
+      type: object
+      required: [id, username, displayName, roles, disabled, createdAt]
+      properties:
+        id:
+          type: string
+        username:
+          type: string
+        displayName:
+          type: string
+        roles:
+          type: array
+          items:
+            type: string
+          description: Resolved the way a request of this user's would be (bindings, then auth.defaultRole).
+        disabled:
+          type: boolean
+        createdAt:
+          type: string
+          format: date-time
+      additionalProperties: false
+    UserCreate:
+      type: object
+      required: [username, password, role]
+      properties:
+        username:
+          type: string
+          pattern: '^[A-Za-z0-9._@-]{1,64}$'
+        displayName:
+          type: string
+          description: Defaults to the username.
+        password:
+          type: string
+          minLength: 12
+          writeOnly: true
+        role:
+          type: string
+      additionalProperties: false
+    UserPatch:
+      type: object
+      minProperties: 1
+      properties:
+        disabled:
+          type: boolean
+        role:
+          type: string
+          description: Replaces the user's direct role bindings with this one, in one transaction; group bindings stay.
+      additionalProperties: false
+    PasswordSet:
+      type: object
+      required: [password]
+      properties:
+        password:
+          type: string
+          minLength: 12
+          writeOnly: true
+      additionalProperties: false
+    PasswordChange:
+      type: object
+      required: [currentPassword, newPassword]
+      properties:
+        currentPassword:
+          type: string
+          writeOnly: true
+        newPassword:
+          type: string
+          minLength: 12
+          writeOnly: true
+      additionalProperties: false
     TokenList:
       type: object
       required: [tokens]

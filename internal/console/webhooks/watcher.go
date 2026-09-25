@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/EsDmitrii/kconmon-ng/internal/console/alerting"
+	"github.com/EsDmitrii/kconmon-ng/internal/console/metrics"
 	"github.com/EsDmitrii/kconmon-ng/internal/console/store"
 )
 
@@ -58,18 +59,36 @@ type AlertWatcherDeps struct {
 	Notifier AlertNotifier
 	// Rules is optional -- see RuleSource.
 	Rules RuleSource
+	// Maintenance, when set, holds back alert edges whose labels an open window's scope covers.
+	Maintenance MaintenanceSource
+	// Metrics, when set, counts the held edges.
+	Metrics *metrics.Metrics
 	// Interval is the poll cadence; non-positive is repaired to DefaultAlertPollInterval.
 	Interval time.Duration
 }
+
+// MaintenanceSource reads maintenance windows; *store.DB satisfies it. nil holds nothing back.
+type MaintenanceSource interface {
+	ListMaintenanceWindows(ctx context.Context, f store.MaintenanceFilter) (store.MaintenancePage, error)
+}
+
+// pairArrow is events.PairArrow, the annotations vocabulary a pair-scoped window is written in. A
+// copy rather than an import keeps this package off the events graph; a test pins the two together.
+const pairArrow = "→"
+
+// maintenanceWindowsPageLimit bounds one page of the open-windows lookup; a console has a handful.
+const maintenanceWindowsPageLimit = 200
 
 // AlertWatcher turns Prometheus' alert STATE into alert.fired/alert.resolved webhook deliveries by
 // polling it and diffing consecutive observations; it lives in this package, next to the
 // dispatcher.
 type AlertWatcher struct {
-	alerts   AlertSource
-	rules    RuleSource
-	notifier AlertNotifier
-	interval time.Duration
+	alerts      AlertSource
+	rules       RuleSource
+	notifier    AlertNotifier
+	maintenance MaintenanceSource
+	metrics     *metrics.Metrics
+	interval    time.Duration
 
 	// firing is the last GOOD observation, keyed by fingerprint. It is only
 	// ever replaced wholesale by a successful poll, which is what makes "freeze
@@ -79,6 +98,9 @@ type AlertWatcher struct {
 	// a console that started while Prometheus was down must still baseline
 	// rather than page when it comes back.
 	baselined bool
+	// suppressed holds the fingerprints whose fired edge a window held back: their resolved edge is
+	// held too, and they are delivered as fired if the window closes while they still fire.
+	suppressed map[string]struct{}
 
 	// now and sleep are indirected for the tests, the dispatcher's idiom: a
 	// loop asserted against a real clock is a thirty-second test.
@@ -104,15 +126,70 @@ func NewAlertWatcher(d AlertWatcherDeps) (*AlertWatcher, error) { //nolint:gocri
 	}
 	now := time.Now
 	return &AlertWatcher{
-		alerts:   d.Alerts,
-		rules:    d.Rules,
-		notifier: d.Notifier,
-		interval: interval,
-		firing:   map[string]Alert{},
-		now:      now,
-		sleep:    realSleep,
-		logs:     newWatcherLogLimiter(now),
+		alerts:      d.Alerts,
+		rules:       d.Rules,
+		notifier:    d.Notifier,
+		maintenance: d.Maintenance,
+		metrics:     d.Metrics,
+		interval:    interval,
+		firing:      map[string]Alert{},
+		suppressed:  map[string]struct{}{},
+		now:         now,
+		sleep:       realSleep,
+		logs:        newWatcherLogLimiter(now),
 	}, nil
+}
+
+// openWindows returns the maintenance windows open at now. A lookup failure fails OPEN: an edge a
+// window would have held back is noise, an edge lost to a database blip is an outage nobody hears of.
+func (w *AlertWatcher) openWindows(ctx context.Context, now time.Time) []store.MaintenanceWindow {
+	if w.maintenance == nil {
+		return nil
+	}
+	var open []store.MaintenanceWindow
+	f := store.MaintenanceFilter{From: now, To: now.Add(time.Nanosecond), Limit: maintenanceWindowsPageLimit}
+	for {
+		page, err := w.maintenance.ListMaintenanceWindows(ctx, f)
+		if err != nil {
+			if w.logs.allow("maintenance") {
+				slog.Warn("alert webhook watcher: reading maintenance windows failed, delivering "+
+					"without suppression", "error", err)
+			}
+			return nil
+		}
+		for i := range page.Windows {
+			if mw := &page.Windows[i]; !now.Before(mw.StartAt) && now.Before(mw.EndAt) {
+				open = append(open, *mw)
+			}
+		}
+		if page.NextCursor == "" {
+			return open
+		}
+		f.Cursor = page.NextCursor
+	}
+}
+
+// covered reports whether an open window's scope covers an alert: a global window, one of the
+// alert's two nodes, its directed pair, or its external target.
+func covered(windows []store.MaintenanceWindow, labels map[string]string) bool {
+	src, dst, target := labels["source_node"], labels["destination_node"], labels["target"]
+	for i := range windows {
+		switch scope := windows[i].Scope; {
+		case scope == "":
+			return true
+		case scope == src || scope == dst || scope == target:
+			return true
+		case src != "" && dst != "" && scope == src+pairArrow+dst:
+			return true
+		}
+	}
+	return false
+}
+
+func (w *AlertWatcher) countSuppressed(event string) {
+	if w.metrics != nil {
+		w.metrics.WebhookSuppressed.WithLabelValues(event).Inc()
+	}
 }
 
 // Run polls immediately and then on every interval until ctx is cancelled; it polls FIRST and waits
@@ -164,16 +241,34 @@ func (w *AlertWatcher) poll(ctx context.Context) {
 
 	w.enrich(ctx, observed)
 
+	windows := w.openWindows(ctx, w.now())
+
 	// Sorted so a fan-out is deterministic.
 	for _, fp := range slices.Sorted(maps.Keys(observed)) {
-		if _, known := w.firing[fp]; !known {
-			a := observed[fp]
+		a := observed[fp]
+		_, known := w.firing[fp]
+		_, held := w.suppressed[fp]
+		switch {
+		case !known && covered(windows, a.Labels):
+			w.suppressed[fp] = struct{}{}
+			w.countSuppressed(store.WebhookEventAlertFired)
+		case !known:
+			w.notifier.NotifyAlert(ctx, store.WebhookEventAlertFired, a)
+		case held && !covered(windows, a.Labels):
+			// The window closed on an alert that kept firing: that is news now.
+			delete(w.suppressed, fp)
 			w.notifier.NotifyAlert(ctx, store.WebhookEventAlertFired, a)
 		}
 	}
 	resolvedAt := w.now().UTC()
 	for _, fp := range slices.Sorted(maps.Keys(w.firing)) {
 		if _, still := observed[fp]; still {
+			continue
+		}
+		if _, held := w.suppressed[fp]; held {
+			// Its fired edge never went out; a lone resolved would page about nothing.
+			delete(w.suppressed, fp)
+			w.countSuppressed(store.WebhookEventAlertResolved)
 			continue
 		}
 		// The REMEMBERED alert, not a re-derived one: a resolution is about the alert that was firing.

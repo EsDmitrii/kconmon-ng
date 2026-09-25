@@ -213,11 +213,23 @@ func (db *DB) CreateUser(ctx context.Context, username, passwordHash, displayNam
 // A transaction removes the question. There is no partial state to repair, so nothing has to guess
 // what a missing binding means, and a revocation stays revoked.
 func (db *DB) CreateBootstrapAdmin(ctx context.Context, username, passwordHash, displayName, role string) (User, error) {
+	return db.createUserWithBinding(ctx, "create bootstrap admin", username, passwordHash, displayName, role)
+}
+
+// CreateUserWithRole is the admin API's create; same transaction as the bootstrap admin.
+func (db *DB) CreateUserWithRole(ctx context.Context, username, passwordHash, displayName, role string) (User, error) {
+	return db.createUserWithBinding(ctx, "create user", username, passwordHash, displayName, role)
+}
+
+// createUserWithBinding creates a local user and binds it to role in ONE transaction: a user row
+// without its binding is an account nobody can use, and a half-made one cannot be told from a
+// deliberate revocation afterwards.
+func (db *DB) createUserWithBinding(ctx context.Context, op, username, passwordHash, displayName, role string) (User, error) {
 	start := time.Now()
 	tx, err := db.pool.Begin(ctx)
 	if err != nil {
 		db.observe(queryCreateUser, start, queryResult(err))
-		return User{}, fmt.Errorf("store: create bootstrap admin: begin: %w", err)
+		return User{}, fmt.Errorf("store: %s: begin: %w", op, err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }() // no-op once Commit has run
 
@@ -227,20 +239,59 @@ func (db *DB) CreateBootstrapAdmin(ctx context.Context, username, passwordHash, 
 	})
 	if err != nil {
 		db.observe(queryCreateUser, start, queryResult(wrapUniqueViolation(err)))
-		return User{}, fmt.Errorf("store: create bootstrap admin: %w", wrapUniqueViolation(err))
+		return User{}, fmt.Errorf("store: %s: %w", op, wrapUniqueViolation(err))
 	}
 	if _, err := q.CreateBinding(ctx, gen.CreateBindingParams{
 		RoleName: role, SubjectKind: "user", SubjectID: u.ID.String(),
 	}); err != nil {
 		db.observe(queryCreateBinding, start, queryResult(wrapUniqueViolation(err)))
-		return User{}, fmt.Errorf("store: create bootstrap admin binding: %w", wrapUniqueViolation(err))
+		return User{}, fmt.Errorf("store: %s binding: %w", op, wrapUniqueViolation(err))
 	}
 	if err := tx.Commit(ctx); err != nil {
 		db.observe(queryCreateUser, start, queryResult(err))
-		return User{}, fmt.Errorf("store: create bootstrap admin: commit: %w", err)
+		return User{}, fmt.Errorf("store: %s: commit: %w", op, err)
 	}
 	db.observe(queryCreateUser, start, queryResult(nil))
 	return userFromRow(&u), nil
+}
+
+// SetUserRole replaces every DIRECT binding of a local user with one binding to role, in one
+// transaction: no reader ever sees the user with no role, or with both. Group bindings stay.
+func (db *DB) SetUserRole(ctx context.Context, userID, role string) error {
+	start := time.Now()
+	tx, err := db.pool.Begin(ctx)
+	if err != nil {
+		db.observe(queryCreateBinding, start, queryResult(err))
+		return fmt.Errorf("store: set user role: begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }() // no-op once Commit has run
+
+	q := gen.New(tx)
+	direct, err := q.ListBindingsForSubject(ctx, gen.ListBindingsForSubjectParams{
+		CallerKind: "user", UserID: userID, Groups: []string{},
+	})
+	if err != nil {
+		db.observe(queryCreateBinding, start, queryResult(err))
+		return fmt.Errorf("store: set user role: list bindings: %w", err)
+	}
+	for _, b := range direct {
+		if _, err := q.DeleteBinding(ctx, b.ID); err != nil {
+			db.observe(queryCreateBinding, start, queryResult(err))
+			return fmt.Errorf("store: set user role: delete binding %d: %w", b.ID, err)
+		}
+	}
+	if _, err := q.CreateBinding(ctx, gen.CreateBindingParams{
+		RoleName: role, SubjectKind: "user", SubjectID: userID,
+	}); err != nil {
+		db.observe(queryCreateBinding, start, queryResult(wrapUniqueViolation(err)))
+		return fmt.Errorf("store: set user role: %w", wrapUniqueViolation(err))
+	}
+	if err := tx.Commit(ctx); err != nil {
+		db.observe(queryCreateBinding, start, queryResult(err))
+		return fmt.Errorf("store: set user role: commit: %w", err)
+	}
+	db.observe(queryCreateBinding, start, queryResult(nil))
+	return nil
 }
 
 func (db *DB) UpdateUserPassword(ctx context.Context, id, passwordHash string) error {

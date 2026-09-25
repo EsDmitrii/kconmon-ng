@@ -66,6 +66,10 @@ func (l *localAuthenticator) Authenticate(r *http.Request) (authz.Subject, error
 	if user.Disabled {
 		return authz.Subject{}, ErrDisabled
 	}
+	if sess.PasswordStamp != "" && sess.PasswordStamp != PasswordStamp(user.PasswordHash) {
+		// The password changed after this session was opened: re-prompt, it is not an attack.
+		return authz.Subject{}, ErrNoCredentials
+	}
 
 	return authz.Subject{
 		Kind:        authz.SubjectUser,

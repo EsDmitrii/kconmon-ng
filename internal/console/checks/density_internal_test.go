@@ -67,6 +67,18 @@ func TestClampTimeoutForGivesMTRItsTraceBudget(t *testing.T) {
 	}
 }
 
+// A black-holed pair's pmtu search waits out a read deadline per lost datagram, at full size and
+// on up to one bisection step in two. Below the floor the run reports "unreachable" for exactly the
+// pair the operator started it to look at.
+func TestClampTimeoutForGivesPMTUItsSearchBudget(t *testing.T) {
+	if got := clampTimeoutFor("pmtu", 0); got < 10*time.Second {
+		t.Errorf("pmtu per-pair timeout for an unspecified deadline = %s, want the search budget", got)
+	}
+	if got := clampTimeoutFor("pmtu", 60*time.Second); got != 60*time.Second {
+		t.Errorf("pmtu per-pair timeout = %s, want the operator's own 60s", got)
+	}
+}
+
 // allToAllPairs builds the n-node all<->all plan the stand runs.
 func allToAllPairs(n int) []Pair {
 	nodes := make([]string, 0, n)
@@ -194,7 +206,7 @@ func TestEffectiveSampleIntervalIgnoresInstantRuns(t *testing.T) {
 // TestNoDurationRunIsImpossible is the replacement for the removed reject path: whatever the shape,
 // the plan is at least one sample per pair, so there is nothing left for a 422 to refuse.
 func TestNoDurationRunIsImpossible(t *testing.T) {
-	for _, checkType := range []string{"tcp", "udp", "icmp", "dns", "http", "mtr"} {
+	for _, checkType := range []string{"tcp", "udp", "icmp", "pmtu", "dns", "http", "mtr"} {
 		for _, duration := range []time.Duration{MinRunDuration, time.Minute, 15 * time.Minute, MaxRunDuration} {
 			for _, nodes := range []int{2, 10, 20} {
 				spec := &Spec{Type: checkType, Duration: duration}

@@ -40,6 +40,11 @@ type Session struct {
 	// LastSeenAt is when a request last used this session; it is what the idle timeout measures
 	// from. Zero on a session issued before the field existed, which reads as IssuedAt.
 	LastSeenAt time.Time `json:"lastSeenAt"`
+	// PasswordStamp ties a local session to the password it was opened with: a password change
+	// leaves every older session stale without an index of sessions by user. Empty on sessions
+	// issued before 2.5.0, which stay valid until they expire rather than logging everyone out on
+	// upgrade.
+	PasswordStamp string `json:"passwordStamp,omitempty"`
 
 	// OIDC only; never leaves the server.
 	RefreshToken string    `json:"refreshToken,omitempty"` //nolint:gosec // not a hardcoded credential; gosec's G117 name heuristic flags any field named *Token

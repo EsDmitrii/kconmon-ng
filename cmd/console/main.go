@@ -278,6 +278,7 @@ func main() {
 	// Deps that only make sense with a database: role bindings.
 	var rolesDep httpapi.RoleResolver
 	var usersDep authn.UserStore
+	var userAdminDep httpapi.UserAdmin
 	var auditDep httpapi.Auditor
 	var rbacDep httpapi.RoleAdmin
 	var tokensDep httpapi.TokenAdmin
@@ -304,6 +305,7 @@ func main() {
 	if db != nil {
 		rolesDep = roleResolver{db: db}
 		usersDep = db
+		userAdminDep = db
 		auditDep = db
 		rbacDep = db
 		tokensDep = db
@@ -525,8 +527,12 @@ func main() {
 			Alerts:   prom,
 			Notifier: dispatcher,
 			// It is non-nil here by construction -- a dispatcher exists only when a database does.
-			Rules:    db,
-			Interval: cfg.Webhooks.AlertPollInterval,
+			Rules: db,
+			// Same database as the rules: windows are console state, and a dispatcher exists only when
+			// a database does.
+			Maintenance: db,
+			Metrics:     m,
+			Interval:    cfg.Webhooks.AlertPollInterval,
 		})
 		if watcherErr != nil {
 			slog.Warn("alert transition webhooks are off", "error", watcherErr)
@@ -549,7 +555,7 @@ func main() {
 		Events:          eventsDep,
 		TopologyHistory: topologyHistoryDep,
 		Authenticator:   authenticator, Policy: policy, Roles: rolesDep, Sessions: sessions,
-		Users: usersDep, OIDC: oidcDep,
+		Users: usersDep, UserAdmin: userAdminDep, OIDC: oidcDep,
 		Audit: auditDep, RBAC: rbacDep, Tokens: tokensDep,
 		Runner: runnerDep, Targets: targetsDep,
 		Definitions: definitionsDep, Schedules: schedulesDep,

@@ -77,6 +77,7 @@ type Server struct {
 	roles         RoleResolver
 	sessions      *authn.SessionStore
 	users         authn.UserStore
+	userAdmin     UserAdmin
 	oidc          OIDCFlow
 
 	// Audit. audit is the async audit-log writer/reader (nil = database.mode=disabled -- the audit
@@ -182,6 +183,9 @@ type Deps struct {
 	// (auth.mode=local only). nil means that endpoint answers 503 when
 	// local mode is otherwise configured.
 	Users authn.UserStore
+	// UserAdmin backs /api/v1/users and POST /api/v1/auth/password (auth.mode=local only). nil means
+	// those routes answer 503.
+	UserAdmin UserAdmin
 	// OIDC backs GET /api/v1/auth/oidc/start and .../callback (auth.mode=oidc only) with the
 	// AuthorizeURL/Callback methods that are not part of the Authenticator interface.
 	OIDC OIDCFlow
@@ -275,7 +279,7 @@ func NewServer(d Deps) *Server { //nolint:gocritic // hugeParam: Deps is the pin
 		metrics: d.Metrics, ctrl: d.Controller, prom: d.Prometheus,
 		hub: d.Hub, realtime: d.Realtime, events: d.Events, promReg: d.PromRegistry, kvBus: d.Bus,
 		authenticator: authenticator, policy: policy, roles: d.Roles, sessions: d.Sessions,
-		users: d.Users, oidc: d.OIDC,
+		users: d.Users, userAdmin: d.UserAdmin, oidc: d.OIDC,
 		audit: d.Audit, roleAdmin: d.RBAC, tokens: d.Tokens,
 		runner: d.Runner, targets: d.Targets,
 		definitions: d.Definitions, schedules: d.Schedules, topology: d.Topology,
@@ -430,6 +434,11 @@ func NewServer(d Deps) *Server { //nolint:gocritic // hugeParam: Deps is the pin
 		api.Get("/api/v1/tokens", s.handleTokensList)
 		api.Post("/api/v1/tokens", s.handleTokensCreate)
 		api.Delete("/api/v1/tokens/{id}", s.handleTokensDelete)
+		api.Get("/api/v1/users", s.handleUsersList)
+		api.Post("/api/v1/users", s.handleUsersCreate)
+		api.Patch("/api/v1/users/{id}", s.handleUsersPatch)
+		api.Post("/api/v1/users/{id}/password", s.handleUsersPassword)
+		api.Post("/api/v1/auth/password", s.handleAuthPassword)
 
 		api.Get("/api/v1/auth/me", s.handleAuthMe)
 		api.Post("/api/v1/auth/login", s.handleAuthLogin)

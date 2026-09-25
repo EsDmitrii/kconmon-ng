@@ -112,9 +112,11 @@ var routeTable = map[string]routeRule{
 	"GET /api/v1/version": {public: true},
 	"GET /api/v1/config":  {public: true},
 
-	"GET /api/v1/auth/me":            {public: true},
-	"POST /api/v1/auth/login":        {public: true},
-	"POST /api/v1/auth/logout":       {public: true},
+	"GET /api/v1/auth/me":      {public: true},
+	"POST /api/v1/auth/login":  {public: true},
+	"POST /api/v1/auth/logout": {public: true},
+	// Changing one's OWN password needs no permission; the handler resolves the session itself.
+	"POST /api/v1/auth/password":     {public: true},
 	"GET /api/v1/auth/oidc/start":    {public: true},
 	"GET " + config.OIDCCallbackPath: {public: true},
 
@@ -223,6 +225,11 @@ var routeTable = map[string]routeRule{
 	"GET /api/v1/tokens":         {permission: authz.PermTokensManage},
 	"POST /api/v1/tokens":        {permission: authz.PermTokensManage},
 	"DELETE /api/v1/tokens/{id}": {permission: authz.PermTokensManage},
+
+	"GET /api/v1/users":                {permission: authz.PermUsersManage},
+	"POST /api/v1/users":               {permission: authz.PermUsersManage},
+	"PATCH /api/v1/users/{id}":         {permission: authz.PermUsersManage},
+	"POST /api/v1/users/{id}/password": {permission: authz.PermUsersManage},
 
 	// The ONE anyOf row, and the only route in this table whose authorization does not end here.
 	"GET /ws": {anyOf: []authz.Permission{authz.PermEventsRead, authz.PermRunsRead}},

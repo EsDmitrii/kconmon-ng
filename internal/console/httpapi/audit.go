@@ -199,6 +199,9 @@ var auditDetailAllowlist = map[string][]string{
 	"POST /api/v1/rbac/roles":    {"name", "permissions"},
 	"POST /api/v1/rbac/bindings": {"roleName", "subjectKind", "subjectId"},
 	"POST /api/v1/tokens":        {"name", "expiresAt"},
+	// Users: who was created with which role, and whether someone was disabled. The password NEVER.
+	"POST /api/v1/users":       {"username", "displayName", "role"},
+	"PATCH /api/v1/users/{id}": {"disabled", "role"},
 	// destinationKind joined in : a closed three-value enum that tells an auditor whether a run probed
 	// the mesh or something outside it; the external address and target id stay excluded for the same
 	// reason sources/destinations.

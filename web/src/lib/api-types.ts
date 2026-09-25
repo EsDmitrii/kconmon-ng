@@ -1110,6 +1110,73 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/users": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Local users with the roles a request of theirs would resolve; auth.mode=local only.
+         * @description 404 in every other mode: the identity provider owns the accounts there. Never carries a password or its hash.
+         */
+        get: operations["listUsers"];
+        put?: never;
+        /**
+         * Create a local user and bind it to one role, in one transaction.
+         * @description The password needs at least 12 characters and at most 256 bytes; the role must be a built-in or an existing custom role. A taken username is 409.
+         */
+        post: operations["createUser"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/users/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Resource id (UUID). A malformed id is 404, indistinguishable from an unknown one. */
+                id: components["parameters"]["PathID"];
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        /**
+         * Disable or enable a user, change their role, or both.
+         * @description 409 when the change would leave no enabled user who can manage users, whether by disabling that user or by a role without users:manage.
+         */
+        patch: operations["updateUser"];
+        trace?: never;
+    };
+    "/api/v1/users/{id}/password": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Resource id (UUID). A malformed id is 404, indistinguishable from an unknown one. */
+                id: components["parameters"]["PathID"];
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Set a user's password; every session they had stops authenticating. */
+        post: operations["resetUserPassword"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/auth/me": {
         parameters: {
             query?: never;
@@ -1164,6 +1231,26 @@ export interface paths {
          * @description Mode-agnostic and idempotent -- safe with no session cookie at all.
          */
         post: operations["logout"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/auth/password": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Change the caller's own password; auth.mode=local only.
+         * @description A public route: no permission is needed to change one's own password, so it carries login's protections instead. The request must come from this console's own origin as application/json, needs a live local session (401 without one), and spends login's per-username rate limit. On success the caller gets a fresh session cookie and every other session of the user stops authenticating. 404 in every other mode.
+         */
+        post: operations["changeOwnPassword"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1225,12 +1312,12 @@ export interface components {
          * @default tcp
          * @enum {string}
          */
-        Protocol: "tcp" | "udp" | "icmp";
+        Protocol: "tcp" | "udp" | "icmp" | "pmtu";
         /**
          * @description A definition names exactly one of these.
          * @enum {string}
          */
-        CheckType: "tcp" | "udp" | "icmp" | "dns" | "http" | "mtr";
+        CheckType: "tcp" | "udp" | "icmp" | "pmtu" | "dns" | "http" | "mtr";
         /** @enum {string} */
         RunStatus: "pending" | "running" | "succeeded" | "failed" | "partial" | "cancelled";
         /** @enum {string} */
@@ -1327,6 +1414,16 @@ export interface components {
             rttP95?: number;
             /** @description udp/icmp only. Omitted when no series matched. */
             lossRatio?: number;
+            /**
+             * Format: int64
+             * @description pmtu only. Largest IP datagram in bytes that crossed the pair. Omitted when no series matched.
+             */
+            mtuBytes?: number;
+            /**
+             * Format: int64
+             * @description pmtu only. The size the source probes at; mtuBytes below it with failRatio 0 is a reduced path.
+             */
+            probeMtuBytes?: number;
         };
         Matrix: {
             protocol: components["schemas"]["Protocol"];
@@ -2361,6 +2458,38 @@ export interface components {
             revokedAt?: string;
             /** Format: date-time */
             createdAt: string;
+        };
+        UserList: {
+            users: components["schemas"]["User"][];
+        };
+        User: {
+            id: string;
+            username: string;
+            displayName: string;
+            /** @description Resolved the way a request of this user's would be (bindings, then auth.defaultRole). */
+            roles: string[];
+            disabled: boolean;
+            /** Format: date-time */
+            createdAt: string;
+        };
+        UserCreate: {
+            username: string;
+            /** @description Defaults to the username. */
+            displayName?: string;
+            password: string;
+            role: string;
+        };
+        UserPatch: {
+            disabled?: boolean;
+            /** @description Replaces the user's direct role bindings with this one, in one transaction; group bindings stay. */
+            role?: string;
+        };
+        PasswordSet: {
+            password: string;
+        };
+        PasswordChange: {
+            currentPassword: string;
+            newPassword: string;
         };
         TokenList: {
             tokens: components["schemas"]["Token"][];
@@ -4817,6 +4946,123 @@ export interface operations {
             503: components["responses"]["Unavailable"];
         };
     };
+    listUsers: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Every local user, sorted by username. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UserList"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            502: components["responses"]["BadGateway"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    createUser: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UserCreate"];
+            };
+        };
+        responses: {
+            /** @description The created user. */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["User"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            500: components["responses"]["InternalError"];
+            502: components["responses"]["BadGateway"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    updateUser: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Resource id (UUID). A malformed id is 404, indistinguishable from an unknown one. */
+                id: components["parameters"]["PathID"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UserPatch"];
+            };
+        };
+        responses: {
+            /** @description The user after the change. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["User"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            502: components["responses"]["BadGateway"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    resetUserPassword: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Resource id (UUID). A malformed id is 404, indistinguishable from an unknown one. */
+                id: components["parameters"]["PathID"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PasswordSet"];
+            };
+        };
+        responses: {
+            204: components["responses"]["NoContent"];
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalError"];
+            502: components["responses"]["BadGateway"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
     getMe: {
         parameters: {
             query?: never;
@@ -4886,6 +5132,38 @@ export interface operations {
                 };
                 content?: never;
             };
+        };
+    };
+    changeOwnPassword: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PasswordChange"];
+            };
+        };
+        responses: {
+            /** @description Changed; a fresh session cookie is set. */
+            204: {
+                headers: {
+                    /** @description The reissued session cookie. */
+                    "Set-Cookie"?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            429: components["responses"]["TooManyRequests"];
+            500: components["responses"]["InternalError"];
+            502: components["responses"]["BadGateway"];
+            503: components["responses"]["Unavailable"];
         };
     };
     oidcStart: {
