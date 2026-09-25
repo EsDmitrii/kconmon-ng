@@ -56,6 +56,7 @@ var validCheckTypes = map[string]struct{}{
 	string(model.CheckTCP):  {},
 	string(model.CheckUDP):  {},
 	string(model.CheckICMP): {},
+	string(model.CheckPMTU): {},
 	string(model.CheckDNS):  {},
 	string(model.CheckHTTP): {},
 	string(model.CheckMTR):  {},

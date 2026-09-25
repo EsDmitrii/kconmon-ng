@@ -20,11 +20,13 @@ func newCheckCmd(opts *globalOptions) *cobra.Command {
 		Short: "Run a one-shot connectivity diagnostic from SRC node to DST node",
 		Long: `Dispatch a single diagnostic from the agent on the SRC node towards the DST
 node, wait for the result, and print a one-line verdict plus the measured
-numbers (RTT, loss, jitter — depending on --type).
+numbers (RTT, loss, jitter or path MTU, depending on --type).
 
 SRC and DST are Kubernetes node names (as shown by 'kubectl kconmon
 topology'). For --type dns and --type http the probe runs the checker's
-configured targets from the SRC node and DST is ignored.
+configured targets from the SRC node and DST is ignored. --type pmtu sends
+full-size datagrams with DF set and reports the largest one that crosses the
+pair; a black hole exits 2 like any failed check.
 
 The wait is server-side: --timeout is passed to the controller (capped at
 120s there); the client allows a small extra margin on top. Exit code is 2
@@ -35,6 +37,9 @@ distinguish "network broken" (2) from "couldn't ask" (1).`,
 
   # Specific protocol, longer wait
   kubectl kconmon check worker-3 worker-7 --type udp --timeout 90s
+
+  # Path MTU: does a full-size datagram cross, and how big may it be
+  kubectl kconmon check worker-3 worker-7 --type pmtu
 
   # DNS health as seen from one node (DST ignored, use any node name)
   kubectl kconmon check worker-3 worker-3 --type dns
@@ -74,7 +79,7 @@ distinguish "network broken" (2) from "couldn't ask" (1).`,
 		},
 	}
 
-	cmd.Flags().StringVar(&checkType, "type", "icmp", "check type: icmp|tcp|udp|dns|http")
+	cmd.Flags().StringVar(&checkType, "type", "icmp", "check type: icmp|tcp|udp|pmtu|dns|http")
 	cmd.Flags().StringVar(&plane, "plane", "pod", "network plane to test")
 	cmd.Flags().DurationVar(&timeout, "timeout", 60*time.Second, "diagnostic timeout (controller caps at 120s)")
 	return cmd

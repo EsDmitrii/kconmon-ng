@@ -34,6 +34,11 @@ type PrometheusMetrics struct {
 	ICMPLossRatio *prometheus.GaugeVec
 	ICMPResults   *prometheus.CounterVec
 
+	// Path MTU: the largest datagram that crossed the pair on the last probe, and whether the
+	// full-size one did. fail is a black hole; a reduced path counts as success.
+	PMTUBytes   *prometheus.GaugeVec
+	PMTUResults *prometheus.CounterVec
+
 	/* ProbeIntended is the topology PLAN, scrapable: 1 for every directed pair this agent is
 	   assigned to probe. Under a sparse mesh "no results for a pair" is either a failure or the
 	   plan, and only this family tells them apart — PairWentSilent joins on it, which is why it
@@ -61,6 +66,8 @@ type PrometheusMetrics struct {
 	ZoneICMPResults         *prometheus.CounterVec
 	ZoneICMPPacketsSent     *prometheus.CounterVec
 	ZoneICMPPacketsReceived *prometheus.CounterVec
+
+	ZonePMTUResults *prometheus.CounterVec
 
 	DNSDuration *prometheus.HistogramVec
 	DNSResults  *prometheus.CounterVec
@@ -104,6 +111,9 @@ type PrometheusMetrics struct {
 	// by reason: "cooldown" (a trace for that destination already ran or runs
 	// inside the cooldown window) or "saturated" (all reactive-trace slots busy).
 	AgentMTRReactiveCoalesced *prometheus.CounterVec
+	// AgentPMTUProbeBytes is the size this agent probes at, keyed by source_node so a PromQL join
+	// tells a reduced path (pmtu_bytes below it) from a healthy one.
+	AgentPMTUProbeBytes *prometheus.GaugeVec
 
 	ControllerRegisteredAgents *prometheus.GaugeVec
 	// ControllerExternalAgents is the bare-host subset of registered agents. KconmonAgentsMissing
@@ -204,6 +214,14 @@ func NewPrometheusMetrics(prefix string, reg prometheus.Registerer) *PrometheusM
 			Name: prefix + "_icmp_results_total",
 			Help: "Total ICMP probe results",
 		}, resultPeerLabels),
+		PMTUBytes: factory.NewGaugeVec(prometheus.GaugeOpts{
+			Name: prefix + "_pmtu_bytes",
+			Help: "Largest IP datagram in bytes that crossed the pair on the last path MTU probe",
+		}, peerLabels),
+		PMTUResults: factory.NewCounterVec(prometheus.CounterOpts{
+			Name: prefix + "_pmtu_results_total",
+			Help: "Total path MTU probe results; fail means full-size datagrams are lost with no ICMP frag-needed (a black hole)",
+		}, resultPeerLabels),
 
 		ProbeIntended: factory.NewGaugeVec(prometheus.GaugeOpts{
 			Name: prefix + "_probe_intended",
@@ -260,6 +278,10 @@ func NewPrometheusMetrics(prefix string, reg prometheus.Registerer) *PrometheusM
 			Name: prefix + "_zone_icmp_packets_received_total",
 			Help: "Total ICMP echo replies received, per zone pair",
 		}, zoneLabels),
+		ZonePMTUResults: factory.NewCounterVec(prometheus.CounterOpts{
+			Name: prefix + "_zone_pmtu_results_total",
+			Help: "Total path MTU probe results, aggregated per zone pair",
+		}, resultZoneLabels),
 
 		DNSDuration: factory.NewHistogramVec(prometheus.HistogramOpts{
 			Name:    prefix + "_dns_duration_seconds",
@@ -370,6 +392,10 @@ func NewPrometheusMetrics(prefix string, reg prometheus.Registerer) *PrometheusM
 			Name: prefix + "_agent_mtr_reactive_coalesced_total",
 			Help: "Failed probes that triggered no new reactive MTR trace, by reason (cooldown|saturated)",
 		}, []string{"reason"}),
+		AgentPMTUProbeBytes: factory.NewGaugeVec(prometheus.GaugeOpts{
+			Name: prefix + "_agent_pmtu_probe_bytes",
+			Help: "IP datagram size in bytes this agent probes the path MTU at: its interface MTU or checkers.pmtu.size",
+		}, []string{"source_node"}),
 
 		ControllerRegisteredAgents: factory.NewGaugeVec(prometheus.GaugeOpts{
 			Name: prefix + "_controller_registered_agents",
@@ -469,6 +495,8 @@ func (m *PrometheusMetrics) PeerResultCounter(checkType string) *prometheus.Coun
 		return m.UDPResults
 	case "icmp":
 		return m.ICMPResults
+	case "pmtu":
+		return m.PMTUResults
 	default:
 		return nil
 	}
@@ -484,6 +512,8 @@ func (m *PrometheusMetrics) ZoneResultCounter(checkType string) *prometheus.Coun
 		return m.ZoneUDPResults
 	case "icmp":
 		return m.ZoneICMPResults
+	case "pmtu":
+		return m.ZonePMTUResults
 	default:
 		return nil
 	}
@@ -531,6 +561,7 @@ func (m *PrometheusMetrics) ForgetPeer(destinationNode string) {
 	m.UDPLossRatio.DeletePartialMatch(labels)
 	m.UDPJitter.DeletePartialMatch(labels)
 	m.ICMPLossRatio.DeletePartialMatch(labels)
+	m.PMTUBytes.DeletePartialMatch(labels)
 	m.MTRHops.DeletePartialMatch(labels)
 	m.MTRHopRTT.DeletePartialMatch(labels)
 	// The plan gauge goes with the peer: a departed destination is by definition no longer

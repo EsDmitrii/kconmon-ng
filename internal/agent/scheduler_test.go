@@ -366,3 +366,31 @@ func TestSchedulerNoPeers(t *testing.T) {
 	}
 	mu.Unlock()
 }
+
+// A path MTU failure never triggers a trace: MTR walks the path with small packets, which is exactly
+// what still works across a black hole.
+func TestTriggerMTRSkipsPMTUFailures(t *testing.T) {
+	var mu sync.Mutex
+	var results []model.CheckResult
+	s := NewScheduler(checker.Target{AgentID: "a", NodeName: "self"}, func(r model.CheckResult) {
+		mu.Lock()
+		results = append(results, r)
+		mu.Unlock()
+	})
+	mtr := checker.NewMTRChecker(5, time.Second, time.Minute)
+	s.SetMTRChecker(mtr)
+
+	peer := checker.Target{NodeName: "peer"}
+	failed := model.CheckResult{Type: model.CheckPMTU, Success: false, Error: "path MTU black hole"}
+	s.triggerMTR(context.Background(), peer, &failed)
+
+	mu.Lock()
+	got := len(results)
+	mu.Unlock()
+	if got != 0 {
+		t.Fatalf("a pmtu failure must not produce an MTR result, got %d", got)
+	}
+	if !mtr.TryAcquire("self", "peer") {
+		t.Fatal("a pmtu failure consumed the MTR cooldown token, so triggerMTR did not return early")
+	}
+}

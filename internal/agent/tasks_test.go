@@ -865,3 +865,26 @@ func TestTargetFromRequestHonoursReportedPortsAndFallsBack(t *testing.T) {
 		t.Error("a peer target came out marked External")
 	}
 }
+
+func TestExecuteRunsAnOnDemandPMTUProbe(t *testing.T) {
+	fc := &fakeChecker{name: model.CheckPMTU, result: model.CheckResult{Success: true}}
+	rep := newFakeReporter()
+	ex := newTestExecutor(rep, fc)
+
+	ex.Handle(context.Background(), &pb.TaskRequest{
+		TaskId: "p1", CheckType: "pmtu",
+		Target: &pb.AgentMeta{NodeName: "node-b", PodIp: "10.0.0.2", Zone: "zone-b"},
+		Plane:  "pod",
+	})
+	waitForReport(t, rep)
+
+	if res := rep.last(); res == nil || !res.GetSuccess() {
+		t.Fatalf("on-demand pmtu did not report success: %+v", res)
+	}
+	if fc.callCount() != 1 {
+		t.Errorf("pmtu checker ran %d times, want 1", fc.callCount())
+	}
+	if got := fc.lastTarget().PodIP; got != "10.0.0.2" {
+		t.Errorf("pmtu probed %q, want the peer's pod IP", got)
+	}
+}

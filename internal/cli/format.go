@@ -291,6 +291,16 @@ func detailLines(res *model.CheckResult) []string {
 				d.PacketsSent, d.PacketsRecv, humanizePct(d.LossRatio),
 				humanizeDuration(d.MeanRTT), humanizeDuration(d.Jitter))}
 		}
+	case model.CheckPMTU:
+		var d model.PMTUDetails
+		if json.Unmarshal(raw, &d) == nil {
+			line := fmt.Sprintf("verdict=%s path_mtu=%d probe_mtu=%d datagrams=%d",
+				d.Verdict, d.PathMTU, d.ProbeMTU, d.Steps)
+			if d.Truncated {
+				line += " truncated=true"
+			}
+			return []string{line}
+		}
 	case model.CheckTCP:
 		var d model.TCPDetails
 		if json.Unmarshal(raw, &d) == nil {

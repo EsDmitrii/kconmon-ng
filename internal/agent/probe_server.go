@@ -34,8 +34,13 @@ func (s *ProbeServer) ListenUDP(ctx context.Context) error {
 	return nil
 }
 
+// probeReadBuffer holds the largest UDP datagram IPv4 can carry, so a full-size pmtu probe is read
+// whole. The reply stays four bytes: only the sequence number travels back, the forward path is what
+// a probe measures.
+const probeReadBuffer = 65535
+
 func (s *ProbeServer) serveUDP() {
-	buf := make([]byte, 1024)
+	buf := make([]byte, probeReadBuffer)
 	for s.running.Load() {
 		n, addr, err := s.listener.ReadFrom(buf)
 		if err != nil {

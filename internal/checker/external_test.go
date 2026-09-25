@@ -679,6 +679,7 @@ func TestParseExternalSpecRejects(t *testing.T) {
 		{"unknown check type", ExternalSpecInput{Name: "n", Address: "1.1.1.1", CheckType: "gopher", Interval: time.Second}, "unknown check type"},
 		{"mtr refused", ExternalSpecInput{Name: "n", Address: "1.1.1.1", CheckType: "mtr", Interval: time.Second}, "not valid"},
 		{"udp refused", ExternalSpecInput{Name: "n", Address: "1.1.1.1", CheckType: "udp", Interval: time.Second}, "not valid"},
+		{"pmtu refused", ExternalSpecInput{Name: "n", Address: "1.1.1.1", CheckType: "pmtu", Interval: time.Second}, "not valid"},
 		{"dns without query", ExternalSpecInput{Name: "n", Address: "1.1.1.1", CheckType: "dns", Interval: time.Second}, "query"},
 		{"dns blank query", ExternalSpecInput{Name: "n", Address: "1.1.1.1", CheckType: "dns", Interval: time.Second, ParamsJSON: []byte(`{"query":"  "}`)}, "query"},
 		{"http non-url address", ExternalSpecInput{Name: "n", Address: "1.1.1.1", CheckType: "http", Interval: time.Second}, "URL"},

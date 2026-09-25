@@ -575,3 +575,42 @@ func TestForgetPeerDropsProbeIntendedForThatDestinationOnly(t *testing.T) {
 		t.Errorf("the still-assigned pair's probe_intended = %v, want 1", got)
 	}
 }
+
+func TestPrometheusMetricsPMTUFamilies(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	m := NewPrometheusMetrics("kconmon_ng", reg)
+
+	m.PMTUBytes.WithLabelValues("src", "dst", "zone-a", "zone-b").Set(1400)
+	m.PMTUResults.WithLabelValues("src", "dst", "zone-a", "zone-b", "fail").Inc()
+	m.ZonePMTUResults.WithLabelValues("zone-a", "zone-b", "fail").Inc()
+	m.AgentPMTUProbeBytes.WithLabelValues("src").Set(1500)
+
+	got := gatheredNames(t, reg)
+	for _, name := range []string{
+		"kconmon_ng_pmtu_bytes",
+		"kconmon_ng_pmtu_results_total",
+		"kconmon_ng_zone_pmtu_results_total",
+		"kconmon_ng_agent_pmtu_probe_bytes",
+	} {
+		if !slices.Contains(got, name) {
+			t.Errorf("expected metric %s not found in %v", name, got)
+		}
+	}
+	if m.PeerResultCounter("pmtu") != m.PMTUResults {
+		t.Error(`PeerResultCounter("pmtu") must return PMTUResults so the peer preinit covers it`)
+	}
+	if m.ZoneResultCounter("pmtu") != m.ZonePMTUResults {
+		t.Error(`ZoneResultCounter("pmtu") must return ZonePMTUResults so the zone preinit covers it`)
+	}
+	if sent, recv := m.ZonePacketCounters("pmtu"); sent != nil || recv != nil {
+		t.Error("pmtu sends a search, not a packet train: it must not get packet counters")
+	}
+
+	m.ForgetPeer("dst")
+	if n := testutil.CollectAndCount(m.PMTUBytes); n != 0 {
+		t.Errorf("ForgetPeer left %d pmtu_bytes series for the departed peer", n)
+	}
+	if n := testutil.CollectAndCount(m.PMTUResults); n != 1 {
+		t.Errorf("ForgetPeer must not drop counters, pmtu_results_total has %d series, want 1", n)
+	}
+}

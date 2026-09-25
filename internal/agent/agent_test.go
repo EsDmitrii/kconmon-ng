@@ -1155,3 +1155,91 @@ func TestNewAgentAdvertisesItsListenerPorts(t *testing.T) {
 		t.Errorf("ownPorts() = %+v, want %+v", got, want)
 	}
 }
+
+func pmtuSample(t *testing.T, reg *prometheus.Registry, family, result string) (float64, bool) {
+	t.Helper()
+	for _, mtr := range icmpPairSamples(t, reg, family) {
+		match := result == ""
+		for _, lp := range mtr.GetLabel() {
+			if lp.GetName() == "result" && lp.GetValue() == result {
+				match = true
+			}
+		}
+		if !match {
+			continue
+		}
+		if c := mtr.GetCounter(); c != nil {
+			return c.GetValue(), true
+		}
+		return mtr.GetGauge().GetValue(), true
+	}
+	return 0, false
+}
+
+func TestResultHandlerPMTUVerdicts(t *testing.T) {
+	tests := []struct {
+		name     string
+		details  *model.PMTUDetails
+		success  bool
+		result   string
+		wantPath float64
+	}{
+		{"ok", &model.PMTUDetails{ProbeMTU: 1500, PathMTU: 1500, Verdict: model.PMTUVerdictOK}, true, "success", 1500},
+		{"reduced", &model.PMTUDetails{ProbeMTU: 1500, PathMTU: 1450, Verdict: model.PMTUVerdictReduced}, true, "success", 1450},
+		{"blackhole", &model.PMTUDetails{ProbeMTU: 1500, PathMTU: 1400, Verdict: model.PMTUVerdictBlackhole}, false, "fail", 1400},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			reg, handle := newTestRegistry(t)
+			handle(model.CheckResult{
+				Type: model.CheckPMTU, Source: "node-a", Destination: "node-b",
+				SourceZone: "zone-a", DestZone: "zone-b", Success: tc.success, Details: tc.details,
+			})
+			if got, ok := pmtuSample(t, reg, "kconmon_ng_pmtu_results_total", tc.result); !ok || got != 1 {
+				t.Errorf("pmtu_results_total{result=%s} = %v (present=%v), want 1", tc.result, got, ok)
+			}
+			if got, ok := pmtuSample(t, reg, "kconmon_ng_pmtu_bytes", ""); !ok || got != tc.wantPath {
+				t.Errorf("pmtu_bytes = %v (present=%v), want %v", got, ok, tc.wantPath)
+			}
+			if got := gaugeValue(t, reg, "kconmon_ng_agent_pmtu_probe_bytes"); got != 1500 {
+				t.Errorf("agent_pmtu_probe_bytes = %v, want 1500", got)
+			}
+		})
+	}
+}
+
+// A peer that is simply down must not look like a black hole: unreachable writes no pmtu series.
+func TestResultHandlerPMTUUnreachableWritesNothing(t *testing.T) {
+	reg, handle := newTestRegistry(t)
+	handle(model.CheckResult{
+		Type: model.CheckPMTU, Source: "node-a", Destination: "node-b",
+		SourceZone: "zone-a", DestZone: "zone-b", Success: false,
+		Error:   "pmtu: the peer's echo did not answer a 64-byte datagram",
+		Details: &model.PMTUDetails{ProbeMTU: 1500, Verdict: model.PMTUVerdictUnreachable, Steps: 2},
+	})
+	// A probe that failed before it could send (no details) writes nothing either.
+	handle(model.CheckResult{
+		Type: model.CheckPMTU, Source: "node-a", Destination: "node-b", Success: false,
+		Error: "pmtu: cannot read the MTU of the interface owning 10.0.0.1",
+	})
+	families, err := reg.Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range families {
+		if strings.Contains(f.GetName(), "pmtu") && len(f.GetMetric()) > 0 {
+			t.Errorf("family %s has %d series after an unreachable probe, want none", f.GetName(), len(f.GetMetric()))
+		}
+	}
+}
+
+func TestAgentCapabilitiesAdvertisePMTU(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Checkers.UDP.Enabled = true
+	cfg.Checkers.PMTU.Enabled = true
+	got := agentCapabilities(cfg)
+	want := []string{"plane:udp", "plane:pmtu", "plane:mtr"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("agentCapabilities = %v, want %v", got, want)
+	}
+}

@@ -372,8 +372,8 @@ func (c *ExternalChecker) probe(ctx context.Context, spec *ExternalSpec, st *ext
 		}
 	case model.CheckHTTP:
 		detail.StatusCode, detail.Duration, err = c.probeHTTP(probeCtx, spec, addr)
-	case model.CheckUDP, model.CheckMTR, model.CheckExternal:
-		// Unreachable: ParseExternalSpec refuses all three and the controller never assigns them (see the
+	case model.CheckUDP, model.CheckMTR, model.CheckExternal, model.CheckPMTU:
+		// Unreachable: ParseExternalSpec refuses all four and the controller never assigns them (see the
 		// ExternalCheckSpec proto comment).
 		err = fmt.Errorf("check type %q is not valid for a continuous external check", spec.Type)
 	default:
@@ -623,7 +623,7 @@ func ParseExternalSpec(in *ExternalSpecInput) (ExternalSpec, error) {
 		if err := validateExternalHTTP(&spec); err != nil {
 			return ExternalSpec{}, err
 		}
-	case model.CheckUDP, model.CheckMTR, model.CheckExternal:
+	case model.CheckUDP, model.CheckMTR, model.CheckExternal, model.CheckPMTU:
 		// The controller rejects all of these at the PUT (validExternalCheckTypes), so they should never
 		// arrive.
 		return ExternalSpec{}, fmt.Errorf("check type %q is not valid for a continuous external check", in.CheckType)

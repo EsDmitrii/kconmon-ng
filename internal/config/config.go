@@ -2,6 +2,7 @@ package config
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"io"
@@ -9,6 +10,7 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -123,6 +125,7 @@ type CheckersConfig struct {
 	TCP      TCPCheckerConfig      `yaml:"tcp"`
 	UDP      UDPCheckerConfig      `yaml:"udp"`
 	ICMP     ICMPCheckerConfig     `yaml:"icmp"`
+	PMTU     PMTUCheckerConfig     `yaml:"pmtu"`
 	DNS      DNSCheckerConfig      `yaml:"dns"`
 	HTTP     HTTPCheckerConfig     `yaml:"http"`
 	MTR      MTRCheckerConfig      `yaml:"mtr"`
@@ -147,6 +150,23 @@ type ICMPCheckerConfig struct {
 	Interval time.Duration `yaml:"interval"`
 	Timeout  time.Duration `yaml:"timeout"`
 }
+
+// PMTUCheckerConfig drives the path-MTU probe. Size 0 probes at the MTU of the interface that routes
+// to the peer, which is what the CNI configured for the pod and the right question almost always;
+// an explicit size exists for networks that deliberately run below the interface MTU.
+type PMTUCheckerConfig struct {
+	Enabled  bool          `yaml:"enabled"`
+	Interval time.Duration `yaml:"interval"`
+	Timeout  time.Duration `yaml:"timeout"`
+	Size     int           `yaml:"size"`
+}
+
+// PMTUMinSize and PMTUMaxSize bound an explicit checkers.pmtu.size: 576 is the datagram every IPv4
+// host must accept, 65535 the IPv4 total-length ceiling.
+const (
+	PMTUMinSize = 576
+	PMTUMaxSize = 65535
+)
 
 type DNSCheckerConfig struct {
 	Enabled   bool          `yaml:"enabled"`
@@ -254,12 +274,18 @@ type OTelConfig struct {
 type OnChangeFunc func(*Config)
 
 type Loader struct {
-	mu       sync.RWMutex
-	cfg      *Config
-	filePath string
-	onChange []OnChangeFunc
-	watcher  *fsnotify.Watcher
+	mu  sync.RWMutex
+	cfg *Config
+	// appliedHash is the sha256 of the file content cfg was built from, so the watcher can tell a
+	// real change from a chmod or a rewrite with the same bytes.
+	appliedHash [sha256.Size]byte
+	filePath    string
+	onChange    []OnChangeFunc
+	watcher     *fsnotify.Watcher
 }
+
+// configReloadDebounce folds the burst of events one rewrite produces into a single reload.
+const configReloadDebounce = 250 * time.Millisecond
 
 func NewLoader(filePath string) *Loader {
 	return &Loader{
@@ -269,10 +295,23 @@ func NewLoader(filePath string) *Loader {
 }
 
 func (l *Loader) Load() error {
+	var data []byte
+	if l.filePath != "" {
+		var err error
+		if data, err = os.ReadFile(l.filePath); err != nil {
+			return fmt.Errorf("loading config file: %w", err)
+		}
+	}
+	return l.load(data)
+}
+
+// load builds the config from the file content data (nil when there is no file), validates it and
+// applies it together with the content hash, so the hash always describes the config in effect.
+func (l *Loader) load(data []byte) error {
 	cfg := DefaultConfig()
 
-	if l.filePath != "" {
-		if err := l.loadFromFile(cfg); err != nil {
+	if data != nil {
+		if err := decodeConfig(data, cfg); err != nil {
 			return fmt.Errorf("loading config file: %w", err)
 		}
 	}
@@ -286,6 +325,7 @@ func (l *Loader) Load() error {
 
 	l.mu.Lock()
 	l.cfg = cfg
+	l.appliedHash = sha256.Sum256(data)
 	l.mu.Unlock()
 
 	return nil
@@ -311,11 +351,18 @@ func (l *Loader) WatchForChanges() error {
 	if err != nil {
 		return fmt.Errorf("creating watcher: %w", err)
 	}
-	l.watcher = watcher
 
-	if err := watcher.Add(l.filePath); err != nil {
-		return fmt.Errorf("watching file %s: %w", l.filePath, err)
+	/* The DIRECTORY is watched, not the file. Editors, ansible, puppet's file resource and `mv tmp
+	   config.yaml` replace the file by rename: a watch on the file follows the old inode, sees one
+	   remove and never fires again, so hot reload died silently after the first such rewrite. A
+	   ConfigMap mount swaps a `..data` symlink next to the file, which only a directory watch sees
+	   at all. */
+	dir := filepath.Dir(l.filePath)
+	if err := watcher.Add(dir); err != nil {
+		_ = watcher.Close()
+		return fmt.Errorf("watching directory %s: %w", dir, err)
 	}
+	l.watcher = watcher
 
 	go l.watchLoop()
 	return nil
@@ -329,23 +376,19 @@ func (l *Loader) Close() error {
 }
 
 func (l *Loader) watchLoop() {
+	var debounce <-chan time.Time
 	for {
 		select {
 		case event, ok := <-l.watcher.Events:
 			if !ok {
 				return
 			}
-			if event.Has(fsnotify.Write) || event.Has(fsnotify.Create) {
-				slog.Info("config file changed, reloading", "file", l.filePath)
-				if err := l.Load(); err != nil {
-					slog.Error("failed to reload config", "error", err)
-					continue
-				}
-				cfg := l.Get()
-				for _, fn := range l.onChange {
-					fn(cfg)
-				}
+			if l.isConfigEvent(event) {
+				debounce = time.After(configReloadDebounce)
 			}
+		case <-debounce:
+			debounce = nil
+			l.reloadIfChanged()
 		case err, ok := <-l.watcher.Errors:
 			if !ok {
 				return
@@ -355,11 +398,43 @@ func (l *Loader) watchLoop() {
 	}
 }
 
-func (l *Loader) loadFromFile(cfg *Config) error {
+// isConfigEvent keeps the events about our file, and the ConfigMap symlink swap, apart from
+// everything else that happens in the directory. The swap renames `..data_tmp` over `..data`:
+// inotify reports it under `..data`, kqueue under `..data_tmp`, so both names count. A false
+// positive costs one read, because the reload compares content first.
+func (l *Loader) isConfigEvent(event fsnotify.Event) bool {
+	name := filepath.Clean(event.Name)
+	return name == filepath.Clean(l.filePath) || strings.HasPrefix(filepath.Base(name), "..data")
+}
+
+// reloadIfChanged applies the file when its content differs from what is applied. A missing file
+// keeps the current config: a rewrite is often a remove followed by a create.
+func (l *Loader) reloadIfChanged() {
 	data, err := os.ReadFile(l.filePath)
 	if err != nil {
-		return err
+		slog.Warn("config file unreadable, keeping the current config", "file", l.filePath, "error", err)
+		return
 	}
+	l.mu.RLock()
+	unchanged := sha256.Sum256(data) == l.appliedHash
+	l.mu.RUnlock()
+	if unchanged {
+		return
+	}
+	slog.Info("config file changed, reloading", "file", l.filePath)
+	if err := l.load(data); err != nil {
+		slog.Error("failed to reload config", "error", err)
+		return
+	}
+	cfg := l.Get()
+	for _, fn := range l.onChange {
+		fn(cfg)
+	}
+}
+
+// decodeConfig overlays the YAML in data onto cfg. Unknown keys are an error, so a typo cannot
+// silently fall back to a default.
+func decodeConfig(data []byte, cfg *Config) error {
 	dec := yaml.NewDecoder(bytes.NewReader(data))
 	dec.KnownFields(true)
 	if err := dec.Decode(cfg); err != nil {
@@ -473,6 +548,10 @@ func (l *Loader) validate(cfg *Config) error {
 	if cfg.Checkers.UDP.Packets < 1 {
 		return fmt.Errorf("udp.packets must be >= 1, got %d", cfg.Checkers.UDP.Packets)
 	}
+	if s := cfg.Checkers.PMTU.Size; s != 0 && (s < PMTUMinSize || s > PMTUMaxSize) {
+		return fmt.Errorf("pmtu.size must be 0 (the interface MTU) or between %d and %d, got %d",
+			PMTUMinSize, PMTUMaxSize, s)
+	}
 	if cfg.Checkers.MTR.MaxHops < 1 || cfg.Checkers.MTR.MaxHops > 64 {
 		return fmt.Errorf("mtr.maxHops must be between 1 and 64, got %d", cfg.Checkers.MTR.MaxHops)
 	}
@@ -489,6 +568,11 @@ func (l *Loader) validate(cfg *Config) error {
 	}
 	if cfg.Checkers.ICMP.Enabled {
 		if err := validateTiming("icmp", cfg.Checkers.ICMP.Interval, cfg.Checkers.ICMP.Timeout); err != nil {
+			return err
+		}
+	}
+	if cfg.Checkers.PMTU.Enabled {
+		if err := validateTiming("pmtu", cfg.Checkers.PMTU.Interval, cfg.Checkers.PMTU.Timeout); err != nil {
 			return err
 		}
 	}

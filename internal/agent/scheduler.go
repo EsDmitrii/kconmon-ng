@@ -353,9 +353,11 @@ func (s *Scheduler) triggerMTR(ctx context.Context, peer checker.Target, failedR
 		trace = mtr.Check
 	}
 
-	// Check types that must never trigger a trace.
+	// Check types that must never trigger a trace. pmtu is here because MTR walks the path with
+	// small packets, which is exactly what still crosses a black hole.
 	if failedResult.Type == model.CheckDNS || failedResult.Type == model.CheckHTTP ||
-		failedResult.Type == model.CheckMTR || failedResult.Type == model.CheckExternal {
+		failedResult.Type == model.CheckMTR || failedResult.Type == model.CheckExternal ||
+		failedResult.Type == model.CheckPMTU {
 		return
 	}
 
