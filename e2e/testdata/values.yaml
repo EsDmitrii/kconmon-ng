@@ -24,6 +24,12 @@ config:
       enabled: false
     icmp:
       enabled: false
+    # Faster than production so the black-hole scenario fits the e2e budget: a 10s round, a 200ms
+    # per-datagram timeout (the whole bisection stays under 4s).
+    pmtu:
+      enabled: true
+      interval: 10s
+      timeout: 200ms
     dns:
       enabled: false
     http:

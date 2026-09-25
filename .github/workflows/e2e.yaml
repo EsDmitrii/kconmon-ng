@@ -258,7 +258,7 @@ jobs:
           sleep 3
 
           # TestConsoleDegradedMode needs a SECOND rollout with the database disabled (see the two steps below).
-          go test -tags=e2e -v -count=1 ./e2e/... -timeout 25m -skip TestConsoleDegradedMode
+          go test -tags=e2e -v -count=1 ./e2e/... -timeout 25m -skip 'TestConsoleDegradedMode|TestFault'
 
           kill "$CONTROLLER_PF_PID" "$CONSOLE_PF_PID" "$AGENT_PF_PID" || true
         env:
@@ -284,6 +284,24 @@ jobs:
       # The plugin is asserted through its table output, the way people read it.
       - name: Build kubectl-kconmon
         run: go build -o "$RUNNER_TEMP/kubectl-kconmon" ./cmd/kubectl-kconmon
+
+      # Fault injection mutates node iptables, so it runs on its own, after the functional suites and
+      # before the gateway overlay changes the release. Every rule is removed by the test's cleanup.
+      - name: Fault-injection E2E tests
+        run: |
+          AGENT_POD=$(kubectl get pods \
+            -l app.kubernetes.io/component=agent \
+            --field-selector=status.phase=Running \
+            -o jsonpath='{.items[0].metadata.name}')
+          kubectl port-forward "pod/$AGENT_POD" 8082:8080 &
+          AGENT_PF_PID=$!
+          sleep 3
+          KCONMON_AGENT_POD="$AGENT_POD" go test -tags=e2e -v -count=1 ./e2e/... -run TestFault -timeout 10m
+          kill "$AGENT_PF_PID" || true
+        env:
+          KCONMON_AGENT_URL: http://localhost:8082
+          # The plugin the step above built; kubectlKconmonBinary (e2e/external_test.go) reads it.
+          KCONMON_KUBECTL_KCONMON: ${{ runner.temp }}/kubectl-kconmon
 
       # Vendored verbatim from prometheus-operator v0.89.0 and applied server-side; the fixture's
       # header says why. This is what makes the chart's ScrapeConfig admissible on kind.
@@ -452,6 +470,46 @@ jobs:
       # redialing a closed port. Remove it so that step sees the fleet the main run had.
       - name: Retire the external agent
         run: kubectl delete -f "$RUNNER_TEMP/external-agent-pod.yaml" --ignore-not-found --wait=true
+
+      - name: Reinstall console with local auth
+        run: |
+          helm upgrade --install kconmon-ng ./charts/kconmon-ng \
+            -f e2e/testdata/values.yaml \
+            -f e2e/testdata/console-values.yaml \
+            --set controller.image.repository=kconmon-ng-controller \
+            --set controller.image.tag=test \
+            --set controller.image.pullPolicy=Never \
+            --set agent.image.repository=kconmon-ng-agent \
+            --set agent.image.tag=test \
+            --set agent.image.pullPolicy=Never \
+            --set console.image.repository=kconmon-ng-console \
+            --set console.image.tag=test \
+            --set console.image.pullPolicy=Never \
+            --set console.auth.mode=local \
+            --set console.auth.local.bootstrapAdmin=admin \
+            --set console.auth.local.secret.create=true \
+            --set console.auth.local.secret.password="$KCONMON_LOCAL_ADMIN_PASSWORD" \
+            --wait \
+            --timeout 5m
+        env:
+          KCONMON_LOCAL_ADMIN_PASSWORD: e2e-admin-password-not-a-secret
+
+      - name: Run local-users E2E test
+        run: |
+          for _ in $(seq 60); do
+            PODS=$(kubectl get pods -l app.kubernetes.io/component=console --no-headers | wc -l)
+            [ "$PODS" -eq 1 ] && break
+            sleep 2
+          done
+          CONSOLE_POD=$(kubectl get pods -l app.kubernetes.io/component=console -o jsonpath='{.items[0].metadata.name}')
+          kubectl port-forward "pod/$CONSOLE_POD" 8081:8080 &
+          CONSOLE_PF_PID=$!
+          sleep 3
+          go test -tags=e2e -v -count=1 ./e2e/... -run TestConsoleLocalUsers -timeout 3m
+          kill "$CONSOLE_PF_PID" || true
+        env:
+          KCONMON_CONSOLE_URL: http://localhost:8081
+          KCONMON_LOCAL_ADMIN_PASSWORD: e2e-admin-password-not-a-secret
 
       # The console skips the reconciler when there is no database -- alert rules live in PostgreSQL.
       #
