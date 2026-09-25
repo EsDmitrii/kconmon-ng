@@ -140,7 +140,7 @@ jobs:
     # because the image's POSTGRES_USER is a superuser), the cache suite a Valkey addr.
     services:
       postgres:
-        image: postgres:17-alpine
+        image: postgres:18-alpine
         env:
           POSTGRES_USER: kconmon
           POSTGRES_PASSWORD: kconmon
@@ -153,7 +153,7 @@ jobs:
           --health-timeout 5s
           --health-retries 10
       valkey:
-        image: valkey/valkey:8-alpine
+        image: valkey/valkey:9-alpine
         ports:
           - 6379:6379
         options: >-

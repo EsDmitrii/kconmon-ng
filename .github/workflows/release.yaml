@@ -58,7 +58,7 @@ jobs:
       - name: Install syft
         uses: anchore/sbom-action/download-syft@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
         with:
-          syft-version: v1.42.3
+          syft-version: v1.52.0
 
       - name: Compute version
         id: ver
@@ -214,7 +214,7 @@ jobs:
       - name: Set up ORAS
         uses: oras-project/setup-oras@1d808f7d7f6995cc68b7bf507bfe5c5446e1dc9d # v2.0.1
         with:
-          version: 1.3.1
+          version: 1.3.4
 
       - name: Publish Artifact Hub repository metadata
         env:

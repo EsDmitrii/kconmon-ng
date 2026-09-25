@@ -135,7 +135,7 @@ jobs:
             -o jsonpath='{.metadata.labels}'
           echo
 
-      # Deliberately a plain postgres:17-alpine Deployment/Service, not CNPG -- see e2e/testdata/postgres.yaml's
+      # Deliberately a plain postgres:18-alpine Deployment/Service, not CNPG -- see e2e/testdata/postgres.yaml's
       # header for why.
       - name: Apply Postgres fixture
         run: |

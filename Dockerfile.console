@@ -25,7 +25,7 @@ RUN CGO_ENABLED=0 go build \
     -ldflags="-s -w -X github.com/EsDmitrii/kconmon-ng/internal/config.Version=${VERSION} -X github.com/EsDmitrii/kconmon-ng/internal/config.Commit=${COMMIT} -X github.com/EsDmitrii/kconmon-ng/internal/config.BuildDate=${BUILD_DATE}" \
     -o /bin/kconmon-ng-console ./cmd/console
 
-FROM gcr.io/distroless/static-debian12:nonroot AS console
+FROM gcr.io/distroless/static-debian13:nonroot AS console
 COPY --from=builder /bin/kconmon-ng-console /usr/local/bin/kconmon-ng-console
 USER nonroot:nonroot
 ENTRYPOINT ["kconmon-ng-console"]
