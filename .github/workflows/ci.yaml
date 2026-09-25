@@ -24,6 +24,8 @@ on:
       # All four Dockerfiles, so base-image bumps are always built.
       - "Dockerfile*"
       - ".goreleaser.yaml"
+      # The pmtu-netns job's scenarios live in a shell script the "**.go" filter does not see.
+      - "hack/pmtu-netns/**"
 
 # No job here needs a writable token: nothing pushes an image (docker/build-push-action runs with push: false).
 permissions:
@@ -185,6 +187,25 @@ jobs:
             echo "::error::integration tests were skipped; the service env did not reach the tests"
             exit 1
           fi
+
+  pmtu-netns:
+    name: PMTU in network namespaces
+    needs: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: go.mod
+          cache: true
+          cache-dependency-path: go.sum
+
+      # The runner VM has root through sudo, iproute2 and iptables; the script builds its own
+      # namespaces and removes them on exit.
+      - name: Probe verdicts against a real kernel
+        run: sudo -E env "PATH=$PATH" "GOPATH=$(go env GOPATH)" "GOCACHE=$(go env GOCACHE)" hack/pmtu-netns/run.sh
 
   build:
     name: Build
@@ -469,6 +490,39 @@ jobs:
           grep -q externalGateway <<<"$err" \
             || { echo "::error::the render failed for a reason other than the gateway:"; echo "$err"; exit 1; }
           echo "ok: a ScrapeConfig on the SD route, and none without the gateway"
+
+      # The agent config decoder is strict: an agent older than 2.5.0 exits on checkers.pmtu. The chart
+      # writes a pmtu key only when it differs from the compiled default, so a chart upgrade ahead of
+      # the image is safe until someone actually tunes the probe.
+      - name: checkers.pmtu renders only the keys an operator tuned
+        run: |
+          set -euo pipefail
+          pmtu() {
+            helm template kconmon-ng charts/kconmon-ng "$@" | python3 -c '
+          import sys, yaml
+          for d in yaml.safe_load_all(sys.stdin):
+              if d and d.get("kind") == "ConfigMap" and "config.yaml" in (d.get("data") or {}):
+                  cfg = yaml.safe_load(d["data"]["config.yaml"])
+                  block = (cfg.get("checkers") or {}).get("pmtu")
+                  print("ABSENT" if block is None else yaml.safe_dump(block, default_flow_style=True).strip())
+                  break
+          '
+          }
+          check() { # want args...
+            local want=$1; shift
+            local got; got=$(pmtu "$@")
+            [[ "$got" == "$want" ]] || { echo "::error::pmtu block for '$*' is '$got', want '$want'"; exit 1; }
+          }
+          check 'ABSENT'
+          check 'ABSENT' --set config.checkers.pmtu.interval=60s --set config.checkers.pmtu.timeout=500ms
+          check '{interval: 30s}' --set config.checkers.pmtu.interval=30s
+          check '{enabled: false}' --set config.checkers.pmtu.enabled=false
+          check '{size: 1400}' --set config.checkers.pmtu.size=1400
+          check '{size: 1400, timeout: 200ms}' \
+            --set config.checkers.pmtu.size=1400 --set config.checkers.pmtu.timeout=200ms
+          # A --reuse-values upgrade over 2.4.0 values carries no pmtu block at all.
+          check 'ABSENT' --set config.checkers.pmtu=null
+          echo "ok: pmtu keys render only when tuned"
 
       - name: Template chart with every ci profile
         run: |
