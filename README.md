@@ -6,7 +6,7 @@
 [![Go](https://img.shields.io/badge/go-1.26-00ADD8?logo=go&logoColor=white)](https://go.dev/)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE)
 
-![The console matrix on the PMTU protocol: every pair green at 1500 bytes, then the column of one worker turns red with 1400 as full-size datagrams to it start vanishing, while the TCP matrix stays green](docs/img/pmtu-black-hole.gif)
+![The console matrix of a 10-node cluster: on TCP all 90 pairs are green; on PMTU the pairs between zone-b and zone-c, every path into worker2 and three single pairs turn red as black holes at 1400 and 1280 bytes and worker3's row turns amber on a reduced 1400-byte path, 38 of 90 pairs in all, while TCP stays green; last, the worker6 to worker2 pair card shows 0.0% TCP failures next to a 1400 of 1500 byte black hole one way and full size the other](docs/img/pmtu-black-hole.gif)
 
 **Someone says "the network is fine." Prove it.**
 
