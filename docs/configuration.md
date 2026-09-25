@@ -97,6 +97,12 @@ checkers:
     interval: 5s
     timeout: 1s # unprivileged ICMP socket; see the ping_group_range sysctl the chart sets
 
+  pmtu:
+    enabled: true # on by default since 2.5.0
+    interval: 60s
+    timeout: 500ms # per datagram; the whole search stays under half the interval
+    size: 0 # IP-level bytes; 0 = the MTU of the interface that routes to the peer
+
   dns:
     enabled: true
     interval: 5s
@@ -129,6 +135,10 @@ checkers:
     maxTargets: 100
     timeout: 10s
 ```
+
+The chart writes a `pmtu` key into the agent ConfigMap only when it differs
+from these defaults, because an agent older than 2.5.0 refuses the key. Tuning
+`pmtu` therefore needs agent images 2.5.0 or newer.
 
 > `observability.otel.*` used to be documented here. The keys parse and are then
 > read by nothing: no tracer is created and no span is exported, so they have

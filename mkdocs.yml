@@ -126,6 +126,7 @@ nav:
       - Pair and node pages: console/pair-and-node-pages.md
   - Scenarios:
       - Diagnose a slow pair: scenarios/diagnose-a-slow-pair.md
+      - Catch an MTU black hole: scenarios/mtu-black-hole.md
       - Set up alerting: scenarios/set-up-alerting.md
       - External targets: scenarios/external-targets.md
       - OIDC setup: scenarios/oidc-setup.md

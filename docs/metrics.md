@@ -9,7 +9,7 @@ External checks use a **different** label set — "external" below:
 no `destination_node` or `destination_zone`, because the destination is not a
 peer: `target` is the operator's NAME for it (never an address), `target_kind`
 is the closed set `host|url` and `check_type` is the probe's own type
-(`icmp|tcp|udp|dns|http`). `check_type` is what keeps two checks on one target
+(`icmp|tcp|dns|http`). `check_type` is what keeps two checks on one target
 apart. Everything that is not http collapses to `target_kind="host"`, so
 without it an icmp and a tcp check on the same target shared one series and
 averaged each other's failures away. **The peer label set was not changed by
@@ -49,6 +49,37 @@ plus the implicit `+Inf`, `_sum` and `_count` — 16 series per histogram.
 | `kconmon_ng_icmp_rtt_seconds`       | histogram | peer            | ICMP round-trip time        |
 | `kconmon_ng_icmp_packet_loss_ratio` | gauge     | peer            | Packet loss ratio (0.0–1.0) |
 | `kconmon_ng_icmp_results_total`     | counter   | peer + `result` | Probe outcomes              |
+
+## Agent — Path MTU
+
+Since 2.5.0. Once a minute per peer, a small datagram and a full-size one with
+Don't Fragment set go to the peer's UDP echo port; on a loss the agent bisects
+the size. See [Catch an MTU black hole](scenarios/mtu-black-hole.md).
+
+| Metric                                | Type    | Labels          | Description |
+| ------------------------------------- | ------- | --------------- | ----------- |
+| `kconmon_ng_pmtu_bytes`               | gauge   | peer            | Largest IP datagram in bytes that crossed the pair on the last path MTU probe; written for ok, reduced and blackhole |
+| `kconmon_ng_pmtu_results_total`       | counter | peer + `result` | `result="success"` for ok and reduced, `fail` for a black hole; nothing when even the small datagram was lost |
+| `kconmon_ng_agent_pmtu_probe_bytes`   | gauge   | `source_node`   | The size this agent probes at: its interface MTU, or `checkers.pmtu.size` |
+
+### Telling a reduced path from a healthy one
+
+A reduced path fails nothing, so no failure ratio shows it. Compare the size
+that crossed with the size the source probes at:
+
+    max by (source_node, destination_node) (kconmon_ng_pmtu_bytes)
+      < on (source_node) group_left
+    max by (source_node) (kconmon_ng_agent_pmtu_probe_bytes)
+
+A black hole is below the probe size too. To keep only the paths that say
+so, drop the pairs with failed probes, as the Overview dashboard's reduced
+path tile does:
+
+    (max by (source_node, destination_node) (kconmon_ng_pmtu_bytes)
+      < on (source_node) group_left
+    max by (source_node) (kconmon_ng_agent_pmtu_probe_bytes))
+      unless on (source_node, destination_node)
+    (sum by (source_node, destination_node) (increase(kconmon_ng_pmtu_results_total{result="fail"}[15m])) > 0)
 
 ## Agent — DNS
 
@@ -136,6 +167,7 @@ exports its own zone view, so queries aggregate with
 | `kconmon_ng_zone_tcp_results_total`           | counter   | zone + `result` | Probe outcomes: `success` / `fail` |
 | `kconmon_ng_zone_udp_results_total`           | counter   | zone + `result` | Probe outcomes                     |
 | `kconmon_ng_zone_icmp_results_total`          | counter   | zone + `result` | Probe outcomes                     |
+| `kconmon_ng_zone_pmtu_results_total`          | counter   | zone + `result` | Path MTU probe outcomes            |
 | `kconmon_ng_zone_udp_packets_sent_total`      | counter   | zone            | UDP probe packets sent             |
 | `kconmon_ng_zone_udp_packets_received_total`  | counter   | zone            | UDP probe packets received back    |
 | `kconmon_ng_zone_icmp_packets_sent_total`     | counter   | zone            | ICMP probe packets sent            |
@@ -395,6 +427,76 @@ story, including how not to get paged twice, lives in
   annotations:
     summary: More than 5% of TCP probes on a pair are failing
 
+- alert: PathMTUBlackHole
+  # The value is the path MTU that still crosses, not the ratio.
+  expr: >-
+    max by (source_node, destination_node, source_zone, destination_zone) (kconmon_ng_pmtu_bytes)
+    and on (source_node, destination_node, source_zone, destination_zone)
+    (
+      sum by (source_node, destination_node, source_zone, destination_zone)
+      (rate(kconmon_ng_pmtu_results_total{result="fail"}[10m]))
+      /
+      sum by (source_node, destination_node, source_zone, destination_zone)
+      (rate(kconmon_ng_pmtu_results_total[10m])) > 0.5
+    )
+  for: 5m
+  labels:
+    severity: warning
+  annotations:
+    summary: Full-size datagrams on a pair are lost with no ICMP frag-needed
+
+- alert: NodeUnreachable
+  # A pair counts as failing above 0.5 of its TCP probes (fixed); the last clause is minPeers.
+  expr: >-
+    (
+      count by (destination_node, destination_zone) (
+        (
+          sum by (source_node, destination_node, destination_zone) (rate(kconmon_ng_tcp_results_total{result="fail"}[5m]))
+          /
+          sum by (source_node, destination_node, destination_zone) (rate(kconmon_ng_tcp_results_total[5m]))
+        ) > 0.5
+      )
+      /
+      count by (destination_node, destination_zone) (
+        sum by (source_node, destination_node, destination_zone) (rate(kconmon_ng_tcp_results_total[5m])) > 0
+      )
+    ) > 0.5
+    and on (destination_node, destination_zone)
+    count by (destination_node, destination_zone) (
+      sum by (source_node, destination_node, destination_zone) (rate(kconmon_ng_tcp_results_total[5m])) > 0
+    ) >= 2
+  for: 5m
+  labels:
+    severity: critical
+  annotations:
+    summary: Most peers cannot reach one node over TCP
+
+- alert: NodeIsolated
+  # The same, grouped by source_node: one node that cannot reach most of the peers it probes.
+  expr: >-
+    (
+      count by (source_node, source_zone) (
+        (
+          sum by (source_node, destination_node, source_zone) (rate(kconmon_ng_tcp_results_total{result="fail"}[5m]))
+          /
+          sum by (source_node, destination_node, source_zone) (rate(kconmon_ng_tcp_results_total[5m]))
+        ) > 0.5
+      )
+      /
+      count by (source_node, source_zone) (
+        sum by (source_node, destination_node, source_zone) (rate(kconmon_ng_tcp_results_total[5m])) > 0
+      )
+    ) > 0.5
+    and on (source_node, source_zone)
+    count by (source_node, source_zone) (
+      sum by (source_node, destination_node, source_zone) (rate(kconmon_ng_tcp_results_total[5m])) > 0
+    ) >= 2
+  for: 5m
+  labels:
+    severity: critical
+  annotations:
+    summary: One node cannot reach most of its peers over TCP
+
 - alert: PairWentSilent
   expr: >-
     sum by (source_node, destination_node)
@@ -514,7 +616,7 @@ story, including how not to get paged twice, lives in
     summary: External kconmon-ng agent {{ $labels.node }} is not answering scrapes
 ```
 
-Ten rules, nine of them on by default; `KconmonExternalAgentDown` ships off
+Thirteen rules, twelve of them on by default; `KconmonExternalAgentDown` ships off
 because its job only exists once external agents are
 [scraped](external-agents.md#scraping-external-agents). `expr`/`for`/`severity`
 above are what the chart renders at its default knob values; the
@@ -552,6 +654,32 @@ warning while a node that is gone for good belongs to `KconmonAgentsMissing`.
 The full reasoning, including why a rollout does not page anyone, is in the
 chart README's "Alerting rules" section.
 
+### One alert per node instead of one per pair
+
+A node that stays registered while its peers cannot reach it (a host
+firewall, a NetworkPolicy, the node's CNI datapath) fails every pair that
+touches it, so one such node on a 100-node cluster raises about 200 pair
+alerts next to one `NodeUnreachable`. These inhibit rules let the node-level
+alert stand for the pairs it explains:
+
+```yaml
+inhibit_rules:
+  - source_matchers: [alertname="NodeUnreachable"]
+    target_matchers: [alertname=~"TCPChecksFailing|UDPLossHigh|PathMTUBlackHole"]
+    equal: [destination_node]
+  - source_matchers: [alertname="NodeIsolated"]
+    target_matchers: [alertname=~"TCPChecksFailing|UDPLossHigh|PathMTUBlackHole"]
+    equal: [source_node]
+```
+
+The chart does not configure Alertmanager; paste this into your Alertmanager
+configuration (with kube-prometheus-stack: `alertmanager.config.inhibit_rules`).
+
+A node that stops altogether is a different signal. Its agent stops
+heartbeating, the controller drops it after `config.controllerAgentTtl` (30s) and
+the peers stop probing it, so its pair counters freeze and neither node-level
+rule gets its five minutes. It pages as `KconmonAgentsMissing`.
+
 ## Scaling and cardinality
 
 Per-pair, per-protocol measurement is the point of the tool, and it is also
@@ -567,17 +695,18 @@ Every directed pair keeps these peer-labelled families
 | --- | --- | --- |
 | `tcp_connect_duration_seconds`, `tcp_total_duration_seconds`, `udp_rtt_seconds`, `icmp_rtt_seconds` | 4 histograms | 64 — each is 13 buckets + `+Inf` + `_sum` + `_count` = 16 |
 | `udp_jitter_seconds`, `udp_packet_loss_ratio`, `icmp_packet_loss_ratio` | 3 gauges | 3 |
-| `tcp_results_total`, `udp_results_total`, `icmp_results_total` | 3 counters | 3, split further by `result` |
+| `pmtu_bytes` | 1 gauge | 1 |
+| `tcp_results_total`, `udp_results_total`, `icmp_results_total`, `pmtu_results_total` | 4 counters | 8, two per family by `result` |
 
-Call it **~70 active series per directed pair** with the default checkers on.
+Call it **~75 active series per directed pair** with the default checkers on.
 Pairs are ordered (node A probes B *and* B probes A), so N nodes make N×(N−1)
 directed pairs:
 
-| Nodes | Directed pairs | Active series at ~70/pair |
+| Nodes | Directed pairs | Active series at ~75/pair |
 | --- | --- | --- |
-| 10 | 90 | ~6.3k |
-| 50 | 2,450 | ~170k |
-| 100 | 9,900 | ~690k |
+| 10 | 90 | ~6.8k |
+| 50 | 2,450 | ~185k |
+| 100 | 9,900 | ~740k |
 
 The MTR families (`mtr_triggered_total`, `mtr_hops`, `mtr_hop_rtt_seconds`)
 appear for a pair only after a failed probe triggered a trace. DNS and HTTP
@@ -587,9 +716,9 @@ and are negligible next to the mesh.
 ### The proven envelope
 
 **50–100 nodes is the production-proven envelope at full detail.** At 100
-nodes, budget ~0.7M active series for kconmon-ng alone and size Prometheus
+nodes, budget ~0.75M active series for kconmon-ng alone and size Prometheus
 accordingly. Above that the quadratic growth is unforgiving: 300 nodes is
-~6.3M series. The valve below cuts what Prometheus keeps by an order of
+~6.7M series. The valve below cuts what Prometheus keeps by an order of
 magnitude by configuration alone; what it cannot change is that the agents
 still *probe* the full N×N mesh, which is what `topology.mode: sparse`
 (since v2.3.0) trims. Do not plan a 1000-node deployment on these defaults.
@@ -603,11 +732,11 @@ still *probe* the full N×N mesh, which is what `topology.mode: sparse`
 
   | `agent.metrics.detail` | Per directed pair | What remains |
   | --- | --- | --- |
-  | `full` (default) | ~70 series | everything |
-  | `counters-only` | ~10 series | drops the four per-pair histograms; gauges and result counters stay, every pair alert keeps firing |
+  | `full` (default) | ~75 series | everything |
+  | `counters-only` | ~12 series | drops the four per-pair histograms; gauges and result counters stay, every pair alert keeps firing |
   | `zone-only` | ~0 series | drops every series naming a `destination_node`; the zone family (~74×Z² series) and the linear DNS/HTTP/external families stay |
 
-  At 100 nodes: ~0.7M series at `full`, ~0.1M at `counters-only`, and
+  At 100 nodes: ~0.75M series at `full`, ~0.12M at `counters-only`, and
   practically N-independent at `zone-only`. The valve renders as
   `metricRelabelings` on the agent `ServiceMonitor` and, since 2.4.0, on the
   external-agent `ScrapeConfig` as well (one shared template, so a bare host

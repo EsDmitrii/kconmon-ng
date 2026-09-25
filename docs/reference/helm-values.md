@@ -15,6 +15,7 @@ touch.
 | `config.checkers.tcp.enabled` | `true` | TCP checker (interval `5s`, timeout `1s`) |
 | `config.checkers.udp.enabled` | `true` | UDP checker (interval `5s`, timeout `250ms`, `packets: 5`) |
 | `config.checkers.icmp.enabled` | `true` | ICMP checker (interval `5s`, timeout `1s`); unprivileged socket, no added capabilities |
+| `config.checkers.pmtu.enabled` | `true` | Path MTU probe (interval `60s`, timeout `500ms` per datagram, `size: 0` = the interface MTU); DF-marked UDP to the peer's echo port, no added capabilities. The chart writes a `pmtu` key only when it differs from these defaults, and tuning one needs agent images 2.5.0 or newer |
 | `config.checkers.dns.enabled` | `true` | DNS checker (interval `5s`, timeout `5s`) |
 | `config.checkers.http.enabled` | `false` | HTTP checker; `targets` are required when enabled |
 | `config.checkers.external.enabled` | `false` | Probes to non-peer destinations, gated by `allowedCidrs`; see [External targets](../scenarios/external-targets.md) |
@@ -22,7 +23,7 @@ touch.
 | `config.checkers.mtr.maxHops` | `30` | Traceroute hop ceiling (1–64) |
 | `config.controllerAgentTtl` | `30s` | Evict an agent missing heartbeats for this long (min `10s`) |
 | `agent.tolerations` | `[{operator: Exists}]` | Run the agent on every node, tainted ones included |
-| `agent.metrics.detail` | `full` | Scrape-time cardinality valve on the agent `ServiceMonitor` and, since 2.4.0, the external-agent `ScrapeConfig`: `full` / `counters-only` / `zone-only` (~70 / ~10 / ~0 series per directed pair); needs `serviceMonitor.enabled` or `scrapeConfig.externalAgents.enabled` |
+| `agent.metrics.detail` | `full` | Scrape-time cardinality valve on the agent `ServiceMonitor` and, since 2.4.0, the external-agent `ScrapeConfig`: `full` / `counters-only` / `zone-only` (~75 / ~12 / ~0 series per directed pair); needs `serviceMonitor.enabled` or `scrapeConfig.externalAgents.enabled` |
 | `agent.pingGroupRange` | `true` | Render the `net.ipv4.ping_group_range` sysctl the ICMP socket needs; not rendered under `agent.hostNetwork`, where the node OS must set it |
 | `agent.hostNetwork` | `false` | Run the agents in the node's network namespace so external hosts can reach them without a routable pod network. Changes what every in-cluster pair measures (node-to-node underlay, not the CNI datapath); needs a `privileged` namespace, free ports on every node, and `networkPolicy.nodeCidrs` when policies are on. Read [External agents](../external-agents.md#when-the-pod-network-does-not-route) first |
 | `agent.dnsPolicy` | `""` | Pod `dnsPolicy`, passed through verbatim (`ClusterFirst`, `ClusterFirstWithHostNet`, `Default`, `None`); empty renders `ClusterFirstWithHostNet` under `agent.hostNetwork` and nothing otherwise |
@@ -54,8 +55,8 @@ touch.
 | `scrapeConfig.externalAgents.jobName` | `""` | Job label; empty means `<release>-agent-external`. Keep `kconmon` in it (the dashboards filter on it) and `agent-external` (the `KconmonExternalAgentDown` rule matches on it) |
 | `scrapeConfig.externalAgents.refreshInterval` | `30s` | How often Prometheus re-reads the target list; matches `config.controllerAgentTtl` |
 | `scrapeConfig.externalAgents.interval` | `""` | Scrape interval; empty falls back to `serviceMonitor.interval` |
-| `prometheusRule.enabled` | `false` | The ten [built-in alert rules](../metrics.md#default-alerting-rules) as one `PrometheusRule` (nine on by default) |
-| `prometheusRule.<alertName>` | all enabled | Per-rule `enabled` / `threshold` / `for` / `severity` knobs |
+| `prometheusRule.enabled` | `false` | The thirteen [built-in alert rules](../metrics.md#default-alerting-rules) as one `PrometheusRule` (twelve on by default) |
+| `prometheusRule.<alertName>` | all enabled | Per-rule `enabled` / `threshold` / `for` / `severity` knobs; `nodeUnreachable` and `nodeIsolated` also take `minPeers` (`2`) |
 | `prometheusRule.externalAgentDown.enabled` | `false` | `KconmonExternalAgentDown`: an external agent the SD endpoint lists at `up == 0` for `for` (`5m`, `warning`); the job exists only with the ScrapeConfig or a hand-written job named `*agent-external*` |
 | `prometheusRule.additionalRules` | `[]` | Your rules, appended verbatim |
 | `networkPolicy.enabled` | `false` | NetworkPolicy for agent/controller traffic |

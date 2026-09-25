@@ -14,6 +14,7 @@ Probes travel pod-IP to pod-IP, and each protocol has a fixed rendezvous:
 | TCP | the peer agent's HTTP port | the peer's own `config.httpPort`, 8080 |
 | UDP | the peer agent's gRPC/probe port | the peer's own `config.grpcPort`, 9090 |
 | ICMP | the peer's pod IP | — |
+| Path MTU | the peer agent's gRPC/probe port, full-size datagrams with DF set | the peer's own `config.grpcPort`, 9090 |
 
 "The peer's own" is literal since 2.4.0: every agent reports its listener
 ports at registration and the controller hands them out with the peer list,
@@ -127,11 +128,14 @@ means the fabric is sick, not one node.
 ## Full mesh and its limits
 
 Per-pair, per-protocol measurement is the point of the tool, and it is also
-the bill. Where the ~70 comes from: the four per-pair histograms (TCP
+the bill. Where the ~75 comes from: the four per-pair histograms (TCP
 connect, TCP total, UDP RTT, ICMP RTT) cost 16 series each on the shared
 13-bucket scale (13 buckets plus `+Inf`, `_sum` and `_count`), for 64, plus
-three loss/jitter gauges and three result counters. Roughly 70 active series
-per directed pair, growing quadratically: about 690k series at 100 nodes.
+three loss/jitter gauges, the path MTU gauge, and four result counters split
+by `result`. Roughly 75 active series per directed pair, growing
+quadratically: about 740k series at 100 nodes. The path MTU probe (since
+2.5.0) accounts for three of them per pair and one gauge per agent, about 30
+thousand series at 100 nodes.
 **50–100 nodes is the production-proven envelope.**
 
 !!! warning "Version skew: the zone family comes from the agent image"
@@ -149,7 +153,7 @@ per directed pair, growing quadratically: about 690k series at 100 nodes.
 The levers that exist today, in one line each:
 
 - `agent.metrics.detail: counters-only` drops the per-pair histograms
-  (~70 → ~10 series per pair) while every pair alert keeps firing.
+  (~75 → ~12 series per pair) while every pair alert keeps firing.
 - `agent.metrics.detail: zone-only` drops per-pair series entirely and keeps
   the Z² zone plane, subject to the version-skew warning above.
 - Disabling a checker removes its families.

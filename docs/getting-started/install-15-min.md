@@ -125,8 +125,8 @@ N×(N−1) rows; on the stand these screenshots come from, ten in-cluster agents
   <figcaption>A healthy install of ten in-cluster agents plus one external agent: <code>kconmon_ng_udp_packet_loss_ratio</code> returns 110 series, every one at 0, each with source/destination node and zone labels; the external agent shows up as <code>destination_zone="external"</code>.</figcaption>
 </figure>
 
-Every exported family, its labels and the ten bundled alert rules (nine on by
-default) are in the [metrics and alerting reference](../metrics.md).
+Every exported family, its labels and the thirteen bundled alert rules (twelve on
+by default) are in the [metrics and alerting reference](../metrics.md).
 
 ### Grafana dashboards
 
