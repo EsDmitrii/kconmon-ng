@@ -225,16 +225,14 @@ func TestTaskManagerDispatchRacesCleanup(t *testing.T) {
 	tm := NewTaskManager()
 
 	const iterations = 100
-	for i := 0; i < iterations; i++ {
+	for i := range iterations {
 		sub, cleanup := tm.Subscribe("agent-1")
 
 		var wg sync.WaitGroup
 
 		// Dispatch racing the teardown. A short deadline bounds the case where
 		// the task lands in the abandoned buffer that nobody drains.
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 			defer cancel()
 			_, err := tm.Dispatch(ctx, "agent-1", &pb.TaskRequest{CheckType: "icmp"})
@@ -246,26 +244,22 @@ func TestTaskManagerDispatchRacesCleanup(t *testing.T) {
 				!errors.Is(err, context.Canceled) {
 				t.Errorf("iteration %d: unexpected Dispatch error: %v", i, err)
 			}
-		}()
+		})
 
 		// A drainer that may or may not receive the task before teardown,
 		// mimicking the WatchTasks loop consuming the channel.
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			select {
 			case <-sub:
 			case <-time.After(15 * time.Millisecond):
 			}
-		}()
+		})
 
 		// Teardown racing the Dispatch.
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			time.Sleep(time.Duration(rand.Intn(3)) * time.Millisecond) //nolint:gosec // test jitter only
 			cleanup()
-		}()
+		})
 
 		wg.Wait()
 	}

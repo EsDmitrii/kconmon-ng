@@ -703,7 +703,7 @@ func TestAuditFlushLogsDroppedCount(t *testing.T) {
 	}
 	defer close(fs.release)
 
-	for i := 0; i < auditBufferSize+4; i++ {
+	for range auditBufferSize + 4 {
 		doRequest(t, s, http.MethodPost, "/api/v1/auth/logout", strings.NewReader(`{}`), mutateWithCSRF)
 	}
 

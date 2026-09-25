@@ -56,10 +56,8 @@ func Build(agents []model.AgentInfo, cfg config.TopologyConfig) Plan {
 		return ring[i].ID < ring[j].ID
 	})
 
-	ringDeg := cfg.Sparse.RingDegree
-	if ringDeg > n-1 {
-		ringDeg = n - 1 // more successors than peers just means "all of them"
-	}
+	// More successors than peers just means "all of them".
+	ringDeg := min(cfg.Sparse.RingDegree, n-1)
 
 	adj := make(map[string]map[string]struct{}, n)
 	for i := range ring {

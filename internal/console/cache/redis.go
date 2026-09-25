@@ -147,8 +147,7 @@ func (b *RedisBus) Close() {
  * mistake that produced it.
  */
 func redactDSNError(err error) error {
-	var uerr *url.Error
-	if errors.As(err, &uerr) {
+	if uerr, ok := errors.AsType[*url.Error](err); ok {
 		return fmt.Errorf("%s: %w", uerr.Op, uerr.Err)
 	}
 	return err

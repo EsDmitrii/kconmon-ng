@@ -217,8 +217,8 @@ func TestMemoryStoreRingEvictsOldestAt51(t *testing.T) {
 	m := checks.NewMemoryStore()
 	ctx := context.Background()
 
-	var ids []string
-	for i := 0; i < 51; i++ {
+	ids := make([]string, 0, 51)
+	for i := range 51 {
 		id := fmt.Sprintf("run-%02d", i)
 		if _, err := m.CreateRun(ctx, id, "tcp", "pod", json.RawMessage(`{}`), "user", "u1", 1, time.Now().Add(time.Hour)); err != nil {
 			t.Fatalf("CreateRun(%d, time.Now().Add(time.Hour)): %v", i, err)
@@ -268,7 +268,7 @@ func TestMemoryStoreListRunsFiltersAndOrdersNewestFirst(t *testing.T) {
 func TestMemoryStoreListRunsLimitClampMirrorsStoreClampLimit(t *testing.T) {
 	m := checks.NewMemoryStore()
 	ctx := context.Background()
-	for i := 0; i < 60; i++ {
+	for i := range 60 {
 		id := fmt.Sprintf("run-%03d", i)
 		if _, err := m.CreateRun(ctx, id, "tcp", "pod", json.RawMessage(`{}`), "user", "u1", 1, time.Now().Add(time.Hour)); err != nil {
 			t.Fatalf("CreateRun(%d, time.Now().Add(time.Hour)): %v", i, err)
@@ -303,7 +303,7 @@ func TestMemoryStoreListRunsLimitClampMirrorsStoreClampLimit(t *testing.T) {
 func TestMemoryStoreListRunsNextCursorMatchesLimitLikeDB(t *testing.T) {
 	m := checks.NewMemoryStore()
 	ctx := context.Background()
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		id := uuid.NewString()
 		if _, err := m.CreateRun(ctx, id, "tcp", "pod", json.RawMessage(`{}`), "user", "u1", 1, time.Now().Add(time.Hour)); err != nil {
 			t.Fatalf("CreateRun(%d, time.Now().Add(time.Hour)): %v", i, err)

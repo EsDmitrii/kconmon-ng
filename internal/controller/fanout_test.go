@@ -61,7 +61,7 @@ func TestSchedulePeerBroadcastCoalescesABurst(t *testing.T) {
 
 	const changes = 40
 	agents := make([]model.AgentInfo, 0, changes)
-	for i := 0; i < changes; i++ {
+	for i := range changes {
 		agents = append(agents, model.AgentInfo{
 			ID:       fmt.Sprintf("agent-%02d", i),
 			NodeName: fmt.Sprintf("node-%02d", i),
@@ -147,7 +147,7 @@ func TestControllerRegistrationBurstCoalescesFanOut(t *testing.T) {
 	stream := subscribePeers(t, c.grpcServer, "watcher")
 
 	const registrations = 30
-	for i := 0; i < registrations; i++ {
+	for i := range registrations {
 		c.registry.Register(model.AgentInfo{
 			ID:       fmt.Sprintf("agent-%02d", i),
 			NodeName: fmt.Sprintf("node-%02d", i),

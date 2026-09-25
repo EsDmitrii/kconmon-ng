@@ -30,7 +30,7 @@ func TestProbeServerUDP(t *testing.T) {
 	}
 	defer func() { _ = conn.Close() }()
 
-	for seq := uint32(0); seq < 3; seq++ {
+	for seq := range uint32(3) {
 		payload := make([]byte, 4)
 		binary.BigEndian.PutUint32(payload, seq)
 

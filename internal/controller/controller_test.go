@@ -54,8 +54,7 @@ func TestControllerPublishesAttributedTopologyEvents(t *testing.T) {
 
 	c := New(cfg)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	stream := newFakeEventStream(ctx)
 	go func() { _ = c.grpcServer.WatchEvents(&pb.WatchEventsRequest{}, stream) }()
 
@@ -160,8 +159,7 @@ func TestControllerRunShutsDownWithActiveEventSubscriber(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = conn.Close() })
 
-	streamCtx, streamCancel := context.WithCancel(context.Background())
-	defer streamCancel()
+	streamCtx := t.Context()
 
 	// Retry the subscribe: Run binds its listener in a goroutine, so the first
 	// dial can land before the server is accepting.

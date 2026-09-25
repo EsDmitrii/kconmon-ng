@@ -158,11 +158,9 @@ func (r *Reader) Run(ctx context.Context) {
 
 	var wg sync.WaitGroup
 	for _, s := range streams {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			r.watchLoop(ctx, s)
-		}()
+		})
 	}
 	wg.Wait()
 }

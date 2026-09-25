@@ -144,14 +144,14 @@ func TestSetPlanSourceIsHotSwapSafe(t *testing.T) {
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		for i := 0; i < 200; i++ {
+		for range 200 {
 			h.SetPlanSource(func() meshplan.Plan { return meshplan.Plan{"agent-a": {}} })
 			h.SetPlanSource(func() meshplan.Plan { return nil })
 		}
 	}()
 	go func() {
 		defer wg.Done()
-		for i := 0; i < 200; i++ {
+		for range 200 {
 			req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/api/v1/topology", http.NoBody)
 			h.ServeHTTP(httptest.NewRecorder(), req)
 		}

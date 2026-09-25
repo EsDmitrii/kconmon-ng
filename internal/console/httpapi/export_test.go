@@ -670,7 +670,7 @@ func TestImportAmbiguousScheduleIsAnError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("seed definition: %v", err)
 	}
-	for i := 0; i < 2; i++ {
+	for i := range 2 {
 		if _, err := fx.checks.CreateSchedule(ctx, store.ScheduleInput{
 			DefinitionID: def.ID, Kind: "interval", IntervalNs: int64(time.Duration(i+1) * time.Minute),
 		}); err != nil {

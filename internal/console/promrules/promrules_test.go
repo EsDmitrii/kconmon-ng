@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -278,9 +279,9 @@ func (f *fakeStore) listCount() int {
 
 // writeFor returns the LAST status written for id.
 func writeFor(writes []statusWrite, id string) (statusWrite, bool) {
-	for i := len(writes) - 1; i >= 0; i-- {
-		if writes[i].ID == id {
-			return writes[i], true
+	for _, write := range slices.Backward(writes) {
+		if write.ID == id {
+			return write, true
 		}
 	}
 	return statusWrite{}, false

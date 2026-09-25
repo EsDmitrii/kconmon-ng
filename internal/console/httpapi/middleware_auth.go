@@ -6,6 +6,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"strings"
 
 	"github.com/go-chi/chi/v5"
 
@@ -90,14 +91,11 @@ func (r routeRule) satisfiedBy(policy *authz.Policy, subject authz.Subject) bool
 // (metrics.go's convention).
 func (r routeRule) deniedLabel() string {
 	accepted := r.accepted()
-	if len(accepted) == 0 {
-		return ""
+	names := make([]string, len(accepted))
+	for i, p := range accepted {
+		names[i] = string(p)
 	}
-	label := string(accepted[0])
-	for _, p := range accepted[1:] {
-		label += "|" + string(p)
-	}
-	return label
+	return strings.Join(names, "|")
 }
 
 // deniedDetail is the RFC 7807 detail for a 403 against r.

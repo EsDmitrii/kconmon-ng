@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"maps"
 	"net/http"
 	"strconv"
 	"strings"
@@ -301,9 +302,7 @@ func mergeAuditResult(detail json.RawMessage, holder *auditResultHolder) json.Ra
 		// package produced; either way starting from {} is correct.
 		_ = json.Unmarshal(detail, &merged)
 	}
-	for key, value := range holder.fields {
-		merged[key] = value
-	}
+	maps.Copy(merged, holder.fields)
 	encoded, err := json.Marshal(merged)
 	if err != nil {
 		return detail

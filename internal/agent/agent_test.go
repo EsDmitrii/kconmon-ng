@@ -541,7 +541,7 @@ func TestResultHandlerFeatureDisabledExposesNoExternalSeries(t *testing.T) {
 		Details: &model.TCPDetails{ConnectTime: time.Millisecond, TotalTime: 2 * time.Millisecond},
 	})
 
-	for _, line := range strings.Split(exposition(t, reg), "\n") {
+	for line := range strings.SplitSeq(exposition(t, reg), "\n") {
 		if strings.Contains(line, "_external_") {
 			t.Errorf("external series exposed with the feature unused: %s", line)
 		}

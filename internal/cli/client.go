@@ -124,10 +124,7 @@ func (c *Client) Diagnostics(ctx context.Context, req DiagnosticsRequest, timeou
 
 	path := "/api/v1/diagnostics"
 	if timeout > 0 {
-		secs := int(timeout.Round(time.Second) / time.Second)
-		if secs < 1 {
-			secs = 1
-		}
+		secs := max(int(timeout.Round(time.Second)/time.Second), 1)
 		path += "?timeout=" + strconv.Itoa(secs)
 	}
 

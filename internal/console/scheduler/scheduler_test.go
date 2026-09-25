@@ -854,7 +854,7 @@ func TestNextFireAtArithmetic(t *testing.T) {
 		{
 			name:  "interval re-anchors on now",
 			sched: store.Schedule{ID: schedID, Kind: kindInterval, IntervalNs: int64(fiveMinute)},
-			want:  ptr(fixedNow.Add(fiveMinute)),
+			want:  new(fixedNow.Add(fiveMinute)),
 		},
 		{
 			name:  "interval with no interval retires rather than dividing by it",
@@ -879,8 +879,6 @@ func TestNextFireAtArithmetic(t *testing.T) {
 		})
 	}
 }
-
-func ptr(t time.Time) *time.Time { return &t }
 
 // The failing-schedule record.
 

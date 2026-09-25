@@ -32,7 +32,7 @@ func names(prefix string, n int) []string {
  */
 func TestChunkZonePairSourcesProperties(t *testing.T) {
 	rng := rand.New(rand.NewSource(1)) //nolint:gosec // deterministic property-test shapes, not crypto
-	for i := 0; i < 500; i++ {
+	for range 500 {
 		nSrc := 1 + rng.Intn(60)
 		nDst := 1 + rng.Intn(500)
 		sources := names("s", nSrc)

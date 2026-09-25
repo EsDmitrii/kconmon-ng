@@ -521,7 +521,7 @@ func isHostname(host string) bool {
 		return false
 	}
 	trimmed := strings.TrimSuffix(host, ".")
-	for _, label := range strings.Split(trimmed, ".") {
+	for label := range strings.SplitSeq(trimmed, ".") {
 		if label == "" || len(label) > hostLabelMaxLen || !hostLabelRE.MatchString(label) {
 			return false
 		}

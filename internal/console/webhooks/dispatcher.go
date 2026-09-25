@@ -18,6 +18,7 @@ import (
 	"log/slog"
 	mathrand "math/rand/v2"
 	"net/http"
+	"slices"
 	"sync"
 	"time"
 
@@ -608,12 +609,7 @@ func (d *Dispatcher) Close() {
 
 // subscribes reports whether h asked for this event.
 func subscribes(h *store.Webhook, event string) bool {
-	for _, e := range h.Events {
-		if e == event {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(h.Events, event)
 }
 
 // sign builds the X-Kconmon-Signature value over the RAW body bytes -- the exact bytes on the wire.

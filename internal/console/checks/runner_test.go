@@ -559,8 +559,8 @@ func TestGetWithMemoryStoreRingEviction(t *testing.T) {
 	runner := checks.NewRunner(nil, nil, nil, mem, testMetrics(t))
 	ctx := context.Background()
 
-	var ids []string
-	for i := 0; i < 51; i++ {
+	ids := make([]string, 0, 51)
+	for i := range 51 {
 		id := fmt.Sprintf("run-%02d", i)
 		if _, err := mem.CreateRun(ctx, id, "tcp", "pod", json.RawMessage(`{}`), "user", "u1", 1, time.Now().Add(time.Hour)); err != nil {
 			t.Fatalf("CreateRun(%d, time.Now().Add(time.Hour)): %v", i, err)

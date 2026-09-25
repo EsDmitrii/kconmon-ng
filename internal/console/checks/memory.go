@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"slices"
 	"sync"
 	"time"
 
@@ -316,8 +317,8 @@ func (m *MemoryStore) ListRuns(_ context.Context, f store.RunFilter) (store.RunP
 	defer m.mu.Unlock()
 
 	runs := make([]store.Run, 0, len(m.order))
-	for i := len(m.order) - 1; i >= 0; i-- {
-		entry := m.runs[m.order[i]]
+	for _, id := range slices.Backward(m.order) {
+		entry := m.runs[id]
 		if f.CheckType != "" && entry.run.CheckType != f.CheckType {
 			continue
 		}

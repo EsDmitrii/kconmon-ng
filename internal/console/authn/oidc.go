@@ -427,10 +427,7 @@ func (a *OIDCAuthenticator) persistSession(ctx context.Context, sess Session) er
 	if err != nil {
 		return fmt.Errorf("marshal: %w", err)
 	}
-	ttl := time.Until(sess.ExpiresAt)
-	if ttl < time.Second {
-		ttl = time.Second
-	}
+	ttl := max(time.Until(sess.ExpiresAt), time.Second)
 	return a.kv.Set(ctx, sessionKey(sess.ID), data, ttl)
 }
 

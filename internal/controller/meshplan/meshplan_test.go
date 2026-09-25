@@ -38,7 +38,7 @@ func randomFleet(rng *rand.Rand, n, zoneCount int) []model.AgentInfo {
 		zones[0] = ""
 	}
 	agents := make([]model.AgentInfo, 0, n)
-	for i := 0; i < n; i++ {
+	for i := range n {
 		agents = append(agents, model.AgentInfo{
 			// Random infix decorrelates the ID order from the node order.
 			ID:       fmt.Sprintf("id-%08x-%d", rng.Uint32(), i),
@@ -151,7 +151,7 @@ one other; (c) every ordered zone pair with agents on both sides has at least on
 threshold above the fleet size degrades the plan to full mesh (nil).
 */
 func TestPlanProperties(t *testing.T) {
-	for seed := int64(0); seed < 40; seed++ {
+	for seed := range int64(40) {
 		rng := rand.New(rand.NewSource(seed))
 		n := 3 + rng.Intn(498)
 		zoneCount := 1 + rng.Intn(8)

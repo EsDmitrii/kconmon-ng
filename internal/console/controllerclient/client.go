@@ -12,6 +12,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"slices"
 	"strconv"
 	"syscall"
 	"time"
@@ -107,12 +108,7 @@ type Version struct {
 // on a nil Capabilities slice (a controller that predates capability flags) —
 // always returns false in that case.
 func (v *Version) HasCapability(name string) bool {
-	for _, c := range v.Capabilities {
-		if c == name {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(v.Capabilities, name)
 }
 
 // Client talks to one controller Service base URL.

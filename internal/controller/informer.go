@@ -109,7 +109,7 @@ func (nw *NodeWatcher) notifyZone(nodeName, zone string) {
 	}
 }
 
-func (nw *NodeWatcher) onNodeEvent(obj interface{}) {
+func (nw *NodeWatcher) onNodeEvent(obj any) {
 	node, ok := obj.(*corev1.Node)
 	if !ok {
 		return
@@ -145,7 +145,7 @@ func (nw *NodeWatcher) onNodeEvent(obj interface{}) {
 	}
 }
 
-func (nw *NodeWatcher) onNodeDelete(obj interface{}) {
+func (nw *NodeWatcher) onNodeDelete(obj any) {
 	node, ok := obj.(*corev1.Node)
 	if !ok {
 		tombstone, ok := obj.(cache.DeletedFinalStateUnknown)
@@ -195,9 +195,9 @@ func NewNodeWatcherWithContext(ctx context.Context, clientset kubernetes.Interfa
 	nodeInformer := factory.Core().V1().Nodes().Informer()
 
 	if _, err := nodeInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
-		AddFunc:    func(obj interface{}) { nw.onNodeEvent(obj) },
-		UpdateFunc: func(_, obj interface{}) { nw.onNodeEvent(obj) },
-		DeleteFunc: func(obj interface{}) { nw.onNodeDelete(obj) },
+		AddFunc:    func(obj any) { nw.onNodeEvent(obj) },
+		UpdateFunc: func(_, obj any) { nw.onNodeEvent(obj) },
+		DeleteFunc: func(obj any) { nw.onNodeDelete(obj) },
 	}); err != nil {
 		slog.Warn("failed to register node event handler", "error", err)
 	}

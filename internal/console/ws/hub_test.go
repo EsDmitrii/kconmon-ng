@@ -213,7 +213,7 @@ func TestHubErrorFramesDoNotMintTopicMetricLabels(t *testing.T) {
 	c := h.register(nil)
 	defer h.unregister(c)
 
-	for i := 0; i < 5; i++ {
+	for i := range 5 {
 		subscribeClient(h, c, "junk:"+strconv.Itoa(i), 0)
 		if got := nextEnvelope(t, c); got.Type != TypeError {
 			t.Fatalf("frame %d type = %q, want %q", i, got.Type, TypeError)
@@ -353,7 +353,7 @@ func TestHubDedupesLiveEventsByID(t *testing.T) {
 
 	// Every republish of the same id is a duplicate — including the extra ones
 	// the loop above may already have sent.
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		if err := bus.Publish(ctx, TopicLive, cache.Message{Type: TypeEvent, Data: duplicate}); err != nil {
 			t.Fatalf("Publish: %v", err)
 		}
@@ -424,7 +424,7 @@ func TestHubDropsMalformedAndIDLessLiveMessages(t *testing.T) {
 	}
 
 	// Each malformed pair is followed by a uniquely-ID'd valid probe.
-	for i := 0; i < 20; i++ {
+	for i := range 20 {
 		if err := bus.Publish(ctx, TopicLive, cache.Message{Type: TypeEvent, Data: json.RawMessage(`{not json`)}); err != nil {
 			t.Fatalf("Publish: %v", err)
 		}
@@ -795,7 +795,7 @@ func TestOpenTopicCapAndEviction(t *testing.T) {
 	h, m := newTestHub(t, cache.NewInProcessBus())
 	ctx := context.Background()
 
-	for i := 0; i < maxEphemeralTopics; i++ {
+	for i := range maxEphemeralTopics {
 		topic := RunTopic("cap-" + strconv.Itoa(i))
 		if !h.OpenTopic(ctx, topic) {
 			t.Fatalf("OpenTopic(%d) returned false before the cap", i)
@@ -854,7 +854,7 @@ func TestHubRunShutdownClosesEveryEphemeralSubscription(t *testing.T) {
 	go func() { defer close(done); h.Run(ctx) }()
 
 	const topics = 5
-	for i := 0; i < topics; i++ {
+	for i := range topics {
 		if !h.OpenTopic(context.Background(), RunTopic("shutdown-"+strconv.Itoa(i))) {
 			t.Fatalf("OpenTopic(%d) returned false", i)
 		}
@@ -958,10 +958,8 @@ func TestHubEphemeralTopicsConcurrentAccessRace(t *testing.T) {
 		}(topic)
 	}
 
-	for i := 0; i < 3; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+	for range 3 {
+		wg.Go(func() {
 			c := h.register(nil)
 			defer h.unregister(c)
 			drain := func() {
@@ -984,13 +982,11 @@ func TestHubEphemeralTopicsConcurrentAccessRace(t *testing.T) {
 				}
 				drain()
 			}
-		}()
+		})
 	}
 
-	for i := 0; i < 2; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+	for range 2 {
+		wg.Go(func() {
 			for {
 				select {
 				case <-stop:
@@ -1001,7 +997,7 @@ func TestHubEphemeralTopicsConcurrentAccessRace(t *testing.T) {
 					h.Broadcast(topic, TypeEvent, json.RawMessage(`{}`))
 				}
 			}
-		}()
+		})
 	}
 
 	time.Sleep(200 * time.Millisecond)
@@ -1052,7 +1048,7 @@ func TestOpenTopicConcurrentSameTopicSubscribesOnlyOnce(t *testing.T) {
 	const callers = 20
 	results := make([]bool, callers)
 	var wg sync.WaitGroup
-	for i := 0; i < callers; i++ {
+	for i := range callers {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
@@ -1080,7 +1076,7 @@ func TestOpenTopicConcurrentDifferentTopicsRespectsCapExactly(t *testing.T) {
 	h, _ := newTestHub(t, cache.NewInProcessBus())
 	ctx := context.Background()
 
-	for i := 0; i < maxEphemeralTopics-1; i++ {
+	for i := range maxEphemeralTopics - 1 {
 		if !h.OpenTopic(ctx, RunTopic("precap-"+strconv.Itoa(i))) {
 			t.Fatalf("OpenTopic(%d) returned false before the cap", i)
 		}
@@ -1094,7 +1090,7 @@ func TestOpenTopicConcurrentDifferentTopicsRespectsCapExactly(t *testing.T) {
 	const racers = 8
 	results := make([]bool, racers)
 	var wg sync.WaitGroup
-	for i := 0; i < racers; i++ {
+	for i := range racers {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()

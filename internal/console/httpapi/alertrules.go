@@ -898,8 +898,7 @@ func (s *Server) handleAlertRulesPreview(w http.ResponseWriter, r *http.Request)
 // PROMETHEUS ITSELF refused the expression -- the only case where the expression is proven bad
 // rather than merely unchecked.
 func promQueryErrorText(err error) (text string, rejected bool) {
-	var ue *promql.UpstreamError
-	if errors.As(err, &ue) {
+	if ue, ok := errors.AsType[*promql.UpstreamError](err); ok {
 		// 4xx is Prometheus judging the EXPRESSION (a parse error, bad_data);
 		// 5xx is Prometheus having a bad day, which says nothing about the
 		// expression and must not be reported as a rejection.
