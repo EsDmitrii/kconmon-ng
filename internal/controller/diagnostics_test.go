@@ -806,3 +806,13 @@ func TestDiagnosticsBodyNeverEmpty(t *testing.T) {
 		})
 	}
 }
+
+func TestDiagnosticsAcceptsPMTU(t *testing.T) {
+	disp := &fakeDispatcher{result: &pb.TaskResult{Success: true, DetailsJson: []byte(`{}`)}}
+	h := newDiagTestHandler(t, disp, false, false)
+
+	w := doDiag(h, `{"source":"node-a","destination":"node-b","type":"pmtu"}`)
+	if w.Code == http.StatusBadRequest {
+		t.Fatalf("pmtu rejected as a diagnostic type: %d %s", w.Code, w.Body.String())
+	}
+}

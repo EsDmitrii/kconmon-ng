@@ -11,6 +11,9 @@ const (
 	CheckTCP  CheckType = "tcp"
 	CheckUDP  CheckType = "udp"
 	CheckICMP CheckType = "icmp"
+	// CheckPMTU is the path-MTU probe: DF-marked UDP datagrams to the peer's echo port, bisected on
+	// loss. It answers whether full-size packets cross a pair that small ones already cross.
+	CheckPMTU CheckType = "pmtu"
 	CheckDNS  CheckType = "dns"
 	CheckHTTP CheckType = "http"
 	CheckMTR  CheckType = "mtr"
@@ -49,6 +52,27 @@ type UDPDetails struct {
 type ICMPDetails struct {
 	RTT       time.Duration `json:"rtt"`
 	LossRatio float64       `json:"lossRatio"`
+}
+
+// PMTU verdicts: the closed set PMTUDetails.Verdict carries. ok and reduced are successes (full-size
+// traffic crosses, or the path says how big it may be); blackhole is the failure the probe exists
+// for; unreachable is no verdict at all, because even the small datagram did not come back.
+const (
+	PMTUVerdictOK          = "ok"
+	PMTUVerdictReduced     = "reduced"
+	PMTUVerdictBlackhole   = "blackhole"
+	PMTUVerdictUnreachable = "unreachable"
+)
+
+// PMTUDetails is one path-MTU probe. Sizes are IP-level bytes (IP header, UDP header and payload),
+// the number an operator compares with `ip link` output.
+type PMTUDetails struct {
+	ProbeMTU int    `json:"probeMtu"`
+	PathMTU  int    `json:"pathMtu"`
+	Verdict  string `json:"verdict"`
+	Steps    int    `json:"steps"`
+	// Truncated means the bisection hit its time budget: PathMTU is a lower bound, not the answer.
+	Truncated bool `json:"truncated,omitempty"`
 }
 
 type DNSDetails struct {

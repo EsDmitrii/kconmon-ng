@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 )
 
 func writeConfig(t *testing.T, content string) string {
@@ -186,4 +187,16 @@ func sharedConfigMapDoc(t *testing.T, manifest string) string {
 	}
 	t.Fatalf("no agent/controller ConfigMap in the rendered manifest")
 	return ""
+}
+
+// The strict decoder must know the pmtu block, and a partial block keeps the defaults it omits.
+func TestStrictDecodeAcceptsPMTUBlock(t *testing.T) {
+	loader := NewLoader(writeConfig(t, "checkers:\n  pmtu:\n    interval: 30s\n    size: 1400\n"))
+	if err := loader.Load(); err != nil {
+		t.Fatalf("Load() = %v", err)
+	}
+	got := loader.Get().Checkers.PMTU
+	if !got.Enabled || got.Interval != 30*time.Second || got.Timeout != 500*time.Millisecond || got.Size != 1400 {
+		t.Fatalf("pmtu = %+v, want enabled, 30s, 500ms (default kept), size 1400", got)
+	}
 }

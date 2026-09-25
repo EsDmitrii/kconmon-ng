@@ -151,7 +151,7 @@ func (e *TaskExecutor) executeOne(ctx context.Context, req *pb.TaskRequest) *pb.
 			return e.errorResult(req, fmt.Errorf("check type %q not enabled on this agent", checkType))
 		}
 		result = c.Check(ctx, checker.Target{})
-	case model.CheckTCP, model.CheckUDP, model.CheckICMP:
+	case model.CheckTCP, model.CheckUDP, model.CheckICMP, model.CheckPMTU:
 		c, ok := e.checkers[checkType]
 		if !ok {
 			return e.errorResult(req, fmt.Errorf("check type %q not enabled on this agent", checkType))

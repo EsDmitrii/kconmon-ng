@@ -94,3 +94,41 @@ func TestProbeServerShortPacket(t *testing.T) {
 		t.Error("expected timeout for short packet, got response")
 	}
 }
+
+// A pmtu probe sends up to the interface MTU, jumbo included, and needs its seq back. The server
+// reads the whole datagram rather than relying on a truncated read keeping the first four bytes,
+// which holds on Linux and Darwin but is an error on other stacks.
+func TestProbeServerEchoesJumboDatagram(t *testing.T) {
+	srv := NewProbeServer(0)
+	lc := net.ListenConfig{}
+	listener, err := lc.ListenPacket(context.Background(), "udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv.listener = listener
+	srv.running.Store(true)
+	go srv.serveUDP()
+	defer func() { _ = srv.Close() }()
+
+	dialer := net.Dialer{}
+	conn, err := dialer.DialContext(context.Background(), "udp", listener.LocalAddr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	payload := make([]byte, 8972) // 9000 bytes on the wire
+	binary.BigEndian.PutUint32(payload, 42)
+	if _, err = conn.Write(payload); err != nil {
+		t.Fatal(err)
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(time.Second))
+	resp := make([]byte, 16)
+	n, err := conn.Read(resp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 4 || binary.BigEndian.Uint32(resp[:4]) != 42 {
+		t.Fatalf("reply = %v (%d bytes), want the 4-byte seq 42", resp[:n], n)
+	}
+}

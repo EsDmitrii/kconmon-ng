@@ -388,3 +388,23 @@ func TestWriteJSONInvalidPassthrough(t *testing.T) {
 		t.Errorf("expected verbatim passthrough:\n%s", buf.String())
 	}
 }
+
+func TestFormatCheckPMTUBlackhole(t *testing.T) {
+	res := &model.CheckResult{
+		Type: model.CheckPMTU, Success: false, Source: "node-1", Destination: "node-2",
+		Error: "path MTU black hole: 1500-byte datagrams are lost with no ICMP frag-needed, 1400 bytes cross",
+		Details: map[string]any{
+			"probeMtu": 1500.0, "pathMtu": 1400.0, "verdict": "blackhole", "steps": 14.0,
+		},
+	}
+	var buf bytes.Buffer
+	if err := formatCheck(&buf, res); err != nil {
+		t.Fatalf("formatCheck: %v", err)
+	}
+	out := buf.String()
+	for _, want := range []string{"FAIL", "pmtu", "verdict=blackhole", "path_mtu=1400", "probe_mtu=1500", "datagrams=14"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output lacks %q:\n%s", want, out)
+		}
+	}
+}

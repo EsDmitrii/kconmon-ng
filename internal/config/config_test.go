@@ -411,18 +411,11 @@ func TestDefaultConfigEventsDisabled(t *testing.T) {
 	}
 }
 
-func TestLoadFromFileEventsEnabled(t *testing.T) {
-	l := NewLoader("")
+func TestDecodeConfigEventsEnabled(t *testing.T) {
 	cfg := DefaultConfig()
 	data := []byte("controller:\n  leaderElection: true\n  agentTtl: 30s\n  events:\n    enabled: true\n")
-	dir := t.TempDir()
-	p := dir + "/config.yaml"
-	if err := os.WriteFile(p, data, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	l.filePath = p
-	if err := l.loadFromFile(cfg); err != nil {
-		t.Fatalf("loadFromFile: %v", err)
+	if err := decodeConfig(data, cfg); err != nil {
+		t.Fatalf("decodeConfig: %v", err)
 	}
 	if !cfg.Controller.Events.Enabled {
 		t.Error("expected controller.events.enabled true after load")
@@ -684,6 +677,54 @@ func TestAgentAdvertiseAddressMustBeAnIPLiteral(t *testing.T) {
 			}
 			if tt.wantErr && err != nil && !strings.Contains(err.Error(), "advertiseAddress") {
 				t.Errorf("error should name the offending key, got: %v", err)
+			}
+		})
+	}
+}
+
+func TestDefaultConfigPMTUEnabled(t *testing.T) {
+	p := DefaultConfig().Checkers.PMTU
+	if !p.Enabled || p.Interval != 60*time.Second || p.Timeout != 500*time.Millisecond || p.Size != 0 {
+		t.Fatalf("pmtu defaults = %+v, want enabled, 60s, 500ms, size 0", p)
+	}
+}
+
+func TestPMTUValidation(t *testing.T) {
+	tests := []struct {
+		name    string
+		modify  func(*Config)
+		wantErr string
+	}{
+		{"defaults", func(*Config) {}, ""},
+		{"size at the floor", func(c *Config) { c.Checkers.PMTU.Size = PMTUMinSize }, ""},
+		{"size at the ceiling", func(c *Config) { c.Checkers.PMTU.Size = PMTUMaxSize }, ""},
+		{"size below the floor", func(c *Config) { c.Checkers.PMTU.Size = PMTUMinSize - 1 }, "pmtu.size"},
+		{"size above the ceiling", func(c *Config) { c.Checkers.PMTU.Size = PMTUMaxSize + 1 }, "pmtu.size"},
+		{"negative size", func(c *Config) { c.Checkers.PMTU.Size = -1 }, "pmtu.size"},
+		{"size is checked even when disabled", func(c *Config) {
+			c.Checkers.PMTU.Enabled = false
+			c.Checkers.PMTU.Size = 100
+		}, "pmtu.size"},
+		{"zero interval when enabled", func(c *Config) { c.Checkers.PMTU.Interval = 0 }, "pmtu.interval"},
+		{"zero timeout when enabled", func(c *Config) { c.Checkers.PMTU.Timeout = 0 }, "pmtu.timeout"},
+		{"zero interval when disabled", func(c *Config) {
+			c.Checkers.PMTU.Enabled = false
+			c.Checkers.PMTU.Interval = 0
+		}, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := DefaultConfig()
+			tt.modify(cfg)
+			err := NewLoader("").validate(cfg)
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("validate() = %v, want nil", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("validate() = %v, want an error naming %q", err, tt.wantErr)
 			}
 		})
 	}

@@ -125,6 +125,14 @@ func New(cfg *config.Config) (*Agent, error) {
 		checkers[model.CheckICMP] = c
 		slog.Info("checker enabled", "type", "icmp", "interval", cfg.Checkers.ICMP.Interval)
 	}
+	if cfg.Checkers.PMTU.Enabled {
+		c := checker.NewPMTUChecker(cfg.Checkers.PMTU.Timeout, cfg.Checkers.PMTU.Interval,
+			cfg.Checkers.PMTU.Size, cfg.GRPCPort)
+		sched.AddChecker(c, SchedulerConfig{Interval: cfg.Checkers.PMTU.Interval})
+		checkers[model.CheckPMTU] = c
+		slog.Info("checker enabled", "type", "pmtu", "interval", cfg.Checkers.PMTU.Interval,
+			"size", cfg.Checkers.PMTU.Size)
+	}
 	if cfg.Checkers.DNS.Enabled && len(cfg.Checkers.DNS.Hosts) > 0 {
 		c := checker.NewDNSChecker(cfg.Checkers.DNS.Hosts, cfg.Checkers.DNS.Resolvers, cfg.Checkers.DNS.Timeout)
 		sched.AddChecker(c, SchedulerConfig{Interval: cfg.Checkers.DNS.Interval, NodeLocal: true})
@@ -235,6 +243,7 @@ func agentCapabilities(cfg *config.Config) []string {
 		{string(model.CheckTCP), cfg.Checkers.TCP.Enabled},
 		{string(model.CheckUDP), cfg.Checkers.UDP.Enabled},
 		{string(model.CheckICMP), cfg.Checkers.ICMP.Enabled},
+		{string(model.CheckPMTU), cfg.Checkers.PMTU.Enabled},
 		{string(model.CheckDNS), cfg.Checkers.DNS.Enabled},
 		{string(model.CheckHTTP), cfg.Checkers.HTTP.Enabled},
 		{string(model.CheckMTR), true},
@@ -905,6 +914,19 @@ func NewResultHandler(m *metrics.PrometheusMetrics, source checker.Target) Resul
 			m.ICMPResults.WithLabelValues(resultLabels...).Inc()
 			m.ZoneICMPResults.WithLabelValues(zoneResultLabels...).Inc()
 
+		case model.CheckPMTU:
+			/* unreachable is no verdict: the small datagram did not come back either, the udp plane
+			   owns that failure, and a fail here would page PathMTUBlackHole for a peer that is
+			   simply down. A probe that never sent (no details) writes nothing for the same reason. */
+			d, ok := result.Details.(*PMTUDetails)
+			if !ok || d.Verdict == model.PMTUVerdictUnreachable {
+				break
+			}
+			m.PMTUBytes.WithLabelValues(labels...).Set(float64(d.PathMTU))
+			m.AgentPMTUProbeBytes.WithLabelValues(result.Source).Set(float64(d.ProbeMTU))
+			m.PMTUResults.WithLabelValues(resultLabels...).Inc()
+			m.ZonePMTUResults.WithLabelValues(zoneResultLabels...).Inc()
+
 		case model.CheckDNS:
 			if details, ok := result.Details.([]DNSDetails); ok {
 				for _, d := range details {
@@ -1084,6 +1106,7 @@ func recordExternalDetail(m *metrics.PrometheusMetrics, node, zone string, d *Ex
 type TCPDetails = model.TCPDetails
 type UDPDetails = model.UDPDetails
 type ICMPDetails = model.ICMPDetails
+type PMTUDetails = model.PMTUDetails
 type DNSDetails = model.DNSDetails
 type HTTPDetails = model.HTTPDetails
 type MTRDetails = model.MTRDetails

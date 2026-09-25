@@ -29,6 +29,14 @@ func DefaultConfig() *Config {
 				Interval: 5 * time.Second,
 				Timeout:  1 * time.Second,
 			},
+			// On by default: a black hole is exactly the failure nobody knows to look for. Two
+			// datagrams per peer per minute cost nothing; the bisection only runs on a broken path.
+			PMTU: PMTUCheckerConfig{
+				Enabled:  true,
+				Interval: 60 * time.Second,
+				Timeout:  500 * time.Millisecond,
+				Size:     0,
+			},
 			DNS: DNSCheckerConfig{
 				Enabled:  true,
 				Interval: 5 * time.Second,
