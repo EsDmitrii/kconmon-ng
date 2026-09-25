@@ -2,8 +2,10 @@ package authn
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"regexp"
@@ -164,4 +166,11 @@ func parsePHC(phc string) (phcParams, error) {
 	p.hash = hash
 
 	return p, nil
+}
+
+// PasswordStamp is a short, non-reversible tag of a PHC hash. A new hash (new salt, new password)
+// always yields a new stamp; nothing about the password can be read back from it.
+func PasswordStamp(phc string) string {
+	sum := sha256.Sum256([]byte(phc))
+	return hex.EncodeToString(sum[:8])
 }

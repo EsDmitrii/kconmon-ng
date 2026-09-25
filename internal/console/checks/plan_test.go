@@ -266,3 +266,12 @@ func TestPlanHugeCartesianProductRejectedBeforeAllocation(t *testing.T) {
 		t.Errorf("Plan took %v, want a near-instant rejection before any large allocation", elapsed)
 	}
 }
+
+func TestPlanAcceptsPMTU(t *testing.T) {
+	pairs, err := checks.Plan(checks.Spec{
+		Type: "pmtu", Plane: "pod", Sources: []string{"a"}, Destinations: []string{"b"},
+	}, []string{"a", "b"})
+	if err != nil || len(pairs) != 1 {
+		t.Fatalf("Plan(pmtu) = %v, %v; want one pair", pairs, err)
+	}
+}

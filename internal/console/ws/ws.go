@@ -86,6 +86,7 @@ var allowedTopics = map[string]struct{}{
 	MatrixTopic("tcp"):  {},
 	MatrixTopic("udp"):  {},
 	MatrixTopic("icmp"): {},
+	MatrixTopic("pmtu"): {},
 }
 
 // errorPayload is the Data of an Envelope{Type: TypeError}.

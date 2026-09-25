@@ -162,3 +162,64 @@ func TestLocalAuthenticateModeIsLocal(t *testing.T) {
 		t.Errorf("Mode() = %q, want %q", got, "local")
 	}
 }
+
+// A session opened with the old password must stop authenticating once the password changes; a
+// session from before 2.5.0 (no stamp) keeps working until it expires.
+func TestLocalAuthenticatorRejectsASessionOpenedWithAnOldPassword(t *testing.T) {
+	oldHash, err := authn.HashPassword("old password 123")
+	if err != nil {
+		t.Fatal(err)
+	}
+	newHash, err := authn.HashPassword("new password 456")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessions := authn.NewSessionStore(cache.NewInProcessKV(), time.Hour, 0)
+	ctx := context.Background()
+	stamped, err := sessions.Create(ctx, authn.Session{Username: "alice", PasswordStamp: authn.PasswordStamp(oldHash)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy, err := sessions.Create(ctx, authn.Session{Username: "alice"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	users := &mapUsers{m: map[string]store.User{"alice": {ID: "u-1", Username: "alice", PasswordHash: oldHash}}}
+	a := authn.NewLocal(users, sessions, "kconmon_session")
+	req := func(id string) *http.Request {
+		r := httptest.NewRequestWithContext(ctx, http.MethodGet, "/", nil)
+		r.AddCookie(&http.Cookie{Name: "kconmon_session", Value: id})
+		return r
+	}
+	if _, err := a.Authenticate(req(stamped)); err != nil {
+		t.Fatalf("stamped session before the change: %v", err)
+	}
+
+	users.m["alice"] = store.User{ID: "u-1", Username: "alice", PasswordHash: newHash}
+	if _, err := a.Authenticate(req(stamped)); !errors.Is(err, authn.ErrNoCredentials) {
+		t.Fatalf("stamped session after the change = %v, want ErrNoCredentials", err)
+	}
+	if _, err := a.Authenticate(req(legacy)); err != nil {
+		t.Fatalf("a pre-2.5.0 session without a stamp must keep working: %v", err)
+	}
+}
+
+type mapUsers struct{ m map[string]store.User }
+
+func (u *mapUsers) GetUserByUsername(_ context.Context, name string) (store.User, error) {
+	usr, ok := u.m[name]
+	if !ok {
+		return store.User{}, store.ErrNotFound
+	}
+	return usr, nil
+}
+
+func (u *mapUsers) GetUserByID(_ context.Context, id string) (store.User, error) {
+	for _, usr := range u.m {
+		if usr.ID == id {
+			return usr, nil
+		}
+	}
+	return store.User{}, store.ErrNotFound
+}

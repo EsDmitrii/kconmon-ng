@@ -38,6 +38,12 @@ const (
 	   who configures a wider probe can still ask for more. */
 	udpMinPerPairTimeout = 5 * time.Second
 
+	/* pmtuMinPerPairTimeout is the same floor for the path MTU probe. On a black hole the search
+	   waits out a read deadline for both full-size attempts and for up to half of its 16 bisection
+	   steps: about 9s with the shipped 500ms timeout. A shorter deadline cancels the search midway,
+	   and the pair reads "unreachable" instead of the black hole the run was started to find. */
+	pmtuMinPerPairTimeout = 15 * time.Second
+
 	// minPerPairTimeout / maxPerPairTimeout clamp Spec.Timeout.
 	minPerPairTimeout = 1 * time.Second
 	maxPerPairTimeout = 120 * time.Second
@@ -205,6 +211,7 @@ var validCheckTypes = map[string]struct{}{
 	"tcp":  {},
 	"udp":  {},
 	"icmp": {},
+	"pmtu": {},
 	"dns":  {},
 	"http": {},
 	"mtr":  {},
@@ -220,7 +227,7 @@ type Pair struct {
 type Spec struct {
 	Sources      []string // node names; empty = every node in the current topology
 	Destinations []string // node names; empty (AND no TypedDestinations) = every node in the current topology
-	Type         string   // tcp|udp|icmp|dns|http|mtr -- the controller's validCheckTypes
+	Type         string   // tcp|udp|icmp|pmtu|dns|http|mtr -- the controller's validCheckTypes
 	Plane        string   // "pod" (the only plane that exists)
 	// TypedDestinations are destinations that a node name cannot express: a targets row resolved to an
 	// address.
@@ -524,6 +531,9 @@ func clampTimeoutFor(checkType string, d time.Duration) time.Duration {
 	}
 	if checkType == string(model.CheckUDP) && out < udpMinPerPairTimeout {
 		return udpMinPerPairTimeout
+	}
+	if checkType == string(model.CheckPMTU) && out < pmtuMinPerPairTimeout {
+		return pmtuMinPerPairTimeout
 	}
 	return out
 }

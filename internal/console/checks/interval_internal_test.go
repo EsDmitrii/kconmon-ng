@@ -113,7 +113,7 @@ func TestRequestedSampleIntervalBelowRoundFloorIsAdjustedNotRefused(t *testing.T
 // planner produces is the one it produced before this field existed, and the three snapshot fields
 // that describe a request stay zero so `omitempty` drops them from the stored spec.
 func TestAbsentSampleIntervalIsUnchanged(t *testing.T) {
-	for _, checkType := range []string{"tcp", "udp", "icmp", "dns", "http", "mtr"} {
+	for _, checkType := range []string{"tcp", "udp", "icmp", "pmtu", "dns", "http", "mtr"} {
 		for _, d := range []time.Duration{0, 10 * time.Second, time.Minute, 15 * time.Minute, 24 * time.Hour} {
 			spec := &Spec{Type: checkType, Duration: d}
 			pairs := allToAllPairs(4)

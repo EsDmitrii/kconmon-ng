@@ -699,3 +699,73 @@ func seedAuditEntryAtAge(t *testing.T, ctx context.Context, db *store.DB, dsn st
 	}
 	backdateAuditEntry(t, dsn, e.ID, ageDays)
 }
+
+func TestCreateUserWithRoleBindsInOneTransaction(t *testing.T) {
+	db, _ := newAuthDB(t)
+	ctx := context.Background()
+
+	u, err := db.CreateUserWithRole(ctx, "bob", "argon2id$fake-hash", "Bob", "operator")
+	if err != nil {
+		t.Fatalf("CreateUserWithRole: %v", err)
+	}
+	bindings, err := db.ListBindings(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, b := range bindings {
+		if b.SubjectKind == "user" && b.SubjectID == u.ID && b.RoleName == "operator" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("no operator binding for %s in %+v", u.ID, bindings)
+	}
+
+	before := len(bindings)
+	if _, err := db.CreateUserWithRole(ctx, "bob", "argon2id$other", "Bob Again", "admin"); !errors.Is(err, store.ErrAlreadyExists) {
+		t.Fatalf("duplicate username = %v, want ErrAlreadyExists", err)
+	}
+	after, err := db.ListBindings(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(after) != before {
+		t.Fatalf("a failed create left %d bindings behind", len(after)-before)
+	}
+}
+
+func TestSetUserRoleReplacesOnlyTheUsersDirectBindings(t *testing.T) {
+	db, _ := newAuthDB(t)
+	ctx := context.Background()
+	u, err := db.CreateUserWithRole(ctx, "carol", "argon2id$fake", "Carol", "viewer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.CreateBinding(ctx, "operator", "group", "sre"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SetUserRole(ctx, u.ID, "admin"); err != nil {
+		t.Fatalf("SetUserRole: %v", err)
+	}
+	bindings, err := db.ListBindings(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var direct []string
+	groupKept := false
+	for _, b := range bindings {
+		if b.SubjectKind == "user" && b.SubjectID == u.ID {
+			direct = append(direct, b.RoleName)
+		}
+		if b.SubjectKind == "group" && b.SubjectID == "sre" {
+			groupKept = true
+		}
+	}
+	if len(direct) != 1 || direct[0] != "admin" {
+		t.Fatalf("direct bindings = %v, want exactly [admin]", direct)
+	}
+	if !groupKept {
+		t.Fatal("a group binding was removed by a user role change")
+	}
+}

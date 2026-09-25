@@ -99,6 +99,8 @@ type Metrics struct {
 	// WebhookDeliveries is the outbound dispatcher's metric; ONE increment per delivery the dispatcher
 	// reached a TERMINAL decision about.
 	WebhookDeliveries *prometheus.CounterVec
+	// WebhookSuppressed counts alert edges a maintenance window held back, by event.
+	WebhookSuppressed *prometheus.CounterVec
 }
 
 // New registers and returns the Console metrics under <prefix>_console_*.
@@ -286,5 +288,11 @@ func New(prefix string, reg prometheus.Registerer) *Metrics {
 				"steady state of an endpoint that does not subscribe to the event, and a disabled " +
 				"endpoint is not counted at all.",
 		}, []string{"result"}),
+		WebhookSuppressed: f.NewCounterVec(prometheus.CounterOpts{
+			Name: ns + "_webhook_suppressed_total",
+			Help: "Alert webhook edges a maintenance window held back, by event (alert.fired, " +
+				"alert.resolved). A held fired edge is delivered when its window closes on an alert " +
+				"that is still firing, and is not counted a second time then.",
+		}, []string{"event"}),
 	}
 }

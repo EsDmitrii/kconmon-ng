@@ -668,6 +668,9 @@ func TestAuditDetailAllowlistIsPinned(t *testing.T) {
 		"POST /api/v1/rbac/roles":    {"name", "permissions"},
 		"POST /api/v1/rbac/bindings": {"roleName", "subjectKind", "subjectId"},
 		"POST /api/v1/tokens":        {"name", "expiresAt"},
+		// Users: never the password.
+		"POST /api/v1/users":       {"username", "displayName", "role"},
+		"PATCH /api/v1/users/{id}": {"disabled", "role"},
 		// destinationKind joined the runs entry.
 		"POST /api/v1/runs":        {"type", "plane", "destinationKind"},
 		"POST /api/v1/targets":     {"name", "kind"},

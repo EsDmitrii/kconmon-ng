@@ -311,10 +311,13 @@ type bindingRequest struct {
 
 // roleKnown reports whether name is a built-in role or an existing custom
 // role -- the check handleRBACBindingsCreate's "unknown role" guard rail
-// needs.
+// and the users API need. Without a role store only the built-ins exist.
 func (s *Server) roleKnown(ctx context.Context, name string) (bool, error) {
 	if authz.IsBuiltinRole(name) {
 		return true, nil
+	}
+	if s.roleAdmin == nil {
+		return false, nil
 	}
 	roles, err := s.roleAdmin.ListRoles(ctx)
 	if err != nil {

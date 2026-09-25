@@ -514,3 +514,16 @@ func TestWrapForeignKeyViolationCoversRestrictViolation(t *testing.T) {
 		}
 	}
 }
+
+func TestDefinitionPMTUNeedsANodeDestination(t *testing.T) {
+	base := validDefinitionInput()
+	base.CheckType = "pmtu"
+	if err := base.Validate(); err != nil {
+		t.Fatalf("pmtu to nodes must validate: %v", err)
+	}
+	adhoc := base
+	adhoc.DestinationKind, adhoc.DestinationAddress = "adhoc", "192.0.2.10"
+	if err := adhoc.Validate(); err == nil || !strings.Contains(err.Error(), "pmtu") {
+		t.Fatalf("pmtu to an adhoc address = %v, want a refusal naming pmtu", err)
+	}
+}

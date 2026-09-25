@@ -18,7 +18,7 @@ const defaultInterval = 15 * time.Second
 
 // matrixProtocols is the fixed protocol set the console pushes. It mirrors the
 // protocols matrix.Compute accepts; there is no "all" mode.
-var matrixProtocols = []string{"tcp", "udp", "icmp"}
+var matrixProtocols = []string{"tcp", "udp", "icmp", "pmtu"}
 
 // MatrixPusher recomputes the connectivity matrix for every protocol and
 // broadcasts it as a full snapshot on the matrix:<protocol>:pod topics.

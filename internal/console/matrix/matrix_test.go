@@ -115,3 +115,38 @@ func TestComputeTreatsNaNAndInfAsNoData(t *testing.T) {
 		t.Fatalf("the matrix must always be marshalable, got: %v", err)
 	}
 }
+
+func sampleSrc(src, value string) string {
+	return `{"metric":{"source_node":"` + src + `"},"value":[1767225600,"` + value + `"]}`
+}
+
+func TestComputePMTU(t *testing.T) {
+	q := &fakeQuerier{byContains: map[string]string{
+		"pmtu_results_total":     vec(sample("a", "b", "1"), sample("b", "a", "0"), sample("a", "c", "0")),
+		"_pmtu_bytes)":           vec(sample("a", "b", "1400"), sample("b", "a", "1500"), sample("a", "c", "1450")),
+		"agent_pmtu_probe_bytes": vec(sampleSrc("a", "1500"), sampleSrc("b", "1500")),
+	}}
+	m, err := matrix.Compute(context.Background(), q, "kconmon_ng", "pmtu")
+	if err != nil {
+		t.Fatalf("Compute: %v", err)
+	}
+	if m.Protocol != "pmtu" {
+		t.Fatalf("protocol = %q", m.Protocol)
+	}
+	cells := map[string]matrix.Cell{}
+	for _, c := range m.Cells {
+		cells[c.Source+"->"+c.Destination] = c
+	}
+	ab := cells["a->b"]
+	if ab.FailRatio == nil || *ab.FailRatio != 1 || ab.MTUBytes == nil || *ab.MTUBytes != 1400 ||
+		ab.ProbeMTUBytes == nil || *ab.ProbeMTUBytes != 1500 {
+		t.Errorf("a->b = %+v, want a black hole at 1400 of 1500", ab)
+	}
+	ac := cells["a->c"]
+	if ac.FailRatio == nil || *ac.FailRatio != 0 || ac.MTUBytes == nil || *ac.MTUBytes != 1450 {
+		t.Errorf("a->c = %+v, want a reduced path at 1450 with no failures", ac)
+	}
+	if ab.RTTP95 != nil || ab.LossRatio != nil {
+		t.Errorf("pmtu carries no rtt or loss: %+v", ab)
+	}
+}

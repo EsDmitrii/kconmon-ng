@@ -422,7 +422,7 @@ var _ DefinitionReader = (*DB)(nil)
 var (
 	sourceSelections = map[string]bool{"all": true, "per-zone": true, "one-per-zone": true}
 	destinationKinds = map[string]bool{"node": true, "target": true, "adhoc": true}
-	checkTypes       = map[string]bool{"tcp": true, "udp": true, "icmp": true, "dns": true, "http": true, "mtr": true}
+	checkTypes       = map[string]bool{"tcp": true, "udp": true, "icmp": true, "pmtu": true, "dns": true, "http": true, "mtr": true}
 )
 
 // Validate reports whether in is a well-formed definition; beyond the enumerations it enforces the
@@ -438,7 +438,12 @@ func (in *DefinitionInput) Validate() error {
 		return fmt.Errorf("store: definition: destination kind %q must be one of node, target, adhoc", in.DestinationKind)
 	}
 	if !checkTypes[in.CheckType] {
-		return fmt.Errorf("store: definition: check type %q must be one of tcp, udp, icmp, dns, http, mtr", in.CheckType)
+		return fmt.Errorf("store: definition: check type %q must be one of tcp, udp, icmp, pmtu, dns, http, mtr", in.CheckType)
+	}
+	// pmtu speaks the kconmon echo protocol: only an agent answers it, so a target or an ad-hoc
+	// address would read as a black hole on every run.
+	if in.CheckType == "pmtu" && in.DestinationKind != "node" {
+		return fmt.Errorf("store: definition: check type pmtu probes kconmon nodes only, not destination kind %q", in.DestinationKind)
 	}
 	if in.Plane == "" {
 		return errors.New("store: definition: plane must not be empty")

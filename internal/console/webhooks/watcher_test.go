@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/EsDmitrii/kconmon-ng/internal/console/events"
 	"github.com/EsDmitrii/kconmon-ng/internal/console/store"
 )
 
@@ -664,5 +665,146 @@ func TestFingerprintIsStableAndPerLabelSet(t *testing.T) {
 	if fingerprint(testRuleID, map[string]string{"a": "b=c"}) ==
 		fingerprint(testRuleID, map[string]string{"a=b": "c"}) {
 		t.Error("the fingerprint is ambiguous across the key/value boundary")
+	}
+}
+
+type fakeMaintenance struct {
+	windows []store.MaintenanceWindow
+	err     error
+}
+
+func (f *fakeMaintenance) ListMaintenanceWindows(context.Context, store.MaintenanceFilter) (store.MaintenancePage, error) {
+	if f.err != nil {
+		return store.MaintenancePage{}, f.err
+	}
+	return store.MaintenancePage{Windows: f.windows}, nil
+}
+
+func windowAround(scope string) store.MaintenanceWindow {
+	return store.MaintenanceWindow{ID: "w-" + scope, Scope: scope,
+		StartAt: testNow.Add(-time.Hour), EndAt: testNow.Add(time.Hour)}
+}
+
+func newMaintenanceWatcher(t *testing.T, src AlertSource, mt MaintenanceSource) (*AlertWatcher, *fakeAlertNotifier) {
+	t.Helper()
+	n := &fakeAlertNotifier{}
+	w, err := NewAlertWatcher(AlertWatcherDeps{Alerts: src, Notifier: n, Maintenance: mt, Interval: 30 * time.Second})
+	if err != nil {
+		t.Fatalf("NewAlertWatcher: %v", err)
+	}
+	w.now = func() time.Time { return testNow }
+	return w, n
+}
+
+func pairAlert() promAlert {
+	return managedAlert(testRuleID, "PairLossHigh", map[string]string{"source_node": "n1", "destination_node": "n2"})
+}
+
+// Inside a window neither edge is delivered: the fired one is held, the resolved one has nothing to
+// resolve.
+func TestAlertWatcherHoldsBothEdgesInsideAWindow(t *testing.T) {
+	src := newFakeAlertSource(
+		alertReply{body: promBody(t)},
+		alertReply{body: promBody(t, pairAlert())},
+		alertReply{body: promBody(t)},
+	)
+	w, n := newMaintenanceWatcher(t, src, &fakeMaintenance{windows: []store.MaintenanceWindow{windowAround("")}})
+	for range 3 {
+		w.poll(context.Background())
+	}
+	if got := n.recorded(); len(got) != 0 {
+		t.Fatalf("delivered %d notifications inside a global window, want 0: %+v", len(got), got)
+	}
+}
+
+// A window that closes on an alert still firing delivers its fired edge then, once, with the
+// original firedAt so replicas still dedupe on it.
+func TestAlertWatcherDeliversWhenTheWindowClosesOnAFiringAlert(t *testing.T) {
+	src := newFakeAlertSource(
+		alertReply{body: promBody(t)},
+		alertReply{body: promBody(t, pairAlert())},
+	)
+	w, n := newMaintenanceWatcher(t, src, &fakeMaintenance{windows: []store.MaintenanceWindow{windowAround("n1")}})
+	w.poll(context.Background())
+	w.poll(context.Background())
+	if got := n.recorded(); len(got) != 0 {
+		t.Fatalf("delivered inside the window: %+v", got)
+	}
+
+	w.now = func() time.Time { return testNow.Add(2 * time.Hour) }
+	w.poll(context.Background())
+	w.poll(context.Background())
+	got := n.recorded()
+	if len(got) != 1 || got[0].event != store.WebhookEventAlertFired {
+		t.Fatalf("after the window: %+v, want exactly one alert.fired", got)
+	}
+	if !got[0].alert.FiredAt.Equal(testActiveAt) {
+		t.Errorf("firedAt = %v, want Prometheus' activeAt %v", got[0].alert.FiredAt, testActiveAt)
+	}
+}
+
+func TestAlertWatcherMatchesWindowScopes(t *testing.T) {
+	tests := []struct {
+		scope string
+		held  bool
+	}{
+		{"", true},
+		{"n1", true},
+		{"n2", true},
+		{"n1" + events.PairArrow + "n2", true},
+		{"n2" + events.PairArrow + "n1", false},
+		{"n3", false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.scope, func(t *testing.T) {
+			src := newFakeAlertSource(alertReply{body: promBody(t)}, alertReply{body: promBody(t, pairAlert())})
+			w, n := newMaintenanceWatcher(t, src, &fakeMaintenance{windows: []store.MaintenanceWindow{windowAround(tc.scope)}})
+			w.poll(context.Background())
+			w.poll(context.Background())
+			if held := len(n.recorded()) == 0; held != tc.held {
+				t.Fatalf("scope %q: held=%v, want %v", tc.scope, held, tc.held)
+			}
+		})
+	}
+}
+
+func TestAlertWatcherHoldsAnExternalTargetAlert(t *testing.T) {
+	alert := managedAlert(testRuleID, "ExternalDown", map[string]string{"target": "dns-edge"})
+	src := newFakeAlertSource(alertReply{body: promBody(t)}, alertReply{body: promBody(t, alert)})
+	w, n := newMaintenanceWatcher(t, src, &fakeMaintenance{windows: []store.MaintenanceWindow{windowAround("dns-edge")}})
+	w.poll(context.Background())
+	w.poll(context.Background())
+	if got := n.recorded(); len(got) != 0 {
+		t.Fatalf("an alert on the window's target was delivered: %+v", got)
+	}
+}
+
+// Windows that have not started or have already ended hold nothing, whatever the store returned.
+func TestAlertWatcherIgnoresWindowsOutsideNow(t *testing.T) {
+	future := store.MaintenanceWindow{Scope: "", StartAt: testNow.Add(time.Minute), EndAt: testNow.Add(time.Hour)}
+	past := store.MaintenanceWindow{Scope: "", StartAt: testNow.Add(-time.Hour), EndAt: testNow}
+	src := newFakeAlertSource(alertReply{body: promBody(t)}, alertReply{body: promBody(t, pairAlert())})
+	w, n := newMaintenanceWatcher(t, src, &fakeMaintenance{windows: []store.MaintenanceWindow{future, past}})
+	w.poll(context.Background())
+	w.poll(context.Background())
+	if got := n.recorded(); len(got) != 1 {
+		t.Fatalf("got %d notifications, want the one fired edge", len(got))
+	}
+}
+
+// An unreadable maintenance table must not swallow pages: fail open.
+func TestAlertWatcherFailsOpenWhenWindowsCannotBeRead(t *testing.T) {
+	src := newFakeAlertSource(alertReply{body: promBody(t)}, alertReply{body: promBody(t, pairAlert())})
+	w, n := newMaintenanceWatcher(t, src, &fakeMaintenance{err: errors.New("db down")})
+	w.poll(context.Background())
+	w.poll(context.Background())
+	if got := n.recorded(); len(got) != 1 {
+		t.Fatalf("got %d notifications with the store down, want the fired edge delivered", len(got))
+	}
+}
+
+func TestPairArrowMatchesTheAnnotationsVocabulary(t *testing.T) {
+	if pairArrow != events.PairArrow {
+		t.Fatalf("pairArrow %q drifted from events.PairArrow %q", pairArrow, events.PairArrow)
 	}
 }

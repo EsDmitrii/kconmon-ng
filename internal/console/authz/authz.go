@@ -21,6 +21,10 @@ const (
 	PermTokensManage  Permission = "tokens:manage"
 	PermSettingsWrite Permission = "settings:write"
 
+	// PermUsersManage gates local user administration (auth.mode=local): list, create, disable,
+	// reset a password, change a role. Admin only, the tokens:manage and rbac:manage posture.
+	PermUsersManage Permission = "users:manage"
+
 	// Read is split from write because the Targets page must be viewable by a role that cannot mutate
 	// the fleet's probe configuration.
 	PermTargetsRead    Permission = "targets:read"
@@ -59,6 +63,7 @@ var AllPermissions = []Permission{
 	PermAuditRead,
 	PermRBACManage,
 	PermTokensManage,
+	PermUsersManage,
 	PermSettingsWrite,
 	PermTargetsRead,
 	PermTargetsWrite,
