@@ -69,6 +69,28 @@
         }
       }
     },
+    "nodeRollupAlert": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "threshold": {
+          "$ref": "#/$defs/thresholdAlert/properties/threshold"
+        },
+        "minPeers": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "for": {
+          "type": "string"
+        },
+        "severity": {
+          "type": "string"
+        }
+      }
+    },
     "thresholdAlert": {
       "type": "object",
       "additionalProperties": false,
@@ -1396,6 +1418,34 @@
                 }
               }
             },
+            "pmtu": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "enabled": {
+                  "type": "boolean"
+                },
+                "interval": {
+                  "type": "string"
+                },
+                "timeout": {
+                  "type": "string"
+                },
+                "size": {
+                  "description": "IP-level bytes; 0 means the interface MTU. Anything else must be a valid IPv4 datagram size an MTU can have.",
+                  "type": "integer",
+                  "anyOf": [
+                    {
+                      "const": 0
+                    },
+                    {
+                      "minimum": 576,
+                      "maximum": 65535
+                    }
+                  ]
+                }
+              }
+            },
             "dns": {
               "type": "object",
               "additionalProperties": false,
@@ -1652,6 +1702,15 @@
         },
         "tcpChecksFailing": {
           "$ref": "#/$defs/thresholdAlert"
+        },
+        "pathMtuBlackHole": {
+          "$ref": "#/$defs/thresholdAlert"
+        },
+        "nodeUnreachable": {
+          "$ref": "#/$defs/nodeRollupAlert"
+        },
+        "nodeIsolated": {
+          "$ref": "#/$defs/nodeRollupAlert"
         },
         "pairWentSilent": {
           "$ref": "#/$defs/alert"

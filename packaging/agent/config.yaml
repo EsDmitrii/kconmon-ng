@@ -41,3 +41,12 @@ agent:
 # httpPort: 8080
 # grpcPort: 9090
 # metricsPort: 9091
+
+# Path MTU probe towards every peer (agent 2.5.0+), on by default. Defaults shown; size 0 probes at
+# the MTU of the interface that routes to the peer.
+# checkers:
+#   pmtu:
+#     enabled: true
+#     interval: 60s
+#     timeout: 500ms
+#     size: 0

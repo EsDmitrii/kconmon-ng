@@ -94,6 +94,32 @@ data:
         enabled: {{ .Values.config.checkers.icmp.enabled }}
         interval: {{ .Values.config.checkers.icmp.interval | quote }}
         timeout: {{ .Values.config.checkers.icmp.timeout | quote }}
+      {{- /* Only the keys that differ from the compiled defaults (true, 60s, 500ms, 0) are written:
+             the config decoder is strict and an agent older than 2.5.0 exits on an unknown key, so a
+             chart upgrade ahead of the image stays safe until someone tunes pmtu. `with` keeps a
+             --reuse-values upgrade over 2.4.0 values, which carry no pmtu block, silent. */}}
+      {{- with .Values.config.checkers.pmtu }}
+      {{- $tuned := dict }}
+      {{- if and (hasKey . "enabled") (not .enabled) }}{{- $_ := set $tuned "enabled" "false" }}{{- end }}
+      {{- if and .interval (ne (toString .interval) "60s") }}{{- $_ := set $tuned "interval" (toString .interval) }}{{- end }}
+      {{- if and .timeout (ne (toString .timeout) "500ms") }}{{- $_ := set $tuned "timeout" (toString .timeout) }}{{- end }}
+      {{- if and .size (ne (int .size) 0) }}{{- $_ := set $tuned "size" (int .size | toString) }}{{- end }}
+      {{- if $tuned }}
+      pmtu:
+        {{- with $tuned.enabled }}
+        enabled: {{ . }}
+        {{- end }}
+        {{- with $tuned.interval }}
+        interval: {{ . | quote }}
+        {{- end }}
+        {{- with $tuned.timeout }}
+        timeout: {{ . | quote }}
+        {{- end }}
+        {{- with $tuned.size }}
+        size: {{ . }}
+        {{- end }}
+      {{- end }}
+      {{- end }}
       dns:
         enabled: {{ .Values.config.checkers.dns.enabled }}
         interval: {{ .Values.config.checkers.dns.interval | quote }}

@@ -63,6 +63,124 @@
       alone (a listener or policy problem).
 {{- end }}
 {{- end }}
+{{- with $pr.pathMtuBlackHole }}
+{{- if .enabled }}
+{{- $t := float64 .threshold }}
+{{/* The value is the path MTU itself, not the ratio: `and on` keeps the left side, so the alert
+     says how many bytes still cross. unreachable probes write no pmtu series, so a peer that is
+     down leaves both counters flat, the ratio is 0/0 and nothing fires. */}}
+- alert: PathMTUBlackHole
+  expr: >-
+    max by (source_node, destination_node, source_zone, destination_zone) ({{ $prefix }}_pmtu_bytes)
+    and on (source_node, destination_node, source_zone, destination_zone)
+    (
+      sum by (source_node, destination_node, source_zone, destination_zone)
+      (rate({{ $prefix }}_pmtu_results_total{result="fail"}[10m]))
+      /
+      sum by (source_node, destination_node, source_zone, destination_zone)
+      (rate({{ $prefix }}_pmtu_results_total[10m]))
+      > {{ $t }}
+    )
+  for: {{ .for }}
+  labels:
+    severity: {{ .severity }}
+  annotations:
+    summary: >-
+      Path MTU black hole {{`{{ $labels.source_node }}`}} -> {{`{{ $labels.destination_node }}`}},
+      only {{`{{ $value }}`}}-byte datagrams cross
+    description: >-
+      Full-size datagrams from {{`{{ $labels.source_node }}`}} (zone
+      {{`{{ $labels.source_zone }}`}}) to {{`{{ $labels.destination_node }}`}} (zone
+      {{`{{ $labels.destination_zone }}`}}) are lost with no ICMP frag-needed while
+      {{`{{ $value }}`}}-byte ones cross, in more than
+      {{ include "kconmon-ng.prometheusRule.pct" $t }}% of path MTU probes over the last
+      10m. Small packets and TCP handshakes still work, so the other pair alerts stay
+      quiet while large transfers stall. Compare the interface MTU on both nodes with the
+      encapsulation overhead of the CNI (VXLAN and Geneve take 50 bytes, WireGuard 60 to
+      80) and check whether ICMP type 3 code 4 is filtered on the path.
+{{- end }}
+{{- end }}
+{{- with $pr.nodeUnreachable }}
+{{- if .enabled }}
+{{- $t := float64 .threshold }}
+{{/* A pair counts as failing when most of its TCP probes fail (> 0.5, fixed: this rule is about
+     how many peers, not how badly each one fails). Only pairs with traffic count toward the
+     denominator, so a sparse topology's unplanned pairs never dilute it. */}}
+- alert: NodeUnreachable
+  expr: >-
+    (
+      count by (destination_node, destination_zone) (
+        (
+          sum by (source_node, destination_node, destination_zone) (rate({{ $prefix }}_tcp_results_total{result="fail"}[5m]))
+          /
+          sum by (source_node, destination_node, destination_zone) (rate({{ $prefix }}_tcp_results_total[5m]))
+        ) > 0.5
+      )
+      /
+      count by (destination_node, destination_zone) (
+        sum by (source_node, destination_node, destination_zone) (rate({{ $prefix }}_tcp_results_total[5m])) > 0
+      )
+    ) > {{ $t }}
+    and on (destination_node, destination_zone)
+    count by (destination_node, destination_zone) (
+      sum by (source_node, destination_node, destination_zone) (rate({{ $prefix }}_tcp_results_total[5m])) > 0
+    ) >= {{ .minPeers }}
+  for: {{ .for }}
+  labels:
+    severity: {{ .severity }}
+  annotations:
+    summary: >-
+      Node {{`{{ $labels.destination_node }}`}} unreachable from
+      {{`{{ $value | humanizePercentage }}`}} of its peers
+    description: >-
+      TCP probes to {{`{{ $labels.destination_node }}`}} (zone
+      {{`{{ $labels.destination_zone }}`}}) fail for {{`{{ $value | humanizePercentage }}`}}
+      of the peers that probe it, above the
+      {{ include "kconmon-ng.prometheusRule.pct" $t }}% threshold, for {{ .for }}. The node
+      is still registered, so its agent runs while its peers cannot reach it: look at the node
+      itself (kubelet, the CNI agent, the host firewall) before the pairs. A node that stops
+      altogether leaves the mesh within the agent TTL and pages as KconmonAgentsMissing
+      instead. The inhibit_rules example in the metrics guide mutes the pair alerts this one
+      explains.
+{{- end }}
+{{- end }}
+{{- with $pr.nodeIsolated }}
+{{- if .enabled }}
+{{- $t := float64 .threshold }}
+- alert: NodeIsolated
+  expr: >-
+    (
+      count by (source_node, source_zone) (
+        (
+          sum by (source_node, destination_node, source_zone) (rate({{ $prefix }}_tcp_results_total{result="fail"}[5m]))
+          /
+          sum by (source_node, destination_node, source_zone) (rate({{ $prefix }}_tcp_results_total[5m]))
+        ) > 0.5
+      )
+      /
+      count by (source_node, source_zone) (
+        sum by (source_node, destination_node, source_zone) (rate({{ $prefix }}_tcp_results_total[5m])) > 0
+      )
+    ) > {{ $t }}
+    and on (source_node, source_zone)
+    count by (source_node, source_zone) (
+      sum by (source_node, destination_node, source_zone) (rate({{ $prefix }}_tcp_results_total[5m])) > 0
+    ) >= {{ .minPeers }}
+  for: {{ .for }}
+  labels:
+    severity: {{ .severity }}
+  annotations:
+    summary: >-
+      Node {{`{{ $labels.source_node }}`}} cannot reach
+      {{`{{ $value | humanizePercentage }}`}} of its peers
+    description: >-
+      TCP probes from {{`{{ $labels.source_node }}`}} (zone {{`{{ $labels.source_zone }}`}})
+      fail to {{`{{ $value | humanizePercentage }}`}} of the peers it probes, above the
+      {{ include "kconmon-ng.prometheusRule.pct" $t }}% threshold, for {{ .for }}. The node's
+      own egress is broken: its network policy, routes or CNI agent, not the peers. The
+      inhibit_rules example in the metrics guide mutes the pair alerts this one explains.
+{{- end }}
+{{- end }}
 {{- with $pr.pairWentSilent }}
 {{- if .enabled }}
 {{/* Fires only for pairs the topology plan assigns (probe_intended == 1): under a sparse mesh

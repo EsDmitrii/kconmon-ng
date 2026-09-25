@@ -61,6 +61,17 @@ config:
       enabled: true
       interval: 5s
       timeout: 1s
+    # Path MTU: full-size datagrams with DF set to each peer's echo port, bisected on loss. Finds the
+    # MTU black hole that small probes and TCP handshakes never see. Tuning any key needs agent
+    # images 2.5.0 or newer: the chart writes a key only when it differs from these defaults, and an
+    # older agent refuses the unknown key.
+    pmtu:
+      enabled: true
+      interval: 60s
+      # Per datagram; the whole search is bounded by half the interval.
+      timeout: 500ms
+      # IP-level bytes to probe at; 0 = the MTU of the interface that routes to the peer.
+      size: 0
     # DNS resolution check.
     dns:
       enabled: true
@@ -184,8 +195,8 @@ agent:
   # It needs serviceMonitor.enabled and the chart refuses the combination otherwise; without the
   # operator, copy the equivalent metric_relabel_configs from docs/metrics.md into your own scrape
   # config. What each mode keeps, per DIRECTED NODE PAIR (N nodes make N*(N-1) of them):
-  #   full          ~70 series/pair — everything the agent exports.
-  #   counters-only ~10 series/pair — drops the four per-pair histograms (64 of the ~70); the
+  #   full          ~75 series/pair — everything the agent exports.
+  #   counters-only ~12 series/pair — drops the four per-pair histograms (64 of the ~75); the
   #                 loss/jitter gauges and result counters stay, so every pair alert keeps firing.
   #   zone-only     ~0 series/pair — drops every series naming a destination node (histograms,
   #                 gauges, counters, MTR). What remains is the zone family (~74 series per
@@ -727,6 +738,30 @@ prometheusRule:
     threshold: 0.05
     for: 5m
     severity: warning
+  # Full-size datagrams lost without ICMP frag-needed on a pair: an MTU black hole. Reads the pmtu
+  # results that agents 2.5.0+ export; on older agents the rule is silently inert.
+  pathMtuBlackHole:
+    enabled: true
+    # Failure ratio of path MTU probes, 0.0-1.0.
+    threshold: 0.5
+    for: 5m
+    severity: warning
+  # Most peers fail TCP to one node: one alert instead of a pair alert per peer.
+  nodeUnreachable:
+    enabled: true
+    # Share of the node's probing peers that fail to reach it, 0.0-1.0.
+    threshold: 0.5
+    # Fewer probing peers than this cannot tell a dead node from a dead link; the rule stays quiet.
+    minPeers: 2
+    for: 5m
+    severity: critical
+  # One node fails TCP to most of the peers it probes: its own egress is broken.
+  nodeIsolated:
+    enabled: true
+    threshold: 0.5
+    minPeers: 2
+    for: 5m
+    severity: critical
   # A pair probed within the last hour that now reports nothing.
   pairWentSilent:
     enabled: true

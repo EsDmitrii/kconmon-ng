@@ -2144,6 +2144,219 @@
         "x": 0,
         "y": 62
       },
+      "id": 30,
+      "panels": [],
+      "title": "Path MTU",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 0,
+        "y": 63
+      },
+      "id": 31,
+      "type": "stat",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "decimals": 0,
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showPercentChange": false,
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "count(sum by (source_node, destination_node) (increase(kconmon_ng_pmtu_results_total{result=\"fail\"}[15m])) > 0) or vector(0)",
+          "refId": "A",
+          "instant": false,
+          "range": true
+        }
+      ],
+      "title": "Black-hole pairs (15m)"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 6,
+        "y": 63
+      },
+      "id": 32,
+      "type": "stat",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "decimals": 0,
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showPercentChange": false,
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "count((max by (source_node, destination_node) (kconmon_ng_pmtu_bytes) < on (source_node) group_left max by (source_node) (kconmon_ng_agent_pmtu_probe_bytes)) unless on (source_node, destination_node) (sum by (source_node, destination_node) (increase(kconmon_ng_pmtu_results_total{result=\"fail\"}[15m])) > 0)) or vector(0)",
+          "refId": "A",
+          "instant": false,
+          "range": true
+        }
+      ],
+      "title": "Pairs on a reduced path MTU"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 63
+      },
+      "id": 33,
+      "type": "table",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "filterable": false,
+            "inspect": false
+          },
+          "decimals": 0,
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "countRows": false,
+          "fields": "",
+          "reducer": [
+            "sum"
+          ],
+          "show": false
+        },
+        "showHeader": true,
+        "sortBy": []
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "sort(max by (source_node, destination_node) (kconmon_ng_pmtu_bytes) < on (source_node) group_left max by (source_node) (kconmon_ng_agent_pmtu_probe_bytes))",
+          "refId": "A",
+          "instant": true,
+          "range": false,
+          "format": "table"
+        }
+      ],
+      "title": "Pairs below their probe size (path MTU, bytes)"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 71
+      },
       "id": 26,
       "panels": [],
       "title": "Agent and controller health",
@@ -2159,7 +2372,7 @@
         "h": 8,
         "w": 8,
         "x": 0,
-        "y": 63
+        "y": 72
       },
       "id": 27,
       "type": "timeseries",
@@ -2257,7 +2470,7 @@
         "h": 8,
         "w": 8,
         "x": 8,
-        "y": 63
+        "y": 72
       },
       "id": 28,
       "type": "timeseries",
@@ -2354,7 +2567,7 @@
         "h": 8,
         "w": 8,
         "x": 16,
-        "y": 63
+        "y": 72
       },
       "id": 29,
       "type": "timeseries",

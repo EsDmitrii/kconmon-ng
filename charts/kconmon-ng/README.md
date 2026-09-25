@@ -124,7 +124,7 @@ The table below lists the most relevant parameters. See
 | `agent.securityContext` | `{allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: {drop: [ALL]}}` | Agent container securityContext; add `NET_RAW` yourself only if you also make it effective |
 | `agent.podSecurityContext` | `{runAsNonRoot: true, runAsUser: 65532, seccompProfile: {type: RuntimeDefault}, sysctls: [{name: net.ipv4.ping_group_range, value: "0 2147483647"}]}` | Agent Pod securityContext. `null` deletes the WHOLE sub-tree, restricted-PSS keys included; to drop only the sysctl use `agent.pingGroupRange: false` |
 | `agent.pingGroupRange` | `true` | Render the `net.ipv4.ping_group_range` sysctl. Set `false` on a runtime that already opens it, or where the sysctl is not allowed, without losing the restricted-PSS keys. Never rendered under `agent.hostNetwork`, where the kubelet refuses `net.*` pod sysctls and the node OS must set it |
-| `agent.metrics.detail` | `full` | Scrape-time cardinality valve on the agent ServiceMonitor and the external-agent ScrapeConfig: `full \| counters-only \| zone-only` (~70 / ~10 / ~0 series per directed pair). Needs `serviceMonitor.enabled` or `scrapeConfig.externalAgents.enabled`; `zone-only` needs agents that export the zone metric family. Series math in `docs/metrics.md`, "Scaling and cardinality" |
+| `agent.metrics.detail` | `full` | Scrape-time cardinality valve on the agent ServiceMonitor and the external-agent ScrapeConfig: `full \| counters-only \| zone-only` (~75 / ~12 / ~0 series per directed pair). Needs `serviceMonitor.enabled` or `scrapeConfig.externalAgents.enabled`; `zone-only` needs agents that export the zone metric family. Series math in `docs/metrics.md`, "Scaling and cardinality" |
 | `agent.hostNetwork` | `false` | Run the agents in the node's network namespace (node IPs, `hostPort` on all three ports) so external hosts reach them without a routable pod network. Changes WHAT every in-cluster pair measures (the underlay, not the CNI datapath); see [Prerequisites](#prerequisites). Cannot share a machine with a bare-host external agent |
 | `agent.dnsPolicy` | `""` | Pod `dnsPolicy`, passed through verbatim (`ClusterFirst`, `ClusterFirstWithHostNet`, `Default`, `None`). Empty renders `ClusterFirstWithHostNet` under `agent.hostNetwork` (the controller address is a bare Service name only cluster DNS resolves) and nothing otherwise |
 | `topology.mode` | `full` | Probe topology plan: `full` probes every peer from every agent; `sparse` trims it to a ring over sorted node names (`topology.sparse.ringDegree`) plus cross-zone chords (`topology.sparse.zoneChords`), with `topology.sparse.autoThreshold` as a fleet-size floor below which the mesh stays full. Needs controller and agent images at appVersion 2.3.0 or newer |
@@ -132,6 +132,7 @@ The table below lists the most relevant parameters. See
 | `config.checkers.tcp.enabled` | `true` | Enable TCP checker (interval `5s`, timeout `1s`) |
 | `config.checkers.udp.enabled` | `true` | Enable UDP checker (interval `5s`, timeout `250ms`, `packets: 5`) |
 | `config.checkers.icmp.enabled` | `true` | Enable ICMP checker (interval `5s`, timeout `1s`) |
+| `config.checkers.pmtu.enabled` | `true` | Enable the path MTU probe (interval `60s`, timeout `500ms` per datagram, `size: 0` = the interface MTU). Tuning any `pmtu` key needs agent images 2.5.0 or newer: the chart writes only tuned keys and an older agent refuses them |
 | `config.checkers.dns.enabled` | `true` | Enable DNS checker (interval `5s`, timeout `5s`) |
 | `config.checkers.http.enabled` | `false` | Enable HTTP checker (interval `30s`, timeout `5s`) |
 | `serviceMonitor.enabled` | `false` | Create a Prometheus Operator `ServiceMonitor` |
@@ -140,7 +141,7 @@ The table below lists the most relevant parameters. See
 | `scrapeConfig.externalAgents.jobName` | `""` | Job label; empty means `<release>-agent-external`. Keep `kconmon` in it (the bundled dashboards filter `job=~".*kconmon.*"`) and `agent-external` (the `KconmonExternalAgentDown` rule matches on it) |
 | `scrapeConfig.externalAgents.refreshInterval` | `30s` | How often Prometheus re-reads the target list; matches `config.controllerAgentTtl` |
 | `scrapeConfig.externalAgents.interval` | `""` | Scrape interval; empty falls back to `serviceMonitor.interval` |
-| `prometheusRule.enabled` | `false` | Create a Prometheus Operator `PrometheusRule` with the ten built-in alerts, nine on by default ([Alerting rules](#alerting-rules)) |
+| `prometheusRule.enabled` | `false` | Create a Prometheus Operator `PrometheusRule` with the thirteen built-in alerts, twelve on by default ([Alerting rules](#alerting-rules)) |
 | `prometheusRule.<alertName>` | all enabled | Per-rule `enabled` / `threshold` / `for` / `severity` |
 | `prometheusRule.externalAgentDown.enabled` | `false` | `KconmonExternalAgentDown`: an external agent the SD endpoint lists sits at `up == 0` for `for` (`5m`, `warning`). Off by default because its job exists only with the ScrapeConfig or a hand-written `*agent-external*` job |
 | `prometheusRule.additionalRules` | `[]` | Extra rules appended to the group verbatim |
@@ -239,6 +240,9 @@ only what an operator actually tunes.
 | --- | --- | --- | --- |
 | `UDPLossHigh` | `<prefix>_udp_packet_loss_ratio > 0.5` for 5m | `prometheusRule.udpLossHigh` | `threshold` `0.5`, `for` `5m`, `severity` `warning` |
 | `TCPChecksFailing` | TCP **failure ratio** > 5% for 5m | `prometheusRule.tcpChecksFailing` | `threshold` `0.05`, `for` `5m`, `severity` `warning` |
+| `PathMTUBlackHole` | more than 50% of path MTU probes on a pair lose the full-size datagram with no ICMP frag-needed, for 5m; the value is the path MTU that still crosses | `prometheusRule.pathMtuBlackHole` | `threshold` `0.5`, `for` `5m`, `severity` `warning` |
+| `NodeUnreachable` | more than 50% of a node's probing peers fail TCP to it (at least `minPeers` `2` peers), for 5m | `prometheusRule.nodeUnreachable` | `threshold` `0.5`, `minPeers` `2`, `for` `5m`, `severity` `critical` |
+| `NodeIsolated` | one node fails TCP to more than 50% of the peers it probes (at least `minPeers` `2`), for 5m | `prometheusRule.nodeIsolated` | `threshold` `0.5`, `minPeers` `2`, `for` `5m`, `severity` `critical` |
 | `PairWentSilent` | a pair probed within the last hour reports **nothing** for ~15m | `prometheusRule.pairWentSilent` | `for` `10m`, `severity` `warning` |
 | `DNSChecksFailing` | DNS **failure ratio** > 5% for 5m | `prometheusRule.dnsChecksFailing` | `threshold` `0.05`, `for` `5m`, `severity` `warning` |
 | `ExternalChecksFailing` | External **failure ratio** > 10% for 5m | `prometheusRule.externalChecksFailing` | `threshold` `0.1`, `for` `5m`, `severity` `warning` |
@@ -301,6 +305,9 @@ repeating one generic sentence per firing series:
 | --- | --- |
 | `UDPLossHigh` | source → destination node, both zones, loss % |
 | `TCPChecksFailing` | source → destination node, both zones, failed % |
+| `PathMTUBlackHole` | source → destination node, both zones, the path MTU that still crosses |
+| `NodeUnreachable` | destination node + zone, share of its peers that fail to reach it |
+| `NodeIsolated` | source node + zone, share of its peers it fails to reach |
 | `PairWentSilent` | source → destination node |
 | `DNSChecksFailing` | source node + zone, queried `host`, `resolver`, failed % |
 | `ExternalChecksFailing` | source node + zone, `target`, `target_kind`, failed % |
